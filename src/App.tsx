@@ -283,76 +283,114 @@ const App: React.FC = () => {
 };
 
 // --- Dashboard View ---
+// --- Dashboard View ---
 const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'finished'>('idle');
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("等待连接...");
   const [decisionData, setDecisionData] = useState<any>(null);
-  const [resultData, setResultData] = useState<any>(null);
-  const [logs, setLogs] = useState<LogEntry[]>([]);  // ✅ 只在这个组件中使用
-
-  useEffect(() => {
-    if (!window.electronAPI?.onPythonEvent) return;
-    const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
-      // ✅ 记录所有 Python 事件到日志
-      if (event.message) {
-        setLogs(prev => [...prev, {
-          timestamp: new Date().toLocaleTimeString(),
-          message: event.message,
-          type: event.type as any
-        }]);
-      }
-
-      switch (event.type) {
-        case 'status':
-          if (event.data?.connected) {
-            setStatus('ready_to_import');
-            setStatusMsg("SD Card Detected: " + event.data.path);
-            setTimeout(() => startImport(), 500);
-          } else {
-            setStatus('idle');
-            setStatusMsg("未检测到 SD 卡");
-          }
-          break;
-        case 'progress':
-          setProgress(event.progress || 0);
-          setStatusMsg(event.message);
-          break;
-        case 'ask_user':
-          if (event.data?.need_split) {
-            setStatus('decision');
-            setDecisionData(event.data);
-            setStatusMsg(event.message);
-          }
-          break;
-        case 'success':
-          setStatus('finished');
-          setResultData(event.data);
-          setStatusMsg("导入完成");
-          break;
-        case 'error':
-          setStatusMsg("Error: " + event.message);
-          break;
-      }
-    });
-    return cleanup;
-  }, []);
-
-  // 自动检查
-  useEffect(() => {
-    if (config?.autoStart) {
-      checkSD();
-    }
-  }, [config?.autoStart]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  
+  // 【关键修改】使用 Ref 来做“防抖”锁，防止 SD 卡接触不良导致多次触发 startImport
+  const isBusyRef = React.useRef(false);
 
   const runCmd = (stage: string, args: string[] = []) => {
     if(window.electronAPI) window.electronAPI.runScript('classify.py', ['--stage', stage, ...args]);
   };
 
+  useEffect(() => {
+    if (!window.electronAPI?.onPythonEvent) return;
+    
+    const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
+      // 1. 记录日志
+      if (event.message) {
+        setLogs(prev => {
+           // 简单的去重逻辑，防止同样的日志刷屏
+           const last = prev[prev.length - 1];
+           if (last && last.message === event.message && event.type === 'progress') return prev;
+           
+           return [...prev, {
+            timestamp: new Date().toLocaleTimeString(),
+            message: event.message,
+            type: event.type as any
+           }];
+        });
+      }
+
+      // 2. 处理事件
+      switch (event.type) {
+        case 'status':
+          // 只有当状态是 idle 或 checking 时，才允许响应连接信号
+          if (event.data?.connected) {
+            // 【关键判断】如果当前正在忙（正在导入或处理），直接忽略这次信号
+            if (isBusyRef.current) return;
+
+            setStatus('ready_to_import');
+            setStatusMsg("检测到设备: " + event.data.path);
+            
+            // 延迟一点启动，给 UI 一个反应时间
+            setTimeout(() => {
+                if (!isBusyRef.current) {
+                    startImport();
+                }
+            }, 500);
+          } else {
+             // 只有在非运行状态下才重置为 idle，防止导入过程中拔卡导致界面重置
+             if (!isBusyRef.current) {
+                setStatus('idle');
+                setStatusMsg("未检测到 SD 卡");
+             }
+          }
+          break;
+
+        case 'progress':
+          setProgress(event.progress || 0);
+          // Python 那边现在发过来的是 "正在导入: IMG_001.JPG"，这里直接显示
+          setStatusMsg(event.message);
+          break;
+
+        case 'ask_user':
+          if (event.data?.need_split) {
+            setStatus('decision');
+            setDecisionData(event.data);
+            setStatusMsg(event.message);
+            // 注意：decision 状态下 isBusyRef 依然是 true，因为流程还没结束
+          }
+          break;
+
+        case 'success':
+          setStatus('finished');
+          setStatusMsg("处理完成");
+          isBusyRef.current = false; // 【解锁】
+          break;
+
+        case 'error':
+          // 如果是普通的 warning 不打断流程
+          if (event.message.includes("警告")) return;
+          
+          // 严重错误
+          setStatusMsg("Error: " + event.message);
+          isBusyRef.current = false; // 【解锁】
+          break;
+      }
+    });
+
+    return cleanup;
+  }, []); // 依赖为空，确保监听器只绑定一次
+
+  // 自动检查逻辑
+  useEffect(() => {
+    if (config?.autoStart && !isBusyRef.current) {
+      checkSD();
+    }
+  }, [config?.autoStart]);
+
   const checkSD = () => {
+    if (isBusyRef.current) return;
+
     setStatus('checking');
     setStatusMsg("正在扫描设备...");
-    setLogs([]);  // ✅ 清空日志
+    setLogs([]); 
     
     const args = [];
     if (config) {
@@ -360,6 +398,7 @@ const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
     }
     runCmd('check', args);
 
+    // 超时重置
     setTimeout(() => {
       setStatus((prevStatus) => {
         if (prevStatus === 'checking') {
@@ -368,13 +407,21 @@ const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
         }
         return prevStatus;
       });
-    }, 2000);
+    }, 3000);
   };
 
   const startImport = () => {
+    // 【双重保险】
+    if (isBusyRef.current) {
+        console.log("Import already running, skipped.");
+        return;
+    }
+    
+    isBusyRef.current = true; // 【上锁】
     setStatus('importing');
     setProgress(0);
-    setLogs([]);  // ✅ 清空日志
+    setLogs([]); // 清空日志准备开始
+    
     const args = [];
     if (config) {
       args.push('--sd_path', config.sdPath);
@@ -389,10 +436,36 @@ const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
   const handleDecision = (split: boolean) => {
     setStatus('processing');
     setProgress(0);
-    runCmd('process', ['--split', split ? 'true' : 'false']);
+    // 这里不需要改变 isBusyRef，因为流程还在继续
+    
+    // 注意：这里需要稍微修改一下后端逻辑或者传参方式
+    // 因为 Python 脚本是运行一次结束的，如果是交互式，通常需要架构支持
+    // 但鉴于你的 Python 脚本是一次性运行的，这里的 decision 其实是前端拦截
+    // 你的 Python 脚本目前设计是不支持中途暂停等待输入的。
+    
+    // **修正方案**：
+    // 之前 Python 代码里 ask_user 只是 emit 了一个事件然后就 return 了吗？
+    // 查看 Python 代码：
+    // if need_split and should_split is None: ask_user(...) return
+    // 是的，Python 进程已经退出了。
+    
+    // 所以这里我们需要**重新运行**脚本，并带上用户的决定参数
+    const args = [];
+    if (config) {
+      args.push('--sd_path', config.sdPath);
+      args.push('--dest_path', config.destPath);
+      if (config.backupEnabled && config.backupPath) {
+        args.push('--backup_path', config.backupPath);
+      }
+      // 添加用户决定的参数
+      args.push('--should_split', split ? 'true' : 'false');
+    }
+    
+    // 重新启动导入流程（因为临时文件已经存在，所以会很快）
+    runCmd('import', args);
   };
 
-  // --- 渲染逻辑 ---
+  // --- 渲染逻辑 (UI 部分) ---
 
   if (status === 'idle' || status === 'checking') {
     return (
@@ -445,58 +518,71 @@ const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
               <div className="w-16 h-16 bg-blue-500/10 rounded-full flex items-center justify-center mb-4 text-blue-400">
                 <Loader2 className="animate-spin" size={32} />
               </div>
-              <p className="text-white font-bold text-lg mb-1">正在导入...</p>
+              <p className="text-white font-bold text-lg mb-1">准备导入...</p>
               <p className="text-slate-400 text-sm mb-6">{statusMsg}</p>
             </div>
           )}
 
-          {/* State: Progress */}
+          {/* State: Progress (Importing or Processing) */}
           {(status === 'importing' || status === 'processing') && (
             <div className="w-full max-w-sm space-y-3">
               <div className="flex justify-between text-xs text-slate-400 font-mono">
-                <span>EXECUTING...</span>
+                <span>{status === 'importing' ? 'COPYING...' : 'ORGANIZING...'}</span>
                 <span>{progress}%</span>
               </div>
               <div className="h-2 bg-slate-800 rounded-full overflow-hidden border border-slate-700/50">
                 <div className="h-full bg-blue-500 transition-all duration-300 relative" style={{ width: `${progress}%` }}></div>
               </div>
-              <p className="text-sm text-slate-300 mt-2 font-mono truncate">{statusMsg}</p>
+              {/* 文件名显示区域 */}
+              <p className="text-sm text-slate-300 mt-2 font-mono truncate w-full px-4">
+                {statusMsg}
+              </p>
             </div>
           )}
 
           {/* State: Decision */}
           {status === 'decision' && decisionData && (
-            <div className="w-full bg-slate-950/80 p-5 rounded-xl border border-yellow-500/20 text-left">
+            <div className="w-full bg-slate-950/80 p-5 rounded-xl border border-yellow-500/20 text-left animate-in zoom-in-95">
               <h4 className="text-white font-bold mb-2 flex items-center gap-2">
                 <AlertCircle className="text-yellow-400" size={20} />
                 需确认操作
               </h4>
               <p className="text-slate-400 text-sm mb-6">
-                {decisionData.need_split 
-                  ? `检测到拍摄时间有 2 小时以上的断层，是否拆分文件夹？`
-                  : `准备处理 ${decisionData.files_count} 个文件。`}
+                检测到拍摄时间有 2 小时以上的断层，是否需要拆分成不同日期的文件夹？
               </p>
               <div className="flex gap-3">
-                <button onClick={() => handleDecision(true)} className="flex-1 bg-indigo-600 text-white py-2 rounded-lg text-sm">是，拆分</button>
-                <button onClick={() => handleDecision(false)} className="flex-1 bg-slate-700 text-slate-200 py-2 rounded-lg text-sm">否，合并</button>
+                <button 
+                    onClick={() => handleDecision(true)} 
+                    className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-2 rounded-lg text-sm transition-colors"
+                >
+                    是，拆分文件夹
+                </button>
+                <button 
+                    onClick={() => handleDecision(false)} 
+                    className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-200 py-2 rounded-lg text-sm transition-colors"
+                >
+                    否，合并在一起
+                </button>
               </div>
             </div>
           )}
 
           {/* State: Finished */}
           {status === 'finished' && (
-            <div className="w-full text-left">
-              <div className="flex items-center gap-3 mb-4 p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-emerald-400">
-                <CheckCircle2 size={24} />
-                <div><h4 className="font-bold text-sm">导入完成</h4></div>
+            <div className="w-full text-left animate-in zoom-in-95">
+              <div className="flex items-center gap-3 mb-4 p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-emerald-400">
+                <CheckCircle2 size={28} />
+                <div>
+                    <h4 className="font-bold text-base">导入完成</h4>
+                    <p className="text-xs text-emerald-500/70 mt-1">所有照片已导入</p>
+                </div>
               </div>
-              <button onClick={() => setStatus('idle')} className="w-full py-2 text-xs text-slate-500 hover:text-white bg-slate-900 rounded">关闭</button>
             </div>
           )}
         </div>
       </div>
 
-      {/* ✅ 日志面板 - 只显示导入相关的日志 */}
+      {/* 日志面板 */}
       <Terminal logs={logs} />
     </div>
   );
