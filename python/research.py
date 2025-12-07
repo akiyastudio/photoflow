@@ -290,8 +290,6 @@ def run(args_list):
     target_dir = args.path
     threshold = args.threshold
     min_duration = args.min_duration
-    
-    log_info("加载CUDA设备，可能需要一些时间...几十秒都是可能的...")
 
     if not os.path.exists(target_dir):
         log_error(f"路径不存在: {target_dir}")

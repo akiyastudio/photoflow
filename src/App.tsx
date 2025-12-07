@@ -407,7 +407,7 @@ const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
         }
         return prevStatus;
       });
-    }, 3000);
+    }, 30000);
   };
 
   const startImport = () => {
