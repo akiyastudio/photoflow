@@ -150,6 +150,7 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched):
 def run(args_list):
     if sys.platform.startswith('win'):
         sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--folder_a", required=True)

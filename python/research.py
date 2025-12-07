@@ -276,9 +276,9 @@ def process_images_deduplication(directory):
 # --- 主入口 ---
         
 def run(args_list):
-    # 强制设置 Windows 下 stdout 为 utf-8，防止 JSON 中文乱码
     if sys.platform.startswith('win'):
         sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
 
     # 定义命令行参数
     parser = argparse.ArgumentParser()

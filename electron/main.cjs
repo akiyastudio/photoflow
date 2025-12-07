@@ -59,72 +59,112 @@ const getScriptEntry = () => {
 };
 
 // 运行 Python 脚本
-ipcMain.on('run-python', (event, scriptName, args = []) => {
-  const pythonExec = getPythonPath();
-  let spawnArgs = [];
+// 辅助函数：根据环境获取可执行文件和参数
+const getRunConfig = (scriptName, args) => {
+  // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
+  const baseName = scriptName.replace('.py', '');
 
   if (app.isPackaged) {
-    spawnArgs = [scriptName, ...args];
+    // 【生产环境】直接运行对应的 exe
+    // 路径例如: resources/python/classify.exe
+    return {
+      command: path.join(process.resourcesPath, 'python', `${baseName}.exe`),
+      args: args
+    };
   } else {
-    spawnArgs = ['-u', getScriptEntry(), scriptName, ...args];
+    // 【开发环境】使用 python 解释器运行对应的 .py 脚本
+    const rootDir = path.join(__dirname, '..');
+    const isWin = process.platform === 'win32';
+    
+    // 寻找 Python 解释器
+    const venvPython = isWin
+      ? path.join(rootDir, '.venv', 'Scripts', 'python.exe')
+      : path.join(rootDir, '.venv', 'bin', 'python');
+    
+    const pythonExec = fs.existsSync(venvPython) ? venvPython : 'python';
+    
+    // 脚本路径: python/classify.py
+    const scriptPath = path.join(rootDir, 'python', `${baseName}.py`);
+    
+    return {
+      command: pythonExec,
+      args: ['-u', scriptPath, ...args] // -u 强制无缓冲输出
+    };
   }
+};
 
-  console.log(`Executing: ${pythonExec} ${spawnArgs.join(' ')}`);
+// 运行 Python 脚本 (完全重写)
+ipcMain.on('run-python', (event, scriptName, args = []) => {
+  const { command, args: spawnArgs } = getRunConfig(scriptName, args);
 
-  const pyProcess = spawn(pythonExec, spawnArgs);
-  
-  // 监听标准输出 (Logs, JSON data)
-  pyProcess.stdout.on('data', (data) => {
-    const lines = data.toString().split('\n');
-    lines.forEach(line => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      try {
-        // 尝试解析 JSON
-        const jsonMsg = JSON.parse(trimmed);
-        mainWindow.webContents.send('python-event', jsonMsg);
-        
-        // 兼容旧的日志显示逻辑
-        if (jsonMsg.type === 'log' || jsonMsg.type === 'error') {
-           mainWindow.webContents.send('python-log', {
+  console.log(`Executing: ${command} ${spawnArgs.join(' ')}`);
+
+  try {
+    // 注意：windowsHide: true 可以隐藏弹出的黑框
+    const pyProcess = spawn(command, spawnArgs, { windowsHide: true });
+    
+    // --- 下面的监听逻辑保持不变 ---
+    pyProcess.stdout.on('data', (data) => {
+      const lines = data.toString().split('\n');
+      lines.forEach(line => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        try {
+          const jsonMsg = JSON.parse(trimmed);
+          mainWindow.webContents.send('python-event', jsonMsg);
+          
+          if (jsonMsg.type === 'log' || jsonMsg.type === 'error') {
+             mainWindow.webContents.send('python-log', {
+                timestamp: new Date().toLocaleTimeString(),
+                message: jsonMsg.message,
+                type: jsonMsg.type === 'error' ? 'error' : 'info'
+             });
+          }
+        } catch (e) {
+          console.log("Raw Python Output:", trimmed);
+          mainWindow.webContents.send('python-log', {
               timestamp: new Date().toLocaleTimeString(),
-              message: jsonMsg.message,
-              type: jsonMsg.type === 'error' ? 'error' : 'info'
-           });
+              message: trimmed,
+              type: 'info'
+          });
         }
-      } catch (e) {
-        // 解析失败，当作普通文本日志
-        console.log("Raw Python Output:", trimmed);
+      });
+    });
+
+    pyProcess.stderr.on('data', (data) => {
+      const message = data.toString().trim();
+      if (message) {
+        console.error("Python Stderr:", message);
         mainWindow.webContents.send('python-log', {
             timestamp: new Date().toLocaleTimeString(),
-            message: trimmed,
-            type: 'info'
+            message: message,
+            type: 'error'
         });
       }
     });
-  });
 
-  // 监听错误输出 (Stderr)
-  pyProcess.stderr.on('data', (data) => {
-    const message = data.toString().trim();
-    if (message) {
-      console.error("Python Stderr:", message);
+    pyProcess.on('close', (code) => {
+      // 可以在这里针对特定脚本做处理，比如 classify 退出不一定代表错误
+      console.log(`${scriptName} finished with code ${code}`);
       mainWindow.webContents.send('python-log', {
           timestamp: new Date().toLocaleTimeString(),
-          message: message,
-          type: 'error'
+          message: `${scriptName} Process finished`,
+          type: code === 0 ? 'success' : 'warning'
       });
-    }
-  });
-
-  // 监听进程结束
-  pyProcess.on('close', (code) => {
-    mainWindow.webContents.send('python-log', {
-        timestamp: new Date().toLocaleTimeString(),
-        message: `Process finished with exit code ${code}`,
-        type: code === 0 ? 'success' : 'warning'
     });
-  });
+    
+    // 监听启动错误（比如 exe 不存在）
+    pyProcess.on('error', (err) => {
+       console.error('Failed to start process:', err);
+       mainWindow.webContents.send('python-event', {
+         type: 'error',
+         message: `Failed to launch ${scriptName}: ${err.message}`
+       });
+    });
+
+  } catch (e) {
+    console.error("Spawn Error:", e);
+  }
 });
 
 const getConfigDir = () => {

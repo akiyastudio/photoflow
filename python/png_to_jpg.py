@@ -18,9 +18,9 @@ def log_error(msg): emit('error', msg)
 def log_progress(msg, percent): emit('progress', msg, progress=percent)
 
 def run(args_list):
-    # 强制 Windows 输出 UTF-8
     if sys.platform.startswith('win'):
         sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
 
     parser = argparse.ArgumentParser()
     parser.add_argument("path", nargs='?', help="要处理的目录路径")
