@@ -3,6 +3,12 @@ import json
 import os
 import multiprocessing as mp
 
+import classify
+import png_to_jpg
+import research
+import catch
+import rename
+
 def main():
     mp.freeze_support()
 
@@ -24,29 +30,24 @@ def main():
 
     try:
         if command == 'classify.py':
-            import classify
             classify.run(args)
             
         elif command == 'png_to_jpg.py':
-            import png_to_jpg
             png_to_jpg.run(args)
             
         elif command == 'research.py':
-            import research
             research.run(args)
             
         elif command == 'catch.py':
-            import catch
             catch.run(args)
             
         elif command == 'rename.py':
-            import rename
             rename.run(args)
             
         else:
             print(json.dumps({"type": "error", "message": f"Unknown command: {command}"}))
 
-        # 【修改点 3】强制刷新缓冲区，确保 Electron 立即收到数据
+        # 强制刷新缓冲区，确保 Electron 立即收到数据
         sys.stdout.flush()
 
     except Exception as e:
