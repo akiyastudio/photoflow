@@ -417,13 +417,9 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
 # --- 4. 程序主入口 ---
 
 def run(args_list):
-    # Windows 控制台编码修复
     if sys.platform.startswith('win'):
-        try:
-            if sys.stdout: sys.stdout.reconfigure(encoding='utf-8')
-            if sys.stderr: sys.stderr.reconfigure(encoding='utf-8')
-        except:
-            pass
+        if sys.stdout: sys.stdout.reconfigure(encoding='utf-8')
+        if sys.stderr: sys.stderr.reconfigure(encoding='utf-8')
 
     username = os.getenv('USERNAME') or 'user'
     

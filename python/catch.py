@@ -16,9 +16,9 @@ def log_success(msg): emit('success', msg)
 def log_error(msg): emit('error', msg)
 
 def run(args_list):
-    # 解决 Windows 中文输出乱码
     if sys.platform.startswith('win'):
         sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True, help="源文件夹路径")

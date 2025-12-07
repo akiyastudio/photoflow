@@ -1,13 +1,13 @@
 {
   "name": "photoflow-toolkit",
   "private": true,
-  "version": "25.12.6",
+  "version": "25.12.7",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:python": "cd python && pyinstaller --onefile --name main main.py",
+    "build:python": "cd python && pyinstaller --onefile --clean --name classify classify.py && pyinstaller --onefile --clean --name png_to_jpg png_to_jpg.py && pyinstaller --onefile --clean --name research research.py && pyinstaller --onefile --clean --name catch catch.py && pyinstaller --onefile --clean --name rename rename.py",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
     "electron": "wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
@@ -25,8 +25,24 @@
     },
     "extraResources": [
       {
-        "from": "python/dist/main.exe",
-        "to": "python/main.exe"
+        "from": "python/dist/classify.exe",
+        "to": "python/classify.exe"
+      },
+      {
+        "from": "python/dist/png_to_jpg.exe",
+        "to": "python/png_to_jpg.exe"
+      },
+      {
+        "from": "python/dist/research.exe",
+        "to": "python/research.exe"
+      },
+      {
+        "from": "python/dist/catch.exe",
+        "to": "python/catch.exe"
+      },
+      {
+        "from": "python/dist/rename.exe",
+        "to": "python/rename.exe"
       },
       {
         "from": "python/birthdays.json",
