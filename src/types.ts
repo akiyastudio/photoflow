@@ -38,6 +38,8 @@ export interface IElectronAPI {
   loadConfig: () => Promise<AppConfig | null>;
   saveConfig: (config: AppConfig) => Promise<{success: boolean, error?: string}>;
   getUserPath: () => Promise<string>;
+  onUpdateAvailable: (callback: (info: { version: string; url: string; notes: string }) => void) => () => void;
+  openExternal: (url: string) => void;
 }
 
 declare global {
