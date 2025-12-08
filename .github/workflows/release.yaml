@@ -32,4 +32,4 @@ jobs:
         # GH_TOKEN 是 GitHub 自动提供的，用于上传文件
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
-        run: npm run electron-builder -- --publish always
+        run: npm run electron-build -- --publish always
