@@ -21,6 +21,8 @@ import {
   Save,
   Download,
   AtSign,
+  ExternalLink,
+  Gift,
 } from 'lucide-react';
 import { Terminal } from './components/Terminal';
 import type { LogEntry, ToolType } from './types';
@@ -79,6 +81,7 @@ const App: React.FC = () => {
   
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configLoaded, setConfigLoaded] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<{version: string, url: string, notes: string} | null>(null);
 
   useEffect(() => {
     const loadConfig = async () => {
@@ -109,6 +112,16 @@ const App: React.FC = () => {
     };
 
     loadConfig();
+  }, []);
+
+  useEffect(() => {
+    if (window.electronAPI?.onUpdateAvailable) {
+      const cleanup = window.electronAPI.onUpdateAvailable((info: any) => {
+        console.log("Update available:", info);
+        setUpdateInfo(info);
+      });
+      return cleanup;
+    }
   }, []);
 
   const handleConfigUpdate = async (newConfig: AppConfig) => {
@@ -186,6 +199,15 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen w-full bg-slate-950 text-slate-200 font-sans selection:bg-blue-500/30">
+
+      {updateInfo && (
+        <UpdateModal 
+          version={updateInfo.version}
+          url={updateInfo.url}
+          notes={updateInfo.notes}
+          onClose={() => setUpdateInfo(null)}
+        />
+      )}
       
       {/* Settings Modal */}
       {showSettings && config && (
@@ -282,7 +304,6 @@ const App: React.FC = () => {
   );
 };
 
-// --- Dashboard View ---
 // --- Dashboard View ---
 const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'finished'>('idle');
@@ -1356,6 +1377,65 @@ const RenameView = () => {
 };
 
 // --- 小组件 ---
+// 2. 新增 UpdateModal 组件 (放在 SettingsModal 附近)
+const UpdateModal = ({ 
+  version, 
+  notes, 
+  url, 
+  onClose 
+}: { 
+  version: string, 
+  notes: string, 
+  url: string, 
+  onClose: () => void 
+}) => {
+  const handleUpdate = () => {
+    if (window.electronAPI?.openExternal) {
+      window.electronAPI.openExternal(url);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-300">
+      <div className="bg-slate-900 border border-blue-500/30 w-full max-w-md rounded-2xl shadow-2xl flex flex-col relative overflow-hidden">
+        {/* 装饰背景 */}
+        <div className="absolute top-0 right-0 p-16 bg-blue-500/20 blur-3xl rounded-full -translate-y-1/2 translate-x-1/2 pointer-events-none"></div>
+        
+        <div className="p-6 pb-0 z-10">
+          <div className="w-12 h-12 bg-blue-600/20 rounded-xl flex items-center justify-center text-blue-400 mb-4 border border-blue-500/20">
+            <Gift size={24} />
+          </div>
+          <h3 className="text-xl font-bold text-white mb-2">发现新版本 {version}</h3>
+          <p className="text-slate-400 text-sm">
+            一个新的更新已准备就绪。下载安装包以体验最新功能。
+          </p>
+        </div>
+
+        <div className="p-6 z-10">
+          <div className="bg-slate-950/50 rounded-lg p-4 border border-slate-800 max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700">
+            <p className="text-xs font-bold text-slate-500 uppercase mb-2">更新日志</p>
+            <p className="text-sm text-slate-300 whitespace-pre-wrap">{notes}</p>
+          </div>
+        </div>
+
+        <div className="p-6 pt-2 flex gap-3 z-10">
+          <button 
+            onClick={onClose}
+            className="flex-1 py-2.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition font-medium text-sm"
+          >
+            以后再说
+          </button>
+          <button 
+            onClick={handleUpdate}
+            className="flex-1 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-900/20 transition font-bold text-sm flex items-center justify-center gap-2"
+          >
+            去下载 <ExternalLink size={14} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const SettingsModal = ({ 
   config, 

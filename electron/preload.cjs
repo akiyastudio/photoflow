@@ -17,4 +17,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadConfig: () => ipcRenderer.invoke('loadConfig'),
   saveConfig: (config) => ipcRenderer.invoke('saveConfig', config),
   getUserPath: () => ipcRenderer.invoke('getUserPath'),
+  onUpdateAvailable: (callback) => {
+    const subscription = (_event, value) => callback(value);
+    ipcRenderer.on('update-available', subscription);
+    return () => ipcRenderer.removeListener('update-available', subscription);
+  },
+  openExternal: (url) => ipcRenderer.send('open-external', url),
 });

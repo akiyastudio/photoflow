@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, shell } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -58,7 +58,6 @@ const getScriptEntry = () => {
   return path.join(__dirname, '../python/main.py');
 };
 
-// 运行 Python 脚本
 // 辅助函数：根据环境获取可执行文件和参数
 const getRunConfig = (scriptName, args) => {
   // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
@@ -93,7 +92,61 @@ const getRunConfig = (scriptName, args) => {
   }
 };
 
-// 运行 Python 脚本 (完全重写)
+// 配置你的 GitHub 仓库信息
+const UPDATE_CONFIG = {
+  owner: 'akiyastudio', // 替换为你的 GitHub 用户名
+  repo: 'photoflow'   // 替换为你的仓库名
+};
+
+const checkForUpdates = async () => {
+  if (!mainWindow) return;
+  
+  try {
+    // 这里的 fetch 在 Node 18+ (Electron 20+) 中原生支持
+    const response = await fetch(`https://api.github.com/repos/${UPDATE_CONFIG.owner}/${UPDATE_CONFIG.repo}/releases/latest`, {
+      headers: { 'User-Agent': 'PhotoFlow-App' }
+    });
+    
+    if (!response.ok) return;
+    
+    const data = await response.json();
+    const latestVersion = data.tag_name.replace(/^v/, ''); // 去除 'v' 前缀，如 v1.0.1 -> 1.0.1
+    const currentVersion = app.getVersion(); // 获取 package.json 中的 version
+
+    console.log(`Current: ${currentVersion}, Latest: ${latestVersion}`);
+
+    // 简单的版本比较逻辑 (如果你需要更严格的 semver 比较，可以引入 semver 库)
+    if (latestVersion !== currentVersion && compareVersions(latestVersion, currentVersion) > 0) {
+      mainWindow.webContents.send('update-available', {
+        version: latestVersion,
+        url: data.html_url, // GitHub Release 页面地址
+        notes: data.body    // Release Note
+      });
+    }
+  } catch (error) {
+    console.error('Update check failed:', error);
+  }
+};
+
+// 简单的版本号比较函数 (1.0.1 > 1.0.0)
+const compareVersions = (a, b) => {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const na = pa[i] || 0;
+    const nb = pb[i] || 0;
+    if (na > nb) return 1;
+    if (nb > na) return -1;
+  }
+  return 0;
+};
+
+// 3. 添加打开外部链接的 IPC 处理
+ipcMain.on('open-external', (event, url) => {
+  shell.openExternal(url);
+});
+
+// 运行 Python 脚本
 ipcMain.on('run-python', (event, scriptName, args = []) => {
   const { command, args: spawnArgs } = getRunConfig(scriptName, args);
 
@@ -276,6 +329,7 @@ ipcMain.handle('save-birthdays', async (event, newContent) => {
 app.whenReady().then(() => {
   createWindow();
 
+  setTimeout(checkForUpdates, 3000);
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
