@@ -2,7 +2,6 @@ const { app, BrowserWindow, ipcMain, Menu } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
-const { autoUpdater: updater } = require('electron-updater');
 
 let mainWindow;
 
@@ -274,17 +273,12 @@ ipcMain.handle('save-birthdays', async (event, newContent) => {
   }
 });
 
-updater.logger = require("electron-log");
-updater.logger.transports.file.level = "info";
-
 app.whenReady().then(() => {
   createWindow();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
-
-  updater.checkForUpdatesAndNotify();
 });
 
 app.on('window-all-closed', () => {
