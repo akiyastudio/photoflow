@@ -371,11 +371,10 @@ const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
           break;
 
         case 'ask_user':
-          if (event.data?.need_split) {
+          if (event.data?.need_split) { 
             setStatus('decision');
             setDecisionData(event.data);
             setStatusMsg(event.message);
-            // 注意：decision 状态下 isBusyRef 依然是 true，因为流程还没结束
           }
           break;
 

@@ -51,10 +51,7 @@ def run(args_list):
 
     # 3. 遍历并复制文件
     log_info(f"开始搜索关键词: {', '.join(search_names)}")
-    
-    found_keywords = set()  # 记录匹配成功的关键词
-    count = 0               # 成功复制计数
-    skip_count = 0          # 同名跳过计数
+    count = 0
     
     for root, _, files in os.walk(source_dir):
         # 忽略目标文件夹本身，防止递归死循环
@@ -62,18 +59,11 @@ def run(args_list):
             continue
 
         for file in files:
-            # 核心匹配逻辑
+            # 核心匹配逻辑：只要文件名包含关键词，就匹配成功
             for name in search_names:
                 if name in file:
-                    found_keywords.add(name) # 标记该关键词已找到文件
                     source_path = os.path.join(root, file)
                     target_path = os.path.join(target_dir, file)
-                    
-                    # --- 新增：同名检查逻辑 ---
-                    if os.path.exists(target_path):
-                        log_info(f"跳过: {file} (目标目录已存在同名文件)")
-                        skip_count += 1
-                        break # 匹配到关键词但跳过复制，处理下一个文件
                     
                     try:
                         shutil.copy2(source_path, target_path)
@@ -82,25 +72,13 @@ def run(args_list):
                     except Exception as e:
                         log_error(f"复制失败 {file}: {e}")
                     
-                    break # 匹配到一个关键词后即处理下一个文件
+                    # 找到一个匹配项后跳出内层循环，避免重复处理
+                    break
     
-    # --- 结果反馈逻辑 ---
-    not_found = [n for n in search_names if n not in found_keywords]
-    
-    if not_found:
-        log_info(f"提示：以下关键词未找到任何匹配文件: {', '.join(not_found)}")
-
-    # 汇总消息
-    result_msg = f"处理完成。成功复制: {count} 个"
-    if skip_count > 0:
-        result_msg += f"，跳过同名文件: {skip_count} 个"
-    
-    if count == 0 and skip_count == 0:
-        log_error("未找到任何包含指定关键词的文件。")
+    if count == 0:
+        log_info("未找到包含指定关键词的文件。")
     else:
-        if not_found:
-            result_msg += f" (注：有 {len(not_found)} 个关键词未命中)"
-        emit('success', result_msg)
+        emit('success', f"处理完成，共复制 {count} 个文件到文件夹 '{args.dest_name}'。")
 
 if __name__ == "__main__":
     try:
