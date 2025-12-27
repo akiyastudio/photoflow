@@ -47,13 +47,15 @@ interface AppConfig {
   };
 }
 
+const isMac = window.navigator.userAgent.includes('Mac');
+
 const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   smartImport: {
     autoStart: false,
-    sdPath: "H:/DCIM",
+    sdPath: isMac ? "/Volumes" : "H:/DCIM",
     destPath: `${userPath}/Desktop`,
     backupEnabled: false,
-    backupPath: "D:/Backup"
+    backupPath: isMac ? `${userPath}/Pictures/Backup` : "D:/Backup"
   },
   smartMatch: {
     destFolderName: "1" 
@@ -171,7 +173,7 @@ const App: React.FC = () => {
           {/* 文字 */}
           <div className="space-y-2">
             <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent">
-              摄影工具包
+              Photoflow
             </h2>
             <p className="text-sm text-slate-400 font-mono">初始化配置中...</p>
           </div>
@@ -228,7 +230,7 @@ const App: React.FC = () => {
       <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col shrink-0">
         <div className="p-6 border-b border-slate-800">
           <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent cursor-default">
-            摄影工具包
+            Photoflow
           </h1>
           <p className="text-xs text-slate-500 mt-1 font-mono">v25.12.27 by秋也寻</p>
         </div>
