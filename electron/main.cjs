@@ -35,41 +35,20 @@ function createWindow() {
   }
 }
 
-// 获取 Python 路径
-const getPythonPath = () => {
-  if (app.isPackaged) {
-    // 【生产环境】直接找打包好的 exe
-    return path.join(process.resourcesPath, 'python', 'main.exe');
-  } else {
-    // 【开发环境】找 python 解释器 (优先 .venv)
-    const rootDir = path.join(__dirname, '..');
-    const isWin = process.platform === 'win32';
-    const venvPython = isWin
-      ? path.join(rootDir, '.venv', 'Scripts', 'python.exe')
-      : path.join(rootDir, '.venv', 'bin', 'python');
-      
-    if (fs.existsSync(venvPython)) return venvPython;
-    return 'python'; // 回退到系统 python
-  }
-};
-
-// 获取脚本入口 (仅开发环境需要)
-const getScriptEntry = () => {
-  return path.join(__dirname, '../python/main.py');
-};
-
-// 辅助函数：根据环境获取可执行文件和参数
+// 根据环境获取可执行文件和参数
 const getRunConfig = (scriptName, args) => {
   // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
   const baseName = scriptName.replace('.py', '');
 
   if (app.isPackaged) {
-    // 【生产环境】直接运行对应的 exe
-    // 路径例如: resources/python/classify.exe
-    return {
-      command: path.join(process.resourcesPath, 'python', `${baseName}.exe`),
-      args: args
-    };
+    // 生产环境：根据平台决定是否有 .exe 后缀
+    const exeSuffix = isWin ? '.exe' : '';
+    const command = path.join(
+      process.resourcesPath, 
+      'python', 
+      `${baseName}${exeSuffix}`
+    );
+    return { command, args };
   } else {
     // 【开发环境】使用 python 解释器运行对应的 .py 脚本
     const rootDir = path.join(__dirname, '..');
@@ -92,7 +71,7 @@ const getRunConfig = (scriptName, args) => {
   }
 };
 
-// 配置你的 GitHub 仓库信息
+// 检查更新，配置你的 GitHub 仓库信息
 const UPDATE_CONFIG = {
   owner: 'akiyastudio', // 替换为你的 GitHub 用户名
   repo: 'photoflow'   // 替换为你的仓库名
@@ -141,7 +120,7 @@ const compareVersions = (a, b) => {
   return 0;
 };
 
-// 3. 添加打开外部链接的 IPC 处理
+// 添加打开外部链接的 IPC 处理
 ipcMain.on('open-external', (event, url) => {
   shell.openExternal(url);
 });
@@ -149,6 +128,19 @@ ipcMain.on('open-external', (event, url) => {
 // 运行 Python 脚本
 ipcMain.on('run-python', (event, scriptName, args = []) => {
   const { command, args: spawnArgs } = getRunConfig(scriptName, args);
+
+  // --- 插入权限修复代码开始 ---
+  if (process.platform === 'darwin' && app.isPackaged) {
+    try {
+      // 检查文件是否存在并尝试赋予 755 权限 (rwxr-xr-x)
+      if (fs.existsSync(command)) {
+        fs.chmodSync(command, 0o755); 
+        console.log(`Successfully set permissions for: ${command}`);
+      }
+    } catch (err) {
+      console.error(`Failed to set permissions for ${command}:`, err);
+    }
+  }
 
   console.log(`Executing: ${command} ${spawnArgs.join(' ')}`);
 

@@ -61,10 +61,11 @@ def check_cuda_support():
         # 获取第一个 GPU 的名称
         gpu_name = torch.cuda.get_device_name(0)
         log_info(f"CUDA 就绪: {count} 个设备 ({gpu_name})")
-        return True
+    elif torch.backends.mps.is_available():
+        log_info("检测到 Apple Silicon (MPS) 加速")
     else:
-        log_error("未检测到 CUDA 设备，脚本需要 NVIDIA 显卡才能高效运行。")
-        return False
+        log_info("未检测到硬件加速，将使用 CPU 运行（速度较慢）")
+    return True
 
 # GPU 加速的 SSIM 计算
 def ssim_gpu(img1, img2):
@@ -159,7 +160,13 @@ def extract_best_frames(video_path, segments, fps, original_name, video_dir):
 # --- 视频分析逻辑 ---
 
 def analyze_video(video_path, original_name, threshold_low, min_duration):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps") # 支持 Mac 加速 (Apple Silicon)
+    else:
+        device = torch.device("cpu") # 兜底方案：使用 CPU
+    
     cap = cv2.VideoCapture(video_path)
     
     fps = cap.get(cv2.CAP_PROP_FPS)
