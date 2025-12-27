@@ -230,7 +230,7 @@ const App: React.FC = () => {
           <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent cursor-default">
             摄影工具包
           </h1>
-          <p className="text-xs text-slate-500 mt-1 font-mono">v25.12.7 by秋也寻</p>
+          <p className="text-xs text-slate-500 mt-1 font-mono">v25.12.27 by秋也寻</p>
         </div>
 
         <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
@@ -796,7 +796,7 @@ const DashboardView = ({ config }: { config?: AppConfig }) => {
 
           {/* Footer */}
           <div className="flex items-center justify-between mt-auto pt-4 border-t border-indigo-500/20 z-10">
-              <p className="text-xs text-indigo-400/60">birthdays.json</p>
+              <p className="text-xs text-indigo-400/60">只显示接下来两个月的角色生日</p>
               <button onClick={() => setShowManager(true)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-200 text-xs font-bold transition-all border border-indigo-500/30">
                 <Edit size={12} /> Manage
               </button>
@@ -1612,7 +1612,7 @@ const AboutModal = ({ onClose }: { onClose: () => void }) => {
           <p className="text-slate-300 text-base leading-relaxed">
             @秋也寻
             <br/>
-            版本 25.12.7
+            版本 25.12.27
             <br/>
             大部分代码为Google Gemini和Copilot生成。
             <br />
