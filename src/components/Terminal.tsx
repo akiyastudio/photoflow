@@ -23,15 +23,15 @@ export const Terminal: React.FC<TerminalProps> = ({ logs, title = "Output", heig
   // --- 修改重点结束 ---
 
   return (
-    <div className={`flex flex-col bg-slate-900 border border-slate-700 rounded-lg overflow-hidden ${height}`}>
+    <div className={`flex flex-col bg-white border border-slate-200 rounded-lg overflow-hidden ${height}`}>
       {/* 标题栏 */}
-      <div className="flex items-center px-4 py-2 bg-slate-800 border-b border-slate-700">
+      <div className="flex items-center px-4 py-2 bg-slate-200 border-b border-slate-200">
         <div className="flex space-x-2 mr-4">
           <div className="w-3 h-3 rounded-full bg-red-500"></div>
           <div className="w-3 h-3 rounded-full bg-yellow-500"></div>
           <div className="w-3 h-3 rounded-full bg-green-500"></div>
         </div>
-        <span className="text-xs font-mono text-slate-400">{title}</span>
+        <span className="text-xs font-mono text-slate-500">{title}</span>
       </div>
 
       {/* 内容区域 */}
@@ -46,7 +46,7 @@ export const Terminal: React.FC<TerminalProps> = ({ logs, title = "Output", heig
               log.type === 'error' ? 'text-red-400' :
               log.type === 'success' ? 'text-green-400' :
               log.type === 'warning' ? 'text-yellow-400' :
-              'text-slate-300'
+              'text-slate-800'
             }`}>
               {log.message}
             </span>

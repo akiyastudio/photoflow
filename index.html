@@ -3,15 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Photoflow</title>
+    <title>照片流</title>
     <style>
       body {
-        background-color: #020617; /* 对应 slate-950 */
+        background-color: #f8fafc; /* 亮色背景 slate-50 */
         margin: 0;
         overflow: hidden;
       }
       
-      /* 定义加载动画，确保在 React 加载前就能动 */
       @keyframes spin {
         from { transform: rotate(0deg); }
         to { transform: rotate(360deg); }
@@ -29,46 +28,67 @@
       .loader-spin { animation: spin 1s linear infinite; }
       .loader-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
       .bar-anim { animation: loadingBar 1.5s ease-in-out infinite; }
+
+      /* === 全局滚动条样式 === */
+      ::-webkit-scrollbar {
+        width: 8px;  /* 垂直滚动条宽度 */
+        height: 8px; /* 水平滚动条高度 */
+      }
+      
+      /* 滚动条轨道（透明，融入背景） */
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      
+      /* 滚动条滑块（浅灰色） */
+      ::-webkit-scrollbar-thumb {
+        background-color: #cbd5e1; /* Tailwind 的 slate-300 */
+        border-radius: 9999px;
+        /* 使用边框模拟内边距，让滚动条看起来更细 */
+        border: 2px solid #f8fafc; 
+      }
+      
+      /* 鼠标悬停在滑块上时加深一点点 */
+      ::-webkit-scrollbar-thumb:hover {
+        background-color: #94a3b8; /* Tailwind 的 slate-400 */
+      }
+      
+      /* 如果滚动条在纯白背景的容器里（如侧边栏），边框颜色自动适应为白色 */
+      .bg-white ::-webkit-scrollbar-thumb {
+        border-color: #ffffff;
+      }
     </style>
   </head>
-  <body class="bg-slate-950 text-slate-200 antialiased overflow-hidden">
+  <body class="bg-slate-50 text-slate-900 antialiased overflow-hidden">
     <div style="position: fixed; top: 0; left: 0; width: 100%; height: 32px; -webkit-app-region: drag; z-index: 9999;"></div>
-    <!-- 2. 将加载界面放入 root 内部 -->
+    
     <div id="root">
-      <div style="display:flex; align-items:center; justify-content:center; height:100vh; width:100%; background: linear-gradient(to bottom right, #020617, #0f172a, #020617); color: #e2e8f0; position: relative; overflow: hidden;">
+      <div style="display:flex; align-items:center; justify-content:center; height:100vh; width:100%; background: linear-gradient(to bottom right, #f8fafc, #ffffff, #f1f5f9); color: #0f172a; position: relative; overflow: hidden;">
         
-        <!-- 背景装饰 (使用内联样式模拟 Tailwind 效果) -->
         <div style="position: absolute; top: 0; left: 25%; width: 24rem; height: 24rem; background-color: rgba(59, 130, 246, 0.1); border-radius: 9999px; filter: blur(64px);"></div>
         <div style="position: absolute; bottom: 0; right: 25%; width: 24rem; height: 24rem; background-color: rgba(99, 102, 241, 0.1); border-radius: 9999px; filter: blur(64px);"></div>
 
         <div style="text-align: center; z-index: 10; display: flex; flex-direction: column; gap: 2rem; align-items: center;">
           
-          <!-- 加载图标 -->
           <div style="display: flex; justify-content: center;">
             <div style="position: relative; width: 5rem; height: 5rem;">
-              <!-- 外圆 -->
-              <div style="position: absolute; inset: 0; border-radius: 9999px; border: 4px solid rgba(51, 65, 85, 0.3);"></div>
-              <!-- 旋转动画圆 -->
-              <div class="loader-spin" style="position: absolute; inset: 0; border-radius: 9999px; border: 4px solid transparent; border-top-color: #60a5fa; border-right-color: #93c5fd;"></div>
-              <!-- 内圆脉冲 -->
-              <div class="loader-pulse" style="position: absolute; inset: 1rem; border-radius: 9999px; border: 2px solid rgba(59, 130, 246, 0.3);"></div>
-              <!-- 中心点 -->
+              <div style="position: absolute; inset: 0; border-radius: 9999px; border: 4px solid rgba(226, 232, 240, 0.6);"></div>
+              <div class="loader-spin" style="position: absolute; inset: 0; border-radius: 9999px; border: 4px solid transparent; border-top-color: #3b82f6; border-right-color: #93c5fd;"></div>
+              <div class="loader-pulse" style="position: absolute; inset: 1rem; border-radius: 9999px; border: 2px solid rgba(59, 130, 246, 0.2);"></div>
               <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;">
-                <div class="loader-pulse" style="width: 0.5rem; height: 0.5rem; background-color: #60a5fa; border-radius: 9999px;"></div>
+                <div class="loader-pulse" style="width: 0.5rem; height: 0.5rem; background-color: #3b82f6; border-radius: 9999px;"></div>
               </div>
             </div>
           </div>
 
-          <!-- 文字 -->
           <div style="display: flex; flex-direction: column; gap: 0.5rem;">
-            <h2 style="font-size: 1.5rem; font-weight: 700; color: #60a5fa; margin: 0; background: linear-gradient(to right, #60a5fa, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
-              Photoflow
+            <h2 style="font-size: 1.5rem; font-weight: 700; margin: 0; background: linear-gradient(to right, #3b82f6, #6366f1); background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
+              照片流
             </h2>
-            <p style="font-size: 0.875rem; color: #94a3b8; font-family: monospace; margin: 0;">启动中...</p>
+            <p style="font-size: 0.875rem; color: #64748b; font-family: monospace; margin: 0;">启动中...</p>
           </div>
 
-          <!-- 进度条 -->
-          <div style="width: 12rem; height: 0.25rem; background-color: #1e293b; border-radius: 9999px; overflow: hidden;">
+          <div style="width: 12rem; height: 0.25rem; background-color: #e2e8f0; border-radius: 9999px; overflow: hidden;">
             <div class="bar-anim" style="height: 100%; background: linear-gradient(to right, #3b82f6, #6366f1); border-radius: 9999px; width: 60%;"></div>
           </div>
 

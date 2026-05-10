@@ -9,13 +9,13 @@ function createWindow() {
   // 2. 彻底移除顶部菜单栏 (File, Edit, View...)
   Menu.setApplicationMenu(null);
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    backgroundColor: '#020617',
+    width: 1024,
+    height: 768,
+    backgroundColor: '#f8fafc',
     titleBarStyle: 'hidden', 
     titleBarOverlay: {
-      color: '#020617',
-      symbolColor: '#ffffff',
+      color: '#f8fafc',
+      symbolColor: '#334155',
       height: 32
     },
     webPreferences: {
@@ -40,19 +40,18 @@ const getRunConfig = (scriptName, args) => {
   // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
   const baseName = scriptName.replace('.py', '');
 
+  const isWin = process.platform === 'win32';
+
   if (app.isPackaged) {
     // 生产环境：根据平台决定是否有 .exe 后缀
     const exeSuffix = isWin ? '.exe' : '';
-    const command = path.join(
-      process.resourcesPath, 
-      'python', 
-      `${baseName}${exeSuffix}`
-    );
-    return { command, args };
+    return {
+      command: path.join(process.resourcesPath, 'python', `${baseName}${exeSuffix}`),
+      args: args
+    };
   } else {
     // 【开发环境】使用 python 解释器运行对应的 .py 脚本
     const rootDir = path.join(__dirname, '..');
-    const isWin = process.platform === 'win32';
     
     // 寻找 Python 解释器
     const venvPython = isWin
@@ -315,6 +314,24 @@ ipcMain.handle('save-birthdays', async (event, newContent) => {
   } catch (error) {
     console.error('Error writing birthdays.json:', error);
     return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('check-script', async (event, scriptName) => {
+  try {
+    if (!app.isPackaged) {
+      console.log(`[开发模式] 自动放行组件检查: ${scriptName}`);
+      return true; 
+    }
+
+    // 以下是打包后的正式环境逻辑
+    // 打包后去 resources/tools 目录下寻找 Python 引擎文件
+    const scriptPath = path.join(process.resourcesPath, 'python', scriptName);
+    return fs.existsSync(scriptPath);
+    
+  } catch (error) {
+    console.error("检查脚本失败:", error);
+    return false;
   }
 });
 

@@ -1,7 +1,7 @@
 {
-  "name": "photoflow-toolkit",
+  "name": "photoflow",
   "private": true,
-  "version": "25.12.27",
+  "version": "26.5.10",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -21,13 +21,7 @@
       "electron/**/*"
     ],
     "win": {
-      "target": "nsis",
-      "nsis": {
-        "oneClick": false,
-        "allowToChangeInstallationDirectory": true,
-        "createDesktopShortcut": true,
-        "shortcutName": "Photoflow"
-      },
+      "target": ["zip"] ,
       "extraResources": [
         { "from": "python/dist/classify.exe", "to": "python/classify.exe" },
         { "from": "python/dist/png_to_jpg.exe", "to": "python/png_to_jpg.exe" },
@@ -35,6 +29,12 @@
         { "from": "python/dist/catch.exe", "to": "python/catch.exe" },
         { "from": "python/dist/rename.exe", "to": "python/rename.exe" }
       ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Photoflow"
     },
     "mac": {
       "target": "dmg",

@@ -18,11 +18,13 @@ import {
   RotateCcw,
   FileDiff,
   Settings,
-  Save,
   Download,
   AtSign,
   ExternalLink,
   Gift,
+  Scissors,
+  Video,
+  Puzzle
 } from 'lucide-react';
 import { Terminal } from './components/Terminal';
 import type { LogEntry, ToolType } from './types';
@@ -74,11 +76,61 @@ interface PythonEvent {
   progress?: number;
 }
 
+const RequirePlugin = ({ scriptName, title, desc, children }: { scriptName: string, title: string, desc: string, children: React.ReactNode }) => {
+  const [isInstalled, setIsInstalled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    const check = async () => {
+      // 如果后端提供了 checkScript 方法，则调用它检测文件是否存在
+      if (window.electronAPI && 'checkScript' in window.electronAPI) {
+        try {
+          // @ts-ignore
+          const exists = await window.electronAPI.checkScript(scriptName);
+          setIsInstalled(exists);
+        } catch (e) {
+          setIsInstalled(false);
+        }
+      } else {
+        // 如果你的 Electron 后端还没写这个 API，默认放行，并在控制台提示
+        console.warn(`[插件系统] 未检测到 electronAPI.checkScript，跳过验证: ${scriptName}`);
+        setIsInstalled(true); 
+      }
+    };
+    check();
+  }, [scriptName]);
+
+  if (isInstalled === null) {
+    return <div className="p-8 flex items-center gap-3 text-slate-500"><Loader2 className="animate-spin" size={18}/> 检测组件状态...</div>;
+  }
+
+  if (!isInstalled) {
+    return (
+      <div className="w-full space-y-6">
+        <h2 className="text-2xl font-bold text-slate-800">{title}</h2>
+        <div className="bg-white border border-slate-200 rounded-xl p-12 flex flex-col items-center justify-center text-center space-y-4 shadow-sm">
+            <div className="w-16 h-16 bg-slate-50 border border-slate-100 rounded-2xl flex items-center justify-center text-slate-400 mb-2">
+                <Puzzle size={32} />
+            </div>
+            <h3 className="text-xl font-bold text-slate-800">未安装此功能组件</h3>
+            <p className="text-slate-500 text-sm max-w-md">
+                没有文件 <strong className="text-blue-600">{scriptName}</strong>。<br/>
+                {desc}
+            </p>
+            <button disabled className="mt-4 px-6 py-2 bg-slate-100 text-slate-400 rounded-lg font-bold border border-slate-200 cursor-not-allowed">
+                组件缺失
+            </button>
+        </div>
+      </div>
+    );
+  }
+
+  return <>{children}</>;
+};
+
 // --- 主组件 ---
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ToolType>('dashboard');
-  const [showSettings, setShowSettings] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
   
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -145,9 +197,9 @@ const App: React.FC = () => {
   // 等待配置加载完成再渲染主界面
   if (!configLoaded || !config) {
     return (
-      <div className="flex items-center justify-center h-screen w-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-200 overflow-hidden relative">
+      <div className="flex items-center justify-center h-screen w-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-900 overflow-hidden relative">
         {/* 背景装饰 */}
-        <div className="absolute top-0 left-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-3xl"></div>
+        <div className="absolute top-0 left-1/4 w-96 h-96 bg-blue-50 rounded-full blur-3xl"></div>
         <div className="absolute bottom-0 right-1/4 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl"></div>
         
         <div className="text-center z-10 space-y-8">
@@ -155,7 +207,7 @@ const App: React.FC = () => {
           <div className="flex justify-center">
             <div className="relative w-20 h-20">
               {/* 外圆 */}
-              <div className="absolute inset-0 rounded-full border-4 border-slate-700/30"></div>
+              <div className="absolute inset-0 rounded-full border-4 border-slate-200/30"></div>
               
               {/* 旋转动画 */}
               <div className="absolute inset-0 rounded-full border-4 border-transparent border-t-blue-400 border-r-blue-300 animate-spin"></div>
@@ -173,9 +225,9 @@ const App: React.FC = () => {
           {/* 文字 */}
           <div className="space-y-2">
             <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent">
-              Photoflow
+              照片流
             </h2>
-            <p className="text-sm text-slate-400 font-mono">初始化配置中...</p>
+            <p className="text-sm text-slate-500 font-mono">初始化配置中...</p>
           </div>
           
           {/* 加载进度条 */}
@@ -200,7 +252,7 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="flex h-screen w-full bg-slate-950 text-slate-200 font-sans selection:bg-blue-500/30">
+    <div className="flex h-screen w-full bg-slate-50 text-slate-900 font-sans selection:bg-blue-500/30">
 
       {updateInfo && (
         <UpdateModal 
@@ -208,15 +260,6 @@ const App: React.FC = () => {
           url={updateInfo.url}
           notes={updateInfo.notes}
           onClose={() => setUpdateInfo(null)}
-        />
-      )}
-      
-      {/* Settings Modal */}
-      {showSettings && config && (
-        <SettingsModal 
-          config={config} 
-          onConfigChange={handleConfigUpdate} 
-          onClose={() => setShowSettings(false)} 
         />
       )}
 
@@ -227,12 +270,12 @@ const App: React.FC = () => {
       )}
 
       {/* Sidebar */}
-      <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col shrink-0">
-        <div className="p-6 border-b border-slate-800">
+      <aside className="w-64 bg-white border-r border-slate-200 flex flex-col shrink-0">
+        <div className="p-6 border-b border-slate-200">
           <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent cursor-default">
-            Photoflow
+            照片流
           </h1>
-          <p className="text-xs text-slate-500 mt-1 font-mono">v25.12.27 by秋也寻</p>
+          <p className="text-xs text-slate-500 mt-1 font-mono">v26.5.10 by秋也寻</p>
         </div>
 
         <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
@@ -263,6 +306,12 @@ const App: React.FC = () => {
             icon={<FileDiff size={20} />} 
             label="整理前后期图片" 
           />
+          <SidebarItem 
+            active={activeTab === 'video_split'} 
+            onClick={() => setActiveTab('video_split')} 
+            icon={<Scissors size={20} />} 
+            label="视频对半切割" 
+          />
           <div className="pt-4 pb-2 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">
             分析
           </div>
@@ -274,39 +323,60 @@ const App: React.FC = () => {
           />
         </nav>
 
-        <div className="p-4 border-t border-slate-800">
-          <div className="flex flex-col rounded-lg border border-slate-700/50 bg-slate-800/50 overflow-hidden divide-y divide-slate-700/50">
+        <div className="p-4 border-t border-slate-200">
+          <div className="flex flex-col rounded-lg border border-slate-200 bg-white overflow-hidden divide-y divide-slate-50">
             <button 
               onClick={() => setShowAbout(true)}
-              className="w-full flex items-center gap-3 p-3 hover:bg-slate-800 text-slate-400 hover:text-white transition-all group"
+              className="w-full flex items-center gap-3 p-3 rounded-lg hover:bg-slate-50 text-slate-600 hover:text-slate-900 transition-all group"
             >
-              <AtSign size={18} className="group-hover:rotate-90 transition-transform duration-500 text-blue-400" />
+              <AtSign size={18} className="group-hover:rotate-90 transition-transform duration-500 text-slate-400" />
               <span className="font-medium text-sm">关于</span>
-            </button>
-            <button 
-              onClick={() => setShowSettings(true)}
-              className="w-full flex items-center gap-3 p-3 hover:bg-slate-800 text-slate-400 hover:text-white transition-all group"
-            >
-              <Settings size={18} className="group-hover:rotate-90 transition-transform duration-500 text-blue-400" />
-              <span className="font-medium text-sm">设置</span>
             </button>
           </div>
         </div>
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-auto bg-slate-950 p-8 relative scrollbar-thin scrollbar-thumb-slate-700">
-        {activeTab === 'dashboard' && <DashboardView config={config} />}
-        {activeTab === 'converter' && <ConverterView />}
-        {activeTab === 'research' && <ResearchView config={config.research} />}
-        {activeTab === 'match' && <MatchView config={config.smartMatch} />}
-        {activeTab === 'rename_tool' && <RenameView />}
+      <main className="flex-1 overflow-auto bg-slate-50 p-8 relative">
+        {activeTab === 'dashboard' && (
+          <DashboardView config={config.smartImport} onUpdateConfig={(newConfig: AppConfig['smartImport']) => handleConfigUpdate({...config, smartImport: newConfig})} />
+        )}
+        
+        {activeTab === 'converter' && (
+          <RequirePlugin scriptName="png_to_jpg.py" title="PNG 转 JPG" desc="需要该引擎来执行图片格式的批量转换。">
+            <ConverterView />
+          </RequirePlugin>
+        )}
+        
+        {activeTab === 'research' && (
+          <RequirePlugin scriptName="research.py" title="调研整理" desc="需要该引擎来执行视频分镜识别和图片去重。">
+            <ResearchView config={config.research} onUpdateConfig={(newConfig: AppConfig['research']) => handleConfigUpdate({ ...config, research: newConfig })}/>
+          </RequirePlugin>
+        )}
+        
+        {activeTab === 'match' && (
+          <RequirePlugin scriptName="catch.py" title="选片" desc="需要该引擎来根据关键词提取对应的 RAW 照片。">
+            <MatchView config={config.smartMatch} onUpdateConfig={(newConfig: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch: newConfig })} />
+          </RequirePlugin>
+        )}
+        
+        {activeTab === 'rename_tool' && (
+          <RequirePlugin scriptName="rename.py" title="整理前后期图片" desc="需要该引擎进行 pHash 视觉图像指纹比对。">
+            <RenameView />
+          </RequirePlugin>
+        )}
+        
+        {activeTab === 'video_split' && (
+          <RequirePlugin scriptName="cut_video.py" title="视频对半切割" desc="需要调用底层引擎进行极速无损视频切割。">
+            <VideoSplitView />
+          </RequirePlugin>
+        )}
       </main>
     </div>
   );
 };
 
-// --- Dashboard View ---
+// --- 主功能 ---
 const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'finished'>('idle');
   const [progress, setProgress] = useState(0);
@@ -433,7 +503,6 @@ const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
   };
 
   const startImport = () => {
-    // 【双重保险】
     if (isBusyRef.current) {
         console.log("Import already running, skipped.");
         return;
@@ -458,20 +527,6 @@ const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
   const handleDecision = (split: boolean) => {
     setStatus('processing');
     setProgress(0);
-    // 这里不需要改变 isBusyRef，因为流程还在继续
-    
-    // 注意：这里需要稍微修改一下后端逻辑或者传参方式
-    // 因为 Python 脚本是运行一次结束的，如果是交互式，通常需要架构支持
-    // 但鉴于你的 Python 脚本是一次性运行的，这里的 decision 其实是前端拦截
-    // 你的 Python 脚本目前设计是不支持中途暂停等待输入的。
-    
-    // **修正方案**：
-    // 之前 Python 代码里 ask_user 只是 emit 了一个事件然后就 return 了吗？
-    // 查看 Python 代码：
-    // if need_split and should_split is None: ask_user(...) return
-    // 是的，Python 进程已经退出了。
-    
-    // 所以这里我们需要**重新运行**脚本，并带上用户的决定参数
     const args = [];
     if (config) {
       args.push('--sd_path', config.sdPath);
@@ -491,20 +546,20 @@ const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
 
   if (status === 'idle' || status === 'checking') {
     return (
-      <div className="w-full bg-slate-900/50 border border-slate-800 rounded-xl p-4 flex items-center justify-between animate-in fade-in">
+      <div className="w-full bg-white/50 border border-slate-200 rounded-xl p-4 flex items-center justify-between animate-in fade-in">
         <div className="flex items-center gap-3">
-          <div className={`p-2 rounded-lg ${status === 'checking' ? 'bg-blue-500/10 text-blue-400' : 'bg-slate-800 text-slate-500'}`}>
+          <div className={`p-2 rounded-lg ${status === 'checking' ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>
             {status === 'checking' ? <Loader2 className="animate-spin" size={18} /> : <HardDrive size={18} />}
           </div>
           <div className="flex flex-col">
-            <span className="text-sm font-medium text-slate-300">从SD卡导入媒体</span>
+            <span className="text-sm font-bold text-slate-800">从SD卡导入媒体</span>
             <span className="text-xs text-slate-500">{status === 'checking' ? '正在搜索 SD 卡...' : '未检测到 SD 卡连接'}</span>
           </div>
         </div>
         <button 
           onClick={checkSD}
           disabled={status === 'checking'}
-          className="p-2 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition disabled:opacity-50"
+          className="p-2 hover:bg-slate-800 rounded-lg text-slate-500 hover:text-slate-800 transition disabled:opacity-50"
           title="重新扫描"
         >
           <RotateCcw size={18} className={status === 'checking' ? 'animate-spin' : ''} />
@@ -516,7 +571,7 @@ const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
   return (
     <div className="w-full space-y-4">
       {/* 主卡片 */}
-      <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-6 flex flex-col relative overflow-hidden min-h-[250px] animate-in slide-in-from-top-2">
+      <div className="bg-white/50 border border-slate-200 rounded-xl p-6 flex flex-col relative overflow-hidden min-h-[250px] animate-in slide-in-from-top-2">
         {/* 顶部标题栏 */}
         <div className="flex justify-between items-center mb-6 z-10">
           <h3 className="text-lg font-semibold text-blue-200 flex items-center gap-2">
@@ -537,26 +592,26 @@ const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
           {/* State: Ready */}
           {status === 'ready_to_import' && (
             <div className="flex flex-col items-center w-full">
-              <div className="w-16 h-16 bg-blue-500/10 rounded-full flex items-center justify-center mb-4 text-blue-400">
+              <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mb-4 text-blue-600">
                 <Loader2 className="animate-spin" size={32} />
               </div>
-              <p className="text-white font-bold text-lg mb-1">准备导入...</p>
-              <p className="text-slate-400 text-sm mb-6">{statusMsg}</p>
+              <p className="text-slate-800 font-bold text-lg mb-1">准备导入...</p>
+              <p className="text-slate-500 text-sm mb-6">{statusMsg}</p>
             </div>
           )}
 
           {/* State: Progress (Importing or Processing) */}
           {(status === 'importing' || status === 'processing') && (
             <div className="w-full max-w-sm space-y-3">
-              <div className="flex justify-between text-xs text-slate-400 font-mono">
+              <div className="flex justify-between text-xs text-slate-500 font-mono">
                 <span>{status === 'importing' ? 'COPYING...' : 'ORGANIZING...'}</span>
                 <span>{progress}%</span>
               </div>
-              <div className="h-2 bg-slate-800 rounded-full overflow-hidden border border-slate-700/50">
+              <div className="h-2 bg-slate-800 rounded-full overflow-hidden border border-slate-200/50">
                 <div className="h-full bg-blue-500 transition-all duration-300 relative" style={{ width: `${progress}%` }}></div>
               </div>
               {/* 文件名显示区域 */}
-              <p className="text-sm text-slate-300 mt-2 font-mono truncate w-full px-4">
+              <p className="text-sm text-slate-800 mt-2 font-mono truncate w-full px-4">
                 {statusMsg}
               </p>
             </div>
@@ -564,24 +619,24 @@ const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
 
           {/* State: Decision */}
           {status === 'decision' && decisionData && (
-            <div className="w-full bg-slate-950/80 p-5 rounded-xl border border-yellow-500/20 text-left animate-in zoom-in-95">
-              <h4 className="text-white font-bold mb-2 flex items-center gap-2">
+            <div className="w-full bg-slate-50/80 p-5 rounded-xl border border-yellow-500/20 text-left animate-in zoom-in-95">
+              <h4 className="text-slate-800 font-bold mb-2 flex items-center gap-2">
                 <AlertCircle className="text-yellow-400" size={20} />
                 需确认操作
               </h4>
-              <p className="text-slate-400 text-sm mb-6">
+              <p className="text-slate-500 text-sm mb-6">
                 检测到拍摄时间有 2 小时以上的断层，是否需要拆分成不同日期的文件夹？
               </p>
               <div className="flex gap-3">
                 <button 
                     onClick={() => handleDecision(true)} 
-                    className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white py-2 rounded-lg text-sm transition-colors"
+                    className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-slate-800 py-2 rounded-lg text-sm transition-colors"
                 >
                     是，拆分文件夹
                 </button>
                 <button 
                     onClick={() => handleDecision(false)} 
-                    className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-200 py-2 rounded-lg text-sm transition-colors"
+                    className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-900 py-2 rounded-lg text-sm transition-colors"
                 >
                     否，合并在一起
                 </button>
@@ -669,31 +724,31 @@ const BirthdayManagerModal = ({ onClose, onDataChanged }: { onClose: () => void,
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-50/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
       <div className="absolute inset-0" onClick={onClose}></div>
-      <div className="bg-slate-900 border border-slate-700 w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[80vh] relative z-10">
-        <div className="p-6 border-b border-slate-800 flex justify-between items-center bg-slate-800/50 rounded-t-2xl">
-          <div><h3 className="text-xl font-bold text-white">Birthday Database</h3></div>
-          <button onClick={onClose} className="p-2 hover:bg-slate-700 rounded-full text-slate-400 hover:text-white transition cursor-pointer"><X size={24} /></button>
+      <div className="bg-white border border-slate-200 w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[80vh] relative z-10">
+        <div className="p-6 border-b border-slate-200 flex justify-between items-center bg-slate-200 rounded-t-2xl">
+          <div><h3 className="text-xl font-bold text-slate-800">生日列表</h3></div>
+          <button onClick={onClose} className="p-2 hover:bg-slate-700 rounded-full text-slate-500 hover:text-slate-800 transition cursor-pointer"><X size={24} /></button>
         </div>
         <div className="flex-1 overflow-y-auto p-6 space-y-2">
           {loading ? <div className="text-center text-slate-500">Loading...</div> : 
            sortedBirthdays.map(([name, date]) => (
-            <div key={name} className="flex items-center justify-between bg-slate-950 p-3 rounded-lg border border-slate-800 group">
+            <div key={name} className="flex items-center justify-between bg-slate-50 p-3 rounded-lg border border-slate-200 group">
                <div className="flex items-center gap-3">
                   <div className="w-8 h-8 rounded-full bg-indigo-500/10 flex items-center justify-center text-indigo-400"><User size={14} /></div>
-                  <div><div className="font-medium text-slate-200">{name}</div><div className="text-xs text-slate-500">{date}</div></div>
+                  <div><div className="font-medium text-slate-900">{name}</div><div className="text-xs text-slate-500">{date}</div></div>
                </div>
                <button onClick={() => handleDelete(name)} className="opacity-0 group-hover:opacity-100 p-2 text-slate-500 hover:text-red-400 transition"><Trash2 size={16} /></button>
             </div>
           ))}
         </div>
-        <div className="p-6 border-t border-slate-800 bg-slate-900 rounded-b-2xl">
+        <div className="p-6 border-t border-slate-200 bg-white rounded-b-2xl">
            <div className="flex gap-3">
-              <input placeholder="Name" value={newName} onChange={e => setNewName(e.target.value)} className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-4 py-2 text-white" />
-              <input placeholder="M" type="number" value={newMonth} onChange={e => setNewMonth(e.target.value)} className="w-16 bg-slate-950 border border-slate-700 rounded-lg px-2 py-2 text-center text-white" />
-              <input placeholder="D" type="number" value={newDay} onChange={e => setNewDay(e.target.value)} className="w-16 bg-slate-950 border border-slate-700 rounded-lg px-2 py-2 text-center text-white" />
-              <button onClick={handleSave} className="bg-blue-600 text-white px-4 py-2 rounded-lg flex items-center gap-2"><Plus size={16} /> Add</button>
+              <input placeholder="Name" value={newName} onChange={e => setNewName(e.target.value)} className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-slate-800" />
+              <input placeholder="M" type="number" value={newMonth} onChange={e => setNewMonth(e.target.value)} className="w-16 bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-center text-slate-800" />
+              <input placeholder="D" type="number" value={newDay} onChange={e => setNewDay(e.target.value)} className="w-16 bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-center text-slate-800" />
+              <button onClick={handleSave} className="bg-blue-500 text-slate-800 px-4 py-2 rounded-lg flex items-center gap-2"><Plus size={16} /> Add</button>
            </div>
         </div>
       </div>
@@ -701,7 +756,13 @@ const BirthdayManagerModal = ({ onClose, onDataChanged }: { onClose: () => void,
   );
 };
 
-const DashboardView = ({ config }: { config?: AppConfig }) => {
+const DashboardView = ({ 
+  config, 
+  onUpdateConfig 
+}: { 
+  config: AppConfig['smartImport']; 
+  onUpdateConfig: (c: AppConfig['smartImport']) => void;
+}) => {
   // 生日逻辑保持不变
   const [upcomingBirthdays, setUpcomingBirthdays] = useState<{name: string, date: string, sortKey: number}[]>([]);
   const [loading, setLoading] = useState(true);
@@ -765,41 +826,101 @@ const DashboardView = ({ config }: { config?: AppConfig }) => {
       )}
 
       <div className="flex flex-col gap-6">
-        <ImportCard config={config?.smartImport} />
+        <ImportCard config={config} />
+        <div className="w-full bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+          <h3 className="text-sm font-bold text-blue-400 uppercase tracking-wider flex items-center gap-2 mb-4">
+            <Settings size={16} /> 导入偏好设置
+          </h3>
+          
+          <div className="flex items-center gap-3 p-2 rounded hover:bg-slate-800/30 transition">
+             <input 
+               type="checkbox" 
+               id="autoStart"
+               checked={config.autoStart} 
+               onChange={e => onUpdateConfig({...config, autoStart: e.target.checked})}
+               className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-blue-500"
+             />
+             <label htmlFor="autoStart" className="text-sm text-slate-800 cursor-pointer select-none">
+               应用启动时自动开始读取SD卡文件
+             </label>
+          </div>
+          <p className="text-xs text-slate-500">
+            支持佳能（.cr2 .cr3）、索尼（.arw）、尼康（.nef）、奥林巴斯（.orf）、徕卡（.rwl .dng）、富士（.raf）、哈苏（.3fr .fff）、大疆（.dng）的RAW格式导入。
+          </p>
+          
+          <InputField 
+            label="SD卡读取路径" 
+            value={config.sdPath} 
+            onChange={v => onUpdateConfig({...config, sdPath: v})} 
+            icon={<FolderInput size={14}/>} 
+          />
+          <InputField 
+            label="默认导入目标路径" 
+            value={config.destPath} 
+            onChange={v => onUpdateConfig({...config, destPath: v})} 
+            icon={<Download size={14}/>} 
+          />
+
+          <div className="bg-white p-4 rounded-lg border border-slate-200 space-y-3">
+             <div className="flex items-center gap-3 mb-2">
+                <input 
+                  type="checkbox" 
+                  id="backupEnabled"
+                  checked={config.backupEnabled} 
+                  onChange={e => onUpdateConfig({...config, backupEnabled: e.target.checked})}
+                  className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-green-500"
+                />
+                <label htmlFor="backupEnabled" className="text-sm text-slate-800 font-bold cursor-pointer select-none">
+                  开启备份
+                </label>
+             </div>
+             {config.backupEnabled && (
+                <InputField 
+                  label="备份目标路径" 
+                  value={config.backupPath} 
+                  onChange={v => onUpdateConfig({...config, backupPath: v})} 
+                  icon={<HardDrive size={14}/>} 
+                />
+             )}
+          </div>
+        </div>
+
         <div className="w-full bg-gradient-to-br from-indigo-900/50 to-purple-900/50 border border-indigo-500/20 rounded-xl p-6 flex flex-col">
           <div className="flex justify-between items-start mb-6 z-10">
-              <h3 className="text-lg font-semibold text-indigo-200 flex items-center gap-2">
+              <h3 className="text-lg font-semibold text-indigo-900 flex items-center gap-2">
                 <span className="text-xl">🎂</span> 角色生日
               </h3>
           </div>
           
           <div className="flex-1 z-10">
               {loading ? (
-                <div className="text-indigo-300/50 text-sm">Loading birthdays...</div>
+                <div className="text-indigo-400 text-sm">Loading birthdays...</div>
               ) : upcomingBirthdays.length > 0 ? (
-                // 这里的 grid 可以改成 grid-cols-2 让名字在内部并列，或者 grid-cols-1 纯列表
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pr-2">
                   {upcomingBirthdays.map((b, i) => (
-                    <div key={i} className="flex items-center justify-between bg-slate-900/40 backdrop-blur-sm p-3 rounded-lg border border-indigo-500/10 hover:bg-slate-900/60 transition group">
+                    // 内部小卡片改为白底，hover 时稍微加深
+                    <div key={i} className="flex items-center justify-between bg-white shadow-sm p-3 rounded-lg border border-indigo-50 hover:border-indigo-200 transition group">
                       <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-indigo-500/20 flex items-center justify-center text-indigo-300 font-bold text-xs">{b.name.charAt(0)}</div>
-                        <span className="font-medium text-white pr-3 leading-snug">{b.name}</span>
+                        <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center text-indigo-600 font-bold text-xs">{b.name.charAt(0)}</div>
+                        {/* 名字文字加深 */}
+                        <span className="font-bold text-slate-700 pr-3 leading-snug">{b.name}</span>
                       </div>
-                      <span className="flex-shrink-0 text-indigo-200 font-mono text-xs bg-indigo-500/20 px-2 py-1 rounded border border-indigo-500/20">{b.date}</span>
+                      <span className="flex-shrink-0 text-indigo-600 font-mono text-xs bg-indigo-50 px-2 py-1 rounded border border-indigo-100">{b.date}</span>
                     </div>
                   ))}
                 </div>
               ) : (
-                <div className="flex flex-col items-center justify-center h-40 text-indigo-300/60 text-sm italic">
-                  <p>No birthdays coming up soon.</p>
+                <div className="flex flex-col items-center justify-center h-40 text-indigo-400/60 text-sm italic">
+                  <p>近期没有角色过生日哦。</p>
                 </div>
               )}
           </div>
 
           {/* Footer */}
-          <div className="flex items-center justify-between mt-auto pt-4 border-t border-indigo-500/20 z-10">
-              <p className="text-xs text-indigo-400/60">只显示接下来两个月的角色生日</p>
-              <button onClick={() => setShowManager(true)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-200 text-xs font-bold transition-all border border-indigo-500/30">
+          <div className="flex items-center justify-between mt-auto pt-4 border-t border-indigo-100 z-10">
+              <p className="text-xs text-indigo-900">只显示接下来两个月的角色生日</p>
+              {/* 管理按钮变亮 */}
+              <button onClick={() => setShowManager(true)} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-indigo-50 text-indigo-600 text-xs font-bold transition-all border border-indigo-200 shadow-sm">
                 <Edit size={12} /> Manage
               </button>
           </div>
@@ -808,8 +929,6 @@ const DashboardView = ({ config }: { config?: AppConfig }) => {
     </div>
   );
 };
-
-// --- 其他视图 ---
 
 const ConverterView = () => {
   const [targetPath, setTargetPath] = useState("");
@@ -884,8 +1003,8 @@ const ConverterView = () => {
 
   return (
     <div className="w-full space-y-6">
-      <h2 className="text-2xl font-bold text-white">PNG 转 JPG </h2>
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6">
+      <h2 className="text-2xl font-bold text-slate-800">PNG 转 JPG </h2>
+      <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
         
         {/* Path Input with Drag & Drop */}
         <div className="space-y-2">
@@ -901,7 +1020,7 @@ const ConverterView = () => {
                   onDrop={handleDrop}
                   onDragOver={handleDragOver}
                   placeholder="粘贴路径或者拖入文件夹"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-10 pr-4 py-3 text-slate-200 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-10 pr-4 py-3 text-slate-900 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm"
                 />
             </div>
             <p className="text-xs text-slate-600 flex items-center gap-1">
@@ -911,13 +1030,13 @@ const ConverterView = () => {
         </div>
 
         {/* Progress & Actions */}
-        <div className="bg-slate-950 rounded-lg border border-slate-800 p-4 flex items-center gap-6">
+        <div className="bg-slate-50 rounded-lg border border-slate-200 p-4 flex items-center gap-6">
              <div className="flex-1 flex flex-col gap-1">
-                <div className="flex justify-between text-xs text-slate-400">
+                <div className="flex justify-between text-xs text-slate-500">
                     <span>进度</span>
-                    <span className="font-mono text-blue-400">{progress}%</span>
+                    <span className="font-mono text-blue-600">{progress}%</span>
                 </div>
-                <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+                <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
                     <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${progress}%` }}></div>
                 </div>
              </div>
@@ -925,11 +1044,13 @@ const ConverterView = () => {
              <button 
                 onClick={startConversion}
                 disabled={!targetPath || isRunning}
-                className={`px-8 py-2 rounded-lg font-bold text-white transition flex items-center gap-2 shadow-lg ${
-                  isRunning ? 'bg-slate-700 cursor-not-allowed shadow-none' : 'bg-blue-600 hover:bg-blue-500 shadow-blue-900/20'
+                className={`px-8 py-2 rounded-lg font-bold transition flex items-center gap-2 ${
+                  isRunning || !targetPath 
+                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200 shadow-none' 
+                    : 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-500/20'
                 }`}
              >
-                {isRunning ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} fill="currentColor" />}
+                {isRunning ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} fill="currentColor" />} 
                 {isRunning ? '转换中...' : '开始转换'}
              </button>
         </div>
@@ -940,57 +1061,17 @@ const ConverterView = () => {
   );
 };
 
-const ResearchView = ({ config }: { config: AppConfig['research'] }) => {
-  // 使用传入的 config 初始化状态
-  const [targetPath, setTargetPath] = useState(config.defaultDir);
-  const [ssimThreshold, setSsimThreshold] = useState(config.ssimThreshold);
-  const [minDuration, setMinDuration] = useState(config.minDuration);
-
+const ResearchView = ({ 
+  config,
+  onUpdateConfig
+}: { 
+  config: AppConfig['research'];
+  onUpdateConfig: (newConfig: AppConfig['research']) => void;
+}) => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("准备就绪");
-
-  // 监听 config 变化 (如果用户在设置中修改了，这里也会同步更新)
-  useEffect(() => {
-    setTargetPath(config.defaultDir);
-    setSsimThreshold(config.ssimThreshold);
-    setMinDuration(config.minDuration);
-  }, [config]);
-
-  useEffect(() => {
-    if (!window.electronAPI?.onPythonEvent) return;
-    const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
-      switch (event.type) {
-        case 'log':
-        case 'warning':
-          setLogs(prev => [...prev, {
-            timestamp: new Date().toLocaleTimeString(),
-            message: event.message,
-            type: event.type as any
-          }]);
-          break;
-        case 'progress':
-          if (event.progress !== undefined) setProgress(event.progress);
-          if (event.message) setStatusMsg(event.message);
-          break;
-        case 'success':
-        case 'error':
-          setLogs(prev => [...prev, {
-            timestamp: new Date().toLocaleTimeString(),
-            message: event.message,
-            type: event.type as any
-          }]);
-          setIsRunning(false); 
-          if (event.type === 'success') setProgress(100);
-          break;
-        case 'status':
-          setStatusMsg(event.message);
-          break;
-      }
-    });
-    return cleanup;
-  }, []);
 
   const runAnalysis = () => {
     if (isRunning) return;
@@ -1001,28 +1082,28 @@ const ResearchView = ({ config }: { config: AppConfig['research'] }) => {
 
     if (window.electronAPI) {
       window.electronAPI.runScript('research.py', [
-        '--path', targetPath,
-        '--threshold', ssimThreshold.toString(),
-        '--min_duration', minDuration.toString()
+        '--path', config.defaultDir,
+        '--threshold', config.ssimThreshold.toString(),
+        '--min_duration', config.minDuration.toString()
       ]);
     }
   };
 
   return (
     <div className="w-full space-y-6">
-      <h2 className="text-2xl font-bold text-white">调研整理</h2>
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6">
+      <h2 className="text-2xl font-bold text-slate-800">调研整理</h2>
+      <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
         <div className="space-y-2">
           <p className="mt-2 text-gray-600">这个功能会整理从小红书/抖音爬取下来的文件。这个程序会删除掉小红书的爬取可能会出现重复图片的情况，然后会对视频执行转场识别，把每一个分镜的视频帧截取一帧下来。</p>
         </div>
         {/* 路径设置 */}
         <div className="space-y-2">
-           <label className="text-xs font-semibold text-slate-500 uppercase">工作目录</label>
+           <label className="text-xs font-semibold text-slate-500 uppercase">读取目录</label>
            <input 
              type="text" 
-             value={targetPath}
-             onChange={(e) => setTargetPath(e.target.value)}
-             className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2 text-slate-200 font-mono text-sm focus:border-blue-500 outline-none"
+             value={config.defaultDir}
+             onChange={(e) => onUpdateConfig({...config, defaultDir: e.target.value})}
+             className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-slate-900 font-mono text-sm focus:border-blue-500 outline-none"
            />
         </div>
 
@@ -1030,13 +1111,13 @@ const ResearchView = ({ config }: { config: AppConfig['research'] }) => {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             <div>
                 <div className="flex justify-between mb-2">
-                    <label className="text-sm font-medium text-slate-400">SSIM 阈值</label>
-                    <span className="text-sm font-mono text-blue-400">{ssimThreshold}</span>
+                    <label className="text-sm font-medium text-slate-500">SSIM 阈值</label>
+                    <span className="text-sm font-mono text-blue-600">{config.ssimThreshold}</span>
                 </div>
                 <input 
                     type="range" min="0.5" max="1.0" step="0.01"
-                    value={ssimThreshold}
-                    onChange={(e) => setSsimThreshold(parseFloat(e.target.value))}
+                    value={config.ssimThreshold}
+                    onChange={(e) => onUpdateConfig({...config, ssimThreshold: parseFloat(e.target.value)})}
                     className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
                 />
                 <p className="text-xs text-slate-600 gap-6 flex items-center mt-1">
@@ -1045,13 +1126,13 @@ const ResearchView = ({ config }: { config: AppConfig['research'] }) => {
             </div>
             <div>
                 <div className="flex justify-between mb-2">
-                    <label className="text-sm font-medium text-slate-400">最小片段时长 (秒)</label>
-                    <span className="text-sm font-mono text-blue-400">{minDuration}s</span>
+                    <label className="text-sm font-medium text-slate-500">最小片段时长 (秒)</label>
+                    <span className="text-sm font-mono text-blue-600">{config.minDuration}s</span>
                 </div>
                 <input 
                     type="range" min="0.1" max="5.0" step="0.1"
-                    value={minDuration}
-                    onChange={(e) => setMinDuration(parseFloat(e.target.value))}
+                    value={config.minDuration}
+                    onChange={(e) => onUpdateConfig({...config, minDuration: parseFloat(e.target.value)})}
                     className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-blue-500"
                 />
                 <p className="text-xs text-slate-600 gap-6 flex items-center mt-1">
@@ -1061,12 +1142,12 @@ const ResearchView = ({ config }: { config: AppConfig['research'] }) => {
         </div>
 
         {/* 状态与进度 */}
-        <div className="bg-slate-950 rounded-lg border border-slate-800 p-4">
+        <div className="bg-slate-50 rounded-lg border border-slate-200 p-4">
             <div className="flex justify-between text-sm mb-2">
-               <span className="text-slate-300">{statusMsg}</span>
-               <span className="text-blue-400 font-mono">{progress.toFixed(1)}%</span>
+               <span className="text-slate-800">{statusMsg}</span>
+               <span className="text-blue-600 font-mono">{progress.toFixed(1)}%</span>
             </div>
-            <div className="h-2 bg-slate-800 rounded-full overflow-hidden">
+            <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
                <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${progress}%` }}/>
             </div>
         </div>
@@ -1075,8 +1156,10 @@ const ResearchView = ({ config }: { config: AppConfig['research'] }) => {
              <button 
                onClick={runAnalysis} 
                disabled={isRunning}
-               className={`px-6 py-2 rounded-lg font-bold text-white transition flex items-center gap-2 ${
-                 isRunning ? 'bg-slate-700 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'
+               className={`px-6 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
+                 isRunning 
+                  ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none' 
+                  : 'bg-blue-600 text-white hover:bg-blue-500 shadow-md shadow-blue-500/20'
                }`}
              >
                 {isRunning ? <Loader2 className="animate-spin" size={18}/> : <Play size={18} fill="currentColor" />}
@@ -1090,7 +1173,14 @@ const ResearchView = ({ config }: { config: AppConfig['research'] }) => {
   );
 };
 
-const MatchView = ({ config }: { config: AppConfig['smartMatch'] }) => {
+const MatchView = ({ 
+        config, 
+        onUpdateConfig 
+    }: { 
+        config: AppConfig['smartMatch']; 
+        onUpdateConfig: (newMatchConfig: AppConfig['smartMatch']) => void; 
+    }) => {
+      
     const [sourceDir, setSourceDir] = useState("");
     const [keywords, setKeywords] = useState("");
     const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -1154,12 +1244,20 @@ const MatchView = ({ config }: { config: AppConfig['smartMatch'] }) => {
 
     return (
         <div className="w-full space-y-6">
-            <h2 className="text-2xl font-bold text-white">选片</h2>
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-6">
+            <h2 className="text-2xl font-bold text-slate-800">选片</h2>
+            <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
                 <div className="space-y-2">
                   <p className="mt-2 text-gray-600">逻辑是客户发来了文件名的选片，把文件名从RAW文件夹挑选出来。</p>
                 </div>
-                {/* Source Input */}
+                <div className="space-y-2">
+                    <label className="text-xs font-semibold text-slate-500 uppercase">生成选片文件夹的名称</label>
+                    <input 
+                        type="text" 
+                        value={config.destFolderName}
+                        onChange={(e) => onUpdateConfig({...config, destFolderName: e.target.value})}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-slate-800 focus:border-blue-500"
+                    />
+                </div>
                 <div className="space-y-2">
                     <label className="text-xs font-semibold text-slate-500 uppercase">包含RAW文件的原始文件夹路径</label>
                     <div className="relative">
@@ -1173,11 +1271,11 @@ const MatchView = ({ config }: { config: AppConfig['smartMatch'] }) => {
                             onDrop={handleDrop}
                             onDragOver={handleDragOver}
                             placeholder="粘贴路径或者拖入文件夹"
-                            className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-10 pr-4 py-3 text-slate-200 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm"
+                            className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-10 pr-4 py-3 text-slate-900 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm"
                         />
                     </div>
                     <p className="text-xs text-slate-600">
-                        会在原始文件夹外面创建一个<span className="text-blue-400 font-mono mx-1">"{config.destFolderName}"</span>文件夹用于提取选片
+                        会在原始文件夹外面创建一个<span className="text-blue-600 font-mono mx-1">"{config.destFolderName}"</span>文件夹用于提取选片
                         <p className="text-xs text-slate-600 flex items-center gap-1">
                           <AlertCircle size={12}/> 
                           文件夹名称可以在设置中更改
@@ -1192,7 +1290,7 @@ const MatchView = ({ config }: { config: AppConfig['smartMatch'] }) => {
                         value={keywords}
                         onChange={(e) => setKeywords(e.target.value)}
                         placeholder="关键词需要用空格分开，一个空格分开一个文件名"
-                        className="w-full h-24 bg-slate-950 border border-slate-700 rounded-lg p-4 text-slate-200 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm resize-none"
+                        className="w-full h-24 bg-slate-50 border border-slate-200 rounded-lg p-4 text-slate-900 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm resize-none"
                     />
                 </div>
 
@@ -1201,10 +1299,10 @@ const MatchView = ({ config }: { config: AppConfig['smartMatch'] }) => {
                     <button 
                         onClick={runTask}
                         disabled={isRunning || !sourceDir || !keywords}
-                        className={`px-8 py-2.5 rounded-lg font-bold text-white transition flex items-center gap-2 ${
+                        className={`px-8 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
                             isRunning || !sourceDir || !keywords
-                                ? 'bg-slate-700 cursor-not-allowed text-slate-400' 
-                                : 'bg-blue-600 hover:bg-blue-500 shadow-lg shadow-blue-900/20'
+                                ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none' 
+                                : 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-500/20'
                         }`}
                     >
                         {isRunning ? <Loader2 className="animate-spin" size={18}/> : <ScanSearch size={18} />}
@@ -1212,7 +1310,6 @@ const MatchView = ({ config }: { config: AppConfig['smartMatch'] }) => {
                     </button>
                 </div>
             </div>
-
             <Terminal logs={logs} />
         </div>
     )
@@ -1254,10 +1351,10 @@ const RenameView = () => {
 
     return (
         <div className="w-full space-y-6">
-            <h2 className="text-2xl font-bold text-white">整理前后期图片</h2>
+            <h2 className="text-2xl font-bold text-slate-800">整理前后期图片</h2>
             
             {/* --- 新增：可视化流程图 (替换了原来的纯文字说明) --- */}
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 relative overflow-hidden">
+            <div className="bg-white border border-slate-200 rounded-xl p-6 relative overflow-hidden">
                 <div className="space-y-2">
                   <p className="mt-2 text-gray-600">我会遇到这么个情况，返给客户很多图，然后客户修了一部分，但是又需要匹配到返给客户图的文件，所以这个功能可以匹配你返给客户的和客户修了再返给你的图，重命名和寻找客户没给你的图。</p>
                 </div>
@@ -1267,11 +1364,11 @@ const RenameView = () => {
                 <div className="relative z-10 flex flex-col md:flex-row items-center justify-between gap-4 md:gap-8">
                     
                     {/* 左侧：摄影师基准 */}
-                    <div className="flex-1 w-full bg-slate-950/50 border border-blue-500/20 rounded-lg p-4 flex flex-col items-center text-center">
-                        <div className="text-xs font-bold text-blue-400 uppercase mb-3 flex items-center gap-2">
+                    <div className="flex-1 w-full bg-slate-50/50 border border-blue-500/20 rounded-lg p-4 flex flex-col items-center text-center">
+                        <div className="text-xs font-bold text-blue-600 uppercase mb-3 flex items-center gap-2">
                             <HardDrive size={14} /> 摄影师原图 (文件夹A)
                         </div>
-                        <div className="bg-slate-900 p-2 rounded border border-slate-800 flex items-center gap-2 text-slate-300 w-full justify-center">
+                        <div className="bg-white p-2 rounded border border-slate-200 flex items-center gap-2 text-slate-800 w-full justify-center">
                             <ImageIcon size={16} className="text-blue-500" />
                             <span className="font-mono text-sm">IMG_8821.JPG</span>
                         </div>
@@ -1280,10 +1377,10 @@ const RenameView = () => {
 
                     {/* 中间：处理逻辑 */}
                     <div className="flex flex-col items-center justify-center shrink-0">
-                        <div className="text-[10px] text-slate-400 mb-1 font-mono">pHash 视觉指纹比对</div>
+                        <div className="text-[10px] text-slate-500 mb-1 font-mono">pHash 视觉指纹比对</div>
                         <div className="flex items-center gap-2">
                             <div className="h-[1px] w-8 md:w-16 bg-gradient-to-r from-blue-500/50 to-purple-500/50"></div>
-                            <div className="bg-slate-800 p-2 rounded-full border border-purple-500/30 text-purple-400 shadow-[0_0_10px_rgba(168,85,247,0.2)]">
+                            <div className="bg-purple-50 p-2 rounded-full border border-purple-200 text-purple-600 shadow-sm">
                                 <ScanSearch size={20} />
                             </div>
                             <div className="h-[1px] w-8 md:w-16 bg-gradient-to-r from-purple-500/50 to-green-500/50"></div>
@@ -1292,7 +1389,7 @@ const RenameView = () => {
                     </div>
 
                     {/* 右侧：客户返图 */}
-                    <div className="flex-1 w-full bg-slate-950/50 border border-green-500/20 rounded-lg p-4 flex flex-col items-center text-center relative overflow-hidden">
+                    <div className="flex-1 w-full bg-slate-50/50 border border-green-500/20 rounded-lg p-4 flex flex-col items-center text-center relative overflow-hidden">
                         <div className="text-xs font-bold text-green-400 uppercase mb-3 flex items-center gap-2">
                             <User size={14} /> 客户选修返图 (文件夹B)
                         </div>
@@ -1304,7 +1401,7 @@ const RenameView = () => {
                             </div>
                             <div className="text-slate-600"><RotateCcw size={10} className="rotate-180"/></div>
                             {/* 变化后 */}
-                            <div className="bg-slate-900 p-2 rounded border border-green-900/50 flex items-center gap-2 text-green-300 w-full justify-center shadow-[0_0_10px_rgba(34,197,94,0.1)]">
+                            <div className="bg-white p-2 rounded border border-green-900/50 flex items-center gap-2 text-green-300 w-full justify-center shadow-[0_0_10px_rgba(34,197,94,0.1)]">
                                 <CheckCircle2 size={16} />
                                 <span className="font-mono text-sm font-bold">IMG_8821.JPG</span>
                             </div>
@@ -1315,8 +1412,8 @@ const RenameView = () => {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col gap-3">
-                    <label className="text-xs font-semibold text-blue-400 uppercase flex items-center gap-2">
+                <div className="bg-white border border-slate-200 rounded-xl p-6 flex flex-col gap-3">
+                    <label className="text-xs font-semibold text-blue-600 uppercase flex items-center gap-2">
                         <FolderInput size={14}/> 文件夹A (参照组/摄影师)
                     </label>
                     <input 
@@ -1325,12 +1422,12 @@ const RenameView = () => {
                         onDrop={(e) => handleDrop(e, setFolderA)}
                         onDragOver={allowDrag}
                         placeholder="拖入摄影师发给客户的原图文件夹..."
-                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm font-mono"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-sm font-mono"
                     />
                     <p className="text-xs text-slate-500">这里的文件名正确，但可能不包含客户的选择。</p>
                 </div>
 
-                <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col gap-3">
+                <div className="bg-white border border-slate-200 rounded-xl p-6 flex flex-col gap-3">
                     <label className="text-xs font-semibold text-green-400 uppercase flex items-center gap-2">
                         <Edit size={14}/> 文件夹B (待重命名/客户返图)
                     </label>
@@ -1340,31 +1437,28 @@ const RenameView = () => {
                         onDrop={(e) => handleDrop(e, setFolderB)}
                         onDragOver={allowDrag}
                         placeholder="拖入客户发回来的乱序文件夹..."
-                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 text-sm font-mono"
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-sm font-mono"
                     />
                     <p className="text-xs text-slate-500">这里的图片是客户想要的，但文件名是乱的。</p>
                 </div>
             </div>
 
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex items-center justify-between">
+            <div className="bg-white border border-slate-200 rounded-xl p-4 flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                    <input 
-                        type="checkbox" id="copyUnmatched"
-                        checked={copyUnmatched}
-                        onChange={(e) => setCopyUnmatched(e.target.checked)}
-                        className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-blue-600"
-                    />
-                    <label htmlFor="copyUnmatched" className="text-sm text-slate-300 cursor-pointer select-none">
+                    <input type="checkbox" id="copyUnmatched" checked={copyUnmatched} onChange={(e) => setCopyUnmatched(e.target.checked)} className="w-4 h-4 rounded border-slate-300 bg-white text-blue-600" />
+                    <label htmlFor="copyUnmatched" className="text-sm text-slate-800 cursor-pointer select-none">
                         单独整理 文件夹A 中客户没返回的图片
                     </label>
                 </div>
                 <div className="flex items-center gap-4">
-                    {isRunning && <span className="text-blue-400 font-mono text-sm">{progress}%</span>}
+                    {isRunning && <span className="text-blue-600 font-mono text-sm">{progress}%</span>}
                     <button 
                         onClick={runRename}
                         disabled={isRunning || !folderA || !folderB}
-                        className={`px-6 py-2 rounded-lg font-bold text-white transition flex items-center gap-2 ${
-                            isRunning ? 'bg-slate-700 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500'
+                        className={`px-6 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
+                            isRunning || !folderA || !folderB
+                                ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none' 
+                                : 'bg-blue-600 text-white hover:bg-blue-500 shadow-md shadow-blue-500/20'
                         }`}
                     >
                         {isRunning ? <Loader2 className="animate-spin" size={18}/> : <FileDiff size={18} />}
@@ -1377,8 +1471,149 @@ const RenameView = () => {
     );
 };
 
-// --- 小组件 ---
-// 2. 新增 UpdateModal 组件 (放在 SettingsModal 附近)
+const VideoSplitView = () => {
+  const [videoPath, setVideoPath] = useState("");
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [isRunning, setIsRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [statusMsg, setStatusMsg] = useState("等待输入...");
+
+  useEffect(() => {
+    if (!window.electronAPI?.onPythonEvent) return;
+    const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
+      switch (event.type) {
+        case 'log':
+        case 'error':
+        case 'warning':
+        case 'success':
+          setLogs(prev => [...prev, {
+            timestamp: new Date().toLocaleTimeString(),
+            message: event.message,
+            type: event.type as any
+          }]);
+          if (event.type === 'success' || event.type === 'error') {
+            setIsRunning(false);
+            if (event.type === 'success') {
+                setProgress(100);
+                setStatusMsg("处理完成");
+            } else {
+                setStatusMsg("发生错误");
+            }
+          }
+          break;
+        case 'progress':
+          if (event.progress !== undefined) setProgress(event.progress);
+          if (event.message) {
+             setStatusMsg(event.message);
+             setLogs(prev => [...prev, {
+               timestamp: new Date().toLocaleTimeString(),
+               message: event.message,
+               type: 'info'
+             }]);
+          }
+          break;
+      }
+    });
+    return cleanup;
+  }, []);
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      // @ts-ignore
+      const path = e.dataTransfer.files[0].path;
+      if (path) {
+        setVideoPath(path);
+      }
+    }
+  };
+
+  const startSplit = () => {
+    if (!videoPath.trim()) return;
+    if (isRunning) return;
+
+    setLogs([]);
+    setProgress(0);
+    setIsRunning(true);
+    setStatusMsg("正在启动处理...");
+
+    if (window.electronAPI) {
+      window.electronAPI.runScript('cut_video.py', [videoPath]);
+    }
+  };
+
+  return (
+    <div className="w-full space-y-6">
+      <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
+          <Scissors size={24} /> 视频对半切割
+      </h2>
+      <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
+        
+        <div className="space-y-2">
+          <p className="mt-2 text-gray-600">
+            无损将视频对半切割分为两个视频文件。用于处理过长的花絮/素材文件。
+          </p>
+        </div>
+
+        {/* Path Input */}
+        <div className="space-y-2">
+            <label className="text-xs font-semibold text-slate-500 uppercase">目标视频文件</label>
+            <div className="relative">
+                <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">
+                    <Video size={18} />
+                </div>
+                <input 
+                  type="text" 
+                  value={videoPath}
+                  onChange={(e) => setVideoPath(e.target.value)}
+                  onDrop={handleDrop}
+                  onDragOver={handleDragOver}
+                  placeholder="将 .mov / .mp4 视频文件拖入此处，或粘贴绝对路径"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-10 pr-4 py-3 text-slate-900 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm"
+                />
+            </div>
+        </div>
+
+        {/* Progress & Actions */}
+        <div className="bg-slate-50 rounded-lg border border-slate-200 p-4 flex items-center gap-6">
+              <div className="flex-1 flex flex-col gap-1">
+                <div className="flex justify-between text-xs text-slate-500">
+                    <span>{statusMsg}</span>
+                    <span className="font-mono text-blue-600">{progress}%</span>
+                </div>
+                <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+                    <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${progress}%` }}></div>
+                </div>
+              </div>
+             
+            <button 
+              onClick={startSplit}
+              disabled={!videoPath || isRunning}
+              className={`px-8 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
+                isRunning || !videoPath 
+                  ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none' 
+                  : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20'
+              }`}
+            >
+              {isRunning ? <Loader2 className="animate-spin" size={18} /> : <Scissors size={18} fill="currentColor" />}
+              {isRunning ? '切割中...' : '开始切割'}
+            </button>
+        </div>
+      </div>
+
+      <Terminal logs={logs} />
+    </div>
+  );
+};
+
+// --- 组件 ---
 const UpdateModal = ({ 
   version, 
   notes, 
@@ -1397,38 +1632,38 @@ const UpdateModal = ({
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-300">
-      <div className="bg-slate-900 border border-blue-500/30 w-full max-w-md rounded-2xl shadow-2xl flex flex-col relative overflow-hidden">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-50/80 backdrop-blur-sm p-4 animate-in fade-in duration-300">
+      <div className="bg-white border border-blue-500/30 w-full max-w-md rounded-2xl shadow-2xl flex flex-col relative overflow-hidden">
         {/* 装饰背景 */}
         <div className="absolute top-0 right-0 p-16 bg-blue-500/20 blur-3xl rounded-full -translate-y-1/2 translate-x-1/2 pointer-events-none"></div>
         
         <div className="p-6 pb-0 z-10">
-          <div className="w-12 h-12 bg-blue-600/20 rounded-xl flex items-center justify-center text-blue-400 mb-4 border border-blue-500/20">
+          <div className="w-12 h-12 bg-blue-500/20 rounded-xl flex items-center justify-center text-blue-600 mb-4 border border-blue-500/20">
             <Gift size={24} />
           </div>
-          <h3 className="text-xl font-bold text-white mb-2">发现新版本 {version}</h3>
-          <p className="text-slate-400 text-sm">
+          <h3 className="text-xl font-bold text-slate-800 mb-2">发现新版本 {version}</h3>
+          <p className="text-slate-500 text-sm">
             一个新的更新已准备就绪。下载安装包以体验最新功能。
           </p>
         </div>
 
         <div className="p-6 z-10">
-          <div className="bg-slate-950/50 rounded-lg p-4 border border-slate-800 max-h-40 overflow-y-auto scrollbar-thin scrollbar-thumb-slate-700">
+          <div className="bg-slate-50/50 rounded-lg p-4 border border-slate-200 max-h-40 overflow-y-auto">
             <p className="text-xs font-bold text-slate-500 uppercase mb-2">更新日志</p>
-            <p className="text-sm text-slate-300 whitespace-pre-wrap">{notes}</p>
+            <p className="text-sm text-slate-800 whitespace-pre-wrap">{notes}</p>
           </div>
         </div>
 
         <div className="p-6 pt-2 flex gap-3 z-10">
           <button 
             onClick={onClose}
-            className="flex-1 py-2.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition font-medium text-sm"
+            className="flex-1 py-2.5 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-800 transition font-medium text-sm"
           >
             以后再说
           </button>
           <button 
             onClick={handleUpdate}
-            className="flex-1 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-900/20 transition font-bold text-sm flex items-center justify-center gap-2"
+            className="flex-1 py-2.5 rounded-lg bg-blue-500 hover:bg-blue-500 text-slate-800 shadow-lg shadow-blue-900/20 transition font-bold text-sm flex items-center justify-center gap-2"
           >
             去下载 <ExternalLink size={14} />
           </button>
@@ -1438,183 +1673,27 @@ const UpdateModal = ({
   );
 };
 
-const SettingsModal = ({ 
-  config, 
-  onConfigChange, 
-  onClose 
-}: { 
-  config: AppConfig, 
-  onConfigChange: (newConfig: AppConfig) => void, 
-  onClose: () => void 
-}) => {
-  const [localConfig, setLocalConfig] = useState<AppConfig>(config);
-
-  const handleSave = () => {
-    onConfigChange(localConfig);
-    onClose();
-  };
-
-  const updateImport = (key: keyof AppConfig['smartImport'], val: any) => {
-    setLocalConfig(prev => ({
-      ...prev,
-      smartImport: { ...prev.smartImport, [key]: val }
-    }));
-  };
-
-  const updateResearch = (key: keyof AppConfig['research'], val: any) => {
-    setLocalConfig(prev => ({
-      ...prev,
-      research: { ...prev.research, [key]: val }
-    }));
-  };
-
-  const updateMatch = (val: string) => {
-    setLocalConfig((prev: AppConfig) => ({
-      ...prev,
-      smartMatch: { ...prev.smartMatch, destFolderName: val }
-    }));
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-      <div className="absolute inset-0" onClick={onClose}></div>
-      <div className="bg-slate-900 border border-slate-700 w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[90vh] relative z-10 overflow-hidden">
-        
-        {/* Header */}
-        <div className="p-6 border-b border-slate-800 flex justify-between items-center bg-slate-800/50">
-          <h3 className="text-xl font-bold text-white flex items-center gap-2">
-            <Settings size={20} className="text-blue-400"/> 设置
-          </h3>
-          <button onClick={onClose} className="p-2 hover:bg-slate-700 rounded-full text-slate-400 hover:text-white transition">
-            <X size={20} />
-          </button>
-        </div>
-        
-        {/* Body - 补全了之前缺失的设置项 */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-8 scrollbar-thin scrollbar-thumb-slate-700">
-          
-          {/* 1. Smart Import 设置 */}
-          <section className="space-y-4">
-            <h4 className="text-blue-400 font-bold uppercase text-xs tracking-wider border-b border-slate-800 pb-2">
-              从SD卡导入媒体
-            </h4>
-            
-            <div className="flex items-center gap-3 p-2 rounded hover:bg-slate-800/30 transition">
-               <input 
-                 type="checkbox" 
-                 id="autoStart"
-                 checked={localConfig.smartImport.autoStart} 
-                 onChange={e => updateImport('autoStart', e.target.checked)}
-                 className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-blue-500 focus:ring-offset-slate-900"
-               />
-               <label htmlFor="autoStart" className="text-sm text-slate-300 cursor-pointer select-none">
-                 应用启动时自动开始读取SD卡文件
-               </label>
-            </div>
-            <p className="text-xs text-slate-500">
-              支持佳能（.cr2 .cr3）、索尼（.arw）、尼康（.nef）、奥林巴斯（.orf）、徕卡（.rwl .dng）、富士（.raf）、哈苏（.3fr .fff）、大疆（.dng）的RAW格式导入。
-            </p>
-
-            <InputField label="SD卡路径" value={localConfig.smartImport.sdPath} onChange={v => updateImport('sdPath', v)} icon={<FolderInput size={14}/>} />
-            <InputField label="导入的默认路径" value={localConfig.smartImport.destPath} onChange={v => updateImport('destPath', v)} icon={<Download size={14}/>} />
-
-            <div className="bg-slate-950 p-4 rounded-lg border border-slate-800 space-y-3">
-               <div className="flex items-center gap-3 mb-2">
-                  <input 
-                    type="checkbox" 
-                    id="backupEnabled"
-                    checked={localConfig.smartImport.backupEnabled} 
-                    onChange={e => updateImport('backupEnabled', e.target.checked)}
-                    className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-green-500 focus:ring-offset-slate-900"
-                  />
-                  <label htmlFor="backupEnabled" className="text-sm text-slate-300 font-bold cursor-pointer select-none">
-                    开启备份
-                  </label>
-               </div>
-               {localConfig.smartImport.backupEnabled && (
-                  <InputField label="备份目标路径" value={localConfig.smartImport.backupPath} onChange={v => updateImport('backupPath', v)} icon={<HardDrive size={14}/>} />
-               )}
-            </div>
-          </section>
-
-          {/* 2. Smart Match 设置 */}
-          <section className="space-y-4">
-            <h4 className="text-emerald-400 font-bold uppercase text-xs tracking-wider border-b border-slate-800 pb-2">
-              选片
-            </h4>
-            <InputField 
-                label="选片的文件夹名" 
-                value={localConfig.smartMatch.destFolderName} 
-                onChange={updateMatch} 
-                icon={<FolderInput size={14}/>} 
-            />
-            <p className="text-xs text-slate-500">
-                文件会被复制到这个文件夹，如果路径不存在会自动创建
-            </p>
-          </section>
-
-          {/* 3. Research AI 设置 */}
-          <section className="space-y-4">
-            <h4 className="text-purple-400 font-bold uppercase text-xs tracking-wider border-b border-slate-800 pb-2">
-              调研整理
-            </h4>
-            <InputField label="默认读取路径" value={localConfig.research.defaultDir} onChange={v => updateResearch('defaultDir', v)} icon={<FolderInput size={14}/>} />
-            <div className="grid grid-cols-2 gap-4">
-               <div>
-                  <label className="text-xs text-slate-500 font-bold uppercase">默认SSIM阈值</label>
-                  <input 
-                    type="number" step="0.01" max="1" min="0"
-                    value={localConfig.research.ssimThreshold}
-                    onChange={e => updateResearch('ssimThreshold', parseFloat(e.target.value))}
-                    className="w-full mt-2 bg-slate-950 border border-slate-700 rounded-lg p-2 text-white text-sm focus:border-blue-500 outline-none"
-                  />
-               </div>
-               <div>
-                  <label className="text-xs text-slate-500 font-bold uppercase">默认最小持续时间(秒)</label>
-                  <input 
-                    type="number" step="0.1"
-                    value={localConfig.research.minDuration}
-                    onChange={e => updateResearch('minDuration', parseFloat(e.target.value))}
-                    className="w-full mt-2 bg-slate-950 border border-slate-700 rounded-lg p-2 text-white text-sm focus:border-blue-500 outline-none"
-                  />
-               </div>
-            </div>
-          </section>
-        </div>
-
-        {/* Footer */}
-        <div className="p-4 border-t border-slate-800 bg-slate-900 flex justify-end gap-3">
-           <button onClick={onClose} className="px-4 py-2 text-slate-400 hover:text-white transition text-sm">取消</button>
-           <button onClick={handleSave} className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded-lg font-bold flex items-center gap-2 text-sm shadow-lg shadow-blue-900/20">
-              <Save size={16} /> 保存
-           </button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
 const AboutModal = ({ onClose }: { onClose: () => void }) => {
   
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-50/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
       <div className="absolute inset-0" onClick={onClose}></div>
-      <div className="bg-slate-900 border border-slate-700 w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[90vh] relative z-10 overflow-hidden">
-        <div className="p-6 border-b border-slate-800 flex justify-between items-center bg-slate-800/50">
-          <h3 className="text-xl font-bold text-white flex items-center gap-2">
-            <AtSign size={20} className="text-blue-400"/> 关于
+      <div className="bg-white border border-slate-200 w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[90vh] relative z-10 overflow-hidden">
+        <div className="p-6 border-b border-slate-200 flex justify-between items-center bg-slate-200">
+          <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+            <AtSign size={20} className="text-blue-600"/> 关于
           </h3>
-          <button onClick={onClose} className="p-2 hover:bg-slate-700 rounded-full text-slate-400 hover:text-white transition">
+          <button onClick={onClose} className="p-2 hover:bg-slate-700 rounded-full text-slate-500 hover:text-slate-800 transition">
             <X size={20} />
           </button>
         </div>
         
         {/* Body - 仅保留一行正文文字 */}
-        <div className="flex-1 overflow-y-auto p-6 scrollbar-thin scrollbar-thumb-slate-700 flex">
-          <p className="text-slate-300 text-base leading-relaxed">
+        <div className="flex-1 overflow-y-auto p-6 flex">
+          <p className="text-slate-800 text-base leading-relaxed">
             @秋也寻
             <br/>
-            版本 25.12.27
+            版本 26.5.10
             <br/>
             大部分代码为Google Gemini和Copilot生成。
             <br />
@@ -1629,10 +1708,10 @@ const AboutModal = ({ onClose }: { onClose: () => void }) => {
 const SidebarItem = ({ active, onClick, icon, label }: { active: boolean, onClick: () => void, icon: React.ReactNode, label: string }) => (
   <button
     onClick={onClick}
-    className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all duration-200 ${
+    className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 ${
       active 
-        ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' 
-        : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+        ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20 font-bold' 
+        : 'text-slate-500 hover:bg-slate-100 hover:text-blue-600 font-medium'
     }`}
   >
     {icon}
@@ -1651,7 +1730,7 @@ const InputField = ({ label, value, onChange, icon }: { label: string, value: st
         type="text" 
         value={value} 
         onChange={(e) => onChange(e.target.value)}
-        className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-10 pr-4 py-2 text-slate-200 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm"
+        className="w-full bg-white border border-slate-200 rounded-lg pl-10 pr-4 py-2 text-slate-800 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors font-mono text-sm"
       />
     </div>
   </div>
