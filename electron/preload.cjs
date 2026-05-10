@@ -23,4 +23,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('update-available', subscription);
   },
   openExternal: (url) => ipcRenderer.send('open-external', url),
+  checkScript: (scriptName) => ipcRenderer.invoke('check-script', scriptName)
 });

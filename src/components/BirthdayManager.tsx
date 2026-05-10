@@ -83,8 +83,8 @@ const BirthdayManager = () => {
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold text-white">生日数据管理</h2>
-        <span className="text-xs text-slate-500 bg-slate-900 px-3 py-1 rounded-full border border-slate-800">
+        <h2 className="text-2xl font-bold text-slate-800">生日数据管理</h2>
+        <span className="text-xs text-slate-500 bg-white px-3 py-1 rounded-full border border-slate-200">
           Source: birthdays.json
         </span>
       </div>
@@ -99,8 +99,8 @@ const BirthdayManager = () => {
       )}
 
       {/* 添加区域 */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
-        <h3 className="text-sm font-semibold text-slate-400 uppercase mb-4 flex items-center gap-2">
+      <div className="bg-white border border-slate-200 rounded-xl p-6">
+        <h3 className="text-sm font-semibold text-slate-500 uppercase mb-4 flex items-center gap-2">
           <Plus size={16} /> 添加新角色
         </h3>
         <div className="flex flex-col md:flex-row gap-4 items-end">
@@ -113,7 +113,7 @@ const BirthdayManager = () => {
                   value={newName}
                   onChange={e => setNewName(e.target.value)}
                   placeholder="例如: 刻晴"
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg pl-10 pr-4 py-2 text-slate-200 focus:border-blue-500 outline-none"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-10 pr-4 py-2 text-slate-900 focus:border-blue-500 outline-none"
                 />
              </div>
           </div>
@@ -125,7 +125,7 @@ const BirthdayManager = () => {
                 value={newMonth}
                 onChange={e => setNewMonth(e.target.value)}
                 placeholder="1-12"
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:border-blue-500 outline-none text-center"
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 focus:border-blue-500 outline-none text-center"
              />
           </div>
 
@@ -136,14 +136,14 @@ const BirthdayManager = () => {
                 value={newDay}
                 onChange={e => setNewDay(e.target.value)}
                 placeholder="1-31"
-                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:border-blue-500 outline-none text-center"
+                className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 focus:border-blue-500 outline-none text-center"
              />
           </div>
 
           <button 
             onClick={handleAdd}
             disabled={loading}
-            className="w-full md:w-auto px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+            className="w-full md:w-auto px-6 py-2 bg-blue-500 hover:bg-blue-500 text-slate-800 rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
           >
             <Save size={18} /> 保存
           </button>
@@ -151,9 +151,9 @@ const BirthdayManager = () => {
       </div>
 
       {/* 列表区域 */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-800 bg-slate-900/50 flex justify-between items-center">
-          <h3 className="font-semibold text-slate-200">现有列表 ({Object.keys(birthdays).length})</h3>
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 bg-white/50 flex justify-between items-center">
+          <h3 className="font-semibold text-slate-900">现有列表 ({Object.keys(birthdays).length})</h3>
         </div>
         
         <div className="max-h-[400px] overflow-y-auto">
@@ -161,7 +161,7 @@ const BirthdayManager = () => {
             <div className="p-8 text-center text-slate-500">暂无数据</div>
           ) : (
             <table className="w-full text-left text-sm">
-              <thead className="bg-slate-950 text-slate-500 sticky top-0">
+              <thead className="bg-slate-50 text-slate-500 sticky top-0">
                 <tr>
                   <th className="px-6 py-3 font-medium">角色名</th>
                   <th className="px-6 py-3 font-medium">生日日期</th>
@@ -170,9 +170,9 @@ const BirthdayManager = () => {
               </thead>
               <tbody className="divide-y divide-slate-800">
                 {Object.entries(birthdays).map(([name, dateStr]) => (
-                  <tr key={name} className="hover:bg-slate-800/50 transition-colors group">
-                    <td className="px-6 py-3 text-slate-300 font-medium">{name}</td>
-                    <td className="px-6 py-3 text-blue-400 font-mono">{dateStr}</td>
+                  <tr key={name} className="hover:bg-slate-200 transition-colors group">
+                    <td className="px-6 py-3 text-slate-800 font-medium">{name}</td>
+                    <td className="px-6 py-3 text-blue-600 font-mono">{dateStr}</td>
                     <td className="px-6 py-3 text-right">
                       <button 
                         onClick={() => handleDelete(name)}

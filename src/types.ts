@@ -9,7 +9,7 @@ export interface LogEntry {
   type: 'info' | 'success' | 'warning' | 'error';
 }
 
-export type ToolType = 'dashboard' | 'converter' | 'research' | 'match' | 'rename_tool';
+export type ToolType = 'dashboard' | 'converter' | 'research' | 'match' | 'rename_tool' | 'video_split';
 
 export interface AppConfig {
   smartImport: {
@@ -48,4 +48,4 @@ declare global {
   }
 }
 
-export const TYPES_VERSION = "25.12.27";
+export const TYPES_VERSION = "26.5.10";

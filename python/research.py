@@ -10,6 +10,7 @@ from PIL import Image
 from send2trash import send2trash
 import torch
 import torch.nn.functional as F
+import shutil
 
 def init_worker():
     if sys.platform.startswith('win'):
@@ -100,7 +101,7 @@ def extract_best_frames(video_path, segments, fps, original_name, video_dir):
     在识别出的稳定片段中，提取清晰度最高的一帧保存。
     """
     if not segments: return
-    cap = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(video_path, cv2.CAP_ANY)
     if not cap.isOpened(): return
 
     safe_base_name = sanitize_filename(os.path.splitext(original_name)[0])
@@ -160,6 +161,8 @@ def extract_best_frames(video_path, segments, fps, original_name, video_dir):
 # --- 视频分析逻辑 ---
 
 def analyze_video(video_path, original_name, threshold_low, min_duration):
+    log_info(f"正在分析视频: {original_name}") 
+    
     if torch.cuda.is_available():
         device = torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -167,7 +170,7 @@ def analyze_video(video_path, original_name, threshold_low, min_duration):
     else:
         device = torch.device("cpu") # 兜底方案：使用 CPU
     
-    cap = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(video_path, cv2.CAP_ANY)
     
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -221,8 +224,12 @@ def analyze_video(video_path, original_name, threshold_low, min_duration):
         
     # 提取帧
     extract_best_frames(video_path, low_segments, fps, original_name, os.path.dirname(video_path))
-    
-    log_success(f"完成: {original_name}")
+
+    pass
+
+def worker_wrapper(args):
+    """用于 imap 解包参数的辅助函数"""
+    return analyze_video(*args)
 
 # --- 图片去重逻辑 ---
 
@@ -307,7 +314,7 @@ def run(args_list):
         return
 
     # 2. 视频扫描与处理
-    log_progress("扫描视频文件...", 5)
+    log_progress("扫描视频文件...", 0)
     video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv']
     video_files = [f for f in os.listdir(target_dir) if os.path.splitext(f)[1].lower() in video_extensions]
     
@@ -320,10 +327,16 @@ def run(args_list):
         
         # 限制最大进程数
         num_processes = min(mp.cpu_count(), len(video_files))
+
+        total_videos = len(video_files)
         
         # 启动多进程
         with mp.Pool(processes=num_processes, initializer=init_worker) as pool:
-            pool.starmap(analyze_video, tasks)
+            # 使用 worker_wrapper 并在主进程中追踪进度
+            # 我们假设视频处理占总进度的 90%
+            for i, _ in enumerate(pool.imap_unordered(worker_wrapper, tasks), 1):
+                percent = int((i / total_videos) * 90) 
+                log_progress(f"处理视频: {i}/{total_videos}", percent)
         
         log_success("所有视频处理完成。")
     else:
@@ -331,6 +344,29 @@ def run(args_list):
 
     # 3. 图片去重
     process_images_deduplication(target_dir)
+
+    # --- 新增：移动 txt 文件到 data 文件夹 ---
+    try:
+        log_info("正在整理 TXT 文件...")
+        data_dir = os.path.join(target_dir, "data")
+        
+        # 获取所有 txt 文件
+        txt_files = [f for f in os.listdir(target_dir) if f.lower().endswith('.txt')]
+        
+        if txt_files:
+            # 如果 data 文件夹不存在则创建
+            if not os.path.exists(data_dir):
+                os.makedirs(data_dir)
+                
+            count_txt = 0
+            for txt_file in txt_files:
+                src_path = os.path.join(target_dir, txt_file)
+                dst_path = os.path.join(data_dir, txt_file)
+                shutil.move(src_path, dst_path)
+                count_txt += 1
+            log_info(f"已将 {count_txt} 个 txt 文件移动至 data 文件夹")
+    except Exception as e:
+        log_error(f"移动 TXT 文件时出错: {str(e)}")
 
     # 4. 结束
     log_progress("任务全部完成", 100)
