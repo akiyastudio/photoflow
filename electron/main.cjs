@@ -324,9 +324,11 @@ ipcMain.handle('check-script', async (event, scriptName) => {
       return true; 
     }
 
-    // 以下是打包后的正式环境逻辑
-    // 打包后去 resources/tools 目录下寻找 Python 引擎文件
-    const scriptPath = path.join(process.resourcesPath, 'python', scriptName);
+    const baseName = scriptName.replace('.py', '');
+    const isWin = process.platform === 'win32';
+    const exeSuffix = isWin ? '.exe' : '';
+    // 打包后去 resources/python 目录下寻找 Python 引擎文件
+    const scriptPath = path.join(process.resourcesPath, 'python', `${baseName}${exeSuffix}`);
     return fs.existsSync(scriptPath);
     
   } catch (error) {

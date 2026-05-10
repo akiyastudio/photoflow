@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:python": "cd python && pyinstaller --onefile --clean --name classify classify.py && pyinstaller --onefile --clean --name png_to_jpg png_to_jpg.py && pyinstaller --onefile --clean --name research research.py && pyinstaller --onefile --clean --name catch catch.py && pyinstaller --onefile --clean --name rename rename.py",
+    "build:python": "cd python && pyinstaller --onefile --clean --name classify classify.py && pyinstaller --onefile --clean --name png_to_jpg png_to_jpg.py && pyinstaller --onefile --clean --name research research.py && pyinstaller --onefile --clean --name catch catch.py && pyinstaller --onefile --clean --name cut_video cut_video.py && pyinstaller --onefile --clean --name rename rename.py",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
     "electron": "wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
