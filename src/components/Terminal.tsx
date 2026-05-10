@@ -7,7 +7,7 @@ interface TerminalProps {
   height?: string;
 }
 
-export const Terminal: React.FC<TerminalProps> = ({ logs, title = "Output", height = "h-64" }) => {
+export const Terminal: React.FC<TerminalProps> = ({ logs, title = "日志", height = "h-64" }) => {
   // 指向列表底部的锚点
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -37,7 +37,7 @@ export const Terminal: React.FC<TerminalProps> = ({ logs, title = "Output", heig
       {/* 内容区域 */}
       <div className="flex-1 p-4 overflow-y-auto font-mono text-sm terminal-scroll space-y-1 scrollbar-thin scrollbar-thumb-slate-600 scrollbar-track-transparent">
         {logs.length === 0 && (
-          <div className="text-slate-600 italic">Waiting for process to start...</div>
+          <div className="text-slate-600">等待开始...</div>
         )}
         {logs.map((log, index) => (
           <div key={index} className="flex gap-3">
