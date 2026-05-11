@@ -214,7 +214,7 @@ ipcMain.on('run-python', (event, scriptName, args = []) => {
 const getConfigDir = () => {
   // 在用户数据目录下创建 config 文件夹
   const userDataPath = app.getPath('userData');
-  const configDir = path.join(userDataPath, 'photo-flow');
+  const configDir = path.join(userDataPath, 'photoflow');
   
   if (!fs.existsSync(configDir)) {
     fs.mkdirSync(configDir, { recursive: true });

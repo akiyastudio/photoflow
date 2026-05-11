@@ -16,6 +16,9 @@
   },
   "build": {
     "appId": "com.photoflow.toolkit",
+    "directories": {
+      "output": "release" 
+    },
     "files": [
       "dist/**/*",
       "electron/**/*"
@@ -27,7 +30,8 @@
         { "from": "python/dist/png_to_jpg.exe", "to": "python/png_to_jpg.exe" },
         { "from": "python/dist/research.exe", "to": "python/research.exe" },
         { "from": "python/dist/catch.exe", "to": "python/catch.exe" },
-        { "from": "python/dist/rename.exe", "to": "python/rename.exe" }
+        { "from": "python/dist/rename.exe", "to": "python/rename.exe" },
+        { "from": "python/dist/cut_video.exe", "to": "python/cut_video.exe" }
       ]
     },
     "nsis": {
@@ -48,7 +52,8 @@
         { "from": "python/dist/png_to_jpg", "to": "python/png_to_jpg" },
         { "from": "python/dist/research", "to": "python/research" },
         { "from": "python/dist/catch", "to": "python/catch" },
-        { "from": "python/dist/rename", "to": "python/rename" }
+        { "from": "python/dist/rename", "to": "python/rename" },
+        { "from": "python/dist/cut_video", "to": "python/cut_video" }
       ]
     },
     "extraResources": [
