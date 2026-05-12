@@ -59,17 +59,30 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
     success_imported_count = 0
 
     try:
-        # Step 1: 扫描 SD 卡
+        # Step 1: 扫描 SD 卡 (仅扫描 DCIM 和 PRIVATE 目录)
         valid_exts = ('.jpg', '.jpeg', '.png', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.heic', '.mp4', '.mov', '.avi', '.rwl', '.raf', '.3fr', '.fff')
-        for root, dirs, files in os.walk(sd_path):
-            dirs[:] = [d for d in dirs if not d.startswith('.')]
-            for f in files:
-                if not f.startswith('.') and f.lower().endswith(valid_exts):
-                    original_sd_files.append(os.path.join(root, f))
+        
+        # 兼容老配置，如果传过来的是 H:/DCIM，自动退回到根目录 H:/
+        base_sd = sd_path[:-5] if sd_path.upper().endswith('DCIM') else sd_path
+        
+        # 定义需要扫描的目标子目录 (DCIM放大部分文件，PRIVATE放索尼高清视频)
+        target_dirs = [os.path.join(base_sd, "DCIM"), os.path.join(base_sd, "PRIVATE")]
+        
+        for t_dir in target_dirs:
+            if not os.path.exists(t_dir):
+                continue
+            for root, dirs, files in os.walk(t_dir):
+                # 排除隐藏目录
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                for f in files:
+                    # 排除隐藏文件并校验后缀
+                    if not f.startswith('.') and f.lower().endswith(valid_exts):
+                        original_sd_files.append(os.path.join(root, f))
         
         if not original_sd_files:
-            log_info("SD 卡中没有找到媒体文件")
+            log_info(f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
             return
+
 
 # Step 2: 复制到临时区 (仅复制不存在或不完整的文件)
         os.makedirs(temp_dir, exist_ok=True)

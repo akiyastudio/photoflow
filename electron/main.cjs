@@ -337,6 +337,28 @@ ipcMain.handle('check-script', async (event, scriptName) => {
   }
 });
 
+// 获取系统盘符列表
+ipcMain.handle('getDrives', async () => {
+  const drives = [];
+  try {
+    if (process.platform === 'win32') {
+      // Windows: 遍历 A-Z 盘符
+      const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      for (let i = 0; i < letters.length; i++) {
+        const drive = letters[i] + ':/';
+        if (fs.existsSync(drive)) drives.push(drive);
+      }
+    } else if (process.platform === 'darwin') {
+      // Mac: 读取 /Volumes 挂载目录
+      const volumes = fs.readdirSync('/Volumes');
+      volumes.forEach(v => drives.push('/Volumes/' + v));
+    }
+  } catch (error) {
+    console.error('Error getting drives:', error);
+  }
+  return drives;
+});
+
 app.whenReady().then(() => {
   createWindow();
 
