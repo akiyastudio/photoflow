@@ -24,7 +24,9 @@ import {
   Gift,
   Scissors,
   Video,
-  Puzzle
+  Puzzle,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { Terminal } from './components/Terminal';
 import type { LogEntry, ToolType } from './types';
@@ -224,7 +226,7 @@ const App: React.FC = () => {
           
           {/* 文字 */}
           <div className="space-y-2">
-            <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent">
+            <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-800 to-indigo-800 bg-clip-text text-transparent">
               照片流
             </h2>
             <p className="text-sm text-slate-500 font-mono">初始化配置中...</p>
@@ -272,10 +274,10 @@ const App: React.FC = () => {
       {/* Sidebar */}
       <aside className="w-64 bg-white border-r border-slate-200 flex flex-col shrink-0">
         <div className="p-6 border-b border-slate-200">
-          <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-400 to-indigo-400 bg-clip-text text-transparent cursor-default">
+          <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-800 to-indigo-800 bg-clip-text text-transparent cursor-default">
             照片流
           </h1>
-          <p className="text-xs text-slate-500 mt-1 font-mono">v26.5.10 by秋也寻</p>
+          <p className="text-xs text-slate-500 mt-1 font-mono">v25.5.12 by秋也寻</p>
         </div>
 
         <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
@@ -377,7 +379,7 @@ const App: React.FC = () => {
 };
 
 // --- 主功能 ---
-const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
+const ImportCard = ({ config, drives = [] }: { config?: AppConfig['smartImport'], drives?: string[] }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'finished'>('idle');
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("等待连接...");
@@ -545,25 +547,64 @@ const ImportCard = ({ config }: { config?: AppConfig['smartImport'] }) => {
   // --- 渲染逻辑 (UI 部分) ---
 
   if (status === 'idle' || status === 'checking') {
+    // 实时判断当前配置的盘符是否插在电脑上
+    const isConnected = config?.sdPath && drives.includes(config.sdPath);
+    
+    // 动态判断显示的副标题
+    let displayMsg = statusMsg;
+    if (status === 'idle') {
+      if (!config?.sdPath) {
+        displayMsg = "请先在下方设置中选择 SD 卡盘符";
+      } else if (isConnected) {
+        // 👇 这里的文案改成了“点击右侧按钮导入”
+        displayMsg = `已连接 ${config?.sdPath}，点击右侧按钮导入`;
+      } else {
+        displayMsg = `等待 ${config?.sdPath} 接入...`;
+      }
+    } else if (status === 'checking') {
+      displayMsg = `正在准备读取 ${config?.sdPath}...`;
+    }
+
+    // 动态图标颜色 (扫描中是蓝色，已连接是绿色，未连接是灰色)
+    const iconColorClass = status === 'checking' 
+        ? 'bg-blue-50 text-blue-600' 
+        : isConnected 
+            ? 'bg-emerald-50 text-emerald-600' 
+            : 'bg-slate-100 text-slate-500';
+
     return (
-      <div className="w-full bg-white/50 border border-slate-200 rounded-xl p-4 flex items-center justify-between animate-in fade-in">
+      <div className="w-full bg-white/50 border border-slate-200 rounded-xl p-4 flex items-center justify-between animate-in fade-in transition-all">
         <div className="flex items-center gap-3">
-          <div className={`p-2 rounded-lg ${status === 'checking' ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>
+          <div className={`p-2 rounded-lg transition-colors ${iconColorClass}`}>
             {status === 'checking' ? <Loader2 className="animate-spin" size={18} /> : <HardDrive size={18} />}
           </div>
           <div className="flex flex-col">
             <span className="text-sm font-bold text-slate-800">从SD卡导入媒体</span>
-            <span className="text-xs text-slate-500">{status === 'checking' ? '正在搜索 SD 卡...' : '未检测到 SD 卡连接'}</span>
+            <span className="text-xs text-slate-500">{displayMsg}</span>
           </div>
         </div>
-        <button 
-          onClick={checkSD}
-          disabled={status === 'checking'}
-          className="p-2 hover:bg-slate-800 rounded-lg text-slate-500 hover:text-slate-800 transition disabled:opacity-50"
-          title="重新扫描"
-        >
-          <RotateCcw size={18} className={status === 'checking' ? 'animate-spin' : ''} />
-        </button>
+
+        {/* 👇 动态切换右侧按钮 */}
+        {isConnected && status === 'idle' ? (
+          <button 
+            onClick={startImport} // 直接调用导入，无需再 check
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-bold flex items-center gap-2 shadow-md shadow-blue-500/20 transition-all animate-in zoom-in-95"
+          >
+            <Download size={16} />
+            开始导入
+          </button>
+        ) : (
+          <button 
+            disabled
+            className={`p-2 rounded-lg transition ${
+              status === 'checking'
+                ? 'text-blue-500' 
+                : 'text-slate-300 bg-slate-50 cursor-not-allowed'
+            }`}
+          >
+            <RotateCcw size={18} className={status === 'checking' ? 'animate-spin' : ''} />
+          </button>
+        )}
       </div>
     );
   }
@@ -767,6 +808,32 @@ const DashboardView = ({
   const [upcomingBirthdays, setUpcomingBirthdays] = useState<{name: string, date: string, sortKey: number}[]>([]);
   const [loading, setLoading] = useState(true);
   const [showManager, setShowManager] = useState(false);
+  const [isPrefOpen, setIsPrefOpen] = useState(false);
+  const [drives, setDrives] = useState<string[]>([]);
+
+  // 挂载时获取系统盘符
+  useEffect(() => {
+    const fetchDrives = async () => {
+      if (window.electronAPI?.getDrives) {
+        const sysDrives = await window.electronAPI.getDrives();
+        // 只有当盘符发生变化时才更新状态，避免 React 无意义的频繁重绘
+        setDrives(prevDrives => {
+          if (JSON.stringify(prevDrives) === JSON.stringify(sysDrives)) {
+            return prevDrives;
+          }
+          return sysDrives;
+        });
+      }
+    };
+
+    fetchDrives(); // 首次立刻执行获取
+    
+    // 每 3 秒钟在后台静默检查一次新插入的设备
+    const intervalId = setInterval(fetchDrives, 3000); 
+
+    // 组件卸载时清理定时器
+    return () => clearInterval(intervalId);
+  }, []);
 
   // 解析 "M月.D日" 格式
   const parseBirthday = (dateStr: string) => {
@@ -826,63 +893,95 @@ const DashboardView = ({
       )}
 
       <div className="flex flex-col gap-6">
-        <ImportCard config={config} />
-        <div className="w-full bg-white border border-slate-200 rounded-xl p-6 space-y-4">
-          <h3 className="text-sm font-bold text-blue-400 uppercase tracking-wider flex items-center gap-2 mb-4">
-            <Settings size={16} /> 导入偏好设置
-          </h3>
+        <ImportCard config={config} drives={drives} />
+        <div className="w-full bg-white border border-slate-200 rounded-xl p-6 transition-all duration-300">
+          <button 
+            onClick={() => setIsPrefOpen(!isPrefOpen)}
+            className="w-full flex items-center justify-between group cursor-pointer"
+          >
+            <h3 className="text-sm font-bold text-blue-400 uppercase tracking-wider flex items-center gap-2">
+              <Settings size={16} /> 导入偏好设置
+            </h3>
+            <div className="p-1 rounded-md text-slate-400 group-hover:bg-slate-50 transition">
+              {isPrefOpen ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+            </div>
+          </button>
           
-          <div className="flex items-center gap-3 p-2 rounded hover:bg-slate-800/30 transition">
-             <input 
-               type="checkbox" 
-               id="autoStart"
-               checked={config.autoStart} 
-               onChange={e => onUpdateConfig({...config, autoStart: e.target.checked})}
-               className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-blue-500"
-             />
-             <label htmlFor="autoStart" className="text-sm text-slate-800 cursor-pointer select-none">
-               应用启动时自动开始读取SD卡文件
-             </label>
-          </div>
-          <p className="text-xs text-slate-500">
-            支持佳能（.cr2 .cr3）、索尼（.arw）、尼康（.nef）、奥林巴斯（.orf）、徕卡（.rwl .dng）、富士（.raf）、哈苏（.3fr .fff）、大疆（.dng）的RAW格式导入。
-          </p>
-          
-          <InputField 
-            label="SD卡读取路径" 
-            value={config.sdPath} 
-            onChange={v => onUpdateConfig({...config, sdPath: v})} 
-            icon={<FolderInput size={14}/>} 
-          />
-          <InputField 
-            label="默认导入目标路径" 
-            value={config.destPath} 
-            onChange={v => onUpdateConfig({...config, destPath: v})} 
-            icon={<Download size={14}/>} 
-          />
-
-          <div className="bg-white p-4 rounded-lg border border-slate-200 space-y-3">
-             <div className="flex items-center gap-3 mb-2">
+          {isPrefOpen && (
+            <div className="space-y-4 mt-6 animate-in slide-in-from-top-2 duration-300 border-t border-slate-100 pt-4">
+              <div className="flex items-center gap-3 p-2 rounded hover:bg-slate-800/5 transition bg-slate-50 border border-slate-100">
                 <input 
-                  type="checkbox" 
-                  id="backupEnabled"
-                  checked={config.backupEnabled} 
-                  onChange={e => onUpdateConfig({...config, backupEnabled: e.target.checked})}
-                  className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-green-500"
+                  type="checkbox" id="autoStart" checked={config.autoStart} 
+                  onChange={e => onUpdateConfig({...config, autoStart: e.target.checked})}
+                  className="w-4 h-4 rounded border-slate-300 text-blue-500"
                 />
-                <label htmlFor="backupEnabled" className="text-sm text-slate-800 font-bold cursor-pointer select-none">
-                  开启备份
+                <label htmlFor="autoStart" className="text-sm text-slate-800 cursor-pointer select-none font-medium">
+                  应用启动时自动开始读取SD卡文件
                 </label>
-             </div>
-             {config.backupEnabled && (
-                <InputField 
-                  label="备份目标路径" 
-                  value={config.backupPath} 
-                  onChange={v => onUpdateConfig({...config, backupPath: v})} 
-                  icon={<HardDrive size={14}/>} 
-                />
-             )}
-          </div>
+              </div>
+              <p className="text-xs text-slate-500 bg-blue-50 text-blue-700/70 p-3 rounded-lg border border-blue-100">
+                支持佳能（.cr2 .cr3）、索尼（.arw）、尼康（.nef）、奥林巴斯（.orf）、徕卡（.rwl .dng）、富士（.raf）、哈苏（.3fr .fff）、大疆（.dng）的RAW格式/图片/视频导入。
+              </p>
+              
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-500 uppercase">选择SD卡盘符</label>
+                <div className="relative">
+                  <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">
+                    <HardDrive size={14}/>
+                  </div>
+                  <select 
+                    value={config.sdPath} 
+                    onChange={(e) => onUpdateConfig({...config, sdPath: e.target.value})}
+                    className="w-full bg-white border border-slate-200 rounded-lg pl-10 pr-10 py-2 text-slate-800 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors font-mono text-sm appearance-none cursor-pointer"
+                  >
+                    <option value="">-- 请选择设备盘符 --</option>
+                    
+                    {config.sdPath && !drives.includes(config.sdPath) && (
+                      <option value={config.sdPath}>
+                        {config.sdPath} (上一次使用 / 当前未连接)
+                      </option>
+                    )}
+                    
+                    {/* 实时遍历当前系统挂载的盘符 */}
+                    {drives.map(drive => (
+                      <option key={drive} value={drive}>{drive}</option>
+                    ))}
+                  </select>
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+                    <ChevronDown size={14}/>
+                  </div>
+                </div>
+              </div>
+
+              <InputField 
+                label="默认导入目标路径" 
+                value={config.destPath} 
+                onChange={v => onUpdateConfig({...config, destPath: v})} 
+                icon={<Download size={14}/>} 
+              />
+
+              <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 space-y-3">
+                 <div className="flex items-center gap-3 mb-2">
+                    <input 
+                      type="checkbox" id="backupEnabled" checked={config.backupEnabled} 
+                      onChange={e => onUpdateConfig({...config, backupEnabled: e.target.checked})}
+                      className="w-4 h-4 rounded border-slate-300 text-green-500"
+                    />
+                    <label htmlFor="backupEnabled" className="text-sm text-slate-800 font-bold cursor-pointer select-none">
+                      开启备份
+                    </label>
+                 </div>
+                 {config.backupEnabled && (
+                    <InputField 
+                      label="备份目标路径" 
+                      value={config.backupPath} 
+                      onChange={v => onUpdateConfig({...config, backupPath: v})} 
+                      icon={<FolderInput size={14}/>} 
+                    />
+                 )}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="w-full bg-gradient-to-br from-indigo-900/50 to-purple-900/50 border border-indigo-500/20 rounded-xl p-6 flex flex-col">
@@ -1072,6 +1171,49 @@ const ResearchView = ({
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("准备就绪");
+
+  useEffect(() => {
+    if (!window.electronAPI?.onPythonEvent) return;
+    const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
+      switch (event.type) {
+        case 'log':
+        case 'error':
+        case 'warning':
+        case 'success':
+          setLogs(prev => [...prev, {
+            timestamp: new Date().toLocaleTimeString(),
+            message: event.message,
+            type: event.type as any
+          }]);
+          
+          // 如果是成功或失败，停止运行状态
+          if (event.type === 'success' || event.type === 'error') {
+            setIsRunning(false);
+            if (event.type === 'success') {
+                setProgress(100);
+                setStatusMsg("处理完成");
+            } else {
+                setStatusMsg("发生错误");
+            }
+          }
+          break;
+          
+        case 'progress':
+          if (event.progress !== undefined) setProgress(event.progress);
+          if (event.message) {
+             setStatusMsg(event.message);
+             // 将进度消息也记录到终端日志中
+             setLogs(prev => [...prev, {
+               timestamp: new Date().toLocaleTimeString(),
+               message: event.message,
+               type: 'info'
+             }]);
+          }
+          break;
+      }
+    });
+    return cleanup;
+  }, []);
 
   const runAnalysis = () => {
     if (isRunning) return;
@@ -1276,10 +1418,6 @@ const MatchView = ({
                     </div>
                     <p className="text-xs text-slate-600">
                         会在原始文件夹外面创建一个<span className="text-blue-600 font-mono mx-1">"{config.destFolderName}"</span>文件夹用于提取选片
-                        <p className="text-xs text-slate-600 flex items-center gap-1">
-                          <AlertCircle size={12}/> 
-                          文件夹名称可以在设置中更改
-                        </p>
                     </p>
                 </div>
 
@@ -1693,7 +1831,7 @@ const AboutModal = ({ onClose }: { onClose: () => void }) => {
           <p className="text-slate-800 text-base leading-relaxed">
             @秋也寻
             <br/>
-            版本 26.5.10
+            版本 25.5.12
             <br/>
             大部分代码为Google Gemini和Copilot生成。
             <br />

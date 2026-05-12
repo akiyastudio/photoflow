@@ -40,6 +40,7 @@ export interface IElectronAPI {
   getUserPath: () => Promise<string>;
   onUpdateAvailable: (callback: (info: { version: string; url: string; notes: string }) => void) => () => void;
   openExternal: (url: string) => void;
+  getDrives: () => Promise<string[]>;
 }
 
 declare global {
@@ -48,4 +49,4 @@ declare global {
   }
 }
 
-export const TYPES_VERSION = "26.5.10";
+export const TYPES_VERSION = "25.5.12";
