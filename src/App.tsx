@@ -312,7 +312,7 @@ const App: React.FC = () => {
             active={activeTab === 'video_split'} 
             onClick={() => setActiveTab('video_split')} 
             icon={<Scissors size={20} />} 
-            label="视频对半切割" 
+            label="视频切割" 
           />
           <div className="pt-4 pb-2 px-4 text-xs font-semibold text-slate-500 uppercase tracking-wider">
             分析
@@ -369,7 +369,7 @@ const App: React.FC = () => {
         )}
         
         {activeTab === 'video_split' && (
-          <RequirePlugin scriptName="cut_video.py" title="视频对半切割" desc="需要调用底层引擎进行极速无损视频切割。">
+          <RequirePlugin scriptName="cut_video.py" title="视频切割" desc="需要调用底层引擎进行极速无损视频切割。">
             <VideoSplitView />
           </RequirePlugin>
         )}
@@ -1491,17 +1491,14 @@ const RenameView = () => {
         <div className="w-full space-y-6">
             <h2 className="text-2xl font-bold text-slate-800">整理前后期图片</h2>
             
-            {/* --- 新增：可视化流程图 (替换了原来的纯文字说明) --- */}
             <div className="bg-white border border-slate-200 rounded-xl p-6 relative overflow-hidden">
                 <div className="space-y-2">
-                  <p className="mt-2 text-gray-600">我会遇到这么个情况，返给客户很多图，然后客户修了一部分，但是又需要匹配到返给客户图的文件，所以这个功能可以匹配你返给客户的和客户修了再返给你的图，重命名和寻找客户没给你的图。</p>
+                  <p className="mt-2 text-gray-600">通常用于团片后期中。每一个人后期之后文件名会乱序，为了方便整理和溯源，这个组件可以把类似的图片重命名到初始版本。</p>
                 </div>
-                {/* 背景光效 */}
                 <div className="absolute top-0 left-1/2 -translate-x-1/2 p-32 bg-indigo-500/5 blur-3xl rounded-full pointer-events-none"></div>
                 
                 <div className="relative z-10 flex flex-col md:flex-row items-center justify-between gap-4 md:gap-8">
                     
-                    {/* 左侧：摄影师基准 */}
                     <div className="flex-1 w-full bg-slate-50/50 border border-blue-500/20 rounded-lg p-4 flex flex-col items-center text-center">
                         <div className="text-xs font-bold text-blue-600 uppercase mb-3 flex items-center gap-2">
                             <HardDrive size={14} /> 摄影师原图 (文件夹A)
@@ -1513,7 +1510,6 @@ const RenameView = () => {
                         <p className="text-[10px] text-slate-500 mt-2">作为命名的基准标准</p>
                     </div>
 
-                    {/* 中间：处理逻辑 */}
                     <div className="flex flex-col items-center justify-center shrink-0">
                         <div className="text-[10px] text-slate-500 mb-1 font-mono">pHash 视觉指纹比对</div>
                         <div className="flex items-center gap-2">
@@ -1526,7 +1522,6 @@ const RenameView = () => {
                         <div className="text-[10px] text-purple-400 mt-1 font-bold">画面一致 = 匹配成功</div>
                     </div>
 
-                    {/* 右侧：客户返图 */}
                     <div className="flex-1 w-full bg-slate-50/50 border border-green-500/20 rounded-lg p-4 flex flex-col items-center text-center relative overflow-hidden">
                         <div className="text-xs font-bold text-green-400 uppercase mb-3 flex items-center gap-2">
                             <User size={14} /> 客户选修返图 (文件夹B)
@@ -1690,13 +1685,13 @@ const VideoSplitView = () => {
   return (
     <div className="w-full space-y-6">
       <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
-          <Scissors size={24} /> 视频对半切割
+          <Scissors size={24} /> 视频切割
       </h2>
       <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
         
         <div className="space-y-2">
           <p className="mt-2 text-gray-600">
-            无损将视频对半切割分为两个视频文件。用于处理过长的花絮/素材文件。
+            无损将视频切割分为4GB为一个的视频文件。用于处理过长的花絮/素材文件。
           </p>
         </div>
 

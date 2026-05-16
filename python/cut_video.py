@@ -34,27 +34,41 @@ def fast_lossless_split(input_file):
         
     h, m, s = match.groups()
     total_seconds = int(h) * 3600 + int(m) * 60 + float(s)
-    midpoint = total_seconds / 2.0
     
-    emit("log", f"视频总时长: {total_seconds:.2f} 秒，切割中点: {midpoint:.2f} 秒")
+    # --- 以下为修改后的 4GB 切割逻辑 ---
+    file_size = os.path.getsize(input_file)
+    target_size = 3.95 * 1024 * 1024 * 1024 # 设为 3.95GB 留点安全余量
+    
+    if file_size <= target_size:
+        emit("success", "✅ 视频文件小于 4GB，无需切割！", 100)
+        return
+
+    # 按比例估算 4GB 对应的视频时长（假设视频码率大致均匀）
+    segment_duration = total_seconds * (target_size / file_size)
+    part_count = int((file_size + target_size - 1) // target_size) # 向上取整计算预估段数
+    
+    emit("log", f"视频时长: {total_seconds:.2f} 秒，大小: {file_size/(1024**3):.2f} GB")
+    emit("log", f"目标单文件大小: 约 3.95 GB，预估切割为 {part_count} 段，每段约 {segment_duration:.2f} 秒")
     
     file_name, file_ext = os.path.splitext(input_file)
-    output1 = f"{file_name}_上集{file_ext}"
-    output2 = f"{file_name}_下集{file_ext}"
+    # 生成如 "视频_part001.mp4", "视频_part002.mp4" 的输出格式
+    output_pattern = f"{file_name}_part%03d{file_ext}"
     
-    # 2. 切割第一部分
-    emit("progress", "⚡ 正在极速无损切割【上集】...", 40)
-    cmd_part1 = [ffmpeg_exe, "-i", input_file, "-t", str(midpoint), "-c", "copy", "-y", output1]
-    subprocess.run(cmd_part1, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    emit("progress", f"⚡ 正在切割，请耐心等待...", 50)
     
-    # 3. 切割第二部分
-    emit("progress", "⚡ 正在极速无损切割【下集】...", 70)
-    cmd_part2 = [ffmpeg_exe, "-i", input_file, "-ss", str(midpoint), "-c", "copy", "-y", output2]
-    subprocess.run(cmd_part2, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # 使用 ffmpeg 的 segment 模块进行自动化无损分段
+    cmd_split = [
+        ffmpeg_exe, "-i", input_file,
+        "-c", "copy",
+        "-f", "segment",
+        "-segment_time", str(segment_duration),
+        "-reset_timestamps", "1",
+        output_pattern
+    ]
+    subprocess.run(cmd_split, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     
-    emit("log", f"上集路径: {output1}")
-    emit("log", f"下集路径: {output2}")
-    emit("success", "✅ 极速切割完成！(画质和 HDR 均已保留)", 100)
+    emit("log", f"分段文件前缀: {file_name}_part...{file_ext}")
+    emit("success", f"✅ 极速切割完成！成功分为 {part_count} 段", 100)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Fast lossless video splitter')
@@ -62,6 +76,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     try:
-        fast_lossless_split(args.video_path)
+        # 清除 Electron 传递路径时可能附带的双引号/单引号
+        clean_path = args.video_path.strip('"').strip("'")
+        fast_lossless_split(clean_path)
     except Exception as e:
         emit("error", f"执行出错: {str(e)}")
