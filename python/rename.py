@@ -17,20 +17,33 @@ def log_success(msg): emit('success', msg)
 def log_error(msg): emit('error', msg)
 def log_progress(msg, percent): emit('progress', msg, progress=percent)
 
-def calculate_hash(image_path, hash_size=8):
+def calculate_hashes(image_path):
     try:
         with Image.open(image_path) as img:
-            img = img.resize((hash_size + 1, hash_size), Image.LANCZOS).convert('L')
-            pixels = list(img.getdata())
-            avg = sum(pixels) / len(pixels)
-            hash_value = 0
-            for i in range(hash_size):
-                for j in range(hash_size):
-                    if pixels[i * hash_size + j] > avg:
-                        hash_value |= 1 << (i * hash_size + j)
-            return hash_value
+            img_gray = img.convert('L')
+            
+            # 1. 粗略哈希 (aHash 8x8 -> 64 bits) - 用于快速筛选
+            img_coarse = img_gray.resize((8, 8), Image.LANCZOS)
+            pixels_coarse = list(img_coarse.getdata())
+            avg = sum(pixels_coarse) / len(pixels_coarse)
+            coarse_hash = 0
+            for i, p in enumerate(pixels_coarse):
+                if p > avg: coarse_hash |= 1 << i
+
+            # 2. 精细哈希 (dHash 16x16 -> 256 bits) - 用于精准区分细节
+            # dHash 原理：对比相邻像素的明暗，能极其敏锐地捕捉画面结构的微小变化
+            img_fine = img_gray.resize((17, 16), Image.LANCZOS)
+            pixels_fine = list(img_fine.getdata())
+            fine_hash = 0
+            for row in range(16):
+                for col in range(16):
+                    # 对比当前像素和右边相邻像素
+                    if pixels_fine[row * 17 + col] > pixels_fine[row * 17 + col + 1]:
+                        fine_hash |= 1 << (row * 16 + col)
+
+            return coarse_hash, fine_hash
     except Exception:
-        return None
+        return None, None
 
 def hamming_distance(hash1, hash2):
     if hash1 is None or hash2 is None: return float('inf')
@@ -64,66 +77,85 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched):
     list_a = [f for f in os.listdir(folder_a) if f.lower().endswith(image_extensions)]
     for i, f in enumerate(list_a):
         path = os.path.join(folder_a, f)
-        h = calculate_hash(path)
-        if h is not None: files_a[f] = (path, h)
+        h_coarse, h_fine = calculate_hashes(path)
+        if h_coarse is not None: files_a[f] = (path, h_coarse, h_fine)
         if i % 10 == 0: log_progress(f"分析 A: {i}/{len(list_a)}", int(i/len(list_a)*20))
 
-    # 2. 分析 文件夹A
-    log_info("正在分析 文件夹A (待处理组)...")
+    # 2. 分析 文件夹B
+    log_info("正在分析 文件夹B (待处理组)...")
     files_b = {}
     list_b = [f for f in os.listdir(folder_b) if f.lower().endswith(image_extensions)]
     for i, f in enumerate(list_b):
         path = os.path.join(folder_b, f)
-        h = calculate_hash(path)
-        if h is not None: files_b[f] = (path, h)
+        h_coarse, h_fine = calculate_hashes(path)
+        if h_coarse is not None: files_b[f] = (path, h_coarse, h_fine)
         if i % 10 == 0: log_progress(f"分析 B: {i}/{len(list_b)}", 20 + int(i/len(list_b)*20))
 
     if not files_b:
-        log_error("文件夹A 中没有图片")
+        log_error("文件夹B 中没有图片")
         return
 
+    # 3. 收集并计算所有候选匹配对 (粗筛)
+    log_info("正在进行深度交叉比对...")
+    potential_matches = []
+    
+    total_a = len(files_a)
+    for idx, (file_a, (path_a, coarse_a, fine_a)) in enumerate(files_a.items()):
+        for file_b, (path_b, coarse_b, fine_b) in files_b.items():
+            rough_dist = hamming_distance(coarse_a, coarse_b)
+            # 如果粗略差距在阈值内，视为候选对象
+            if rough_dist <= threshold:
+                fine_dist = hamming_distance(fine_a, fine_b)
+                potential_matches.append((fine_dist, rough_dist, file_a, file_b))
+        
+        if idx % 5 == 0:
+            log_progress(f"交叉比对: {idx}/{total_a}", 40 + int(idx/total_a*10))
+
+    # 核心改动：全局排序 (精筛)
+    # 按 精细差距(第一优先) 和 粗略差距(第二优先) 从小到大排序
+    potential_matches.sort(key=lambda x: (x[0], x[1]))
+
+    # 4. 执行重命名 (最优分配)
+    log_info("开始执行精准重命名...")
     processed_b = set()
     matched_a = {f: 0 for f in files_a}
     
-    # 3. 比对重命名
-    log_info("开始比对并重命名...")
-    total = len(files_a)
-    
-    for idx, (file_a, (path_a, hash_a)) in enumerate(files_a.items()):
-        matches = []
-        for file_b, (path_b, hash_b) in files_b.items():
-            if file_b not in processed_b and hamming_distance(hash_a, hash_b) <= threshold:
-                matches.append(file_b)
+    total_matches = len(potential_matches)
+    for idx, (fine_dist, rough_dist, file_a, file_b) in enumerate(potential_matches):
+        # 如果这个待处理文件已经被最适合它的参照文件领走了，跳过
+        if file_b in processed_b:
+            continue
+            
+        path_b = files_b[file_b][0]
+        name, ext = os.path.splitext(file_a)
         
-        for m_idx, file_b in enumerate(matches, 1):
-            path_b, _ = files_b[file_b]
-            name, ext = os.path.splitext(file_a)
-            
-            # 命名逻辑
-            if m_idx == 1: new_name = f"{name}{ext}"
-            else: new_name = f"{name}_{m_idx}{ext}"
-            
+        m_idx = matched_a[file_a] + 1
+        
+        # 命名逻辑
+        if m_idx == 1: new_name = f"{name}{ext}"
+        else: new_name = f"{name}_{m_idx}{ext}"
+        
+        new_path_b = os.path.join(folder_b, new_name)
+        
+        # 防止同名覆盖 (比如用户文件夹B原本就有同名文件)
+        c = 1
+        while os.path.exists(new_path_b):
+            if m_idx == 1: new_name = f"{name}_{c}{ext}"
+            else: new_name = f"{name}_{m_idx+c-1}{ext}"
             new_path_b = os.path.join(folder_b, new_name)
-            
-            # 防止同名覆盖
-            c = 1
-            while os.path.exists(new_path_b):
-                if m_idx == 1: new_name = f"{name}_{c}{ext}"
-                else: new_name = f"{name}_{m_idx+c-1}{ext}"
-                new_path_b = os.path.join(folder_b, new_name)
-                c += 1
-            
-            try:
-                os.rename(path_b, new_path_b)
-                processed_b.add(file_b)
-                matched_a[file_a] += 1
-            except Exception:
-                pass
+            c += 1
         
-        if idx % 5 == 0:
-            log_progress(f"比对进度: {idx}/{total}", 40 + int(idx/total*50))
+        try:
+            os.rename(path_b, new_path_b)
+            processed_b.add(file_b)
+            matched_a[file_a] += 1
+        except Exception:
+            pass
+            
+        if idx % 10 == 0:
+            log_progress(f"重命名进度: {idx}/{total_matches}", 50 + int(idx/total_matches*40))
 
-    # 4. 处理未匹配
+    # 5. 处理未匹配
     unmatched_b = [f for f in files_b if f not in processed_b]
     if unmatched_b:
         sub_folder = os.path.join(folder_b, "未匹配的图片")
@@ -140,12 +172,12 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched):
 
     unmatched_a = [f for f in files_a if matched_a[f] == 0]
     
-    stats = (f"B匹配:{len(processed_b)}/{len(files_b)}, A匹配:{sum(1 for v in matched_a.values() if v>0)}/{len(files_a)}")
+    stats = (f"待处理组匹配成功:{len(processed_b)}/{len(files_b)}, 参照组已被匹配:{sum(1 for v in matched_a.values() if v>0)}/{len(files_a)}")
     log_success(f"完成! {stats}")
 
     if unmatched_a and auto_copy_unmatched:
         copy_unmatched_a_files(unmatched_a, folder_a)
-        log_success("已复制A中未匹配文件")
+        log_success("已复制参照组中未匹配的文件")
 
 def run(args_list):
     if sys.platform.startswith('win'):

@@ -93,8 +93,8 @@ const checkForUpdates = async () => {
 
     console.log(`Current: ${currentVersion}, Latest: ${latestVersion}`);
 
-    // 简单的版本比较逻辑 (如果你需要更严格的 semver 比较，可以引入 semver 库)
-    if (latestVersion !== currentVersion && compareVersions(latestVersion, currentVersion) > 0) {
+    // 简单的版本比较逻辑：仅当 Github 上的版本严格大于本地当前版本时才提示更新
+    if (compareVersions(latestVersion, currentVersion) > 0) {
       mainWindow.webContents.send('update-available', {
         version: latestVersion,
         url: data.html_url, // GitHub Release 页面地址
@@ -106,16 +106,25 @@ const checkForUpdates = async () => {
   }
 };
 
-// 简单的版本号比较函数 (1.0.1 > 1.0.0)
-const compareVersions = (a, b) => {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    const na = pa[i] || 0;
-    const nb = pb[i] || 0;
-    if (na > nb) return 1;
-    if (nb > na) return -1;
+// 健壮的版本号比较函数 (支持过滤 1.0.1-beta 这种带后缀的情况)
+const compareVersions = (v1, v2) => {
+  // 去除可能的尾缀并将其转为安全的整数数组，例如 "1.0.1-beta" -> [1, 0, 1]
+  const parseVersion = (v) => v.split('-')[0].split('.').map(x => parseInt(x, 10) || 0);
+  
+  const p1 = parseVersion(v1); // GitHub 的版本
+  const p2 = parseVersion(v2); // 本地的版本
+  
+  const len = Math.max(p1.length, p2.length);
+  for (let i = 0; i < len; i++) {
+    const n1 = p1[i] || 0;
+    const n2 = p2[i] || 0;
+    
+    // 如果 GitHub 版本号数字更大，说明需要更新
+    if (n1 > n2) return 1; 
+    // 如果 本地 版本号数字更大（你本地在超前开发），无需更新
+    if (n1 < n2) return -1;
   }
+  // 版本号完全一致
   return 0;
 };
 
