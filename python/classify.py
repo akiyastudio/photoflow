@@ -6,6 +6,7 @@ import datetime
 import json
 import argparse
 from pathlib import Path
+import gc
 
 # --- 1. Electron 通信辅助 ---
 def emit(event_type, message, data=None, progress=None):
@@ -22,6 +23,24 @@ def log_status(msg, data=None): emit('status', msg, data)
 def ask_user(msg, data=None): emit('ask_user', msg, data)
 
 # --- 2. 辅助工具函数 ---
+def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024):
+    try:
+        with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
+            while True:
+                buf = fsrc.read(chunk_size)
+                if not buf:
+                    break
+                fdst.write(buf)
+                # 可选：如果读卡器实在太差，可以取消下一行的注释，每次复制强制让主控休息 2 毫秒
+                # time.sleep(0.002) 
+        
+        # 复制完成后，手动把修改时间和权限等元数据同步过去（达到 copy2 的效果）
+        shutil.copystat(src, dst)
+    except Exception as e:
+        # 如果中途出错（比如读卡器突然拔出），with open 会确保文件句柄被立即强制关闭
+        # 避免 Windows 内核锁死
+        raise e
+
 def get_file_time(file_path):
     try: return os.path.getmtime(file_path)
     except: return 0
@@ -105,7 +124,13 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
                 dst = os.path.join(temp_dir, f"{name}_{int(time.time()*1000)}{ext}")
             
             # 执行复制
-            shutil.copy2(src, dst)
+            try:
+                safe_chunk_copy(src, dst)
+            except Exception as e:
+                log_error(f"复制文件 {filename} 时读卡器断开或报错: {e}")
+                # 如果复制单个文件就报错了，极大概率是读卡器已经掉线，抛出异常让外层统一处理
+                raise e 
+            
             temp_files_list.append(dst)
             log_progress(f"导入中: {filename}", int(((idx+1)/len(original_sd_files))*100))
 
@@ -184,6 +209,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
     except Exception as e:
         log_error(f"流程异常: {str(e)}")
         # 异常情况下保留临时文件夹和 SD 卡文件，确保数据不丢
+        gc.collect()
 
 def run(args_list):
     if sys.platform.startswith('win'):
