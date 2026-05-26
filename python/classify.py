@@ -31,10 +31,9 @@ def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024):
                 if not buf:
                     break
                 fdst.write(buf)
-                # 可选：如果读卡器实在太差，可以取消下一行的注释，每次复制强制让主控休息 2 毫秒
-                # time.sleep(0.002) 
+                # 防止读卡器性能太差崩盘
+                time.sleep(0.002) 
         
-        # 复制完成后，手动把修改时间和权限等元数据同步过去（达到 copy2 的效果）
         shutil.copystat(src, dst)
     except Exception as e:
         # 如果中途出错（比如读卡器突然拔出），with open 会确保文件句柄被立即强制关闭
@@ -48,9 +47,9 @@ def get_file_time(file_path):
 def classify_files_by_type(folder_path):
     """整理子文件夹"""
     ext_map = {
-        'jpg': ('.jpg', '.jpeg'),
+        'jpg': ('.jpg', '.jpeg', '.hif', '.heic'),
         'raw': ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.rwl', '.raf', '.3fr', '.fff'),
-        'mov': ('.mp4', '.mov', '.avi', '.heic')
+        'mov': ('.mp4', '.mov', '.avi', '.crm')
     }
     for f in os.listdir(folder_path):
         src_path = os.path.join(folder_path, f)
@@ -78,11 +77,16 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
     success_imported_count = 0
 
     try:
+        time.sleep(2.5)
         # Step 1: 扫描 SD 卡 (仅扫描 DCIM 和 PRIVATE 目录)
         valid_exts = ('.jpg', '.jpeg', '.png', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.heic', '.mp4', '.mov', '.avi', '.rwl', '.raf', '.3fr', '.fff')
         
         # 兼容老配置，如果传过来的是 H:/DCIM，自动退回到根目录 H:/
-        base_sd = sd_path[:-5] if sd_path.upper().endswith('DCIM') else sd_path
+        normalized_sd = os.path.normpath(sd_path)
+        if normalized_sd.upper().endswith('DCIM'):
+            base_sd = os.path.dirname(normalized_sd) # 完美安全地退回到上一级，如 G:\
+        else:
+            base_sd = normalized_sd
         
         # 定义需要扫描的目标子目录 (DCIM放大部分文件，PRIVATE放索尼高清视频)
         target_dirs = [os.path.join(base_sd, "DCIM"), os.path.join(base_sd, "PRIVATE")]
@@ -97,6 +101,9 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
                     # 排除隐藏文件并校验后缀
                     if not f.startswith('.') and f.lower().endswith(valid_exts):
                         original_sd_files.append(os.path.join(root, f))
+
+                        if len(original_sd_files) % 10 == 0:
+                            time.sleep(0.01)
         
         if not original_sd_files:
             log_info(f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
@@ -111,6 +118,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
         for idx, src in enumerate(original_sd_files):
             filename = os.path.basename(src)
             dst = os.path.join(temp_dir, filename)
+            time.sleep(0.005)
             
             # 如果临时目录已存在该文件，且大小与原文件一致，则跳过复制
             if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src):
