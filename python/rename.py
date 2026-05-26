@@ -136,6 +136,11 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched):
         else: new_name = f"{name}_{m_idx}{ext}"
         
         new_path_b = os.path.join(folder_b, new_name)
+
+        if file_b == new_name:
+            processed_b.add(file_b)
+            matched_a[file_a] += 1
+            continue
         
         # 防止同名覆盖 (比如用户文件夹B原本就有同名文件)
         c = 1
