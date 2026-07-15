@@ -52,15 +52,18 @@ export interface IElectronAPI {
   getUserPath: () => Promise<string>;
   onUpdateAvailable: (callback: (info: { version: string; url: string; notes: string }) => void) => () => void;
   openExternal: (url: string) => void;
+  checkForUpdates: () => Promise<{ success: boolean; updateAvailable?: boolean; currentVersion?: string; latestVersion?: string; url?: string; notes?: string; error?: string }>;
   getDrives: () => Promise<string[]>;
   setTheme: (theme: Theme) => Promise<void>;
   getWorkspaceProjects: (workspacePath: string) => Promise<{ success: boolean; root?: string; statuses: WorkspaceStatusGroup[]; error?: string }> ;
+  onWorkspaceFilesChanged: (callback: (change: { root: string; fileName: string }) => void) => () => void;
   createWorkspaceProject: (workspacePath: string, date: string, name: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
-  renameWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, nextName: string) => Promise<{ success: boolean; error?: string }> ;
+  renameWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, nextName: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   moveWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, nextStatus: ProjectStatus) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
+  archiveImportedProjects: (workspacePath: string) => Promise<{ success: boolean; projects: WorkspaceProject[]; error?: string }>;
   trashWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; error?: string }>;
 
-  getProjectContents: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; folders: Array<{ name: string; path: string; updatedAt: number }>; error?: string }> ;
+  getProjectContents: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; folders: Array<{ name: string; path: string; updatedAt: number }>;error?: string }> ;
   openWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, folderName?: string) => Promise<{ success: boolean; error?: string }> ;
   importBroll: (workspacePath: string, status: ProjectStatus, name: string, options: { splitLargeFiles: boolean; clearSource: boolean }) => Promise<{ success: boolean; cancelled?: boolean; count?: number; splitCount?: number; clearedCount?: number; error?: string}>;
 }

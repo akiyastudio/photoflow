@@ -24,7 +24,7 @@
       "electron/**/*"
     ],
     "win": {
-      "target": ["zip"] ,
+      "target": ["nsis", "zip"] ,
       "extraResources": [
         { "from": "python/dist/classify.exe", "to": "python/classify.exe" },
         { "from": "python/dist/png_to_jpg.exe", "to": "python/png_to_jpg.exe" },

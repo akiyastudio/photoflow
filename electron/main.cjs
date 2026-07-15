@@ -4,6 +4,9 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 
 let mainWindow;
+let workspaceWatcher = null;
+let watchedWorkspacePath = '';
+let workspaceWatchTimer = null;
 const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
 
@@ -140,35 +143,23 @@ const UPDATE_CONFIG = {
 };
 
 const checkForUpdates = async () => {
-  if (!mainWindow) return;
-  
+  if (!mainWindow) return { success: false, error: '主窗口尚未就绪' };
   try {
-    const response = await fetch(`https://api.github.com/repos/${UPDATE_CONFIG.owner}/${UPDATE_CONFIG.repo}/releases/latest`, {
-      headers: { 'User-Agent': 'PhotoFlow-App' }
-    });
-    
-    if (!response.ok) return;
-    
+    const response = await fetch(`https://api.github.com/repos/${UPDATE_CONFIG.owner}/${UPDATE_CONFIG.repo}/releases/latest`, { headers: { 'User-Agent': 'PhotoFlow-App' } });
+    if (!response.ok) return { success: false, error: `更新服务返回 ${response.status}` };
     const data = await response.json();
-    const latestVersion = data.tag_name.replace(/^v/, ''); // 去除 'v' 前缀，如 v1.0.1 -> 1.0.1
-    const currentVersion = app.getVersion(); // 获取 package.json 中的 version
-
+    const latestVersion = data.tag_name.replace(/^v/, '');
+    const currentVersion = app.getVersion();
+    const updateAvailable = latestVersion !== currentVersion && compareVersions(latestVersion, currentVersion) > 0;
     console.log(`Current: ${currentVersion}, Latest: ${latestVersion}`);
-
-    // 简单的版本比较逻辑 (如果你需要更严格的 semver 比较，可以引入 semver 库)
-    if (latestVersion !== currentVersion && compareVersions(latestVersion, currentVersion) > 0) {
-      mainWindow.webContents.send('update-available', {
-        version: latestVersion,
-        url: data.html_url, // GitHub Release 页面地址
-        notes: data.body    // Release Note
-      });
-    }
+    if (updateAvailable) mainWindow.webContents.send('update-available', { version: latestVersion, url: data.html_url, notes: data.body || '' });
+    return { success: true, updateAvailable, currentVersion, latestVersion, url: data.html_url, notes: data.body || '' };
   } catch (error) {
     console.error('Update check failed:', error);
+    return { success: false, error: error.message || String(error) };
   }
 };
 
-// 简单的版本号比较函数 (1.0.1 > 1.0.0)
 const compareVersions = (a, b) => {
   const pa = a.split('.').map(Number);
   const pb = b.split('.').map(Number);
@@ -185,6 +176,7 @@ const compareVersions = (a, b) => {
 ipcMain.on('open-external', (event, url) => {
   shell.openExternal(url);
 });
+ipcMain.handle('check-for-updates', async () => checkForUpdates());
 ipcMain.handle('set-theme', async (_event, theme) => {
   if (!mainWindow) return;
   const isDark = theme === 'dark';
@@ -433,9 +425,33 @@ const getProjectPath = (workspacePath, status, projectName) => {
 
 const cleanProjectName = (value) => value.trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
 
+const stopWorkspaceWatcher = () => {
+  if (workspaceWatchTimer) clearTimeout(workspaceWatchTimer);
+  workspaceWatchTimer = null;
+  if (workspaceWatcher) workspaceWatcher.close();
+  workspaceWatcher = null;
+  watchedWorkspacePath = '';
+};
+
+const watchWorkspace = (root) => {
+  if (watchedWorkspacePath === root && workspaceWatcher) return;
+  stopWorkspaceWatcher();
+  try {
+    workspaceWatcher = fs.watch(root, { recursive: process.platform !== 'linux' }, (_eventType, fileName) => {
+      if (workspaceWatchTimer) clearTimeout(workspaceWatchTimer);
+      workspaceWatchTimer = setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('workspace-files-changed', { root, fileName: fileName || '' });
+      }, 200);
+    });
+    watchedWorkspacePath = root;
+  } catch (error) {
+    writeLog('warn', 'Unable to watch workspace for file changes', error);
+  }
+};
 ipcMain.handle('workspace-projects', async (_event, workspacePath) => {
   try {
     const root = ensureWorkspace(workspacePath);
+    watchWorkspace(root);
     const statuses = WORKSPACE_STATUSES.map(status => {
       const statusPath = path.join(root, status);
       const projects = fs.readdirSync(statusPath, { withFileTypes: true })
@@ -480,7 +496,7 @@ ipcMain.handle('workspace-rename-project', async (_event, workspacePath, status,
     if (!fs.existsSync(source)) throw new Error('项目不存在');
     if (fs.existsSync(destination)) throw new Error('同名项目已存在');
     fs.renameSync(source, destination);
-    return { success: true };
+    return { success: true, project: { name: cleanedName, path: destination, status, updatedAt: Date.now() } };
   } catch (error) {
     return { success: false, error: error.message || String(error) };
   }
@@ -499,6 +515,74 @@ ipcMain.handle('workspace-move-project', async (_event, workspacePath, currentSt
   }
 });
 
+const mergeProjectDirectories = (source, destination) => {
+  fs.mkdirSync(destination, { recursive: true });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const sourcePath = path.join(source, entry.name);
+    let destinationPath = path.join(destination, entry.name);
+    if (entry.isDirectory()) {
+      mergeProjectDirectories(sourcePath, destinationPath);
+      continue;
+    }
+    if (fs.existsSync(destinationPath)) {
+      const extension = path.extname(entry.name);
+      const basename = path.basename(entry.name, extension);
+      let index = 1;
+      do {
+        destinationPath = path.join(destination, `${basename}_imported_${Date.now()}_${index}${extension}`);
+        index += 1;
+      } while (fs.existsSync(destinationPath));
+    }
+    fs.renameSync(sourcePath, destinationPath);
+  }
+  fs.rmdirSync(source);
+};
+
+ipcMain.handle('workspace-archive-imports', async (_event, workspacePath) => {
+  try {
+    const root = ensureWorkspace(workspacePath);
+    const plannedStatus = '已策划';
+    const plannedPath = path.join(root, plannedStatus);
+    const importedFolders = fs.readdirSync(root, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.startsWith('_') && !WORKSPACE_STATUSES.includes(entry.name));
+    const projects = [];
+
+    for (const folder of importedFolders) {
+      const importedPath = path.join(root, folder.name);
+      let existing = null;
+      for (const status of WORKSPACE_STATUSES) {
+        const candidate = path.join(root, status, folder.name);
+        if (fs.existsSync(candidate)) {
+          existing = { path: candidate, status };
+          break;
+        }
+      }
+
+      if (existing) {
+        mergeProjectDirectories(importedPath, existing.path);
+        if (existing.status !== plannedStatus) {
+          const plannedProjectPath = path.join(plannedPath, folder.name);
+          if (fs.existsSync(plannedProjectPath)) {
+            mergeProjectDirectories(existing.path, plannedProjectPath);
+          } else {
+            fs.renameSync(existing.path, plannedProjectPath);
+          }
+        }
+      } else {
+        fs.renameSync(importedPath, path.join(plannedPath, folder.name));
+      }
+
+      const projectPath = path.join(plannedPath, folder.name);
+      projects.push({ name: folder.name, path: projectPath, status: plannedStatus, updatedAt: fs.statSync(projectPath).mtimeMs });
+    }
+
+    writeLog('info', 'Imported folders archived', { root, count: projects.length });
+    return { success: true, projects };
+  } catch (error) {
+    writeLog('error', 'Unable to archive imported folders', error);
+    return { success: false, error: error.message || String(error), projects: [] };
+  }
+});
 ipcMain.handle('workspace-trash-project', async (_event, workspacePath, status, projectName) => {
   try {
     const projectPath = getProjectPath(workspacePath, status, projectName);
@@ -630,6 +714,8 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+app.on('before-quit', stopWorkspaceWatcher);
 
 app.on('window-all-closed', () => {
   writeLog('info', 'All application windows closed');
