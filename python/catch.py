@@ -1,151 +1,130 @@
+import argparse
+import json
 import os
+import re
 import shutil
 import sys
-import json
-import argparse
-import re
 
-# --- Electron 通信辅助函数 ---
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff', '.heic', '.webp',
+                    '.cr2', '.cr3', '.arw', '.nef', '.orf', '.rwl', '.dng', '.raf', '.3fr', '.fff'}
+VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.m4v', '.mkv', '.mts', '.m2ts'}
+
+
 def emit(event_type, message, data=None, progress=None):
     payload = {"type": event_type, "message": message}
-    if data is not None: payload["data"] = data
-    if progress is not None: payload["progress"] = progress
+    if data is not None:
+        payload["data"] = data
+    if progress is not None:
+        payload["progress"] = progress
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
-def log_info(msg): emit('log', msg)
-def log_success(msg): emit('success', msg)
-def log_error(msg): emit('error', msg)
 
-def process_files(source_dir, target_dir, search_names):
-    """
-    负责执行最终的遍历、比对、复制文件的逻辑
-    """
-    if not os.path.exists(source_dir):
-        log_error(f"源文件夹不存在: {source_dir}")
-        return
+def log_info(message):
+    emit('log', message)
 
-    # 自动设定目标文件夹
-    try:
-        if not os.path.exists(target_dir):
-            os.makedirs(target_dir)
-            log_info(f"已创建目标文件夹: {target_dir}")
-        else:
-            log_info(f"目标文件夹已存在: {target_dir}")
-    except Exception as e:
-        log_error(f"创建目标文件夹失败: {e}")
-        return
 
-    log_info(f"开始搜索关键词: {', '.join(search_names)}")
-    
-    found_keywords = set()  
-    count = 0               
-    skip_count = 0          
-    
+def log_success(message):
+    emit('success', message)
+
+
+def log_error(message):
+    emit('error', message)
+
+
+def find_project_folder(project_dir, wanted_name):
+    if not os.path.isdir(project_dir):
+        return None
+    for entry in os.scandir(project_dir):
+        if entry.is_dir() and entry.name.casefold() == wanted_name.casefold():
+            return entry.path
+    return None
+
+
+def matching_files(source_dir, keyword):
+    if not source_dir:
+        return []
+    matches = []
     for root, _, files in os.walk(source_dir):
-        if os.path.abspath(root).startswith(os.path.abspath(target_dir)):
+        matches.extend(os.path.join(root, name) for name in files if keyword in name)
+    return matches
+
+
+def process_project(project_dir, image_dest_name, video_dest_name, search_names):
+    project_dir = os.path.abspath(project_dir)
+    raw_dir = find_project_folder(project_dir, 'RAW')
+    mov_dir = find_project_folder(project_dir, 'MOV')
+    if not raw_dir and not mov_dir:
+        log_error("项目中没有找到 RAW 或 MOV 文件夹。")
+        return
+
+    image_target = os.path.join(project_dir, image_dest_name)
+    video_target = os.path.join(project_dir, video_dest_name)
+    copied, skipped, missing = 0, 0, []
+    log_info("开始选片：优先在 RAW 中查找，未命中的文件名再到 MOV 中查找。")
+
+    for keyword in search_names:
+        matches = matching_files(raw_dir, keyword)
+        source_label = 'RAW'
+        if not matches:
+            matches = matching_files(mov_dir, keyword)
+            source_label = 'MOV'
+        if not matches:
+            missing.append(keyword)
             continue
 
-        for file in files:
-            for name in search_names:
-                if name in file:
-                    found_keywords.add(name)
-                    source_path = os.path.join(root, file)
-                    target_path = os.path.join(target_dir, file)
-                    
-                    if os.path.exists(target_path):
-                        log_info(f"跳过: {file} (目标目录已存在同名文件)")
-                        skip_count += 1
-                        break 
-                    
-                    try:
-                        shutil.copy2(source_path, target_path)
-                        log_info(f"复制: {file}")
-                        count += 1
-                    except Exception as e:
-                        log_error(f"复制失败 {file}: {e}")
-                    
-                    break 
-    
-    # 结果反馈逻辑
-    not_found = [n for n in search_names if n not in found_keywords]
-    
-    if not_found:
-        log_info(f"提示：以下关键词未找到任何匹配文件: {', '.join(not_found)}")
+        log_info(f"{keyword}: 在 {source_label} 中找到 {len(matches)} 个匹配文件")
+        for source_path in matches:
+            extension = os.path.splitext(source_path)[1].lower()
+            target_dir = video_target if extension in VIDEO_EXTENSIONS else image_target
+            os.makedirs(target_dir, exist_ok=True)
+            destination = os.path.join(target_dir, os.path.basename(source_path))
+            if os.path.exists(destination):
+                skipped += 1
+                log_info(f"跳过同名文件: {os.path.basename(source_path)}")
+                continue
+            try:
+                shutil.copy2(source_path, destination)
+                copied += 1
+                log_info(f"复制到 {os.path.basename(target_dir)}: {os.path.basename(source_path)}")
+            except Exception as error:
+                log_error(f"复制失败 {os.path.basename(source_path)}: {error}")
 
-    result_msg = f"处理完成。成功复制: {count} 个"
-    if skip_count > 0:
-        result_msg += f"，跳过同名文件: {skip_count} 个"
-    
-    if count == 0 and skip_count == 0:
-        log_error("未找到任何包含指定关键词的文件。")
-    else:
-        if not_found:
-            result_msg += f" (注：有 {len(not_found)} 个关键词未命中)"
-        emit('success', result_msg)
-
-# ==========================================
-# 模式一：新逻辑 - 智能提取连续数字作为关键词
-# ==========================================
-def run_extract_numbers(args_list):
-    if sys.platform.startswith('win'):
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--source", required=True, help="源文件夹路径")
-    parser.add_argument("--keywords", nargs='+', required=True, help="包含数字的混合文本")
-    parser.add_argument("--dest_name", default="1", help="目标文件夹名称") 
-    args = parser.parse_args(args_list) 
-
-    source_dir = args.source.strip().strip('"').strip("'")
-    
-    # 1. 把传入的参数全拼成一个长字符串（应对中间有空格、换行等情况）
-    raw_text = " ".join(args.keywords)
-    
-    # 2. 核心正则切割提取：\d+ 代表“匹配一段连续的1个或多个数字”
-    # 如果文本是 "7380/7381 7404编辫子\n测试"，结果将是['7380', '7381', '7404']
-    extracted_numbers = re.findall(r'\d{3,}', raw_text)
-    
-    # 3. 去重，并保持原有的先后顺序
-    search_names = list(dict.fromkeys(extracted_numbers))
-
-    if not search_names:
-        log_error("未从输入内容中提取到任何数字作为关键词。")
+    if missing:
+        log_info(f"以下文件名在 RAW 和 MOV 中均未找到: {', '.join(missing)}")
+    if copied == 0 and skipped == 0:
+        log_error("未找到任何包含指定文件名的文件。")
         return
 
-    # 4. 生成目标路径并调用公共逻辑
-    abs_source_dir = os.path.abspath(source_dir)
-    parent_dir = os.path.dirname(abs_source_dir)
-    target_dir = os.path.join(parent_dir, args.dest_name)
-    
-    process_files(source_dir, target_dir, search_names)
+    message = f"选片完成。成功复制 {copied} 个文件"
+    if skipped:
+        message += f"，跳过 {skipped} 个同名文件"
+    if missing:
+        message += f"，{len(missing)} 个文件名未命中"
+    log_success(message)
 
-# ==========================================
-# 模式二：旧逻辑 - 原封不动保留（作为独立函数）
-# ==========================================
-def run_original(args_list):
+
+def run(arguments):
     if sys.platform.startswith('win'):
         sys.stdout.reconfigure(encoding='utf-8')
         sys.stderr.reconfigure(encoding='utf-8')
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", required=True, help="源文件夹路径")
-    parser.add_argument("--keywords", nargs='+', required=True, help="文件名关键词列表")
-    parser.add_argument("--dest_name", default="1", help="目标文件夹名称") 
-    args = parser.parse_args(args_list) 
+    parser.add_argument("--source", required=True, help="项目文件夹路径")
+    parser.add_argument("--keywords", nargs='+', required=True, help="包含数字的混合文本")
+    parser.add_argument("--image_dest_name", default="图片选片")
+    parser.add_argument("--video_dest_name", default="视频选片")
+    args = parser.parse_args(arguments)
 
-    source_dir = args.source.strip().strip('"').strip("'")
-    search_names = args.keywords
+    project_dir = args.source.strip().strip('"').strip("'")
+    search_names = list(dict.fromkeys(re.findall(r'\d{3,}', " ".join(args.keywords))))
+    if not search_names:
+        log_error("未从输入内容中提取到任何数字作为文件名。")
+        return
+    process_project(project_dir, args.image_dest_name, args.video_dest_name, search_names)
 
-    abs_source_dir = os.path.abspath(source_dir)
-    parent_dir = os.path.dirname(abs_source_dir)
-    target_dir = os.path.join(parent_dir, args.dest_name)
-
-    # 直接使用原始关键词调用公共逻辑
-    process_files(source_dir, target_dir, search_names)
 
 if __name__ == "__main__":
     try:
-        run_extract_numbers(sys.argv[1:])
-    except Exception as e:
-        log_error(f"脚本运行出错: {str(e)}")
+        run(sys.argv[1:])
+    except Exception as error:
+        log_error(f"脚本运行出错: {error}")

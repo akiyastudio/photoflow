@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   LayoutDashboard,
   FolderInput,
+  FolderPlus,
   Folder,
   Image as ImageIcon,
   ScanSearch,
@@ -56,7 +57,9 @@ interface AppConfig {
     clearSource: boolean;
   };
   smartMatch: {
-    destFolderName: string;
+    imageDestFolderName: string;
+    videoDestFolderName: string;
+    destFolderName?: string;
   };
   research: {
     defaultDir: string;
@@ -84,7 +87,8 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
     clearSource: true
   },
   smartMatch: {
-    destFolderName: "1"
+    imageDestFolderName: "\u56fe\u7247\u9009\u7247",
+    videoDestFolderName: "\u89c6\u9891\u9009\u7247"
   },
   research: {
     defaultDir: `${userPath}/Downloads`,
@@ -164,6 +168,7 @@ const App: React.FC = () => {
   const [updateInfo, setUpdateInfo] = useState<{version: string, url: string, notes: string} | null>(null);
   const [selectedProject, setSelectedProject] = useState<WorkspaceProject | null>(null);
   const [projectDestination, setProjectDestination] = useState<string | null>(null);
+  const [undoNotice, setUndoNotice] = useState('');
   const [homeOrder, setHomeOrder] = useState<HomeCardId[]>(DEFAULT_HOME_ORDER);
   const [draggedHomeCard, setDraggedHomeCard] = useState<HomeCardId | null>(null);
   const [projectOperation, setProjectOperation] = useState<'import' | 'broll' | 'match' | null>(null);
@@ -174,7 +179,7 @@ const App: React.FC = () => {
         if (window.electronAPI?.loadConfig) {
           const fileConfig = await window.electronAPI.loadConfig();
           if (fileConfig) {
-            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', workspacePath: fileConfig.workspacePath?.trim() ?? '', homeOrder: Array.isArray(fileConfig.homeOrder) ? fileConfig.homeOrder : DEFAULT_HOME_ORDER, smartImport: { ...fileConfig.smartImport, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true } } as AppConfig;
+            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', workspacePath: fileConfig.workspacePath?.trim() ?? '', homeOrder: Array.isArray(fileConfig.homeOrder) ? fileConfig.homeOrder : DEFAULT_HOME_ORDER, smartImport: { ...fileConfig.smartImport, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true }, smartMatch: { imageDestFolderName: fileConfig.smartMatch?.imageDestFolderName ?? fileConfig.smartMatch?.destFolderName ?? '\u56fe\u7247\u9009\u7247', videoDestFolderName: fileConfig.smartMatch?.videoDestFolderName ?? '\u89c6\u9891\u9009\u7247' } } as AppConfig;
             if (normalizedConfig.workspacePath) {
               const workspace = await window.electronAPI.getWorkspaceProjects(normalizedConfig.workspacePath);
               if (workspace.success && workspace.root) normalizedConfig = { ...normalizedConfig, workspacePath: workspace.root };
@@ -182,7 +187,7 @@ const App: React.FC = () => {
               setShowWorkspaceSetup(true);
             }
             setConfig(normalizedConfig);
-            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.smartImport.backupEnabled || !fileConfig.brollImport) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
+            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.smartImport.backupEnabled || !fileConfig.brollImport || !fileConfig.smartMatch?.imageDestFolderName || !fileConfig.smartMatch?.videoDestFolderName) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             console.log('📋 Configuration loaded from file');
           } else {
             if (window.electronAPI?.getUserPath) {
@@ -236,6 +241,27 @@ const App: React.FC = () => {
   useEffect(() => {
     if (config?.homeOrder?.length) setHomeOrder(config.homeOrder);
   }, [config?.homeOrder]);
+
+  useEffect(() => {
+    let noticeTimer: number | undefined;
+    const onKeyDown = async (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'z') return;
+      event.preventDefault();
+      const result = await window.electronAPI.undoLastRename();
+      setUndoNotice(result.success ? (result.message || '\u5df2\u64a4\u9500\u4e0a\u4e00\u6b21\u91cd\u547d\u540d') : (result.error || '\u6682\u65e0\u53ef\u64a4\u9500\u7684\u91cd\u547d\u540d'));
+      if (result.success) {
+        if (result.project) {
+          setSelectedProject(result.project);
+          setProjectDestination(result.project.path);
+        }
+        window.dispatchEvent(new Event('workspace-projects-changed'));
+      }
+      window.clearTimeout(noticeTimer);
+      noticeTimer = window.setTimeout(() => setUndoNotice(''), 2000);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => { window.removeEventListener('keydown', onKeyDown); window.clearTimeout(noticeTimer); };
+  }, []);
 
   const reorderHomeCards = (target: HomeCardId) => {
     if (!draggedHomeCard || draggedHomeCard === target) return;
@@ -343,6 +369,7 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen w-full bg-slate-50 text-slate-900 font-sans selection:bg-blue-500/30">
+      {undoNotice && <div className="fixed left-1/2 top-10 z-[400] -translate-x-1/2 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-bold text-white shadow-xl animate-in fade-in slide-in-from-top-2">{undoNotice}</div>}
 
       {updateInfo && (
         <UpdateModal
@@ -428,7 +455,7 @@ const App: React.FC = () => {
         )}
 
         {activeTab === 'rename_tool' && (
-          <RequirePlugin scriptName="rename.py" title="整理前后期图片" desc="需要该引擎进行 pHash 视觉图像指纹比对。">
+          <RequirePlugin scriptName="rename.py" title="对比图片" desc="需要该引擎进行 pHash 视觉图像指纹比对。">
             <RenameView />
           </RequirePlugin>
         )}
@@ -1027,6 +1054,14 @@ const DashboardView = ({
 
 const HomePanel = ({ title, initiallyOpen = false, tone, children }: { title: string; initiallyOpen?: boolean; tone?: 'birthday'; children: React.ReactNode }) => {
   const [open, setOpen] = useState(initiallyOpen);
+  const storageKey = `photoflow:home-panel:${title}`;
+  useEffect(() => {
+    const saved = window.localStorage.getItem(storageKey);
+    if (saved !== null) setOpen(saved === 'true');
+  }, [storageKey]);
+  useEffect(() => {
+    window.localStorage.setItem(storageKey, String(open));
+  }, [open, storageKey]);
   const isBirthday = tone === 'birthday';
   return <section className={`rounded-xl overflow-hidden ${isBirthday ? 'birthday-panel' : 'border border-slate-200 bg-white'}`}><button onClick={() => setOpen(value => !value)} className={`flex w-full items-center justify-between px-5 py-4 text-left ${isBirthday ? 'birthday-panel-header' : ''}`}><span className={`text-base font-bold ${isBirthday ? 'birthday-panel-title' : 'text-slate-800'}`}>{title}</span><span className={isBirthday ? 'birthday-panel-icon' : 'text-slate-400'}>{open ? <ChevronUp size={18}/> : <ChevronDown size={18}/>}</span></button>{open && <div className={`border-t p-5 animate-in slide-in-from-top-1 duration-200 ${isBirthday ? 'birthday-panel-body' : 'border-slate-100'}`}>{children}</div>}</section>;
 };
@@ -1334,147 +1369,65 @@ const MatchView = ({
         embedded = false,
         config,
         projectPath,
-        onUpdateConfig
+        onUpdateConfig: _onUpdateConfig
     }: {
         embedded?: boolean;
         config: AppConfig['smartMatch'];
         projectPath?: string;
         onUpdateConfig: (newMatchConfig: AppConfig['smartMatch']) => void;
     }) => {
-
-    const [sourceDir, setSourceDir] = useState(projectPath || "");
     const [keywords, setKeywords] = useState("");
     const [logs, setLogs] = useState<LogEntry[]>([]);
     const [isRunning, setIsRunning] = useState(false);
 
-    useEffect(() => { if (projectPath) setSourceDir(projectPath); }, [projectPath]);
-
     useEffect(() => {
         if (!window.electronAPI?.onPythonEvent) return;
         const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
-            switch (event.type) {
-                case 'log':
-                case 'error':
-                case 'success':
-                    setLogs(prev => [...prev, {
-                        timestamp: new Date().toLocaleTimeString(),
-                        message: event.message,
-                        type: event.type as any
-                    }]);
-                    if (event.type === 'success' || event.type === 'error') {
-                        setIsRunning(false);
-                    }
-                    break;
+            if (event.type === 'log' || event.type === 'error' || event.type === 'success') {
+                setLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), message: event.message, type: event.type as any }]);
+                if (event.type === 'success' || event.type === 'error') setIsRunning(false);
             }
         });
         return cleanup;
     }, []);
 
-    const handleDragOver = (e: React.DragEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-    };
-
-    const handleDrop = (e: React.DragEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-            // @ts-ignore
-            const path = e.dataTransfer.files[0].path;
-            if (path) {
-                setSourceDir(path);
-            }
-        }
-    };
-
     const runTask = () => {
-        if (!sourceDir.trim() || !keywords.trim()) return;
-
+        if (!projectPath || !keywords.trim() || isRunning) return;
         setIsRunning(true);
         setLogs([]);
-
-        const keywordList = keywords.trim().split(/\s+/);
-
-        if (window.electronAPI) {
-            window.electronAPI.runScript('catch.py', [
-                '--source', sourceDir,
-                '--dest_name', config.destFolderName,
-                '--keywords', ...keywordList
-            ]);
-        }
+        window.electronAPI.runScript('catch.py', [
+            '--source', projectPath,
+            '--image_dest_name', config.imageDestFolderName,
+            '--video_dest_name', config.videoDestFolderName,
+            '--keywords', ...keywords.trim().split(/\s+/)
+        ]);
     };
 
     return (
         <div className="w-full space-y-6">
             {!embedded && <h2 className="text-2xl font-bold text-slate-800">选片</h2>}
             <div className={embedded ? 'space-y-6' : 'bg-white border border-slate-200 rounded-xl p-6 space-y-6'}>
-                <div className="space-y-2">
-                  <p className="mt-2 text-gray-600">逻辑是客户发来了文件名的选片，把文件名从RAW文件夹挑选出来。</p>
+                <p className="text-gray-600">默认先在当前项目的 RAW 文件夹查找，未找到的文件名再到 MOV 文件夹查找。</p>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-sm text-blue-700">图片存放到：<strong>{config.imageDestFolderName}</strong></div>
+                    <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-sm text-blue-700">视频存放到：<strong>{config.videoDestFolderName}</strong></div>
                 </div>
                 <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-500 uppercase">生成选片文件夹的名称</label>
-                    <input
-                        type="text"
-                        value={config.destFolderName}
-                        onChange={(e) => onUpdateConfig({...config, destFolderName: e.target.value})}
-                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-slate-800 focus:border-blue-500"
-                    />
+                    <label className="text-xs font-semibold text-slate-500 uppercase">文件名</label>
+                    <textarea value={keywords} onChange={(e) => setKeywords(e.target.value)} placeholder="文件名需要用空格分开，一个空格分开一个文件名" className="w-full h-24 bg-slate-50 border border-slate-200 rounded-lg p-4 text-slate-900 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm resize-none"/>
                 </div>
-                <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-500 uppercase">包含RAW文件的原始文件夹路径</label>
-                    <div className="relative">
-                        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">
-                            <FolderInput size={18} />
-                        </div>
-                        <input
-                            type="text"
-                            value={sourceDir}
-                            onChange={(e) => setSourceDir(e.target.value)}
-                            onDrop={handleDrop}
-                            onDragOver={handleDragOver}
-                            placeholder="粘贴路径或者拖入文件夹"
-                            className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-10 pr-4 py-3 text-slate-900 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm"
-                        />
-                    </div>
-                    <p className="text-xs text-slate-600">
-                        会在原始文件夹外面创建一个<span className="text-blue-600 font-mono mx-1">"{config.destFolderName}"</span>文件夹用于提取选片
-                    </p>
-                </div>
-
-                {/* Keywords Input */}
-                <div className="space-y-2">
-                    <label className="text-xs font-semibold text-slate-500 uppercase">关键词</label>
-                    <textarea
-                        value={keywords}
-                        onChange={(e) => setKeywords(e.target.value)}
-                        placeholder="关键词需要用空格分开，一个空格分开一个文件名"
-                        className="w-full h-24 bg-slate-50 border border-slate-200 rounded-lg p-4 text-slate-900 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm resize-none"
-                    />
-                </div>
-
-                {/* Action Button */}
                 <div className="flex justify-end">
-                    <button
-                        onClick={runTask}
-                        disabled={isRunning || !sourceDir || !keywords}
-                        className={`px-8 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
-                            isRunning || !sourceDir || !keywords
-                                ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none'
-                                : 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-500/20'
-                        }`}
-                    >
-                        {isRunning ? <Loader2 className="animate-spin" size={18}/> : <ScanSearch size={18} />}
+                    <button onClick={runTask} disabled={isRunning || !projectPath || !keywords.trim()} className={`px-8 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${isRunning || !projectPath || !keywords.trim() ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none' : 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-500/20'}`}>
+                        {isRunning ? <Loader2 className="animate-spin" size={18}/> : <ScanSearch size={18}/>}
                         {isRunning ? '复制中...' : '开始选片'}
                     </button>
                 </div>
             </div>
-            <TaskStatus logs={logs} />
+            <TaskStatus logs={logs}/>
         </div>
-    )
+    );
 };
-
-const RenameView = () => {
+const RenameView = ({ embedded = false, folderOptions = [] }: { embedded?: boolean; folderOptions?: Array<{ name: string; path: string }> }) => {
     const [folderA, setFolderA] = useState("");
     const [folderB, setFolderB] = useState("");
     const [copyUnmatched, setCopyUnmatched] = useState(false);
@@ -1510,7 +1463,7 @@ const RenameView = () => {
 
     return (
         <div className="w-full space-y-6">
-            <h2 className="text-2xl font-bold text-slate-800">整理前后期图片</h2>
+            {!embedded && <h2 className="text-2xl font-bold text-slate-800">对比图片</h2>}
 
             <div className="bg-white border border-slate-200 rounded-xl p-6 relative overflow-hidden">
                 <div className="space-y-2">
@@ -1568,32 +1521,34 @@ const RenameView = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div className="bg-white border border-slate-200 rounded-xl p-6 flex flex-col gap-3">
                     <label className="text-xs font-semibold text-blue-600 uppercase flex items-center gap-2">
-                        <FolderInput size={14}/> 文件夹A (参照组/摄影师)
+                        <FolderInput size={14}/> 对比图片（对照组 A）
                     </label>
                     <input
-                        type="text" value={folderA}
+                        type="text" list="compare-folder-a" value={folderA}
                         onChange={(e) => setFolderA(e.target.value)}
                         onDrop={(e) => handleDrop(e, setFolderA)}
                         onDragOver={allowDrag}
                         placeholder="拖入摄影师发给客户的原图文件夹..."
                         className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-sm font-mono"
                     />
-                    <p className="text-xs text-slate-500">这里的文件名正确，但可能不包含客户的选择。</p>
+                    <datalist id="compare-folder-a">{folderOptions.map(folder => <option key={folder.path} value={folder.path}>{folder.name}</option>)}</datalist>
+                    <p className="text-xs text-slate-500">选择对照图片所在的项目文件夹（对照组 A）。</p>
                 </div>
 
                 <div className="bg-white border border-slate-200 rounded-xl p-6 flex flex-col gap-3">
                     <label className="text-xs font-semibold text-green-400 uppercase flex items-center gap-2">
-                        <Edit size={14}/> 文件夹B (待重命名/客户返图)
+                        <Edit size={14}/> 最新图片（对照组 B）
                     </label>
                     <input
-                        type="text" value={folderB}
+                        type="text" list="compare-folder-b" value={folderB}
                         onChange={(e) => setFolderB(e.target.value)}
                         onDrop={(e) => handleDrop(e, setFolderB)}
                         onDragOver={allowDrag}
                         placeholder="拖入客户发回来的乱序文件夹..."
                         className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-sm font-mono"
                     />
-                    <p className="text-xs text-slate-500">这里的图片是客户想要的，但文件名是乱的。</p>
+                    <datalist id="compare-folder-b">{folderOptions.map(folder => <option key={folder.path} value={folder.path}>{folder.name}</option>)}</datalist>
+                    <p className="text-xs text-slate-500">选择最新图片所在的项目文件夹（对照组 B）。</p>
                 </div>
             </div>
 
@@ -1616,7 +1571,7 @@ const RenameView = () => {
                         }`}
                     >
                         {isRunning ? <Loader2 className="animate-spin" size={18}/> : <FileDiff size={18} />}
-                        {isRunning ? '整理中...' : '开始整理'}
+                        {isRunning ? '对比中...' : '开始对比'}
                     </button>
                 </div>
             </div>
@@ -1843,10 +1798,13 @@ const SettingsModal = ({ config, onSave, onClose, requireWorkspace = false }: { 
   useEffect(() => { window.electronAPI?.getDrives?.().then(setDrives); }, []);
   const updateImport = (changes: Partial<AppConfig['smartImport']>) => setDraft(current => ({ ...current, smartImport: { ...current.smartImport, ...changes } }));
   const updateBroll = (changes: Partial<AppConfig['brollImport']>) => setDraft(current => ({ ...current, brollImport: { ...current.brollImport, ...changes } }));
+  const updateMatch = (changes: Partial<AppConfig['smartMatch']>) => setDraft(current => ({ ...current, smartMatch: { ...current.smartMatch, ...changes } }));
   const save = async () => { const workspacePath = draft.workspacePath.trim(); if (!workspacePath) return; await onSave({ ...draft, workspacePath }); if (!requireWorkspace) onClose(); };
-  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"><div className="absolute inset-0" onClick={requireWorkspace ? undefined : onClose}/><div className="relative z-10 flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><div className="flex items-center justify-between border-b border-slate-200 bg-slate-100 p-5"><h3 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Settings size={20} className="text-blue-600"/>{requireWorkspace ? '设置工作目录' : '设置'}</h3>{requireWorkspace && <p className="mt-1 text-sm text-slate-500">首次使用前，请先选择一个用于存放项目的工作目录。</p>}{!requireWorkspace && <button onClick={onClose} className="rounded-full p-2 text-slate-500 hover:bg-slate-200"><X size={20}/></button>}</div><div className="min-h-0 flex-1 space-y-7 overflow-y-auto p-6"><section><h4 className="text-sm font-bold text-slate-800">界面配色</h4><p className="mt-1 text-sm text-slate-500">默认适应系统，也可固定为浅色或深色。</p><div className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">{([['system', '适应系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([theme, label]) => <button key={theme} onClick={() => setDraft(current => ({ ...current, theme }))} className={`rounded-md px-4 py-2 text-sm font-bold transition ${draft.theme === theme ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}</div></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">工作目录</h4><p className="mt-1 text-sm text-slate-500">选择磁盘根目录时，会使用根目录下的“照片流”文件夹。</p><input value={draft.workspacePath} onChange={event => setDraft(current => ({ ...current, workspacePath: event.target.value }))} placeholder="例如：D:/照片流" className="mt-4 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 font-mono text-sm text-slate-800 focus:border-blue-500 focus:outline-none"/></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">从 SD 卡导入</h4><p className="mt-1 text-sm text-slate-500">导入位置由当前项目或工作目录决定。</p><p className="mt-3 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs leading-5 text-blue-700">支持佳能（.cr2、.cr3）、索尼（.arw）、尼康（.nef）、奥林巴斯（.orf）、徕卡（.rwl、.dng）、富士（.raf）、哈苏（.3fr、.fff）、大疆（.dng）的 RAW 格式，以及常见图片和视频导入。</p><label className="settings-check"><input type="checkbox" checked={draft.smartImport.autoStart} onChange={event => updateImport({ autoStart: event.target.checked })}/>应用启动时自动读取 SD 卡</label><label className="form-label">SD 卡盘符</label><select value={draft.smartImport.sdPath} onChange={event => updateImport({ sdPath: event.target.value })} className="form-input">{draft.smartImport.sdPath && !drives.includes(draft.smartImport.sdPath) && <option value={draft.smartImport.sdPath}>{draft.smartImport.sdPath}（当前未连接）</option>}<option value="">请选择设备盘符</option>{drives.map(drive => <option key={drive} value={drive}>{drive}</option>)}</select><label className="settings-check"><input type="checkbox" checked={draft.smartImport.generateVideoPreview} onChange={event => updateImport({ generateVideoPreview: event.target.checked })}/>生成视频预览（储存至 mov_压缩）</label></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">导入花絮</h4><p className="mt-1 text-sm text-slate-500">文件会复制到当前项目的“花絮”文件夹。</p><label className="settings-check"><input type="checkbox" checked={draft.brollImport.splitLargeFiles} onChange={event => updateBroll({ splitLargeFiles: event.target.checked })}/>超过 4GB 的单个视频自动分割为约 4GB 的文件</label><label className="settings-check"><input type="checkbox" checked={draft.brollImport.clearSource} onChange={event => updateBroll({ clearSource: event.target.checked })}/>导入后清空原始文件</label></section></div><div className="flex justify-end gap-3 border-t border-slate-100 bg-white p-5">{!requireWorkspace && <button onClick={onClose} className="dialog-secondary">取消</button>}<button onClick={save} disabled={!draft.workspacePath.trim()} className="dialog-primary">{requireWorkspace ? '确认工作目录' : '保存设置'}</button></div></div></div>;
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"><div className="absolute inset-0" onClick={requireWorkspace ? undefined : onClose}/><div className="relative z-10 flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><div className="flex items-center justify-between border-b border-slate-200 bg-slate-100 p-5"><h3 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Settings size={20} className="text-blue-600"/>{requireWorkspace ? '设置工作目录' : '设置'}</h3>{requireWorkspace && <p className="mt-1 text-sm text-slate-500">首次使用前，请先选择一个用于存放项目的工作目录。</p>}{!requireWorkspace && <button onClick={onClose} className="rounded-full p-2 text-slate-500 hover:bg-slate-200"><X size={20}/></button>}</div><div className="min-h-0 flex-1 space-y-7 overflow-y-auto p-6"><section><h4 className="text-sm font-bold text-slate-800">界面配色</h4><p className="mt-1 text-sm text-slate-500">默认适应系统，也可固定为浅色或深色。</p><div className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">{([['system', '适应系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([theme, label]) => <button key={theme} onClick={() => setDraft(current => ({ ...current, theme }))} className={`rounded-md px-4 py-2 text-sm font-bold transition ${draft.theme === theme ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}</div></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">工作目录</h4><p className="mt-1 text-sm text-slate-500">选择磁盘根目录时，会使用根目录下的“照片流”文件夹。</p><input value={draft.workspacePath} onChange={event => setDraft(current => ({ ...current, workspacePath: event.target.value }))} placeholder="例如：D:/照片流" className="mt-4 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 font-mono text-sm text-slate-800 focus:border-blue-500 focus:outline-none"/></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">从 SD 卡导入</h4><p className="mt-1 text-sm text-slate-500">导入位置由当前项目或工作目录决定。</p><p className="mt-3 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs leading-5 text-blue-700">支持佳能（.cr2、.cr3）、索尼（.arw）、尼康（.nef）、奥林巴斯（.orf）、徕卡（.rwl、.dng）、富士（.raf）、哈苏（.3fr、.fff）、大疆（.dng）的 RAW 格式，以及常见图片和视频导入。</p><label className="settings-check"><input type="checkbox" checked={draft.smartImport.autoStart} onChange={event => updateImport({ autoStart: event.target.checked })}/>应用启动时自动读取 SD 卡</label><label className="form-label">SD 卡盘符</label><select value={draft.smartImport.sdPath} onChange={event => updateImport({ sdPath: event.target.value })} className="form-input">{draft.smartImport.sdPath && !drives.includes(draft.smartImport.sdPath) && <option value={draft.smartImport.sdPath}>{draft.smartImport.sdPath}（当前未连接）</option>}<option value="">请选择设备盘符</option>{drives.map(drive => <option key={drive} value={drive}>{drive}</option>)}</select><label className="settings-check"><input type="checkbox" checked={draft.smartImport.generateVideoPreview} onChange={event => updateImport({ generateVideoPreview: event.target.checked })}/>生成视频预览（储存至 mov_压缩）</label></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">导入花絮</h4><p className="mt-1 text-sm text-slate-500">文件会复制到当前项目的“花絮”文件夹。</p><label className="settings-check"><input type="checkbox" checked={draft.brollImport.splitLargeFiles} onChange={event => updateBroll({ splitLargeFiles: event.target.checked })}/>超过 4GB 的单个视频自动分割为约 4GB 的文件</label><label className="settings-check"><input type="checkbox" checked={draft.brollImport.clearSource} onChange={event => updateBroll({ clearSource: event.target.checked })}/>导入后清空原始文件</label></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">{"\u9009\u7247"}</h4><p className="mt-1 text-sm text-slate-500">{"\u6311\u9009\u51fa\u7684\u56fe\u7247\u548c\u89c6\u9891\u4f1a\u5206\u522b\u5b58\u653e\u5230\u5f53\u524d\u9879\u76ee\u4e2d\u7684\u4ee5\u4e0b\u6587\u4ef6\u5939\u3002"}</p><label className="form-label">{"\u56fe\u7247\u9009\u7247\u6587\u4ef6\u5939\u540d\u79f0"}</label><input value={draft.smartMatch.imageDestFolderName} onChange={event => updateMatch({ imageDestFolderName: event.target.value })} placeholder={"\u56fe\u7247\u9009\u7247"} className="form-input"/><label className="form-label">{"\u89c6\u9891\u9009\u7247\u6587\u4ef6\u5939\u540d\u79f0"}</label><input value={draft.smartMatch.videoDestFolderName} onChange={event => updateMatch({ videoDestFolderName: event.target.value })} placeholder={"\u89c6\u9891\u9009\u7247"} className="form-input"/></section></div><div className="flex justify-end gap-3 border-t border-slate-100 bg-white p-5">{!requireWorkspace && <button onClick={onClose} className="dialog-secondary">取消</button>}<button onClick={save} disabled={!draft.workspacePath.trim()} className="dialog-primary">{requireWorkspace ? '确认工作目录' : '保存设置'}</button></div></div></div>;
 };
-type ProjectPanel = 'import' | 'broll' | 'match' | 'trash' | null;
+type ProjectPanel = 'import' | 'broll' | 'match' | 'compare' | 'create' | 'trash' | null;
+const PROJECT_STATUSES: Array<WorkspaceProject['status']> = ['未策划', '已策划', '进行中', '已归档'];
+
 const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, brollConfig, matchConfig, onMatchConfigChange, onProjectMoved, onDeleted }: {
   project: WorkspaceProject;
   workspacePath: string;
@@ -1861,6 +1819,11 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
   const [folders, setFolders] = useState<Array<{ name: string; path: string; updatedAt: number }>>([]);
   const [panel, setPanel] = useState<ProjectPanel>(initialPanel);
   const [message, setMessage] = useState('');
+  const [showStatusMenu, setShowStatusMenu] = useState(false);
+  const [folderMenu, setFolderMenu] = useState<{ folder: { name: string; path: string; updatedAt: number }; x: number; y: number } | null>(null);
+  const [renameFolder, setRenameFolder] = useState<{ name: string; path: string } | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [progressName, setProgressName] = useState('');
 
   const refresh = async () => {
     const result = await window.electronAPI.getProjectContents(workspacePath, project.status, project.name);
@@ -1873,30 +1836,58 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
     setMessage('');
     refresh();
   }, [project.path, project.status, initialPanel]);
-
+  useEffect(() => window.electronAPI.onWorkspaceFilesChanged(() => refresh()), [workspacePath, project.path]);
   useEffect(() => {
-    const unsubscribe = window.electronAPI.onWorkspaceFilesChanged(() => refresh());
-    return unsubscribe;
-  }, [workspacePath, project.path]);
+    const closeMenus = () => { setFolderMenu(null); setShowStatusMenu(false); };
+    window.addEventListener('click', closeMenus);
+    return () => window.removeEventListener('click', closeMenus);
+  }, []);
+
   const togglePanel = (next: Exclude<ProjectPanel, null>) => setPanel(current => current === next ? null : next);
   const openFolder = async (folderName?: string) => {
     const result = await window.electronAPI.openWorkspaceProject(workspacePath, project.status, project.name, folderName);
     if (!result.success) setMessage(result.error || '无法打开文件夹');
+  };
+  const moveStatus = async (status: WorkspaceProject['status']) => {
+    setShowStatusMenu(false);
+    if (status === project.status) return;
+    const result = await window.electronAPI.moveWorkspaceProject(workspacePath, project.status, project.name, status);
+    if (!result.success || !result.project) { setMessage(result.error || '更改状态失败'); return; }
+    onProjectMoved(result.project);
   };
   const importBroll = async () => {
     setMessage('正在选择花絮文件…');
     const result = await window.electronAPI.importBroll(workspacePath, project.status, project.name, brollConfig);
     if (!result.success) { setMessage(result.error || '导入花絮失败'); return; }
     if (result.cancelled) { setMessage('已取消选择花絮文件。'); return; }
-    setMessage(`已导入 ${result.count || 0} 个花絮文件${result.splitCount ? `，分割 ${result.splitCount} 个大视频` : ""}${result.clearedCount ? `，已清理 ${result.clearedCount} 个原始文件` : ""}。`);
+    setMessage(`已导入 ${result.count || 0} 个花絮文件。`);
     refresh();
   };
   const markInProgress = async () => {
     if (project.status === '进行中') return;
     const result = await window.electronAPI.moveWorkspaceProject(workspacePath, project.status, project.name, '进行中');
-    if (!result.success || !result.project) { setMessage(result.error || '导入已完成，但项目状态更新失败'); return; }
+    if (!result.success || !result.project) { setMessage(result.error || '项目状态更新失败'); return; }
     setMessage('导入完成，项目已移入“进行中”。');
     onProjectMoved(result.project);
+  };
+  const createProgress = async () => {
+    const name = progressName.trim();
+    if (!name) return;
+    const result = await window.electronAPI.createProjectFolder(workspacePath, project.status, project.name, name);
+    if (!result.success) { setMessage(result.error || '创建进度文件夹失败'); return; }
+    setMessage(`已创建进度文件夹“${result.folder?.name || name}”。`);
+    setProgressName('');
+    setPanel(null);
+    refresh();
+  };
+  const renameProjectFolder = async () => {
+    if (!renameFolder || !renameValue.trim()) return;
+    const result = await window.electronAPI.renameProjectFolder(workspacePath, project.status, project.name, renameFolder.name, renameValue.trim());
+    if (!result.success) { setMessage(result.error || '重命名文件夹失败'); return; }
+    setMessage(`已将“${renameFolder.name}”重命名为“${result.folder?.name || renameValue.trim()}”。按 Ctrl+Z 可撤销。`);
+    setRenameFolder(null);
+    setRenameValue('');
+    refresh();
   };
   const moveToTrash = async () => {
     const result = await window.electronAPI.trashWorkspaceProject(workspacePath, project.status, project.name);
@@ -1907,28 +1898,47 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
   return (
     <div className="mx-auto max-w-6xl space-y-6 animate-in fade-in duration-300">
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="flex items-center gap-3"><h2 className="text-2xl font-bold text-slate-800">{project.name}</h2><span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-600 border border-blue-100">{project.status}</span></div>
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 className="text-2xl font-bold text-slate-800">{project.name}</h2>
+          <div className="relative" onClick={event => event.stopPropagation()}>
+            <button onClick={() => setShowStatusMenu(value => !value)} className="flex items-center gap-1 rounded-full border border-blue-100 bg-blue-50 px-2.5 py-1 text-xs font-bold text-blue-600 hover:bg-blue-100">{project.status} <ChevronDown size={14}/></button>
+            {showStatusMenu && <div className="absolute left-0 top-full z-30 mt-1 w-36 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">{PROJECT_STATUSES.map(status => <button key={status} onClick={() => moveStatus(status)} className={`project-menu-item ${status === project.status ? 'bg-blue-50 font-bold text-blue-600' : ''}`}>{status}{status === project.status ? '（当前）' : ''}</button>)}</div>}
+          </div>
+        </div>
         <button onClick={() => openFolder()} className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50"><ExternalLink size={16}/>打开项目文件夹</button>
       </div>
-      <div className="flex flex-wrap gap-3 rounded-xl border border-slate-200 bg-white p-4">
-        <button onClick={() => togglePanel('import')} className="project-action-button"><Download size={16}/>从 SD 卡导入</button>
-        <button onClick={() => togglePanel('broll')} className="project-action-button"><Video size={16}/>导入花絮</button>
-        <button onClick={() => togglePanel('match')} className="project-action-button"><ScanSearch size={16}/>选片</button>
-        <button onClick={() => togglePanel('trash')} className="project-action-button project-action-danger"><Trash2 size={16}/>移入回收站</button>
+
+      <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+        <div className="flex flex-wrap gap-3">
+          <button onClick={() => togglePanel('import')} className="project-action-button"><Download size={16}/>从 SD 卡导入</button>
+          <button onClick={() => togglePanel('broll')} className="project-action-button"><Video size={16}/>导入花絮</button>
+          <button onClick={() => togglePanel('match')} className="project-action-button"><ScanSearch size={16}/>选片</button>
+          <button onClick={() => togglePanel('trash')} className="project-action-button project-action-danger"><Trash2 size={16}/>移入回收站</button>
+        </div>
+        <div className="flex flex-wrap gap-3 border-t border-slate-100 pt-3">
+          <button onClick={() => togglePanel('create')} className="project-action-button"><FolderPlus size={16}/>创建进度</button>
+          <button onClick={() => togglePanel('compare')} className="project-action-button"><FileDiff size={16}/>对比图片</button>
+        </div>
       </div>
+
       {message && <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">{message}</div>}
       {panel === 'import' && <CollapsiblePanel title="从 SD 卡导入" onClose={() => setPanel(null)}><p className="mb-4 text-sm text-slate-500">导入的文件会直接整理到当前项目“{project.name}”中。</p><ImportCard config={importConfig} destinationPath={project.path} onImportComplete={markInProgress}/></CollapsiblePanel>}
       {panel === 'broll' && <CollapsiblePanel title="导入花絮" onClose={() => setPanel(null)}><p className="text-sm text-slate-500">选择要保留的花絮媒体，软件会复制到当前项目的“花絮”文件夹。</p><button onClick={importBroll} className="mt-4 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-500">选择花絮文件</button></CollapsiblePanel>}
       {panel === 'match' && <CollapsiblePanel title="选片" onClose={() => setPanel(null)}><MatchView embedded config={matchConfig} projectPath={project.path} onUpdateConfig={onMatchConfigChange}/></CollapsiblePanel>}
+      {panel === 'create' && <div className="fixed inset-0 z-[320] flex items-center justify-center bg-slate-950/40 p-4"><div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="mb-4 flex items-center justify-between"><h3 className="font-bold text-slate-800">创建进度</h3><button onClick={() => { setPanel(null); setProgressName(''); }}><X size={18}/></button></div><p className="mb-3 text-sm text-slate-500">输入进度名称后，会在当前项目中新建同名文件夹。</p><input autoFocus value={progressName} onChange={event => setProgressName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') createProgress(); }} placeholder="例如：初修、精修、交付" className="form-input"/><div className="mt-4 flex justify-end gap-2"><button onClick={() => { setPanel(null); setProgressName(''); }} className="dialog-secondary">取消</button><button onClick={createProgress} disabled={!progressName.trim()} className="dialog-primary">创建文件夹</button></div></div></div>}
+      {panel === 'compare' && <CollapsiblePanel title="对比图片" onClose={() => setPanel(null)}><RenameView embedded folderOptions={folders}/></CollapsiblePanel>}
       {panel === 'trash' && <CollapsiblePanel title="移入回收站" onClose={() => setPanel(null)}><p className="text-sm text-slate-500">项目“{project.name}”及其全部内容将移入系统回收站。</p><button onClick={moveToTrash} className="mt-4 rounded-lg bg-red-600 px-4 py-2 text-sm font-bold text-white hover:bg-red-500">确认移入回收站</button></CollapsiblePanel>}
+
       <section className="rounded-xl border border-slate-200 bg-white p-6">
         <div className="mb-4 flex items-center justify-between"><h3 className="text-lg font-bold text-slate-800">项目文件夹</h3><span className="text-sm text-slate-500">{folders.length} 个</span></div>
-        {folders.length ? <div className="grid grid-cols-2 gap-5 sm:grid-cols-3 lg:grid-cols-5">{folders.map(folder => <button key={folder.path} onClick={() => openFolder(folder.name)} title={`打开 ${folder.name}`} className="group flex flex-col items-center gap-2 rounded-lg p-3 text-center transition hover:bg-blue-50"><Folder size={64} strokeWidth={1.5} fill="currentColor" className="text-blue-500 drop-shadow-sm transition-transform group-hover:scale-105"/><span className="max-w-full truncate text-sm font-medium text-slate-700">{folder.name}</span></button>)}</div> : <p className="py-8 text-center text-sm text-slate-400">当前项目还没有子文件夹。</p>}
+        {folders.length ? <div className="grid grid-cols-2 gap-5 sm:grid-cols-3 lg:grid-cols-5">{folders.map(folder => <button key={folder.path} onClick={() => openFolder(folder.name)} onContextMenu={event => { event.preventDefault(); setFolderMenu({ folder, x: event.clientX, y: event.clientY }); }} title={`打开 ${folder.name}`} className="group flex flex-col items-center gap-2 rounded-lg p-3 text-center transition hover:bg-blue-50"><Folder size={64} strokeWidth={1.5} fill="currentColor" className="text-blue-500 drop-shadow-sm transition-transform group-hover:scale-105"/><span className="max-w-full truncate text-sm font-medium text-slate-700">{folder.name}</span></button>)}</div> : <p className="py-8 text-center text-sm text-slate-400">当前项目还没有子文件夹。</p>}
       </section>
+
+      {folderMenu && <div className="fixed z-[300] w-36 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" style={{ left: Math.min(folderMenu.x, window.innerWidth - 160), top: Math.min(folderMenu.y, window.innerHeight - 100) }} onClick={event => event.stopPropagation()}><button className="project-menu-item" onClick={() => { setRenameFolder(folderMenu.folder); setRenameValue(folderMenu.folder.name); setFolderMenu(null); }}>重命名</button></div>}
+      {renameFolder && <div className="fixed inset-0 z-[320] flex items-center justify-center bg-slate-950/40 p-4"><div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="mb-4 flex items-center justify-between"><h3 className="font-bold text-slate-800">重命名文件夹</h3><button onClick={() => setRenameFolder(null)}><X size={18}/></button></div><input autoFocus value={renameValue} onChange={event => setRenameValue(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') renameProjectFolder(); }} className="form-input"/><div className="mt-4 flex justify-end gap-2"><button onClick={() => setRenameFolder(null)} className="dialog-secondary">取消</button><button onClick={renameProjectFolder} disabled={!renameValue.trim() || renameValue.trim() === renameFolder.name} className="dialog-primary">确认重命名</button></div></div></div>}
     </div>
   );
 };
-
 const CollapsiblePanel = ({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) => (
   <section className="rounded-xl border border-slate-200 bg-white p-6 animate-in slide-in-from-top-2 duration-200">
     <div className="mb-5 flex items-center justify-between border-b border-slate-100 pb-4"><h3 className="text-lg font-bold text-slate-800">{title}</h3><button onClick={onClose} className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-slate-50">收起 <ChevronUp size={16}/></button></div>
@@ -1950,7 +1960,7 @@ const AboutModal = ({ onClose }: { onClose: () => void }) => {
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-6 text-sm leading-7 text-slate-600">
         <div><p className="text-lg font-bold text-slate-800">by秋也寻</p><div className="mt-1 flex flex-wrap items-center gap-3"><p className="text-blue-600">版本 26.7.15</p><button onClick={checkForUpdates} disabled={updateStatus === 'checking'} className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-0.5 text-xs font-bold leading-5 text-blue-700 transition hover:bg-blue-100 disabled:cursor-wait disabled:opacity-60">{updateStatus === 'checking' ? '正在检查…' : '检查更新'}</button>{updateStatus === 'latest' && <span className="text-xs text-emerald-600">已是最新版本</span>}{updateStatus === 'error' && <span className="text-xs text-red-500">检查失败，请稍后重试</span>}</div></div>
         <section><h4 className="text-base font-bold text-slate-800">软件简介</h4><p className="mt-1">照片流是一款为摄影师设计的项目管理与素材整理工具，帮助你跟进拍摄进度，并自动从 SD 卡导入和整理照片、视频。</p></section>
-        <section><h4 className="text-base font-bold text-slate-800">功能说明</h4><p className="mt-1">调研整理功能可配合脚本整理下载的图片与视频、截取视频帧，并汇总调研资料信息。<br/>团片管理功能可将高像素大图裁切为便于修图的小图，后续再拼接回完整大图；也支持对比、整理前后期图片并交接给下一位修图人员。</p></section>
+        <section><h4 className="text-base font-bold text-slate-800">功能说明</h4><p className="mt-1">调研整理功能可配合脚本整理下载的图片与视频、截取视频帧，并汇总调研资料信息。<br/>团片管理功能可将高像素大图裁切为便于修图的小图，后续再拼接回完整大图；也支持对比、对比图片并交接给下一位修图人员。</p></section>
         <section><h4 className="text-base font-bold text-slate-800">制作说明</h4><p className="mt-1">早期版本的大部分代码由 Google Gemini 与 Copilot 生成；当前版本主要使用 Codex 制作。</p></section>
         <section className="border-t border-slate-200 pt-5"><h4 className="text-base font-bold text-slate-800">使用提示</h4><p className="mt-1">软件尚未经过充分测试。使用前请备份重要数据；作者不对使用本软件造成的损失负责。</p></section>
       </div>

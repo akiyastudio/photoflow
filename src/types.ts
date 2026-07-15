@@ -32,7 +32,10 @@ export interface AppConfig {
     clearSource: boolean;
   };
   smartMatch: {
-    destFolderName: string;
+    imageDestFolderName: string;
+    videoDestFolderName: string;
+    /** legacy config field */
+    destFolderName?: string;
   };
   research: {
     defaultDir: string;
@@ -59,6 +62,9 @@ export interface IElectronAPI {
   onWorkspaceFilesChanged: (callback: (change: { root: string; fileName: string }) => void) => () => void;
   createWorkspaceProject: (workspacePath: string, date: string, name: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   renameWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, nextName: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
+  renameProjectFolder: (workspacePath: string, status: ProjectStatus, name: string, folderName: string, nextName: string) => Promise<{ success: boolean; folder?: { name: string; path: string; updatedAt: number }; error?: string }> ;
+  createProjectFolder: (workspacePath: string, status: ProjectStatus, name: string, folderName: string) => Promise<{ success: boolean; folder?: { name: string; path: string; updatedAt: number }; error?: string }> ;
+  undoLastRename: () => Promise<{ success: boolean; message?: string; project?: WorkspaceProject; error?: string }> ;
   moveWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, nextStatus: ProjectStatus) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   archiveImportedProjects: (workspacePath: string) => Promise<{ success: boolean; projects: WorkspaceProject[]; error?: string }>;
   trashWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; error?: string }>;
