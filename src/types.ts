@@ -71,4 +71,4 @@ declare global {
   }
 }
 
-export const TYPES_VERSION = "26.5.18";
+export const TYPES_VERSION = "26.7.15";

@@ -1,7 +1,7 @@
 {
   "name": "photoflow",
   "private": true,
-  "version": "26.5.18",
+  "version": "26.7.15",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
