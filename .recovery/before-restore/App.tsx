@@ -277,7 +277,7 @@ const App: React.FC = () => {
           <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-800 to-indigo-800 bg-clip-text text-transparent cursor-default">
             照片流
           </h1>
-          <p className="text-xs text-slate-500 mt-1 font-mono">v26.5.18 by秋也寻</p>
+          <p className="text-xs text-slate-500 mt-1 font-mono">v26.7.15 by秋也寻</p>
         </div>
 
         <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
@@ -1826,7 +1826,7 @@ const AboutModal = ({ onClose }: { onClose: () => void }) => {
           <p className="text-slate-800 text-base leading-relaxed">
             @秋也寻
             <br/>
-            版本 26.5.18
+            版本 26.7.15
             <br/>
             大部分代码为Google Gemini和Copilot生成。
             <br />

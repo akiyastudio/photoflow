@@ -342,7 +342,7 @@ const App: React.FC = () => {
           <button onClick={() => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); }} className="text-left text-2xl font-bold bg-gradient-to-r from-blue-800 to-indigo-800 bg-clip-text text-transparent cursor-pointer">
             照片流
           </button>
-          <p className="text-xs text-slate-500 mt-1 font-mono">v26.5.18 by秋也寻</p>
+          <p className="text-xs text-slate-500 mt-1 font-mono">v26.7.15 by秋也寻</p>
         </div>
 
         <ProjectNavigator
@@ -2024,7 +2024,7 @@ const AboutModal = ({ onClose }: { onClose: () => void }) => {
           <p className="text-slate-800 text-base leading-relaxed">
             @秋也寻
             <br/>
-            版本 26.5.18
+            版本 26.7.15
             <br/>
             大部分代码为Google Gemini和Copilot生成。
             <br />

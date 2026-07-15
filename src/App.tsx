@@ -350,7 +350,7 @@ const App: React.FC = () => {
           <button onClick={() => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); }} className="text-left text-2xl font-bold bg-gradient-to-r from-blue-800 to-indigo-800 bg-clip-text text-transparent cursor-pointer">
             照片流
           </button>
-          <p className="text-xs text-slate-500 mt-1 font-mono">v26.5.18 by秋也寻</p>
+          <p className="text-xs text-slate-500 mt-1 font-mono">v26.7.15</p>
         </div>
 
         <ProjectNavigator
@@ -1931,11 +1931,17 @@ const AboutModal = ({ onClose }: { onClose: () => void }) => {
           <p className="text-slate-800 text-base leading-relaxed">
             @秋也寻
             <br/>
-            版本 26.5.18
-            <br/>
-            大部分代码为Google Gemini和Copilot生成。
-            <br />
-            软件没有经过充分测试。使用前请备份重要数据。作者不对因使用本软件造成的任何损失负责。
+            版本 26.7.15
+          </p>
+          <p className="text-slate-800 text-base leading-relaxed">
+            这一个软件专门为了拍摄者而设计，可以帮助你管理你的拍摄项目，跟进进度，自动化从SD卡导入并整理图片。此外还有调研整理功能，团片管理功能等。<br/>
+调研整理功能需要配合油猴脚本使用，会自动整理下来下来的图片和视频，并且自动截取视频帧，整理下载下来的调研帖子的信息。<br/>
+团片管理功能可以将一张高像素大图裁剪成小图，供模特修图使用，防止影响原图像素和画质，然后再拼接图片为完整大图。还有多人修图后的追踪功能，可以对比和整理前后图片，并且完整传递给下一个人。
+          </p>
+          <p className="text-slate-800 text-base leading-relaxed">
+            第一个版本的大部分代码为Google Gemini和Copilot生成。<br/>
+现在的版本大部分使用Codex制作。<br/>
+软件没有经过充分测试。使用前请备份重要数据。作者不对因使用本软件造成的任何损失负责。<br/>
           </p>
         </div>
       </div>
