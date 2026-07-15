@@ -25,4 +25,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openExternal: (url) => ipcRenderer.send('open-external', url),
   checkScript: (scriptName) => ipcRenderer.invoke('check-script', scriptName),
   getDrives: () => ipcRenderer.invoke('getDrives'),
+  getWorkspaceProjects: (workspacePath) => ipcRenderer.invoke('workspace-projects', workspacePath),
+  createWorkspaceProject: (workspacePath, date, name) => ipcRenderer.invoke('workspace-create-project', workspacePath, date, name),
+  renameWorkspaceProject: (workspacePath, status, name, nextName) => ipcRenderer.invoke('workspace-rename-project', workspacePath, status, name, nextName),
+  moveWorkspaceProject: (workspacePath, status, name, nextStatus) => ipcRenderer.invoke('workspace-move-project', workspacePath, status, name, nextStatus),
+  trashWorkspaceProject: (workspacePath, status, name) => ipcRenderer.invoke('workspace-trash-project', workspacePath, status, name),
+  getProjectContents: (workspacePath, status, name) => ipcRenderer.invoke('workspace-project-contents', workspacePath, status, name),
+  openWorkspaceProject: (workspacePath, status, name, folderName) => ipcRenderer.invoke('workspace-open-project', workspacePath, status, name, folderName),
+  importBroll: (workspacePath, status, name, options) => ipcRenderer.invoke('workspace-import-broll', workspacePath, status, name, options),
+  setTheme: (theme) => ipcRenderer.invoke('set-theme', theme),
 });

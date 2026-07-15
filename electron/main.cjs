@@ -1,9 +1,72 @@
-const { app, BrowserWindow, ipcMain, Menu, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, shell, dialog } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
 
 let mainWindow;
+const nativeConsoleLog = console.log.bind(console);
+const nativeConsoleError = console.error.bind(console);
+
+// Persist operational logs outside of the installation directory so they are
+// available after an app restart or a packaged-app update.
+const getLogDir = () => {
+  const logDir = path.join(app.getPath('userData'), 'photoflow', 'logs');
+  if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+  return logDir;
+};
+
+const LOG_RETENTION_DAYS = 7;
+const cleanupExpiredLogs = () => {
+  const expiresBefore = Date.now() - LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  let deletedCount = 0;
+
+  try {
+    for (const fileName of fs.readdirSync(getLogDir())) {
+      // Only remove files created by this logger; never touch user files.
+      if (!/^photoflow-\d{4}-\d{2}-\d{2}\.log$/.test(fileName)) continue;
+
+      const filePath = path.join(getLogDir(), fileName);
+      if (fs.statSync(filePath).mtimeMs < expiresBefore) {
+        fs.unlinkSync(filePath);
+        deletedCount += 1;
+      }
+    }
+  } catch (error) {
+    nativeConsoleError('Failed to clean up expired application logs:', error);
+  }
+
+  return deletedCount;
+};
+const formatLogValue = (value) => {
+  if (value instanceof Error) return value.stack || value.message;
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+};
+
+const writeLog = (level, message, details) => {
+  const timestamp = new Date().toISOString();
+  const suffix = details === undefined ? '' : ` ${formatLogValue(details)}`;
+  const line = `[${timestamp}] [${level.toUpperCase()}] ${message}${suffix}\n`;
+  const consoleMethod = level === 'error' ? nativeConsoleError : nativeConsoleLog;
+  consoleMethod(line.trim());
+
+  try {
+    const date = timestamp.slice(0, 10);
+    fs.appendFileSync(path.join(getLogDir(), `photoflow-${date}.log`), line, 'utf8');
+  } catch (error) {
+    nativeConsoleError('Failed to write application log:', error);
+  }
+};
+
+// Mirror existing main-process console output to the persistent log without
+// requiring every call site to be rewritten.
+console.log = (...values) => writeLog('info', values.map(formatLogValue).join(' '));
+console.warn = (...values) => writeLog('warn', values.map(formatLogValue).join(' '));
+console.error = (...values) => writeLog('error', values.map(formatLogValue).join(' '));
 
 function createWindow() {
   // 2. 彻底移除顶部菜单栏 (File, Edit, View...)
@@ -12,7 +75,7 @@ function createWindow() {
     width: 1024,
     height: 768,
     backgroundColor: '#f8fafc',
-    titleBarStyle: 'hidden', 
+    titleBarStyle: 'hidden',
     titleBarOverlay: {
       color: '#f8fafc',
       symbolColor: '#334155',
@@ -121,6 +184,15 @@ const compareVersions = (a, b) => {
 // 添加打开外部链接的 IPC 处理
 ipcMain.on('open-external', (event, url) => {
   shell.openExternal(url);
+});
+ipcMain.handle('set-theme', async (_event, theme) => {
+  if (!mainWindow) return;
+  const isDark = theme === 'dark';
+  mainWindow.setTitleBarOverlay({
+    color: isDark ? '#0f172a' : '#f8fafc',
+    symbolColor: isDark ? '#e2e8f0' : '#334155',
+    height: 32,
+  });
 });
 
 // 运行 Python 脚本
@@ -337,6 +409,106 @@ ipcMain.handle('check-script', async (event, scriptName) => {
 });
 
 // 获取系统盘符列表
+
+const WORKSPACE_STATUSES = ['未策划', '已策划', '进行中', '已归档'];
+
+const ensureWorkspace = (workspacePath) => {
+  const requestedPath = path.resolve(workspacePath);
+  const isDriveRoot = requestedPath === path.parse(requestedPath).root;
+  // Never create or alter a drive root. A root selection uses its dedicated app folder.
+  const root = isDriveRoot ? path.join(requestedPath, '照片流') : requestedPath;
+  fs.mkdirSync(root, { recursive: true });
+  WORKSPACE_STATUSES.forEach(status => fs.mkdirSync(path.join(root, status), { recursive: true }));
+  return root;
+};
+
+const getProjectPath = (workspacePath, status, projectName) => {
+  if (!WORKSPACE_STATUSES.includes(status)) throw new Error('无效的项目状态');
+  const root = ensureWorkspace(workspacePath);
+  const statusPath = path.resolve(root, status);
+  const projectPath = path.resolve(statusPath, projectName);
+  if (!projectPath.startsWith(statusPath + path.sep)) throw new Error('无效的项目路径');
+  return projectPath;
+};
+
+const cleanProjectName = (value) => value.trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
+
+ipcMain.handle('workspace-projects', async (_event, workspacePath) => {
+  try {
+    const root = ensureWorkspace(workspacePath);
+    const statuses = WORKSPACE_STATUSES.map(status => {
+      const statusPath = path.join(root, status);
+      const projects = fs.readdirSync(statusPath, { withFileTypes: true })
+        .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+        .map(entry => {
+          const projectPath = path.join(statusPath, entry.name);
+          return { name: entry.name, path: projectPath, status, updatedAt: fs.statSync(projectPath).mtimeMs };
+        })
+        .sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name, 'zh-CN'));
+      return { status, projects };
+    });
+    return { success: true, root, statuses };
+  } catch (error) {
+    writeLog('error', 'Unable to load workspace projects', error);
+    return { success: false, error: String(error), statuses: [] };
+  }
+});
+
+ipcMain.handle('workspace-create-project', async (_event, workspacePath, date, name) => {
+  try {
+    const datePart = cleanProjectName(date || '');
+    const namePart = cleanProjectName(name || '');
+    const projectName = [datePart, namePart].filter(Boolean).join(' ');
+    if (!projectName) throw new Error('请至少填写日期或名称');
+    const projectPath = getProjectPath(workspacePath, '未策划', projectName);
+    if (fs.existsSync(projectPath)) throw new Error('同名项目已存在');
+    fs.mkdirSync(projectPath, { recursive: false });
+    fs.mkdirSync(path.join(projectPath, '策划'), { recursive: true });
+    writeLog('info', 'Project created', { projectName, projectPath });
+    return { success: true, project: { name: projectName, path: projectPath, status: '未策划', updatedAt: Date.now() } };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace-rename-project', async (_event, workspacePath, status, projectName, nextName) => {
+  try {
+    const cleanedName = cleanProjectName(nextName || '');
+    if (!cleanedName) throw new Error('项目名称不能为空');
+    const source = getProjectPath(workspacePath, status, projectName);
+    const destination = getProjectPath(workspacePath, status, cleanedName);
+    if (!fs.existsSync(source)) throw new Error('项目不存在');
+    if (fs.existsSync(destination)) throw new Error('同名项目已存在');
+    fs.renameSync(source, destination);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace-move-project', async (_event, workspacePath, currentStatus, projectName, nextStatus) => {
+  try {
+    const source = getProjectPath(workspacePath, currentStatus, projectName);
+    const destination = getProjectPath(workspacePath, nextStatus, projectName);
+    if (!fs.existsSync(source)) throw new Error('项目不存在');
+    if (fs.existsSync(destination)) throw new Error('目标状态中已有同名项目');
+    fs.renameSync(source, destination);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace-trash-project', async (_event, workspacePath, status, projectName) => {
+  try {
+    const projectPath = getProjectPath(workspacePath, status, projectName);
+    if (!fs.existsSync(projectPath)) throw new Error('项目不存在');
+    await shell.trashItem(projectPath);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
 ipcMain.handle('getDrives', async () => {
   const drives = [];
   try {
@@ -358,7 +530,64 @@ ipcMain.handle('getDrives', async () => {
   return drives;
 });
 
+
+ipcMain.handle('workspace-project-contents', async (_event, workspacePath, status, projectName) => {
+  try {
+    const projectPath = getProjectPath(workspacePath, status, projectName);
+    if (!fs.existsSync(projectPath)) throw new Error('项目不存在');
+    const folders = fs.readdirSync(projectPath, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+      .map(entry => {
+        const folderPath = path.join(projectPath, entry.name);
+        return { name: entry.name, path: folderPath, updatedAt: fs.statSync(folderPath).mtimeMs };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    return { success: true, folders };
+  } catch (error) {
+    return { success: false, error: error.message || String(error), folders: [] };
+  }
+});
+
+ipcMain.handle('workspace-open-project', async (_event, workspacePath, status, projectName, folderName) => {
+  try {
+    const projectPath = getProjectPath(workspacePath, status, projectName);
+    const target = folderName ? path.resolve(projectPath, folderName) : projectPath;
+    if (!target.startsWith(projectPath) || !fs.existsSync(target)) throw new Error('目标文件夹不存在');
+    const error = await shell.openPath(target);
+    return { success: !error, error };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace-import-broll', async (_event, workspacePath, status, projectName) => {
+  try {
+    const projectPath = getProjectPath(workspacePath, status, projectName);
+    const choice = await dialog.showOpenDialog(mainWindow, {
+      title: '选择花絮文件',
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: '媒体文件', extensions: ['jpg', 'jpeg', 'png', 'heic', 'mp4', 'mov', 'avi', 'm4v'] }, { name: '所有文件', extensions: ['*'] }]
+    });
+    if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, count: 0 };
+    const destinationDir = path.join(projectPath, '花絮');
+    fs.mkdirSync(destinationDir, { recursive: true });
+    let count = 0;
+    for (const sourcePath of choice.filePaths) {
+      const parsed = path.parse(sourcePath);
+      let targetPath = path.join(destinationDir, parsed.base);
+      if (fs.existsSync(targetPath)) targetPath = path.join(destinationDir, `${parsed.name}_${Date.now()}_${count}${parsed.ext}`);
+      fs.copyFileSync(sourcePath, targetPath);
+      count += 1;
+    }
+    writeLog('info', 'B-roll imported', { projectPath, count });
+    return { success: true, count };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
 app.whenReady().then(() => {
+  const deletedLogFiles = cleanupExpiredLogs();
+  writeLog('info', 'Application started', { version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, deletedExpiredLogFiles: deletedLogFiles });
   createWindow();
 
   setTimeout(checkForUpdates, 3000);
@@ -368,5 +597,13 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  writeLog('info', 'All application windows closed');
   if (process.platform !== 'darwin') app.quit();
+});
+process.on('uncaughtException', (error) => {
+  writeLog('error', 'Uncaught main-process exception', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  writeLog('error', 'Unhandled main-process promise rejection', reason);
 });
