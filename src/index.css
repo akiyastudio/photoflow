@@ -86,12 +86,44 @@ html.dark .border-blue-100, html.dark .border-blue-200 { border-color: #1d4ed8; 
 html.dark .text-slate-900, html.dark .text-slate-800, html.dark .text-slate-700 { color: #e2e8f0; }
 html.dark .text-slate-600, html.dark .text-slate-500 { color: #94a3b8; }
 html.dark .text-slate-400 { color: #cbd5e1; }
-html.dark .hover\\:bg-slate-50:hover, html.dark .hover\\:bg-slate-100:hover { background-color: #273449; }
-html.dark .hover\\:text-slate-800:hover, html.dark .hover\\:text-slate-900:hover { color: #f8fafc; }
-html.dark .hover\\:bg-blue-50:hover { background-color: #1e3a8a; }
+html.dark .hover\:bg-slate-50:hover, html.dark .hover\:bg-slate-100:hover { background-color: #273449; }
+html.dark .hover\:text-slate-800:hover, html.dark .hover\:text-slate-900:hover { color: #f8fafc; }
+html.dark .hover\:bg-blue-50:hover { background-color: #1e3a8a; }
 html.dark input, html.dark select, html.dark textarea { background-color: #0f172a !important; color: #e2e8f0 !important; border-color: #475569 !important; }
 html.dark .project-action-button, html.dark .dialog-secondary, html.dark .form-input { background: #162033; border-color: #475569; color: #bfdbfe; }
 html.dark .project-action-button:hover, html.dark .dialog-secondary:hover, html.dark .project-menu-item:hover { background: #273449; }
 html.dark .project-action-danger { color: #fca5a5; border-color: #7f1d1d; }
 html.dark .project-menu-item { color: #cbd5e1; }
 html.dark .terminal-scroll::-webkit-scrollbar-thumb { background: #64748b; }
+
+.settings-check { display:flex; align-items:flex-start; gap:.65rem; margin-top:1rem; border:1px solid #e2e8f0; border-radius:.6rem; padding:.75rem; background:#f8fafc; color:#334155; font-size:.875rem; line-height:1.4; cursor:pointer; }
+.settings-check input { margin-top:.12rem; flex:none; accent-color:#2563eb; }
+.project-open-button:hover { background:rgb(255 255 255 / .2); }
+.birthday-panel { border:1px solid #f59e0b; background:#fffbeb; }
+.birthday-panel-header { background:#fde68a; }
+.birthday-panel-title { color:#78350f; }
+.birthday-panel-icon { color:#b45309; }
+.birthday-panel-body { border-color:#fbbf24; }
+html.dark .bg-white\/50, html.dark .bg-white\/80 { background-color:rgb(22 32 51 / .88); }
+html.dark .bg-slate-50\/50, html.dark .bg-slate-50\/80 { background-color:rgb(15 23 42 / .8); }
+html.dark .bg-blue-100 { background-color:#1e3a8a; }
+html.dark .bg-emerald-50 { background-color:#052e2b; }
+html.dark .bg-purple-50 { background-color:#2e1065; }
+html.dark .border-purple-200 { border-color:#6b21a8; }
+html.dark .text-gray-600 { color:#94a3b8; }
+html.dark .hover\:bg-slate-200:hover, html.dark .hover\:bg-slate-700:hover, html.dark .hover\:bg-slate-800:hover { background-color:#334155; }
+html.dark .hover\:bg-red-50:hover { background-color:#450a0a; }
+html.dark .project-open-button:hover { background:#334155; color:#f8fafc; }
+html.dark .settings-check { border-color:#334155; background:#0f172a; color:#cbd5e1; }
+html.dark input[type="checkbox"], html.dark input[type="range"] { accent-color:#3b82f6; }
+html.dark .birthday-panel { border-color:#a16207; background:#211a0b; }
+html.dark .birthday-panel-header { background:#3b2b0b; }
+html.dark .birthday-panel-title { color:#fde68a; }
+html.dark .birthday-panel-icon { color:#fbbf24; }
+html.dark .birthday-panel-body { border-color:#854d0e; }
+html.dark .birthday-panel .bg-white\/80 { background-color:#29200f; }
+html.dark .birthday-panel .border-blue-100 { border-color:#854d0e; }
+html.dark .birthday-panel .bg-blue-50 { background-color:#3b2b0b; }
+html.dark .birthday-panel .bg-blue-100 { background-color:#713f12; }
+html.dark ::-webkit-scrollbar-track { background:#0f172a; }
+html.dark ::-webkit-scrollbar-thumb { background:#475569; border-radius:999px; }

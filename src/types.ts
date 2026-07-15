@@ -27,6 +27,10 @@ export interface AppConfig {
     backupPath: string;
     generateVideoPreview: boolean;
   };
+  brollImport: {
+    splitLargeFiles: boolean;
+    clearSource: boolean;
+  };
   smartMatch: {
     destFolderName: string;
   };
