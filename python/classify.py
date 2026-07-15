@@ -5,6 +5,8 @@ import time
 import datetime
 import json
 import argparse
+import subprocess
+import imageio_ffmpeg
 from pathlib import Path
 import gc
 
@@ -67,8 +69,53 @@ def classify_files_by_type(folder_path):
                 shutil.move(src_path, dst_path)
                 break
 
+def generate_video_previews(target_folder):
+    """Create H.264 MP4 previews for the already classified video files."""
+    source_dir = os.path.join(target_folder, 'mov')
+    if not os.path.isdir(source_dir):
+        return 0, 0
+
+    video_extensions = ('.mp4', '.mov', '.avi', '.crm')
+    video_files = [
+        name for name in os.listdir(source_dir)
+        if os.path.isfile(os.path.join(source_dir, name)) and name.lower().endswith(video_extensions)
+    ]
+    if not video_files:
+        return 0, 0
+
+    output_dir = os.path.join(target_folder, 'mov_压缩')
+    os.makedirs(output_dir, exist_ok=True)
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    succeeded = 0
+
+    log_info(f"正在生成 {len(video_files)} 个视频预览版...")
+    for index, file_name in enumerate(video_files, start=1):
+        input_path = os.path.join(source_dir, file_name)
+        output_name = f"{Path(file_name).stem}.mp4"
+        output_path = os.path.join(output_dir, output_name)
+        if os.path.exists(output_path):
+            output_path = os.path.join(output_dir, f"{Path(file_name).stem}_{int(time.time())}.mp4")
+
+        command = [
+            ffmpeg_exe, '-y', '-i', input_path,
+            '-map', '0:v:0', '-map', '0:a?',
+            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', '-pix_fmt', 'yuv420p',
+            '-c:v', 'libx264', '-preset', 'medium',
+            '-b:v', '4M', '-maxrate', '5M', '-bufsize', '8M',
+            '-c:a', 'aac', '-b:a', '128k',
+            '-movflags', '+faststart', output_path
+        ]
+        result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
+        if result.returncode == 0:
+            succeeded += 1
+            log_info(f"视频预览版 {index}/{len(video_files)}：{os.path.basename(output_path)}")
+        else:
+            detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else '未知转码错误'
+            emit('warning', f"视频预览生成失败，已保留原视频 {file_name}：{detail}")
+
+    return succeeded, len(video_files)
 # --- 3. 核心导入流程 ---
-def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_threshold_hours=2.0, should_split=None):
+def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_threshold_hours=2.0, should_split=None, generate_video_preview=False):
     # 临时存放区（即使出错也保留，直到确认安全）
     temp_dir = os.path.join(dest_path, "_PhotoFlow_Safety_Temp")
     
@@ -79,7 +126,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
     try:
         time.sleep(2.5)
         # Step 1: 扫描 SD 卡 (仅扫描 DCIM 和 PRIVATE 目录)
-        valid_exts = ('.jpg', '.jpeg', '.png', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.heic', '.mp4', '.mov', '.avi', '.rwl', '.raf', '.3fr', '.fff')
+        valid_exts = ('.jpg', '.jpeg', '.png', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.heic', '.mp4', '.mov', '.avi', '.crm', '.rwl', '.raf', '.3fr', '.fff')
         
         # 兼容老配置，如果传过来的是 H:/DCIM，自动退回到根目录 H:/
         normalized_sd = os.path.normpath(sd_path)
@@ -195,6 +242,10 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
                 if os.path.exists(backup_dst): shutil.rmtree(backup_dst)
                 shutil.copytree(target_folder, backup_dst)
 
+            if generate_video_preview:
+                preview_count, video_count = generate_video_previews(target_folder)
+                if video_count:
+                    log_info(f"视频预览完成：{preview_count}/{video_count} 个文件已保存到 mov_压缩")
         # Step 5: 最终校验与清理 SD 卡
         if success_imported_count == len(original_sd_files):
             log_success(f"整理完成，共处理 {success_imported_count} 个文件")
@@ -231,6 +282,7 @@ def run(args_list):
     parser.add_argument("--backup_path", default="")
     parser.add_argument("--time_gap", type=float, default=2.0)
     parser.add_argument("--should_split", type=str, default="")
+    parser.add_argument("--generate_video_preview", action="store_true")
 
     args, _ = parser.parse_known_args(args_list)
     
@@ -241,7 +293,7 @@ def run(args_list):
     if args.stage == 'check':
         log_status("SD Card Detected" if os.path.exists(args.sd_path) else "No Device", {"connected": os.path.exists(args.sd_path)})
     elif args.stage == 'import':
-        stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val)
+        stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val, args.generate_video_preview)
 
 if __name__ == "__main__":
     run(sys.argv[1:])
