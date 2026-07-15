@@ -362,11 +362,11 @@ const App: React.FC = () => {
 
         />
         <div className="p-4 border-t border-slate-200">
-          <div className="flex flex-col rounded-lg border border-slate-200 bg-white overflow-hidden divide-y divide-slate-50">
-            <button onClick={() => setShowSettings(true)} className="w-full flex items-center gap-3 p-3 rounded-lg hover:bg-slate-50 text-slate-600 hover:text-slate-900 transition-all group"><Settings size={18} className="text-slate-400"/><span className="font-medium text-sm">设置</span></button>
+          <div className="flex flex-col overflow-hidden rounded-lg border border-slate-200 bg-white">
+            <button onClick={() => setShowSettings(true)} className="w-full flex items-center gap-3 p-3 hover:bg-slate-50 text-slate-600 hover:text-slate-900 transition-all group"><Settings size={18} className="text-slate-400"/><span className="font-medium text-sm">设置</span></button>
             <button
               onClick={() => setShowAbout(true)}
-              className="w-full flex items-center gap-3 p-3 rounded-lg hover:bg-slate-50 text-slate-600 hover:text-slate-900 transition-all group"
+              className="w-full flex items-center gap-3 border-t border-slate-200 p-3 hover:bg-slate-50 text-slate-600 hover:text-slate-900 transition-all group"
             >
               <AtSign size={18} className="group-hover:rotate-90 transition-transform duration-500 text-slate-400" />
               <span className="font-medium text-sm">关于</span>
