@@ -1110,7 +1110,7 @@ const ConverterView = ({ embedded = false }: { embedded?: boolean }) => {
         </div>
 
         <div className="flex items-center justify-between gap-4 rounded-lg bg-slate-50 p-3 border border-slate-200">
-          <label className="text-sm font-medium text-slate-700">JPG 画质</label>
+          <label className="text-sm font-medium text-slate-700">导出JPG 画质</label>
           <select value={quality} onChange={event => setQuality(Number(event.target.value))} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 focus:outline-none focus:border-blue-500">
             <option value={100}>最高（100）</option>
             <option value={95}>高（95）</option>
@@ -1714,7 +1714,7 @@ const VideoSplitView = () => {
         </div>
 
         <div className="flex items-center justify-between gap-4 rounded-lg bg-slate-50 p-3 border border-slate-200">
-          <label className="text-sm font-medium text-slate-700">JPG 画质</label>
+          <label className="text-sm font-medium text-slate-700">导出JPG 画质</label>
           <select value={quality} onChange={event => setQuality(Number(event.target.value))} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 focus:outline-none focus:border-blue-500">
             <option value={100}>最高（100）</option>
             <option value={95}>高（95）</option>
