@@ -444,7 +444,7 @@ ipcMain.handle('workspace-projects', async (_event, workspacePath) => {
           const projectPath = path.join(statusPath, entry.name);
           return { name: entry.name, path: projectPath, status, updatedAt: fs.statSync(projectPath).mtimeMs };
         })
-        .sort((a, b) => b.updatedAt - a.updatedAt || a.name.localeCompare(b.name, 'zh-CN'));
+        .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
       return { status, projects };
     });
     return { success: true, root, statuses };
@@ -493,7 +493,7 @@ ipcMain.handle('workspace-move-project', async (_event, workspacePath, currentSt
     if (!fs.existsSync(source)) throw new Error('项目不存在');
     if (fs.existsSync(destination)) throw new Error('目标状态中已有同名项目');
     fs.renameSync(source, destination);
-    return { success: true };
+    return { success: true, project: { name: projectName, path: destination, status: nextStatus, updatedAt: Date.now() } };
   } catch (error) {
     return { success: false, error: error.message || String(error) };
   }
@@ -560,28 +560,63 @@ ipcMain.handle('workspace-open-project', async (_event, workspacePath, status, p
   }
 });
 
-ipcMain.handle('workspace-import-broll', async (_event, workspacePath, status, projectName) => {
+const BROLL_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.m4v', '.mkv']);
+const FOUR_GB = 4 * 1024 * 1024 * 1024;
+
+const splitVideoAt4Gb = (videoPath) => new Promise((resolve, reject) => {
+  const { command, args } = getRunConfig('cut_video.py', [videoPath]);
+  const child = spawn(command, args, { windowsHide: true });
+  let stderr = '';
+  child.stderr.on('data', data => { stderr += data.toString(); });
+  child.on('error', reject);
+  child.on('close', code => code === 0 ? resolve() : reject(new Error(stderr || `视频分割进程退出，代码 ${code}`)));
+});
+
+ipcMain.handle('workspace-import-broll', async (_event, workspacePath, status, projectName, options = {}) => {
   try {
+    const { splitLargeFiles = false, clearSource = true } = options || {};
     const projectPath = getProjectPath(workspacePath, status, projectName);
     const choice = await dialog.showOpenDialog(mainWindow, {
       title: '选择花絮文件',
       properties: ['openFile', 'multiSelections'],
-      filters: [{ name: '媒体文件', extensions: ['jpg', 'jpeg', 'png', 'heic', 'mp4', 'mov', 'avi', 'm4v'] }, { name: '所有文件', extensions: ['*'] }]
+      filters: [{ name: '媒体文件', extensions: ['jpg', 'jpeg', 'png', 'heic', 'mp4', 'mov', 'avi', 'm4v', 'mkv'] }, { name: '所有文件', extensions: ['*'] }]
     });
-    if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, count: 0 };
+    if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, count: 0, splitCount: 0, clearedCount: 0 };
+
     const destinationDir = path.join(projectPath, '花絮');
     fs.mkdirSync(destinationDir, { recursive: true });
     let count = 0;
+    let splitCount = 0;
+    let clearedCount = 0;
+
     for (const sourcePath of choice.filePaths) {
       const parsed = path.parse(sourcePath);
       let targetPath = path.join(destinationDir, parsed.base);
       if (fs.existsSync(targetPath)) targetPath = path.join(destinationDir, `${parsed.name}_${Date.now()}_${count}${parsed.ext}`);
       fs.copyFileSync(sourcePath, targetPath);
+
+      const shouldSplit = splitLargeFiles && BROLL_VIDEO_EXTENSIONS.has(parsed.ext.toLowerCase()) && fs.statSync(targetPath).size > FOUR_GB;
+      if (shouldSplit) {
+        await splitVideoAt4Gb(targetPath);
+        const splitPrefix = path.parse(targetPath).name + '_part';
+        const splitExtension = path.extname(targetPath).toLowerCase();
+        const segmentCount = fs.readdirSync(destinationDir).filter(fileName => fileName.startsWith(splitPrefix) && path.extname(fileName).toLowerCase() === splitExtension).length;
+        if (segmentCount < 2) throw new Error('视频分割未生成完整分段：' + parsed.base);
+        await shell.trashItem(targetPath);
+        splitCount += 1;
+      }
+
+      if (clearSource && fs.existsSync(sourcePath)) {
+        await shell.trashItem(sourcePath);
+        clearedCount += 1;
+      }
       count += 1;
     }
-    writeLog('info', 'B-roll imported', { projectPath, count });
-    return { success: true, count };
+
+    writeLog('info', 'B-roll imported', { projectPath, count, splitCount, clearedCount });
+    return { success: true, count, splitCount, clearedCount };
   } catch (error) {
+    writeLog('error', 'B-roll import failed', error);
     return { success: false, error: error.message || String(error) };
   }
 });
