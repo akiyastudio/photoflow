@@ -16,7 +16,7 @@ export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProje
   const [error, setError] = useState('');
   const [menu, setMenu] = useState<{ project: WorkspaceProject; x: number; y: number } | null>(null);
   const [showNew, setShowNew] = useState(false);
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState('');
   const [name, setName] = useState('');
 
   const refresh = async () => {
@@ -62,7 +62,7 @@ export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProje
       {error && <p className="mt-2 px-2 text-xs text-red-500">{error}</p>}
     </nav>
     {menu && <div className="fixed z-[300] w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" style={{ left: menu.x, top: menu.y }} onClick={event => event.stopPropagation()}><button className="project-menu-item" onClick={() => { rename(menu.project); setMenu(null); }}>重命名</button><div className="my-1 border-t border-slate-100"/><p className="px-2 py-1 text-[11px] font-bold text-slate-400">更改状态</p>{STATUSES.map(status => <button key={status} className="project-menu-item" onClick={() => { move(menu.project, status); setMenu(null); }}>{status}{status === menu.project.status ? '（当前）' : ''}</button>)}<div className="my-1 border-t border-slate-100"/><button className="project-menu-item" onClick={() => { onProjectAction('import', menu.project); setMenu(null); }}>从 SD 卡导入</button><button className="project-menu-item" onClick={() => { onProjectAction('broll', menu.project); setMenu(null); }}>导入花絮</button><button className="project-menu-item" onClick={() => { onProjectAction('match', menu.project); setMenu(null); }}>选片</button><div className="my-1 border-t border-slate-100"/><button className="project-menu-item text-red-500 hover:bg-red-50" onClick={() => { trash(menu.project); setMenu(null); }}>移入回收站</button></div>}
-    {showNew && <ProjectDialog title="新建项目" onClose={() => setShowNew(false)}><p className="text-xs text-slate-500">日期和名称至少填写一项；新项目会创建在“未策划”。</p><label className="form-label">项目日期</label><input type="date" value={date} onChange={event => setDate(event.target.value)} className="form-input"/><label className="form-label">项目名称</label><input value={name} onChange={event => setName(event.target.value)} className="form-input"/><div className="mt-5 flex justify-end gap-2"><button onClick={() => setShowNew(false)} className="dialog-secondary">取消</button><button onClick={createProject} disabled={!date && !name} className="dialog-primary">创建</button></div></ProjectDialog>}
+    {showNew && <ProjectDialog title="新建项目" onClose={() => setShowNew(false)}><p className="text-xs text-slate-500">日期和名称至少填写一项；新项目会创建在“未策划”。</p><label className="form-label">项目日期</label><input value={date} onChange={event => setDate(event.target.value)} placeholder="例如：8-10 或 2026-08-10" className="form-input"/><label className="form-label">项目名称</label><input value={name} onChange={event => setName(event.target.value)} className="form-input"/><div className="mt-5 flex justify-end gap-2"><button onClick={() => setShowNew(false)} className="dialog-secondary">取消</button><button onClick={createProject} disabled={!date && !name} className="dialog-primary">创建</button></div></ProjectDialog>}
   </>;
 };
 
