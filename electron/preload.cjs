@@ -2,11 +2,6 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   runScript: (scriptName, args) => ipcRenderer.send('run-python', scriptName, args),
-  onLog: (callback) => {
-    const subscription = (_event, value) => callback(value);
-    ipcRenderer.on('python-log', subscription);
-    return () => ipcRenderer.removeListener('python-log', subscription);
-  },
   getBirthdays: () => ipcRenderer.invoke('get-birthdays'),
   saveBirthdays: (data) => ipcRenderer.invoke('save-birthdays', data),
   onPythonEvent: (callback) => {

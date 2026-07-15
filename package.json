@@ -7,8 +7,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:python": "cd python && pyinstaller --onefile --clean --name classify classify.py && pyinstaller --onefile --clean --name png_to_jpg png_to_jpg.py && pyinstaller --onefile --clean --name research research.py && pyinstaller --onefile --clean --name catch catch.py && pyinstaller --onefile --clean --name cut_video cut_video.py && pyinstaller --onefile --clean --name rename rename.py",
-    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "build:python": "cd python && pyinstaller --onefile --clean --specpath build/specs --name classify classify.py && pyinstaller --onefile --clean --specpath build/specs --name png_to_jpg png_to_jpg.py && pyinstaller --onefile --clean --specpath build/specs --name research research.py && pyinstaller --onefile --clean --specpath build/specs --name catch catch.py && pyinstaller --onefile --clean --specpath build/specs --name cut_video cut_video.py && pyinstaller --onefile --clean --specpath build/specs --name rename rename.py",
+    "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
     "electron": "wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
     "electron:dev": "concurrently -k \"cross-env BROWSER=none npm run dev\" \"npm run electron\"",
@@ -17,21 +17,42 @@
   "build": {
     "appId": "com.photoflow.toolkit",
     "directories": {
-      "output": "release" 
+      "output": "release"
     },
     "files": [
       "dist/**/*",
       "electron/**/*"
     ],
     "win": {
-      "target": ["nsis", "zip"] ,
+      "target": [
+        "nsis",
+        "zip"
+      ],
       "extraResources": [
-        { "from": "python/dist/classify.exe", "to": "python/classify.exe" },
-        { "from": "python/dist/png_to_jpg.exe", "to": "python/png_to_jpg.exe" },
-        { "from": "python/dist/research.exe", "to": "python/research.exe" },
-        { "from": "python/dist/catch.exe", "to": "python/catch.exe" },
-        { "from": "python/dist/rename.exe", "to": "python/rename.exe" },
-        { "from": "python/dist/cut_video.exe", "to": "python/cut_video.exe" }
+        {
+          "from": "python/dist/classify.exe",
+          "to": "python/classify.exe"
+        },
+        {
+          "from": "python/dist/png_to_jpg.exe",
+          "to": "python/png_to_jpg.exe"
+        },
+        {
+          "from": "python/dist/research.exe",
+          "to": "python/research.exe"
+        },
+        {
+          "from": "python/dist/catch.exe",
+          "to": "python/catch.exe"
+        },
+        {
+          "from": "python/dist/rename.exe",
+          "to": "python/rename.exe"
+        },
+        {
+          "from": "python/dist/cut_video.exe",
+          "to": "python/cut_video.exe"
+        }
       ]
     },
     "nsis": {
@@ -48,12 +69,30 @@
         "NSPhotoLibraryUsageDescription": "需要访问照片以进行整理"
       },
       "extraResources": [
-        { "from": "python/dist/classify", "to": "python/classify" },
-        { "from": "python/dist/png_to_jpg", "to": "python/png_to_jpg" },
-        { "from": "python/dist/research", "to": "python/research" },
-        { "from": "python/dist/catch", "to": "python/catch" },
-        { "from": "python/dist/rename", "to": "python/rename" },
-        { "from": "python/dist/cut_video", "to": "python/cut_video" }
+        {
+          "from": "python/dist/classify",
+          "to": "python/classify"
+        },
+        {
+          "from": "python/dist/png_to_jpg",
+          "to": "python/png_to_jpg"
+        },
+        {
+          "from": "python/dist/research",
+          "to": "python/research"
+        },
+        {
+          "from": "python/dist/catch",
+          "to": "python/catch"
+        },
+        {
+          "from": "python/dist/rename",
+          "to": "python/rename"
+        },
+        {
+          "from": "python/dist/cut_video",
+          "to": "python/cut_video"
+        }
       ]
     },
     "extraResources": [
@@ -64,12 +103,12 @@
     ]
   },
   "dependencies": {
-    "electron-updater": "^6.6.2",
     "lucide-react": "^0.344.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
+    "@eslint/js": "^8.57.1",
     "@types/node": "^24.10.1",
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22",
@@ -82,9 +121,11 @@
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-react-refresh": "^0.4.6",
+    "globals": "^15.14.0",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.18",
     "typescript": "^5.2.2",
+    "typescript-eslint": "^8.46.4",
     "vite": "^5.2.0",
     "wait-on": "^7.2.0"
   }
