@@ -69,7 +69,7 @@ const isMac = window.navigator.userAgent.includes('Mac');
 
 const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   theme: 'system',
-  workspacePath: 'D:/',
+  workspacePath: '',
   homeOrder: DEFAULT_HOME_ORDER,
   smartImport: {
     autoStart: false,
@@ -157,6 +157,7 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ToolType>('home');
   const [showAbout, setShowAbout] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showWorkspaceSetup, setShowWorkspaceSetup] = useState(false);
 
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configLoaded, setConfigLoaded] = useState(false);
@@ -173,9 +174,13 @@ const App: React.FC = () => {
         if (window.electronAPI?.loadConfig) {
           const fileConfig = await window.electronAPI.loadConfig();
           if (fileConfig) {
-            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', workspacePath: fileConfig.workspacePath ?? 'D:/', homeOrder: Array.isArray(fileConfig.homeOrder) ? fileConfig.homeOrder : DEFAULT_HOME_ORDER, smartImport: { ...fileConfig.smartImport, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true } } as AppConfig;
-            const workspace = await window.electronAPI.getWorkspaceProjects(normalizedConfig.workspacePath);
-            if (workspace.success && workspace.root) normalizedConfig = { ...normalizedConfig, workspacePath: workspace.root };
+            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', workspacePath: fileConfig.workspacePath?.trim() ?? '', homeOrder: Array.isArray(fileConfig.homeOrder) ? fileConfig.homeOrder : DEFAULT_HOME_ORDER, smartImport: { ...fileConfig.smartImport, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true } } as AppConfig;
+            if (normalizedConfig.workspacePath) {
+              const workspace = await window.electronAPI.getWorkspaceProjects(normalizedConfig.workspacePath);
+              if (workspace.success && workspace.root) normalizedConfig = { ...normalizedConfig, workspacePath: workspace.root };
+            } else {
+              setShowWorkspaceSetup(true);
+            }
             setConfig(normalizedConfig);
             if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.smartImport.backupEnabled || !fileConfig.brollImport) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             console.log('📋 Configuration loaded from file');
@@ -184,10 +189,9 @@ const App: React.FC = () => {
               const userPath = await window.electronAPI.getUserPath();
               if (userPath) {
                 let defaultConfig = DEFAULT_CONFIG(userPath);
-                const workspace = await window.electronAPI.getWorkspaceProjects(defaultConfig.workspacePath);
-                if (workspace.success && workspace.root) defaultConfig = { ...defaultConfig, workspacePath: workspace.root };
                 setConfig(defaultConfig);
                 if (window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(defaultConfig);
+                setShowWorkspaceSetup(true);
                 console.log('📋 Configuration created with user path:', userPath);
               } else {
                 console.error('❌ Failed to get user path');
@@ -259,6 +263,21 @@ const App: React.FC = () => {
     }
   };
 
+  const handleWorkspaceSetup = async (newConfig: AppConfig) => {
+    await handleConfigUpdate(newConfig);
+    setShowWorkspaceSetup(false);
+  };
+  const handleHomeImportComplete = async () => {
+    const result = await window.electronAPI.archiveImportedProjects(config.workspacePath);
+    if (!result.success) return;
+    if (result.projects.length === 1) {
+      setSelectedProject(result.projects[0]);
+      setProjectDestination(result.projects[0].path);
+      setProjectOperation(null);
+      setActiveTab('project');
+    }
+    window.dispatchEvent(new Event('workspace-projects-changed'));
+  };
   // 等待配置加载完成再渲染主界面
   const handleProjectAction = (action: 'import' | 'broll' | 'match', project: WorkspaceProject) => {
     setSelectedProject(project);
@@ -335,6 +354,7 @@ const App: React.FC = () => {
       )}
 
       {showSettings && config && <SettingsModal config={config} onSave={handleConfigUpdate} onClose={() => setShowSettings(false)} />}
+      {showWorkspaceSetup && config && <SettingsModal config={config} onSave={handleWorkspaceSetup} onClose={() => undefined} requireWorkspace />}
 
       {showAbout && config && (
         <AboutModal
@@ -381,7 +401,7 @@ const App: React.FC = () => {
           const content = card === 'birthday'
             ? <DashboardView section="birthday" workspacePath={config.workspacePath} config={config.smartImport} onUpdateConfig={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })}/>
             : card === 'import'
-              ? <DashboardView section="import" workspacePath={config.workspacePath} config={config.smartImport} onUpdateConfig={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })}/>
+              ? <DashboardView section="import" workspacePath={config.workspacePath} config={config.smartImport} onImportComplete={handleHomeImportComplete} onUpdateConfig={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })}/>
               : card === 'research'
                 ? <HomePanel title="调研整理"><ResearchView embedded config={config.research} onUpdateConfig={(research: AppConfig['research']) => handleConfigUpdate({ ...config, research })}/></HomePanel>
                 : <HomePanel title="PNG 转 JPG"><ConverterView embedded /></HomePanel>;
@@ -855,6 +875,7 @@ const DashboardView = ({
   config,
   projectDestination,
   projectName,
+  onImportComplete,
   onUpdateConfig
 }: {
   workspacePath: string;
@@ -862,6 +883,7 @@ const DashboardView = ({
   config: AppConfig['smartImport'];
   projectDestination?: string | null;
   projectName?: string;
+  onImportComplete?: () => void | Promise<void>;
   onUpdateConfig: (c: AppConfig['smartImport']) => void;
 }) => {
   // 生日逻辑保持不变
@@ -954,7 +976,7 @@ const DashboardView = ({
 
       {section !== 'birthday' && <HomePanel title="从 SD 卡导入" initiallyOpen>
         <div className="flex flex-col gap-6">
-          <ImportCard config={config} drives={drives} destinationPath={projectDestination ?? workspacePath} />
+          <ImportCard config={config} drives={drives} destinationPath={projectDestination ?? workspacePath} onImportComplete={projectDestination ? undefined : () => { void onImportComplete?.(); }} />
         </div>
       </HomePanel>}
       {section !== 'import' && <HomePanel title="角色生日" initiallyOpen tone="birthday">
@@ -1815,14 +1837,14 @@ const UpdateModal = ({
   );
 };
 
-const SettingsModal = ({ config, onSave, onClose }: { config: AppConfig; onSave: (config: AppConfig) => void; onClose: () => void }) => {
+const SettingsModal = ({ config, onSave, onClose, requireWorkspace = false }: { config: AppConfig; onSave: (config: AppConfig) => void | Promise<void>; onClose: () => void; requireWorkspace?: boolean }) => {
   const [draft, setDraft] = useState(config);
   const [drives, setDrives] = useState<string[]>([]);
   useEffect(() => { window.electronAPI?.getDrives?.().then(setDrives); }, []);
   const updateImport = (changes: Partial<AppConfig['smartImport']>) => setDraft(current => ({ ...current, smartImport: { ...current.smartImport, ...changes } }));
   const updateBroll = (changes: Partial<AppConfig['brollImport']>) => setDraft(current => ({ ...current, brollImport: { ...current.brollImport, ...changes } }));
-  const save = () => { const workspacePath = draft.workspacePath.trim(); if (!workspacePath) return; onSave({ ...draft, workspacePath }); onClose(); };
-  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"><div className="absolute inset-0" onClick={onClose}/><div className="relative z-10 flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><div className="flex items-center justify-between border-b border-slate-200 bg-slate-100 p-5"><h3 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Settings size={20} className="text-blue-600"/>设置</h3><button onClick={onClose} className="rounded-full p-2 text-slate-500 hover:bg-slate-200"><X size={20}/></button></div><div className="min-h-0 flex-1 space-y-7 overflow-y-auto p-6"><section><h4 className="text-sm font-bold text-slate-800">界面配色</h4><p className="mt-1 text-sm text-slate-500">默认适应系统，也可固定为浅色或深色。</p><div className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">{([['system', '适应系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([theme, label]) => <button key={theme} onClick={() => setDraft(current => ({ ...current, theme }))} className={`rounded-md px-4 py-2 text-sm font-bold transition ${draft.theme === theme ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}</div></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">工作目录</h4><p className="mt-1 text-sm text-slate-500">选择磁盘根目录时，会使用根目录下的“照片流”文件夹。</p><input value={draft.workspacePath} onChange={event => setDraft(current => ({ ...current, workspacePath: event.target.value }))} placeholder="例如：D:/照片流" className="mt-4 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 font-mono text-sm text-slate-800 focus:border-blue-500 focus:outline-none"/></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">从 SD 卡导入</h4><p className="mt-1 text-sm text-slate-500">导入位置由当前项目或工作目录决定。</p><label className="settings-check"><input type="checkbox" checked={draft.smartImport.autoStart} onChange={event => updateImport({ autoStart: event.target.checked })}/>应用启动时自动读取 SD 卡</label><label className="form-label">SD 卡盘符</label><select value={draft.smartImport.sdPath} onChange={event => updateImport({ sdPath: event.target.value })} className="form-input">{draft.smartImport.sdPath && !drives.includes(draft.smartImport.sdPath) && <option value={draft.smartImport.sdPath}>{draft.smartImport.sdPath}（当前未连接）</option>}<option value="">请选择设备盘符</option>{drives.map(drive => <option key={drive} value={drive}>{drive}</option>)}</select><label className="settings-check"><input type="checkbox" checked={draft.smartImport.generateVideoPreview} onChange={event => updateImport({ generateVideoPreview: event.target.checked })}/>生成视频预览（储存至 mov_压缩）</label></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">导入花絮</h4><p className="mt-1 text-sm text-slate-500">文件会复制到当前项目的“花絮”文件夹。</p><label className="settings-check"><input type="checkbox" checked={draft.brollImport.splitLargeFiles} onChange={event => updateBroll({ splitLargeFiles: event.target.checked })}/>超过 4GB 的单个视频自动分割为约 4GB 的文件</label><label className="settings-check"><input type="checkbox" checked={draft.brollImport.clearSource} onChange={event => updateBroll({ clearSource: event.target.checked })}/>导入后清空原始文件</label></section></div><div className="flex justify-end gap-3 border-t border-slate-100 bg-white p-5"><button onClick={onClose} className="dialog-secondary">取消</button><button onClick={save} className="dialog-primary">保存设置</button></div></div></div>;
+  const save = async () => { const workspacePath = draft.workspacePath.trim(); if (!workspacePath) return; await onSave({ ...draft, workspacePath }); if (!requireWorkspace) onClose(); };
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"><div className="absolute inset-0" onClick={requireWorkspace ? undefined : onClose}/><div className="relative z-10 flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><div className="flex items-center justify-between border-b border-slate-200 bg-slate-100 p-5"><h3 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Settings size={20} className="text-blue-600"/>{requireWorkspace ? '设置工作目录' : '设置'}</h3>{requireWorkspace && <p className="mt-1 text-sm text-slate-500">首次使用前，请先选择一个用于存放项目的工作目录。</p>}{!requireWorkspace && <button onClick={onClose} className="rounded-full p-2 text-slate-500 hover:bg-slate-200"><X size={20}/></button>}</div><div className="min-h-0 flex-1 space-y-7 overflow-y-auto p-6"><section><h4 className="text-sm font-bold text-slate-800">界面配色</h4><p className="mt-1 text-sm text-slate-500">默认适应系统，也可固定为浅色或深色。</p><div className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">{([['system', '适应系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([theme, label]) => <button key={theme} onClick={() => setDraft(current => ({ ...current, theme }))} className={`rounded-md px-4 py-2 text-sm font-bold transition ${draft.theme === theme ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}</div></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">工作目录</h4><p className="mt-1 text-sm text-slate-500">选择磁盘根目录时，会使用根目录下的“照片流”文件夹。</p><input value={draft.workspacePath} onChange={event => setDraft(current => ({ ...current, workspacePath: event.target.value }))} placeholder="例如：D:/照片流" className="mt-4 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 font-mono text-sm text-slate-800 focus:border-blue-500 focus:outline-none"/></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">从 SD 卡导入</h4><p className="mt-1 text-sm text-slate-500">导入位置由当前项目或工作目录决定。</p><p className="mt-3 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs leading-5 text-blue-700">支持佳能（.cr2、.cr3）、索尼（.arw）、尼康（.nef）、奥林巴斯（.orf）、徕卡（.rwl、.dng）、富士（.raf）、哈苏（.3fr、.fff）、大疆（.dng）的 RAW 格式，以及常见图片和视频导入。</p><label className="settings-check"><input type="checkbox" checked={draft.smartImport.autoStart} onChange={event => updateImport({ autoStart: event.target.checked })}/>应用启动时自动读取 SD 卡</label><label className="form-label">SD 卡盘符</label><select value={draft.smartImport.sdPath} onChange={event => updateImport({ sdPath: event.target.value })} className="form-input">{draft.smartImport.sdPath && !drives.includes(draft.smartImport.sdPath) && <option value={draft.smartImport.sdPath}>{draft.smartImport.sdPath}（当前未连接）</option>}<option value="">请选择设备盘符</option>{drives.map(drive => <option key={drive} value={drive}>{drive}</option>)}</select><label className="settings-check"><input type="checkbox" checked={draft.smartImport.generateVideoPreview} onChange={event => updateImport({ generateVideoPreview: event.target.checked })}/>生成视频预览（储存至 mov_压缩）</label></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">导入花絮</h4><p className="mt-1 text-sm text-slate-500">文件会复制到当前项目的“花絮”文件夹。</p><label className="settings-check"><input type="checkbox" checked={draft.brollImport.splitLargeFiles} onChange={event => updateBroll({ splitLargeFiles: event.target.checked })}/>超过 4GB 的单个视频自动分割为约 4GB 的文件</label><label className="settings-check"><input type="checkbox" checked={draft.brollImport.clearSource} onChange={event => updateBroll({ clearSource: event.target.checked })}/>导入后清空原始文件</label></section></div><div className="flex justify-end gap-3 border-t border-slate-100 bg-white p-5">{!requireWorkspace && <button onClick={onClose} className="dialog-secondary">取消</button>}<button onClick={save} disabled={!draft.workspacePath.trim()} className="dialog-primary">{requireWorkspace ? '确认工作目录' : '保存设置'}</button></div></div></div>;
 };
 type ProjectPanel = 'import' | 'broll' | 'match' | 'trash' | null;
 const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, brollConfig, matchConfig, onMatchConfigChange, onProjectMoved, onDeleted }: {
@@ -1852,6 +1874,10 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
     refresh();
   }, [project.path, project.status, initialPanel]);
 
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.onWorkspaceFilesChanged(() => refresh());
+    return unsubscribe;
+  }, [workspacePath, project.path]);
   const togglePanel = (next: Exclude<ProjectPanel, null>) => setPanel(current => current === next ? null : next);
   const openFolder = async (folderName?: string) => {
     const result = await window.electronAPI.openWorkspaceProject(workspacePath, project.status, project.name, folderName);
@@ -1910,46 +1936,27 @@ const CollapsiblePanel = ({ title, onClose, children }: { title: string; onClose
   </section>
 );
 const AboutModal = ({ onClose }: { onClose: () => void }) => {
+  const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'latest' | 'error'>('idle');
+  const checkForUpdates = async () => {
+    setUpdateStatus('checking');
+    const result = await window.electronAPI.checkForUpdates();
+    setUpdateStatus(result.success && !result.updateAvailable ? 'latest' : result.success ? 'idle' : 'error');
+  };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-50/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-      <div className="absolute inset-0" onClick={onClose}></div>
-      <div className="bg-white border border-slate-200 w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[90vh] relative z-10 overflow-hidden">
-        <div className="p-6 border-b border-slate-200 flex justify-between items-center bg-slate-200">
-          <h3 className="text-xl font-bold text-slate-800 flex items-center gap-2">
-            <AtSign size={20} className="text-blue-600"/> 关于
-          </h3>
-          <button onClick={onClose} className="p-2 hover:bg-slate-700 rounded-full text-slate-500 hover:text-slate-800 transition">
-            <X size={20} />
-          </button>
-        </div>
-
-        {/* Body - 仅保留一行正文文字 */}
-        <div className="flex-1 overflow-y-auto p-6 flex">
-
-          <div className="flex">
-          <p className="text-slate-800 text-base leading-relaxed">
-            @秋也寻
-            <br/>
-            版本 26.7.15
-          </p>
-          <p className="text-slate-800 text-base leading-relaxed">
-            这一个软件专门为了拍摄者而设计，可以帮助你管理你的拍摄项目，跟进进度，自动化从SD卡导入并整理图片。此外还有调研整理功能，团片管理功能等。<br/>
-调研整理功能需要配合油猴脚本使用，会自动整理下来下来的图片和视频，并且自动截取视频帧，整理下载下来的调研帖子的信息。<br/>
-团片管理功能可以将一张高像素大图裁剪成小图，供模特修图使用，防止影响原图像素和画质，然后再拼接图片为完整大图。还有多人修图后的追踪功能，可以对比和整理前后图片，并且完整传递给下一个人。
-          </p>
-          <p className="text-slate-800 text-base leading-relaxed">
-            第一个版本的大部分代码为Google Gemini和Copilot生成。<br/>
-现在的版本大部分使用Codex制作。<br/>
-软件没有经过充分测试。使用前请备份重要数据。作者不对因使用本软件造成的任何损失负责。<br/>
-          </p>
-        </div>
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm animate-in fade-in duration-200">
+    <div className="absolute inset-0" onClick={onClose}/>
+    <section role="dialog" aria-modal="true" aria-labelledby="about-title" className="relative z-10 flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+      <header className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-6 py-5"><h3 id="about-title" className="flex items-center gap-2 text-xl font-bold text-slate-800"><AtSign size={20} className="text-blue-600"/>关于</h3><button onClick={onClose} aria-label="关闭" className="rounded-full p-2 text-slate-500 transition hover:bg-slate-200 hover:text-slate-800"><X size={20}/></button></header>
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-6 text-sm leading-7 text-slate-600">
+        <div><p className="text-lg font-bold text-slate-800">by秋也寻</p><div className="mt-1 flex flex-wrap items-center gap-3"><p className="text-blue-600">版本 26.7.15</p><button onClick={checkForUpdates} disabled={updateStatus === 'checking'} className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-0.5 text-xs font-bold leading-5 text-blue-700 transition hover:bg-blue-100 disabled:cursor-wait disabled:opacity-60">{updateStatus === 'checking' ? '正在检查…' : '检查更新'}</button>{updateStatus === 'latest' && <span className="text-xs text-emerald-600">已是最新版本</span>}{updateStatus === 'error' && <span className="text-xs text-red-500">检查失败，请稍后重试</span>}</div></div>
+        <section><h4 className="text-base font-bold text-slate-800">软件简介</h4><p className="mt-1">照片流是一款为摄影师设计的项目管理与素材整理工具，帮助你跟进拍摄进度，并自动从 SD 卡导入和整理照片、视频。</p></section>
+        <section><h4 className="text-base font-bold text-slate-800">功能说明</h4><p className="mt-1">调研整理功能可配合脚本整理下载的图片与视频、截取视频帧，并汇总调研资料信息。<br/>团片管理功能可将高像素大图裁切为便于修图的小图，后续再拼接回完整大图；也支持对比、整理前后期图片并交接给下一位修图人员。</p></section>
+        <section><h4 className="text-base font-bold text-slate-800">制作说明</h4><p className="mt-1">早期版本的大部分代码由 Google Gemini 与 Copilot 生成；当前版本主要使用 Codex 制作。</p></section>
+        <section className="border-t border-slate-200 pt-5"><h4 className="text-base font-bold text-slate-800">使用提示</h4><p className="mt-1">软件尚未经过充分测试。使用前请备份重要数据；作者不对使用本软件造成的损失负责。</p></section>
       </div>
-    </div>
-    </div>
-  );
+    </section>
+  </div>;
 };
-
 const SidebarItem = ({ active, onClick, icon, label }: { active: boolean, onClick: () => void, icon: React.ReactNode, label: string }) => (
   <button
     onClick={onClick}

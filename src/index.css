@@ -98,6 +98,8 @@ html.dark .terminal-scroll::-webkit-scrollbar-thumb { background: #64748b; }
 
 .settings-check { display:flex; align-items:flex-start; gap:.65rem; margin-top:1rem; border:1px solid #e2e8f0; border-radius:.6rem; padding:.75rem; background:#f8fafc; color:#334155; font-size:.875rem; line-height:1.4; cursor:pointer; }
 .settings-check input { margin-top:.12rem; flex:none; accent-color:#2563eb; }
+.project-open-button { visibility: hidden; opacity: 0; transition: opacity .15s, background .15s; }
+.project-row:hover .project-open-button, .project-row:focus-within .project-open-button { visibility: visible; opacity: 1; }
 .project-open-button:hover { background:rgb(255 255 255 / .2); }
 .birthday-panel { border:1px solid #a78bfa; background:#f5f3ff; }
 .birthday-panel-header { background:#ede9fe; }
