@@ -1,8 +1,3 @@
-export interface Birthday {
-  name: string;
-  dateStr: string;
-}
-
 export interface LogEntry {
   timestamp: string;
   message: string;
@@ -12,6 +7,7 @@ export interface LogEntry {
 export type ToolType = 'home' | 'project' | 'dashboard' | 'converter' | 'research' | 'match' | 'rename_tool' | 'video_split';
 
 export type Theme = 'light' | 'dark' | 'system';
+export type HomeCardId = 'birthday' | 'import' | 'research' | 'converter';
 export type ProjectStatus = '未策划' | '已策划' | '进行中' | '已归档';
 export interface WorkspaceProject { name: string; path: string; status: ProjectStatus; updatedAt: number; }
 export interface WorkspaceStatusGroup { status: ProjectStatus; projects: WorkspaceProject[]; }
@@ -19,6 +15,7 @@ export interface WorkspaceStatusGroup { status: ProjectStatus; projects: Workspa
 export interface AppConfig {
   theme: Theme;
   workspacePath: string;
+  homeOrder: HomeCardId[];
   smartImport: {
     autoStart: boolean;
     sdPath: string;
@@ -47,7 +44,6 @@ export interface AppConfig {
 export interface IElectronAPI {
   onPythonEvent: any;
   runScript: (scriptName: string, args?: string[]) => void;
-  onLog: (callback: (log: LogEntry) => void) => void;
   getBirthdays: () => Promise<Record<string, string>>;
   saveBirthdays: (data: Record<string, string>) => Promise<{success: boolean, error?: string}>;
   loadConfig: () => Promise<AppConfig | null>;
@@ -79,5 +75,3 @@ declare global {
     electronAPI: IElectronAPI;
   }
 }
-
-export const TYPES_VERSION = "26.7.15";

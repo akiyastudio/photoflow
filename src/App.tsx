@@ -1,12 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import {
-  LayoutDashboard,
   FolderInput,
   FolderPlus,
   Folder,
   Image as ImageIcon,
   ScanSearch,
-  ArrowRightLeft,
   HardDrive,
   Play,
   Trash2,
@@ -30,43 +28,13 @@ import {
   ChevronDown,
   ChevronUp
 } from 'lucide-react';
-import { TaskStatus } from './components/Terminal';
+import { TaskStatus } from './components/TaskStatus';
 import { ProjectNavigator } from './components/ProjectNavigator';
-import type { LogEntry, ToolType, WorkspaceProject } from './types';
+import type { AppConfig, HomeCardId, LogEntry, ToolType, WorkspaceProject } from './types';
 
-type Theme = 'light' | 'dark' | 'system';
-type HomeCardId = 'birthday' | 'import' | 'research' | 'converter';
 const DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'research', 'converter'];
 
 // --- 类型定义 ---
-
-interface AppConfig {
-  theme: Theme;
-  workspacePath: string;
-  homeOrder: HomeCardId[];
-  smartImport: {
-    autoStart: boolean;
-    sdPath: string;
-    destPath: string;
-    backupEnabled: boolean;
-    backupPath: string;
-    generateVideoPreview: boolean;
-  };
-  brollImport: {
-    splitLargeFiles: boolean;
-    clearSource: boolean;
-  };
-  smartMatch: {
-    imageDestFolderName: string;
-    videoDestFolderName: string;
-    destFolderName?: string;
-  };
-  research: {
-    defaultDir: string;
-    ssimThreshold: number;
-    minDuration: number;
-  };
-}
 
 const isMac = window.navigator.userAgent.includes('Mac');
 
@@ -115,7 +83,7 @@ const RequirePlugin = ({ scriptName, title, desc, children }: { scriptName: stri
           // @ts-ignore
           const exists = await window.electronAPI.checkScript(scriptName);
           setIsInstalled(exists);
-        } catch (e) {
+        } catch {
           setIsInstalled(false);
         }
       } else {
@@ -167,7 +135,7 @@ const App: React.FC = () => {
   const [configLoaded, setConfigLoaded] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<{version: string, url: string, notes: string} | null>(null);
   const [selectedProject, setSelectedProject] = useState<WorkspaceProject | null>(null);
-  const [projectDestination, setProjectDestination] = useState<string | null>(null);
+  const [, setProjectDestination] = useState<string | null>(null);
   const [undoNotice, setUndoNotice] = useState('');
   const [homeOrder, setHomeOrder] = useState<HomeCardId[]>(DEFAULT_HOME_ORDER);
   const [draggedHomeCard, setDraggedHomeCard] = useState<HomeCardId | null>(null);
@@ -193,7 +161,7 @@ const App: React.FC = () => {
             if (window.electronAPI?.getUserPath) {
               const userPath = await window.electronAPI.getUserPath();
               if (userPath) {
-                let defaultConfig = DEFAULT_CONFIG(userPath);
+                const defaultConfig = DEFAULT_CONFIG(userPath);
                 setConfig(defaultConfig);
                 if (window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(defaultConfig);
                 setShowWorkspaceSetup(true);
@@ -294,6 +262,7 @@ const App: React.FC = () => {
     setShowWorkspaceSetup(false);
   };
   const handleHomeImportComplete = async () => {
+    if (!config) return;
     const result = await window.electronAPI.archiveImportedProjects(config.workspacePath);
     if (!result.success) return;
     if (result.projects.length === 1) {
@@ -383,10 +352,8 @@ const App: React.FC = () => {
       {showSettings && config && <SettingsModal config={config} onSave={handleConfigUpdate} onClose={() => setShowSettings(false)} />}
       {showWorkspaceSetup && config && <SettingsModal config={config} onSave={handleWorkspaceSetup} onClose={() => undefined} requireWorkspace />}
 
-      {showAbout && config && (
+      {showAbout && (
         <AboutModal
-          theme={config.theme}
-          onThemeChange={(theme: Theme) => handleConfigUpdate({...config, theme})}
           onClose={() => setShowAbout(false)}
         />
       )}
@@ -426,9 +393,9 @@ const App: React.FC = () => {
       <main className="flex-1 overflow-auto bg-slate-50 p-8 relative">
         {activeTab === 'home' && <div className="mx-auto max-w-6xl space-y-4">{homeOrder.map(card => {
           const content = card === 'birthday'
-            ? <DashboardView section="birthday" workspacePath={config.workspacePath} config={config.smartImport} onUpdateConfig={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })}/>
+            ? <DashboardView section="birthday" workspacePath={config.workspacePath} config={config.smartImport}/>
             : card === 'import'
-              ? <DashboardView section="import" workspacePath={config.workspacePath} config={config.smartImport} onImportComplete={handleHomeImportComplete} onUpdateConfig={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })}/>
+              ? <DashboardView section="import" workspacePath={config.workspacePath} config={config.smartImport} onImportComplete={handleHomeImportComplete}/>
               : card === 'research'
                 ? <HomePanel title="调研整理"><ResearchView embedded config={config.research} onUpdateConfig={(research: AppConfig['research']) => handleConfigUpdate({ ...config, research })}/></HomePanel>
                 : <HomePanel title="PNG 转 JPG"><ConverterView embedded /></HomePanel>;
@@ -902,8 +869,7 @@ const DashboardView = ({
   config,
   projectDestination,
   projectName,
-  onImportComplete,
-  onUpdateConfig
+  onImportComplete
 }: {
   workspacePath: string;
   section?: 'all' | 'import' | 'birthday';
@@ -911,7 +877,6 @@ const DashboardView = ({
   projectDestination?: string | null;
   projectName?: string;
   onImportComplete?: () => void | Promise<void>;
-  onUpdateConfig: (c: AppConfig['smartImport']) => void;
 }) => {
   // 生日逻辑保持不变
   const [upcomingBirthdays, setUpcomingBirthdays] = useState<{name: string, date: string, sortKey: number}[]>([]);
@@ -1175,7 +1140,6 @@ const ConverterView = ({ embedded = false }: { embedded?: boolean }) => {
             <option value={75}>节省空间（75）</option>
           </select>
         </div>
-
         {/* Progress & Actions */}
         <div className="bg-slate-50 rounded-lg border border-slate-200 p-4 flex items-center gap-6">
              <div className="flex-1 flex flex-col gap-1">
@@ -1690,16 +1654,6 @@ const VideoSplitView = () => {
             </div>
         </div>
 
-        <div className="flex items-center justify-between gap-4 rounded-lg bg-slate-50 p-3 border border-slate-200">
-          <label className="text-sm font-medium text-slate-700">导出JPG 画质</label>
-          <select value={quality} onChange={event => setQuality(Number(event.target.value))} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 focus:outline-none focus:border-blue-500">
-            <option value={100}>最高（100）</option>
-            <option value={95}>高（95）</option>
-            <option value={85}>标准（85）</option>
-            <option value={75}>节省空间（75）</option>
-          </select>
-        </div>
-
         {/* Progress & Actions */}
         <div className="bg-slate-50 rounded-lg border border-slate-200 p-4 flex items-center gap-6">
               <div className="flex-1 flex flex-col gap-1">
@@ -1967,35 +1921,5 @@ const AboutModal = ({ onClose }: { onClose: () => void }) => {
     </section>
   </div>;
 };
-const SidebarItem = ({ active, onClick, icon, label }: { active: boolean, onClick: () => void, icon: React.ReactNode, label: string }) => (
-  <button
-    onClick={onClick}
-    className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200 ${
-      active
-        ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20 font-bold'
-        : 'text-slate-500 hover:bg-slate-100 hover:text-blue-600 font-medium'
-    }`}
-  >
-    {icon}
-    <span className="font-medium">{label}</span>
-  </button>
-);
-
-const InputField = ({ label, value, onChange, icon }: { label: string, value: string, onChange: (v: string) => void, icon: React.ReactNode }) => (
-  <div className="space-y-1">
-    <label className="text-xs font-bold text-slate-500 uppercase">{label}</label>
-    <div className="relative">
-      <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">
-        {icon}
-      </div>
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full bg-white border border-slate-200 rounded-lg pl-10 pr-4 py-2 text-slate-800 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-colors font-mono text-sm"
-      />
-    </div>
-  </div>
-);
 
 export default App;
