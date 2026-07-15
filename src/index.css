@@ -45,3 +45,53 @@
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
   background: #475569;
 }
+/* Recovered workspace UI primitives */
+.project-action-button {
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+  border: 1px solid #bfdbfe;
+  border-radius: .55rem;
+  padding: .55rem .85rem;
+  color: #2563eb;
+  background: #fff;
+  font-size: .875rem;
+  font-weight: 700;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.project-action-button:hover { background: #eff6ff; border-color: #60a5fa; }
+.project-action-danger { color: #dc2626; border-color: #fecaca; }
+.project-action-danger:hover { background: #fef2f2; border-color: #f87171; }
+.project-menu-item { display: block; width: 100%; border-radius: .4rem; padding: .5rem; text-align: left; font-size: .875rem; color: #475569; }
+.project-menu-item:hover { background: #f1f5f9; color: #0f172a; }
+.form-label { display: block; margin-top: 1rem; margin-bottom: .4rem; font-size: .75rem; font-weight: 700; color: #64748b; }
+.form-input { width: 100%; border: 1px solid #cbd5e1; border-radius: .5rem; padding: .55rem .7rem; color: #1e293b; background: #fff; outline: none; }
+.form-input:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgb(59 130 246 / .15); }
+.dialog-primary, .dialog-secondary { border-radius: .5rem; padding: .55rem .9rem; font-size: .875rem; font-weight: 700; transition: background .15s, color .15s; }
+.dialog-primary { background: #2563eb; color: #fff; }
+.dialog-primary:hover { background: #1d4ed8; }
+.dialog-primary:disabled { cursor: not-allowed; opacity: .45; }
+.dialog-secondary { border: 1px solid #cbd5e1; color: #475569; background: #fff; }
+.dialog-secondary:hover { background: #f8fafc; }
+
+/* The application uses Tailwind utility classes, while theme is applied to <html>. */
+html.dark { color-scheme: dark; }
+html.dark body, html.dark #root { background: #0f172a; color: #e2e8f0; }
+html.dark .bg-white { background-color: #162033; }
+html.dark .bg-slate-50 { background-color: #0f172a; }
+html.dark .bg-slate-100, html.dark .bg-slate-200 { background-color: #1e293b; }
+html.dark .bg-blue-50 { background-color: #172554; }
+html.dark .border-slate-100, html.dark .border-slate-200, html.dark .border-slate-300 { border-color: #334155; }
+html.dark .border-blue-100, html.dark .border-blue-200 { border-color: #1d4ed8; }
+html.dark .text-slate-900, html.dark .text-slate-800, html.dark .text-slate-700 { color: #e2e8f0; }
+html.dark .text-slate-600, html.dark .text-slate-500 { color: #94a3b8; }
+html.dark .text-slate-400 { color: #cbd5e1; }
+html.dark .hover\\:bg-slate-50:hover, html.dark .hover\\:bg-slate-100:hover { background-color: #273449; }
+html.dark .hover\\:text-slate-800:hover, html.dark .hover\\:text-slate-900:hover { color: #f8fafc; }
+html.dark .hover\\:bg-blue-50:hover { background-color: #1e3a8a; }
+html.dark input, html.dark select, html.dark textarea { background-color: #0f172a !important; color: #e2e8f0 !important; border-color: #475569 !important; }
+html.dark .project-action-button, html.dark .dialog-secondary, html.dark .form-input { background: #162033; border-color: #475569; color: #bfdbfe; }
+html.dark .project-action-button:hover, html.dark .dialog-secondary:hover, html.dark .project-menu-item:hover { background: #273449; }
+html.dark .project-action-danger { color: #fca5a5; border-color: #7f1d1d; }
+html.dark .project-menu-item { color: #cbd5e1; }
+html.dark .terminal-scroll::-webkit-scrollbar-thumb { background: #64748b; }
