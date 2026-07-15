@@ -7,6 +7,7 @@ let mainWindow;
 let workspaceWatcher = null;
 let watchedWorkspacePath = '';
 let workspaceWatchTimer = null;
+const renameHistory = [];
 const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
 
@@ -496,7 +497,63 @@ ipcMain.handle('workspace-rename-project', async (_event, workspacePath, status,
     if (!fs.existsSync(source)) throw new Error('项目不存在');
     if (fs.existsSync(destination)) throw new Error('同名项目已存在');
     fs.renameSync(source, destination);
+    renameHistory.push({ kind: 'project', source, destination, status, beforeName: projectName, afterName: cleanedName });
     return { success: true, project: { name: cleanedName, path: destination, status, updatedAt: Date.now() } };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+ipcMain.handle('workspace-create-project-folder', async (_event, workspacePath, status, projectName, folderName) => {
+  try {
+    const cleanedName = cleanProjectName(folderName || '');
+    if (!cleanedName) throw new Error('文件夹名称不能为空');
+    const projectPath = getProjectPath(workspacePath, status, projectName);
+    const folderPath = path.resolve(projectPath, cleanedName);
+    if (!folderPath.startsWith(projectPath + path.sep)) throw new Error('无效的文件夹名称');
+    if (fs.existsSync(folderPath)) throw new Error('同名文件夹已存在');
+    fs.mkdirSync(folderPath);
+    return { success: true, folder: { name: cleanedName, path: folderPath, updatedAt: Date.now() } };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace-rename-project-folder', async (_event, workspacePath, status, projectName, folderName, nextName) => {
+  try {
+    const cleanedName = cleanProjectName(nextName || '');
+    if (!cleanedName) throw new Error('文件夹名称不能为空');
+    const projectPath = getProjectPath(workspacePath, status, projectName);
+    const source = path.resolve(projectPath, folderName);
+    const destination = path.resolve(projectPath, cleanedName);
+    if (!source.startsWith(projectPath + path.sep) || !destination.startsWith(projectPath + path.sep)) throw new Error('无效的文件夹路径');
+    if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) throw new Error('文件夹不存在');
+    if (fs.existsSync(destination)) throw new Error('同名文件夹已存在');
+    fs.renameSync(source, destination);
+    renameHistory.push({ kind: 'folder', source, destination, beforeName: folderName, afterName: cleanedName });
+    return { success: true, folder: { name: cleanedName, path: destination, updatedAt: Date.now() } };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace-undo-rename', async () => {
+  try {
+    const operation = renameHistory.pop();
+    if (!operation) return { success: false, error: '没有可撤销的重命名操作' };
+    if (!fs.existsSync(operation.destination)) {
+      renameHistory.push(operation);
+      throw new Error('重命名后的文件夹已不存在，无法撤销');
+    }
+    if (fs.existsSync(operation.source)) {
+      renameHistory.push(operation);
+      throw new Error('原名称已被占用，无法撤销');
+    }
+    fs.renameSync(operation.destination, operation.source);
+    const response = { success: true, message: `已撤销重命名：${operation.afterName} → ${operation.beforeName}` };
+    if (operation.kind === 'project') {
+      response.project = { name: operation.beforeName, path: operation.source, status: operation.status, updatedAt: Date.now() };
+    }
+    return response;
   } catch (error) {
     return { success: false, error: error.message || String(error) };
   }
