@@ -291,7 +291,7 @@ const App: React.FC = () => {
     return (
       <div className="flex h-screen w-full items-center justify-center overflow-hidden bg-slate-950 text-white">
         <div className="flex flex-col items-center gap-6 text-center">
-          <img src="/app-logo-dark.svg" className="brand-logo brand-logo-dark h-20 w-20" alt="照片流" />
+          <img src="./app-logo-dark.svg" className="brand-logo brand-logo-dark h-20 w-20" alt="照片流" />
           <div className="space-y-2">
             <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-500 to-indigo-400 bg-clip-text text-transparent">照片流</h2>
             <p className="text-sm text-slate-400">正在启动…</p>
@@ -328,8 +328,8 @@ const App: React.FC = () => {
       <aside className="w-64 bg-white border-r border-slate-200 flex flex-col shrink-0">
         <div className="p-6 border-b border-slate-200">
           <button onClick={() => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); }} className="flex items-center gap-2 text-left text-2xl font-bold bg-gradient-to-r from-blue-800 to-indigo-800 bg-clip-text text-transparent cursor-pointer">
-            <img src="/app-logo.svg" className="brand-logo brand-logo-light-only h-7 w-7" alt="" />
-            <img src="/app-logo-dark.svg" className="brand-logo brand-logo-dark-only h-7 w-7" alt="" />
+            <img src="./app-logo.svg" className="brand-logo brand-logo-light-only h-7 w-7" alt="" />
+            <img src="./app-logo-dark.svg" className="brand-logo brand-logo-dark-only h-7 w-7" alt="" />
             照片流
           </button>
           <p className="text-xs text-slate-500 mt-1 font-mono">v26.7.15</p>
