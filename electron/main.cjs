@@ -104,6 +104,8 @@ function createWindow() {
 }
 
 // 根据环境获取可执行文件和参数
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'research']);
+
 const getRunConfig = (scriptName, args) => {
   // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
   const baseName = scriptName.replace('.py', '');
@@ -113,6 +115,12 @@ const getRunConfig = (scriptName, args) => {
   if (app.isPackaged) {
     // 生产环境：根据平台决定是否有 .exe 后缀
     const exeSuffix = isWin ? '.exe' : '';
+    if (MERGED_PYTHON_TOOLS.has(baseName)) {
+      return {
+        command: path.join(process.resourcesPath, 'python', `tools${exeSuffix}`),
+        args: [baseName, ...args]
+      };
+    }
     return {
       command: path.join(process.resourcesPath, 'python', `${baseName}${exeSuffix}`),
       args: args
@@ -394,7 +402,8 @@ ipcMain.handle('check-script', async (event, scriptName) => {
     const isWin = process.platform === 'win32';
     const exeSuffix = isWin ? '.exe' : '';
     // 打包后去 resources/python 目录下寻找 Python 引擎文件
-    const scriptPath = path.join(process.resourcesPath, 'python', `${baseName}${exeSuffix}`);
+    const executableName = MERGED_PYTHON_TOOLS.has(baseName) ? 'tools' : baseName;
+    const scriptPath = path.join(process.resourcesPath, 'python', `${executableName}${exeSuffix}`);
     return fs.existsSync(scriptPath);
     
   } catch (error) {

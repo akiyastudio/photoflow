@@ -4,7 +4,7 @@ import sys
 import json
 import argparse
 import subprocess
-import imageio_ffmpeg
+from ffmpeg_utils import get_ffmpeg_exe
 
 # 向 Electron 前端发送事件的辅助函数
 def emit(event_type, message, progress=None):
@@ -20,7 +20,7 @@ def fast_lossless_split(input_file):
         
     emit("progress", f"正在分析视频: {os.path.basename(input_file)} ...", 10)
     
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg_exe = get_ffmpeg_exe()
     
     # 1. 尝试读取视频的总时长
     cmd_info = [ffmpeg_exe, "-i", input_file]
@@ -70,10 +70,10 @@ def fast_lossless_split(input_file):
     emit("log", f"分段文件前缀: {file_name}_part...{file_ext}")
     emit("success", f"✅ 极速切割完成！成功分为 {part_count} 段", 100)
 
-if __name__ == "__main__":
+def run(args_list):
     parser = argparse.ArgumentParser(description='Fast lossless video splitter')
     parser.add_argument('video_path', type=str, help='Path to the input video file')
-    args = parser.parse_args()
+    args = parser.parse_args(args_list)
     
     try:
         # 清除 Electron 传递路径时可能附带的双引号/单引号
@@ -81,3 +81,7 @@ if __name__ == "__main__":
         fast_lossless_split(clean_path)
     except Exception as e:
         emit("error", f"执行出错: {str(e)}")
+
+
+if __name__ == "__main__":
+    run(sys.argv[1:])
