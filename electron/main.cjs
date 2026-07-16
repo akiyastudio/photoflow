@@ -78,6 +78,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1024,
     height: 768,
+    icon: app.isPackaged ? undefined : path.join(__dirname, '../build/icon.ico'),
     backgroundColor: '#f8fafc',
     titleBarStyle: 'hidden',
     titleBarOverlay: {
@@ -219,7 +220,7 @@ ipcMain.on('run-python', (event, scriptName, args = []) => {
         if (!trimmed) return;
         try {
           const jsonMsg = JSON.parse(trimmed);
-          mainWindow.webContents.send('python-event', jsonMsg);
+          mainWindow.webContents.send('python-event', { ...jsonMsg, scriptName });
           
           if (jsonMsg.type === 'log' || jsonMsg.type === 'error') {
              mainWindow.webContents.send('python-log', {
@@ -266,7 +267,8 @@ ipcMain.on('run-python', (event, scriptName, args = []) => {
        console.error('Failed to start process:', err);
        mainWindow.webContents.send('python-event', {
          type: 'error',
-         message: `Failed to launch ${scriptName}: ${err.message}`
+         message: `Failed to launch ${scriptName}: ${err.message}`,
+         scriptName
        });
     });
 
@@ -686,6 +688,31 @@ ipcMain.handle('workspace-project-contents', async (_event, workspacePath, statu
     return { success: true, folders };
   } catch (error) {
     return { success: false, error: error.message || String(error), folders: [] };
+  }
+});
+
+// 图片对比使用 JPEG 解码流程。开始前检查所选文件夹的直接图片文件，避免
+// 在处理到一半才因 PNG 等格式失败。
+ipcMain.handle('workspace-check-compare-folders', async (_event, folderPaths = []) => {
+  try {
+    const imageExtensions = new Set(['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tif', '.tiff', '.heic']);
+    const invalidFolders = folderPaths.map(folderPath => {
+      const resolvedPath = path.resolve(folderPath);
+      if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isDirectory()) {
+        throw new Error('所选文件夹不存在');
+      }
+      const files = fs.readdirSync(resolvedPath, { withFileTypes: true })
+        .filter(entry => entry.isFile())
+        .filter(entry => {
+          const extension = path.extname(entry.name).toLowerCase();
+          return imageExtensions.has(extension) && extension !== '.jpg' && extension !== '.jpeg';
+        })
+        .map(entry => entry.name);
+      return { path: resolvedPath, files };
+    }).filter(folder => folder.files.length > 0);
+    return { success: true, invalidFolders };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
   }
 });
 

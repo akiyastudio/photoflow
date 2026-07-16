@@ -34,5 +34,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getProjectContents: (workspacePath, status, name) => ipcRenderer.invoke('workspace-project-contents', workspacePath, status, name),
   openWorkspaceProject: (workspacePath, status, name, folderName) => ipcRenderer.invoke('workspace-open-project', workspacePath, status, name, folderName),
   importBroll: (workspacePath, status, name, options) => ipcRenderer.invoke('workspace-import-broll', workspacePath, status, name, options),
+  checkCompareFolders: (folderPaths) => ipcRenderer.invoke('workspace-check-compare-folders', folderPaths),
   setTheme: (theme) => ipcRenderer.invoke('set-theme', theme),
 });
