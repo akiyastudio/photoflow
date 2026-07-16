@@ -8,7 +8,7 @@
     "generate:icon": "node scripts/generate-app-icon.cjs",
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:python": "cd python && pyinstaller --onefile --clean --specpath build/specs --name classify classify.py && pyinstaller --onefile --clean --specpath build/specs --name png_to_jpg png_to_jpg.py && pyinstaller --onefile --clean --specpath build/specs --name catch catch.py && pyinstaller --onefile --clean --specpath build/specs --name cut_video cut_video.py && pyinstaller --onefile --clean --specpath build/specs --name rename rename.py",
+    "build:python": "node scripts/prepare-ffmpeg.cjs && node scripts/build-python.cjs",
     "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
     "electron": "wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
@@ -32,24 +32,12 @@
       ],
       "extraResources": [
         {
-          "from": "python/dist/classify.exe",
-          "to": "python/classify.exe"
+          "from": "python/dist/tools.exe",
+          "to": "python/tools.exe"
         },
         {
-          "from": "python/dist/png_to_jpg.exe",
-          "to": "python/png_to_jpg.exe"
-        },
-        {
-          "from": "python/dist/catch.exe",
-          "to": "python/catch.exe"
-        },
-        {
-          "from": "python/dist/rename.exe",
-          "to": "python/rename.exe"
-        },
-        {
-          "from": "python/dist/cut_video.exe",
-          "to": "python/cut_video.exe"
+          "from": "python/dist/ffmpeg.zip",
+          "to": "python/ffmpeg.zip"
         }
       ]
     },
@@ -68,28 +56,12 @@
       },
       "extraResources": [
         {
-          "from": "python/dist/classify",
-          "to": "python/classify"
+          "from": "python/dist/tools",
+          "to": "python/tools"
         },
         {
-          "from": "python/dist/png_to_jpg",
-          "to": "python/png_to_jpg"
-        },
-        {
-          "from": "python/dist/research",
-          "to": "python/research"
-        },
-        {
-          "from": "python/dist/catch",
-          "to": "python/catch"
-        },
-        {
-          "from": "python/dist/rename",
-          "to": "python/rename"
-        },
-        {
-          "from": "python/dist/cut_video",
-          "to": "python/cut_video"
+          "from": "python/dist/ffmpeg.zip",
+          "to": "python/ffmpeg.zip"
         }
       ]
     },

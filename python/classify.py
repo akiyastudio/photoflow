@@ -6,9 +6,9 @@ import datetime
 import json
 import argparse
 import subprocess
-import imageio_ffmpeg
 from pathlib import Path
 import gc
+from ffmpeg_utils import get_ffmpeg_exe
 
 # --- 1. Electron 通信辅助 ---
 def emit(event_type, message, data=None, progress=None):
@@ -85,7 +85,7 @@ def generate_video_previews(target_folder):
 
     output_dir = os.path.join(target_folder, 'mov_压缩')
     os.makedirs(output_dir, exist_ok=True)
-    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg_exe = get_ffmpeg_exe()
     succeeded = 0
 
     log_info(f"正在生成 {len(video_files)} 个视频预览版...")

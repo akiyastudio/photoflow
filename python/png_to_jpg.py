@@ -2,8 +2,14 @@ import os
 import sys
 import json
 import argparse
-from PIL import Image
+from io import BytesIO
+from PIL import Image, ImageCms
 from send2trash import send2trash
+
+
+# 所有输出统一为 sRGB；这是网页和大多数 Windows 软件的默认色彩空间。
+_SRGB_PROFILE = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
+_SRGB_ICC_PROFILE = _SRGB_PROFILE.tobytes()
 
 # --- Electron 通信辅助函数 ---
 def emit(event_type, message, data=None, progress=None):
@@ -16,6 +22,22 @@ def log_info(msg): emit('log', msg)
 def log_success(msg): emit('success', msg)
 def log_error(msg): emit('error', msg)
 def log_progress(msg, percent): emit('progress', msg, progress=percent)
+
+
+def convert_to_srgb(img):
+    """将带 ICC 配置文件的图片转换为 sRGB，其他图片按 sRGB 处理。"""
+    source_icc_profile = img.info.get("icc_profile")
+    if not source_icc_profile:
+        return img.convert("RGB")
+
+    try:
+        source_profile = ImageCms.ImageCmsProfile(BytesIO(source_icc_profile))
+        return ImageCms.profileToProfile(
+            img, source_profile, _SRGB_PROFILE, outputMode="RGB"
+        )
+    except (ImageCms.PyCMSError, OSError, ValueError):
+        # 配置文件损坏时保持原先的兼容行为，避免一张异常图片中断整个批处理。
+        return img.convert("RGB")
 
 def run(args_list):
     if sys.platform.startswith('win'):
@@ -64,11 +86,16 @@ def run(args_list):
         
         try:
             with Image.open(file_path) as img:
-                rgb_img = img.convert('RGB')
+                rgb_img = convert_to_srgb(img)
                 jpg_filename = os.path.splitext(filename)[0] + '.jpg'
                 jpg_file_path = os.path.join(directory, jpg_filename)
                 
-                rgb_img.save(jpg_file_path, 'JPEG', quality=max(1, min(100, args.quality)))
+                rgb_img.save(
+                    jpg_file_path,
+                    'JPEG',
+                    quality=max(1, min(100, args.quality)),
+                    icc_profile=_SRGB_ICC_PROFILE,
+                )
                 
                 # 移入回收站
                 send2trash(file_path)
