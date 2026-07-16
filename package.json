@@ -5,17 +5,19 @@
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
+    "generate:icon": "node scripts/generate-app-icon.cjs",
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:python": "cd python && pyinstaller --onefile --clean --specpath build/specs --name classify classify.py && pyinstaller --onefile --clean --specpath build/specs --name png_to_jpg png_to_jpg.py && pyinstaller --onefile --clean --specpath build/specs --name research research.py && pyinstaller --onefile --clean --specpath build/specs --name catch catch.py && pyinstaller --onefile --clean --specpath build/specs --name cut_video cut_video.py && pyinstaller --onefile --clean --specpath build/specs --name rename rename.py",
+    "build:python": "cd python && pyinstaller --onefile --clean --specpath build/specs --name classify classify.py && pyinstaller --onefile --clean --specpath build/specs --name png_to_jpg png_to_jpg.py && pyinstaller --onefile --clean --specpath build/specs --name catch catch.py && pyinstaller --onefile --clean --specpath build/specs --name cut_video cut_video.py && pyinstaller --onefile --clean --specpath build/specs --name rename rename.py",
     "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview",
     "electron": "wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
     "electron:dev": "concurrently -k \"cross-env BROWSER=none npm run dev\" \"npm run electron\"",
-    "electron:build": "npm run build && npm run build:python && electron-builder"
+    "electron:build": "npm run generate:icon && npm run build && npm run build:python && electron-builder"
   },
   "build": {
     "appId": "com.photoflow.toolkit",
+    "icon": "build/icon.ico",
     "directories": {
       "output": "release"
     },
@@ -36,10 +38,6 @@
         {
           "from": "python/dist/png_to_jpg.exe",
           "to": "python/png_to_jpg.exe"
-        },
-        {
-          "from": "python/dist/research.exe",
-          "to": "python/research.exe"
         },
         {
           "from": "python/dist/catch.exe",
@@ -109,6 +107,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^8.57.1",
+    "@resvg/resvg-js": "^2.6.2",
     "@types/node": "^24.10.1",
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22",

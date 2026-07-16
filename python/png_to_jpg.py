@@ -24,6 +24,7 @@ def run(args_list):
 
     parser = argparse.ArgumentParser()
     parser.add_argument("path", nargs='?', help="要处理的目录路径")
+    parser.add_argument("--quality", type=int, default=100)
     args = parser.parse_args(args_list)
 
     # 获取路径
@@ -67,7 +68,7 @@ def run(args_list):
                 jpg_filename = os.path.splitext(filename)[0] + '.jpg'
                 jpg_file_path = os.path.join(directory, jpg_filename)
                 
-                rgb_img.save(jpg_file_path, 'JPEG', quality=95)
+                rgb_img.save(jpg_file_path, 'JPEG', quality=max(1, min(100, args.quality)))
                 
                 # 移入回收站
                 send2trash(file_path)

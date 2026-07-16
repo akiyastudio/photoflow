@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
   FolderInput,
   FolderPlus,
@@ -28,7 +29,7 @@ import {
   ChevronDown,
   ChevronUp
 } from 'lucide-react';
-import { TaskStatus } from './components/TaskStatus';
+import { TaskProgress } from './components/TaskStatus';
 import { ProjectNavigator } from './components/ProjectNavigator';
 import type { AppConfig, HomeCardId, LogEntry, ToolType, WorkspaceProject } from './types';
 
@@ -54,6 +55,9 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
     splitLargeFiles: false,
     clearSource: true
   },
+  imageConversion: {
+    jpgQuality: 100
+  },
   smartMatch: {
     imageDestFolderName: "\u56fe\u7247\u9009\u7247",
     videoDestFolderName: "\u89c6\u9891\u9009\u7247"
@@ -70,9 +74,10 @@ interface PythonEvent {
   message: string;
   data?: any;
   progress?: number;
+  scriptName?: string;
 }
 
-const RequirePlugin = ({ scriptName, title, desc, children }: { scriptName: string, title: string, desc: string, children: React.ReactNode }) => {
+const RequirePlugin = ({ scriptName, title, desc, children, embedded = false }: { scriptName: string, title: string, desc: string, children: React.ReactNode, embedded?: boolean }) => {
   const [isInstalled, setIsInstalled] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -102,7 +107,7 @@ const RequirePlugin = ({ scriptName, title, desc, children }: { scriptName: stri
   if (!isInstalled) {
     return (
       <div className="w-full space-y-6">
-        <h2 className="text-2xl font-bold text-slate-800">{title}</h2>
+        {!embedded && <h2 className="text-2xl font-bold text-slate-800">{title}</h2>}
         <div className="bg-white border border-slate-200 rounded-xl p-12 flex flex-col items-center justify-center text-center space-y-4 shadow-sm">
             <div className="w-16 h-16 bg-slate-50 border border-slate-100 rounded-2xl flex items-center justify-center text-slate-400 mb-2">
                 <Puzzle size={32} />
@@ -147,7 +152,9 @@ const App: React.FC = () => {
         if (window.electronAPI?.loadConfig) {
           const fileConfig = await window.electronAPI.loadConfig();
           if (fileConfig) {
-            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', workspacePath: fileConfig.workspacePath?.trim() ?? '', homeOrder: Array.isArray(fileConfig.homeOrder) ? fileConfig.homeOrder : DEFAULT_HOME_ORDER, smartImport: { ...fileConfig.smartImport, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true }, smartMatch: { imageDestFolderName: fileConfig.smartMatch?.imageDestFolderName ?? fileConfig.smartMatch?.destFolderName ?? '\u56fe\u7247\u9009\u7247', videoDestFolderName: fileConfig.smartMatch?.videoDestFolderName ?? '\u89c6\u9891\u9009\u7247' } } as AppConfig;
+            const userPath = await window.electronAPI.getUserPath();
+            const downloadPath = userPath ? `${userPath}/Downloads` : fileConfig.research?.defaultDir;
+            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', workspacePath: fileConfig.workspacePath?.trim() ?? '', homeOrder: Array.isArray(fileConfig.homeOrder) ? fileConfig.homeOrder : DEFAULT_HOME_ORDER, smartImport: { ...fileConfig.smartImport, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true }, imageConversion: { jpgQuality: fileConfig.imageConversion?.jpgQuality ?? 100 }, smartMatch: { imageDestFolderName: fileConfig.smartMatch?.imageDestFolderName ?? fileConfig.smartMatch?.destFolderName ?? '\u56fe\u7247\u9009\u7247', videoDestFolderName: fileConfig.smartMatch?.videoDestFolderName ?? '\u89c6\u9891\u9009\u7247' }, research: { ...fileConfig.research, defaultDir: downloadPath } } as AppConfig;
             if (normalizedConfig.workspacePath) {
               const workspace = await window.electronAPI.getWorkspaceProjects(normalizedConfig.workspacePath);
               if (workspace.success && workspace.root) normalizedConfig = { ...normalizedConfig, workspacePath: workspace.root };
@@ -155,7 +162,7 @@ const App: React.FC = () => {
               setShowWorkspaceSetup(true);
             }
             setConfig(normalizedConfig);
-            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.smartImport.backupEnabled || !fileConfig.brollImport || !fileConfig.smartMatch?.imageDestFolderName || !fileConfig.smartMatch?.videoDestFolderName) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
+            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.smartImport.backupEnabled || !fileConfig.brollImport || !fileConfig.imageConversion || !fileConfig.smartMatch?.imageDestFolderName || !fileConfig.smartMatch?.videoDestFolderName) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             console.log('📋 Configuration loaded from file');
           } else {
             if (window.electronAPI?.getUserPath) {
@@ -282,56 +289,15 @@ const App: React.FC = () => {
   };
   if (!configLoaded || !config) {
     return (
-      <div className="flex items-center justify-center h-screen w-full bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-900 overflow-hidden relative">
-        {/* 背景装饰 */}
-        <div className="absolute top-0 left-1/4 w-96 h-96 bg-blue-50 rounded-full blur-3xl"></div>
-        <div className="absolute bottom-0 right-1/4 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl"></div>
-
-        <div className="text-center z-10 space-y-8">
-          {/* ✅ 加载动画 */}
-          <div className="flex justify-center">
-            <div className="relative w-20 h-20">
-              {/* 外圆 */}
-              <div className="absolute inset-0 rounded-full border-4 border-slate-200/30"></div>
-
-              {/* 旋转动画 */}
-              <div className="absolute inset-0 rounded-full border-4 border-transparent border-t-blue-400 border-r-blue-300 animate-spin"></div>
-
-              {/* 内圆脉冲 */}
-              <div className="absolute inset-4 rounded-full border-2 border-blue-500/30 animate-pulse"></div>
-
-              {/* 中心点 */}
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></div>
-              </div>
-            </div>
-          </div>
-
-          {/* 文字 */}
+      <div className="flex h-screen w-full items-center justify-center overflow-hidden bg-slate-950 text-white">
+        <div className="flex flex-col items-center gap-6 text-center">
+          <img src="/app-logo-dark.svg" className="brand-logo brand-logo-dark h-20 w-20" alt="照片流" />
           <div className="space-y-2">
-            <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-800 to-indigo-800 bg-clip-text text-transparent">
-              照片流
-            </h2>
-            <p className="text-sm text-slate-500 font-mono">初始化配置中...</p>
+            <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-500 to-indigo-400 bg-clip-text text-transparent">照片流</h2>
+            <p className="text-sm text-slate-400">正在启动…</p>
           </div>
-
-          {/* 加载进度条 */}
-          <div className="w-48 h-1 bg-slate-800 rounded-full overflow-hidden">
-            <div className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 rounded-full animate-pulse" style={{
-              width: '60%',
-              animation: 'loadingBar 1.5s ease-in-out infinite'
-            }}></div>
-          </div>
+          <span className="win11-spinner" aria-label="正在加载" />
         </div>
-
-        {/* ✅ CSS 动画 */}
-        <style>{`
-          @keyframes loadingBar {
-            0% { width: 10%; }
-            50% { width: 80%; }
-            100% { width: 10%; }
-          }
-        `}</style>
       </div>
     );
   }
@@ -361,7 +327,9 @@ const App: React.FC = () => {
       {/* Sidebar */}
       <aside className="w-64 bg-white border-r border-slate-200 flex flex-col shrink-0">
         <div className="p-6 border-b border-slate-200">
-          <button onClick={() => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); }} className="text-left text-2xl font-bold bg-gradient-to-r from-blue-800 to-indigo-800 bg-clip-text text-transparent cursor-pointer">
+          <button onClick={() => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); }} className="flex items-center gap-2 text-left text-2xl font-bold bg-gradient-to-r from-blue-800 to-indigo-800 bg-clip-text text-transparent cursor-pointer">
+            <img src="/app-logo.svg" className="brand-logo brand-logo-light-only h-7 w-7" alt="" />
+            <img src="/app-logo-dark.svg" className="brand-logo brand-logo-dark-only h-7 w-7" alt="" />
             照片流
           </button>
           <p className="text-xs text-slate-500 mt-1 font-mono">v26.7.15</p>
@@ -392,20 +360,31 @@ const App: React.FC = () => {
       {/* Main Content */}
       <main className="flex-1 overflow-auto bg-slate-50 p-8 relative">
         {activeTab === 'home' && <div className="mx-auto max-w-6xl space-y-4">{homeOrder.map(card => {
+          const dragProps = {
+            draggable: true,
+            onDragStart: () => setDraggedHomeCard(card),
+            onDragEnd: () => setDraggedHomeCard(null),
+            onDragOver: (event: React.DragEvent<HTMLButtonElement>) => event.preventDefault(),
+            onDrop: (event: React.DragEvent<HTMLButtonElement>) => {
+              event.preventDefault();
+              reorderHomeCards(card);
+              setDraggedHomeCard(null);
+            }
+          };
           const content = card === 'birthday'
-            ? <DashboardView section="birthday" workspacePath={config.workspacePath} config={config.smartImport}/>
+            ? <DashboardView section="birthday" workspacePath={config.workspacePath} config={config.smartImport} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} dragProps={dragProps}/>
             : card === 'import'
-              ? <DashboardView section="import" workspacePath={config.workspacePath} config={config.smartImport} onImportComplete={handleHomeImportComplete}/>
+              ? <DashboardView section="import" workspacePath={config.workspacePath} config={config.smartImport} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onImportComplete={handleHomeImportComplete} dragProps={dragProps}/>
               : card === 'research'
-                ? <HomePanel title="调研整理"><ResearchView embedded config={config.research} onUpdateConfig={(research: AppConfig['research']) => handleConfigUpdate({ ...config, research })}/></HomePanel>
-                : <HomePanel title="PNG 转 JPG"><ConverterView embedded /></HomePanel>;
-          return <div key={card} draggable onDragStart={() => setDraggedHomeCard(card)} onDragEnd={() => setDraggedHomeCard(null)} onDragOver={event => event.preventDefault()} onDrop={() => { reorderHomeCards(card); setDraggedHomeCard(null); }} className={draggedHomeCard === card ? 'opacity-40' : 'cursor-grab active:cursor-grabbing'}>{content}</div>;
+                ? <HomePanel title="调研整理" {...dragProps}><RequirePlugin embedded scriptName="research.py" title="调研整理" desc="需要该引擎来执行视频分镜识别和图片去重。"><ResearchView embedded config={config.research} onUpdateConfig={(research: AppConfig['research']) => handleConfigUpdate({ ...config, research })}/></RequirePlugin></HomePanel>
+                : <HomePanel title="PNG 转 JPG" {...dragProps}><RequirePlugin embedded scriptName="png_to_jpg.py" title="PNG 转 JPG" desc="需要该引擎来执行图片格式的批量转换。"><ConverterView embedded defaultQuality={config.imageConversion.jpgQuality} /></RequirePlugin></HomePanel>;
+          return <div key={card} className={draggedHomeCard === card ? 'opacity-40' : undefined}>{content}</div>;
         })}</div>}
-        {activeTab === 'project' && selectedProject && <ProjectWorkspace project={selectedProject} workspacePath={config.workspacePath} initialPanel={projectOperation} importConfig={config.smartImport} brollConfig={config.brollImport} matchConfig={config.smartMatch} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onProjectMoved={nextProject => { setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { setSelectedProject(null); setProjectDestination(null); setProjectOperation(null); setActiveTab('home'); window.dispatchEvent(new Event('workspace-projects-changed')); }} />}
+        {activeTab === 'project' && selectedProject && <ProjectWorkspace project={selectedProject} workspacePath={config.workspacePath} initialPanel={projectOperation} importConfig={config.smartImport} brollConfig={config.brollImport} conversionConfig={config.imageConversion} matchConfig={config.smartMatch} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onProjectMoved={nextProject => { setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { setSelectedProject(null); setProjectDestination(null); setProjectOperation(null); setActiveTab('home'); window.dispatchEvent(new Event('workspace-projects-changed')); }} />}
 
         {activeTab === 'converter' && (
           <RequirePlugin scriptName="png_to_jpg.py" title="PNG 转 JPG" desc="需要该引擎来执行图片格式的批量转换。">
-            <ConverterView />
+            <ConverterView defaultQuality={config.imageConversion.jpgQuality} />
           </RequirePlugin>
         )}
 
@@ -438,7 +417,7 @@ const App: React.FC = () => {
 };
 
 // --- 主功能 ---
-const ImportCard = ({ config, drives = [], destinationPath, onImportComplete }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, onImportComplete?: () => void }) => {
+const ImportCard = ({ config, drives = [], destinationPath, onImportConfigChange, onImportComplete }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: () => void }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'finished'>('idle');
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("等待连接...");
@@ -449,6 +428,10 @@ const ImportCard = ({ config, drives = [], destinationPath, onImportComplete }: 
   const isBusyRef = React.useRef(false);
   const onImportCompleteRef = React.useRef(onImportComplete);
   useEffect(() => { onImportCompleteRef.current = onImportComplete; }, [onImportComplete]);
+  const selectDrive = (sdPath: string) => {
+    if (!config || !onImportConfigChange) return;
+    onImportConfigChange({ ...config, sdPath });
+  };
 
   const runCmd = (stage: string, args: string[] = []) => {
     if(window.electronAPI) window.electronAPI.runScript('classify.py', ['--stage', stage, ...args]);
@@ -458,6 +441,7 @@ const ImportCard = ({ config, drives = [], destinationPath, onImportComplete }: 
     if (!window.electronAPI?.onPythonEvent) return;
 
     const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
+      if (event.scriptName !== 'classify.py') return;
       // 1. 记录日志
       if (event.message) {
         setLogs(prev => {
@@ -620,7 +604,7 @@ const ImportCard = ({ config, drives = [], destinationPath, onImportComplete }: 
     let displayMsg = statusMsg;
     if (status === 'idle') {
       if (!config?.sdPath) {
-        displayMsg = "请先在下方设置中选择 SD 卡盘符";
+        displayMsg = "请选择 SD 卡盘符";
       } else if (isConnected) {
         // 👇 这里的文案改成了“点击右侧按钮导入”
         displayMsg = `已连接 ${config?.sdPath}，点击右侧按钮导入`;
@@ -650,27 +634,18 @@ const ImportCard = ({ config, drives = [], destinationPath, onImportComplete }: 
           </div>
         </div>
 
-        {/* 👇 动态切换右侧按钮 */}
-        {isConnected && status === 'idle' ? (
-          <button
-            onClick={startImport} // 直接调用导入，无需再 check
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-bold flex items-center gap-2 shadow-md shadow-blue-500/20 transition-all animate-in zoom-in-95"
-          >
-            <Download size={16} />
-            开始导入
-          </button>
-        ) : (
-          <button
-            disabled
-            className={`p-2 rounded-lg transition ${
-              status === 'checking'
-                ? 'text-blue-500'
-                : 'text-slate-300 bg-slate-50 cursor-not-allowed'
-            }`}
-          >
-            <RotateCcw size={18} className={status === 'checking' ? 'animate-spin' : ''} />
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          <select aria-label="SD 卡盘符" value={config?.sdPath || ''} onChange={event => selectDrive(event.target.value)} disabled={status === 'checking'} className="h-9 max-w-40 rounded-lg border border-slate-200 bg-white px-2 text-sm font-medium text-slate-700 outline-none focus:border-blue-500 disabled:cursor-wait disabled:opacity-60">
+            {config?.sdPath && !drives.includes(config.sdPath) && <option value={config.sdPath}>{config.sdPath}（未连接）</option>}
+            <option value="">选择盘符</option>
+            {drives.map(drive => <option key={drive} value={drive}>{drive}</option>)}
+          </select>
+          {isConnected && status === 'idle' ? (
+            <button onClick={startImport} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-bold flex items-center gap-2 shadow-md shadow-blue-500/20 transition-all animate-in zoom-in-95"><Download size={16} />开始导入</button>
+          ) : (
+            <button disabled className={`p-2 rounded-lg transition ${status === 'checking' ? 'text-blue-500' : 'text-slate-300 bg-slate-50 cursor-not-allowed'}`}><RotateCcw size={18} className={status === 'checking' ? 'animate-spin' : ''} /></button>
+          )}
+        </div>
       </div>
     );
   }
@@ -709,18 +684,8 @@ const ImportCard = ({ config, drives = [], destinationPath, onImportComplete }: 
 
           {/* State: Progress (Importing or Processing) */}
           {(status === 'importing' || status === 'processing') && (
-            <div className="w-full max-w-sm space-y-3">
-              <div className="flex justify-between text-xs text-slate-500 font-mono">
-                <span>{status === 'importing' ? 'COPYING...' : 'ORGANIZING...'}</span>
-                <span>{progress}%</span>
-              </div>
-              <div className="h-2 bg-slate-800 rounded-full overflow-hidden border border-slate-200/50">
-                <div className="h-full bg-blue-500 transition-all duration-300 relative" style={{ width: `${progress}%` }}></div>
-              </div>
-              {/* 文件名显示区域 */}
-              <p className="text-sm text-slate-800 mt-2 font-mono truncate w-full px-4">
-                {statusMsg}
-              </p>
+            <div className="w-full max-w-xl">
+              <TaskProgress logs={logs} progress={progress} isRunning idleMessage={statusMsg} />
             </div>
           )}
 
@@ -754,20 +719,12 @@ const ImportCard = ({ config, drives = [], destinationPath, onImportComplete }: 
           {/* State: Finished */}
           {status === 'finished' && (
             <div className="w-full text-left animate-in zoom-in-95">
-              <div className="flex items-center gap-3 mb-4 p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-emerald-400">
-                <CheckCircle2 size={28} />
-                <div>
-                    <h4 className="font-bold text-base">导入完成</h4>
-                    <p className="text-xs text-emerald-500/70 mt-1">所有照片已导入</p>
-                </div>
-              </div>
+              <TaskProgress logs={logs} progress={100} isRunning={false} idleMessage="处理完成" />
             </div>
           )}
         </div>
       </div>
 
-      {/* 日志面板 */}
-      <TaskStatus logs={logs} />
     </div>
   );
 };
@@ -863,20 +820,26 @@ const BirthdayManagerModal = ({ onClose, onDataChanged }: { onClose: () => void,
   );
 };
 
+type HomePanelDragProps = Pick<React.ComponentProps<'button'>, 'draggable' | 'onDragStart' | 'onDragEnd' | 'onDragOver' | 'onDrop'>;
+
 const DashboardView = ({
   workspacePath,
   section = 'all',
   config,
   projectDestination,
   projectName,
-  onImportComplete
+  onImportConfigChange,
+  onImportComplete,
+  dragProps
 }: {
   workspacePath: string;
   section?: 'all' | 'import' | 'birthday';
   config: AppConfig['smartImport'];
   projectDestination?: string | null;
   projectName?: string;
+  onImportConfigChange: (config: AppConfig['smartImport']) => void;
   onImportComplete?: () => void | Promise<void>;
+  dragProps?: HomePanelDragProps;
 }) => {
   // 生日逻辑保持不变
   const [upcomingBirthdays, setUpcomingBirthdays] = useState<{name: string, date: string, sortKey: number}[]>([]);
@@ -966,12 +929,14 @@ const DashboardView = ({
         />
       )}
 
-      {section !== 'birthday' && <HomePanel title="从 SD 卡导入" initiallyOpen>
+      {section !== 'birthday' && <HomePanel title="从 SD 卡导入" initiallyOpen {...dragProps}>
         <div className="flex flex-col gap-6">
-          <ImportCard config={config} drives={drives} destinationPath={projectDestination ?? workspacePath} onImportComplete={projectDestination ? undefined : () => { void onImportComplete?.(); }} />
+          <RequirePlugin embedded scriptName="classify.py" title="从 SD 卡导入" desc="需要该引擎来识别和导入 SD 卡中的媒体文件。">
+            <ImportCard config={config} drives={drives} destinationPath={projectDestination ?? workspacePath} onImportConfigChange={onImportConfigChange} onImportComplete={projectDestination ? undefined : () => { void onImportComplete?.(); }} />
+          </RequirePlugin>
         </div>
       </HomePanel>}
-      {section !== 'import' && <HomePanel title="角色生日" initiallyOpen tone="birthday">
+      {section !== 'import' && <HomePanel title="角色生日" initiallyOpen tone="birthday" {...dragProps}>
         <div className="space-y-3">
           <div className="flex justify-between items-start">
               <h3 className="text-sm font-semibold text-slate-600 flex items-center gap-1.5">
@@ -1017,7 +982,7 @@ const DashboardView = ({
   );
 };
 
-const HomePanel = ({ title, initiallyOpen = false, tone, children }: { title: string; initiallyOpen?: boolean; tone?: 'birthday'; children: React.ReactNode }) => {
+const HomePanel = ({ title, initiallyOpen = false, tone, children, ...dragProps }: { title: string; initiallyOpen?: boolean; tone?: 'birthday'; children: React.ReactNode } & HomePanelDragProps) => {
   const [open, setOpen] = useState(initiallyOpen);
   const storageKey = `photoflow:home-panel:${title}`;
   useEffect(() => {
@@ -1028,19 +993,23 @@ const HomePanel = ({ title, initiallyOpen = false, tone, children }: { title: st
     window.localStorage.setItem(storageKey, String(open));
   }, [open, storageKey]);
   const isBirthday = tone === 'birthday';
-  return <section className={`rounded-xl overflow-hidden ${isBirthday ? 'birthday-panel' : 'border border-slate-200 bg-white'}`}><button onClick={() => setOpen(value => !value)} className={`flex w-full items-center justify-between px-5 py-4 text-left ${isBirthday ? 'birthday-panel-header' : ''}`}><span className={`text-base font-bold ${isBirthday ? 'birthday-panel-title' : 'text-slate-800'}`}>{title}</span><span className={isBirthday ? 'birthday-panel-icon' : 'text-slate-400'}>{open ? <ChevronUp size={18}/> : <ChevronDown size={18}/>}</span></button>{open && <div className={`border-t p-5 animate-in slide-in-from-top-1 duration-200 ${isBirthday ? 'birthday-panel-body' : 'border-slate-100'}`}>{children}</div>}</section>;
+  return <section className={`rounded-xl overflow-hidden ${isBirthday ? 'birthday-panel' : 'border border-slate-200 bg-white'}`}><button {...dragProps} onClick={() => setOpen(value => !value)} className={`flex w-full items-center justify-between px-5 py-4 text-left ${dragProps.draggable ? 'cursor-grab active:cursor-grabbing' : ''} ${isBirthday ? 'birthday-panel-header' : ''}`}><span className={`text-base font-bold ${isBirthday ? 'birthday-panel-title' : 'text-slate-800'}`}>{title}</span><span className={isBirthday ? 'birthday-panel-icon' : 'text-slate-400'}>{open ? <ChevronUp size={18}/> : <ChevronDown size={18}/>}</span></button>{open && <div className={`border-t p-5 animate-in slide-in-from-top-1 duration-200 ${isBirthday ? 'birthday-panel-body' : 'border-slate-100'}`}>{children}</div>}</section>;
 };
 
-const ConverterView = ({ embedded = false }: { embedded?: boolean }) => {
-  const [targetPath, setTargetPath] = useState("");
+const ConverterView = ({ embedded = false, initialTargetPath = "", defaultQuality = 100 }: { embedded?: boolean; initialTargetPath?: string; defaultQuality?: number }) => {
+  const [targetPath, setTargetPath] = useState(initialTargetPath);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [quality, setQuality] = useState(100);
+  const [quality, setQuality] = useState(defaultQuality);
+
+  useEffect(() => { setTargetPath(initialTargetPath); }, [initialTargetPath]);
+  useEffect(() => { setQuality(defaultQuality); }, [defaultQuality]);
 
   useEffect(() => {
     if (!window.electronAPI?.onPythonEvent) return;
     const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
+      if (event.scriptName !== 'png_to_jpg.py') return;
       switch (event.type) {
         case 'log':
         case 'error':
@@ -1141,18 +1110,12 @@ const ConverterView = ({ embedded = false }: { embedded?: boolean }) => {
           </select>
         </div>
         {/* Progress & Actions */}
-        <div className="bg-slate-50 rounded-lg border border-slate-200 p-4 flex items-center gap-6">
-             <div className="flex-1 flex flex-col gap-1">
-                <div className="flex justify-between text-xs text-slate-500">
-                    <span>进度</span>
-                    <span className="font-mono text-blue-600">{progress}%</span>
-                </div>
-                <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
-                    <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${progress}%` }}></div>
-                </div>
-             </div>
-
-             <button
+        <TaskProgress
+          logs={logs}
+          progress={progress}
+          isRunning={isRunning}
+          idleMessage={isRunning ? '正在转换…' : '进度'}
+          action={<button
                 onClick={startConversion}
                 disabled={!targetPath || isRunning}
                 className={`px-8 py-2 rounded-lg font-bold transition flex items-center gap-2 ${
@@ -1163,11 +1126,10 @@ const ConverterView = ({ embedded = false }: { embedded?: boolean }) => {
              >
                 {isRunning ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} fill="currentColor" />}
                 {isRunning ? '转换中...' : '开始转换'}
-             </button>
-        </div>
+             </button>}
+        />
       </div>
 
-      <TaskStatus logs={logs} />
     </div>
   );
 };
@@ -1189,6 +1151,7 @@ const ResearchView = ({
   useEffect(() => {
     if (!window.electronAPI?.onPythonEvent) return;
     const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
+      if (event.scriptName !== 'research.py') return;
       switch (event.type) {
         case 'log':
         case 'error':
@@ -1297,19 +1260,12 @@ const ResearchView = ({
             </div>
         </div>
 
-        {/* 状态与进度 */}
-        <div className="bg-slate-50 rounded-lg border border-slate-200 p-4">
-            <div className="flex justify-between text-sm mb-2">
-               <span className="text-slate-800">{statusMsg}</span>
-               <span className="text-blue-600 font-mono">{progress.toFixed(1)}%</span>
-            </div>
-            <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
-               <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${progress}%` }}/>
-            </div>
-        </div>
-
-        <div className="flex justify-end">
-             <button
+        <TaskProgress
+          logs={logs}
+          progress={progress}
+          isRunning={isRunning}
+          idleMessage={statusMsg}
+          action={<button
                onClick={runAnalysis}
                disabled={isRunning}
                className={`px-6 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
@@ -1320,10 +1276,8 @@ const ResearchView = ({
              >
                 {isRunning ? <Loader2 className="animate-spin" size={18}/> : <Play size={18} fill="currentColor" />}
                 {isRunning ? '处理中' : '开始处理'}
-             </button>
-        </div>
-
-        <TaskStatus logs={logs} />
+             </button>}
+        />
       </div>
     </div>
   );
@@ -1343,13 +1297,21 @@ const MatchView = ({
     const [keywords, setKeywords] = useState("");
     const [logs, setLogs] = useState<LogEntry[]>([]);
     const [isRunning, setIsRunning] = useState(false);
+    const [progress, setProgress] = useState(0);
 
     useEffect(() => {
         if (!window.electronAPI?.onPythonEvent) return;
         const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
+            if (event.scriptName !== 'catch.py') return;
             if (event.type === 'log' || event.type === 'error' || event.type === 'success') {
                 setLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), message: event.message, type: event.type as any }]);
-                if (event.type === 'success' || event.type === 'error') setIsRunning(false);
+                if (event.type === 'success' || event.type === 'error') {
+                    setIsRunning(false);
+                    if (event.type === 'success') setProgress(100);
+                }
+            } else if (event.type === 'progress') {
+                if (event.progress !== undefined) setProgress(event.progress);
+                if (event.message) setLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), message: event.message, type: 'info' }]);
             }
         });
         return cleanup;
@@ -1359,6 +1321,7 @@ const MatchView = ({
         if (!projectPath || !keywords.trim() || isRunning) return;
         setIsRunning(true);
         setLogs([]);
+        setProgress(0);
         window.electronAPI.runScript('catch.py', [
             '--source', projectPath,
             '--image_dest_name', config.imageDestFolderName,
@@ -1371,7 +1334,7 @@ const MatchView = ({
         <div className="w-full space-y-6">
             {!embedded && <h2 className="text-2xl font-bold text-slate-800">选片</h2>}
             <div className={embedded ? 'space-y-6' : 'bg-white border border-slate-200 rounded-xl p-6 space-y-6'}>
-                <p className="text-gray-600">默认先在当前项目的 RAW 文件夹查找，未找到的文件名再到 MOV 文件夹查找。</p>
+                <p className="text-gray-600">逻辑是客户发来了文件名的选片，把文件名从RAW/MOV文件夹挑选出来。</p>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-sm text-blue-700">图片存放到：<strong>{config.imageDestFolderName}</strong></div>
                     <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-sm text-blue-700">视频存放到：<strong>{config.videoDestFolderName}</strong></div>
@@ -1380,14 +1343,17 @@ const MatchView = ({
                     <label className="text-xs font-semibold text-slate-500 uppercase">文件名</label>
                     <textarea value={keywords} onChange={(e) => setKeywords(e.target.value)} placeholder="文件名需要用空格分开，一个空格分开一个文件名" className="w-full h-24 bg-slate-50 border border-slate-200 rounded-lg p-4 text-slate-900 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm resize-none"/>
                 </div>
-                <div className="flex justify-end">
-                    <button onClick={runTask} disabled={isRunning || !projectPath || !keywords.trim()} className={`px-8 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${isRunning || !projectPath || !keywords.trim() ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none' : 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-500/20'}`}>
+                <TaskProgress
+                    logs={logs}
+                    progress={progress}
+                    isRunning={isRunning}
+                    idleMessage={isRunning ? '正在选片…' : '进度'}
+                    action={<button onClick={runTask} disabled={isRunning || !projectPath || !keywords.trim()} className={`px-8 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${isRunning || !projectPath || !keywords.trim() ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none' : 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-500/20'}`}>
                         {isRunning ? <Loader2 className="animate-spin" size={18}/> : <ScanSearch size={18}/>}
                         {isRunning ? '复制中...' : '开始选片'}
-                    </button>
-                </div>
+                    </button>}
+                />
             </div>
-            <TaskStatus logs={logs}/>
         </div>
     );
 };
@@ -1403,6 +1369,7 @@ const RenameView = ({ embedded = false, folderOptions = [] }: { embedded?: boole
     useEffect(() => {
         if (!window.electronAPI?.onPythonEvent) return;
         const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
+            if (event.scriptName !== 'rename.py') return;
             switch (event.type) {
                 case 'log': case 'error': case 'success':
                     setLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), message: event.message, type: event.type as any }]);
@@ -1417,8 +1384,18 @@ const RenameView = ({ embedded = false, folderOptions = [] }: { embedded?: boole
     const handleDrop = (e: React.DragEvent, setPath: (s: string) => void) => { e.preventDefault(); e.stopPropagation(); if (e.dataTransfer.files.length > 0) setPath((e.dataTransfer.files[0] as any).path); };
     const allowDrag = (e: React.DragEvent) => { e.preventDefault(); e.stopPropagation(); };
 
-    const runRename = () => {
+    const runRename = async () => {
         if (!folderA || !folderB || isRunning) return;
+        const formatCheck = await window.electronAPI.checkCompareFolders([folderA, folderB]);
+        if (!formatCheck.success) {
+            setLogs([{ timestamp: new Date().toLocaleTimeString(), message: formatCheck.error || '无法检查图片格式', type: 'error' }]);
+            return;
+        }
+        if (formatCheck.invalidFolders?.length) {
+            const invalidCount = formatCheck.invalidFolders.reduce((count, folder) => count + folder.files.length, 0);
+            setLogs([{ timestamp: new Date().toLocaleTimeString(), message: `检测到 ${invalidCount} 张非 JPG/JPEG 图片，请先在项目文件夹中右键选择“PNG 转 JPG”完成转换。`, type: 'warning' }]);
+            return;
+        }
         setLogs([]); setProgress(0); setIsRunning(true);
         const args = ['--folder_a', folderA, '--folder_b', folderB];
         if (copyUnmatched) args.push('--copy_unmatched');
@@ -1493,8 +1470,9 @@ const RenameView = ({ embedded = false, folderOptions = [] }: { embedded?: boole
                         onDrop={(e) => handleDrop(e, setFolderA)}
                         onDragOver={allowDrag}
                         placeholder="拖入摄影师发给客户的原图文件夹..."
-                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-sm font-mono"
+                        className="hidden"
                     />
+                    <select value={folderA} onChange={event => setFolderA(event.target.value)} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 focus:border-blue-500 focus:outline-none"><option value="">请选择项目文件夹</option>{folderOptions.map(folder => <option key={folder.path} value={folder.path}>{folder.name}</option>)}</select>
                     <datalist id="compare-folder-a">{folderOptions.map(folder => <option key={folder.path} value={folder.path}>{folder.name}</option>)}</datalist>
                     <p className="text-xs text-slate-500">选择对照图片所在的项目文件夹（对照组 A）。</p>
                 </div>
@@ -1509,22 +1487,22 @@ const RenameView = ({ embedded = false, folderOptions = [] }: { embedded?: boole
                         onDrop={(e) => handleDrop(e, setFolderB)}
                         onDragOver={allowDrag}
                         placeholder="拖入客户发回来的乱序文件夹..."
-                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 text-sm font-mono"
+                        className="hidden"
                     />
+                    <select value={folderB} onChange={event => setFolderB(event.target.value)} className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 focus:border-green-500 focus:outline-none"><option value="">请选择项目文件夹</option>{folderOptions.map(folder => <option key={folder.path} value={folder.path}>{folder.name}</option>)}</select>
                     <datalist id="compare-folder-b">{folderOptions.map(folder => <option key={folder.path} value={folder.path}>{folder.name}</option>)}</datalist>
                     <p className="text-xs text-slate-500">选择最新图片所在的项目文件夹（对照组 B）。</p>
                 </div>
             </div>
 
-            <div className="bg-white border border-slate-200 rounded-xl p-4 flex items-center justify-between">
+            <div className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col gap-4">
                 <div className="flex items-center gap-2">
                     <input type="checkbox" id="copyUnmatched" checked={copyUnmatched} onChange={(e) => setCopyUnmatched(e.target.checked)} className="w-4 h-4 rounded border-slate-300 bg-white text-blue-600" />
                     <label htmlFor="copyUnmatched" className="text-sm text-slate-800 cursor-pointer select-none">
                         单独整理 文件夹A 中客户没返回的图片
                     </label>
                 </div>
-                <div className="flex items-center gap-4">
-                    {isRunning && <span className="text-blue-600 font-mono text-sm">{progress}%</span>}
+                <div className="hidden">
                     <button
                         onClick={runRename}
                         disabled={isRunning || !folderA || !folderB}
@@ -1539,7 +1517,13 @@ const RenameView = ({ embedded = false, folderOptions = [] }: { embedded?: boole
                     </button>
                 </div>
             </div>
-            <TaskStatus logs={logs} />
+            <TaskProgress
+                logs={logs}
+                progress={progress}
+                isRunning={isRunning}
+                idleMessage={isRunning ? '正在对比…' : '进度'}
+                action={<button onClick={runRename} disabled={isRunning || !folderA || !folderB} className={`project-action-button ${isRunning || !folderA || !folderB ? 'cursor-not-allowed opacity-50' : ''}`}>{isRunning ? <Loader2 className="animate-spin" size={16}/> : <FileDiff size={16}/>} {isRunning ? '对比中...' : '开始对比'}</button>}
+            />
         </div>
     );
 };
@@ -1554,6 +1538,7 @@ const VideoSplitView = () => {
   useEffect(() => {
     if (!window.electronAPI?.onPythonEvent) return;
     const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
+      if (event.scriptName !== 'cut_video.py') return;
       switch (event.type) {
         case 'log':
         case 'error':
@@ -1655,18 +1640,12 @@ const VideoSplitView = () => {
         </div>
 
         {/* Progress & Actions */}
-        <div className="bg-slate-50 rounded-lg border border-slate-200 p-4 flex items-center gap-6">
-              <div className="flex-1 flex flex-col gap-1">
-                <div className="flex justify-between text-xs text-slate-500">
-                    <span>{statusMsg}</span>
-                    <span className="font-mono text-blue-600">{progress}%</span>
-                </div>
-                <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
-                    <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${progress}%` }}></div>
-                </div>
-              </div>
-
-            <button
+        <TaskProgress
+          logs={logs}
+          progress={progress}
+          isRunning={isRunning}
+          idleMessage={statusMsg}
+          action={<button
               onClick={startSplit}
               disabled={!videoPath || isRunning}
               className={`px-8 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
@@ -1677,11 +1656,10 @@ const VideoSplitView = () => {
             >
               {isRunning ? <Loader2 className="animate-spin" size={18} /> : <Scissors size={18} fill="currentColor" />}
               {isRunning ? '切割中...' : '开始切割'}
-            </button>
-        </div>
+            </button>}
+        />
       </div>
 
-      <TaskStatus logs={logs} />
     </div>
   );
 };
@@ -1746,26 +1724,41 @@ const UpdateModal = ({
   );
 };
 
-const SettingsModal = ({ config, onSave, onClose, requireWorkspace = false }: { config: AppConfig; onSave: (config: AppConfig) => void | Promise<void>; onClose: () => void; requireWorkspace?: boolean }) => {
+const LegacySettingsModal = ({ config, onSave, onClose, requireWorkspace = false }: { config: AppConfig; onSave: (config: AppConfig) => void | Promise<void>; onClose: () => void; requireWorkspace?: boolean }) => {
   const [draft, setDraft] = useState(config);
   const [drives, setDrives] = useState<string[]>([]);
   useEffect(() => { window.electronAPI?.getDrives?.().then(setDrives); }, []);
   const updateImport = (changes: Partial<AppConfig['smartImport']>) => setDraft(current => ({ ...current, smartImport: { ...current.smartImport, ...changes } }));
   const updateBroll = (changes: Partial<AppConfig['brollImport']>) => setDraft(current => ({ ...current, brollImport: { ...current.brollImport, ...changes } }));
+  const updateImageConversion = (changes: Partial<AppConfig['imageConversion']>) => setDraft(current => ({ ...current, imageConversion: { ...current.imageConversion, ...changes } }));
   const updateMatch = (changes: Partial<AppConfig['smartMatch']>) => setDraft(current => ({ ...current, smartMatch: { ...current.smartMatch, ...changes } }));
   const save = async () => { const workspacePath = draft.workspacePath.trim(); if (!workspacePath) return; await onSave({ ...draft, workspacePath }); if (!requireWorkspace) onClose(); };
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"><div className="absolute inset-0" onClick={requireWorkspace ? undefined : onClose}/><div className="relative z-10 flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><header className="flex items-center justify-between border-b border-slate-200 bg-slate-100 p-5"><h3 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Settings size={20} className="text-blue-600"/>{requireWorkspace ? '设置工作目录' : '设置'}</h3>{!requireWorkspace && <button onClick={onClose} className="rounded-full p-2 text-slate-500 hover:bg-slate-200"><X size={20}/></button>}</header><div className="min-h-0 flex-1 space-y-7 overflow-y-auto p-6"><section><h4 className="text-sm font-bold text-slate-800">界面配色</h4><div className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">{([['system', '适应系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([theme, label]) => <button key={theme} onClick={() => setDraft(current => ({ ...current, theme }))} className={`rounded-md px-4 py-2 text-sm font-bold transition ${draft.theme === theme ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}</div></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">工作目录</h4><input value={draft.workspacePath} onChange={event => setDraft(current => ({ ...current, workspacePath: event.target.value }))} placeholder="例如：D:/照片流" className="mt-4 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 font-mono text-sm text-slate-800 focus:border-blue-500 focus:outline-none"/></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">PNG 转 JPG</h4><p className="mt-1 text-sm text-slate-500">批量转换默认使用此导出画质。</p><label className="form-label">默认导出 JPG 画质</label><select value={draft.imageConversion.jpgQuality} onChange={event => updateImageConversion({ jpgQuality: Number(event.target.value) })} className="form-input"><option value={100}>最高（100）</option><option value={95}>高（95）</option><option value={85}>标准（85）</option><option value={75}>节省空间（75）</option></select></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">从 SD 卡导入</h4><label className="settings-check"><input type="checkbox" checked={draft.smartImport.autoStart} onChange={event => updateImport({ autoStart: event.target.checked })}/>应用启动时自动读取 SD 卡</label><label className="settings-check"><input type="checkbox" checked={draft.smartImport.generateVideoPreview} onChange={event => updateImport({ generateVideoPreview: event.target.checked })}/>生成视频预览</label></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">导入花絮</h4><label className="settings-check"><input type="checkbox" checked={draft.brollImport.splitLargeFiles} onChange={event => updateBroll({ splitLargeFiles: event.target.checked })}/>超过 4GB 的视频自动分割</label><label className="settings-check"><input type="checkbox" checked={draft.brollImport.clearSource} onChange={event => updateBroll({ clearSource: event.target.checked })}/>导入后清空原始文件</label></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">选片</h4><label className="form-label">图片选片文件夹名称</label><input value={draft.smartMatch.imageDestFolderName} onChange={event => updateMatch({ imageDestFolderName: event.target.value })} className="form-input"/><label className="form-label">视频选片文件夹名称</label><input value={draft.smartMatch.videoDestFolderName} onChange={event => updateMatch({ videoDestFolderName: event.target.value })} className="form-input"/></section></div><footer className="flex justify-end gap-3 border-t border-slate-100 bg-white p-5">{!requireWorkspace && <button onClick={onClose} className="dialog-secondary">取消</button>}<button onClick={save} disabled={!draft.workspacePath.trim()} className="dialog-primary">{requireWorkspace ? '确认工作目录' : '保存设置'}</button></footer></div></div>;
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"><div className="absolute inset-0" onClick={requireWorkspace ? undefined : onClose}/><div className="relative z-10 flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><div className="flex items-center justify-between border-b border-slate-200 bg-slate-100 p-5"><h3 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Settings size={20} className="text-blue-600"/>{requireWorkspace ? '设置工作目录' : '设置'}</h3>{requireWorkspace && <p className="mt-1 text-sm text-slate-500">首次使用前，请先选择一个用于存放项目的工作目录。</p>}{!requireWorkspace && <button onClick={onClose} className="rounded-full p-2 text-slate-500 hover:bg-slate-200"><X size={20}/></button>}</div><div className="min-h-0 flex-1 space-y-7 overflow-y-auto p-6"><section><h4 className="text-sm font-bold text-slate-800">界面配色</h4><p className="mt-1 text-sm text-slate-500">默认适应系统，也可固定为浅色或深色。</p><div className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">{([['system', '适应系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([theme, label]) => <button key={theme} onClick={() => setDraft(current => ({ ...current, theme }))} className={`rounded-md px-4 py-2 text-sm font-bold transition ${draft.theme === theme ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}</div></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">工作目录</h4><p className="mt-1 text-sm text-slate-500">选择磁盘根目录时，会使用根目录下的“照片流”文件夹。</p><input value={draft.workspacePath} onChange={event => setDraft(current => ({ ...current, workspacePath: event.target.value }))} placeholder="例如：D:/照片流" className="mt-4 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 font-mono text-sm text-slate-800 focus:border-blue-500 focus:outline-none"/></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">从 SD 卡导入</h4><p className="mt-1 text-sm text-slate-500">导入位置由当前项目或工作目录决定。</p><p className="mt-3 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs leading-5 text-blue-700">支持佳能（.cr2、.cr3）、索尼（.arw）、尼康（.nef）、奥林巴斯（.orf）、徕卡（.rwl、.dng）、富士（.raf）、哈苏（.3fr、.fff）、大疆（.dng）的 RAW 格式，以及常见图片和视频导入。</p><label className="settings-check"><input type="checkbox" checked={draft.smartImport.autoStart} onChange={event => updateImport({ autoStart: event.target.checked })}/>应用启动时自动读取 SD 卡</label><label className="form-label">SD 卡盘符</label><select value={draft.smartImport.sdPath} onChange={event => updateImport({ sdPath: event.target.value })} className="form-input">{draft.smartImport.sdPath && !drives.includes(draft.smartImport.sdPath) && <option value={draft.smartImport.sdPath}>{draft.smartImport.sdPath}（当前未连接）</option>}<option value="">请选择设备盘符</option>{drives.map(drive => <option key={drive} value={drive}>{drive}</option>)}</select><label className="settings-check"><input type="checkbox" checked={draft.smartImport.generateVideoPreview} onChange={event => updateImport({ generateVideoPreview: event.target.checked })}/>生成视频预览（储存至 mov_压缩）</label></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">导入花絮</h4><p className="mt-1 text-sm text-slate-500">文件会复制到当前项目的“花絮”文件夹。</p><label className="settings-check"><input type="checkbox" checked={draft.brollImport.splitLargeFiles} onChange={event => updateBroll({ splitLargeFiles: event.target.checked })}/>超过 4GB 的单个视频自动分割为约 4GB 的文件</label><label className="settings-check"><input type="checkbox" checked={draft.brollImport.clearSource} onChange={event => updateBroll({ clearSource: event.target.checked })}/>导入后清空原始文件</label></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">{"\u9009\u7247"}</h4><p className="mt-1 text-sm text-slate-500">{"\u6311\u9009\u51fa\u7684\u56fe\u7247\u548c\u89c6\u9891\u4f1a\u5206\u522b\u5b58\u653e\u5230\u5f53\u524d\u9879\u76ee\u4e2d\u7684\u4ee5\u4e0b\u6587\u4ef6\u5939\u3002"}</p><label className="form-label">{"\u56fe\u7247\u9009\u7247\u6587\u4ef6\u5939\u540d\u79f0"}</label><input value={draft.smartMatch.imageDestFolderName} onChange={event => updateMatch({ imageDestFolderName: event.target.value })} placeholder={"\u56fe\u7247\u9009\u7247"} className="form-input"/><label className="form-label">{"\u89c6\u9891\u9009\u7247\u6587\u4ef6\u5939\u540d\u79f0"}</label><input value={draft.smartMatch.videoDestFolderName} onChange={event => updateMatch({ videoDestFolderName: event.target.value })} placeholder={"\u89c6\u9891\u9009\u7247"} className="form-input"/></section></div><div className="flex justify-end gap-3 border-t border-slate-100 bg-white p-5">{!requireWorkspace && <button onClick={onClose} className="dialog-secondary">取消</button>}<button onClick={save} disabled={!draft.workspacePath.trim()} className="dialog-primary">{requireWorkspace ? '确认工作目录' : '保存设置'}</button></div></div></div>;
 };
-type ProjectPanel = 'import' | 'broll' | 'match' | 'compare' | 'create' | 'trash' | null;
+
+const SettingsModal = ({ config, onSave, onClose, requireWorkspace = false }: { config: AppConfig; onSave: (config: AppConfig) => void | Promise<void>; onClose: () => void; requireWorkspace?: boolean }) => {
+  const [draft, setDraft] = useState(config);
+  const updateImport = (changes: Partial<AppConfig['smartImport']>) => setDraft(current => ({ ...current, smartImport: { ...current.smartImport, ...changes } }));
+  const updateBroll = (changes: Partial<AppConfig['brollImport']>) => setDraft(current => ({ ...current, brollImport: { ...current.brollImport, ...changes } }));
+  const updateImageConversion = (changes: Partial<AppConfig['imageConversion']>) => setDraft(current => ({ ...current, imageConversion: { ...current.imageConversion, ...changes } }));
+  const updateMatch = (changes: Partial<AppConfig['smartMatch']>) => setDraft(current => ({ ...current, smartMatch: { ...current.smartMatch, ...changes } }));
+  const save = async () => { const workspacePath = draft.workspacePath.trim(); if (!workspacePath) return; await onSave({ ...draft, workspacePath }); if (!requireWorkspace) onClose(); };
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"><div className="absolute inset-0" onClick={requireWorkspace ? undefined : onClose}/><div className="relative z-10 flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><header className="flex items-center justify-between border-b border-slate-200 bg-slate-100 p-5"><h3 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Settings size={20} className="text-blue-600"/>{requireWorkspace ? '设置工作目录' : '设置'}</h3>{!requireWorkspace && <button onClick={onClose} className="rounded-full p-2 text-slate-500 hover:bg-slate-200"><X size={20}/></button>}</header><div className="min-h-0 flex-1 space-y-7 overflow-y-auto p-6"><section><h4 className="text-sm font-bold text-slate-800">界面配色</h4><div className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">{([['system', '适应系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([theme, label]) => <button key={theme} onClick={() => setDraft(current => ({ ...current, theme }))} className={`rounded-md px-4 py-2 text-sm font-bold transition ${draft.theme === theme ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}</div></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">工作目录</h4><input value={draft.workspacePath} onChange={event => setDraft(current => ({ ...current, workspacePath: event.target.value }))} placeholder="例如：D:/照片流" className="mt-4 w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 font-mono text-sm text-slate-800 focus:border-blue-500 focus:outline-none"/></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">PNG 转 JPG</h4><label className="form-label">默认导出 JPG 画质</label><select value={draft.imageConversion.jpgQuality} onChange={event => updateImageConversion({ jpgQuality: Number(event.target.value) })} className="form-input"><option value={100}>最高（100）</option><option value={95}>高（95）</option><option value={85}>标准（85）</option><option value={75}>节省空间（75）</option></select></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">从 SD 卡导入</h4><p className="mt-3 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs leading-5 text-blue-700">支持佳能（.cr2、.cr3）、索尼（.arw）、尼康（.nef）、奥林巴斯（.orf）、徕卡（.rwl、.dng）、富士（.raf）、哈苏（.3fr、.fff）、大疆（.dng）的 RAW 格式，以及常见图片和视频导入。</p><label className="settings-check"><input type="checkbox" checked={draft.smartImport.autoStart} onChange={event => updateImport({ autoStart: event.target.checked })}/>应用启动时自动读取 SD 卡</label><label className="settings-check"><input type="checkbox" checked={draft.smartImport.generateVideoPreview} onChange={event => updateImport({ generateVideoPreview: event.target.checked })}/>生成视频预览</label></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">导入花絮</h4><label className="settings-check"><input type="checkbox" checked={draft.brollImport.splitLargeFiles} onChange={event => updateBroll({ splitLargeFiles: event.target.checked })}/>超过 4GB 的视频自动分割</label><label className="settings-check"><input type="checkbox" checked={draft.brollImport.clearSource} onChange={event => updateBroll({ clearSource: event.target.checked })}/>导入后清空原始文件</label></section><section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">选片</h4><label className="form-label">图片选片文件夹名称</label><input value={draft.smartMatch.imageDestFolderName} onChange={event => updateMatch({ imageDestFolderName: event.target.value })} className="form-input"/><label className="form-label">视频选片文件夹名称</label><input value={draft.smartMatch.videoDestFolderName} onChange={event => updateMatch({ videoDestFolderName: event.target.value })} className="form-input"/></section></div><footer className="flex justify-end gap-3 border-t border-slate-100 bg-white p-5">{!requireWorkspace && <button onClick={onClose} className="dialog-secondary">取消</button>}<button onClick={save} disabled={!draft.workspacePath.trim()} className="dialog-primary">{requireWorkspace ? '确认工作目录' : '保存设置'}</button></footer></div></div>;
+};
+
+type ProjectPanel = 'import' | 'broll' | 'match' | 'compare' | 'converter' | 'create' | 'trash' | null;
 const PROJECT_STATUSES: Array<WorkspaceProject['status']> = ['未策划', '已策划', '进行中', '已归档'];
 
-const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, brollConfig, matchConfig, onMatchConfigChange, onProjectMoved, onDeleted }: {
+const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, brollConfig, conversionConfig, matchConfig, onImportConfigChange, onMatchConfigChange, onProjectMoved, onDeleted }: {
   project: WorkspaceProject;
   workspacePath: string;
   initialPanel: 'import' | 'broll' | 'match' | null;
   importConfig: AppConfig['smartImport'];
   brollConfig: AppConfig['brollImport'];
+  conversionConfig: AppConfig['imageConversion'];
   matchConfig: AppConfig['smartMatch'];
+  onImportConfigChange: (config: AppConfig['smartImport']) => void;
   onMatchConfigChange: (config: AppConfig['smartMatch']) => void;
   onProjectMoved: (project: WorkspaceProject) => void;
   onDeleted: () => void;
@@ -1778,6 +1771,15 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
   const [renameFolder, setRenameFolder] = useState<{ name: string; path: string } | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [progressName, setProgressName] = useState('');
+  const [conversionTarget, setConversionTarget] = useState('');
+  const [drives, setDrives] = useState<string[]>([]);
+
+  useEffect(() => {
+    const fetchDrives = () => window.electronAPI?.getDrives?.().then(setDrives);
+    fetchDrives();
+    const intervalId = window.setInterval(fetchDrives, 3000);
+    return () => window.clearInterval(intervalId);
+  }, []);
 
   const refresh = async () => {
     const result = await window.electronAPI.getProjectContents(workspacePath, project.status, project.name);
@@ -1851,6 +1853,8 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
 
   return (
     <div className="mx-auto max-w-6xl space-y-6 animate-in fade-in duration-300">
+      {panel === 'converter' && <CollapsiblePanel title="PNG 转 JPG" onClose={() => setPanel(null)}><ConverterView embedded initialTargetPath={conversionTarget} defaultQuality={conversionConfig.jpgQuality}/></CollapsiblePanel>}
+      {folderMenu && createPortal(<div className="fixed z-[301] w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" style={{ left: Math.min(folderMenu.x, window.innerWidth - 190), top: Math.min(folderMenu.y, window.innerHeight - 110) }} onClick={event => event.stopPropagation()}><button className="project-menu-item" onClick={() => { setConversionTarget(folderMenu.folder.path); setPanel('converter'); setFolderMenu(null); }}>PNG 转 JPG</button><button className="project-menu-item" onClick={() => { setRenameFolder(folderMenu.folder); setRenameValue(folderMenu.folder.name); setFolderMenu(null); }}>重命名</button></div>, document.body)}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex flex-wrap items-center gap-3">
           <h2 className="text-2xl font-bold text-slate-800">{project.name}</h2>
@@ -1876,7 +1880,7 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
       </div>
 
       {message && <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">{message}</div>}
-      {panel === 'import' && <CollapsiblePanel title="从 SD 卡导入" onClose={() => setPanel(null)}><p className="mb-4 text-sm text-slate-500">导入的文件会直接整理到当前项目“{project.name}”中。</p><ImportCard config={importConfig} destinationPath={project.path} onImportComplete={markInProgress}/></CollapsiblePanel>}
+      {panel === 'import' && <CollapsiblePanel title="从 SD 卡导入" onClose={() => setPanel(null)}><p className="mb-4 text-sm text-slate-500">导入的文件会直接整理到当前项目“{project.name}”中。</p><ImportCard config={importConfig} drives={drives} destinationPath={project.path} onImportConfigChange={onImportConfigChange} onImportComplete={markInProgress}/></CollapsiblePanel>}
       {panel === 'broll' && <CollapsiblePanel title="导入花絮" onClose={() => setPanel(null)}><p className="text-sm text-slate-500">选择要保留的花絮媒体，软件会复制到当前项目的“花絮”文件夹。</p><button onClick={importBroll} className="mt-4 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-500">选择花絮文件</button></CollapsiblePanel>}
       {panel === 'match' && <CollapsiblePanel title="选片" onClose={() => setPanel(null)}><MatchView embedded config={matchConfig} projectPath={project.path} onUpdateConfig={onMatchConfigChange}/></CollapsiblePanel>}
       {panel === 'create' && <div className="fixed inset-0 z-[320] flex items-center justify-center bg-slate-950/40 p-4"><div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="mb-4 flex items-center justify-between"><h3 className="font-bold text-slate-800">创建进度</h3><button onClick={() => { setPanel(null); setProgressName(''); }}><X size={18}/></button></div><p className="mb-3 text-sm text-slate-500">输入进度名称后，会在当前项目中新建同名文件夹。</p><input autoFocus value={progressName} onChange={event => setProgressName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') createProgress(); }} placeholder="例如：初修、精修、交付" className="form-input"/><div className="mt-4 flex justify-end gap-2"><button onClick={() => { setPanel(null); setProgressName(''); }} className="dialog-secondary">取消</button><button onClick={createProgress} disabled={!progressName.trim()} className="dialog-primary">创建文件夹</button></div></div></div>}

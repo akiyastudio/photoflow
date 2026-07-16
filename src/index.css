@@ -2,6 +2,14 @@
 @tailwind components;
 @tailwind utilities;
 
+.brand-logo { object-fit: contain; }
+.brand-logo-dark { filter: brightness(1.35) saturate(.9); }
+.brand-logo-dark-only { display: none; }
+html.dark .brand-logo-light-only { display: none; }
+html.dark .brand-logo-dark-only { display: block; }
+.win11-spinner { width: 24px; height: 24px; border: 3px solid rgb(148 163 184 / .28); border-top-color: #fff; border-radius: 9999px; animation: win11-spin .8s linear infinite; }
+@keyframes win11-spin { to { transform: rotate(360deg); } }
+
 /* Custom scrollbar for terminal outputs */
 .scrollbar-hide::-webkit-scrollbar {
     display: none;
