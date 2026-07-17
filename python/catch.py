@@ -49,25 +49,25 @@ def matching_files(source_dir, keyword):
     return matches
 
 
-def process_project(project_dir, image_dest_name, video_dest_name, search_names):
+def process_project(project_dir, image_dest_name, video_dest_name, image_source_name, video_source_name, search_names):
     project_dir = os.path.abspath(project_dir)
-    raw_dir = find_project_folder(project_dir, 'RAW')
-    mov_dir = find_project_folder(project_dir, 'MOV')
+    raw_dir = find_project_folder(project_dir, image_source_name) if image_source_name else None
+    mov_dir = find_project_folder(project_dir, video_source_name) if video_source_name else None
     if not raw_dir and not mov_dir:
-        log_error("项目中没有找到 RAW 或 MOV 文件夹。")
+        log_error("项目中没有找到 raw 或 mov 文件夹。")
         return
 
     image_target = os.path.join(project_dir, image_dest_name)
     video_target = os.path.join(project_dir, video_dest_name)
     copied, skipped, missing = 0, 0, []
-    log_info("开始选片：优先在 RAW 中查找，未命中的文件名再到 MOV 中查找。")
+    log_info("开始选片：优先在 raw 中查找，未命中的文件名再到 mov 中查找。")
 
     for keyword in search_names:
         matches = matching_files(raw_dir, keyword)
-        source_label = 'RAW'
+        source_label = 'raw'
         if not matches:
             matches = matching_files(mov_dir, keyword)
-            source_label = 'MOV'
+            source_label = 'mov'
         if not matches:
             missing.append(keyword)
             continue
@@ -90,7 +90,7 @@ def process_project(project_dir, image_dest_name, video_dest_name, search_names)
                 log_error(f"复制失败 {os.path.basename(source_path)}: {error}")
 
     if missing:
-        log_info(f"以下文件名在 RAW 和 MOV 中均未找到: {', '.join(missing)}")
+        log_info(f"以下文件名在 raw 和 mov 中均未找到: {', '.join(missing)}")
     if copied == 0 and skipped == 0:
         log_error("未找到任何包含指定文件名的文件。")
         return
@@ -113,6 +113,8 @@ def run(arguments):
     parser.add_argument("--keywords", nargs='+', required=True, help="包含数字的混合文本")
     parser.add_argument("--image_dest_name", default="图片选片")
     parser.add_argument("--video_dest_name", default="视频选片")
+    parser.add_argument("--image_source_name", default="raw")
+    parser.add_argument("--video_source_name", default="mov")
     args = parser.parse_args(arguments)
 
     project_dir = args.source.strip().strip('"').strip("'")
@@ -120,7 +122,7 @@ def run(arguments):
     if not search_names:
         log_error("未从输入内容中提取到任何数字作为文件名。")
         return
-    process_project(project_dir, args.image_dest_name, args.video_dest_name, search_names)
+    process_project(project_dir, args.image_dest_name, args.video_dest_name, args.image_source_name, args.video_source_name, search_names)
 
 
 if __name__ == "__main__":

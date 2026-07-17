@@ -1,8 +1,10 @@
 import argparse
+import ctypes
 import json
 import os
 import shutil
 import sys
+import unicodedata
 from pathlib import Path
 
 import cv2
@@ -15,6 +17,17 @@ from send2trash import send2trash
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".m4v", ".webm"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 PREVIEW_WIDTH = 384
+
+
+def configure_text_streams():
+    """Keep the JSON event stream UTF-8 on Windows, regardless of its code page."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
+configure_text_streams()
 
 
 def emit(event_type, message, data=None, progress=None):
@@ -43,9 +56,56 @@ def log_progress(message, percent):
 
 
 def sanitize_filename(filename):
+    """Return a Windows-safe name without discarding valid Unicode characters."""
     invalid_chars = r'\\/:*?"<>|'
-    filename = "".join("_" if char in invalid_chars else char for char in filename)
-    return "".join(char for char in filename if ord(char) >= 32).strip()
+    filename = unicodedata.normalize("NFC", str(filename))
+    filename = "".join(
+        "_" if char in invalid_chars or unicodedata.category(char) in {"Cc", "Cs"} else char
+        for char in filename
+    )
+    # Windows silently rejects names ending in a space/dot and reserves these
+    # device names even when an extension is present.
+    filename = filename.strip().rstrip(" .")
+    if not filename:
+        return "未命名"
+    reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+    if filename.split(".", 1)[0].upper() in reserved:
+        filename = f"_{filename}"
+    return filename
+
+
+def windows_short_path(path):
+    """Use an ASCII-compatible 8.3 path when a Windows OpenCV build needs it."""
+    if os.name != "nt":
+        return path
+    try:
+        get_short_path = ctypes.windll.kernel32.GetShortPathNameW
+        get_short_path.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+        get_short_path.restype = ctypes.c_uint
+        size = get_short_path(path, None, 0)
+        if not size:
+            return path
+        buffer = ctypes.create_unicode_buffer(size)
+        if not get_short_path(path, buffer, size):
+            return path
+        return buffer.value
+    except (AttributeError, OSError, ValueError):
+        return path
+
+
+def open_video(video_path):
+    """Open paths containing Chinese, emoji, and other Unicode characters."""
+    candidates = []
+    short_path = windows_short_path(os.path.abspath(video_path))
+    if short_path != video_path:
+        candidates.append(short_path)
+    candidates.append(video_path)
+    for candidate in dict.fromkeys(candidates):
+        cap = cv2.VideoCapture(candidate, cv2.CAP_ANY)
+        if cap.isOpened():
+            return cap
+        cap.release()
+    return cv2.VideoCapture()
 
 
 def preview_features(frame):
@@ -81,22 +141,36 @@ def frame_difference(previous, current):
     return float(0.55 * colour + 0.25 * edge_change + 0.20 * luminance)
 
 
-def robust_thresholds(scores, legacy_ssim_threshold):
+def normalize_sensitivity(sensitivity):
+    if sensitivity in {"low", "standard", "high"}:
+        return sensitivity
+    # Compatibility for direct callers and old --threshold values.
+    try:
+        threshold = float(sensitivity)
+        return "high" if threshold >= 0.98 else "low" if threshold <= 0.85 else "standard"
+    except (TypeError, ValueError):
+        return "standard"
+
+
+def robust_thresholds(scores, sensitivity):
     values = np.asarray(scores, dtype=np.float32)
     median = float(np.median(values))
     mad = float(np.median(np.abs(values - median))) + 1e-6
-    # Keep --threshold compatible with the old SSIM control: lower SSIM means the
-    # user accepts more change inside one shot, therefore detection is less sensitive.
-    user_floor = 0.04 + max(0.0, min(1.0, 1.0 - legacy_ssim_threshold))
-    hard = max(user_floor, float(np.quantile(values, 0.92)), median + 4.0 * mad)
-    soft = max(0.018, median + 1.5 * mad)
+    settings = {
+        "low": (0.13, 0.96, 5.0, 0.025, 2.0),
+        "standard": (0.09, 0.92, 4.0, 0.018, 1.5),
+        "high": (0.055, 0.85, 3.0, 0.012, 1.0),
+    }
+    hard_floor, quantile, hard_mad, soft_floor, soft_mad = settings[normalize_sensitivity(sensitivity)]
+    hard = max(hard_floor, float(np.quantile(values, quantile)), median + hard_mad * mad)
+    soft = max(soft_floor, median + soft_mad * mad)
     return hard, min(soft, hard * 0.85)
 
 
-def find_boundaries(scores, fps, legacy_ssim_threshold, min_duration):
+def find_boundaries(scores, fps, sensitivity, min_duration):
     if not scores:
         return []
-    hard, soft = robust_thresholds(scores, legacy_ssim_threshold)
+    hard, soft = robust_thresholds(scores, sensitivity)
     candidates = []
 
     # Sharp cuts are local maxima above the per-video adaptive threshold.
@@ -147,7 +221,7 @@ def calculate_frame_quality(frame):
 
 
 def extract_best_frames(video_path, shots, fps, original_name):
-    cap = cv2.VideoCapture(video_path, cv2.CAP_ANY)
+    cap = open_video(video_path)
     if not cap.isOpened():
         raise RuntimeError("无法重新打开视频以提取截图")
 
@@ -196,10 +270,10 @@ def extract_best_frames(video_path, shots, fps, original_name):
     return metadata
 
 
-def analyze_video(video_path, threshold, min_duration):
+def analyze_video(video_path, sensitivity, min_duration):
     name = os.path.basename(video_path)
     log_info(f"正在分析视频：{name}")
-    cap = cv2.VideoCapture(video_path, cv2.CAP_ANY)
+    cap = open_video(video_path)
     if not cap.isOpened():
         log_error(f"无法打开视频：{name}")
         return []
@@ -224,22 +298,12 @@ def analyze_video(video_path, threshold, min_duration):
     if not scores:
         return []
 
-    boundaries = find_boundaries(scores, fps, threshold, min_duration)
+    boundaries = find_boundaries(scores, fps, sensitivity, min_duration)
     total = len(scores) + 1
     starts = [0] + [frame for frame, _, _ in boundaries]
     ends = [frame - 1 for frame, _, _ in boundaries] + [total - 1]
     shots = [(start, end) for start, end in zip(starts, ends) if end >= start]
     frames = extract_best_frames(video_path, shots, fps, name)
-    report_path = os.path.join(os.path.dirname(video_path), f"{sanitize_filename(os.path.splitext(name)[0])}_shots.json")
-    report = {
-        "video": name,
-        "fps": round(fps, 3),
-        "frames_read": total,
-        "transitions": [{"frame": frame, "seconds": round(frame / fps, 3), "type": kind, "score": round(score, 4)} for frame, score, kind in boundaries],
-        "shots": frames,
-    }
-    with open(report_path, "w", encoding="utf-8") as target:
-        json.dump(report, target, ensure_ascii=False, indent=2)
     log_info(f"{name}：识别 {len(boundaries)} 个转场，导出 {len(frames)} 张截图")
     return frames
 
@@ -288,7 +352,8 @@ def move_txt_files(directory):
 def run(args_list):
     parser = argparse.ArgumentParser()
     parser.add_argument("--path", required=True, help="目标工作目录")
-    parser.add_argument("--threshold", type=float, default=0.95, help="镜头稳定度（兼容旧 SSIM 设置）")
+    parser.add_argument("--sensitivity", choices=("low", "standard", "high"), help="转场检测灵敏度")
+    parser.add_argument("--threshold", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--min_duration", type=float, default=0.2, help="最短镜头时长（秒）")
     args = parser.parse_args(args_list)
     target = Path(args.path)
@@ -297,8 +362,9 @@ def run(args_list):
         return
     videos = [path for path in target.iterdir() if path.suffix.lower() in VIDEO_EXTENSIONS]
     log_progress("扫描视频文件…", 0)
+    sensitivity = args.sensitivity or normalize_sensitivity(args.threshold)
     for index, video in enumerate(videos, 1):
-        analyze_video(str(video), args.threshold, max(0.05, args.min_duration))
+        analyze_video(str(video), sensitivity, max(0.05, args.min_duration))
         log_progress(f"处理视频：{index}/{len(videos)}", int(index / max(1, len(videos)) * 90))
     if not videos:
         log_info("目录中未找到视频文件，跳过分镜识别")

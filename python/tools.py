@@ -6,6 +6,7 @@ import cut_video
 import png_to_jpg
 import rename
 import research
+import video_preview
 
 
 TOOLS = {
@@ -15,6 +16,7 @@ TOOLS = {
     "png_to_jpg": png_to_jpg.run,
     "rename": rename.run,
     "research": research.run,
+    "video_preview": video_preview.run,
 }
 
 
