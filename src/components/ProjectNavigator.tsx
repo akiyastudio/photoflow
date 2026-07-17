@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus, X } from 'lucide-react';
+import { PROJECT_STATUS_LABELS } from '../types';
 import type { ProjectStatus, WorkspaceProject, WorkspaceStatusGroup } from '../types';
 
-const STATUSES: ProjectStatus[] = ['未策划', '已策划', '进行中', '已归档'];
+const STATUSES: ProjectStatus[] = ['策划中', '待拍摄', '后期中', '已归档'];
 type Action = 'import' | 'broll' | 'match';
 
 export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProject, onProjectAction, onWorkspaceResolved }: {
@@ -13,7 +14,7 @@ export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProje
   onWorkspaceResolved: (workspacePath: string) => void;
 }) => {
   const [groups, setGroups] = useState<WorkspaceStatusGroup[]>([]);
-  const [expanded, setExpanded] = useState<Record<ProjectStatus, boolean>>({ 未策划: true, 已策划: true, 进行中: true, 已归档: true });
+  const [expanded, setExpanded] = useState<Record<ProjectStatus, boolean>>({ 策划中: true, 待拍摄: true, 后期中: true, 已归档: true });
   useEffect(() => {
     try {
       const saved = window.localStorage.getItem('photoflow:sidebar-expanded');
@@ -68,7 +69,7 @@ export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProje
       setShowNew(false);
       setDate('');
       setName('');
-      setExpanded(current => ({ ...current, 未策划: true }));
+      setExpanded(current => ({ ...current, 策划中: true }));
       onSelectProject(result.project);
       refresh();
       setCreateNotice(`项目“${createdName}”已创建成功`);
@@ -99,9 +100,9 @@ export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProje
     refresh();
   };
   const trash = async (project: WorkspaceProject) => {
-    if (!window.confirm(`确定将“${project.name}”移入系统回收站吗？`)) return;
+    if (!window.confirm(`确定删除项目“${project.name}”吗？项目会移入系统回收站。`)) return;
     const result = await window.electronAPI.trashWorkspaceProject(workspacePath, project.status, project.name);
-    if (!result.success) setError(result.error || '移入回收站失败');
+    if (!result.success) setError(result.error || '删除项目失败');
     refresh();
   };
   const openProject = async (project: WorkspaceProject) => {
@@ -117,14 +118,14 @@ export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProje
         const projects = (groups.find(group => group.status === status)?.projects || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
         const isOpen = expanded[status];
         return <section key={status} className="border-t border-slate-200 py-2 first:border-t-0">
-          <button type="button" onClick={() => setExpanded(current => ({ ...current, [status]: !current[status] }))} className="flex w-full items-center gap-1.5 rounded-md px-2 py-2 text-left text-xs font-bold tracking-wide text-slate-500 hover:bg-slate-100 hover:text-slate-800">{isOpen ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span>{status}</span><span className="ml-auto font-mono text-[10px] text-slate-400">{projects.length}</span></button>
+          <button type="button" onClick={() => setExpanded(current => ({ ...current, [status]: !current[status] }))} className="flex w-full items-center gap-1.5 rounded-md px-2 py-2 text-left text-xs font-bold tracking-wide text-slate-500 hover:bg-slate-100 hover:text-slate-800">{isOpen ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span>{PROJECT_STATUS_LABELS[status]}</span><span className="ml-auto font-mono text-[10px] text-slate-400">{projects.length}</span></button>
           {isOpen && <div className="mt-1 space-y-1">{projects.map(project => <div key={project.path} className={`project-row group flex items-center gap-1 rounded-lg text-sm transition ${selectedProject?.path === project.path ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'}`}><button title={project.name} onClick={() => onSelectProject(project)} onContextMenu={event => { event.preventDefault(); setMenu({ project, x: event.clientX, y: event.clientY }); }} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left"><Folder size={15} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{project.name}</span></button><button type="button" aria-label="打开项目文件夹" title="打开项目文件夹" onClick={() => openProject(project)} className="project-open-button mr-1 rounded p-1.5"><FolderOpen size={15}/></button></div>)}{!projects.length && <p className="px-7 py-1 text-xs text-slate-400">暂无项目</p>}</div>}
         </section>;
       })}
       {error && <p className="mt-2 px-2 text-xs text-red-500">{error}</p>}
     </nav>
-    {menu && <div className="fixed z-[300] w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" style={{ left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 360) }} onClick={event => event.stopPropagation()}><button className="project-menu-item" onClick={() => { setRenameProject(menu.project); setRenameValue(menu.project.name); setMenu(null); }}>重命名</button><div className="my-1 border-t border-slate-100"/><p className="px-2 py-1 text-[11px] font-bold text-slate-400">更改状态</p>{STATUSES.map(status => <button key={status} className="project-menu-item" onClick={() => { move(menu.project, status); setMenu(null); }}>{status}{status === menu.project.status ? '（当前）' : ''}</button>)}<div className="my-1 border-t border-slate-100"/><button className="project-menu-item" onClick={() => { onProjectAction('import', menu.project); setMenu(null); }}>从 SD 卡导入</button><button className="project-menu-item" onClick={() => { onProjectAction('broll', menu.project); setMenu(null); }}>导入花絮</button><button className="project-menu-item" onClick={() => { onProjectAction('match', menu.project); setMenu(null); }}>选片</button><div className="my-1 border-t border-slate-100"/><button className="project-menu-item text-red-500 hover:bg-red-50" onClick={() => { trash(menu.project); setMenu(null); }}>移入回收站</button></div>}
-    {renameProject && <ProjectDialog title="重命名项目" onClose={() => { setRenameProject(null); setRenameValue(''); }}><label className="form-label">项目名称</label><input autoFocus value={renameValue} onChange={event => setRenameValue(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void rename(); }} className="form-input"/><div className="mt-5 flex justify-end gap-2"><button onClick={() => { setRenameProject(null); setRenameValue(''); }} className="dialog-secondary">取消</button><button onClick={() => void rename()} disabled={!renameValue.trim()} className="dialog-primary">确认重命名</button></div></ProjectDialog>}    {showNew && <ProjectDialog title="新建项目" onClose={() => { setShowNew(false); setNewProjectError(''); }}><p className="text-xs text-slate-500">日期和名称至少填写一项；新项目会创建在“未策划”。</p><label className="form-label">项目日期</label><input value={date} onChange={event => setDate(event.target.value)} placeholder="例如：8-10 或 2026-08-10" className="form-input"/><label className="form-label">项目名称</label><input value={name} onChange={event => setName(event.target.value)} placeholder="例如：春日写真" className="form-input"/>{newProjectError && <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{newProjectError}</div>}<div className="mt-5 flex justify-end gap-2"><button onClick={() => { setShowNew(false); setNewProjectError(''); }} className="dialog-secondary">取消</button><button onClick={createProject} disabled={isCreating || (!date && !name)} className="dialog-primary">{isCreating ? '创建中…' : '创建'}</button></div></ProjectDialog>}
+    {menu && <div className="fixed z-[300] w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" style={{ left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 360) }} onClick={event => event.stopPropagation()}><button className="project-menu-item" onClick={() => { setRenameProject(menu.project); setRenameValue(menu.project.name); setMenu(null); }}>重命名</button><div className="my-1 border-t border-slate-100"/><p className="px-2 py-1 text-[11px] font-bold text-slate-400">更改状态</p>{STATUSES.map(status => <button key={status} className="project-menu-item" onClick={() => { move(menu.project, status); setMenu(null); }}>{PROJECT_STATUS_LABELS[status]}{status === menu.project.status ? '（当前）' : ''}</button>)}<div className="my-1 border-t border-slate-100"/><button className="project-menu-item" onClick={() => { onProjectAction('import', menu.project); setMenu(null); }}>从 SD 卡导入</button><button className="project-menu-item" onClick={() => { onProjectAction('broll', menu.project); setMenu(null); }}>导入花絮</button><button className="project-menu-item" onClick={() => { onProjectAction('match', menu.project); setMenu(null); }}>选片</button><div className="my-1 border-t border-slate-100"/><button className="project-menu-item text-red-500 hover:bg-red-50" onClick={() => { trash(menu.project); setMenu(null); }}>删除项目</button></div>}
+    {renameProject && <ProjectDialog title="重命名项目" onClose={() => { setRenameProject(null); setRenameValue(''); }}><label className="form-label">项目名称</label><input autoFocus value={renameValue} onChange={event => setRenameValue(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void rename(); }} className="form-input"/><div className="mt-5 flex justify-end gap-2"><button onClick={() => { setRenameProject(null); setRenameValue(''); }} className="dialog-secondary">取消</button><button onClick={() => void rename()} disabled={!renameValue.trim()} className="dialog-primary">确认重命名</button></div></ProjectDialog>}    {showNew && <ProjectDialog title="新建项目" onClose={() => { setShowNew(false); setNewProjectError(''); }}><p className="text-xs text-slate-500">日期和名称至少填写一项；新项目会创建在“策划中”。</p><label className="form-label">项目日期</label><input value={date} onChange={event => setDate(event.target.value)} placeholder="例如：8-10 或 2026-08-10" className="form-input"/><label className="form-label">项目名称</label><input value={name} onChange={event => setName(event.target.value)} placeholder="例如：春日写真" className="form-input"/>{newProjectError && <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{newProjectError}</div>}<div className="mt-5 flex justify-end gap-2"><button onClick={() => { setShowNew(false); setNewProjectError(''); }} className="dialog-secondary">取消</button><button onClick={createProject} disabled={isCreating || (!date && !name)} className="dialog-primary">{isCreating ? '创建中…' : '创建'}</button></div></ProjectDialog>}
   </>;
 };
 

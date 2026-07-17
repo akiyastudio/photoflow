@@ -70,7 +70,19 @@ def run(args_list):
         log_error(f"无法读取目录: {str(e)}")
         return
 
-    png_files = [f for f in all_files if f.lower().endswith('.png')]
+    # 不只看扩展名：部分素材虽然以 .jpg 命名，内容实际上是 PNG。
+    png_files = []
+    for filename in all_files:
+        file_path = os.path.join(directory, filename)
+        if not os.path.isfile(file_path):
+            continue
+        try:
+            with open(file_path, 'rb') as source:
+                is_png = source.read(8) == b'\x89PNG\r\n\x1a\n'
+            if is_png:
+                png_files.append(filename)
+        except OSError:
+            continue
     total_files = len(png_files)
 
     if total_files == 0:

@@ -6,6 +6,7 @@ import datetime
 import json
 import argparse
 import subprocess
+import re
 from pathlib import Path
 import gc
 from ffmpeg_utils import get_ffmpeg_exe
@@ -83,7 +84,7 @@ def generate_video_previews(target_folder):
     if not video_files:
         return 0, 0
 
-    output_dir = os.path.join(target_folder, 'mov_压缩')
+    output_dir = os.path.join(target_folder, 'mov_预览')
     os.makedirs(output_dir, exist_ok=True)
     ffmpeg_exe = get_ffmpeg_exe()
     succeeded = 0
@@ -114,8 +115,52 @@ def generate_video_previews(target_folder):
             emit('warning', f"视频预览生成失败，已保留原视频 {file_name}：{detail}")
 
     return succeeded, len(video_files)
+
+def split_large_videos(target_folder):
+    """Losslessly split imported videos for FAT32 and cloud single-file limits."""
+    source_dir = os.path.join(target_folder, 'mov')
+    if not os.path.isdir(source_dir):
+        return 0
+
+    target_size = 3.95 * 1024 * 1024 * 1024
+    ffmpeg_exe = get_ffmpeg_exe()
+    split_count = 0
+    for file_name in list(os.listdir(source_dir)):
+        input_path = os.path.join(source_dir, file_name)
+        if not os.path.isfile(input_path) or os.path.getsize(input_path) <= target_size:
+            continue
+
+        probe = subprocess.run([ffmpeg_exe, '-i', input_path], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
+        match = re.search(r'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)', probe.stderr)
+        if not match:
+            emit('warning', f'无法读取视频时长，未分割：{file_name}')
+            continue
+
+        hours, minutes, seconds = match.groups()
+        total_seconds = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        segment_duration = total_seconds * (target_size / os.path.getsize(input_path))
+        stem, extension = os.path.splitext(input_path)
+        output_pattern = f'{stem}_part%03d{extension}'
+        log_info(f'正在将超过 4GB 的视频分割为约 3.95GB：{file_name}')
+        result = subprocess.run([
+            ffmpeg_exe, '-y', '-i', input_path, '-c', 'copy', '-f', 'segment',
+            '-segment_time', str(segment_duration), '-reset_timestamps', '1', output_pattern
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
+        prefix = os.path.basename(stem) + '_part'
+        segments = [name for name in os.listdir(source_dir) if name.startswith(prefix) and name.lower().endswith(extension.lower())]
+        if result.returncode == 0 and len(segments) >= 2:
+            os.remove(input_path)
+            split_count += 1
+            log_info(f'视频分割完成：{file_name} → {len(segments)} 段')
+        else:
+            for segment in segments:
+                try: os.remove(os.path.join(source_dir, segment))
+                except OSError: pass
+            detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else '未生成完整分段'
+            emit('warning', f'视频分割失败，已保留原文件 {file_name}：{detail}')
+    return split_count
 # --- 3. 核心导入流程 ---
-def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_threshold_hours=2.0, should_split=None, generate_video_preview=False):
+def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_threshold_hours=2.0, should_split=None, generate_video_preview=False, split_large_files=False):
     # 临时存放区（即使出错也保留，直到确认安全）
     temp_dir = os.path.join(dest_path, "_PhotoFlow_Safety_Temp")
     
@@ -235,6 +280,11 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
                 success_imported_count += 1
             
             classify_files_by_type(target_folder)
+
+            if split_large_files:
+                split_count = split_large_videos(target_folder)
+                if split_count:
+                    log_info(f'大文件分割完成：共处理 {split_count} 个视频')
             
             # 备份
             if backup_path and os.path.exists(backup_path):
@@ -245,7 +295,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             if generate_video_preview:
                 preview_count, video_count = generate_video_previews(target_folder)
                 if video_count:
-                    log_info(f"视频预览完成：{preview_count}/{video_count} 个文件已保存到 mov_压缩")
+                    log_info(f"视频预览完成：{preview_count}/{video_count} 个文件已保存到 mov_预览")
         # Step 5: 最终校验与清理 SD 卡
         if success_imported_count == len(original_sd_files):
             log_success(f"整理完成，共处理 {success_imported_count} 个文件")
@@ -283,6 +333,7 @@ def run(args_list):
     parser.add_argument("--time_gap", type=float, default=2.0)
     parser.add_argument("--should_split", type=str, default="")
     parser.add_argument("--generate_video_preview", action="store_true")
+    parser.add_argument("--split_large_files", action="store_true")
 
     args, _ = parser.parse_known_args(args_list)
     
@@ -293,7 +344,7 @@ def run(args_list):
     if args.stage == 'check':
         log_status("SD Card Detected" if os.path.exists(args.sd_path) else "No Device", {"connected": os.path.exists(args.sd_path)})
     elif args.stage == 'import':
-        stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val, args.generate_video_preview)
+        stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files)
 
 if __name__ == "__main__":
     run(sys.argv[1:])

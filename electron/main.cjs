@@ -1,13 +1,26 @@
-const { app, BrowserWindow, ipcMain, Menu, shell, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, shell, dialog, protocol, net, nativeImage, clipboard } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const crypto = require('crypto');
+const { pathToFileURL } = require('url');
+
+protocol.registerSchemesAsPrivileged([{ scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
+
+const toMediaUrl = filePath => `photoflow-media://file/${Buffer.from(filePath, 'utf8').toString('base64url')}`;
 
 let mainWindow;
 let workspaceWatcher = null;
 let watchedWorkspacePath = '';
 let workspaceWatchTimer = null;
+let projectFileClipboard = null;
+const activeProjectFileOperations = new Map();
 const renameHistory = [];
+let shellThumbnailProcess = null;
+let shellThumbnailOutput = '';
+let shellThumbnailRequestId = 0;
+const shellThumbnailRequests = new Map();
+let shellThumbnailUnavailableLogged = false;
 const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
 
@@ -66,11 +79,102 @@ const writeLog = (level, message, details) => {
   }
 };
 
+const getShellThumbnailExecutable = () => app.isPackaged
+  ? path.join(process.resourcesPath, 'shell-thumbnail.exe')
+  : path.join(__dirname, 'bin', 'shell-thumbnail.exe');
+
+const finishShellThumbnailRequests = () => {
+  for (const request of shellThumbnailRequests.values()) {
+    clearTimeout(request.timer);
+    request.resolve(false);
+  }
+  shellThumbnailRequests.clear();
+};
+
+const stopShellThumbnailProcess = () => {
+  const child = shellThumbnailProcess;
+  shellThumbnailProcess = null;
+  shellThumbnailOutput = '';
+  finishShellThumbnailRequests();
+  if (child && !child.killed) child.kill();
+};
+
+const ensureShellThumbnailProcess = () => {
+  if (process.platform !== 'win32') return null;
+  if (shellThumbnailProcess && !shellThumbnailProcess.killed) return shellThumbnailProcess;
+  const executable = getShellThumbnailExecutable();
+  if (!fs.existsSync(executable)) {
+    if (!shellThumbnailUnavailableLogged) {
+      shellThumbnailUnavailableLogged = true;
+      writeLog('warn', 'Windows Shell thumbnail cache helper is unavailable', { executable });
+    }
+    return null;
+  }
+
+  const child = spawn(executable, [], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+  shellThumbnailProcess = child;
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', data => {
+    shellThumbnailOutput += data;
+    const lines = shellThumbnailOutput.split(/\r?\n/);
+    shellThumbnailOutput = lines.pop() || '';
+    for (const rawLine of lines) {
+      const fields = rawLine.replace(/^\uFEFF/, '').split('\t');
+      const request = shellThumbnailRequests.get(fields[0]);
+      if (!request) continue;
+      shellThumbnailRequests.delete(fields[0]);
+      clearTimeout(request.timer);
+      request.resolve(fields[1] === '1' && fs.existsSync(request.targetPath));
+    }
+  });
+  child.on('error', error => {
+    writeLog('warn', 'Windows Shell thumbnail cache helper failed to start', { error: error.message || String(error) });
+  });
+  child.on('exit', (code, signal) => {
+    if (shellThumbnailProcess === child) shellThumbnailProcess = null;
+    shellThumbnailOutput = '';
+    finishShellThumbnailRequests();
+    if (code && code !== 0) writeLog('warn', 'Windows Shell thumbnail cache helper exited', { code, signal });
+  });
+  return child;
+};
+
+// Query only Explorer's existing thumbnail cache. The helper deliberately uses
+// SIIGBF_INCACHEONLY | SIIGBF_THUMBNAILONLY so a cache miss never starts video
+// decoding on the Electron main thread.
+const copyWindowsShellCachedThumbnail = (sourcePath, targetPath, requestedSize) => new Promise(resolve => {
+  const child = ensureShellThumbnailProcess();
+  if (!child?.stdin?.writable) return resolve(false);
+  const requestId = String(++shellThumbnailRequestId);
+  const timer = setTimeout(() => {
+    shellThumbnailRequests.delete(requestId);
+    resolve(false);
+    // A cache-only lookup should finish almost immediately. Restart the helper
+    // if a cloud/offline Shell provider stalls so later thumbnails are not
+    // trapped behind the same blocked COM request.
+    if (shellThumbnailProcess === child) stopShellThumbnailProcess();
+  }, 2000);
+  shellThumbnailRequests.set(requestId, { resolve, timer, targetPath });
+  const encode = value => Buffer.from(value, 'utf8').toString('base64');
+  child.stdin.write(`${requestId}\t${requestedSize}\t${encode(sourcePath)}\t${encode(targetPath)}\n`, error => {
+    if (!error) return;
+    const request = shellThumbnailRequests.get(requestId);
+    if (!request) return;
+    shellThumbnailRequests.delete(requestId);
+    clearTimeout(request.timer);
+    request.resolve(false);
+  });
+});
+
 // Mirror existing main-process console output to the persistent log without
 // requiring every call site to be rewritten.
 console.log = (...values) => writeLog('info', values.map(formatLogValue).join(' '));
 console.warn = (...values) => writeLog('warn', values.map(formatLogValue).join(' '));
 console.error = (...values) => writeLog('error', values.map(formatLogValue).join(' '));
+
+ipcMain.on('renderer-error-log', (_event, message, details) => {
+  writeLog('error', `Renderer: ${String(message || '未知错误').slice(0, 500)}`, String(details || '').slice(0, 4000));
+});
 
 function createWindow() {
   // 2. 彻底移除顶部菜单栏 (File, Edit, View...)
@@ -104,7 +208,7 @@ function createWindow() {
 }
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'research']);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'research', 'video_preview']);
 
 const getRunConfig = (scriptName, args) => {
   // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
@@ -414,7 +518,38 @@ ipcMain.handle('check-script', async (event, scriptName) => {
 
 // 获取系统盘符列表
 
-const WORKSPACE_STATUSES = ['未策划', '已策划', '进行中', '已归档'];
+const WORKSPACE_STATUSES = ['策划中', '待拍摄', '后期中', '已归档'];
+const LEGACY_WORKSPACE_STATUS_MAP = new Map([
+  ['未策划', '策划中'],
+  ['已策划', '待拍摄'],
+  ['进行中', '后期中']
+]);
+
+const getAvailableLegacyPath = destinationPath => {
+  const parsed = path.parse(destinationPath);
+  let index = 1;
+  let candidate;
+  do candidate = path.join(parsed.dir, `${parsed.name}_legacy_${index++}${parsed.ext}`);
+  while (fs.existsSync(candidate));
+  return candidate;
+};
+
+const mergeLegacyStatusDirectory = (source, destination) => {
+  fs.mkdirSync(destination, { recursive: true });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const sourcePath = path.join(source, entry.name);
+    let destinationPath = path.join(destination, entry.name);
+    if (entry.isDirectory()) {
+      if (!fs.existsSync(destinationPath)) fs.renameSync(sourcePath, destinationPath);
+      else if (fs.statSync(destinationPath).isDirectory()) mergeLegacyStatusDirectory(sourcePath, destinationPath);
+      else fs.renameSync(sourcePath, getAvailableLegacyPath(destinationPath));
+      continue;
+    }
+    if (fs.existsSync(destinationPath)) destinationPath = getAvailableLegacyPath(destinationPath);
+    fs.renameSync(sourcePath, destinationPath);
+  }
+  fs.rmdirSync(source);
+};
 
 const ensureWorkspace = (workspacePath) => {
   const requestedPath = path.resolve(workspacePath);
@@ -422,6 +557,14 @@ const ensureWorkspace = (workspacePath) => {
   // Never create or alter a drive root. A root selection uses its dedicated app folder.
   const root = isDriveRoot ? path.join(requestedPath, '照片流') : requestedPath;
   fs.mkdirSync(root, { recursive: true });
+  for (const [legacyStatus, nextStatus] of LEGACY_WORKSPACE_STATUS_MAP) {
+    const legacyPath = path.join(root, legacyStatus);
+    if (!fs.existsSync(legacyPath)) continue;
+    const nextPath = path.join(root, nextStatus);
+    if (fs.existsSync(nextPath)) mergeLegacyStatusDirectory(legacyPath, nextPath);
+    else fs.renameSync(legacyPath, nextPath);
+    writeLog('info', 'Workspace status migrated', { legacyStatus, nextStatus });
+  }
   WORKSPACE_STATUSES.forEach(status => fs.mkdirSync(path.join(root, status), { recursive: true }));
   return root;
 };
@@ -488,12 +631,12 @@ ipcMain.handle('workspace-create-project', async (_event, workspacePath, date, n
     const namePart = cleanProjectName(name || '');
     const projectName = [datePart, namePart].filter(Boolean).join(' ');
     if (!projectName) throw new Error('请至少填写日期或名称');
-    const projectPath = getProjectPath(workspacePath, '未策划', projectName);
+    const projectPath = getProjectPath(workspacePath, '策划中', projectName);
     if (fs.existsSync(projectPath)) throw new Error('同名项目已存在');
     fs.mkdirSync(projectPath, { recursive: false });
     fs.mkdirSync(path.join(projectPath, '策划'), { recursive: true });
     writeLog('info', 'Project created', { projectName, projectPath });
-    return { success: true, project: { name: projectName, path: projectPath, status: '未策划', updatedAt: Date.now() } };
+    return { success: true, project: { name: projectName, path: projectPath, status: '策划中', updatedAt: Date.now() } };
   } catch (error) {
     return { success: false, error: error.message || String(error) };
   }
@@ -609,10 +752,10 @@ const mergeProjectDirectories = (source, destination) => {
 ipcMain.handle('workspace-archive-imports', async (_event, workspacePath) => {
   try {
     const root = ensureWorkspace(workspacePath);
-    const plannedStatus = '已策划';
+    const plannedStatus = '待拍摄';
     const plannedPath = path.join(root, plannedStatus);
     const importedFolders = fs.readdirSync(root, { withFileTypes: true })
-      .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.startsWith('_') && !WORKSPACE_STATUSES.includes(entry.name));
+      .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.startsWith('_') && !WORKSPACE_STATUSES.includes(entry.name) && !LEGACY_WORKSPACE_STATUS_MAP.has(entry.name));
     const projects = [];
 
     for (const folder of importedFolders) {
@@ -651,13 +794,20 @@ ipcMain.handle('workspace-archive-imports', async (_event, workspacePath) => {
     return { success: false, error: error.message || String(error), projects: [] };
   }
 });
-ipcMain.handle('workspace-trash-project', async (_event, workspacePath, status, projectName) => {
+ipcMain.handle('workspace-trash-project', async (event, workspacePath, status, projectName) => {
+  const operationId = crypto.randomUUID();
+  const publish = payload => {
+    if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', { operationId, operation: 'trash', ...payload });
+  };
   try {
     const projectPath = getProjectPath(workspacePath, status, projectName);
     if (!fs.existsSync(projectPath)) throw new Error('项目不存在');
+    publish({ phase: 'trashing', progress: 0, currentName: projectName, processedCount: 0, totalCount: 1 });
     await shell.trashItem(projectPath);
-    return { success: true };
+    publish({ phase: 'complete', progress: 100, currentName: projectName, processedCount: 1, totalCount: 1 });
+    return { success: true, operationId };
   } catch (error) {
+    publish({ phase: 'failed', progress: 0, currentName: projectName, error: error.message || String(error) });
     return { success: false, error: error.message || String(error) };
   }
 });
@@ -700,6 +850,545 @@ ipcMain.handle('workspace-project-contents', async (_event, workspacePath, statu
   }
 });
 
+const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.avif']);
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv']);
+const RAW_EXTENSIONS = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
+
+const getMediaCacheDir = (config = {}) => {
+  const requested = typeof config.directory === 'string' ? config.directory.trim() : '';
+  const cacheDir = requested || path.join(getConfigDir(), 'media-cache');
+  if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+  return cacheDir;
+};
+
+const getDirectorySize = (directory) => {
+  let sizeBytes = 0;
+  let fileCount = 0;
+  if (!fs.existsSync(directory)) return { sizeBytes, fileCount };
+  const visit = (current) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) visit(entryPath);
+      else if (entry.isFile()) { sizeBytes += fs.statSync(entryPath).size; fileCount += 1; }
+    }
+  };
+  visit(directory);
+  return { sizeBytes, fileCount };
+};
+
+const trimMediaCache = (cacheDir, maxSizeGB) => {
+  const maxBytes = Math.max(1, Number(maxSizeGB) || 10) * 1024 * 1024 * 1024;
+  const files = fs.readdirSync(cacheDir, { withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => { const filePath = path.join(cacheDir, entry.name); const stat = fs.statSync(filePath); return { filePath, size: stat.size, used: stat.atimeMs || stat.mtimeMs }; })
+    .sort((a, b) => a.used - b.used);
+  let total = files.reduce((sum, file) => sum + file.size, 0);
+  for (const file of files) {
+    if (total <= maxBytes) break;
+    fs.unlinkSync(file.filePath);
+    total -= file.size;
+  }
+};
+
+const rawPreviewPath = (sourcePath, stat, cacheConfig) => {
+  const cacheDir = getMediaCacheDir(cacheConfig);
+  const target = rawPreviewCacheFile(sourcePath, stat, cacheDir);
+  if (fs.existsSync(target)) return target;
+  // Most RAW files embed a camera-generated JPEG. Extracting it avoids a large
+  // decoder dependency and is fast enough for a browse thumbnail.
+  const source = fs.readFileSync(sourcePath);
+  let best = null;
+  let start = source.indexOf(Buffer.from([0xff, 0xd8]));
+  while (start >= 0) {
+    const end = source.indexOf(Buffer.from([0xff, 0xd9]), start + 2);
+    if (end < 0) break;
+    const length = end + 2 - start;
+    if (!best || length > best.length) best = { start, length };
+    start = source.indexOf(Buffer.from([0xff, 0xd8]), end + 2);
+  }
+  if (!best || best.length < 8 * 1024) return null;
+  fs.writeFileSync(target, source.subarray(best.start, best.start + best.length));
+  trimMediaCache(cacheDir, cacheConfig?.maxSizeGB);
+  return target;
+};
+
+const rawPreviewCacheFile = (sourcePath, stat, cacheDir) => path.join(cacheDir, crypto.createHash('sha256').update(`${sourcePath}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
+const mediaThumbnailCacheFile = (sourcePath, stat, cacheDir, requestedSize) => path.join(cacheDir, crypto.createHash('sha256').update(`thumbnail|${requestedSize}|${sourcePath}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
+
+// Keep the browser from decoding full camera images just to fill a small tile.
+// The renderer asks for these only when a tile approaches the viewport.
+const mediaThumbnailPath = async (sourcePath, stat, kind, cacheConfig, requestedSize = 640) => {
+  const cacheDir = getMediaCacheDir(cacheConfig);
+  const size = Math.max(160, Math.min(1600, Math.round(Number(requestedSize) || 640)));
+  const target = mediaThumbnailCacheFile(sourcePath, stat, cacheDir, size);
+  if (fs.existsSync(target)) return target;
+  if (kind === 'video') {
+    const foundInWindowsCache = await copyWindowsShellCachedThumbnail(sourcePath, target, size);
+    if (!foundInWindowsCache) return null;
+    trimMediaCache(cacheDir, cacheConfig?.maxSizeGB);
+    return target;
+  }
+  let thumbnail = nativeImage.createEmpty();
+  try {
+    thumbnail = await nativeImage.createThumbnailFromPath(sourcePath, { width: size, height: size });
+  } catch { /* no system thumbnail provider for this format */ }
+  // On Windows this first attempt uses the installed Shell/WIC RAW thumbnail
+  // provider, matching Explorer. Fall back to the camera's embedded JPEG when
+  // no system codec is available for this RAW format.
+  if (thumbnail.isEmpty() && kind === 'raw') {
+    const previewSource = rawPreviewPath(sourcePath, stat, cacheConfig);
+    if (previewSource) {
+      try {
+        thumbnail = await nativeImage.createThumbnailFromPath(previewSource, { width: size, height: size });
+      } catch { /* malformed or unsupported embedded preview */ }
+    }
+  }
+  if (thumbnail.isEmpty()) return null;
+  fs.writeFileSync(target, thumbnail.toJPEG(size >= 960 ? 84 : 80));
+  trimMediaCache(cacheDir, cacheConfig?.maxSizeGB);
+  return target;
+};
+
+ipcMain.handle('workspace-browse-files', async (_event, workspacePath, status, projectName, relativePath = '', cacheConfig = {}) => {
+  try {
+    const projectPath = getProjectPath(workspacePath, status, projectName);
+    const root = path.resolve(projectPath);
+    const currentPath = path.resolve(root, relativePath || '.');
+    if (currentPath !== root && !currentPath.startsWith(root + path.sep)) throw new Error('无效的文件夹路径');
+    const currentStat = await fs.promises.stat(currentPath);
+    if (!currentStat.isDirectory()) throw new Error('文件夹不存在');
+    const directoryEntries = await fs.promises.readdir(currentPath, { withFileTypes: true });
+    const entries = directoryEntries
+      .filter(entry => !entry.name.startsWith('.'))
+      .map(entry => {
+        const entryPath = path.join(currentPath, entry.name);
+        const extension = entry.isDirectory() ? '' : path.extname(entry.name).toLowerCase();
+        const kind = entry.isDirectory() ? 'folder' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
+        return { name: entry.name, path: entryPath, relativePath: path.relative(root, entryPath), kind, extension, size: -1, updatedAt: 0 };
+      })
+      .sort((a, b) => (a.kind === 'folder' ? 0 : 1) - (b.kind === 'folder' ? 0 : 1) || a.name.localeCompare(b.name, 'zh-CN'));
+    return { success: true, path: path.relative(root, currentPath), entries };
+  } catch (error) {
+    writeLog('warn', 'Unable to browse project directory', { projectName, relativePath, error: error.message || String(error) });
+    return { success: false, error: error.message || String(error), entries: [] };
+  }
+});
+
+ipcMain.handle('workspace-file-details', async (_event, workspacePath, status, projectName, relativePaths = []) => {
+  try {
+    const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const requested = Array.isArray(relativePaths) ? relativePaths.slice(0, 500) : [];
+    const details = (await Promise.all(requested.map(async relativePath => {
+      const filePath = path.resolve(root, relativePath);
+      if (filePath !== root && !filePath.startsWith(root + path.sep)) return null;
+      try {
+        const stat = await fs.promises.stat(filePath);
+        return { relativePath: path.relative(root, filePath), size: stat.size, updatedAt: stat.mtimeMs };
+      } catch { return null; }
+    }))).filter(Boolean);
+    return { success: true, details };
+  } catch (error) { return { success: false, details: [], error: error.message || String(error) }; }
+});
+
+ipcMain.handle('media-thumbnail', async (_event, filePath, kind, cacheConfig = {}, requestedSize = 640) => {
+  try {
+    const sourcePath = path.resolve(filePath);
+    const extension = path.extname(sourcePath).toLowerCase();
+    const supported = kind === 'raw' ? RAW_EXTENSIONS.has(extension) : kind === 'video' ? VIDEO_EXTENSIONS.has(extension) : IMAGE_EXTENSIONS.has(extension);
+    if (!supported || !fs.existsSync(sourcePath)) throw new Error('文件不存在或格式不受支持');
+    const thumbnail = await mediaThumbnailPath(sourcePath, fs.statSync(sourcePath), kind, cacheConfig, requestedSize);
+    if (thumbnail) return { success: true, previewUrl: toMediaUrl(thumbnail), mediaUrl: kind === 'video' ? toMediaUrl(sourcePath) : undefined };
+    if (kind === 'video') return { success: true, mediaUrl: toMediaUrl(sourcePath) };
+    return { success: false, error: '无法生成缩略图' };
+  } catch (error) { return { success: false, error: error.message || String(error) }; }
+});
+
+const videoPreviewJobs = new Map();
+let videoPreviewWorkChain = Promise.resolve();
+ipcMain.handle('media-video-hover-preview', async (_event, filePath, cacheConfig = {}, requestedSize = 640, cacheOnly = false, generateHoverFrames = false) => {
+  try {
+    const sourcePath = path.resolve(filePath);
+    if (!VIDEO_EXTENSIONS.has(path.extname(sourcePath).toLowerCase()) || !fs.existsSync(sourcePath)) throw new Error('视频文件不存在或格式不受支持');
+    const stat = fs.statSync(sourcePath);
+    const size = Math.max(320, Math.min(1600, Math.round(Number(requestedSize) || 640)));
+    const cacheDir = getMediaCacheDir(cacheConfig);
+    const cacheKey = crypto.createHash('sha256').update(`video-preview|${size}|${sourcePath}|${stat.size}|${stat.mtimeMs}`).digest('hex');
+    const manifestPath = path.join(cacheDir, `${cacheKey}.json`);
+    const readCached = () => {
+      if (!fs.existsSync(manifestPath)) return null;
+      try {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        if (!Array.isArray(manifest.frames) || !manifest.frames.length || !manifest.frames.every(frame => fs.existsSync(frame))) return null;
+        return { success: true, cached: true, complete: manifest.complete === true, duration: Number(manifest.duration) || 0, frameUrls: manifest.frames.map(toMediaUrl) };
+      } catch { return null; }
+    };
+    const cached = readCached();
+    if (cached?.complete || cacheOnly || (cached && !generateHoverFrames)) return cached || { success: true, cached: false, complete: false, duration: 0, frameUrls: [] };
+
+    if (!videoPreviewJobs.has(cacheKey)) {
+      const runPreviewJob = () => new Promise((resolve, reject) => {
+        const toolArgs = ['--source', sourcePath, '--output_dir', cacheDir, '--cache_key', cacheKey, '--size', String(size)];
+        if (generateHoverFrames && cached) toolArgs.push('--remaining_only');
+        else if (!generateHoverFrames) toolArgs.push('--cover_only');
+        const { command, args } = getRunConfig('video_preview.py', toolArgs);
+        const child = spawn(command, args, { windowsHide: true });
+        let stdoutBuffer = '';
+        let stderr = '';
+        let previewDuration = 0;
+        let publishedFrameCount = 0;
+        let progressTimer;
+        const isCompleteJpeg = framePath => {
+          try {
+            const frameStat = fs.statSync(framePath);
+            if (frameStat.size < 1024) return false;
+            const handle = fs.openSync(framePath, 'r');
+            const ending = Buffer.alloc(2);
+            fs.readSync(handle, ending, 0, 2, frameStat.size - 2);
+            fs.closeSync(handle);
+            return ending[0] === 0xff && ending[1] === 0xd9;
+          } catch { return false; }
+        };
+        const publishFinishedFrames = () => {
+          if (!previewDuration) return;
+          const frames = Array.from({ length: 5 }, (_value, index) => path.join(cacheDir, `${cacheKey}-${index + 1}.jpg`)).filter(isCompleteJpeg);
+          if (frames.length <= publishedFrameCount) return;
+          publishedFrameCount = frames.length;
+          fs.writeFileSync(manifestPath, JSON.stringify({ duration: previewDuration, frames, complete: frames.length === 5 }), 'utf8');
+        };
+        const consumeOutput = (flush = false) => {
+          const lines = stdoutBuffer.split(/\r?\n/);
+          stdoutBuffer = flush ? '' : lines.pop() || '';
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const payload = JSON.parse(trimmed);
+              if (payload.error) throw new Error(payload.error);
+              if (Array.isArray(payload.frames) && payload.frames.length && payload.frames.every(frame => fs.existsSync(frame))) {
+                previewDuration = Number(payload.duration) || previewDuration;
+                fs.writeFileSync(manifestPath, JSON.stringify(payload), 'utf8');
+                publishedFrameCount = Math.max(publishedFrameCount, payload.frames.length);
+                if (!progressTimer && payload.complete !== true) progressTimer = setInterval(publishFinishedFrames, 100);
+              }
+            } catch (error) {
+              writeLog('warn', 'Unable to process video preview progress', { filePath, error: error.message || String(error) });
+            }
+          }
+        };
+        child.stdout.on('data', data => { stdoutBuffer += data.toString(); consumeOutput(); });
+        child.stderr.on('data', data => { stderr += data.toString(); });
+        child.on('error', reject);
+        child.on('close', code => {
+          try {
+            if (progressTimer) clearInterval(progressTimer);
+            if (stdoutBuffer.trim()) { stdoutBuffer += '\n'; consumeOutput(true); }
+            publishFinishedFrames();
+            const finalManifest = readCached();
+            if (code !== 0 || !finalManifest || (generateHoverFrames && !finalManifest.complete)) throw new Error(stderr.trim() || '视频抽样进程失败');
+            trimMediaCache(cacheDir, cacheConfig?.maxSizeGB);
+            resolve(finalManifest);
+          } catch (error) { reject(error); }
+        });
+      });
+      const job = generateHoverFrames ? runPreviewJob() : videoPreviewWorkChain.then(runPreviewJob);
+      if (!generateHoverFrames) videoPreviewWorkChain = job.catch(() => undefined);
+      const trackedJob = job.finally(() => videoPreviewJobs.delete(cacheKey));
+      trackedJob.catch(() => undefined);
+      videoPreviewJobs.set(cacheKey, trackedJob);
+    }
+    if (cached && !generateHoverFrames) return cached;
+    const job = videoPreviewJobs.get(cacheKey);
+    while (videoPreviewJobs.has(cacheKey)) {
+      const progressive = readCached();
+      if (progressive) return progressive;
+      await Promise.race([job.catch(() => undefined), new Promise(resolve => setTimeout(resolve, 50))]);
+    }
+    const generated = readCached();
+    if (!generated) throw new Error('视频代表帧未能写入缓存');
+    return generated;
+  } catch (error) {
+    writeLog('warn', 'Video hover preview failed', { filePath, error: error.message || String(error) });
+    return { success: false, cached: false, complete: false, duration: 0, frameUrls: [], error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('media-raw-preview', async (_event, filePath, cacheConfig = {}) => {
+  try {
+    const sourcePath = path.resolve(filePath);
+    if (!RAW_EXTENSIONS.has(path.extname(sourcePath).toLowerCase()) || !fs.existsSync(sourcePath)) throw new Error('RAW 文件不存在或格式不受支持');
+    const preview = rawPreviewPath(sourcePath, fs.statSync(sourcePath), cacheConfig);
+    return preview ? { success: true, previewUrl: toMediaUrl(preview) } : { success: false, error: '未找到内嵌预览' };
+  } catch (error) { return { success: false, error: error.message || String(error) }; }
+});
+
+ipcMain.handle('folder-has-png', async (_event, folderPath) => {
+  try {
+    const target = path.resolve(folderPath);
+    if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) throw new Error('文件夹不存在');
+    for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
+      if (!entry.isFile()) continue;
+      const handle = fs.openSync(path.join(target, entry.name), 'r');
+      const header = Buffer.alloc(8);
+      fs.readSync(handle, header, 0, 8, 0);
+      fs.closeSync(handle);
+      if (header.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return { success: true, hasPng: true };
+    }
+    return { success: true, hasPng: false };
+  } catch (error) { return { success: false, error: error.message || String(error) }; }
+});
+
+class FileOperationCancelledError extends Error {
+  constructor() { super('操作已取消'); this.name = 'FileOperationCancelledError'; }
+}
+
+const assertFileOperationActive = job => {
+  if (job.cancelled) throw new FileOperationCancelledError();
+};
+
+const collectCopyPlan = async (source, destination, plan, job) => {
+  assertFileOperationActive(job);
+  const stat = await fs.promises.lstat(source);
+  if (stat.isDirectory()) {
+    plan.push({ kind: 'directory', source, destination, size: 0 });
+    const entries = await fs.promises.readdir(source);
+    for (const name of entries) await collectCopyPlan(path.join(source, name), path.join(destination, name), plan, job);
+    return;
+  }
+  if (!stat.isFile()) throw new Error(`不支持复制此文件类型：${path.basename(source)}`);
+  plan.push({ kind: 'file', source, destination, size: stat.size, mode: stat.mode, atime: stat.atime, mtime: stat.mtime });
+};
+
+const copyFileWithProgress = async (entry, job, onBytes, onCreated) => {
+  const sourceHandle = await fs.promises.open(entry.source, 'r');
+  let destinationHandle;
+  try {
+    destinationHandle = await fs.promises.open(entry.destination, 'wx', entry.mode);
+    onCreated();
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    let position = 0;
+    while (true) {
+      assertFileOperationActive(job);
+      const { bytesRead } = await sourceHandle.read(buffer, 0, buffer.length, position);
+      if (!bytesRead) break;
+      await destinationHandle.write(buffer, 0, bytesRead, position);
+      position += bytesRead;
+      onBytes(bytesRead);
+    }
+    await destinationHandle.sync();
+    await fs.promises.utimes(entry.destination, entry.atime, entry.mtime);
+  } catch (error) {
+    await destinationHandle?.close().catch(() => undefined);
+    destinationHandle = undefined;
+    await fs.promises.rm(entry.destination, { force: true }).catch(() => undefined);
+    throw error;
+  } finally {
+    await sourceHandle.close().catch(() => undefined);
+    await destinationHandle?.close().catch(() => undefined);
+  }
+};
+
+const removeCreatedPasteTargets = async targets => {
+  for (const target of targets.slice().reverse()) await fs.promises.rm(target, { recursive: true, force: true }).catch(() => undefined);
+};
+
+ipcMain.handle('workspace-cancel-file-operation', async (_event, operationId) => {
+  const job = activeProjectFileOperations.get(operationId);
+  if (!job || job.finishing) return { success: false, error: job?.finishing ? '文件已复制完成，正在整理源文件' : '操作已结束' };
+  job.cancelled = true;
+  return { success: true };
+});
+
+ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, projectName, operation, relativePaths = [], targetRelativePath = '', nextName = '', options = {}) => {
+  try {
+    const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const resolveInsideProject = relativePath => {
+      const target = path.resolve(root, relativePath || '.');
+      if (target !== root && !target.startsWith(root + path.sep)) throw new Error('无效的文件路径');
+      return target;
+    };
+    const sources = relativePaths.map(resolveInsideProject);
+    if (operation === 'copy' || operation === 'cut') {
+      if (!sources.length) throw new Error('未选择文件');
+      projectFileClipboard = { operation, sources };
+      return { success: true, count: sources.length };
+    }
+    if (operation === 'paste') {
+      if (activeProjectFileOperations.size) throw new Error('已有文件粘贴任务正在进行');
+      if (!projectFileClipboard?.sources?.length) throw new Error('剪贴板为空');
+      const destinationDir = resolveInsideProject(targetRelativePath);
+      if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
+      const clipboardSnapshot = { operation: projectFileClipboard.operation, sources: [...projectFileClipboard.sources] };
+      const operationId = crypto.randomUUID();
+      const job = { cancelled: false, finishing: false };
+      const createdTargets = [];
+      activeProjectFileOperations.set(operationId, job);
+      const publish = payload => {
+        if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', { operationId, operation: 'paste', ...payload });
+      };
+      publish({ phase: 'scanning', progress: 0, currentName: '', bytesCopied: 0, totalBytes: 0 });
+      try {
+        const topLevelTargets = [];
+        const plan = [];
+        for (const source of clipboardSnapshot.sources) {
+          assertFileOperationActive(job);
+          if (!fs.existsSync(source)) continue;
+          let destination = path.join(destinationDir, path.basename(source));
+          const parsed = path.parse(destination);
+          let index = 1;
+          while (fs.existsSync(destination)) destination = path.join(destinationDir, `${parsed.name} (${index++})${parsed.ext}`);
+          if (destination === source || destination.startsWith(source + path.sep)) throw new Error('不能将文件夹粘贴到自身内部');
+          topLevelTargets.push({ source, destination });
+          await collectCopyPlan(source, destination, plan, job);
+        }
+        const totalBytes = plan.reduce((sum, entry) => sum + entry.size, 0);
+        const totalFiles = plan.filter(entry => entry.kind === 'file').length;
+        let bytesCopied = 0;
+        let filesCopied = 0;
+        let lastPublishedAt = 0;
+        const reportCopyProgress = (currentName, force = false) => {
+          const now = Date.now();
+          if (!force && now - lastPublishedAt < 80) return;
+          lastPublishedAt = now;
+          const progress = totalBytes > 0
+            ? Math.min(99, Math.round(bytesCopied / totalBytes * 100))
+            : Math.min(99, Math.round(filesCopied / Math.max(1, totalFiles) * 100));
+          publish({ phase: 'copying', progress, currentName, bytesCopied, totalBytes, filesCopied, totalFiles });
+        };
+        const markCreatedTarget = destination => {
+          const target = topLevelTargets.find(item => item.destination === destination);
+          if (target && !createdTargets.includes(destination)) createdTargets.push(destination);
+        };
+        for (const entry of plan) {
+          assertFileOperationActive(job);
+          if (entry.kind === 'directory') {
+            await fs.promises.mkdir(entry.destination, { recursive: false });
+            markCreatedTarget(entry.destination);
+            continue;
+          }
+          reportCopyProgress(path.basename(entry.source), true);
+          await fs.promises.mkdir(path.dirname(entry.destination), { recursive: true });
+          await copyFileWithProgress(entry, job, copied => {
+            bytesCopied += copied;
+            reportCopyProgress(path.basename(entry.source));
+          }, () => markCreatedTarget(entry.destination));
+          filesCopied += 1;
+          reportCopyProgress(path.basename(entry.source), true);
+        }
+        assertFileOperationActive(job);
+        if (clipboardSnapshot.operation === 'cut') {
+          job.finishing = true;
+          publish({ phase: 'finishing', progress: 99, currentName: '正在移除源文件', bytesCopied, totalBytes, filesCopied, totalFiles });
+          for (const source of clipboardSnapshot.sources) await fs.promises.rm(source, { recursive: true, force: true });
+          projectFileClipboard = null;
+        }
+        const count = topLevelTargets.length;
+        publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied, totalBytes, filesCopied, totalFiles, count });
+        writeLog('info', 'Project files pasted', { projectName, targetRelativePath, count, operationId });
+        return { success: true, count, operationId };
+      } catch (error) {
+        // Once cut finalization starts, keeping the completed copies is the only
+        // data-safe fallback if removing a source fails partway through.
+        if (!job.finishing) await removeCreatedPasteTargets(createdTargets);
+        if (error instanceof FileOperationCancelledError) {
+          publish({ phase: 'cancelled', progress: 0, currentName: '' });
+          writeLog('info', 'Project file paste cancelled', { projectName, operationId });
+          return { success: false, cancelled: true, operationId, error: '粘贴已取消' };
+        }
+        publish({ phase: 'failed', progress: 0, currentName: '', error: error.message || String(error) });
+        throw error;
+      } finally {
+        activeProjectFileOperations.delete(operationId);
+      }
+    }
+    if (operation === 'trash') {
+      const existingSources = sources.filter(source => fs.existsSync(source));
+      const operationId = crypto.randomUUID();
+      const totalCount = existingSources.length;
+      const publish = payload => {
+        if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', { operationId, operation: 'trash', ...payload });
+      };
+      let processedCount = 0;
+      publish({ phase: 'trashing', progress: 0, currentName: '', processedCount, totalCount });
+      try {
+        for (const source of existingSources) {
+          publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
+          await shell.trashItem(source);
+          processedCount += 1;
+          publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
+        }
+        publish({ phase: 'complete', progress: 100, currentName: '', processedCount, totalCount });
+        writeLog('info', 'Project files moved to trash', { projectName, count: processedCount, operationId });
+        return { success: true, count: processedCount, operationId };
+      } catch (error) {
+        publish({ phase: 'failed', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: '', processedCount, totalCount, error: error.message || String(error) });
+        throw error;
+      }
+    }
+    if (operation === 'select') {
+      if (!sources.length) throw new Error('未选择媒体文件');
+      const imageDirName = '图片选片';
+      const videoDirName = '视频选片';
+      const imageTarget = path.join(root, imageDirName);
+      const videoTarget = path.join(root, videoDirName);
+      let count = 0;
+      for (const source of sources) {
+        if (!fs.existsSync(source) || !fs.statSync(source).isFile()) throw new Error('只能选择媒体文件');
+        const extension = path.extname(source).toLowerCase();
+        const isVideo = VIDEO_EXTENSIONS.has(extension);
+        const isImage = IMAGE_EXTENSIONS.has(extension) || RAW_EXTENSIONS.has(extension);
+        if (!isVideo && !isImage) throw new Error('只能选择媒体文件');
+        const destinationDir = isVideo ? videoTarget : imageTarget;
+        fs.mkdirSync(destinationDir, { recursive: true });
+        let destination = path.join(destinationDir, path.basename(source));
+        const parsed = path.parse(destination);
+        let index = 1;
+        while (fs.existsSync(destination)) destination = path.join(destinationDir, `${parsed.name} (${index++})${parsed.ext}`);
+        fs.copyFileSync(source, destination);
+        count += 1;
+      }
+      return { success: true, count };
+    }
+    if (operation === 'rename') {
+      if (!sources.length || !nextName.trim()) throw new Error('请选择文件并输入新名称');
+      const baseName = nextName.trim();
+      const destinations = sources.map((source, index) => {
+        const extension = path.extname(source);
+        const fileName = sources.length === 1 ? baseName : `${baseName}_${String(index + 1).padStart(2, '0')}${extension}`;
+        return path.join(path.dirname(source), fileName);
+      });
+      for (const destination of destinations) {
+        if (path.resolve(destination) === root || !path.resolve(destination).startsWith(root + path.sep)) throw new Error('无效的文件名');
+        if (fs.existsSync(destination)) throw new Error('已有同名文件');
+      }
+      for (let index = 0; index < sources.length; index += 1) fs.renameSync(sources[index], destinations[index]);
+      writeLog('info', 'Project files renamed', { projectName, count: sources.length });
+      return { success: true, count: sources.length };
+    }
+    throw new Error('不支持的文件操作');
+  } catch (error) {
+    writeLog('error', 'Project file operation failed', { projectName, operation, targetRelativePath, count: relativePaths.length, error: error.message || String(error) });
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('choose-cache-directory', async () => {
+  const choice = await dialog.showOpenDialog(mainWindow, { title: '选择缩略图缓存目录', properties: ['openDirectory', 'createDirectory'] });
+  return choice.canceled ? { cancelled: true } : { path: choice.filePaths[0] };
+});
+
+ipcMain.handle('media-cache-info', async (_event, cacheConfig = {}) => {
+  try { const cacheDir = getMediaCacheDir(cacheConfig); trimMediaCache(cacheDir, cacheConfig.maxSizeGB); return { success: true, path: cacheDir, ...getDirectorySize(cacheDir) }; }
+  catch (error) { return { success: false, path: '', sizeBytes: 0, fileCount: 0, error: error.message || String(error) }; }
+});
+
+ipcMain.handle('media-cache-clear', async (_event, cacheConfig = {}) => {
+  try {
+    const cacheDir = getMediaCacheDir(cacheConfig);
+    for (const entry of fs.readdirSync(cacheDir, { withFileTypes: true })) if (entry.isFile()) fs.unlinkSync(path.join(cacheDir, entry.name));
+    return { success: true };
+  } catch (error) { return { success: false, error: error.message || String(error) }; }
+});
+
 // 图片对比使用 JPEG 解码流程。开始前检查所选文件夹的直接图片文件，避免
 // 在处理到一半才因 PNG 等格式失败。
 ipcMain.handle('workspace-check-compare-folders', async (_event, folderPaths = []) => {
@@ -725,16 +1414,47 @@ ipcMain.handle('workspace-check-compare-folders', async (_event, folderPaths = [
   }
 });
 
+const resolveProjectEntry = (workspacePath, status, projectName, relativePath = '') => {
+  const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+  const target = path.resolve(projectPath, relativePath || '.');
+  if (target !== projectPath && !target.startsWith(projectPath + path.sep)) throw new Error('无效的项目路径');
+  if (!fs.existsSync(target)) throw new Error('文件或文件夹不存在');
+  return target;
+};
+
 ipcMain.handle('workspace-open-project', async (_event, workspacePath, status, projectName, folderName) => {
   try {
-    const projectPath = getProjectPath(workspacePath, status, projectName);
-    const target = folderName ? path.resolve(projectPath, folderName) : projectPath;
-    if (!target.startsWith(projectPath) || !fs.existsSync(target)) throw new Error('目标文件夹不存在');
+    const target = resolveProjectEntry(workspacePath, status, projectName, folderName);
     const error = await shell.openPath(target);
     return { success: !error, error };
   } catch (error) {
     return { success: false, error: error.message || String(error) };
   }
+});
+
+ipcMain.handle('workspace-open-entry', async (_event, workspacePath, status, projectName, relativePath) => {
+  try {
+    const target = resolveProjectEntry(workspacePath, status, projectName, relativePath);
+    const error = await shell.openPath(target);
+    return { success: !error, error };
+  } catch (error) { return { success: false, error: error.message || String(error) }; }
+});
+
+ipcMain.handle('workspace-copy-entry-path', async (_event, workspacePath, status, projectName, relativePath) => {
+  try {
+    const target = resolveProjectEntry(workspacePath, status, projectName, relativePath);
+    clipboard.writeText(target);
+    return { success: true };
+  } catch (error) { return { success: false, error: error.message || String(error) }; }
+});
+
+ipcMain.handle('workspace-entry-file-icon', async (_event, filePath) => {
+  try {
+    const target = path.resolve(filePath);
+    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) throw new Error('文件不存在');
+    const icon = await app.getFileIcon(target, { size: 'normal' });
+    return { success: !icon.isEmpty(), dataUrl: icon.isEmpty() ? undefined : icon.toDataURL() };
+  } catch (error) { return { success: false, error: error.message || String(error) }; }
 });
 
 const BROLL_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.m4v', '.mkv']);
@@ -798,6 +1518,18 @@ ipcMain.handle('workspace-import-broll', async (_event, workspacePath, status, p
   }
 });
 app.whenReady().then(() => {
+  protocol.handle('photoflow-media', request => {
+    try {
+      const encodedPath = new URL(request.url).pathname.replace(/^\//, '');
+      const filePath = Buffer.from(encodedPath, 'base64url').toString('utf8');
+      if (!path.isAbsolute(filePath) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return new Response('Not found', { status: 404 });
+      // Forward Range headers so video metadata and sampled hover frames do not
+      // require reading the entire source file.
+      return net.fetch(pathToFileURL(filePath).toString(), { method: request.method, headers: request.headers });
+    } catch {
+      return new Response('Bad request', { status: 400 });
+    }
+  });
   const deletedLogFiles = cleanupExpiredLogs();
   writeLog('info', 'Application started', { version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, deletedExpiredLogFiles: deletedLogFiles });
   createWindow();
@@ -808,7 +1540,10 @@ app.whenReady().then(() => {
   });
 });
 
-app.on('before-quit', stopWorkspaceWatcher);
+app.on('before-quit', () => {
+  stopWorkspaceWatcher();
+  stopShellThumbnailProcess();
+});
 
 app.on('window-all-closed', () => {
   writeLog('info', 'All application windows closed');
@@ -816,8 +1551,10 @@ app.on('window-all-closed', () => {
 });
 process.on('uncaughtException', (error) => {
   writeLog('error', 'Uncaught main-process exception', error);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app-error', error.message || '主进程发生未知错误');
 });
 
 process.on('unhandledRejection', (reason) => {
   writeLog('error', 'Unhandled main-process promise rejection', reason);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app-error', reason instanceof Error ? reason.message : String(reason || '后台操作失败'));
 });
