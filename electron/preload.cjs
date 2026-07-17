@@ -35,6 +35,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   browseProjectFiles: (workspacePath, status, name, relativePath, cacheConfig) => ipcRenderer.invoke('workspace-browse-files', workspacePath, status, name, relativePath, cacheConfig),
   getProjectFileDetails: (workspacePath, status, name, relativePaths) => ipcRenderer.invoke('workspace-file-details', workspacePath, status, name, relativePaths),
   getMediaThumbnail: (filePath, kind, cacheConfig, requestedSize) => ipcRenderer.invoke('media-thumbnail', filePath, kind, cacheConfig, requestedSize),
+  getMediaOriginal: (filePath, kind, cacheConfig) => ipcRenderer.invoke('media-original', filePath, kind, cacheConfig),
+  getMediaMetadata: (filePath) => ipcRenderer.invoke('media-metadata', filePath),
   getVideoHoverPreview: (filePath, cacheConfig, requestedSize, cacheOnly, generateHoverFrames) => ipcRenderer.invoke('media-video-hover-preview', filePath, cacheConfig, requestedSize, cacheOnly, generateHoverFrames),
   reportRendererError: (message, details) => ipcRenderer.send('renderer-error-log', message, details),
   onAppError: (callback) => { const subscription = (_event, message) => callback(message); ipcRenderer.on('app-error', subscription); return () => ipcRenderer.removeListener('app-error', subscription); },
@@ -53,4 +55,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   importBroll: (workspacePath, status, name, options) => ipcRenderer.invoke('workspace-import-broll', workspacePath, status, name, options),
   checkCompareFolders: (folderPaths) => ipcRenderer.invoke('workspace-check-compare-folders', folderPaths),
   setTheme: (theme) => ipcRenderer.invoke('set-theme', theme),
+  minimizeWindow: () => ipcRenderer.send('window-minimize'),
+  toggleMaximizeWindow: () => ipcRenderer.invoke('window-toggle-maximize'),
+  closeWindow: () => ipcRenderer.send('window-close'),
+  isWindowMaximized: () => ipcRenderer.invoke('window-is-maximized'),
+  onWindowMaximizedChange: (callback) => { const subscription = (_event, maximized) => callback(maximized); ipcRenderer.on('window-maximized-change', subscription); return () => ipcRenderer.removeListener('window-maximized-change', subscription); },
 });

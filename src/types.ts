@@ -22,6 +22,7 @@ export interface AppConfig {
   theme: Theme;
   workspacePath: string;
   homeOrder: HomeCardId[];
+  birthdayEnabled: boolean;
   mediaCache: {
     maxSizeGB: number;
     directory: string;
@@ -29,6 +30,7 @@ export interface AppConfig {
   smartImport: {
     autoStart: boolean;
     sdPath: string;
+    sdPaths: string[];
     destPath: string;
     backupEnabled: boolean;
     backupPath: string;
@@ -70,6 +72,12 @@ export interface ProjectFileEntry {
   previewUrl?: string;
 }
 
+export interface MediaMetadataField {
+  group: string;
+  name: string;
+  value: string;
+}
+
 export interface ProjectFileOperationProgress {
   operationId: string;
   operation: 'paste' | 'trash';
@@ -99,6 +107,11 @@ export interface IElectronAPI {
   checkForUpdates: () => Promise<{ success: boolean; updateAvailable?: boolean; currentVersion?: string; latestVersion?: string; url?: string; notes?: string; error?: string }>;
   getDrives: () => Promise<string[]>;
   setTheme: (theme: Theme) => Promise<void>;
+  minimizeWindow: () => void;
+  toggleMaximizeWindow: () => Promise<boolean>;
+  closeWindow: () => void;
+  isWindowMaximized: () => Promise<boolean>;
+  onWindowMaximizedChange: (callback: (maximized: boolean) => void) => () => void;
   getWorkspaceProjects: (workspacePath: string) => Promise<{ success: boolean; root?: string; statuses: WorkspaceStatusGroup[]; error?: string }> ;
   onWorkspaceFilesChanged: (callback: (change: { root: string; fileName: string }) => void) => () => void;
   createWorkspaceProject: (workspacePath: string, date: string, name: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
@@ -114,6 +127,8 @@ export interface IElectronAPI {
   browseProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath?: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path?: string; entries: ProjectFileEntry[]; error?: string }>;
   getProjectFileDetails: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<{ success: boolean; details: Array<{ relativePath: string; size: number; updatedAt: number }>; error?: string }>;
   getMediaThumbnail: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache'], requestedSize?: number) => Promise<{ success: boolean; previewUrl?: string; mediaUrl?: string; error?: string }>;
+  getMediaOriginal: (filePath: string, kind: 'image' | 'raw', cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; mediaUrl?: string; original?: boolean; orientation?: { matrix: number[]; swapsAxes: boolean; rawOrientation: number; embeddedOrientation: number }; error?: string }>;
+  getMediaMetadata: (filePath: string) => Promise<{ success: boolean; fields: MediaMetadataField[]; error?: string }>;
   getVideoHoverPreview: (filePath: string, cacheConfig?: AppConfig['mediaCache'], requestedSize?: number, cacheOnly?: boolean, generateHoverFrames?: boolean) => Promise<{ success: boolean; cached: boolean; complete: boolean; duration: number; frameUrls: string[]; error?: string }>;
   reportRendererError: (message: string, details?: string) => void;
   onAppError: (callback: (message: string) => void) => () => void;

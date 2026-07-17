@@ -4,6 +4,9 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const crypto = require('crypto');
 const { pathToFileURL } = require('url');
+const { exiftool } = require('exiftool-vendored');
+
+app.setName('照片流');
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 
@@ -15,6 +18,8 @@ let watchedWorkspacePath = '';
 let workspaceWatchTimer = null;
 let projectFileClipboard = null;
 const activeProjectFileOperations = new Map();
+const mediaMetadataCache = new Map();
+const rawOrientationCache = new Map();
 const renameHistory = [];
 let shellThumbnailProcess = null;
 let shellThumbnailOutput = '';
@@ -184,18 +189,23 @@ function createWindow() {
     height: 768,
     icon: app.isPackaged ? undefined : path.join(__dirname, '../build/icon.ico'),
     backgroundColor: '#f8fafc',
-    titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#f8fafc',
-      symbolColor: '#334155',
-      height: 32
-    },
+    frame: false,
+    // Keep the Windows resize frame so Aero Snap and drag-to-top maximize work
+    // with the custom title bar. Interactive title-bar regions are controlled
+    // in the renderer; the old full-width transparent drag overlay is gone.
+    thickFrame: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
       contextIsolation: true,
     },
   });
+  const sendMaximizedState = () => {
+    if (!mainWindow?.isDestroyed()) mainWindow.webContents.send('window-maximized-change', mainWindow.isMaximized());
+  };
+  mainWindow.on('maximize', sendMaximizedState);
+  mainWindow.on('unmaximize', sendMaximizedState);
+  mainWindow.center();
 
   const isDev = process.env.NODE_ENV === 'development';
 
@@ -294,12 +304,18 @@ ipcMain.handle('check-for-updates', async () => checkForUpdates());
 ipcMain.handle('set-theme', async (_event, theme) => {
   if (!mainWindow) return;
   const isDark = theme === 'dark';
-  mainWindow.setTitleBarOverlay({
-    color: isDark ? '#0f172a' : '#f8fafc',
-    symbolColor: isDark ? '#e2e8f0' : '#334155',
-    height: 32,
-  });
+  mainWindow.setBackgroundColor(isDark ? '#030407' : '#f8fafc');
 });
+ipcMain.on('window-minimize', event => BrowserWindow.fromWebContents(event.sender)?.minimize());
+ipcMain.handle('window-toggle-maximize', event => {
+  const targetWindow = BrowserWindow.fromWebContents(event.sender);
+  if (!targetWindow) return false;
+  if (targetWindow.isMaximized()) targetWindow.unmaximize();
+  else targetWindow.maximize();
+  return targetWindow.isMaximized();
+});
+ipcMain.on('window-close', event => BrowserWindow.fromWebContents(event.sender)?.close());
+ipcMain.handle('window-is-maximized', event => BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false);
 
 // 运行 Python 脚本
 ipcMain.on('run-python', (event, scriptName, args = []) => {
@@ -853,6 +869,7 @@ ipcMain.handle('workspace-project-contents', async (_event, workspacePath, statu
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.avif']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv']);
 const RAW_EXTENSIONS = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
+const HIDDEN_SYSTEM_ENTRY_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store']);
 
 const getMediaCacheDir = (config = {}) => {
   const requested = typeof config.directory === 'string' ? config.directory.trim() : '';
@@ -877,7 +894,7 @@ const getDirectorySize = (directory) => {
 };
 
 const trimMediaCache = (cacheDir, maxSizeGB) => {
-  const maxBytes = Math.max(1, Number(maxSizeGB) || 10) * 1024 * 1024 * 1024;
+  const maxBytes = Math.max(1, Number(maxSizeGB) || 1) * 1024 * 1024 * 1024;
   const files = fs.readdirSync(cacheDir, { withFileTypes: true })
     .filter(entry => entry.isFile())
     .map(entry => { const filePath = path.join(cacheDir, entry.name); const stat = fs.statSync(filePath); return { filePath, size: stat.size, used: stat.atimeMs || stat.mtimeMs }; })
@@ -915,6 +932,50 @@ const rawPreviewPath = (sourcePath, stat, cacheConfig) => {
 const rawPreviewCacheFile = (sourcePath, stat, cacheDir) => path.join(cacheDir, crypto.createHash('sha256').update(`${sourcePath}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
 const mediaThumbnailCacheFile = (sourcePath, stat, cacheDir, requestedSize) => path.join(cacheDir, crypto.createHash('sha256').update(`thumbnail|${requestedSize}|${sourcePath}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
 
+const EXIF_ORIENTATION_MATRICES = {
+  1: [1, 0, 0, 1],
+  2: [-1, 0, 0, 1],
+  3: [-1, 0, 0, -1],
+  4: [1, 0, 0, -1],
+  5: [0, 1, 1, 0],
+  6: [0, 1, -1, 0],
+  7: [0, -1, -1, 0],
+  8: [0, -1, 1, 0]
+};
+const readExifOrientation = async filePath => {
+  try {
+    const tags = await exiftool.readRaw(filePath, ['-G1', '-Orientation#', '-n', '-api', 'largefilesupport=1']);
+    const candidates = Object.entries(tags).filter(([name, value]) => /(^|:)Orientation$/i.test(name) && Number.isInteger(Number(value)) && Number(value) >= 1 && Number(value) <= 8);
+    const priority = name => /(^|:)IFD0:Orientation$/i.test(name) ? 0 : 1;
+    candidates.sort(([left], [right]) => priority(left) - priority(right));
+    return candidates.length ? Number(candidates[0][1]) : 1;
+  } catch {
+    return 1;
+  }
+};
+const multiplyOrientationMatrices = (left, right) => [
+  left[0] * right[0] + left[2] * right[1],
+  left[1] * right[0] + left[3] * right[1],
+  left[0] * right[2] + left[2] * right[3],
+  left[1] * right[2] + left[3] * right[3]
+];
+const rawOrientationCorrection = async (sourcePath, previewPath, stat) => {
+  const cacheKey = `${sourcePath}|${stat.size}|${stat.mtimeMs}`;
+  const cached = rawOrientationCache.get(cacheKey);
+  if (cached) return cached;
+  const [rawOrientation, embeddedOrientation] = await Promise.all([readExifOrientation(sourcePath), readExifOrientation(previewPath)]);
+  const rawMatrix = EXIF_ORIENTATION_MATRICES[rawOrientation] || EXIF_ORIENTATION_MATRICES[1];
+  const embeddedMatrix = EXIF_ORIENTATION_MATRICES[embeddedOrientation] || EXIF_ORIENTATION_MATRICES[1];
+  // The browser already applies the embedded JPEG orientation. Apply only the
+  // missing difference required by the outer RAW container.
+  const embeddedInverse = [embeddedMatrix[0], embeddedMatrix[2], embeddedMatrix[1], embeddedMatrix[3]];
+  const matrix = multiplyOrientationMatrices(rawMatrix, embeddedInverse).map(value => Object.is(value, -0) ? 0 : value);
+  const result = { matrix, swapsAxes: Math.abs(matrix[1]) === 1 || Math.abs(matrix[2]) === 1, rawOrientation, embeddedOrientation };
+  if (rawOrientationCache.size >= 64) rawOrientationCache.delete(rawOrientationCache.keys().next().value);
+  rawOrientationCache.set(cacheKey, result);
+  return result;
+};
+
 // Keep the browser from decoding full camera images just to fill a small tile.
 // The renderer asks for these only when a tile approaches the viewport.
 const mediaThumbnailPath = async (sourcePath, stat, kind, cacheConfig, requestedSize = 640) => {
@@ -922,12 +983,15 @@ const mediaThumbnailPath = async (sourcePath, stat, kind, cacheConfig, requested
   const size = Math.max(160, Math.min(1600, Math.round(Number(requestedSize) || 640)));
   const target = mediaThumbnailCacheFile(sourcePath, stat, cacheDir, size);
   if (fs.existsSync(target)) return target;
-  if (kind === 'video') {
-    const foundInWindowsCache = await copyWindowsShellCachedThumbnail(sourcePath, target, size);
-    if (!foundInWindowsCache) return null;
+  // Explorer feels instant because it reuses the shared Windows thumbnail
+  // cache. Query that cache first for every media type, without triggering a
+  // Shell extraction on a cache miss; the normal decoder remains the fallback.
+  const foundInWindowsCache = await copyWindowsShellCachedThumbnail(sourcePath, target, size);
+  if (foundInWindowsCache) {
     trimMediaCache(cacheDir, cacheConfig?.maxSizeGB);
     return target;
   }
+  if (kind === 'video') return null;
   let thumbnail = nativeImage.createEmpty();
   try {
     thumbnail = await nativeImage.createThumbnailFromPath(sourcePath, { width: size, height: size });
@@ -959,7 +1023,7 @@ ipcMain.handle('workspace-browse-files', async (_event, workspacePath, status, p
     if (!currentStat.isDirectory()) throw new Error('文件夹不存在');
     const directoryEntries = await fs.promises.readdir(currentPath, { withFileTypes: true });
     const entries = directoryEntries
-      .filter(entry => !entry.name.startsWith('.'))
+      .filter(entry => !entry.name.startsWith('.') && !HIDDEN_SYSTEM_ENTRY_NAMES.has(entry.name.toLowerCase()))
       .map(entry => {
         const entryPath = path.join(currentPath, entry.name);
         const extension = entry.isDirectory() ? '' : path.extname(entry.name).toLowerCase();
@@ -1001,6 +1065,77 @@ ipcMain.handle('media-thumbnail', async (_event, filePath, kind, cacheConfig = {
     if (kind === 'video') return { success: true, mediaUrl: toMediaUrl(sourcePath) };
     return { success: false, error: '无法生成缩略图' };
   } catch (error) { return { success: false, error: error.message || String(error) }; }
+});
+
+ipcMain.handle('media-original', async (_event, filePath, kind, cacheConfig = {}) => {
+  try {
+    const sourcePath = path.resolve(filePath);
+    const extension = path.extname(sourcePath).toLowerCase();
+    const supported = kind === 'raw' ? RAW_EXTENSIONS.has(extension) : kind === 'image' ? IMAGE_EXTENSIONS.has(extension) : false;
+    if (!supported || !fs.existsSync(sourcePath)) throw new Error('图片不存在或格式不受支持');
+    if (kind === 'image') return { success: true, mediaUrl: toMediaUrl(sourcePath), original: true };
+
+    // Chromium cannot decode camera RAW containers directly. Use the largest
+    // camera-embedded JPEG, which is the closest displayable source preview.
+    const stat = fs.statSync(sourcePath);
+    const previewPath = rawPreviewPath(sourcePath, stat, cacheConfig);
+    if (!previewPath) throw new Error('RAW 文件中没有可显示的内嵌原图');
+    const orientation = await rawOrientationCorrection(sourcePath, previewPath, stat);
+    return { success: true, mediaUrl: toMediaUrl(previewPath), original: false, orientation };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+const formatMetadataValue = value => {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value);
+  if (Array.isArray(value)) return value.map(formatMetadataValue).filter(Boolean).join(', ');
+  try {
+    return JSON.stringify(value, (_key, nestedValue) => typeof nestedValue === 'bigint' ? String(nestedValue) : nestedValue);
+  } catch {
+    return String(value);
+  }
+};
+
+const flattenMetadataValue = (group, name, value, depth = 0) => {
+  if (depth < 5 && Array.isArray(value) && value.some(item => item && typeof item === 'object')) {
+    return value.flatMap((item, index) => flattenMetadataValue(group, `${name}.${index + 1}`, item, depth + 1));
+  }
+  if (depth < 5 && value && typeof value === 'object' && !Array.isArray(value)) {
+    return Object.entries(value).flatMap(([childName, childValue]) => flattenMetadataValue(group, `${name}.${childName}`, childValue, depth + 1));
+  }
+  const formatted = formatMetadataValue(value);
+  return formatted ? [{ group, name, value: formatted }] : [];
+};
+
+ipcMain.handle('media-metadata', async (_event, filePath) => {
+  try {
+    const sourcePath = path.resolve(filePath);
+    const extension = path.extname(sourcePath).toLowerCase();
+    if (![...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS, ...RAW_EXTENSIONS].includes(extension) || !fs.existsSync(sourcePath)) throw new Error('媒体文件不存在或格式不受支持');
+    const stat = fs.statSync(sourcePath);
+    const cacheKey = `${sourcePath}|${stat.size}|${stat.mtimeMs}`;
+    const cached = mediaMetadataCache.get(cacheKey);
+    if (cached) return cached;
+
+    const tags = await exiftool.readRaw(sourcePath, ['-G1', '-struct', '-api', 'largefilesupport=1']);
+    const fields = Object.entries(tags).flatMap(([qualifiedName, rawValue]) => {
+      if (qualifiedName === 'SourceFile') return [];
+      const separatorIndex = qualifiedName.indexOf(':');
+      const group = separatorIndex > 0 ? qualifiedName.slice(0, separatorIndex) : '其他';
+      const name = separatorIndex > 0 ? qualifiedName.slice(separatorIndex + 1) : qualifiedName;
+      return flattenMetadataValue(group, name, rawValue);
+    });
+    const result = { success: true, fields };
+    if (mediaMetadataCache.size >= 32) mediaMetadataCache.delete(mediaMetadataCache.keys().next().value);
+    mediaMetadataCache.set(cacheKey, result);
+    return result;
+  } catch (error) {
+    writeLog('warn', 'Unable to read media metadata', { filePath, error: error.message || String(error) });
+    return { success: false, fields: [], error: error.message || String(error) };
+  }
 });
 
 const videoPreviewJobs = new Map();
@@ -1543,6 +1678,7 @@ app.whenReady().then(() => {
 app.on('before-quit', () => {
   stopWorkspaceWatcher();
   stopShellThumbnailProcess();
+  void exiftool.end().catch(() => undefined);
 });
 
 app.on('window-all-closed', () => {
