@@ -9,7 +9,7 @@ type Action = 'import' | 'broll' | 'match';
 export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProject, onProjectAction, onWorkspaceResolved }: {
   workspacePath: string;
   selectedProject: WorkspaceProject | null;
-  onSelectProject: (project: WorkspaceProject) => void;
+  onSelectProject: (project: WorkspaceProject, replacePath?: string) => void;
   onProjectAction: (action: Action, project: WorkspaceProject) => void;
   onWorkspaceResolved: (workspacePath: string) => void;
 }) => {
@@ -86,7 +86,7 @@ export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProje
     if (!nextName || nextName === renameProject.name) { setRenameProject(null); return; }
     const result = await window.electronAPI.renameWorkspaceProject(workspacePath, renameProject.status, renameProject.name, nextName);
     if (!result.success) setError(result.error || '重命名失败');
-    else if (result.project && selectedProject?.path === renameProject.path) onSelectProject(result.project);
+    else if (result.project && selectedProject?.path === renameProject.path) onSelectProject(result.project, renameProject.path);
     setRenameProject(null);
     setRenameValue('');
     refresh();
@@ -95,7 +95,7 @@ export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProje
     if (status === project.status) return;
     const result = await window.electronAPI.moveWorkspaceProject(workspacePath, project.status, project.name, status);
     if (!result.success) setError(result.error || '更改状态失败');
-    else if (result.project && selectedProject?.path === project.path) onSelectProject(result.project);
+    else if (result.project && selectedProject?.path === project.path) onSelectProject(result.project, project.path);
     setExpanded(current => ({ ...current, [status]: true }));
     refresh();
   };
@@ -113,7 +113,7 @@ export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProje
   return <>
     {createNotice && <div className="fixed left-1/2 top-10 z-[400] -translate-x-1/2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-xl animate-in fade-in slide-in-from-top-2">{createNotice}</div>}
     <div className="px-4 pt-4"><button onClick={() => { setNewProjectError(''); setShowNew(true); }} className="w-full rounded-lg bg-blue-600 px-3 py-2.5 text-sm font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-500"><span className="flex items-center justify-center gap-2"><FolderPlus size={17}/>新建项目</span></button></div>
-    <nav className="flex-1 overflow-y-auto p-4 pt-2">
+    <nav className="project-navigator-scroll flex-1 overflow-y-auto p-4 pt-2">
       {STATUSES.map(status => {
         const projects = (groups.find(group => group.status === status)?.projects || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
         const isOpen = expanded[status];

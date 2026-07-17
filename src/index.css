@@ -7,6 +7,28 @@
 .brand-logo-dark-only { display: none; }
 html.dark .brand-logo-light-only { display: none; }
 html.dark .brand-logo-dark-only { display: block; }
+.app-titlebar { -webkit-app-region: no-drag; }
+.app-titlebar-brand-region, .app-window-drag-region { -webkit-app-region: drag; cursor:default; }
+.app-titlebar-control {
+  position: relative;
+  z-index: 1;
+  pointer-events: auto;
+  -webkit-app-region: no-drag !important;
+}
+.app-titlebar-control * { -webkit-app-region: no-drag !important; }
+.window-control-button { position:relative; display:flex; width:46px; align-items:center; justify-content:center; color:#475569; -webkit-app-region:no-drag; }
+.window-control-button:hover { background:#e2e8f0; color:#0f172a; }
+.window-control-close:hover { background:#e81123; color:#fff; }
+.window-glyph { position:relative; display:block; width:10px; height:10px; pointer-events:none; }
+.window-glyph-minimize::before { content:''; position:absolute; left:0; right:0; top:5px; height:1px; background:currentColor; }
+.window-glyph-maximize { border:1px solid currentColor; }
+.window-glyph-restore::before, .window-glyph-restore::after { content:''; position:absolute; width:8px; height:8px; border:1px solid currentColor; background:inherit; }
+.window-glyph-restore::before { left:2px; top:0; }
+.window-glyph-restore::after { left:0; top:2px; }
+.window-glyph-close::before, .window-glyph-close::after { content:''; position:absolute; left:-1px; top:4.5px; width:12px; height:1px; background:currentColor; }
+.window-glyph-close::before { transform:rotate(45deg); }
+.window-glyph-close::after { transform:rotate(-45deg); }
+.workspace-tab.is-active { border-bottom-color: #f8fafc; box-shadow: 0 -1px 0 rgb(15 23 42 / .02); }
 .win11-spinner { width: 24px; height: 24px; border: 3px solid rgb(148 163 184 / .28); border-top-color: #fff; border-radius: 9999px; animation: win11-spin .8s linear infinite; }
 @keyframes win11-spin { to { transform: rotate(360deg); } }
 
@@ -53,6 +75,8 @@ html.dark .brand-logo-dark-only { display: block; }
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
   background: #475569;
 }
+.project-navigator-scroll::-webkit-scrollbar { width:6px; }
+.project-navigator-scroll::-webkit-scrollbar-track { background:#fff; }
 /* Recovered workspace UI primitives */
 .project-action-button {
   display: inline-flex;
@@ -88,6 +112,24 @@ html.dark .brand-logo-dark-only { display: block; }
 .project-toolbar .project-action-button:disabled { color:#94a3b8; cursor:not-allowed; opacity:.5; }
 .project-toolbar .project-action-button:disabled:hover { background:transparent; }
 .toolbar-divider { align-self:stretch; width:1px; margin:.3rem .45rem; background:#e2e8f0; }
+.column-resize-handle {
+  position: relative;
+  z-index: 20;
+  width: 1px;
+  flex: 0 0 1px;
+  cursor: col-resize;
+  touch-action: none;
+  border-left: 1px solid #e2e8f0;
+  background: transparent;
+  transition: border-color .15s;
+}
+.column-resize-handle::after {
+  content: '';
+  position: absolute;
+  inset: 0 -5px;
+}
+.column-resize-handle:hover,
+.column-resize-handle:focus-visible { border-color:#3b82f6; outline:none; }
 .file-list-row .file-select-box { opacity:0; transition:opacity .15s; }
 .file-list-row:hover .file-select-box, .file-list-row .file-select-box.is-selected { opacity:1; }
 .file-grid-select { opacity:0; transition:opacity .15s; }
@@ -133,9 +175,14 @@ html.dark .project-action-danger { color: #fca5a5; border-color: #7f1d1d; }
 html.dark .project-toolbar .project-action-button { background:transparent; }
 html.dark .project-toolbar .project-action-button:hover { background:#111827; }
 html.dark .toolbar-divider { background:#1f2937; }
+html.dark .column-resize-handle { border-color:#1f2937; background:transparent; }
+html.dark .column-resize-handle:hover, html.dark .column-resize-handle:focus-visible { border-color:#3b82f6; }
+html.dark .project-navigator-scroll::-webkit-scrollbar-track { background:#090c12; }
 html.dark .file-list-heading { background:#090c12; }
 html.dark .project-menu-item { color: #d1d5db; }
 html.dark .terminal-scroll::-webkit-scrollbar-thumb { background: #64748b; }
+html.dark .app-titlebar { background:#090c12; border-color:#1f2937; }
+html.dark .workspace-tab.is-active { border-color:#1f2937; border-bottom-color:#030407; background:#030407; }
 
 .settings-check { display:flex; align-items:flex-start; gap:.65rem; margin-top:1rem; border:1px solid #e2e8f0; border-radius:.6rem; padding:.75rem; background:#f8fafc; color:#334155; font-size:.875rem; line-height:1.4; cursor:pointer; }
 .settings-check input { margin-top:.12rem; flex:none; accent-color:#2563eb; }
