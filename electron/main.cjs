@@ -1326,6 +1326,74 @@ const removeCreatedPasteTargets = async targets => {
   for (const target of targets.slice().reverse()) await fs.promises.rm(target, { recursive: true, force: true }).catch(() => undefined);
 };
 
+const runWindowsClipboardScript = script => new Promise((resolve, reject) => {
+  const encodedCommand = Buffer.from(script, 'utf16le').toString('base64');
+  const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', encodedCommand], { windowsHide: true });
+  let stdout = '';
+  let stderr = '';
+  let settled = false;
+  const finish = (error, value) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeout);
+    if (error) reject(error);
+    else resolve(value);
+  };
+  const timeout = setTimeout(() => {
+    child.kill();
+    finish(new Error('系统剪贴板响应超时'));
+  }, 8000);
+  child.stdout.on('data', data => { stdout += data.toString('utf8'); });
+  child.stderr.on('data', data => { stderr += data.toString('utf8'); });
+  child.on('error', error => finish(error));
+  child.on('close', code => finish(code === 0 ? null : new Error(stderr.trim() || `PowerShell 退出，代码 ${code}`), stdout.trim()));
+});
+
+const writeSystemFileClipboard = async (sources, operation) => {
+  if (process.platform !== 'win32') return false;
+  const payload = Buffer.from(JSON.stringify({ sources, operation }), 'utf8').toString('base64');
+  const script = `
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+$json = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${payload}'))
+$payload = ConvertFrom-Json $json
+$files = New-Object System.Collections.Specialized.StringCollection
+foreach ($file in $payload.sources) { [void]$files.Add([string]$file) }
+$data = New-Object System.Windows.Forms.DataObject
+$data.SetFileDropList($files)
+$effect = if ($payload.operation -eq 'cut') { 2 } else { 1 }
+$data.SetData('Preferred DropEffect', (New-Object System.IO.MemoryStream(,[System.BitConverter]::GetBytes([int]$effect))))
+for ($attempt = 0; $attempt -lt 5; $attempt++) {
+  try { [System.Windows.Forms.Clipboard]::SetDataObject($data, $true); exit 0 }
+  catch { if ($attempt -eq 4) { throw }; Start-Sleep -Milliseconds 80 }
+}`;
+  await runWindowsClipboardScript(script);
+  return true;
+};
+
+const readSystemFileClipboard = async () => {
+  if (process.platform !== 'win32') return null;
+  const script = `
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+$data = [System.Windows.Forms.Clipboard]::GetDataObject()
+$files = @([System.Windows.Forms.Clipboard]::GetFileDropList() | ForEach-Object { [string]$_ })
+$operation = 'copy'
+if ($data -and $data.GetDataPresent('Preferred DropEffect')) {
+  $effectData = $data.GetData('Preferred DropEffect')
+  if ($effectData -is [System.IO.Stream]) {
+    $effectData.Position = 0
+    $effect = $effectData.ReadByte()
+  } elseif ($effectData -is [byte[]] -and $effectData.Length) {
+    $effect = $effectData[0]
+  }
+  if (($effect -band 2) -eq 2) { $operation = 'cut' }
+}
+@{ sources = $files; operation = $operation } | ConvertTo-Json -Compress`;
+  const output = await runWindowsClipboardScript(script);
+  return output ? JSON.parse(output) : null;
+};
+
 ipcMain.handle('workspace-cancel-file-operation', async (_event, operationId) => {
   const job = activeProjectFileOperations.get(operationId);
   if (!job || job.finishing) return { success: false, error: job?.finishing ? '文件已复制完成，正在整理源文件' : '操作已结束' };
@@ -1345,14 +1413,28 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
     if (operation === 'copy' || operation === 'cut') {
       if (!sources.length) throw new Error('未选择文件');
       projectFileClipboard = { operation, sources };
+      try {
+        await writeSystemFileClipboard(sources, operation);
+      } catch (error) {
+        writeLog('warn', 'Unable to sync project files to the system clipboard', error);
+      }
       return { success: true, count: sources.length };
     }
     if (operation === 'paste') {
       if (activeProjectFileOperations.size) throw new Error('已有文件粘贴任务正在进行');
-      if (!projectFileClipboard?.sources?.length) throw new Error('剪贴板为空');
       const destinationDir = resolveInsideProject(targetRelativePath);
       if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
-      const clipboardSnapshot = { operation: projectFileClipboard.operation, sources: [...projectFileClipboard.sources] };
+      let clipboardSnapshot = null;
+      try {
+        const systemClipboard = await readSystemFileClipboard();
+        if (systemClipboard?.sources?.length) clipboardSnapshot = { operation: systemClipboard.operation, sources: systemClipboard.sources.map(source => path.resolve(source)) };
+      } catch (error) {
+        writeLog('warn', 'Unable to read project files from the system clipboard', error);
+      }
+      if (!clipboardSnapshot && projectFileClipboard?.sources?.length) {
+        clipboardSnapshot = { operation: projectFileClipboard.operation, sources: [...projectFileClipboard.sources] };
+      }
+      if (!clipboardSnapshot?.sources?.length) throw new Error('剪贴板中没有文件或文件夹');
       const operationId = crypto.randomUUID();
       const job = { cancelled: false, finishing: false };
       const createdTargets = [];
@@ -1415,6 +1497,7 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
           publish({ phase: 'finishing', progress: 99, currentName: '正在移除源文件', bytesCopied, totalBytes, filesCopied, totalFiles });
           for (const source of clipboardSnapshot.sources) await fs.promises.rm(source, { recursive: true, force: true });
           projectFileClipboard = null;
+          if (process.platform === 'win32') clipboard.clear();
         }
         const count = topLevelTargets.length;
         publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied, totalBytes, filesCopied, totalFiles, count });
