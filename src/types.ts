@@ -26,6 +26,7 @@ export interface AppConfig {
   mediaCache: {
     maxSizeGB: number;
     directory: string;
+    autoCleanup30Days: boolean;
   };
   smartImport: {
     autoStart: boolean;
@@ -71,6 +72,8 @@ export interface ProjectFileEntry {
   updatedAt: number;
   previewUrl?: string;
 }
+
+export type ThumbnailState = 'NOT_READY' | 'QUEUED' | 'GENERATING' | 'READY' | 'STALE' | 'FAILED' | 'MISSING';
 
 export interface MediaMetadataField {
   group: string;
@@ -126,7 +129,9 @@ export interface IElectronAPI {
   getProjectContents: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; folders: Array<{ name: string; path: string; updatedAt: number }>;error?: string }> ;
   browseProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath?: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path?: string; entries: ProjectFileEntry[]; error?: string }>;
   getProjectFileDetails: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<{ success: boolean; details: Array<{ relativePath: string; size: number; updatedAt: number }>; error?: string }>;
-  getMediaThumbnail: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache'], requestedSize?: number) => Promise<{ success: boolean; previewUrl?: string; mediaUrl?: string; error?: string }>;
+  getMediaThumbnail: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache'], requestedSize?: number, priority?: 0 | 1 | 2 | 3, queueOrder?: number) => Promise<{ success: boolean; state?: ThumbnailState; previewUrl?: string; mediaUrl?: string; usingImportedPreview?: boolean; importedVideoWithoutPreview?: boolean; cacheLayer?: 'memory' | 'disk' | 'source'; error?: string }>;
+  cancelMediaThumbnail: (filePath: string, requestedSize?: number) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
+  onThumbnailStateChanged: (callback: (update: { filePath: string; state: ThumbnailState; previewUrls?: Partial<Record<'small' | 'medium' | 'large', string>>; error?: string }) => void) => () => void;
   getMediaOriginal: (filePath: string, kind: 'image' | 'raw', cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; mediaUrl?: string; original?: boolean; orientation?: { matrix: number[]; swapsAxes: boolean; rawOrientation: number; embeddedOrientation: number }; error?: string }>;
   getMediaMetadata: (filePath: string) => Promise<{ success: boolean; fields: MediaMetadataField[]; error?: string }>;
   getVideoHoverPreview: (filePath: string, cacheConfig?: AppConfig['mediaCache'], requestedSize?: number, cacheOnly?: boolean, generateHoverFrames?: boolean) => Promise<{ success: boolean; cached: boolean; complete: boolean; duration: number; frameUrls: string[]; error?: string }>;
@@ -141,7 +146,7 @@ export interface IElectronAPI {
   cancelProjectFileOperation: (operationId: string) => Promise<{ success: boolean; error?: string }>;
   chooseCacheDirectory: () => Promise<{ cancelled?: boolean; path?: string }>;
   getMediaCacheInfo: (cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path: string; sizeBytes: number; fileCount: number; error?: string }>;
-  clearMediaCache: (cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; error?: string }>;
+  clearMediaCache: (cacheConfig?: AppConfig['mediaCache'], olderThanDays?: number) => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
   openWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, folderName?: string) => Promise<{ success: boolean; error?: string }> ;
   openProjectEntry: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; error?: string }>;
   copyProjectEntryPath: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; error?: string }>;

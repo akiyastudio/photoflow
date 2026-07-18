@@ -52,7 +52,7 @@ internal static class ShellThumbnailCache
         return Convert.ToBase64String(Encoding.UTF8.GetBytes(value ?? String.Empty));
     }
 
-    private static void SaveJpegFromCache(string sourcePath, string targetPath, int requestedSize)
+    private static void SaveJpeg(string sourcePath, string targetPath, int requestedSize, bool cacheOnly)
     {
         var interfaceId = typeof(IShellItemImageFactory).GUID;
         IShellItemImageFactory factory = null;
@@ -61,10 +61,12 @@ internal static class ShellThumbnailCache
         try
         {
             SHCreateItemFromParsingName(sourcePath, IntPtr.Zero, ref interfaceId, out factory);
-            var size = Math.Max(160, Math.Min(1024, requestedSize));
+            var size = Math.Max(160, Math.Min(1600, requestedSize));
+            var flags = ShellImageFlags.ThumbnailOnly;
+            if (cacheOnly) flags |= ShellImageFlags.InCacheOnly;
             var result = factory.GetImage(
                 new NativeSize { Width = size, Height = size },
-                ShellImageFlags.ThumbnailOnly | ShellImageFlags.InCacheOnly,
+                flags,
                 out bitmapHandle);
             if (result < 0 || bitmapHandle == IntPtr.Zero)
                 Marshal.ThrowExceptionForHR(result);
@@ -109,19 +111,20 @@ internal static class ShellThumbnailCache
         while ((line = Console.ReadLine()) != null)
         {
             var fields = line.Split('\t');
-            if (fields.Length != 4) continue;
+            if (fields.Length != 4 && fields.Length != 5) continue;
             var requestId = fields[0];
             try
             {
                 var requestedSize = Int32.Parse(fields[1]);
-                SaveJpegFromCache(Decode(fields[2]), Decode(fields[3]), requestedSize);
+                var cacheOnly = fields.Length == 4 || fields[4] != "generate";
+                SaveJpeg(Decode(fields[2]), Decode(fields[3]), requestedSize, cacheOnly);
                 Console.WriteLine(requestId + "\t1\t");
             }
             catch (Exception error)
             {
                 // A cache miss is expected and intentionally stays on stdout so
                 // the Node client can fall back without treating it as a crash.
-                Console.WriteLine(requestId + "\t0\t" + Encode(error.Message));
+                Console.WriteLine(requestId + "\t0\t" + Encode(error.ToString()));
             }
             Console.Out.Flush();
         }

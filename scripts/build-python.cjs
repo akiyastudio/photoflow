@@ -19,4 +19,17 @@ const result = spawnSync(python, [
 ], { cwd: join(root, 'python'), stdio: 'inherit' });
 
 if (result.error) throw result.error;
-process.exit(result.status ?? 1);
+if ((result.status ?? 1) !== 0) process.exit(result.status ?? 1);
+
+const thumbnailWorker = spawnSync(python, [
+  '-m', 'PyInstaller', '--onefile', '--clean', '--specpath', 'build/specs',
+  '--name', 'thumbnail-image-worker',
+  '--exclude-module', 'numpy', '--exclude-module', 'scipy',
+  '--exclude-module', 'matplotlib', '--exclude-module', 'cv2',
+  '--exclude-module', 'torch', '--exclude-module', 'tkinter',
+  '--exclude-module', 'PIL.ImageTk', '--exclude-module', 'PIL.ImageQt',
+  'thumbnail_image.py',
+], { cwd: join(root, 'python'), stdio: 'inherit' });
+
+if (thumbnailWorker.error) throw thumbnailWorker.error;
+process.exit(thumbnailWorker.status ?? 1);

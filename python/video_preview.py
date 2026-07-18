@@ -105,6 +105,12 @@ def run(arguments):
 
 
 if __name__ == '__main__':
+    # Electron decodes the JSONL response as UTF-8. Explicitly override the
+    # Windows console code page so custom cache paths remain valid too.
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='strict')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     try:
         run(sys.argv[1:])
     except Exception as error:

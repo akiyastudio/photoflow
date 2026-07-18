@@ -3,10 +3,12 @@ const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const crypto = require('crypto');
+const os = require('os');
 const { pathToFileURL } = require('url');
 const { exiftool } = require('exiftool-vendored');
+const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY } = require('./thumbnail-pipeline.cjs');
 
-app.setName('照片流');
+app.setName('photoflow');
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 
@@ -24,15 +26,25 @@ const renameHistory = [];
 let shellThumbnailProcess = null;
 let shellThumbnailOutput = '';
 let shellThumbnailRequestId = 0;
+let shellThumbnailWorkChain = Promise.resolve();
 const shellThumbnailRequests = new Map();
 let shellThumbnailUnavailableLogged = false;
+let thumbnailPipeline = null;
+let thumbnailImageWorkerPool = null;
+let originalImageWorkerPool = null;
+let activeMediaCacheConfig = { maxSizeGB: 50, directory: '' };
+const normalizeMediaCacheSizeGB = (value, fallback = 50) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, number) : fallback;
+};
+const workspaceWatchChanges = new Set();
 const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
 
 // Persist operational logs outside of the installation directory so they are
 // available after an app restart or a packaged-app update.
 const getLogDir = () => {
-  const logDir = path.join(app.getPath('userData'), 'photoflow', 'logs');
+  const logDir = path.join(getConfigDir(), 'logs');
   if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
   return logDir;
 };
@@ -144,10 +156,9 @@ const ensureShellThumbnailProcess = () => {
   return child;
 };
 
-// Query only Explorer's existing thumbnail cache. The helper deliberately uses
-// SIIGBF_INCACHEONLY | SIIGBF_THUMBNAILONLY so a cache miss never starts video
-// decoding on the Electron main thread.
-const copyWindowsShellCachedThumbnail = (sourcePath, targetPath, requestedSize) => new Promise(resolve => {
+// Query Explorer's cache first, then optionally ask the installed provider to
+// extract in the isolated helper process. Provider work never blocks Electron.
+const copyWindowsShellThumbnailNow = (sourcePath, targetPath, requestedSize, cacheOnly = true) => new Promise(resolve => {
   const child = ensureShellThumbnailProcess();
   if (!child?.stdin?.writable) return resolve(false);
   const requestId = String(++shellThumbnailRequestId);
@@ -158,10 +169,10 @@ const copyWindowsShellCachedThumbnail = (sourcePath, targetPath, requestedSize) 
     // if a cloud/offline Shell provider stalls so later thumbnails are not
     // trapped behind the same blocked COM request.
     if (shellThumbnailProcess === child) stopShellThumbnailProcess();
-  }, 2000);
+  }, cacheOnly ? 1500 : 10000);
   shellThumbnailRequests.set(requestId, { resolve, timer, targetPath });
   const encode = value => Buffer.from(value, 'utf8').toString('base64');
-  child.stdin.write(`${requestId}\t${requestedSize}\t${encode(sourcePath)}\t${encode(targetPath)}\n`, error => {
+  child.stdin.write(`${requestId}\t${requestedSize}\t${encode(sourcePath)}\t${encode(targetPath)}\t${cacheOnly ? 'cache' : 'generate'}\n`, error => {
     if (!error) return;
     const request = shellThumbnailRequests.get(requestId);
     if (!request) return;
@@ -170,6 +181,14 @@ const copyWindowsShellCachedThumbnail = (sourcePath, targetPath, requestedSize) 
     request.resolve(false);
   });
 });
+
+const copyWindowsShellThumbnail = (sourcePath, targetPath, requestedSize, cacheOnly = true) => {
+  // The COM helper is single-threaded. Serialize callers here so later requests
+  // do not time out while an earlier provider is still decoding a large video.
+  const job = shellThumbnailWorkChain.then(() => copyWindowsShellThumbnailNow(sourcePath, targetPath, requestedSize, cacheOnly));
+  shellThumbnailWorkChain = job.catch(() => false);
+  return job;
+};
 
 // Mirror existing main-process console output to the persistent log without
 // requiring every call site to be rewritten.
@@ -218,7 +237,7 @@ function createWindow() {
 }
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'research', 'video_preview']);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'research', 'thumbnail_db', 'video_preview']);
 
 const getRunConfig = (scriptName, args) => {
   // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
@@ -229,6 +248,12 @@ const getRunConfig = (scriptName, args) => {
   if (app.isPackaged) {
     // 生产环境：根据平台决定是否有 .exe 后缀
     const exeSuffix = isWin ? '.exe' : '';
+    if (baseName === 'thumbnail_image') {
+      return {
+        command: path.join(process.resourcesPath, 'python', `thumbnail-image-worker${exeSuffix}`),
+        args
+      };
+    }
     if (MERGED_PYTHON_TOOLS.has(baseName)) {
       return {
         command: path.join(process.resourcesPath, 'python', `tools${exeSuffix}`),
@@ -406,14 +431,10 @@ ipcMain.on('run-python', (event, scriptName, args = []) => {
 });
 
 const getConfigDir = () => {
-  // 在用户数据目录下创建 config 文件夹
-  const userDataPath = app.getPath('userData');
-  const configDir = path.join(userDataPath, 'photoflow');
-  
-  if (!fs.existsSync(configDir)) {
-    fs.mkdirSync(configDir, { recursive: true });
-  }
-  
+  // Keep runtime data under an ASCII-only path. This also prevents legacy
+  // command-line tools from corrupting cache paths on Chinese Windows.
+  const configDir = app.getPath('userData');
+  fs.mkdirSync(configDir, { recursive: true });
   return configDir;
 };
 
@@ -602,6 +623,7 @@ const stopWorkspaceWatcher = () => {
   if (workspaceWatcher) workspaceWatcher.close();
   workspaceWatcher = null;
   watchedWorkspacePath = '';
+  workspaceWatchChanges.clear();
 };
 
 const watchWorkspace = (root) => {
@@ -609,9 +631,31 @@ const watchWorkspace = (root) => {
   stopWorkspaceWatcher();
   try {
     workspaceWatcher = fs.watch(root, { recursive: process.platform !== 'linux' }, (_eventType, fileName) => {
+      if (fileName) workspaceWatchChanges.add(String(fileName));
       if (workspaceWatchTimer) clearTimeout(workspaceWatchTimer);
       workspaceWatchTimer = setTimeout(() => {
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('workspace-files-changed', { root, fileName: fileName || '' });
+        const changedNames = [...workspaceWatchChanges];
+        workspaceWatchChanges.clear();
+        if (thumbnailPipeline) {
+          const changesByProject = new Map();
+          for (const changedName of changedNames) {
+            const segments = changedName.split(/[\\/]/).filter(Boolean);
+            if (segments.length < 2) continue;
+            const projectRoot = path.join(root, segments[0], segments[1]);
+            if (!changesByProject.has(projectRoot)) changesByProject.set(projectRoot, []);
+            changesByProject.get(projectRoot).push(path.join(root, changedName));
+          }
+          for (const [projectRoot, changedPaths] of changesByProject) {
+            void thumbnailPipeline.syncChangedPaths(projectRoot, changedPaths, activeMediaCacheConfig).catch(error => {
+              writeLog('warn', 'Unable to update thumbnail index from file watcher', { projectRoot, error: error.message || String(error) });
+            });
+          }
+        }
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          for (const changedName of changedNames.length ? changedNames : ['']) {
+            mainWindow.webContents.send('workspace-files-changed', { root, fileName: changedName });
+          }
+        }
       }, 200);
     });
     watchedWorkspacePath = root;
@@ -878,59 +922,131 @@ const getMediaCacheDir = (config = {}) => {
   return cacheDir;
 };
 
-const getDirectorySize = (directory) => {
-  let sizeBytes = 0;
-  let fileCount = 0;
-  if (!fs.existsSync(directory)) return { sizeBytes, fileCount };
-  const visit = (current) => {
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      const entryPath = path.join(current, entry.name);
-      if (entry.isDirectory()) visit(entryPath);
-      else if (entry.isFile()) { sizeBytes += fs.statSync(entryPath).size; fileCount += 1; }
-    }
-  };
-  visit(directory);
-  return { sizeBytes, fileCount };
+const mediaCacheIndexes = new Map();
+
+const refreshMediaCacheIndex = async cacheDir => {
+  const directory = path.resolve(cacheDir);
+  const entries = await fs.promises.readdir(directory, { withFileTypes: true });
+  const files = new Map();
+  let totalBytes = 0;
+  await Promise.all(entries.filter(entry => entry.isFile()).map(async entry => {
+    const filePath = path.join(directory, entry.name);
+    try {
+      const stat = await fs.promises.stat(filePath);
+      files.set(filePath, { size: stat.size, used: stat.atimeMs || stat.mtimeMs });
+      totalBytes += stat.size;
+    } catch { /* file changed while the cache snapshot was being built */ }
+  }));
+  const previous = mediaCacheIndexes.get(directory);
+  const state = previous || { pendingPaths: new Set(), timer: null, running: false, maxBytes: 50 * 1024 ** 3 };
+  state.files = files;
+  state.totalBytes = totalBytes;
+  state.initialized = true;
+  mediaCacheIndexes.set(directory, state);
+  return state;
 };
 
-const trimMediaCache = (cacheDir, maxSizeGB) => {
-  const maxBytes = Math.max(1, Number(maxSizeGB) || 1) * 1024 * 1024 * 1024;
-  const files = fs.readdirSync(cacheDir, { withFileTypes: true })
-    .filter(entry => entry.isFile())
-    .map(entry => { const filePath = path.join(cacheDir, entry.name); const stat = fs.statSync(filePath); return { filePath, size: stat.size, used: stat.atimeMs || stat.mtimeMs }; })
-    .sort((a, b) => a.used - b.used);
-  let total = files.reduce((sum, file) => sum + file.size, 0);
-  for (const file of files) {
-    if (total <= maxBytes) break;
-    fs.unlinkSync(file.filePath);
-    total -= file.size;
+const getMediaCacheIndex = async cacheDir => {
+  const directory = path.resolve(cacheDir);
+  const current = mediaCacheIndexes.get(directory);
+  if (current?.initialized) return current;
+  if (current?.initializing) return current.initializing;
+  const state = current || { pendingPaths: new Set(), timer: null, running: false, maxBytes: 50 * 1024 ** 3 };
+  state.initializing = refreshMediaCacheIndex(directory).finally(() => { state.initializing = null; });
+  mediaCacheIndexes.set(directory, state);
+  return state.initializing;
+};
+
+const updateMediaCacheIndex = async (state, changedPaths) => {
+  for (const filePath of changedPaths) {
+    const resolved = path.resolve(filePath);
+    const previous = state.files.get(resolved);
+    try {
+      const stat = await fs.promises.stat(resolved);
+      state.files.set(resolved, { size: stat.size, used: stat.atimeMs || stat.mtimeMs });
+      state.totalBytes += stat.size - (previous?.size || 0);
+    } catch {
+      if (previous) state.totalBytes -= previous.size;
+      state.files.delete(resolved);
+    }
   }
 };
 
-const rawPreviewPath = (sourcePath, stat, cacheConfig) => {
+const runMediaCacheMaintenance = async cacheDir => {
+  const directory = path.resolve(cacheDir);
+  const state = await getMediaCacheIndex(directory);
+  if (state.running) return;
+  state.running = true;
+  try {
+    const changedPaths = [...state.pendingPaths];
+    state.pendingPaths.clear();
+    await updateMediaCacheIndex(state, changedPaths);
+    if (state.totalBytes <= state.maxBytes) return;
+    // Access times only need a full refresh when eviction is actually needed.
+    const refreshed = await refreshMediaCacheIndex(directory);
+    const oldest = [...refreshed.files.entries()].sort((left, right) => left[1].used - right[1].used);
+    for (const [filePath, record] of oldest) {
+      if (refreshed.totalBytes <= refreshed.maxBytes) break;
+      try { await fs.promises.unlink(filePath); } catch { continue; }
+      refreshed.files.delete(filePath);
+      refreshed.totalBytes -= record.size;
+    }
+  } finally {
+    state.running = false;
+    if (state.pendingPaths.size) trimMediaCache(directory, state.maxBytes / 1024 ** 3, []);
+  }
+};
+
+const trimMediaCache = (cacheDir, maxSizeGB, changedPaths = []) => {
+  const directory = path.resolve(cacheDir);
+  const state = mediaCacheIndexes.get(directory) || { pendingPaths: new Set(), timer: null, running: false, maxBytes: 50 * 1024 ** 3 };
+  state.maxBytes = normalizeMediaCacheSizeGB(maxSizeGB) * 1024 ** 3;
+  for (const filePath of changedPaths) state.pendingPaths.add(path.resolve(filePath));
+  if (state.timer) clearTimeout(state.timer);
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    void runMediaCacheMaintenance(directory).catch(error => writeLog('warn', 'Media cache maintenance failed', { directory, error: error.message || String(error) }));
+  }, 500);
+  mediaCacheIndexes.set(directory, state);
+};
+
+const isCompleteJpegFile = filePath => {
+  try {
+    const fileStat = fs.statSync(filePath);
+    if (!fileStat.isFile() || fileStat.size < 128) return false;
+    const handle = fs.openSync(filePath, 'r');
+    try {
+      const markers = Buffer.alloc(4);
+      fs.readSync(handle, markers, 0, 2, 0);
+      fs.readSync(handle, markers, 2, 2, fileStat.size - 2);
+      return markers[0] === 0xff && markers[1] === 0xd8 && markers[2] === 0xff && markers[3] === 0xd9;
+    } finally {
+      fs.closeSync(handle);
+    }
+  } catch {
+    return false;
+  }
+};
+
+const rawPreviewPath = async (sourcePath, stat, cacheConfig) => {
   const cacheDir = getMediaCacheDir(cacheConfig);
   const target = rawPreviewCacheFile(sourcePath, stat, cacheDir);
-  if (fs.existsSync(target)) return target;
-  // Most RAW files embed a camera-generated JPEG. Extracting it avoids a large
-  // decoder dependency and is fast enough for a browse thumbnail.
-  const source = fs.readFileSync(sourcePath);
-  let best = null;
-  let start = source.indexOf(Buffer.from([0xff, 0xd8]));
-  while (start >= 0) {
-    const end = source.indexOf(Buffer.from([0xff, 0xd9]), start + 2);
-    if (end < 0) break;
-    const length = end + 2 - start;
-    if (!best || length > best.length) best = { start, length };
-    start = source.indexOf(Buffer.from([0xff, 0xd8]), end + 2);
+  if (isCompleteJpegFile(target)) return target;
+  if (fs.existsSync(target)) void fs.promises.unlink(target).catch(() => undefined);
+  try {
+    await generateOriginalImagePreviewFile(sourcePath, 'raw', [{ sizeLabel: 'raw-preview', pixels: 0, path: target }]);
+    if (!isCompleteJpegFile(target)) return null;
+    trimMediaCache(cacheDir, cacheConfig?.maxSizeGB, [target]);
+    return target;
+  } catch (error) {
+    writeLog('warn', 'RAW embedded preview extraction failed', { sourcePath, error: error.message || String(error) });
+    return null;
   }
-  if (!best || best.length < 8 * 1024) return null;
-  fs.writeFileSync(target, source.subarray(best.start, best.start + best.length));
-  trimMediaCache(cacheDir, cacheConfig?.maxSizeGB);
-  return target;
 };
 
-const rawPreviewCacheFile = (sourcePath, stat, cacheDir) => path.join(cacheDir, crypto.createHash('sha256').update(`${sourcePath}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
-const mediaThumbnailCacheFile = (sourcePath, stat, cacheDir, requestedSize) => path.join(cacheDir, crypto.createHash('sha256').update(`thumbnail|${requestedSize}|${sourcePath}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
+const mediaSourceCacheKey = sourcePath => process.platform === 'win32' ? path.resolve(sourcePath).toLowerCase() : path.resolve(sourcePath);
+const rawPreviewCacheFile = (sourcePath, stat, cacheDir) => path.join(cacheDir, crypto.createHash('sha256').update(`${mediaSourceCacheKey(sourcePath)}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
+const mediaThumbnailCacheFile = (sourcePath, stat, cacheDir, requestedSize, version = THUMBNAIL_VERSION) => path.join(cacheDir, crypto.createHash('sha256').update(`thumbnail|v${version}|${requestedSize}|${mediaSourceCacheKey(sourcePath)}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
 
 const EXIF_ORIENTATION_MATRICES = {
   1: [1, 0, 0, 1],
@@ -976,42 +1092,192 @@ const rawOrientationCorrection = async (sourcePath, previewPath, stat) => {
   return result;
 };
 
-// Keep the browser from decoding full camera images just to fill a small tile.
-// The renderer asks for these only when a tile approaches the viewport.
-const mediaThumbnailPath = async (sourcePath, stat, kind, cacheConfig, requestedSize = 640) => {
-  const cacheDir = getMediaCacheDir(cacheConfig);
-  const size = Math.max(160, Math.min(1600, Math.round(Number(requestedSize) || 640)));
-  const target = mediaThumbnailCacheFile(sourcePath, stat, cacheDir, size);
-  if (fs.existsSync(target)) return target;
-  // Explorer feels instant because it reuses the shared Windows thumbnail
-  // cache. Query that cache first for every media type, without triggering a
-  // Shell extraction on a cache miss; the normal decoder remains the fallback.
-  const foundInWindowsCache = await copyWindowsShellCachedThumbnail(sourcePath, target, size);
-  if (foundInWindowsCache) {
-    trimMediaCache(cacheDir, cacheConfig?.maxSizeGB);
-    return target;
-  }
-  if (kind === 'video') return null;
-  let thumbnail = nativeImage.createEmpty();
+const writeThumbnailJpeg = (target, image, quality) => {
+  const temporary = `${target}.tmp-${crypto.randomUUID()}`;
   try {
-    thumbnail = await nativeImage.createThumbnailFromPath(sourcePath, { width: size, height: size });
-  } catch { /* no system thumbnail provider for this format */ }
-  // On Windows this first attempt uses the installed Shell/WIC RAW thumbnail
-  // provider, matching Explorer. Fall back to the camera's embedded JPEG when
-  // no system codec is available for this RAW format.
-  if (thumbnail.isEmpty() && kind === 'raw') {
-    const previewSource = rawPreviewPath(sourcePath, stat, cacheConfig);
-    if (previewSource) {
-      try {
-        thumbnail = await nativeImage.createThumbnailFromPath(previewSource, { width: size, height: size });
-      } catch { /* malformed or unsupported embedded preview */ }
+    fs.writeFileSync(temporary, image.toJPEG(quality));
+    if (fs.existsSync(target)) fs.unlinkSync(temporary);
+    else fs.renameSync(temporary, target);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+};
+
+class ThumbnailImageWorkerPool {
+  constructor(size) {
+    this.size = size;
+    this.workers = [];
+    this.queue = [];
+    this.nextId = 0;
+    this.stopped = false;
+  }
+
+  run(source, kind, outputs, urgent = false) {
+    if (this.stopped) return Promise.reject(new Error('图片解码服务已经停止'));
+    return new Promise((resolve, reject) => {
+      const job = { id: ++this.nextId, source, kind, outputs, resolve, reject };
+      if (urgent) this.queue.unshift(job);
+      else this.queue.push(job);
+      this.pump();
+    });
+  }
+
+  createWorker() {
+    const { command, args } = getRunConfig('thumbnail_image.py', ['--server']);
+    const child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const worker = { child, output: '', stderr: '', job: null, timer: null, dead: false };
+    this.workers.push(worker);
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', data => {
+      worker.output += data;
+      const lines = worker.output.split(/\r?\n/);
+      worker.output = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let response;
+        try { response = JSON.parse(line); } catch { continue; }
+        if (!worker.job || response.id !== worker.job.id) continue;
+        const job = worker.job;
+        worker.job = null;
+        clearTimeout(worker.timer);
+        worker.timer = null;
+        if (response.success) job.resolve(response.generated || []);
+        else job.reject(new Error(response.error || '图片解码失败'));
+        this.pump();
+      }
+    });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', data => { worker.stderr = (worker.stderr + data).slice(-4000); });
+    const finish = error => {
+      if (worker.dead) return;
+      worker.dead = true;
+      clearTimeout(worker.timer);
+      if (worker.job) worker.job.reject(error);
+      worker.job = null;
+      this.workers = this.workers.filter(item => item !== worker);
+      if (!this.stopped) this.pump();
+    };
+    child.on('error', finish);
+    child.on('exit', code => finish(new Error(worker.stderr.trim() || `图片解码服务退出，代码 ${code}`)));
+    return worker;
+  }
+
+  pump() {
+    if (this.stopped) return;
+    while (this.workers.length < this.size && this.queue.length > this.workers.filter(worker => !worker.job && !worker.dead).length) this.createWorker();
+    for (const worker of this.workers) {
+      if (worker.dead || worker.job || !this.queue.length) continue;
+      const job = this.queue.shift();
+      worker.job = job;
+      worker.timer = setTimeout(() => {
+        if (worker.job === job) worker.child.kill();
+      }, 120000);
+      worker.child.stdin.write(`${JSON.stringify({ id: job.id, source: job.source, kind: job.kind, outputs: job.outputs })}\n`, error => {
+        if (error && !worker.dead) worker.child.kill();
+      });
     }
   }
-  if (thumbnail.isEmpty()) return null;
-  fs.writeFileSync(target, thumbnail.toJPEG(size >= 960 ? 84 : 80));
-  trimMediaCache(cacheDir, cacheConfig?.maxSizeGB);
-  return target;
+
+  stop() {
+    this.stopped = true;
+    for (const job of this.queue.splice(0)) job.reject(new Error('图片解码服务已经停止'));
+    for (const worker of this.workers) if (!worker.child.killed) worker.child.kill();
+  }
+}
+
+const generateImageThumbnailFiles = (sourcePath, kind, outputs, urgent = false) => {
+  if (!thumbnailImageWorkerPool) thumbnailImageWorkerPool = new ThumbnailImageWorkerPool(2);
+  return thumbnailImageWorkerPool.run(sourcePath, kind, outputs, urgent);
 };
+
+const generateOriginalImagePreviewFile = (sourcePath, kind, outputs) => {
+  // Full preview extraction must never wait behind project thumbnail warming.
+  // A dedicated one-worker pool keeps selection latency bounded even while the
+  // background scheduler is decoding hundreds of files.
+  if (!originalImageWorkerPool) originalImageWorkerPool = new ThumbnailImageWorkerPool(1);
+  return originalImageWorkerPool.run(sourcePath, kind, outputs, true);
+};
+
+const generateVideoCoverSource = (sourcePath, stat, cacheDir, requestedSize) => new Promise((resolve, reject) => {
+  const cacheKey = crypto.createHash('sha256').update(`scheduler-video-cover|v${THUMBNAIL_VERSION}|${requestedSize}|${sourcePath}|${stat.size}|${stat.mtimeMs}`).digest('hex');
+  const toolArgs = ['--source', sourcePath, '--output_dir', cacheDir, '--cache_key', cacheKey, '--size', String(requestedSize), '--cover_only'];
+  const { command, args } = getRunConfig('video_preview.py', toolArgs);
+  const child = spawn(command, args, { windowsHide: true });
+  let stdout = '';
+  let stderr = '';
+  const timer = setTimeout(() => child.kill(), 120000);
+  child.stdout.on('data', data => { stdout += data.toString(); });
+  child.stderr.on('data', data => { stderr += data.toString(); });
+  child.on('error', error => { clearTimeout(timer); reject(error); });
+  child.on('close', code => {
+    clearTimeout(timer);
+    try {
+      const payloads = stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line => {
+        try { return JSON.parse(line); } catch { return null; }
+      }).filter(Boolean);
+      const payload = [...payloads].reverse().find(item => Array.isArray(item.frames) && item.frames.length);
+      const errorPayload = [...payloads].reverse().find(item => item?.error);
+      if (code !== 0 || !payload || !fs.existsSync(payload.frames[0])) throw new Error(stderr.trim() || errorPayload?.error || 'FFmpeg 未能生成视频封面');
+      resolve(payload.frames[0]);
+    } catch (error) { reject(error); }
+  });
+});
+
+// Generate only the tiers requested by the scheduler. Windows' provider and
+// Python decoding both run outside Electron's main event loop.
+const generateThumbnailSet = async (sourcePath, stat, kind, cacheConfig, sizes) => {
+  const cacheDir = getMediaCacheDir(cacheConfig);
+  const ordered = [...sizes].sort((left, right) => right.pixels - left.pixels);
+  const targets = new Map(ordered.map(size => [size.label, mediaThumbnailCacheFile(sourcePath, stat, cacheDir, size.pixels, THUMBNAIL_VERSION)]));
+  let missing = ordered.filter(size => !fs.existsSync(targets.get(size.label)));
+  if (!missing.length) return ordered.map(size => ({ sizeLabel: size.label, pixelSize: size.pixels, path: targets.get(size.label) }));
+
+  const largest = missing[0];
+  const largestTarget = targets.get(largest.label);
+  let generatedByShell = await copyWindowsShellThumbnail(sourcePath, largestTarget, largest.pixels, true);
+  if (!generatedByShell) generatedByShell = await copyWindowsShellThumbnail(sourcePath, largestTarget, largest.pixels, false);
+  if (generatedByShell) {
+    missing = missing.slice(1);
+    if (missing.length) {
+      await generateImageThumbnailFiles(largestTarget, 'image', missing.map(size => ({ sizeLabel: size.label, pixels: size.pixels, path: targets.get(size.label) })));
+    }
+  } else if (kind === 'video') {
+    const coverPath = await generateVideoCoverSource(sourcePath, stat, cacheDir, largest.pixels);
+    await generateImageThumbnailFiles(coverPath, 'image', missing.map(size => ({ sizeLabel: size.label, pixels: size.pixels, path: targets.get(size.label) })));
+  } else {
+    try {
+      await generateImageThumbnailFiles(sourcePath, kind === 'raw' ? 'raw' : 'image', missing.map(size => ({ sizeLabel: size.label, pixels: size.pixels, path: targets.get(size.label) })));
+    } catch (decodeError) {
+      // Retain Electron's decoder only as a compatibility fallback for
+      // formats supplied by an installed OS codec but unsupported by Pillow.
+      if (kind === 'raw') throw decodeError;
+      for (const size of missing) {
+        const target = targets.get(size.label);
+        let thumbnail = nativeImage.createEmpty();
+        try { thumbnail = await nativeImage.createThumbnailFromPath(sourcePath, { width: size.pixels, height: size.pixels }); }
+        catch { /* reported below if every requested tier is still absent */ }
+        if (!thumbnail.isEmpty()) writeThumbnailJpeg(target, thumbnail, size.pixels >= 960 ? 84 : 80);
+      }
+    }
+  }
+  return ordered.filter(size => fs.existsSync(targets.get(size.label))).map(size => ({ sizeLabel: size.label, pixelSize: size.pixels, path: targets.get(size.label) }));
+};
+
+thumbnailPipeline = new ThumbnailPipeline({
+  getRunConfig,
+  databasePath: path.join(getConfigDir(), 'thumbnail-index.sqlite3'),
+  getCacheDir: getMediaCacheDir,
+  cacheFilePath: mediaThumbnailCacheFile,
+  generateThumbnailSet,
+  toPreviewUrl: toMediaUrl,
+  trimCache: trimMediaCache,
+  notify: update => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('thumbnail-state-changed', update);
+  },
+  log: writeLog,
+  concurrency: Math.max(2, Math.min(4, Math.floor((os.availableParallelism?.() || os.cpus().length || 4) / 4))),
+  maxBackgroundTasks: 1000,
+});
 
 ipcMain.handle('workspace-browse-files', async (_event, workspacePath, status, projectName, relativePath = '', cacheConfig = {}) => {
   try {
@@ -1021,6 +1287,7 @@ ipcMain.handle('workspace-browse-files', async (_event, workspacePath, status, p
     if (currentPath !== root && !currentPath.startsWith(root + path.sep)) throw new Error('无效的文件夹路径');
     const currentStat = await fs.promises.stat(currentPath);
     if (!currentStat.isDirectory()) throw new Error('文件夹不存在');
+    activeMediaCacheConfig = { maxSizeGB: normalizeMediaCacheSizeGB(cacheConfig?.maxSizeGB), directory: cacheConfig?.directory || '' };
     const directoryEntries = await fs.promises.readdir(currentPath, { withFileTypes: true });
     const entries = directoryEntries
       .filter(entry => !entry.name.startsWith('.') && !HIDDEN_SYSTEM_ENTRY_NAMES.has(entry.name.toLowerCase()))
@@ -1031,6 +1298,10 @@ ipcMain.handle('workspace-browse-files', async (_event, workspacePath, status, p
         return { name: entry.name, path: entryPath, relativePath: path.relative(root, entryPath), kind, extension, size: -1, updatedAt: 0 };
       })
       .sort((a, b) => (a.kind === 'folder' ? 0 : 1) - (b.kind === 'folder' ? 0 : 1) || a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+    const directoryIndex = thumbnailPipeline.indexDirectory(root, currentPath, entries, activeMediaCacheConfig);
+    if (!relativePath) {
+      void directoryIndex.then(indexed => indexed && thumbnailPipeline.scanProject(root, activeMediaCacheConfig));
+    }
     return { success: true, path: path.relative(root, currentPath), entries };
   } catch (error) {
     writeLog('warn', 'Unable to browse project directory', { projectName, relativePath, error: error.message || String(error) });
@@ -1054,21 +1325,65 @@ ipcMain.handle('workspace-file-details', async (_event, workspacePath, status, p
   } catch (error) { return { success: false, details: [], error: error.message || String(error) }; }
 });
 
-ipcMain.handle('media-thumbnail', async (_event, filePath, kind, cacheConfig = {}, requestedSize = 640) => {
+const findImportedVideoPreview = sourcePath => {
+  const sourceDir = path.dirname(sourcePath);
+  const sourceFolder = path.basename(sourceDir).toLocaleLowerCase();
+  if (sourceFolder === 'mov_预览'.toLocaleLowerCase()) return sourcePath;
+  if (sourceFolder !== 'mov') return null;
+
+  const previewDir = path.join(path.dirname(sourceDir), 'mov_预览');
+  if (!fs.existsSync(previewDir)) return null;
+  const sourceStem = path.parse(sourcePath).name;
+  const exactPath = path.join(previewDir, `${sourceStem}.mp4`);
+  try {
+    if (fs.statSync(exactPath).isFile()) return exactPath;
+  } catch {}
+
+  // Re-running import preview generation keeps the previous file and adds a
+  // timestamp. Prefer the newest matching result without scanning elsewhere.
+  const escapedStem = sourceStem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const timestampedName = new RegExp(`^${escapedStem}_\\d+\\.mp4$`, 'i');
+  try {
+    return fs.readdirSync(previewDir, { withFileTypes: true })
+      .filter(entry => entry.isFile() && timestampedName.test(entry.name))
+      .map(entry => {
+        const previewPath = path.join(previewDir, entry.name);
+        return { path: previewPath, mtimeMs: fs.statSync(previewPath).mtimeMs };
+      })
+      .sort((left, right) => right.mtimeMs - left.mtimeMs)[0]?.path || null;
+  } catch {
+    return null;
+  }
+};
+
+ipcMain.handle('media-thumbnail', async (_event, filePath, kind, cacheConfig = {}, requestedSize = 640, priority = PRIORITY.visible, queueOrder = Number.MAX_SAFE_INTEGER) => {
   try {
     const sourcePath = path.resolve(filePath);
     const extension = path.extname(sourcePath).toLowerCase();
     const supported = kind === 'raw' ? RAW_EXTENSIONS.has(extension) : kind === 'video' ? VIDEO_EXTENSIONS.has(extension) : IMAGE_EXTENSIONS.has(extension);
     if (!supported || !fs.existsSync(sourcePath)) throw new Error('文件不存在或格式不受支持');
-    const thumbnail = await mediaThumbnailPath(sourcePath, fs.statSync(sourcePath), kind, cacheConfig, requestedSize);
-    if (thumbnail) return { success: true, previewUrl: toMediaUrl(thumbnail), mediaUrl: kind === 'video' ? toMediaUrl(sourcePath) : undefined };
-    if (kind === 'video') return { success: true, mediaUrl: toMediaUrl(sourcePath) };
-    return { success: false, error: '无法生成缩略图' };
+    activeMediaCacheConfig = { maxSizeGB: normalizeMediaCacheSizeGB(cacheConfig?.maxSizeGB), directory: cacheConfig?.directory || '' };
+    const result = await thumbnailPipeline.request({ filePath: sourcePath, kind, cacheConfig: activeMediaCacheConfig, requestedSize, priority, queueOrder });
+    if (kind !== 'video') return result;
+    const isImportedOriginal = path.basename(path.dirname(sourcePath)).toLocaleLowerCase() === 'mov';
+    const importedPreview = findImportedVideoPreview(sourcePath);
+    return {
+      ...result,
+      mediaUrl: importedPreview ? toMediaUrl(importedPreview) : isImportedOriginal ? undefined : toMediaUrl(sourcePath),
+      usingImportedPreview: Boolean(importedPreview),
+      importedVideoWithoutPreview: isImportedOriginal && !importedPreview
+    };
   } catch (error) { return { success: false, error: error.message || String(error) }; }
+});
+
+ipcMain.handle('media-thumbnail-cancel', async (_event, filePath, requestedSize = 640) => {
+  try { return { success: true, cancelled: thumbnailPipeline.cancel(path.resolve(filePath), requestedSize) }; }
+  catch (error) { return { success: false, cancelled: false, error: error.message || String(error) }; }
 });
 
 ipcMain.handle('media-original', async (_event, filePath, kind, cacheConfig = {}) => {
   try {
+    thumbnailPipeline?.noteForegroundActivity();
     const sourcePath = path.resolve(filePath);
     const extension = path.extname(sourcePath).toLowerCase();
     const supported = kind === 'raw' ? RAW_EXTENSIONS.has(extension) : kind === 'image' ? IMAGE_EXTENSIONS.has(extension) : false;
@@ -1078,9 +1393,16 @@ ipcMain.handle('media-original', async (_event, filePath, kind, cacheConfig = {}
     // Chromium cannot decode camera RAW containers directly. Use the largest
     // camera-embedded JPEG, which is the closest displayable source preview.
     const stat = fs.statSync(sourcePath);
-    const previewPath = rawPreviewPath(sourcePath, stat, cacheConfig);
+    const previewPath = await rawPreviewPath(sourcePath, stat, cacheConfig);
     if (!previewPath) throw new Error('RAW 文件中没有可显示的内嵌原图');
-    const orientation = await rawOrientationCorrection(sourcePath, previewPath, stat);
+    let orientationTimer;
+    const orientation = await Promise.race([
+      rawOrientationCorrection(sourcePath, previewPath, stat),
+      new Promise(resolve => {
+        orientationTimer = setTimeout(() => resolve({ matrix: [1, 0, 0, 1], swapsAxes: false, rawOrientation: 1, embeddedOrientation: 1 }), 3000);
+      })
+    ]);
+    clearTimeout(orientationTimer);
     return { success: true, mediaUrl: toMediaUrl(previewPath), original: false, orientation };
   } catch (error) {
     return { success: false, error: error.message || String(error) };
@@ -1144,10 +1466,14 @@ ipcMain.handle('media-video-hover-preview', async (_event, filePath, cacheConfig
   try {
     const sourcePath = path.resolve(filePath);
     if (!VIDEO_EXTENSIONS.has(path.extname(sourcePath).toLowerCase()) || !fs.existsSync(sourcePath)) throw new Error('视频文件不存在或格式不受支持');
-    const stat = fs.statSync(sourcePath);
+    const isImportedOriginal = path.basename(path.dirname(sourcePath)).toLocaleLowerCase() === 'mov';
+    const importedPreview = findImportedVideoPreview(sourcePath);
+    if (isImportedOriginal && !importedPreview) return { success: true, cached: false, complete: false, duration: 0, frameUrls: [] };
+    const previewSource = importedPreview || sourcePath;
+    const stat = fs.statSync(previewSource);
     const size = Math.max(320, Math.min(1600, Math.round(Number(requestedSize) || 640)));
     const cacheDir = getMediaCacheDir(cacheConfig);
-    const cacheKey = crypto.createHash('sha256').update(`video-preview|${size}|${sourcePath}|${stat.size}|${stat.mtimeMs}`).digest('hex');
+    const cacheKey = crypto.createHash('sha256').update(`video-preview|${size}|${previewSource}|${stat.size}|${stat.mtimeMs}`).digest('hex');
     const manifestPath = path.join(cacheDir, `${cacheKey}.json`);
     const readCached = () => {
       if (!fs.existsSync(manifestPath)) return null;
@@ -1162,7 +1488,7 @@ ipcMain.handle('media-video-hover-preview', async (_event, filePath, cacheConfig
 
     if (!videoPreviewJobs.has(cacheKey)) {
       const runPreviewJob = () => new Promise((resolve, reject) => {
-        const toolArgs = ['--source', sourcePath, '--output_dir', cacheDir, '--cache_key', cacheKey, '--size', String(size)];
+        const toolArgs = ['--source', previewSource, '--output_dir', cacheDir, '--cache_key', cacheKey, '--size', String(size)];
         if (generateHoverFrames && cached) toolArgs.push('--remaining_only');
         else if (!generateHoverFrames) toolArgs.push('--cover_only');
         const { command, args } = getRunConfig('video_preview.py', toolArgs);
@@ -1220,7 +1546,7 @@ ipcMain.handle('media-video-hover-preview', async (_event, filePath, cacheConfig
             publishFinishedFrames();
             const finalManifest = readCached();
             if (code !== 0 || !finalManifest || (generateHoverFrames && !finalManifest.complete)) throw new Error(stderr.trim() || '视频抽样进程失败');
-            trimMediaCache(cacheDir, cacheConfig?.maxSizeGB);
+            trimMediaCache(cacheDir, cacheConfig?.maxSizeGB, [manifestPath, ...finalManifest.frames]);
             resolve(finalManifest);
           } catch (error) { reject(error); }
         });
@@ -1251,7 +1577,7 @@ ipcMain.handle('media-raw-preview', async (_event, filePath, cacheConfig = {}) =
   try {
     const sourcePath = path.resolve(filePath);
     if (!RAW_EXTENSIONS.has(path.extname(sourcePath).toLowerCase()) || !fs.existsSync(sourcePath)) throw new Error('RAW 文件不存在或格式不受支持');
-    const preview = rawPreviewPath(sourcePath, fs.statSync(sourcePath), cacheConfig);
+    const preview = await rawPreviewPath(sourcePath, fs.statSync(sourcePath), cacheConfig);
     return preview ? { success: true, previewUrl: toMediaUrl(preview) } : { success: false, error: '未找到内嵌预览' };
   } catch (error) { return { success: false, error: error.message || String(error) }; }
 });
@@ -1696,15 +2022,36 @@ ipcMain.handle('choose-cache-directory', async () => {
 });
 
 ipcMain.handle('media-cache-info', async (_event, cacheConfig = {}) => {
-  try { const cacheDir = getMediaCacheDir(cacheConfig); trimMediaCache(cacheDir, cacheConfig.maxSizeGB); return { success: true, path: cacheDir, ...getDirectorySize(cacheDir) }; }
+  try {
+    const normalizedConfig = { maxSizeGB: normalizeMediaCacheSizeGB(cacheConfig?.maxSizeGB), directory: cacheConfig?.directory || '' };
+    const cacheDir = getMediaCacheDir(normalizedConfig);
+    const state = await refreshMediaCacheIndex(cacheDir);
+    trimMediaCache(cacheDir, normalizedConfig.maxSizeGB);
+    return { success: true, path: cacheDir, sizeBytes: state.totalBytes, fileCount: state.files.size };
+  }
   catch (error) { return { success: false, path: '', sizeBytes: 0, fileCount: 0, error: error.message || String(error) }; }
 });
 
-ipcMain.handle('media-cache-clear', async (_event, cacheConfig = {}) => {
+ipcMain.handle('media-cache-clear', async (_event, cacheConfig = {}, olderThanDays) => {
   try {
     const cacheDir = getMediaCacheDir(cacheConfig);
-    for (const entry of fs.readdirSync(cacheDir, { withFileTypes: true })) if (entry.isFile()) fs.unlinkSync(path.join(cacheDir, entry.name));
-    return { success: true };
+    const days = Number(olderThanDays);
+    const cutoff = Number.isFinite(days) && days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : null;
+    const deletedPaths = [];
+    const entries = (await fs.promises.readdir(cacheDir, { withFileTypes: true })).filter(entry => entry.isFile());
+    for (let offset = 0; offset < entries.length; offset += 64) {
+      await Promise.all(entries.slice(offset, offset + 64).map(async entry => {
+        const filePath = path.join(cacheDir, entry.name);
+        try {
+          if (cutoff !== null && (await fs.promises.stat(filePath)).mtimeMs >= cutoff) return;
+          await fs.promises.unlink(filePath);
+          deletedPaths.push(filePath);
+        } catch { /* cache files can disappear while cleanup is running */ }
+      }));
+    }
+    void thumbnailPipeline.invalidateDeleted(deletedPaths, cutoff).catch(error => writeLog('warn', 'Unable to invalidate deleted thumbnail metadata', { error: error.message || String(error) }));
+    mediaCacheIndexes.delete(path.resolve(cacheDir));
+    return { success: true, deletedCount: deletedPaths.length };
   } catch (error) { return { success: false, error: error.message || String(error) }; }
 });
 
@@ -1862,6 +2209,9 @@ app.whenReady().then(() => {
 app.on('before-quit', () => {
   stopWorkspaceWatcher();
   stopShellThumbnailProcess();
+  thumbnailImageWorkerPool?.stop();
+  originalImageWorkerPool?.stop();
+  thumbnailPipeline?.stop();
   void exiftool.end().catch(() => undefined);
 });
 
