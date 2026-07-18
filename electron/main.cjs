@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, shell, dialog, protocol, net, nativeImage, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, shell, dialog, protocol, net, nativeImage, clipboard, screen } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -1030,7 +1030,7 @@ ipcMain.handle('workspace-browse-files', async (_event, workspacePath, status, p
         const kind = entry.isDirectory() ? 'folder' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
         return { name: entry.name, path: entryPath, relativePath: path.relative(root, entryPath), kind, extension, size: -1, updatedAt: 0 };
       })
-      .sort((a, b) => (a.kind === 'folder' ? 0 : 1) - (b.kind === 'folder' ? 0 : 1) || a.name.localeCompare(b.name, 'zh-CN'));
+      .sort((a, b) => (a.kind === 'folder' ? 0 : 1) - (b.kind === 'folder' ? 0 : 1) || a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
     return { success: true, path: path.relative(root, currentPath), entries };
   } catch (error) {
     writeLog('warn', 'Unable to browse project directory', { projectName, relativePath, error: error.message || String(error) });
@@ -1401,6 +1401,45 @@ ipcMain.handle('workspace-cancel-file-operation', async (_event, operationId) =>
   return { success: true };
 });
 
+ipcMain.on('workspace-start-file-drag', async (event, workspacePath, status, projectName, relativePaths = []) => {
+  let validatedRelativePaths = [];
+  try {
+    if (!Array.isArray(relativePaths) || !relativePaths.length || relativePaths.length > 500) throw new Error('没有可拖动的文件');
+    const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const sources = Array.from(new Set(relativePaths.map(relativePath => {
+      if (typeof relativePath !== 'string' || !relativePath) throw new Error('无效的文件路径');
+      const source = path.resolve(root, relativePath);
+      if (source === root || !source.startsWith(root + path.sep)) throw new Error('文件不在当前项目中');
+      if (!fs.existsSync(source)) throw new Error(`文件不存在：${path.basename(source)}`);
+      return source;
+    })));
+    validatedRelativePaths = sources.map(source => path.relative(root, source));
+
+    let icon = nativeImage.createEmpty();
+    try {
+      icon = await app.getFileIcon(sources[0], { size: 'normal' });
+    } catch (error) {
+      writeLog('warn', 'Unable to create native file drag icon', error);
+    }
+    if (event.sender.isDestroyed()) return;
+    event.sender.startDrag({ file: sources[0], files: sources, icon });
+    writeLog('info', 'Native project file drag started', { count: sources.length });
+  } catch (error) {
+    writeLog('error', 'Unable to start native project file drag', error);
+    if (!event.sender.isDestroyed()) event.sender.send('app-error', error.message || String(error));
+  } finally {
+    if (!event.sender.isDestroyed()) {
+      const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+      const contentBounds = ownerWindow?.getContentBounds();
+      const cursor = screen.getCursorScreenPoint();
+      const clientX = contentBounds ? cursor.x - contentBounds.x : -1;
+      const clientY = contentBounds ? cursor.y - contentBounds.y : -1;
+      const insideWindow = Boolean(contentBounds && clientX >= 0 && clientY >= 0 && clientX < contentBounds.width && clientY < contentBounds.height);
+      event.sender.send('workspace-file-drag-ended', { paths: validatedRelativePaths, clientX, clientY, insideWindow });
+    }
+  }
+});
+
 ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, projectName, operation, relativePaths = [], targetRelativePath = '', nextName = '', options = {}) => {
   try {
     const root = path.resolve(getProjectPath(workspacePath, status, projectName));
@@ -1409,7 +1448,69 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
       if (target !== root && !target.startsWith(root + path.sep)) throw new Error('无效的文件路径');
       return target;
     };
+    if (operation === 'import') {
+      if (!Array.isArray(relativePaths) || !relativePaths.length || relativePaths.length > 500) throw new Error('没有可导入的文件');
+      const destinationDir = resolveInsideProject(targetRelativePath);
+      if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
+      const sources = Array.from(new Set(relativePaths.map(source => {
+        if (typeof source !== 'string' || !path.isAbsolute(source)) throw new Error('无效的外部文件路径');
+        const resolvedSource = path.resolve(source);
+        if (!fs.existsSync(resolvedSource)) throw new Error(`文件不存在：${path.basename(resolvedSource)}`);
+        if (resolvedSource === destinationDir || destinationDir.startsWith(resolvedSource + path.sep)) throw new Error('不能将文件夹复制到自身或其子文件夹中');
+        return resolvedSource;
+      })));
+      const reservedDestinations = new Set();
+      const importPlan = sources.map(source => {
+        const stat = fs.statSync(source);
+        let destination = path.join(destinationDir, path.basename(source));
+        const parsed = path.parse(destination);
+        let index = 1;
+        while (fs.existsSync(destination) || reservedDestinations.has(destination.toLowerCase())) {
+          destination = stat.isDirectory()
+            ? path.join(destinationDir, `${path.basename(source)} (${index++})`)
+            : path.join(destinationDir, `${parsed.name} (${index++})${parsed.ext}`);
+        }
+        reservedDestinations.add(destination.toLowerCase());
+        return { source, destination };
+      });
+      const createdTargets = [];
+      try {
+        for (const entry of importPlan) {
+          createdTargets.push(entry.destination);
+          await fs.promises.cp(entry.source, entry.destination, { recursive: true, errorOnExist: true, preserveTimestamps: true });
+        }
+      } catch (error) {
+        await removeCreatedPasteTargets(createdTargets);
+        throw error;
+      }
+      writeLog('info', 'External files imported by drag and drop', { projectName, targetRelativePath, count: importPlan.length });
+      return { success: true, count: importPlan.length };
+    }
     const sources = relativePaths.map(resolveInsideProject);
+    if (operation === 'move') {
+      if (!sources.length) throw new Error('没有可移动的文件');
+      const destinationDir = resolveInsideProject(targetRelativePath);
+      if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
+      const reservedDestinations = new Set();
+      const movePlan = sources.map(source => {
+        if (!fs.existsSync(source)) throw new Error(`文件不存在：${path.basename(source)}`);
+        const stat = fs.statSync(source);
+        if (source === destinationDir || destinationDir.startsWith(source + path.sep)) throw new Error('不能将文件夹移动到自身或其子文件夹中');
+        let destination = path.join(destinationDir, path.basename(source));
+        const parsed = path.parse(destination);
+        let index = 1;
+        while (fs.existsSync(destination) || reservedDestinations.has(destination.toLowerCase())) {
+          destination = stat.isDirectory()
+            ? path.join(destinationDir, `${path.basename(source)} (${index++})`)
+            : path.join(destinationDir, `${parsed.name} (${index++})${parsed.ext}`);
+        }
+        reservedDestinations.add(destination.toLowerCase());
+        return { source, destination };
+      });
+      for (const entry of movePlan) await fs.promises.rename(entry.source, entry.destination);
+      writeLog('info', 'Project files moved by internal drag', { projectName, targetRelativePath, count: movePlan.length });
+      return { success: true, count: movePlan.length };
+    }
     if (operation === 'copy' || operation === 'cut') {
       if (!sources.length) throw new Error('未选择文件');
       projectFileClipboard = { operation, sources };

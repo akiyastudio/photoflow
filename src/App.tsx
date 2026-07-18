@@ -2119,8 +2119,13 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
   const projectPathRef = useRef(project.path);
   const directoryEntriesCacheRef = useRef(new Map<string, ProjectFileEntry[]>());
   const selectionDragRef = useRef<{ startX: number; startY: number; initialPaths: string[]; additive: boolean } | null>(null);
+  const internalDragPathsRef = useRef<string[]>([]);
+  const internalDropHandledRef = useRef(false);
   const renameCommitRef = useRef(false);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const [cutPaths, setCutPaths] = useState<string[]>([]);
+  const [dragTargetPath, setDragTargetPath] = useState('');
+  const [surfaceDropActive, setSurfaceDropActive] = useState(false);
   const [previewPath, setPreviewPath] = useState('');
   const [previewTechnicalMetadata, setPreviewTechnicalMetadata] = useState<PreviewTechnicalMetadata>({});
   const [previewMetadataFields, setPreviewMetadataFields] = useState<MediaMetadataField[]>([]);
@@ -2375,7 +2380,7 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
     if (!name) return;
     const result = await window.electronAPI.createProjectFolder(workspacePath, project.status, project.name, name);
     if (!result.success) { onNotice(`新建文件夹失败：${result.error || '未知错误'}`); return; }
-    setMessage(`已新建文件夹“${result.folder?.name || name}”。`);
+    onNotice(`已新建文件夹“${result.folder?.name || name}”`);
     setProgressName('');
     setPanel(null);
     refresh();
@@ -2392,7 +2397,7 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
     const name = `${prefix}_${highestIndex + 1}`;
     const result = await window.electronAPI.createProjectFolder(workspacePath, project.status, project.name, name);
     if (!result.success) { onNotice(`创建失败：${result.error || `无法创建“${name}”`}`); return; }
-    setMessage(`已创建“${result.folder?.name || name}”。`);
+    onNotice(`已创建“${result.folder?.name || name}”`);
     refresh();
   };
   const moveToTrash = async () => {
@@ -2510,7 +2515,13 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
     event.currentTarget.setPointerCapture(event.pointerId);
     const additive = event.ctrlKey || event.metaKey;
     selectionDragRef.current = { startX: event.clientX, startY: event.clientY, initialPaths: additive ? selectedPaths : [], additive };
-    if (!additive) setSelectedPaths([]);
+    if (!additive) {
+      setSelectedPaths([]);
+      setPreviewPath('');
+      setViewportCurrentPath('');
+      setPreviewPaneOpen(false);
+      setMetadataPaneOpen(false);
+    }
     const rect = surface.getBoundingClientRect();
     setSelectionBox({ left: event.clientX - rect.left, top: event.clientY - rect.top, width: 0, height: 0 });
   };
@@ -2541,8 +2552,16 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
     const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, operation, selectedPaths, currentRelativePath, nextName);
     if (result.cancelled) { onNotice('粘贴已取消'); refresh(); return; }
     if (!result.success) { onNotice(`操作失败：${result.error || '未知错误'}`); return; }
-    if (operation === 'copy' || operation === 'cut') onNotice(`${operation === 'copy' ? '已复制' : '已剪切'} ${result.count} 个项目`);
-    else { onNotice(operation === 'trash' ? `已移入回收站 ${result.count} 个项目` : operation === 'paste' ? `已粘贴 ${result.count} 个项目` : '操作完成'); setSelectedPaths([]); refresh(); }
+    if (operation === 'copy' || operation === 'cut') {
+      setCutPaths(operation === 'cut' ? [...selectedPaths] : []);
+      onNotice(`${operation === 'copy' ? '已复制' : '已剪切'} ${result.count} 个项目`);
+    } else {
+      if (operation === 'paste') setCutPaths([]);
+      if (operation === 'trash') setCutPaths(current => current.filter(path => !selectedPaths.includes(path)));
+      onNotice(operation === 'trash' ? `已移入回收站 ${result.count} 个项目` : operation === 'paste' ? `已粘贴 ${result.count} 个项目` : '操作完成');
+      setSelectedPaths([]);
+      refresh();
+    }
   };
   useEffect(() => {
     const handleFileShortcut = (event: KeyboardEvent) => {
@@ -2726,6 +2745,115 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
     : entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video'
       ? <><MediaThumbnail entry={entry} cacheConfig={mediaCacheConfig} requestedSize={large ? gridThumbnailSize : 160} large={large}/>{entry.kind === 'video' && <Play size={large ? 25 : 15} fill="currentColor" className="pointer-events-none absolute text-white drop-shadow-[0_1px_4px_rgba(0,0,0,.8)]"/>}</>
       : <SystemFileIcon filePath={entry.path} size={large ? 48 : 28}/>;
+  const startEntryDrag = (event: React.DragEvent<HTMLDivElement>, entry: ProjectFileEntry) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const dragPaths = selectedPaths.includes(entry.relativePath) ? selectedPaths : [entry.relativePath];
+    internalDragPathsRef.current = dragPaths;
+    internalDropHandledRef.current = false;
+    if (!selectedPaths.includes(entry.relativePath)) setSelectedPaths([entry.relativePath]);
+    window.electronAPI.startProjectFileDrag(workspacePath, project.status, project.name, dragPaths);
+  };
+  const finishEntryDrag = () => {
+    internalDragPathsRef.current = [];
+    setDragTargetPath('');
+  };
+  const hasExternalFiles = (event: React.DragEvent<HTMLElement>) => internalDragPathsRef.current.length === 0 && Array.from(event.dataTransfer.types).includes('Files');
+  const getExternalFilePaths = (event: React.DragEvent<HTMLElement>) => Array.from(event.dataTransfer.files)
+    .map(file => (file as File & { path?: string }).path || '')
+    .filter(Boolean);
+  const canDropInternalIntoFolder = (entry: ProjectFileEntry) => internalDragPathsRef.current.length > 0 && !internalDragPathsRef.current.some(source => entry.relativePath === source || entry.relativePath.startsWith(`${source}\\`) || entry.relativePath.startsWith(`${source}/`));
+  const handleEntryDragOver = (event: React.DragEvent<HTMLDivElement>, entry: ProjectFileEntry) => {
+    if (entry.kind !== 'folder' || (!canDropInternalIntoFolder(entry) && !hasExternalFiles(event))) return;
+    event.preventDefault();
+    event.stopPropagation();
+    // Electron's native file drag advertises copy support to Windows. Accept it
+    // as copy here so the cursor is not shown as forbidden; an internal drop is
+    // still completed as a move by the main process.
+    event.dataTransfer.dropEffect = 'copy';
+    setSurfaceDropActive(false);
+    if (dragTargetPath !== entry.relativePath) setDragTargetPath(entry.relativePath);
+  };
+  const handleEntryDragLeave = (event: React.DragEvent<HTMLDivElement>, entry: ProjectFileEntry) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    if (dragTargetPath === entry.relativePath) setDragTargetPath('');
+  };
+  const handleEntryDrop = async (event: React.DragEvent<HTMLDivElement>, entry: ProjectFileEntry) => {
+    if (entry.kind !== 'folder') return;
+    const internalPaths = [...internalDragPathsRef.current];
+    const externalPaths = internalPaths.length ? [] : getExternalFilePaths(event);
+    if ((!internalPaths.length || !canDropInternalIntoFolder(entry)) && !externalPaths.length) return;
+    event.preventDefault();
+    event.stopPropagation();
+    internalDropHandledRef.current = internalPaths.length > 0;
+    finishEntryDrag();
+    setSurfaceDropActive(false);
+    const operation = internalPaths.length ? 'move' : 'import';
+    const paths = internalPaths.length ? internalPaths : externalPaths;
+    const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, operation, paths, entry.relativePath);
+    if (!result.success) { onNotice(`${operation === 'move' ? '移动' : '导入'}失败：${result.error || '未知错误'}`); return; }
+    if (operation === 'move') setCutPaths(current => current.filter(path => !paths.includes(path)));
+    setSelectedPaths([]);
+    onNotice(`已${operation === 'move' ? '移动' : '导入'} ${result.count} 个项目到 ${entry.name}`);
+    refresh();
+  };
+  useEffect(() => {
+    const acceptInternalFolderDrag = (event: DragEvent) => {
+      if (!internalDragPathsRef.current.length) return;
+      const target = (event.target as HTMLElement | null)?.closest<HTMLElement>('[data-entry-kind="folder"][data-entry-path]');
+      const targetRelativePath = target?.dataset.entryPath;
+      if (!targetRelativePath || internalDragPathsRef.current.some(source => targetRelativePath === source || targetRelativePath.startsWith(`${source}\\`) || targetRelativePath.startsWith(`${source}/`))) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+      setDragTargetPath(targetRelativePath);
+    };
+    window.addEventListener('dragover', acceptInternalFolderDrag, true);
+    return () => window.removeEventListener('dragover', acceptInternalFolderDrag, true);
+  }, []);
+  useEffect(() => window.electronAPI.onProjectFileDragEnd(result => {
+    const dragPaths = result.paths?.length ? result.paths : [...internalDragPathsRef.current];
+    internalDragPathsRef.current = [];
+    setDragTargetPath('');
+    setSurfaceDropActive(false);
+    if (internalDropHandledRef.current) {
+      internalDropHandledRef.current = false;
+      return;
+    }
+    if (!result.insideWindow || !dragPaths.length) return;
+    const target = document.elementFromPoint(result.clientX, result.clientY)?.closest<HTMLElement>('[data-entry-kind="folder"][data-entry-path]');
+    const targetRelativePath = target?.dataset.entryPath;
+    if (!targetRelativePath || dragPaths.some(source => targetRelativePath === source || targetRelativePath.startsWith(`${source}\\`) || targetRelativePath.startsWith(`${source}/`))) return;
+    const targetName = target.title || targetRelativePath.split(/[\\/]/).pop() || '文件夹';
+    void window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, 'move', dragPaths, targetRelativePath).then(moveResult => {
+      if (!moveResult.success) { onNotice(`移动失败：${moveResult.error || '未知错误'}`); return; }
+      setCutPaths(current => current.filter(path => !dragPaths.includes(path)));
+      setSelectedPaths([]);
+      onNotice(`已移动 ${moveResult.count} 个项目到 ${targetName}`);
+      refresh();
+    });
+  }), [workspacePath, project.status, project.name]);
+  const handleSurfaceDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!hasExternalFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    if (!surfaceDropActive) setSurfaceDropActive(true);
+  };
+  const handleSurfaceDragLeave = (event: React.DragEvent<HTMLDivElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setSurfaceDropActive(false);
+  };
+  const handleSurfaceDrop = async (event: React.DragEvent<HTMLDivElement>) => {
+    if (!hasExternalFiles(event)) return;
+    const externalPaths = getExternalFilePaths(event);
+    if (!externalPaths.length) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setSurfaceDropActive(false);
+    const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, 'import', externalPaths, currentRelativePath);
+    if (!result.success) { onNotice(`导入失败：${result.error || '未知错误'}`); return; }
+    onNotice(`已导入 ${result.count} 个项目`);
+    refresh();
+  };
   useEffect(() => {
     const workspace = projectWorkspaceRef.current;
     if (!workspace || viewMode !== 'grid') return;
@@ -2833,17 +2961,17 @@ const ProjectWorkspace = ({ project, workspacePath, initialPanel, importConfig, 
             {breadcrumbs.map((crumb, index) => <React.Fragment key={crumb.relativePath || 'root'}><span className="inline-flex h-8 shrink-0 items-center leading-none text-slate-300">/</span><button onClick={() => navigateToDirectory(crumb.relativePath)} title={`进入 ${crumb.label}`} className={`inline-flex h-8 min-w-0 items-center truncate rounded border border-transparent px-1.5 text-sm leading-none transition hover:border-slate-300 hover:bg-slate-100 hover:text-slate-800 ${index === breadcrumbs.length - 1 ? 'font-bold text-slate-700' : ''}`}>{crumb.label}</button></React.Fragment>)}
           </div>
         </div>
-        <div ref={filesSurfaceRef} onPointerDown={startSelectionDrag} onPointerMove={updateSelectionDrag} onPointerUp={finishSelectionDrag} onPointerCancel={finishSelectionDrag} className="relative min-h-[220px] flex-1 select-none">
+        <div ref={filesSurfaceRef} onPointerDown={startSelectionDrag} onPointerMove={updateSelectionDrag} onPointerUp={finishSelectionDrag} onPointerCancel={finishSelectionDrag} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} className={`relative min-h-[220px] flex-1 select-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
           {selectionBox && <div className="pointer-events-none absolute z-20 border border-blue-500 bg-blue-400/15" style={selectionBox}/>}
           {fileEntries.length ? viewMode === 'list' ? <div className="min-w-[620px] border-y border-slate-200 text-sm">
             <div className="file-list-row file-list-heading text-xs font-medium text-slate-500"><span>名称</span><span>修改日期</span><span>类型</span><span>大小</span></div>
-            {renderedFileEntries.map(entry => <div role="button" tabIndex={0} data-entry-path={entry.relativePath} key={entry.path} onMouseEnter={() => prefetchDirectory(entry)} onClick={() => handleEntryClick(entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.name} className={`file-list-row group w-full cursor-default border-t border-slate-200 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) || previewPath === entry.relativePath ? 'bg-blue-50' : ''}`}>
+            {renderedFileEntries.map(entry => <div role="button" tabIndex={0} draggable={inlineRenamePath !== entry.relativePath} onDragStart={event => startEntryDrag(event, entry)} onDragOver={event => handleEntryDragOver(event, entry)} onDragLeave={event => handleEntryDragLeave(event, entry)} onDrop={event => void handleEntryDrop(event, entry)} data-entry-kind={entry.kind} data-entry-path={entry.relativePath} key={entry.path} onMouseEnter={() => prefetchDirectory(entry)} onClick={() => handleEntryClick(entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.name} className={`file-list-row group w-full cursor-default border-t border-slate-200 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) || previewPath === entry.relativePath ? 'bg-blue-50' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'bg-blue-100 ring-2 ring-inset ring-blue-500' : ''}`}>
               <span className="flex min-w-0 items-center gap-2.5"><span onClick={event => { event.stopPropagation(); toggleSelected(entry.relativePath); }} className={`file-select-box ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-transparent'} flex h-4 w-4 shrink-0 items-center justify-center rounded border`}><CheckSquare size={12}/></span><span className="relative flex h-9 w-11 shrink-0 items-center justify-center overflow-hidden rounded bg-slate-100">{renderEntryIcon(entry)}</span>{renderEntryName(entry)}</span>
               <span className="text-slate-500">{entry.updatedAt ? new Date(entry.updatedAt).toLocaleString() : '…'}</span>
               <span className="uppercase text-slate-500">{entry.kind === 'folder' ? '文件夹' : entry.kind === 'raw' ? `RAW · ${entry.extension.slice(1)}` : entry.kind === 'video' ? `视频 · ${entry.extension.slice(1)}` : entry.extension.slice(1) || '文件'}</span>
               <span className="text-slate-500">{entry.kind === 'folder' ? '' : entry.size >= 0 ? formatFileSize(entry.size) : '…'}</span>
             </div>)}
-          </div> : <div className="grid w-full content-start gap-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${gridIconSize}px), 1fr))` }}>{renderedFileEntries.map(entry => <div role="button" tabIndex={0} data-entry-path={entry.relativePath} key={entry.path} onMouseEnter={() => prefetchDirectory(entry)} onClick={() => handleEntryClick(entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.name} className={`group relative min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) || previewPath === entry.relativePath ? 'bg-blue-50 ring-1 ring-blue-400' : ''}`}><span onClick={event => { event.stopPropagation(); toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span><div className="relative flex aspect-square items-center justify-center overflow-hidden rounded-lg bg-slate-100">{renderEntryIcon(entry, true)}</div>{renderEntryName(entry, true)}<p className="mt-0.5 text-[10px] uppercase text-slate-400">{entry.kind === 'folder' ? '文件夹' : entry.extension.slice(1) || '文件'}</p></div>)}</div> : <p className="border-y border-slate-200 py-12 text-center text-sm text-slate-400">当前文件夹为空。</p>}
+          </div> : <div className="grid w-full content-start gap-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${gridIconSize}px), 1fr))` }}>{renderedFileEntries.map(entry => <div role="button" tabIndex={0} draggable={inlineRenamePath !== entry.relativePath} onDragStart={event => startEntryDrag(event, entry)} onDragOver={event => handleEntryDragOver(event, entry)} onDragLeave={event => handleEntryDragLeave(event, entry)} onDrop={event => void handleEntryDrop(event, entry)} data-entry-kind={entry.kind} data-entry-path={entry.relativePath} key={entry.path} onMouseEnter={() => prefetchDirectory(entry)} onClick={() => handleEntryClick(entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.name} className={`group relative min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) || previewPath === entry.relativePath ? 'bg-blue-50 ring-1 ring-blue-400' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'bg-blue-100 ring-2 ring-blue-500' : ''}`}><span onClick={event => { event.stopPropagation(); toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span><div className="relative flex aspect-square items-center justify-center overflow-hidden rounded-lg bg-slate-100">{renderEntryIcon(entry, true)}</div>{renderEntryName(entry, true)}<p className="mt-0.5 text-[10px] uppercase text-slate-400">{entry.kind === 'folder' ? '文件夹' : entry.extension.slice(1) || '文件'}</p></div>)}</div> : <p className="border-y border-slate-200 py-12 text-center text-sm text-slate-400">当前文件夹为空。</p>}
           {renderedEntryCount < fileEntries.length && <div ref={loadMoreEntriesRef} className="h-8 py-2 text-center text-xs text-slate-400">正在加载更多文件…</div>}
         </div>
       </section>

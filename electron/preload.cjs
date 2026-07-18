@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getRawPreview: (filePath, cacheConfig) => ipcRenderer.invoke('media-raw-preview', filePath, cacheConfig),
   folderHasPng: (folderPath) => ipcRenderer.invoke('folder-has-png', folderPath),
   projectFileOperation: (workspacePath, status, projectName, operation, paths, targetRelativePath, nextName, options) => ipcRenderer.invoke('workspace-file-operation', workspacePath, status, projectName, operation, paths, targetRelativePath, nextName, options),
+  startProjectFileDrag: (workspacePath, status, projectName, paths) => ipcRenderer.send('workspace-start-file-drag', workspacePath, status, projectName, paths),
+  onProjectFileDragEnd: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-file-drag-ended', subscription); return () => ipcRenderer.removeListener('workspace-file-drag-ended', subscription); },
   onProjectFileOperationProgress: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-file-operation-progress', subscription); return () => ipcRenderer.removeListener('workspace-file-operation-progress', subscription); },
   cancelProjectFileOperation: (operationId) => ipcRenderer.invoke('workspace-cancel-file-operation', operationId),
   chooseCacheDirectory: () => ipcRenderer.invoke('choose-cache-directory'),

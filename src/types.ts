@@ -134,7 +134,9 @@ export interface IElectronAPI {
   onAppError: (callback: (message: string) => void) => () => void;
   getRawPreview: (filePath: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; previewUrl?: string; error?: string }>;
   folderHasPng: (folderPath: string) => Promise<{ success: boolean; hasPng?: boolean; error?: string }>;
-  projectFileOperation: (workspacePath: string, status: ProjectStatus, projectName: string, operation: 'trash' | 'copy' | 'cut' | 'paste' | 'rename' | 'select', paths: string[], targetRelativePath?: string, nextName?: string, options?: { imageDestFolderName?: string; videoDestFolderName?: string }) => Promise<{ success: boolean; cancelled?: boolean; count?: number; operationId?: string; error?: string }>;
+  projectFileOperation: (workspacePath: string, status: ProjectStatus, projectName: string, operation: 'trash' | 'copy' | 'cut' | 'paste' | 'rename' | 'select' | 'move' | 'import', paths: string[], targetRelativePath?: string, nextName?: string, options?: { imageDestFolderName?: string; videoDestFolderName?: string }) => Promise<{ success: boolean; cancelled?: boolean; count?: number; operationId?: string; error?: string }>;
+  startProjectFileDrag: (workspacePath: string, status: ProjectStatus, projectName: string, paths: string[]) => void;
+  onProjectFileDragEnd: (callback: (result: { paths: string[]; clientX: number; clientY: number; insideWindow: boolean }) => void) => () => void;
   onProjectFileOperationProgress: (callback: (progress: ProjectFileOperationProgress) => void) => () => void;
   cancelProjectFileOperation: (operationId: string) => Promise<{ success: boolean; error?: string }>;
   chooseCacheDirectory: () => Promise<{ cancelled?: boolean; path?: string }>;
