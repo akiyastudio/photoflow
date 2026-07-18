@@ -8,7 +8,10 @@ const { pathToFileURL } = require('url');
 const { exiftool } = require('exiftool-vendored');
 const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY } = require('./thumbnail-pipeline.cjs');
 
-app.setName('photoflow');
+// Keep user-facing OS labels localized while runtime data stays in a stable,
+// Latin-only application directory name.
+app.setPath('userData', path.join(app.getPath('appData'), 'Photoflow'));
+app.setName('照片流');
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 
