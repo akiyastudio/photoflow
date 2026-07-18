@@ -119,6 +119,7 @@ export interface IElectronAPI {
   onWindowMaximizedChange: (callback: (maximized: boolean) => void) => () => void;
   getWorkspaceProjects: (workspacePath: string) => Promise<{ success: boolean; root?: string; statuses: WorkspaceStatusGroup[]; error?: string }> ;
   onWorkspaceFilesChanged: (callback: (change: { root: string; fileName: string }) => void) => () => void;
+  onWorkspaceProjectsChanged: (callback: (change: { root: string }) => void) => () => void;
   createWorkspaceProject: (workspacePath: string, date: string, name: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   renameWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, nextName: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   renameProjectFolder: (workspacePath: string, status: ProjectStatus, name: string, folderName: string, nextName: string) => Promise<{ success: boolean; folder?: { name: string; path: string; updatedAt: number }; error?: string }> ;

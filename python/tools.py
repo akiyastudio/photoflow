@@ -1,26 +1,16 @@
+import importlib
 import sys
-
-import catch
-import classify
-import cut_video
-import png_to_jpg
-import rename
-import research
-import thumbnail_db
-import video_preview
-import workspace_db
 
 
 TOOLS = {
-    "catch": catch.run,
-    "classify": classify.run,
-    "cut_video": cut_video.run,
-    "png_to_jpg": png_to_jpg.run,
-    "rename": rename.run,
-    "research": research.run,
-    "thumbnail_db": thumbnail_db.run,
-    "video_preview": video_preview.run,
-    "workspace_db": workspace_db.run,
+    "catch": "catch",
+    "classify": "classify",
+    "cut_video": "cut_video",
+    "png_to_jpg": "png_to_jpg",
+    "rename": "rename",
+    "research": "research",
+    "thumbnail_db": "thumbnail_db",
+    "video_preview": "video_preview",
 }
 
 
@@ -31,10 +21,10 @@ def main(args_list):
     tool_name, *tool_args = args_list
     tool_name = tool_name.removesuffix(".py")
     try:
-        run_tool = TOOLS[tool_name]
+        module_name = TOOLS[tool_name]
     except KeyError:
         raise SystemExit(f"未知工具：{tool_name}") from None
-    run_tool(tool_args)
+    importlib.import_module(module_name).run(tool_args)
 
 
 if __name__ == "__main__":
