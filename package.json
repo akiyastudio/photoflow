@@ -1,6 +1,6 @@
 {
   "name": "photoflow",
-  "productName": "照片流",
+  "productName": "photoflow",
   "private": true,
   "version": "26.7.17",
   "type": "module",
@@ -46,6 +46,10 @@
           "to": "python/tools.exe"
         },
         {
+          "from": "python/dist/thumbnail-image-worker.exe",
+          "to": "python/thumbnail-image-worker.exe"
+        },
+        {
           "from": "python/dist/ffmpeg.zip",
           "to": "python/ffmpeg.zip"
         },
@@ -59,7 +63,7 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "shortcutName": "照片流"
+      "shortcutName": "photoflow"
     },
     "mac": {
       "target": "dmg",
@@ -72,6 +76,10 @@
         {
           "from": "python/dist/tools",
           "to": "python/tools"
+        },
+        {
+          "from": "python/dist/thumbnail-image-worker",
+          "to": "python/thumbnail-image-worker"
         },
         {
           "from": "python/dist/ffmpeg.zip",
