@@ -3,6 +3,7 @@
 @tailwind utilities;
 
 .brand-logo { object-fit: contain; }
+
 .brand-logo-dark { filter: brightness(1.35) saturate(.9); }
 .brand-logo-dark-only { display: none; }
 html.dark .brand-logo-light-only { display: none; }
@@ -28,7 +29,7 @@ html.dark .brand-logo-dark-only { display: block; }
 .window-glyph-close::before, .window-glyph-close::after { content:''; position:absolute; left:-1px; top:4.5px; width:12px; height:1px; background:currentColor; }
 .window-glyph-close::before { transform:rotate(45deg); }
 .window-glyph-close::after { transform:rotate(-45deg); }
-.workspace-tab.is-active { border-bottom-color: #f8fafc; box-shadow: 0 -1px 0 rgb(15 23 42 / .02); }
+.workspace-tab.is-active { border-bottom-color: transparent; box-shadow: 0 -1px 0 rgb(15 23 42 / .02); }
 .win11-spinner { width: 24px; height: 24px; border: 3px solid rgb(148 163 184 / .28); border-top-color: #fff; border-radius: 9999px; animation: win11-spin .8s linear infinite; }
 @keyframes win11-spin { to { transform: rotate(360deg); } }
 
@@ -139,6 +140,7 @@ html.dark .brand-logo-dark-only { display: block; }
 .project-menu-item { display: block; width: 100%; border-radius: .4rem; padding: .5rem; text-align: left; font-size: .875rem; color: #475569; }
 .project-menu-item:hover { background: #f1f5f9; color: #0f172a; }
 .project-context-menu .project-menu-item { display: flex; align-items: center; gap: .5rem; }
+.sort-menu .project-menu-item { display:flex; align-items:center; gap:.5rem; }
 .project-context-menu .project-menu-item:disabled { cursor: not-allowed; opacity: .45; }
 .project-context-menu .project-menu-item:disabled:hover { background: transparent; color: #475569; }
 .project-context-menu .project-menu-danger { color: #dc2626; }
@@ -182,7 +184,7 @@ html.dark .file-list-heading { background:#090c12; }
 html.dark .project-menu-item { color: #d1d5db; }
 html.dark .terminal-scroll::-webkit-scrollbar-thumb { background: #64748b; }
 html.dark .app-titlebar { background:#090c12; border-color:#1f2937; }
-html.dark .workspace-tab.is-active { border-color:#1f2937; border-bottom-color:#030407; background:#030407; }
+html.dark .workspace-tab.is-active { border-color:#1f2937; border-bottom-color:transparent; background:#030407; }
 
 .settings-check { display:flex; align-items:flex-start; gap:.65rem; margin-top:1rem; border:1px solid #e2e8f0; border-radius:.6rem; padding:.75rem; background:#f8fafc; color:#334155; font-size:.875rem; line-height:1.4; cursor:pointer; }
 .settings-check input { margin-top:.12rem; flex:none; accent-color:#2563eb; }

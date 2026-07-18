@@ -157,9 +157,9 @@ def robust_thresholds(scores, sensitivity):
     median = float(np.median(values))
     mad = float(np.median(np.abs(values - median))) + 1e-6
     settings = {
-        "low": (0.13, 0.96, 5.0, 0.025, 2.0),
-        "standard": (0.09, 0.92, 4.0, 0.018, 1.5),
-        "high": (0.055, 0.85, 3.0, 0.012, 1.0),
+        "low": (0.18, 0.985, 7.0, 0.06, 3.0),
+        "standard": (0.12, 0.96, 5.0, 0.04, 2.2),
+        "high": (0.08, 0.90, 3.5, 0.025, 1.5),
     }
     hard_floor, quantile, hard_mad, soft_floor, soft_mad = settings[normalize_sensitivity(sensitivity)]
     hard = max(hard_floor, float(np.quantile(values, quantile)), median + hard_mad * mad)
@@ -170,14 +170,18 @@ def robust_thresholds(scores, sensitivity):
 def find_boundaries(scores, fps, sensitivity, min_duration):
     if not scores:
         return []
+    sensitivity = normalize_sensitivity(sensitivity)
     hard, soft = robust_thresholds(scores, sensitivity)
     candidates = []
+    prominence_floor = {"low": 0.08, "standard": 0.05, "high": 0.025}[sensitivity]
 
     # Sharp cuts are local maxima above the per-video adaptive threshold.
     for index, score in enumerate(scores):
         left = scores[index - 1] if index else -1.0
         right = scores[index + 1] if index + 1 < len(scores) else -1.0
-        if score >= hard and score >= left and score >= right:
+        neighbours = scores[max(0, index - 5):index] + scores[index + 1:min(len(scores), index + 6)]
+        local_baseline = float(np.median(neighbours)) if neighbours else 0.0
+        if score >= hard and score - local_baseline >= prominence_floor and score >= left and score >= right:
             candidates.append((index + 1, score, "cut"))
 
     # A fade/dissolve yields a run of moderate change instead of one large peak.
@@ -186,21 +190,22 @@ def find_boundaries(scores, fps, sensitivity, min_duration):
     max_score = -1.0
     max_gap = max(1, round(fps * 0.08))
     last_active = -1
-    for index, score in enumerate(scores):
+    for index, score in enumerate(scores if sensitivity != "low" else []):
         if score >= soft:
             if run_start is None or index - last_active > max_gap:
-                if run_start is not None and last_active - run_start + 1 >= max(2, round(fps * 0.12)):
+                if run_start is not None and last_active - run_start + 1 >= max(3, round(fps * (0.12 if sensitivity == "high" else 0.22))):
                     candidates.append((max_index + 1, max_score, "gradual"))
                 run_start, max_index, max_score = index, index, score
             elif score > max_score:
                 max_index, max_score = index, score
             last_active = index
-    if run_start is not None and last_active - run_start + 1 >= max(2, round(fps * 0.12)):
+    if run_start is not None and last_active - run_start + 1 >= max(3, round(fps * (0.12 if sensitivity == "high" else 0.22))):
         candidates.append((max_index + 1, max_score, "gradual"))
 
     # Do not create unusably short shots.  For conflicting detections retain the
     # stronger one, which is normally the actual edit point.
-    minimum_gap = max(1, round(fps * min_duration))
+    minimum_shot_seconds = {"low": 1.25, "standard": 0.65, "high": 0.30}[sensitivity]
+    minimum_gap = max(1, round(fps * max(min_duration, minimum_shot_seconds)))
     selected = []
     for candidate in sorted(candidates, key=lambda item: item[0]):
         if not selected or candidate[0] - selected[-1][0] >= minimum_gap:

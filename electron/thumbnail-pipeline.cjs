@@ -2,7 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const THUMBNAIL_VERSION = 2;
+// v3 switches media covers from square crops to full-frame thumbnails.
+const THUMBNAIL_VERSION = 3;
 const THUMBNAIL_SIZES = [
   { label: 'small', pixels: 320 },
   { label: 'medium', pixels: 640 },
