@@ -1,6 +1,6 @@
 const { app, BrowserWindow, ipcMain, Menu, shell, dialog, protocol, net, nativeImage, clipboard, screen } = require('electron');
 const path = require('path');
-const { spawn, spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const fs = require('fs');
 const crypto = require('crypto');
 const os = require('os');
@@ -18,41 +18,57 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'photoflow-media', privileges: {
 const toMediaUrl = filePath => `photoflow-media://file/${Buffer.from(filePath, 'utf8').toString('base64url')}`;
 
 let cachedPhotoshopPath;
+let photoshopDiscoveryPromise = null;
+const queryPhotoshopRegistry = () => new Promise(resolve => {
+  const child = spawn('reg.exe', ['query', 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Photoshop.exe', '/ve'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  let output = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', data => { output = (output + data).slice(-16000); });
+  child.on('error', () => resolve(''));
+  child.on('close', code => resolve(code === 0 ? output : ''));
+});
+
 const findLatestPhotoshop = () => {
-  if (cachedPhotoshopPath !== undefined) return cachedPhotoshopPath;
-  cachedPhotoshopPath = null;
-  if (process.platform !== 'win32') return cachedPhotoshopPath;
-
-  const candidates = [];
-  const addCandidate = (executable, version = []) => {
-    if (executable && fs.existsSync(executable)) candidates.push({ executable, version });
-  };
-  for (const root of [...new Set([process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter(Boolean))]) {
-    const adobeRoot = path.join(root, 'Adobe');
-    if (!fs.existsSync(adobeRoot)) continue;
-    for (const entry of fs.readdirSync(adobeRoot, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !/^Adobe Photoshop\b/i.test(entry.name) || /beta/i.test(entry.name)) continue;
-      const version = (entry.name.match(/\d+(?:\.\d+)*/g) || []).flatMap(value => value.split('.').map(Number));
-      addCandidate(path.join(adobeRoot, entry.name, 'Photoshop.exe'), version);
+  if (cachedPhotoshopPath !== undefined) return Promise.resolve(cachedPhotoshopPath);
+  if (photoshopDiscoveryPromise) return photoshopDiscoveryPromise;
+  photoshopDiscoveryPromise = (async () => {
+    if (process.platform !== 'win32') {
+      cachedPhotoshopPath = null;
+      return cachedPhotoshopPath;
     }
-  }
 
-  if (!candidates.length) {
-    const registry = spawnSync('reg.exe', ['query', 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Photoshop.exe', '/ve'], { windowsHide: true, encoding: 'utf8' });
-    const match = registry.status === 0 ? registry.stdout.match(/REG_SZ\s+(.+Photoshop\.exe)\s*$/im) : null;
-    if (match) addCandidate(match[1].trim());
-  }
-
-  candidates.sort((left, right) => {
-    const length = Math.max(left.version.length, right.version.length);
-    for (let index = 0; index < length; index += 1) {
-      const difference = (right.version[index] || 0) - (left.version[index] || 0);
-      if (difference) return difference;
+    const candidates = [];
+    const addCandidate = (executable, version = []) => {
+      if (executable && fs.existsSync(executable)) candidates.push({ executable, version });
+    };
+    for (const root of [...new Set([process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter(Boolean))]) {
+      const adobeRoot = path.join(root, 'Adobe');
+      if (!fs.existsSync(adobeRoot)) continue;
+      for (const entry of fs.readdirSync(adobeRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !/^Adobe Photoshop\b/i.test(entry.name) || /beta/i.test(entry.name)) continue;
+        const version = (entry.name.match(/\d+(?:\.\d+)*/g) || []).flatMap(value => value.split('.').map(Number));
+        addCandidate(path.join(adobeRoot, entry.name, 'Photoshop.exe'), version);
+      }
     }
-    return right.executable.localeCompare(left.executable, undefined, { numeric: true });
-  });
-  cachedPhotoshopPath = candidates[0]?.executable || null;
-  return cachedPhotoshopPath;
+
+    if (!candidates.length) {
+      const registryOutput = await queryPhotoshopRegistry();
+      const match = registryOutput.match(/REG_SZ\s+(.+Photoshop\.exe)\s*$/im);
+      if (match) addCandidate(match[1].trim());
+    }
+
+    candidates.sort((left, right) => {
+      const length = Math.max(left.version.length, right.version.length);
+      for (let index = 0; index < length; index += 1) {
+        const difference = (right.version[index] || 0) - (left.version[index] || 0);
+        if (difference) return difference;
+      }
+      return right.executable.localeCompare(left.executable, undefined, { numeric: true });
+    });
+    cachedPhotoshopPath = candidates[0]?.executable || null;
+    return cachedPhotoshopPath;
+  })().finally(() => { photoshopDiscoveryPromise = null; });
+  return photoshopDiscoveryPromise;
 };
 
 let mainWindow;
@@ -279,7 +295,7 @@ function createWindow() {
 }
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'research', 'thumbnail_db', 'video_preview', 'workspace_db']);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'research', 'thumbnail_db', 'video_preview']);
 
 const getRunConfig = (scriptName, args) => {
   // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
@@ -292,13 +308,19 @@ const getRunConfig = (scriptName, args) => {
     const exeSuffix = isWin ? '.exe' : '';
     if (baseName === 'thumbnail_image') {
       return {
-        command: path.join(process.resourcesPath, 'python', `thumbnail-image-worker${exeSuffix}`),
+        command: path.join(process.resourcesPath, 'python', 'thumbnail-image-worker', `thumbnail-image-worker${exeSuffix}`),
+        args
+      };
+    }
+    if (baseName === 'workspace_db') {
+      return {
+        command: path.join(process.resourcesPath, 'python', 'workspace-db-worker', `workspace-db-worker${exeSuffix}`),
         args
       };
     }
     if (MERGED_PYTHON_TOOLS.has(baseName)) {
       return {
-        command: path.join(process.resourcesPath, 'python', `tools${exeSuffix}`),
+        command: path.join(process.resourcesPath, 'python', 'tools', `tools${exeSuffix}`),
         args: [baseName, ...args]
       };
     }
@@ -585,8 +607,8 @@ ipcMain.handle('check-script', async (event, scriptName) => {
     const isWin = process.platform === 'win32';
     const exeSuffix = isWin ? '.exe' : '';
     // 打包后去 resources/python 目录下寻找 Python 引擎文件
-    const executableName = MERGED_PYTHON_TOOLS.has(baseName) ? 'tools' : baseName;
-    const scriptPath = path.join(process.resourcesPath, 'python', `${executableName}${exeSuffix}`);
+    const executableName = baseName === 'thumbnail_image' ? 'thumbnail-image-worker' : baseName === 'workspace_db' ? 'workspace-db-worker' : MERGED_PYTHON_TOOLS.has(baseName) ? 'tools' : baseName;
+    const scriptPath = path.join(process.resourcesPath, 'python', executableName, `${executableName}${exeSuffix}`);
     return fs.existsSync(scriptPath);
     
   } catch (error) {
@@ -607,27 +629,104 @@ const getWorkspaceDatabasePath = root => {
   return path.join(databaseDir, fileName);
 };
 
-const runWorkspaceDatabase = (root, action, payload = {}) => {
-  const config = getRunConfig('workspace_db.py', [action, '--root', root, '--database', getWorkspaceDatabasePath(root), '--payload', JSON.stringify(payload)]);
-  const result = spawnSync(config.command, config.args, { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error((result.stderr || result.stdout || '工作区数据库操作失败').trim());
-  const lines = String(result.stdout || '').trim().split(/\r?\n/).filter(Boolean);
-  const response = JSON.parse(lines.at(-1) || '{}');
-  if (!response.success) throw new Error(response.error || '工作区数据库操作失败');
-  return response;
-};
+class WorkspaceDatabaseClient {
+  constructor() {
+    this.process = null;
+    this.output = '';
+    this.nextId = 0;
+    this.pending = new Map();
+    this.stopping = false;
+  }
 
-const refreshWorkspaceCatalog = root => {
-  const response = runWorkspaceDatabase(root, 'init');
+  ensureProcess() {
+    if (this.process && !this.process.killed) return this.process;
+    const run = getRunConfig('workspace_db.py', ['--server']);
+    const child = spawn(run.command, run.args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    this.process = child;
+    this.output = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', data => {
+      this.output += data;
+      const lines = this.output.split(/\r?\n/);
+      this.output = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const response = JSON.parse(line);
+          const request = this.pending.get(response.id);
+          if (!request) continue;
+          this.pending.delete(response.id);
+          clearTimeout(request.timer);
+          if (response.success) request.resolve(response.result);
+          else request.reject(new Error(response.error || '工作区数据库操作失败'));
+        } catch (error) {
+          writeLog('warn', 'Unable to parse workspace database response', { error: error.message, line: line.slice(0, 500) });
+        }
+      }
+    });
+    let stderr = '';
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', data => { stderr = (stderr + data).slice(-4000); });
+    const finish = error => {
+      if (this.process === child) this.process = null;
+      for (const request of this.pending.values()) {
+        clearTimeout(request.timer);
+        request.reject(error);
+      }
+      this.pending.clear();
+      if (!this.stopping) writeLog('warn', 'Workspace database service stopped', { error: error.message || String(error) });
+    };
+    child.on('error', finish);
+    child.on('exit', code => finish(new Error(stderr.trim() || `Workspace database service exited with code ${code}`)));
+    return child;
+  }
+
+  call(root, action, payload = {}, timeoutMs = 30000) {
+    return new Promise((resolve, reject) => {
+      const child = this.ensureProcess();
+      const id = ++this.nextId;
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`工作区数据库操作超时：${action}`));
+        if (this.process === child) {
+          this.process = null;
+          if (!child.killed) child.kill();
+        }
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
+      const request = { id, root, database: getWorkspaceDatabasePath(root), action, payload };
+      child.stdin.write(`${JSON.stringify(request)}\n`, error => {
+        if (!error) return;
+        const pending = this.pending.get(id);
+        if (!pending) return;
+        this.pending.delete(id);
+        clearTimeout(pending.timer);
+        pending.reject(error);
+      });
+    });
+  }
+
+  stop() {
+    this.stopping = true;
+    const child = this.process;
+    this.process = null;
+    if (child && !child.killed) child.kill();
+  }
+}
+
+const workspaceDatabase = new WorkspaceDatabaseClient();
+const runWorkspaceDatabase = (root, action, payload = {}) => workspaceDatabase.call(root, action, payload);
+
+const refreshWorkspaceCatalog = async root => {
+  const response = await runWorkspaceDatabase(root, 'init');
   const projects = Array.isArray(response.projects) ? response.projects : [];
   const catalog = { projects, byName: new Map(projects.map(project => [project.name.toLocaleLowerCase(), project])) };
   workspaceCatalogs.set(root, catalog);
   return catalog;
 };
 
-const mutateWorkspaceCatalog = (root, action, payload) => {
-  runWorkspaceDatabase(root, action, payload);
+const mutateWorkspaceCatalog = async (root, action, payload) => {
+  await runWorkspaceDatabase(root, action, payload);
   return refreshWorkspaceCatalog(root);
 };
 
@@ -638,7 +737,6 @@ const ensureWorkspace = (workspacePath) => {
   // Never create or alter a drive root. A root selection uses its dedicated app folder.
   const root = isDriveRoot ? path.join(requestedPath, '照片流') : requestedPath;
   fs.mkdirSync(root, { recursive: true });
-  if (!workspaceCatalogs.has(root)) refreshWorkspaceCatalog(root);
   return root;
 };
 
@@ -692,6 +790,9 @@ const watchWorkspace = (root) => {
           for (const changedName of changedNames.length ? changedNames : ['']) {
             mainWindow.webContents.send('workspace-files-changed', { root, fileName: changedName });
           }
+          if (changedNames.some(changedName => changedName.split(/[\\/]/).filter(Boolean).length === 1)) {
+            mainWindow.webContents.send('workspace-projects-changed', { root });
+          }
         }
       }, 200);
     });
@@ -704,7 +805,7 @@ ipcMain.handle('workspace-projects', async (_event, workspacePath) => {
   try {
     const root = ensureWorkspace(workspacePath);
     watchWorkspace(root);
-    const catalog = refreshWorkspaceCatalog(root);
+    const catalog = await refreshWorkspaceCatalog(root);
     const statuses = WORKSPACE_STATUSES.map(status => {
       const projects = catalog.projects
         .filter(project => project.status === status)
@@ -729,12 +830,13 @@ ipcMain.handle('workspace-create-project', async (_event, workspacePath, date, n
     const projectName = [datePart, namePart].filter(Boolean).join(' ');
     if (!projectName) throw new Error('请至少填写日期或名称');
     const root = ensureWorkspace(workspacePath);
-    if (workspaceCatalogs.get(root)?.byName.has(projectName.toLocaleLowerCase())) throw new Error('同名项目已存在');
+    const catalog = workspaceCatalogs.get(root) || await refreshWorkspaceCatalog(root);
+    if (catalog.byName.has(projectName.toLocaleLowerCase())) throw new Error('同名项目已存在');
     const projectPath = getProjectPath(workspacePath, '策划中', projectName);
     if (fs.existsSync(projectPath)) throw new Error('同名项目已存在');
     fs.mkdirSync(projectPath, { recursive: false });
     fs.mkdirSync(path.join(projectPath, '策划'), { recursive: true });
-    mutateWorkspaceCatalog(root, 'add', { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath) });
+    await mutateWorkspaceCatalog(root, 'add', { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath) });
     writeLog('info', 'Project created', { projectName, projectPath });
     return { success: true, project: { name: projectName, path: projectPath, status: '策划中', updatedAt: Date.now() } };
   } catch (error) {
@@ -747,14 +849,15 @@ ipcMain.handle('workspace-rename-project', async (_event, workspacePath, status,
     const cleanedName = cleanProjectName(nextName || '');
     if (!cleanedName) throw new Error('项目名称不能为空');
     const root = ensureWorkspace(workspacePath);
-    const existingProject = workspaceCatalogs.get(root)?.byName.get(cleanedName.toLocaleLowerCase());
+    const catalog = workspaceCatalogs.get(root) || await refreshWorkspaceCatalog(root);
+    const existingProject = catalog.byName.get(cleanedName.toLocaleLowerCase());
     if (existingProject && existingProject.name.toLocaleLowerCase() !== projectName.toLocaleLowerCase()) throw new Error('同名项目已存在');
     const source = getProjectPath(workspacePath, status, projectName);
     const destination = path.join(path.dirname(source), cleanedName);
     if (!fs.existsSync(source)) throw new Error('项目不存在');
     if (fs.existsSync(destination)) throw new Error('同名项目已存在');
     fs.renameSync(source, destination);
-    mutateWorkspaceCatalog(root, 'rename', { name: projectName, nextName: cleanedName, relativePath: path.relative(root, destination) });
+    await mutateWorkspaceCatalog(root, 'rename', { name: projectName, nextName: cleanedName, relativePath: path.relative(root, destination) });
     renameHistory.push({ kind: 'project', source, destination, status, workspaceRoot: root, beforeName: projectName, afterName: cleanedName });
     return { success: true, project: { name: cleanedName, path: destination, status, updatedAt: Date.now() } };
   } catch (error) {
@@ -818,7 +921,7 @@ ipcMain.handle('workspace-undo-rename', async () => {
     fs.renameSync(operation.destination, operation.source);
     const response = { success: true, message: `已撤销重命名：${operation.afterName} → ${operation.beforeName}` };
     if (operation.kind === 'project') {
-      mutateWorkspaceCatalog(operation.workspaceRoot, 'rename', { name: operation.afterName, nextName: operation.beforeName, relativePath: path.relative(operation.workspaceRoot, operation.source) });
+      await mutateWorkspaceCatalog(operation.workspaceRoot, 'rename', { name: operation.afterName, nextName: operation.beforeName, relativePath: path.relative(operation.workspaceRoot, operation.source) });
       response.project = { name: operation.beforeName, path: operation.source, status: operation.status, updatedAt: Date.now() };
     }
     return response;
@@ -832,9 +935,10 @@ ipcMain.handle('workspace-move-project', async (_event, workspacePath, currentSt
     if (!WORKSPACE_STATUSES.includes(nextStatus)) throw new Error('无效的项目状态');
     if (nextStatus === '未分类') throw new Error('未分类仅用于自动发现的新文件夹');
     const root = ensureWorkspace(workspacePath);
+    if (!workspaceCatalogs.has(root)) await refreshWorkspaceCatalog(root);
     const source = getProjectPath(workspacePath, currentStatus, projectName);
     if (!fs.existsSync(source)) throw new Error('项目不存在');
-    mutateWorkspaceCatalog(root, 'status', { name: projectName, status: nextStatus });
+    await mutateWorkspaceCatalog(root, 'status', { name: projectName, status: nextStatus });
     return { success: true, project: { name: projectName, path: source, status: nextStatus, updatedAt: Date.now() } };
   } catch (error) {
     return { success: false, error: error.message || String(error) };
@@ -845,17 +949,19 @@ ipcMain.handle('workspace-archive-imports', async (_event, workspacePath) => {
   try {
     const root = ensureWorkspace(workspacePath);
     const plannedStatus = '待拍摄';
-    const catalog = refreshWorkspaceCatalog(root);
+    const catalog = await refreshWorkspaceCatalog(root);
     const importedFolders = fs.readdirSync(root, { withFileTypes: true })
       .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.startsWith('_') && !WORKSPACE_STATUSES.includes(entry.name) && !catalog.byName.has(entry.name.toLocaleLowerCase()));
     const projects = [];
 
     for (const folder of importedFolders) {
       const projectPath = path.join(root, folder.name);
-      mutateWorkspaceCatalog(root, 'add', { name: folder.name, status: plannedStatus, relativePath: folder.name });
+      await runWorkspaceDatabase(root, 'add', { name: folder.name, status: plannedStatus, relativePath: folder.name });
 
       projects.push({ name: folder.name, path: projectPath, status: plannedStatus, updatedAt: fs.statSync(projectPath).mtimeMs });
     }
+
+    if (projects.length) await refreshWorkspaceCatalog(root);
 
     writeLog('info', 'Imported folders archived', { root, count: projects.length });
     return { success: true, projects };
@@ -875,7 +981,7 @@ ipcMain.handle('workspace-trash-project', async (event, workspacePath, status, p
     publish({ phase: 'trashing', progress: 0, currentName: projectName, processedCount: 0, totalCount: 1 });
     await shell.trashItem(projectPath);
     const root = ensureWorkspace(workspacePath);
-    mutateWorkspaceCatalog(root, 'delete', { name: projectName });
+    await mutateWorkspaceCatalog(root, 'delete', { name: projectName });
     publish({ phase: 'complete', progress: 100, currentName: projectName, processedCount: 1, totalCount: 1 });
     return { success: true, operationId };
   } catch (error) {
@@ -2161,13 +2267,13 @@ ipcMain.handle('workspace-open-entry', async (_event, workspacePath, status, pro
 });
 
 ipcMain.handle('photoshop-status', async () => {
-  const executable = findLatestPhotoshop();
+  const executable = await findLatestPhotoshop();
   return { available: Boolean(executable) };
 });
 
 ipcMain.handle('workspace-open-entry-photoshop', async (_event, workspacePath, status, projectName, relativePath) => {
   try {
-    const executable = findLatestPhotoshop();
+    const executable = await findLatestPhotoshop();
     if (!executable) throw new Error('未检测到 Photoshop');
     const target = resolveProjectEntry(workspacePath, status, projectName, relativePath);
     if (!fs.statSync(target).isFile()) throw new Error('只能用 Photoshop 打开文件');
@@ -2285,6 +2391,7 @@ app.whenReady().then(() => {
 app.on('before-quit', () => {
   stopWorkspaceWatcher();
   stopShellThumbnailProcess();
+  workspaceDatabase.stop();
   thumbnailImageWorkerPool?.stop();
   originalImageWorkerPool?.stop();
   thumbnailPipeline?.stop();

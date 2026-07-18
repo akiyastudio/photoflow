@@ -136,13 +136,38 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("init", "add", "status", "rename", "delete"))
-    parser.add_argument("--root", required=True)
-    parser.add_argument("--database", required=True)
+    parser.add_argument("action", nargs="?", choices=("init", "add", "status", "rename", "delete"))
+    parser.add_argument("--root")
+    parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")
+    parser.add_argument("--server", action="store_true")
     args = parser.parse_args(args_list)
+    if args.server:
+        run_server()
+        return
+    if not args.action or not args.root or not args.database:
+        parser.error("action, --root and --database are required outside server mode")
     result = load(args.root, args.database) if args.action == "init" else mutate(args.root, args.database, args.action, json.loads(args.payload))
     print(json.dumps(result, ensure_ascii=False), flush=True)
+
+
+def run_server():
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        request_id = None
+        try:
+            request = json.loads(line)
+            request_id = request.get("id")
+            action = request["action"]
+            root = request["root"]
+            database = request["database"]
+            payload = request.get("payload") or {}
+            result = load(root, database) if action == "init" else mutate(root, database, action, payload)
+            response = {"id": request_id, "success": True, "result": result}
+        except Exception as error:
+            response = {"id": request_id, "success": False, "error": str(error)}
+        print(json.dumps(response, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":

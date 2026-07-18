@@ -54,12 +54,16 @@ export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProje
   useEffect(() => { refresh(); }, [workspacePath]);
   useEffect(() => {
     const close = () => setMenu(null);
-    const changed = () => refresh();
-    const unsubscribe = window.electronAPI.onWorkspaceFilesChanged(changed);
+    let refreshTimer = 0;
+    const changed = () => {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => void refresh(), 250);
+    };
+    const unsubscribe = window.electronAPI.onWorkspaceProjectsChanged(changed);
     window.addEventListener('click', close);
     window.addEventListener('photoflow-menu-open', close);
     window.addEventListener('workspace-projects-changed', changed);
-    return () => { unsubscribe(); window.removeEventListener('click', close); window.removeEventListener('photoflow-menu-open', close); window.removeEventListener('workspace-projects-changed', changed); };
+    return () => { window.clearTimeout(refreshTimer); unsubscribe(); window.removeEventListener('click', close); window.removeEventListener('photoflow-menu-open', close); window.removeEventListener('workspace-projects-changed', changed); };
   }, [workspacePath]);
 
   const createProject = async () => {

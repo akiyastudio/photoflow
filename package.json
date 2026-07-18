@@ -43,12 +43,16 @@
       ],
       "extraResources": [
         {
-          "from": "python/dist/tools.exe",
-          "to": "python/tools.exe"
+          "from": "python/dist/tools",
+          "to": "python/tools"
         },
         {
-          "from": "python/dist/thumbnail-image-worker.exe",
-          "to": "python/thumbnail-image-worker.exe"
+          "from": "python/dist/thumbnail-image-worker",
+          "to": "python/thumbnail-image-worker"
+        },
+        {
+          "from": "python/dist/workspace-db-worker",
+          "to": "python/workspace-db-worker"
         },
         {
           "from": "python/dist/ffmpeg.zip",
@@ -82,6 +86,10 @@
         {
           "from": "python/dist/thumbnail-image-worker",
           "to": "python/thumbnail-image-worker"
+        },
+        {
+          "from": "python/dist/workspace-db-worker",
+          "to": "python/workspace-db-worker"
         },
         {
           "from": "python/dist/ffmpeg.zip",

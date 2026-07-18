@@ -9,12 +9,16 @@ const venvPython = process.platform === 'win32'
 const python = existsSync(venvPython) ? venvPython : 'python';
 
 const result = spawnSync(python, [
-  '-m', 'PyInstaller', '--onefile', '--clean', '--specpath', 'build/specs',
+  '-m', 'PyInstaller', '--onedir', '--clean', '--specpath', 'build/specs',
   '--name', 'tools', '--exclude-module', 'imageio_ffmpeg',
   '--exclude-module', 'torch', '--exclude-module', 'torchvision',
   '--exclude-module', 'torchaudio', '--exclude-module', 'triton',
   '--exclude-module', 'PIL._avif', '--exclude-module', 'PIL._imagingmath',
   '--exclude-module', 'PIL._imagingtk', '--exclude-module', 'PIL._webp',
+  '--hidden-import', 'catch', '--hidden-import', 'classify',
+  '--hidden-import', 'cut_video', '--hidden-import', 'png_to_jpg',
+  '--hidden-import', 'rename', '--hidden-import', 'research',
+  '--hidden-import', 'thumbnail_db', '--hidden-import', 'video_preview',
   'tools.py',
 ], { cwd: join(root, 'python'), stdio: 'inherit' });
 
@@ -22,7 +26,7 @@ if (result.error) throw result.error;
 if ((result.status ?? 1) !== 0) process.exit(result.status ?? 1);
 
 const thumbnailWorker = spawnSync(python, [
-  '-m', 'PyInstaller', '--onefile', '--clean', '--specpath', 'build/specs',
+  '-m', 'PyInstaller', '--onedir', '--clean', '--specpath', 'build/specs',
   '--name', 'thumbnail-image-worker',
   '--exclude-module', 'numpy', '--exclude-module', 'scipy',
   '--exclude-module', 'matplotlib', '--exclude-module', 'cv2',
@@ -32,4 +36,16 @@ const thumbnailWorker = spawnSync(python, [
 ], { cwd: join(root, 'python'), stdio: 'inherit' });
 
 if (thumbnailWorker.error) throw thumbnailWorker.error;
-process.exit(thumbnailWorker.status ?? 1);
+if ((thumbnailWorker.status ?? 1) !== 0) process.exit(thumbnailWorker.status ?? 1);
+
+const workspaceWorker = spawnSync(python, [
+  '-m', 'PyInstaller', '--onedir', '--clean', '--specpath', 'build/specs',
+  '--name', 'workspace-db-worker',
+  '--exclude-module', 'numpy', '--exclude-module', 'scipy',
+  '--exclude-module', 'matplotlib', '--exclude-module', 'cv2',
+  '--exclude-module', 'torch', '--exclude-module', 'PIL',
+  'workspace_db.py',
+], { cwd: join(root, 'python'), stdio: 'inherit' });
+
+if (workspaceWorker.error) throw workspaceWorker.error;
+process.exit(workspaceWorker.status ?? 1);

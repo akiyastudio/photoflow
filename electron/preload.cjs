@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getDrives: () => ipcRenderer.invoke('getDrives'),
   getWorkspaceProjects: (workspacePath) => ipcRenderer.invoke('workspace-projects', workspacePath),
   onWorkspaceFilesChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-files-changed', subscription); return () => ipcRenderer.removeListener('workspace-files-changed', subscription); },
+  onWorkspaceProjectsChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-projects-changed', subscription); return () => ipcRenderer.removeListener('workspace-projects-changed', subscription); },
   createWorkspaceProject: (workspacePath, date, name) => ipcRenderer.invoke('workspace-create-project', workspacePath, date, name),
   renameWorkspaceProject: (workspacePath, status, name, nextName) => ipcRenderer.invoke('workspace-rename-project', workspacePath, status, name, nextName),
   renameProjectFolder: (workspacePath, status, name, folderName, nextName) => ipcRenderer.invoke('workspace-rename-project-folder', workspacePath, status, name, folderName, nextName),
