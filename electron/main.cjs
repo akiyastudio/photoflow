@@ -1,6 +1,6 @@
 const { app, BrowserWindow, ipcMain, Menu, shell, dialog, protocol, net, nativeImage, clipboard, screen } = require('electron');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const crypto = require('crypto');
 const os = require('os');
@@ -14,6 +14,44 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'photoflow-media', privileges: {
 
 const toMediaUrl = filePath => `photoflow-media://file/${Buffer.from(filePath, 'utf8').toString('base64url')}`;
 
+let cachedPhotoshopPath;
+const findLatestPhotoshop = () => {
+  if (cachedPhotoshopPath !== undefined) return cachedPhotoshopPath;
+  cachedPhotoshopPath = null;
+  if (process.platform !== 'win32') return cachedPhotoshopPath;
+
+  const candidates = [];
+  const addCandidate = (executable, version = []) => {
+    if (executable && fs.existsSync(executable)) candidates.push({ executable, version });
+  };
+  for (const root of [...new Set([process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter(Boolean))]) {
+    const adobeRoot = path.join(root, 'Adobe');
+    if (!fs.existsSync(adobeRoot)) continue;
+    for (const entry of fs.readdirSync(adobeRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/^Adobe Photoshop\b/i.test(entry.name) || /beta/i.test(entry.name)) continue;
+      const version = (entry.name.match(/\d+(?:\.\d+)*/g) || []).flatMap(value => value.split('.').map(Number));
+      addCandidate(path.join(adobeRoot, entry.name, 'Photoshop.exe'), version);
+    }
+  }
+
+  if (!candidates.length) {
+    const registry = spawnSync('reg.exe', ['query', 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Photoshop.exe', '/ve'], { windowsHide: true, encoding: 'utf8' });
+    const match = registry.status === 0 ? registry.stdout.match(/REG_SZ\s+(.+Photoshop\.exe)\s*$/im) : null;
+    if (match) addCandidate(match[1].trim());
+  }
+
+  candidates.sort((left, right) => {
+    const length = Math.max(left.version.length, right.version.length);
+    for (let index = 0; index < length; index += 1) {
+      const difference = (right.version[index] || 0) - (left.version[index] || 0);
+      if (difference) return difference;
+    }
+    return right.executable.localeCompare(left.executable, undefined, { numeric: true });
+  });
+  cachedPhotoshopPath = candidates[0]?.executable || null;
+  return cachedPhotoshopPath;
+};
+
 let mainWindow;
 let workspaceWatcher = null;
 let watchedWorkspacePath = '';
@@ -23,6 +61,7 @@ const activeProjectFileOperations = new Map();
 const mediaMetadataCache = new Map();
 const rawOrientationCache = new Map();
 const renameHistory = [];
+const workspaceCatalogs = new Map();
 let shellThumbnailProcess = null;
 let shellThumbnailOutput = '';
 let shellThumbnailRequestId = 0;
@@ -237,7 +276,7 @@ function createWindow() {
 }
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'research', 'thumbnail_db', 'video_preview']);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'research', 'thumbnail_db', 'video_preview', 'workspace_db']);
 
 const getRunConfig = (scriptName, args) => {
   // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
@@ -555,63 +594,58 @@ ipcMain.handle('check-script', async (event, scriptName) => {
 
 // 获取系统盘符列表
 
-const WORKSPACE_STATUSES = ['策划中', '待拍摄', '后期中', '已归档'];
-const LEGACY_WORKSPACE_STATUS_MAP = new Map([
-  ['未策划', '策划中'],
-  ['已策划', '待拍摄'],
-  ['进行中', '后期中']
-]);
+const WORKSPACE_STATUSES = ['未分类', '策划中', '待拍摄', '后期中', '已归档'];
 
-const getAvailableLegacyPath = destinationPath => {
-  const parsed = path.parse(destinationPath);
-  let index = 1;
-  let candidate;
-  do candidate = path.join(parsed.dir, `${parsed.name}_legacy_${index++}${parsed.ext}`);
-  while (fs.existsSync(candidate));
-  return candidate;
+const getWorkspaceDatabasePath = root => {
+  const databaseDir = path.join(app.getPath('userData'), 'workspace-data');
+  fs.mkdirSync(databaseDir, { recursive: true });
+  const identity = process.platform === 'win32' ? root.toLocaleLowerCase() : root;
+  const fileName = `${crypto.createHash('sha256').update(identity).digest('hex').slice(0, 24)}.sqlite3`;
+  return path.join(databaseDir, fileName);
 };
 
-const mergeLegacyStatusDirectory = (source, destination) => {
-  fs.mkdirSync(destination, { recursive: true });
-  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
-    const sourcePath = path.join(source, entry.name);
-    let destinationPath = path.join(destination, entry.name);
-    if (entry.isDirectory()) {
-      if (!fs.existsSync(destinationPath)) fs.renameSync(sourcePath, destinationPath);
-      else if (fs.statSync(destinationPath).isDirectory()) mergeLegacyStatusDirectory(sourcePath, destinationPath);
-      else fs.renameSync(sourcePath, getAvailableLegacyPath(destinationPath));
-      continue;
-    }
-    if (fs.existsSync(destinationPath)) destinationPath = getAvailableLegacyPath(destinationPath);
-    fs.renameSync(sourcePath, destinationPath);
-  }
-  fs.rmdirSync(source);
+const runWorkspaceDatabase = (root, action, payload = {}) => {
+  const config = getRunConfig('workspace_db.py', [action, '--root', root, '--database', getWorkspaceDatabasePath(root), '--payload', JSON.stringify(payload)]);
+  const result = spawnSync(config.command, config.args, { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error((result.stderr || result.stdout || '工作区数据库操作失败').trim());
+  const lines = String(result.stdout || '').trim().split(/\r?\n/).filter(Boolean);
+  const response = JSON.parse(lines.at(-1) || '{}');
+  if (!response.success) throw new Error(response.error || '工作区数据库操作失败');
+  return response;
+};
+
+const refreshWorkspaceCatalog = root => {
+  const response = runWorkspaceDatabase(root, 'init');
+  const projects = Array.isArray(response.projects) ? response.projects : [];
+  const catalog = { projects, byName: new Map(projects.map(project => [project.name.toLocaleLowerCase(), project])) };
+  workspaceCatalogs.set(root, catalog);
+  return catalog;
+};
+
+const mutateWorkspaceCatalog = (root, action, payload) => {
+  runWorkspaceDatabase(root, action, payload);
+  return refreshWorkspaceCatalog(root);
 };
 
 const ensureWorkspace = (workspacePath) => {
-  const requestedPath = path.resolve(workspacePath);
+  if (typeof workspacePath !== 'string' || !workspacePath.trim()) throw new Error('尚未选择工作目录');
+  const requestedPath = path.resolve(workspacePath.trim());
   const isDriveRoot = requestedPath === path.parse(requestedPath).root;
   // Never create or alter a drive root. A root selection uses its dedicated app folder.
   const root = isDriveRoot ? path.join(requestedPath, '照片流') : requestedPath;
   fs.mkdirSync(root, { recursive: true });
-  for (const [legacyStatus, nextStatus] of LEGACY_WORKSPACE_STATUS_MAP) {
-    const legacyPath = path.join(root, legacyStatus);
-    if (!fs.existsSync(legacyPath)) continue;
-    const nextPath = path.join(root, nextStatus);
-    if (fs.existsSync(nextPath)) mergeLegacyStatusDirectory(legacyPath, nextPath);
-    else fs.renameSync(legacyPath, nextPath);
-    writeLog('info', 'Workspace status migrated', { legacyStatus, nextStatus });
-  }
-  WORKSPACE_STATUSES.forEach(status => fs.mkdirSync(path.join(root, status), { recursive: true }));
+  if (!workspaceCatalogs.has(root)) refreshWorkspaceCatalog(root);
   return root;
 };
 
 const getProjectPath = (workspacePath, status, projectName) => {
   if (!WORKSPACE_STATUSES.includes(status)) throw new Error('无效的项目状态');
   const root = ensureWorkspace(workspacePath);
-  const statusPath = path.resolve(root, status);
-  const projectPath = path.resolve(statusPath, projectName);
-  if (!projectPath.startsWith(statusPath + path.sep)) throw new Error('无效的项目路径');
+  const row = workspaceCatalogs.get(root)?.byName.get(String(projectName).toLocaleLowerCase());
+  const relativePath = row?.relative_path || projectName;
+  const projectPath = path.resolve(root, relativePath);
+  if (!projectPath.startsWith(root + path.sep)) throw new Error('无效的项目路径');
   return projectPath;
 };
 
@@ -641,7 +675,7 @@ const watchWorkspace = (root) => {
           for (const changedName of changedNames) {
             const segments = changedName.split(/[\\/]/).filter(Boolean);
             if (segments.length < 2) continue;
-            const projectRoot = path.join(root, segments[0], segments[1]);
+            const projectRoot = path.join(root, segments[0]);
             if (!changesByProject.has(projectRoot)) changesByProject.set(projectRoot, []);
             changesByProject.get(projectRoot).push(path.join(root, changedName));
           }
@@ -667,13 +701,13 @@ ipcMain.handle('workspace-projects', async (_event, workspacePath) => {
   try {
     const root = ensureWorkspace(workspacePath);
     watchWorkspace(root);
+    const catalog = refreshWorkspaceCatalog(root);
     const statuses = WORKSPACE_STATUSES.map(status => {
-      const statusPath = path.join(root, status);
-      const projects = fs.readdirSync(statusPath, { withFileTypes: true })
-        .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
-        .map(entry => {
-          const projectPath = path.join(statusPath, entry.name);
-          return { name: entry.name, path: projectPath, status, updatedAt: fs.statSync(projectPath).mtimeMs };
+      const projects = catalog.projects
+        .filter(project => project.status === status)
+        .map(project => {
+          const projectPath = path.resolve(root, project.relative_path);
+          return { name: project.name, path: projectPath, status, updatedAt: fs.existsSync(projectPath) ? fs.statSync(projectPath).mtimeMs : project.updated_at };
         })
         .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
       return { status, projects };
@@ -691,10 +725,13 @@ ipcMain.handle('workspace-create-project', async (_event, workspacePath, date, n
     const namePart = cleanProjectName(name || '');
     const projectName = [datePart, namePart].filter(Boolean).join(' ');
     if (!projectName) throw new Error('请至少填写日期或名称');
+    const root = ensureWorkspace(workspacePath);
+    if (workspaceCatalogs.get(root)?.byName.has(projectName.toLocaleLowerCase())) throw new Error('同名项目已存在');
     const projectPath = getProjectPath(workspacePath, '策划中', projectName);
     if (fs.existsSync(projectPath)) throw new Error('同名项目已存在');
     fs.mkdirSync(projectPath, { recursive: false });
     fs.mkdirSync(path.join(projectPath, '策划'), { recursive: true });
+    mutateWorkspaceCatalog(root, 'add', { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath) });
     writeLog('info', 'Project created', { projectName, projectPath });
     return { success: true, project: { name: projectName, path: projectPath, status: '策划中', updatedAt: Date.now() } };
   } catch (error) {
@@ -706,27 +743,40 @@ ipcMain.handle('workspace-rename-project', async (_event, workspacePath, status,
   try {
     const cleanedName = cleanProjectName(nextName || '');
     if (!cleanedName) throw new Error('项目名称不能为空');
+    const root = ensureWorkspace(workspacePath);
+    const existingProject = workspaceCatalogs.get(root)?.byName.get(cleanedName.toLocaleLowerCase());
+    if (existingProject && existingProject.name.toLocaleLowerCase() !== projectName.toLocaleLowerCase()) throw new Error('同名项目已存在');
     const source = getProjectPath(workspacePath, status, projectName);
-    const destination = getProjectPath(workspacePath, status, cleanedName);
+    const destination = path.join(path.dirname(source), cleanedName);
     if (!fs.existsSync(source)) throw new Error('项目不存在');
     if (fs.existsSync(destination)) throw new Error('同名项目已存在');
     fs.renameSync(source, destination);
-    renameHistory.push({ kind: 'project', source, destination, status, beforeName: projectName, afterName: cleanedName });
+    mutateWorkspaceCatalog(root, 'rename', { name: projectName, nextName: cleanedName, relativePath: path.relative(root, destination) });
+    renameHistory.push({ kind: 'project', source, destination, status, workspaceRoot: root, beforeName: projectName, afterName: cleanedName });
     return { success: true, project: { name: cleanedName, path: destination, status, updatedAt: Date.now() } };
   } catch (error) {
     return { success: false, error: error.message || String(error) };
   }
 });
-ipcMain.handle('workspace-create-project-folder', async (_event, workspacePath, status, projectName, folderName) => {
+ipcMain.handle('workspace-create-project-folder', async (_event, workspacePath, status, projectName, folderName, relativePath = '', makeUnique = false) => {
   try {
     const cleanedName = cleanProjectName(folderName || '');
     if (!cleanedName) throw new Error('文件夹名称不能为空');
-    const projectPath = getProjectPath(workspacePath, status, projectName);
-    const folderPath = path.resolve(projectPath, cleanedName);
-    if (!folderPath.startsWith(projectPath + path.sep)) throw new Error('无效的文件夹名称');
-    if (fs.existsSync(folderPath)) throw new Error('同名文件夹已存在');
+    const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const parentPath = path.resolve(projectPath, relativePath || '.');
+    if (parentPath !== projectPath && !parentPath.startsWith(projectPath + path.sep)) throw new Error('无效的文件夹位置');
+    let actualName = cleanedName;
+    let folderPath = path.resolve(parentPath, actualName);
+    if (!folderPath.startsWith(parentPath + path.sep)) throw new Error('无效的文件夹名称');
+    if (makeUnique) {
+      let index = 2;
+      while (fs.existsSync(folderPath)) {
+        actualName = `${cleanedName} (${index++})`;
+        folderPath = path.resolve(parentPath, actualName);
+      }
+    } else if (fs.existsSync(folderPath)) throw new Error('同名文件夹已存在');
     fs.mkdirSync(folderPath);
-    return { success: true, folder: { name: cleanedName, path: folderPath, updatedAt: Date.now() } };
+    return { success: true, folder: { name: actualName, path: folderPath, relativePath: path.relative(projectPath, folderPath), updatedAt: Date.now() } };
   } catch (error) {
     return { success: false, error: error.message || String(error) };
   }
@@ -765,6 +815,7 @@ ipcMain.handle('workspace-undo-rename', async () => {
     fs.renameSync(operation.destination, operation.source);
     const response = { success: true, message: `已撤销重命名：${operation.afterName} → ${operation.beforeName}` };
     if (operation.kind === 'project') {
+      mutateWorkspaceCatalog(operation.workspaceRoot, 'rename', { name: operation.afterName, nextName: operation.beforeName, relativePath: path.relative(operation.workspaceRoot, operation.source) });
       response.project = { name: operation.beforeName, path: operation.source, status: operation.status, updatedAt: Date.now() };
     }
     return response;
@@ -775,75 +826,31 @@ ipcMain.handle('workspace-undo-rename', async () => {
 
 ipcMain.handle('workspace-move-project', async (_event, workspacePath, currentStatus, projectName, nextStatus) => {
   try {
+    if (!WORKSPACE_STATUSES.includes(nextStatus)) throw new Error('无效的项目状态');
+    if (nextStatus === '未分类') throw new Error('未分类仅用于自动发现的新文件夹');
+    const root = ensureWorkspace(workspacePath);
     const source = getProjectPath(workspacePath, currentStatus, projectName);
-    const destination = getProjectPath(workspacePath, nextStatus, projectName);
     if (!fs.existsSync(source)) throw new Error('项目不存在');
-    if (fs.existsSync(destination)) throw new Error('目标状态中已有同名项目');
-    fs.renameSync(source, destination);
-    return { success: true, project: { name: projectName, path: destination, status: nextStatus, updatedAt: Date.now() } };
+    mutateWorkspaceCatalog(root, 'status', { name: projectName, status: nextStatus });
+    return { success: true, project: { name: projectName, path: source, status: nextStatus, updatedAt: Date.now() } };
   } catch (error) {
     return { success: false, error: error.message || String(error) };
   }
 });
 
-const mergeProjectDirectories = (source, destination) => {
-  fs.mkdirSync(destination, { recursive: true });
-  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
-    const sourcePath = path.join(source, entry.name);
-    let destinationPath = path.join(destination, entry.name);
-    if (entry.isDirectory()) {
-      mergeProjectDirectories(sourcePath, destinationPath);
-      continue;
-    }
-    if (fs.existsSync(destinationPath)) {
-      const extension = path.extname(entry.name);
-      const basename = path.basename(entry.name, extension);
-      let index = 1;
-      do {
-        destinationPath = path.join(destination, `${basename}_imported_${Date.now()}_${index}${extension}`);
-        index += 1;
-      } while (fs.existsSync(destinationPath));
-    }
-    fs.renameSync(sourcePath, destinationPath);
-  }
-  fs.rmdirSync(source);
-};
-
 ipcMain.handle('workspace-archive-imports', async (_event, workspacePath) => {
   try {
     const root = ensureWorkspace(workspacePath);
     const plannedStatus = '待拍摄';
-    const plannedPath = path.join(root, plannedStatus);
+    const catalog = refreshWorkspaceCatalog(root);
     const importedFolders = fs.readdirSync(root, { withFileTypes: true })
-      .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.startsWith('_') && !WORKSPACE_STATUSES.includes(entry.name) && !LEGACY_WORKSPACE_STATUS_MAP.has(entry.name));
+      .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.startsWith('_') && !WORKSPACE_STATUSES.includes(entry.name) && !catalog.byName.has(entry.name.toLocaleLowerCase()));
     const projects = [];
 
     for (const folder of importedFolders) {
-      const importedPath = path.join(root, folder.name);
-      let existing = null;
-      for (const status of WORKSPACE_STATUSES) {
-        const candidate = path.join(root, status, folder.name);
-        if (fs.existsSync(candidate)) {
-          existing = { path: candidate, status };
-          break;
-        }
-      }
+      const projectPath = path.join(root, folder.name);
+      mutateWorkspaceCatalog(root, 'add', { name: folder.name, status: plannedStatus, relativePath: folder.name });
 
-      if (existing) {
-        mergeProjectDirectories(importedPath, existing.path);
-        if (existing.status !== plannedStatus) {
-          const plannedProjectPath = path.join(plannedPath, folder.name);
-          if (fs.existsSync(plannedProjectPath)) {
-            mergeProjectDirectories(existing.path, plannedProjectPath);
-          } else {
-            fs.renameSync(existing.path, plannedProjectPath);
-          }
-        }
-      } else {
-        fs.renameSync(importedPath, path.join(plannedPath, folder.name));
-      }
-
-      const projectPath = path.join(plannedPath, folder.name);
       projects.push({ name: folder.name, path: projectPath, status: plannedStatus, updatedAt: fs.statSync(projectPath).mtimeMs });
     }
 
@@ -864,6 +871,8 @@ ipcMain.handle('workspace-trash-project', async (event, workspacePath, status, p
     if (!fs.existsSync(projectPath)) throw new Error('项目不存在');
     publish({ phase: 'trashing', progress: 0, currentName: projectName, processedCount: 0, totalCount: 1 });
     await shell.trashItem(projectPath);
+    const root = ensureWorkspace(workspacePath);
+    mutateWorkspaceCatalog(root, 'delete', { name: projectName });
     publish({ phase: 'complete', progress: 100, currentName: projectName, processedCount: 1, totalCount: 1 });
     return { success: true, operationId };
   } catch (error) {
@@ -1295,7 +1304,7 @@ ipcMain.handle('workspace-browse-files', async (_event, workspacePath, status, p
         const entryPath = path.join(currentPath, entry.name);
         const extension = entry.isDirectory() ? '' : path.extname(entry.name).toLowerCase();
         const kind = entry.isDirectory() ? 'folder' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
-        return { name: entry.name, path: entryPath, relativePath: path.relative(root, entryPath), kind, extension, size: -1, updatedAt: 0 };
+        return { name: entry.name, path: entryPath, relativePath: path.relative(root, entryPath), kind, extension, size: -1, createdAt: 0, updatedAt: 0 };
       })
       .sort((a, b) => (a.kind === 'folder' ? 0 : 1) - (b.kind === 'folder' ? 0 : 1) || a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
     const directoryIndex = thumbnailPipeline.indexDirectory(root, currentPath, entries, activeMediaCacheConfig);
@@ -1318,7 +1327,7 @@ ipcMain.handle('workspace-file-details', async (_event, workspacePath, status, p
       if (filePath !== root && !filePath.startsWith(root + path.sep)) return null;
       try {
         const stat = await fs.promises.stat(filePath);
-        return { relativePath: path.relative(root, filePath), size: stat.size, updatedAt: stat.mtimeMs };
+        return { relativePath: path.relative(root, filePath), size: stat.size, createdAt: stat.birthtimeMs || stat.ctimeMs, updatedAt: stat.mtimeMs };
       } catch { return null; }
     }))).filter(Boolean);
     return { success: true, details };
@@ -1473,7 +1482,7 @@ ipcMain.handle('media-video-hover-preview', async (_event, filePath, cacheConfig
     const stat = fs.statSync(previewSource);
     const size = Math.max(320, Math.min(1600, Math.round(Number(requestedSize) || 640)));
     const cacheDir = getMediaCacheDir(cacheConfig);
-    const cacheKey = crypto.createHash('sha256').update(`video-preview|${size}|${previewSource}|${stat.size}|${stat.mtimeMs}`).digest('hex');
+    const cacheKey = crypto.createHash('sha256').update(`video-preview|v2|${size}|${previewSource}|${stat.size}|${stat.mtimeMs}`).digest('hex');
     const manifestPath = path.join(cacheDir, `${cacheKey}.json`);
     const readCached = () => {
       if (!fs.existsSync(manifestPath)) return null;
@@ -1766,6 +1775,18 @@ ipcMain.on('workspace-start-file-drag', async (event, workspacePath, status, pro
   }
 });
 
+ipcMain.handle('workspace-file-clipboard-status', async () => {
+  const internalSources = projectFileClipboard?.sources?.filter(source => fs.existsSync(source)) || [];
+  if (internalSources.length) return { success: true, hasFiles: true };
+  try {
+    const systemClipboard = await readSystemFileClipboard();
+    const systemSources = systemClipboard?.sources?.filter(source => fs.existsSync(path.resolve(source))) || [];
+    return { success: true, hasFiles: systemSources.length > 0 };
+  } catch {
+    return { success: true, hasFiles: Boolean(projectFileClipboard?.sources?.some(source => fs.existsSync(source))) };
+  }
+});
+
 ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, projectName, operation, relativePaths = [], targetRelativePath = '', nextName = '', options = {}) => {
   try {
     const root = path.resolve(getProjectPath(workspacePath, status, projectName));
@@ -1840,26 +1861,21 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
     if (operation === 'copy' || operation === 'cut') {
       if (!sources.length) throw new Error('未选择文件');
       projectFileClipboard = { operation, sources };
-      try {
-        await writeSystemFileClipboard(sources, operation);
-      } catch (error) {
-        writeLog('warn', 'Unable to sync project files to the system clipboard', error);
-      }
+      void writeSystemFileClipboard(sources, operation).catch(error => writeLog('warn', 'Unable to sync project files to the system clipboard', error));
       return { success: true, count: sources.length };
     }
     if (operation === 'paste') {
       if (activeProjectFileOperations.size) throw new Error('已有文件粘贴任务正在进行');
       const destinationDir = resolveInsideProject(targetRelativePath);
       if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
-      let clipboardSnapshot = null;
-      try {
-        const systemClipboard = await readSystemFileClipboard();
-        if (systemClipboard?.sources?.length) clipboardSnapshot = { operation: systemClipboard.operation, sources: systemClipboard.sources.map(source => path.resolve(source)) };
-      } catch (error) {
-        writeLog('warn', 'Unable to read project files from the system clipboard', error);
-      }
-      if (!clipboardSnapshot && projectFileClipboard?.sources?.length) {
-        clipboardSnapshot = { operation: projectFileClipboard.operation, sources: [...projectFileClipboard.sources] };
+      let clipboardSnapshot = projectFileClipboard?.sources?.length ? { operation: projectFileClipboard.operation, sources: [...projectFileClipboard.sources] } : null;
+      if (!clipboardSnapshot) {
+        try {
+          const systemClipboard = await readSystemFileClipboard();
+          if (systemClipboard?.sources?.length) clipboardSnapshot = { operation: systemClipboard.operation, sources: systemClipboard.sources.map(source => path.resolve(source)) };
+        } catch (error) {
+          writeLog('warn', 'Unable to read project files from the system clipboard', error);
+        }
       }
       if (!clipboardSnapshot?.sources?.length) throw new Error('剪贴板中没有文件或文件夹');
       const operationId = crypto.randomUUID();
@@ -1996,16 +2012,41 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
     if (operation === 'rename') {
       if (!sources.length || !nextName.trim()) throw new Error('请选择文件并输入新名称');
       const baseName = nextName.trim();
+      const explicitNames = Array.isArray(options.renameNames) && options.renameNames.length === sources.length ? options.renameNames.map(name => String(name).trim()) : null;
       const destinations = sources.map((source, index) => {
         const extension = path.extname(source);
-        const fileName = sources.length === 1 ? baseName : `${baseName}_${String(index + 1).padStart(2, '0')}${extension}`;
+        const fileName = explicitNames ? explicitNames[index] : sources.length === 1 ? baseName : `${baseName}_${String(index + 1).padStart(2, '0')}${extension}`;
+        if (!fileName || path.basename(fileName) !== fileName || /[<>:"/\\|?*\x00-\x1f]/.test(fileName) || /[. ]$/.test(fileName)) throw new Error(`无效的文件名：${fileName || '空文件名'}`);
         return path.join(path.dirname(source), fileName);
       });
+      const normalizedDestinations = destinations.map(destination => path.resolve(destination).toLocaleLowerCase());
+      if (new Set(normalizedDestinations).size !== normalizedDestinations.length) throw new Error('生成的新文件名存在重复');
+      const normalizedSources = new Set(sources.map(source => path.resolve(source).toLocaleLowerCase()));
       for (const destination of destinations) {
         if (path.resolve(destination) === root || !path.resolve(destination).startsWith(root + path.sep)) throw new Error('无效的文件名');
-        if (fs.existsSync(destination)) throw new Error('已有同名文件');
+        if (fs.existsSync(destination) && !normalizedSources.has(path.resolve(destination).toLocaleLowerCase())) throw new Error(`已有同名文件：${path.basename(destination)}`);
       }
-      for (let index = 0; index < sources.length; index += 1) fs.renameSync(sources[index], destinations[index]);
+      const moves = sources.map((source, index) => ({ source, destination: destinations[index] })).filter(move => path.resolve(move.source) !== path.resolve(move.destination));
+      const staged = [];
+      try {
+        for (const move of moves) {
+          const temporary = path.join(path.dirname(move.source), `.photoflow-rename-${crypto.randomUUID()}${path.extname(move.source)}`);
+          fs.renameSync(move.source, temporary);
+          staged.push({ ...move, temporary, completed: false });
+        }
+        for (const move of staged) {
+          fs.renameSync(move.temporary, move.destination);
+          move.completed = true;
+        }
+      } catch (error) {
+        for (const move of [...staged].reverse()) {
+          try {
+            if (move.completed && fs.existsSync(move.destination) && !fs.existsSync(move.source)) fs.renameSync(move.destination, move.source);
+            else if (!move.completed && fs.existsSync(move.temporary) && !fs.existsSync(move.source)) fs.renameSync(move.temporary, move.source);
+          } catch { /* best-effort rollback; original error is reported below */ }
+        }
+        throw error;
+      }
       writeLog('info', 'Project files renamed', { projectName, count: sources.length });
       return { success: true, count: sources.length };
     }
@@ -2018,6 +2059,16 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
 
 ipcMain.handle('choose-cache-directory', async () => {
   const choice = await dialog.showOpenDialog(mainWindow, { title: '选择缩略图缓存目录', properties: ['openDirectory', 'createDirectory'] });
+  return choice.canceled ? { cancelled: true } : { path: choice.filePaths[0] };
+});
+
+ipcMain.handle('choose-workspace-directory', async (_event, currentPath = '') => {
+  const defaultPath = currentPath && fs.existsSync(currentPath) && fs.statSync(currentPath).isDirectory() ? currentPath : undefined;
+  const choice = await dialog.showOpenDialog(mainWindow, {
+    title: '选择工作文件夹',
+    defaultPath,
+    properties: ['openDirectory', 'createDirectory']
+  });
   return choice.canceled ? { cancelled: true } : { path: choice.filePaths[0] };
 });
 
@@ -2103,6 +2154,28 @@ ipcMain.handle('workspace-open-entry', async (_event, workspacePath, status, pro
     const target = resolveProjectEntry(workspacePath, status, projectName, relativePath);
     const error = await shell.openPath(target);
     return { success: !error, error };
+  } catch (error) { return { success: false, error: error.message || String(error) }; }
+});
+
+ipcMain.handle('photoshop-status', async () => {
+  const executable = findLatestPhotoshop();
+  return { available: Boolean(executable) };
+});
+
+ipcMain.handle('workspace-open-entry-photoshop', async (_event, workspacePath, status, projectName, relativePath) => {
+  try {
+    const executable = findLatestPhotoshop();
+    if (!executable) throw new Error('未检测到 Photoshop');
+    const target = resolveProjectEntry(workspacePath, status, projectName, relativePath);
+    if (!fs.statSync(target).isFile()) throw new Error('只能用 Photoshop 打开文件');
+    return await new Promise(resolve => {
+      const child = spawn(executable, [target], { detached: true, stdio: 'ignore', windowsHide: false });
+      child.once('error', error => resolve({ success: false, error: error.message || String(error) }));
+      child.once('spawn', () => {
+        child.unref();
+        resolve({ success: true });
+      });
+    });
   } catch (error) { return { success: false, error: error.message || String(error) }; }
 });
 

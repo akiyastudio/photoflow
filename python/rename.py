@@ -68,7 +68,7 @@ def copy_unmatched_a_files(unmatched_files_a, folder_a):
         except Exception:
             pass
 
-def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched):
+def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_only=False):
     image_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.gif')
     
     # 1. 分析 文件夹A
@@ -106,7 +106,10 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched):
             # 如果粗略差距在阈值内，视为候选对象
             if rough_dist <= threshold:
                 fine_dist = hamming_distance(fine_a, fine_b)
-                potential_matches.append((fine_dist, rough_dist, file_a, file_b))
+                # Very different fine hashes are more likely a false match than
+                # an edited version of the same frame.
+                if fine_dist <= 96:
+                    potential_matches.append((fine_dist, rough_dist, file_a, file_b))
         
         if idx % 5 == 0:
             log_progress(f"交叉比对: {idx}/{total_a}", 40 + int(idx/total_a*10))
@@ -119,6 +122,7 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched):
     log_info("开始执行精准重命名...")
     processed_b = set()
     matched_a = {f: 0 for f in files_a}
+    preview_matches = []
     
     total_matches = len(potential_matches)
     for idx, (fine_dist, rough_dist, file_a, file_b) in enumerate(potential_matches):
@@ -127,7 +131,8 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched):
             continue
             
         path_b = files_b[file_b][0]
-        name, ext = os.path.splitext(file_a)
+        name, _reference_ext = os.path.splitext(file_a)
+        _current_name, ext = os.path.splitext(file_b)
         
         m_idx = matched_a[file_a] + 1
         
@@ -150,19 +155,25 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched):
             new_path_b = os.path.join(folder_b, new_name)
             c += 1
         
-        try:
-            os.rename(path_b, new_path_b)
+        confidence = "高" if fine_dist <= 40 else "中" if fine_dist <= 72 else "低"
+        preview_matches.append({"source": file_b, "reference": file_a, "target": new_name, "confidence": confidence, "distance": fine_dist})
+        if preview_only:
             processed_b.add(file_b)
             matched_a[file_a] += 1
-        except Exception:
-            pass
+        else:
+            try:
+                os.rename(path_b, new_path_b)
+                processed_b.add(file_b)
+                matched_a[file_a] += 1
+            except Exception as error:
+                log_error(f"重命名失败：{file_b}（{error}）")
             
         if idx % 10 == 0:
             log_progress(f"重命名进度: {idx}/{total_matches}", 50 + int(idx/total_matches*40))
 
     # 5. 处理未匹配
     unmatched_b = [f for f in files_b if f not in processed_b]
-    if unmatched_b:
+    if unmatched_b and not preview_only:
         sub_folder = os.path.join(folder_b, "未匹配的图片")
         os.makedirs(sub_folder, exist_ok=True)
         for f in unmatched_b:
@@ -178,6 +189,10 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched):
     unmatched_a = [f for f in files_a if matched_a[f] == 0]
     
     stats = (f"待处理组匹配成功:{len(processed_b)}/{len(files_b)}, 参照组已被匹配:{sum(1 for v in matched_a.values() if v>0)}/{len(files_a)}")
+    if preview_only:
+        emit('preview', f"预览完成：找到 {len(preview_matches)} 个匹配", {"matches": preview_matches, "unmatched": unmatched_b})
+        log_success(f"预览完成，尚未修改文件。{stats}")
+        return
     log_success(f"完成! {stats}")
 
     if unmatched_a and auto_copy_unmatched:
@@ -194,6 +209,7 @@ def run(args_list):
     parser.add_argument("--folder_b", required=True)
     parser.add_argument("--copy_unmatched", action="store_true")
     parser.add_argument("--threshold", type=int, default=5)
+    parser.add_argument("--preview", action="store_true")
     args = parser.parse_args(args_list)
 
     # 清理路径
@@ -205,7 +221,7 @@ def run(args_list):
         return
 
     try:
-        process_folders(fa, fb, args.threshold, args.copy_unmatched)
+        process_folders(fa, fb, args.threshold, args.copy_unmatched, args.preview)
         emit('success', "所有任务结束")
     except Exception as e:
         log_error(f"错误: {e}")

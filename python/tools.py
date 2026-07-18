@@ -8,6 +8,7 @@ import rename
 import research
 import thumbnail_db
 import video_preview
+import workspace_db
 
 
 TOOLS = {
@@ -19,6 +20,7 @@ TOOLS = {
     "research": research.run,
     "thumbnail_db": thumbnail_db.run,
     "video_preview": video_preview.run,
+    "workspace_db": workspace_db.run,
 }
 
 

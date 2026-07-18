@@ -57,7 +57,7 @@ def run(arguments):
             [
                 ffmpeg_exe, '-hide_banner', '-loglevel', 'error', '-y',
                 '-ss', f'{cover_timestamp:.3f}', '-i', source_path,
-                '-frames:v', '1', '-vf', f'scale={size}:{size}:force_original_aspect_ratio=increase,crop={size}:{size}',
+                '-frames:v', '1', '-vf', f'scale={size}:{size}:force_original_aspect_ratio=decrease',
                 '-q:v', '4', cover_path,
             ],
             stdout=subprocess.DEVNULL,
@@ -85,7 +85,7 @@ def run(arguments):
         remaining_paths.append(output_path)
         command.extend([
             '-map', f'{input_index}:v:0', '-frames:v', '1',
-            '-vf', f'scale={size}:{size}:force_original_aspect_ratio=increase,crop={size}:{size}',
+            '-vf', f'scale={size}:{size}:force_original_aspect_ratio=decrease',
             '-q:v', '4', output_path,
         ])
 
