@@ -39,6 +39,9 @@ env/
 node_modules/
 dist/
 build/
+!/build/
+/build/*
+!/build/installer.nsh
 release/
 out/
 electron/bin/

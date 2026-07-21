@@ -67,7 +67,8 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
+      "createDesktopShortcut": false,
+      "include": "build/installer.nsh",
       "shortcutName": "照片流",
       "uninstallDisplayName": "照片流"
     },

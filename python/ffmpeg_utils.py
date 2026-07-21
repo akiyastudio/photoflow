@@ -12,9 +12,14 @@ def get_ffmpeg_exe():
     executable_name = "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg"
 
     if getattr(sys, "frozen", False):
-        archive_path = os.path.join(os.path.dirname(sys.executable), "ffmpeg.zip")
-        if not os.path.isfile(archive_path):
-            raise RuntimeError(f"未找到应用内置的 FFmpeg：{archive_path}")
+        executable_dir = os.path.dirname(sys.executable)
+        archive_candidates = [
+            os.path.join(executable_dir, "ffmpeg.zip"),
+            os.path.join(os.path.dirname(executable_dir), "ffmpeg.zip"),
+        ]
+        archive_path = next((candidate for candidate in archive_candidates if os.path.isfile(candidate)), None)
+        if archive_path is None:
+            raise RuntimeError(f"未找到应用内置的 FFmpeg：{'；'.join(archive_candidates)}")
 
         archive_stat = os.stat(archive_path)
         cache_dir = os.path.join(

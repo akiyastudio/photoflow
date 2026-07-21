@@ -1,5 +1,6 @@
 import os
 import sys
+import os
 import shutil
 import time
 import datetime
@@ -19,7 +20,7 @@ def emit(event_type, message, data=None, progress=None):
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 def log_info(msg): emit('log', msg)
-def log_success(msg): emit('success', msg)
+def log_success(msg, data=None): emit('success', msg, data)
 def log_error(msg): emit('error', msg)
 def log_progress(msg, percent): emit('progress', msg, progress=percent)
 def log_status(msg, data=None): emit('status', msg, data)
@@ -47,6 +48,19 @@ def get_file_time(file_path):
     try: return os.path.getmtime(file_path)
     except: return 0
 
+def unique_destination(directory, file_name):
+    """Never overwrite an earlier card import or another folder's same name."""
+    destination = os.path.join(directory, file_name)
+    if not os.path.exists(destination):
+        return destination
+    stem, extension = os.path.splitext(file_name)
+    index = 1
+    while True:
+        candidate = os.path.join(directory, f"{stem} ({index}){extension}")
+        if not os.path.exists(candidate):
+            return candidate
+        index += 1
+
 def classify_files_by_type(folder_path):
     """整理子文件夹"""
     ext_map = {
@@ -63,10 +77,7 @@ def classify_files_by_type(folder_path):
                 sub_dir = os.path.join(folder_path, sub)
                 os.makedirs(sub_dir, exist_ok=True)
                 # 如果子目录已有同名文件，加时间戳
-                dst_path = os.path.join(sub_dir, f)
-                if os.path.exists(dst_path):
-                    name, ext = os.path.splitext(f)
-                    dst_path = os.path.join(sub_dir, f"{name}_{int(time.time())}{ext}")
+                dst_path = unique_destination(sub_dir, f)
                 shutil.move(src_path, dst_path)
                 break
 
@@ -167,6 +178,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
     # 记录原始文件列表，用于最后的清理
     original_sd_files = []
     success_imported_count = 0
+    created_projects = []
 
     try:
         time.sleep(2.5)
@@ -198,7 +210,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
                             time.sleep(0.01)
         
         if not original_sd_files:
-            log_info(f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
+            log_error(f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
             return
 
 
@@ -274,9 +286,10 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             
             target_folder = os.path.join(dest_path, date_str)
             os.makedirs(target_folder, exist_ok=True)
+            created_projects.append(date_str)
             
             for f_path, _ in group:
-                shutil.move(f_path, os.path.join(target_folder, os.path.basename(f_path)))
+                shutil.move(f_path, unique_destination(target_folder, os.path.basename(f_path)))
                 success_imported_count += 1
             
             classify_files_by_type(target_folder)
@@ -298,7 +311,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
                     log_info(f"视频预览完成：{preview_count}/{video_count} 个文件已保存到 mov_预览")
         # Step 5: 最终校验与清理 SD 卡
         if success_imported_count == len(original_sd_files):
-            log_success(f"整理完成，共处理 {success_imported_count} 个文件")
+            log_info(f"整理完成，共处理 {success_imported_count} 个文件")
             
             # 只有在此刻，才开始清理 SD 卡
             log_info("正在安全清理 SD 卡原始文件...")
@@ -307,7 +320,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
                     os.remove(f)
                 except:
                     pass
-            log_success("SD 卡清理完成")
+            log_success("SD 卡清理完成", {"projectNames": created_projects, "importedCount": success_imported_count})
             
             # 只有全部成功，才清理临时目录
             if os.path.exists(temp_dir):
@@ -342,7 +355,7 @@ def run(args_list):
     elif args.should_split.lower() == 'false': split_val = False
 
     if args.stage == 'check':
-        log_status("SD Card Detected" if os.path.exists(args.sd_path) else "No Device", {"connected": os.path.exists(args.sd_path)})
+        log_status("SD Card Detected" if os.path.exists(args.sd_path) else "No Device", {"connected": os.path.exists(args.sd_path), "path": args.sd_path})
     elif args.stage == 'import':
         stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files)
 
