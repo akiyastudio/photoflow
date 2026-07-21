@@ -24,7 +24,6 @@ class ThumbnailDatabaseClient {
     this.log = log;
     this.serviceArgs = serviceArgs;
     this.process = null;
-    this.output = '';
     this.nextId = 0;
     this.pending = new Map();
     this.terminationReasons = new WeakMap();
@@ -35,17 +34,18 @@ class ThumbnailDatabaseClient {
     const run = this.getRunConfig('thumbnail_db.py', ['--server', '--db', this.databasePath, ...this.serviceArgs]);
     const child = spawn(run.command, run.args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     this.process = child;
+    let output = '';
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', data => {
-      this.output += data;
-      const lines = this.output.split(/\r?\n/);
-      this.output = lines.pop() || '';
+      output += data;
+      const lines = output.split(/\r?\n/);
+      output = lines.pop() || '';
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const response = JSON.parse(line);
           const request = this.pending.get(response.id);
-          if (!request) continue;
+          if (!request || request.child !== child) continue;
           this.pending.delete(response.id);
           clearTimeout(request.timer);
           if (response.success) request.resolve(response.result);
@@ -58,13 +58,18 @@ class ThumbnailDatabaseClient {
     let stderr = '';
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', data => { stderr = (stderr + data).slice(-4000); });
+    // A timed-out service is deliberately killed. Its writable stream may emit
+    // EPIPE before the child exit event; consume it here and let pending calls
+    // receive the more useful service-termination error below.
+    child.stdin.on('error', () => undefined);
     const finish = (error) => {
       if (this.process === child) this.process = null;
-      for (const request of this.pending.values()) {
+      for (const [id, request] of this.pending.entries()) {
+        if (request.child !== child) continue;
         clearTimeout(request.timer);
         request.reject(error);
+        this.pending.delete(id);
       }
-      this.pending.clear();
     };
     child.on('error', error => finish(error));
     child.on('exit', code => finish(new Error(this.terminationReasons.get(child) || stderr.trim() || `Thumbnail database service exited with code ${code}`)));
@@ -87,15 +92,23 @@ class ThumbnailDatabaseClient {
           if (!child.killed) child.kill();
         }
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
-      child.stdin.write(`${JSON.stringify({ id, op, args })}\n`, error => {
-        if (!error) return;
+      this.pending.set(id, { resolve, reject, timer, child });
+      try {
+        child.stdin.write(`${JSON.stringify({ id, op, args })}\n`, error => {
+          if (!error) return;
+          const request = this.pending.get(id);
+          if (!request || request.child !== child) return;
+          this.pending.delete(id);
+          clearTimeout(request.timer);
+          request.reject(error);
+        });
+      } catch (error) {
         const request = this.pending.get(id);
         if (!request) return;
         this.pending.delete(id);
         clearTimeout(request.timer);
-        reject(error);
-      });
+        request.reject(error);
+      }
     });
   }
 
@@ -423,6 +436,11 @@ class ThumbnailPipeline {
   }
 
   async runDirectoryIndex(projectRoot, directory, entries, cacheConfig) {
+    // Let the renderer's visible thumbnail requests claim the disk first.
+    // Directory indexing touches the same source and cache files and otherwise
+    // creates a burst of duplicate I/O while a folder is opening.
+    await new Promise(resolve => setTimeout(resolve, 50));
+    await this.waitForBackgroundIdle(PRIORITY.directory);
     let lastError;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
@@ -460,7 +478,6 @@ class ThumbnailPipeline {
       pending.push(entry);
     }
     if (pending.length) {
-      await this.waitForBackgroundIdle(PRIORITY.directory);
       await this.database.call('set_states', { file_paths: pending.map(entry => entry.path), state: 'QUEUED' }, 10 * 60 * 1000);
       for (const [index, entry] of pending.entries()) {
         this.enqueue({ filePath: entry.path, kind: entry.kind, cacheConfig, persistState: false, requestedSizes: [THUMBNAIL_SIZES[0]], queueOrder: index }, PRIORITY.directory);

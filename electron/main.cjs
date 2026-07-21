@@ -15,7 +15,7 @@ app.setName('照片流');
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 
-const toMediaUrl = filePath => `photoflow-media://file/${Buffer.from(filePath, 'utf8').toString('base64url')}`;
+const toMediaUrl = (filePath, fresh = false) => `photoflow-media://file/${Buffer.from(filePath, 'utf8').toString('base64url')}${fresh ? `?request=${crypto.randomUUID()}` : ''}`;
 
 let cachedPhotoshopPath;
 let photoshopDiscoveryPromise = null;
@@ -80,6 +80,19 @@ const activeProjectFileOperations = new Map();
 const mediaMetadataCache = new Map();
 const rawOrientationCache = new Map();
 const renameHistory = [];
+const MAX_UNDO_HISTORY = 50;
+const discardUndoOperation = operation => {
+  if (operation?.kind !== 'trash' && operation?.kind !== 'import-with-sources') return;
+  for (const item of operation.items || []) {
+    try { fs.rmSync(item.backupRoot, { recursive: true, force: true }); } catch { /* cache cleanup is best-effort */ }
+  }
+};
+const pushUndoOperation = operation => {
+  renameHistory.push(operation);
+  // Keep undo data bounded. Entries that fall off the stack intentionally
+  // become permanent, matching the behaviour of standard file managers.
+  if (renameHistory.length > MAX_UNDO_HISTORY) discardUndoOperation(renameHistory.shift());
+};
 const workspaceCatalogs = new Map();
 let shellThumbnailProcess = null;
 let shellThumbnailOutput = '';
@@ -96,6 +109,8 @@ const normalizeMediaCacheSizeGB = (value, fallback = 50) => {
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
 };
 const workspaceWatchChanges = new Set();
+const mediaTrackingTimers = new Map();
+const trackedVersionThumbnailCopies = new Map();
 const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
 
@@ -295,7 +310,7 @@ function createWindow() {
 }
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'research', 'thumbnail_db', 'video_preview']);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'face_patch', 'rename', 'research', 'thumbnail_db', 'video_preview']);
 
 const getRunConfig = (scriptName, args) => {
   // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
@@ -348,6 +363,40 @@ const getRunConfig = (scriptName, args) => {
     };
   }
 };
+
+const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000) => new Promise((resolve, reject) => {
+  const run = getRunConfig(scriptName, args);
+  const child = spawn(run.command, run.args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  let finished = false;
+  const settle = callback => value => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timer);
+    callback(value);
+  };
+  const succeed = settle(resolve);
+  const fail = settle(reject);
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', data => { stdout = (stdout + data).slice(-2 * 1024 * 1024); });
+  child.stderr.on('data', data => { stderr = (stderr + data).slice(-16000); });
+  child.on('error', error => fail(error));
+  child.on('close', code => {
+    if (code !== 0) return fail(new Error(stderr.trim() || `${scriptName} 处理失败（代码 ${code}）`));
+    const lines = stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      try { return succeed(JSON.parse(lines[index])); }
+      catch { /* keep looking for the last JSON result */ }
+    }
+    fail(new Error(stderr.trim() || `${scriptName} 未返回有效结果`));
+  });
+  const timer = setTimeout(() => {
+    if (!child.killed) child.kill();
+    fail(new Error(`${scriptName} 处理超时`));
+  }, timeoutMs);
+});
 
 // 检查更新
 const UPDATE_CONFIG = {
@@ -632,7 +681,6 @@ const getWorkspaceDatabasePath = root => {
 class WorkspaceDatabaseClient {
   constructor() {
     this.process = null;
-    this.output = '';
     this.nextId = 0;
     this.pending = new Map();
     this.stopping = false;
@@ -643,18 +691,18 @@ class WorkspaceDatabaseClient {
     const run = getRunConfig('workspace_db.py', ['--server']);
     const child = spawn(run.command, run.args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     this.process = child;
-    this.output = '';
+    let output = '';
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', data => {
-      this.output += data;
-      const lines = this.output.split(/\r?\n/);
-      this.output = lines.pop() || '';
+      output += data;
+      const lines = output.split(/\r?\n/);
+      output = lines.pop() || '';
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const response = JSON.parse(line);
           const request = this.pending.get(response.id);
-          if (!request) continue;
+          if (!request || request.child !== child) continue;
           this.pending.delete(response.id);
           clearTimeout(request.timer);
           if (response.success) request.resolve(response.result);
@@ -667,13 +715,15 @@ class WorkspaceDatabaseClient {
     let stderr = '';
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', data => { stderr = (stderr + data).slice(-4000); });
+    child.stdin.on('error', () => undefined);
     const finish = error => {
       if (this.process === child) this.process = null;
-      for (const request of this.pending.values()) {
+      for (const [id, request] of this.pending.entries()) {
+        if (request.child !== child) continue;
         clearTimeout(request.timer);
         request.reject(error);
+        this.pending.delete(id);
       }
-      this.pending.clear();
       if (!this.stopping) writeLog('warn', 'Workspace database service stopped', { error: error.message || String(error) });
     };
     child.on('error', finish);
@@ -693,16 +743,24 @@ class WorkspaceDatabaseClient {
           if (!child.killed) child.kill();
         }
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, child });
       const request = { id, root, database: getWorkspaceDatabasePath(root), action, payload };
-      child.stdin.write(`${JSON.stringify(request)}\n`, error => {
-        if (!error) return;
+      try {
+        child.stdin.write(`${JSON.stringify(request)}\n`, error => {
+          if (!error) return;
+          const pending = this.pending.get(id);
+          if (!pending || pending.child !== child) return;
+          this.pending.delete(id);
+          clearTimeout(pending.timer);
+          pending.reject(error);
+        });
+      } catch (error) {
         const pending = this.pending.get(id);
         if (!pending) return;
         this.pending.delete(id);
         clearTimeout(pending.timer);
         pending.reject(error);
-      });
+      }
     });
   }
 
@@ -716,6 +774,11 @@ class WorkspaceDatabaseClient {
 
 const workspaceDatabase = new WorkspaceDatabaseClient();
 const runWorkspaceDatabase = (root, action, payload = {}) => workspaceDatabase.call(root, action, payload);
+// Media scans can hash files and must never block project navigation/status
+// updates. A second worker shares the WAL database safely while keeping the
+// catalog service responsive.
+const mediaDatabase = new WorkspaceDatabaseClient();
+const runMediaDatabase = (root, action, payload = {}, timeoutMs = 30 * 60 * 1000) => mediaDatabase.call(root, action, payload, timeoutMs);
 
 const refreshWorkspaceCatalog = async root => {
   const response = await runWorkspaceDatabase(root, 'init');
@@ -759,6 +822,35 @@ const stopWorkspaceWatcher = () => {
   workspaceWatcher = null;
   watchedWorkspacePath = '';
   workspaceWatchChanges.clear();
+  for (const timer of mediaTrackingTimers.values()) clearTimeout(timer);
+  mediaTrackingTimers.clear();
+};
+
+const scheduleMediaTrackingScan = (root, projectName) => {
+  if (!projectName) return;
+  const key = `${root}\0${projectName.toLocaleLowerCase()}`;
+  const previous = mediaTrackingTimers.get(key);
+  if (previous) clearTimeout(previous);
+  mediaTrackingTimers.set(key, setTimeout(() => {
+    mediaTrackingTimers.delete(key);
+    void runMediaDatabase(root, 'media_sync_project', { projectName }).then(result => {
+      const row = workspaceCatalogs.get(root)?.byName.get(projectName.toLocaleLowerCase());
+      if (!row) return;
+      const projectPath = path.resolve(root, row.relative_path);
+      for (const candidate of (result.thumbnailCandidates || []).slice(0, 750)) {
+        void ensureTrackedVersionThumbnail({
+          workspaceRoot: root,
+          projectPath,
+          photoId: candidate.photoId,
+          versionId: candidate.versionId,
+          filePath: candidate.filePath,
+          priority: PRIORITY.project,
+        });
+      }
+    }).catch(error => {
+      writeLog('warn', 'Media version tracking scan deferred', { projectName, error: error.message || String(error) });
+    });
+  }, 1500));
 };
 
 const watchWorkspace = (root) => {
@@ -786,6 +878,14 @@ const watchWorkspace = (root) => {
             });
           }
         }
+        const catalog = workspaceCatalogs.get(root);
+        const changedProjects = new Set();
+        for (const changedName of changedNames) {
+          const firstSegment = changedName.split(/[\\/]/).filter(Boolean)[0];
+          const project = catalog?.projects.find(item => item.relative_path.toLocaleLowerCase() === String(firstSegment || '').toLocaleLowerCase());
+          if (project) changedProjects.add(project.name);
+        }
+        for (const projectName of changedProjects) scheduleMediaTrackingScan(root, projectName);
         if (mainWindow && !mainWindow.isDestroyed()) {
           for (const changedName of changedNames.length ? changedNames : ['']) {
             mainWindow.webContents.send('workspace-files-changed', { root, fileName: changedName });
@@ -858,7 +958,7 @@ ipcMain.handle('workspace-rename-project', async (_event, workspacePath, status,
     if (fs.existsSync(destination)) throw new Error('同名项目已存在');
     fs.renameSync(source, destination);
     await mutateWorkspaceCatalog(root, 'rename', { name: projectName, nextName: cleanedName, relativePath: path.relative(root, destination) });
-    renameHistory.push({ kind: 'project', source, destination, status, workspaceRoot: root, beforeName: projectName, afterName: cleanedName });
+    pushUndoOperation({ kind: 'project', source, destination, status, workspaceRoot: root, beforeName: projectName, afterName: cleanedName });
     return { success: true, project: { name: cleanedName, path: destination, status, updatedAt: Date.now() } };
   } catch (error) {
     return { success: false, error: error.message || String(error) };
@@ -882,6 +982,7 @@ ipcMain.handle('workspace-create-project-folder', async (_event, workspacePath, 
       }
     } else if (fs.existsSync(folderPath)) throw new Error('同名文件夹已存在');
     fs.mkdirSync(folderPath);
+    pushUndoOperation({ kind: 'remove-created', paths: [folderPath], label: '新建文件夹' });
     return { success: true, folder: { name: actualName, path: folderPath, relativePath: path.relative(projectPath, folderPath), updatedAt: Date.now() } };
   } catch (error) {
     return { success: false, error: error.message || String(error) };
@@ -899,7 +1000,7 @@ ipcMain.handle('workspace-rename-project-folder', async (_event, workspacePath, 
     if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) throw new Error('文件夹不存在');
     if (fs.existsSync(destination)) throw new Error('同名文件夹已存在');
     fs.renameSync(source, destination);
-    renameHistory.push({ kind: 'folder', source, destination, beforeName: folderName, afterName: cleanedName });
+    pushUndoOperation({ kind: 'folder', source, destination, beforeName: folderName, afterName: cleanedName });
     return { success: true, folder: { name: cleanedName, path: destination, updatedAt: Date.now() } };
   } catch (error) {
     return { success: false, error: error.message || String(error) };
@@ -909,7 +1010,95 @@ ipcMain.handle('workspace-rename-project-folder', async (_event, workspacePath, 
 ipcMain.handle('workspace-undo-rename', async () => {
   try {
     const operation = renameHistory.pop();
-    if (!operation) return { success: false, error: '没有可撤销的重命名操作' };
+    if (!operation) return { success: false, error: '没有可撤销的操作' };
+    if (operation.kind === 'remove-created') {
+      if (operation.paths.some(item => !fs.existsSync(item))) {
+        renameHistory.push(operation);
+        throw new Error('操作后的文件已发生变化，无法安全撤销');
+      }
+      for (const item of operation.paths) fs.rmSync(item, { recursive: true, force: true });
+      return { success: true, message: `已撤销${operation.label || '文件操作'} ${operation.paths.length} 个项目` };
+    }
+    if (operation.kind === 'trash') {
+      if (operation.items.some(item => fs.existsSync(item.original) || !fs.existsSync(item.backup))) {
+        renameHistory.push(operation);
+        throw new Error('原位置已被占用，或删除文件的恢复副本不可用');
+      }
+      try {
+        for (const item of operation.items) {
+          fs.mkdirSync(path.dirname(item.original), { recursive: true });
+          fs.cpSync(item.backup, item.original, { recursive: true, preserveTimestamps: true, errorOnExist: true });
+        }
+      } catch (error) {
+        renameHistory.push(operation);
+        throw error;
+      }
+      for (const item of operation.items) fs.rmSync(item.backupRoot, { recursive: true, force: true });
+      return { success: true, message: `已恢复 ${operation.items.length} 个已删除项目` };
+    }
+    if (operation.kind === 'import-with-sources') {
+      if (operation.createdPaths.some(item => !fs.existsSync(item)) || operation.items.some(item => fs.existsSync(item.original) || !fs.existsSync(item.backup))) {
+        renameHistory.push(operation);
+        throw new Error('导入后的文件已发生变化，无法安全撤销');
+      }
+      for (const createdPath of operation.createdPaths) fs.rmSync(createdPath, { recursive: true, force: true });
+      for (const item of operation.items) {
+        fs.mkdirSync(path.dirname(item.original), { recursive: true });
+        fs.cpSync(item.backup, item.original, { recursive: true, preserveTimestamps: true, errorOnExist: true });
+        fs.rmSync(item.backupRoot, { recursive: true, force: true });
+      }
+      return { success: true, message: `已撤销导入 ${operation.items.length} 个文件` };
+    }
+    if (operation.kind === 'external-move') {
+      if (operation.moves.some(move => !fs.existsSync(move.destination) || fs.existsSync(move.source))) {
+        renameHistory.push(operation);
+        throw new Error('导入后的文件已发生变化，无法安全撤销');
+      }
+      for (const move of operation.moves) {
+        try {
+          await fs.promises.rename(move.destination, move.source);
+        } catch (error) {
+          if (error.code !== 'EXDEV') throw error;
+          await fs.promises.cp(move.destination, move.source, { recursive: true, preserveTimestamps: true, errorOnExist: true });
+          await fs.promises.rm(move.destination, { recursive: true, force: true });
+        }
+      }
+      return { success: true, message: `已撤销导入 ${operation.moves.length} 个文件` };
+    }
+    if (operation.kind === 'files' || operation.kind === 'move') {
+      const moves = operation.moves.map(move => ({ source: move.destination, destination: move.source }));
+      const normalizedSources = new Set(moves.map(move => path.resolve(move.source).toLocaleLowerCase()));
+      if (moves.some(move => !fs.existsSync(move.source))) {
+        renameHistory.push(operation);
+        throw new Error('重命名后的文件已不存在，无法撤销');
+      }
+      if (moves.some(move => fs.existsSync(move.destination) && !normalizedSources.has(path.resolve(move.destination).toLocaleLowerCase()))) {
+        renameHistory.push(operation);
+        throw new Error('原名称已被占用，无法撤销');
+      }
+      const staged = [];
+      try {
+        for (const move of moves) {
+          const temporary = path.join(path.dirname(move.source), `.photoflow-undo-rename-${crypto.randomUUID()}${path.extname(move.source)}`);
+          fs.renameSync(move.source, temporary);
+          staged.push({ ...move, temporary, completed: false });
+        }
+        for (const move of staged) {
+          fs.renameSync(move.temporary, move.destination);
+          move.completed = true;
+        }
+      } catch (error) {
+        for (const move of [...staged].reverse()) {
+          try {
+            if (move.completed && fs.existsSync(move.destination) && !fs.existsSync(move.source)) fs.renameSync(move.destination, move.source);
+            else if (!move.completed && fs.existsSync(move.temporary) && !fs.existsSync(move.source)) fs.renameSync(move.temporary, move.source);
+          } catch { /* best-effort rollback; original error is reported below */ }
+        }
+        renameHistory.push(operation);
+        throw error;
+      }
+      return { success: true, message: operation.kind === 'files' ? `已撤销重命名 ${moves.length} 个文件` : `已撤销移动 ${moves.length} 个项目` };
+    }
     if (!fs.existsSync(operation.destination)) {
       renameHistory.push(operation);
       throw new Error('重命名后的文件夹已不存在，无法撤销');
@@ -945,25 +1134,28 @@ ipcMain.handle('workspace-move-project', async (_event, workspacePath, currentSt
   }
 });
 
-ipcMain.handle('workspace-archive-imports', async (_event, workspacePath) => {
+ipcMain.handle('workspace-archive-imports', async (_event, workspacePath, projectNames = []) => {
   try {
     const root = ensureWorkspace(workspacePath);
-    const plannedStatus = '待拍摄';
+    const plannedStatus = '后期中';
     const catalog = await refreshWorkspaceCatalog(root);
-    const importedFolders = fs.readdirSync(root, { withFileTypes: true })
-      .filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && !entry.name.startsWith('_') && !WORKSPACE_STATUSES.includes(entry.name) && !catalog.byName.has(entry.name.toLocaleLowerCase()));
+    const requestedNames = new Set((Array.isArray(projectNames) ? projectNames : []).map(value => cleanProjectName(String(value))).filter(Boolean).map(value => value.toLocaleLowerCase()));
+    const importedRows = catalog.projects.filter(project => requestedNames.has(project.name.toLocaleLowerCase()));
     const projects = [];
 
-    for (const folder of importedFolders) {
-      const projectPath = path.join(root, folder.name);
-      await runWorkspaceDatabase(root, 'add', { name: folder.name, status: plannedStatus, relativePath: folder.name });
-
-      projects.push({ name: folder.name, path: projectPath, status: plannedStatus, updatedAt: fs.statSync(projectPath).mtimeMs });
+    for (const row of importedRows) {
+      const projectPath = path.join(root, row.relative_path);
+      if (!fs.existsSync(projectPath)) continue;
+      if (row.status !== plannedStatus) await runWorkspaceDatabase(root, 'status', { name: row.name, status: plannedStatus });
+      projects.push({ name: row.name, path: projectPath, status: plannedStatus, updatedAt: fs.statSync(projectPath).mtimeMs });
     }
 
-    if (projects.length) await refreshWorkspaceCatalog(root);
+    if (projects.length) {
+      await refreshWorkspaceCatalog(root);
+      for (const project of projects) scheduleMediaTrackingScan(root, project.name);
+    }
 
-    writeLog('info', 'Imported folders archived', { root, count: projects.length });
+    writeLog('info', 'Imported projects moved to post-production', { root, requested: [...requestedNames], count: projects.length });
     return { success: true, projects };
   } catch (error) {
     writeLog('error', 'Unable to archive imported folders', error);
@@ -1031,7 +1223,7 @@ ipcMain.handle('workspace-project-contents', async (_event, workspacePath, statu
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.avif']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv']);
 const RAW_EXTENSIONS = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
-const HIDDEN_SYSTEM_ENTRY_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store']);
+const HIDDEN_SYSTEM_ENTRY_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store', 'thumbnails', 'comparecache', 'patches']);
 
 const getMediaCacheDir = (config = {}) => {
   const requested = typeof config.directory === 'string' ? config.directory.trim() : '';
@@ -1165,6 +1357,43 @@ const rawPreviewPath = async (sourcePath, stat, cacheConfig) => {
 const mediaSourceCacheKey = sourcePath => process.platform === 'win32' ? path.resolve(sourcePath).toLowerCase() : path.resolve(sourcePath);
 const rawPreviewCacheFile = (sourcePath, stat, cacheDir) => path.join(cacheDir, crypto.createHash('sha256').update(`${mediaSourceCacheKey(sourcePath)}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
 const mediaThumbnailCacheFile = (sourcePath, stat, cacheDir, requestedSize, version = THUMBNAIL_VERSION) => path.join(cacheDir, crypto.createHash('sha256').update(`thumbnail|v${version}|${requestedSize}|${mediaSourceCacheKey(sourcePath)}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
+
+const finalizeTrackedVersionThumbnail = async pending => {
+  if (!isCompleteJpegFile(pending.cachePath)) return false;
+  await fs.promises.mkdir(path.dirname(pending.targetPath), { recursive: true });
+  await fs.promises.copyFile(pending.cachePath, pending.targetPath);
+  await runMediaDatabase(pending.workspaceRoot, 'media_set_thumbnail', {
+    versionId: pending.versionId,
+    thumbnailPath: pending.targetPath,
+  });
+  return true;
+};
+
+const ensureTrackedVersionThumbnail = async ({ workspaceRoot, projectPath, photoId, versionId, filePath, priority = PRIORITY.nearby }) => {
+  try {
+    if (!thumbnailPipeline || !fs.existsSync(filePath)) return;
+    const stat = await fs.promises.stat(filePath);
+    const extension = path.extname(filePath).toLowerCase();
+    const kind = RAW_EXTENSIONS.has(extension) ? 'raw' : VIDEO_EXTENSIONS.has(extension) ? 'video' : IMAGE_EXTENSIONS.has(extension) ? 'image' : '';
+    if (!kind) return;
+    const cacheConfig = { ...activeMediaCacheConfig };
+    const pending = {
+      workspaceRoot,
+      versionId,
+      cachePath: mediaThumbnailCacheFile(filePath, stat, getMediaCacheDir(cacheConfig), 640, THUMBNAIL_VERSION),
+      targetPath: path.join(projectPath, 'Thumbnails', photoId, `${versionId}.jpg`),
+    };
+    if (await finalizeTrackedVersionThumbnail(pending)) return;
+    trackedVersionThumbnailCopies.set(mediaSourceCacheKey(filePath), pending);
+    const result = await thumbnailPipeline.request({ filePath, kind, cacheConfig, requestedSize: 640, priority });
+    if (result.state === 'READY' && await finalizeTrackedVersionThumbnail(pending)) {
+      trackedVersionThumbnailCopies.delete(mediaSourceCacheKey(filePath));
+    }
+  } catch (error) {
+    trackedVersionThumbnailCopies.delete(mediaSourceCacheKey(filePath));
+    writeLog('warn', 'Unable to persist ID-based version thumbnail', { versionId, filePath, error: error.message || String(error) });
+  }
+};
 
 const EXIF_ORIENTATION_MATRICES = {
   1: [1, 0, 0, 1],
@@ -1390,6 +1619,15 @@ thumbnailPipeline = new ThumbnailPipeline({
   toPreviewUrl: toMediaUrl,
   trimCache: trimMediaCache,
   notify: update => {
+    const trackedThumbnail = trackedVersionThumbnailCopies.get(mediaSourceCacheKey(update.filePath));
+    if (trackedThumbnail && update.state === 'READY') {
+      trackedVersionThumbnailCopies.delete(mediaSourceCacheKey(update.filePath));
+      void finalizeTrackedVersionThumbnail(trackedThumbnail).catch(error => {
+        writeLog('warn', 'Unable to finalize ID-based version thumbnail', { versionId: trackedThumbnail.versionId, error: error.message || String(error) });
+      });
+    } else if (trackedThumbnail && (update.state === 'FAILED' || update.state === 'MISSING')) {
+      trackedVersionThumbnailCopies.delete(mediaSourceCacheKey(update.filePath));
+    }
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('thumbnail-state-changed', update);
   },
   log: writeLog,
@@ -1419,11 +1657,12 @@ ipcMain.handle('workspace-browse-files', async (_event, workspacePath, status, p
     const directoryIndex = thumbnailPipeline.indexDirectory(root, currentPath, entries, activeMediaCacheConfig);
     if (!relativePath) {
       void directoryIndex.then(indexed => indexed && thumbnailPipeline.scanProject(root, activeMediaCacheConfig));
+      scheduleMediaTrackingScan(ensureWorkspace(workspacePath), projectName);
     }
     return { success: true, path: path.relative(root, currentPath), entries };
   } catch (error) {
     writeLog('warn', 'Unable to browse project directory', { projectName, relativePath, error: error.message || String(error) });
-    return { success: false, error: error.message || String(error), entries: [] };
+    return { success: false, missingDirectory: error?.code === 'ENOENT' || error?.code === 'ENOTDIR', error: error.message || String(error), entries: [] };
   }
 });
 
@@ -1441,6 +1680,32 @@ ipcMain.handle('workspace-file-details', async (_event, workspacePath, status, p
     }))).filter(Boolean);
     return { success: true, details };
   } catch (error) { return { success: false, details: [], error: error.message || String(error) }; }
+});
+
+ipcMain.handle('workspace-entry-details', async (_event, workspacePath, status, projectName, relativePath) => {
+  try {
+    const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const target = path.resolve(root, relativePath);
+    if (target !== root && !target.startsWith(root + path.sep)) throw new Error('无效的文件路径');
+    const stat = await fs.promises.stat(target);
+    let size = stat.isFile() ? stat.size : 0;
+    let fileCount = stat.isFile() ? 1 : 0;
+    let folderCount = 0;
+    if (stat.isDirectory()) {
+      const pending = [target];
+      while (pending.length) {
+        const directory = pending.pop();
+        for (const entry of await fs.promises.readdir(directory, { withFileTypes: true })) {
+          const entryPath = path.join(directory, entry.name);
+          if (entry.isDirectory()) { folderCount += 1; pending.push(entryPath); }
+          else if (entry.isFile()) { fileCount += 1; size += (await fs.promises.stat(entryPath)).size; }
+        }
+      }
+    }
+    return { success: true, details: { size, createdAt: stat.birthtimeMs || stat.ctimeMs, updatedAt: stat.mtimeMs, fileCount, folderCount } };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
 });
 
 const findImportedVideoPreview = sourcePath => {
@@ -1506,7 +1771,7 @@ ipcMain.handle('media-original', async (_event, filePath, kind, cacheConfig = {}
     const extension = path.extname(sourcePath).toLowerCase();
     const supported = kind === 'raw' ? RAW_EXTENSIONS.has(extension) : kind === 'image' ? IMAGE_EXTENSIONS.has(extension) : false;
     if (!supported || !fs.existsSync(sourcePath)) throw new Error('图片不存在或格式不受支持');
-    if (kind === 'image') return { success: true, mediaUrl: toMediaUrl(sourcePath), original: true };
+    if (kind === 'image') return { success: true, mediaUrl: toMediaUrl(sourcePath, true), original: true };
 
     // Chromium cannot decode camera RAW containers directly. Use the largest
     // camera-embedded JPEG, which is the closest displayable source preview.
@@ -1521,7 +1786,7 @@ ipcMain.handle('media-original', async (_event, filePath, kind, cacheConfig = {}
       })
     ]);
     clearTimeout(orientationTimer);
-    return { success: true, mediaUrl: toMediaUrl(previewPath), original: false, orientation };
+    return { success: true, mediaUrl: toMediaUrl(previewPath, true), original: false, orientation };
   } catch (error) {
     return { success: false, error: error.message || String(error) };
   }
@@ -1586,7 +1851,11 @@ ipcMain.handle('media-video-hover-preview', async (_event, filePath, cacheConfig
     if (!VIDEO_EXTENSIONS.has(path.extname(sourcePath).toLowerCase()) || !fs.existsSync(sourcePath)) throw new Error('视频文件不存在或格式不受支持');
     const isImportedOriginal = path.basename(path.dirname(sourcePath)).toLocaleLowerCase() === 'mov';
     const importedPreview = findImportedVideoPreview(sourcePath);
-    if (isImportedOriginal && !importedPreview) return { success: true, cached: false, complete: false, duration: 0, frameUrls: [] };
+    // Imported camera originals deliberately do not trigger ad-hoc hover
+    // transcoding. Treat the absence of an imported preview as a terminal
+    // result so the renderer does not poll forever while the pointer is over
+    // the card.
+    if (isImportedOriginal && !importedPreview) return { success: true, cached: false, complete: true, unavailable: true, duration: 0, frameUrls: [] };
     const previewSource = importedPreview || sourcePath;
     const stat = fs.statSync(previewSource);
     const size = Math.max(320, Math.min(1600, Math.round(Number(requestedSize) || 640)));
@@ -1940,6 +2209,7 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
         throw error;
       }
       writeLog('info', 'External files imported by drag and drop', { projectName, targetRelativePath, count: importPlan.length });
+      if (importPlan.length) pushUndoOperation({ kind: 'remove-created', paths: importPlan.map(item => item.destination), label: '导入' });
       return { success: true, count: importPlan.length };
     }
     const sources = relativePaths.map(resolveInsideProject);
@@ -1965,6 +2235,7 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
       });
       for (const entry of movePlan) await fs.promises.rename(entry.source, entry.destination);
       writeLog('info', 'Project files moved by internal drag', { projectName, targetRelativePath, count: movePlan.length });
+      if (movePlan.length) pushUndoOperation({ kind: 'move', moves: movePlan });
       return { success: true, count: movePlan.length };
     }
     if (operation === 'copy' || operation === 'cut') {
@@ -1987,6 +2258,29 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
         }
       }
       if (!clipboardSnapshot?.sources?.length) throw new Error('剪贴板中没有文件或文件夹');
+      const folderConflicts = [];
+      for (const source of clipboardSnapshot.sources) {
+        if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) continue;
+        const destination = path.join(destinationDir, path.basename(source));
+        if (path.resolve(destination) === path.resolve(source) || !fs.existsSync(destination)) continue;
+        if (fs.statSync(destination).isDirectory()) folderConflicts.push({ source, destination });
+      }
+      if (folderConflicts.length) {
+        const names = folderConflicts.slice(0, 6).map(item => `“${path.basename(item.destination)}”`).join('、');
+        const more = folderConflicts.length > 6 ? ` 等 ${folderConflicts.length} 个文件夹` : '';
+        const confirmation = await dialog.showMessageBox(mainWindow, {
+          type: 'warning',
+          title: '目标位置已有同名文件夹',
+          message: `目标位置已有 ${names}${more}`,
+          detail: '继续后，目标位置原有的同名文件夹会先移入系统回收站，再粘贴剪贴板中的文件夹。此操作不会直接永久删除原文件夹。',
+          buttons: ['替换并继续', '取消'],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true,
+        });
+        if (confirmation.response !== 0) return { success: false, cancelled: true, count: 0 };
+        for (const conflict of folderConflicts) await shell.trashItem(conflict.destination);
+      }
       const operationId = crypto.randomUUID();
       const job = { cancelled: false, finishing: false };
       const createdTargets = [];
@@ -2054,7 +2348,10 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
         const count = topLevelTargets.length;
         publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied, totalBytes, filesCopied, totalFiles, count });
         writeLog('info', 'Project files pasted', { projectName, targetRelativePath, count, operationId });
-        return { success: true, count, operationId };
+        if (count) pushUndoOperation(clipboardSnapshot.operation === 'cut'
+          ? { kind: 'move', moves: topLevelTargets }
+          : { kind: 'remove-created', paths: topLevelTargets.map(item => item.destination), label: '粘贴' });
+        return { success: true, count, operationId, replacedCount: folderConflicts.length, replacedNames: folderConflicts.map(item => path.basename(item.destination)) };
       } catch (error) {
         // Once cut finalization starts, keeping the completed copies is the only
         // data-safe fallback if removing a source fails partway through.
@@ -2078,16 +2375,23 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
         if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', { operationId, operation: 'trash', ...payload });
       };
       let processedCount = 0;
+      const undoItems = [];
       publish({ phase: 'trashing', progress: 0, currentName: '', processedCount, totalCount });
       try {
         for (const source of existingSources) {
           publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
+          const backupRoot = path.join(app.getPath('userData'), 'undo-trash', crypto.randomUUID());
+          const backup = path.join(backupRoot, path.basename(source));
+          await fs.promises.mkdir(backupRoot, { recursive: true });
+          await fs.promises.cp(source, backup, { recursive: true, preserveTimestamps: true, errorOnExist: true });
           await shell.trashItem(source);
+          undoItems.push({ original: source, backup, backupRoot });
           processedCount += 1;
           publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
         }
         publish({ phase: 'complete', progress: 100, currentName: '', processedCount, totalCount });
         writeLog('info', 'Project files moved to trash', { projectName, count: processedCount, operationId });
+        if (undoItems.length) pushUndoOperation({ kind: 'trash', items: undoItems });
         return { success: true, count: processedCount, operationId };
       } catch (error) {
         publish({ phase: 'failed', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: '', processedCount, totalCount, error: error.message || String(error) });
@@ -2101,6 +2405,7 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
       const imageTarget = path.join(root, imageDirName);
       const videoTarget = path.join(root, videoDirName);
       let count = 0;
+      const createdTargets = [];
       for (const source of sources) {
         if (!fs.existsSync(source) || !fs.statSync(source).isFile()) throw new Error('只能选择媒体文件');
         const extension = path.extname(source).toLowerCase();
@@ -2114,8 +2419,10 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
         let index = 1;
         while (fs.existsSync(destination)) destination = path.join(destinationDir, `${parsed.name} (${index++})${parsed.ext}`);
         fs.copyFileSync(source, destination);
+        createdTargets.push(destination);
         count += 1;
       }
+      if (createdTargets.length) pushUndoOperation({ kind: 'remove-created', paths: createdTargets, label: '选片复制' });
       return { success: true, count };
     }
     if (operation === 'rename') {
@@ -2133,7 +2440,7 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
       const normalizedSources = new Set(sources.map(source => path.resolve(source).toLocaleLowerCase()));
       for (const destination of destinations) {
         if (path.resolve(destination) === root || !path.resolve(destination).startsWith(root + path.sep)) throw new Error('无效的文件名');
-        if (fs.existsSync(destination) && !normalizedSources.has(path.resolve(destination).toLocaleLowerCase())) throw new Error(`已有同名文件：${path.basename(destination)}`);
+        if (fs.existsSync(destination) && !normalizedSources.has(path.resolve(destination).toLocaleLowerCase())) throw new Error(`目标名称已被占用：${path.basename(destination)}`);
       }
       const moves = sources.map((source, index) => ({ source, destination: destinations[index] })).filter(move => path.resolve(move.source) !== path.resolve(move.destination));
       const staged = [];
@@ -2157,12 +2464,25 @@ ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, 
         throw error;
       }
       writeLog('info', 'Project files renamed', { projectName, count: sources.length });
+      if (moves.length) pushUndoOperation({ kind: 'files', moves });
       return { success: true, count: sources.length };
     }
     throw new Error('不支持的文件操作');
   } catch (error) {
-    writeLog('error', 'Project file operation failed', { projectName, operation, targetRelativePath, count: relativePaths.length, error: error.message || String(error) });
-    return { success: false, error: error.message || String(error) };
+    const errorCode = error && typeof error === 'object' ? error.code : '';
+    const errorMessage = errorCode === 'EPERM' || errorCode === 'EBUSY' || errorCode === 'EACCES'
+      ? '文件正在被其他程序占用或没有访问权限，请关闭相关程序后重试'
+      : errorCode === 'ENOSPC'
+        ? '目标磁盘空间不足，操作已停止；已创建的不完整副本会自动清理'
+        : errorCode === 'ENAMETOOLONG'
+          ? '文件路径过长，请缩短项目路径或文件名后重试'
+          : errorCode === 'EROFS'
+            ? '目标磁盘为只读状态，无法写入文件'
+            : errorCode === 'ENOENT' || errorCode === 'ENOTDIR'
+              ? '操作中的文件或文件夹已在外部移动或删除，请刷新后重试'
+              : error.message || String(error);
+    writeLog('error', 'Project file operation failed', { projectName, operation, targetRelativePath, count: relativePaths.length, error: errorMessage });
+    return { success: false, error: errorMessage };
   }
 });
 
@@ -2248,6 +2568,343 @@ const resolveProjectEntry = (workspacePath, status, projectName, relativePath = 
   return target;
 };
 
+const cleanVersionName = value => String(value || '').trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/[. ]+$/g, '').slice(0, 80);
+
+ipcMain.handle('workspace-media-versions', async (_event, workspacePath, status, projectName, relativePath) => {
+  try {
+    const workspaceRoot = ensureWorkspace(workspacePath);
+    if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+    const filePath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) throw new Error('素材文件不存在');
+    const extension = path.extname(filePath).toLowerCase();
+    if (!IMAGE_EXTENSIONS.has(extension) && !RAW_EXTENSIONS.has(extension) && !VIDEO_EXTENSIONS.has(extension)) throw new Error('只有图片、RAW 和视频可以建立版本');
+    const result = await runMediaDatabase(workspaceRoot, 'media_get', { projectName, filePath });
+    const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+    for (const version of result.versions || []) {
+      if (!version.thumbnailPath || !fs.existsSync(version.thumbnailPath)) {
+        void ensureTrackedVersionThumbnail({ workspaceRoot, projectPath, photoId: result.photo.id, versionId: version.id, filePath: version.filePath });
+      }
+    }
+    return result;
+  } catch (error) {
+    writeLog('error', 'Unable to load media versions', { projectName, relativePath, error: error.message || String(error) });
+    return { success: false, error: error.message || String(error), versions: [] };
+  }
+});
+
+ipcMain.handle('workspace-version-create', async (_event, workspacePath, status, projectName, request = {}) => {
+  let createdPath = '';
+  try {
+    const workspaceRoot = ensureWorkspace(workspacePath);
+    if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+    const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const bundle = await runMediaDatabase(workspaceRoot, 'media_get_photo', { photoId: request.photoId });
+    const parent = bundle.versions?.find(version => version.id === request.parentVersionId);
+    if (!parent) throw new Error('基础版本不存在');
+    if (parent.fileMissing || !fs.existsSync(parent.filePath)) throw new Error('基础版本文件已丢失，请先重新定位');
+
+    let sourcePath = parent.filePath;
+    if (request.mode === 'import') {
+      const choice = await dialog.showOpenDialog(mainWindow, {
+        title: '选择处理后的图片或视频',
+        properties: ['openFile'],
+        filters: [{ name: '图片和视频', extensions: [...new Set([...IMAGE_EXTENSIONS, ...RAW_EXTENSIONS, ...VIDEO_EXTENSIONS])].map(value => value.slice(1)) }, { name: '所有文件', extensions: ['*'] }]
+      });
+      if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, ...bundle };
+      sourcePath = path.resolve(choice.filePaths[0]);
+    }
+    if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) throw new Error('选择的版本文件不存在');
+    const sourceExtension = path.extname(sourcePath).toLowerCase();
+    if (!IMAGE_EXTENSIONS.has(sourceExtension) && !RAW_EXTENSIONS.has(sourceExtension) && !VIDEO_EXTENSIONS.has(sourceExtension)) throw new Error('选择的文件不是支持的图片或视频');
+
+    const nextNumber = Math.max(-1, ...(bundle.versions || []).map(version => Number(version.versionNumber))) + 1;
+    const versionId = crypto.randomUUID();
+    const versionDirectory = path.join(projectPath, 'Versions', request.photoId);
+    await fs.promises.mkdir(versionDirectory, { recursive: true });
+    const suffix = request.mode === 'import' ? sourceExtension : path.extname(parent.filePath);
+    createdPath = path.join(versionDirectory, `v${String(nextNumber).padStart(3, '0')}${suffix}`);
+    if (fs.existsSync(createdPath)) throw new Error(`版本文件已存在：${path.basename(createdPath)}`);
+    await fs.promises.copyFile(sourcePath, createdPath, fs.constants.COPYFILE_EXCL);
+    const result = await runMediaDatabase(workspaceRoot, 'media_create_version', {
+      versionId,
+      photoId: request.photoId,
+      parentVersionId: parent.id,
+      versionName: cleanVersionName(request.versionName) || `版本 ${nextNumber}`,
+      versionType: request.versionType || 'custom',
+      note: String(request.note || '').slice(0, 2000),
+      author: String(request.author || '').slice(0, 120),
+      status: request.status || 'draft',
+      isFinal: Boolean(request.isFinal),
+      filePath: createdPath,
+    });
+    void ensureTrackedVersionThumbnail({ workspaceRoot, projectPath, photoId: request.photoId, versionId, filePath: createdPath });
+    createdPath = '';
+    writeLog('info', 'Media version created', { projectName, photoId: request.photoId, versionId, versionNumber: nextNumber, mode: request.mode || 'copy' });
+    return result;
+  } catch (error) {
+    if (createdPath) await fs.promises.rm(createdPath, { force: true }).catch(() => undefined);
+    writeLog('error', 'Unable to create media version', { projectName, error: error.message || String(error) });
+    return { success: false, error: error.message || String(error), versions: [] };
+  }
+});
+
+ipcMain.handle('workspace-version-update', async (_event, workspacePath, request = {}) => {
+  try {
+    const workspaceRoot = ensureWorkspace(workspacePath);
+    return await runMediaDatabase(workspaceRoot, 'media_update_version', {
+      versionId: request.versionId,
+      ...(request.versionName !== undefined ? { versionName: cleanVersionName(request.versionName) } : {}),
+      ...(request.note !== undefined ? { note: String(request.note).slice(0, 2000) } : {}),
+      ...(request.isFinal !== undefined ? { isFinal: Boolean(request.isFinal) } : {}),
+      ...(request.makeCurrent ? { makeCurrent: true } : {}),
+    });
+  } catch (error) {
+    return { success: false, error: error.message || String(error), versions: [] };
+  }
+});
+
+ipcMain.handle('workspace-version-relocate', async (_event, workspacePath, status, projectName, request = {}) => {
+  try {
+    const workspaceRoot = ensureWorkspace(workspacePath);
+    const choice = await dialog.showOpenDialog(mainWindow, {
+      title: '重新定位版本文件',
+      properties: ['openFile'],
+      filters: [{ name: '图片和视频', extensions: [...new Set([...IMAGE_EXTENSIONS, ...RAW_EXTENSIONS, ...VIDEO_EXTENSIONS])].map(value => value.slice(1)) }, { name: '所有文件', extensions: ['*'] }]
+    });
+    if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, versions: [] };
+    const filePath = path.resolve(choice.filePaths[0]);
+    let result = await runMediaDatabase(workspaceRoot, 'media_relocate_version', {
+      versionId: request.versionId,
+      filePath,
+      force: false,
+    });
+    if (result.fingerprintMismatch) {
+      const confirmation = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: '文件内容不一致',
+        message: '所选文件与原版本的内容指纹不一致',
+        detail: '继续会保留原 Photo ID 和 Version ID，但把该版本标记为“内容已变化”。',
+        buttons: ['仍然重新定位', '取消'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      });
+      if (confirmation.response !== 0) return { success: true, cancelled: true, versions: [] };
+      result = await runMediaDatabase(workspaceRoot, 'media_relocate_version', {
+        versionId: request.versionId,
+        filePath,
+        force: true,
+      });
+    }
+    if (!result.success) return result;
+    const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+    void ensureTrackedVersionThumbnail({ workspaceRoot, projectPath, photoId: request.photoId, versionId: request.versionId, filePath });
+    writeLog('info', 'Media version relocated', { projectName, photoId: request.photoId, versionId: request.versionId, filePath });
+    return result;
+  } catch (error) {
+    return { success: false, error: error.message || String(error), versions: [] };
+  }
+});
+
+ipcMain.handle('workspace-version-delete', async (_event, workspacePath, request = {}) => {
+  try {
+    const workspaceRoot = ensureWorkspace(workspacePath);
+    const bundle = await runMediaDatabase(workspaceRoot, 'media_get_photo', { photoId: request.photoId });
+    const version = bundle.versions?.find(item => item.id === request.versionId);
+    if (!version) throw new Error('版本不存在');
+    const result = await runMediaDatabase(workspaceRoot, 'media_delete_version', { versionId: request.versionId });
+    if (version.thumbnailPath) {
+      const thumbnailPath = path.resolve(version.thumbnailPath);
+      const expectedName = `${version.id}.jpg`.toLocaleLowerCase();
+      const expectedPhotoDirectory = request.photoId.toLocaleLowerCase();
+      const isManagedThumbnail = path.basename(thumbnailPath).toLocaleLowerCase() === expectedName
+        && path.basename(path.dirname(thumbnailPath)).toLocaleLowerCase() === expectedPhotoDirectory
+        && path.basename(path.dirname(path.dirname(thumbnailPath))).toLocaleLowerCase() === 'thumbnails';
+      if (isManagedThumbnail) await fs.promises.rm(thumbnailPath, { force: true }).catch(() => undefined);
+    }
+    let warning;
+    if (request.trashFile && fs.existsSync(version.filePath)) {
+      try { await shell.trashItem(version.filePath); }
+      catch (error) { warning = `版本记录已删除，但文件移入回收站失败：${error.message || String(error)}`; }
+    }
+    return { ...result, warning };
+  } catch (error) {
+    return { success: false, error: error.message || String(error), versions: [] };
+  }
+});
+
+ipcMain.handle('workspace-version-compare-record', async (_event, workspacePath, request = {}) => {
+  try {
+    return await runMediaDatabase(ensureWorkspace(workspacePath), 'media_record_compare', request);
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace-open-version', async (_event, filePath) => {
+  try {
+    const target = path.resolve(String(filePath || ''));
+    if (!fs.existsSync(target)) throw new Error('版本文件不存在');
+    const error = await shell.openPath(target);
+    if (error) throw new Error(error);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace-team-patches', async (_event, workspacePath, status, projectName, relativePath) => {
+  try {
+    const workspaceRoot = ensureWorkspace(workspacePath);
+    if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+    const filePath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
+    const extension = path.extname(filePath).toLowerCase();
+    if (!IMAGE_EXTENSIONS.has(extension)) throw new Error('多人修脸目前支持 JPG、PNG、TIFF、HEIC 等成片格式，不直接处理 RAW 或视频');
+    const bundle = await runMediaDatabase(workspaceRoot, 'media_get', { projectName, filePath });
+    const patchResult = await runMediaDatabase(workspaceRoot, 'team_patch_list', { photoId: bundle.photo.id });
+    return { ...bundle, tasks: patchResult.tasks || [] };
+  } catch (error) {
+    return { success: false, error: error.message || String(error), versions: [], tasks: [] };
+  }
+});
+
+ipcMain.handle('workspace-team-patch-detect', async (_event, workspacePath, status, projectName, request = {}) => {
+  try {
+    const workspaceRoot = ensureWorkspace(workspacePath);
+    const bundle = await runMediaDatabase(workspaceRoot, 'media_get_photo', { photoId: request.photoId });
+    const base = bundle.versions?.find(version => version.id === request.baseVersionId);
+    if (!base || base.fileMissing || !fs.existsSync(base.filePath)) throw new Error('基础版本文件不存在');
+    if (!IMAGE_EXTENSIONS.has(path.extname(base.filePath).toLowerCase())) throw new Error('多人修脸目前不直接处理 RAW 或视频');
+    const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const outputDirectory = path.join(projectPath, 'Patches', request.photoId, request.baseVersionId, 'exports');
+    const detected = await runPythonJsonAction('face_patch.py', ['detect', '--input', base.filePath, '--output-dir', outputDirectory]);
+    const patchResult = await runMediaDatabase(workspaceRoot, 'team_patch_replace', {
+      photoId: request.photoId,
+      baseVersionId: request.baseVersionId,
+      tasks: detected.tasks || [],
+    });
+    writeLog('info', 'Team retouch people detected', { projectName, photoId: request.photoId, baseVersionId: request.baseVersionId, count: patchResult.tasks.length, detector: detected.detector });
+    return { success: true, photo: bundle.photo, versions: bundle.versions, tasks: patchResult.tasks, detection: { detector: detected.detector, width: detected.width, height: detected.height } };
+  } catch (error) {
+    writeLog('error', 'Unable to detect team retouch subjects', { projectName, error: error.message || String(error) });
+    return { success: false, error: error.message || String(error), versions: [], tasks: [] };
+  }
+});
+
+ipcMain.handle('workspace-team-patch-update', async (_event, workspacePath, request = {}) => {
+  try {
+    const payload = {
+      taskId: request.taskId,
+      ...(request.personName !== undefined ? { personName: String(request.personName).trim().slice(0, 80) || '未命名人物' } : {}),
+      ...(request.assignee !== undefined ? { assignee: String(request.assignee).trim().slice(0, 80) } : {}),
+    };
+    return await runMediaDatabase(ensureWorkspace(workspacePath), 'team_patch_update', payload);
+  } catch (error) {
+    return { success: false, error: error.message || String(error), tasks: [] };
+  }
+});
+
+ipcMain.handle('workspace-team-patch-upload', async (_event, workspacePath, request = {}) => {
+  let copiedPath = '';
+  try {
+    const workspaceRoot = ensureWorkspace(workspacePath);
+    const patchResult = await runMediaDatabase(workspaceRoot, 'team_patch_list', { photoId: request.photoId });
+    const task = patchResult.tasks.find(item => item.id === request.taskId);
+    if (!task) throw new Error('人物修图任务不存在');
+    const choice = await dialog.showOpenDialog(mainWindow, {
+      title: `上传 ${task.personName} 的修图结果`,
+      properties: ['openFile'],
+      filters: [{ name: '修图结果', extensions: [...IMAGE_EXTENSIONS].map(value => value.slice(1)) }, { name: '所有文件', extensions: ['*'] }],
+    });
+    if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, tasks: patchResult.tasks };
+    const sourcePath = path.resolve(choice.filePaths[0]);
+    if (!IMAGE_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) throw new Error('请选择 JPG、PNG、TIFF、HEIC 等图片文件');
+    const uploadDirectory = path.join(path.dirname(path.dirname(task.patchPath)), 'uploads');
+    await fs.promises.mkdir(uploadDirectory, { recursive: true });
+    copiedPath = path.join(uploadDirectory, `${task.id}${path.extname(sourcePath).toLowerCase()}`);
+    await fs.promises.copyFile(sourcePath, copiedPath);
+    const updated = await runMediaDatabase(workspaceRoot, 'team_patch_update', {
+      taskId: task.id,
+      editedPatchPath: copiedPath,
+      status: 'uploaded',
+    });
+    copiedPath = '';
+    return updated;
+  } catch (error) {
+    if (copiedPath) await fs.promises.rm(copiedPath, { force: true }).catch(() => undefined);
+    return { success: false, error: error.message || String(error), tasks: [] };
+  }
+});
+
+ipcMain.handle('workspace-team-patch-open', async (_event, filePath) => {
+  try {
+    const target = path.resolve(String(filePath || ''));
+    if (!fs.existsSync(target)) throw new Error('Patch 文件不存在');
+    shell.showItemInFolder(target);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
+ipcMain.handle('workspace-team-patch-merge', async (_event, workspacePath, status, projectName, request = {}) => {
+  let createdPath = '';
+  try {
+    const workspaceRoot = ensureWorkspace(workspacePath);
+    const bundle = await runMediaDatabase(workspaceRoot, 'media_get_photo', { photoId: request.photoId });
+    const base = bundle.versions?.find(version => version.id === request.baseVersionId);
+    if (!base || base.fileMissing || !fs.existsSync(base.filePath)) throw new Error('基础版本文件不存在');
+    const patchResult = await runMediaDatabase(workspaceRoot, 'team_patch_list', { photoId: request.photoId });
+    const tasks = patchResult.tasks.filter(task => task.baseVersionId === base.id && task.editedPatchPath && fs.existsSync(task.editedPatchPath));
+    if (!tasks.length) throw new Error('请至少上传一个人物的修图结果');
+    const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const nextNumber = Math.max(-1, ...(bundle.versions || []).map(version => Number(version.versionNumber))) + 1;
+    const versionId = crypto.randomUUID();
+    const versionDirectory = path.join(projectPath, 'Versions', request.photoId);
+    await fs.promises.mkdir(versionDirectory, { recursive: true });
+    createdPath = path.join(versionDirectory, `v${String(nextNumber).padStart(3, '0')}.tif`);
+    if (fs.existsSync(createdPath)) throw new Error(`版本文件已存在：${path.basename(createdPath)}`);
+    const mergeDirectory = path.join(projectPath, 'Patches', request.photoId, base.id);
+    await fs.promises.mkdir(mergeDirectory, { recursive: true });
+    const manifestPath = path.join(mergeDirectory, `merge-${versionId}.json`);
+    await fs.promises.writeFile(manifestPath, JSON.stringify({ photoId: request.photoId, baseVersionId: base.id, tasks }, null, 2), 'utf8');
+    const merged = await runPythonJsonAction('face_patch.py', ['merge', '--input', base.filePath, '--manifest', manifestPath, '--output', createdPath], 60 * 60 * 1000);
+    const versionName = cleanVersionName(request.versionName) || `多人修脸合成 ${nextNumber}`;
+    const conflictThreshold = Math.max(500, Number(merged.width || 0) * Number(merged.height || 0) * 0.00005);
+    const needsReview = Number(merged.conflictPixels || 0) > conflictThreshold;
+    const note = `由 ${merged.mergedCount} 个人物 Patch 自动回拼；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(conflictThreshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`;
+    const versionBundle = await runMediaDatabase(workspaceRoot, 'media_create_version', {
+      versionId,
+      photoId: request.photoId,
+      parentVersionId: base.id,
+      versionName,
+      versionType: 'team-retouch',
+      note,
+      status: needsReview ? 'needs-review' : 'draft',
+      isFinal: false,
+      filePath: createdPath,
+    });
+    for (const task of tasks) {
+      const metrics = merged.metrics?.find(item => item.taskId === task.id) || {};
+      await runMediaDatabase(workspaceRoot, 'team_patch_update', {
+        taskId: task.id,
+        status: 'merged',
+        mergedVersionId: versionId,
+        mergeMetrics: metrics,
+      });
+    }
+    const updatedTasks = await runMediaDatabase(workspaceRoot, 'team_patch_list', { photoId: request.photoId });
+    void ensureTrackedVersionThumbnail({ workspaceRoot, projectPath, photoId: request.photoId, versionId, filePath: createdPath });
+    createdPath = '';
+    writeLog('info', 'Team retouch patches merged', { projectName, photoId: request.photoId, versionId, mergedCount: merged.mergedCount, conflictPixels: merged.conflictPixels });
+    return { ...versionBundle, tasks: updatedTasks.tasks, merge: { ...merged, needsReview } };
+  } catch (error) {
+    if (createdPath) await fs.promises.rm(createdPath, { force: true }).catch(() => undefined);
+    writeLog('error', 'Unable to merge team retouch patches', { projectName, error: error.message || String(error) });
+    return { success: false, error: error.message || String(error), versions: [], tasks: [] };
+  }
+});
+
 ipcMain.handle('workspace-open-project', async (_event, workspacePath, status, projectName, folderName) => {
   try {
     const target = resolveProjectEntry(workspacePath, status, projectName, folderName);
@@ -2271,18 +2928,20 @@ ipcMain.handle('photoshop-status', async () => {
   return { available: Boolean(executable) };
 });
 
-ipcMain.handle('workspace-open-entry-photoshop', async (_event, workspacePath, status, projectName, relativePath) => {
+ipcMain.handle('workspace-open-entry-photoshop', async (_event, workspacePath, status, projectName, relativePaths) => {
   try {
     const executable = await findLatestPhotoshop();
     if (!executable) throw new Error('未检测到 Photoshop');
-    const target = resolveProjectEntry(workspacePath, status, projectName, relativePath);
-    if (!fs.statSync(target).isFile()) throw new Error('只能用 Photoshop 打开文件');
+    const paths = Array.isArray(relativePaths) ? relativePaths : [relativePaths];
+    if (!paths.length) throw new Error('没有选择要打开的文件');
+    const targets = paths.map(relativePath => resolveProjectEntry(workspacePath, status, projectName, relativePath));
+    if (targets.some(target => !fs.statSync(target).isFile())) throw new Error('只能用 Photoshop 打开文件');
     return await new Promise(resolve => {
-      const child = spawn(executable, [target], { detached: true, stdio: 'ignore', windowsHide: false });
+      const child = spawn(executable, targets, { detached: true, stdio: 'ignore', windowsHide: false });
       child.once('error', error => resolve({ success: false, error: error.message || String(error) }));
       child.once('spawn', () => {
         child.unref();
-        resolve({ success: true });
+        resolve({ success: true, count: targets.length });
       });
     });
   } catch (error) { return { success: false, error: error.message || String(error) }; }
@@ -2317,9 +2976,49 @@ const splitVideoAt4Gb = (videoPath) => new Promise((resolve, reject) => {
   child.on('close', code => code === 0 ? resolve() : reject(new Error(stderr || `视频分割进程退出，代码 ${code}`)));
 });
 
+ipcMain.handle('workspace-import-files', async (_event, workspacePath, status, projectName, relativePath = '', options = {}) => {
+  try {
+    const { preserveOriginal = false } = options || {};
+    const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const destinationDir = path.resolve(projectPath, relativePath || '.');
+    if (destinationDir !== projectPath && !destinationDir.startsWith(projectPath + path.sep)) throw new Error('无效的导入位置');
+    if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('当前文件夹不存在');
+    const choice = await dialog.showOpenDialog(mainWindow, { title: '选择要导入的文件', properties: ['openFile', 'multiSelections'] });
+    if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, count: 0 };
+    const moves = [];
+    const createdTargets = [];
+    for (const source of choice.filePaths) {
+      const parsed = path.parse(source);
+      let destination = path.join(destinationDir, parsed.base);
+      let index = 1;
+      while (fs.existsSync(destination)) destination = path.join(destinationDir, `${parsed.name} (${index++})${parsed.ext}`);
+      if (preserveOriginal) {
+        await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+        createdTargets.push(destination);
+      } else {
+        try {
+          await fs.promises.rename(source, destination);
+        } catch (error) {
+          if (error.code !== 'EXDEV') throw error;
+          await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+          await fs.promises.rm(source, { force: true });
+        }
+        moves.push({ source, destination });
+      }
+    }
+    if (preserveOriginal && createdTargets.length) pushUndoOperation({ kind: 'remove-created', paths: createdTargets, label: '导入' });
+    if (!preserveOriginal && moves.length) pushUndoOperation({ kind: 'external-move', moves });
+    writeLog('info', 'Files imported into current project directory', { projectName, relativePath, count: choice.filePaths.length, preserveOriginal });
+    return { success: true, count: choice.filePaths.length };
+  } catch (error) {
+    writeLog('error', 'Project file import failed', error);
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
 ipcMain.handle('workspace-import-broll', async (_event, workspacePath, status, projectName, options = {}) => {
   try {
-    const { splitLargeFiles = false, clearSource = true } = options || {};
+    const { splitLargeFiles = false, preserveOriginal = options?.clearSource === false } = options || {};
     const projectPath = getProjectPath(workspacePath, status, projectName);
     const choice = await dialog.showOpenDialog(mainWindow, {
       title: '选择花絮文件',
@@ -2333,6 +3032,8 @@ ipcMain.handle('workspace-import-broll', async (_event, workspacePath, status, p
     let count = 0;
     let splitCount = 0;
     let clearedCount = 0;
+    const createdTargets = [];
+    const undoItems = [];
 
     for (const sourcePath of choice.filePaths) {
       const parsed = path.parse(sourcePath);
@@ -2347,18 +3048,26 @@ ipcMain.handle('workspace-import-broll', async (_event, workspacePath, status, p
         const splitExtension = path.extname(targetPath).toLowerCase();
         const segmentCount = fs.readdirSync(destinationDir).filter(fileName => fileName.startsWith(splitPrefix) && path.extname(fileName).toLowerCase() === splitExtension).length;
         if (segmentCount < 2) throw new Error('视频分割未生成完整分段：' + parsed.base);
+        createdTargets.push(...fs.readdirSync(destinationDir).filter(fileName => fileName.startsWith(splitPrefix) && path.extname(fileName).toLowerCase() === splitExtension).map(fileName => path.join(destinationDir, fileName)));
         await shell.trashItem(targetPath);
         splitCount += 1;
-      }
+      } else createdTargets.push(targetPath);
 
-      if (clearSource && fs.existsSync(sourcePath)) {
+      if (!preserveOriginal && fs.existsSync(sourcePath)) {
+        const backupRoot = path.join(app.getPath('userData'), 'undo-trash', crypto.randomUUID());
+        const backup = path.join(backupRoot, path.basename(sourcePath));
+        await fs.promises.mkdir(backupRoot, { recursive: true });
+        await fs.promises.copyFile(sourcePath, backup, fs.constants.COPYFILE_EXCL);
         await shell.trashItem(sourcePath);
+        undoItems.push({ original: sourcePath, backup, backupRoot });
         clearedCount += 1;
       }
       count += 1;
     }
 
     writeLog('info', 'B-roll imported', { projectPath, count, splitCount, clearedCount });
+    if (preserveOriginal && createdTargets.length) pushUndoOperation({ kind: 'remove-created', paths: createdTargets, label: '导入花絮' });
+    if (!preserveOriginal && createdTargets.length) pushUndoOperation({ kind: 'import-with-sources', createdPaths: createdTargets, items: undoItems });
     return { success: true, count, splitCount, clearedCount };
   } catch (error) {
     writeLog('error', 'B-roll import failed', error);
@@ -2366,15 +3075,16 @@ ipcMain.handle('workspace-import-broll', async (_event, workspacePath, status, p
   }
 });
 app.whenReady().then(() => {
-  protocol.handle('photoflow-media', request => {
+  protocol.handle('photoflow-media', async request => {
     try {
       const encodedPath = new URL(request.url).pathname.replace(/^\//, '');
       const filePath = Buffer.from(encodedPath, 'base64url').toString('utf8');
       if (!path.isAbsolute(filePath) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return new Response('Not found', { status: 404 });
       // Forward Range headers so video metadata and sampled hover frames do not
       // require reading the entire source file.
-      return net.fetch(pathToFileURL(filePath).toString(), { method: request.method, headers: request.headers });
-    } catch {
+      return await net.fetch(pathToFileURL(filePath).toString(), { method: request.method, headers: request.headers });
+    } catch (error) {
+      writeLog('warn', 'Media protocol request failed', { url: request.url, error: error.message || String(error) });
       return new Response('Bad request', { status: 400 });
     }
   });
@@ -2392,6 +3102,7 @@ app.on('before-quit', () => {
   stopWorkspaceWatcher();
   stopShellThumbnailProcess();
   workspaceDatabase.stop();
+  mediaDatabase.stop();
   thumbnailImageWorkerPool?.stop();
   originalImageWorkerPool?.stop();
   thumbnailPipeline?.stop();

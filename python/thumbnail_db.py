@@ -298,7 +298,14 @@ class ThumbnailDatabase:
                 (source_digest, timestamp, file_path),
             )
             row = self.connection.execute("SELECT version FROM files WHERE path=?", (file_path,)).fetchone()
-            source_version = row["version"] if row else 1
+            # A queued thumbnail can finish after its project scan was cancelled
+            # or its database service was recycled. In that case the parent
+            # `files` row no longer exists and inserting a thumbnail would break
+            # the foreign-key constraint. The next scan will register and queue
+            # the file again, so safely defer this stale completion.
+            if row is None:
+                return {"state": "NOT_READY", "deferred": True}
+            source_version = row["version"]
             for item in thumbnails:
                 self.connection.execute(
                     """INSERT INTO thumbnails
