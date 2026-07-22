@@ -1,13 +1,11 @@
-"""Local person-patch detection and seam-safe high-resolution recomposition."""
+"""Seam-safe high-resolution Patch recomposition for the team-retouch component."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import sys
-import uuid
 
 import cv2
 import numpy as np
@@ -28,120 +26,6 @@ def load_rgb(path):
             "dpi": source.info.get("dpi"),
         }
         return np.asarray(oriented.convert("RGB")), metadata
-
-
-def save_png(path, rgb):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    Image.fromarray(rgb.astype(np.uint8), "RGB").save(path, format="PNG", compress_level=3)
-
-
-def intersection_over_union(left, right):
-    x1 = max(left[0], right[0])
-    y1 = max(left[1], right[1])
-    x2 = min(left[0] + left[2], right[0] + right[2])
-    y2 = min(left[1] + left[3], right[1] + right[3])
-    intersection = max(0, x2 - x1) * max(0, y2 - y1)
-    union = left[2] * left[3] + right[2] * right[3] - intersection
-    return intersection / union if union else 0
-
-
-def non_maximum_suppression(boxes, threshold=0.32):
-    ordered = sorted(boxes, key=lambda box: box[2] * box[3], reverse=True)
-    kept = []
-    for box in ordered:
-        if all(intersection_over_union(box, candidate) < threshold for candidate in kept):
-            kept.append(box)
-    return sorted(kept, key=lambda box: (box[1], box[0]))
-
-
-def detect_faces(rgb):
-    height, width = rgb.shape[:2]
-    scale = min(1.0, 2400.0 / max(height, width))
-    working = cv2.resize(rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else rgb
-    gray = cv2.cvtColor(working, cv2.COLOR_RGB2GRAY)
-    gray = cv2.equalizeHist(gray)
-    minimum = max(28, int(min(working.shape[:2]) * 0.018))
-    cascades = [
-        cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_alt2.xml")),
-        cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, "haarcascade_profileface.xml")),
-    ]
-    boxes = []
-    for cascade in cascades:
-        if cascade.empty():
-            continue
-        detections = cascade.detectMultiScale(gray, scaleFactor=1.075, minNeighbors=5, minSize=(minimum, minimum))
-        boxes.extend(tuple(int(round(value / scale)) for value in detection) for detection in detections)
-    return non_maximum_suppression(boxes)
-
-
-def detect_people_fallback(rgb):
-    """HOG is a conservative fallback when no frontal/profile face is visible."""
-    height, width = rgb.shape[:2]
-    scale = min(1.0, 1400.0 / max(height, width))
-    working = cv2.resize(rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else rgb
-    hog = cv2.HOGDescriptor()
-    hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-    detections, weights = hog.detectMultiScale(cv2.cvtColor(working, cv2.COLOR_RGB2BGR), winStride=(8, 8), padding=(8, 8), scale=1.05)
-    boxes = []
-    for detection, confidence in zip(detections, weights):
-        if float(confidence) < 0.35:
-            continue
-        x, y, w, h = (int(round(value / scale)) for value in detection)
-        boxes.append((x, y, w, h))
-    return non_maximum_suppression(boxes, 0.45)
-
-
-def expanded_crop(box, image_width, image_height, kind):
-    x, y, width, height = box
-    if kind == "face":
-        center_x = x + width / 2
-        left = center_x - width * 2.35
-        right = center_x + width * 2.35
-        top = y - height * 1.45
-        bottom = y + height * 6.0
-    else:
-        left = x - width * 0.45
-        right = x + width * 1.45
-        top = y - height * 0.18
-        bottom = y + height * 1.12
-    left = max(0, int(math.floor(left)))
-    top = max(0, int(math.floor(top)))
-    right = min(image_width, int(math.ceil(right)))
-    bottom = min(image_height, int(math.ceil(bottom)))
-    return [left, top, max(1, right - left), max(1, bottom - top)]
-
-
-def detect(input_path, output_dir):
-    rgb, _ = load_rgb(input_path)
-    height, width = rgb.shape[:2]
-    detections = [(box, "face") for box in detect_faces(rgb)]
-    detector = "opencv-face"
-    if not detections:
-        detections = [(box, "person") for box in detect_people_fallback(rgb)]
-        detector = "opencv-person"
-    tasks = []
-    os.makedirs(output_dir, exist_ok=True)
-    for index, (box, kind) in enumerate(detections, start=1):
-        crop = expanded_crop(box, width, height, kind)
-        crop_x, crop_y, crop_width, crop_height = crop
-        task_id = str(uuid.uuid4())
-        patch_path = os.path.join(output_dir, f"person-{index:02d}-{task_id}.png")
-        save_png(patch_path, rgb[crop_y:crop_y + crop_height, crop_x:crop_x + crop_width])
-        tasks.append({
-            "id": task_id,
-            "personIndex": index,
-            "personName": f"人物 {index}",
-            "assignee": "",
-            "detector": detector,
-            "bbox": {"x": box[0], "y": box[1], "width": box[2], "height": box[3]},
-            "crop": {"x": crop_x, "y": crop_y, "width": crop_width, "height": crop_height},
-            "patchPath": patch_path,
-            "status": "exported",
-        })
-    manifest_path = os.path.join(output_dir, "manifest.json")
-    with open(manifest_path, "w", encoding="utf-8") as manifest:
-        json.dump({"source": input_path, "width": width, "height": height, "tasks": tasks}, manifest, ensure_ascii=False, indent=2)
-    return {"success": True, "detector": detector, "width": width, "height": height, "tasks": tasks, "manifestPath": manifest_path}
 
 
 def align_patch(base_rgb, edited_rgb):
@@ -299,20 +183,14 @@ def merge(input_path, manifest_path, output_path):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("detect", "merge"))
+    parser.add_argument("action", choices=("merge",))
     parser.add_argument("--input", required=True)
-    parser.add_argument("--output-dir")
     parser.add_argument("--manifest")
     parser.add_argument("--output")
     args = parser.parse_args(args_list)
-    if args.action == "detect":
-        if not args.output_dir:
-            parser.error("detect requires --output-dir")
-        result = detect(os.path.abspath(args.input), os.path.abspath(args.output_dir))
-    else:
-        if not args.manifest or not args.output:
-            parser.error("merge requires --manifest and --output")
-        result = merge(os.path.abspath(args.input), os.path.abspath(args.manifest), os.path.abspath(args.output))
+    if not args.manifest or not args.output:
+        parser.error("merge requires --manifest and --output")
+    result = merge(os.path.abspath(args.input), os.path.abspath(args.manifest), os.path.abspath(args.output))
     emit(result)
 
 

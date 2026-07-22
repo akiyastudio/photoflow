@@ -33,6 +33,8 @@ type VersionManagerProps = {
 type CreateDraft = {
   parentVersionId: string;
   mode: 'copy' | 'import';
+  sourceFilePath: string;
+  sourceFileName: string;
   versionType: string;
   versionName: string;
   note: string;
@@ -43,6 +45,19 @@ const VERSION_TYPES = [
   ['first', '第一版'], ['second', '第二版'], ['third', '第三版'],
   ['primary', '主版本'], ['secondary', '副版本'], ['custom', '自定义版本'],
 ] as const;
+
+const suggestedVersionType = (nextNumber: number) => nextNumber === 1 ? 'first' : nextNumber === 2 ? 'second' : nextNumber === 3 ? 'third' : 'custom';
+const suggestedVersionName = (type: string, nextNumber: number, versions: MediaVersion[]) => {
+  if (type === 'first') return '第一版';
+  if (type === 'second') return '第二版';
+  if (type === 'third') return '第三版';
+  if (type === 'primary') return '主版本';
+  if (type === 'secondary') {
+    const count = versions.filter(version => version.versionType === 'secondary').length;
+    return count ? `副版本 ${count + 1}` : '副版本';
+  }
+  return `版本 ${nextNumber}`;
+};
 
 const formatSize = (size: number) => size < 1024 * 1024
   ? `${Math.max(1, Math.round(size / 1024))} KB`
@@ -86,24 +101,53 @@ const VersionResource = ({ version, cacheConfig, className = '', contentStyle }:
   </div>;
 };
 
-const CreateVersionDialog = ({ draft, busy, onChange, onSubmit, onClose }: {
+const CreateVersionDialog = ({ draft, versions, nextVersionNumber, cacheConfig, busy, onChooseSource, onChange, onSubmit, onClose }: {
   draft: CreateDraft;
+  versions: MediaVersion[];
+  nextVersionNumber: number;
+  cacheConfig: AppConfig['mediaCache'];
   busy: boolean;
+  onChooseSource: () => void;
   onChange: (draft: CreateDraft) => void;
   onSubmit: () => void;
   onClose: () => void;
-}) => <div className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4">
-  <div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-2xl">
+}) => {
+  const parent = versions.find(version => version.id === draft.parentVersionId);
+  const importedVersion: MediaVersion | undefined = draft.sourceFilePath ? {
+    id: `pending:${draft.sourceFilePath}`,
+    photoId: parent?.photoId || '',
+    parentVersionId: parent?.id,
+    versionNumber: nextVersionNumber,
+    versionName: draft.versionName || `版本 ${nextVersionNumber}`,
+    versionType: draft.versionType,
+    filePath: draft.sourceFilePath,
+    fileSize: 0,
+    note: draft.note,
+    status: 'draft',
+    isCurrent: false,
+    isFinal: draft.isFinal,
+    fileMissing: false,
+    contentChanged: false,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  } : undefined;
+  return <div className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4">
+  <div className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-xl border border-slate-200 bg-white p-5 shadow-2xl">
     <header className="flex items-center justify-between"><div><h3 className="font-bold text-slate-800">创建新版本</h3><p className="mt-1 text-xs text-slate-500">新版本会获得永久 Version ID，并自动成为当前版本。</p></div><button onClick={onClose} className="rounded p-1 text-slate-500 hover:bg-slate-100"><X size={18}/></button></header>
     <label className="form-label">文件来源</label>
-    <div className="grid grid-cols-2 gap-2"><button onClick={() => onChange({ ...draft, mode: 'copy' })} className={`rounded-lg border p-3 text-left text-sm ${draft.mode === 'copy' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600'}`}><Copy size={16} className="mb-1"/><b>复制基础版本</b><span className="mt-1 block text-xs font-normal">立即建立可编辑副本</span></button><button onClick={() => onChange({ ...draft, mode: 'import' })} className={`rounded-lg border p-3 text-left text-sm ${draft.mode === 'import' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600'}`}><Upload size={16} className="mb-1"/><b>导入外部成片</b><span className="mt-1 block text-xs font-normal">确认时选择处理后的文件</span></button></div>
-    <label className="form-label">版本类型</label><select value={draft.versionType} onChange={event => onChange({ ...draft, versionType: event.target.value })} className="form-input">{VERSION_TYPES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
+    <div className="grid grid-cols-2 gap-2"><button onClick={() => onChange({ ...draft, mode: 'copy', sourceFilePath: '', sourceFileName: '' })} className={`rounded-lg border p-3 text-left text-sm ${draft.mode === 'copy' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600'}`}><Copy size={16} className="mb-1"/><b>复制基础版本</b><span className="mt-1 block text-xs font-normal">立即建立可编辑副本</span></button><button onClick={() => onChange({ ...draft, mode: 'import' })} className={`rounded-lg border p-3 text-left text-sm ${draft.mode === 'import' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600'}`}><Upload size={16} className="mb-1"/><b>导入图片或视频</b><span className="mt-1 block text-xs font-normal">先选择文件，再确认它基于哪个版本</span></button></div>
+    <label className="form-label">它是哪一个版本的更新</label><select value={draft.parentVersionId} onChange={event => onChange({ ...draft, parentVersionId: event.target.value })} className="form-input">{versions.map(version => <option key={version.id} value={version.id}>V{version.versionNumber} · {version.versionName}{version.isCurrent ? '（当前）' : ''}</option>)}</select>
+    {draft.mode === 'import' && <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3"><div className="flex items-center justify-between gap-3"><div className="min-w-0"><p className="text-xs font-bold text-slate-500">待导入文件</p><p className="mt-1 truncate text-sm text-slate-700" title={draft.sourceFilePath}>{draft.sourceFileName || '尚未选择图片、RAW 或视频'}</p></div><button type="button" disabled={busy} onClick={onChooseSource} className="dialog-secondary shrink-0 inline-flex items-center gap-2"><FolderSearch size={15}/>{draft.sourceFilePath ? '重新选择' : '选择文件'}</button></div></div>}
+    <label className="form-label">版本类型</label><select value={draft.versionType} onChange={event => { const versionType = event.target.value; onChange({ ...draft, versionType, versionName: suggestedVersionName(versionType, nextVersionNumber, versions) }); }} className="form-input">{VERSION_TYPES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
     <label className="form-label">版本名称</label><input autoFocus value={draft.versionName} onChange={event => onChange({ ...draft, versionName: event.target.value })} placeholder="例如：初修、调色、最终交付" className="form-input"/>
     <label className="form-label">版本说明</label><textarea rows={3} value={draft.note} onChange={event => onChange({ ...draft, note: event.target.value })} placeholder="记录修改内容、客户意见或交付信息" className="form-input resize-none"/>
     <label className="settings-check"><input type="checkbox" checked={draft.isFinal} onChange={event => onChange({ ...draft, isFinal: event.target.checked })}/><span>创建后标记为最终版</span></label>
-    <footer className="mt-5 flex justify-end gap-2"><button onClick={onClose} className="dialog-secondary">取消</button><button onClick={onSubmit} disabled={busy || !draft.versionName.trim()} className="dialog-primary inline-flex items-center gap-2">{busy && <Loader2 size={15} className="animate-spin"/>}{draft.mode === 'import' ? '选择文件并创建' : '创建版本'}</button></footer>
+    {draft.mode === 'import' && parent && importedVersion && <section className="mt-5"><p className="mb-2 text-xs font-bold text-slate-500">确认画面与父版本关系</p><div className="grid grid-cols-2 gap-3"><div><VersionResource version={parent} cacheConfig={cacheConfig} className="h-40 w-full rounded-lg border border-slate-200 bg-slate-950"/><p className="mt-1 text-center text-xs text-slate-500">父版本 V{parent.versionNumber}</p></div><div><VersionResource version={importedVersion} cacheConfig={cacheConfig} className="h-40 w-full rounded-lg border border-slate-200 bg-slate-950"/><p className="mt-1 text-center text-xs text-slate-500">新文件 · {draft.sourceFileName}</p></div></div></section>}
+    <p className="mt-4 rounded-lg bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-700">文件会复制到该素材的 Versions 目录，并按原始文件名自动生成“_2、_3…”后缀；外部源文件不会被改名或覆盖。</p>
+    <footer className="mt-5 flex justify-end gap-2"><button onClick={onClose} className="dialog-secondary">取消</button><button onClick={onSubmit} disabled={busy || !draft.versionName.trim() || draft.mode === 'import' && !draft.sourceFilePath} className="dialog-primary inline-flex items-center gap-2">{busy && <Loader2 size={15} className="animate-spin"/>}{draft.mode === 'import' ? '确认导入并建立跟踪' : '创建版本'}</button></footer>
   </div>
 </div>;
+};
 
 const CompareDialog = ({ left, right, cacheConfig, workspacePath, photoId, onClose }: {
   left: MediaVersion;
@@ -192,18 +236,42 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
     }));
   }, [bundle.versions]);
 
-  const beginCreate = (parent: MediaVersion, mode: 'copy' | 'import' = 'copy', restored = false) => setCreateDraft({
-    parentVersionId: parent.id,
-    mode,
-    versionType: 'custom',
-    versionName: restored ? `恢复自 V${parent.versionNumber}` : '',
-    note: restored ? `从历史版本 V${parent.versionNumber} 恢复` : '',
-    isFinal: false,
-  });
+  const nextVersionNumber = bundle.nextVersionNumber ?? Math.max(-1, ...bundle.versions.map(version => version.versionNumber)) + 1;
+  const beginCreate = (parent: MediaVersion, mode: 'copy' | 'import' = 'copy', restored = false) => {
+    const versionType = restored ? 'custom' : suggestedVersionType(nextVersionNumber);
+    setCreateDraft({
+      parentVersionId: parent.id,
+      mode,
+      sourceFilePath: '',
+      sourceFileName: '',
+      versionType,
+      versionName: restored ? `恢复自 V${parent.versionNumber}` : suggestedVersionName(versionType, nextVersionNumber, bundle.versions),
+      note: restored ? `从历史版本 V${parent.versionNumber} 恢复` : '',
+      isFinal: false,
+    });
+  };
+  const chooseVersionSource = async () => {
+    if (!createDraft) return;
+    setBusy(true);
+    const result = await window.electronAPI.chooseMediaVersionFile();
+    setBusy(false);
+    if (result.cancelled) return;
+    if (!result.success || !result.filePath) { onNotice(`选择版本文件失败：${result.error || '未知错误'}`); return; }
+    setCreateDraft(current => current ? { ...current, mode: 'import', sourceFilePath: result.filePath || '', sourceFileName: result.fileName || '' } : current);
+  };
   const createVersion = async () => {
     if (!createDraft || !bundle.photo) return;
     setBusy(true);
-    const result = await window.electronAPI.createMediaVersion(workspacePath, project.status, project.name, { photoId: bundle.photo.id, ...createDraft });
+    const result = await window.electronAPI.createMediaVersion(workspacePath, project.status, project.name, {
+      photoId: bundle.photo.id,
+      parentVersionId: createDraft.parentVersionId,
+      mode: createDraft.mode,
+      sourceFilePath: createDraft.sourceFilePath,
+      versionType: createDraft.versionType,
+      versionName: createDraft.versionName,
+      note: createDraft.note,
+      isFinal: createDraft.isFinal,
+    });
     setBusy(false);
     if (result.cancelled) return;
     if (!result.success) { onNotice(`创建版本失败：${result.error || '未知错误'}`); return; }
@@ -260,7 +328,7 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
       </aside>
       <main className="min-w-0 flex-1 overflow-y-auto p-5">{selected ? <div className="mx-auto max-w-5xl space-y-4"><VersionResource version={selected} cacheConfig={cacheConfig} className="h-[min(52vh,560px)] w-full rounded-xl border border-slate-200 bg-slate-950"/><section className="rounded-xl border border-slate-200 bg-white p-5"><div className="flex flex-wrap items-start gap-3"><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className="font-mono text-sm font-bold text-blue-600">V{selected.versionNumber}</span><h3 className="truncate text-xl font-bold text-slate-800">{selected.versionName}</h3>{selected.isCurrent && <span className="rounded-full bg-blue-50 px-2 py-1 text-xs font-bold text-blue-600">当前版本</span>}{selected.isFinal && <span className="rounded-full bg-amber-50 px-2 py-1 text-xs font-bold text-amber-600">最终版</span>}</div><p className="mt-2 break-all text-xs text-slate-400">Version ID：<span className="font-mono">{selected.id}</span></p><p className="mt-1 break-all text-xs text-slate-400">{selected.filePath}</p></div><div className="flex flex-wrap gap-2"><button disabled={selected.fileMissing} onClick={async () => { const result = await window.electronAPI.openMediaVersion(selected.filePath); if (!result.success) onNotice(`打开版本失败：${result.error}`); }} className="dialog-secondary inline-flex items-center gap-2"><ExternalLink size={15}/>打开</button>{selected.fileMissing && <button disabled={busy} onClick={() => void relocateVersion(selected)} className="dialog-secondary inline-flex items-center gap-2"><FolderSearch size={15}/>重新定位</button>}<button onClick={() => { setEditing(selected); setEditName(selected.versionName); setEditNote(selected.note); }} className="dialog-secondary inline-flex items-center gap-2"><Pencil size={15}/>编辑</button>{!selected.isCurrent && <button onClick={() => void updateVersion({ versionId: selected.id, makeCurrent: true }, '已切换当前版本')} className="dialog-secondary inline-flex items-center gap-2"><CheckCircle2 size={15}/>设为当前</button>}<button onClick={() => void updateVersion({ versionId: selected.id, isFinal: !selected.isFinal }, selected.isFinal ? '已取消最终版' : '已标记为最终版')} className="dialog-secondary inline-flex items-center gap-2"><Star size={15}/>{selected.isFinal ? '取消最终版' : '标记最终版'}</button>{selected.versionNumber > 0 && <button onClick={() => beginCreate(selected, 'copy', true)} className="dialog-secondary inline-flex items-center gap-2"><RotateCcw size={15}/>恢复为新版本</button>}<button onClick={() => beginCreate(selected, 'copy')} className="dialog-secondary inline-flex items-center gap-2"><GitBranch size={15}/>基于此版本创建</button>{selected.versionNumber > 0 && <button onClick={() => void deleteVersion(selected)} className="inline-flex items-center gap-2 rounded-md border border-red-200 px-3 py-2 text-sm font-bold text-red-600 hover:bg-red-50"><Trash2 size={15}/>删除</button>}</div></div><div className="mt-5 grid gap-3 sm:grid-cols-3"><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] font-bold text-slate-400">创建人</p><p className="mt-1 text-sm text-slate-700">{selected.author || '本机用户'}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] font-bold text-slate-400">文件大小</p><p className="mt-1 text-sm text-slate-700">{formatSize(selected.fileSize)}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] font-bold text-slate-400">状态</p><p className="mt-1 text-sm text-slate-700">{selected.fileMissing ? '文件丢失' : selected.contentChanged ? '内容已变化' : selected.status === 'original' ? '原片（受保护）' : selected.status === 'needs-review' ? '需要复核（Patch 重叠冲突）' : '正常'}</p></div></div><div className="mt-4 rounded-lg bg-slate-50 p-3"><p className="text-[11px] font-bold text-slate-400">版本说明</p><p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-700">{selected.note || '暂无说明'}</p></div></section></div> : <div className="flex h-full items-center justify-center text-slate-400">请选择一个版本</div>}</main>
     </div>}
-    {createDraft && <CreateVersionDialog draft={createDraft} busy={busy} onChange={setCreateDraft} onSubmit={() => void createVersion()} onClose={() => !busy && setCreateDraft(null)}/>} 
+    {createDraft && <CreateVersionDialog draft={createDraft} versions={bundle.versions} nextVersionNumber={nextVersionNumber} cacheConfig={cacheConfig} busy={busy} onChooseSource={() => void chooseVersionSource()} onChange={setCreateDraft} onSubmit={() => void createVersion()} onClose={() => !busy && setCreateDraft(null)}/>}
     {editing && <div className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><header className="flex items-center justify-between"><h3 className="font-bold text-slate-800">编辑 V{editing.versionNumber}</h3><button onClick={() => setEditing(null)}><X size={18}/></button></header><label className="form-label">版本名称</label><input autoFocus value={editName} onChange={event => setEditName(event.target.value)} className="form-input"/><label className="form-label">版本说明</label><textarea rows={4} value={editNote} onChange={event => setEditNote(event.target.value)} className="form-input resize-none"/><p className="mt-3 text-xs text-slate-500">修改显示名称不会重命名磁盘文件，也不会改变 Photo ID 或 Version ID。</p><footer className="mt-5 flex justify-end gap-2"><button onClick={() => setEditing(null)} className="dialog-secondary">取消</button><button disabled={busy || !editName.trim()} onClick={() => void updateVersion({ versionId: editing.id, versionName: editName, note: editNote }, '版本信息已更新')} className="dialog-primary">保存</button></footer></div></div>}
     {compareOpen && bundle.photo && compareVersions.length === 2 && <CompareDialog left={compareVersions[0]} right={compareVersions[1]} cacheConfig={cacheConfig} workspacePath={workspacePath} photoId={bundle.photo.id} onClose={() => setCompareOpen(false)}/>} 
   </div>;

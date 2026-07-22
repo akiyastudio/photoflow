@@ -49,6 +49,9 @@ export interface AppConfig {
   imageConversion: {
     jpgQuality: number;
   };
+  personDetection: {
+    useGpu: boolean;
+  };
   smartMatch: {
     imageDestFolderName: string;
     videoDestFolderName: string;
@@ -125,9 +128,26 @@ export interface MediaVersionBundle {
   success: boolean;
   photo?: TrackedPhoto;
   versions: MediaVersion[];
+  nextVersionNumber?: number;
   cancelled?: boolean;
   warning?: string;
   error?: string;
+}
+
+export interface VersionBatch {
+  id: string;
+  projectId: string;
+  sequence: number;
+  displayName: string;
+  sourceFolderPath: string;
+  parentBatchId?: string;
+  parentSequence?: number;
+  status: 'importing' | 'ready' | 'failed' | string;
+  itemCount: number;
+  matchedCount: number;
+  newCount: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface TeamPatchTask {
@@ -151,8 +171,29 @@ export interface TeamPatchTask {
 
 export interface TeamPatchBundle extends MediaVersionBundle {
   tasks: TeamPatchTask[];
-  detection?: { detector: string; width: number; height: number };
+  detection?: { detector: string; backend?: 'gpu' | 'cpu' | string; provider?: string; width: number; height: number; fallbackReason?: string };
   merge?: { outputPath: string; mergedCount: number; conflictPixels: number; seamScore: number; needsReview?: boolean };
+}
+
+export interface ComponentStatus {
+  id: 'team-retouch' | 'research-tools' | string;
+  name: string;
+  description: string;
+  capability: string;
+  installed: boolean;
+  compatible: boolean;
+  version: string;
+  path: string;
+  source: 'application' | 'bundled' | 'development' | 'missing' | string;
+  sizeBytes: number;
+  error?: string;
+  runtimeAvailable?: boolean;
+  gpuAvailable?: boolean;
+  mergeAvailable?: boolean;
+  provider?: string;
+  providers?: string[];
+  runtimeError?: string;
+  gpuError?: string;
 }
 
 export interface ProjectFileOperationProgress {
@@ -182,6 +223,9 @@ export interface IElectronAPI {
   onUpdateAvailable: (callback: (info: { version: string; url: string; notes: string }) => void) => () => void;
   openExternal: (url: string) => void;
   checkForUpdates: () => Promise<{ success: boolean; updateAvailable?: boolean; currentVersion?: string; latestVersion?: string; url?: string; notes?: string; error?: string }>;
+  checkScript: (scriptName: string) => Promise<boolean>;
+  getComponents: () => Promise<{ success: boolean; components: ComponentStatus[]; installPath: string; error?: string }>;
+  openComponentsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
   getDrives: () => Promise<string[]>;
   setTheme: (theme: Theme) => Promise<void>;
   minimizeWindow: () => void;
@@ -206,12 +250,15 @@ export interface IElectronAPI {
   getProjectFileDetails: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<{ success: boolean; details: Array<{ relativePath: string; size: number; createdAt: number; updatedAt: number }>; error?: string }>;
   getProjectEntryDetails: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; details?: { size: number; createdAt: number; updatedAt: number; fileCount: number; folderCount: number }; error?: string }>;
   getMediaVersions: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<MediaVersionBundle>;
-  createMediaVersion: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; parentVersionId: string; mode: 'copy' | 'import'; versionName: string; versionType: string; note: string; author?: string; status?: string; isFinal?: boolean }) => Promise<MediaVersionBundle>;
+  chooseMediaVersionFile: () => Promise<{ success: boolean; cancelled?: boolean; filePath?: string; fileName?: string; kind?: 'image' | 'raw' | 'video'; error?: string }>;
+  createMediaVersion: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; parentVersionId: string; mode: 'copy' | 'import'; sourceFilePath?: string; versionName: string; versionType: string; note: string; author?: string; status?: string; isFinal?: boolean }) => Promise<MediaVersionBundle>;
   updateMediaVersion: (workspacePath: string, request: { versionId: string; versionName?: string; note?: string; isFinal?: boolean; makeCurrent?: boolean }) => Promise<MediaVersionBundle>;
   relocateMediaVersion: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; versionId: string }) => Promise<MediaVersionBundle>;
   deleteMediaVersion: (workspacePath: string, request: { photoId: string; versionId: string; trashFile?: boolean }) => Promise<MediaVersionBundle>;
   recordMediaVersionCompare: (workspacePath: string, request: { photoId: string; leftVersionId: string; rightVersionId: string; compareMode: string }) => Promise<{ success: boolean; error?: string }>;
   openMediaVersion: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+  getVersionBatches: (workspacePath: string, projectName: string) => Promise<{ success: boolean; batches: VersionBatch[]; error?: string }>;
+  commitVersionBatch: (workspacePath: string, status: ProjectStatus, projectName: string, request: { folderA: string; folderB: string; importKey: string; displayName?: string; renameSources?: boolean; matches: Array<{ reference: string; source: string; target?: string; distance: number; confidence: string }> }) => Promise<{ success: boolean; alreadyCommitted?: boolean; referenceBatch?: VersionBatch; batch?: VersionBatch; renamedCount?: number; renameErrors?: Array<{ source: string; target: string; error: string }>; error?: string }>;
   getTeamPatches: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<TeamPatchBundle>;
   detectTeamPatchPeople: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; baseVersionId: string }) => Promise<TeamPatchBundle>;
   updateTeamPatch: (workspacePath: string, request: { taskId: string; personName?: string; assignee?: string }) => Promise<{ success: boolean; tasks: TeamPatchTask[]; error?: string }>;

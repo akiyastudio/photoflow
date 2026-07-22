@@ -68,7 +68,7 @@ def copy_unmatched_a_files(unmatched_files_a, folder_a):
         except Exception:
             pass
 
-def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_only=False):
+def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_only=False, move_unmatched=False):
     image_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.gif')
     
     # 1. 分析 文件夹A
@@ -91,9 +91,12 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
         if h_coarse is not None: files_b[f] = (path, h_coarse, h_fine)
         if i % 10 == 0: log_progress(f"分析 B: {i}/{len(list_b)}", 20 + int(i/len(list_b)*20))
 
+    if not files_a:
+        log_error("文件夹A 中没有可用于对照的图片")
+        return False
     if not files_b:
         log_error("文件夹B 中没有图片")
-        return
+        return False
 
     # 3. 收集并计算所有候选匹配对 (粗筛)
     log_info("正在进行深度交叉比对...")
@@ -123,6 +126,7 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
     processed_b = set()
     matched_a = {f: 0 for f in files_a}
     preview_matches = []
+    reserved_targets = set()
     
     total_matches = len(potential_matches)
     for idx, (fine_dist, rough_dist, file_a, file_b) in enumerate(potential_matches):
@@ -142,14 +146,10 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
         
         new_path_b = os.path.join(folder_b, new_name)
 
-        if file_b == new_name:
-            processed_b.add(file_b)
-            matched_a[file_a] += 1
-            continue
-        
-        # 防止同名覆盖 (比如用户文件夹B原本就有同名文件)
+        # 防止同名覆盖，也在预览阶段预留已经分配的目标文件名。
         c = 1
-        while os.path.exists(new_path_b):
+        while (new_name.casefold() in reserved_targets
+               or (os.path.exists(new_path_b) and os.path.normcase(os.path.abspath(new_path_b)) != os.path.normcase(os.path.abspath(path_b)))):
             if m_idx == 1: new_name = f"{name}_{c}{ext}"
             else: new_name = f"{name}_{m_idx+c-1}{ext}"
             new_path_b = os.path.join(folder_b, new_name)
@@ -157,7 +157,8 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
         
         confidence = "高" if fine_dist <= 40 else "中" if fine_dist <= 72 else "低"
         preview_matches.append({"source": file_b, "reference": file_a, "target": new_name, "confidence": confidence, "distance": fine_dist})
-        if preview_only:
+        reserved_targets.add(new_name.casefold())
+        if preview_only or os.path.normcase(os.path.abspath(path_b)) == os.path.normcase(os.path.abspath(new_path_b)):
             processed_b.add(file_b)
             matched_a[file_a] += 1
         else:
@@ -173,7 +174,7 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
 
     # 5. 处理未匹配
     unmatched_b = [f for f in files_b if f not in processed_b]
-    if unmatched_b and not preview_only:
+    if unmatched_b and not preview_only and move_unmatched:
         sub_folder = os.path.join(folder_b, "未匹配的图片")
         os.makedirs(sub_folder, exist_ok=True)
         for f in unmatched_b:
@@ -190,14 +191,15 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
     
     stats = (f"待处理组匹配成功:{len(processed_b)}/{len(files_b)}, 参照组已被匹配:{sum(1 for v in matched_a.values() if v>0)}/{len(files_a)}")
     if preview_only:
-        emit('preview', f"预览完成：找到 {len(preview_matches)} 个匹配", {"matches": preview_matches, "unmatched": unmatched_b})
+        emit('preview', f"预览完成：找到 {len(preview_matches)} 个匹配", {"matches": preview_matches, "unmatched": unmatched_b, "unmatchedReference": unmatched_a})
         log_success(f"预览完成，尚未修改文件。{stats}")
-        return
+        return True
     log_success(f"完成! {stats}")
 
     if unmatched_a and auto_copy_unmatched:
         copy_unmatched_a_files(unmatched_a, folder_a)
         log_success("已复制参照组中未匹配的文件")
+    return True
 
 def run(args_list):
     if sys.platform.startswith('win'):
@@ -210,6 +212,7 @@ def run(args_list):
     parser.add_argument("--copy_unmatched", action="store_true")
     parser.add_argument("--threshold", type=int, default=5)
     parser.add_argument("--preview", action="store_true")
+    parser.add_argument("--move_unmatched", action="store_true")
     args = parser.parse_args(args_list)
 
     # 清理路径
@@ -221,8 +224,8 @@ def run(args_list):
         return
 
     try:
-        process_folders(fa, fb, args.threshold, args.copy_unmatched, args.preview)
-        emit('success', "所有任务结束")
+        if process_folders(fa, fb, args.threshold, args.copy_unmatched, args.preview, args.move_unmatched):
+            emit('success', "所有任务结束")
     except Exception as e:
         log_error(f"错误: {e}")
 

@@ -42,7 +42,7 @@ export const TeamRetouchManager = ({ entry, workspacePath, project, cacheConfig,
     setLoading(true);
     const result = await window.electronAPI.getTeamPatches(workspacePath, project.status, project.name, entry.relativePath);
     setLoading(false);
-    if (!result.success) { onNotice(`打开多人修脸失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) { onNotice(`打开多人修脸失败：${result.error || '未知错误'}`); onClose(); return; }
     setBundle(result);
     setBaseVersionId(current => result.versions.some(version => version.id === current)
       ? current

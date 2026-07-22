@@ -1,0 +1,10 @@
+{
+  "apiVersion": 1,
+  "id": "team-retouch",
+  "version": "1.0.0",
+  "platforms": ["win32"],
+  "architectures": ["x64"],
+  "entrypoints": {
+    "win32-x64": "team-retouch.exe"
+  }
+}

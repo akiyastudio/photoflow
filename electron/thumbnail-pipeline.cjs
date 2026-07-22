@@ -238,14 +238,19 @@ class ThumbnailPipeline {
   async readDisk(filePath, stat, cacheConfig, size) {
     const target = this.targetFor(filePath, stat, cacheConfig, size);
     let handle;
+    let invalidThumbnail = false;
     try {
       const thumbnailStat = await fs.promises.stat(target);
-      if (thumbnailStat.size < 128) throw new Error('thumbnail is empty or damaged');
+      if (thumbnailStat.size < 128) {
+        invalidThumbnail = true;
+        throw new Error('thumbnail is empty or damaged');
+      }
       handle = await fs.promises.open(target, 'r');
       const markers = Buffer.alloc(4);
       await handle.read(markers, 0, 2, 0);
       await handle.read(markers, 2, 2, thumbnailStat.size - 2);
       if (markers[0] !== 0xff || markers[1] !== 0xd8 || markers[2] !== 0xff || markers[3] !== 0xd9) {
+        invalidThumbnail = true;
         throw new Error('thumbnail is empty or damaged');
       }
       await handle.close();
@@ -257,12 +262,15 @@ class ThumbnailPipeline {
       return { dataUrl, target };
     } catch {
       await handle?.close().catch(() => undefined);
-      void fs.promises.unlink(target).catch(() => undefined);
+      // A second renderer request can arrive while the worker for this source
+      // is publishing a cache tier. Never let that reader delete a file owned
+      // by the in-flight task. Only remove a positively identified stale file.
+      if (invalidThumbnail && !this.tasks.has(pathKey(filePath))) await fs.promises.unlink(target).catch(() => undefined);
       return null;
     }
   }
 
-  async request({ filePath, kind, cacheConfig = {}, requestedSize = 640, priority = PRIORITY.visible, queueOrder = Number.MAX_SAFE_INTEGER }) {
+  async request({ filePath, kind, cacheConfig = {}, requestedSize = 640, priority = PRIORITY.visible, queueOrder = Number.MAX_SAFE_INTEGER, requireDisk = false, forceRegenerate = false }) {
     if (priority <= PRIORITY.nearby) this.noteForegroundActivity();
     const sourcePath = path.resolve(filePath);
     const size = chooseSize(requestedSize);
@@ -275,11 +283,22 @@ class ThumbnailPipeline {
       return { success: false, state: 'MISSING', error: '原始文件不存在或磁盘离线' };
     }
 
-    const memoryUrl = this.memory.get(this.cacheKey(sourcePath, stat, size.label));
-    if (memoryUrl) return { success: true, state: 'READY', previewUrl: memoryUrl, cacheLayer: 'memory', mediaUrl: kind === 'video' ? null : undefined };
+    if (!requireDisk && !forceRegenerate) {
+      const memoryUrl = this.memory.get(this.cacheKey(sourcePath, stat, size.label));
+      if (memoryUrl) return { success: true, state: 'READY', previewUrl: memoryUrl, cacheLayer: 'memory', mediaUrl: kind === 'video' ? null : undefined };
+    }
 
-    const disk = await this.readDisk(sourcePath, stat, cacheConfig, size);
-    if (disk) return { success: true, state: 'READY', previewUrl: disk.dataUrl, cacheLayer: 'disk', mediaUrl: kind === 'video' ? null : undefined };
+    // Merge the request into an existing task before touching its output. This
+    // closes the read/delete race between a foreground request and generation.
+    if (this.tasks.has(pathKey(sourcePath))) {
+      this.enqueue({ filePath: sourcePath, kind, cacheConfig, stat, persistState: false, requestedSizes: [size], queueOrder, forceRegenerate }, priority);
+      return { success: true, state: 'QUEUED', cacheLayer: 'source', mediaUrl: kind === 'video' ? null : undefined };
+    }
+
+    if (!forceRegenerate) {
+      const disk = await this.readDisk(sourcePath, stat, cacheConfig, size);
+      if (disk) return { success: true, state: 'READY', previewUrl: disk.dataUrl, cacheLayer: 'disk', mediaUrl: kind === 'video' ? null : undefined };
+    }
 
     // The database index is durable metadata, not a prerequisite for showing
     // an image. Visible cache misses enter the scheduler immediately; index
@@ -298,10 +317,13 @@ class ThumbnailPipeline {
     if (existing) {
       existing.input = { ...existing.input, ...input, filePath: sourcePath };
       existing.order = Math.min(existing.order, queueOrder);
-      for (const size of input.requestedSizes || [THUMBNAIL_SIZES[0]]) existing.requestedSizes.set(size.label, size);
+      for (const size of input.requestedSizes || [THUMBNAIL_SIZES[0]]) {
+        existing.requestedSizes.set(size.label, size);
+        if (input.forceRegenerate) existing.completedSizes.delete(size.label);
+      }
       if (normalizedPriority < existing.priority && !existing.running) {
         existing.cancelled = true;
-        const replacement = { key, input: existing.input, requestedSizes: existing.requestedSizes, priority: normalizedPriority, order: existing.order, running: false, cancelled: false };
+        const replacement = { key, input: existing.input, requestedSizes: existing.requestedSizes, completedSizes: existing.completedSizes, priority: normalizedPriority, order: existing.order, running: false, cancelled: false };
         this.tasks.set(key, replacement);
         this.queues[normalizedPriority].push(replacement);
         this.queues[normalizedPriority].sort((left, right) => left.order - right.order);
@@ -312,7 +334,7 @@ class ThumbnailPipeline {
     }
     if (normalizedPriority >= PRIORITY.directory && this.tasks.size >= this.maxBackgroundTasks) return;
     const requestedSizes = new Map((input.requestedSizes || [THUMBNAIL_SIZES[0]]).map(size => [size.label, size]));
-    const task = { key, input: { ...input, filePath: sourcePath }, requestedSizes, priority: normalizedPriority, order: queueOrder, running: false, cancelled: false };
+    const task = { key, input: { ...input, filePath: sourcePath }, requestedSizes, completedSizes: new Set(), priority: normalizedPriority, order: queueOrder, running: false, cancelled: false };
     this.tasks.set(key, task);
     this.queues[normalizedPriority].push(task);
     this.queues[normalizedPriority].sort((left, right) => left.order - right.order);
@@ -381,26 +403,51 @@ class ThumbnailPipeline {
 
   async runTask(task) {
     const { filePath, kind, cacheConfig, sourceHash } = task.input;
+    let stat;
     try {
-      const stat = await fs.promises.stat(filePath);
+      stat = await fs.promises.stat(filePath);
       if (!stat.isFile()) throw Object.assign(new Error('原始文件不存在'), { code: 'ENOENT' });
+    } catch (error) {
+      const state = 'MISSING';
+      void this.database.call('set_state', { file_path: filePath, state, error: error.message || String(error) }).catch(() => undefined);
+      this.notify({ filePath, state, error: error.message || String(error) });
+      this.log('warn', 'Thumbnail source is missing', { filePath, kind, state, error: error.message || String(error) });
+      return;
+    }
+    try {
       this.notify({ filePath, state: 'GENERATING' });
       void this.database.call('set_state', { file_path: filePath, state: 'GENERATING' }).catch(() => undefined);
-      const completedSizes = new Set();
       while (true) {
-        const requestedSizes = [...task.requestedSizes.values()].filter(size => !completedSizes.has(size.label));
+        const requestedSizes = [...task.requestedSizes.values()].filter(size => !task.completedSizes.has(size.label));
         if (!requestedSizes.length) break;
-        const generated = await this.generateThumbnailSet(filePath, stat, kind, cacheConfig, requestedSizes);
-        if (!generated.length) throw new Error('没有可用的图片、RAW 或视频解码器');
-        const metadata = generated.map(item => ({
-          sizeLabel: item.sizeLabel,
-          pixelSize: item.pixelSize,
-          path: item.path,
-          fileSize: fs.statSync(item.path).size,
-        }));
+        let generated;
+        let metadata;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            generated = await this.generateThumbnailSet(filePath, stat, kind, cacheConfig, requestedSizes);
+            if (!generated.length) throw Object.assign(new Error('缩略图缓存输出在生成后丢失'), { code: 'ECACHEMISS' });
+            metadata = generated.map(item => ({
+              sizeLabel: item.sizeLabel,
+              pixelSize: item.pixelSize,
+              path: item.path,
+              fileSize: fs.statSync(item.path).size,
+            }));
+            break;
+          } catch (error) {
+            let sourceExists = false;
+            try { sourceExists = (await fs.promises.stat(filePath)).isFile(); } catch { /* source is genuinely missing/offline */ }
+            const cacheOutputMissing = error?.code === 'ENOENT' || error?.code === 'ECACHEMISS';
+            if (attempt === 0 && sourceExists && cacheOutputMissing) {
+              this.log('warn', 'Thumbnail cache output disappeared; retrying once', { filePath, error: error.message || String(error) });
+              await new Promise(resolve => setTimeout(resolve, 25));
+              continue;
+            }
+            throw error;
+          }
+        }
         const urls = {};
         for (const item of generated) {
-          completedSizes.add(item.sizeLabel);
+          task.completedSizes.add(item.sizeLabel);
           const bytes = metadata.find(record => record.sizeLabel === item.sizeLabel)?.fileSize || 0;
           urls[item.sizeLabel] = this.memory.put(this.cacheKey(filePath, stat, item.sizeLabel), this.toPreviewUrl(item.path), bytes);
         }
@@ -414,7 +461,9 @@ class ThumbnailPipeline {
         this.trimCache(this.getCacheDir(cacheConfig), cacheConfig.maxSizeGB, generated.map(item => item.path));
       }
     } catch (error) {
-      const state = error?.code === 'ENOENT' ? 'MISSING' : 'FAILED';
+      let sourceExists = false;
+      try { sourceExists = (await fs.promises.stat(filePath)).isFile(); } catch { /* source is genuinely missing/offline */ }
+      const state = sourceExists ? 'FAILED' : 'MISSING';
       void this.database.call('set_state', { file_path: filePath, state, error: error.message || String(error) }).catch(() => undefined);
       this.notify({ filePath, state, error: error.message || String(error) });
       this.log('warn', 'Thumbnail generation failed', { filePath, kind, state, error: error.message || String(error) });

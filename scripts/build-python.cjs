@@ -7,15 +7,6 @@ const venvPython = process.platform === 'win32'
   ? join(root, '.venv', 'Scripts', 'python.exe')
   : join(root, '.venv', 'bin', 'python');
 const python = existsSync(venvPython) ? venvPython : 'python';
-const cascadeProbe = spawnSync(python, ['-c', 'import cv2; print(cv2.data.haarcascades)'], { cwd: root, encoding: 'utf8' });
-if (cascadeProbe.error || (cascadeProbe.status ?? 1) !== 0) throw cascadeProbe.error || new Error(cascadeProbe.stderr || 'Unable to locate OpenCV cascade data');
-const cascadeDirectory = cascadeProbe.stdout.trim();
-const dataSeparator = process.platform === 'win32' ? ';' : ':';
-const cascadeDataArgs = [
-  '--add-data', `${join(cascadeDirectory, 'haarcascade_frontalface_alt2.xml')}${dataSeparator}cv2/data`,
-  '--add-data', `${join(cascadeDirectory, 'haarcascade_profileface.xml')}${dataSeparator}cv2/data`,
-];
-
 const result = spawnSync(python, [
   '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm', '--specpath', 'build/specs',
   '--name', 'tools', '--exclude-module', 'imageio_ffmpeg',
@@ -23,10 +14,9 @@ const result = spawnSync(python, [
   '--exclude-module', 'torchaudio', '--exclude-module', 'triton',
   '--exclude-module', 'PIL._avif', '--exclude-module', 'PIL._imagingmath',
   '--exclude-module', 'PIL._imagingtk', '--exclude-module', 'PIL._webp',
-  ...cascadeDataArgs,
   '--hidden-import', 'catch', '--hidden-import', 'classify',
-  '--hidden-import', 'cut_video', '--hidden-import', 'face_patch', '--hidden-import', 'png_to_jpg',
-  '--hidden-import', 'rename', '--hidden-import', 'research',
+  '--hidden-import', 'cut_video', '--hidden-import', 'png_to_jpg',
+  '--hidden-import', 'rename',
   '--hidden-import', 'thumbnail_db', '--hidden-import', 'video_preview',
   'tools.py',
 ], { cwd: join(root, 'python'), stdio: 'inherit' });
