@@ -1,10 +1,10 @@
 import os
 import shutil
 import sys
-import json
 import argparse
 import io
 import subprocess
+from event_protocol import log_error, log_info, log_progress, log_success
 from PIL import Image
 from ffmpeg_utils import get_ffmpeg_exe
 
@@ -12,18 +12,6 @@ IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tif', '.
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.m4v', '.mkv', '.webm', '.crm')
 RAW_EXTENSIONS = ('.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw')
 FFMPEG_IMAGE_EXTENSIONS = ('.heic', '.avif') + RAW_EXTENSIONS
-
-# --- Electron 通信辅助函数 ---
-def emit(event_type, message, data=None, progress=None):
-    payload = {"type": event_type, "message": message}
-    if data is not None: payload["data"] = data
-    if progress is not None: payload["progress"] = progress
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
-
-def log_info(msg): emit('log', msg)
-def log_success(msg): emit('success', msg)
-def log_error(msg): emit('error', msg)
-def log_progress(msg, percent): emit('progress', msg, progress=percent)
 
 def load_visual_frame(media_path):
     extension = os.path.splitext(media_path)[1].lower()

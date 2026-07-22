@@ -4,6 +4,11 @@
 
 - Large B-roll files no longer use synchronous `copyFileSync` on Electron's
   main thread.
+- Project paste plans now send files up to 2 MB through an eight-worker native
+  atomic-copy pool, while larger files retain a single cancellable streaming
+  lane. Progress events are coalesced to 150 ms, and ordinary copy no longer
+  forces a disk flush for every small file; cut still uses durable writes before
+  deleting any source.
 - File copies are streamed to a unique temporary file and atomically renamed,
   so a crash does not leave a valid-looking partial destination.
 - Cross-volume moves copy atomically and remove the source only after verifying

@@ -1,8 +1,8 @@
 import os
 import sys
-import json
 import argparse
 from io import BytesIO
+from event_protocol import log_error, log_info, log_progress, log_success
 from PIL import Image, ImageCms
 from send2trash import send2trash
 
@@ -10,19 +10,6 @@ from send2trash import send2trash
 # 所有输出统一为 sRGB；这是网页和大多数 Windows 软件的默认色彩空间。
 _SRGB_PROFILE = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
 _SRGB_ICC_PROFILE = _SRGB_PROFILE.tobytes()
-
-# --- Electron 通信辅助函数 ---
-def emit(event_type, message, data=None, progress=None):
-    payload = {"type": event_type, "message": message}
-    if data is not None: payload["data"] = data
-    if progress is not None: payload["progress"] = progress
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
-
-def log_info(msg): emit('log', msg)
-def log_success(msg): emit('success', msg)
-def log_error(msg): emit('error', msg)
-def log_progress(msg, percent): emit('progress', msg, progress=percent)
-
 
 def convert_to_srgb(img):
     """将带 ICC 配置文件的图片转换为 sRGB，其他图片按 sRGB 处理。"""

@@ -1,34 +1,13 @@
 import argparse
-import json
 import os
 import re
 import shutil
 import sys
+from event_protocol import log_error, log_info, log_success
 
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff', '.heic', '.webp',
                     '.cr2', '.cr3', '.arw', '.nef', '.orf', '.rwl', '.dng', '.raf', '.3fr', '.fff'}
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.m4v', '.mkv', '.mts', '.m2ts'}
-
-
-def emit(event_type, message, data=None, progress=None):
-    payload = {"type": event_type, "message": message}
-    if data is not None:
-        payload["data"] = data
-    if progress is not None:
-        payload["progress"] = progress
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
-
-
-def log_info(message):
-    emit('log', message)
-
-
-def log_success(message):
-    emit('success', message)
-
-
-def log_error(message):
-    emit('error', message)
 
 
 def find_project_folder(project_dir, wanted_name):

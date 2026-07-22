@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, ExternalLink, Loader2, RefreshCw, ScanFace, Sparkles, Upload, UserRound, UsersRound, Wand2, X } from 'lucide-react';
 import type { AppConfig, MediaVersion, ProjectFileEntry, TeamPatchBundle, TeamPatchTask, WorkspaceProject } from '../types';
 

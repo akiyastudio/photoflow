@@ -2,7 +2,8 @@
 
 PhotoFlow keeps large or independently deployable features outside the base
 application. A component is a complete directory containing `component.json`,
-its executable, and all of its private runtime files.
+its executable, and all of its private runtime files. The normal application
+installer does not contain optional components.
 
 ## Offline installation
 
@@ -16,6 +17,10 @@ Copy the complete component directory into the PhotoFlow installation folder:
 Then restart PhotoFlow or use **设置 → 可选功能组件 → 刷新状态**. This folder
 is beside `Photoflow.exe`; if PhotoFlow was installed under `Program Files`,
 copying or upgrading a component may require administrator permission.
+
+`npm run electron:build` also creates one ZIP package per component in
+`release`. Each ZIP contains the correctly named top-level component directory;
+extract that directory into `<PhotoFlow installation directory>\components`.
 
 Packaged builds also scan these locations in order:
 

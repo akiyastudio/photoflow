@@ -26,6 +26,8 @@ file workflows.
   `WorkspaceService`, `FileSystemService`, `ThumbnailService`, `MediaService`,
   and `VersionService` form the core domain boundary. The event bus and
   background task service provide task IDs, progress, cancellation and retry.
+  File-transfer planning and the bounded small/large copy scheduler live in the
+  filesystem service rather than the Electron composition root.
 - `electron/repositories`: the only JavaScript modules that know Python
   database action names. IPC and services call domain methods instead.
 - `electron/plugins`: the optional-plugin catalog and capability mapping.

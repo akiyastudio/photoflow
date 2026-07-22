@@ -8,6 +8,7 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-components-test
 const resourcesPath = path.join(sandbox, 'resources');
 const executablePath = path.join(sandbox, 'app', 'Photoflow.exe');
 const projectRoot = path.join(sandbox, 'project');
+const repositoryRoot = path.resolve(__dirname, '..');
 
 const writeComponent = (root, id, version, entrypoint = `${id}.exe`) => {
   const directory = path.join(root, id);
@@ -25,6 +26,22 @@ const writeComponent = (root, id, version, entrypoint = `${id}.exe`) => {
 };
 
 try {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
+  const releaseCommand = packageJson.scripts['electron:build'];
+  assert(releaseCommand.includes('npm run build:components'), 'default installer build must build both optional components');
+  assert(releaseCommand.indexOf('npm run build:components') < releaseCommand.indexOf('electron-builder'), 'components must be built before electron-builder');
+
+  const installer = fs.readFileSync(path.join(repositoryRoot, 'build', 'installer.nsh'), 'utf8');
+  assert(!installer.includes('release\\components'), 'base installer must not embed optional components');
+  assert(installer.includes('$EXEDIR\\components'), 'offline media may provide independently packaged components beside the installer');
+  assert(!installer.includes('File /r "${PROJECT_DIR}\\release\\components'), 'component binaries must not be compiled into the base installer');
+
+  const componentBuilder = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'build-components.cjs'), 'utf8');
+  assert(componentBuilder.includes('PhotoFlow-${id}-${manifest.version}-${process.platform}-${process.arch}.zip'));
+  assert(componentBuilder.includes('zipfile.ZIP_DEFLATED'));
+  assert(componentBuilder.includes("'--collect-binaries', 'onnxruntime'"));
+  assert(!componentBuilder.includes("'--collect-all', 'onnxruntime'"));
+
   const registry = createComponentRegistry({
     resourcesPath,
     executablePath,

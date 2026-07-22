@@ -1,5 +1,5 @@
 const registerFileOperationsIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, FileOperationCancelledError, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertExistingInside, assertFileOperationActive, assertInside, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyFileWithProgress, crypto, dialog, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, mainWindow, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, removeCreatedPasteTargets, screen, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertExistingInside, assertInside, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, mainWindow, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, removeCreatedPasteTargets, screen, throwIfCancelled, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
 
   ipcMain.handle('workspace-file-details', async (_event, workspacePath, status, projectName, relativePaths = []) => {
     try {
@@ -150,7 +150,7 @@ const registerFileOperationsIpc = context => {
       }
       if (operation === 'copy' || operation === 'cut') {
         if (!sources.length) throw new Error('未选择文件');
-      fileOperationState.projectFileClipboard = { operation, sources };
+        fileOperationState.projectFileClipboard = { operation, sources };
         void writeSystemFileClipboard(sources, operation).catch(error => writeLog('warn', 'Unable to sync project files to the system clipboard', error));
         return { success: true, count: sources.length };
       }
@@ -158,7 +158,7 @@ const registerFileOperationsIpc = context => {
         if (activeProjectFileOperations.size) throw new Error('已有文件粘贴任务正在进行');
         const destinationDir = resolveInsideProject(targetRelativePath);
         if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
-      let clipboardSnapshot = fileOperationState.projectFileClipboard?.sources?.length ? { operation: fileOperationState.projectFileClipboard.operation, sources: [...fileOperationState.projectFileClipboard.sources] } : null;
+        let clipboardSnapshot = fileOperationState.projectFileClipboard?.sources?.length ? { operation: fileOperationState.projectFileClipboard.operation, sources: [...fileOperationState.projectFileClipboard.sources] } : null;
         if (!clipboardSnapshot) {
           try {
             const systemClipboard = await readSystemFileClipboard();
@@ -203,7 +203,7 @@ const registerFileOperationsIpc = context => {
           const topLevelTargets = [];
           const plan = [];
           for (const source of clipboardSnapshot.sources) {
-            assertFileOperationActive(job);
+            throwIfCancelled(() => job.cancelled);
             if (!fs.existsSync(source)) continue;
             let destination = path.join(destinationDir, path.basename(source));
             const parsed = path.parse(destination);
@@ -211,7 +211,7 @@ const registerFileOperationsIpc = context => {
             while (fs.existsSync(destination)) destination = path.join(destinationDir, `${parsed.name} (${index++})${parsed.ext}`);
             if (destination === source || destination.startsWith(source + path.sep)) throw new Error('不能将文件夹粘贴到自身内部');
             topLevelTargets.push({ source, destination });
-            await collectCopyPlan(source, destination, plan, job);
+            await collectCopyPlan(source, destination, plan, { isCancelled: () => job.cancelled });
           }
           const totalBytes = plan.reduce((sum, entry) => sum + entry.size, 0);
           const totalFiles = plan.filter(entry => entry.kind === 'file').length;
@@ -220,44 +220,41 @@ const registerFileOperationsIpc = context => {
           let lastPublishedAt = 0;
           const reportCopyProgress = (currentName, force = false) => {
             const now = Date.now();
-            if (!force && now - lastPublishedAt < 80) return;
+            if (!force && now - lastPublishedAt < 150) return;
             lastPublishedAt = now;
             const progress = totalBytes > 0
               ? Math.min(99, Math.round(bytesCopied / totalBytes * 100))
               : Math.min(99, Math.round(filesCopied / Math.max(1, totalFiles) * 100));
             publish({ phase: 'copying', progress, currentName, bytesCopied, totalBytes, filesCopied, totalFiles });
           };
+          const topLevelTargetPaths = new Set(topLevelTargets.map(item => item.destination));
           const markCreatedTarget = destination => {
-            const target = topLevelTargets.find(item => item.destination === destination);
-            if (target && !createdTargets.includes(destination)) createdTargets.push(destination);
+            if (topLevelTargetPaths.has(destination) && !createdTargets.includes(destination)) createdTargets.push(destination);
           };
-          for (const entry of plan) {
-            assertFileOperationActive(job);
-            if (entry.kind === 'directory') {
-              await fs.promises.mkdir(entry.destination, { recursive: false });
-              markCreatedTarget(entry.destination);
-              continue;
-            }
-            reportCopyProgress(path.basename(entry.source), true);
-            await fs.promises.mkdir(path.dirname(entry.destination), { recursive: true });
-            await copyFileWithProgress(entry, job, copied => {
-              bytesCopied += copied;
+          reportCopyProgress('', true);
+          const transferStats = await copyPlannedFiles(plan, {
+            destinationRoot: destinationDir,
+            durable: clipboardSnapshot.operation === 'cut',
+            isCancelled: () => job.cancelled,
+            onCreated: markCreatedTarget,
+            onFileStart: entry => reportCopyProgress(path.basename(entry.source)),
+            onProgress: ({ entry, bytesDelta, fileCompleted }) => {
+              bytesCopied += bytesDelta;
+              if (fileCompleted) filesCopied += 1;
               reportCopyProgress(path.basename(entry.source));
-            }, () => markCreatedTarget(entry.destination));
-            filesCopied += 1;
-            reportCopyProgress(path.basename(entry.source), true);
-          }
-          assertFileOperationActive(job);
+            },
+          });
+          throwIfCancelled(() => job.cancelled);
           if (clipboardSnapshot.operation === 'cut') {
             job.finishing = true;
             publish({ phase: 'finishing', progress: 99, currentName: '正在移除源文件', bytesCopied, totalBytes, filesCopied, totalFiles });
             for (const source of clipboardSnapshot.sources) await fs.promises.rm(source, { recursive: true, force: true });
-          fileOperationState.projectFileClipboard = null;
+            fileOperationState.projectFileClipboard = null;
             if (process.platform === 'win32') clipboard.clear();
           }
           const count = topLevelTargets.length;
           publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied, totalBytes, filesCopied, totalFiles, count });
-          writeLog('info', 'Project files pasted', { projectName, targetRelativePath, count, operationId });
+          writeLog('info', 'Project files pasted', { projectName, targetRelativePath, count, operationId, ...transferStats });
           if (count) await pushUndoOperation(clipboardSnapshot.operation === 'cut'
             ? { kind: 'move', moves: topLevelTargets }
             : { kind: 'remove-created', paths: topLevelTargets.map(item => item.destination), label: '粘贴' });
@@ -266,7 +263,7 @@ const registerFileOperationsIpc = context => {
           // Once cut finalization starts, keeping the completed copies is the only
           // data-safe fallback if removing a source fails partway through.
           if (!job.finishing) await removeCreatedPasteTargets(createdTargets);
-          if (error instanceof FileOperationCancelledError) {
+          if (error?.code === CANCELLED_CODE) {
             publish({ phase: 'cancelled', progress: 0, currentName: '' });
             writeLog('info', 'Project file paste cancelled', { projectName, operationId });
             return { success: false, cancelled: true, operationId, error: '粘贴已取消' };

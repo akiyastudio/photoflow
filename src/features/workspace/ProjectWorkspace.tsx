@@ -3,8 +3,10 @@ import { createPortal } from 'react-dom';
 import { FolderInput, FolderPlus, Folder, Image as ImageIcon, ScanSearch, Play, Trash2, Edit, X, Plus, Loader2, CheckCircle2, ExternalLink, Video, ChevronDown, ChevronUp, File, FileImage, MemoryStick, LayoutList, Grid2X2, FileText, Copy, Scissors as Cut, ClipboardPaste, CheckSquare, ArrowLeft, ArrowRight, Camera, Aperture, Timer, Gauge, Ruler, Calendar, Activity, Volume2, PanelLeftOpen, ArrowUpDown, ArrowUp, ArrowDown, Search, Info, GripVertical, Maximize2, Minimize2, GitBranch, UsersRound } from 'lucide-react';
 import { VersionManager } from '../../components/VersionManager';
 import { TeamRetouchManager } from '../../components/TeamRetouchManager';
+import { MediaCacheSettings } from '../settings/SettingsFeature';
+import { ConverterView, ImportCard, MatchView } from '../tools/ToolViews';
 import { PROJECT_STATUS_LABELS } from '../../types';
-import type { AppConfig, MediaMetadataField, ProgressFolder, ProjectFileEntry, WorkspaceProject } from '../../types';
+import type { AppConfig, MediaMetadataField, ProgressFolder, ProjectFileEntry, ThumbnailState, WorkspaceProject } from '../../types';
 
 const CONTEXT_MENU_VIEWPORT_MARGIN = 8;
 
@@ -39,9 +41,31 @@ const ViewportContextMenu = ({ x, y, widthClass, children }: { x: number; y: num
   return <div ref={menuRef} role="menu" className={`project-context-menu fixed z-[301] max-h-[calc(100vh-1rem)] max-w-[calc(100vw-1rem)] overflow-y-auto overscroll-contain rounded-lg border border-slate-200 bg-white p-1 shadow-xl ${widthClass}`} style={{ left: position.left, top: position.top, visibility: position.ready ? 'visible' : 'hidden' }} onClick={event => event.stopPropagation()}>{children}</div>;
 };
 
+const CollapsiblePanel = ({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) => (
+  <section className="shrink-0 rounded-xl border border-slate-200 bg-white p-6 animate-in slide-in-from-top-2 duration-200">
+    <div className="-mx-6 -mt-6 mb-5 flex items-center justify-between border-b border-slate-100 px-6 pb-4 pt-6"><h3 className="text-lg font-bold text-slate-800">{title}</h3><button type="button" onClick={onClose} className="flex items-center gap-1 rounded-md px-2 py-1 text-sm text-slate-500 hover:bg-slate-50">收起 <ChevronUp size={16}/></button></div>
+    {children}
+  </section>
+);
+
 // Source decoding is scheduled in the Electron main process. Renderer calls
 // only probe the memory/disk layers and enqueue or reprioritize a task.
 const requestThumbnail = <T,>(task: () => Promise<T>) => task();
+const thumbnailSizeLabel = (requestedSize: number) => requestedSize <= 320 ? 'small' : requestedSize <= 640 ? 'medium' : 'large';
+
+const useThumbnailUpdates = (
+  filePath: string,
+  requestedSize: number,
+  onUpdate: (state: ThumbnailState, url?: string) => void,
+) => {
+  const onUpdateRef = useRef(onUpdate);
+  onUpdateRef.current = onUpdate;
+  const sizeLabel = thumbnailSizeLabel(requestedSize);
+  useEffect(() => window.electronAPI.onThumbnailStateChanged(update => {
+    if (update.filePath.toLocaleLowerCase() !== filePath.toLocaleLowerCase()) return;
+    onUpdateRef.current(update.state, update.previewUrls?.[sizeLabel]);
+  }), [filePath, sizeLabel]);
+};
 const METADATA_GROUP_PRIORITY = ['ExifIFD', 'ExifIFD1', 'IFD0', 'Composite', 'QuickTime', 'Track1', 'XMP', 'File', 'System', '其他'];
 const pickMetadataValue = (fields: MediaMetadataField[], ...names: string[]) => {
   for (const name of names) {
@@ -233,7 +257,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, initialPanel, import
   onImportConfigChange: (config: AppConfig['smartImport']) => void;
   onMatchConfigChange: (config: AppConfig['smartMatch']) => void;
   onMediaCacheConfigChange: (config: AppConfig['mediaCache']) => void;
-  onNotice: (message: string) => void;
+  onNotice: (message: string, duration?: number) => void;
   onProjectMoved: (project: WorkspaceProject) => void;
   onDeleted: () => void;
 }) => {
@@ -1029,10 +1053,19 @@ const ProjectWorkspace = ({ active, project, workspacePath, initialPanel, import
     const result = await window.electronAPI.openProjectEntry(workspacePath, project.status, project.name, entry.relativePath);
     if (!result.success) onNotice(`打开文件失败：${result.error || '无法打开文件'}`);
   };
+  const hasVersionTrackingForEntry = (entry?: ProjectFileEntry) => {
+    if (!entry || !['image', 'raw', 'video'].includes(entry.kind)) return false;
+    const mediaKind = entry.kind === 'video' ? 'video' : 'image';
+    return progressFolders.some(folder => folder.mediaKind === mediaKind && folder.trackingEnabled && !folder.folderMissing);
+  };
   const openVersions = (entry?: ProjectFileEntry) => {
     const target = entry || selectedEntries[0];
     if (!target || !['image', 'raw', 'video'].includes(target.kind)) {
       onNotice('请先选择一张图片、RAW 或视频');
+      return;
+    }
+    if (!hasVersionTrackingForEntry(target)) {
+      onNotice(`项目尚未录入${target.kind === 'video' ? '视频' : '图片'}版本信息，请先导入版本进度并开启项目跟踪`);
       return;
     }
     setTeamRetouchEntry(null);
@@ -1478,7 +1511,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, initialPanel, import
         {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openPreviewAndMetadata(entry); }}><PanelLeftOpen size={14}/>打开预览和详细信息</button>}
         {fileMenu.entry.kind !== 'folder' && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openProjectEntry(entry); }}><ExternalLink size={14}/>用默认方式打开</button>}
         {photoshopAvailable && fileMenu.entry.kind === 'image' && <button className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(entry => entry.kind === 'image') : [fileMenu.entry]; setFileMenu(null); void openProjectEntriesInPhotoshop(entries); }}><ImageIcon size={14}/>用 Photoshop 打开{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(entry => entry.kind === 'image').length > 1 ? `（${selectedEntries.filter(entry => entry.kind === 'image').length} 个）` : ''}</button>}
-        {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <><div className="my-1 border-t border-slate-100"/><button disabled={!canSelectMedia} className="project-menu-item" onClick={() => { setFileMenu(null); selectMediaFiles(); }}><CheckCircle2 size={14}/>选片</button><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openVersions(entry); }}><GitBranch size={14}/>版本管理</button>{fileMenu.entry.kind === 'image' && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openTeamRetouch(entry); }}><UsersRound size={14}/>多人修脸</button>}</>}
+        {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <><div className="my-1 border-t border-slate-100"/><button disabled={!canSelectMedia} className="project-menu-item" onClick={() => { setFileMenu(null); selectMediaFiles(); }}><CheckCircle2 size={14}/>选片</button><button disabled={!hasVersionTrackingForEntry(fileMenu.entry)} title={hasVersionTrackingForEntry(fileMenu.entry) ? '管理素材的历史版本' : '请先导入版本进度并开启项目跟踪'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openVersions(entry); }}><GitBranch size={14}/>版本管理</button>{fileMenu.entry.kind === 'image' && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openTeamRetouch(entry); }}><UsersRound size={14}/>多人修脸</button>}</>}
         {fileMenu.entry.kind !== 'folder' && <div className="my-1 border-t border-slate-100"/>}
         <button className="project-menu-item" onClick={() => { setFileMenu(null); beginRename(); }}><Edit size={14}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
         <button className="project-menu-item" onClick={() => { setFileMenu(null); runFileOperation('cut'); }}><Cut size={14}/>剪切</button>
@@ -1537,21 +1570,21 @@ const ProjectWorkspace = ({ active, project, workspacePath, initialPanel, import
         </div>
         <span aria-hidden className="toolbar-divider"/>
         {selectedPaths.length > 0 && <span className="mr-1 self-center text-xs text-slate-500">已选 {selectedPaths.length}</span>}
-        <button disabled={!selectedPaths.length} title={selectedPaths.length > 1 ? '批量重命名' : selectedPaths.length === 1 ? '重命名' : '请先选择文件或文件夹'} onClick={beginRename} className="project-action-button compact-hide-file-action"><Edit size={16}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
-        <button disabled={!selectedPaths.length} title={selectedPaths.length ? '剪切' : '请先选择文件'} onClick={() => runFileOperation('cut')} className="project-action-button compact-hide-file-action"><Cut size={16}/>剪切</button>
-        <button disabled={!selectedPaths.length} title={selectedPaths.length ? '复制' : '请先选择文件'} onClick={() => runFileOperation('copy')} className="project-action-button compact-hide-file-action"><Copy size={16}/>复制</button>
+        <button disabled={!selectedPaths.length} title={selectedPaths.length > 1 ? '批量重命名' : '重命名'} onClick={beginRename} className="project-action-button compact-hide-file-action"><Edit size={16}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
+        <button disabled={!selectedPaths.length} title="剪切" onClick={() => runFileOperation('cut')} className="project-action-button compact-hide-file-action"><Cut size={16}/>剪切</button>
+        <button disabled={!selectedPaths.length} title="复制" onClick={() => runFileOperation('copy')} className="project-action-button compact-hide-file-action"><Copy size={16}/>复制</button>
         <button disabled={!clipboardHasFiles} title={clipboardHasFiles ? '粘贴到当前文件夹' : '剪贴板中没有文件'} onClick={() => runFileOperation('paste')} className="project-action-button compact-hide-file-action"><ClipboardPaste size={16}/>粘贴</button>
-        <button disabled={!selectedPaths.length} title={selectedPaths.length ? '删除（移入回收站）' : '请先选择文件'} onClick={() => runFileOperation('trash')} className="project-action-button project-action-danger compact-hide-file-action"><Trash2 size={16}/>删除</button>
+        <button disabled={!selectedPaths.length} title="删除" onClick={() => runFileOperation('trash')} className="project-action-button project-action-danger compact-hide-file-action"><Trash2 size={16}/>删除</button>
         <button disabled={!selectedPaths.length} title="取消选择" onClick={() => setSelectedPaths([])} className="project-action-button"><X size={16}/>取消选择</button>
         <span aria-hidden className="toolbar-divider"/>
         <div className="contents">
           <button onClick={() => togglePanel('import')} title="从 SD 卡导入" aria-label="从 SD 卡导入" className="project-action-button"><MemoryStick size={16}/>从 SD 卡导入</button>
           <button onClick={() => togglePanel('match')} title="从文件名选片" aria-label="从文件名选片" className="project-action-button"><FileText size={16}/>从文件名选片</button>
-          <button aria-disabled={!canSelectMedia} title={canSelectMedia ? '选片' : selectedPaths.length ? '只能选择媒体文件' : '请先选择媒体文件'} onClick={selectMediaFiles} className={`project-action-button ${canSelectMedia ? '' : 'cursor-not-allowed opacity-50'}`}><CheckCircle2 size={16}/>选片</button>
+          <button aria-disabled={!canSelectMedia} title="选片" onClick={selectMediaFiles} className={`project-action-button ${canSelectMedia ? '' : 'cursor-not-allowed opacity-50'}`}><CheckCircle2 size={16}/>选片</button>
         </div>
         <div className="contents">
-          <button disabled={selectedEntries.length !== 1 || !['image', 'raw', 'video'].includes(selectedEntries[0]?.kind)} onClick={() => openVersions()} title="管理所选素材的历史版本" aria-label="版本管理" className="project-action-button"><GitBranch size={16}/>版本管理</button>
-          <button disabled={selectedEntries.length !== 1 || selectedEntries[0]?.kind !== 'image'} onClick={() => openTeamRetouch()} title="为照片中的人物分别生成手机修脸任务" aria-label="多人修脸" className="project-action-button"><UsersRound size={16}/>多人修脸</button>
+          <button disabled={selectedEntries.length !== 1 || !hasVersionTrackingForEntry(selectedEntries[0])} onClick={() => openVersions()} title="版本管理" aria-label="版本管理" className="project-action-button"><GitBranch size={16}/>版本管理</button>
+          <button disabled={selectedEntries.length !== 1 || selectedEntries[0]?.kind !== 'image'} onClick={() => openTeamRetouch()} title="团片裁切" aria-label="团片裁切" className="project-action-button"><UsersRound size={16}/>团片裁切</button>
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1 pl-3"><button onClick={() => setViewMode('grid')} title="图标模式" className={`rounded-md p-1.5 ${viewMode === 'grid' ? 'bg-slate-200 text-slate-800' : 'text-slate-500 hover:bg-slate-200'}`}><Grid2X2 size={17}/></button><button onClick={() => setViewMode('list')} title="列表模式" className={`rounded-md p-1.5 ${viewMode === 'list' ? 'bg-slate-200 text-slate-800' : 'text-slate-500 hover:bg-slate-200'}`}><LayoutList size={17}/></button>{viewMode === 'grid' && <input aria-label="图标大小" title="图标大小" type="range" min="80" max="360" step="4" value={gridIconSize} onChange={event => setGridIconSize(Number(event.target.value))} className="compact-hide-slider ml-2 w-24 accent-blue-600"/>}<span aria-hidden className="mx-1 h-5 w-px bg-slate-200"/><div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !showSortMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowSortMenu(next); }} title="排序" aria-label="排序" aria-haspopup="menu" aria-expanded={showSortMenu} className="project-action-button"><ArrowUpDown size={16}/>排序</button>{showSortMenu && <div className="sort-menu absolute right-0 top-full z-40 mt-1 w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">{([['name', '文件名'], ['date', '修改日期'], ['size', '大小']] as const).map(([field, label]) => <button key={field} type="button" onClick={() => setSortField(field)} className={`project-menu-item ${sortField === field ? 'bg-blue-50 font-bold text-blue-600' : ''}`}>{label}</button>)}<div className="my-1 border-t border-slate-100"/><button type="button" onClick={() => setSortDirection('asc')} className={`project-menu-item ${sortDirection === 'asc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowUp size={14}/><span>递增</span></button><button type="button" onClick={() => setSortDirection('desc')} className={`project-menu-item ${sortDirection === 'desc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowDown size={14}/><span>递减</span></button></div>}</div><div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !searchOpen; window.dispatchEvent(new Event('photoflow-menu-open')); setSearchOpen(next); }} title="查找文件" aria-label="查找文件" aria-expanded={searchOpen} className={`project-action-button ${searchOpen || searchQuery ? 'bg-blue-50 text-blue-600' : ''}`}><Search size={16}/>查找文件</button>{searchOpen && <div className="absolute right-0 top-full z-40 mt-1 w-64 rounded-lg border border-slate-200 bg-white p-2 shadow-xl"><div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2"><Search size={15} className="shrink-0 text-slate-400"/><input autoFocus value={searchQuery} onChange={event => setSearchQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { setSearchOpen(false); setSearchQuery(''); } }} placeholder="输入文件名" className="min-w-0 flex-1 bg-transparent py-2 text-sm text-slate-800 outline-none"/>{searchQuery && <button type="button" onClick={() => setSearchQuery('')} title="清除查找" className="rounded p-0.5 text-slate-400 hover:bg-slate-200"><X size={14}/></button>}</div></div>}</div></div>
       </div>
@@ -2073,18 +2106,15 @@ const FolderCoverMedia = ({ entry, cacheConfig, requestedSize, queueOrder }: {
   queueOrder: number;
 }) => {
   const [url, setUrl] = useState(entry.previewUrl);
-  const thumbnailSizeLabel = requestedSize <= 320 ? 'small' : requestedSize <= 640 ? 'medium' : 'large';
+  useThumbnailUpdates(entry.path, requestedSize, (state, nextUrl) => {
+    if (state === 'READY' && nextUrl) setUrl(nextUrl);
+  });
   useEffect(() => {
     let active = true;
     window.electronAPI.getMediaThumbnail(entry.path, entry.kind as 'image' | 'raw' | 'video', cacheConfig, requestedSize, 2, queueOrder)
       .then(result => { if (active && result.previewUrl) setUrl(result.previewUrl); });
-    const unsubscribe = window.electronAPI.onThumbnailStateChanged(update => {
-      if (!active || update.filePath.toLocaleLowerCase() !== entry.path.toLocaleLowerCase() || update.state !== 'READY') return;
-      const nextUrl = update.previewUrls?.[thumbnailSizeLabel];
-      if (nextUrl) setUrl(nextUrl);
-    });
-    return () => { active = false; unsubscribe(); };
-  }, [entry.path, entry.kind, cacheConfig.directory, cacheConfig.maxSizeGB, requestedSize, queueOrder, thumbnailSizeLabel]);
+    return () => { active = false; };
+  }, [entry.path, entry.kind, cacheConfig.directory, cacheConfig.maxSizeGB, requestedSize, queueOrder]);
   return url
     ? <img src={url} alt="" draggable={false} className="h-full w-full object-cover"/>
     : <FileImage size={requestedSize > 160 ? 28 : 14} className="text-slate-400"/>;
@@ -2164,7 +2194,14 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
   const [loading, setLoading] = useState(false);
   const container = useRef<HTMLSpanElement>(null);
   const thumbnailRequestRef = useRef<{ key: string; promoted: boolean; promise: ReturnType<typeof window.electronAPI.getMediaThumbnail> }>();
-  const thumbnailSizeLabel = requestedSize <= 320 ? 'small' : requestedSize <= 640 ? 'medium' : 'large';
+  useThumbnailUpdates(entry.path, requestedSize, (state, url) => {
+    if (state === 'READY') {
+      if (url) setPreview({ url, size: requestedSize });
+      setLoading(false);
+    } else if (state === 'FAILED' || state === 'MISSING') {
+      setLoading(false);
+    }
+  });
   const requestTileThumbnail = (priority: 0 | 1) => {
     const key = `${entry.path}|${requestedSize}`;
     const current = thumbnailRequestRef.current;
@@ -2209,16 +2246,6 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
     observer.observe(container.current);
     return () => observer.disconnect();
   }, [entry.kind, entry.path, cacheConfig, requestedSize, queueOrder]);
-  useEffect(() => window.electronAPI.onThumbnailStateChanged(update => {
-    if (update.filePath.toLocaleLowerCase() !== entry.path.toLocaleLowerCase()) return;
-    if (update.state === 'READY') {
-      const url = update.previewUrls?.[thumbnailSizeLabel];
-      if (url) setPreview({ url, size: requestedSize });
-      setLoading(false);
-    } else if (update.state === 'FAILED' || update.state === 'MISSING') {
-      setLoading(false);
-    }
-  }), [entry.path, requestedSize, thumbnailSizeLabel]);
   useEffect(() => {
     if (!hovering || entry.kind !== 'video' || videoPreviewComplete) return;
     let active = true;

@@ -42,7 +42,6 @@ const ComponentSettings = ({ useGpu, onUseGpuChange, onNotice }: { useGpu: boole
     } finally {
       setLoading(false);
     }
-    importRequestIdRef.current = crypto.randomUUID();
   }, [onNotice]);
   useEffect(() => { void refresh(); }, [refresh]);
   const gpu = components.find(component => component.id === 'team-retouch');
@@ -151,4 +150,4 @@ const MediaCacheSettings = ({ config, onChange }: { config: AppConfig['mediaCach
   </div>;
 };
 
-export { WorkspaceSetupPage, SettingsNavigator, SettingsPage };
+export { WorkspaceSetupPage, SettingsNavigator, SettingsPage, MediaCacheSettings };

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Activity, RotateCcw, X } from 'lucide-react';
+import { ProgressBar } from '../../components/ProgressBar';
 import type { BackgroundTask } from '../../types';
 
 const isVisible = (task: BackgroundTask) => task.state === 'queued' || task.state === 'running' || task.state === 'failed';
@@ -38,7 +39,7 @@ export const BackgroundTaskIndicator = () => {
         {visibleTasks.length === 0 && <p className="px-2 py-6 text-center text-xs text-slate-400">暂无进行中的任务</p>}
         {visibleTasks.map(task => <div key={task.id} className="rounded-lg border border-slate-100 p-2.5">
           <div className="flex items-start justify-between gap-2"><span className="min-w-0 truncate text-xs font-bold text-slate-700">{task.title}</span><span className={`shrink-0 text-[10px] ${task.state === 'failed' ? 'text-red-500' : 'text-slate-400'}`}>{task.state === 'failed' ? '失败' : task.state === 'queued' ? '等待中' : `${Math.round(task.progress)}%`}</span></div>
-          <div className="mt-2 h-1 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${task.state === 'failed' ? 'bg-red-500' : 'bg-blue-500'}`} style={{ width: `${Math.max(2, task.progress)}%` }}/></div>
+          <ProgressBar value={task.progress} minimumVisible={2} trackClassName="mt-2 h-1 overflow-hidden rounded-full bg-slate-100" barClassName={`h-full rounded-full ${task.state === 'failed' ? 'bg-red-500' : 'bg-blue-500'}`}/>
           {task.message && <p className="mt-1.5 line-clamp-2 text-[11px] text-slate-500">{task.message}</p>}
           <div className="mt-2 flex justify-end gap-1">
             {task.state === 'failed' && task.retryable && <button type="button" onClick={() => void window.electronAPI.retryBackgroundTask(task.id)} className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-blue-600 hover:bg-blue-50"><RotateCcw size={11}/>重试</button>}

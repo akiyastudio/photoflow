@@ -1,4 +1,5 @@
 import { Loader2, Trash2 } from 'lucide-react';
+import { ProgressBar } from '../../components/ProgressBar';
 import type { ProjectFileOperationProgress } from '../../types';
 
 type Props = {
@@ -34,9 +35,7 @@ export const FileOperationProgressOverlay = ({ progress, cancelling, onCancel }:
           <p className="text-sm font-bold">{operationTitle(progress, cancelling)}</p>
           <span className="font-mono text-xs text-slate-300">{trashingOne ? '处理中' : `${progress.progress}%`}</span>
         </div>
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/15">
-          <div className={`h-full rounded-full transition-[width] duration-150 ${progress.operation === 'trash' ? 'bg-red-400' : 'bg-blue-400'} ${trashingOne ? 'animate-pulse' : ''}`} style={{ width: trashingOne ? '100%' : `${progress.progress}%` }}/>
-        </div>
+        <ProgressBar value={trashingOne ? 100 : progress.progress} trackClassName="mt-2 h-1.5 overflow-hidden rounded-full bg-white/15" barClassName={`h-full rounded-full transition-[width] duration-150 ${progress.operation === 'trash' ? 'bg-red-400' : 'bg-blue-400'} ${trashingOne ? 'animate-pulse' : ''}`}/>
         <p className="mt-2 truncate text-xs text-slate-300">
           {progress.currentName || (progress.phase === 'scanning' ? '正在统计文件大小和数量' : '正在处理文件')}
           {progress.operation === 'trash' && (progress.totalCount || 0) > 1 ? ` · ${progress.processedCount || 0}/${progress.totalCount}` : ''}

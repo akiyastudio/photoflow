@@ -11,6 +11,11 @@ const lines = value => value.split(/\r?\n/).length;
 
 const main = read('electron/main.cjs');
 const app = read('src/App.tsx');
+const projectWorkspace = read('src/features/workspace/ProjectWorkspace.tsx');
+const packageJson = JSON.parse(read('package.json'));
+assert(/\btsc\s+-b\b/.test(packageJson.scripts.build), 'production build must type-check referenced TypeScript projects');
+assert(projectWorkspace.includes('folder.trackingEnabled && !folder.folderMissing'), 'version management must require an enabled, available progress tracker');
+assert(/openVersions[\s\S]*?if \(!hasVersionTrackingForEntry\(target\)\)/.test(projectWorkspace), 'version management must guard every open path before creating media history');
 assert(!/ipcMain\.(?:handle|on)\s*\(/.test(main), 'main.cjs must not own IPC handlers');
 assert(lines(main) < 2000, 'main.cjs exceeded the architecture size budget');
 assert(lines(app) < 1000, 'App.tsx exceeded the architecture size budget');
