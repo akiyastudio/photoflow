@@ -333,6 +333,77 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
         # 异常情况下保留临时文件夹和 SD 卡文件，确保数据不丢
         gc.collect()
 
+def stage_import_broll(sd_path, dest_path):
+    """Copy all supported card media into the project's b-roll folder, then clean the card."""
+    valid_exts = ('.jpg', '.jpeg', '.png', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.heic', '.mp4', '.mov', '.avi', '.crm', '.rwl', '.raf', '.3fr', '.fff')
+    normalized_sd = os.path.normpath(sd_path)
+    base_sd = os.path.dirname(normalized_sd) if normalized_sd.upper().endswith('DCIM') else normalized_sd
+    original_files = []
+    created_files = []
+    source_cleanup_started = False
+
+    try:
+        for target_dir in (os.path.join(base_sd, 'DCIM'), os.path.join(base_sd, 'PRIVATE')):
+            if not os.path.exists(target_dir):
+                continue
+            for root, dirs, files in os.walk(target_dir):
+                dirs[:] = [directory for directory in dirs if not directory.startswith('.')]
+                original_files.extend(
+                    os.path.join(root, name)
+                    for name in files
+                    if not name.startswith('.') and name.lower().endswith(valid_exts)
+                )
+
+        if not original_files:
+            log_error(f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
+            return
+
+        broll_folder = os.path.join(dest_path, '花絮')
+        os.makedirs(broll_folder, exist_ok=True)
+        log_info(f"正在把 {len(original_files)} 个文件导入花絮...")
+        for index, source in enumerate(original_files):
+            destination = unique_destination(broll_folder, os.path.basename(source))
+            try:
+                safe_chunk_copy(source, destination)
+            except Exception:
+                try:
+                    os.remove(destination)
+                except OSError:
+                    pass
+                raise
+            if os.path.getsize(source) != os.path.getsize(destination):
+                try:
+                    os.remove(destination)
+                except OSError:
+                    pass
+                raise IOError(f"复制校验失败：{os.path.basename(source)}")
+            created_files.append(destination)
+            log_progress(f"导入花絮：{os.path.basename(source)}", int(((index + 1) / len(original_files)) * 100))
+
+        # The source card is only cleaned after every destination file has passed validation.
+        source_cleanup_started = True
+        for source in original_files:
+            os.remove(source)
+        log_success("花絮导入完成，SD 卡已安全清理", {
+            "projectNames": [],
+            "importedCount": len(created_files),
+            "destination": broll_folder,
+        })
+    except Exception as error:
+        # Before source cleanup starts, remove a partial destination so retrying
+        # is unambiguous. Once cleanup has begun, destination copies are the
+        # only remaining copy for any source already deleted and must be kept.
+        if not source_cleanup_started:
+            for destination in created_files:
+                try:
+                    os.remove(destination)
+                except OSError:
+                    pass
+            log_error(f"花絮导入失败，SD 卡原文件已保留：{error}")
+        else:
+            log_error(f"花絮文件已完整复制，但清理 SD 卡时失败；目标文件已保留，请手动检查卡内剩余文件：{error}")
+        gc.collect()
+
 def run(args_list):
     if sys.platform.startswith('win'):
         if sys.stdout: sys.stdout.reconfigure(encoding='utf-8')
@@ -358,6 +429,8 @@ def run(args_list):
         log_status("SD Card Detected" if os.path.exists(args.sd_path) else "No Device", {"connected": os.path.exists(args.sd_path), "path": args.sd_path})
     elif args.stage == 'import':
         stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files)
+    elif args.stage == 'broll':
+        stage_import_broll(args.sd_path, args.dest_path)
 
 if __name__ == "__main__":
     run(sys.argv[1:])

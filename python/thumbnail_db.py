@@ -200,11 +200,8 @@ class ThumbnailDatabase:
         pending = []
         changed_count = 0
         writes_since_commit = 0
-        for directory, directory_names, file_names in os.walk(project_root):
-            directory_names[:] = [name for name in directory_names if not name.startswith(".")]
+        for directory, _directory_names, file_names in os.walk(project_root):
             for name in file_names:
-                if name.startswith("."):
-                    continue
                 kind = MEDIA_EXTENSIONS.get(Path(name).suffix.lower())
                 if not kind:
                     continue

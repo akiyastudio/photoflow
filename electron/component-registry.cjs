@@ -1,39 +1,30 @@
 const fs = require('fs');
 const path = require('path');
+const { PLUGIN_API_VERSION, PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
 
-const COMPONENT_API_VERSION = 1;
-const COMPONENT_DEFINITIONS = Object.freeze({
-  'team-retouch': {
-    id: 'team-retouch',
-    name: '多人裁片修图',
-    description: '人物检测、无损裁片以及高分辨率 Patch 对齐、融合与拼回。',
-    capability: 'team-retouch',
-  },
-  'research-tools': {
-    id: 'research-tools',
-    name: '调研整理',
-    description: '视频分镜识别、图片去重与调研资料整理。',
-    capability: 'research.organize',
-  },
-});
+const COMPONENT_API_VERSION = PLUGIN_API_VERSION;
+const COMPONENT_DEFINITIONS = Object.freeze(Object.fromEntries(Object.entries(PLUGIN_DEFINITIONS).map(([id, definition]) => [id, {
+  ...definition,
+  capability: definition.capabilities[0],
+}])));
 
 const isInside = (root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 };
 
-const directorySize = root => {
+const directorySize = async root => {
   let size = 0;
   const pending = [root];
   while (pending.length) {
     const directory = pending.pop();
     let entries = [];
-    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { continue; }
+    try { entries = await fs.promises.readdir(directory, { withFileTypes: true }); } catch { continue; }
     for (const entry of entries) {
       const entryPath = path.join(directory, entry.name);
       if (entry.isDirectory()) pending.push(entryPath);
       else if (entry.isFile()) {
-        try { size += fs.statSync(entryPath).size; } catch { /* file changed during inspection */ }
+        try { size += (await fs.promises.stat(entryPath)).size; } catch { /* file changed during inspection */ }
       }
     }
   }
@@ -74,7 +65,7 @@ const createComponentRegistry = ({ resourcesPath, executablePath, projectRoot, i
         version: String(manifest.version || '0.0.0'),
         path: componentRoot,
         source: root.source,
-        sizeBytes: directorySize(componentRoot),
+        sizeBytes: 0,
         command,
         argsPrefix: Array.isArray(manifest.argsPrefix) ? manifest.argsPrefix.map(String) : [],
         manifest,
@@ -87,7 +78,7 @@ const createComponentRegistry = ({ resourcesPath, executablePath, projectRoot, i
         version: '',
         path: componentRoot,
         source: root.source,
-        sizeBytes: directorySize(componentRoot),
+        sizeBytes: 0,
         error: error.message || String(error),
       };
     }
@@ -124,7 +115,14 @@ const createComponentRegistry = ({ resourcesPath, executablePath, projectRoot, i
     return installRoot;
   };
 
-  return { inspect, list, resolve, ensureInstallRoot, installRoot, roots };
+  const listWithSizes = async () => Promise.all(list().map(async component => ({
+    ...component,
+    sizeBytes: component.path && await fs.promises.stat(component.path).then(stat => stat.isDirectory(), () => false)
+      ? await directorySize(component.path)
+      : 0,
+  })));
+
+  return { inspect, list, listWithSizes, resolve, ensureInstallRoot, installRoot, roots };
 };
 
 module.exports = { COMPONENT_API_VERSION, COMPONENT_DEFINITIONS, createComponentRegistry };

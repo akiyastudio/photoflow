@@ -3,7 +3,15 @@ import shutil
 import sys
 import json
 import argparse
+import io
+import subprocess
 from PIL import Image
+from ffmpeg_utils import get_ffmpeg_exe
+
+IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tif', '.tiff')
+VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.m4v', '.mkv', '.webm', '.crm')
+RAW_EXTENSIONS = ('.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw')
+FFMPEG_IMAGE_EXTENSIONS = ('.heic', '.avif') + RAW_EXTENSIONS
 
 # --- Electron 通信辅助函数 ---
 def emit(event_type, message, data=None, progress=None):
@@ -17,9 +25,25 @@ def log_success(msg): emit('success', msg)
 def log_error(msg): emit('error', msg)
 def log_progress(msg, percent): emit('progress', msg, progress=percent)
 
-def calculate_hashes(image_path):
+def load_visual_frame(media_path):
+    extension = os.path.splitext(media_path)[1].lower()
+    if extension in VIDEO_EXTENSIONS or extension in FFMPEG_IMAGE_EXTENSIONS:
+        ffmpeg_exe = get_ffmpeg_exe()
+        if not ffmpeg_exe:
+            raise RuntimeError('FFmpeg 未安装，无法分析此媒体版本')
+        command = [ffmpeg_exe, '-hide_banner', '-loglevel', 'error']
+        if extension in VIDEO_EXTENSIONS:
+            command.extend(['-ss', '0.2'])
+        command.extend(['-i', media_path, '-frames:v', '1', '-vf', 'scale=640:-2', '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1'])
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        if result.returncode != 0 or not result.stdout:
+            raise RuntimeError(result.stderr.decode('utf-8', errors='replace').strip() or '无法提取视频画面')
+        return Image.open(io.BytesIO(result.stdout))
+    return Image.open(media_path)
+
+def calculate_hashes(media_path):
     try:
-        with Image.open(image_path) as img:
+        with load_visual_frame(media_path) as img:
             img_gray = img.convert('L')
             
             # 1. 粗略哈希 (aHash 8x8 -> 64 bits) - 用于快速筛选
@@ -69,33 +93,33 @@ def copy_unmatched_a_files(unmatched_files_a, folder_a):
             pass
 
 def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_only=False, move_unmatched=False):
-    image_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.gif')
+    media_extensions = IMAGE_EXTENSIONS + FFMPEG_IMAGE_EXTENSIONS + VIDEO_EXTENSIONS
     
     # 1. 分析 文件夹A
     log_info("正在分析 文件夹A (参照组)...")
     files_a = {}
-    list_a = [f for f in os.listdir(folder_a) if f.lower().endswith(image_extensions)]
+    list_a = [f for f in os.listdir(folder_a) if f.lower().endswith(media_extensions)]
     for i, f in enumerate(list_a):
         path = os.path.join(folder_a, f)
         h_coarse, h_fine = calculate_hashes(path)
-        if h_coarse is not None: files_a[f] = (path, h_coarse, h_fine)
+        if h_coarse is not None: files_a[f] = (path, h_coarse, h_fine, 'video' if f.lower().endswith(VIDEO_EXTENSIONS) else 'image')
         if i % 10 == 0: log_progress(f"分析 A: {i}/{len(list_a)}", int(i/len(list_a)*20))
 
     # 2. 分析 文件夹B
     log_info("正在分析 文件夹B (待处理组)...")
     files_b = {}
-    list_b = [f for f in os.listdir(folder_b) if f.lower().endswith(image_extensions)]
+    list_b = [f for f in os.listdir(folder_b) if f.lower().endswith(media_extensions)]
     for i, f in enumerate(list_b):
         path = os.path.join(folder_b, f)
         h_coarse, h_fine = calculate_hashes(path)
-        if h_coarse is not None: files_b[f] = (path, h_coarse, h_fine)
+        if h_coarse is not None: files_b[f] = (path, h_coarse, h_fine, 'video' if f.lower().endswith(VIDEO_EXTENSIONS) else 'image')
         if i % 10 == 0: log_progress(f"分析 B: {i}/{len(list_b)}", 20 + int(i/len(list_b)*20))
 
     if not files_a:
-        log_error("文件夹A 中没有可用于对照的图片")
+        log_error("文件夹A 中没有可用于对照的图片或视频")
         return False
     if not files_b:
-        log_error("文件夹B 中没有图片")
+        log_error("文件夹B 中没有图片或视频")
         return False
 
     # 3. 收集并计算所有候选匹配对 (粗筛)
@@ -103,8 +127,10 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
     potential_matches = []
     
     total_a = len(files_a)
-    for idx, (file_a, (path_a, coarse_a, fine_a)) in enumerate(files_a.items()):
-        for file_b, (path_b, coarse_b, fine_b) in files_b.items():
+    for idx, (file_a, (path_a, coarse_a, fine_a, kind_a)) in enumerate(files_a.items()):
+        for file_b, (path_b, coarse_b, fine_b, kind_b) in files_b.items():
+            if kind_a != kind_b:
+                continue
             rough_dist = hamming_distance(coarse_a, coarse_b)
             # 如果粗略差距在阈值内，视为候选对象
             if rough_dist <= threshold:

@@ -426,12 +426,12 @@ class ThumbnailPipeline {
           try {
             generated = await this.generateThumbnailSet(filePath, stat, kind, cacheConfig, requestedSizes);
             if (!generated.length) throw Object.assign(new Error('缩略图缓存输出在生成后丢失'), { code: 'ECACHEMISS' });
-            metadata = generated.map(item => ({
+            metadata = await Promise.all(generated.map(async item => ({
               sizeLabel: item.sizeLabel,
               pixelSize: item.pixelSize,
               path: item.path,
-              fileSize: fs.statSync(item.path).size,
-            }));
+              fileSize: (await fs.promises.stat(item.path)).size,
+            })));
             break;
           } catch (error) {
             let sourceExists = false;
@@ -508,18 +508,20 @@ class ThumbnailPipeline {
       if (!['image', 'raw', 'video'].includes(entry.kind)) continue;
       try {
         const stat = await fs.promises.stat(entry.path);
-        const cached = THUMBNAIL_SIZES.map(size => ({ size, target: this.targetFor(entry.path, stat, cacheConfig, size) })).filter(item => fs.existsSync(item.target));
+        const candidates = THUMBNAIL_SIZES.map(size => ({ size, target: this.targetFor(entry.path, stat, cacheConfig, size) }));
+        const cached = [];
+        for (const item of candidates) if (await fs.promises.access(item.target).then(() => true, () => false)) cached.push(item);
         if (cached.length) {
           void this.database.call('mark_ready', {
             file_path: entry.path,
             source_mtime_ms: stat.mtimeMs,
             source_digest: null,
-            thumbnails: cached.map(item => ({
+            thumbnails: await Promise.all(cached.map(async item => ({
               sizeLabel: item.size.label,
               pixelSize: item.size.pixels,
               path: item.target,
-              fileSize: fs.statSync(item.target).size,
-            })),
+              fileSize: (await fs.promises.stat(item.target)).size,
+            }))),
           }).catch(() => undefined);
           if (cached.some(item => item.size.label === 'small')) continue;
         }

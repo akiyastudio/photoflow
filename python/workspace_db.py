@@ -18,7 +18,7 @@ IMAGE_EXTENSIONS = {
     ".heic", ".avif", ".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf",
     ".rw2", ".dng", ".rwl", ".3fr", ".fff", ".iiq", ".pef", ".srw",
 }
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".crm"}
 SQLITE_BUSY_TIMEOUT_MS = 15_000
 
 
@@ -45,6 +45,7 @@ def connect(root: str, database: str):
             status TEXT NOT NULL,
             relative_path TEXT NOT NULL UNIQUE,
             filesystem_id TEXT,
+            is_deleted INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             extra_json TEXT NOT NULL DEFAULT '{}'
@@ -127,6 +128,23 @@ def connect(root: str, database: str):
         CREATE INDEX IF NOT EXISTS version_batches_project ON version_batches(project_id, sequence);
         CREATE INDEX IF NOT EXISTS version_batches_folder ON version_batches(project_id, source_folder_path_key);
         CREATE INDEX IF NOT EXISTS version_batches_folder_id ON version_batches(project_id, source_folder_id);
+        CREATE TABLE IF NOT EXISTS progress_folders (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            media_kind TEXT NOT NULL,
+            version_key TEXT NOT NULL,
+            parent_progress_id TEXT REFERENCES progress_folders(id),
+            display_name TEXT NOT NULL,
+            folder_path TEXT NOT NULL,
+            folder_path_key TEXT NOT NULL,
+            folder_id TEXT,
+            tracking_enabled INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(project_id, media_kind, version_key)
+        );
+        CREATE INDEX IF NOT EXISTS progress_folders_project ON progress_folders(project_id, media_kind, version_key);
+        CREATE INDEX IF NOT EXISTS progress_folders_identity ON progress_folders(project_id, folder_id);
         CREATE TABLE IF NOT EXISTS batch_items (
             id TEXT PRIMARY KEY,
             batch_id TEXT NOT NULL REFERENCES version_batches(id) ON DELETE CASCADE,
@@ -194,11 +212,22 @@ def connect(root: str, database: str):
             is_deleted INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS team_patch_photo ON team_patch_tasks(photo_id, base_version_id, is_deleted);
+        CREATE TABLE IF NOT EXISTS undo_records (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'ready',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS undo_records_ready ON undo_records(state, created_at DESC);
     """)
     columns = {row[1] for row in db.execute("PRAGMA table_info(projects)").fetchall()}
     if "filesystem_id" not in columns:
         db.execute("ALTER TABLE projects ADD COLUMN filesystem_id TEXT")
-    for key, value in (("schema_version", "4"), ("workspace_root", root)):
+    if "is_deleted" not in columns:
+        db.execute("ALTER TABLE projects ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
+    for key, value in (("schema_version", "6"), ("workspace_root", root)):
         current = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         if current is None:
             db.execute("INSERT INTO meta(key, value) VALUES (?, ?)", (key, value))
@@ -465,8 +494,7 @@ def media_sync_project(root: str, db, payload: dict):
     db.commit()
     seen_paths = set()
     created_or_updated = 0
-    for directory, directory_names, file_names in os.walk(project_path):
-        directory_names[:] = [name for name in directory_names if not name.startswith(".") and name.casefold() not in {"thumbnails", "comparecache", "patches"}]
+    for directory, _directory_names, file_names in os.walk(project_path):
         for name in file_names:
             file_path = os.path.join(directory, name)
             if not media_type(file_path):
@@ -533,6 +561,152 @@ def serialize_batch(row):
         "matchedCount": row["matched_count"], "newCount": row["new_count"],
         "createdAt": row["created_at"], "updatedAt": row["updated_at"],
     }
+
+
+def serialize_progress(row):
+    return {
+        "id": row["id"], "projectId": row["project_id"], "mediaKind": row["media_kind"],
+        "versionKey": row["version_key"], "parentProgressId": row["parent_progress_id"],
+        "parentVersionKey": row["parent_version_key"], "displayName": row["display_name"],
+        "folderPath": row["folder_path"], "folderMissing": not os.path.isdir(row["folder_path"]),
+        "trackingEnabled": bool(row["tracking_enabled"]),
+        "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+    }
+
+
+def progress_rows(db, project_id: str):
+    return db.execute(
+        """SELECT progress.*, parent.version_key AS parent_version_key
+           FROM progress_folders AS progress
+           LEFT JOIN progress_folders AS parent ON parent.id=progress.parent_progress_id
+           WHERE progress.project_id=?
+           ORDER BY progress.media_kind, progress.created_at, progress.version_key""",
+        (project_id,),
+    ).fetchall()
+
+
+def sync_legacy_progress_folders(root: str, db, project):
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    existing = progress_rows(db, project["id"])
+    by_identity = {row["folder_id"]: row for row in existing if row["folder_id"]}
+    by_path = {row["folder_path_key"]: row for row in existing}
+    timestamp = int(time.time() * 1000)
+    discovered = []
+    prefixes = (("图片后期_", "image"), ("视频后期_", "video"))
+    if not os.path.isdir(project_path):
+        return
+    project_entries = [entry for entry in os.scandir(project_path) if entry.is_dir()]
+    # Keep custom display names rename-safe. The folder identity survives a
+    # rename, unlike its absolute path, so metadata follows the actual folder.
+    for entry in project_entries:
+        folder_path = canonical_path(entry.path)
+        identity = directory_identity(folder_path)
+        tracked = by_identity.get(identity) if identity else None
+        if tracked is not None and (tracked["folder_path_key"] != folder_path.casefold() or tracked["display_name"] != entry.name):
+            db.execute(
+                """UPDATE progress_folders SET display_name=?,folder_path=?,folder_path_key=?,folder_id=?,updated_at=?
+                   WHERE id=?""",
+                (entry.name, folder_path, folder_path.casefold(), identity, timestamp, tracked["id"]),
+            )
+    db.commit()
+    existing = progress_rows(db, project["id"])
+    by_identity = {row["folder_id"]: row for row in existing if row["folder_id"]}
+    by_path = {row["folder_path_key"]: row for row in existing}
+    for entry in project_entries:
+        for prefix, media_kind in prefixes:
+            if not entry.name.startswith(prefix):
+                continue
+            version_key = entry.name[len(prefix):]
+            if not version_key or any(not part.isdigit() for part in version_key.split("_")):
+                continue
+            discovered.append((len(version_key.split("_")), tuple(int(part) for part in version_key.split("_")), entry, media_kind, version_key))
+            break
+    discovered.sort(key=lambda item: (item[0], item[1]))
+    by_key = {(row["media_kind"], row["version_key"]): row for row in existing}
+    for _depth, _parts, entry, media_kind, version_key in discovered:
+        folder_path = canonical_path(entry.path)
+        identity = directory_identity(folder_path)
+        row = by_identity.get(identity) if identity else None
+        if row is None:
+            row = by_path.get(folder_path.casefold()) or by_key.get((media_kind, version_key))
+        parent_key = "_".join(version_key.split("_")[:-1]) or None
+        parent = by_key.get((media_kind, parent_key)) if parent_key else None
+        if row is not None:
+            db.execute(
+                """UPDATE progress_folders SET display_name=?,folder_path=?,folder_path_key=?,folder_id=?,
+                   parent_progress_id=COALESCE(parent_progress_id,?),updated_at=? WHERE id=?""",
+                (entry.name, folder_path, folder_path.casefold(), identity, parent["id"] if parent else None, timestamp, row["id"]),
+            )
+        else:
+            progress_id = str(uuid.uuid4())
+            db.execute(
+                """INSERT INTO progress_folders(id,project_id,media_kind,version_key,parent_progress_id,
+                   display_name,folder_path,folder_path_key,folder_id,tracking_enabled,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,0,?,?)""",
+                (progress_id, project["id"], media_kind, version_key, parent["id"] if parent else None,
+                 entry.name, folder_path, folder_path.casefold(), identity, timestamp, timestamp),
+            )
+            row = db.execute("SELECT * FROM progress_folders WHERE id=?", (progress_id,)).fetchone()
+        by_key[(media_kind, version_key)] = row
+        by_path[folder_path.casefold()] = row
+        if identity:
+            by_identity[identity] = row
+    db.commit()
+
+
+def progress_list(root: str, db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    sync_legacy_progress_folders(root, db, project)
+    return {"success": True, "progressFolders": [serialize_progress(row) for row in progress_rows(db, project["id"])]}
+
+
+def progress_register(root: str, db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    media_kind = str(payload.get("mediaKind") or "")
+    if media_kind not in ("image", "video"):
+        raise ValueError("无效的进度类型")
+    version_key = str(payload.get("versionKey") or "")
+    if not version_key or any(not part.isdigit() for part in version_key.split("_")):
+        raise ValueError("无效的版本编号")
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    folder_path = canonical_path(payload["folderPath"])
+    if os.path.dirname(folder_path).casefold() != project_path.casefold() or not os.path.isdir(folder_path):
+        raise ValueError("版本进度必须是项目根目录下的文件夹")
+    parent_id = payload.get("parentProgressId") or None
+    if parent_id:
+        parent = db.execute(
+            "SELECT * FROM progress_folders WHERE id=? AND project_id=? AND media_kind=?",
+            (parent_id, project["id"], media_kind),
+        ).fetchone()
+        if parent is None:
+            raise ValueError("父版本进度不存在")
+    timestamp = int(time.time() * 1000)
+    existing = db.execute(
+        "SELECT * FROM progress_folders WHERE project_id=? AND media_kind=? AND version_key=?",
+        (project["id"], media_kind, version_key),
+    ).fetchone()
+    values = (
+        parent_id, str(payload.get("displayName") or os.path.basename(folder_path)), folder_path,
+        folder_path.casefold(), directory_identity(folder_path), int(bool(payload.get("trackingEnabled"))), timestamp,
+    )
+    if existing:
+        db.execute(
+            """UPDATE progress_folders SET parent_progress_id=?,display_name=?,folder_path=?,folder_path_key=?,
+               folder_id=?,tracking_enabled=?,updated_at=? WHERE id=?""",
+            values + (existing["id"],),
+        )
+        progress_id = existing["id"]
+    else:
+        progress_id = str(uuid.uuid4())
+        db.execute(
+            """INSERT INTO progress_folders(id,project_id,media_kind,version_key,parent_progress_id,
+               display_name,folder_path,folder_path_key,folder_id,tracking_enabled,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (progress_id, project["id"], media_kind, version_key, *values[:-1], timestamp, timestamp),
+        )
+    db.commit()
+    row = next(row for row in progress_rows(db, project["id"]) if row["id"] == progress_id)
+    return {"success": True, "progressFolder": serialize_progress(row)}
 
 
 def batch_summary(db, batch_id: str):
@@ -725,6 +899,12 @@ def ensure_reference_batch(root: str, db, project, folder_path: str):
         db.commit()
         raise
     return db.execute("SELECT * FROM version_batches WHERE id=?", (batch["id"],)).fetchone()
+
+
+def batch_register_baseline(root: str, db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    batch = ensure_reference_batch(root, db, project, canonical_path(payload["folderPath"]))
+    return {"success": True, "batch": batch_summary(db, batch["id"])}
 
 
 def discard_unclaimed_source_photo(db, project_id: str, source_path: str, target_photo_id: str):
@@ -1169,19 +1349,33 @@ def sync_directories(root: str, db):
     seen_ids = set()
 
     for entry in os.scandir(root):
-        if not entry.is_dir() or entry.name.startswith((".", "_")):
+        if not entry.is_dir():
             continue
         relative_path = entry.name
         identity = directory_identity(entry.path)
         row = by_path.get(relative_path.casefold())
         if row is not None:
+            if row["is_deleted"]:
+                if identity and identity == row["filesystem_id"]:
+                    db.execute("UPDATE projects SET is_deleted=0, updated_at=? WHERE id=?", (now, row["id"]))
+                else:
+                    db.execute("DELETE FROM projects WHERE id=?", (row["id"],))
+                    row = None
+            if row is None:
+                project_id = str(uuid.uuid4())
+                db.execute(
+                    "INSERT INTO projects(id,name,status,relative_path,filesystem_id,is_deleted,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (project_id, entry.name, "未分类", relative_path, identity, 0, now, now),
+                )
+                seen_ids.add(project_id)
+                continue
             seen_ids.add(row["id"])
             if identity and identity != row["filesystem_id"]:
                 db.execute("UPDATE projects SET filesystem_id=?, updated_at=? WHERE id=?", (identity, now, row["id"]))
             continue
         renamed_row = by_identity.get(identity) if identity else None
         if renamed_row is not None and renamed_row["id"] not in seen_ids:
-            db.execute("UPDATE projects SET name=?, relative_path=?, updated_at=? WHERE id=?", (entry.name, relative_path, now, renamed_row["id"]))
+            db.execute("UPDATE projects SET name=?, relative_path=?, is_deleted=0, updated_at=? WHERE id=?", (entry.name, relative_path, now, renamed_row["id"]))
             seen_ids.add(renamed_row["id"])
             continue
         project_id = str(uuid.uuid4())
@@ -1192,7 +1386,7 @@ def sync_directories(root: str, db):
         seen_ids.add(project_id)
 
     for row in rows:
-        if row["id"] not in seen_ids and not os.path.isdir(os.path.join(root, row["relative_path"])):
+        if not row["is_deleted"] and row["id"] not in seen_ids and not os.path.isdir(os.path.join(root, row["relative_path"])):
             db.execute("DELETE FROM projects WHERE id=?", (row["id"],))
     db.commit()
 
@@ -1200,7 +1394,7 @@ def sync_directories(root: str, db):
 def load(root: str, database: str):
     db = connect(root, database)
     sync_directories(os.path.abspath(root), db)
-    rows = [dict(row) for row in db.execute("SELECT * FROM projects ORDER BY name COLLATE NOCASE").fetchall()]
+    rows = [dict(row) for row in db.execute("SELECT * FROM projects WHERE is_deleted=0 ORDER BY name COLLATE NOCASE").fetchall()]
     db.close()
     return {"success": True, "projects": rows, "database": os.path.abspath(database)}
 
@@ -1212,6 +1406,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
         if payload["status"] not in STATUSES:
             raise ValueError("无效的项目状态")
         project_path = os.path.join(os.path.abspath(root), payload["relativePath"])
+        db.execute("DELETE FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],))
         db.execute(
             "INSERT INTO projects(id,name,status,relative_path,filesystem_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
             (str(uuid.uuid4()), payload["name"], payload["status"], payload["relativePath"], directory_identity(project_path), now, now),
@@ -1219,11 +1414,13 @@ def mutate(root: str, database: str, action: str, payload: dict):
     elif action == "status":
         if payload["status"] not in STATUSES:
             raise ValueError("无效的项目状态")
-        db.execute("UPDATE projects SET status=?, updated_at=? WHERE name=? COLLATE NOCASE", (payload["status"], now, payload["name"]))
+        db.execute("UPDATE projects SET status=?, updated_at=? WHERE is_deleted=0 AND name=? COLLATE NOCASE", (payload["status"], now, payload["name"]))
     elif action == "rename":
-        db.execute("UPDATE projects SET name=?, relative_path=?, updated_at=? WHERE name=? COLLATE NOCASE", (payload["nextName"], payload["relativePath"], now, payload["name"]))
+        db.execute("UPDATE projects SET name=?, relative_path=?, updated_at=? WHERE is_deleted=0 AND name=? COLLATE NOCASE", (payload["nextName"], payload["relativePath"], now, payload["name"]))
     elif action == "delete":
-        db.execute("DELETE FROM projects WHERE name=? COLLATE NOCASE", (payload["name"],))
+        db.execute("UPDATE projects SET is_deleted=1, updated_at=? WHERE name=? COLLATE NOCASE", (now, payload["name"]))
+    elif action == "restore_project":
+        db.execute("UPDATE projects SET is_deleted=0, status=?, updated_at=? WHERE name=? COLLATE NOCASE", (payload.get("status") or "未分类", now, payload["name"]))
     elif action == "media_sync_project":
         result = media_sync_project(root, db, payload)
         db.close()
@@ -1242,6 +1439,18 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "batch_list":
         result = batch_list(root, db, payload)
+        db.close()
+        return result
+    elif action == "progress_list":
+        result = progress_list(root, db, payload)
+        db.close()
+        return result
+    elif action == "progress_register":
+        result = progress_register(root, db, payload)
+        db.close()
+        return result
+    elif action == "batch_register_baseline":
+        result = batch_register_baseline(root, db, payload)
         db.close()
         return result
     elif action == "batch_commit_compare":
@@ -1280,6 +1489,27 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = team_patch_update(db, payload)
         db.close()
         return result
+    elif action == "undo_record_add":
+        record_id = str(payload.get("id") or uuid.uuid4())
+        db.execute(
+            "INSERT OR REPLACE INTO undo_records(id,kind,payload_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            (record_id, str(payload.get("kind") or "trash"), json.dumps(payload.get("payload") or {}, ensure_ascii=False), "ready", now, now),
+        )
+        db.commit()
+        db.close()
+        return {"success": True, "id": record_id}
+    elif action == "undo_record_latest":
+        row = db.execute("SELECT * FROM undo_records WHERE state='ready' ORDER BY created_at DESC LIMIT 1").fetchone()
+        db.close()
+        if row is None:
+            return {"success": True, "record": None}
+        record = dict(row)
+        record["payload"] = json.loads(record.pop("payload_json"))
+        return {"success": True, "record": record}
+    elif action == "undo_record_remove":
+        db.execute("DELETE FROM undo_records WHERE id=?", (str(payload.get("id") or ""),))
+    elif action == "undo_record_mark_unavailable":
+        db.execute("UPDATE undo_records SET state='unavailable', updated_at=? WHERE id=?", (now, str(payload.get("id") or "")))
     else:
         raise ValueError(f"不支持的数据库操作：{action}")
     db.commit()
@@ -1289,7 +1519,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "add", "status", "rename", "delete", "media_sync_project", "media_get", "media_get_photo", "batch_list", "batch_commit_compare", "media_create_version", "media_update_version", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_record_compare", "team_patch_list", "team_patch_replace", "team_patch_update"))
+    parser.add_argument("action", nargs="?", choices=("init", "add", "status", "rename", "delete", "restore_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "batch_register_baseline", "batch_commit_compare", "media_create_version", "media_update_version", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_record_compare", "team_patch_list", "team_patch_replace", "team_patch_update", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")
