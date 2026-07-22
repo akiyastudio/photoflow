@@ -117,7 +117,7 @@ html.dark .brand-logo-dark-only { display: block; }
 @container (max-width: 1040px) {
   .project-toolbar .compact-hide-slider { display:none !important; }
 }
-@container (max-width: 860px) {
+@container (max-width: 680px) {
   .project-toolbar .compact-hide-file-action { display:none !important; }
 }
 .toolbar-divider { align-self:stretch; width:1px; margin:.3rem .45rem; background:#e2e8f0; }

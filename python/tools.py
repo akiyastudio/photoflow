@@ -6,10 +6,8 @@ TOOLS = {
     "catch": "catch",
     "classify": "classify",
     "cut_video": "cut_video",
-    "face_patch": "face_patch",
     "png_to_jpg": "png_to_jpg",
     "rename": "rename",
-    "research": "research",
     "thumbnail_db": "thumbnail_db",
     "video_preview": "video_preview",
 }

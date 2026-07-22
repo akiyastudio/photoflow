@@ -7,11 +7,20 @@ const os = require('os');
 const { pathToFileURL } = require('url');
 const { exiftool } = require('exiftool-vendored');
 const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY } = require('./thumbnail-pipeline.cjs');
+const { COMPONENT_DEFINITIONS, createComponentRegistry } = require('./component-registry.cjs');
 
 // Keep user-facing OS labels localized while runtime data stays in a stable,
 // Latin-only application directory name.
 app.setPath('userData', path.join(app.getPath('appData'), 'Photoflow'));
 app.setName('照片流');
+
+const projectRoot = path.join(__dirname, '..');
+const componentRegistry = createComponentRegistry({
+  resourcesPath: process.resourcesPath,
+  executablePath: process.execPath,
+  projectRoot,
+  isPackaged: app.isPackaged,
+});
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 
@@ -310,13 +319,69 @@ function createWindow() {
 }
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'face_patch', 'rename', 'research', 'thumbnail_db', 'video_preview']);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'thumbnail_db', 'video_preview']);
+
+const getDevelopmentPython = () => {
+  const isWin = process.platform === 'win32';
+  const venvPython = isWin
+    ? path.join(projectRoot, '.venv', 'Scripts', 'python.exe')
+    : path.join(projectRoot, '.venv', 'bin', 'python');
+  return fs.existsSync(venvPython) ? venvPython : 'python';
+};
+
+const getDevelopmentComponentRunConfig = (componentId, args) => {
+  const scripts = {
+    'team-retouch': path.join(projectRoot, 'components', 'team-retouch', 'team_retouch.py'),
+    'research-tools': path.join(projectRoot, 'python', 'research.py'),
+  };
+  const scriptPath = scripts[componentId];
+  if (!scriptPath || !fs.existsSync(scriptPath)) return null;
+  if (componentId === 'team-retouch') {
+    const modelPath = path.join(path.dirname(scriptPath), 'models', 'person_detection_mediapipe_2023mar.onnx');
+    if (!fs.existsSync(modelPath)) return null;
+  }
+  return { command: getDevelopmentPython(), args: ['-u', scriptPath, ...args] };
+};
+
+const getComponentRunConfig = (componentId, args = []) => {
+  if (!app.isPackaged) {
+    const development = getDevelopmentComponentRunConfig(componentId, args);
+    if (development) return development;
+  }
+  const component = componentRegistry.resolve(componentId);
+  if (!component) {
+    const error = new Error(`未安装组件：${COMPONENT_DEFINITIONS[componentId]?.name || componentId}`);
+    error.code = 'COMPONENT_MISSING';
+    throw error;
+  }
+  return { command: component.command, args: [...component.argsPrefix, ...args] };
+};
+
+const getComponentStatuses = () => Object.keys(COMPONENT_DEFINITIONS).map(id => {
+  if (!app.isPackaged) {
+    const development = getDevelopmentComponentRunConfig(id, []);
+    if (development) return {
+      ...COMPONENT_DEFINITIONS[id], installed: true, compatible: true, version: 'development',
+      path: id === 'research-tools' ? path.join(projectRoot, 'python') : path.join(projectRoot, 'components', id),
+      source: 'development', sizeBytes: 0,
+    };
+  }
+  return componentRegistry.inspect(id);
+});
+
+const requireTeamRetouchComponent = () => {
+  const component = getComponentStatuses().find(item => item.id === 'team-retouch');
+  if (!component?.installed) throw new Error('未安装“多人裁片修图”可选组件；请在设置中打开组件文件夹并离线安装');
+  return component;
+};
 
 const getRunConfig = (scriptName, args) => {
   // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
   const baseName = scriptName.replace('.py', '');
 
   const isWin = process.platform === 'win32';
+
+  if (baseName === 'research') return getComponentRunConfig('research-tools', args);
 
   if (app.isPackaged) {
     // 生产环境：根据平台决定是否有 .exe 后缀
@@ -345,27 +410,17 @@ const getRunConfig = (scriptName, args) => {
     };
   } else {
     // 【开发环境】使用 python 解释器运行对应的 .py 脚本
-    const rootDir = path.join(__dirname, '..');
-    
-    // 寻找 Python 解释器
-    const venvPython = isWin
-      ? path.join(rootDir, '.venv', 'Scripts', 'python.exe')
-      : path.join(rootDir, '.venv', 'bin', 'python');
-    
-    const pythonExec = fs.existsSync(venvPython) ? venvPython : 'python';
-    
     // 脚本路径: python/classify.py
-    const scriptPath = path.join(rootDir, 'python', `${baseName}.py`);
+    const scriptPath = path.join(projectRoot, 'python', `${baseName}.py`);
     
     return {
-      command: pythonExec,
+      command: getDevelopmentPython(),
       args: ['-u', scriptPath, ...args] // -u 强制无缓冲输出
     };
   }
 };
 
-const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000) => new Promise((resolve, reject) => {
-  const run = getRunConfig(scriptName, args);
+const runJsonCommand = (run, label, timeoutMs = 20 * 60 * 1000) => new Promise((resolve, reject) => {
   const child = spawn(run.command, run.args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
@@ -384,19 +439,25 @@ const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000) => ne
   child.stderr.on('data', data => { stderr = (stderr + data).slice(-16000); });
   child.on('error', error => fail(error));
   child.on('close', code => {
-    if (code !== 0) return fail(new Error(stderr.trim() || `${scriptName} 处理失败（代码 ${code}）`));
+    if (code !== 0) return fail(new Error(stderr.trim() || `${label} 处理失败（代码 ${code}）`));
     const lines = stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
     for (let index = lines.length - 1; index >= 0; index -= 1) {
       try { return succeed(JSON.parse(lines[index])); }
       catch { /* keep looking for the last JSON result */ }
     }
-    fail(new Error(stderr.trim() || `${scriptName} 未返回有效结果`));
+    fail(new Error(stderr.trim() || `${label} 未返回有效结果`));
   });
   const timer = setTimeout(() => {
     if (!child.killed) child.kill();
-    fail(new Error(`${scriptName} 处理超时`));
+    fail(new Error(`${label} 处理超时`));
   }, timeoutMs);
 });
+
+const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000) =>
+  runJsonCommand(getRunConfig(scriptName, args), scriptName, timeoutMs);
+
+const runComponentJsonAction = (componentId, args, timeoutMs = 20 * 60 * 1000) =>
+  runJsonCommand(getComponentRunConfig(componentId, args), COMPONENT_DEFINITIONS[componentId]?.name || componentId, timeoutMs);
 
 // 检查更新
 const UPDATE_CONFIG = {
@@ -455,9 +516,50 @@ ipcMain.handle('window-toggle-maximize', event => {
 ipcMain.on('window-close', event => BrowserWindow.fromWebContents(event.sender)?.close());
 ipcMain.handle('window-is-maximized', event => BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false);
 
+ipcMain.handle('components-list', async () => {
+  const components = getComponentStatuses();
+  const gpu = components.find(component => component.id === 'team-retouch');
+  if (gpu?.installed) {
+    try {
+      const probe = await runComponentJsonAction('team-retouch', ['probe'], 15000);
+      const runtimeAvailable = Boolean(probe.componentAvailable ?? probe.cpuAvailable);
+      Object.assign(gpu, {
+        runtimeAvailable,
+        gpuAvailable: Boolean(probe.gpuAvailable),
+        mergeAvailable: Boolean(probe.mergeAvailable),
+        provider: probe.provider || '',
+        providers: Array.isArray(probe.providers) ? probe.providers : [],
+        runtimeError: runtimeAvailable ? '' : (probe.error || ''),
+        gpuError: probe.gpuAvailable ? '' : (probe.error || ''),
+      });
+    } catch (error) {
+      Object.assign(gpu, { runtimeAvailable: false, provider: '', providers: [], runtimeError: error.message || String(error) });
+    }
+  }
+  return { success: true, components, installPath: componentRegistry.installRoot };
+});
+
+ipcMain.handle('components-open-folder', async () => {
+  try {
+    const installPath = componentRegistry.ensureInstallRoot();
+    const error = await shell.openPath(installPath);
+    if (error) throw new Error(error);
+    return { success: true, path: installPath };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
 // 运行 Python 脚本
 ipcMain.on('run-python', (event, scriptName, args = []) => {
-  const { command, args: spawnArgs } = getRunConfig(scriptName, args);
+  let command;
+  let spawnArgs;
+  try {
+    ({ command, args: spawnArgs } = getRunConfig(scriptName, args));
+  } catch (error) {
+    event.sender.send('python-event', { type: 'error', message: error.message || String(error), scriptName });
+    return;
+  }
 
   // --- 插入权限修复代码开始 ---
   if (process.platform === 'darwin' && app.isPackaged) {
@@ -555,6 +657,16 @@ const getConfigPath = () => {
   return path.join(getConfigDir(), 'photoflow_config.json');
 };
 
+const readSavedConfig = () => {
+  try {
+    const configPath = getConfigPath();
+    return fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
+  } catch (error) {
+    writeLog('warn', 'Unable to read saved configuration', { error: error.message || String(error) });
+    return {};
+  }
+};
+
 ipcMain.handle('getUserPath', async (event) => {
   try {
     const userPath = app.getPath('home').replace(/\\/g, '/');
@@ -647,12 +759,13 @@ ipcMain.handle('save-birthdays', async (event, newContent) => {
 
 ipcMain.handle('check-script', async (event, scriptName) => {
   try {
+    const baseName = scriptName.replace('.py', '');
+    if (baseName === 'research') return Boolean(getComponentStatuses().find(component => component.id === 'research-tools')?.installed);
     if (!app.isPackaged) {
       console.log(`[开发模式] 自动放行组件检查: ${scriptName}`);
       return true; 
     }
 
-    const baseName = scriptName.replace('.py', '');
     const isWin = process.platform === 'win32';
     const exeSuffix = isWin ? '.exe' : '';
     // 打包后去 resources/python 目录下寻找 Python 引擎文件
@@ -1295,8 +1408,14 @@ const runMediaCacheMaintenance = async cacheDir => {
     // Access times only need a full refresh when eviction is actually needed.
     const refreshed = await refreshMediaCacheIndex(directory);
     const oldest = [...refreshed.files.entries()].sort((left, right) => left[1].used - right[1].used);
+    const protectedCachePaths = new Set([...trackedVersionThumbnailCopies.values()].map(pending => {
+      const resolved = path.resolve(pending.cachePath);
+      return process.platform === 'win32' ? resolved.toLocaleLowerCase() : resolved;
+    }));
     for (const [filePath, record] of oldest) {
       if (refreshed.totalBytes <= refreshed.maxBytes) break;
+      const cacheKey = process.platform === 'win32' ? path.resolve(filePath).toLocaleLowerCase() : path.resolve(filePath);
+      if (protectedCachePaths.has(cacheKey)) continue;
       try { await fs.promises.unlink(filePath); } catch { continue; }
       refreshed.files.delete(filePath);
       refreshed.totalBytes -= record.size;
@@ -1358,15 +1477,103 @@ const mediaSourceCacheKey = sourcePath => process.platform === 'win32' ? path.re
 const rawPreviewCacheFile = (sourcePath, stat, cacheDir) => path.join(cacheDir, crypto.createHash('sha256').update(`${mediaSourceCacheKey(sourcePath)}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
 const mediaThumbnailCacheFile = (sourcePath, stat, cacheDir, requestedSize, version = THUMBNAIL_VERSION) => path.join(cacheDir, crypto.createHash('sha256').update(`thumbnail|v${version}|${requestedSize}|${mediaSourceCacheKey(sourcePath)}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
 
+const isCompleteJpegBuffer = buffer => buffer.length >= 128
+  && buffer[0] === 0xff && buffer[1] === 0xd8
+  && buffer[buffer.length - 2] === 0xff && buffer[buffer.length - 1] === 0xd9;
+
+const readCompleteJpegBuffer = async filePath => {
+  let handle;
+  try {
+    // Keep the handle open until the complete payload is in memory. On Windows
+    // this also prevents a concurrent cache cleanup from deleting the source.
+    handle = await fs.promises.open(filePath, 'r');
+    const buffer = await handle.readFile();
+    return isCompleteJpegBuffer(buffer) ? buffer : null;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+};
+
+const writeVersionThumbnailAtomically = async (targetPath, buffer) => {
+  if (isCompleteJpegFile(targetPath)) return;
+  const temporaryPath = `${targetPath}.tmp-${crypto.randomUUID()}`;
+  try {
+    await fs.promises.writeFile(temporaryPath, buffer, { flag: 'wx' });
+    try {
+      await fs.promises.rename(temporaryPath, targetPath);
+    } catch (error) {
+      // Another finalizer may have won the race. Keep its complete thumbnail;
+      // replace only an incomplete leftover.
+      if (isCompleteJpegFile(targetPath)) return;
+      if (!['EEXIST', 'EPERM', 'EACCES'].includes(error?.code)) throw error;
+      await fs.promises.unlink(targetPath).catch(unlinkError => {
+        if (unlinkError?.code !== 'ENOENT') throw unlinkError;
+      });
+      await fs.promises.rename(temporaryPath, targetPath);
+    }
+  } finally {
+    await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+};
+
 const finalizeTrackedVersionThumbnail = async pending => {
-  if (!isCompleteJpegFile(pending.cachePath)) return false;
   await fs.promises.mkdir(path.dirname(pending.targetPath), { recursive: true });
-  await fs.promises.copyFile(pending.cachePath, pending.targetPath);
+  if (!isCompleteJpegFile(pending.targetPath)) {
+    const buffer = await readCompleteJpegBuffer(pending.cachePath);
+    if (!buffer) return false;
+    await writeVersionThumbnailAtomically(pending.targetPath, buffer);
+  }
   await runMediaDatabase(pending.workspaceRoot, 'media_set_thumbnail', {
     versionId: pending.versionId,
     thumbnailPath: pending.targetPath,
   });
   return true;
+};
+
+const persistTrackedVersionThumbnail = async pending => {
+  if (pending.finalizing) return;
+  pending.finalizing = true;
+  const sourceKey = mediaSourceCacheKey(pending.filePath);
+  try {
+    if (trackedVersionThumbnailCopies.get(sourceKey) !== pending) return;
+    if (await finalizeTrackedVersionThumbnail(pending)) {
+      if (trackedVersionThumbnailCopies.get(sourceKey) === pending) trackedVersionThumbnailCopies.delete(sourceKey);
+      return;
+    }
+    if (pending.retryCount >= 1) {
+      if (trackedVersionThumbnailCopies.get(sourceKey) === pending) trackedVersionThumbnailCopies.delete(sourceKey);
+      writeLog('warn', 'Unable to finalize ID-based version thumbnail after retry', { versionId: pending.versionId, filePath: pending.filePath });
+      return;
+    }
+    pending.retryCount += 1;
+    const result = await thumbnailPipeline.request({
+      filePath: pending.filePath,
+      kind: pending.kind,
+      cacheConfig: pending.cacheConfig,
+      requestedSize: 640,
+      priority: pending.priority,
+      requireDisk: true,
+      forceRegenerate: true,
+    });
+    if (result.state === 'READY') {
+      if (await finalizeTrackedVersionThumbnail(pending)) {
+        if (trackedVersionThumbnailCopies.get(sourceKey) === pending) trackedVersionThumbnailCopies.delete(sourceKey);
+      } else {
+        if (trackedVersionThumbnailCopies.get(sourceKey) === pending) trackedVersionThumbnailCopies.delete(sourceKey);
+        writeLog('warn', 'Unable to finalize ID-based version thumbnail after retry', { versionId: pending.versionId, filePath: pending.filePath });
+      }
+    } else if (result.state === 'FAILED' || result.state === 'MISSING') {
+      if (trackedVersionThumbnailCopies.get(sourceKey) === pending) trackedVersionThumbnailCopies.delete(sourceKey);
+    }
+  } catch (error) {
+    if (trackedVersionThumbnailCopies.get(sourceKey) === pending) trackedVersionThumbnailCopies.delete(sourceKey);
+    writeLog('warn', 'Unable to finalize ID-based version thumbnail', { versionId: pending.versionId, filePath: pending.filePath, error: error.message || String(error) });
+  } finally {
+    pending.finalizing = false;
+  }
 };
 
 const ensureTrackedVersionThumbnail = async ({ workspaceRoot, projectPath, photoId, versionId, filePath, priority = PRIORITY.nearby }) => {
@@ -1380,15 +1587,20 @@ const ensureTrackedVersionThumbnail = async ({ workspaceRoot, projectPath, photo
     const pending = {
       workspaceRoot,
       versionId,
+      filePath,
+      kind,
+      cacheConfig,
+      priority,
+      retryCount: 0,
+      finalizing: false,
       cachePath: mediaThumbnailCacheFile(filePath, stat, getMediaCacheDir(cacheConfig), 640, THUMBNAIL_VERSION),
       targetPath: path.join(projectPath, 'Thumbnails', photoId, `${versionId}.jpg`),
     };
     if (await finalizeTrackedVersionThumbnail(pending)) return;
     trackedVersionThumbnailCopies.set(mediaSourceCacheKey(filePath), pending);
-    const result = await thumbnailPipeline.request({ filePath, kind, cacheConfig, requestedSize: 640, priority });
-    if (result.state === 'READY' && await finalizeTrackedVersionThumbnail(pending)) {
-      trackedVersionThumbnailCopies.delete(mediaSourceCacheKey(filePath));
-    }
+    const result = await thumbnailPipeline.request({ filePath, kind, cacheConfig, requestedSize: 640, priority, requireDisk: true });
+    if (result.state === 'READY') await persistTrackedVersionThumbnail(pending);
+    else if (result.state === 'FAILED' || result.state === 'MISSING') trackedVersionThumbnailCopies.delete(mediaSourceCacheKey(filePath));
   } catch (error) {
     trackedVersionThumbnailCopies.delete(mediaSourceCacheKey(filePath));
     writeLog('warn', 'Unable to persist ID-based version thumbnail', { versionId, filePath, error: error.message || String(error) });
@@ -1621,10 +1833,7 @@ thumbnailPipeline = new ThumbnailPipeline({
   notify: update => {
     const trackedThumbnail = trackedVersionThumbnailCopies.get(mediaSourceCacheKey(update.filePath));
     if (trackedThumbnail && update.state === 'READY') {
-      trackedVersionThumbnailCopies.delete(mediaSourceCacheKey(update.filePath));
-      void finalizeTrackedVersionThumbnail(trackedThumbnail).catch(error => {
-        writeLog('warn', 'Unable to finalize ID-based version thumbnail', { versionId: trackedThumbnail.versionId, error: error.message || String(error) });
-      });
+      void persistTrackedVersionThumbnail(trackedThumbnail);
     } else if (trackedThumbnail && (update.state === 'FAILED' || update.state === 'MISSING')) {
       trackedVersionThumbnailCopies.delete(mediaSourceCacheKey(update.filePath));
     }
@@ -2569,6 +2778,30 @@ const resolveProjectEntry = (workspacePath, status, projectName, relativePath = 
 };
 
 const cleanVersionName = value => String(value || '').trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/[. ]+$/g, '').slice(0, 80);
+const supportedVersionFileKind = filePath => {
+  const extension = path.extname(filePath).toLowerCase();
+  if (RAW_EXTENSIONS.has(extension)) return 'raw';
+  if (VIDEO_EXTENSIONS.has(extension)) return 'video';
+  if (IMAGE_EXTENSIONS.has(extension)) return 'image';
+  return '';
+};
+
+ipcMain.handle('workspace-version-choose-file', async () => {
+  try {
+    const choice = await dialog.showOpenDialog(mainWindow, {
+      title: '选择新的图片或视频版本',
+      properties: ['openFile'],
+      filters: [{ name: '图片、RAW 和视频', extensions: [...new Set([...IMAGE_EXTENSIONS, ...RAW_EXTENSIONS, ...VIDEO_EXTENSIONS])].map(value => value.slice(1)) }, { name: '所有文件', extensions: ['*'] }]
+    });
+    if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true };
+    const filePath = path.resolve(choice.filePaths[0]);
+    const kind = supportedVersionFileKind(filePath);
+    if (!kind || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) throw new Error('请选择可读取的图片、RAW 或视频文件');
+    return { success: true, filePath, fileName: path.basename(filePath), kind };
+  } catch (error) {
+    return { success: false, error: error.message || String(error) };
+  }
+});
 
 ipcMain.handle('workspace-media-versions', async (_event, workspacePath, status, projectName, relativePath) => {
   try {
@@ -2592,6 +2825,91 @@ ipcMain.handle('workspace-media-versions', async (_event, workspacePath, status,
   }
 });
 
+ipcMain.handle('workspace-version-batches', async (_event, workspacePath, projectName) => {
+  try {
+    const workspaceRoot = ensureWorkspace(workspacePath);
+    if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+    return await runMediaDatabase(workspaceRoot, 'batch_list', { projectName });
+  } catch (error) {
+    return { success: false, error: error.message || String(error), batches: [] };
+  }
+});
+
+const buildVersionBatchImportKey = async (folderA, folderB) => {
+  const folderStat = await fs.promises.stat(folderA);
+  const parentIdentity = folderStat.ino ? `${folderStat.dev}:${folderStat.ino}` : path.resolve(folderA).toLocaleLowerCase();
+  const tokens = [`parent:${parentIdentity}`];
+  const entries = await fs.promises.readdir(folderB, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const filePath = path.join(folderB, entry.name);
+    if (!supportedVersionFileKind(filePath)) continue;
+    const stat = await fs.promises.stat(filePath);
+    const sampleSize = Math.min(64 * 1024, stat.size);
+    const handle = await fs.promises.open(filePath, 'r');
+    try {
+      const head = Buffer.alloc(sampleSize);
+      if (sampleSize) await handle.read(head, 0, sampleSize, 0);
+      const tail = Buffer.alloc(sampleSize);
+      if (sampleSize && stat.size > sampleSize) await handle.read(tail, 0, sampleSize, stat.size - sampleSize);
+      const content = crypto.createHash('sha256').update(head).update(tail).digest('hex').slice(0, 24);
+      // File identity and sampled content make the key stable across the
+      // optional source rename while still changing when a return folder is
+      // edited or receives additional files.
+      tokens.push(`${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${content}`);
+    } finally {
+      await handle.close();
+    }
+  }
+  tokens.sort();
+  return `folder-snapshot:${crypto.createHash('sha256').update(tokens.join('|')).digest('hex')}`;
+};
+
+ipcMain.handle('workspace-version-batch-commit', async (_event, workspacePath, status, projectName, request = {}) => {
+  try {
+    const workspaceRoot = ensureWorkspace(workspacePath);
+    if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+    const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const resolveBatchFolder = value => {
+      const folderPath = path.resolve(String(value || ''));
+      const relative = path.relative(projectPath, folderPath);
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('批次必须选择项目内的两个不同子文件夹');
+      if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) throw new Error('批次文件夹不存在');
+      return folderPath;
+    };
+    const folderA = resolveBatchFolder(request.folderA);
+    const folderB = resolveBatchFolder(request.folderB);
+    if (folderA.toLocaleLowerCase() === folderB.toLocaleLowerCase()) throw new Error('对照批次和新返图不能是同一个文件夹');
+    const importKey = await buildVersionBatchImportKey(folderA, folderB);
+    const matches = (Array.isArray(request.matches) ? request.matches : []).slice(0, 20000).map(match => {
+      const reference = String(match.reference || '');
+      const source = String(match.source || '');
+      if (!reference || path.basename(reference) !== reference || !source || path.basename(source) !== source) throw new Error('匹配结果包含无效文件名');
+      return {
+        reference,
+        source,
+        target: String(match.target || source),
+        distance: Number.isFinite(Number(match.distance)) ? Number(match.distance) : 1000000,
+        confidence: String(match.confidence || '').slice(0, 20),
+      };
+    });
+    const result = await runMediaDatabase(workspaceRoot, 'batch_commit_compare', {
+      projectName,
+      folderA,
+      folderB,
+      importKey,
+      displayName: cleanVersionName(request.displayName || path.basename(folderB)) || path.basename(folderB),
+      renameSources: Boolean(request.renameSources),
+      matches,
+    });
+    writeLog('info', 'Version batch committed', { projectName, folderA, folderB, matchCount: matches.length, batch: result.batch?.sequence });
+    return result;
+  } catch (error) {
+    writeLog('error', 'Unable to commit version batch', { projectName, error: error.message || String(error) });
+    return { success: false, error: error.message || String(error) };
+  }
+});
+
 ipcMain.handle('workspace-version-create', async (_event, workspacePath, status, projectName, request = {}) => {
   let createdPath = '';
   try {
@@ -2605,25 +2923,31 @@ ipcMain.handle('workspace-version-create', async (_event, workspacePath, status,
 
     let sourcePath = parent.filePath;
     if (request.mode === 'import') {
-      const choice = await dialog.showOpenDialog(mainWindow, {
-        title: '选择处理后的图片或视频',
-        properties: ['openFile'],
-        filters: [{ name: '图片和视频', extensions: [...new Set([...IMAGE_EXTENSIONS, ...RAW_EXTENSIONS, ...VIDEO_EXTENSIONS])].map(value => value.slice(1)) }, { name: '所有文件', extensions: ['*'] }]
-      });
-      if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, ...bundle };
-      sourcePath = path.resolve(choice.filePaths[0]);
+      if (request.sourceFilePath) sourcePath = path.resolve(String(request.sourceFilePath));
+      else {
+        const choice = await dialog.showOpenDialog(mainWindow, {
+          title: '选择处理后的图片或视频',
+          properties: ['openFile'],
+          filters: [{ name: '图片和视频', extensions: [...new Set([...IMAGE_EXTENSIONS, ...RAW_EXTENSIONS, ...VIDEO_EXTENSIONS])].map(value => value.slice(1)) }, { name: '所有文件', extensions: ['*'] }]
+        });
+        if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, ...bundle };
+        sourcePath = path.resolve(choice.filePaths[0]);
+      }
     }
     if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) throw new Error('选择的版本文件不存在');
     const sourceExtension = path.extname(sourcePath).toLowerCase();
     if (!IMAGE_EXTENSIONS.has(sourceExtension) && !RAW_EXTENSIONS.has(sourceExtension) && !VIDEO_EXTENSIONS.has(sourceExtension)) throw new Error('选择的文件不是支持的图片或视频');
 
-    const nextNumber = Math.max(-1, ...(bundle.versions || []).map(version => Number(version.versionNumber))) + 1;
+    const nextNumber = Number.isInteger(bundle.nextVersionNumber)
+      ? bundle.nextVersionNumber
+      : Math.max(-1, ...(bundle.versions || []).map(version => Number(version.versionNumber))) + 1;
     const versionId = crypto.randomUUID();
     const versionDirectory = path.join(projectPath, 'Versions', request.photoId);
     await fs.promises.mkdir(versionDirectory, { recursive: true });
     const suffix = request.mode === 'import' ? sourceExtension : path.extname(parent.filePath);
-    createdPath = path.join(versionDirectory, `v${String(nextNumber).padStart(3, '0')}${suffix}`);
-    if (fs.existsSync(createdPath)) throw new Error(`版本文件已存在：${path.basename(createdPath)}`);
+    const originalStem = cleanVersionName(path.parse(bundle.photo?.originalName || parent.filePath).name) || '素材';
+    createdPath = path.join(versionDirectory, `${originalStem}_${nextNumber + 1}${suffix}`);
+    if (fs.existsSync(createdPath)) createdPath = path.join(versionDirectory, `${originalStem}_${nextNumber + 1}-${versionId.slice(0, 8)}${suffix}`);
     await fs.promises.copyFile(sourcePath, createdPath, fs.constants.COPYFILE_EXCL);
     const result = await runMediaDatabase(workspaceRoot, 'media_create_version', {
       versionId,
@@ -2755,6 +3079,7 @@ ipcMain.handle('workspace-open-version', async (_event, filePath) => {
 
 ipcMain.handle('workspace-team-patches', async (_event, workspacePath, status, projectName, relativePath) => {
   try {
+    requireTeamRetouchComponent();
     const workspaceRoot = ensureWorkspace(workspacePath);
     if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
     const filePath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
@@ -2777,14 +3102,17 @@ ipcMain.handle('workspace-team-patch-detect', async (_event, workspacePath, stat
     if (!IMAGE_EXTENSIONS.has(path.extname(base.filePath).toLowerCase())) throw new Error('多人修脸目前不直接处理 RAW 或视频');
     const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
     const outputDirectory = path.join(projectPath, 'Patches', request.photoId, request.baseVersionId, 'exports');
-    const detected = await runPythonJsonAction('face_patch.py', ['detect', '--input', base.filePath, '--output-dir', outputDirectory]);
+    const detectionArgs = ['detect', '--input', base.filePath, '--output-dir', outputDirectory];
+    const useGpu = readSavedConfig().personDetection?.useGpu !== false;
+    requireTeamRetouchComponent();
+    const detected = await runComponentJsonAction('team-retouch', [...detectionArgs, '--provider', useGpu ? 'auto' : 'cpu']);
     const patchResult = await runMediaDatabase(workspaceRoot, 'team_patch_replace', {
       photoId: request.photoId,
       baseVersionId: request.baseVersionId,
       tasks: detected.tasks || [],
     });
     writeLog('info', 'Team retouch people detected', { projectName, photoId: request.photoId, baseVersionId: request.baseVersionId, count: patchResult.tasks.length, detector: detected.detector });
-    return { success: true, photo: bundle.photo, versions: bundle.versions, tasks: patchResult.tasks, detection: { detector: detected.detector, width: detected.width, height: detected.height } };
+    return { success: true, photo: bundle.photo, versions: bundle.versions, tasks: patchResult.tasks, detection: { detector: detected.detector, backend: detected.backend || 'cpu', provider: detected.provider || '', width: detected.width, height: detected.height, fallbackReason: detected.fallbackReason || '' } };
   } catch (error) {
     writeLog('error', 'Unable to detect team retouch subjects', { projectName, error: error.message || String(error) });
     return { success: false, error: error.message || String(error), versions: [], tasks: [] };
@@ -2793,6 +3121,7 @@ ipcMain.handle('workspace-team-patch-detect', async (_event, workspacePath, stat
 
 ipcMain.handle('workspace-team-patch-update', async (_event, workspacePath, request = {}) => {
   try {
+    requireTeamRetouchComponent();
     const payload = {
       taskId: request.taskId,
       ...(request.personName !== undefined ? { personName: String(request.personName).trim().slice(0, 80) || '未命名人物' } : {}),
@@ -2807,6 +3136,7 @@ ipcMain.handle('workspace-team-patch-update', async (_event, workspacePath, requ
 ipcMain.handle('workspace-team-patch-upload', async (_event, workspacePath, request = {}) => {
   let copiedPath = '';
   try {
+    requireTeamRetouchComponent();
     const workspaceRoot = ensureWorkspace(workspacePath);
     const patchResult = await runMediaDatabase(workspaceRoot, 'team_patch_list', { photoId: request.photoId });
     const task = patchResult.tasks.find(item => item.id === request.taskId);
@@ -2838,6 +3168,7 @@ ipcMain.handle('workspace-team-patch-upload', async (_event, workspacePath, requ
 
 ipcMain.handle('workspace-team-patch-open', async (_event, filePath) => {
   try {
+    requireTeamRetouchComponent();
     const target = path.resolve(String(filePath || ''));
     if (!fs.existsSync(target)) throw new Error('Patch 文件不存在');
     shell.showItemInFolder(target);
@@ -2850,6 +3181,7 @@ ipcMain.handle('workspace-team-patch-open', async (_event, filePath) => {
 ipcMain.handle('workspace-team-patch-merge', async (_event, workspacePath, status, projectName, request = {}) => {
   let createdPath = '';
   try {
+    requireTeamRetouchComponent();
     const workspaceRoot = ensureWorkspace(workspacePath);
     const bundle = await runMediaDatabase(workspaceRoot, 'media_get_photo', { photoId: request.photoId });
     const base = bundle.versions?.find(version => version.id === request.baseVersionId);
@@ -2868,7 +3200,7 @@ ipcMain.handle('workspace-team-patch-merge', async (_event, workspacePath, statu
     await fs.promises.mkdir(mergeDirectory, { recursive: true });
     const manifestPath = path.join(mergeDirectory, `merge-${versionId}.json`);
     await fs.promises.writeFile(manifestPath, JSON.stringify({ photoId: request.photoId, baseVersionId: base.id, tasks }, null, 2), 'utf8');
-    const merged = await runPythonJsonAction('face_patch.py', ['merge', '--input', base.filePath, '--manifest', manifestPath, '--output', createdPath], 60 * 60 * 1000);
+    const merged = await runComponentJsonAction('team-retouch', ['merge', '--input', base.filePath, '--manifest', manifestPath, '--output', createdPath], 60 * 60 * 1000);
     const versionName = cleanVersionName(request.versionName) || `多人修脸合成 ${nextNumber}`;
     const conflictThreshold = Math.max(500, Number(merged.width || 0) * Number(merged.height || 0) * 0.00005);
     const needsReview = Number(merged.conflictPixels || 0) > conflictThreshold;
