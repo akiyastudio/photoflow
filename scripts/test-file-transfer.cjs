@@ -4,9 +4,13 @@ const os = require('os');
 const path = require('path');
 const {
   CANCELLED_CODE,
+  DEFAULT_SMALL_FILE_CONCURRENCY,
   assertInside,
+  collectCopyPlan,
   copyFileAtomic,
+  copyPlannedFiles,
   moveFileAtomic,
+  removeCreatedPasteTargets,
   uniqueDestination,
 } = require('../electron/services/file-transfer-service.cjs');
 
@@ -42,6 +46,57 @@ const run = async () => {
     );
     assert.strictEqual(fs.existsSync(cancelTarget), false);
     assert.strictEqual(fs.readdirSync(root).some(name => name.endsWith('.photoflow-part')), false);
+
+    const batchSource = path.join(root, 'batch-source');
+    const batchTarget = path.join(root, 'batch-target');
+    fs.mkdirSync(path.join(batchSource, 'nested', 'empty'), { recursive: true });
+    for (let index = 0; index < 96; index += 1) {
+      const directory = index % 2 ? batchSource : path.join(batchSource, 'nested');
+      fs.writeFileSync(path.join(directory, `small-${index}.bin`), Buffer.alloc(8 * 1024, index));
+    }
+    fs.writeFileSync(path.join(batchSource, 'large.bin'), Buffer.alloc(3 * 1024 * 1024, 0x4b));
+    const batchPlan = [];
+    await collectCopyPlan(batchSource, batchTarget, batchPlan);
+    let batchBytesCopied = 0;
+    let batchFilesCopied = 0;
+    const batchCreated = [];
+    const batchStats = await copyPlannedFiles(batchPlan, {
+      destinationRoot: root,
+      onCreated: target => batchCreated.push(target),
+      onProgress: progress => {
+        batchBytesCopied += progress.bytesDelta;
+        if (progress.fileCompleted) batchFilesCopied += 1;
+      },
+    });
+    assert.strictEqual(batchStats.smallFilesCopied, 96);
+    assert.strictEqual(batchStats.largeFilesCopied, 1);
+    assert.strictEqual(batchStats.peakSmallConcurrency, DEFAULT_SMALL_FILE_CONCURRENCY);
+    assert.strictEqual(batchFilesCopied, 97);
+    assert.strictEqual(batchBytesCopied, batchPlan.reduce((sum, entry) => sum + entry.size, 0));
+    assert(batchCreated.includes(batchTarget));
+    assert.strictEqual(fs.readFileSync(path.join(batchTarget, 'nested', 'small-0.bin'))[0], 0);
+    assert.strictEqual(fs.statSync(path.join(batchTarget, 'large.bin')).size, 3 * 1024 * 1024);
+    assert(fs.statSync(path.join(batchTarget, 'nested', 'empty')).isDirectory());
+
+    const cancelBatchSource = path.join(root, 'cancel-batch-source');
+    const cancelBatchTarget = path.join(root, 'cancel-batch-target');
+    fs.mkdirSync(cancelBatchSource);
+    for (let index = 0; index < 32; index += 1) {
+      fs.writeFileSync(path.join(cancelBatchSource, `small-${index}.bin`), Buffer.alloc(512 * 1024, index));
+    }
+    const cancelBatchPlan = [];
+    await collectCopyPlan(cancelBatchSource, cancelBatchTarget, cancelBatchPlan);
+    let cancelBatch = false;
+    await assert.rejects(
+      copyPlannedFiles(cancelBatchPlan, {
+        isCancelled: () => cancelBatch,
+        onProgress: progress => { if (progress.fileCompleted) cancelBatch = true; },
+      }),
+      error => error.code === CANCELLED_CODE,
+    );
+    assert.strictEqual(fs.readdirSync(root, { recursive: true }).some(name => String(name).endsWith('.photoflow-part')), false);
+    await removeCreatedPasteTargets([cancelBatchTarget]);
+    assert.strictEqual(fs.existsSync(cancelBatchTarget), false);
 
     assert.strictEqual(assertInside(root, path.join(root, 'child'), 'test'), path.join(root, 'child'));
     assert.throws(() => assertInside(root, path.join(root, '..', 'outside'), 'test'), /超出允许的目录/);

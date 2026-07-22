@@ -6,7 +6,7 @@ const crypto = require('crypto');
 const os = require('os');
 const { pathToFileURL } = require('url');
 const { exiftool } = require('exiftool-vendored');
-const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY } = require('./thumbnail-pipeline.cjs');
+const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY, isThumbnailSizeSufficient } = require('./thumbnail-pipeline.cjs');
 const { createComponentRegistry } = require('./component-registry.cjs');
 const { registerBrollImportIpc } = require('./modules/broll-import.cjs');
 const { registerSystemIpc } = require('./modules/system-ipc.cjs');
@@ -158,8 +158,13 @@ const {
   assertExistingInside,
   assertInside,
   assertRegularFile,
+  CANCELLED_CODE,
+  collectCopyPlan,
   copyFileAtomic,
+  copyPlannedFiles,
   moveFileAtomic,
+  removeCreatedPasteTargets,
+  throwIfCancelled,
   uniqueDestination,
   capturePathIdentity,
   addUndoIdentities,
@@ -277,7 +282,22 @@ const ensureShellThumbnailProcess = () => {
       if (!request) continue;
       shellThumbnailRequests.delete(fields[0]);
       clearTimeout(request.timer);
-      request.resolve(fields[1] === '1' && fs.existsSync(request.targetPath));
+      let accepted = fields[1] === '1' && fs.existsSync(request.targetPath);
+      if (accepted) {
+        const thumbnail = nativeImage.createFromPath(request.targetPath);
+        const size = thumbnail.isEmpty() ? { width: 0, height: 0 } : thumbnail.getSize();
+        accepted = isThumbnailSizeSufficient(size.width, size.height, request.requestedSize);
+        if (!accepted) {
+          try { fs.unlinkSync(request.targetPath); } catch { /* the decoder fallback will recreate it */ }
+          writeLog('warn', 'Rejected undersized Windows Shell thumbnail', {
+            requestedSize: request.requestedSize,
+            actualWidth: size.width,
+            actualHeight: size.height,
+            sourcePath: request.sourcePath,
+          });
+        }
+      }
+      request.resolve(accepted);
     }
   });
   child.on('error', error => {
@@ -306,7 +326,7 @@ const copyWindowsShellThumbnailNow = (sourcePath, targetPath, requestedSize, cac
     // trapped behind the same blocked COM request.
     if (shellThumbnailProcess === child) stopShellThumbnailProcess();
   }, cacheOnly ? 1500 : 10000);
-  shellThumbnailRequests.set(requestId, { resolve, timer, targetPath });
+  shellThumbnailRequests.set(requestId, { resolve, timer, targetPath, requestedSize, sourcePath });
   const encode = value => Buffer.from(value, 'utf8').toString('base64');
   child.stdin.write(`${requestId}\t${requestedSize}\t${encode(sourcePath)}\t${encode(targetPath)}\t${cacheOnly ? 'cache' : 'generate'}\n`, error => {
     if (!error) return;
@@ -1420,60 +1440,6 @@ const videoPreviewJobs = new Map();
 
 
 
-class FileOperationCancelledError extends Error {
-  constructor() { super('操作已取消'); this.name = 'FileOperationCancelledError'; }
-}
-
-const assertFileOperationActive = job => {
-  if (job.cancelled) throw new FileOperationCancelledError();
-};
-
-const collectCopyPlan = async (source, destination, plan, job) => {
-  assertFileOperationActive(job);
-  const stat = await fs.promises.lstat(source);
-  if (stat.isDirectory()) {
-    plan.push({ kind: 'directory', source, destination, size: 0 });
-    const entries = await fs.promises.readdir(source);
-    for (const name of entries) await collectCopyPlan(path.join(source, name), path.join(destination, name), plan, job);
-    return;
-  }
-  if (!stat.isFile()) throw new Error(`不支持复制此文件类型：${path.basename(source)}`);
-  plan.push({ kind: 'file', source, destination, size: stat.size, mode: stat.mode, atime: stat.atime, mtime: stat.mtime });
-};
-
-const copyFileWithProgress = async (entry, job, onBytes, onCreated) => {
-  const sourceHandle = await fs.promises.open(entry.source, 'r');
-  let destinationHandle;
-  try {
-    destinationHandle = await fs.promises.open(entry.destination, 'wx', entry.mode);
-    onCreated();
-    const buffer = Buffer.allocUnsafe(1024 * 1024);
-    let position = 0;
-    while (true) {
-      assertFileOperationActive(job);
-      const { bytesRead } = await sourceHandle.read(buffer, 0, buffer.length, position);
-      if (!bytesRead) break;
-      await destinationHandle.write(buffer, 0, bytesRead, position);
-      position += bytesRead;
-      onBytes(bytesRead);
-    }
-    await destinationHandle.sync();
-    await fs.promises.utimes(entry.destination, entry.atime, entry.mtime);
-  } catch (error) {
-    await destinationHandle?.close().catch(() => undefined);
-    destinationHandle = undefined;
-    await fs.promises.rm(entry.destination, { force: true }).catch(() => undefined);
-    throw error;
-  } finally {
-    await sourceHandle.close().catch(() => undefined);
-    await destinationHandle?.close().catch(() => undefined);
-  }
-};
-
-const removeCreatedPasteTargets = async targets => {
-  for (const target of targets.slice().reverse()) await fs.promises.rm(target, { recursive: true, force: true }).catch(() => undefined);
-};
-
 const runWindowsClipboardScript = script => new Promise((resolve, reject) => {
   const encodedCommand = Buffer.from(script, 'utf16le').toString('base64');
   const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', encodedCommand], { windowsHide: true });
@@ -1694,7 +1660,7 @@ app.whenReady().then(async () => {
 
   registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, dialog, findLatestPhotoshop, fs, getConfigPath, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, shell, spawn, undefined, writeLog });
   registerWorkspaceIpc({ Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog });
-  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, Date, Error, FileOperationCancelledError, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertExistingInside, assertFileOperationActive, assertInside, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyFileWithProgress, crypto, dialog, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, mainWindow, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, removeCreatedPasteTargets, screen, workspaceRepository, writeLog, writeSystemFileClipboard });
+  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertExistingInside, assertInside, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, mainWindow, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, removeCreatedPasteTargets, screen, throwIfCancelled, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Array, Boolean, Buffer, Date, Error, IMAGE_EXTENSIONS, JSON, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearInterval, clearTimeout, crypto, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, getRunConfig, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setInterval, setTimeout, spawn, thumbnailService, trimMediaCache, undefined, videoPreviewJobs, writeLog });
   registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, buildVersionBatchImportKey, cleanVersionName, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, undefined, versionService, workspaceCatalogs, writeLog });
 

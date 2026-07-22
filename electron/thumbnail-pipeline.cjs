@@ -3,7 +3,9 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 // v3 switches media covers from square crops to full-frame thumbnails.
-const THUMBNAIL_VERSION = 3;
+// v4 rejects undersized Windows Shell images that were previously cached as
+// larger tiers and therefore looked visibly soft when the renderer enlarged them.
+const THUMBNAIL_VERSION = 4;
 const THUMBNAIL_SIZES = [
   { label: 'small', pixels: 320 },
   { label: 'medium', pixels: 640 },
@@ -15,6 +17,12 @@ const pathKey = filePath => process.platform === 'win32' ? path.resolve(filePath
 const chooseSize = requestedSize => {
   const requested = Math.max(1, Number(requestedSize) || 640);
   return THUMBNAIL_SIZES.find(item => requested <= item.pixels) || THUMBNAIL_SIZES[THUMBNAIL_SIZES.length - 1];
+};
+
+const isThumbnailSizeSufficient = (width, height, requestedSize) => {
+  const longestEdge = Math.max(Number(width) || 0, Number(height) || 0);
+  const requested = Math.max(1, Number(requestedSize) || 640);
+  return longestEdge >= Math.ceil(requested * 0.75);
 };
 
 class ThumbnailDatabaseClient {
@@ -643,4 +651,4 @@ class ThumbnailPipeline {
   }
 }
 
-module.exports = { ThumbnailPipeline, THUMBNAIL_SIZES, THUMBNAIL_VERSION, PRIORITY, chooseSize };
+module.exports = { ThumbnailPipeline, THUMBNAIL_SIZES, THUMBNAIL_VERSION, PRIORITY, chooseSize, isThumbnailSizeSufficient };

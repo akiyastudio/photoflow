@@ -1,6 +1,5 @@
 import argparse
 import ctypes
-import json
 import os
 import shutil
 import sys
@@ -8,8 +7,8 @@ import unicodedata
 from pathlib import Path
 
 import cv2
-import imagehash
 import numpy as np
+from event_protocol import log_error, log_info, log_progress, log_success
 from PIL import Image
 from send2trash import send2trash
 
@@ -28,31 +27,6 @@ def configure_text_streams():
 
 
 configure_text_streams()
-
-
-def emit(event_type, message, data=None, progress=None):
-    payload = {"type": event_type, "message": message}
-    if data is not None:
-        payload["data"] = data
-    if progress is not None:
-        payload["progress"] = progress
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
-
-
-def log_info(message):
-    emit("log", message)
-
-
-def log_success(message):
-    emit("success", message)
-
-
-def log_error(message):
-    emit("error", message)
-
-
-def log_progress(message, percent):
-    emit("progress", message, progress=int(percent))
 
 
 def sanitize_filename(filename):
@@ -313,10 +287,32 @@ def analyze_video(video_path, sensitivity, min_duration):
     return frames
 
 
+def perceptual_hash(image, hash_size=8, highfreq_factor=4):
+    """Return the same pHash value as ImageHash without its SciPy dependency."""
+    if hash_size < 2:
+        raise ValueError("Hash size must be greater than or equal to 2")
+    image_size = hash_size * highfreq_factor
+    pixels = np.asarray(
+        image.convert("L").resize((image_size, image_size), Image.Resampling.LANCZOS),
+        dtype=np.float64,
+    )
+    normalized_dct = cv2.dct(pixels)
+    # OpenCV uses an orthonormal DCT while ImageHash/SciPy used the unnormalised
+    # DCT-II. Restoring those scale factors keeps every existing hash bit stable.
+    scales = np.full(image_size, np.sqrt(2.0 * image_size), dtype=np.float64)
+    scales[0] = 2.0 * np.sqrt(image_size)
+    coefficients = normalized_dct * scales[:, None] * scales[None, :]
+    low_frequencies = coefficients[:hash_size, :hash_size]
+    bits = (low_frequencies > np.median(low_frequencies)).flatten()
+    bit_string = "".join("1" if value else "0" for value in bits)
+    width = (len(bit_string) + 3) // 4
+    return f"{int(bit_string, 2):0{width}x}"
+
+
 def calculate_image_hash(file_path):
     try:
         with Image.open(file_path) as image:
-            return str(imagehash.phash(image))
+            return perceptual_hash(image)
     except Exception:
         return None
 

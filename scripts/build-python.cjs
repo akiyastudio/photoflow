@@ -10,6 +10,7 @@ const python = existsSync(venvPython) ? venvPython : 'python';
 const result = spawnSync(python, [
   '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm', '--specpath', 'build/specs',
   '--name', 'tools', '--exclude-module', 'imageio_ffmpeg',
+  '--exclude-module', 'numpy', '--exclude-module', 'scipy', '--exclude-module', 'cv2',
   '--exclude-module', 'torch', '--exclude-module', 'torchvision',
   '--exclude-module', 'torchaudio', '--exclude-module', 'triton',
   '--exclude-module', 'PIL._avif', '--exclude-module', 'PIL._imagingmath',

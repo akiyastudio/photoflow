@@ -15,6 +15,51 @@ interface PythonEvent {
   requestId?: string;
 }
 
+const usePythonTask = (scriptName: string, initialStatus: string) => {
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [isRunning, setIsRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [statusMsg, setStatusMsg] = useState(initialStatus);
+
+  useEffect(() => {
+    if (!window.electronAPI?.onPythonEvent) return;
+    return window.electronAPI.onPythonEvent((event: PythonEvent) => {
+      if (event.scriptName !== scriptName) return;
+      if (event.type === 'log' || event.type === 'error' || event.type === 'warning' || event.type === 'success') {
+        const type: LogEntry['type'] = event.type === 'log' ? 'info' : event.type;
+        setLogs(previous => [...previous, { timestamp: new Date().toLocaleTimeString(), message: event.message, type }]);
+        if (event.type === 'success' || event.type === 'error') {
+          setIsRunning(false);
+          if (event.type === 'success') {
+            setProgress(100);
+            setStatusMsg('处理完成');
+          } else {
+            setStatusMsg('发生错误');
+          }
+        }
+      } else if (event.type === 'progress') {
+        if (event.progress !== undefined) setProgress(event.progress);
+        if (event.message) {
+          setStatusMsg(event.message);
+          setLogs(previous => [...previous, { timestamp: new Date().toLocaleTimeString(), message: event.message, type: 'info' }]);
+        }
+      }
+    });
+  }, [scriptName]);
+
+  const start = (args: string[], startingStatus: string) => {
+    if (isRunning) return false;
+    setLogs([]);
+    setProgress(0);
+    setIsRunning(true);
+    setStatusMsg(startingStatus);
+    window.electronAPI.runScript(scriptName, args);
+    return true;
+  };
+
+  return { logs, isRunning, progress, statusMsg, start };
+};
+
 const ImportCard = ({ config, drives = [], destinationPath, active = true, onImportConfigChange, onImportComplete }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, active?: boolean, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (projectNames: string[]) => void }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'finished'>('idle');
   const [progress, setProgress] = useState(0);
@@ -655,47 +700,11 @@ const HomePanel = ({ title, initiallyOpen = false, tone, children, ...dragProps 
 
 const ConverterView = ({ embedded = false, initialTargetPath = "", defaultQuality = 100 }: { embedded?: boolean; initialTargetPath?: string; defaultQuality?: number }) => {
   const [targetPath, setTargetPath] = useState(initialTargetPath);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [isRunning, setIsRunning] = useState(false);
-  const [progress, setProgress] = useState(0);
   const [quality, setQuality] = useState(defaultQuality);
+  const { logs, isRunning, progress, start } = usePythonTask('png_to_jpg.py', '进度');
 
   useEffect(() => { setTargetPath(initialTargetPath); }, [initialTargetPath]);
   useEffect(() => { setQuality(defaultQuality); }, [defaultQuality]);
-
-  useEffect(() => {
-    if (!window.electronAPI?.onPythonEvent) return;
-    const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
-      if (event.scriptName !== 'png_to_jpg.py') return;
-      switch (event.type) {
-        case 'log':
-        case 'error':
-        case 'warning':
-        case 'success':
-          setLogs(prev => [...prev, {
-            timestamp: new Date().toLocaleTimeString(),
-            message: event.message,
-            type: event.type as any
-          }]);
-          if (event.type === 'success' || event.type === 'error') {
-            setIsRunning(false);
-            if (event.type === 'success') setProgress(100);
-          }
-          break;
-        case 'progress':
-          if (event.progress !== undefined) setProgress(event.progress);
-          if (event.message) {
-             setLogs(prev => [...prev, {
-               timestamp: new Date().toLocaleTimeString(),
-               message: event.message,
-               type: 'info'
-             }]);
-          }
-          break;
-      }
-    });
-    return cleanup;
-  }, []);
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -718,15 +727,7 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", defaultQualit
 
   const startConversion = () => {
     if (!targetPath.trim()) return;
-    if (isRunning) return;
-
-    setLogs([]);
-    setProgress(0);
-    setIsRunning(true);
-
-    if (window.electronAPI) {
-      window.electronAPI.runScript('png_to_jpg.py', [targetPath, '--quality', quality.toString()]);
-    }
+    start([targetPath, '--quality', quality.toString()], '正在转换…');
   };
 
   return (
@@ -800,69 +801,14 @@ const ResearchView = ({
   config: AppConfig['research'];
   onUpdateConfig: (newConfig: AppConfig['research']) => void;
 }) => {
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [isRunning, setIsRunning] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [statusMsg, setStatusMsg] = useState("准备就绪");
-
-  useEffect(() => {
-    if (!window.electronAPI?.onPythonEvent) return;
-    const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
-      if (event.scriptName !== 'research.py') return;
-      switch (event.type) {
-        case 'log':
-        case 'error':
-        case 'warning':
-        case 'success':
-          setLogs(prev => [...prev, {
-            timestamp: new Date().toLocaleTimeString(),
-            message: event.message,
-            type: event.type as any
-          }]);
-
-          // 如果是成功或失败，停止运行状态
-          if (event.type === 'success' || event.type === 'error') {
-            setIsRunning(false);
-            if (event.type === 'success') {
-                setProgress(100);
-                setStatusMsg("处理完成");
-            } else {
-                setStatusMsg("发生错误");
-            }
-          }
-          break;
-
-        case 'progress':
-          if (event.progress !== undefined) setProgress(event.progress);
-          if (event.message) {
-             setStatusMsg(event.message);
-             // 将进度消息也记录到终端日志中
-             setLogs(prev => [...prev, {
-               timestamp: new Date().toLocaleTimeString(),
-               message: event.message,
-               type: 'info'
-             }]);
-          }
-          break;
-      }
-    });
-    return cleanup;
-  }, []);
+  const { logs, isRunning, progress, statusMsg, start } = usePythonTask('research.py', '准备就绪');
 
   const runAnalysis = () => {
-    if (isRunning) return;
-    setLogs([]);
-    setProgress(0);
-    setIsRunning(true);
-    setStatusMsg("正在初始化引擎...");
-
-    if (window.electronAPI) {
-      window.electronAPI.runScript('research.py', [
-        '--path', config.defaultDir,
-        '--sensitivity', config.sensitivity,
-        '--min_duration', config.minDuration.toString()
-      ]);
-    }
+    start([
+      '--path', config.defaultDir,
+      '--sensitivity', config.sensitivity,
+      '--min_duration', config.minDuration.toString()
+    ], '正在初始化引擎...');
   };
 
   return (
@@ -932,41 +878,18 @@ const MatchView = ({
         folderOptions?: Array<{ name: string; path: string }>;
     }) => {
     const [keywords, setKeywords] = useState("");
-    const [logs, setLogs] = useState<LogEntry[]>([]);
-    const [isRunning, setIsRunning] = useState(false);
-    const [progress, setProgress] = useState(0);
-
-    useEffect(() => {
-        if (!window.electronAPI?.onPythonEvent) return;
-        const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
-            if (event.scriptName !== 'catch.py') return;
-            if (event.type === 'log' || event.type === 'error' || event.type === 'success') {
-                setLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), message: event.message, type: event.type as any }]);
-                if (event.type === 'success' || event.type === 'error') {
-                    setIsRunning(false);
-                    if (event.type === 'success') setProgress(100);
-                }
-            } else if (event.type === 'progress') {
-                if (event.progress !== undefined) setProgress(event.progress);
-                if (event.message) setLogs(prev => [...prev, { timestamp: new Date().toLocaleTimeString(), message: event.message, type: 'info' }]);
-            }
-        });
-        return cleanup;
-    }, []);
+    const { logs, isRunning, progress, start } = usePythonTask('catch.py', '进度');
 
     const runTask = () => {
         if (!projectPath || !keywords.trim() || isRunning) return;
-        setIsRunning(true);
-        setLogs([]);
-        setProgress(0);
-        window.electronAPI.runScript('catch.py', [
+        start([
             '--source', projectPath,
             '--image_dest_name', IMAGE_SELECTION_FOLDER_NAME,
             '--video_dest_name', VIDEO_SELECTION_FOLDER_NAME,
             '--image_source_name', config.imageSourceFolderName || '',
             '--video_source_name', config.videoSourceFolderName || '',
             '--keywords', ...keywords.trim().split(/\s+/)
-        ]);
+        ], '正在选片…');
     };
 
     return (
@@ -995,50 +918,7 @@ const MatchView = ({
 
 const VideoSplitView = () => {
   const [videoPath, setVideoPath] = useState("");
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [isRunning, setIsRunning] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [statusMsg, setStatusMsg] = useState("等待输入...");
-
-  useEffect(() => {
-    if (!window.electronAPI?.onPythonEvent) return;
-    const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
-      if (event.scriptName !== 'cut_video.py') return;
-      switch (event.type) {
-        case 'log':
-        case 'error':
-        case 'warning':
-        case 'success':
-          setLogs(prev => [...prev, {
-            timestamp: new Date().toLocaleTimeString(),
-            message: event.message,
-            type: event.type as any
-          }]);
-          if (event.type === 'success' || event.type === 'error') {
-            setIsRunning(false);
-            if (event.type === 'success') {
-                setProgress(100);
-                setStatusMsg("处理完成");
-            } else {
-                setStatusMsg("发生错误");
-            }
-          }
-          break;
-        case 'progress':
-          if (event.progress !== undefined) setProgress(event.progress);
-          if (event.message) {
-             setStatusMsg(event.message);
-             setLogs(prev => [...prev, {
-               timestamp: new Date().toLocaleTimeString(),
-               message: event.message,
-               type: 'info'
-             }]);
-          }
-          break;
-      }
-    });
-    return cleanup;
-  }, []);
+  const { logs, isRunning, progress, statusMsg, start } = usePythonTask('cut_video.py', '等待输入...');
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -1060,16 +940,7 @@ const VideoSplitView = () => {
 
   const startSplit = () => {
     if (!videoPath.trim()) return;
-    if (isRunning) return;
-
-    setLogs([]);
-    setProgress(0);
-    setIsRunning(true);
-    setStatusMsg("正在启动处理...");
-
-    if (window.electronAPI) {
-      window.electronAPI.runScript('cut_video.py', [videoPath]);
-    }
+    start([videoPath], '正在启动处理...');
   };
 
   return (
@@ -1131,4 +1002,4 @@ const VideoSplitView = () => {
 
 // --- 组件 ---
 
-export { DashboardView, HomePanel, ConverterView, ResearchView, MatchView, VideoSplitView };
+export { DashboardView, HomePanel, ImportCard, ConverterView, ResearchView, MatchView, VideoSplitView };

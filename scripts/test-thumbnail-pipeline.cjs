@@ -2,7 +2,7 @@ const assert = require('assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { ThumbnailPipeline, PRIORITY } = require('../electron/thumbnail-pipeline.cjs');
+const { ThumbnailPipeline, PRIORITY, isThumbnailSizeSufficient } = require('../electron/thumbnail-pipeline.cjs');
 
 const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(124), Buffer.from([0xff, 0xd9])]);
 
@@ -33,6 +33,11 @@ const waitForTerminalState = (run, timeoutMs = 2000) => new Promise((resolve, re
 });
 
 const run = async () => {
+  assert.equal(isThumbnailSizeSufficient(64, 96, 320), false, 'a 96px Shell image must not populate the 320px tier');
+  assert.equal(isThumbnailSizeSufficient(64, 96, 640), false, 'a 96px Shell image must not populate the 640px tier');
+  assert.equal(isThumbnailSizeSufficient(427, 640, 640), true, 'a full 640px thumbnail should be accepted');
+  assert.equal(isThumbnailSizeSufficient(512, 384, 640), true, 'a provider may return a slightly smaller but still useful thumbnail');
+
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-thumbnail-test-'));
   try {
     const source = path.join(temporaryRoot, 'source.jpg');

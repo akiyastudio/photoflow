@@ -1,5 +1,6 @@
 import React from 'react';
 import type { LogEntry } from '../types';
+import { ProgressBar } from './ProgressBar';
 
 interface TaskProgressProps {
   logs: LogEntry[];
@@ -30,9 +31,7 @@ export const TaskProgress: React.FC<TaskProgressProps> = ({
             <p className={`min-w-0 truncate font-medium ${color}`} title={message} role="status">{message}</p>
             <span className="shrink-0 font-mono text-blue-600">{percentage.toFixed(Number.isInteger(percentage) ? 0 : 1)}%</span>
           </div>
-          <div className="h-2 overflow-hidden rounded-full bg-slate-200">
-            <div className="h-full rounded-full bg-blue-500 transition-all duration-300" style={{ width: `${percentage}%` }} />
-          </div>
+          <ProgressBar value={percentage} trackClassName="h-2 overflow-hidden rounded-full bg-slate-200" barClassName="h-full rounded-full bg-blue-500 transition-all duration-300"/>
         </div>
         {action && <div className="shrink-0">{action}</div>}
       </div>

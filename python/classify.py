@@ -1,30 +1,15 @@
-import os
 import sys
 import os
 import shutil
 import time
 import datetime
-import json
 import argparse
 import subprocess
 import re
 from pathlib import Path
 import gc
+from event_protocol import ask_user, log_error, log_info, log_progress, log_status, log_success
 from ffmpeg_utils import get_ffmpeg_exe
-
-# --- 1. Electron 通信辅助 ---
-def emit(event_type, message, data=None, progress=None):
-    payload = {"type": event_type, "message": message}
-    if data is not None: payload["data"] = data
-    if progress is not None: payload["progress"] = progress
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
-
-def log_info(msg): emit('log', msg)
-def log_success(msg, data=None): emit('success', msg, data)
-def log_error(msg): emit('error', msg)
-def log_progress(msg, percent): emit('progress', msg, progress=percent)
-def log_status(msg, data=None): emit('status', msg, data)
-def ask_user(msg, data=None): emit('ask_user', msg, data)
 
 # --- 2. 辅助工具函数 ---
 def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024):
