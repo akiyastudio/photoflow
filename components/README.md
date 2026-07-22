@@ -36,10 +36,11 @@ The current component IDs are:
   whole team-retouch workflow is unavailable.
 - `research-tools`: research image/video organization and scene extraction.
 
-Run `npm run build:components` to create distributable folders under
-`release/components`. This command builds components only; it does not create
-the PhotoFlow installer.
+Run `npm run setup:team-retouch` once to create/prepare the development virtual
+environment and verify that the DirectML provider is available. Run
+`npm run build:team-retouch` to create a self-contained distributable component
+under `release/components/team-retouch`; the packaged component includes ONNX
+Runtime and does not require Python on the user's machine.
 
-On the Windows component build machine, install
-`components/team-retouch/requirements.txt` into the build virtual
-environment first. The main application does not install these dependencies.
+`npm run build:components` builds every optional component. Components remain
+separate from the base PhotoFlow installer so the core application stays small.

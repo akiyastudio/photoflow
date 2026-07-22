@@ -75,7 +75,7 @@ def create_session(preference="auto"):
     try:
         import onnxruntime as ort
     except ImportError as error:
-        raise RuntimeError("GPU 组件缺少 onnxruntime-directml 运行库") from error
+        raise RuntimeError("人物检测组件缺少 ONNX Runtime 运行库（onnxruntime-directml）") from error
     providers = ort.get_available_providers()
     options = ort.SessionOptions()
     if preference != "cpu" and "DmlExecutionProvider" in providers:
@@ -286,28 +286,42 @@ def probe():
     providers = []
     cpu_available = False
     gpu_available = False
-    errors = []
+    runtime_errors = []
+    gpu_error = ""
     merge_available = False
     try:
         from patch_merge import merge as _merge
         merge_available = callable(_merge)
     except Exception as error:
-        errors.append(f"拼回引擎: {error}")
+        runtime_errors.append(f"拼回引擎: {error}")
     try:
         session, providers, _backend = create_session("cpu")
         zero = np.zeros((1, 3, INPUT_SIZE, INPUT_SIZE), dtype=np.float32)
         session.run(None, {session.get_inputs()[0].name: zero})
         cpu_available = True
     except Exception as error:
-        errors.append(f"CPU: {error}")
-    try:
-        session, providers, _backend = create_session("gpu")
-        zero = np.zeros((1, 3, INPUT_SIZE, INPUT_SIZE), dtype=np.float32)
-        session.run(None, {session.get_inputs()[0].name: zero})
-        gpu_available = True
-    except Exception as error:
-        errors.append(f"GPU: {error}")
-    return {"success": True, "componentAvailable": cpu_available and merge_available, "cpuAvailable": cpu_available, "gpuAvailable": gpu_available, "mergeAvailable": merge_available, "provider": "DmlExecutionProvider" if gpu_available else "CPUExecutionProvider" if cpu_available else "", "providers": providers, "error": "；".join(errors)}
+        runtime_errors.append(str(error))
+    if cpu_available:
+        try:
+            session, providers, _backend = create_session("gpu")
+            zero = np.zeros((1, 3, INPUT_SIZE, INPUT_SIZE), dtype=np.float32)
+            session.run(None, {session.get_inputs()[0].name: zero})
+            gpu_available = True
+        except Exception as error:
+            gpu_error = str(error)
+    runtime_error = "；".join(runtime_errors)
+    return {
+        "success": True,
+        "componentAvailable": cpu_available and merge_available,
+        "cpuAvailable": cpu_available,
+        "gpuAvailable": gpu_available,
+        "mergeAvailable": merge_available,
+        "provider": "DmlExecutionProvider" if gpu_available else "CPUExecutionProvider" if cpu_available else "",
+        "providers": providers,
+        "runtimeError": runtime_error,
+        "gpuError": gpu_error,
+        "error": runtime_error or gpu_error,
+    }
 
 
 def run(args_list=None):

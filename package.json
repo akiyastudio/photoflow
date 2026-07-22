@@ -8,18 +8,24 @@
   "scripts": {
     "generate:icon": "node scripts/generate-app-icon.cjs",
     "build:shell-thumbnail": "node scripts/build-shell-thumbnail.cjs",
+    "build:recycle-bin-service": "node scripts/build-recycle-bin-service.cjs",
     "dev": "vite",
     "build": "tsc && vite build",
     "build:python": "node scripts/prepare-ffmpeg.cjs && node scripts/build-python.cjs",
     "build:components": "node scripts/build-components.cjs",
+    "setup:team-retouch": "node scripts/setup-team-retouch.cjs",
+    "build:team-retouch": "npm run setup:team-retouch && node scripts/build-components.cjs --only team-retouch",
     "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
     "test:thumbnail-pipeline": "node scripts/test-thumbnail-pipeline.cjs",
+    "test:file-transfer": "node scripts/test-file-transfer.cjs",
+    "test:filesystem-safety": "node scripts/test-filesystem-safety.cjs",
+    "test:architecture": "node scripts/test-architecture.cjs",
     "test:components": "node scripts/test-components.cjs",
     "test:team-retouch": ".venv\\Scripts\\python.exe scripts\\test-team-retouch.py",
     "preview": "vite preview",
-    "electron": "npm run build:shell-thumbnail && wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
+    "electron": "npm run build:shell-thumbnail && npm run build:recycle-bin-service && wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
     "electron:dev": "concurrently -k \"cross-env BROWSER=none npm run dev\" \"npm run electron\"",
-    "electron:build": "npm run generate:icon && npm run build && npm run build:python && npm run build:shell-thumbnail && electron-builder"
+    "electron:build": "npm run generate:icon && npm run build && npm run build:python && npm run build:shell-thumbnail && npm run build:recycle-bin-service && electron-builder"
   },
   "build": {
     "appId": "com.photoflow.toolkit",
@@ -65,6 +71,10 @@
         {
           "from": "electron/bin/shell-thumbnail.exe",
           "to": "shell-thumbnail.exe"
+        },
+        {
+          "from": "electron/bin/recycle-bin-service.exe",
+          "to": "recycle-bin-service.exe"
         }
       ]
     },
