@@ -1,10 +1,94 @@
 const registerWorkspaceIpc = context => {
-  const { Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog } = context;
+  const { Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog } = context;
   const officeOpenXmlExtensions = new Set([
     '.docx', '.docm', '.dotx', '.dotm',
     '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam',
     '.xlsx', '.xlsm', '.xltx', '.xltm', '.xlam', '.xlsb',
   ]);
+
+  const inspectDeletedProject = async (root, project) => {
+    const originalPath = path.resolve(root, project.relativePath);
+    const relative = path.relative(root, originalPath);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+      return { ...project, originalPath, recycleStatus: 'unknown', statusDetail: '项目原路径无效，已保留数据' };
+    }
+    if (await pathExists(originalPath)) {
+      return { ...project, originalPath, recycleStatus: 'restored', statusDetail: '原项目路径已重新出现' };
+    }
+    if (!project.recyclePidl || !recycleBinService.nativeAvailable()) {
+      return { ...project, originalPath, recycleStatus: 'unknown', statusDetail: '当前无法可靠检查系统回收站，已保留数据' };
+    }
+    try {
+      const probe = await recycleBinService.probe(project.recyclePidl);
+      return probe.exists
+        ? { ...project, originalPath, recycleStatus: 'in_recycle_bin', statusDetail: '项目仍在系统回收站中' }
+        : { ...project, originalPath, recycleStatus: 'missing', statusDetail: '回收站条目和原项目路径均不存在' };
+    } catch (error) {
+      return { ...project, originalPath, recycleStatus: 'unknown', statusDetail: error.message || String(error) };
+    }
+  };
+
+  const removeInternalProjectArtifacts = async (root, purgeResult) => {
+    const dataRoot = path.resolve(getWorkspaceDataRoot(root));
+    const candidates = [
+      ...(purgeResult.artifactPaths || []),
+      ...(purgeResult.photoIds || []).flatMap(photoId => [
+        path.join(dataRoot, 'thumbnails', photoId),
+        path.join(dataRoot, 'team-retouch', photoId),
+      ]),
+    ];
+    let removedCount = 0;
+    for (const candidate of new Set(candidates)) {
+      if (!candidate) continue;
+      const resolved = path.resolve(candidate);
+      const relative = path.relative(dataRoot, resolved);
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue;
+      try {
+        await fs.promises.rm(resolved, { recursive: true, force: true });
+        removedCount += 1;
+      } catch (error) {
+        writeLog('warn', 'Unable to remove deleted project artifact', { path: resolved, error: error.message || String(error) });
+      }
+    }
+    return removedCount;
+  };
+
+  const purgeConfirmedDeletedProject = async (root, project) => {
+    const inspected = await inspectDeletedProject(root, project);
+    if (inspected.recycleStatus !== 'missing') return { cleaned: false, status: inspected.recycleStatus };
+    const purgeResult = await workspaceRepository.purgeDeletedProject(root, project.id);
+    const removedArtifactCount = await removeInternalProjectArtifacts(root, purgeResult);
+    await thumbnailService.invalidateSources(purgeResult.sourcePaths || []).catch(error => {
+      writeLog('warn', 'Unable to clear deleted project thumbnail cache', { project: project.name, error: error.message || String(error) });
+    });
+    for (let index = renameHistory.length - 1; index >= 0; index -= 1) {
+      const operation = renameHistory[index];
+      if (operation.projectCatalog?.name?.toLocaleLowerCase() === project.name.toLocaleLowerCase()
+        || (purgeResult.removedUndoIds || []).includes(operation.persistentId)) renameHistory.splice(index, 1);
+    }
+    writeLog('info', 'Purged unavailable deleted project data', {
+      root,
+      project: project.name,
+      photoCount: purgeResult.photoIds?.length || 0,
+      removedArtifactCount,
+    });
+    return { cleaned: true, status: 'missing', removedArtifactCount };
+  };
+
+  ipcMain.handle('workspace-cleanup-deleted-projects', async (_event, workspacePath) => {
+    try {
+      const root = ensureWorkspace(workspacePath);
+      const result = await workspaceRepository.listDeletedProjects(root);
+      const outcomes = [];
+      for (const project of result.projects || []) outcomes.push({ projectId: project.id, name: project.name, ...await purgeConfirmedDeletedProject(root, project) });
+      const cleanedCount = outcomes.filter(outcome => outcome.cleaned).length;
+      if (cleanedCount) await refreshWorkspaceCatalog(root);
+      return { success: true, checkedCount: outcomes.length, cleanedCount, outcomes };
+    } catch (error) {
+      writeLog('error', 'Unable to clean deleted project data', error);
+      return { success: false, checkedCount: 0, cleanedCount: 0, outcomes: [], error: error.message || String(error) };
+    }
+  });
 
   ipcMain.handle('workspace-projects', async (_event, workspacePath) => {
     try {

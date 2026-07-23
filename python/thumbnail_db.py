@@ -344,6 +344,43 @@ class ThumbnailDatabase:
             )
         return {"success": True}
 
+    def invalidate_sources(self, source_paths: list[str] | None = None) -> dict:
+        normalized = list(dict.fromkeys(canonical(value) for value in (source_paths or []) if value))
+        if not normalized:
+            return {"success": True, "thumbnailPaths": [], "sourceCount": 0}
+        placeholders = ",".join("?" for _ in normalized)
+        thumbnail_rows = self.connection.execute(
+            f"SELECT thumbnail_path FROM thumbnails WHERE file_path IN ({placeholders})",
+            normalized,
+        ).fetchall()
+        with self.connection:
+            self.connection.execute(f"DELETE FROM files WHERE path IN ({placeholders})", normalized)
+        return {
+            "success": True,
+            "thumbnailPaths": list(dict.fromkeys(row["thumbnail_path"] for row in thumbnail_rows if row["thumbnail_path"])),
+            "sourceCount": len(normalized),
+        }
+
+    def prune_missing_sources(self) -> dict:
+        """Remove source-index rows already confirmed missing by a directory/project scan."""
+        rows = self.connection.execute(
+            """SELECT DISTINCT thumbnails.thumbnail_path
+               FROM thumbnails JOIN files ON files.path=thumbnails.file_path
+               WHERE files.exists_on_disk=0 OR files.thumbnail_state='MISSING'"""
+        ).fetchall()
+        count_row = self.connection.execute(
+            "SELECT COUNT(*) AS count FROM files WHERE exists_on_disk=0 OR thumbnail_state='MISSING'"
+        ).fetchone()
+        with self.connection:
+            self.connection.execute(
+                "DELETE FROM files WHERE exists_on_disk=0 OR thumbnail_state='MISSING'"
+            )
+        return {
+            "success": True,
+            "thumbnailPaths": list(dict.fromkeys(row["thumbnail_path"] for row in rows if row["thumbnail_path"])),
+            "sourceCount": int(count_row["count"] if count_row else 0),
+        }
+
 
 def run_server(database_path: str, recover: bool = True) -> None:
     # Keep the JSONL protocol independent of the Windows system code page;

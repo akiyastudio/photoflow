@@ -193,6 +193,10 @@ const getLogDir = () => {
 
 const LOG_RETENTION_DAYS = 7;
 const cleanupExpiredLogs = async () => {
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const markerPath = path.join(getLogDir(), '.last-cleanup-date');
+  if ((await fs.promises.readFile(markerPath, 'utf8').catch(() => '')).trim() === today) return 0;
   const expiresBefore = Date.now() - LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   let deletedCount = 0;
 
@@ -207,6 +211,7 @@ const cleanupExpiredLogs = async () => {
         deletedCount += 1;
       }
     }
+    await fs.promises.writeFile(markerPath, today, 'utf8');
   } catch (error) {
     nativeConsoleError('Failed to clean up expired application logs:', error);
   }
@@ -1676,10 +1681,10 @@ app.whenReady().then(async () => {
   createWindow();
 
   registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, shell, spawn, undefined, writeLog });
-  registerWorkspaceIpc({ Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog });
+  registerWorkspaceIpc({ Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog });
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertExistingInside, assertInside, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, mainWindow, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, removeCreatedPasteTargets, screen, throwIfCancelled, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Array, Boolean, Buffer, Date, Error, IMAGE_EXTENSIONS, JSON, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearInterval, clearTimeout, crypto, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, getRunConfig, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setInterval, setTimeout, spawn, thumbnailService, trimMediaCache, undefined, videoPreviewJobs, writeLog });
-  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
+  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
 
   setTimeout(checkForUpdates, 3000);
   app.on('activate', () => {

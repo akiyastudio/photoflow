@@ -260,10 +260,11 @@ const registerMediaIpc = context => {
           task.report(Math.round(((offset + 64) / Math.max(1, entries.length)) * 95), `已检查 ${Math.min(offset + 64, entries.length)} / ${entries.length} 个文件`);
         }
         await thumbnailService.invalidateDeleted(deletedPaths, cutoff);
+        const pruned = await thumbnailService.pruneMissingSources();
         mediaCacheIndexes.delete(path.resolve(cacheDir));
-        return { deletedCount: deletedPaths.length };
+        return { deletedCount: deletedPaths.length, prunedSourceCount: pruned.sourceCount || 0 };
       });
-      return { success: true, deletedCount: execution.result.deletedCount, taskId: execution.task.id };
+      return { success: true, deletedCount: execution.result.deletedCount, prunedSourceCount: execution.result.prunedSourceCount, taskId: execution.task.id };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
   });
 };

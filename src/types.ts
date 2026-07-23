@@ -39,6 +39,7 @@ export interface WorkspaceStatusGroup { status: ProjectStatus; projects: Workspa
 export interface AppConfig {
   theme: Theme;
   workspacePath: string;
+  autoCleanupDeletedProjectData: boolean;
   homeOrder: HomeCardId[];
   birthdayEnabled: boolean;
   componentSettings: ComponentSettingsMap;
@@ -214,6 +215,37 @@ export interface TeamPatchBundle extends MediaVersionBundle {
   merge?: { outputPath: string; mergedCount: number; conflictPixels: number; seamScore: number; needsReview?: boolean };
 }
 
+export interface TeamPatchReturnMatch {
+  returnId: string;
+  sourceName: string;
+  path: string;
+  matched: boolean;
+  accepted: boolean;
+  confidence: 'high' | 'medium' | 'low' | 'unmatched' | string;
+  score: number;
+  margin: number;
+  taskId?: string;
+  photoId?: string;
+  baseVersionId?: string;
+  photoName?: string;
+  personName?: string;
+  alternatives?: Array<{ taskId?: string; photoName?: string; personName?: string; score: number }>;
+}
+
+export interface TeamPatchReturnBatchResult {
+  success: boolean;
+  cancelled?: boolean;
+  returnedCount?: number;
+  candidateCount?: number;
+  acceptedCount?: number;
+  reviewCount?: number;
+  missingTaskCount?: number;
+  mergedCount?: number;
+  matches: TeamPatchReturnMatch[];
+  merges: Array<{ photoId: string; photoName: string; success: boolean; skipped?: boolean; outputPath?: string; needsReview?: boolean; error?: string }>;
+  error?: string;
+}
+
 export interface ComponentStatus {
   id: 'team-retouch' | 'research-tools' | string;
   name: string;
@@ -286,6 +318,7 @@ export interface IElectronAPI {
   openComponentsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
   openLogsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
   clearLogs: () => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
+  clearInterfaceCache: () => Promise<{ success: boolean; clearedBytes?: number; error?: string }>;
   installComponent: (componentId: string) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>;
   uninstallComponent: (componentId: string) => Promise<{ success: boolean; error?: string }>;
   getDrives: () => Promise<string[]>;
@@ -306,6 +339,7 @@ export interface IElectronAPI {
   moveWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, nextStatus: ProjectStatus) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   archiveImportedProjects: (workspacePath: string, projectNames?: string[]) => Promise<{ success: boolean; projects: WorkspaceProject[]; error?: string }>;
   trashWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; operationId?: string; error?: string }>;
+  cleanupDeletedWorkspaceProjects: (workspacePath: string) => Promise<{ success: boolean; checkedCount: number; cleanedCount: number; outcomes: Array<{ projectId: string; name: string; cleaned: boolean; status: 'in_recycle_bin' | 'missing' | 'restored' | 'unknown'; removedArtifactCount?: number }>; error?: string }>;
 
   getProjectContents: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; folders: Array<{ name: string; path: string; updatedAt: number }>;error?: string }> ;
   browseProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath?: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path?: string; entries: ProjectFileEntry[]; missingDirectory?: boolean; error?: string }>;
@@ -316,6 +350,8 @@ export interface IElectronAPI {
   updateMediaVersion: (workspacePath: string, request: { versionId: string; versionName?: string; note?: string; isFinal?: boolean; makeCurrent?: boolean }) => Promise<MediaVersionBundle>;
   relocateMediaVersion: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; versionId: string }) => Promise<MediaVersionBundle>;
   deleteMediaVersion: (workspacePath: string, request: { photoId: string; versionId: string; trashFile?: boolean }) => Promise<MediaVersionBundle>;
+  getMediaVersionDeleteScope: (workspacePath: string, versionId: string) => Promise<{ success: boolean; versionNumber: number; versionCount: number; missingCount: number; allMissing: boolean; childCount: number; selectedChildCount: number; error?: string }>;
+  deleteProjectMissingMediaVersion: (workspacePath: string, versionId: string) => Promise<{ success: boolean; deletedCount: number; versionNumber?: number; reparentedCount?: number; removedArtifactCount?: number; error?: string }>;
   recordMediaVersionCompare: (workspacePath: string, request: { photoId: string; leftVersionId: string; rightVersionId: string; compareMode: string }) => Promise<{ success: boolean; error?: string }>;
   openMediaVersion: (filePath: string) => Promise<{ success: boolean; error?: string }>;
   getProgressFolders: (workspacePath: string, projectName: string) => Promise<{ success: boolean; progressFolders: ProgressFolder[]; error?: string }>;
@@ -334,7 +370,10 @@ export interface IElectronAPI {
   detectTeamPatchBatch: (workspacePath: string, status: ProjectStatus, name: string, request: { relativePaths: string[] }) => Promise<{ success: boolean; persistentBackend?: boolean; results: Array<{ relativePath: string; name: string; success: boolean; photoId?: string; baseVersionId?: string; personCount?: number; workTileCount?: number; error?: string }>; error?: string }>;
   onTeamPatchBatchProgress: (callback: (value: { itemIndex: number; itemCount: number; relativePath: string; itemName: string; progress: number; message: string }) => void) => () => void;
   updateTeamPatch: (workspacePath: string, request: { taskId: string; personName?: string; assignee?: string; needsReview?: boolean; reviewReason?: string }) => Promise<{ success: boolean; tasks: TeamPatchTask[]; error?: string }>;
+  cleanupTeamPatches: (workspacePath: string, request: { photoId: string; baseVersionId: string }) => Promise<TeamPatchBundle & { removedArtifactCount?: number }>;
   uploadTeamPatch: (workspacePath: string, request: { photoId: string; taskId: string }) => Promise<{ success: boolean; cancelled?: boolean; tasks: TeamPatchTask[]; error?: string }>;
+  returnTeamPatchBatch: (workspacePath: string, status: ProjectStatus, name: string, request: { relativePaths: string[] }) => Promise<TeamPatchReturnBatchResult>;
+  onTeamPatchReturnBatchProgress: (callback: (value: { phase: 'matching' | 'importing' | 'merging' | 'complete' | string; progress: number; message: string }) => void) => () => void;
   openTeamPatch: (filePath: string) => Promise<{ success: boolean; error?: string }>;
   mergeTeamPatches: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; baseVersionId: string; versionName?: string }) => Promise<TeamPatchBundle>;
   getMediaThumbnail: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache'], requestedSize?: number, priority?: 0 | 1 | 2 | 3, queueOrder?: number) => Promise<{ success: boolean; taskId?: string; state?: ThumbnailState; previewUrl?: string; mediaUrl?: string; usingImportedPreview?: boolean; importedVideoWithoutPreview?: boolean; cacheLayer?: 'memory' | 'disk' | 'source'; error?: string }>;
@@ -356,7 +395,7 @@ export interface IElectronAPI {
   chooseCacheDirectory: () => Promise<{ cancelled?: boolean; path?: string }>;
   chooseWorkspaceDirectory: (currentPath?: string) => Promise<{ cancelled?: boolean; path?: string }>;
   getMediaCacheInfo: (cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path: string; sizeBytes: number; fileCount: number; error?: string }>;
-  clearMediaCache: (cacheConfig?: AppConfig['mediaCache'], olderThanDays?: number) => Promise<{ success: boolean; deletedCount?: number; taskId?: string; error?: string }>;
+  clearMediaCache: (cacheConfig?: AppConfig['mediaCache'], olderThanDays?: number) => Promise<{ success: boolean; deletedCount?: number; prunedSourceCount?: number; taskId?: string; error?: string }>;
   getBackgroundTasks: () => Promise<{ success: boolean; tasks: BackgroundTask[] }>;
   cancelBackgroundTask: (id: string) => Promise<{ success: boolean }>;
   retryBackgroundTask: (id: string) => Promise<{ success: boolean; task?: BackgroundTask; error?: string }>;

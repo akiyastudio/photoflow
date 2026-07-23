@@ -11,7 +11,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +19,7 @@ ENGINE = ROOT / "components" / "team-retouch" / "team_retouch.py"
 sys.path.insert(0, str(ENGINE.parent))
 sys.path.insert(0, str(ROOT / "python"))
 
-from team_retouch import centered_work_crop, emit_progress, load_mask, plan_work_tiles, restore_patches, save_mask  # noqa: E402
+from team_retouch import centered_work_crop, emit_progress, load_mask, match_returned_batch, maximize_assignment, plan_work_tiles, restore_patches, save_mask  # noqa: E402
 from workspace_db import connect, team_patch_replace  # noqa: E402
 
 
@@ -69,6 +69,41 @@ def main():
         full_mask[80:170, 105:205] = 255
         save_mask(mask_path, full_mask)
         assert np.array_equal(load_mask(mask_path), full_mask)
+
+        # Returned phone images lose names/metadata and may be resized,
+        # compressed, blurred and recolored. Content matching must still
+        # recover a one-to-one task assignment in arbitrary return order.
+        candidates, returned = [], []
+        for index in range(4):
+            rng = np.random.default_rng(100 + index)
+            pixels = np.full((360, 540, 3), (45 + 30 * index, 75 + 12 * index, 105 + 8 * index), dtype=np.uint8)
+            pixels = np.clip(pixels + rng.integers(0, 35, pixels.shape, dtype=np.uint8), 0, 255).astype(np.uint8)
+            candidate_image = Image.fromarray(pixels, "RGB")
+            draw = ImageDraw.Draw(candidate_image)
+            draw.ellipse((70 + 30 * index, 50, 270 + 30 * index, 300), fill=(190, 130 + 20 * index, 100), outline="white", width=9)
+            draw.rectangle((300 - 20 * index, 80 + 25 * index, 500, 300), outline=(255, 220, 40 + 30 * index), width=15)
+            candidate_path = test_root / f"candidate-{index}.png"
+            candidate_image.save(candidate_path)
+            candidates.append({
+                "taskId": f"task-{index}", "photoId": f"photo-{index // 2}",
+                "baseVersionId": f"base-{index // 2}", "photoName": f"团片 {index // 2}",
+                "personName": f"人物 {index}", "patchPath": str(candidate_path),
+            })
+        return_order = [2, 0, 3, 1]
+        for return_index, candidate_index in enumerate(return_order):
+            returned_image = Image.open(test_root / f"candidate-{candidate_index}.png").resize((450, 300))
+            returned_image = ImageEnhance.Brightness(returned_image).enhance(1.08)
+            returned_image = ImageEnhance.Color(returned_image).enhance(0.82).filter(ImageFilter.GaussianBlur(0.65))
+            returned_path = test_root / f"phone-{return_index}.jpg"
+            returned_image.save(returned_path, quality=73)
+            returned.append({"returnId": f"return-{return_index}", "path": str(returned_path), "sourceName": returned_path.name})
+        match_manifest = test_root / "returned-manifest.json"
+        match_manifest.write_text(json.dumps({"returned": returned, "candidates": candidates}), encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            matched = match_returned_batch(match_manifest)
+        assert [item["taskId"] for item in matched["matches"]] == [f"task-{index}" for index in return_order]
+        assert all(item["confidence"] == "high" for item in matched["matches"])
+        assert maximize_assignment([[0.9, 0.2], [0.8, 0.7]]) == [0, 1]
         manifest_path.write_text(json.dumps({"tasks": [{
             "id": "test-task",
             "crop": crop,

@@ -623,6 +623,230 @@ def restore_patches(input_path, manifest_path):
     return {"success": True, "restoredCount": len(restored), "paths": restored}
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def _normalized_correlation(left, right):
+    left = np.asarray(left, dtype=np.float32)
+    right = np.asarray(right, dtype=np.float32)
+    left -= float(left.mean())
+    right -= float(right.mean())
+    denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
+    if denominator < 1e-6:
+        return 1.0 if float(np.mean(np.abs(left - right))) < 1e-6 else 0.0
+    return float(np.clip(np.sum(left * right) / denominator, -1.0, 1.0))
+
+
+def _perceptual_hash(gray):
+    small = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_AREA).astype(np.float32)
+    low_frequency = cv2.dct(small)[:8, :8]
+    median = float(np.median(low_frequency[1:]))
+    return low_frequency > median
+
+
+def describe_match_image(image_path):
+    """Build edit-tolerant visual descriptors without relying on names or metadata."""
+    rgb = load_rgb(image_path)
+    height, width = rgb.shape[:2]
+    scale = min(1.0, 960.0 / max(width, height))
+    proxy = cv2.resize(
+        rgb,
+        (max(1, round(width * scale)), max(1, round(height * scale))),
+        interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR,
+    )
+    gray = cv2.cvtColor(proxy, cv2.COLOR_RGB2GRAY)
+    normalized = cv2.equalizeHist(gray)
+    structure = cv2.resize(normalized, (96, 96), interpolation=cv2.INTER_AREA)
+    edges = cv2.Canny(structure, 55, 145)
+    sift = cv2.SIFT_create(nfeatures=900, contrastThreshold=0.025, edgeThreshold=12)
+    keypoints, descriptors = sift.detectAndCompute(normalized, None)
+    return {
+        "path": str(image_path), "width": width, "height": height,
+        "proxyWidth": proxy.shape[1], "proxyHeight": proxy.shape[0],
+        "structure": structure, "edges": edges, "hash": _perceptual_hash(normalized),
+        "keypoints": keypoints or [], "descriptors": descriptors,
+    }
+
+
+def fast_match_score(returned, candidate):
+    structure = max(0.0, _normalized_correlation(returned["structure"], candidate["structure"]))
+    edges = max(0.0, _normalized_correlation(returned["edges"], candidate["edges"]))
+    hash_score = 1.0 - float(np.mean(returned["hash"] != candidate["hash"]))
+    returned_ratio = returned["width"] / max(1, returned["height"])
+    candidate_ratio = candidate["width"] / max(1, candidate["height"])
+    aspect_score = math.exp(-3.5 * abs(math.log(max(1e-6, returned_ratio / candidate_ratio))))
+    return float(np.clip(0.50 * structure + 0.24 * edges + 0.16 * hash_score + 0.10 * aspect_score, 0.0, 1.0))
+
+
+def local_feature_score(returned, candidate):
+    left = returned["descriptors"]
+    right = candidate["descriptors"]
+    if left is None or right is None or len(left) < 4 or len(right) < 4:
+        return None
+    matcher = cv2.BFMatcher(cv2.NORM_L2)
+    pairs = matcher.knnMatch(left, right, k=2)
+    good = [first for pair in pairs if len(pair) == 2 for first, second in [pair] if first.distance < 0.76 * second.distance]
+    if len(good) < 4:
+        return 0.0
+    source_points = np.float32([returned["keypoints"][match.queryIdx].pt for match in good])
+    target_points = np.float32([candidate["keypoints"][match.trainIdx].pt for match in good])
+    try:
+        _matrix, inlier_mask = cv2.findHomography(source_points, target_points, cv2.RANSAC, 5.0)
+    except cv2.error:
+        return 0.0
+    inliers = inlier_mask.ravel().astype(bool) if inlier_mask is not None else np.zeros(len(good), dtype=bool)
+    inlier_count = int(inliers.sum())
+    if inlier_count < 4:
+        return 0.0
+
+    def coverage(points, width, height):
+        if len(points) < 3:
+            return 0.0
+        hull = cv2.convexHull(np.asarray(points, dtype=np.float32))
+        return min(1.0, float(cv2.contourArea(hull)) / max(1.0, width * height))
+
+    source_coverage = coverage(source_points[inliers], returned["proxyWidth"], returned["proxyHeight"])
+    target_coverage = coverage(target_points[inliers], candidate["proxyWidth"], candidate["proxyHeight"])
+    spread = min(1.0, math.sqrt(max(0.0, source_coverage * target_coverage)) * 3.0)
+    inlier_ratio = inlier_count / max(1, len(good))
+    count_score = min(1.0, inlier_count / 45.0)
+    return float(np.clip(0.45 * inlier_ratio + 0.30 * count_score + 0.25 * spread, 0.0, 1.0))
+
+
+def maximize_assignment(scores):
+    """Hungarian assignment for a rectangular score matrix; each return is used once."""
+    if not scores:
+        return []
+    row_count = len(scores)
+    real_column_count = len(scores[0]) if scores[0] else 0
+    if not real_column_count:
+        return [-1] * row_count
+    column_count = max(row_count, real_column_count)
+    costs = [[1.0 - (scores[row][column] if column < real_column_count else 0.0)
+              for column in range(column_count)] for row in range(row_count)]
+    potentials_rows = [0.0] * (row_count + 1)
+    potentials_columns = [0.0] * (column_count + 1)
+    matched_row = [0] * (column_count + 1)
+    previous_column = [0] * (column_count + 1)
+    for row in range(1, row_count + 1):
+        matched_row[0] = row
+        minimum = [float("inf")] * (column_count + 1)
+        used = [False] * (column_count + 1)
+        column = 0
+        while True:
+            used[column] = True
+            current_row = matched_row[column]
+            delta, next_column = float("inf"), 0
+            for candidate_column in range(1, column_count + 1):
+                if used[candidate_column]:
+                    continue
+                reduced = costs[current_row - 1][candidate_column - 1] - potentials_rows[current_row] - potentials_columns[candidate_column]
+                if reduced < minimum[candidate_column]:
+                    minimum[candidate_column] = reduced
+                    previous_column[candidate_column] = column
+                if minimum[candidate_column] < delta:
+                    delta, next_column = minimum[candidate_column], candidate_column
+            for candidate_column in range(column_count + 1):
+                if used[candidate_column]:
+                    potentials_rows[matched_row[candidate_column]] += delta
+                    potentials_columns[candidate_column] -= delta
+                else:
+                    minimum[candidate_column] -= delta
+            column = next_column
+            if matched_row[column] == 0:
+                break
+        while True:
+            next_column = previous_column[column]
+            matched_row[column] = matched_row[next_column]
+            column = next_column
+            if column == 0:
+                break
+    assignment = [-1] * row_count
+    for column in range(1, column_count + 1):
+        if matched_row[column] and column <= real_column_count:
+            assignment[matched_row[column] - 1] = column - 1
+    return assignment
+
+
+def match_returned_batch(manifest_path):
+    payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    returned_items = payload.get("returned") or []
+    candidates = payload.get("candidates") or []
+    if not returned_items:
+        raise ValueError("没有收到可比对的修图结果")
+    if not candidates:
+        raise ValueError("当前项目没有可用于比对的原始工作图")
+
+    emit_progress(2, "正在读取返回图片")
+    returned_descriptors = []
+    for index, item in enumerate(returned_items, start=1):
+        returned_descriptors.append(describe_match_image(item["path"]))
+        emit_progress(2 + 18 * index / len(returned_items), f"读取返回图片 {index}/{len(returned_items)}")
+    candidate_descriptors = []
+    for index, item in enumerate(candidates, start=1):
+        candidate_descriptors.append(describe_match_image(item["patchPath"]))
+        emit_progress(20 + 20 * index / len(candidates), f"读取原始工作图 {index}/{len(candidates)}")
+
+    scores = []
+    for row_index, returned in enumerate(returned_descriptors):
+        fast_scores = [fast_match_score(returned, candidate) for candidate in candidate_descriptors]
+        detailed_indices = sorted(range(len(fast_scores)), key=lambda index: fast_scores[index], reverse=True)[:min(10, len(fast_scores))]
+        combined = list(fast_scores)
+        for candidate_index in detailed_indices:
+            local_score = local_feature_score(returned, candidate_descriptors[candidate_index])
+            if local_score is not None:
+                combined[candidate_index] = 0.55 * fast_scores[candidate_index] + 0.45 * local_score
+        scores.append(combined)
+        emit_progress(40 + 48 * (row_index + 1) / len(returned_descriptors), f"比对图片 {row_index + 1}/{len(returned_descriptors)}")
+
+    assignment = maximize_assignment(scores)
+    matches = []
+    for row_index, candidate_index in enumerate(assignment):
+        returned_item = returned_items[row_index]
+        if candidate_index < 0:
+            matches.append({**returned_item, "matched": False, "confidence": "unmatched", "score": 0.0, "margin": 0.0, "alternatives": []})
+            continue
+        ranked = sorted(range(len(candidates)), key=lambda index: scores[row_index][index], reverse=True)
+        score = float(scores[row_index][candidate_index])
+        alternative_scores = [scores[row_index][index] for index in ranked if index != candidate_index]
+        margin = score - (float(alternative_scores[0]) if alternative_scores else 0.0)
+        if score >= 0.68 and margin >= 0.075:
+            confidence = "high"
+        elif score >= 0.55 and margin >= 0.025:
+            confidence = "medium"
+        else:
+            confidence = "low"
+        candidate = candidates[candidate_index]
+        alternatives = [{
+            "taskId": candidates[index].get("taskId"),
+            "personName": candidates[index].get("personName"),
+            "photoName": candidates[index].get("photoName"),
+            "score": round(float(scores[row_index][index]), 4),
+        } for index in ranked[:3]]
+        matches.append({
+            **returned_item, **candidate, "matched": True, "confidence": confidence,
+            "score": round(score, 4), "margin": round(margin, 4), "alternatives": alternatives,
+        })
+    emit_progress(100, "内容比对完成")
+    return {
+        "success": True, "matches": matches,
+        "returnedCount": len(returned_items), "candidateCount": len(candidates),
+        "highCount": sum(item.get("confidence") == "high" for item in matches),
+        "reviewCount": sum(item.get("confidence") != "high" for item in matches),
+    }
+
+
 class UnavailableAdvancedRunner:
     def __init__(self, error):
         self.error = str(error)
@@ -730,7 +954,7 @@ def probe():
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("probe", "detect", "detect-batch", "restore", "merge"))
+    parser.add_argument("action", choices=("probe", "detect", "detect-batch", "match-batch", "restore", "merge"))
     parser.add_argument("--input")
     parser.add_argument("--output-dir")
     parser.add_argument("--delivery-dir")
@@ -753,6 +977,11 @@ def run(args_list=None):
         if not args.manifest:
             parser.error("detect-batch requires --manifest")
         emit(detect_batch(os.path.abspath(args.manifest), args.provider, args.oversize_crop_mode))
+        return
+    if args.action == "match-batch":
+        if not args.manifest:
+            parser.error("match-batch requires --manifest")
+        emit(match_returned_batch(os.path.abspath(args.manifest)))
         return
     if args.action == "restore":
         if not args.input or not args.manifest:

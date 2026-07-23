@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { FolderOpen, HardDrive, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, ScanSearch, Loader2, FileImage } from 'lucide-react';
 import type { AppConfig, ComponentStatus } from '../../types';
+import { useAppDialog } from '../../components/AppDialogProvider';
 
 const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
@@ -28,13 +29,19 @@ const WorkspaceSetupPage = ({ config, onSave }: { config: AppConfig; onSave: (co
 const formatComponentSize = (sizeBytes: number) => sizeBytes > 0 ? `${(sizeBytes / 1024 / 1024).toFixed(sizeBytes >= 100 * 1024 * 1024 ? 0 : 1)} MB` : '';
 
 const LogSettings = ({ onNotice }: { onNotice: (message: string, duration?: number) => void }) => {
+  const appDialog = useAppDialog();
   const [clearing, setClearing] = useState(false);
   const openFolder = async () => {
     const result = await window.electronAPI.openLogsFolder();
     if (!result.success) onNotice(`打开日志文件夹失败：${result.error || '未知错误'}`, 5000);
   };
   const clear = async () => {
-    if (clearing || !window.confirm('确定清空全部应用日志吗？此操作无法撤销。')) return;
+    if (clearing || !await appDialog.confirm({
+      title: '确定清空全部应用日志吗？',
+      message: '此操作无法撤销，只会删除照片流生成的日志文件。',
+      confirmLabel: '清空日志',
+      tone: 'danger',
+    })) return;
     setClearing(true);
     try {
       const result = await window.electronAPI.clearLogs();
@@ -53,6 +60,7 @@ const LogSettings = ({ onNotice }: { onNotice: (message: string, duration?: numb
 };
 
 const ComponentSettings = ({ components, installPath, loading, onRefresh, onComponentsChanged, onNotice }: { components: ComponentStatus[]; installPath: string; loading: boolean; onRefresh: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onNotice: (message: string, duration?: number) => void }) => {
+  const appDialog = useAppDialog();
   const [busyId, setBusyId] = useState('');
   const openFolder = async () => {
     const result = await window.electronAPI.openComponentsFolder();
@@ -70,7 +78,12 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     } finally { setBusyId(''); }
   };
   const uninstall = async (component: ComponentStatus) => {
-    if (busyId || !window.confirm(`确定卸载“${component.name}”吗？组件文件夹会移入系统回收站。`)) return;
+    if (busyId || !await appDialog.confirm({
+      title: `确定卸载“${component.name}”吗？`,
+      message: '组件文件夹会移入系统回收站。',
+      confirmLabel: '卸载组件',
+      tone: 'danger',
+    })) return;
     setBusyId(component.id);
     try {
       const result = await window.electronAPI.uninstallComponent(component.id);
@@ -137,11 +150,12 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
     <section><h4 className="text-sm font-bold text-slate-800">界面配色</h4><div className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">{([['system', '适应系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([theme, label]) => <button key={theme} onClick={() => update('theme', theme)} className={`rounded-md px-4 py-2 text-sm font-bold transition ${draft.theme === theme ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}</div></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">工作目录</h4><p className="mt-1 text-sm leading-6 text-slate-500">项目会直接放在选中的客户文件夹中；只有选择磁盘根目录时，才会使用根目录下的“照片流”文件夹。</p><div className="mt-4"><WorkspaceFolderPicker value={draft.workspacePath} onChange={workspacePath => update('workspacePath', workspacePath)}/></div></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">角色生日</h4><label className="settings-check"><input type="checkbox" checked={draft.birthdayEnabled} onChange={event => update('birthdayEnabled', event.target.checked)}/>在首页显示角色生日</label></section>
-    <div className="border-t border-slate-100 pt-6"><LogSettings onNotice={onNotice}/></div>
     </>}
     {activeSection === 'storage' && <>
     <section><h4 className="text-sm font-bold text-slate-800">缩略图缓存</h4><p className="mt-1 text-sm text-slate-500">设置图片、RAW 和视频缩略图缓存的容量与位置，并可按时间清理。版本历史预览固定保存在 AppData，不会写入项目目录。</p><div className="mt-4"><MediaCacheSettings config={draft.mediaCache} onChange={mediaCache => update('mediaCache', mediaCache)}/></div></section>
-    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">PNG 转 JPG</h4><label className="form-label">默认导出 JPG 画质</label><select value={draft.imageConversion.jpgQuality} onChange={event => update('imageConversion', { jpgQuality: Number(event.target.value) })} className="form-input"><option value={100}>最高（100）</option><option value={95}>高（95）</option><option value={85}>标准（85）</option><option value={75}>节省空间（75）</option></select></section>
+    <InterfaceCacheSettings onNotice={onNotice}/>
+    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">已删除项目数据</h4><label className="settings-check"><input type="checkbox" checked={draft.autoCleanupDeletedProjectData} onChange={event => update('autoCleanupDeletedProjectData', event.target.checked)}/><span><span className="block">是否自动清理已删除项目的数据</span><span className="mt-1 block text-xs leading-5 text-slate-500">默认开启，每天第一次启动软件时检查一次。仅当项目条目已不在系统回收站、原项目路径也不存在时，才会清理数据库记录、项目专属文件和缩略图缓存；无法确认时会保留数据。</span></span></label></section>
+    <div className="border-t border-slate-100 pt-6"><LogSettings onNotice={onNotice}/></div>
     </>}
     {activeSection === 'components' && <ComponentSettings components={components} installPath={componentInstallPath} loading={componentsLoading} onRefresh={onRefreshComponents} onComponentsChanged={onComponentsChanged} onNotice={onNotice}/>}
     {activeSection === 'team-retouch' && <>
@@ -161,6 +175,7 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
     {activeSection === 'import' && <>
     <section><h4 className="text-sm font-bold text-slate-800">从 SD 卡导入</h4><label className="settings-check"><input type="checkbox" checked={draft.smartImport.autoStart} onChange={event => update('smartImport', { ...draft.smartImport, autoStart: event.target.checked })}/>应用启动时自动读取 SD 卡</label><label className="settings-check"><input type="checkbox" checked={draft.smartImport.splitLargeFiles} onChange={event => update('smartImport', { ...draft.smartImport, splitLargeFiles: event.target.checked })}/><span><span className="block">超过 4GB 的视频自动分割</span><span className="mt-1 block text-xs leading-5 text-slate-500">用于兼容部分老旧 U 盘的 FAT32 单文件大小限制，以及某些云盘的单文件上传限制。</span></span></label><label className="settings-check"><input type="checkbox" checked={draft.smartImport.generateVideoPreview} onChange={event => update('smartImport', { ...draft.smartImport, generateVideoPreview: event.target.checked })}/><span><span className="block">生成视频预览</span><span className="mt-1 block text-xs leading-5 text-slate-500">为导入到“mov”的大型视频生成 H.264 中码率文件，储存在“mov_预览”并作为软件内快速播放源。关闭后不会在浏览时临时转码这些导入视频；其他普通视频仍可照常预览。</span></span></label></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">导入设置</h4><label className="settings-check"><input type="checkbox" checked={draft.fileImport.preserveOriginal} onChange={event => update('fileImport', { preserveOriginal: event.target.checked })}/><span><span className="block">导入后保留原始文件</span><span className="mt-1 block text-xs leading-5 text-slate-500">开启此项后导入的文件会保留源文件。这可能会导致大量的文件重复。</span></span></label><label className="settings-check"><input type="checkbox" checked={draft.brollImport.splitLargeFiles} onChange={event => update('brollImport', { ...draft.brollImport, splitLargeFiles: event.target.checked })}/><span><span className="block">花絮视频超过 4GB 时自动分割</span><span className="mt-1 block text-xs leading-5 text-slate-500">用于兼容 FAT32 和部分云盘的单文件大小限制。</span></span></label></section>
+    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">PNG 转 JPG</h4><label className="form-label">默认导出 JPG 画质，此为在文件夹选择该功能之后的默认媒体文件转换画质。此功能用于部分软件无法直接打开png文件的情况。</label><select value={draft.imageConversion.jpgQuality} onChange={event => update('imageConversion', { jpgQuality: Number(event.target.value) })} className="form-input"><option value={100}>最高（100）</option><option value={95}>高（95）</option><option value={85}>标准（85）</option><option value={75}>节省空间（75）</option></select></section>
     </>}
   </div></section>;
 };
@@ -199,10 +214,33 @@ const MediaCacheSettings = ({ config, onChange }: { config: AppConfig['mediaCach
     <div className="space-y-4">
       <div><label className="form-label">最大缓存容量</label><div className="flex max-w-xs items-center gap-2"><input type="number" min={0} step={0.1} inputMode="decimal" value={capacityInput} onChange={event => setCapacityInput(event.target.value)} onBlur={commitCapacity} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} className="form-input"/><span className="text-sm font-medium text-slate-500">GB</span></div><p className="mt-2 text-xs text-slate-500">超过上限时自动清理最久未使用的缩略图。</p></div>
       <div><label className="form-label">缓存目录</label><div className="flex gap-2"><input readOnly value={info.path || config.directory || '默认应用缓存目录'} className="form-input min-w-0 font-mono text-xs"/><button onClick={chooseDirectory} className="dialog-secondary shrink-0">选择目录</button></div></div>
-      <label className="settings-check"><input type="checkbox" checked={config.autoCleanup30Days} onChange={event => onChange({ ...config, autoCleanup30Days: event.target.checked })}/><span><span className="block">自动清理 30 天以前的缓存</span><span className="mt-1 block text-xs leading-5 text-slate-500">启用后会立即检查一次，并在应用运行期间每天自动检查。</span></span></label>
+      <label className="settings-check"><input type="checkbox" checked={config.autoCleanup30Days} onChange={event => onChange({ ...config, autoCleanup30Days: event.target.checked })}/><span><span className="block">自动清理 30 天以前的缓存</span><span className="mt-1 block text-xs leading-5 text-slate-500">启用后每天第一次启动软件时检查一次，同时移除已经确认不存在的源文件索引；当天再次启动不会重复检查。</span></span></label>
     </div>
     <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm"><p className="font-bold text-slate-800">当前缓存：{sizeText}</p><p className="mt-1 text-xs text-slate-500">{info.fileCount} 个缓存文件</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={clearAll} disabled={busy} className="inline-flex items-center gap-1.5 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-50"><Trash2 size={14}/>{busy ? '正在清理…' : '清空全部缓存'}</button></div></div>
   </div>;
+};
+
+const InterfaceCacheSettings = ({ onNotice }: { onNotice: (message: string, duration?: number) => void }) => {
+  const appDialog = useAppDialog();
+  const [busy, setBusy] = useState(false);
+  const clear = async () => {
+    if (busy || !await appDialog.confirm({
+      title: '确定清理界面缓存吗？',
+      message: '软件会自动管理这部分缓存，通常只需在释放磁盘空间时清理。',
+      confirmLabel: '清理缓存',
+      tone: 'danger',
+    })) return;
+    setBusy(true);
+    try {
+      const result = await window.electronAPI.clearInterfaceCache();
+      if (!result.success) { onNotice(`清理界面缓存失败：${result.error || '未知错误'}`); return; }
+      const clearedMB = Math.round((result.clearedBytes || 0) / 1024 / 1024);
+      onNotice(`界面缓存已清理${clearedMB ? `，释放约 ${clearedMB} MB` : ''}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">界面缓存</h4><p className="mt-1 text-sm leading-6 text-slate-500">软件自身有自动清理和容量淘汰机制。除非需要释放磁盘空间或界面资源显示异常，否则不建议经常清理。</p><button type="button" disabled={busy} onClick={() => void clear()} className="dialog-secondary mt-4 inline-flex items-center gap-2 disabled:opacity-50"><Trash2 size={14}/>{busy ? '正在清理…' : '清理界面缓存'}</button></section>;
 };
 
 export { WorkspaceSetupPage, SettingsNavigator, SettingsPage, MediaCacheSettings };

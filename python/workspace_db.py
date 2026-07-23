@@ -1350,27 +1350,153 @@ def media_relocate_version(db, payload: dict):
     return {"success": True, **media_bundle(db, row["photo_id"])}
 
 
+def team_artifact_paths(rows) -> list[str]:
+    values = []
+    for row in rows:
+        values.extend(value for value in (row["patch_path"], row["mask_path"], row["edited_patch_path"]) if value)
+    return list(dict.fromkeys(values))
+
+
+def unreferenced_team_artifact_paths(db, candidates: list[str]) -> list[str]:
+    if not candidates:
+        return []
+    referenced = set()
+    for row in db.execute(
+        "SELECT patch_path,mask_path,edited_patch_path FROM team_patch_tasks WHERE is_deleted=0"
+    ).fetchall():
+        referenced.update(canonical_path(value) for value in (row["patch_path"], row["mask_path"], row["edited_patch_path"]) if value)
+    return [value for value in dict.fromkeys(candidates) if canonical_path(value) not in referenced]
+
+
+def delete_version_rows(db, rows) -> dict:
+    timestamp = int(time.time() * 1000)
+    version_ids = [row["id"] for row in rows]
+    if not version_ids:
+        return {"deletedVersions": [], "teamArtifactPaths": [], "sourcePaths": []}
+    placeholders = ",".join("?" for _ in version_ids)
+    reparented_count = 0
+    for row in rows:
+        cursor = db.execute(
+            """UPDATE versions SET parent_version_id=?,updated_at=?
+               WHERE parent_version_id=? AND is_deleted=0""",
+            (row["parent_version_id"], timestamp, row["id"]),
+        )
+        reparented_count += cursor.rowcount
+    task_rows = db.execute(
+        f"""SELECT patch_path,mask_path,edited_patch_path FROM team_patch_tasks
+            WHERE base_version_id IN ({placeholders})""",
+        version_ids,
+    ).fetchall()
+    team_candidates = team_artifact_paths(task_rows)
+    db.execute(f"DELETE FROM team_patch_tasks WHERE base_version_id IN ({placeholders})", version_ids)
+    db.execute(
+        f"""UPDATE team_patch_tasks SET merged_version_id=NULL,
+              status=CASE WHEN edited_patch_path IS NOT NULL THEN 'uploaded' ELSE 'exported' END,
+              updated_at=? WHERE merged_version_id IN ({placeholders}) AND is_deleted=0""",
+        (timestamp, *version_ids),
+    )
+    db.execute(
+        f"UPDATE versions SET is_deleted=1,is_current=0,is_final=0,updated_at=? WHERE id IN ({placeholders})",
+        (timestamp, *version_ids),
+    )
+    db.execute(
+        f"DELETE FROM file_records WHERE owner_type='version' AND owner_id IN ({placeholders})",
+        version_ids,
+    )
+    for photo_id in dict.fromkeys(row["photo_id"] for row in rows if row["is_current"]):
+        replacement = db.execute(
+            "SELECT id FROM versions WHERE photo_id=? AND is_deleted=0 ORDER BY version_number DESC LIMIT 1",
+            (photo_id,),
+        ).fetchone()
+        replacement_id = replacement["id"] if replacement else None
+        if replacement_id:
+            db.execute("UPDATE versions SET is_current=1 WHERE id=?", (replacement_id,))
+        db.execute(
+            "UPDATE photos SET current_version_id=?,updated_at=? WHERE id=?",
+            (replacement_id, timestamp, photo_id),
+        )
+    return {
+        "deletedVersions": [{
+            "id": row["id"], "photoId": row["photo_id"], "filePath": row["file_path"],
+            "thumbnailPath": row["thumbnail_path"], "versionNumber": row["version_number"],
+        } for row in rows],
+        "teamArtifactPaths": unreferenced_team_artifact_paths(db, team_candidates),
+        "sourcePaths": list(dict.fromkeys(row["file_path"] for row in rows if row["file_path"])),
+        "reparentedCount": reparented_count,
+    }
+
+
+def media_version_delete_scope(db, payload: dict):
+    row = db.execute(
+        """SELECT versions.*,photos.project_id FROM versions
+           JOIN photos ON photos.id=versions.photo_id
+           WHERE versions.id=? AND versions.is_deleted=0""",
+        (payload["versionId"],),
+    ).fetchone()
+    if row is None:
+        raise ValueError("版本不存在")
+    rows = db.execute(
+        """SELECT versions.id,versions.file_missing FROM versions
+           JOIN photos ON photos.id=versions.photo_id
+           WHERE photos.project_id=? AND versions.version_number=? AND versions.is_deleted=0""",
+        (row["project_id"], row["version_number"]),
+    ).fetchall()
+    version_ids = [item["id"] for item in rows]
+    child_count = 0
+    if version_ids:
+        placeholders = ",".join("?" for _ in version_ids)
+        child_count = db.execute(
+            f"SELECT COUNT(*) AS count FROM versions WHERE parent_version_id IN ({placeholders}) AND is_deleted=0",
+            version_ids,
+        ).fetchone()["count"]
+    selected_child_count = db.execute(
+        "SELECT COUNT(*) AS count FROM versions WHERE parent_version_id=? AND is_deleted=0",
+        (row["id"],),
+    ).fetchone()["count"]
+    missing_count = sum(int(item["file_missing"]) for item in rows)
+    return {
+        "success": True,
+        "versionNumber": row["version_number"],
+        "versionCount": len(rows),
+        "missingCount": missing_count,
+        "allMissing": bool(rows) and missing_count == len(rows),
+        "childCount": int(child_count),
+        "selectedChildCount": int(selected_child_count),
+    }
+
+
 def media_delete_version(db, payload: dict):
     row = db.execute("SELECT * FROM versions WHERE id=? AND is_deleted=0", (payload["versionId"],)).fetchone()
     if row is None:
         raise ValueError("版本不存在")
     if row["version_number"] == 0:
         raise ValueError("原片版本 V0 受保护，不能删除")
-    child = db.execute("SELECT id FROM versions WHERE parent_version_id=? AND is_deleted=0 LIMIT 1", (row["id"],)).fetchone()
-    if child:
-        raise ValueError("该版本仍有子版本，需先删除或改接子版本")
-    timestamp = int(time.time() * 1000)
-    db.execute("UPDATE versions SET is_deleted=1, is_current=0, updated_at=? WHERE id=?", (timestamp, row["id"]))
-    db.execute("DELETE FROM file_records WHERE owner_type='version' AND owner_id=?", (row["id"],))
-    if row["is_current"]:
-        replacement = db.execute(
-            "SELECT id FROM versions WHERE photo_id=? AND is_deleted=0 ORDER BY version_number DESC LIMIT 1", (row["photo_id"],)
-        ).fetchone()
-        if replacement:
-            db.execute("UPDATE versions SET is_current=1 WHERE id=?", (replacement["id"],))
-            db.execute("UPDATE photos SET current_version_id=?, updated_at=? WHERE id=?", (replacement["id"], timestamp, row["photo_id"]))
+    cleanup = delete_version_rows(db, [row])
     db.commit()
-    return {"success": True, **media_bundle(db, row["photo_id"])}
+    return {"success": True, **media_bundle(db, row["photo_id"]), **cleanup}
+
+
+def media_delete_project_missing_version(db, payload: dict):
+    selected = db.execute(
+        """SELECT versions.*,photos.project_id FROM versions
+           JOIN photos ON photos.id=versions.photo_id
+           WHERE versions.id=? AND versions.is_deleted=0""",
+        (payload["versionId"],),
+    ).fetchone()
+    if selected is None:
+        raise ValueError("版本不存在")
+    if selected["version_number"] == 0:
+        raise ValueError("原片版本 V0 受保护，不能删除")
+    rows = db.execute(
+        """SELECT versions.* FROM versions JOIN photos ON photos.id=versions.photo_id
+           WHERE photos.project_id=? AND versions.version_number=? AND versions.is_deleted=0""",
+        (selected["project_id"], selected["version_number"]),
+    ).fetchall()
+    if not rows or any(not row["file_missing"] for row in rows):
+        raise ValueError("该版本仍有文件存在，不能批量删除")
+    cleanup = delete_version_rows(db, rows)
+    db.commit()
+    return {"success": True, "deletedCount": len(rows), "versionNumber": selected["version_number"], **cleanup}
 
 
 def media_record_compare(db, payload: dict):
@@ -1407,9 +1533,13 @@ def team_patch_list(db, payload: dict):
 
 def team_patch_replace(db, payload: dict):
     timestamp = int(time.time() * 1000)
+    previous_rows = db.execute(
+        "SELECT patch_path,mask_path,edited_patch_path FROM team_patch_tasks WHERE photo_id=? AND base_version_id=?",
+        (payload["photoId"], payload["baseVersionId"]),
+    ).fetchall()
     db.execute(
-        "UPDATE team_patch_tasks SET is_deleted=1, updated_at=? WHERE photo_id=? AND base_version_id=? AND is_deleted=0",
-        (timestamp, payload["photoId"], payload["baseVersionId"]),
+        "DELETE FROM team_patch_tasks WHERE photo_id=? AND base_version_id=?",
+        (payload["photoId"], payload["baseVersionId"]),
     )
     for task in payload.get("tasks", []):
         db.execute(
@@ -1428,7 +1558,30 @@ def team_patch_replace(db, payload: dict):
              task.get("status") or "exported", timestamp, timestamp),
         )
     db.commit()
-    return team_patch_list(db, {"photoId": payload["photoId"]})
+    result = team_patch_list(db, {"photoId": payload["photoId"]})
+    result["artifactPaths"] = unreferenced_team_artifact_paths(db, team_artifact_paths(previous_rows))
+    return result
+
+
+def team_patch_cleanup(db, payload: dict):
+    rows = db.execute(
+        """SELECT * FROM team_patch_tasks
+           WHERE photo_id=? AND base_version_id=? AND is_deleted=0""",
+        (payload["photoId"], payload["baseVersionId"]),
+    ).fetchall()
+    if not rows:
+        return {**team_patch_list(db, {"photoId": payload["photoId"]}), "artifactPaths": [], "cleanedCount": 0}
+    if any(row["status"] != "merged" for row in rows):
+        raise ValueError("仍有未完成的多人修脸任务，不能清理工作数据")
+    candidates = team_artifact_paths(rows)
+    db.execute(
+        "DELETE FROM team_patch_tasks WHERE photo_id=? AND base_version_id=?",
+        (payload["photoId"], payload["baseVersionId"]),
+    )
+    db.commit()
+    result = team_patch_list(db, {"photoId": payload["photoId"]})
+    result.update({"artifactPaths": unreferenced_team_artifact_paths(db, candidates), "cleanedCount": len(rows)})
+    return result
 
 
 def team_patch_update(db, payload: dict):
@@ -1523,6 +1676,104 @@ def load(root: str, database: str):
     return {"success": True, "projects": rows, "database": os.path.abspath(database)}
 
 
+def deleted_projects_list(db):
+    records_by_name = {}
+    for record in db.execute("SELECT * FROM undo_records WHERE kind='trash' ORDER BY created_at DESC").fetchall():
+        try:
+            payload = json.loads(record["payload_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        catalog = payload.get("projectCatalog") or {}
+        name = str(catalog.get("name") or "").casefold()
+        if not name or name in records_by_name:
+            continue
+        item = (payload.get("items") or [{}])[0] or {}
+        records_by_name[name] = {
+            "undoRecordId": record["id"],
+            "undoRecordState": record["state"],
+            "originalPath": str(item.get("original") or ""),
+            "recyclePidl": str(item.get("recyclePidl") or ""),
+            "preciseRestore": bool(item.get("preciseRestore", True)),
+        }
+
+    rows = db.execute(
+        """SELECT projects.*,
+                  (SELECT COUNT(*) FROM photos WHERE photos.project_id=projects.id) AS photo_count,
+                  (SELECT COUNT(*) FROM versions JOIN photos ON photos.id=versions.photo_id
+                    WHERE photos.project_id=projects.id) AS version_count
+           FROM projects WHERE projects.is_deleted=1 ORDER BY projects.updated_at DESC"""
+    ).fetchall()
+    projects = []
+    for row in rows:
+        record = records_by_name.get(str(row["name"]).casefold(), {})
+        projects.append({
+            "id": row["id"],
+            "name": row["name"],
+            "status": row["status"],
+            "relativePath": row["relative_path"],
+            "deletedAt": row["updated_at"],
+            "photoCount": row["photo_count"],
+            "versionCount": row["version_count"],
+            **record,
+        })
+    return {"success": True, "projects": projects}
+
+
+def purge_deleted_project(db, payload: dict):
+    project_id = str(payload.get("projectId") or "")
+    project = db.execute("SELECT * FROM projects WHERE id=? AND is_deleted=1", (project_id,)).fetchone()
+    if project is None:
+        raise ValueError("已删除项目记录不存在")
+
+    photo_rows = db.execute("SELECT id,original_file_path FROM photos WHERE project_id=?", (project_id,)).fetchall()
+    photo_ids = [row["id"] for row in photo_rows]
+    version_rows = db.execute(
+        """SELECT versions.id,versions.file_path,versions.thumbnail_path FROM versions
+           JOIN photos ON photos.id=versions.photo_id WHERE photos.project_id=?""",
+        (project_id,),
+    ).fetchall()
+    version_ids = [row["id"] for row in version_rows]
+    source_paths = [row["original_file_path"] for row in photo_rows if row["original_file_path"]]
+    source_paths.extend(row["file_path"] for row in version_rows if row["file_path"])
+    artifact_paths = [row["thumbnail_path"] for row in version_rows if row["thumbnail_path"]]
+    if photo_ids:
+        placeholders = ",".join("?" for _ in photo_ids)
+        patch_rows = db.execute(
+            f"""SELECT patch_path,mask_path,edited_patch_path FROM team_patch_tasks
+                WHERE photo_id IN ({placeholders})""",
+            photo_ids,
+        ).fetchall()
+        for row in patch_rows:
+            artifact_paths.extend(value for value in (row["patch_path"], row["mask_path"], row["edited_patch_path"]) if value)
+    if version_ids:
+        placeholders = ",".join("?" for _ in version_ids)
+        db.execute(f"DELETE FROM file_records WHERE owner_type='version' AND owner_id IN ({placeholders})", version_ids)
+
+    removed_undo_ids = []
+    for record in db.execute("SELECT id,payload_json FROM undo_records WHERE kind='trash'").fetchall():
+        try:
+            record_payload = json.loads(record["payload_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        catalog = record_payload.get("projectCatalog") or {}
+        if str(catalog.get("name") or "").casefold() == str(project["name"]).casefold():
+            removed_undo_ids.append(record["id"])
+    if removed_undo_ids:
+        placeholders = ",".join("?" for _ in removed_undo_ids)
+        db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", removed_undo_ids)
+
+    db.execute("DELETE FROM projects WHERE id=? AND is_deleted=1", (project_id,))
+    db.commit()
+    return {
+        "success": True,
+        "name": project["name"],
+        "photoIds": photo_ids,
+        "sourcePaths": list(dict.fromkeys(source_paths)),
+        "artifactPaths": list(dict.fromkeys(artifact_paths)),
+        "removedUndoIds": removed_undo_ids,
+    }
+
+
 def mutate(root: str, database: str, action: str, payload: dict):
     db = connect(root, database)
     now = int(time.time() * 1000)
@@ -1544,7 +1795,22 @@ def mutate(root: str, database: str, action: str, payload: dict):
     elif action == "delete":
         db.execute("UPDATE projects SET is_deleted=1, updated_at=? WHERE name=? COLLATE NOCASE", (now, payload["name"]))
     elif action == "restore_project":
-        db.execute("UPDATE projects SET is_deleted=0, status=?, updated_at=? WHERE name=? COLLATE NOCASE", (payload.get("status") or "未分类", now, payload["name"]))
+        next_name = payload.get("nextName") or payload["name"]
+        relative_path = payload.get("relativePath") or next_name
+        filesystem_id = directory_identity(os.path.join(os.path.abspath(root), relative_path))
+        db.execute(
+            """UPDATE projects SET is_deleted=0,name=?,status=?,relative_path=?,filesystem_id=?,updated_at=?
+               WHERE name=? COLLATE NOCASE""",
+            (next_name, payload.get("status") or "未分类", relative_path, filesystem_id, now, payload["name"]),
+        )
+    elif action == "deleted_projects_list":
+        result = deleted_projects_list(db)
+        db.close()
+        return result
+    elif action == "purge_deleted_project":
+        result = purge_deleted_project(db, payload)
+        db.close()
+        return result
     elif action == "media_sync_project":
         result = media_sync_project(root, db, payload)
         db.close()
@@ -1601,6 +1867,14 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = media_delete_version(db, payload)
         db.close()
         return result
+    elif action == "media_version_delete_scope":
+        result = media_version_delete_scope(db, payload)
+        db.close()
+        return result
+    elif action == "media_delete_project_missing_version":
+        result = media_delete_project_missing_version(db, payload)
+        db.close()
+        return result
     elif action == "media_record_compare":
         result = media_record_compare(db, payload)
         db.close()
@@ -1615,6 +1889,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "team_patch_update":
         result = team_patch_update(db, payload)
+        db.close()
+        return result
+    elif action == "team_patch_cleanup":
+        result = team_patch_cleanup(db, payload)
         db.close()
         return result
     elif action == "undo_record_add":
@@ -1647,7 +1925,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "add", "status", "rename", "delete", "restore_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "batch_register_baseline", "batch_commit_compare", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_record_compare", "team_patch_list", "team_patch_replace", "team_patch_update", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
+    parser.add_argument("action", nargs="?", choices=("init", "add", "status", "rename", "delete", "restore_project", "deleted_projects_list", "purge_deleted_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "batch_register_baseline", "batch_commit_compare", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_patch_replace", "team_patch_update", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")

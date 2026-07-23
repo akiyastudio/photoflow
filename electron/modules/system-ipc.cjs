@@ -97,6 +97,17 @@ const registerSystemIpc = context => {
     }
   });
 
+  ipcMain.handle('interface-cache-clear', async event => {
+    try {
+      const targetSession = event.sender.session;
+      const clearedBytes = await targetSession.getCacheSize().catch(() => 0);
+      await targetSession.clearCache();
+      return { success: true, clearedBytes };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
   ipcMain.handle('components-install', async (_event, componentId) => {
     let stagingPath = '';
     let backupPath = '';

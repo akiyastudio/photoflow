@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { FolderInput, FolderPlus, Folder, Image as ImageIcon, ScanSearch, Play, Trash2, Edit, X, Plus, Loader2, CheckCircle2, ExternalLink, Video, ChevronDown, ChevronUp, File, FileImage, MemoryStick, LayoutList, Grid2X2, FileText, Copy, Scissors as Cut, ClipboardPaste, CheckSquare, ArrowLeft, ArrowRight, Camera, Aperture, Timer, Gauge, Ruler, Calendar, Activity, Volume2, PanelLeftOpen, ArrowUpDown, ArrowUp, ArrowDown, Search, Info, GripVertical, Maximize2, Minimize2, GitBranch, UsersRound, Heart } from 'lucide-react';
 import { VersionManager } from '../../components/VersionManager';
 import { TeamRetouchManager } from '../../components/TeamRetouchManager';
+import { useAppDialog } from '../../components/AppDialogProvider';
 import { MediaCacheSettings } from '../settings/SettingsFeature';
 import { ConverterView, ImportCard, MatchView } from '../tools/ToolViews';
 import { PROJECT_STATUS_LABELS } from '../../types';
@@ -374,6 +375,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   onProjectMoved: (project: WorkspaceProject) => void;
   onDeleted: () => void;
 }) => {
+  const appDialog = useAppDialog();
   const [folders, setFolders] = useState<Array<{ name: string; path: string; updatedAt: number }>>([]);
   const [progressFolders, setProgressFolders] = useState<ProgressFolder[]>([]);
   const [fileEntries, setFileEntries] = useState<ProjectFileEntry[]>([]);
@@ -408,6 +410,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   const internalDropHandledRef = useRef(false);
   const renameCommitRef = useRef(false);
   const selectionAnchorPathRef = useRef('');
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [cutPaths, setCutPaths] = useState<string[]>([]);
   const [dragTargetPath, setDragTargetPath] = useState('');
@@ -1335,13 +1338,14 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     onNotice(`已重命名为“${nextName}”`);
     refresh();
   };
-  const beginRename = () => {
+  const beginRename = (targetPaths = selectedPaths) => {
     if (finalViewOpen) { onNotice('最终版浏览是只读视图，请回到原文件夹重命名'); return; }
-    if (!selectedPaths.length) return;
-    if (selectedPaths.length === 1) {
-      beginInlineRename(selectedPaths[0]);
+    if (!targetPaths.length) return;
+    if (targetPaths.length === 1) {
+      beginInlineRename(targetPaths[0]);
       return;
     }
+    if (targetPaths !== selectedPaths) setSelectedPaths(targetPaths);
     setBatchRenameParts([
       createBatchRenamePart('text'),
       createBatchRenamePart('sequence')
@@ -1410,13 +1414,15 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     onNotice(`已批量重命名 ${count} 个项目`);
     refresh();
   };
-  const openFileMenu = (event: React.MouseEvent, entry: ProjectFileEntry) => {
+  const openFileMenu = (event: React.MouseEvent, entry: ProjectFileEntry, selectEntry = true) => {
     event.preventDefault();
     event.stopPropagation();
     window.dispatchEvent(new Event('photoflow-menu-open'));
     setSurfaceMenu(null);
-    if (!selectedPaths.includes(entry.relativePath)) selectionAnchorPathRef.current = entry.relativePath;
-    setSelectedPaths(current => current.includes(entry.relativePath) ? current : [entry.relativePath]);
+    if (selectEntry) {
+      if (!selectedPaths.includes(entry.relativePath)) selectionAnchorPathRef.current = entry.relativePath;
+      setSelectedPaths(current => current.includes(entry.relativePath) ? current : [entry.relativePath]);
+    }
     setFileMenu({ entry, x: event.clientX, y: event.clientY });
     setClipboardHasFiles(false);
     void window.electronAPI.getProjectFileClipboardStatus().then(result => setClipboardHasFiles(result.success && result.hasFiles));
@@ -1503,7 +1509,11 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       .filter(folder => folder.mediaKind === 'image' && /^\d+$/.test(folder.versionKey))
       .reduce((highest, folder) => Math.max(highest, Number(folder.versionKey)), 0);
     const expectedName = `图片后期_${latestRootNumber + 1}_最终版`;
-    if (!window.confirm(`将 ${summary.availableCount} 张最终版图片复制到新进度“${expectedName}”，是否继续？`)) return;
+    if (!await appDialog.confirm({
+      title: '确定创建最终版进度吗？',
+      message: `将 ${summary.availableCount} 张最终版图片复制到新进度“${expectedName}”。`,
+      confirmLabel: '创建并复制',
+    })) return;
     setFinalExporting(true);
     try {
       const result = await window.electronAPI.exportFinalVersions(workspacePath, project.status, project.name);
@@ -1600,18 +1610,18 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     selectionDragRef.current = null;
     setSelectionBox(null);
   };
-  const runFileOperation = async (operation: 'trash' | 'copy' | 'cut' | 'paste' | 'rename', nextName?: string) => {
+  const runFileOperation = async (operation: 'trash' | 'copy' | 'cut' | 'paste' | 'rename', nextName?: string, targetPaths = selectedPaths) => {
     if (finalViewOpen && operation !== 'copy') { onNotice('最终版浏览是只读视图，请回到原文件夹修改文件'); return; }
-    const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, operation, selectedPaths, currentRelativePath, nextName);
+    const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, operation, targetPaths, currentRelativePath, nextName);
     if (result.cancelled) { onNotice('粘贴已取消'); refresh(); return; }
     if (!result.success) { onNotice(`操作失败：${result.error || '未知错误'}`); return; }
     if (operation === 'copy' || operation === 'cut') {
-      setCutPaths(operation === 'cut' ? [...selectedPaths] : []);
+      setCutPaths(operation === 'cut' ? [...targetPaths] : []);
       setClipboardHasFiles(true);
       onNotice(operation === 'copy' ? '成功复制文件' : `已剪切 ${result.count} 个项目`);
     } else {
       if (operation === 'paste') setCutPaths([]);
-      if (operation === 'trash') setCutPaths(current => current.filter(path => !selectedPaths.includes(path)));
+      if (operation === 'trash') setCutPaths(current => current.filter(path => !targetPaths.includes(path)));
       onNotice(operation === 'trash'
         ? `已移入回收站 ${result.count} 个项目`
         : operation === 'paste'
@@ -1627,9 +1637,20 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     const handleFileShortcut = (event: KeyboardEvent) => {
       if (!active) return;
       const target = event.target as HTMLElement | null;
-      if (target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
       const commandKey = event.ctrlKey || event.metaKey;
       const key = event.key.toLowerCase();
+      if (commandKey && key === 'f' && !target?.closest('[role="dialog"]')) {
+        event.preventDefault();
+        event.stopPropagation();
+        window.dispatchEvent(new Event('photoflow-menu-open'));
+        setSearchOpen(true);
+        window.requestAnimationFrame(() => {
+          searchInputRef.current?.focus();
+          searchInputRef.current?.select();
+        });
+        return;
+      }
+      if (target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
       let handled = false;
 
       if (commandKey && key === 'a') {
@@ -1914,10 +1935,20 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     return { ...current, files, metadata: total - files };
   });
   const canSelectMedia = !finalViewOpen && selectedEntries.length > 0 && selectedEntries.length === selectedPaths.length && selectedEntries.every(entry => entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video');
-  const selectMediaFiles = async () => {
+  const fileMenuEntrySelected = Boolean(fileMenu && selectedPaths.includes(fileMenu.entry.relativePath));
+  const fileMenuTargetPaths = fileMenu
+    ? fileMenuEntrySelected ? selectedPaths : [fileMenu.entry.relativePath]
+    : selectedPaths;
+  const canSelectFileMenuMedia = !finalViewOpen && fileMenuTargetPaths.length > 0 && fileMenuTargetPaths.every(path => {
+    const entry = activeFileEntries.find(candidate => candidate.relativePath === path);
+    return Boolean(entry && (entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video'));
+  });
+  const selectMediaFiles = async (targetPaths = selectedPaths) => {
     if (finalViewOpen) { onNotice('最终版浏览是只读视图，请回到原文件夹进行选片'); return; }
-    if (!canSelectMedia) { onNotice(selectedPaths.length ? '只能选择媒体文件' : '请先选择媒体文件'); return; }
-    const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, 'select', selectedPaths);
+    const targetEntries = activeFileEntries.filter(entry => targetPaths.includes(entry.relativePath));
+    const canSelectTargets = targetEntries.length > 0 && targetEntries.length === targetPaths.length && targetEntries.every(entry => entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video');
+    if (!canSelectTargets) { onNotice(targetPaths.length ? '只能选择媒体文件' : '请先选择媒体文件'); return; }
+    const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, 'select', targetPaths);
     if (!result.success) { onNotice(`选片失败：${result.error || '未知错误'}`); return; }
     const baseline = result.imageCount ? await ensureSelectionBaseline(true) : null;
     if (result.imageCount && !baseline?.success) return;
@@ -1933,14 +1964,6 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     setPreviewTechnicalMetadata({});
     setPreviewPaneOpen(true);
     setMetadataPaneOpen(true);
-  };
-  const selectPreviewEntryInFolder = () => {
-    if (!previewEntry) return;
-    selectionAnchorPathRef.current = previewEntry.relativePath;
-    setSelectedPaths([previewEntry.relativePath]);
-    setSearchOpen(false);
-    setSearchQuery('');
-    requestFileReveal(previewEntry.relativePath);
   };
   const openEntryDetails = (entry: ProjectFileEntry) => {
     setPreviewPath(entry.relativePath);
@@ -2126,18 +2149,18 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         {fileMenu.entry.kind !== 'folder' && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openProjectEntry(entry); }}><ExternalLink size={14}/>用默认方式打开</button>}
         {officeImageExtractorAvailable && isOfficeOpenXmlEntry(fileMenu.entry) && <button className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(isOfficeOpenXmlEntry) : [fileMenu.entry]; setFileMenu(null); void extractOfficeImages(entries); }}><ImageIcon size={14}/>提取图片{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(isOfficeOpenXmlEntry).length > 1 ? `（${selectedEntries.filter(isOfficeOpenXmlEntry).length} 个文档）` : ''}</button>}
         {photoshopAvailable && fileMenu.entry.kind === 'image' && <button className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(entry => entry.kind === 'image') : [fileMenu.entry]; setFileMenu(null); void openProjectEntriesInPhotoshop(entries); }}><PhotoshopIcon size={14}/>用 Photoshop 打开{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(entry => entry.kind === 'image').length > 1 ? `（${selectedEntries.filter(entry => entry.kind === 'image').length} 个）` : ''}</button>}
-        {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <><div className="my-1 border-t border-slate-100"/><button disabled={!canSelectMedia} className="project-menu-item" onClick={() => { setFileMenu(null); selectMediaFiles(); }}><CheckCircle2 size={14}/>选片</button><button disabled={!hasVersionTrackingForEntry(fileMenu.entry)} title={hasVersionTrackingForEntry(fileMenu.entry) ? '管理素材的历史版本' : '请先导入版本进度并开启项目跟踪'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openVersions(entry); }}><GitBranch size={14}/>版本管理</button>{teamRetouchAvailable && fileMenu.entry.kind === 'image' && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openTeamRetouch(entry); }}><UsersRound size={14}/>多人修脸</button>}</>}
+        {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <><div className="my-1 border-t border-slate-100"/><button disabled={!canSelectFileMenuMedia} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); selectMediaFiles(targets); }}><CheckCircle2 size={14}/>选片</button><button disabled={!hasVersionTrackingForEntry(fileMenu.entry)} title={hasVersionTrackingForEntry(fileMenu.entry) ? '管理素材的历史版本' : '请先导入版本进度并开启项目跟踪'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openVersions(entry); }}><GitBranch size={14}/>版本管理</button>{teamRetouchAvailable && fileMenu.entry.kind === 'image' && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openTeamRetouch(entry); }}><UsersRound size={14}/>多人修脸</button>}</>}
         {fileMenu.entry.kind !== 'folder' && <div className="my-1 border-t border-slate-100"/>}
-        <button disabled={finalViewOpen} className="project-menu-item" onClick={() => { setFileMenu(null); beginRename(); }}><Edit size={14}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
-        <button disabled={finalViewOpen} className="project-menu-item" onClick={() => { setFileMenu(null); runFileOperation('cut'); }}><Cut size={14}/>剪切</button>
-        <button className="project-menu-item" onClick={() => { setFileMenu(null); runFileOperation('copy'); }}><Copy size={14}/>复制</button>
+        <button disabled={finalViewOpen} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); beginRename(targets); }}><Edit size={14}/>{fileMenuTargetPaths.length > 1 ? '批量重命名' : '重命名'}</button>
+        <button disabled={finalViewOpen} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('cut', undefined, targets); }}><Cut size={14}/>剪切</button>
+        <button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('copy', undefined, targets); }}><Copy size={14}/>复制</button>
         <button disabled={finalViewOpen || !clipboardHasFiles} title={finalViewOpen ? '最终版浏览为只读视图' : clipboardHasFiles ? '粘贴到当前文件夹' : '剪贴板中没有文件'} className="project-menu-item" onClick={() => { setFileMenu(null); runFileOperation('paste'); }}><ClipboardPaste size={14}/>粘贴</button>
         {fileMenu.entry.kind === 'folder' && <><div className="my-1 border-t border-slate-100"/><button disabled={fileMenu.entry.relativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').includes('/')} title={fileMenu.entry.relativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').includes('/') ? '进度文件夹必须位于项目根目录' : '把当前文件夹登记为图片或视频进度'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openMarkProgress(entry); }}><GitBranch size={14}/>标记进度</button></>}
         {fileMenu.entry.kind === 'folder' && <button className="project-menu-item" onClick={() => { setFileMenu(null); openPngConverter(fileMenu.entry.path); }}><ImageIcon size={14}/>PNG 转 JPG</button>}
         <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); copyEntryPath(entry); }}><FileText size={14}/>{fileMenu.entry.kind === 'folder' ? '复制文件夹地址' : '复制文件地址'}</button>
         <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openEntryDetails(entry); }}><Info size={14}/>详细信息</button>
-        <button className="project-menu-item" onClick={() => { setSelectedPaths([]); setFileMenu(null); }}><X size={14}/>退出选择</button>
-        <button disabled={finalViewOpen} className="project-menu-item project-menu-danger" onClick={() => { setFileMenu(null); runFileOperation('trash'); }}><Trash2 size={14}/>删除</button>
+        <button className="project-menu-item" onClick={() => { const path = fileMenu.entry.relativePath; if (fileMenuEntrySelected) setSelectedPaths(current => current.filter(item => item !== path)); else { selectionAnchorPathRef.current = path; setSelectedPaths(current => [...current, path]); setSearchOpen(false); setSearchQuery(''); requestFileReveal(path); } setFileMenu(null); }}>{fileMenuEntrySelected ? <X size={14}/> : <CheckSquare size={14}/>} {fileMenuEntrySelected ? '取消选择' : '选择'}</button>
+        <button disabled={finalViewOpen} className="project-menu-item project-menu-danger" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('trash', undefined, targets); }}><Trash2 size={14}/>删除</button>
       </ViewportContextMenu>, document.body)}
       {surfaceMenu && createPortal(<ViewportContextMenu x={surfaceMenu.x} y={surfaceMenu.y} widthClass="w-56">
         <p className="px-2 py-1 text-[11px] font-bold text-slate-400">新建</p>
@@ -2193,7 +2216,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         </div>
         <span aria-hidden className="toolbar-divider"/>
         {selectedPaths.length > 0 && <span className="mr-1 self-center text-xs text-slate-500">已选 {selectedPaths.length}</span>}
-        <button disabled={finalViewOpen || !selectedPaths.length} title={finalViewOpen ? '最终版浏览为只读视图' : selectedPaths.length > 1 ? '批量重命名' : '重命名'} onClick={beginRename} className="project-action-button compact-hide-file-action"><Edit size={16}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
+        <button disabled={finalViewOpen || !selectedPaths.length} title={finalViewOpen ? '最终版浏览为只读视图' : selectedPaths.length > 1 ? '批量重命名' : '重命名'} onClick={() => beginRename()} className="project-action-button compact-hide-file-action"><Edit size={16}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
         <button disabled={finalViewOpen || !selectedPaths.length} title={finalViewOpen ? '最终版浏览为只读视图' : '剪切'} onClick={() => runFileOperation('cut')} className="project-action-button compact-hide-file-action"><Cut size={16}/>剪切</button>
         <button disabled={!selectedPaths.length} title="复制" onClick={() => runFileOperation('copy')} className="project-action-button compact-hide-file-action"><Copy size={16}/>复制</button>
         <button disabled={finalViewOpen || !clipboardHasFiles} title={finalViewOpen ? '最终版浏览为只读视图' : clipboardHasFiles ? '粘贴到当前文件夹' : '剪贴板中没有文件'} onClick={() => runFileOperation('paste')} className="project-action-button compact-hide-file-action"><ClipboardPaste size={16}/>粘贴</button>
@@ -2203,14 +2226,14 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         <div className="contents">
           <button onClick={() => togglePanel('import')} title="从 SD 卡导入" aria-label="从 SD 卡导入" className="project-action-button"><MemoryStick size={16}/>从 SD 卡导入</button>
           <button onClick={() => togglePanel('match')} title="从文件名选片" aria-label="从文件名选片" className="project-action-button"><FileText size={16}/>从文件名选片</button>
-          <button aria-disabled={!canSelectMedia} title="选片" onClick={selectMediaFiles} className={`project-action-button ${canSelectMedia ? '' : 'cursor-not-allowed opacity-50'}`}><CheckCircle2 size={16}/>选片</button>
+          <button aria-disabled={!canSelectMedia} title="选片" onClick={() => void selectMediaFiles()} className={`project-action-button ${canSelectMedia ? '' : 'cursor-not-allowed opacity-50'}`}><CheckCircle2 size={16}/>选片</button>
         </div>
         <div className="contents">
           <button disabled={selectedProgressFolder ? !selectedProgressFolderIsRoot : selectedEntries.length !== 1 || !hasVersionTrackingForEntry(selectedEntries[0])} onClick={() => selectedProgressFolder ? void openMarkProgress(selectedProgressFolder) : openVersions()} title={selectedProgressFolder ? selectedProgressFolderIsRoot ? selectedRegisteredProgressFolder ? '修改当前进度版本' : '标记当前文件夹为进度' : '进度文件夹必须位于项目根目录' : '版本管理'} aria-label={selectedProgressFolder ? selectedRegisteredProgressFolder ? '修改进度版本' : '标记进度' : '版本管理'} className="project-action-button"><GitBranch size={16}/>{selectedProgressFolder ? selectedRegisteredProgressFolder ? '修改进度版本' : '标记进度' : '版本管理'}</button>
           {finalVersionSummary.count > 0 && <button disabled={finalViewLoading} onClick={() => void openFinalVersionView()} title={`浏览最终版（${finalVersionSummary.availableCount} 张${finalVersionSummary.missingCount ? `，${finalVersionSummary.missingCount} 张文件丢失` : ''}）`} aria-label="浏览所有已标记最终版的图片" aria-pressed={finalViewOpen} className={`project-action-button !text-emerald-600 hover:!bg-emerald-50 ${finalViewOpen ? '!bg-emerald-50' : ''}`}>{finalViewLoading ? <Loader2 size={16} className="animate-spin"/> : <Heart size={16} fill="currentColor"/>}</button>}
           {teamRetouchAvailable && <button disabled={!selectedEntries.length || selectedEntries.some(entry => entry.kind !== 'image')} onClick={() => openTeamRetouch()} title="多人修脸" aria-label="多人修脸" className="project-action-button"><UsersRound size={16}/>多人修脸{selectedEntries.length > 1 ? `（${selectedEntries.length} 张）` : ''}</button>}
         </div>
-        <div className="ml-auto flex shrink-0 items-center gap-1 pl-3"><button onClick={() => setViewMode('grid')} title="图标模式" className={`rounded-md p-1.5 ${viewMode === 'grid' ? 'bg-slate-200 text-slate-800' : 'text-slate-500 hover:bg-slate-200'}`}><Grid2X2 size={17}/></button><button onClick={() => setViewMode('list')} title="列表模式" className={`rounded-md p-1.5 ${viewMode === 'list' ? 'bg-slate-200 text-slate-800' : 'text-slate-500 hover:bg-slate-200'}`}><LayoutList size={17}/></button>{viewMode === 'grid' && <input aria-label="图标大小" title="图标大小" type="range" min="80" max="360" step="4" value={gridIconSize} onChange={event => setGridIconSize(Number(event.target.value))} className="compact-hide-slider ml-2 w-24 accent-blue-600"/>}<span aria-hidden className="mx-1 h-5 w-px bg-slate-200"/><div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !showSortMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowSortMenu(next); }} title="排序" aria-label="排序" aria-haspopup="menu" aria-expanded={showSortMenu} className="project-action-button"><ArrowUpDown size={16}/>排序</button>{showSortMenu && <div className="sort-menu absolute right-0 top-full z-40 mt-1 w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">{([['name', '文件名'], ['date', '修改日期'], ['size', '大小']] as const).map(([field, label]) => <button key={field} type="button" onClick={() => setSortField(field)} className={`project-menu-item ${sortField === field ? 'bg-blue-50 font-bold text-blue-600' : ''}`}>{label}</button>)}<div className="my-1 border-t border-slate-100"/><button type="button" onClick={() => setSortDirection('asc')} className={`project-menu-item ${sortDirection === 'asc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowUp size={14}/><span>递增</span></button><button type="button" onClick={() => setSortDirection('desc')} className={`project-menu-item ${sortDirection === 'desc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowDown size={14}/><span>递减</span></button></div>}</div><div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !searchOpen; window.dispatchEvent(new Event('photoflow-menu-open')); setSearchOpen(next); }} title="查找文件" aria-label="查找文件" aria-expanded={searchOpen} className={`project-action-button ${searchOpen || searchQuery ? 'bg-blue-50 text-blue-600' : ''}`}><Search size={16}/>查找文件</button>{searchOpen && <div className="absolute right-0 top-full z-40 mt-1 w-64 rounded-lg border border-slate-200 bg-white p-2 shadow-xl"><div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2"><Search size={15} className="shrink-0 text-slate-400"/><input autoFocus value={searchQuery} onChange={event => setSearchQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { setSearchOpen(false); setSearchQuery(''); } }} placeholder="输入文件名" className="min-w-0 flex-1 bg-transparent py-2 text-sm text-slate-800 outline-none"/>{searchQuery && <button type="button" onClick={() => setSearchQuery('')} title="清除查找" className="rounded p-0.5 text-slate-400 hover:bg-slate-200"><X size={14}/></button>}</div></div>}</div></div>
+        <div className="ml-auto flex shrink-0 items-center gap-1 pl-3"><button onClick={() => setViewMode('grid')} title="图标模式" className={`rounded-md p-1.5 ${viewMode === 'grid' ? 'bg-slate-200 text-slate-800' : 'text-slate-500 hover:bg-slate-200'}`}><Grid2X2 size={17}/></button><button onClick={() => setViewMode('list')} title="列表模式" className={`rounded-md p-1.5 ${viewMode === 'list' ? 'bg-slate-200 text-slate-800' : 'text-slate-500 hover:bg-slate-200'}`}><LayoutList size={17}/></button>{viewMode === 'grid' && <input aria-label="图标大小" title="图标大小" type="range" min="80" max="360" step="4" value={gridIconSize} onChange={event => setGridIconSize(Number(event.target.value))} className="compact-hide-slider ml-2 w-24 accent-blue-600"/>}<span aria-hidden className="mx-1 h-5 w-px bg-slate-200"/><div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !showSortMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowSortMenu(next); }} title="排序" aria-label="排序" aria-haspopup="menu" aria-expanded={showSortMenu} className="project-action-button"><ArrowUpDown size={16}/>排序</button>{showSortMenu && <div className="sort-menu absolute right-0 top-full z-40 mt-1 w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">{([['name', '文件名'], ['date', '修改日期'], ['size', '大小']] as const).map(([field, label]) => <button key={field} type="button" onClick={() => setSortField(field)} className={`project-menu-item ${sortField === field ? 'bg-blue-50 font-bold text-blue-600' : ''}`}>{label}</button>)}<div className="my-1 border-t border-slate-100"/><button type="button" onClick={() => setSortDirection('asc')} className={`project-menu-item ${sortDirection === 'asc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowUp size={14}/><span>递增</span></button><button type="button" onClick={() => setSortDirection('desc')} className={`project-menu-item ${sortDirection === 'desc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowDown size={14}/><span>递减</span></button></div>}</div><div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !searchOpen; window.dispatchEvent(new Event('photoflow-menu-open')); setSearchOpen(next); }} title="查找文件（Ctrl+F）" aria-label="查找文件" aria-expanded={searchOpen} className={`project-action-button ${searchOpen || searchQuery ? 'bg-blue-50 text-blue-600' : ''}`}><Search size={16}/>查找文件</button>{searchOpen && <div className="absolute right-0 top-full z-40 mt-1 w-64 rounded-lg border border-slate-200 bg-white p-2 shadow-xl"><div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2"><Search size={15} className="shrink-0 text-slate-400"/><input ref={searchInputRef} autoFocus value={searchQuery} onChange={event => setSearchQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { setSearchOpen(false); setSearchQuery(''); } }} placeholder="输入文件名" className="min-w-0 flex-1 bg-transparent py-2 text-sm text-slate-800 outline-none"/>{searchQuery && <button type="button" onClick={() => setSearchQuery('')} title="清除查找" className="rounded p-0.5 text-slate-400 hover:bg-slate-200"><X size={14}/></button>}</div></div>}</div></div>
       </div>
       <div className="flex min-w-0 items-center px-6 py-2">
         <div className="flex min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap text-sm text-slate-500">
@@ -2299,7 +2322,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       </section>
 
       </div>
-      {previewPaneOpen && <><ColumnResizeHandle label="调整文件区和预览区宽度" onDrag={resizeFilesAndPreview}/><MediaPreviewPane entry={previewEntry} cacheConfig={mediaCacheConfig} width={displayedColumnWidths.preview} photoshopAvailable={photoshopAvailable} finalVersionAvailable={previewCanMarkFinal} finalVersion={previewVersion} finalVersionLoading={previewVersionLoading} finalVersionBusy={previewVersionBusy} onToggleFinal={() => void togglePreviewFinalVersion()} onTechnicalMetadata={setPreviewTechnicalMetadata} onSelect={selectPreviewEntryInFolder} onOpen={() => previewEntry && openProjectEntry(previewEntry)} onOpenInPhotoshop={() => previewEntry && openProjectEntriesInPhotoshop([previewEntry])} onClose={() => setPreviewPaneOpen(false)}/></>}
+      {previewPaneOpen && <><ColumnResizeHandle label="调整文件区和预览区宽度" onDrag={resizeFilesAndPreview}/><MediaPreviewPane entry={previewEntry} cacheConfig={mediaCacheConfig} width={displayedColumnWidths.preview} photoshopAvailable={photoshopAvailable} finalVersionAvailable={previewCanMarkFinal} finalVersion={previewVersion} finalVersionLoading={previewVersionLoading} finalVersionBusy={previewVersionBusy} onToggleFinal={() => void togglePreviewFinalVersion()} onTechnicalMetadata={setPreviewTechnicalMetadata} onContextMenu={event => previewEntry && openFileMenu(event, previewEntry, false)} onOpen={() => previewEntry && openProjectEntry(previewEntry)} onOpenInPhotoshop={() => previewEntry && openProjectEntriesInPhotoshop([previewEntry])} onClose={() => setPreviewPaneOpen(false)}/></>}
       {metadataPaneOpen && <><ColumnResizeHandle label={previewPaneOpen ? '调整预览区和详细信息区宽度' : '调整文件区和详细信息区宽度'} onDrag={previewPaneOpen ? resizePreviewAndMetadata : resizeFilesAndMetadata}/><FileMetadataPane entry={previewEntry} entryDetails={previewEntryDetails} metadataFields={currentPreviewMetadataFields} metadataLoading={currentPreviewMetadataLoading} metadataError={currentPreviewMetadataError} technicalMetadata={previewTechnicalMetadata} formatFileSize={formatFileSize} width={displayedColumnWidths.metadata} onOpen={() => previewEntry && openProjectEntry(previewEntry)} onCopyPath={() => previewEntry && copyEntryPath(previewEntry)} onClose={() => setMetadataPaneOpen(false)}/></>}
       </div>
 
@@ -2319,7 +2342,7 @@ const formatMediaDuration = (seconds?: number) => {
     : `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
 };
 
-const MediaPreviewPane = ({ entry, cacheConfig, width, photoshopAvailable, finalVersionAvailable, finalVersion, finalVersionLoading, finalVersionBusy, onToggleFinal, onTechnicalMetadata, onSelect, onOpen, onOpenInPhotoshop, onClose }: {
+const MediaPreviewPane = ({ entry, cacheConfig, width, photoshopAvailable, finalVersionAvailable, finalVersion, finalVersionLoading, finalVersionBusy, onToggleFinal, onTechnicalMetadata, onContextMenu, onOpen, onOpenInPhotoshop, onClose }: {
   entry?: ProjectFileEntry;
   cacheConfig: AppConfig['mediaCache'];
   width: number;
@@ -2330,7 +2353,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, photoshopAvailable, final
   finalVersionBusy: boolean;
   onToggleFinal: () => void;
   onTechnicalMetadata: (metadata: PreviewTechnicalMetadata) => void;
-  onSelect: () => void;
+  onContextMenu: (event: React.MouseEvent<HTMLElement>) => void;
   onOpen: () => void;
   onOpenInPhotoshop: () => void;
   onClose: () => void;
@@ -2346,28 +2369,8 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, photoshopAvailable, final
   const [imageSurfaceSize, setImageSurfaceSize] = useState({ width: 0, height: 0 });
   const [imageDragging, setImageDragging] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const imageSurfaceRef = useRef<HTMLDivElement>(null);
   const imageDragRef = useRef<{ pointerId: number; startX: number; startY: number; panX: number; panY: number } | null>(null);
-
-  useEffect(() => {
-    const closeContextMenu = () => setContextMenu(null);
-    window.addEventListener('click', closeContextMenu);
-    window.addEventListener('photoflow-menu-open', closeContextMenu);
-    return () => {
-      window.removeEventListener('click', closeContextMenu);
-      window.removeEventListener('photoflow-menu-open', closeContextMenu);
-    };
-  }, []);
-  useEffect(() => setContextMenu(null), [entry?.path]);
-
-  const openContextMenu = (event: React.MouseEvent<HTMLElement>) => {
-    if (!entry) return;
-    event.preventDefault();
-    event.stopPropagation();
-    window.dispatchEvent(new Event('photoflow-menu-open'));
-    setContextMenu({ x: event.clientX, y: event.clientY });
-  };
 
   useEffect(() => {
     let active = true;
@@ -2603,10 +2606,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, photoshopAvailable, final
     onTechnicalMetadata({ unavailable: true });
   };
 
-  const previewPane = <section onContextMenu={openContextMenu} style={fullscreen ? undefined : { width }} className={`flex min-h-0 shrink-0 flex-col bg-slate-50 ${fullscreen ? 'fixed inset-x-0 bottom-0 top-10 z-40 w-screen' : ''}`}>
-    {contextMenu && createPortal(<ViewportContextMenu x={contextMenu.x} y={contextMenu.y} widthClass="w-36">
-      <button type="button" className="project-menu-item" onClick={() => { setContextMenu(null); setFullscreen(false); onSelect(); }}><CheckSquare size={14}/>选择</button>
-    </ViewportContextMenu>, document.body)}
+  const previewPane = <section onContextMenu={onContextMenu} style={fullscreen ? undefined : { width }} className={`flex min-h-0 shrink-0 flex-col bg-slate-50 ${fullscreen ? 'fixed inset-x-0 bottom-0 top-10 z-40 w-screen' : ''}`}>
     <header className="flex min-h-14 shrink-0 items-center justify-between border-b border-slate-200 px-3 py-2">
       <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wider text-slate-400">预览</p><p className="truncate text-sm font-semibold text-slate-700">{entry?.name || '未选择媒体'}</p></div>
       <div className="flex items-center gap-1">{entry && <>{(finalVersionAvailable || finalVersion) && <button type="button" disabled={finalVersionLoading || finalVersionBusy || !finalVersion || finalVersion.fileMissing} onClick={onToggleFinal} title={finalVersion?.isFinal ? '取消标记最终版' : finalVersionLoading ? '正在读取最终版状态' : '标记为最终版'} className={`group min-w-[96px] rounded-md border px-2.5 py-1.5 text-[11px] font-medium transition hover:!border-red-300 hover:!bg-red-50 hover:!text-red-700 disabled:opacity-40 ${finalVersion?.isFinal ? 'border-red-200 bg-red-50 text-red-600' : 'border-slate-200 bg-slate-50 text-slate-500'}`}>{finalVersionBusy ? '处理中…' : finalVersionLoading ? '读取最终版状态…' : finalVersion?.isFinal ? <><span className="group-hover:hidden">已标记最终版</span><span className="hidden group-hover:inline">取消标记最终版</span></> : '标记为最终版'}</button>}{!fullscreen && <button type="button" onClick={() => setFullscreen(true)} title="全屏查看预览图" aria-label="全屏查看预览图" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Maximize2 size={16}/></button>}{photoshopAvailable && entry.kind === 'image' && <button type="button" onClick={onOpenInPhotoshop} title="使用 Photoshop 打开" aria-label="使用 Photoshop 打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><PhotoshopIcon size={16}/></button>}<button type="button" onClick={onOpen} title="使用系统默认应用打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><ExternalLink size={16}/></button></>}{fullscreen ? <button type="button" onClick={() => setFullscreen(false)} title="缩小预览（Esc）" aria-label="缩小预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Minimize2 size={16}/></button> : <button type="button" onClick={onClose} title="关闭预览" aria-label="关闭预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X size={16}/></button>}</div>

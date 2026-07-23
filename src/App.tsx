@@ -22,6 +22,10 @@ import { ConverterView, DashboardView, HomePanel, MatchView, ResearchView, Video
 import type { AppConfig, ComponentStatus, HomeCardId, ProjectFileOperationProgress, ToolType, WorkspaceProject } from './types';
 
 const DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'research', 'converter'];
+const localDateKey = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+};
 const normalizeHomeOrder = (value: unknown): HomeCardId[] => {
   const valid = new Set<HomeCardId>(DEFAULT_HOME_ORDER);
   const ordered = (Array.isArray(value) ? value : []).filter((card): card is HomeCardId => valid.has(card as HomeCardId));
@@ -84,6 +88,7 @@ const isMac = window.navigator.userAgent.includes('Mac');
 const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   theme: 'system',
   workspacePath: '',
+  autoCleanupDeletedProjectData: true,
   homeOrder: DEFAULT_HOME_ORDER,
   birthdayEnabled: true,
   componentSettings: {
@@ -167,6 +172,7 @@ const App: React.FC = () => {
   const [isCancellingFileOperation, setIsCancellingFileOperation] = useState(false);
   const noticeTimerRef = useRef<number>();
   const lastNoticeRef = useRef({ message: '', shownAt: 0 });
+  const cacheCleanupCheckedRef = useRef(false);
   const [homeOrder, setHomeOrder] = useState<HomeCardId[]>(DEFAULT_HOME_ORDER);
   const [draggedHomeCard, setDraggedHomeCard] = useState<HomeCardId | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => readStoredNumber('photoflow:sidebar-width', 256));
@@ -209,21 +215,17 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (!config?.mediaCache.autoCleanup30Days) return;
-    let active = true;
-    const storageKey = `photoflow:auto-cache-cleanup:${config.mediaCache.directory || 'default'}`;
-    const cleanExpiredCache = async () => {
-      const lastRun = Number(window.localStorage.getItem(storageKey)) || 0;
-      if (Date.now() - lastRun < 24 * 60 * 60 * 1000) return;
-      const result = await window.electronAPI.clearMediaCache(config.mediaCache, 30);
-      if (active && result.success) window.localStorage.setItem(storageKey, String(Date.now()));
-    };
-    void cleanExpiredCache();
-    const timer = window.setInterval(() => void cleanExpiredCache(), 60 * 60 * 1000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
+    if (!config?.mediaCache.autoCleanup30Days || cacheCleanupCheckedRef.current) return;
+    const storageKey = 'photoflow:maintenance:cache-cleanup-date';
+    const today = localDateKey();
+    if (window.localStorage.getItem(storageKey) === today) {
+      cacheCleanupCheckedRef.current = true;
+      return;
+    }
+    cacheCleanupCheckedRef.current = true;
+    void window.electronAPI.clearMediaCache(config.mediaCache, 30).then(result => {
+      if (result.success) window.localStorage.setItem(storageKey, today);
+    });
   }, [config?.mediaCache.autoCleanup30Days, config?.mediaCache.directory, config?.mediaCache.maxSizeGB]);
   // Keep the user's preferred width untouched while the window is compact.
   // The rendered width may shrink temporarily and returns automatically when
@@ -351,7 +353,7 @@ const App: React.FC = () => {
             const configuredImageSource = fileConfig.smartMatch?.imageSourceFolderName;
             const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;
             const savedSdPaths = (Array.isArray(fileConfig.smartImport?.sdPaths) && fileConfig.smartImport.sdPaths.length ? fileConfig.smartImport.sdPaths : fileConfig.smartImport?.sdPath ? [fileConfig.smartImport.sdPath] : []).map((drive: string) => isMac ? drive : drive.replace(/\\/g, '/').replace(/\/DCIM\/?$/i, '/'));
-            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', workspacePath: fileConfig.workspacePath?.trim() ?? '', homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, componentSettings: { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings, 'research-tools': researchSettings }, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false, splitLargeFiles: fileConfig.smartImport?.splitLargeFiles ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true }, fileImport: { preserveOriginal: fileConfig.fileImport?.preserveOriginal ?? false }, imageConversion: { jpgQuality: fileConfig.imageConversion?.jpgQuality ?? 100 }, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: !configuredImageSource || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: !configuredVideoSource || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
+            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, componentSettings: { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings, 'research-tools': researchSettings }, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false, splitLargeFiles: fileConfig.smartImport?.splitLargeFiles ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true }, fileImport: { preserveOriginal: fileConfig.fileImport?.preserveOriginal ?? false }, imageConversion: { jpgQuality: fileConfig.imageConversion?.jpgQuality ?? 100 }, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: !configuredImageSource || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: !configuredVideoSource || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
             if (normalizedConfig.workspacePath) {
               const workspace = await window.electronAPI.getWorkspaceProjects(normalizedConfig.workspacePath);
               if (workspace.success && workspace.root) normalizedConfig = { ...normalizedConfig, workspacePath: workspace.root };
@@ -359,7 +361,7 @@ const App: React.FC = () => {
               setShowWorkspaceSetup(true);
             }
             setConfig(normalizedConfig);
-            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.birthdayEnabled === undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.splitLargeFiles === undefined || !fileConfig.brollImport || !fileConfig.fileImport || !fileConfig.imageConversion || fileConfig.personDetection?.useGpu === undefined || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || !fileConfig.research?.sensitivity || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
+            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.birthdayEnabled === undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.splitLargeFiles === undefined || !fileConfig.brollImport || !fileConfig.fileImport || !fileConfig.imageConversion || fileConfig.personDetection?.useGpu === undefined || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || !fileConfig.research?.sensitivity || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             console.log('📋 Configuration loaded from file');
           } else {
             if (window.electronAPI?.getUserPath) {
@@ -566,7 +568,7 @@ const App: React.FC = () => {
             <img src="./app-logo.svg" className="brand-logo brand-logo-light-only h-5 w-5 shrink-0" alt="" />
             <img src="./app-logo-dark.svg" className="brand-logo brand-logo-dark-only h-5 w-5 shrink-0" alt="" />
             <span className="truncate text-sm font-bold text-slate-800">照片流</span>
-            <span className="shrink-0 font-mono text-[10px] text-slate-400">v26.7.23</span>
+            <span className="shrink-0 font-mono text-[10px] text-slate-400">v26.7.24</span>
           </div>
         </div>
         <div className="flex min-w-0 flex-1">
@@ -598,6 +600,7 @@ const App: React.FC = () => {
           ? <SettingsNavigator activeSection={settingsSection} components={components} onSelect={setSettingsSection}/>
           : <><ProjectNavigator
           workspacePath={config.workspacePath}
+          autoCleanupDeletedProjectData={config.autoCleanupDeletedProjectData}
           selectedProject={selectedProject}
           onSelectProject={(project, replacePath) => openProjectTab(project, null, replacePath)}
           onProjectAction={handleProjectAction}
@@ -740,7 +743,7 @@ const AboutPage = () => {
   return <section aria-labelledby="about-title" className="flex min-h-full w-full flex-col bg-white">
       <header className="sticky top-0 z-20 border-b border-slate-200 bg-slate-50 px-6 py-5"><h3 id="about-title" className="flex items-center gap-2 text-xl font-bold text-slate-800"><AtSign size={20} className="text-blue-600"/>关于</h3></header>
       <div className="mx-auto w-full max-w-4xl flex-1 space-y-5 p-6 text-sm leading-7 text-slate-600">
-        <div><p className="text-lg font-bold text-slate-800">by秋也寻</p><div className="mt-1 flex flex-wrap items-center gap-3"><p className="text-blue-600">版本 26.7.23</p><button onClick={checkForUpdates} disabled={updateStatus === 'checking'} className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-0.5 text-xs font-bold leading-5 text-blue-700 transition hover:bg-blue-100 disabled:cursor-wait disabled:opacity-60">{updateStatus === 'checking' ? '正在检查…' : '检查更新'}</button>{updateStatus === 'latest' && <span className="text-xs text-emerald-600">已是最新版本</span>}{updateStatus === 'error' && <span className="text-xs text-red-500">检查失败，请稍后重试</span>}</div></div>
+        <div><p className="text-lg font-bold text-slate-800">by秋也寻</p><div className="mt-1 flex flex-wrap items-center gap-3"><p className="text-blue-600">版本 26.7.24</p><button onClick={checkForUpdates} disabled={updateStatus === 'checking'} className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-0.5 text-xs font-bold leading-5 text-blue-700 transition hover:bg-blue-100 disabled:cursor-wait disabled:opacity-60">{updateStatus === 'checking' ? '正在检查…' : '检查更新'}</button>{updateStatus === 'latest' && <span className="text-xs text-emerald-600">已是最新版本</span>}{updateStatus === 'error' && <span className="text-xs text-red-500">检查失败，请稍后重试</span>}</div></div>
         <section><h4 className="text-base font-bold text-slate-800">软件简介</h4><p className="mt-1">照片流是一款为摄影师设计的项目管理与素材整理工具，帮助你跟进拍摄进度，并自动从 SD 卡导入和整理照片、视频。</p></section>
         <section><h4 className="text-base font-bold text-slate-800">功能说明</h4><p className="mt-1">调研整理功能可配合脚本整理下载的图片与视频、截取视频帧，并汇总调研资料信息。<br/>团片管理功能可将高像素大图裁切为便于修图的小图，后续再拼接回完整大图；也支持版本核对并交接给下一位修图人员。</p></section>
         <section><h4 className="text-base font-bold text-slate-800">制作说明</h4><p className="mt-1">早期版本的大部分代码由 Google Gemini 与 Copilot 生成；当前版本主要使用 Codex 制作。</p></section>

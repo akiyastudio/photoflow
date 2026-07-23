@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "office-media-extractor",
-  "version": "26.7.23.1",
+  "version": "26.7.24.1",
   "platforms": ["win32", "darwin"],
   "architectures": ["x64", "arm64"],
   "entrypoints": {

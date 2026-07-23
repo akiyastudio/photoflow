@@ -639,6 +639,20 @@ class ThumbnailPipeline {
     await this.database.call('invalidate_cache', { deleted_paths: deletedPaths || null, before_ms: beforeMs || null });
   }
 
+  async invalidateSources(sourcePaths) {
+    this.memory.clear();
+    const result = await this.database.call('invalidate_sources', { source_paths: sourcePaths || [] });
+    await Promise.all((result.thumbnailPaths || []).map(filePath => fs.promises.unlink(filePath).catch(() => undefined)));
+    return result;
+  }
+
+  async pruneMissingSources() {
+    this.memory.clear();
+    const result = await this.database.call('prune_missing_sources');
+    await Promise.all((result.thumbnailPaths || []).map(filePath => fs.promises.unlink(filePath).catch(() => undefined)));
+    return result;
+  }
+
   stop() {
     if (this.projectScanPumpTimer) clearTimeout(this.projectScanPumpTimer);
     if (this.thumbnailPumpTimer) clearTimeout(this.thumbnailPumpTimer);

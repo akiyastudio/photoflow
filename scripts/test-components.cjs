@@ -54,8 +54,8 @@ try {
   assert(advancedBridge.includes('PHOTOFLOW_WSL_DISTRO'), 'custom WSL distribution override must remain supported');
   assert(advancedBridge.includes('class AdvancedBatchSession'), 'batch retouch must keep advanced models resident for the batch lifetime');
   assert(advancedBridge.includes('payload_b64'), 'persistent WSL requests must preserve Unicode paths');
-  const pairDetrScript = fs.readFileSync(path.join(repositoryRoot, 'experiments', 'team-retouch-model-lab', 'scripts', 'smoke_pairdetr.py'), 'utf8');
-  const sam2Script = fs.readFileSync(path.join(repositoryRoot, 'experiments', 'team-retouch-model-lab', 'scripts', 'smoke_sam2.py'), 'utf8');
+  const pairDetrScript = fs.readFileSync(path.join(repositoryRoot, 'components', 'team-retouch', 'advanced', 'pairdetr_service.py'), 'utf8');
+  const sam2Script = fs.readFileSync(path.join(repositoryRoot, 'components', 'team-retouch', 'advanced', 'sam2_service.py'), 'utf8');
   assert(pairDetrScript.includes('parser.add_argument("--serve"'), 'PairDETR must expose persistent service mode');
   assert(sam2Script.includes('parser.add_argument("--serve"'), 'SAM 2.1 must expose persistent service mode');
 
