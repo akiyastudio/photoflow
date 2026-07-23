@@ -18,6 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import type { AppConfig, MediaMetadataField, MediaVersion, MediaVersionBundle, ProjectFileEntry, WorkspaceProject } from '../types';
+import { useAppDialog } from './AppDialogProvider';
 
 type VersionManagerProps = {
   entry: ProjectFileEntry;
@@ -262,7 +263,7 @@ const SingleVersionView = ({ version, cacheConfig, busy, onClose, onNotice, onTo
           <button type="button" onClick={onEditNote} className="dialog-secondary inline-flex items-center justify-center gap-2"><Pencil size={14}/>编辑版本说明</button>
           {!version.isCurrent && <button type="button" disabled={busy || version.fileMissing} onClick={onMakeCurrent} className="dialog-secondary inline-flex items-center justify-center gap-2"><CheckCircle2 size={14}/>设为当前版本</button>}
           <button type="button" onClick={async () => { try { await navigator.clipboard.writeText(version.filePath); onNotice('成功复制文字'); } catch { onNotice('复制文件地址失败'); } }} className="dialog-secondary inline-flex items-center justify-center gap-2"><Copy size={14}/>复制文件地址</button>
-          {version.versionNumber > 0 && <button type="button" disabled={busy} onClick={onDelete} className="inline-flex items-center justify-center gap-2 rounded-md border border-red-200 px-3 py-2 text-sm font-bold text-red-600 hover:bg-red-50"><Trash2 size={14}/>删除版本记录</button>}
+          {version.versionNumber > 0 && !version.fileMissing && <button type="button" disabled={busy} onClick={onDelete} className="inline-flex items-center justify-center gap-2 rounded-md border border-red-200 px-3 py-2 text-sm font-bold text-red-600 hover:bg-red-50"><Trash2 size={14}/>删除版本记录</button>}
         </div>
       </div>
     </aside>
@@ -270,6 +271,7 @@ const SingleVersionView = ({ version, cacheConfig, busy, onClose, onNotice, onTo
 };
 
 export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onClose, onNotice, onVersionStateChanged }: VersionManagerProps) => {
+  const appDialog = useAppDialog();
   const [bundle, setBundle] = useState<MediaVersionBundle>({ success: true, versions: [] });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -345,8 +347,47 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
     onNotice(notice);
   };
   const deleteVersion = async (version: MediaVersion) => {
-    if (!bundle.photo || !window.confirm(`确定删除 V${version.versionNumber} · ${visibleVersionName(version)} 的版本记录吗？`)) return;
-    const trashFile = window.confirm('是否同时把对应磁盘文件移入系统回收站？\n选择“取消”将只删除版本记录。');
+    if (!bundle.photo) return;
+    const scope = await window.electronAPI.getMediaVersionDeleteScope(workspacePath, version.id);
+    const selectedReparentText = scope.success && scope.selectedChildCount
+      ? `\n\n该版本有 ${scope.selectedChildCount} 条直接子版本；删除后会自动改接到它的上一级版本，编号不会变化。`
+      : '';
+    if (!await appDialog.confirm({
+      title: `确定删除 V${version.versionNumber} 吗？`,
+      message: `将删除“${visibleVersionName(version)}”的版本记录。${selectedReparentText}`,
+      confirmLabel: '删除版本',
+      tone: 'danger',
+    })) return;
+    if (version.fileMissing) {
+      if (scope.success && scope.allMissing && scope.versionCount > 1) {
+        const bulkReparentText = scope.childCount ? `\n其中 ${scope.childCount} 条直接子版本会自动改接到上一级版本。` : '';
+        const deleteAll = await appDialog.confirm({
+          title: `删除所有图片的 V${scope.versionNumber}？`,
+          message: `当前项目中 V${scope.versionNumber} 的 ${scope.versionCount} 条版本记录已全部丢失。${bulkReparentText}\n\n选择“只删当前图片”将只删除当前这一张图片的 V${scope.versionNumber}。`,
+          confirmLabel: '删除所有图片',
+          cancelLabel: '只删当前图片',
+          tone: 'danger',
+        });
+        if (deleteAll) {
+          setBusy(true);
+          const bulkResult = await window.electronAPI.deleteProjectMissingMediaVersion(workspacePath, version.id);
+          setBusy(false);
+          if (!bulkResult.success) { onNotice(`批量删除失效版本失败：${bulkResult.error || '未知错误'}`); return; }
+          setCompareIds([]);
+          await load();
+          onVersionStateChanged?.();
+          onNotice(`已删除当前项目 ${bulkResult.deletedCount} 张图片的 V${bulkResult.versionNumber} 失效版本${bulkResult.reparentedCount ? `，并改接 ${bulkResult.reparentedCount} 条后续版本` : ''}；其他版本编号保持不变`);
+          return;
+        }
+      }
+    }
+    const trashFile = version.fileMissing ? false : await appDialog.confirm({
+      title: '是否同时删除磁盘文件？',
+      message: '对应磁盘文件将移入系统回收站。选择“仅删除记录”会保留磁盘文件。',
+      confirmLabel: '文件移入回收站',
+      cancelLabel: '仅删除记录',
+      tone: 'danger',
+    });
     setBusy(true);
     const result = await window.electronAPI.deleteMediaVersion(workspacePath, { photoId: bundle.photo.id, versionId: version.id, trashFile });
     setBusy(false);
@@ -355,7 +396,7 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
     setSelectedId(result.versions.find(item => item.isCurrent)?.id || result.versions[0]?.id || '');
     setCompareIds(ids => ids.filter(id => id !== version.id));
     onVersionStateChanged?.();
-    onNotice(result.warning || (trashFile ? '版本已删除，文件已移入回收站' : '版本记录已删除'));
+    onNotice(result.warning || (trashFile ? '版本已删除，文件已移入回收站；其他版本编号保持不变' : '版本记录已删除；其他版本编号保持不变'));
   };
   const relocateVersion = async (version: MediaVersion) => {
     if (!bundle.photo) return;
@@ -378,10 +419,10 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
         <header className="sticky top-0 z-10 border-b border-slate-200 bg-white px-4 py-3"><div className="flex items-start gap-2"><GitBranch size={18} className="mt-0.5 shrink-0 text-blue-600"/><div className="min-w-0 flex-1"><h2 className="truncate text-sm font-bold text-slate-800">版本管理 · {bundle.photo?.displayName || entry.name}</h2><p className="mt-1 truncate text-[11px] text-slate-500" title={bundle.photo?.id}>Photo ID：<span className="font-mono">{bundle.photo?.id || '正在建立追踪…'}</span></p></div><button onClick={onClose} title="关闭版本管理" aria-label="关闭版本管理" className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100"><X size={17}/></button></div></header>
         {missingVersionCount > 0 && <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[11px] font-medium leading-5 text-amber-800"><AlertTriangle size={14} className="mt-0.5 shrink-0"/><span>{missingVersionCount} 个版本文件已被删除或移动，可选择对应版本重新定位或删除记录。</span></div>}
         <div className="p-3"><div className="mb-2 flex items-center justify-between px-2"><span className="text-xs font-bold uppercase tracking-wider text-slate-400">版本树</span><span className="text-xs text-slate-400">{bundle.versions.length} 个版本</span></div>
-        <div className="space-y-2">{bundle.versions.map(version => <button key={version.id} onClick={() => setSelectedId(version.id)} className={`relative w-full rounded-xl border p-3 text-left transition ${selectedId === version.id ? 'border-blue-400 bg-blue-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'}`} style={{ paddingLeft: 12 + (depths.get(version.id) || 0) * 14 }}>
+        <div className="space-y-2">{bundle.versions.map(version => <div key={version.id} role="button" tabIndex={0} onClick={() => setSelectedId(version.id)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedId(version.id); } }} className={`relative w-full cursor-pointer rounded-xl border p-3 text-left transition ${selectedId === version.id ? 'border-blue-400 bg-blue-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'}`} style={{ paddingLeft: 12 + (depths.get(version.id) || 0) * 14 }}>
           {(depths.get(version.id) || 0) > 0 && <span className="absolute bottom-1/2 top-0 w-px bg-slate-200" style={{ left: 8 + (depths.get(version.id) || 0) * 14 }}/>} 
-          <div className="flex items-start gap-3"><VersionResource version={version} cacheConfig={cacheConfig} className="h-16 w-20 shrink-0 rounded-md"/><div className="min-w-0 flex-1"><div className="flex items-center gap-1.5"><span className="font-mono text-xs font-bold text-blue-600">V{version.versionNumber}</span><span className="truncate text-sm font-bold text-slate-800">{visibleVersionName(version)}</span>{version.isCurrent && <span title="当前版本" className="rounded-full bg-blue-600 p-0.5 text-white"><Check size={10}/></span>}{version.isFinal && <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">最终</span>}</div><p className="mt-1 flex items-center gap-1 text-[11px] text-slate-400"><Clock3 size={11}/>{new Date(version.createdAt).toLocaleString()}</p>{version.fileMissing && <p className="mt-1 text-[11px] font-bold text-red-500">文件丢失</p>}{version.contentChanged && <p className="mt-1 text-[11px] font-bold text-amber-600">文件曾被外部修改</p>}</div><input disabled={version.fileMissing} title={version.fileMissing ? '请先重新定位文件' : '选择进行对比'} aria-label={`选择 V${version.versionNumber} 进行对比`} type="checkbox" checked={compareIds.includes(version.id)} onClick={event => event.stopPropagation()} onChange={() => toggleCompare(version.id)} className="mt-1 accent-blue-600 disabled:opacity-40"/></div>
-        </button>)}</div></div>
+          <div className="flex items-start gap-3"><VersionResource version={version} cacheConfig={cacheConfig} className="h-16 w-20 shrink-0 rounded-md"/><div className="min-w-0 flex-1"><div className="flex items-center gap-1.5"><span className="font-mono text-xs font-bold text-blue-600">V{version.versionNumber}</span><span className="truncate text-sm font-bold text-slate-800">{visibleVersionName(version)}</span>{version.isCurrent && <span title="当前版本" className="rounded-full bg-blue-600 p-0.5 text-white"><Check size={10}/></span>}{version.isFinal && <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">最终</span>}</div><p className="mt-1 flex items-center gap-1 text-[11px] text-slate-400"><Clock3 size={11}/>{new Date(version.createdAt).toLocaleString()}</p>{version.fileMissing && <div className="mt-1 flex flex-wrap items-center gap-2"><span className="text-[11px] font-bold text-red-500">文件丢失</span>{version.versionNumber > 0 && <button type="button" disabled={busy} onClick={event => { event.stopPropagation(); void deleteVersion(version); }} className="inline-flex items-center gap-1 rounded border border-red-200 bg-white px-2 py-0.5 text-[10px] font-bold text-red-600 hover:bg-red-50 disabled:opacity-40"><Trash2 size={11}/>删除版本</button>}</div>}{version.contentChanged && <p className="mt-1 text-[11px] font-bold text-amber-600">文件曾被外部修改</p>}</div><input disabled={version.fileMissing} title={version.fileMissing ? '请先重新定位文件' : '选择进行对比'} aria-label={`选择 V${version.versionNumber} 进行对比`} type="checkbox" checked={compareIds.includes(version.id)} onClick={event => event.stopPropagation()} onChange={() => toggleCompare(version.id)} className="mt-1 accent-blue-600 disabled:opacity-40"/></div>
+        </div>)}</div></div>
       </aside>
       <div
         role="separator"

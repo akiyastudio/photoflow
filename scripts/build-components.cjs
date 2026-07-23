@@ -35,8 +35,8 @@ const definitions = {
     template: path.join(root, 'components', 'team-retouch', 'component.template.json'),
     models: [path.join(root, 'components', 'team-retouch', 'models', 'rtmdet-ins_m_640x640.onnx')],
     advancedScripts: [
-      path.join(root, 'experiments', 'team-retouch-model-lab', 'scripts', 'smoke_pairdetr.py'),
-      path.join(root, 'experiments', 'team-retouch-model-lab', 'scripts', 'smoke_sam2.py'),
+      path.join(root, 'components', 'team-retouch', 'advanced', 'pairdetr_service.py'),
+      path.join(root, 'components', 'team-retouch', 'advanced', 'sam2_service.py'),
     ],
     pyInstallerArgs: [
       '--collect-binaries', 'onnxruntime',

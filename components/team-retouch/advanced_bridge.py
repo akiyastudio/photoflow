@@ -26,7 +26,6 @@ def script_path(name):
     candidates = [component_directory() / "advanced" / name]
     if hasattr(__import__("sys"), "_MEIPASS"):
         candidates.append(Path(__import__("sys")._MEIPASS) / "advanced" / name)
-    candidates.append(Path(__file__).resolve().parents[2] / "experiments" / "team-retouch-model-lab" / "scripts" / name)
     for candidate in candidates:
         if candidate.is_file():
             return candidate
@@ -160,8 +159,8 @@ class AdvancedBatchSession:
 
     def __enter__(self):
         try:
-            self.pair = _WslJsonService(PAIR_PYTHON, script_path("smoke_pairdetr.py"))
-            self.sam = _WslJsonService(SAM2_PYTHON, script_path("smoke_sam2.py"))
+            self.pair = _WslJsonService(PAIR_PYTHON, script_path("pairdetr_service.py"))
+            self.sam = _WslJsonService(SAM2_PYTHON, script_path("sam2_service.py"))
             return self
         except Exception:
             self.__exit__(None, None, None)
@@ -203,8 +202,8 @@ class AdvancedBatchSession:
 
 def probe_advanced():
     try:
-        pair_script = wsl_path(script_path("smoke_pairdetr.py"))
-        sam_script = wsl_path(script_path("smoke_sam2.py"))
+        pair_script = wsl_path(script_path("pairdetr_service.py"))
+        sam_script = wsl_path(script_path("sam2_service.py"))
         command = " && ".join([
             f"test -x {PAIR_PYTHON}", f"test -x {SAM2_PYTHON}",
             "test -s $HOME/model-lab/checkpoints/pairdetr/pytorch_model.bin",
@@ -218,7 +217,7 @@ def probe_advanced():
 
 
 def run_pairdetr(input_path, output_root, threshold):
-    script = wsl_path(script_path("smoke_pairdetr.py"))
+    script = wsl_path(script_path("pairdetr_service.py"))
     image = wsl_path(input_path)
     output_path = Path(output_root) / "pairdetr-boxes.json"
     output = wsl_path(output_path)
@@ -233,7 +232,7 @@ def run_pairdetr(input_path, output_root, threshold):
 
 
 def run_sam2(input_path, fused, output_root):
-    script = wsl_path(script_path("smoke_sam2.py"))
+    script = wsl_path(script_path("sam2_service.py"))
     image = wsl_path(input_path)
     boxes_path = Path(output_root) / "fused-boxes.json"
     boxes_path.write_text(json.dumps({

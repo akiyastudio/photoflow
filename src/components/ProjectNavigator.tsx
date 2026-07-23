@@ -2,17 +2,25 @@ import React, { useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus, X } from 'lucide-react';
 import { PROJECT_STATUS_LABELS } from '../types';
 import type { ProjectStatus, WorkspaceProject, WorkspaceStatusGroup } from '../types';
+import { useAppDialog } from './AppDialogProvider';
 
 const STATUSES: ProjectStatus[] = ['未分类', '策划中', '待拍摄', '后期中', '已归档'];
 type Action = 'import' | 'broll' | 'match';
+const cleanupCheckedWorkspaces = new Set<string>();
+const localDateKey = () => {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+};
 
-export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProject, onProjectAction, onWorkspaceResolved }: {
+export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData, selectedProject, onSelectProject, onProjectAction, onWorkspaceResolved }: {
   workspacePath: string;
+  autoCleanupDeletedProjectData: boolean;
   selectedProject: WorkspaceProject | null;
   onSelectProject: (project: WorkspaceProject, replacePath?: string) => void;
   onProjectAction: (action: Action, project: WorkspaceProject) => void;
   onWorkspaceResolved: (workspacePath: string) => void;
 }) => {
+  const appDialog = useAppDialog();
   const [groups, setGroups] = useState<WorkspaceStatusGroup[]>([]);
   const [expanded, setExpanded] = useState<Record<ProjectStatus, boolean>>({ 未分类: true, 策划中: true, 待拍摄: true, 后期中: true, 已归档: true });
   useEffect(() => {
@@ -52,6 +60,22 @@ export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProje
   };
 
   useEffect(() => { refresh(); }, [workspacePath]);
+  useEffect(() => {
+    if (!autoCleanupDeletedProjectData || !workspacePath.trim()) return;
+    const key = workspacePath.trim().toLocaleLowerCase();
+    if (cleanupCheckedWorkspaces.has(key)) return;
+    cleanupCheckedWorkspaces.add(key);
+    const storageKey = `photoflow:maintenance:deleted-project-cleanup:${key}`;
+    const today = localDateKey();
+    if (window.localStorage.getItem(storageKey) === today) return;
+    let disposed = false;
+    void window.electronAPI.cleanupDeletedWorkspaceProjects(workspacePath).then(result => {
+      if (!result.success) return;
+      window.localStorage.setItem(storageKey, today);
+      if (!disposed && result.cleanedCount > 0) void refresh();
+    });
+    return () => { disposed = true; };
+  }, [workspacePath, autoCleanupDeletedProjectData]);
   useEffect(() => {
     const close = () => setMenu(null);
     let refreshTimer = 0;
@@ -110,7 +134,12 @@ export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProje
     refresh();
   };
   const trash = async (project: WorkspaceProject) => {
-    if (!window.confirm(`确定删除项目“${project.name}”吗？项目会移入系统回收站。`)) return;
+    if (!await appDialog.confirm({
+      title: '确定要删除项目吗？',
+      message: `删除项目会将项目文件夹“${project.name}”移入回收站。`,
+      confirmLabel: '删除项目',
+      tone: 'danger',
+    })) return;
     const result = await window.electronAPI.trashWorkspaceProject(workspacePath, project.status, project.name);
     if (!result.success) setError(result.error || '删除项目失败');
     refresh();
@@ -134,7 +163,7 @@ export const ProjectNavigator = ({ workspacePath, selectedProject, onSelectProje
       })}
       {error && <p className="mt-2 px-2 text-xs text-red-500">{error}</p>}
     </nav>
-    {menu && <div className="fixed z-[300] w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" style={{ left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 360) }} onClick={event => event.stopPropagation()}><button className="project-menu-item" onClick={() => { setRenameProject(menu.project); setRenameValue(menu.project.name); setMenu(null); }}>重命名</button><div className="my-1 border-t border-slate-100"/><p className="px-2 py-1 text-[11px] font-bold text-slate-400">更改状态</p>{STATUSES.filter(status => status !== '未分类').map(status => { const isCurrentStatus = status === menu.project.status; return <button key={status} aria-current={isCurrentStatus ? 'true' : undefined} className={`project-menu-item ${isCurrentStatus ? 'bg-blue-50 font-bold text-blue-700' : ''}`} onClick={() => { move(menu.project, status); setMenu(null); }}>{PROJECT_STATUS_LABELS[status]}{isCurrentStatus ? '（当前）' : ''}</button>; })}<div className="my-1 border-t border-slate-100"/><button className="project-menu-item" onClick={() => { onProjectAction('import', menu.project); setMenu(null); }}>从 SD 卡导入</button><button className="project-menu-item" onClick={() => { onProjectAction('broll', menu.project); setMenu(null); }}>导入花絮</button><button className="project-menu-item" onClick={() => { onProjectAction('match', menu.project); setMenu(null); }}>从SD卡选片</button><div className="my-1 border-t border-slate-100"/><button className="project-menu-item text-red-500 hover:bg-red-50" onClick={() => { trash(menu.project); setMenu(null); }}>删除项目</button></div>}
+    {menu && <div className="fixed z-[300] w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" style={{ left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 360) }} onClick={event => event.stopPropagation()}><button className="project-menu-item" onClick={() => { setRenameProject(menu.project); setRenameValue(menu.project.name); setMenu(null); }}>重命名</button><div className="my-1 border-t border-slate-100"/><p className="px-2 py-1 text-[11px] font-bold text-slate-400">更改状态</p>{STATUSES.filter(status => status !== '未分类').map(status => { const isCurrentStatus = status === menu.project.status; return <button key={status} aria-current={isCurrentStatus ? 'true' : undefined} className={`project-menu-item ${isCurrentStatus ? 'bg-blue-50 font-bold text-blue-700' : ''}`} onClick={() => { move(menu.project, status); setMenu(null); }}>{PROJECT_STATUS_LABELS[status]}{isCurrentStatus ? '（当前）' : ''}</button>; })}<div className="my-1 border-t border-slate-100"/><button className="project-menu-item" onClick={() => { onProjectAction('import', menu.project); setMenu(null); }}>从 SD 卡导入</button><button className="project-menu-item" onClick={() => { onProjectAction('broll', menu.project); setMenu(null); }}>导入花絮</button><button className="project-menu-item" onClick={() => { onProjectAction('match', menu.project); setMenu(null); }}>从文件名选片</button><div className="my-1 border-t border-slate-100"/><button className="project-menu-item text-red-500 hover:bg-red-50" onClick={() => { trash(menu.project); setMenu(null); }}>删除项目</button></div>}
     {renameProject && <ProjectDialog title="重命名项目" onClose={() => { setRenameProject(null); setRenameValue(''); }}><label className="form-label">项目名称</label><input autoFocus value={renameValue} onChange={event => setRenameValue(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void rename(); }} className="form-input"/><div className="mt-5 flex justify-end gap-2"><button onClick={() => { setRenameProject(null); setRenameValue(''); }} className="dialog-secondary">取消</button><button onClick={() => void rename()} disabled={!renameValue.trim()} className="dialog-primary">确认重命名</button></div></ProjectDialog>}    {showNew && <ProjectDialog title="新建项目" onClose={() => { setShowNew(false); setNewProjectError(''); }}><p className="text-xs text-slate-500">日期和名称至少填写一项；新项目会创建在“策划中”。</p><label className="form-label">项目日期</label><input value={date} onChange={event => setDate(event.target.value)} placeholder="例如：8-10 或 2026-08-10" className="form-input"/><label className="form-label">项目名称</label><input value={name} onChange={event => setName(event.target.value)} placeholder="例如：春日写真" className="form-input"/>{newProjectError && <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{newProjectError}</div>}<div className="mt-5 flex justify-end gap-2"><button onClick={() => { setShowNew(false); setNewProjectError(''); }} className="dialog-secondary">取消</button><button onClick={createProject} disabled={isCreating || (!date && !name)} className="dialog-primary">{isCreating ? '创建中…' : '创建'}</button></div></ProjectDialog>}
   </>;
 };

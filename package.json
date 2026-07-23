@@ -2,7 +2,7 @@
   "name": "photoflow",
   "productName": "照片流",
   "private": true,
-  "version": "26.7.23",
+  "version": "26.7.24",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -19,6 +19,8 @@
     "test:thumbnail-pipeline": "node scripts/test-thumbnail-pipeline.cjs",
     "test:file-transfer": "node scripts/test-file-transfer.cjs",
     "test:filesystem-safety": "node scripts/test-filesystem-safety.cjs",
+    "test:deleted-project-cleanup": "node scripts/test-deleted-project-cleanup.cjs",
+    "test:data-maintenance": ".venv\\Scripts\\python.exe scripts\\test-data-maintenance.py",
     "test:architecture": "node scripts/test-architecture.cjs",
     "test:components": "node scripts/test-components.cjs",
     "test:office-media": ".venv\\Scripts\\python.exe scripts\\test-office-media-extractor.py",

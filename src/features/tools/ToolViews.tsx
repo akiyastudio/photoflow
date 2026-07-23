@@ -3,6 +3,7 @@ import { FolderInput, ScanSearch, HardDrive, Play, Trash2, AlertCircle, Edit, X,
 import { TaskProgress } from '../../components/TaskStatus';
 import { RequirePlugin } from '../../features/plugins/RequirePlugin';
 import type { AppConfig, LogEntry } from '../../types';
+import { useAppDialog } from '../../components/AppDialogProvider';
 
 const IMAGE_SELECTION_FOLDER_NAME = '图片选片';
 const VIDEO_SELECTION_FOLDER_NAME = '视频选片';
@@ -464,6 +465,7 @@ const ImportCard = ({ config, drives = [], destinationPath, active = true, onImp
 };
 
 const BirthdayManagerModal = ({ onClose, onDataChanged }: { onClose: () => void, onDataChanged: () => void }) => {
+  const appDialog = useAppDialog();
   const [birthdays, setBirthdays] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState('');
@@ -511,7 +513,12 @@ const BirthdayManagerModal = ({ onClose, onDataChanged }: { onClose: () => void,
   };
 
   const handleDelete = async (name: string) => {
-    if (!confirm(`确定要删除 ${name} 吗？`)) return;
+    if (!await appDialog.confirm({
+      title: `确定删除“${name}”吗？`,
+      message: '该生日记录将被删除。',
+      confirmLabel: '删除记录',
+      tone: 'danger',
+    })) return;
     const newData = { ...birthdays };
     delete newData[name];
     if (window.electronAPI) {

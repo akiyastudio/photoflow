@@ -26,6 +26,8 @@ const createThumbnailService = ({ pipeline, backgroundTasks }) => {
     scanProject: (...args) => pipeline.scanProject(...args),
     syncChangedPaths: (...args) => pipeline.syncChangedPaths(...args),
     invalidateDeleted: (...args) => pipeline.invalidateDeleted(...args),
+    invalidateSources: (...args) => pipeline.invalidateSources(...args),
+    pruneMissingSources: () => pipeline.pruneMissingSources(),
     stop: () => pipeline.stop(),
   };
   return service;

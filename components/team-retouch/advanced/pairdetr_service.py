@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load the pinned PairDETR checkpoint and run one real CUDA inference."""
+"""PairDETR CUDA inference service used by the production team-retouch component."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def load_runtime(args: argparse.Namespace):
     from hf_utils import PairDetr, forward  # noqa: PLC0415
 
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for this smoke test")
+        raise RuntimeError("CUDA is required for PairDETR inference")
 
     # PairDETR's checkpoint contains the ResNet-50 backbone, so downloading a
     # second pretrained backbone during construction is unnecessary.

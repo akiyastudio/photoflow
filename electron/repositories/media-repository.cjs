@@ -8,6 +8,8 @@ const createMediaRepository = client => ({
   listFinalVersions: (root, projectName) => client.call(root, 'final_version_list', { projectName }),
   relocateVersion: (root, payload) => client.call(root, 'media_relocate_version', payload),
   deleteVersion: (root, versionId) => client.call(root, 'media_delete_version', { versionId }),
+  getVersionDeleteScope: (root, versionId) => client.call(root, 'media_version_delete_scope', { versionId }),
+  deleteProjectMissingVersion: (root, versionId) => client.call(root, 'media_delete_project_missing_version', { versionId }),
   recordCompare: (root, payload) => client.call(root, 'media_record_compare', payload),
   listProgress: (root, projectName) => client.call(root, 'progress_list', { projectName }),
   registerProgress: (root, payload) => client.call(root, 'progress_register', payload),
@@ -16,6 +18,7 @@ const createMediaRepository = client => ({
   listTeamPatches: (root, photoId) => client.call(root, 'team_patch_list', { photoId }),
   replaceTeamPatches: (root, payload) => client.call(root, 'team_patch_replace', payload),
   updateTeamPatch: (root, payload) => client.call(root, 'team_patch_update', payload),
+  cleanupTeamPatches: (root, payload) => client.call(root, 'team_patch_cleanup', payload),
   stop: () => client.stop(),
 });
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run SAM 2.1 Hiera Large from PairDETR body-box prompts."""
+"""SAM 2.1 CUDA inference service used by the production team-retouch component."""
 
 from __future__ import annotations
 
