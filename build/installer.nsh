@@ -55,7 +55,6 @@ Function PhotoFlowComponentPage
   Pop $PhotoFlowGpuComponentCheckbox
   ${NSD_Uncheck} $PhotoFlowGpuComponentCheckbox
   ${If} $PhotoFlowGpuComponentArchive == ""
-  ${AndIfNot} ${FileExists} "$EXEDIR\components\team-retouch\component.json"
     ${NSD_SetText} $PhotoFlowGpuComponentCheckbox "多人裁片修图（安装介质中未找到）"
     EnableWindow $PhotoFlowGpuComponentCheckbox 0
   ${EndIf}
@@ -64,7 +63,6 @@ Function PhotoFlowComponentPage
   Pop $PhotoFlowResearchComponentCheckbox
   ${NSD_Uncheck} $PhotoFlowResearchComponentCheckbox
   ${If} $PhotoFlowResearchComponentArchive == ""
-  ${AndIfNot} ${FileExists} "$EXEDIR\components\research-tools\component.json"
     ${NSD_SetText} $PhotoFlowResearchComponentCheckbox "调研整理（安装介质中未找到）"
     EnableWindow $PhotoFlowResearchComponentCheckbox 0
   ${EndIf}
@@ -73,12 +71,11 @@ Function PhotoFlowComponentPage
   Pop $PhotoFlowOfficeMediaComponentCheckbox
   ${NSD_Uncheck} $PhotoFlowOfficeMediaComponentCheckbox
   ${If} $PhotoFlowOfficeMediaComponentArchive == ""
-  ${AndIfNot} ${FileExists} "$EXEDIR\components\office-media-extractor\component.json"
     ${NSD_SetText} $PhotoFlowOfficeMediaComponentCheckbox "Office 图片提取（安装介质中未找到）"
     EnableWindow $PhotoFlowOfficeMediaComponentCheckbox 0
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 116u 100% 26u "仍兼容旧方式：把完整组件文件夹放在安装程序旁的 components 文件夹中。安装后也可以在照片流的“组件管理”中单独安装或卸载。"
+  ${NSD_CreateLabel} 0 116u 100% 26u "安装后也可以在照片流的“组件管理”中单独安装或卸载。"
   Pop $1
   nsDialogs::Show
 FunctionEnd
@@ -122,9 +119,6 @@ FunctionEnd
       ${If} $0 != "success"
         MessageBox MB_OK|MB_ICONEXCLAMATION "多人裁片修图组件解压失败：$0"
       ${EndIf}
-    ${ElseIf} ${FileExists} "$EXEDIR\components\team-retouch\component.json"
-      CreateDirectory "$INSTDIR\components\team-retouch"
-      CopyFiles /SILENT "$EXEDIR\components\team-retouch\*.*" "$INSTDIR\components\team-retouch"
     ${EndIf}
   ${EndIf}
   ${If} $PhotoFlowInstallResearchComponent == ${BST_CHECKED}
@@ -134,9 +128,6 @@ FunctionEnd
       ${If} $0 != "success"
         MessageBox MB_OK|MB_ICONEXCLAMATION "调研整理组件解压失败：$0"
       ${EndIf}
-    ${ElseIf} ${FileExists} "$EXEDIR\components\research-tools\component.json"
-      CreateDirectory "$INSTDIR\components\research-tools"
-      CopyFiles /SILENT "$EXEDIR\components\research-tools\*.*" "$INSTDIR\components\research-tools"
     ${EndIf}
   ${EndIf}
   ${If} $PhotoFlowInstallOfficeMediaComponent == ${BST_CHECKED}
@@ -146,9 +137,6 @@ FunctionEnd
       ${If} $0 != "success"
         MessageBox MB_OK|MB_ICONEXCLAMATION "Office 图片提取组件解压失败：$0"
       ${EndIf}
-    ${ElseIf} ${FileExists} "$EXEDIR\components\office-media-extractor\component.json"
-      CreateDirectory "$INSTDIR\components\office-media-extractor"
-      CopyFiles /SILENT "$EXEDIR\components\office-media-extractor\*.*" "$INSTDIR\components\office-media-extractor"
     ${EndIf}
   ${EndIf}
   ${If} $PhotoFlowCreateDesktopShortcut == ${BST_CHECKED}

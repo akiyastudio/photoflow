@@ -31,6 +31,11 @@ try {
   const releaseCommand = packageJson.scripts['electron:build'];
   assert(releaseCommand.includes('npm run build:components'), 'default installer build must build both optional components');
   assert(releaseCommand.indexOf('npm run build:components') < releaseCommand.indexOf('electron-builder'), 'components must be built before electron-builder');
+  assert.deepStrictEqual(packageJson.build.win.target, ['nsis'], 'Windows release must only build the NSIS installer');
+  assert(releaseCommand.endsWith('npm run cleanup:electron-artifacts'), 'release build must remove the unpacked staging directory');
+  const artifactCleanup = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'cleanup-electron-artifacts.cjs'), 'utf8');
+  assert(artifactCleanup.includes("path.join(outputDirectory, 'win-unpacked')"), 'artifact cleanup must remove win-unpacked');
+  assert(artifactCleanup.includes("entry.name.endsWith('-win.zip')"), 'artifact cleanup must remove legacy application ZIPs');
 
   const installer = fs.readFileSync(path.join(repositoryRoot, 'build', 'installer.nsh'), 'utf8');
   assert(!installer.includes('release\\components'), 'base installer must not embed optional components');
@@ -38,7 +43,9 @@ try {
   assert(installer.includes('$EXEDIR\\PhotoFlow-research-tools-*-win32-*.zip'), 'installer must discover research archives beside itself');
   assert(installer.includes('$EXEDIR\\PhotoFlow-office-media-extractor-*-win32-*.zip'), 'installer must discover Office media extractor archives beside itself');
   assert(installer.includes('nsisunz::Unzip'), 'installer must extract component archives');
-  assert(installer.includes('$EXEDIR\\components'), 'legacy component folders beside the installer must remain supported');
+  assert(!installer.includes('$EXEDIR\\components'), 'legacy component folders beside the installer must not be supported');
+  assert(!installer.includes('仍兼容旧方式'), 'installer must not advertise the removed legacy component flow');
+  assert(!installer.includes('CopyFiles /SILENT'), 'installer must only install component ZIP archives');
   assert(!installer.includes('File /r "${PROJECT_DIR}\\release\\components'), 'component binaries must not be compiled into the base installer');
 
   const componentBuilder = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'build-components.cjs'), 'utf8');
