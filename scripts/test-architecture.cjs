@@ -14,12 +14,16 @@ const app = read('src/App.tsx');
 const projectWorkspace = read('src/features/workspace/ProjectWorkspace.tsx');
 const settingsFeature = read('src/features/settings/SettingsFeature.tsx');
 const requirePlugin = read('src/features/plugins/RequirePlugin.tsx');
+const recycleBinFailure = read('src/utils/recycleBinFailure.ts');
+const recycleBinService = read('electron/services/recycle-bin-service.cjs');
+const nativeRecycleBinService = read('electron/native/RecycleBinService.cs');
 const packageJson = JSON.parse(read('package.json'));
 assert(/\btsc\s+-b\b/.test(packageJson.scripts.build), 'production build must type-check referenced TypeScript projects');
 assert(projectWorkspace.includes('folder.trackingEnabled && !folder.folderMissing'), 'version management must require an enabled, available progress tracker');
 assert(/openVersions[\s\S]*?if \(!hasVersionTrackingForEntry\(target\)\)/.test(projectWorkspace), 'version management must guard every open path before creating media history');
 assert(!/ipcMain\.(?:handle|on)\s*\(/.test(main), 'main.cjs must not own IPC handlers');
 assert(lines(main) < 2000, 'main.cjs exceeded the architecture size budget');
+assert(/workspaceDatabase = new PythonDatabaseClient\([\s\S]*?defaultTimeoutMs: 2 \* 60 \* 1000/.test(main), 'workspace recovery must allow long project-catalog reconciliation to finish');
 assert(lines(app) < 1000, 'App.tsx exceeded the architecture size budget');
 assert(!/run(?:Workspace|Media)Database/.test(`${main}\n${read('electron/modules/workspace-ipc.cjs')}\n${read('electron/modules/versions-ipc.cjs')}`), 'IPC code bypassed repositories');
 assert.strictEqual((app.match(/electronAPI\.getComponents\(/g) || []).length, 1, 'App must be the single renderer owner of component status');
@@ -31,6 +35,15 @@ assert(!app.includes('尚未安装调研整理组件'), 'uninstalled component c
 assert(projectWorkspace.includes("teamRetouchAvailable && fileMenu.entry.kind === 'image'"), 'team retouch context-menu contribution must require the installed component');
 assert(settingsFeature.includes('filter(item => installedComponentIds.has(item.componentId))'), 'component settings contributions must require the installed component');
 assert(app.includes("componentSettings: { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings, 'research-tools': researchSettings }"), 'legacy component config must migrate into componentSettings');
+for (const code of ['RECYCLE_BIN_FAILED', 'RECYCLE_UNAVAILABLE', 'RECYCLE_SERVICE_MISSING', 'EPERM', 'EACCES', 'EBUSY']) {
+  assert(recycleBinFailure.includes(`'${code}'`), `recycle-bin failure dialog must recognize ${code}`);
+}
+assert(recycleBinFailure.includes('拒绝访问') && recycleBinFailure.includes('being used by another process'), 'recycle-bin failure dialog must recognize localized Windows denial messages');
+assert(recycleBinService.includes("args[0] === 'trash' ? 'RECYCLE_BIN_FAILED'"), 'native trash failures must expose a stable structured error code');
+assert(projectWorkspace.includes('isRecycleBinFailure(result.error, result.errorCode)'), 'project and ordinary file deletion must use structured recycle-bin errors');
+assert(/missingDirectory && !requestedPath[\s\S]*?onDeleted\(\)/.test(projectWorkspace), 'an externally deleted open project must close its stale tab');
+assert(nativeRecycleBinService.includes('EnsureRecycleCapacity(sourcePath, allowUnknownCapacity)'), 'native trash must reject items that exceed the per-volume Recycle Bin capacity');
+assert(nativeRecycleBinService.includes('sourceBytes >= capacityBytes'), 'native trash capacity preflight must fail closed before Windows offers permanent deletion');
 
 const electronSources = fs.readdirSync(path.join(root, 'electron'), { recursive: true })
   .filter(name => name.endsWith('.cjs'))

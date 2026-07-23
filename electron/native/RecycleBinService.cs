@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Web.Script.Serialization;
+using Microsoft.Win32;
 
 internal static class RecycleBinService
 {
@@ -52,7 +54,7 @@ internal static class RecycleBinService
         try
         {
             Dictionary<string, object> recycled;
-            try { recycled = (Dictionary<string, object>)Trash(canary); }
+            try { recycled = (Dictionary<string, object>)Trash(canary, true); }
             catch (Exception error)
             {
                 return new Dictionary<string, object> { { "success", true }, { "supported", false }, { "reason", error.Message } };
@@ -71,10 +73,12 @@ internal static class RecycleBinService
         }
     }
 
-    private static object Trash(string requestedPath)
+    private static object Trash(string requestedPath, bool allowUnknownCapacity = false)
     {
         var sourcePath = Path.GetFullPath(requestedPath);
         if (!File.Exists(sourcePath) && !Directory.Exists(sourcePath)) throw new FileNotFoundException("文件或文件夹不存在", sourcePath);
+
+        EnsureRecycleCapacity(sourcePath, allowUnknownCapacity);
 
         IShellItem source;
         ThrowIfFailed(SHCreateItemFromParsingName(sourcePath, IntPtr.Zero, typeof(IShellItem).GUID, out source));
@@ -84,6 +88,7 @@ internal static class RecycleBinService
         ThrowIfFailed(operation.Advise(sink, out cookie));
         try
         {
+            // A trash operation must either create a recoverable Recycle Bin item or fail.
             ThrowIfFailed(operation.SetOperationFlags(FOF_SILENT | FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_NOERRORUI | FOF_WANTNUKEWARNING | FOFX_RECYCLEONDELETE | FOFX_ADDUNDORECORD));
             ThrowIfFailed(operation.DeleteItem(source, null));
             ThrowIfFailed(operation.PerformOperations());
@@ -105,6 +110,77 @@ internal static class RecycleBinService
             Release(source);
             Release(operation);
         }
+    }
+
+    private static void EnsureRecycleCapacity(string sourcePath, bool allowUnknownCapacity)
+    {
+        long capacityBytes;
+        bool nukeOnDelete;
+        if (!TryGetRecycleSettings(sourcePath, out capacityBytes, out nukeOnDelete))
+        {
+            if (allowUnknownCapacity) return;
+            throw new InvalidOperationException("无法确认该磁盘的回收站容量，已取消删除以避免永久删除");
+        }
+        if (nukeOnDelete || capacityBytes <= 0)
+            throw new InvalidOperationException("该磁盘已关闭回收站，已取消删除以避免永久删除");
+
+        var sourceBytes = CalculateSourceSize(sourcePath, capacityBytes);
+        if (sourceBytes >= capacityBytes)
+            throw new InvalidOperationException("文件或文件夹超过该磁盘的回收站容量，已取消删除以避免永久删除");
+    }
+
+    private static bool TryGetRecycleSettings(string sourcePath, out long capacityBytes, out bool nukeOnDelete)
+    {
+        capacityBytes = 0;
+        nukeOnDelete = false;
+        var root = Path.GetPathRoot(sourcePath);
+        if (String.IsNullOrEmpty(root)) return false;
+
+        var volumeName = new StringBuilder(64);
+        if (!GetVolumeNameForVolumeMountPoint(root, volumeName, volumeName.Capacity)) return false;
+        var text = volumeName.ToString();
+        var start = text.IndexOf('{');
+        var end = text.IndexOf('}', start + 1);
+        if (start < 0 || end < 0) return false;
+
+        var volumeId = text.Substring(start, end - start + 1);
+        var keyPath = @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\" + volumeId;
+        var capacity = Registry.GetValue(keyPath, "MaxCapacity", null);
+        if (capacity == null) return false;
+        var nuke = Registry.GetValue(keyPath, "NukeOnDelete", 0);
+        try
+        {
+            var capacityMegabytes = Convert.ToInt64(capacity);
+            capacityBytes = checked(capacityMegabytes * 1024L * 1024L);
+            nukeOnDelete = Convert.ToInt32(nuke) != 0;
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static long CalculateSourceSize(string sourcePath, long stopAt)
+    {
+        if (File.Exists(sourcePath)) return new FileInfo(sourcePath).Length;
+        long total = 0;
+        var pending = new Stack<string>();
+        pending.Push(sourcePath);
+        while (pending.Count > 0)
+        {
+            var directory = pending.Pop();
+            foreach (var file in Directory.EnumerateFiles(directory))
+            {
+                total = checked(total + new FileInfo(file).Length);
+                if (total >= stopAt) return total;
+            }
+            foreach (var child in Directory.EnumerateDirectories(directory))
+            {
+                if ((File.GetAttributes(child) & FileAttributes.ReparsePoint) == 0) pending.Push(child);
+            }
+        }
+        return total;
     }
 
     private static object Restore(string encodedPidl, string requestedTarget)
@@ -223,6 +299,10 @@ internal static class RecycleBinService
 
     [DllImport("shell32.dll", PreserveSig = true)]
     private static extern uint ILGetSize(IntPtr pidl);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetVolumeNameForVolumeMountPoint(string volumeMountPoint, StringBuilder volumeName, int bufferLength);
 
     [ComImport, Guid("3AD05575-8857-4850-9277-11B85BDB8E09")]
     private class FileOperation { }

@@ -1,5 +1,5 @@
 const registerMediaIpc = context => {
-  const { Array, Boolean, Buffer, Date, Error, IMAGE_EXTENSIONS, JSON, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearInterval, clearTimeout, crypto, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, getRunConfig, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setInterval, setTimeout, spawn, thumbnailService, trimMediaCache, undefined, videoPreviewJobs, writeLog } = context;
+  const { Buffer, Date, Error, IMAGE_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog } = context;
 
   ipcMain.handle('media-thumbnail', async (_event, filePath, kind, cacheConfig = {}, requestedSize = 640, priority = PRIORITY.visible, queueOrder = Number.MAX_SAFE_INTEGER) => {
     try {
@@ -79,121 +79,6 @@ const registerMediaIpc = context => {
     } catch (error) {
       writeLog('warn', 'Unable to read media metadata', { filePath, error: error.message || String(error) });
       return { success: false, fields: [], error: error.message || String(error) };
-    }
-  });
-  
-  ipcMain.handle('media-video-hover-preview', async (_event, filePath, cacheConfig = {}, requestedSize = 640, cacheOnly = false, generateHoverFrames = false) => {
-    try {
-      const sourcePath = await mediaService.authorizeInput(filePath);
-      if (!VIDEO_EXTENSIONS.has(path.extname(sourcePath).toLowerCase()) || !fs.existsSync(sourcePath)) throw new Error('视频文件不存在或格式不受支持');
-      const isImportedOriginal = path.basename(path.dirname(sourcePath)).toLocaleLowerCase() === 'mov';
-      const importedPreview = await findImportedVideoPreview(sourcePath);
-      // Imported camera originals deliberately do not trigger ad-hoc hover
-      // transcoding. Treat the absence of an imported preview as a terminal
-      // result so the renderer does not poll forever while the pointer is over
-      // the card.
-      if (isImportedOriginal && !importedPreview) return { success: true, cached: false, complete: true, unavailable: true, duration: 0, frameUrls: [] };
-      const previewSource = importedPreview || sourcePath;
-      const stat = fs.statSync(previewSource);
-      const size = Math.max(320, Math.min(1600, Math.round(Number(requestedSize) || 640)));
-      const cacheDir = getMediaCacheDir(cacheConfig);
-      const cacheKey = crypto.createHash('sha256').update(`video-preview|v2|${size}|${previewSource}|${stat.size}|${stat.mtimeMs}`).digest('hex');
-      const manifestPath = path.join(cacheDir, `${cacheKey}.json`);
-      const readCached = () => {
-        if (!fs.existsSync(manifestPath)) return null;
-        try {
-          const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-          if (!Array.isArray(manifest.frames) || !manifest.frames.length || !manifest.frames.every(frame => fs.existsSync(frame))) return null;
-          return { success: true, cached: true, complete: manifest.complete === true, duration: Number(manifest.duration) || 0, frameUrls: manifest.frames.map(mediaService.toUrl) };
-        } catch { return null; }
-      };
-      const cached = readCached();
-      if (cached?.complete || cacheOnly || (cached && !generateHoverFrames)) return cached || { success: true, cached: false, complete: false, duration: 0, frameUrls: [] };
-  
-      if (!videoPreviewJobs.has(cacheKey)) {
-        const runPreviewJob = () => new Promise((resolve, reject) => {
-          const toolArgs = ['--source', previewSource, '--output_dir', cacheDir, '--cache_key', cacheKey, '--size', String(size)];
-          if (generateHoverFrames && cached) toolArgs.push('--remaining_only');
-          else if (!generateHoverFrames) toolArgs.push('--cover_only');
-          const { command, args } = getRunConfig('video_preview.py', toolArgs);
-          const child = spawn(command, args, { windowsHide: true });
-          let stdoutBuffer = '';
-          let stderr = '';
-          let previewDuration = 0;
-          let publishedFrameCount = 0;
-          let progressTimer;
-          const isCompleteJpeg = framePath => {
-            try {
-              const frameStat = fs.statSync(framePath);
-              if (frameStat.size < 1024) return false;
-              const handle = fs.openSync(framePath, 'r');
-              const ending = Buffer.alloc(2);
-              fs.readSync(handle, ending, 0, 2, frameStat.size - 2);
-              fs.closeSync(handle);
-              return ending[0] === 0xff && ending[1] === 0xd9;
-            } catch { return false; }
-          };
-          const publishFinishedFrames = () => {
-            if (!previewDuration) return;
-            const frames = Array.from({ length: 5 }, (_value, index) => path.join(cacheDir, `${cacheKey}-${index + 1}.jpg`)).filter(isCompleteJpeg);
-            if (frames.length <= publishedFrameCount) return;
-            publishedFrameCount = frames.length;
-            fs.writeFileSync(manifestPath, JSON.stringify({ duration: previewDuration, frames, complete: frames.length === 5 }), 'utf8');
-          };
-          const consumeOutput = (flush = false) => {
-            const lines = stdoutBuffer.split(/\r?\n/);
-            stdoutBuffer = flush ? '' : lines.pop() || '';
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed) continue;
-              try {
-                const payload = JSON.parse(trimmed);
-                if (payload.error) throw new Error(payload.error);
-                if (Array.isArray(payload.frames) && payload.frames.length && payload.frames.every(frame => fs.existsSync(frame))) {
-                  previewDuration = Number(payload.duration) || previewDuration;
-                  fs.writeFileSync(manifestPath, JSON.stringify(payload), 'utf8');
-                  publishedFrameCount = Math.max(publishedFrameCount, payload.frames.length);
-                  if (!progressTimer && payload.complete !== true) progressTimer = setInterval(publishFinishedFrames, 100);
-                }
-              } catch (error) {
-                writeLog('warn', 'Unable to process video preview progress', { filePath, error: error.message || String(error) });
-              }
-            }
-          };
-          child.stdout.on('data', data => { stdoutBuffer += data.toString(); consumeOutput(); });
-          child.stderr.on('data', data => { stderr += data.toString(); });
-          child.on('error', reject);
-          child.on('close', code => {
-            try {
-              if (progressTimer) clearInterval(progressTimer);
-              if (stdoutBuffer.trim()) { stdoutBuffer += '\n'; consumeOutput(true); }
-              publishFinishedFrames();
-              const finalManifest = readCached();
-              if (code !== 0 || !finalManifest || (generateHoverFrames && !finalManifest.complete)) throw new Error(stderr.trim() || '视频抽样进程失败');
-              trimMediaCache(cacheDir, cacheConfig?.maxSizeGB, [manifestPath, ...finalManifest.frames]);
-              resolve(finalManifest);
-            } catch (error) { reject(error); }
-          });
-        });
-      const job = generateHoverFrames ? runPreviewJob() : mediaRuntimeState.videoPreviewWorkChain.then(runPreviewJob);
-      if (!generateHoverFrames) mediaRuntimeState.videoPreviewWorkChain = job.catch(() => undefined);
-        const trackedJob = job.finally(() => videoPreviewJobs.delete(cacheKey));
-        trackedJob.catch(() => undefined);
-        videoPreviewJobs.set(cacheKey, trackedJob);
-      }
-      if (cached && !generateHoverFrames) return cached;
-      const job = videoPreviewJobs.get(cacheKey);
-      while (videoPreviewJobs.has(cacheKey)) {
-        const progressive = readCached();
-        if (progressive) return progressive;
-        await Promise.race([job.catch(() => undefined), new Promise(resolve => setTimeout(resolve, 50))]);
-      }
-      const generated = readCached();
-      if (!generated) throw new Error('视频代表帧未能写入缓存');
-      return generated;
-    } catch (error) {
-      writeLog('warn', 'Video hover preview failed', { filePath, error: error.message || String(error) });
-      return { success: false, cached: false, complete: false, duration: 0, frameUrls: [], error: error.message || String(error) };
     }
   });
   

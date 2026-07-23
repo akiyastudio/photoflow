@@ -1,10 +1,9 @@
-const { app, BrowserWindow, ipcMain, Menu, shell, dialog, protocol, net, nativeImage, clipboard, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, shell, dialog, protocol, nativeImage, clipboard, screen } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const crypto = require('crypto');
 const os = require('os');
-const { pathToFileURL } = require('url');
 const { exiftool } = require('exiftool-vendored');
 const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY, isThumbnailSizeSufficient } = require('./thumbnail-pipeline.cjs');
 const { createComponentRegistry } = require('./component-registry.cjs');
@@ -16,6 +15,7 @@ const { registerMediaIpc } = require('./modules/media-ipc.cjs');
 const { registerVersionIpc } = require('./modules/versions-ipc.cjs');
 const { createRecycleBinService } = require('./services/recycle-bin-service.cjs');
 const { createMediaAccessService } = require('./services/media-access-service.cjs');
+const { createMediaFileResponse } = require('./services/media-response-service.cjs');
 const { PythonDatabaseClient } = require('./repositories/database-client.cjs');
 const { createWorkspaceRepository } = require('./repositories/workspace-repository.cjs');
 const { createMediaRepository } = require('./repositories/media-repository.cjs');
@@ -140,7 +140,6 @@ let thumbnailImageWorkerPool = null;
 let originalImageWorkerPool = null;
 const mediaRuntimeState = {
   activeMediaCacheConfig: { maxSizeGB: 50, directory: '' },
-  videoPreviewWorkChain: Promise.resolve(),
 };
 const normalizeMediaCacheSizeGB = (value, fallback = 50) => {
   const number = Number(value);
@@ -672,7 +671,15 @@ const getTrackedVersionThumbnailPath = (workspaceRoot, photoId, versionId) => {
   );
 };
 
-const workspaceDatabase = new PythonDatabaseClient({ getRunConfig, getDatabasePath: getWorkspaceDatabasePath, writeLog });
+const workspaceDatabase = new PythonDatabaseClient({
+  getRunConfig,
+  getDatabasePath: getWorkspaceDatabasePath,
+  writeLog,
+  // A one-time reconciliation can cascade through thousands of media rows
+  // after a project folder disappears outside the app. Do not kill the worker
+  // halfway through that recovery and leave the project list empty.
+  defaultTimeoutMs: 2 * 60 * 1000,
+});
 const workspaceRepository = createWorkspaceRepository(workspaceDatabase);
 // Media scans can hash files and must never block project navigation/status
 // updates. A second worker shares the WAL database safely while keeping the
@@ -1299,7 +1306,7 @@ const generateOriginalImagePreviewFile = (sourcePath, kind, outputs) => {
 
 const generateVideoCoverSource = (sourcePath, stat, cacheDir, requestedSize) => new Promise((resolve, reject) => {
   const cacheKey = crypto.createHash('sha256').update(`scheduler-video-cover|v${THUMBNAIL_VERSION}|${requestedSize}|${sourcePath}|${stat.size}|${stat.mtimeMs}`).digest('hex');
-  const toolArgs = ['--source', sourcePath, '--output_dir', cacheDir, '--cache_key', cacheKey, '--size', String(requestedSize), '--cover_only'];
+  const toolArgs = ['--source', sourcePath, '--output_dir', cacheDir, '--cache_key', cacheKey, '--size', String(requestedSize)];
   const { command, args } = getRunConfig('video_preview.py', toolArgs);
   const child = spawn(command, args, { windowsHide: true });
   let stdout = '';
@@ -1452,11 +1459,6 @@ const flattenMetadataValue = (group, name, value, depth = 0) => {
   const formatted = formatMetadataValue(value);
   return formatted ? [{ group, name, value: formatted }] : [];
 };
-
-
-
-const videoPreviewJobs = new Map();
-
 
 
 
@@ -1667,10 +1669,8 @@ app.whenReady().then(async () => {
     try {
       const token = new URL(request.url).pathname.replace(/^\//, '');
       const filePath = mediaAccessService.resolveToken(token);
-      if (!filePath || !(await fs.promises.stat(filePath).catch(() => null))?.isFile()) return new Response('Not found', { status: 404 });
-      // Forward Range headers so video metadata and sampled hover frames do not
-      // require reading the entire source file.
-      return await net.fetch(pathToFileURL(filePath).toString(), { method: request.method, headers: request.headers });
+      if (!filePath) return new Response('Not found', { status: 404 });
+      return await createMediaFileResponse(filePath, request);
     } catch (error) {
       writeLog('warn', 'Media protocol request failed', { url: request.url, error: error.message || String(error) });
       return new Response('Bad request', { status: 400 });
@@ -1680,10 +1680,10 @@ app.whenReady().then(async () => {
   writeLog('info', 'Application started', { version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, deletedExpiredLogFiles: deletedLogFiles });
   createWindow();
 
-  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, shell, spawn, undefined, writeLog });
+  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, undefined, writeLog });
   registerWorkspaceIpc({ Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog });
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertExistingInside, assertInside, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, mainWindow, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, removeCreatedPasteTargets, screen, throwIfCancelled, workspaceRepository, writeLog, writeSystemFileClipboard });
-  registerMediaIpc({ Array, Boolean, Buffer, Date, Error, IMAGE_EXTENSIONS, JSON, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearInterval, clearTimeout, crypto, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, getRunConfig, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setInterval, setTimeout, spawn, thumbnailService, trimMediaCache, undefined, videoPreviewJobs, writeLog });
+  registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
 
   setTimeout(checkForUpdates, 3000);

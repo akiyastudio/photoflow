@@ -27,7 +27,8 @@ const runJson = (command, args, timeoutMs = 120000) => new Promise((resolve, rej
     }
     if (!payload) return finish(new Error(stderr.trim() || `回收站辅助程序未返回有效结果（代码 ${code}）`));
     if (!payload.success) {
-      const error = Object.assign(new Error(payload.error || '回收站操作失败'), { code: payload.code, hresult: payload.hresult });
+      const errorCode = payload.code || (args[0] === 'trash' ? 'RECYCLE_BIN_FAILED' : undefined);
+      const error = Object.assign(new Error(payload.error || '回收站操作失败'), { code: errorCode, hresult: payload.hresult });
       return finish(error);
     }
     finish(null, payload);

@@ -6,6 +6,18 @@ const RECYCLE_BIN_FAILURE_DIALOG = {
   tone: 'danger',
 } as const;
 
-const isRecycleBinFailure = (value?: string) => Boolean(value && /回收站|系统取消了删除操作|可恢复删除/.test(value));
+const RECYCLE_BIN_FAILURE_CODES = new Set([
+  'RECYCLE_BIN_FAILED',
+  'RECYCLE_UNAVAILABLE',
+  'RECYCLE_SERVICE_MISSING',
+  'EPERM',
+  'EACCES',
+  'EBUSY',
+]);
+
+const isRecycleBinFailure = (value?: string, code?: string) => Boolean(
+  code && RECYCLE_BIN_FAILURE_CODES.has(code)
+  || value && /回收站|系统取消了删除操作|可恢复删除|拒绝访问|访问被拒绝|文件.*占用|没有访问权限|权限不足|access (?:is )?denied|being used by another process/i.test(value),
+);
 
 export { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure };

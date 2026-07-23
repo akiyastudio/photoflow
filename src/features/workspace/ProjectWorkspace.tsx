@@ -613,6 +613,11 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     } else {
       // Never leave entries from the previous directory under a new breadcrumb.
       setFileEntries([]);
+      if (browseResult.missingDirectory && !requestedPath) {
+        onNotice(`项目“${project.name}”已在外部删除，已关闭项目标签`);
+        onDeleted();
+        return;
+      }
       if (browseResult.missingDirectory && requestedPath) {
         const parentPath = requestedPath.split('/').slice(0, -1).join('/');
         setDirectoryHistory(current => ({
@@ -1284,7 +1289,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   const moveToTrash = async () => {
     const result = await window.electronAPI.trashWorkspaceProject(workspacePath, project.status, project.name);
     if (!result.success) {
-      if (isRecycleBinFailure(result.error)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
+      if (isRecycleBinFailure(result.error, result.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
       else onNotice(`删除项目失败：${result.error || '未知错误'}`);
       return;
     }
@@ -1425,6 +1430,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   const openFileMenu = (event: React.MouseEvent, entry: ProjectFileEntry, selectEntry = true) => {
     event.preventDefault();
     event.stopPropagation();
+    filesSurfaceRef.current?.focus({ preventScroll: true });
     window.dispatchEvent(new Event('photoflow-menu-open'));
     setSurfaceMenu(null);
     if (selectEntry) {
@@ -1439,6 +1445,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     if ((event.target as HTMLElement).closest('[data-entry-path]')) return;
     event.preventDefault();
     if (finalViewOpen) return;
+    filesSurfaceRef.current?.focus({ preventScroll: true });
     window.dispatchEvent(new Event('photoflow-menu-open'));
     setFileMenu(null);
     selectionAnchorPathRef.current = '';
@@ -1573,6 +1580,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     if (event.button !== 0 || (event.target as HTMLElement).closest('[data-entry-path], button, input, select, textarea')) return;
     const surface = filesSurfaceRef.current;
     if (!surface) return;
+    surface.focus({ preventScroll: true });
     cancelInlineRename();
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -1623,7 +1631,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, operation, targetPaths, currentRelativePath, nextName);
     if (result.cancelled) { onNotice('粘贴已取消'); refresh(); return; }
     if (!result.success) {
-      if (operation === 'trash' && isRecycleBinFailure(result.error)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
+      if (operation === 'trash' && isRecycleBinFailure(result.error, result.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
       else onNotice(`操作失败：${result.error || '未知错误'}`);
       return;
     }
@@ -1663,19 +1671,20 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         return;
       }
       if (target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
+      if (!target || !filesSurfaceRef.current?.contains(target)) return;
       let handled = false;
 
-      if (commandKey && key === 'a') {
+      if (commandKey && !event.altKey && !event.shiftKey && key === 'a') {
         setSelectedPaths(activeFileEntries.map(entry => entry.relativePath));
         onNotice(`已选择 ${activeFileEntries.length} 个项目`);
         handled = true;
-      } else if (commandKey && key === 'c' && selectedPaths.length) {
+      } else if (commandKey && !event.altKey && !event.shiftKey && key === 'c' && selectedPaths.length) {
         void runFileOperation('copy');
         handled = true;
-      } else if (commandKey && key === 'x' && selectedPaths.length) {
+      } else if (commandKey && !event.altKey && !event.shiftKey && key === 'x' && selectedPaths.length) {
         void runFileOperation('cut');
         handled = true;
-      } else if (commandKey && key === 'v') {
+      } else if (commandKey && !event.altKey && !event.shiftKey && key === 'v') {
         void runFileOperation('paste');
         handled = true;
       } else if (event.key === 'Delete' && selectedPaths.length) {
@@ -1985,6 +1994,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   };
   const handleEntryClick = (event: React.MouseEvent | React.KeyboardEvent, entry: ProjectFileEntry) => {
     if (inlineRenamePath === entry.relativePath) return;
+    (event.currentTarget as HTMLElement).focus({ preventScroll: true });
     if (event.shiftKey) {
       selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey);
       return;
@@ -2022,7 +2032,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   const renderEntryIcon = (entry: ProjectFileEntry, large = false, queueOrder = displayedFileEntries.findIndex(candidate => candidate.path === entry.path)) => entry.kind === 'folder'
     ? <FolderCover entry={entry} cacheConfig={mediaCacheConfig} requestedSize={large ? 320 : 160} queueOrder={queueOrder} large={large} loadEntries={loadDirectoryPreviewEntries}/>
     : entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video'
-      ? <><MediaThumbnail entry={entry} cacheConfig={mediaCacheConfig} requestedSize={large ? gridThumbnailSize : 160} queueOrder={queueOrder} large={large}/>{entry.kind === 'video' && <Play size={large ? 25 : 15} fill="currentColor" className="pointer-events-none absolute text-white drop-shadow-[0_1px_4px_rgba(0,0,0,.8)]"/>}</>
+      ? <MediaThumbnail entry={entry} cacheConfig={mediaCacheConfig} requestedSize={large ? gridThumbnailSize : 160} queueOrder={queueOrder} large={large}/>
       : <SystemFileIcon filePath={entry.path} size={large ? 48 : 28}/>;
   const startEntryDrag = (event: React.DragEvent<HTMLDivElement>, entry: ProjectFileEntry) => {
     event.preventDefault();
@@ -2312,7 +2322,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       {teamRetouchAvailable && teamRetouchEntries.length > 0 && <TeamRetouchManager entries={teamRetouchEntries} workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} onNotice={onNotice} onClose={() => setTeamRetouchEntries([])}/>}
 
       <section className="flex min-h-[220px] min-w-0 flex-auto flex-col">
-        <div ref={filesSurfaceRef} onContextMenu={openSurfaceMenu} onPointerDown={startSelectionDrag} onPointerMove={updateSelectionDrag} onPointerUp={finishSelectionDrag} onPointerCancel={finishSelectionDrag} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} className={`relative -mx-6 min-h-[220px] flex-1 select-none px-6 transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
+        <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={event => (event.target as HTMLElement).closest<HTMLElement>('[data-entry-path]')?.focus({ preventScroll: true })} onPointerDown={startSelectionDrag} onPointerMove={updateSelectionDrag} onPointerUp={finishSelectionDrag} onPointerCancel={finishSelectionDrag} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} className={`relative -mx-6 min-h-[220px] flex-1 select-none px-6 outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
           {selectionBox && <div className="pointer-events-none absolute z-20 border border-blue-500 bg-blue-400/15" style={selectionBox}/>}
           {displayedFileEntries.length ? viewMode === 'list' ? <div className="min-w-[620px] border-y border-slate-200 text-sm">
             <div className="file-list-row file-list-heading text-xs font-medium text-slate-500"><span>名称</span><span>修改日期</span><span>类型</span><span>大小</span></div>
@@ -2851,16 +2861,24 @@ const SystemFileIcon = ({ filePath, size }: { filePath: string; size: number }) 
   }, [filePath]);
   return dataUrl ? <img src={dataUrl} alt="" draggable={false} style={{ width: size, height: size }} className="object-contain"/> : <File size={size} className="text-slate-400"/>;
 };
+const HOVER_VIDEO_PLAY_DELAY_MS = 300;
+let activeHoverVideo: HTMLVideoElement | null = null;
+
 const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large = false }: { entry: ProjectFileEntry; cacheConfig: AppConfig['mediaCache']; requestedSize: number; queueOrder: number; large?: boolean }) => {
-  const videoPreviewSize = Math.max(320, Math.min(1600, requestedSize));
   const [preview, setPreview] = useState<{ url?: string; size: number }>({ url: entry.previewUrl, size: entry.previewUrl ? 320 : 0 });
-  const [videoFrames, setVideoFrames] = useState<string[]>([]);
-  const [videoPreviewComplete, setVideoPreviewComplete] = useState(false);
+  const [videoUrl, setVideoUrl] = useState<string>();
+  const [videoActivated, setVideoActivated] = useState(false);
+  const [videoUnavailable, setVideoUnavailable] = useState(false);
   const [videoDuration, setVideoDuration] = useState(0);
+  const [videoTime, setVideoTime] = useState(0);
   const [hovering, setHovering] = useState(false);
-  const [frameIndex, setFrameIndex] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [playbackFailed, setPlaybackFailed] = useState(false);
   const [loading, setLoading] = useState(false);
   const container = useRef<HTMLSpanElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const hoverRatioRef = useRef(0);
+  const hoverSeekFrameRef = useRef<number>();
   const thumbnailRequestRef = useRef<{ key: string; promoted: boolean; promise: ReturnType<typeof window.electronAPI.getMediaThumbnail> }>();
   useThumbnailUpdates(entry.path, requestedSize, (state, url) => {
     if (state === 'READY') {
@@ -2886,6 +2904,11 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
     thumbnailRequestRef.current = { key, promoted: priority === 0, promise };
     return promise;
   };
+  const captureVideoResource = (result: Awaited<ReturnType<typeof window.electronAPI.getMediaThumbnail>>) => {
+    if (entry.kind !== 'video') return;
+    if (result.mediaUrl) setVideoUrl(result.mediaUrl);
+    if (result.importedVideoWithoutPreview) setVideoUnavailable(true);
+  };
   useEffect(() => () => { void window.electronAPI.cancelMediaThumbnail(entry.path, requestedSize); }, [entry.path, requestedSize]);
   useEffect(() => {
     if (preview.size >= requestedSize || !container.current) return;
@@ -2898,6 +2921,7 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
         .then(result => {
           if (!active) return;
           if (result.previewUrl) setPreview({ url: result.previewUrl, size: requestedSize });
+          captureVideoResource(result);
           if (result.state !== 'QUEUED' && result.state !== 'GENERATING') setLoading(false);
         })
         .catch(() => { if (active) setLoading(false); });
@@ -2909,50 +2933,168 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
     if (!container.current) return;
     const observer = new IntersectionObserver(([item]) => {
       if (!item.isIntersecting) return;
-      void requestTileThumbnail(0);
+      void requestTileThumbnail(0).then(captureVideoResource);
     });
     observer.observe(container.current);
     return () => observer.disconnect();
   }, [entry.kind, entry.path, cacheConfig, requestedSize, queueOrder]);
   useEffect(() => {
-    if (!hovering || entry.kind !== 'video' || videoPreviewComplete) return;
+    if (!hovering || entry.kind !== 'video' || videoUnavailable) return;
     let active = true;
-    let retryTimer: number | undefined;
-    const requestHoverFrames = () => {
-      // Keep an existing static cover visible while optional hover frames are
-      // prepared. The loading overlay is only useful when there is no visual
-      // fallback at all.
-      if (!videoFrames.length && !preview.url) setLoading(true);
-      window.electronAPI.getVideoHoverPreview(entry.path, cacheConfig, videoPreviewSize, false, true).then(result => {
+    const timer = window.setTimeout(() => {
+      if (!active) return;
+      setVideoActivated(true);
+      if (!videoUrl) setLoading(true);
+      requestTileThumbnail(0).then(result => {
         if (!active) return;
-        if (result.success) { setVideoFrames(result.frameUrls); setVideoDuration(result.duration); setVideoPreviewComplete(result.complete); }
-        else console.error(`视频抽样预览失败：${entry.name}`, result.error || '未知错误');
-        if (result.success && !result.complete && result.frameUrls.length > 0) retryTimer = window.setTimeout(requestHoverFrames, 300);
+        captureVideoResource(result);
+        if (!result.mediaUrl) setVideoUnavailable(true);
       }).finally(() => { if (active) setLoading(false); });
-    };
-    const timer = window.setTimeout(requestHoverFrames, 180);
-    return () => { active = false; window.clearTimeout(timer); window.clearTimeout(retryTimer); };
-  }, [entry.kind, entry.path, entry.name, hovering, videoFrames.length, videoPreviewComplete, preview.url, cacheConfig]);
+    }, HOVER_VIDEO_PLAY_DELAY_MS);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [entry.kind, hovering, videoUnavailable, videoUrl]);
   useEffect(() => {
-    if (entry.kind !== 'video' || !videoFrames.length || videoPreviewComplete) return;
+    const video = videoRef.current;
+    if (!hovering || !videoActivated || !videoUrl || !video) return;
     let active = true;
-    const refreshProgress = () => window.electronAPI.getVideoHoverPreview(entry.path, cacheConfig, videoPreviewSize, true, false).then(result => {
-      if (!active || !result.success || !result.cached) return;
-      setVideoFrames(current => result.frameUrls.length >= current.length ? result.frameUrls : current);
-      setVideoDuration(result.duration);
-      setVideoPreviewComplete(result.complete);
-    });
-    const timer = window.setInterval(refreshProgress, 250);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [entry.kind, entry.path, videoFrames.length, videoPreviewComplete, cacheConfig]);
+    const beginPlayback = () => {
+      if (!active) return;
+      if (activeHoverVideo && activeHoverVideo !== video) activeHoverVideo.pause();
+      activeHoverVideo = video;
+      video.play().catch(() => {
+        if (!active) return;
+        if (activeHoverVideo === video) activeHoverVideo = null;
+        setPlaybackFailed(true);
+        setPlaying(false);
+      });
+    };
+    const seekBeforePlayback = () => {
+      if (!active || !Number.isFinite(video.duration) || video.duration <= 0) return;
+      const endBuffer = Math.max(0.05, Math.min(0.5, video.duration * 0.01));
+      const targetTime = Math.min(Math.max(0, video.duration - endBuffer), hoverRatioRef.current * video.duration);
+      setVideoDuration(video.duration);
+      setVideoTime(targetTime);
+      if (Math.abs(video.currentTime - targetTime) <= 0.04) { beginPlayback(); return; }
+      video.addEventListener('seeked', beginPlayback, { once: true });
+      video.currentTime = targetTime;
+    };
+    const preparePlayback = () => {
+      if (!active) return;
+      if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        video.addEventListener('loadeddata', seekBeforePlayback, { once: true });
+        return;
+      }
+      seekBeforePlayback();
+    };
+    if (video.readyState >= HTMLMediaElement.HAVE_METADATA) preparePlayback();
+    else video.addEventListener('loadedmetadata', preparePlayback, { once: true });
+    return () => {
+      active = false;
+      video.removeEventListener('loadedmetadata', preparePlayback);
+      video.removeEventListener('loadeddata', seekBeforePlayback);
+      video.removeEventListener('seeked', beginPlayback);
+      video.pause();
+      if (activeHoverVideo === video) activeHoverVideo = null;
+    };
+  }, [hovering, videoActivated, videoUrl]);
+  useEffect(() => () => {
+    const video = videoRef.current;
+    if (video) video.pause();
+    if (activeHoverVideo === video) activeHoverVideo = null;
+    if (hoverSeekFrameRef.current !== undefined) window.cancelAnimationFrame(hoverSeekFrameRef.current);
+  }, []);
   useEffect(() => {
-    if (!hovering || videoFrames.length < 2) { setFrameIndex(0); return; }
-    const timer = window.setInterval(() => setFrameIndex(index => (index + 1) % videoFrames.length), 700);
-    return () => window.clearInterval(timer);
-  }, [hovering, videoFrames.length]);
-  const durationLabel = videoDuration > 0 ? `${Math.floor(videoDuration / 3600) ? `${Math.floor(videoDuration / 3600)}:` : ''}${String(Math.floor(videoDuration % 3600 / 60)).padStart(2, '0')}:${String(Math.floor(videoDuration % 60)).padStart(2, '0')}` : '';
-  const displayedUrl = entry.kind === 'video' && videoFrames.length ? videoFrames[hovering ? frameIndex : 0] : preview.url;
-  return <span ref={container} onMouseEnter={() => setHovering(true)} onMouseLeave={() => setHovering(false)} className="relative flex h-full w-full items-center justify-center overflow-hidden">{displayedUrl ? <img src={displayedUrl} alt="" className="h-full w-full object-contain"/> : <FileImage size={large ? 42 : 23} className="text-slate-400"/>}{loading && <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-900/25"><Loader2 size={large ? 24 : 16} className="animate-spin text-white drop-shadow"/><span className="sr-only">正在加载预览</span></span>}{entry.kind === 'video' && durationLabel && <span className="pointer-events-none absolute bottom-1.5 right-1.5 rounded bg-black/75 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-4 text-white shadow">{durationLabel}</span>}</span>;
+    if (!playing) return;
+    let animationFrame = 0;
+    const updateProgress = () => {
+      const video = videoRef.current;
+      if (video) setVideoTime(video.currentTime);
+      animationFrame = window.requestAnimationFrame(updateProgress);
+    };
+    animationFrame = window.requestAnimationFrame(updateProgress);
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [playing]);
+  const hoverTargetTime = (duration: number, ratio = hoverRatioRef.current) => {
+    const endBuffer = Math.max(0.05, Math.min(0.5, duration * 0.01));
+    return Math.min(Math.max(0, duration - endBuffer), ratio * duration);
+  };
+  const seekVideoToRatio = (ratio: number) => {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
+    if (hoverSeekFrameRef.current !== undefined) window.cancelAnimationFrame(hoverSeekFrameRef.current);
+    hoverSeekFrameRef.current = window.requestAnimationFrame(() => {
+      hoverSeekFrameRef.current = undefined;
+      const targetTime = hoverTargetTime(video.duration, ratio);
+      video.currentTime = targetTime;
+      setVideoTime(targetTime);
+    });
+  };
+  const handleMouseLeave = () => {
+    setHovering(false);
+    if (hoverSeekFrameRef.current !== undefined) {
+      window.cancelAnimationFrame(hoverSeekFrameRef.current);
+      hoverSeekFrameRef.current = undefined;
+    }
+    const video = videoRef.current;
+    if (video) {
+      video.pause();
+      video.currentTime = 0;
+    }
+    hoverRatioRef.current = 0;
+    setVideoTime(0);
+    setVideoActivated(false);
+  };
+  const seekVideo = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const nextTime = Number(event.currentTarget.value);
+    video.currentTime = nextTime;
+    if (video.duration > 0) hoverRatioRef.current = nextTime / video.duration;
+    setVideoTime(nextTime);
+  };
+  const restartHoverPlayback = (event: React.SyntheticEvent<HTMLVideoElement>) => {
+    const video = event.currentTarget;
+    if (!hovering) { setPlaying(false); return; }
+    const targetTime = hoverTargetTime(video.duration);
+    video.currentTime = targetTime;
+    setVideoTime(targetTime);
+    video.play().catch(() => setPlaying(false));
+  };
+  useEffect(() => {
+    if (!hovering || entry.kind !== 'video') return;
+    let active = true;
+    let pollTimer: number | undefined;
+    const trackSystemPointer = async () => {
+      const [cursorPoint, bounds] = await Promise.all([
+        window.electronAPI.getCursorScreenPoint().catch(() => null),
+        Promise.resolve(container.current?.getBoundingClientRect()),
+      ]);
+      if (!active) return;
+      if (cursorPoint && bounds && bounds.width > 0) {
+        const clientX = cursorPoint.x - window.screenX;
+        const ratio = Math.min(1, Math.max(0, (clientX - bounds.left) / bounds.width));
+        if (Math.abs(ratio - hoverRatioRef.current) >= 0.002) {
+          hoverRatioRef.current = ratio;
+          seekVideoToRatio(ratio);
+        }
+      }
+      pollTimer = window.setTimeout(trackSystemPointer, 40);
+    };
+    void trackSystemPointer();
+    return () => { active = false; window.clearTimeout(pollTimer); };
+  }, [entry.kind, hovering]);
+  const showVideo = entry.kind === 'video' && videoActivated && videoUrl && !playbackFailed;
+  const progress = videoDuration > 0 ? Math.min(100, Math.max(0, videoTime / videoDuration * 100)) : 0;
+  return <span ref={container} onMouseEnter={() => setHovering(true)} onMouseLeave={handleMouseLeave} className="relative flex h-full w-full items-center justify-center overflow-hidden bg-black/5">
+    {showVideo
+      ? <video ref={videoRef} src={videoUrl} muted playsInline preload="auto" poster={preview.url} className="h-full w-full object-contain" onLoadedMetadata={event => { setVideoDuration(event.currentTarget.duration); setLoading(false); }} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={restartHoverPlayback} onError={() => { setPlaybackFailed(true); setPlaying(false); setLoading(false); }}/>
+      : preview.url ? <img src={preview.url} alt="" draggable={false} className="h-full w-full object-contain"/> : <FileImage size={large ? 42 : 23} className="text-slate-400"/>}
+    {loading && <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-900/25"><Loader2 size={large ? 24 : 16} className="animate-spin text-white drop-shadow"/><span className="sr-only">正在加载预览</span></span>}
+    {entry.kind === 'video' && !playing && <Play size={large ? 25 : 15} fill="currentColor" className="pointer-events-none absolute text-white drop-shadow-[0_1px_4px_rgba(0,0,0,.8)]"/>}
+    {entry.kind === 'video' && showVideo && hovering && videoDuration > 0 && <span className="absolute inset-x-0 bottom-0 z-10 flex items-center gap-1.5 bg-gradient-to-t from-black/85 to-black/20 px-2 pb-1.5 pt-3" onPointerDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}>
+      <input type="range" min="0" max={videoDuration} step="0.05" value={Math.min(videoTime, videoDuration)} onChange={seekVideo} aria-label={`调整 ${entry.name} 的播放进度`} className="video-hover-seek min-w-0 flex-1" style={{ '--seek-progress': `${progress}%` } as React.CSSProperties}/>
+    </span>}
+  </span>;
 };
 
 export { ProjectWorkspace };

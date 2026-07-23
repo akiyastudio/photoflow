@@ -398,7 +398,7 @@ const registerFileOperationsIpc = context => {
                 ? '操作中的文件或文件夹已在外部移动或删除，请刷新后重试'
                 : error.message || String(error);
       writeLog('error', 'Project file operation failed', { projectName, operation, targetRelativePath, count: relativePaths.length, error: errorMessage });
-      return { success: false, error: errorMessage };
+      return { success: false, error: errorMessage, errorCode: errorCode || undefined };
     }
   });
 };

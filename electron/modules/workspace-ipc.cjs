@@ -430,7 +430,7 @@ const registerWorkspaceIpc = context => {
       return { success: true, operationId };
     } catch (error) {
       publish({ phase: 'failed', progress: 0, currentName: projectName, error: error.message || String(error) });
-      return { success: false, error: error.message || String(error) };
+      return { success: false, error: error.message || String(error), errorCode: error?.code || undefined };
     }
   });
   
