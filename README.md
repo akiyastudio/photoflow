@@ -16,23 +16,6 @@
 > [!WARNING]
 > 项目仍处于个人开发和持续迭代阶段，尚未经过大规模设备与素材兼容性测试。首次使用前请备份重要数据，并先用副本验证自己的工作流。文件导入默认可能移动源文件；如需保留源文件，请先在 **设置 → 导入 → 导入后保留原始文件** 中开启复制模式。
 
-## 界面预览
-
-![照片流主页：项目状态与常用工具](docs/images/photoflow-home.png)
-
-<table>
-  <tr>
-    <td width="50%"><img src="docs/images/photoflow-workspace.png" alt="照片流项目工作区" /></td>
-    <td width="50%"><img src="docs/images/photoflow-components.png" alt="照片流组件管理" /></td>
-  </tr>
-  <tr>
-    <td align="center">项目工作区</td>
-    <td align="center">可选组件管理</td>
-  </tr>
-</table>
-
-> 截图使用虚构演示项目和空素材目录，不包含真实人物或真实项目素材。
-
 ## 主要特性
 
 ### 摄影项目工作区
