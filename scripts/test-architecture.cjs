@@ -12,6 +12,8 @@ const lines = value => value.split(/\r?\n/).length;
 const main = read('electron/main.cjs');
 const app = read('src/App.tsx');
 const projectWorkspace = read('src/features/workspace/ProjectWorkspace.tsx');
+const settingsFeature = read('src/features/settings/SettingsFeature.tsx');
+const requirePlugin = read('src/features/plugins/RequirePlugin.tsx');
 const packageJson = JSON.parse(read('package.json'));
 assert(/\btsc\s+-b\b/.test(packageJson.scripts.build), 'production build must type-check referenced TypeScript projects');
 assert(projectWorkspace.includes('folder.trackingEnabled && !folder.folderMissing'), 'version management must require an enabled, available progress tracker');
@@ -20,6 +22,15 @@ assert(!/ipcMain\.(?:handle|on)\s*\(/.test(main), 'main.cjs must not own IPC han
 assert(lines(main) < 2000, 'main.cjs exceeded the architecture size budget');
 assert(lines(app) < 1000, 'App.tsx exceeded the architecture size budget');
 assert(!/run(?:Workspace|Media)Database/.test(`${main}\n${read('electron/modules/workspace-ipc.cjs')}\n${read('electron/modules/versions-ipc.cjs')}`), 'IPC code bypassed repositories');
+assert.strictEqual((app.match(/electronAPI\.getComponents\(/g) || []).length, 1, 'App must be the single renderer owner of component status');
+assert(!settingsFeature.includes('electronAPI.getComponents('), 'settings must consume App component state instead of fetching it');
+assert(!projectWorkspace.includes('electronAPI.getComponents('), 'project workspace must consume App component state instead of fetching it');
+assert(!requirePlugin.includes('electronAPI.getComponents('), 'component contributions must not independently fetch component state');
+assert(app.includes("card !== 'research' || installedComponentIds.has('research-tools')"), 'research home contribution must be hidden when its component is not installed');
+assert(!app.includes('尚未安装调研整理组件'), 'uninstalled component contributions must not leave placeholder UI');
+assert(projectWorkspace.includes("teamRetouchAvailable && fileMenu.entry.kind === 'image'"), 'team retouch context-menu contribution must require the installed component');
+assert(settingsFeature.includes('filter(item => installedComponentIds.has(item.componentId))'), 'component settings contributions must require the installed component');
+assert(app.includes("componentSettings: { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings, 'research-tools': researchSettings }"), 'legacy component config must migrate into componentSettings');
 
 const electronSources = fs.readdirSync(path.join(root, 'electron'), { recursive: true })
   .filter(name => name.endsWith('.cjs'))

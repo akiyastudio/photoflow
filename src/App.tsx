@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Folder,
   X,
@@ -17,8 +17,9 @@ import { AppErrorBoundary } from './features/app/AppErrorBoundary';
 import { RequirePlugin } from './features/plugins/RequirePlugin';
 import { BackgroundTaskIndicator } from './features/background-tasks/BackgroundTaskIndicator';
 import { SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
+import type { SettingsSection } from './features/settings/SettingsFeature';
 import { ConverterView, DashboardView, HomePanel, MatchView, ResearchView, VideoSplitView } from './features/tools/ToolViews';
-import type { AppConfig, HomeCardId, ProjectFileOperationProgress, ToolType, WorkspaceProject } from './types';
+import type { AppConfig, ComponentStatus, HomeCardId, ProjectFileOperationProgress, ToolType, WorkspaceProject } from './types';
 
 const DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'research', 'converter'];
 const normalizeHomeOrder = (value: unknown): HomeCardId[] => {
@@ -28,7 +29,6 @@ const normalizeHomeOrder = (value: unknown): HomeCardId[] => {
 };
 const IMAGE_SELECTION_FOLDER_NAME = '图片选片';
 const VIDEO_SELECTION_FOLDER_NAME = '视频选片';
-type SettingsSection = 'general' | 'storage' | 'components' | 'import';
 const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
@@ -86,6 +86,14 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   workspacePath: '',
   homeOrder: DEFAULT_HOME_ORDER,
   birthdayEnabled: true,
+  componentSettings: {
+    'team-retouch': { useGpu: true, oversizeCropMode: 'face-centered' },
+    'research-tools': {
+      defaultDir: `${userPath}/Downloads`,
+      sensitivity: 'standard',
+      minDuration: 0.2
+    }
+  },
   mediaCache: {
     maxSizeGB: 50,
     directory: '',
@@ -113,7 +121,8 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
     jpgQuality: 100
   },
   personDetection: {
-    useGpu: true
+    useGpu: true,
+    oversizeCropMode: 'face-centered'
   },
   smartMatch: {
     imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME,
@@ -164,6 +173,21 @@ const App: React.FC = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem('photoflow:sidebar-collapsed') === 'true');
   const [windowMaximized, setWindowMaximized] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const [components, setComponents] = useState<ComponentStatus[]>([]);
+  const [componentInstallPath, setComponentInstallPath] = useState('');
+  const [componentsLoading, setComponentsLoading] = useState(true);
+  const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed).map(component => component.id)), [components]);
+
+  useEffect(() => {
+    if (componentsLoading) return;
+    const componentIdBySection: Partial<Record<SettingsSection, string>> = {
+      'team-retouch': 'team-retouch',
+      'research-tools': 'research-tools',
+      'office-media-extractor': 'office-media-extractor'
+    };
+    const componentId = componentIdBySection[settingsSection];
+    if (componentId && !installedComponentIds.has(componentId)) setSettingsSection('components');
+  }, [componentsLoading, installedComponentIds, settingsSection]);
 
   useEffect(() => {
     window.localStorage.setItem('photoflow:sidebar-width', String(Math.round(sidebarWidth)));
@@ -216,6 +240,44 @@ const App: React.FC = () => {
     window.clearTimeout(noticeTimerRef.current);
     if (!isFailure) noticeTimerRef.current = window.setTimeout(() => setUndoNotice(''), duration);
   }, []);
+
+  useEffect(() => {
+    const showTextCopyNotice = (event: ClipboardEvent) => {
+      const target = event.target;
+      let selectedText = event.clipboardData?.getData('text/plain') || '';
+      if (!selectedText && (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement)) {
+        const selectionStart = target.selectionStart ?? 0;
+        const selectionEnd = target.selectionEnd ?? selectionStart;
+        selectedText = target.value.slice(selectionStart, selectionEnd);
+      }
+      if (!selectedText) selectedText = window.getSelection()?.toString() || '';
+      if (selectedText) showNotice('成功复制文字');
+    };
+    window.addEventListener('copy', showTextCopyNotice);
+    return () => window.removeEventListener('copy', showTextCopyNotice);
+  }, [showNotice]);
+
+  const refreshComponents = useCallback(async () => {
+    setComponentsLoading(true);
+    try {
+      const result = await window.electronAPI.getComponents();
+      if (!result.success) throw new Error(result.error || '无法读取组件状态');
+      setComponents(result.components || []);
+      setComponentInstallPath(result.installPath || '');
+    } catch (error) {
+      setComponents([]);
+      showNotice(`读取组件状态失败：${error instanceof Error ? error.message : String(error)}`, 5000);
+    } finally {
+      setComponentsLoading(false);
+    }
+  }, [showNotice]);
+
+  const handleComponentsChanged = useCallback(async () => {
+    await refreshComponents();
+    window.dispatchEvent(new Event('photoflow-components-changed'));
+  }, [refreshComponents]);
+
+  useEffect(() => { void refreshComponents(); }, [refreshComponents]);
 
   useEffect(() => {
     const report = (message: string, details?: string) => {
@@ -275,13 +337,21 @@ const App: React.FC = () => {
           const fileConfig = await window.electronAPI.loadConfig();
           if (fileConfig) {
             const userPath = await window.electronAPI.getUserPath();
-            const downloadPath = userPath ? `${userPath}/Downloads` : fileConfig.research?.defaultDir;
-            const legacyThreshold = fileConfig.research?.ssimThreshold;
-            const researchSensitivity = fileConfig.research?.sensitivity ?? (legacyThreshold !== undefined && legacyThreshold >= 0.98 ? 'high' : legacyThreshold !== undefined && legacyThreshold <= 0.85 ? 'low' : 'standard');
+            const storedResearch = fileConfig.componentSettings?.['research-tools'] as AppConfig['research'] | undefined;
+            const legacyResearch = storedResearch || fileConfig.research;
+            const downloadPath = legacyResearch?.defaultDir || (userPath ? `${userPath}/Downloads` : '');
+            const legacyThreshold = legacyResearch?.ssimThreshold;
+            const researchSensitivity = legacyResearch?.sensitivity ?? (legacyThreshold !== undefined && legacyThreshold >= 0.98 ? 'high' : legacyThreshold !== undefined && legacyThreshold <= 0.85 ? 'low' : 'standard');
+            const researchSettings: AppConfig['research'] = { ...legacyResearch, defaultDir: downloadPath, sensitivity: researchSensitivity, minDuration: legacyResearch?.minDuration ?? 0.2 };
+            const storedPersonDetection = fileConfig.componentSettings?.['team-retouch'] as AppConfig['personDetection'] | undefined;
+            const personDetectionSettings: AppConfig['personDetection'] = {
+              useGpu: storedPersonDetection?.useGpu ?? fileConfig.personDetection?.useGpu ?? true,
+              oversizeCropMode: storedPersonDetection?.oversizeCropMode ?? fileConfig.personDetection?.oversizeCropMode ?? 'face-centered',
+            };
             const configuredImageSource = fileConfig.smartMatch?.imageSourceFolderName;
             const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;
             const savedSdPaths = (Array.isArray(fileConfig.smartImport?.sdPaths) && fileConfig.smartImport.sdPaths.length ? fileConfig.smartImport.sdPaths : fileConfig.smartImport?.sdPath ? [fileConfig.smartImport.sdPath] : []).map((drive: string) => isMac ? drive : drive.replace(/\\/g, '/').replace(/\/DCIM\/?$/i, '/'));
-            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', workspacePath: fileConfig.workspacePath?.trim() ?? '', homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false, splitLargeFiles: fileConfig.smartImport?.splitLargeFiles ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true }, fileImport: { preserveOriginal: fileConfig.fileImport?.preserveOriginal ?? false }, imageConversion: { jpgQuality: fileConfig.imageConversion?.jpgQuality ?? 100 }, personDetection: { useGpu: fileConfig.personDetection?.useGpu ?? true }, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: !configuredImageSource || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: !configuredVideoSource || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: { ...fileConfig.research, defaultDir: downloadPath, sensitivity: researchSensitivity, minDuration: fileConfig.research?.minDuration ?? 0.2 } } as AppConfig;
+            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', workspacePath: fileConfig.workspacePath?.trim() ?? '', homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, componentSettings: { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings, 'research-tools': researchSettings }, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false, splitLargeFiles: fileConfig.smartImport?.splitLargeFiles ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true }, fileImport: { preserveOriginal: fileConfig.fileImport?.preserveOriginal ?? false }, imageConversion: { jpgQuality: fileConfig.imageConversion?.jpgQuality ?? 100 }, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: !configuredImageSource || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: !configuredVideoSource || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
             if (normalizedConfig.workspacePath) {
               const workspace = await window.electronAPI.getWorkspaceProjects(normalizedConfig.workspacePath);
               if (workspace.success && workspace.root) normalizedConfig = { ...normalizedConfig, workspacePath: workspace.root };
@@ -289,7 +359,7 @@ const App: React.FC = () => {
               setShowWorkspaceSetup(true);
             }
             setConfig(normalizedConfig);
-            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.birthdayEnabled === undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.splitLargeFiles === undefined || !fileConfig.brollImport || !fileConfig.fileImport || !fileConfig.imageConversion || fileConfig.personDetection?.useGpu === undefined || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || !fileConfig.research?.sensitivity) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
+            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.birthdayEnabled === undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.splitLargeFiles === undefined || !fileConfig.brollImport || !fileConfig.fileImport || !fileConfig.imageConversion || fileConfig.personDetection?.useGpu === undefined || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || !fileConfig.research?.sensitivity || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             console.log('📋 Configuration loaded from file');
           } else {
             if (window.electronAPI?.getUserPath) {
@@ -525,7 +595,7 @@ const App: React.FC = () => {
       {/* Sidebar */}
       <aside style={{ width: sidebarCollapsed ? 0 : renderedSidebarWidth }} className="relative z-30 flex min-w-0 shrink-0 flex-col overflow-hidden bg-white transition-[width] duration-200">
         {activeTab === 'settings'
-          ? <SettingsNavigator activeSection={settingsSection} onSelect={setSettingsSection}/>
+          ? <SettingsNavigator activeSection={settingsSection} components={components} onSelect={setSettingsSection}/>
           : <><ProjectNavigator
           workspacePath={config.workspacePath}
           selectedProject={selectedProject}
@@ -551,7 +621,7 @@ const App: React.FC = () => {
 
       {/* Main Content */}
       <main className={`relative min-w-0 flex-1 bg-slate-50 ${activeTab === 'project' ? 'overflow-hidden p-0' : activeTab === 'settings' || activeTab === 'about' ? 'overflow-auto p-0' : 'overflow-auto p-8'}`}>
-        {activeTab === 'home' && <div className="mx-auto max-w-6xl space-y-4">{homeOrder.filter(card => card !== 'birthday' || config.birthdayEnabled).map(card => {
+        {activeTab === 'home' && <div className="mx-auto max-w-6xl space-y-4">{homeOrder.filter(card => (card !== 'birthday' || config.birthdayEnabled) && (card !== 'research' || installedComponentIds.has('research-tools'))).map(card => {
           const dragProps = {
             draggable: true,
             onDragStart: () => setDraggedHomeCard(card),
@@ -568,13 +638,13 @@ const App: React.FC = () => {
             : card === 'import'
               ? <DashboardView section="import" workspacePath={config.workspacePath} config={config.smartImport} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onImportComplete={handleHomeImportComplete} dragProps={dragProps}/>
               : card === 'research'
-                ? <HomePanel title="调研整理" {...dragProps}><RequirePlugin embedded componentId="research-tools" title="调研整理" desc="尚未安装调研整理组件。请在设置的组件管理中打开组件目录并安装。"><ResearchView embedded config={config.research} onUpdateConfig={(research: AppConfig['research']) => handleConfigUpdate({ ...config, research })}/></RequirePlugin></HomePanel>
+                ? <HomePanel title="调研整理" {...dragProps}><ResearchView embedded config={(config.componentSettings['research-tools'] as AppConfig['research'] | undefined) || config.research} onUpdateConfig={(research: AppConfig['research']) => handleConfigUpdate({ ...config, research, componentSettings: { ...config.componentSettings, 'research-tools': research } })}/></HomePanel>
                 : <HomePanel title="PNG 转 JPG" {...dragProps}><RequirePlugin embedded scriptName="png_to_jpg.py" title="PNG 转 JPG" desc="需要该引擎来执行图片格式的批量转换。"><ConverterView embedded defaultQuality={config.imageConversion.jpgQuality} /></RequirePlugin></HomePanel>;
           return <div key={card} className={draggedHomeCard === card ? 'opacity-40' : undefined}>{content}</div>;
         })}</div>}
-        {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} config={config} onSave={handleConfigUpdate} onNotice={showNotice}/>}
+        {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={refreshComponents} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} onNotice={showNotice}/>}
         {activeTab === 'about' && <AboutPage/>}
-        {openProjects.map(project => { const active = activeTab === 'project' && selectedProject?.path === project.path; return <div key={project.path} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace active={active} project={project} workspacePath={config.workspacePath} initialPanel={projectOperations[project.path] ?? null} importConfig={config.smartImport} brollConfig={config.brollImport} fileImportConfig={config.fileImport} conversionConfig={config.imageConversion} matchConfig={config.smartMatch} mediaCacheConfig={config.mediaCache} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onMediaCacheConfigChange={(mediaCache: AppConfig['mediaCache']) => handleConfigUpdate({ ...config, mediaCache })} onNotice={showNotice} onProjectMoved={nextProject => { setOpenProjects(current => current.map(item => item.path === project.path ? nextProject : item)); setProjectOperations(current => { if (nextProject.path === project.path) return current; const next = { ...current, [nextProject.path]: current[project.path] ?? null }; delete next[project.path]; return next; }); setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { closeProjectTab(project.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} /></div>; })}
+        {openProjects.map(project => { const active = activeTab === 'project' && selectedProject?.path === project.path; return <div key={project.path} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace active={active} project={project} workspacePath={config.workspacePath} installedComponentIds={installedComponentIds} initialPanel={projectOperations[project.path] ?? null} importConfig={config.smartImport} brollConfig={config.brollImport} fileImportConfig={config.fileImport} conversionConfig={config.imageConversion} matchConfig={config.smartMatch} mediaCacheConfig={config.mediaCache} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onMediaCacheConfigChange={(mediaCache: AppConfig['mediaCache']) => handleConfigUpdate({ ...config, mediaCache })} onNotice={showNotice} onProjectMoved={nextProject => { setOpenProjects(current => current.map(item => item.path === project.path ? nextProject : item)); setProjectOperations(current => { if (nextProject.path === project.path) return current; const next = { ...current, [nextProject.path]: current[project.path] ?? null }; delete next[project.path]; return next; }); setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { closeProjectTab(project.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} /></div>; })}
 
         {activeTab === 'converter' && (
           <RequirePlugin scriptName="png_to_jpg.py" title="PNG 转 JPG" desc="需要该引擎来执行图片格式的批量转换。">

@@ -15,6 +15,22 @@ interface PythonEvent {
   requestId?: string;
 }
 
+type ImportTransferStats = {
+  bytesCopied: number;
+  totalBytes: number;
+  bytesPerSecond: number;
+  filesCopied?: number;
+  totalFiles?: number;
+};
+
+const formatTransferBytes = (bytes: number) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const unitIndex = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / 1024 ** unitIndex;
+  return `${value.toFixed(value >= 100 || unitIndex === 0 ? 0 : value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
+};
+
 const usePythonTask = (scriptName: string, initialStatus: string) => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isRunning, setIsRunning] = useState(false);
@@ -66,6 +82,7 @@ const ImportCard = ({ config, drives = [], destinationPath, active = true, onImp
   const [statusMsg, setStatusMsg] = useState("等待连接...");
   const [decisionData, setDecisionData] = useState<any>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [transferStats, setTransferStats] = useState<ImportTransferStats | null>(null);
   const selectedDrives = config?.sdPaths?.length ? config.sdPaths : config?.sdPath ? [config.sdPath] : [];
   const driveTypes = config?.sdDriveTypes || {};
 
@@ -146,6 +163,15 @@ const ImportCard = ({ config, drives = [], destinationPath, active = true, onImp
           setProgress(event.progress || 0);
           // Python 那边现在发过来的是 "正在导入: IMG_001.JPG"，这里直接显示
           setStatusMsg(event.message);
+          if (event.data && Number.isFinite(Number(event.data.totalBytes))) {
+            setTransferStats({
+              bytesCopied: Number(event.data.bytesCopied) || 0,
+              totalBytes: Number(event.data.totalBytes) || 0,
+              bytesPerSecond: Number(event.data.bytesPerSecond) || 0,
+              filesCopied: Number.isFinite(Number(event.data.filesCopied)) ? Number(event.data.filesCopied) : undefined,
+              totalFiles: Number.isFinite(Number(event.data.totalFiles)) ? Number(event.data.totalFiles) : undefined,
+            });
+          }
           break;
 
         case 'ask_user':
@@ -238,6 +264,7 @@ const ImportCard = ({ config, drives = [], destinationPath, active = true, onImp
     currentDriveTypeRef.current = type;
     setStatus('importing');
     setProgress(0);
+    setTransferStats(null);
     setLogs([]); // 清空日志准备开始
     setStatusMsg(type === 'broll' ? `正在把 ${sdPath} 导入“花絮”` : `正在整理 ${sdPath} 的工作文件`);
 
@@ -388,6 +415,11 @@ const ImportCard = ({ config, drives = [], destinationPath, active = true, onImp
           {(status === 'importing' || status === 'processing') && (
             <div className="w-full max-w-xl">
               <TaskProgress logs={logs} progress={progress} isRunning idleMessage={statusMsg} />
+              {transferStats && <p className="mt-2 text-center text-xs font-medium tabular-nums text-slate-500">
+                已导入 {formatTransferBytes(transferStats.bytesCopied)} / {formatTransferBytes(transferStats.totalBytes)}
+                {' · '}{formatTransferBytes(transferStats.bytesPerSecond)}/s
+                {transferStats.totalFiles ? ` · ${transferStats.filesCopied || 0}/${transferStats.totalFiles} 个文件` : ''}
+              </p>}
             </div>
           )}
 

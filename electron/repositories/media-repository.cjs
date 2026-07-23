@@ -5,6 +5,7 @@ const createMediaRepository = client => ({
   getPhoto: (root, photoId) => client.call(root, 'media_get_photo', { photoId }),
   createVersion: (root, payload) => client.call(root, 'media_create_version', payload),
   updateVersion: (root, payload) => client.call(root, 'media_update_version', payload),
+  listFinalVersions: (root, projectName) => client.call(root, 'final_version_list', { projectName }),
   relocateVersion: (root, payload) => client.call(root, 'media_relocate_version', payload),
   deleteVersion: (root, versionId) => client.call(root, 'media_delete_version', { versionId }),
   recordCompare: (root, payload) => client.call(root, 'media_record_compare', payload),

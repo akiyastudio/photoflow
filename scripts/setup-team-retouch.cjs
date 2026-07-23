@@ -16,7 +16,7 @@ const run = (command, args) => {
 };
 
 try {
-  if (process.platform !== 'win32') throw new Error('多人裁片修图的 DirectML 运行库目前只支持 Windows');
+  if (process.platform !== 'win32') throw new Error('多人修脸的 DirectML 运行库目前只支持 Windows');
   if (!fs.existsSync(venvPython)) run(systemPython, ['-m', 'venv', venvRoot]);
   // OpenCV packages share the same cv2 directory. Uninstall every variant
   // before reinstalling the one supported build so stale DLLs cannot leak into

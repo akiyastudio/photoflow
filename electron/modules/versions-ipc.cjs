@@ -1,23 +1,10 @@
 const registerVersionIpc = context => {
-  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, buildVersionBatchImportKey, cleanVersionName, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, undefined, versionService, workspaceCatalogs, writeLog } = context;
+  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog } = context;
+  const teamDataDirectory = (workspaceRoot, photoId, baseVersionId) => path.join(getWorkspaceDataRoot(workspaceRoot), 'team-retouch', photoId, baseVersionId);
+  const deliveryName = (photo, basePath) => path.parse(photo?.originalName || photo?.displayName || basePath).name;
+  const deliveryDirectory = (photo, basePath) => path.join(path.dirname(photo?.originalFilePath || basePath), `${deliveryName(photo, basePath)}_裁切`);
+  const deliveryPath = (photo, basePath, personIndex) => path.join(deliveryDirectory(photo, basePath), `${deliveryName(photo, basePath)}_人物${String(personIndex).padStart(2, '0')}.png`);
 
-  ipcMain.handle('workspace-version-choose-file', async () => {
-    try {
-      const choice = await dialog.showOpenDialog(mainWindow, {
-        title: '选择新的图片或视频版本',
-        properties: ['openFile'],
-        filters: [{ name: '图片、RAW 和视频', extensions: [...new Set([...IMAGE_EXTENSIONS, ...RAW_EXTENSIONS, ...VIDEO_EXTENSIONS])].map(value => value.slice(1)) }, { name: '所有文件', extensions: ['*'] }]
-      });
-      if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true };
-      const filePath = path.resolve(choice.filePaths[0]);
-      const kind = supportedVersionFileKind(filePath);
-      if (!kind || !(await fs.promises.stat(filePath)).isFile()) throw new Error('请选择可读取的图片、RAW 或视频文件');
-      return { success: true, filePath: `media-token:${mediaService.grantPath(filePath)}`, fileName: path.basename(filePath), kind };
-    } catch (error) {
-      return { success: false, error: error.message || String(error) };
-    }
-  });
-  
   ipcMain.handle('workspace-media-versions', async (_event, workspacePath, status, projectName, relativePath) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
@@ -48,6 +35,156 @@ const registerVersionIpc = context => {
       return { success: false, error: error.message || String(error), progressFolders: [] };
     }
   });
+
+  ipcMain.handle('workspace-selection-baseline-ensure', async (_event, workspacePath, status, projectName) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const folderPath = path.join(projectPath, '图片选片');
+      if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) {
+        return { success: true, registered: false, count: 0 };
+      }
+      const imageFiles = (await fs.promises.readdir(folderPath, { withFileTypes: true }))
+        .filter(entry => entry.isFile())
+        .filter(entry => IMAGE_EXTENSIONS.has(path.extname(entry.name).toLowerCase()) || RAW_EXTENSIONS.has(path.extname(entry.name).toLowerCase()));
+      if (!imageFiles.length) return { success: true, registered: false, count: 0 };
+      const registered = await versionService.registerProgress(workspaceRoot, {
+        projectName,
+        mediaKind: 'image',
+        versionKey: '0',
+        displayName: '图片选片（原图）',
+        folderPath,
+        trackingEnabled: true,
+      });
+      const baseline = await versionService.registerBatchBaseline(workspaceRoot, {
+        projectName,
+        folderPath,
+        versionName: '图片选片（原图）',
+      });
+      return { success: true, registered: true, count: imageFiles.length, progressFolder: registered.progressFolder, batch: baseline.batch };
+    } catch (error) {
+      writeLog('error', 'Unable to ensure selection baseline', { projectName, error: error.message || String(error) });
+      return { success: false, registered: false, count: 0, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-final-version-summary', async (_event, workspacePath, projectName) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      const result = await versionService.listFinalVersions(workspaceRoot, projectName);
+      return {
+        success: true,
+        count: Number(result.count) || 0,
+        availableCount: Number(result.availableCount) || 0,
+        missingCount: Number(result.missingCount) || 0,
+      };
+    } catch (error) {
+      return { success: false, count: 0, availableCount: 0, missingCount: 0, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-final-version-browse', async (_event, workspacePath, status, projectName) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const result = await versionService.listFinalVersions(workspaceRoot, projectName);
+      const versions = Array.isArray(result.versions) ? result.versions : [];
+      const entries = [];
+      let unavailableCount = 0;
+      for (const version of versions) {
+        try {
+          const filePath = path.resolve(String(version.filePath || ''));
+          const relative = path.relative(projectPath, filePath);
+          if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || version.fileMissing) throw new Error('最终版文件不可用');
+          const stat = await fs.promises.stat(filePath);
+          if (!stat.isFile()) throw new Error('最终版文件不是文件');
+          const extension = path.extname(filePath).toLowerCase();
+          const kind = IMAGE_EXTENSIONS.has(extension) ? 'image' : RAW_EXTENSIONS.has(extension) ? 'raw' : null;
+          if (!kind) throw new Error('最终版不是支持的图片');
+          entries.push({
+            name: path.basename(filePath),
+            path: filePath,
+            relativePath: relative.replace(/\\/g, '/'),
+            kind,
+            extension,
+            size: stat.size,
+            createdAt: stat.birthtimeMs || stat.ctimeMs,
+            updatedAt: stat.mtimeMs,
+          });
+        } catch {
+          unavailableCount += 1;
+        }
+      }
+      return { success: true, count: versions.length, availableCount: entries.length, missingCount: unavailableCount, entries };
+    } catch (error) {
+      return { success: false, count: 0, availableCount: 0, missingCount: 0, entries: [], error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-final-version-export', async (_event, workspacePath, status, projectName) => {
+    let folderPath = '';
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      const finalResult = await versionService.listFinalVersions(workspaceRoot, projectName);
+      const versions = Array.isArray(finalResult.versions) ? finalResult.versions : [];
+      if (!versions.length) throw new Error('当前项目还没有标记最终版的图片');
+      const missing = versions.filter(version => version.fileMissing || !fs.existsSync(version.filePath));
+      if (missing.length) throw new Error(`有 ${missing.length} 个最终版文件已被删除或移动，请先重新定位`);
+
+      const progressResult = await versionService.listProgress(workspaceRoot, projectName);
+      const imageRoots = (progressResult.progressFolders || [])
+        .filter(progress => progress.mediaKind === 'image' && /^\d+$/.test(progress.versionKey))
+        .sort((left, right) => Number(left.versionKey) - Number(right.versionKey));
+      const latestRoot = imageRoots.at(-1);
+      const versionKey = String((latestRoot ? Number(latestRoot.versionKey) : 0) + 1);
+      const displayName = `图片后期_${versionKey}_最终版`;
+      const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+      folderPath = path.resolve(projectPath, displayName);
+      if (!folderPath.startsWith(projectPath + path.sep)) throw new Error('最终版进度文件夹路径无效');
+      if (fs.existsSync(folderPath)) throw new Error(`文件夹“${displayName}”已经存在`);
+
+      await fs.promises.mkdir(folderPath);
+      const reserved = new Set();
+      const copiedFiles = [];
+      for (const version of versions) {
+        const sourcePath = await mediaService.authorizeInput(version.filePath);
+        const destinationPath = uniqueDestination(folderPath, path.basename(sourcePath), reserved);
+        await copyFileAtomic(sourcePath, destinationPath);
+        copiedFiles.push(destinationPath);
+      }
+      const registered = await versionService.registerProgress(workspaceRoot, {
+        projectName,
+        mediaKind: 'image',
+        versionKey,
+        parentProgressId: latestRoot?.id,
+        displayName,
+        folderPath,
+        trackingEnabled: false,
+      });
+      writeLog('info', 'Final versions exported to progress folder', { projectName, displayName, count: copiedFiles.length });
+      return {
+        success: true,
+        count: copiedFiles.length,
+        displayName,
+        versionKey,
+        progressFolder: registered.progressFolder,
+        folder: {
+          name: displayName,
+          path: folderPath,
+          relativePath: path.relative(projectPath, folderPath).replace(/\\/g, '/'),
+          updatedAt: Date.now(),
+        },
+      };
+    } catch (error) {
+      if (folderPath && fs.existsSync(folderPath)) await fs.promises.rm(folderPath, { recursive: true, force: true }).catch(() => undefined);
+      writeLog('error', 'Unable to export final versions', { projectName, error: error.message || String(error) });
+      return { success: false, count: 0, error: error.message || String(error) };
+    }
+  });
   
   ipcMain.handle('workspace-progress-register', async (_event, workspacePath, status, projectName, request = {}) => {
     try {
@@ -63,6 +200,7 @@ const registerVersionIpc = context => {
         displayName: request.displayName || path.basename(folderPath),
         folderPath,
         trackingEnabled: Boolean(request.trackingEnabled),
+        progressId: request.progressId,
       });
     } catch (error) {
       return { success: false, error: error.message || String(error) };
@@ -103,6 +241,7 @@ const registerVersionIpc = context => {
   });
   
   ipcMain.handle('workspace-version-batch-commit', async (_event, workspacePath, status, projectName, request = {}) => {
+    const copiedMissingPaths = [];
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
@@ -130,6 +269,24 @@ const registerVersionIpc = context => {
           confidence: String(match.confidence || '').slice(0, 20),
         };
       });
+      const copyMissingErrors = [];
+      const reservedDestinations = new Set();
+      const missingReferences = [...new Set((Array.isArray(request.copyMissingReferences) ? request.copyMissingReferences : []).slice(0, 20000).map(value => String(value || '')))];
+      for (const reference of missingReferences) {
+        try {
+          if (!reference || path.basename(reference) !== reference) throw new Error('无效文件名');
+          const sourcePath = path.resolve(folderA, reference);
+          if (path.dirname(sourcePath).toLocaleLowerCase() !== folderA.toLocaleLowerCase()) throw new Error('文件不在上一版本文件夹中');
+          if (!supportedVersionFileKind(sourcePath)) throw new Error('不是支持的媒体文件');
+          const destinationPath = uniqueDestination(folderB, reference, reservedDestinations);
+          await copyFileAtomic(sourcePath, destinationPath);
+          copiedMissingPaths.push(destinationPath);
+          const copiedName = path.basename(destinationPath);
+          matches.push({ reference, source: copiedName, target: copiedName, distance: 0, confidence: '复制补齐' });
+        } catch (error) {
+          copyMissingErrors.push({ name: reference, error: error.message || String(error) });
+        }
+      }
       const result = await versionService.commitBatchCompare(workspaceRoot, {
         projectName,
         folderA,
@@ -139,73 +296,12 @@ const registerVersionIpc = context => {
         renameSources: Boolean(request.renameSources),
         matches,
       });
-      writeLog('info', 'Version batch committed', { projectName, folderA, folderB, matchCount: matches.length, batch: result.batch?.sequence });
-      return result;
+      writeLog('info', 'Version batch committed', { projectName, folderA, folderB, matchCount: matches.length, copiedMissingCount: copiedMissingPaths.length, copyMissingErrorCount: copyMissingErrors.length, batch: result.batch?.sequence });
+      return { ...result, copiedMissingCount: copiedMissingPaths.length, copyMissingErrors };
     } catch (error) {
+      await Promise.all(copiedMissingPaths.map(filePath => fs.promises.rm(filePath, { force: true }).catch(() => undefined)));
       writeLog('error', 'Unable to commit version batch', { projectName, error: error.message || String(error) });
       return { success: false, error: error.message || String(error) };
-    }
-  });
-  
-  ipcMain.handle('workspace-version-create', async (_event, workspacePath, status, projectName, request = {}) => {
-    let createdPath = '';
-    try {
-      const workspaceRoot = ensureWorkspace(workspacePath);
-      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
-      const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const bundle = await versionService.getPhoto(workspaceRoot, request.photoId);
-      const parent = bundle.versions?.find(version => version.id === request.parentVersionId);
-      if (!parent) throw new Error('基础版本不存在');
-      if (parent.fileMissing || !fs.existsSync(parent.filePath)) throw new Error('基础版本文件已丢失，请先重新定位');
-  
-      let sourcePath = parent.filePath;
-      if (request.mode === 'import') {
-        if (request.sourceFilePath) sourcePath = await mediaService.authorizeInput(String(request.sourceFilePath));
-        else {
-          const choice = await dialog.showOpenDialog(mainWindow, {
-            title: '选择处理后的图片或视频',
-            properties: ['openFile'],
-            filters: [{ name: '图片和视频', extensions: [...new Set([...IMAGE_EXTENSIONS, ...RAW_EXTENSIONS, ...VIDEO_EXTENSIONS])].map(value => value.slice(1)) }, { name: '所有文件', extensions: ['*'] }]
-          });
-          if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, ...bundle };
-          sourcePath = path.resolve(choice.filePaths[0]);
-        }
-      }
-      if (!fs.existsSync(sourcePath) || !fs.statSync(sourcePath).isFile()) throw new Error('选择的版本文件不存在');
-      const sourceExtension = path.extname(sourcePath).toLowerCase();
-      if (!IMAGE_EXTENSIONS.has(sourceExtension) && !RAW_EXTENSIONS.has(sourceExtension) && !VIDEO_EXTENSIONS.has(sourceExtension)) throw new Error('选择的文件不是支持的图片或视频');
-  
-      const nextNumber = Number.isInteger(bundle.nextVersionNumber)
-        ? bundle.nextVersionNumber
-        : Math.max(-1, ...(bundle.versions || []).map(version => Number(version.versionNumber))) + 1;
-      const versionId = crypto.randomUUID();
-      const versionDirectory = path.join(projectPath, 'Versions', request.photoId);
-      await fs.promises.mkdir(versionDirectory, { recursive: true });
-      const suffix = request.mode === 'import' ? sourceExtension : path.extname(parent.filePath);
-      const originalStem = cleanVersionName(path.parse(bundle.photo?.originalName || parent.filePath).name) || '素材';
-      createdPath = path.join(versionDirectory, `${originalStem}_${nextNumber + 1}${suffix}`);
-      if (fs.existsSync(createdPath)) createdPath = path.join(versionDirectory, `${originalStem}_${nextNumber + 1}-${versionId.slice(0, 8)}${suffix}`);
-      await fs.promises.copyFile(sourcePath, createdPath, fs.constants.COPYFILE_EXCL);
-      const result = await versionService.createVersion(workspaceRoot, {
-        versionId,
-        photoId: request.photoId,
-        parentVersionId: parent.id,
-        versionName: cleanVersionName(request.versionName) || `版本 ${nextNumber}`,
-        versionType: request.versionType || 'custom',
-        note: String(request.note || '').slice(0, 2000),
-        author: String(request.author || '').slice(0, 120),
-        status: request.status || 'draft',
-        isFinal: Boolean(request.isFinal),
-        filePath: createdPath,
-      });
-      void ensureTrackedVersionThumbnail({ workspaceRoot, photoId: request.photoId, versionId, filePath: createdPath });
-      createdPath = '';
-      writeLog('info', 'Media version created', { projectName, photoId: request.photoId, versionId, versionNumber: nextNumber, mode: request.mode || 'copy' });
-      return result;
-    } catch (error) {
-      if (createdPath) await fs.promises.rm(createdPath, { force: true }).catch(() => undefined);
-      writeLog('error', 'Unable to create media version', { projectName, error: error.message || String(error) });
-      return { success: false, error: error.message || String(error), versions: [] };
     }
   });
   
@@ -312,35 +408,178 @@ const registerVersionIpc = context => {
       if (!IMAGE_EXTENSIONS.has(extension)) throw new Error('多人修脸目前支持 JPG、PNG、TIFF、HEIC 等成片格式，不直接处理 RAW 或视频');
       const bundle = await versionService.getMedia(workspaceRoot, { projectName, filePath });
       const patchResult = await versionService.listTeamPatches(workspaceRoot, bundle.photo.id);
-      return { ...bundle, tasks: patchResult.tasks || [] };
+      let tasks = patchResult.tasks || [];
+      const groups = new Map();
+      for (const task of tasks) {
+        const base = bundle.versions?.find(version => version.id === task.baseVersionId);
+        if (!base || base.fileMissing || !fs.existsSync(base.filePath)) continue;
+        const target = deliveryPath(bundle.photo, base.filePath, task.personIndex);
+        if (path.resolve(task.patchPath || '') === path.resolve(target) && fs.existsSync(target)) continue;
+        const group = groups.get(task.baseVersionId) || [];
+        group.push({ task, target });
+        groups.set(task.baseVersionId, group);
+      }
+      for (const [baseVersionId, migrations] of groups) {
+          const base = bundle.versions?.find(version => version.id === baseVersionId);
+          if (!base || !migrations.length) continue;
+          const repairDirectory = teamDataDirectory(workspaceRoot, bundle.photo.id, baseVersionId);
+          const manifestPath = path.join(repairDirectory, `restore-${crypto.randomUUID()}.json`);
+          try {
+            await fs.promises.mkdir(repairDirectory, { recursive: true });
+            const restoreTasks = migrations.filter(item => !fs.existsSync(item.target)).map(item => ({ id: item.task.id, crop: item.task.crop, patchPath: item.target }));
+            if (restoreTasks.length) {
+              await fs.promises.writeFile(manifestPath, JSON.stringify({ tasks: restoreTasks }, null, 2), 'utf8');
+              await pluginService.runJson('team-retouch', ['restore', '--input', base.filePath, '--manifest', manifestPath], 60 * 60 * 1000);
+            }
+            for (const item of migrations) {
+              if (!fs.existsSync(item.target)) continue;
+              await versionService.updateTeamPatch(workspaceRoot, { taskId: item.task.id, patchPath: item.target });
+              tasks = tasks.map(task => task.id === item.task.id ? { ...task, patchPath: item.target } : task);
+            }
+            writeLog('info', 'Team retouch exports moved beside source image', { projectName, photoId: bundle.photo.id, baseVersionId, count: migrations.length });
+          } catch (error) {
+            writeLog('warn', 'Unable to restore missing team retouch exports', { projectName, photoId: bundle.photo.id, baseVersionId, error: error.message || String(error) });
+          } finally {
+            await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined);
+          }
+      }
+      tasks = tasks.map(task => ({ ...task, patchMissing: !task.patchPath || !fs.existsSync(task.patchPath) }));
+      return { ...bundle, tasks };
     } catch (error) {
       return { success: false, error: error.message || String(error), versions: [], tasks: [] };
     }
   });
   
-  ipcMain.handle('workspace-team-patch-detect', async (_event, workspacePath, status, projectName, request = {}) => {
+  ipcMain.handle('workspace-team-patch-detect', async (event, workspacePath, status, projectName, request = {}) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       const bundle = await versionService.getPhoto(workspaceRoot, request.photoId);
       const base = bundle.versions?.find(version => version.id === request.baseVersionId);
       if (!base || base.fileMissing || !fs.existsSync(base.filePath)) throw new Error('基础版本文件不存在');
       if (!IMAGE_EXTENSIONS.has(path.extname(base.filePath).toLowerCase())) throw new Error('多人修脸目前不直接处理 RAW 或视频');
-      const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const outputDirectory = path.join(projectPath, 'Patches', request.photoId, request.baseVersionId, 'exports');
-      const detectionArgs = ['detect', '--input', base.filePath, '--output-dir', outputDirectory];
-      const useGpu = readSavedConfig().personDetection?.useGpu !== false;
+      const outputDirectory = path.join(teamDataDirectory(workspaceRoot, request.photoId, request.baseVersionId), 'analysis');
+      const exportDirectory = deliveryDirectory(bundle.photo, base.filePath);
+      const detectionArgs = ['detect', '--input', base.filePath, '--output-dir', outputDirectory, '--delivery-dir', exportDirectory, '--delivery-prefix', deliveryName(bundle.photo, base.filePath)];
+      const personDetection = readSavedConfig().personDetection || {};
+      const useGpu = personDetection.useGpu !== false;
+      const oversizeCropMode = personDetection.oversizeCropMode === 'expand' ? 'expand' : 'face-centered';
       pluginService.requireCapability('team-retouch.detect');
-      const detected = await pluginService.runJson('team-retouch', [...detectionArgs, '--provider', useGpu ? 'auto' : 'cpu']);
+      const detected = await pluginService.runJson(
+        'team-retouch',
+        [...detectionArgs, '--provider', useGpu ? 'auto' : 'cpu', '--oversize-crop-mode', oversizeCropMode],
+        60 * 60 * 1000,
+        message => {
+          if (message?.type !== 'progress' || event.sender.isDestroyed()) return;
+          event.sender.send('workspace-team-patch-detect-progress', {
+            photoId: request.photoId,
+            baseVersionId: request.baseVersionId,
+            progress: Math.max(0, Math.min(100, Number(message.progress) || 0)),
+            message: String(message.message || '正在AI识别'),
+          });
+        },
+      );
+      const missingExports = (detected.tasks || []).filter(task => !task.patchPath || !fs.existsSync(task.patchPath));
+      if (missingExports.length) throw new Error(`切好的图片没有成功保存（缺少 ${missingExports.length} 个文件）`);
       const patchResult = await versionService.replaceTeamPatches(workspaceRoot, {
         photoId: request.photoId,
         baseVersionId: request.baseVersionId,
         tasks: detected.tasks || [],
       });
-      writeLog('info', 'Team retouch people detected', { projectName, photoId: request.photoId, baseVersionId: request.baseVersionId, count: patchResult.tasks.length, detector: detected.detector });
-      return { success: true, photo: bundle.photo, versions: bundle.versions, tasks: patchResult.tasks, detection: { detector: detected.detector, backend: detected.backend || 'cpu', provider: detected.provider || '', width: detected.width, height: detected.height, fallbackReason: detected.fallbackReason || '' } };
+      writeLog('info', 'Team retouch people detected', { projectName, photoId: request.photoId, baseVersionId: request.baseVersionId, personCount: detected.personCount || patchResult.tasks.length, workTileCount: patchResult.tasks.length, detector: detected.detector });
+      return { success: true, photo: bundle.photo, versions: bundle.versions, tasks: patchResult.tasks, detection: { detector: detected.detector, backend: detected.backend || 'cpu', provider: detected.provider || '', width: detected.width, height: detected.height, personCount: detected.personCount || patchResult.tasks.length, workTileEdge: detected.workTileEdge || 4000, needsReviewCount: detected.needsReviewCount || 0, fallbackReason: detected.fallbackReason || '' } };
     } catch (error) {
       writeLog('error', 'Unable to detect team retouch subjects', { projectName, error: error.message || String(error) });
       return { success: false, error: error.message || String(error), versions: [], tasks: [] };
+    }
+  });
+
+  ipcMain.handle('workspace-team-patch-detect-batch', async (event, workspacePath, status, projectName, request = {}) => {
+    let manifestPath = '';
+    try {
+      const relativePaths = [...new Set((request.relativePaths || []).map(value => String(value)))];
+      if (relativePaths.length < 2) throw new Error('批量多人修脸至少需要选择两张图片');
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      pluginService.requireCapability('team-retouch.detect');
+      const prepared = [];
+      for (const relativePath of relativePaths) {
+        const filePath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
+        if (!IMAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) throw new Error(`不支持的图片：${path.basename(filePath)}`);
+        const bundle = await versionService.getMedia(workspaceRoot, { projectName, filePath });
+        const base = bundle.versions?.find(version => version.id === bundle.photo?.currentVersionId)
+          || bundle.versions?.find(version => version.isCurrent)
+          || bundle.versions?.at(-1);
+        if (!base || base.fileMissing || !fs.existsSync(base.filePath)) throw new Error(`基础版本不存在：${path.basename(filePath)}`);
+        const outputDirectory = path.join(teamDataDirectory(workspaceRoot, bundle.photo.id, base.id), 'analysis');
+        prepared.push({
+          key: relativePath, name: bundle.photo.displayName || path.basename(filePath), relativePath,
+          bundle, base,
+          engineItem: {
+            key: relativePath, name: bundle.photo.displayName || path.basename(filePath), input: base.filePath,
+            outputDir: outputDirectory, deliveryDir: deliveryDirectory(bundle.photo, base.filePath),
+            deliveryPrefix: deliveryName(bundle.photo, base.filePath),
+          },
+        });
+      }
+      const batchDirectory = path.join(getWorkspaceDataRoot(workspaceRoot), 'team-retouch', 'batches');
+      await fs.promises.mkdir(batchDirectory, { recursive: true });
+      manifestPath = path.join(batchDirectory, `detect-${crypto.randomUUID()}.json`);
+      await fs.promises.writeFile(manifestPath, JSON.stringify({ items: prepared.map(item => item.engineItem) }, null, 2), 'utf8');
+      const personDetection = readSavedConfig().personDetection || {};
+      const useGpu = personDetection.useGpu !== false;
+      const oversizeCropMode = personDetection.oversizeCropMode === 'expand' ? 'expand' : 'face-centered';
+      const detected = await pluginService.runJson(
+        'team-retouch',
+        ['detect-batch', '--manifest', manifestPath, '--provider', useGpu ? 'auto' : 'cpu', '--oversize-crop-mode', oversizeCropMode],
+        4 * 60 * 60 * 1000,
+        message => {
+          if (message?.type !== 'progress' || event.sender.isDestroyed()) return;
+          event.sender.send('workspace-team-patch-detect-batch-progress', {
+            itemIndex: Number(message.itemIndex) || 1,
+            itemCount: Number(message.itemCount) || prepared.length,
+            relativePath: String(message.itemKey || ''),
+            itemName: String(message.itemName || ''),
+            progress: Math.max(0, Math.min(100, Number(message.progress) || 0)),
+            message: String(message.message || '正在AI识别'),
+          });
+        },
+      );
+      const byKey = new Map((detected.results || []).map(item => [String(item.key), item]));
+      const results = [];
+      for (const item of prepared) {
+        const result = byKey.get(item.key);
+        if (!result?.success) {
+          results.push({ relativePath: item.relativePath, name: item.name, success: false, error: result?.error || '未返回识别结果' });
+          continue;
+        }
+        const missingExports = (result.tasks || []).filter(task => !task.patchPath || !fs.existsSync(task.patchPath));
+        if (missingExports.length) {
+          results.push({ relativePath: item.relativePath, name: item.name, success: false, error: `缺少 ${missingExports.length} 张工作图` });
+          continue;
+        }
+        const patchResult = await versionService.replaceTeamPatches(workspaceRoot, {
+          photoId: item.bundle.photo.id, baseVersionId: item.base.id, tasks: result.tasks || [],
+        });
+        results.push({
+          relativePath: item.relativePath, name: item.name, success: true,
+          photoId: item.bundle.photo.id, baseVersionId: item.base.id,
+          personCount: result.personCount || patchResult.tasks.length,
+          workTileCount: patchResult.tasks.length,
+        });
+      }
+      writeLog('info', 'Team retouch batch completed', {
+        projectName, count: prepared.length, successCount: results.filter(item => item.success).length,
+        persistentBackend: Boolean(detected.persistentBackend),
+      });
+      return {
+        success: results.some(item => item.success), results,
+        persistentBackend: Boolean(detected.persistentBackend),
+        error: results.some(item => item.success) ? undefined : '批量识别全部失败',
+      };
+    } catch (error) {
+      writeLog('error', 'Unable to batch detect team retouch subjects', { projectName, error: error.message || String(error) });
+      return { success: false, error: error.message || String(error), results: [] };
+    } finally {
+      if (manifestPath) await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined);
     }
   });
   
@@ -351,6 +590,8 @@ const registerVersionIpc = context => {
         taskId: request.taskId,
         ...(request.personName !== undefined ? { personName: String(request.personName).trim().slice(0, 80) || '未命名人物' } : {}),
         ...(request.assignee !== undefined ? { assignee: String(request.assignee).trim().slice(0, 80) } : {}),
+        ...(request.needsReview !== undefined ? { needsReview: Boolean(request.needsReview) } : {}),
+        ...(request.reviewReason !== undefined ? { reviewReason: String(request.reviewReason).trim().slice(0, 300) } : {}),
       };
       return await versionService.updateTeamPatch(ensureWorkspace(workspacePath), payload);
     } catch (error) {
@@ -374,7 +615,7 @@ const registerVersionIpc = context => {
       if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, tasks: patchResult.tasks };
       const sourcePath = path.resolve(choice.filePaths[0]);
       if (!IMAGE_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) throw new Error('请选择 JPG、PNG、TIFF、HEIC 等图片文件');
-      const uploadDirectory = path.join(path.dirname(path.dirname(task.patchPath)), 'uploads');
+      const uploadDirectory = path.join(teamDataDirectory(workspaceRoot, task.photoId, task.baseVersionId), 'uploads');
       await fs.promises.mkdir(uploadDirectory, { recursive: true });
       copiedPath = path.join(uploadDirectory, `${task.id}${path.extname(sourcePath).toLowerCase()}`);
       await fs.promises.copyFile(sourcePath, copiedPath);
@@ -395,7 +636,8 @@ const registerVersionIpc = context => {
     try {
       pluginService.requireCapability('team-retouch.detect');
       const target = await mediaService.authorizeInput(filePath);
-      shell.showItemInFolder(target);
+      const openError = await shell.openPath(target);
+      if (openError) throw new Error(openError);
       return { success: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
@@ -412,23 +654,21 @@ const registerVersionIpc = context => {
       if (!base || base.fileMissing || !fs.existsSync(base.filePath)) throw new Error('基础版本文件不存在');
       const patchResult = await versionService.listTeamPatches(workspaceRoot, request.photoId);
       const tasks = patchResult.tasks.filter(task => task.baseVersionId === base.id && task.editedPatchPath && fs.existsSync(task.editedPatchPath));
-      if (!tasks.length) throw new Error('请至少上传一个人物的修图结果');
-      const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+      if (!tasks.length) throw new Error('请至少上传一张工作图的修图结果');
       const nextNumber = Math.max(-1, ...(bundle.versions || []).map(version => Number(version.versionNumber))) + 1;
       const versionId = crypto.randomUUID();
-      const versionDirectory = path.join(projectPath, 'Versions', request.photoId);
-      await fs.promises.mkdir(versionDirectory, { recursive: true });
-      createdPath = path.join(versionDirectory, `v${String(nextNumber).padStart(3, '0')}.tif`);
-      if (fs.existsSync(createdPath)) throw new Error(`版本文件已存在：${path.basename(createdPath)}`);
-      const mergeDirectory = path.join(projectPath, 'Patches', request.photoId, base.id);
+      const versionDirectory = path.dirname(base.filePath);
+      const originalStem = cleanVersionName(path.parse(bundle.photo?.originalName || base.filePath).name) || '素材';
+      createdPath = uniqueDestination(versionDirectory, `${originalStem}_多人修图_${nextNumber + 1}.tif`);
+      const mergeDirectory = path.join(teamDataDirectory(workspaceRoot, request.photoId, base.id), 'merge');
       await fs.promises.mkdir(mergeDirectory, { recursive: true });
       const manifestPath = path.join(mergeDirectory, `merge-${versionId}.json`);
       await fs.promises.writeFile(manifestPath, JSON.stringify({ photoId: request.photoId, baseVersionId: base.id, tasks }, null, 2), 'utf8');
       const merged = await pluginService.runJson('team-retouch', ['merge', '--input', base.filePath, '--manifest', manifestPath, '--output', createdPath], 60 * 60 * 1000);
       const versionName = cleanVersionName(request.versionName) || `多人修脸合成 ${nextNumber}`;
       const conflictThreshold = Math.max(500, Number(merged.width || 0) * Number(merged.height || 0) * 0.00005);
-      const needsReview = Number(merged.conflictPixels || 0) > conflictThreshold;
-      const note = `由 ${merged.mergedCount} 个人物 Patch 自动回拼；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(conflictThreshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`;
+      const needsReview = Boolean(merged.needsReview) || Number(merged.conflictPixels || 0) > conflictThreshold;
+      const note = `由 ${merged.mergedCount} 张人物工作图自动合回原尺寸；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(conflictThreshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`;
       const versionBundle = await versionService.createVersion(workspaceRoot, {
         versionId,
         photoId: request.photoId,

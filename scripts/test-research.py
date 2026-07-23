@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
+from tempfile import TemporaryDirectory
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -44,6 +46,33 @@ def main():
         "data": {"item": 2},
         "progress": 37,
     }
+
+    with TemporaryDirectory() as temporary_directory:
+        reference_directory = Path(temporary_directory) / "reference"
+        source_directory = Path(temporary_directory) / "source"
+        reference_directory.mkdir()
+        source_directory.mkdir()
+        Image.new("RGB", (32, 24), (38, 91, 143)).save(reference_directory / "reference.jpg")
+        Image.new("RGB", (32, 24), (38, 91, 143)).save(source_directory / "edited.jpg")
+
+        result = subprocess.run([
+            sys.executable,
+            str(ROOT / "python" / "rename.py"),
+            "--folder_a", str(reference_directory),
+            "--folder_b", str(source_directory),
+            "--preview",
+        ], capture_output=True, text=True, encoding="utf-8", timeout=30, check=False)
+        assert result.returncode == 0, result.stderr
+        events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        preview = next(event for event in events if event["type"] == "preview")
+        assert preview["data"]["matches"] == [{
+            "source": "edited.jpg",
+            "reference": "reference.jpg",
+            "target": "reference.jpg",
+            "confidence": "高",
+            "distance": 0,
+        }]
+        assert any(event["type"] == "success" and event["message"] == "所有任务结束" for event in events)
     print("research-tools regression tests passed")
 
 

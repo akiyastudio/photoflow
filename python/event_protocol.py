@@ -26,8 +26,8 @@ def log_error(message):
     emit("error", message)
 
 
-def log_progress(message, percent):
-    emit("progress", message, progress=percent)
+def log_progress(message, percent, data=None):
+    emit("progress", message, data=data, progress=percent)
 
 
 def log_status(message, data=None):

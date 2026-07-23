@@ -5,6 +5,7 @@ const createVersionService = ({ repository }) => ({
   getPhoto: (root, photoId) => repository.getPhoto(root, photoId),
   createVersion: (root, payload) => repository.createVersion(root, payload),
   updateVersion: (root, payload) => repository.updateVersion(root, payload),
+  listFinalVersions: (root, projectName) => repository.listFinalVersions(root, projectName),
   relocateVersion: (root, payload) => repository.relocateVersion(root, payload),
   deleteVersion: (root, versionId) => repository.deleteVersion(root, versionId),
   recordCompare: (root, payload) => repository.recordCompare(root, payload),

@@ -1,5 +1,10 @@
 const registerWorkspaceIpc = context => {
-  const { Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog } = context;
+  const { Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog } = context;
+  const officeOpenXmlExtensions = new Set([
+    '.docx', '.docm', '.dotx', '.dotm',
+    '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam',
+    '.xlsx', '.xlsm', '.xltx', '.xltm', '.xlam', '.xlsb',
+  ]);
 
   ipcMain.handle('workspace-projects', async (_event, workspacePath) => {
     try {
@@ -479,6 +484,28 @@ const registerWorkspaceIpc = context => {
       const error = await shell.openPath(target);
       return { success: !error, error };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
+  });
+
+  ipcMain.handle('workspace-extract-office-images', async (_event, workspacePath, status, projectName, relativePaths = []) => {
+    try {
+      pluginService.requireCapability('office-media.extract');
+      const requestedPaths = Array.isArray(relativePaths) ? relativePaths.slice(0, 50) : [];
+      if (!requestedPaths.length) throw new Error('没有选择 Office 文档');
+      const targets = requestedPaths.map(relativePath => resolveProjectEntry(workspacePath, status, projectName, relativePath));
+      for (const target of targets) {
+        if (!fs.statSync(target).isFile() || !officeOpenXmlExtensions.has(path.extname(target).toLowerCase())) {
+          throw new Error(`不支持此 Office 文件：${path.basename(target)}`);
+        }
+      }
+      const args = ['extract', ...targets.flatMap(target => ['--input', target])];
+      const result = await pluginService.runJson('office-media-extractor', args, 20 * 60 * 1000);
+      if (!result?.success) throw new Error(result?.error || '提取图片失败');
+      mainWindow?.webContents.send('workspace-files-changed', { root: getProjectPath(workspacePath, status, projectName), fileName: '' });
+      return { ...result, results: Array.isArray(result.results) ? result.results : [] };
+    } catch (error) {
+      writeLog('warn', 'Office image extraction failed', { projectName, error: error.message || String(error) });
+      return { success: false, error: error.message || String(error), results: [] };
+    }
   });
   
   ipcMain.handle('workspace-open-entry-photoshop', async (_event, workspacePath, status, projectName, relativePaths) => {
