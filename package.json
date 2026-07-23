@@ -29,7 +29,8 @@
     "preview": "vite preview",
     "electron": "npm run build:shell-thumbnail && npm run build:recycle-bin-service && wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
     "electron:dev": "concurrently -k \"cross-env BROWSER=none npm run dev\" \"npm run electron\"",
-    "electron:build": "npm run generate:icon && npm run build && npm run build:python && npm run build:components && npm run build:shell-thumbnail && npm run build:recycle-bin-service && electron-builder"
+    "cleanup:electron-artifacts": "node scripts/cleanup-electron-artifacts.cjs",
+    "electron:build": "npm run generate:icon && npm run build && npm run build:python && npm run build:components && npm run build:shell-thumbnail && npm run build:recycle-bin-service && electron-builder && npm run cleanup:electron-artifacts"
   },
   "build": {
     "appId": "com.photoflow.toolkit",
@@ -52,8 +53,7 @@
     "win": {
       "executableName": "Photoflow",
       "target": [
-        "nsis",
-        "zip"
+        "nsis"
       ],
       "extraResources": [
         {
