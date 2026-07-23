@@ -218,6 +218,41 @@ html.dark .hover\:bg-red-50:hover { background-color:#450a0a; }
 html.dark .project-open-button:hover { background:#1f2937; color:#f8fafc; }
 html.dark .settings-check { border-color:#1f2937; background:#030407; color:#d1d5db; }
 html.dark input[type="checkbox"], html.dark input[type="range"] { accent-color:#3b82f6; }
+
+.video-hover-seek {
+  height: 12px;
+  cursor: pointer;
+  appearance: none;
+  background: transparent;
+}
+.video-hover-seek::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(to right, #3b82f6 var(--seek-progress), rgba(255,255,255,.45) var(--seek-progress));
+}
+.video-hover-seek::-webkit-slider-thumb {
+  width: 10px;
+  height: 10px;
+  margin-top: -3.5px;
+  appearance: none;
+  border: 1px solid rgba(15,23,42,.35);
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(15,23,42,.45);
+}
+.video-hover-seek::-moz-range-track {
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(to right, #3b82f6 var(--seek-progress), rgba(255,255,255,.45) var(--seek-progress));
+}
+.video-hover-seek::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border: 1px solid rgba(15,23,42,.35);
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(15,23,42,.45);
+}
 html.dark .birthday-panel { border-color:#1d4ed8; background:#07111f; }
 html.dark .birthday-panel-header { background:#071a3d; }
 html.dark .birthday-panel-title { color:#dbeafe; }

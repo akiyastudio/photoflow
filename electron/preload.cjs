@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   runScript: (scriptName, args, requestId) => ipcRenderer.send('run-python', scriptName, args, requestId),
+  cancelPythonTask: (requestId) => ipcRenderer.invoke('cancel-python', requestId),
   getBirthdays: () => ipcRenderer.invoke('get-birthdays'),
   saveBirthdays: (data) => ipcRenderer.invoke('save-birthdays', data),
   onPythonEvent: (callback) => {
@@ -25,6 +26,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openLogsFolder: () => ipcRenderer.invoke('logs-open-folder'),
   clearLogs: () => ipcRenderer.invoke('logs-clear'),
   clearInterfaceCache: () => ipcRenderer.invoke('interface-cache-clear'),
+  getCursorScreenPoint: () => ipcRenderer.invoke('cursor-screen-point'),
   installComponent: (componentId) => ipcRenderer.invoke('components-install', componentId),
   uninstallComponent: (componentId) => ipcRenderer.invoke('components-uninstall', componentId),
   getDrives: () => ipcRenderer.invoke('getDrives'),
@@ -80,7 +82,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onThumbnailStateChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('thumbnail-state-changed', subscription); return () => ipcRenderer.removeListener('thumbnail-state-changed', subscription); },
   getMediaOriginal: (filePath, kind, cacheConfig) => ipcRenderer.invoke('media-original', filePath, kind, cacheConfig),
   getMediaMetadata: (filePath) => ipcRenderer.invoke('media-metadata', filePath),
-  getVideoHoverPreview: (filePath, cacheConfig, requestedSize, cacheOnly, generateHoverFrames) => ipcRenderer.invoke('media-video-hover-preview', filePath, cacheConfig, requestedSize, cacheOnly, generateHoverFrames),
   reportRendererError: (message, details) => ipcRenderer.send('renderer-error-log', message, details),
   onAppError: (callback) => { const subscription = (_event, message) => callback(message); ipcRenderer.on('app-error', subscription); return () => ipcRenderer.removeListener('app-error', subscription); },
   getRawPreview: (filePath, cacheConfig) => ipcRenderer.invoke('media-raw-preview', filePath, cacheConfig),

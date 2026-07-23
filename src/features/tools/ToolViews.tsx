@@ -8,7 +8,7 @@ import { useAppDialog } from '../../components/AppDialogProvider';
 const IMAGE_SELECTION_FOLDER_NAME = '图片选片';
 const VIDEO_SELECTION_FOLDER_NAME = '视频选片';
 interface PythonEvent {
-  type: 'log' | 'error' | 'progress' | 'status' | 'ask_user' | 'success' | 'warning' | 'preview';
+  type: 'log' | 'error' | 'progress' | 'status' | 'ask_user' | 'success' | 'warning' | 'preview' | 'cancelled';
   message: string;
   data?: any;
   progress?: number;
@@ -35,18 +35,39 @@ const formatTransferBytes = (bytes: number) => {
 const usePythonTask = (scriptName: string, initialStatus: string) => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isRunning, setIsRunning] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState(initialStatus);
+  const [preview, setPreview] = useState<Record<string, any> | null>(null);
+  const requestIdRef = React.useRef('');
+  const pendingLogsRef = React.useRef<LogEntry[]>([]);
+  const logFlushTimerRef = React.useRef<number | null>(null);
+  const appendLog = React.useCallback((message: string, type: LogEntry['type']) => {
+    pendingLogsRef.current.push({ timestamp: new Date().toLocaleTimeString(), message, type });
+    if (logFlushTimerRef.current !== null) return;
+    logFlushTimerRef.current = window.setTimeout(() => {
+      const pending = pendingLogsRef.current.splice(0);
+      logFlushTimerRef.current = null;
+      if (pending.length) setLogs(previous => [...previous, ...pending].slice(-200));
+    }, 100);
+  }, []);
+
+  useEffect(() => () => {
+    if (logFlushTimerRef.current !== null) window.clearTimeout(logFlushTimerRef.current);
+    pendingLogsRef.current = [];
+  }, []);
 
   useEffect(() => {
     if (!window.electronAPI?.onPythonEvent) return;
     return window.electronAPI.onPythonEvent((event: PythonEvent) => {
       if (event.scriptName !== scriptName) return;
+      if (!requestIdRef.current || event.requestId !== requestIdRef.current) return;
       if (event.type === 'log' || event.type === 'error' || event.type === 'warning' || event.type === 'success') {
         const type: LogEntry['type'] = event.type === 'log' ? 'info' : event.type;
-        setLogs(previous => [...previous, { timestamp: new Date().toLocaleTimeString(), message: event.message, type }]);
+        appendLog(event.message, type);
         if (event.type === 'success' || event.type === 'error') {
           setIsRunning(false);
+          setIsCancelling(false);
           if (event.type === 'success') {
             setProgress(100);
             setStatusMsg('处理完成');
@@ -56,25 +77,54 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
         }
       } else if (event.type === 'progress') {
         if (event.progress !== undefined) setProgress(event.progress);
-        if (event.message) {
-          setStatusMsg(event.message);
-          setLogs(previous => [...previous, { timestamp: new Date().toLocaleTimeString(), message: event.message, type: 'info' }]);
-        }
+        if (event.message) setStatusMsg(event.message);
+        if (event.data?.fileStarted && event.message) appendLog(event.message, 'info');
+      } else if (event.type === 'status') {
+        if (event.message) setStatusMsg(event.message);
+      } else if (event.type === 'preview') {
+        setPreview(event.data || {});
+        setIsRunning(false);
+        setStatusMsg('等待确认');
+      } else if (event.type === 'cancelled') {
+        appendLog(event.message || '任务已取消。', 'warning');
+        setIsRunning(false);
+        setIsCancelling(false);
+        setProgress(0);
+        setStatusMsg('已取消并回滚');
       }
     });
-  }, [scriptName]);
+  }, [appendLog, scriptName]);
 
   const start = (args: string[], startingStatus: string) => {
     if (isRunning) return false;
+    if (logFlushTimerRef.current !== null) window.clearTimeout(logFlushTimerRef.current);
+    logFlushTimerRef.current = null;
+    pendingLogsRef.current = [];
     setLogs([]);
+    setPreview(null);
     setProgress(0);
     setIsRunning(true);
+    setIsCancelling(false);
     setStatusMsg(startingStatus);
-    window.electronAPI.runScript(scriptName, args);
+    const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    requestIdRef.current = requestId;
+    window.electronAPI.runScript(scriptName, args, requestId);
     return true;
   };
 
-  return { logs, isRunning, progress, statusMsg, start };
+  const cancel = async () => {
+    if (!isRunning || !requestIdRef.current || isCancelling) return false;
+    setIsCancelling(true);
+    setStatusMsg('正在取消并回滚……');
+    const result = await window.electronAPI.cancelPythonTask(requestIdRef.current);
+    if (!result.success) {
+      setIsCancelling(false);
+      appendLog(result.error || '无法取消任务。', 'error');
+    }
+    return result.success;
+  };
+
+  return { logs, isRunning, isCancelling, progress, statusMsg, preview, clearPreview: () => setPreview(null), start, cancel };
 };
 
 const ImportCard = ({ config, drives = [], destinationPath, active = true, onImportConfigChange, onImportComplete }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, active?: boolean, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (projectNames: string[]) => void }) => {
@@ -917,18 +967,61 @@ const MatchView = ({
         folderOptions?: Array<{ name: string; path: string }>;
     }) => {
     const [keywords, setKeywords] = useState("");
-    const { logs, isRunning, progress, start } = usePythonTask('catch.py', '进度');
+    const [isConfirming, setIsConfirming] = useState(false);
+    const appDialog = useAppDialog();
+    const baseArgsRef = React.useRef<string[]>([]);
+    const { logs, isRunning, isCancelling, progress, statusMsg, preview, clearPreview, start, cancel } = usePythonTask('catch.py', '进度');
+
+    useEffect(() => {
+        if (!preview) return;
+        clearPreview();
+        setIsConfirming(true);
+        const showPreview = async () => {
+            const filesToCopy = Number(preview.filesToCopy || 0);
+            const existingCount = Number(preview.existingCount || 0);
+            const conflictCount = Number(preview.conflictCount || 0);
+            const missingKeywords = Array.isArray(preview.missingKeywords) ? preview.missingKeywords : [];
+            const details = [
+                `图片 ${Number(preview.imageCount || 0)} 个，视频 ${Number(preview.videoCount || 0)} 个`,
+                existingCount ? `目标中已存在 ${existingCount} 个，将保留原文件` : '',
+                conflictCount ? `发现 ${conflictCount} 个来源同名冲突，将跳过以避免覆盖` : '',
+                missingKeywords.length ? `未找到 ${missingKeywords.length} 个编号：${missingKeywords.slice(0, 10).join('、')}${missingKeywords.length > 10 ? '…' : ''}` : '',
+            ].filter(Boolean).join('；');
+
+            if (filesToCopy === 0) {
+                await appDialog.alert({
+                    title: '没有需要复制的新文件',
+                    message: existingCount || conflictCount ? '匹配项均已存在或存在同名冲突。' : '没有找到与这些编号完全匹配的媒体文件。',
+                    detail: details || undefined,
+                });
+                return;
+            }
+
+            const confirmed = await appDialog.confirm({
+                title: '确认从文件名选片',
+                message: `将复制 ${filesToCopy} 个文件，共 ${formatTransferBytes(Number(preview.totalBytes || 0))}。`,
+                detail: details || undefined,
+                confirmLabel: '开始复制',
+                cancelLabel: '取消',
+            });
+            if (confirmed) {
+                start([...baseArgsRef.current, '--execute', '--expected_signature', String(preview.signature || '')], '正在复制…');
+            }
+        };
+        void showPreview().finally(() => setIsConfirming(false));
+    }, [appDialog, clearPreview, preview, start]);
 
     const runTask = () => {
-        if (!projectPath || !keywords.trim() || isRunning) return;
-        start([
+        if (!projectPath || !keywords.trim() || isRunning || isConfirming) return;
+        baseArgsRef.current = [
             '--source', projectPath,
             '--image_dest_name', IMAGE_SELECTION_FOLDER_NAME,
             '--video_dest_name', VIDEO_SELECTION_FOLDER_NAME,
             '--image_source_name', config.imageSourceFolderName || '',
             '--video_source_name', config.videoSourceFolderName || '',
             '--keywords', ...keywords.trim().split(/\s+/)
-        ], '正在选片…');
+        ];
+        start(baseArgsRef.current, '正在预检…');
     };
 
     return (
@@ -944,10 +1037,10 @@ const MatchView = ({
                     logs={logs}
                     progress={progress}
                     isRunning={isRunning}
-                    idleMessage={isRunning ? '正在选片…' : '进度'}
-                    action={<button onClick={runTask} disabled={isRunning || !projectPath || !keywords.trim()} className={`px-8 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${isRunning || !projectPath || !keywords.trim() ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none' : 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-500/20'}`}>
-                        {isRunning ? <Loader2 className="animate-spin" size={18}/> : <ScanSearch size={18}/>}
-                        {isRunning ? '复制中...' : '开始选片'}
+                    idleMessage={statusMsg}
+                    action={<button onClick={isRunning ? () => void cancel() : runTask} disabled={isCancelling || isConfirming || (!isRunning && (!projectPath || !keywords.trim()))} className={`px-8 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${isRunning ? 'bg-red-600 text-white hover:bg-red-500' : isConfirming || !projectPath || !keywords.trim() ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none' : 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-500/20'}`}>
+                        {isRunning ? (isCancelling ? <Loader2 className="animate-spin" size={18}/> : <X size={18}/>) : <ScanSearch size={18}/>}
+                        {isRunning ? (isCancelling ? '正在回滚…' : '取消任务') : isConfirming ? '等待确认' : '开始选片'}
                     </button>}
                 />
             </div>

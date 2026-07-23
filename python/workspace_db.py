@@ -108,6 +108,7 @@ def connect(root: str, database: str):
             UNIQUE(photo_id, version_number)
         );
         CREATE INDEX IF NOT EXISTS versions_photo ON versions(photo_id, version_number);
+        CREATE INDEX IF NOT EXISTS versions_parent ON versions(parent_version_id);
         CREATE INDEX IF NOT EXISTS versions_file_identity ON versions(file_id);
         CREATE INDEX IF NOT EXISTS versions_file_path_key ON versions(file_path_key);
         CREATE INDEX IF NOT EXISTS versions_fingerprint ON versions(file_fingerprint);
@@ -127,6 +128,7 @@ def connect(root: str, database: str):
             UNIQUE(project_id, sequence)
         );
         CREATE INDEX IF NOT EXISTS version_batches_project ON version_batches(project_id, sequence);
+        CREATE INDEX IF NOT EXISTS version_batches_parent ON version_batches(parent_batch_id);
         CREATE INDEX IF NOT EXISTS version_batches_folder ON version_batches(project_id, source_folder_path_key);
         CREATE INDEX IF NOT EXISTS version_batches_folder_id ON version_batches(project_id, source_folder_id);
         CREATE TABLE IF NOT EXISTS progress_folders (
@@ -145,6 +147,7 @@ def connect(root: str, database: str):
             UNIQUE(project_id, media_kind, version_key)
         );
         CREATE INDEX IF NOT EXISTS progress_folders_project ON progress_folders(project_id, media_kind, version_key);
+        CREATE INDEX IF NOT EXISTS progress_folders_parent ON progress_folders(parent_progress_id);
         CREATE INDEX IF NOT EXISTS progress_folders_identity ON progress_folders(project_id, folder_id);
         CREATE TABLE IF NOT EXISTS batch_items (
             id TEXT PRIMARY KEY,
@@ -166,6 +169,8 @@ def connect(root: str, database: str):
             UNIQUE(batch_id, source_path_key)
         );
         CREATE INDEX IF NOT EXISTS batch_items_photo ON batch_items(photo_id, batch_id);
+        CREATE INDEX IF NOT EXISTS batch_items_batch ON batch_items(batch_id);
+        CREATE INDEX IF NOT EXISTS batch_items_version ON batch_items(version_id);
         CREATE INDEX IF NOT EXISTS batch_items_source_file ON batch_items(source_file_id);
         CREATE TABLE IF NOT EXISTS file_records (
             id TEXT PRIMARY KEY,
@@ -193,6 +198,9 @@ def connect(root: str, database: str):
             compare_mode TEXT NOT NULL,
             created_at INTEGER NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS version_compare_history_photo ON version_compare_history(photo_id);
+        CREATE INDEX IF NOT EXISTS version_compare_history_left ON version_compare_history(left_version_id);
+        CREATE INDEX IF NOT EXISTS version_compare_history_right ON version_compare_history(right_version_id);
         CREATE TABLE IF NOT EXISTS team_patch_tasks (
             id TEXT PRIMARY KEY,
             photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
@@ -218,6 +226,8 @@ def connect(root: str, database: str):
             is_deleted INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS team_patch_photo ON team_patch_tasks(photo_id, base_version_id, is_deleted);
+        CREATE INDEX IF NOT EXISTS team_patch_base_version ON team_patch_tasks(base_version_id);
+        CREATE INDEX IF NOT EXISTS team_patch_merged_version ON team_patch_tasks(merged_version_id);
         CREATE TABLE IF NOT EXISTS undo_records (
             id TEXT PRIMARY KEY,
             kind TEXT NOT NULL,

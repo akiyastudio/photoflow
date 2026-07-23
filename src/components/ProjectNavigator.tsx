@@ -143,7 +143,7 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
     })) return;
     const result = await window.electronAPI.trashWorkspaceProject(workspacePath, project.status, project.name);
     if (!result.success) {
-      if (isRecycleBinFailure(result.error)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
+      if (isRecycleBinFailure(result.error, result.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
       else setError(result.error || '删除项目失败');
     }
     refresh();

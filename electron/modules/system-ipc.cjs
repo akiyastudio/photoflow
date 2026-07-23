@@ -1,5 +1,6 @@
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, shell, spawn, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, undefined, writeLog } = context;
+  const activePythonTasks = new Map();
 
   ipcMain.on('renderer-error-log', (_event, message, details) => {
     writeLog('error', `Renderer: ${String(message || '未知错误').slice(0, 500)}`, String(details || '').slice(0, 4000));
@@ -30,6 +31,8 @@ const registerSystemIpc = context => {
   ipcMain.on('window-close', event => BrowserWindow.fromWebContents(event.sender)?.close());
   
   ipcMain.handle('window-is-maximized', event => BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false);
+
+  ipcMain.handle('cursor-screen-point', () => screen.getCursorScreenPoint());
   
   ipcMain.handle('components-list', async () => {
     const components = await pluginService.listWithSizes();
@@ -186,11 +189,27 @@ const registerSystemIpc = context => {
     }
   });
   
+  ipcMain.handle('cancel-python', async (_event, requestId) => {
+    const task = activePythonTasks.get(String(requestId || ''));
+    if (!task) return { success: false, error: '任务已经结束或不存在。' };
+    try {
+      await fs.promises.writeFile(task.cancelFile, 'cancel', 'utf8');
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
   ipcMain.on('run-python', (event, scriptName, args = [], requestId = '') => {
     let command;
     let spawnArgs;
+    const normalizedRequestId = String(requestId || '');
+    const cancellable = scriptName === 'catch.py' && /^[a-z0-9-]{8,80}$/i.test(normalizedRequestId);
+    const cancelFile = cancellable ? path.join(app.getPath('temp'), `photoflow-cancel-${normalizedRequestId}.flag`) : '';
+    const runtimeArgs = cancellable ? [...args, '--cancel_file', cancelFile] : args;
     try {
-      ({ command, args: spawnArgs } = getRunConfig(scriptName, args));
+      if (cancelFile) fs.rmSync(cancelFile, { force: true });
+      ({ command, args: spawnArgs } = getRunConfig(scriptName, runtimeArgs));
     } catch (error) {
       event.sender.send('python-event', { type: 'error', message: error.message || String(error), scriptName, requestId });
       return;
@@ -214,6 +233,7 @@ const registerSystemIpc = context => {
     try {
       // 注意：windowsHide: true 可以隐藏弹出的黑框
       const pyProcess = spawn(command, spawnArgs, { windowsHide: true });
+      if (cancellable) activePythonTasks.set(normalizedRequestId, { process: pyProcess, cancelFile });
       let stdoutBuffer = '';
       const handlePythonOutputLine = line => {
         const trimmed = line.trim();
@@ -268,10 +288,18 @@ const registerSystemIpc = context => {
             message: `${scriptName} Process finished`,
             type: code === 0 ? 'success' : 'warning'
         });
+        if (cancellable) {
+          activePythonTasks.delete(normalizedRequestId);
+          fs.promises.rm(cancelFile, { force: true }).catch(() => undefined);
+        }
       });
       
       // 监听启动错误（比如 exe 不存在）
       pyProcess.on('error', (err) => {
+         if (cancellable) {
+           activePythonTasks.delete(normalizedRequestId);
+           fs.promises.rm(cancelFile, { force: true }).catch(() => undefined);
+         }
          console.error('Failed to start process:', err);
          mainWindow.webContents.send('python-event', {
            type: 'error',
