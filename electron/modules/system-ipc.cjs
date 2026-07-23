@@ -1,5 +1,5 @@
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, dialog, findLatestPhotoshop, fs, getConfigPath, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, shell, spawn, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, shell, spawn, undefined, writeLog } = context;
 
   ipcMain.on('renderer-error-log', (_event, message, details) => {
     writeLog('error', `Renderer: ${String(message || '未知错误').slice(0, 500)}`, String(details || '').slice(0, 4000));
@@ -41,11 +41,13 @@ const registerSystemIpc = context => {
         Object.assign(gpu, {
           runtimeAvailable,
           gpuAvailable: Boolean(probe.gpuAvailable),
+          advancedAvailable: Boolean(probe.advancedAvailable),
           mergeAvailable: Boolean(probe.mergeAvailable),
-          provider: probe.provider || '',
+          provider: probe.advancedAvailable ? `${probe.provider || 'ONNX'} + PairDETR/SAM 2.1` : (probe.provider || ''),
           providers: Array.isArray(probe.providers) ? probe.providers : [],
           runtimeError: runtimeAvailable ? '' : (probe.runtimeError || probe.error || ''),
           gpuError: probe.gpuAvailable || !runtimeAvailable ? '' : (probe.gpuError || probe.error || ''),
+          advancedError: probe.advancedAvailable ? '' : (probe.advancedError || ''),
         });
       } catch (error) {
         Object.assign(gpu, { runtimeAvailable: false, provider: '', providers: [], runtimeError: error.message || String(error) });
@@ -60,6 +62,114 @@ const registerSystemIpc = context => {
       const error = await shell.openPath(installPath);
       if (error) throw new Error(error);
       return { success: true, path: installPath };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('logs-open-folder', async () => {
+    try {
+      const logDir = getLogDir();
+      const error = await shell.openPath(logDir);
+      if (error) throw new Error(error);
+      return { success: true, path: logDir };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('logs-clear', async () => {
+    try {
+      let deletedCount = 0;
+      const logDir = getLogDir();
+      for (const fileName of await fs.promises.readdir(logDir)) {
+        // Keep the operation scoped to files created by PhotoFlow's logger.
+        if (!/^photoflow-\d{4}-\d{2}-\d{2}\.log$/.test(fileName)) continue;
+        const filePath = path.join(logDir, fileName);
+        const stat = await fs.promises.lstat(filePath).catch(() => null);
+        if (!stat?.isFile()) continue;
+        await fs.promises.unlink(filePath);
+        deletedCount += 1;
+      }
+      return { success: true, deletedCount };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('components-install', async (_event, componentId) => {
+    let stagingPath = '';
+    let backupPath = '';
+    try {
+      if (!app.isPackaged) throw new Error('开发环境组件由源码提供，请在打包版本中测试安装');
+      const knownComponent = (await pluginService.listWithSizes()).find(component => component.id === componentId);
+      if (!knownComponent) throw new Error(`未知组件：${componentId}`);
+      const choice = await dialog.showOpenDialog(mainWindow, {
+        title: `选择“${knownComponent.name}”组件文件夹`,
+        properties: ['openDirectory'],
+      });
+      if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true };
+
+      const selectedPath = path.resolve(choice.filePaths[0]);
+      const directManifest = path.join(selectedPath, 'component.json');
+      const nestedPath = path.join(selectedPath, String(componentId));
+      const componentRoot = fs.existsSync(directManifest) ? selectedPath : nestedPath;
+      const manifestPath = path.join(componentRoot, 'component.json');
+      if (!fs.existsSync(manifestPath)) throw new Error('所选文件夹中没有 component.json');
+      const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+      if (manifest.id !== componentId) throw new Error(`组件 ID 不匹配：需要 ${componentId}，实际为 ${manifest.id || '未填写'}`);
+      if (Number(manifest.apiVersion) !== 1) throw new Error(`组件接口版本不兼容：${manifest.apiVersion || '未填写'}`);
+      const entrypoints = manifest.entrypoints || {};
+      const relativeEntry = entrypoints[`${process.platform}-${process.arch}`] || entrypoints[process.platform] || entrypoints.default;
+      if (typeof relativeEntry !== 'string' || !relativeEntry.trim()) throw new Error('组件没有适用于当前系统的入口文件');
+      const sourceEntry = path.resolve(componentRoot, relativeEntry);
+      const sourceRelative = path.relative(componentRoot, sourceEntry);
+      if (!sourceRelative || sourceRelative.startsWith('..') || path.isAbsolute(sourceRelative)) throw new Error('组件入口路径无效');
+      if (!(await fs.promises.stat(sourceEntry).catch(() => null))?.isFile()) throw new Error(`组件入口不存在：${relativeEntry}`);
+
+      const installRoot = pluginService.ensureInstallRoot();
+      const destination = path.join(installRoot, String(componentId));
+      stagingPath = path.join(installRoot, `.${componentId}-install-${process.pid}-${Date.now()}`);
+      await fs.promises.cp(componentRoot, stagingPath, { recursive: true, force: false, errorOnExist: true });
+      if (fs.existsSync(destination)) {
+        backupPath = path.join(installRoot, `.${componentId}-backup-${process.pid}-${Date.now()}`);
+        await fs.promises.rename(destination, backupPath);
+      }
+      try {
+        await fs.promises.rename(stagingPath, destination);
+        stagingPath = '';
+      } catch (error) {
+        if (backupPath && !fs.existsSync(destination)) await fs.promises.rename(backupPath, destination).catch(() => undefined);
+        backupPath = '';
+        throw error;
+      }
+      if (backupPath) {
+        await shell.trashItem(backupPath).catch(error => writeLog('warn', 'Unable to recycle replaced component backup', { componentId, backupPath, error: error.message || String(error) }));
+        backupPath = '';
+      }
+      writeLog('info', 'Component installed', { componentId, destination });
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    } finally {
+      if (stagingPath) await fs.promises.rm(stagingPath, { recursive: true, force: true }).catch(() => undefined);
+      if (backupPath) await fs.promises.rm(backupPath, { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
+
+  ipcMain.handle('components-uninstall', async (_event, componentId) => {
+    try {
+      if (!app.isPackaged) throw new Error('开发环境组件由源码提供，不能在应用内卸载');
+      const component = (await pluginService.listWithSizes()).find(item => item.id === componentId);
+      if (!component?.installed) throw new Error('组件尚未安装');
+      if (component.source !== 'application') throw new Error('此组件随应用提供，不能单独卸载');
+      const installRoot = path.resolve(pluginService.installRoot);
+      const componentPath = path.resolve(component.path);
+      const relative = path.relative(installRoot, componentPath);
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || path.basename(componentPath) !== componentId) throw new Error('组件目录校验失败');
+      await shell.trashItem(componentPath);
+      writeLog('info', 'Component uninstalled', { componentId, componentPath });
+      return { success: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }

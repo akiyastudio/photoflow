@@ -4,7 +4,7 @@ import sys
 import argparse
 import io
 import subprocess
-from event_protocol import log_error, log_info, log_progress, log_success
+from event_protocol import emit, log_error, log_info, log_progress, log_success
 from PIL import Image
 from ffmpeg_utils import get_ffmpeg_exe
 

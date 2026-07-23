@@ -12,7 +12,8 @@ from event_protocol import ask_user, log_error, log_info, log_progress, log_stat
 from ffmpeg_utils import get_ffmpeg_exe
 
 # --- 2. 辅助工具函数 ---
-def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024):
+def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024, on_progress=None):
+    bytes_copied = 0
     try:
         with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
             while True:
@@ -20,6 +21,9 @@ def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024):
                 if not buf:
                     break
                 fdst.write(buf)
+                bytes_copied += len(buf)
+                if on_progress:
+                    on_progress(bytes_copied)
                 # 防止读卡器性能太差崩盘
                 time.sleep(0.002) 
         
@@ -198,21 +202,50 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             log_error(f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
             return
 
+        total_bytes = sum(os.path.getsize(file_path) for file_path in original_sd_files)
+
 
 # Step 2: 复制到临时区 (仅复制不存在或不完整的文件)
         os.makedirs(temp_dir, exist_ok=True)
         log_info(f"正在处理 {len(original_sd_files)} 个文件...")
         
         temp_files_list = []
+        completed_bytes = 0
+        transferred_bytes = 0
+        transfer_started_at = time.monotonic()
+        last_progress_at = 0.0
+
+        def publish_transfer_progress(filename, current_file_bytes, files_copied):
+            nonlocal last_progress_at
+            now = time.monotonic()
+            bytes_copied = min(total_bytes, completed_bytes + current_file_bytes)
+            if now - last_progress_at < 0.1 and bytes_copied < total_bytes:
+                return
+            last_progress_at = now
+            elapsed = max(0.001, now - transfer_started_at)
+            log_progress(
+                f"导入中: {filename}",
+                int((bytes_copied / max(1, total_bytes)) * 100),
+                {
+                    "bytesCopied": bytes_copied,
+                    "totalBytes": total_bytes,
+                    "bytesPerSecond": (transferred_bytes + current_file_bytes) / elapsed,
+                    "filesCopied": files_copied,
+                    "totalFiles": len(original_sd_files),
+                },
+            )
+
         for idx, src in enumerate(original_sd_files):
             filename = os.path.basename(src)
             dst = os.path.join(temp_dir, filename)
+            source_size = os.path.getsize(src)
             time.sleep(0.005)
             
             # 如果临时目录已存在该文件，且大小与原文件一致，则跳过复制
             if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src):
                 temp_files_list.append(dst)
-                log_progress(f"已就绪: {filename}", int(((idx+1)/len(original_sd_files))*100))
+                completed_bytes += source_size
+                publish_transfer_progress(filename, 0, idx + 1)
                 continue
             
             # 如果文件名冲突（即临时文件夹有同名文件但大小不同，通常是不同目录下的同名文件）
@@ -222,14 +255,16 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             
             # 执行复制
             try:
-                safe_chunk_copy(src, dst)
+                safe_chunk_copy(src, dst, on_progress=lambda current_bytes: publish_transfer_progress(filename, current_bytes, idx))
             except Exception as e:
                 log_error(f"复制文件 {filename} 时读卡器断开或报错: {e}")
                 # 如果复制单个文件就报错了，极大概率是读卡器已经掉线，抛出异常让外层统一处理
                 raise e 
             
             temp_files_list.append(dst)
-            log_progress(f"导入中: {filename}", int(((idx+1)/len(original_sd_files))*100))
+            completed_bytes += source_size
+            transferred_bytes += source_size
+            publish_transfer_progress(filename, 0, idx + 1)
 
         # Step 3: 分组逻辑处理
         files_with_time = [(f, get_file_time(f)) for f in temp_files_list]
@@ -345,11 +380,37 @@ def stage_import_broll(sd_path, dest_path):
 
         broll_folder = os.path.join(dest_path, '花絮')
         os.makedirs(broll_folder, exist_ok=True)
+        total_bytes = sum(os.path.getsize(file_path) for file_path in original_files)
+        completed_bytes = 0
+        transfer_started_at = time.monotonic()
+        last_progress_at = 0.0
         log_info(f"正在把 {len(original_files)} 个文件导入花絮...")
         for index, source in enumerate(original_files):
             destination = unique_destination(broll_folder, os.path.basename(source))
+            source_size = os.path.getsize(source)
+
+            def publish_broll_progress(current_file_bytes, force=False):
+                nonlocal last_progress_at
+                now = time.monotonic()
+                bytes_copied = min(total_bytes, completed_bytes + current_file_bytes)
+                if not force and now - last_progress_at < 0.1 and bytes_copied < total_bytes:
+                    return
+                last_progress_at = now
+                elapsed = max(0.001, now - transfer_started_at)
+                log_progress(
+                    f"导入花絮：{os.path.basename(source)}",
+                    int((bytes_copied / max(1, total_bytes)) * 100),
+                    {
+                        "bytesCopied": bytes_copied,
+                        "totalBytes": total_bytes,
+                        "bytesPerSecond": bytes_copied / elapsed,
+                        "filesCopied": index + (1 if force else 0),
+                        "totalFiles": len(original_files),
+                    },
+                )
+
             try:
-                safe_chunk_copy(source, destination)
+                safe_chunk_copy(source, destination, on_progress=publish_broll_progress)
             except Exception:
                 try:
                     os.remove(destination)
@@ -363,7 +424,8 @@ def stage_import_broll(sd_path, dest_path):
                     pass
                 raise IOError(f"复制校验失败：{os.path.basename(source)}")
             created_files.append(destination)
-            log_progress(f"导入花絮：{os.path.basename(source)}", int(((index + 1) / len(original_files)) * 100))
+            completed_bytes += source_size
+            publish_broll_progress(0, True)
 
         # The source card is only cleaned after every destination file has passed validation.
         source_cleanup_started = True

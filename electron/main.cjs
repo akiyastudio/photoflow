@@ -178,6 +178,7 @@ mediaAccessService = createMediaAccessService({
   getAdditionalRoots: () => [
     mediaRuntimeState.activeMediaCacheConfig.directory && approvedMediaCacheDirectories.has(path.resolve(mediaRuntimeState.activeMediaCacheConfig.directory)) ? mediaRuntimeState.activeMediaCacheConfig.directory : '',
     path.join(app.getPath('userData'), 'media-cache'),
+    path.join(app.getPath('userData'), 'workspace-data'),
   ],
 });
 const pathExists = async candidate => fs.promises.access(candidate).then(() => true, () => false);
@@ -447,9 +448,10 @@ const getRunConfig = (scriptName, args) => {
   }
 };
 
-const runJsonCommand = (run, label, timeoutMs = 20 * 60 * 1000) => new Promise((resolve, reject) => {
+const runJsonCommand = (run, label, timeoutMs = 20 * 60 * 1000, onMessage) => new Promise((resolve, reject) => {
   const child = spawn(run.command, run.args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
+  let messageBuffer = '';
   let stderr = '';
   let finished = false;
   const settle = callback => value => {
@@ -462,7 +464,16 @@ const runJsonCommand = (run, label, timeoutMs = 20 * 60 * 1000) => new Promise((
   const fail = settle(reject);
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
-  child.stdout.on('data', data => { stdout = (stdout + data).slice(-2 * 1024 * 1024); });
+  child.stdout.on('data', data => {
+    stdout = (stdout + data).slice(-2 * 1024 * 1024);
+    if (!onMessage) return;
+    const lines = (messageBuffer + data).split(/\r?\n/);
+    messageBuffer = lines.pop() || '';
+    for (const line of lines) {
+      try { onMessage(JSON.parse(line.trim())); }
+      catch { /* progress messages are compact JSON lines; ignore other output */ }
+    }
+  });
   child.stderr.on('data', data => { stderr = (stderr + data).slice(-16000); });
   child.on('error', error => fail(error));
   child.on('close', code => {
@@ -633,6 +644,12 @@ const getWorkspaceDatabasePath = root => {
   const fileName = `${getWorkspaceStorageKey(root)}.sqlite3`;
   return path.join(databaseDir, fileName);
 };
+
+const getWorkspaceDataRoot = root => path.join(
+  app.getPath('userData'),
+  'workspace-data',
+  getWorkspaceStorageKey(root),
+);
 
 const getTrackedVersionThumbnailPath = (workspaceRoot, photoId, versionId) => {
   const safeSegment = (value, label) => {
@@ -1658,11 +1675,11 @@ app.whenReady().then(async () => {
   writeLog('info', 'Application started', { version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, deletedExpiredLogFiles: deletedLogFiles });
   createWindow();
 
-  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, dialog, findLatestPhotoshop, fs, getConfigPath, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, shell, spawn, undefined, writeLog });
-  registerWorkspaceIpc({ Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog });
+  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, shell, spawn, undefined, writeLog });
+  registerWorkspaceIpc({ Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog });
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertExistingInside, assertInside, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, mainWindow, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, removeCreatedPasteTargets, screen, throwIfCancelled, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Array, Boolean, Buffer, Date, Error, IMAGE_EXTENSIONS, JSON, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearInterval, clearTimeout, crypto, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, getRunConfig, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setInterval, setTimeout, spawn, thumbnailService, trimMediaCache, undefined, videoPreviewJobs, writeLog });
-  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, buildVersionBatchImportKey, cleanVersionName, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, undefined, versionService, workspaceCatalogs, writeLog });
+  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
 
   setTimeout(checkForUpdates, 3000);
   app.on('activate', () => {

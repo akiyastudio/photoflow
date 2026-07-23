@@ -35,6 +35,9 @@ venv/
 .venv/
 env/
 
+# Local model-lab runtimes, downloaded checkpoints, caches, and benchmark output
+.model-lab/
+
 # Electron 和 前端构建文件 (常规建议一起加上)
 node_modules/
 dist/

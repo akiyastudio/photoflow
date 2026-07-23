@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { createComponentRegistry } = require('../electron/component-registry.cjs');
+const { PLUGIN_DEFINITIONS } = require('../electron/plugins/plugin-catalog.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-components-test-'));
 const resourcesPath = path.join(sandbox, 'resources');
@@ -33,14 +34,40 @@ try {
 
   const installer = fs.readFileSync(path.join(repositoryRoot, 'build', 'installer.nsh'), 'utf8');
   assert(!installer.includes('release\\components'), 'base installer must not embed optional components');
-  assert(installer.includes('$EXEDIR\\components'), 'offline media may provide independently packaged components beside the installer');
+  assert(installer.includes('$EXEDIR\\PhotoFlow-team-retouch-*-win32-*.zip'), 'installer must discover team-retouch archives beside itself');
+  assert(installer.includes('$EXEDIR\\PhotoFlow-research-tools-*-win32-*.zip'), 'installer must discover research archives beside itself');
+  assert(installer.includes('$EXEDIR\\PhotoFlow-office-media-extractor-*-win32-*.zip'), 'installer must discover Office media extractor archives beside itself');
+  assert(installer.includes('nsisunz::Unzip'), 'installer must extract component archives');
+  assert(installer.includes('$EXEDIR\\components'), 'legacy component folders beside the installer must remain supported');
   assert(!installer.includes('File /r "${PROJECT_DIR}\\release\\components'), 'component binaries must not be compiled into the base installer');
 
   const componentBuilder = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'build-components.cjs'), 'utf8');
   assert(componentBuilder.includes('PhotoFlow-${id}-${manifest.version}-${process.platform}-${process.arch}.zip'));
+  assert(componentBuilder.includes('existingName.startsWith(artifactPrefix)'), 'component packaging must remove stale archives so the installer finds one version');
   assert(componentBuilder.includes('zipfile.ZIP_DEFLATED'));
   assert(componentBuilder.includes("'--collect-binaries', 'onnxruntime'"));
   assert(!componentBuilder.includes("'--collect-all', 'onnxruntime'"));
+
+  const advancedBridge = fs.readFileSync(path.join(repositoryRoot, 'components', 'team-retouch', 'advanced_bridge.py'), 'utf8');
+  assert(advancedBridge.includes('DEFAULT_DISTROS = ("PhotoFlowNative", "PhotoflowLab")'), 'advanced backend must support both WSL distribution names');
+  assert(advancedBridge.includes('WSL_E_DISTRO_NOT_FOUND'), 'advanced backend must fall through only when a distribution is absent');
+  assert(advancedBridge.includes('PHOTOFLOW_WSL_DISTRO'), 'custom WSL distribution override must remain supported');
+  assert(advancedBridge.includes('class AdvancedBatchSession'), 'batch retouch must keep advanced models resident for the batch lifetime');
+  assert(advancedBridge.includes('payload_b64'), 'persistent WSL requests must preserve Unicode paths');
+  const pairDetrScript = fs.readFileSync(path.join(repositoryRoot, 'experiments', 'team-retouch-model-lab', 'scripts', 'smoke_pairdetr.py'), 'utf8');
+  const sam2Script = fs.readFileSync(path.join(repositoryRoot, 'experiments', 'team-retouch-model-lab', 'scripts', 'smoke_sam2.py'), 'utf8');
+  assert(pairDetrScript.includes('parser.add_argument("--serve"'), 'PairDETR must expose persistent service mode');
+  assert(sam2Script.includes('parser.add_argument("--serve"'), 'SAM 2.1 must expose persistent service mode');
+
+  for (const component of Object.values(PLUGIN_DEFINITIONS)) {
+    assert.match(component.version, /^\d{2}\.\d{1,2}\.\d{1,2}\.\d+$/, `${component.id} must use the date revision version format`);
+    const template = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'components', component.id, 'component.template.json'), 'utf8'));
+    assert.strictEqual(template.version, component.version, `${component.id} catalog and package versions must match`);
+  }
+
+  const systemIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
+  assert(systemIpc.includes("component.source !== 'application'"), 'only application-directory components may be removed');
+  assert(systemIpc.includes('await shell.trashItem(componentPath)'), 'component uninstall must use the system recycle bin');
 
   const registry = createComponentRegistry({
     resourcesPath,
@@ -51,8 +78,9 @@ try {
     arch: 'x64',
   });
 
-  assert.strictEqual(registry.list().length, 2);
+  assert.strictEqual(registry.list().length, 3);
   assert.strictEqual(registry.resolve('team-retouch'), null);
+  assert.strictEqual(registry.resolve('office-media-extractor'), null);
   const installRoot = path.join(path.dirname(executablePath), 'components');
   assert.strictEqual(registry.ensureInstallRoot(), installRoot);
 

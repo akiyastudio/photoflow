@@ -9,6 +9,23 @@ export type ToolType = 'home' | 'project' | 'settings' | 'about' | 'dashboard' |
 export type Theme = 'light' | 'dark' | 'system';
 export type HomeCardId = 'birthday' | 'import' | 'research' | 'converter';
 export type ProjectStatus = '未分类' | '策划中' | '待拍摄' | '后期中' | '已归档';
+export interface TeamRetouchComponentSettings {
+  useGpu: boolean;
+  oversizeCropMode: 'face-centered' | 'expand';
+}
+export interface ResearchToolsComponentSettings {
+  defaultDir: string;
+  sensitivity: 'low' | 'standard' | 'high';
+  minDuration: number;
+  /** legacy config field */
+  ssimThreshold?: number;
+}
+export interface ComponentSettingsMap {
+  'team-retouch'?: TeamRetouchComponentSettings;
+  'research-tools'?: ResearchToolsComponentSettings;
+  'office-media-extractor'?: Record<string, never>;
+  [componentId: string]: unknown;
+}
 export const PROJECT_STATUS_LABELS: Record<ProjectStatus, string> = {
   未分类: '未分类',
   策划中: '策划中',
@@ -24,6 +41,7 @@ export interface AppConfig {
   workspacePath: string;
   homeOrder: HomeCardId[];
   birthdayEnabled: boolean;
+  componentSettings: ComponentSettingsMap;
   mediaCache: {
     maxSizeGB: number;
     directory: string;
@@ -50,9 +68,8 @@ export interface AppConfig {
   imageConversion: {
     jpgQuality: number;
   };
-  personDetection: {
-    useGpu: boolean;
-  };
+  /** Compatibility mirror for versions before componentSettings. */
+  personDetection: TeamRetouchComponentSettings;
   smartMatch: {
     imageDestFolderName: string;
     videoDestFolderName: string;
@@ -61,13 +78,8 @@ export interface AppConfig {
     /** legacy config field */
     destFolderName?: string;
   };
-  research: {
-    defaultDir: string;
-    sensitivity: 'low' | 'standard' | 'high';
-    minDuration: number;
-    /** legacy config field */
-    ssimThreshold?: number;
-  };
+  /** Compatibility mirror for versions before componentSettings. */
+  research: ResearchToolsComponentSettings;
 }
 
 export interface ProjectFileEntry {
@@ -175,8 +187,19 @@ export interface TeamPatchTask {
   assignee: string;
   detector: string;
   bbox: { x: number; y: number; width: number; height: number };
+  members?: Array<{
+    personIndex: number;
+    confidence?: number;
+    bbox: { x: number; y: number; width: number; height: number };
+    faceBox?: { x: number; y: number; width: number; height: number } | null;
+  }>;
   crop: { x: number; y: number; width: number; height: number };
   patchPath: string;
+  patchMissing?: boolean;
+  maskPath?: string;
+  mask?: { width?: number; height?: number; scale?: number };
+  needsReview?: boolean;
+  reviewReason?: string;
   editedPatchPath?: string;
   status: 'exported' | 'uploaded' | 'merged' | string;
   mergeMetrics?: Record<string, number>;
@@ -187,7 +210,7 @@ export interface TeamPatchTask {
 
 export interface TeamPatchBundle extends MediaVersionBundle {
   tasks: TeamPatchTask[];
-  detection?: { detector: string; backend?: 'gpu' | 'cpu' | string; provider?: string; width: number; height: number; fallbackReason?: string };
+  detection?: { detector: string; backend?: 'gpu' | 'cpu' | string; provider?: string; width: number; height: number; personCount?: number; workTileEdge?: number; needsReviewCount?: number; fallbackReason?: string };
   merge?: { outputPath: string; mergedCount: number; conflictPixels: number; seamScore: number; needsReview?: boolean };
 }
 
@@ -205,11 +228,13 @@ export interface ComponentStatus {
   error?: string;
   runtimeAvailable?: boolean;
   gpuAvailable?: boolean;
+  advancedAvailable?: boolean;
   mergeAvailable?: boolean;
   provider?: string;
   providers?: string[];
   runtimeError?: string;
   gpuError?: string;
+  advancedError?: string;
 }
 
 export interface ProjectFileOperationProgress {
@@ -259,6 +284,10 @@ export interface IElectronAPI {
   checkScript: (scriptName: string) => Promise<boolean>;
   getComponents: () => Promise<{ success: boolean; components: ComponentStatus[]; installPath: string; error?: string }>;
   openComponentsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
+  openLogsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
+  clearLogs: () => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
+  installComponent: (componentId: string) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>;
+  uninstallComponent: (componentId: string) => Promise<{ success: boolean; error?: string }>;
   getDrives: () => Promise<string[]>;
   setTheme: (theme: Theme) => Promise<void>;
   minimizeWindow: () => void;
@@ -280,25 +309,31 @@ export interface IElectronAPI {
 
   getProjectContents: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; folders: Array<{ name: string; path: string; updatedAt: number }>;error?: string }> ;
   browseProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath?: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path?: string; entries: ProjectFileEntry[]; missingDirectory?: boolean; error?: string }>;
+  extractOfficeImages: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<{ success: boolean; documentCount?: number; successfulCount?: number; failedCount?: number; imageCount?: number; results: Array<{ document: string; documentName: string; success: boolean; count: number; totalBytes?: number; outputFolder?: string; files?: string[]; message?: string; error?: string }>; error?: string }>;
   getProjectFileDetails: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<{ success: boolean; details: Array<{ relativePath: string; size: number; createdAt: number; updatedAt: number }>; error?: string }>;
   getProjectEntryDetails: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; details?: { size: number; createdAt: number; updatedAt: number; fileCount: number; folderCount: number }; error?: string }>;
   getMediaVersions: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<MediaVersionBundle>;
-  chooseMediaVersionFile: () => Promise<{ success: boolean; cancelled?: boolean; filePath?: string; fileName?: string; kind?: 'image' | 'raw' | 'video'; error?: string }>;
-  createMediaVersion: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; parentVersionId: string; mode: 'copy' | 'import'; sourceFilePath?: string; versionName: string; versionType: string; note: string; author?: string; status?: string; isFinal?: boolean }) => Promise<MediaVersionBundle>;
   updateMediaVersion: (workspacePath: string, request: { versionId: string; versionName?: string; note?: string; isFinal?: boolean; makeCurrent?: boolean }) => Promise<MediaVersionBundle>;
   relocateMediaVersion: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; versionId: string }) => Promise<MediaVersionBundle>;
   deleteMediaVersion: (workspacePath: string, request: { photoId: string; versionId: string; trashFile?: boolean }) => Promise<MediaVersionBundle>;
   recordMediaVersionCompare: (workspacePath: string, request: { photoId: string; leftVersionId: string; rightVersionId: string; compareMode: string }) => Promise<{ success: boolean; error?: string }>;
   openMediaVersion: (filePath: string) => Promise<{ success: boolean; error?: string }>;
   getProgressFolders: (workspacePath: string, projectName: string) => Promise<{ success: boolean; progressFolders: ProgressFolder[]; error?: string }>;
+  ensureSelectionBaseline: (workspacePath: string, status: ProjectStatus, projectName: string) => Promise<{ success: boolean; registered: boolean; count: number; progressFolder?: ProgressFolder; batch?: VersionBatch; error?: string }>;
+  getFinalVersionSummary: (workspacePath: string, projectName: string) => Promise<{ success: boolean; count: number; availableCount: number; missingCount: number; error?: string }>;
+  browseFinalVersions: (workspacePath: string, status: ProjectStatus, projectName: string) => Promise<{ success: boolean; count: number; availableCount: number; missingCount: number; entries: ProjectFileEntry[]; error?: string }>;
+  exportFinalVersions: (workspacePath: string, status: ProjectStatus, projectName: string) => Promise<{ success: boolean; count: number; displayName?: string; versionKey?: string; progressFolder?: ProgressFolder; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
   createProgressFolder: (workspacePath: string, status: ProjectStatus, projectName: string, request: { mediaKind: 'image' | 'video'; versionKey: string; parentProgressId?: string; displayName: string }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
-  registerProgressFolder: (workspacePath: string, status: ProjectStatus, projectName: string, request: { relativePath: string; mediaKind: 'image' | 'video'; versionKey: string; parentProgressId?: string; displayName: string; trackingEnabled: boolean }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; error?: string }>;
+  registerProgressFolder: (workspacePath: string, status: ProjectStatus, projectName: string, request: { relativePath: string; mediaKind: 'image' | 'video'; versionKey: string; parentProgressId?: string; displayName: string; trackingEnabled: boolean; progressId?: string }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; error?: string }>;
   registerVersionBaseline: (workspacePath: string, status: ProjectStatus, projectName: string, relativePath: string) => Promise<{ success: boolean; batch?: VersionBatch; error?: string }>;
   compareVersionFolders: (workspacePath: string, status: ProjectStatus, projectName: string, referenceRelativePath: string, sourceRelativePath: string) => Promise<{ success: boolean; matches: Array<{ source: string; reference: string; target: string; confidence: string; distance: number }>; unmatched: string[]; unmatchedReference: string[]; error?: string }>;
-  commitVersionBatch: (workspacePath: string, status: ProjectStatus, projectName: string, request: { folderA: string; folderB: string; importKey: string; displayName?: string; renameSources?: boolean; matches: Array<{ reference: string; source: string; target?: string; distance: number; confidence: string }> }) => Promise<{ success: boolean; alreadyCommitted?: boolean; referenceBatch?: VersionBatch; batch?: VersionBatch; renamedCount?: number; renameErrors?: Array<{ source: string; target: string; error: string }>; error?: string }>;
+  commitVersionBatch: (workspacePath: string, status: ProjectStatus, projectName: string, request: { folderA: string; folderB: string; importKey: string; displayName?: string; renameSources?: boolean; copyMissingReferences?: string[]; matches: Array<{ reference: string; source: string; target?: string; distance: number; confidence: string }> }) => Promise<{ success: boolean; alreadyCommitted?: boolean; referenceBatch?: VersionBatch; batch?: VersionBatch; renamedCount?: number; renameErrors?: Array<{ source: string; target: string; error: string }>; copiedMissingCount?: number; copyMissingErrors?: Array<{ name: string; error: string }>; error?: string }>;
   getTeamPatches: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<TeamPatchBundle>;
   detectTeamPatchPeople: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; baseVersionId: string }) => Promise<TeamPatchBundle>;
-  updateTeamPatch: (workspacePath: string, request: { taskId: string; personName?: string; assignee?: string }) => Promise<{ success: boolean; tasks: TeamPatchTask[]; error?: string }>;
+  onTeamPatchDetectionProgress: (callback: (value: { photoId: string; baseVersionId: string; progress: number; message: string }) => void) => () => void;
+  detectTeamPatchBatch: (workspacePath: string, status: ProjectStatus, name: string, request: { relativePaths: string[] }) => Promise<{ success: boolean; persistentBackend?: boolean; results: Array<{ relativePath: string; name: string; success: boolean; photoId?: string; baseVersionId?: string; personCount?: number; workTileCount?: number; error?: string }>; error?: string }>;
+  onTeamPatchBatchProgress: (callback: (value: { itemIndex: number; itemCount: number; relativePath: string; itemName: string; progress: number; message: string }) => void) => () => void;
+  updateTeamPatch: (workspacePath: string, request: { taskId: string; personName?: string; assignee?: string; needsReview?: boolean; reviewReason?: string }) => Promise<{ success: boolean; tasks: TeamPatchTask[]; error?: string }>;
   uploadTeamPatch: (workspacePath: string, request: { photoId: string; taskId: string }) => Promise<{ success: boolean; cancelled?: boolean; tasks: TeamPatchTask[]; error?: string }>;
   openTeamPatch: (filePath: string) => Promise<{ success: boolean; error?: string }>;
   mergeTeamPatches: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; baseVersionId: string; versionName?: string }) => Promise<TeamPatchBundle>;
@@ -312,7 +347,7 @@ export interface IElectronAPI {
   onAppError: (callback: (message: string) => void) => () => void;
   getRawPreview: (filePath: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; previewUrl?: string; error?: string }>;
   folderHasPng: (folderPath: string) => Promise<{ success: boolean; hasPng?: boolean; error?: string }>;
-  projectFileOperation: (workspacePath: string, status: ProjectStatus, projectName: string, operation: 'trash' | 'copy' | 'cut' | 'paste' | 'rename' | 'select' | 'move' | 'import', paths: string[], targetRelativePath?: string, nextName?: string, options?: { imageDestFolderName?: string; videoDestFolderName?: string; renameNames?: string[] }) => Promise<{ success: boolean; cancelled?: boolean; count?: number; operationId?: string; replacedCount?: number; replacedNames?: string[]; error?: string }>;
+  projectFileOperation: (workspacePath: string, status: ProjectStatus, projectName: string, operation: 'trash' | 'copy' | 'cut' | 'paste' | 'rename' | 'select' | 'move' | 'import', paths: string[], targetRelativePath?: string, nextName?: string, options?: { imageDestFolderName?: string; videoDestFolderName?: string; renameNames?: string[] }) => Promise<{ success: boolean; cancelled?: boolean; count?: number; imageCount?: number; videoCount?: number; operationId?: string; replacedCount?: number; replacedNames?: string[]; error?: string }>;
   getProjectFileClipboardStatus: () => Promise<{ success: boolean; hasFiles: boolean }>;
   startProjectFileDrag: (workspacePath: string, status: ProjectStatus, projectName: string, paths: string[]) => void;
   onProjectFileDragEnd: (callback: (result: { paths: string[]; clientX: number; clientY: number; insideWindow: boolean }) => void) => () => void;

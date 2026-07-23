@@ -7,11 +7,20 @@ installer does not contain optional components.
 
 ## Offline installation
 
+The preferred layout is to place the generated component ZIP archives directly
+beside the PhotoFlow installer. The installer's optional-component page detects
+files named `PhotoFlow-<component-id>-<version>-win32-<arch>.zip` and extracts
+the selected archives automatically. No pre-created `components` directory is
+required.
+
+The legacy expanded-directory layout remains supported:
+
 Copy the complete component directory into the PhotoFlow installation folder:
 
 ```text
 <PhotoFlow installation directory>\components\team-retouch
 <PhotoFlow installation directory>\components\research-tools
+<PhotoFlow installation directory>\components\office-media-extractor
 ```
 
 Then restart PhotoFlow or use **设置 → 可选功能组件 → 刷新状态**. This folder
@@ -40,6 +49,8 @@ The current component IDs are:
   color matching, overlap blending, and recomposition. When it is missing the
   whole team-retouch workflow is unavailable.
 - `research-tools`: research image/video organization and scene extraction.
+- `office-media-extractor`: extracts embedded images from Office Open XML Word,
+  PowerPoint, and Excel documents into a sibling `<document>_media` directory.
 
 Run `npm run setup:team-retouch` once to create/prepare the development virtual
 environment and verify that the DirectML provider is available. Run

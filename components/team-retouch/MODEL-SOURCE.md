@@ -1,14 +1,32 @@
-# Person detection model
+# Team-retouch model sources
 
-Put `person_detection_mediapipe_2023mar.onnx` in the `models` directory before
-building this optional component.
+## Stable detector and mask fallback
 
-- Upstream: OpenCV Zoo `models/person_detection_mediapipe`
-- Model: MediaPipe Person Detector, 224 × 224 ONNX
-- License: Apache-2.0 (see the upstream model directory)
-- Source URL: `https://github.com/opencv/opencv_zoo/raw/main/models/person_detection_mediapipe/person_detection_mediapipe_2023mar.onnx`
-- SHA-256: `47fd5599d6fa17608f03e0eb0ae230baa6e597d7e8a2c8199fe00abea55a701f`
+`models/rtmdet-ins_m_640x640.onnx` is the MMDeploy export of
+`rtmdet-ins_m_8xb32-300e_coco` from MMDetection.  PhotoFlow uses the COCO
+`person` class at a 0.45 confidence threshold.  The exported model returns body
+boxes and instance masks and runs through ONNX Runtime DirectML with CPU
+fallback.
 
-The model is intentionally not part of the base Electron resources. The
-component build copies it into the standalone team-retouch component, where it
-is shared by the GPU and CPU execution paths.
+- Upstream: OpenMMLab MMDetection / MMDeploy
+- Model family: RTMDet-Ins-m
+- Input: 640 × 640 letterboxed BGR image
+- Local SHA-256: run `Get-FileHash models/rtmdet-ins_m_640x640.onnx`
+
+## Optional advanced backend
+
+PairDETR and SAM 2.1 remain in their isolated WSL CUDA environments because
+their PyTorch stacks and checkpoints are much larger than the Windows
+component.  The packaged component includes the inference bridge scripts and
+automatically activates them when the following environments/checkpoints are
+available in either the `PhotoFlowNative` or legacy `PhotoflowLab`
+distribution. PhotoFlow tries both names automatically; a custom installation
+can select another distribution with `PHOTOFLOW_WSL_DISTRO`:
+
+- `$HOME/miniforge3/envs/pairdetr`
+- `$HOME/miniforge3/envs/sam2`
+- `$HOME/model-lab/checkpoints/pairdetr/pytorch_model.bin`
+- `$HOME/model-lab/checkpoints/sam2/sam2.1_hiera_large.pt`
+
+If the advanced backend is unavailable or fails, detection remains usable with
+RTMDet and the reason is returned to the application for display.

@@ -21,6 +21,7 @@
     "test:filesystem-safety": "node scripts/test-filesystem-safety.cjs",
     "test:architecture": "node scripts/test-architecture.cjs",
     "test:components": "node scripts/test-components.cjs",
+    "test:office-media": ".venv\\Scripts\\python.exe scripts\\test-office-media-extractor.py",
     "test:research": ".venv\\Scripts\\python.exe scripts\\test-research.py",
     "test:team-retouch": ".venv\\Scripts\\python.exe scripts\\test-team-retouch.py",
     "preview": "vite preview",

@@ -317,6 +317,8 @@ const registerFileOperationsIpc = context => {
         const imageTarget = path.join(root, imageDirName);
         const videoTarget = path.join(root, videoDirName);
         let count = 0;
+        let imageCount = 0;
+        let videoCount = 0;
         const createdTargets = [];
         for (const source of sources) {
           if (!fs.existsSync(source) || !fs.statSync(source).isFile()) throw new Error('只能选择媒体文件');
@@ -333,9 +335,11 @@ const registerFileOperationsIpc = context => {
           await copyFileAtomic(source, destination);
           createdTargets.push(destination);
           count += 1;
+          if (isVideo) videoCount += 1;
+          else imageCount += 1;
         }
         if (createdTargets.length) await pushUndoOperation({ kind: 'remove-created', paths: createdTargets, label: '选片复制' });
-        return { success: true, count };
+        return { success: true, count, imageCount, videoCount };
       }
       if (operation === 'rename') {
         if (!sources.length || !nextName.trim()) throw new Error('请选择文件并输入新名称');
