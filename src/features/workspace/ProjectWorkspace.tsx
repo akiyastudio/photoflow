@@ -8,6 +8,7 @@ import { MediaCacheSettings } from '../settings/SettingsFeature';
 import { ConverterView, ImportCard, MatchView } from '../tools/ToolViews';
 import { PROJECT_STATUS_LABELS } from '../../types';
 import type { AppConfig, MediaMetadataField, MediaVersion, MediaVersionBundle, ProgressFolder, ProjectFileEntry, ThumbnailState, WorkspaceProject } from '../../types';
+import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
 
 const CONTEXT_MENU_VIEWPORT_MARGIN = 8;
 const OFFICE_OPEN_XML_EXTENSIONS = new Set([
@@ -900,7 +901,10 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     if (!result.success) { onNotice(`导入花絮失败：${result.error || '未知错误'}`); return; }
     if (result.cancelled) { onNotice('已取消选择花絮文件。'); return; }
     onNotice(`已导入 ${result.count || 0} 个花絮文件。`);
-    if (result.warning) onNotice(result.warning, 6000);
+    if (result.warning) {
+      if (isRecycleBinFailure(result.warning)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
+      else onNotice(result.warning, 6000);
+    }
     refresh();
   };
   const importFiles = async () => {
@@ -1279,7 +1283,11 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   };
   const moveToTrash = async () => {
     const result = await window.electronAPI.trashWorkspaceProject(workspacePath, project.status, project.name);
-    if (!result.success) { onNotice(`删除项目失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) {
+      if (isRecycleBinFailure(result.error)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
+      else onNotice(`删除项目失败：${result.error || '未知错误'}`);
+      return;
+    }
     onDeleted();
   };
   const openPngConverter = async (folderPath: string) => {
@@ -1614,7 +1622,11 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     if (finalViewOpen && operation !== 'copy') { onNotice('最终版浏览是只读视图，请回到原文件夹修改文件'); return; }
     const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, operation, targetPaths, currentRelativePath, nextName);
     if (result.cancelled) { onNotice('粘贴已取消'); refresh(); return; }
-    if (!result.success) { onNotice(`操作失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) {
+      if (operation === 'trash' && isRecycleBinFailure(result.error)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
+      else onNotice(`操作失败：${result.error || '未知错误'}`);
+      return;
+    }
     if (operation === 'copy' || operation === 'cut') {
       setCutPaths(operation === 'cut' ? [...targetPaths] : []);
       setClipboardHasFiles(true);

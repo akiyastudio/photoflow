@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus, X } from 'lu
 import { PROJECT_STATUS_LABELS } from '../types';
 import type { ProjectStatus, WorkspaceProject, WorkspaceStatusGroup } from '../types';
 import { useAppDialog } from './AppDialogProvider';
+import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../utils/recycleBinFailure';
 
 const STATUSES: ProjectStatus[] = ['未分类', '策划中', '待拍摄', '后期中', '已归档'];
 type Action = 'import' | 'broll' | 'match';
@@ -141,7 +142,10 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
       tone: 'danger',
     })) return;
     const result = await window.electronAPI.trashWorkspaceProject(workspacePath, project.status, project.name);
-    if (!result.success) setError(result.error || '删除项目失败');
+    if (!result.success) {
+      if (isRecycleBinFailure(result.error)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
+      else setError(result.error || '删除项目失败');
+    }
     refresh();
   };
   const openProject = async (project: WorkspaceProject) => {

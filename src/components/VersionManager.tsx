@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import type { AppConfig, MediaMetadataField, MediaVersion, MediaVersionBundle, ProjectFileEntry, WorkspaceProject } from '../types';
 import { useAppDialog } from './AppDialogProvider';
+import { RECYCLE_BIN_FAILURE_DIALOG } from '../utils/recycleBinFailure';
 
 type VersionManagerProps = {
   entry: ProjectFileEntry;
@@ -396,7 +397,8 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
     setSelectedId(result.versions.find(item => item.isCurrent)?.id || result.versions[0]?.id || '');
     setCompareIds(ids => ids.filter(id => id !== version.id));
     onVersionStateChanged?.();
-    onNotice(result.warning || (trashFile ? '版本已删除，文件已移入回收站；其他版本编号保持不变' : '版本记录已删除；其他版本编号保持不变'));
+    if (result.warning) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
+    else onNotice(trashFile ? '版本已删除，文件已移入回收站；其他版本编号保持不变' : '版本记录已删除；其他版本编号保持不变');
   };
   const relocateVersion = async (version: MediaVersion) => {
     if (!bundle.photo) return;

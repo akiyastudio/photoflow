@@ -6,14 +6,24 @@ type DialogTone = 'primary' | 'danger';
 type ConfirmDialogOptions = {
   title: string;
   message: string;
+  detail?: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  tone?: DialogTone;
+};
+
+type AlertDialogOptions = {
+  title: string;
+  message: string;
+  detail?: string;
+  confirmLabel?: string;
   tone?: DialogTone;
 };
 
 type PromptDialogOptions = {
   title: string;
   message?: string;
+  detail?: string;
   defaultValue?: string;
   placeholder?: string;
   confirmLabel?: string;
@@ -22,12 +32,13 @@ type PromptDialogOptions = {
 
 type DialogRequest = {
   id: number;
-  kind: 'confirm' | 'prompt';
-  options: ConfirmDialogOptions | PromptDialogOptions;
+  kind: 'alert' | 'confirm' | 'prompt';
+  options: AlertDialogOptions | ConfirmDialogOptions | PromptDialogOptions;
   resolve: (value: boolean | string | null) => void;
 };
 
 type AppDialogApi = {
+  alert: (options: AlertDialogOptions) => Promise<void>;
   confirm: (options: ConfirmDialogOptions) => Promise<boolean>;
   prompt: (options: PromptDialogOptions) => Promise<string | null>;
 };
@@ -41,11 +52,12 @@ const AppDialogProvider = ({ children }: { children: ReactNode }) => {
   const [promptValue, setPromptValue] = useState('');
   const active = queue[0];
 
-  const enqueue = useCallback((kind: DialogRequest['kind'], options: ConfirmDialogOptions | PromptDialogOptions) => new Promise<boolean | string | null>(resolve => {
+  const enqueue = useCallback((kind: DialogRequest['kind'], options: AlertDialogOptions | ConfirmDialogOptions | PromptDialogOptions) => new Promise<boolean | string | null>(resolve => {
     setQueue(current => [...current, { id: nextId.current++, kind, options, resolve }]);
   }), []);
 
   const api = useMemo<AppDialogApi>(() => ({
+    alert: async options => { await enqueue('alert', options); },
     confirm: async options => (await enqueue('confirm', options)) === true,
     prompt: async options => {
       const result = await enqueue('prompt', options);
@@ -82,9 +94,10 @@ const AppDialogProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const options = active?.options;
+  const alertOptions = active?.kind === 'alert' ? options as AlertDialogOptions : null;
   const confirmOptions = active?.kind === 'confirm' ? options as ConfirmDialogOptions : null;
   const promptOptions = active?.kind === 'prompt' ? options as PromptDialogOptions : null;
-  const confirmClass = confirmOptions?.tone === 'danger'
+  const confirmClass = (confirmOptions?.tone || alertOptions?.tone) === 'danger'
     ? 'rounded-md bg-red-600 px-3 py-2 text-sm font-bold text-white transition hover:bg-red-500'
     : 'dialog-primary';
 
@@ -96,11 +109,14 @@ const AppDialogProvider = ({ children }: { children: ReactNode }) => {
           <h3 id={`app-dialog-title-${active.id}`} className="font-bold text-slate-800">{options.title}</h3>
           <button type="button" aria-label="关闭对话框" onClick={() => finish(active.kind === 'confirm' ? false : null)} className="shrink-0 rounded p-1 text-slate-500 hover:bg-slate-100"><X size={18}/></button>
         </div>
-        {options.message && <p id={`app-dialog-message-${active.id}`} className="mt-3 whitespace-pre-line text-sm leading-6 text-slate-500">{options.message}</p>}
+        {options.message && <p id={`app-dialog-message-${active.id}`} className={`mt-3 whitespace-pre-line text-sm leading-6 ${alertOptions ? 'font-medium text-slate-700' : 'text-slate-500'}`}>{options.message}</p>}
+        {options.detail && <p className="mt-2 text-xs leading-5 text-slate-500">{options.detail}</p>}
         {promptOptions && <input autoFocus value={promptValue} onChange={event => setPromptValue(event.target.value)} placeholder={promptOptions.placeholder} className="form-input mt-4"/>}
         <div className="mt-5 flex justify-end gap-2">
-          <button type="button" onClick={() => finish(active.kind === 'confirm' ? false : null)} className="dialog-secondary">{options.cancelLabel || '取消'}</button>
-          {confirmOptions
+          {!alertOptions && <button type="button" onClick={() => finish(active.kind === 'confirm' ? false : null)} className="dialog-secondary">{confirmOptions?.cancelLabel || promptOptions?.cancelLabel || '取消'}</button>}
+          {alertOptions
+            ? <button type="button" autoFocus onClick={() => finish(null)} className={confirmClass}>{alertOptions.confirmLabel || '知道了'}</button>
+            : confirmOptions
             ? <button type="button" autoFocus onClick={() => finish(true)} className={confirmClass}>{confirmOptions.confirmLabel || '确认'}</button>
             : <button type="submit" disabled={!promptValue.trim()} className="dialog-primary">{promptOptions?.confirmLabel || '确认'}</button>}
         </div>
@@ -118,4 +134,4 @@ const useAppDialog = () => {
 // Provider and hook intentionally live together so every dialog uses the same queue.
 // eslint-disable-next-line react-refresh/only-export-components
 export { AppDialogProvider, useAppDialog };
-export type { ConfirmDialogOptions, PromptDialogOptions };
+export type { AlertDialogOptions, ConfirmDialogOptions, PromptDialogOptions };
