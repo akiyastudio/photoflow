@@ -39,6 +39,12 @@ const run = async () => {
     assert.strictEqual(fs.readFileSync(fallbackTarget, 'utf8'), 'rename fallback');
     assert.strictEqual(fs.existsSync(fallbackTemporary), false);
 
+    const durableSource = path.join(root, 'durable-source.bin');
+    const durableTarget = path.join(root, 'durable-target.bin');
+    fs.writeFileSync(durableSource, Buffer.alloc(3 * 1024 * 1024, 0x2d));
+    await copyFileAtomic(durableSource, durableTarget, { durable: true });
+    assert.deepStrictEqual(fs.readFileSync(durableTarget), fs.readFileSync(durableSource));
+
     const moveSource = path.join(root, 'move-source.bin');
     const moveTarget = path.join(root, 'move-target.bin');
     fs.writeFileSync(moveSource, 'move');

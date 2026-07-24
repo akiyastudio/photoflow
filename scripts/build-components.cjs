@@ -107,6 +107,11 @@ const build = id => {
   if (!fs.existsSync(definition.source) || !fs.existsSync(definition.template)) throw new Error(`Component source is incomplete: ${id}`);
   for (const model of definition.models || []) {
     if (!fs.existsSync(model)) throw new Error(`Team-retouch model is missing: ${model}\nSee components/team-retouch/MODEL-SOURCE.md`);
+    const stat = fs.statSync(model);
+    const prefix = fs.readFileSync(model).subarray(0, 256).toString('utf8');
+    if (stat.size < 1024 * 1024 || prefix.startsWith('version https://git-lfs.github.com/spec/v1')) {
+      throw new Error(`Team-retouch model is a Git LFS pointer or incomplete: ${model}\nRun git lfs pull before building.`);
+    }
   }
   for (const script of definition.advancedScripts || []) {
     if (!fs.existsSync(script)) throw new Error(`Team-retouch advanced script is missing: ${script}`);

@@ -16,6 +16,21 @@ const attachTransferContext = (error, stage, source, destination) => {
   return error;
 };
 
+const syncTemporaryFile = async (temporary, source, destination) => {
+  // FlushFileBuffers on Windows requires a handle opened with write access.
+  // Opening with `r` works on Unix but returns EPERM on Windows.
+  const temporaryHandle = await fs.promises.open(temporary, 'r+').catch(error => {
+    throw attachTransferContext(error, 'sync-temporary', source, destination);
+  });
+  try {
+    await temporaryHandle.sync().catch(error => {
+      throw attachTransferContext(error, 'sync-temporary', source, destination);
+    });
+  } finally {
+    await temporaryHandle.close().catch(() => undefined);
+  }
+};
+
 const cancelledError = () => Object.assign(new Error('文件操作已取消'), { code: CANCELLED_CODE });
 
 const throwIfCancelled = isCancelled => {
@@ -155,10 +170,7 @@ const copyFileAtomic = async (source, destination, options = {}) => {
     const written = await fs.promises.stat(temporary);
     if (written.size !== sourceInfo.stat.size) throw new Error(`文件复制不完整：${path.basename(sourceInfo.path)}`);
     await fs.promises.utimes(temporary, sourceInfo.stat.atime, sourceInfo.stat.mtime).catch(() => undefined);
-    if (durable) {
-      const temporaryHandle = await fs.promises.open(temporary, 'r');
-      try { await temporaryHandle.sync(); } finally { await temporaryHandle.close(); }
-    }
+    if (durable) await syncTemporaryFile(temporary, sourceInfo.path, target);
     checkCancelled();
     const commit = await commitTemporaryFile(temporary, target).catch(error => { throw attachTransferContext(error, 'commit-target', sourceInfo.path, target); });
     await fs.promises.chmod(target, sourceInfo.stat.mode).catch(() => undefined);
@@ -219,10 +231,7 @@ const copySmallFileAtomic = async (entry, options = {}) => {
     const written = await fs.promises.stat(temporary);
     if (written.size !== entry.size) throw new Error(`文件复制不完整：${path.basename(entry.source)}`);
     await fs.promises.utimes(temporary, entry.atime, entry.mtime).catch(() => undefined);
-    if (durable) {
-      const temporaryHandle = await fs.promises.open(temporary, 'r');
-      try { await temporaryHandle.sync(); } finally { await temporaryHandle.close(); }
-    }
+    if (durable) await syncTemporaryFile(temporary, entry.source, target);
     throwIfCancelled(isCancelled);
     const commit = await commitTemporaryFile(temporary, target).catch(error => { throw attachTransferContext(error, 'commit-target', entry.source, target); });
     await fs.promises.chmod(target, entry.mode).catch(() => undefined);
