@@ -1463,6 +1463,8 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     const cachedEntries = directoryEntriesCacheRef.current.get(normalizedPath);
     if (cachedEntries) setFileEntries(cachedEntries);
     else setFileEntries([]);
+    setSearchOpen(false);
+    setSearchQuery('');
     setCurrentRelativePath(normalizedPath);
   };
   const navigateToDirectory = (relativePath: string) => {
@@ -1690,8 +1692,8 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       } else if (event.key === 'Delete' && selectedPaths.length) {
         void runFileOperation('trash');
         handled = true;
-      } else if (event.key === 'F2' && selectedPaths.length === 1) {
-        beginInlineRename(selectedPaths[0]);
+      } else if (event.key === 'F2' && selectedPaths.length) {
+        beginRename();
         handled = true;
       } else if (event.key === 'Escape' && selectedPaths.length) {
         setSelectedPaths([]);
@@ -2249,6 +2251,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
           <button onClick={() => togglePanel('import')} title="从 SD 卡导入" aria-label="从 SD 卡导入" className="project-action-button"><MemoryStick size={16}/>从 SD 卡导入</button>
           <button onClick={() => togglePanel('match')} title="从文件名选片" aria-label="从文件名选片" className="project-action-button"><FileText size={16}/>从文件名选片</button>
           <button aria-disabled={!canSelectMedia} title="选片" onClick={() => void selectMediaFiles()} className={`project-action-button ${canSelectMedia ? '' : 'cursor-not-allowed opacity-50'}`}><CheckCircle2 size={16}/>选片</button>
+          {photoshopAvailable && <button disabled={!selectedEntries.length || selectedEntries.some(entry => entry.kind !== 'image')} onClick={() => void openProjectEntriesInPhotoshop(selectedEntries)} title={selectedEntries.length > 1 ? `在 Photoshop 中打开 ${selectedEntries.length} 张图片` : '在 Photoshop 中打开'} aria-label="在 Photoshop 中打开所选图片" className="project-action-button"><PhotoshopIcon size={16}/>在 PS 中打开{selectedEntries.length > 1 ? `（${selectedEntries.length} 张）` : ''}</button>}
         </div>
         <div className="contents">
           <button disabled={selectedProgressFolder ? !selectedProgressFolderIsRoot : selectedEntries.length !== 1 || !hasVersionTrackingForEntry(selectedEntries[0])} onClick={() => selectedProgressFolder ? void openMarkProgress(selectedProgressFolder) : openVersions()} title={selectedProgressFolder ? selectedProgressFolderIsRoot ? selectedRegisteredProgressFolder ? '修改当前进度版本' : '标记当前文件夹为进度' : '进度文件夹必须位于项目根目录' : '版本管理'} aria-label={selectedProgressFolder ? selectedRegisteredProgressFolder ? '修改进度版本' : '标记进度' : '版本管理'} className="project-action-button"><GitBranch size={16}/>{selectedProgressFolder ? selectedRegisteredProgressFolder ? '修改进度版本' : '标记进度' : '版本管理'}</button>
@@ -2266,7 +2269,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       </div>
 
       {panel === 'converter' && <CollapsiblePanel title="PNG 转 JPG" onClose={() => setPanel(null)}><ConverterView embedded initialTargetPath={conversionTarget} defaultQuality={conversionConfig.jpgQuality}/></CollapsiblePanel>}
-      {panel === 'import' && <CollapsiblePanel title="从 SD 卡导入" onClose={() => setPanel(null)}><p className="mb-4 text-sm text-slate-500">导入的文件会直接整理到当前项目“{project.name}”中。</p><ImportCard config={importConfig} drives={drives} destinationPath={project.path} active={active} onImportConfigChange={onImportConfigChange} onImportComplete={markInProgress}/></CollapsiblePanel>}
+      {panel === 'import' && <CollapsiblePanel title="从 SD 卡导入" onClose={() => setPanel(null)}><p className="mb-4 text-sm text-slate-500">导入的文件会直接整理到当前项目“{project.name}”中。</p><ImportCard config={importConfig} drives={drives} destinationPath={project.path} brollDestinationPath={project.path} active={active} onImportConfigChange={onImportConfigChange} onImportComplete={markInProgress}/></CollapsiblePanel>}
       {panel === 'broll' && <CollapsiblePanel title="导入花絮" onClose={() => setPanel(null)}><p className="text-sm text-slate-500">选择要保留的花絮媒体，软件会复制到当前项目的“花絮”文件夹。</p><button onClick={importBroll} className="mt-4 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white hover:bg-blue-500">选择花絮文件</button></CollapsiblePanel>}
       {panel === 'match' && <CollapsiblePanel title="从文件名选片" onClose={() => setPanel(null)}><MatchView embedded config={matchConfig} projectPath={project.path} folderOptions={folders} onUpdateConfig={onMatchConfigChange}/></CollapsiblePanel>}
       {panel === 'cache' && <CollapsiblePanel title="缩略图缓存" onClose={() => setPanel(null)}><MediaCacheSettings config={mediaCacheConfig} onChange={onMediaCacheConfigChange}/></CollapsiblePanel>}

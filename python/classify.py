@@ -6,6 +6,7 @@ import datetime
 import argparse
 import subprocess
 import re
+import json
 from pathlib import Path
 import gc
 from event_protocol import ask_user, log_error, log_info, log_progress, log_status, log_success
@@ -36,6 +37,90 @@ def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024, on_progress=None):
 def get_file_time(file_path):
     try: return os.path.getmtime(file_path)
     except: return 0
+
+VALID_MEDIA_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.heic', '.mp4', '.mov', '.avi', '.crm', '.rwl', '.raf', '.3fr', '.fff')
+
+def scan_sd_media(sd_path):
+    normalized_sd = os.path.normpath(sd_path)
+    base_sd = os.path.dirname(normalized_sd) if normalized_sd.upper().endswith('DCIM') else normalized_sd
+    files = []
+    for target_dir in (os.path.join(base_sd, 'DCIM'), os.path.join(base_sd, 'PRIVATE')):
+        if not os.path.exists(target_dir):
+            continue
+        for root, dirs, names in os.walk(target_dir):
+            dirs[:] = [directory for directory in dirs if not directory.startswith('.')]
+            files.extend(
+                os.path.join(root, name)
+                for name in names
+                if not name.startswith('.') and name.lower().endswith(VALID_MEDIA_EXTENSIONS)
+            )
+    return base_sd, files
+
+def build_capture_groups(files, split_threshold_hours=2.0):
+    """Group each capture day, additionally splitting at a clear time gap."""
+    days = {}
+    for file_path in files:
+        timestamp = get_file_time(file_path)
+        date_key = datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
+        days.setdefault(date_key, []).append((file_path, timestamp))
+    groups = []
+    for date_key in sorted(days):
+        ordered = sorted(days[date_key], key=lambda item: item[1])
+        day_groups = [[ordered[0]]]
+        for item in ordered[1:]:
+            if (item[1] - day_groups[-1][-1][1]) / 3600.0 > split_threshold_hours:
+                day_groups.append([item])
+            else:
+                day_groups[-1].append(item)
+        for index, group in enumerate(day_groups, start=1):
+            groups.append({
+                'id': f'{date_key}:{index}',
+                'date': date_key,
+                'index': index,
+                'files': group,
+                'count': len(group),
+                'startTime': datetime.datetime.fromtimestamp(group[0][1]).strftime('%H:%M'),
+                'endTime': datetime.datetime.fromtimestamp(group[-1][1]).strftime('%H:%M'),
+            })
+    return groups
+
+def stage_plan_import(sd_path, projects_json, import_type='work', split_threshold_hours=2.0):
+    base_sd, files = scan_sd_media(sd_path)
+    if not files:
+        log_error(f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
+        return
+    try:
+        projects = json.loads(projects_json or '[]')
+    except (TypeError, ValueError, json.JSONDecodeError):
+        projects = []
+    groups = build_capture_groups(files, split_threshold_hours)
+    payload_groups = []
+    automatic_routes = {}
+    requires_choice = False
+    for group in groups:
+        year, month, day = (int(part) for part in group['date'].split('-'))
+        exact = [project for project in projects if project.get('projectDate', {}).get('year') == year and project.get('projectDate', {}).get('month') == month and project.get('projectDate', {}).get('day') == day]
+        month_only = [project for project in projects if project.get('projectDate', {}).get('year') == year and project.get('projectDate', {}).get('month') == month and not project.get('projectDate', {}).get('day')]
+        if len(exact) == 1:
+            automatic_routes[group['id']] = exact[0].get('path', '')
+        else:
+            requires_choice = True
+        payload_groups.append({
+            key: group[key] for key in ('id', 'date', 'index', 'count', 'startTime', 'endTime')
+        } | {
+            'exactProjectPaths': [project.get('path', '') for project in exact],
+            'suggestedProjectPaths': [project.get('path', '') for project in (exact or month_only)],
+        })
+    ask_user(
+        '检测到需要确认的项目归属' if requires_choice else '已按项目拍摄日期确定导入位置',
+        {
+            'kind': 'project_routing',
+            'importType': import_type,
+            'requiresChoice': requires_choice,
+            'groups': payload_groups,
+            'automaticRoutes': automatic_routes,
+        },
+    )
 
 def unique_destination(directory, file_name):
     """Never overwrite an earlier card import or another folder's same name."""
@@ -160,7 +245,7 @@ def split_large_videos(target_folder):
             emit('warning', f'视频分割失败，已保留原文件 {file_name}：{detail}')
     return split_count
 # --- 3. 核心导入流程 ---
-def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_threshold_hours=2.0, should_split=None, generate_video_preview=False, split_large_files=False):
+def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_threshold_hours=2.0, should_split=None, generate_video_preview=False, split_large_files=False, project_routes=None, direct_project=False):
     # 临时存放区（即使出错也保留，直到确认安全）
     temp_dir = os.path.join(dest_path, "_PhotoFlow_Safety_Temp")
     
@@ -172,31 +257,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
     try:
         time.sleep(2.5)
         # Step 1: 扫描 SD 卡 (仅扫描 DCIM 和 PRIVATE 目录)
-        valid_exts = ('.jpg', '.jpeg', '.png', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.heic', '.mp4', '.mov', '.avi', '.crm', '.rwl', '.raf', '.3fr', '.fff')
-        
-        # 兼容老配置，如果传过来的是 H:/DCIM，自动退回到根目录 H:/
-        normalized_sd = os.path.normpath(sd_path)
-        if normalized_sd.upper().endswith('DCIM'):
-            base_sd = os.path.dirname(normalized_sd) # 完美安全地退回到上一级，如 G:\
-        else:
-            base_sd = normalized_sd
-        
-        # 定义需要扫描的目标子目录 (DCIM放大部分文件，PRIVATE放索尼高清视频)
-        target_dirs = [os.path.join(base_sd, "DCIM"), os.path.join(base_sd, "PRIVATE")]
-        
-        for t_dir in target_dirs:
-            if not os.path.exists(t_dir):
-                continue
-            for root, dirs, files in os.walk(t_dir):
-                # 排除隐藏目录
-                dirs[:] = [d for d in dirs if not d.startswith('.')]
-                for f in files:
-                    # 排除隐藏文件并校验后缀
-                    if not f.startswith('.') and f.lower().endswith(valid_exts):
-                        original_sd_files.append(os.path.join(root, f))
-
-                        if len(original_sd_files) % 10 == 0:
-                            time.sleep(0.01)
+        base_sd, original_sd_files = scan_sd_media(sd_path)
         
         if not original_sd_files:
             log_error(f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
@@ -270,7 +331,8 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
         files_with_time = [(f, get_file_time(f)) for f in temp_files_list]
         files_with_time.sort(key=lambda x: x[1])
 
-        # 检查是否需要分组提示
+        route_map = project_routes or {}
+        # 检查是否需要分组提示（新项目日期路由已经在复制前确认，无需再次询问）
         need_split_check = False
         if len(files_with_time) > 1:
             for i in range(1, len(files_with_time)):
@@ -278,13 +340,17 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
                     need_split_check = True
                     break
         
-        if need_split_check and should_split is None:
+        if not route_map and not direct_project and need_split_check and should_split is None:
             ask_user("检测到长时间拍摄间隔，是否分文件夹整理？", {"need_split": True, "files_count": len(temp_files_list)})
             return
 
         # Step 4: 移动到最终目的地并分类
         groups = []
-        if should_split and need_split_check:
+        if route_map:
+            groups = build_capture_groups([item[0] for item in files_with_time], split_threshold_hours)
+        elif direct_project:
+            groups = [{'id': 'direct', 'files': files_with_time}]
+        elif should_split and need_split_check:
             current_group = [files_with_time[0]]
             for i in range(1, len(files_with_time)):
                 if (files_with_time[i][1] - files_with_time[i-1][1]) / 3600.0 > split_threshold_hours:
@@ -297,34 +363,46 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             groups = [files_with_time]
 
         log_info(f"正在整理到目标文件夹...")
-        for idx, group in enumerate(groups):
+        processed_targets = set()
+        for idx, group_record in enumerate(groups):
+            group = group_record['files'] if isinstance(group_record, dict) else group_record
             # 命名文件夹
             first_time = group[0][1]
             date_str = datetime.datetime.fromtimestamp(first_time).strftime('%m-%d').lstrip('0').replace('-0', '-')
             if len(groups) > 1:
                 date_str = f"{date_str}-{idx+1}"
-            
-            target_folder = os.path.join(dest_path, date_str)
+            if route_map:
+                target_folder = os.path.abspath(route_map.get(group_record['id'], ''))
+                if not target_folder or os.path.commonpath((os.path.abspath(dest_path), target_folder)) != os.path.abspath(dest_path) or not os.path.isdir(target_folder):
+                    raise ValueError(f"分组 {group_record['id']} 的目标项目无效，请重新选择")
+                date_str = os.path.basename(target_folder)
+            elif direct_project:
+                target_folder = os.path.abspath(dest_path)
+                date_str = os.path.basename(target_folder)
+            else:
+                target_folder = os.path.join(dest_path, date_str)
             os.makedirs(target_folder, exist_ok=True)
-            created_projects.append(date_str)
+            if date_str not in created_projects:
+                created_projects.append(date_str)
             
             for f_path, _ in group:
                 shutil.move(f_path, unique_destination(target_folder, os.path.basename(f_path)))
                 success_imported_count += 1
             
             classify_files_by_type(target_folder)
+            processed_targets.add(target_folder)
 
-            if split_large_files:
-                split_count = split_large_videos(target_folder)
-                if split_count:
-                    log_info(f'大文件分割完成：共处理 {split_count} 个视频')
-            
             # 备份
             if backup_path and os.path.exists(backup_path):
                 backup_dst = os.path.join(backup_path, date_str)
                 if os.path.exists(backup_dst): shutil.rmtree(backup_dst)
                 shutil.copytree(target_folder, backup_dst)
 
+        for target_folder in processed_targets:
+            if split_large_files:
+                split_count = split_large_videos(target_folder)
+                if split_count:
+                    log_info(f'大文件分割完成：共处理 {split_count} 个视频')
             if generate_video_preview:
                 preview_count, video_count = generate_video_previews(target_folder)
                 if video_count:
@@ -353,40 +431,46 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
         # 异常情况下保留临时文件夹和 SD 卡文件，确保数据不丢
         gc.collect()
 
-def stage_import_broll(sd_path, dest_path):
-    """Copy all supported card media into the project's b-roll folder, then clean the card."""
-    valid_exts = ('.jpg', '.jpeg', '.png', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.heic', '.mp4', '.mov', '.avi', '.crm', '.rwl', '.raf', '.3fr', '.fff')
-    normalized_sd = os.path.normpath(sd_path)
-    base_sd = os.path.dirname(normalized_sd) if normalized_sd.upper().endswith('DCIM') else normalized_sd
-    original_files = []
+def stage_import_broll(sd_path, dest_path, project_routes=None):
+    """Copy card media into an explicitly selected project, grouped by media date."""
+    base_sd, original_files = scan_sd_media(sd_path)
     created_files = []
+    created_date_folders = []
     source_cleanup_started = False
 
     try:
-        for target_dir in (os.path.join(base_sd, 'DCIM'), os.path.join(base_sd, 'PRIVATE')):
-            if not os.path.exists(target_dir):
-                continue
-            for root, dirs, files in os.walk(target_dir):
-                dirs[:] = [directory for directory in dirs if not directory.startswith('.')]
-                original_files.extend(
-                    os.path.join(root, name)
-                    for name in files
-                    if not name.startswith('.') and name.lower().endswith(valid_exts)
-                )
-
         if not original_files:
             log_error(f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
             return
 
-        broll_folder = os.path.join(dest_path, '花絮')
-        os.makedirs(broll_folder, exist_ok=True)
+        if not dest_path or not os.path.isdir(dest_path):
+            log_error("花絮目标项目不存在，请重新选择项目")
+            return
+        route_map = project_routes or {}
+        file_routes = {}
+        if route_map:
+            for group in build_capture_groups(original_files):
+                project_path = os.path.abspath(route_map.get(group['id'], ''))
+                if not project_path or os.path.commonpath((os.path.abspath(dest_path), project_path)) != os.path.abspath(dest_path) or not os.path.isdir(project_path):
+                    raise ValueError(f"分组 {group['id']} 的目标项目无效，请重新选择")
+                for file_path, _timestamp in group['files']:
+                    file_routes[file_path] = project_path
         total_bytes = sum(os.path.getsize(file_path) for file_path in original_files)
         completed_bytes = 0
         transfer_started_at = time.monotonic()
         last_progress_at = 0.0
         log_info(f"正在把 {len(original_files)} 个文件导入花絮...")
         for index, source in enumerate(original_files):
-            destination = unique_destination(broll_folder, os.path.basename(source))
+            media_time = datetime.datetime.fromtimestamp(get_file_time(source))
+            date_name = media_time.strftime('%m-%d').lstrip('0').replace('-0', '-')
+            project_path = file_routes.get(source, dest_path)
+            broll_folder = os.path.join(project_path, '花絮')
+            os.makedirs(broll_folder, exist_ok=True)
+            date_folder = os.path.join(broll_folder, date_name)
+            if not os.path.isdir(date_folder):
+                os.makedirs(date_folder, exist_ok=False)
+                created_date_folders.append(date_folder)
+            destination = unique_destination(date_folder, os.path.basename(source))
             source_size = os.path.getsize(source)
 
             def publish_broll_progress(current_file_bytes, force=False):
@@ -432,9 +516,10 @@ def stage_import_broll(sd_path, dest_path):
         for source in original_files:
             os.remove(source)
         log_success("花絮导入完成，SD 卡已安全清理", {
-            "projectNames": [],
+            "projectNames": sorted({os.path.basename(os.path.normpath(project_path)) for project_path in (file_routes.values() or [dest_path])}),
             "importedCount": len(created_files),
-            "destination": broll_folder,
+            "destination": dest_path,
+            "dateFolders": sorted({os.path.basename(os.path.dirname(file_path)) for file_path in created_files}),
         })
     except Exception as error:
         # Before source cleanup starts, remove a partial destination so retrying
@@ -444,6 +529,11 @@ def stage_import_broll(sd_path, dest_path):
             for destination in created_files:
                 try:
                     os.remove(destination)
+                except OSError:
+                    pass
+            for directory in reversed(created_date_folders):
+                try:
+                    os.rmdir(directory)
                 except OSError:
                     pass
             log_error(f"花絮导入失败，SD 卡原文件已保留：{error}")
@@ -465,6 +555,10 @@ def run(args_list):
     parser.add_argument("--should_split", type=str, default="")
     parser.add_argument("--generate_video_preview", action="store_true")
     parser.add_argument("--split_large_files", action="store_true")
+    parser.add_argument("--projects_json", default="[]")
+    parser.add_argument("--project_routes", default="{}")
+    parser.add_argument("--import_type", choices=("work", "broll"), default="work")
+    parser.add_argument("--direct_project", action="store_true")
 
     args, _ = parser.parse_known_args(args_list)
     
@@ -474,10 +568,12 @@ def run(args_list):
 
     if args.stage == 'check':
         log_status("SD Card Detected" if os.path.exists(args.sd_path) else "No Device", {"connected": os.path.exists(args.sd_path), "path": args.sd_path})
+    elif args.stage == 'plan':
+        stage_plan_import(args.sd_path, args.projects_json, args.import_type, args.time_gap)
     elif args.stage == 'import':
-        stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files)
+        stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files, json.loads(args.project_routes or '{}'), args.direct_project)
     elif args.stage == 'broll':
-        stage_import_broll(args.sd_path, args.dest_path)
+        stage_import_broll(args.sd_path, args.dest_path, json.loads(args.project_routes or '{}'))
 
 if __name__ == "__main__":
     run(sys.argv[1:])

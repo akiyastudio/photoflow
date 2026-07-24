@@ -6,6 +6,42 @@ const registerWorkspaceIpc = context => {
     '.xlsx', '.xlsm', '.xltx', '.xltm', '.xlam', '.xlsb',
   ]);
 
+  const readProjectDate = project => {
+    try {
+      const extra = JSON.parse(project?.extra_json || '{}');
+      const value = extra?.projectDate;
+      if (!value || !Number.isInteger(value.year) || !Number.isInteger(value.month)) return undefined;
+      return {
+        year: value.year,
+        month: value.month,
+        ...(Number.isInteger(value.day) ? { day: value.day } : {}),
+        precision: Number.isInteger(value.day) ? 'day' : 'month',
+      };
+    } catch {
+      return undefined;
+    }
+  };
+
+  const normalizeProjectDate = value => {
+    if (!value) return null;
+    let year = Number(value.year);
+    const month = Number(value.month);
+    const hasDay = value.day !== undefined && value.day !== null && String(value.day).trim() !== '';
+    const day = hasDay ? Number(value.day) : undefined;
+    if (year >= 0 && year < 100) year += 2000;
+    if (!Number.isInteger(year) || year < 2000 || year > 2099) throw new Error('年份请输入 00–99 或 2000–2099');
+    if (!Number.isInteger(month) || month < 1 || month > 12) throw new Error('月份请输入 1–12');
+    if (hasDay) {
+      const checked = new Date(year, month - 1, day);
+      if (!Number.isInteger(day) || day < 1 || checked.getFullYear() !== year || checked.getMonth() !== month - 1 || checked.getDate() !== day) throw new Error('日期无效，请检查年月日');
+    }
+    return { year, month, ...(hasDay ? { day } : {}), precision: hasDay ? 'day' : 'month' };
+  };
+
+  const formatProjectDate = value => value
+    ? `${String(value.year).slice(-2)}-${value.month}${value.precision === 'day' ? `-${value.day}` : ''}`
+    : '';
+
   const inspectDeletedProject = async (root, project) => {
     const originalPath = path.resolve(root, project.relativePath);
     const relative = path.relative(root, originalPath);
@@ -100,7 +136,7 @@ const registerWorkspaceIpc = context => {
           .filter(project => project.status === status)
           .map(project => {
             const projectPath = path.resolve(root, project.relative_path);
-            return { name: project.name, path: projectPath, status, updatedAt: fs.existsSync(projectPath) ? fs.statSync(projectPath).mtimeMs : project.updated_at };
+            return { name: project.name, path: projectPath, status, updatedAt: fs.existsSync(projectPath) ? fs.statSync(projectPath).mtimeMs : project.updated_at, projectDate: readProjectDate(project) };
           })
           .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
         return { status, projects };
@@ -114,7 +150,8 @@ const registerWorkspaceIpc = context => {
   
   ipcMain.handle('workspace-create-project', async (_event, workspacePath, date, name) => {
     try {
-      const datePart = cleanProjectName(date || '');
+      const projectDate = normalizeProjectDate(date);
+      const datePart = formatProjectDate(projectDate);
       const namePart = cleanProjectName(name || '');
       const projectName = [datePart, namePart].filter(Boolean).join(' ');
       if (!projectName) throw new Error('请至少填写日期或名称');
@@ -125,9 +162,9 @@ const registerWorkspaceIpc = context => {
       if (fs.existsSync(projectPath)) throw new Error('同名项目已存在');
       fs.mkdirSync(projectPath, { recursive: false });
       fs.mkdirSync(path.join(projectPath, '策划'), { recursive: true });
-      await mutateWorkspaceCatalog(root, 'addProject', { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath) });
+      await mutateWorkspaceCatalog(root, 'addProject', { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath), extra: projectDate ? { projectDate } : {} });
       writeLog('info', 'Project created', { projectName, projectPath });
-      return { success: true, project: { name: projectName, path: projectPath, status: '策划中', updatedAt: Date.now() } };
+      return { success: true, project: { name: projectName, path: projectPath, status: '策划中', updatedAt: Date.now(), projectDate: projectDate || undefined } };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }

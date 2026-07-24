@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { FolderInput, ScanSearch, HardDrive, Play, Trash2, AlertCircle, Edit, X, Plus, User, Loader2, RotateCcw, Download, Scissors, Video, ChevronDown, ChevronUp } from 'lucide-react';
 import { TaskProgress } from '../../components/TaskStatus';
 import { RequirePlugin } from '../../features/plugins/RequirePlugin';
-import type { AppConfig, LogEntry } from '../../types';
+import type { AppConfig, LogEntry, WorkspaceProject } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
 
 const IMAGE_SELECTION_FOLDER_NAME = '图片选片';
@@ -127,7 +127,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
   return { logs, isRunning, isCancelling, progress, statusMsg, preview, clearPreview: () => setPreview(null), start, cancel };
 };
 
-const ImportCard = ({ config, drives = [], destinationPath, active = true, onImportConfigChange, onImportComplete }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, active?: boolean, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (projectNames: string[]) => void }) => {
+const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspaceProjects, active = true, onImportConfigChange, onImportComplete }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (projectNames: string[]) => void }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'finished'>('idle');
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("等待连接...");
@@ -144,6 +144,7 @@ const ImportCard = ({ config, drives = [], destinationPath, active = true, onImp
   const currentDriveTypeRef = React.useRef<'work' | 'broll'>('work');
   const importRequestIdRef = React.useRef('');
   const importedProjectNamesRef = React.useRef<string[]>([]);
+  const continueRoutedImportRef = React.useRef<(routes: Record<string, string>) => void>(() => undefined);
   const startImportRef = React.useRef<(sdPath?: string, type?: 'work' | 'broll') => void>(() => undefined);
   const startBatchRef = React.useRef<() => void>(() => undefined);
   const onImportCompleteRef = React.useRef(onImportComplete);
@@ -226,7 +227,16 @@ const ImportCard = ({ config, drives = [], destinationPath, active = true, onImp
           break;
 
         case 'ask_user':
-          if (event.data?.need_split) {
+          if (event.data?.kind === 'project_routing') {
+            const automaticRoutes = event.data.automaticRoutes || {};
+            if (!event.data.requiresChoice) {
+              continueRoutedImportRef.current(automaticRoutes);
+            } else {
+              setStatus('decision');
+              setDecisionData({ ...event.data, routes: automaticRoutes });
+              setStatusMsg(event.message);
+            }
+          } else if (event.data?.need_split) {
             setStatus('decision');
             setDecisionData(event.data);
             setStatusMsg(event.message);
@@ -300,8 +310,36 @@ const ImportCard = ({ config, drives = [], destinationPath, active = true, onImp
     }, 30000);
   };
 
+  const runActualImport = (routes: Record<string, string> = {}) => {
+    const type = currentDriveTypeRef.current;
+    const usesProjectRouting = workspaceProjects !== undefined;
+    const resolvedDestinationPath = usesProjectRouting ? destinationPath : type === 'broll' ? brollDestinationPath : destinationPath;
+    if (!resolvedDestinationPath) {
+      setStatus('idle');
+      setStatusMsg('无法确定导入目录。');
+      isBusyRef.current = false;
+      return;
+    }
+    setStatus('processing');
+    setProgress(0);
+    setDecisionData(null);
+    const args = ['--sd_path', currentDriveRef.current || selectedDrives[0] || config?.sdPath || '', '--dest_path', resolvedDestinationPath];
+    if (Object.keys(routes).length) args.push('--project_routes', JSON.stringify(routes));
+    if (!usesProjectRouting) args.push('--direct_project');
+    if (type === 'work' && config?.generateVideoPreview) args.push('--generate_video_preview');
+    if (type === 'work' && config?.splitLargeFiles) args.push('--split_large_files');
+    runCmd(type === 'broll' ? 'broll' : 'import', args);
+  };
+  continueRoutedImportRef.current = runActualImport;
+
   const startImport = (sdPath = selectedDrives[0], type: 'work' | 'broll' = driveTypes[sdPath] || 'work') => {
-    if (!destinationPath) {
+    const usesProjectRouting = workspaceProjects !== undefined;
+    const resolvedDestinationPath = usesProjectRouting ? destinationPath : type === 'broll' ? brollDestinationPath : destinationPath;
+    if (!resolvedDestinationPath) {
+      if (type === 'broll') {
+        setStatusMsg('请先选择花絮要导入的目标项目。');
+        return;
+      }
       setStatusMsg('无法确定导入项目，请先设置工作目录。');
       return;
     }
@@ -313,24 +351,18 @@ const ImportCard = ({ config, drives = [], destinationPath, active = true, onImp
     isBusyRef.current = true; // 【上锁】
     currentDriveRef.current = sdPath;
     currentDriveTypeRef.current = type;
-    setStatus('importing');
+    setStatus(usesProjectRouting ? 'processing' : 'importing');
     setProgress(0);
     setTransferStats(null);
     setLogs([]); // 清空日志准备开始
     setStatusMsg(type === 'broll' ? `正在把 ${sdPath} 导入“花絮”` : `正在整理 ${sdPath} 的工作文件`);
 
-    const args = [];
-    if (config) {
-      args.push('--sd_path', sdPath);
-      args.push('--dest_path', destinationPath || '');
-      if (type === 'work' && config.generateVideoPreview) {
-        args.push('--generate_video_preview');
-      }
-      if (type === 'work' && config.splitLargeFiles) {
-        args.push('--split_large_files');
-      }
+    if (usesProjectRouting) {
+      setStatusMsg('正在读取拍摄日期并匹配项目…');
+      runCmd('plan', ['--sd_path', sdPath, '--import_type', type, '--projects_json', JSON.stringify(workspaceProjects)]);
+    } else {
+      runActualImport();
     }
-    runCmd(type === 'broll' ? 'broll' : 'import', args);
   };
   startImportRef.current = startImport;
 
@@ -354,8 +386,15 @@ const ImportCard = ({ config, drives = [], destinationPath, active = true, onImp
     setProgress(0);
     const args = [];
     if (config) {
+      const resolvedDestinationPath = currentDriveTypeRef.current === 'broll' ? brollDestinationPath : destinationPath;
+      if (!resolvedDestinationPath) {
+        setStatus('idle');
+        setStatusMsg(currentDriveTypeRef.current === 'broll' ? '请先选择花絮要导入的目标项目。' : '无法确定导入目录。');
+        isBusyRef.current = false;
+        return;
+      }
       args.push('--sd_path', currentDriveRef.current || selectedDrives[0] || config.sdPath);
-      args.push('--dest_path', destinationPath || '');
+      args.push('--dest_path', resolvedDestinationPath);
       if (config.generateVideoPreview) {
         args.push('--generate_video_preview');
       }
@@ -368,6 +407,28 @@ const ImportCard = ({ config, drives = [], destinationPath, active = true, onImp
 
     // 重新启动导入流程（因为临时文件已经存在，所以会很快）
     runCmd(currentDriveTypeRef.current === 'broll' ? 'broll' : 'import', args);
+  };
+
+  const confirmProjectRoutes = () => {
+    const groups = Array.isArray(decisionData?.groups) ? decisionData.groups : [];
+    const routes = decisionData?.routes || {};
+    if (groups.some((group: any) => !routes[group.id])) {
+      setStatusMsg('请为每个拍摄时间段选择项目。');
+      return;
+    }
+    const groupsByDate = groups.reduce((result: Record<string, any[]>, group: any) => {
+      (result[group.date] ||= []).push(group);
+      return result;
+    }, {});
+    for (const dateGroups of Object.values(groupsByDate) as any[][]) {
+      const exactProjects = new Set(dateGroups.flatMap(group => group.exactProjectPaths || []));
+      const selectedProjects = new Set(dateGroups.map(group => routes[group.id]));
+      if (exactProjects.size > 1 && dateGroups.length === exactProjects.size && selectedProjects.size !== dateGroups.length) {
+        setStatusMsg('同一天的多个项目需要分别对应不同的拍摄时间段。');
+        return;
+      }
+    }
+    runActualImport(routes);
   };
 
   // --- 渲染逻辑 (UI 部分) ---
@@ -481,7 +542,14 @@ const ImportCard = ({ config, drives = [], destinationPath, active = true, onImp
                 <AlertCircle className="text-yellow-400" size={20} />
                 需确认操作
               </h4>
-              <p className="text-slate-500 text-sm mb-6">
+              {decisionData.kind === 'project_routing' ? <>
+                <p className="mb-4 text-sm text-slate-500">没有唯一的精确日期项目，或同一天存在多个项目。相隔超过两小时的素材已分成独立时间段，请确认每一段的归属。</p>
+                <div className="mb-5 max-h-72 space-y-3 overflow-y-auto pr-1">{decisionData.groups.map((group: any) => {
+                  const suggested = new Set<string>(group.suggestedProjectPaths || []);
+                  return <label key={group.id} className="block rounded-lg border border-slate-200 bg-white p-3"><span className="block text-sm font-bold text-slate-700">{group.date} · {group.startTime}–{group.endTime} · {group.count} 个文件</span><select value={decisionData.routes?.[group.id] || ''} onChange={event => setDecisionData((current: any) => ({ ...current, routes: { ...(current?.routes || {}), [group.id]: event.target.value } }))} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"><option value="">请选择目标项目…</option>{(workspaceProjects || []).map(project => <option key={project.path} value={project.path}>{suggested.has(project.path) ? '建议 · ' : ''}{project.name} · {project.status}</option>)}</select></label>;
+                })}</div>
+                <button onClick={confirmProjectRoutes} className="w-full rounded-lg bg-blue-600 py-2 text-sm font-bold text-white hover:bg-blue-500">确认归属并开始导入</button>
+              </> : <><p className="text-slate-500 text-sm mb-6">
                 检测到拍摄时间有 2 小时以上的断层，是否需要拆分成不同日期的文件夹？
               </p>
               <div className="flex gap-3">
@@ -497,7 +565,7 @@ const ImportCard = ({ config, drives = [], destinationPath, active = true, onImp
                 >
                     否，合并在一起
                 </button>
-              </div>
+              </div></>}
             </div>
           )}
 
@@ -637,6 +705,7 @@ const DashboardView = ({
   const [loading, setLoading] = useState(true);
   const [showManager, setShowManager] = useState(false);
   const [drives, setDrives] = useState<string[]>([]);
+  const [workspaceProjects, setWorkspaceProjects] = useState<WorkspaceProject[]>([]);
 
   // 挂载时获取系统盘符
   useEffect(() => {
@@ -661,6 +730,20 @@ const DashboardView = ({
     // 组件卸载时清理定时器
     return () => clearInterval(intervalId);
   }, []);
+
+  useEffect(() => {
+    if (projectDestination || !workspacePath) return;
+    let mounted = true;
+    const loadProjects = async () => {
+      const result = await window.electronAPI.getWorkspaceProjects(workspacePath);
+      if (!mounted || !result.success) return;
+      const projects = result.statuses.flatMap(group => group.projects);
+      setWorkspaceProjects(projects);
+    };
+    void loadProjects();
+    const unsubscribe = window.electronAPI.onWorkspaceProjectsChanged(() => { void loadProjects(); });
+    return () => { mounted = false; unsubscribe(); };
+  }, [projectDestination, workspacePath]);
 
   // 解析 "M月.D日" 格式
   const parseBirthday = (dateStr: string) => {
@@ -723,7 +806,7 @@ const DashboardView = ({
       {section !== 'birthday' && <HomePanel title="从 SD 卡导入" initiallyOpen {...dragProps}>
         <div className="flex flex-col gap-6">
           <RequirePlugin embedded scriptName="classify.py" title="从 SD 卡导入" desc="需要该引擎来识别和导入 SD 卡中的媒体文件。">
-            <ImportCard config={config} drives={drives} destinationPath={projectDestination ?? workspacePath} onImportConfigChange={onImportConfigChange} onImportComplete={projectDestination ? undefined : projectNames => { void onImportComplete?.(projectNames); }} />
+            <ImportCard config={config} drives={drives} destinationPath={projectDestination ?? workspacePath} brollDestinationPath={projectDestination} workspaceProjects={projectDestination ? undefined : workspaceProjects} onImportConfigChange={onImportConfigChange} onImportComplete={projectDestination ? undefined : projectNames => { void onImportComplete?.(projectNames); }} />
           </RequirePlugin>
         </div>
       </HomePanel>}

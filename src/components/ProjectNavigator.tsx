@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus, X } from 'lucide-react';
 import { PROJECT_STATUS_LABELS } from '../types';
-import type { ProjectStatus, WorkspaceProject, WorkspaceStatusGroup } from '../types';
+import type { ProjectDate, ProjectStatus, WorkspaceProject, WorkspaceStatusGroup } from '../types';
 import { useAppDialog } from './AppDialogProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../utils/recycleBinFailure';
 
@@ -11,6 +11,23 @@ const cleanupCheckedWorkspaces = new Set<string>();
 const localDateKey = () => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+};
+const initialProjectDate = () => {
+  const now = new Date();
+  return { year: String(now.getFullYear()).slice(-2), month: String(now.getMonth() + 1), day: String(now.getDate()) };
+};
+const parseProjectDateText = (value: string) => {
+  const matched = value.trim().match(/^(\d{2}|\d{4})\s*[-/.年]\s*(\d{1,2})(?:\s*[-/.月]\s*(\d{1,2})\s*日?)?$/);
+  if (!matched) return null;
+  const year = Number(matched[1]) < 100 ? Number(matched[1]) + 2000 : Number(matched[1]);
+  const month = Number(matched[2]);
+  const day = matched[3] ? Number(matched[3]) : undefined;
+  if (year < 2000 || year > 2099 || month < 1 || month > 12) return null;
+  if (day !== undefined) {
+    const checked = new Date(year, month - 1, day);
+    if (day < 1 || checked.getFullYear() !== year || checked.getMonth() !== month - 1 || checked.getDate() !== day) return null;
+  }
+  return { year: String(year).slice(-2), month: String(month), day: day === undefined ? '' : String(day) };
 };
 
 export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData, selectedProject, onSelectProject, onProjectAction, onWorkspaceResolved }: {
@@ -38,13 +55,45 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
   const [error, setError] = useState('');
   const [menu, setMenu] = useState<{ project: WorkspaceProject; x: number; y: number } | null>(null);
   const [showNew, setShowNew] = useState(false);
-  const [date, setDate] = useState('');
+  const initialDate = initialProjectDate();
+  const [year, setYear] = useState(initialDate.year);
+  const [month, setMonth] = useState(initialDate.month);
+  const [day, setDay] = useState(initialDate.day);
+  const [quickDate, setQuickDate] = useState(`${initialDate.year}-${initialDate.month}-${initialDate.day}`);
   const [name, setName] = useState('');
   const [renameProject, setRenameProject] = useState<WorkspaceProject | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [newProjectError, setNewProjectError] = useState('');
   const [createNotice, setCreateNotice] = useState('');
   const [isCreating, setIsCreating] = useState(false);
+  const resetProjectDate = () => {
+    const value = initialProjectDate();
+    setYear(value.year);
+    setMonth(value.month);
+    setDay(value.day);
+    setQuickDate(`${value.year}-${value.month}-${value.day}`);
+  };
+  const openNewProject = () => {
+    resetProjectDate();
+    setName('');
+    setNewProjectError('');
+    setShowNew(true);
+  };
+  const applyQuickDate = (value: string) => {
+    setQuickDate(value);
+    const parsed = parseProjectDateText(value);
+    if (!parsed) return;
+    setYear(parsed.year);
+    setMonth(parsed.month);
+    setDay(parsed.day);
+  };
+  const projectDate = (): ProjectDate | null => {
+    if (!year.trim() && !month.trim() && !day.trim()) return null;
+    if (!year.trim() || !month.trim()) throw new Error('项目日期至少需要填写年份和月份');
+    const normalizedYear = Number(year) < 100 ? Number(year) + 2000 : Number(year);
+    return { year: normalizedYear, month: Number(month), ...(day.trim() ? { day: Number(day) } : {}), precision: day.trim() ? 'day' : 'month' };
+  };
+  const formattedDate = year && month ? `${String(year).slice(-2)}-${Number(month)}${day ? `-${Number(day)}` : ''}` : '';
 
   const refresh = async () => {
     if (!workspacePath.trim()) {
@@ -95,14 +144,14 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
     setNewProjectError('');
     setIsCreating(true);
     try {
-      const result = await window.electronAPI.createWorkspaceProject(workspacePath, date, name);
+      const result = await window.electronAPI.createWorkspaceProject(workspacePath, projectDate(), name);
       if (!result.success || !result.project) {
         setNewProjectError(result.error || '新建项目失败');
         return;
       }
       const createdName = result.project.name;
       setShowNew(false);
-      setDate('');
+      resetProjectDate();
       setName('');
       setExpanded(current => ({ ...current, 策划中: true }));
       onSelectProject(result.project);
@@ -155,7 +204,7 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
 
   return <>
     {createNotice && <div className="fixed left-1/2 top-10 z-[400] -translate-x-1/2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-xl animate-in fade-in slide-in-from-top-2">{createNotice}</div>}
-    <div className="px-4 pt-4"><button onClick={() => { setNewProjectError(''); setShowNew(true); }} className="w-full rounded-lg bg-blue-600 px-3 py-2.5 text-sm font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-500"><span className="flex items-center justify-center gap-2"><FolderPlus size={17}/>新建项目</span></button></div>
+    <div className="px-4 pt-4"><button onClick={openNewProject} className="w-full rounded-lg bg-blue-600 px-3 py-2.5 text-sm font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-500"><span className="flex items-center justify-center gap-2"><FolderPlus size={17}/>新建项目</span></button></div>
     <nav className="project-navigator-scroll flex-1 overflow-y-auto p-4 pt-2">
       {STATUSES.filter(status => status !== '未分类' || (groups.find(group => group.status === status)?.projects.length || 0) > 0).map(status => {
         const projects = (groups.find(group => group.status === status)?.projects || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
@@ -168,7 +217,8 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
       {error && <p className="mt-2 px-2 text-xs text-red-500">{error}</p>}
     </nav>
     {menu && <div className="fixed z-[300] w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" style={{ left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 360) }} onClick={event => event.stopPropagation()}><button className="project-menu-item" onClick={() => { setRenameProject(menu.project); setRenameValue(menu.project.name); setMenu(null); }}>重命名</button><div className="my-1 border-t border-slate-100"/><p className="px-2 py-1 text-[11px] font-bold text-slate-400">更改状态</p>{STATUSES.filter(status => status !== '未分类').map(status => { const isCurrentStatus = status === menu.project.status; return <button key={status} aria-current={isCurrentStatus ? 'true' : undefined} className={`project-menu-item ${isCurrentStatus ? 'bg-blue-50 font-bold text-blue-700' : ''}`} onClick={() => { move(menu.project, status); setMenu(null); }}>{PROJECT_STATUS_LABELS[status]}{isCurrentStatus ? '（当前）' : ''}</button>; })}<div className="my-1 border-t border-slate-100"/><button className="project-menu-item" onClick={() => { onProjectAction('import', menu.project); setMenu(null); }}>从 SD 卡导入</button><button className="project-menu-item" onClick={() => { onProjectAction('broll', menu.project); setMenu(null); }}>导入花絮</button><button className="project-menu-item" onClick={() => { onProjectAction('match', menu.project); setMenu(null); }}>从文件名选片</button><div className="my-1 border-t border-slate-100"/><button className="project-menu-item text-red-500 hover:bg-red-50" onClick={() => { trash(menu.project); setMenu(null); }}>删除项目</button></div>}
-    {renameProject && <ProjectDialog title="重命名项目" onClose={() => { setRenameProject(null); setRenameValue(''); }}><label className="form-label">项目名称</label><input autoFocus value={renameValue} onChange={event => setRenameValue(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void rename(); }} className="form-input"/><div className="mt-5 flex justify-end gap-2"><button onClick={() => { setRenameProject(null); setRenameValue(''); }} className="dialog-secondary">取消</button><button onClick={() => void rename()} disabled={!renameValue.trim()} className="dialog-primary">确认重命名</button></div></ProjectDialog>}    {showNew && <ProjectDialog title="新建项目" onClose={() => { setShowNew(false); setNewProjectError(''); }}><p className="text-xs text-slate-500">日期和名称至少填写一项；新项目会创建在“策划中”。</p><label className="form-label">项目日期</label><input value={date} onChange={event => setDate(event.target.value)} placeholder="例如：8-10 或 2026-08-10" className="form-input"/><label className="form-label">项目名称</label><input value={name} onChange={event => setName(event.target.value)} placeholder="例如：春日写真" className="form-input"/>{newProjectError && <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{newProjectError}</div>}<div className="mt-5 flex justify-end gap-2"><button onClick={() => { setShowNew(false); setNewProjectError(''); }} className="dialog-secondary">取消</button><button onClick={createProject} disabled={isCreating || (!date && !name)} className="dialog-primary">{isCreating ? '创建中…' : '创建'}</button></div></ProjectDialog>}
+    {renameProject && <ProjectDialog title="重命名项目" onClose={() => { setRenameProject(null); setRenameValue(''); }}><label className="form-label">项目名称</label><input autoFocus value={renameValue} onChange={event => setRenameValue(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void rename(); }} className="form-input"/><div className="mt-5 flex justify-end gap-2"><button onClick={() => { setRenameProject(null); setRenameValue(''); }} className="dialog-secondary">取消</button><button onClick={() => void rename()} disabled={!renameValue.trim()} className="dialog-primary">确认重命名</button></div></ProjectDialog>}
+    {showNew && <ProjectDialog title="新建项目" onClose={() => { setShowNew(false); setNewProjectError(''); }}><p className="text-xs text-slate-500">日期精确到日时可自动匹配 SD 卡；只填年月时，导入前会询问目标项目。</p><label className="form-label">快速输入日期</label><input value={quickDate} onChange={event => applyQuickDate(event.target.value)} placeholder="例如：26-7-17 或 26-7" className="form-input"/><div className="mt-3 grid grid-cols-3 gap-2"><label className="text-xs font-medium text-slate-500">年<input list="project-year-options" value={year} onChange={event => setYear(event.target.value)} placeholder="26" inputMode="numeric" className="form-input mt-1"/></label><label className="text-xs font-medium text-slate-500">月<input list="project-month-options" value={month} onChange={event => setMonth(event.target.value)} placeholder="7" inputMode="numeric" className="form-input mt-1"/></label><label className="text-xs font-medium text-slate-500">日（可不填）<input list="project-day-options" value={day} onChange={event => setDay(event.target.value)} placeholder="17" inputMode="numeric" className="form-input mt-1"/></label></div><datalist id="project-year-options">{Array.from({ length: 8 }, (_, index) => { const value = new Date().getFullYear() - 2 + index; return <option key={value} value={String(value).slice(-2)}/>; })}</datalist><datalist id="project-month-options">{Array.from({ length: 12 }, (_, index) => <option key={index + 1} value={index + 1}/>)}</datalist><datalist id="project-day-options">{Array.from({ length: 31 }, (_, index) => <option key={index + 1} value={index + 1}/>)}</datalist><label className="form-label">项目名称</label><input value={name} onChange={event => setName(event.target.value)} placeholder="例如：春日写真" className="form-input"/><p className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">将创建：<strong className="text-slate-700">{[formattedDate, name.trim()].filter(Boolean).join(' ') || '请填写日期或名称'}</strong></p>{newProjectError && <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{newProjectError}</div>}<div className="mt-5 flex justify-end gap-2"><button onClick={() => { setShowNew(false); setNewProjectError(''); }} className="dialog-secondary">取消</button><button onClick={createProject} disabled={isCreating || (!formattedDate && !name.trim())} className="dialog-primary">{isCreating ? '创建中…' : '创建'}</button></div></ProjectDialog>}
   </>;
 };
 

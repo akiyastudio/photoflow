@@ -749,12 +749,6 @@ def progress_register(root: str, db, payload: dict):
     timestamp = int(time.time() * 1000)
     progress_id = str(payload.get("progressId") or "")
     display_name = str(payload.get("displayName") or os.path.basename(folder_path))
-    duplicate_name = db.execute(
-        "SELECT id FROM progress_folders WHERE project_id=? AND display_name=? COLLATE NOCASE AND id<>?",
-        (project["id"], display_name, progress_id),
-    ).fetchone()
-    if duplicate_name is not None:
-        raise ValueError(f"进度名称已存在：{display_name}")
     existing = None
     if progress_id:
         existing = db.execute(
@@ -763,17 +757,25 @@ def progress_register(root: str, db, payload: dict):
         ).fetchone()
         if existing is None:
             raise ValueError("要修改的进度不存在")
+    else:
+        existing = db.execute(
+            "SELECT * FROM progress_folders WHERE project_id=? AND media_kind=? AND version_key=?",
+            (project["id"], media_kind, version_key),
+        ).fetchone()
+    existing_id = existing["id"] if existing is not None else progress_id
+    duplicate_name = db.execute(
+        "SELECT id FROM progress_folders WHERE project_id=? AND display_name=? COLLATE NOCASE AND id<>?",
+        (project["id"], display_name, existing_id),
+    ).fetchone()
+    if duplicate_name is not None:
+        raise ValueError(f"进度名称已存在：{display_name}")
+    if progress_id:
         conflict = db.execute(
             "SELECT id FROM progress_folders WHERE project_id=? AND media_kind=? AND version_key=? AND id<>?",
             (project["id"], media_kind, version_key, progress_id),
         ).fetchone()
         if conflict is not None:
             raise ValueError(f"版本 _{version_key} 已存在")
-    else:
-        existing = db.execute(
-            "SELECT * FROM progress_folders WHERE project_id=? AND media_kind=? AND version_key=?",
-            (project["id"], media_kind, version_key),
-        ).fetchone()
     values = (
         parent_id, display_name, folder_path,
         folder_path.casefold(), directory_identity(folder_path), int(bool(payload.get("trackingEnabled"))), timestamp,
@@ -1793,8 +1795,8 @@ def mutate(root: str, database: str, action: str, payload: dict):
         project_path = os.path.join(os.path.abspath(root), payload["relativePath"])
         db.execute("DELETE FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],))
         db.execute(
-            "INSERT INTO projects(id,name,status,relative_path,filesystem_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-            (str(uuid.uuid4()), payload["name"], payload["status"], payload["relativePath"], directory_identity(project_path), now, now),
+            "INSERT INTO projects(id,name,status,relative_path,filesystem_id,created_at,updated_at,extra_json) VALUES(?,?,?,?,?,?,?,?)",
+            (str(uuid.uuid4()), payload["name"], payload["status"], payload["relativePath"], directory_identity(project_path), now, now, json.dumps(payload.get("extra") or {}, ensure_ascii=False)),
         )
     elif action == "status":
         if payload["status"] not in STATUSES:
