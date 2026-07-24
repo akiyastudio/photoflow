@@ -9,14 +9,72 @@ import sys
 
 import cv2
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import ExifTags, Image, ImageOps
 
 
 Image.MAX_IMAGE_PIXELS = None
 
 
+# TIFF's primary IFD also contains image-layout fields such as strip offsets.
+# Reusing those fields in a newly encoded TIFF can point outside the new file.
+# Keep descriptive fields and rebuild nested EXIF/GPS IFDs instead of copying
+# the source TIFF dictionary verbatim.
+SAFE_EXIF_TAGS = {
+    269,    # DocumentName
+    270,    # ImageDescription
+    271,    # Make
+    272,    # Model
+    274,    # Orientation (removed by exif_transpose when necessary)
+    282,    # XResolution
+    283,    # YResolution
+    296,    # ResolutionUnit
+    305,    # Software
+    306,    # DateTime
+    315,    # Artist
+    316,    # HostComputer
+    33432,  # Copyright
+}
+
+
 def emit(result):
     print(json.dumps(result, ensure_ascii=False), flush=True)
+
+
+def safe_exif_bytes(image):
+    """Serialize portable EXIF fields without source-file offset pointers."""
+    try:
+        source_exif = image.getexif()
+    except Exception:
+        return None
+    if not source_exif:
+        return None
+
+    cleaned = Image.Exif()
+    for tag in SAFE_EXIF_TAGS:
+        if tag in source_exif:
+            cleaned[tag] = source_exif[tag]
+
+    for ifd_tag in (ExifTags.IFD.Exif, ExifTags.IFD.GPSInfo):
+        try:
+            ifd = source_exif.get_ifd(ifd_tag)
+        except Exception:
+            continue
+        if not ifd:
+            continue
+        portable_ifd = dict(ifd)
+        if ifd_tag == ExifTags.IFD.Exif and ExifTags.IFD.Interop in portable_ifd:
+            try:
+                portable_ifd[ExifTags.IFD.Interop] = dict(source_exif.get_ifd(ExifTags.IFD.Interop))
+            except Exception:
+                portable_ifd.pop(ExifTags.IFD.Interop, None)
+        cleaned[ifd_tag] = portable_ifd
+
+    if not cleaned:
+        return None
+    try:
+        return cleaned.tobytes()
+    except Exception:
+        return None
 
 
 def load_rgb(path):
@@ -25,7 +83,7 @@ def load_rgb(path):
         oriented = ImageOps.exif_transpose(source)
         metadata = {
             "icc_profile": source.info.get("icc_profile"),
-            "exif": oriented.getexif().tobytes() if oriented.getexif() else None,
+            "exif": safe_exif_bytes(oriented),
             "dpi": source.info.get("dpi"),
         }
         return np.asarray(oriented.convert("RGB")), metadata
@@ -146,7 +204,20 @@ def save_tiff(path, rgb, metadata):
     if metadata.get("dpi"):
         options["dpi"] = metadata["dpi"]
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    Image.fromarray(rgb.astype(np.uint8), "RGB").save(path, **options)
+    image = Image.fromarray(rgb.astype(np.uint8), "RGB")
+    try:
+        image.save(path, **options)
+    except Exception:
+        if "exif" not in options:
+            raise
+        # Pixel output, ICC and DPI are more important than a malformed EXIF
+        # block. Remove a partial TIFF and retry without EXIF only.
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        fallback_options = {key: value for key, value in options.items() if key != "exif"}
+        image.save(path, **fallback_options)
 
 
 def merge(input_path, manifest_path, output_path):

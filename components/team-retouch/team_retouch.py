@@ -30,7 +30,8 @@ PAIRDETR_LOW_THRESHOLD = 0.20
 PAIRDETR_EXTRA_THRESHOLD = 0.50
 PAIR_MATCH_IOU = 0.15
 WORK_TILE_EDGE = 4000
-MAX_PEOPLE_PER_TILE = 3
+MIN_WORK_TILE_EDGE = 2800
+MAX_PEOPLE_PER_TILE = 4
 MASK_PROXY_EDGE = 4096
 RTMDET_MODEL_NAME = "rtmdet-ins_m_640x640.onnx"
 PROGRESS_CONTEXT = {}
@@ -293,34 +294,54 @@ def _place_crop(box, crop_width, crop_height, image_width, image_height):
     return [left, top, crop_width, crop_height]
 
 
-def _preferred_crop_sizes(image_width, image_height, edge=WORK_TILE_EDGE):
-    sizes = []
-    for ratio_width, ratio_height in ((2, 3), (3, 2)):
-        scale = min(
-            float(edge) / max(ratio_width, ratio_height),
-            float(image_width) / ratio_width,
-            float(image_height) / ratio_height,
-        )
-        sizes.append((max(1, round(ratio_width * scale)), max(1, round(ratio_height * scale))))
-    return sizes
+def expanded_planning_box(box, image_width, image_height, margin_ratio=0.08):
+    box_width = max(1.0, float(box[2]) - float(box[0]))
+    box_height = max(1.0, float(box[3]) - float(box[1]))
+    margin_x = max(80.0, box_width * margin_ratio)
+    margin_y = max(80.0, box_height * margin_ratio)
+    return [
+        max(0.0, float(box[0]) - margin_x),
+        max(0.0, float(box[1]) - margin_y),
+        min(float(image_width), float(box[2]) + margin_x),
+        min(float(image_height), float(box[3]) + margin_y),
+    ]
 
 
-def planned_work_crop(box, image_width, image_height, edge=WORK_TILE_EDGE, allow_oversize=True):
-    """Return a 2:3/3:2 crop containing a complete person/group.
+def planned_work_crop(box, image_width, image_height, edge=WORK_TILE_EDGE, allow_oversize=True, margin_ratio=0.08):
+    """Return an adaptive phone-friendly crop containing a complete person/group.
 
     Normal work images use at most ``edge`` pixels on their longest side. If a
     single person's detected body cannot fit, the crop grows beyond that limit
     instead of cutting the person off.
     """
-    box_width = max(1.0, float(box[2]) - float(box[0]))
-    box_height = max(1.0, float(box[3]) - float(box[1]))
-    box_aspect = box_width / box_height
+    padded_box = expanded_planning_box(box, image_width, image_height, margin_ratio)
+    desired_width = max(1.0, padded_box[2] - padded_box[0])
+    desired_height = max(1.0, padded_box[3] - padded_box[1])
+    box_aspect = desired_width / desired_height
     candidates = []
-    for crop_width, crop_height in _preferred_crop_sizes(image_width, image_height, edge):
-        crop = _place_crop(box, crop_width, crop_height, image_width, image_height)
+    for ratio_width, ratio_height in ((2, 3), (3, 2), (1, 2), (2, 1), (1, 1)):
+        required_scale = max(desired_width / ratio_width, desired_height / ratio_height)
+        maximum_scale = min(
+            float(edge) / max(ratio_width, ratio_height),
+            float(image_width) / ratio_width,
+            float(image_height) / ratio_height,
+        )
+        if required_scale > maximum_scale:
+            continue
+        context_scale = min(float(MIN_WORK_TILE_EDGE) / max(ratio_width, ratio_height), maximum_scale)
+        scale = max(required_scale, context_scale)
+        crop_width = math.ceil(ratio_width * scale)
+        crop_height = math.ceil(ratio_height * scale)
+        # Integer crop origins sometimes need one extra pixel to contain a
+        # floating-point planning box exactly.
+        crop_width = max(crop_width, math.ceil(padded_box[2]) - math.floor(padded_box[0]))
+        crop_height = max(crop_height, math.ceil(padded_box[3]) - math.floor(padded_box[1]))
+        if max(crop_width, crop_height) > edge:
+            continue
+        crop = _place_crop(padded_box, crop_width, crop_height, image_width, image_height)
         if crop is not None:
             aspect_penalty = abs(math.log((crop_width / crop_height) / box_aspect))
-            candidates.append((aspect_penalty, crop_width * crop_height, crop))
+            candidates.append((crop_width * crop_height, aspect_penalty, crop))
     if candidates:
         return min(candidates, key=lambda item: (item[0], item[1]))[2]
     if not allow_oversize:
@@ -328,28 +349,24 @@ def planned_work_crop(box, image_width, image_height, edge=WORK_TILE_EDGE, allow
 
     # Grow the preferred aspect ratio just enough to contain an oversized
     # person, including a modest context margin where the source permits it.
-    margin_x = max(64.0, box_width * 0.06)
-    margin_y = max(64.0, box_height * 0.06)
-    desired_width = min(float(image_width), box_width + margin_x * 2)
-    desired_height = min(float(image_height), box_height + margin_y * 2)
-    for ratio_width, ratio_height in ((2, 3), (3, 2)):
+    for ratio_width, ratio_height in ((2, 3), (3, 2), (1, 2), (2, 1), (1, 1)):
         scale = max(desired_width / ratio_width, desired_height / ratio_height)
         crop_width = math.ceil(ratio_width * scale)
         crop_height = math.ceil(ratio_height * scale)
-        crop = _place_crop(box, crop_width, crop_height, image_width, image_height)
+        crop_width = max(crop_width, math.ceil(padded_box[2]) - math.floor(padded_box[0]))
+        crop_height = max(crop_height, math.ceil(padded_box[3]) - math.floor(padded_box[1]))
+        crop = _place_crop(padded_box, crop_width, crop_height, image_width, image_height)
         if crop is not None:
             aspect_penalty = abs(math.log((crop_width / crop_height) / box_aspect))
-            candidates.append((aspect_penalty, crop_width * crop_height, crop))
+            candidates.append((crop_width * crop_height, aspect_penalty, crop))
     if candidates:
         return min(candidates, key=lambda item: (item[0], item[1]))[2]
 
     # A source edge can make both preferred ratios impossible. Preserve the
     # complete person first and use the closest source-bounded rectangle.
     padded = [
-        max(0, math.floor(float(box[0]) - margin_x)),
-        max(0, math.floor(float(box[1]) - margin_y)),
-        min(image_width, math.ceil(float(box[2]) + margin_x)),
-        min(image_height, math.ceil(float(box[3]) + margin_y)),
+        math.floor(padded_box[0]), math.floor(padded_box[1]),
+        math.ceil(padded_box[2]), math.ceil(padded_box[3]),
     ]
     return [padded[0], padded[1], max(1, padded[2] - padded[0]), max(1, padded[3] - padded[1])]
 
@@ -371,30 +388,140 @@ def estimated_face_box(body_box):
     ]
 
 
+def mask_bounds(mask, scale, image_width, image_height):
+    """Convert the visible segmentation extent from proxy to source pixels."""
+    rows, columns = np.nonzero(np.asarray(mask) > 0)
+    if not len(columns) or scale <= 0:
+        return None
+    return clamp_box([
+        float(columns.min()) / scale,
+        float(rows.min()) / scale,
+        float(columns.max() + 1) / scale,
+        float(rows.max() + 1) / scale,
+    ], image_width, image_height)
+
+
+def box_coverage_by_crop(box, crop):
+    """Return how much of a detected person is visible inside a work crop."""
+    crop_box = [crop[0], crop[1], crop[0] + crop[2], crop[1] + crop[3]]
+    intersection_width = max(0.0, min(float(box[2]), crop_box[2]) - max(float(box[0]), crop_box[0]))
+    intersection_height = max(0.0, min(float(box[3]), crop_box[3]) - max(float(box[1]), crop_box[1]))
+    box_area = max(1.0, (float(box[2]) - float(box[0])) * (float(box[3]) - float(box[1])))
+    return intersection_width * intersection_height / box_area
+
+
+def bystander_crop_penalty(coverage):
+    """Penalize both visible bystanders and especially half-cut bodies."""
+    coverage = float(np.clip(coverage, 0.0, 1.0))
+    return coverage + 4.0 * coverage * (1.0 - coverage)
+
+
+def reposition_crop_to_avoid_bystanders(crop, focus_box, image_width, image_height, bystander_boxes):
+    """Slide a valid crop around its targets to avoid cutting adjacent people."""
+    crop_width, crop_height = int(crop[2]), int(crop[3])
+    minimum_left = max(0, int(math.ceil(float(focus_box[2]) - crop_width)))
+    maximum_left = min(int(math.floor(float(focus_box[0]))), int(image_width) - crop_width)
+    minimum_top = max(0, int(math.ceil(float(focus_box[3]) - crop_height)))
+    maximum_top = min(int(math.floor(float(focus_box[1]))), int(image_height) - crop_height)
+    if minimum_left > maximum_left or minimum_top > maximum_top:
+        return crop
+
+    def positions(current, minimum, maximum, boxes, start_index, end_index, size):
+        values = {minimum, maximum, max(minimum, min(current, maximum))}
+        for box in boxes:
+            values.add(max(minimum, min(int(math.floor(float(box[start_index]) - size)), maximum)))
+            values.add(max(minimum, min(int(math.ceil(float(box[end_index]))), maximum)))
+        return sorted(values)
+
+    left_positions = positions(int(crop[0]), minimum_left, maximum_left, bystander_boxes, 0, 2, crop_width)
+    top_positions = positions(int(crop[1]), minimum_top, maximum_top, bystander_boxes, 1, 3, crop_height)
+    best = None
+    for left in left_positions:
+        for top in top_positions:
+            candidate_crop = [left, top, crop_width, crop_height]
+            coverages = [box_coverage_by_crop(box, candidate_crop) for box in bystander_boxes]
+            penalty = sum(bystander_crop_penalty(coverage) for coverage in coverages)
+            distance = abs(left - int(crop[0])) + abs(top - int(crop[1]))
+            score = (round(penalty, 6), distance)
+            if best is None or score < best[0]:
+                best = (score, candidate_crop)
+    return best[1] if best else crop
+
+
 def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, oversize_crop_mode="expand"):
-    """Partition people into the fewest valid one-to-three-person work tiles."""
+    """Plan spatially coherent work tiles with as little bystander duplication as possible."""
     count = len(items)
     if not count:
         return []
 
     candidate_cache = {}
+    centers = [
+        ((float(item.get("planningBox", item["box"])[0]) + float(item.get("planningBox", item["box"])[2])) / 2,
+         (float(item.get("planningBox", item["box"])[1]) + float(item.get("planningBox", item["box"])[3])) / 2)
+        for item in items
+    ]
+    x_span = max(center[0] for center in centers) - min(center[0] for center in centers)
+    y_span = max(center[1] for center in centers) - min(center[1] for center in centers)
+    dominant_axis = 0 if x_span >= y_span else 1
+    spatial_order = sorted(range(count), key=lambda index: (centers[index][dominant_axis], centers[index][1 - dominant_axis]))
+    spatial_rank = {person_index: rank for rank, person_index in enumerate(spatial_order)}
+
+    def is_contiguous(indices):
+        ranks = sorted(spatial_rank[index] for index in indices)
+        return ranks[-1] - ranks[0] + 1 == len(ranks)
 
     def candidate(indices):
         key = tuple(sorted(indices))
         if key not in candidate_cache:
+            if len(key) > 1 and not is_contiguous(key):
+                candidate_cache[key] = None
+                return None
             box = union_box([items[index]["box"] for index in key])
-            crop = planned_work_crop(box, image_width, image_height, edge, allow_oversize=False)
-            if crop is None and oversize_crop_mode == "face-centered":
+            planning_box = union_box([items[index].get("planningBox", items[index]["box"]) for index in key])
+            focus_box = planning_box
+            focus_margin_ratio = 0.04 if len(key) > 1 else 0.08
+            crop = planned_work_crop(
+                planning_box, image_width, image_height, edge,
+                allow_oversize=False, margin_ratio=focus_margin_ratio,
+            )
+            # Face-centered cropping is a last resort for one genuinely
+            # oversized person. Never use it to force several people into a
+            # tile whose complete outlines do not fit; split that group.
+            if crop is None and oversize_crop_mode == "face-centered" and len(key) == 1:
                 focus_boxes = [
                     clamp_box(items[index].get("faceBox") or estimated_face_box(items[index]["box"]), image_width, image_height)
                     for index in key
                 ]
-                crop = planned_work_crop(union_box(focus_boxes), image_width, image_height, edge, allow_oversize=False)
+                focus_box = union_box(focus_boxes)
+                focus_margin_ratio = 0.08
+                crop = planned_work_crop(focus_box, image_width, image_height, edge, allow_oversize=False)
             if crop is None and len(key) == 1:
                 crop = planned_work_crop(box, image_width, image_height, edge, allow_oversize=True)
-            candidate_cache[key] = None if crop is None else {
-                "indices": list(key), "box": box, "crop": crop,
-            }
+            if crop is None:
+                candidate_cache[key] = None
+            else:
+                selected = set(key)
+                bystander_boxes = [item.get("planningBox", item["box"]) for index, item in enumerate(items) if index not in selected]
+                safe_focus_box = expanded_planning_box(
+                    focus_box, image_width, image_height, focus_margin_ratio,
+                )
+                crop = reposition_crop_to_avoid_bystanders(
+                    crop, safe_focus_box, image_width, image_height, bystander_boxes,
+                )
+                bystander_coverages = [
+                    box_coverage_by_crop(bystander_box, crop)
+                    for bystander_box in bystander_boxes
+                ]
+                # Fully or mostly visible unassigned people are much more
+                # dangerous than a small edge sliver. The retoucher must never
+                # mistake them for members whose edits will be merged back.
+                bystander_cost = sum(bystander_crop_penalty(coverage) for coverage in bystander_coverages)
+                candidate_cache[key] = {
+                    "indices": list(key), "box": box, "crop": crop,
+                    "bystanderCost": bystander_cost,
+                    "visibleBystanderCount": sum(coverage >= 0.8 for coverage in bystander_coverages),
+                    "cutBystanderCount": sum(0.1 <= coverage < 0.8 for coverage in bystander_coverages),
+                }
         return candidate_cache[key]
 
     if count <= 18:
@@ -402,7 +529,7 @@ def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, overs
 
         def solve(remaining):
             if not remaining:
-                return (0, 0, [])
+                return (0, 0, 0, 0.0, 0, [])
             if remaining in memo:
                 return memo[remaining]
             first = (remaining & -remaining).bit_length() - 1
@@ -417,13 +544,20 @@ def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, overs
                     next_remaining = remaining
                     for index in group:
                         next_remaining &= ~(1 << index)
-                    child_count, child_area, child_tiles = solve(next_remaining)
+                    child_visible_count, child_count, child_cut_count, child_bystander_cost, child_area, child_tiles = solve(next_remaining)
                     area = tile["crop"][2] * tile["crop"][3]
-                    options.append((child_count + 1, child_area + area, [tile, *child_tiles]))
-            memo[remaining] = min(options, key=lambda item: (item[0], item[1]))
+                    options.append((
+                        child_visible_count + tile["visibleBystanderCount"],
+                        child_count + 1,
+                        child_cut_count + tile["cutBystanderCount"],
+                        child_bystander_cost + tile["bystanderCost"],
+                        child_area + area,
+                        [tile, *child_tiles],
+                    ))
+            memo[remaining] = min(options, key=lambda item: (item[1], item[0], item[2], round(item[3], 6), item[4]))
             return memo[remaining]
 
-        tiles = solve((1 << count) - 1)[2]
+        tiles = solve((1 << count) - 1)[5]
     else:
         # Large crowds avoid exponential search. Prefer the tightest triples,
         # then pairs, and finally guaranteed single-person crops.
@@ -432,17 +566,22 @@ def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, overs
         while remaining:
             first = min(remaining)
             best = None
-            for group_size in (3, 2):
+            for group_size in (3, 2, 1):
                 for tail in itertools.combinations(sorted(remaining - {first}), group_size - 1):
                     tile = candidate((first, *tail))
                     if tile is None:
                         continue
                     area = tile["crop"][2] * tile["crop"][3]
-                    score = (area, tuple(tile["indices"]))
+                    score = (
+                        tile["visibleBystanderCount"] / group_size,
+                        tile["cutBystanderCount"] / group_size,
+                        round(tile["bystanderCost"] / group_size, 6),
+                        -group_size,
+                        area / group_size,
+                        tuple(tile["indices"]),
+                    )
                     if best is None or score < best[0]:
                         best = (score, tile)
-                if best is not None:
-                    break
             tile = best[1] if best is not None else candidate((first,))
             tiles.append(tile)
             remaining.difference_update(tile["indices"])
@@ -463,7 +602,8 @@ def overlap_review_reasons(items):
 
 
 def detect(input_path, output_dir, preference="auto", delivery_dir=None, delivery_prefix=None,
-           oversize_crop_mode="expand", advanced_runner=None, session_bundle=None):
+           oversize_crop_mode="expand", advanced_runner=None, session_bundle=None,
+           advanced_mode="auto"):
     emit_progress(2, "正在读取原图")
     rgb = load_rgb(input_path)
     height, width = rgb.shape[:2]
@@ -495,23 +635,28 @@ def detect(input_path, output_dir, preference="auto", delivery_dir=None, deliver
     } for index, item in enumerate(rtmdet)]
     advanced_backend = False
     sam_masks = []
-    try:
-        if advanced_runner is None:
-            from advanced_bridge import run_pairdetr, run_sam2
-        else:
-            run_pairdetr = advanced_runner.run_pairdetr
-            run_sam2 = advanced_runner.run_sam2
-        emit_progress(34, "正在确认每个人的位置")
-        pair_boxes = run_pairdetr(Path(input_path), output_root, PAIRDETR_LOW_THRESHOLD)
-        fused = fuse_boxes(rtmdet, pair_boxes)
-        emit_progress(56, f"正在区分 {len(fused)} 个重叠人物")
-        sam_masks = run_sam2(Path(input_path), fused, output_root)
-        if len(sam_masks) != len(fused):
-            raise RuntimeError(f"SAM 2.1 遮罩数量不一致：{len(sam_masks)}/{len(fused)}")
-        advanced_backend = True
-        emit_progress(78, "人物识别完成，正在把图片切小")
-    except Exception as error:
-        fallback_reasons.append(advanced_fallback_reason(error))
+    if advanced_mode != "basic":
+        try:
+            if advanced_runner is None:
+                from advanced_bridge import run_pairdetr, run_sam2
+            else:
+                run_pairdetr = advanced_runner.run_pairdetr
+                run_sam2 = advanced_runner.run_sam2
+            emit_progress(34, "正在确认每个人的位置")
+            pair_boxes = run_pairdetr(Path(input_path), output_root, PAIRDETR_LOW_THRESHOLD)
+            fused = fuse_boxes(rtmdet, pair_boxes)
+            emit_progress(56, f"正在区分 {len(fused)} 个重叠人物")
+            sam_masks = run_sam2(Path(input_path), fused, output_root)
+            if len(sam_masks) != len(fused):
+                raise RuntimeError(f"SAM 2.1 遮罩数量不一致：{len(sam_masks)}/{len(fused)}")
+            advanced_backend = True
+            emit_progress(78, "人物识别完成，正在把图片切小")
+        except Exception as error:
+            if advanced_mode == "advanced":
+                raise RuntimeError(f"高级模式不可用：{advanced_fallback_reason(error)}") from error
+            fallback_reasons.append(advanced_fallback_reason(error))
+            emit_progress(58, "正在使用基础识别结果把图片切小")
+    else:
         emit_progress(58, "正在使用基础识别结果把图片切小")
 
     for item in fused:
@@ -542,7 +687,14 @@ def detect(input_path, output_dir, preference="auto", delivery_dir=None, deliver
                 final_mask.astype(np.uint8), (proxy_width, proxy_height),
                 interpolation=cv2.INTER_NEAREST,
             ) > 0
-        people.append({**item, "mask": final_mask, "reviewReason": review_reasons[person_index]})
+        visible_box = mask_bounds(final_mask, proxy_scale, width, height)
+        planning_box = union_box([item["box"], visible_box]) if visible_box else item["box"]
+        people.append({
+            **item,
+            "mask": final_mask,
+            "planningBox": planning_box,
+            "reviewReason": review_reasons[person_index],
+        })
 
     tiles = plan_work_tiles(people, width, height, oversize_crop_mode=oversize_crop_mode)
     emit_progress(78, f"人物识别完成，正在生成 {len(tiles)} 张工作图")
@@ -614,6 +766,7 @@ def detect(input_path, output_dir, preference="auto", delivery_dir=None, deliver
         "success": True,
         "detector": "rtmdet-pairdetr-sam2" if advanced_backend else "rtmdet-ins-m",
         "backend": backend, "provider": session.get_providers()[0],
+        "requestedMode": advanced_mode, "advancedBackend": advanced_backend,
         "providers": providers, "fallbackReason": "；".join(fallback_reasons),
         "width": width, "height": height, "workTileEdge": WORK_TILE_EDGE,
         "personCount": len(fused),
@@ -878,7 +1031,7 @@ class UnavailableAdvancedRunner:
         raise RuntimeError(self.error)
 
 
-def detect_batch(manifest_path, preference="auto", oversize_crop_mode="face-centered"):
+def detect_batch(manifest_path, preference="auto", oversize_crop_mode="face-centered", advanced_mode="auto"):
     payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     items = payload.get("items") or []
     if len(items) < 2:
@@ -886,15 +1039,18 @@ def detect_batch(manifest_path, preference="auto", oversize_crop_mode="face-cent
     session_bundle = create_session(preference)
     batch_runner = None
     advanced_session = None
-    try:
-        from advanced_bridge import AdvancedBatchSession
-        advanced_session = AdvancedBatchSession()
-        batch_runner = advanced_session.__enter__()
-    except Exception as error:
-        if advanced_session:
-            advanced_session.__exit__(None, None, None)
-        advanced_session = None
-        batch_runner = UnavailableAdvancedRunner(f"批量高级后端不可用：{error}")
+    if advanced_mode != "basic":
+        try:
+            from advanced_bridge import AdvancedBatchSession
+            advanced_session = AdvancedBatchSession()
+            batch_runner = advanced_session.__enter__()
+        except Exception as error:
+            if advanced_session:
+                advanced_session.__exit__(None, None, None)
+            advanced_session = None
+            if advanced_mode == "advanced":
+                raise RuntimeError(f"高级模式不可用：{advanced_fallback_reason(error)}") from error
+            batch_runner = UnavailableAdvancedRunner(f"批量高级后端不可用：{error}")
 
     results = []
     try:
@@ -910,7 +1066,7 @@ def detect_batch(manifest_path, preference="auto", oversize_crop_mode="face-cent
                 result = detect(
                     os.path.abspath(item["input"]), os.path.abspath(item["outputDir"]),
                     preference, os.path.abspath(item["deliveryDir"]), item.get("deliveryPrefix"),
-                    oversize_crop_mode, batch_runner, session_bundle,
+                    oversize_crop_mode, batch_runner, session_bundle, advanced_mode,
                 )
                 results.append({
                     "success": True, "key": item.get("key"), "name": item.get("name"),
@@ -929,6 +1085,9 @@ def detect_batch(manifest_path, preference="auto", oversize_crop_mode="face-cent
         "success": any(item.get("success") for item in results),
         "results": results,
         "persistentBackend": advanced_session is not None,
+        "requestedMode": advanced_mode,
+        "advancedUsedCount": sum(item.get("advancedBackend") is True for item in results),
+        "fallbackCount": sum(bool(item.get("fallbackReason")) for item in results),
     }
 
 
@@ -972,9 +1131,20 @@ def probe():
     }
 
 
+def probe_advanced_runtime():
+    from advanced_bridge import AdvancedBatchSession
+    with AdvancedBatchSession() as session:
+        return {
+            "success": True,
+            "pairDetrReady": session.pair is not None,
+            "sam2Ready": session.sam is not None,
+            "distro": session.pair.distro if session.pair else "",
+        }
+
+
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("probe", "detect", "detect-batch", "match-batch", "restore", "merge"))
+    parser.add_argument("action", choices=("probe", "probe-advanced-runtime", "detect", "detect-batch", "match-batch", "restore", "merge"))
     parser.add_argument("--input")
     parser.add_argument("--output-dir")
     parser.add_argument("--delivery-dir")
@@ -982,10 +1152,14 @@ def run(args_list=None):
     parser.add_argument("--manifest")
     parser.add_argument("--output")
     parser.add_argument("--provider", choices=("auto", "gpu", "cpu"), default="auto")
+    parser.add_argument("--advanced-mode", choices=("auto", "basic", "advanced"), default="auto")
     parser.add_argument("--oversize-crop-mode", choices=("face-centered", "expand"), default="face-centered")
     args = parser.parse_args(args_list)
     if args.action == "probe":
         emit(probe())
+        return
+    if args.action == "probe-advanced-runtime":
+        emit(probe_advanced_runtime())
         return
     if args.action == "merge":
         if not args.input or not args.manifest or not args.output:
@@ -996,7 +1170,7 @@ def run(args_list=None):
     if args.action == "detect-batch":
         if not args.manifest:
             parser.error("detect-batch requires --manifest")
-        emit(detect_batch(os.path.abspath(args.manifest), args.provider, args.oversize_crop_mode))
+        emit(detect_batch(os.path.abspath(args.manifest), args.provider, args.oversize_crop_mode, args.advanced_mode))
         return
     if args.action == "match-batch":
         if not args.manifest:
@@ -1013,7 +1187,7 @@ def run(args_list=None):
     emit(detect(
         os.path.abspath(args.input), os.path.abspath(args.output_dir), args.provider,
         os.path.abspath(args.delivery_dir) if args.delivery_dir else None,
-        args.delivery_prefix, args.oversize_crop_mode,
+        args.delivery_prefix, args.oversize_crop_mode, advanced_mode=args.advanced_mode,
     ))
 
 

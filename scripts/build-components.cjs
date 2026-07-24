@@ -38,6 +38,10 @@ const definitions = {
       path.join(root, 'components', 'team-retouch', 'advanced', 'pairdetr_service.py'),
       path.join(root, 'components', 'team-retouch', 'advanced', 'sam2_service.py'),
     ],
+    advancedInstallerFiles: [
+      path.join(root, 'scripts', 'setup-team-retouch-advanced.ps1'),
+      path.join(root, 'scripts', 'uninstall-team-retouch-advanced.ps1'),
+    ],
     pyInstallerArgs: [
       '--collect-binaries', 'onnxruntime',
       '--paths', path.join(root, 'components', 'team-retouch'),
@@ -116,6 +120,9 @@ const build = id => {
   for (const script of definition.advancedScripts || []) {
     if (!fs.existsSync(script)) throw new Error(`Team-retouch advanced script is missing: ${script}`);
   }
+  for (const installerFile of definition.advancedInstallerFiles || []) {
+    if (!fs.existsSync(installerFile)) throw new Error(`Team-retouch advanced installer file is missing: ${installerFile}`);
+  }
   if (id === 'team-retouch' && !probeModule('onnxruntime')) {
     throw new Error('onnxruntime-directml is not installed in the component build environment');
   }
@@ -146,6 +153,13 @@ const build = id => {
   ], { cwd: root, stdio: 'inherit' });
   if (result.error) throw result.error;
   if ((result.status ?? 1) !== 0) throw new Error(`${id} build failed with code ${result.status}`);
+  if (definition.advancedInstallerFiles?.length) {
+    const installerRoot = path.join(target, 'advanced-installer');
+    fs.mkdirSync(installerRoot, { recursive: true });
+    for (const installerFile of definition.advancedInstallerFiles) {
+      fs.copyFileSync(installerFile, path.join(installerRoot, path.basename(installerFile)));
+    }
+  }
   fs.copyFileSync(definition.template, path.join(target, 'component.json'));
   console.log(`Component ready: ${target}`);
   packageComponent(id);

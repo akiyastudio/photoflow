@@ -29,6 +29,8 @@ type VersionManagerProps = {
   onClose: () => void;
   onNotice: (message: string) => void;
   onVersionStateChanged?: () => void;
+  initialCompareIds?: string[];
+  initialCompareMode?: 'side-by-side' | 'split' | 'overlay' | 'blink' | 'difference';
 };
 
 const formatSize = (size: number) => size < 1024 * 1024
@@ -108,15 +110,16 @@ const VersionResource = ({ version, cacheConfig, className = '', contentStyle }:
   </div>;
 };
 
-const CompareView = ({ left, right, cacheConfig, workspacePath, photoId, onClose }: {
+const CompareView = ({ left, right, cacheConfig, workspacePath, photoId, onClose, initialMode = 'side-by-side' }: {
   left: MediaVersion;
   right: MediaVersion;
   cacheConfig: AppConfig['mediaCache'];
   workspacePath: string;
   photoId: string;
   onClose: () => void;
+  initialMode?: 'side-by-side' | 'split' | 'overlay' | 'blink' | 'difference';
 }) => {
-  const [mode, setMode] = useState<'side-by-side' | 'split' | 'overlay' | 'blink' | 'difference'>('side-by-side');
+  const [mode, setMode] = useState<'side-by-side' | 'split' | 'overlay' | 'blink' | 'difference'>(initialMode);
   const [split, setSplit] = useState(50);
   const [opacity, setOpacity] = useState(50);
   const [blinkRight, setBlinkRight] = useState(false);
@@ -271,14 +274,16 @@ const SingleVersionView = ({ version, cacheConfig, busy, onClose, onNotice, onTo
   </div>;
 };
 
-export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onClose, onNotice, onVersionStateChanged }: VersionManagerProps) => {
+export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onClose, onNotice, onVersionStateChanged, initialCompareIds = [], initialCompareMode = 'side-by-side' }: VersionManagerProps) => {
   const appDialog = useAppDialog();
+  const initialCompareKey = initialCompareIds.join('|');
   const [bundle, setBundle] = useState<MediaVersionBundle>({ success: true, versions: [] });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [selectedId, setSelectedId] = useState('');
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [editing, setEditing] = useState<MediaVersion | null>(null);
+  const initialCompareAppliedRef = useRef('');
   const [editNote, setEditNote] = useState('');
   const [treeWidth, setTreeWidth] = useState(() => {
     const stored = Number(window.localStorage.getItem('photoflow:version-manager-tree-width-v2'));
@@ -303,8 +308,14 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
     setBundle(normalizeVisibleVersionBundle(result));
     const current = result.versions.find(version => version.isCurrent) || result.versions[result.versions.length - 1];
     setSelectedId(value => result.versions.some(version => version.id === value) ? value : current?.id || '');
+    const compareKey = initialCompareKey;
+    if (compareKey && initialCompareAppliedRef.current !== compareKey) {
+      const availableIds = initialCompareIds.filter(id => result.versions.some(version => version.id === id && !version.fileMissing)).slice(0, 2);
+      if (availableIds.length === 2) setCompareIds(availableIds);
+      initialCompareAppliedRef.current = compareKey;
+    }
   };
-  useEffect(() => { void load(); }, [entry.path, entry.updatedAt]);
+  useEffect(() => { void load(); }, [entry.path, entry.updatedAt, initialCompareKey]);
 
   const selected = bundle.versions.find(version => version.id === selectedId);
   const compareVersions = compareIds.map(id => bundle.versions.find(version => version.id === id)).filter((version): version is MediaVersion => Boolean(version));
@@ -458,7 +469,7 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
         className="column-resize-handle"
       />
       <main className="flex min-w-0 flex-1 overflow-hidden">{selected ? <SingleVersionView version={selected} cacheConfig={cacheConfig} busy={busy} onClose={onClose} onNotice={onNotice} onToggleFinal={() => void updateVersion({ versionId: selected.id, isFinal: !selected.isFinal }, selected.isFinal ? '已取消最终版' : '已标记为最终版')} onEditNote={() => { setEditing(selected); setEditNote(selected.note); }} onMakeCurrent={() => void updateVersion({ versionId: selected.id, makeCurrent: true }, '已切换当前版本')} onRelocate={() => void relocateVersion(selected)} onDelete={() => void deleteVersion(selected)}/> : <div className="flex h-full flex-1 items-center justify-center text-slate-400">请选择一个版本</div>}</main>
-      {bundle.photo && compareVersions.length === 2 && <div className="absolute inset-y-0 right-0 z-20 bg-slate-950" style={{ left: treeWidth + 1 }}><CompareView left={compareVersions[0]} right={compareVersions[1]} cacheConfig={cacheConfig} workspacePath={workspacePath} photoId={bundle.photo.id} onClose={() => setCompareIds([])}/></div>}
+      {bundle.photo && compareVersions.length === 2 && <div className="absolute inset-y-0 right-0 z-20 bg-slate-950" style={{ left: treeWidth + 1 }}><CompareView left={compareVersions[0]} right={compareVersions[1]} cacheConfig={cacheConfig} workspacePath={workspacePath} photoId={bundle.photo.id} initialMode={initialCompareMode} onClose={() => setCompareIds([])}/></div>}
     </div>}
     {editing && <div className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><header className="flex items-center justify-between"><h3 className="font-bold text-slate-800">编辑版本说明 · V{editing.versionNumber}</h3><button onClick={() => setEditing(null)}><X size={18}/></button></header><label className="form-label">版本说明</label><textarea autoFocus rows={5} value={editNote} onChange={event => setEditNote(event.target.value)} placeholder="记录本次进度的修改内容" className="form-input resize-none"/><p className="mt-3 text-xs text-slate-500">版本名称由进度规则生成，不在这里修改。</p><footer className="mt-5 flex justify-end gap-2"><button onClick={() => setEditing(null)} className="dialog-secondary">取消</button><button disabled={busy} onClick={() => void updateVersion({ versionId: editing.id, note: editNote }, '版本说明已更新')} className="dialog-primary">保存</button></footer></div></div>}
   </div>;

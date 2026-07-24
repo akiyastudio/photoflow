@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FolderOpen, HardDrive, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, ScanSearch, Loader2, FileImage } from 'lucide-react';
+import { FolderOpen, HardDrive, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, ScanSearch, Loader2, FileImage, Cpu, CheckCircle2, AlertTriangle, Wrench } from 'lucide-react';
 import type { AppConfig, ComponentStatus } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
 
@@ -27,6 +27,80 @@ const WorkspaceSetupPage = ({ config, onSave }: { config: AppConfig; onSave: (co
 };
 
 const formatComponentSize = (sizeBytes: number) => sizeBytes > 0 ? `${(sizeBytes / 1024 / 1024).toFixed(sizeBytes >= 100 * 1024 * 1024 ? 0 : 1)} MB` : '';
+const formatStorageSize = (sizeBytes = 0) => sizeBytes >= 1024 ** 3
+  ? `${(sizeBytes / 1024 ** 3).toFixed(sizeBytes >= 10 * 1024 ** 3 ? 1 : 2)} GB`
+  : sizeBytes > 0 ? `${(sizeBytes / 1024 ** 2).toFixed(0)} MB` : '0 MB';
+
+const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { component?: ComponentStatus; onRefresh: () => void | Promise<void>; onNotice: (message: string, duration?: number) => void }) => {
+  const appDialog = useAppDialog();
+  const [busy, setBusy] = useState<'check' | 'install' | 'repair' | 'uninstall' | ''>('');
+  const [progress, setProgress] = useState({ progress: 0, message: '' });
+  useEffect(() => window.electronAPI.onTeamRetouchAdvancedProgress(value => {
+    setProgress({ progress: Number(value.progress) || 0, message: value.message });
+  }), []);
+  const install = async (repair = false) => {
+    if (busy || !await appDialog.confirm({
+      title: repair ? '修复高级引擎吗？' : '安装高级引擎吗？',
+      message: repair
+        ? '修复需要重新选择与当前组件版本一致的高级引擎离线包。程序不会联网下载，基础引擎不会受到影响。'
+        : '程序不会联网下载。请选择从部署盘或移动硬盘取得的高级引擎离线包；安装后约占 20–30 GB，建议预留 35 GB。',
+      confirmLabel: repair ? '选择离线包并修复' : '选择离线包',
+    })) return;
+    setBusy(repair ? 'repair' : 'install');
+    setProgress({ progress: 1, message: repair ? '正在准备修复' : '正在准备安装' });
+    try {
+      const result = await window.electronAPI.installTeamRetouchAdvanced({ repair });
+      if (result.cancelled) return;
+      if (!result.success) { onNotice(`高级引擎${repair ? '修复' : '安装'}失败：${result.error || '未知错误'}`, 8000); return; }
+      onNotice(`高级引擎已${repair ? '修复' : '安装'}并通过运行验证`);
+      await onRefresh();
+    } finally { setBusy(''); }
+  };
+  const checkRequirements = async () => {
+    if (busy) return;
+    setBusy('check');
+    setProgress({ progress: 2, message: '正在检查 WSL 2、NVIDIA 驱动和磁盘空间' });
+    try {
+      const result = await window.electronAPI.checkTeamRetouchAdvancedRequirements();
+      if (!result.success) { onNotice(`本机条件检查未通过：${result.error || '未知错误'}`, 8000); return; }
+      onNotice(result.message || '本机已满足高级引擎安装条件');
+    } finally { setBusy(''); }
+  };
+  const uninstall = async () => {
+    if (busy || !await appDialog.confirm({
+      title: '卸载多人修脸高级引擎吗？',
+      message: `将注销 PhotoFlowNative 并删除高级模型、Python 环境和虚拟磁盘，预计释放 ${formatStorageSize(component?.advancedSizeBytes)}。基础多人修脸仍可继续使用。`,
+      confirmLabel: '卸载高级引擎', tone: 'danger',
+    })) return;
+    setBusy('uninstall');
+    setProgress({ progress: 20, message: '正在停止并删除高级引擎' });
+    try {
+      const result = await window.electronAPI.uninstallTeamRetouchAdvanced();
+      if (!result.success) { onNotice(`卸载高级引擎失败：${result.error || '未知错误'}`, 8000); return; }
+      onNotice('高级引擎已卸载，基础多人修脸不受影响');
+      await onRefresh();
+    } finally { setBusy(''); }
+  };
+  const openFolder = async () => {
+    const result = await window.electronAPI.openTeamRetouchAdvancedFolder();
+    if (!result.success) onNotice(`打开高级引擎目录失败：${result.error || '未知错误'}`);
+  };
+  const baseAvailable = Boolean(component?.installed && component.runtimeAvailable);
+  const advancedReady = Boolean(component?.advancedAvailable);
+  const needsRepair = component?.advancedState === 'repair-needed';
+  return <section>
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="text-sm font-bold text-slate-800">识别引擎与安装状态</h4><p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">基础引擎随“多人修脸”组件安装；高级引擎是可选的独立 WSL 环境，不会放进程序安装目录，应用升级和清理源码不会删除它。</p></div><button type="button" onClick={() => void onRefresh()} disabled={Boolean(busy)} className="dialog-secondary inline-flex items-center gap-2"><RotateCcw size={15} className={busy ? 'animate-spin' : ''}/>重新检测</button></div>
+    <div className="mt-4 grid gap-4 lg:grid-cols-2">
+      <article className="rounded-xl border border-slate-200 bg-white p-4"><div className="flex items-start gap-3"><span className="rounded-lg bg-blue-50 p-2 text-blue-600"><Cpu size={18}/></span><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><h5 className="font-bold text-slate-800">基础方案 · RTMDet</h5><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${baseAvailable ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>{baseAvailable ? '可用' : '不可用'}</span></div><p className="mt-2 text-xs leading-5 text-slate-500">检测人物、生成基础人物蒙版、规划工作图并自动拼回。支持 CPU 及 Intel、AMD、NVIDIA 的 DirectML GPU，体积小、启动快。</p><p className="mt-3 text-xs text-slate-500">{component?.provider ? `当前运行：${component.provider}` : component?.runtimeError || '等待组件状态'}</p><p className="mt-1 text-xs text-slate-400">组件占用：{formatStorageSize(component?.sizeBytes)}</p></div></div></article>
+      <article className={`rounded-xl border p-4 ${advancedReady ? 'border-violet-200 bg-violet-50/30' : needsRepair ? 'border-amber-200 bg-amber-50/40' : 'border-slate-200 bg-white'}`}><div className="flex items-start gap-3"><span className={`rounded-lg p-2 ${advancedReady ? 'bg-violet-100 text-violet-700' : needsRepair ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{advancedReady ? <CheckCircle2 size={18}/> : needsRepair ? <AlertTriangle size={18}/> : <UsersRound size={18}/>}</span><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><h5 className="font-bold text-slate-800">高级方案 · PairDETR + SAM 2.1</h5><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${advancedReady ? 'bg-violet-100 text-violet-700' : needsRepair ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{advancedReady ? '可用' : needsRepair ? '需要修复' : '未安装'}</span></div><p className="mt-2 text-xs leading-5 text-slate-500">增加脸与身体的对应关系和精细人物分割，更适合多人密集、互相遮挡和复杂姿势。高级方案通过离线安装包部署，程序不会联网下载。</p><div className="mt-3 space-y-1 text-xs text-slate-500">{component?.advancedProvider && <p>当前运行：{component.advancedProvider}</p>}<p>当前占用：{component?.advancedSizeBytes ? formatStorageSize(component.advancedSizeBytes) : '未安装'}</p><p>离线包通常约 10–15 GB · 安装后约 20–30 GB · 建议预留 35 GB</p>{component?.advancedFreeBytes ? <p>目标磁盘剩余：{formatStorageSize(component.advancedFreeBytes)}</p> : null}<p className="break-all font-mono text-[11px] text-slate-400">{component?.advancedDataPath || '等待检测安装位置'}</p></div>{component?.advancedError && !advancedReady && <p className="mt-2 break-all rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-700">{component.advancedError}</p>}</div></div><div className="mt-4 flex flex-wrap justify-end gap-2"><button type="button" onClick={() => void checkRequirements()} disabled={Boolean(busy) || !baseAvailable} className="dialog-secondary disabled:opacity-45">检查本机条件</button>{advancedReady ? <><button type="button" onClick={() => void openFolder()} disabled={Boolean(busy)} className="dialog-secondary inline-flex items-center gap-2"><FolderOpen size={14}/>打开安装目录</button><button type="button" onClick={() => void install(true)} disabled={Boolean(busy)} className="dialog-secondary inline-flex items-center gap-2"><Wrench size={14}/>选择离线包修复</button><button type="button" onClick={() => void uninstall()} disabled={Boolean(busy)} className="rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">卸载高级引擎</button></> : needsRepair ? <button type="button" onClick={() => void install(true)} disabled={Boolean(busy)} className="dialog-primary inline-flex items-center gap-2"><Wrench size={14}/>选择离线包修复</button> : <button type="button" onClick={() => void install(false)} disabled={Boolean(busy) || !baseAvailable} className="dialog-primary disabled:opacity-45">选择离线安装包</button>}</div></article>
+    </div>
+    <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4"><h5 className="text-xs font-bold text-slate-700">离线安装方式</h5><ol className="mt-2 grid gap-2 text-xs leading-5 text-slate-500 md:grid-cols-4"><li><span className="font-bold text-slate-700">1. 准备电脑</span><span className="mt-1 block">离线安装 NVIDIA 驱动并启用 WSL 2；如有需要，完成系统重启。</span></li><li><span className="font-bold text-slate-700">2. 接入部署盘</span><span className="mt-1 block">从移动硬盘或部署盘取得与当前组件版本一致的高级引擎离线包。</span></li><li><span className="font-bold text-slate-700">3. 选择离线包</span><span className="mt-1 block">程序校验包版本、路径安全性和 VHDX 的 SHA256 后导入，不会访问网络。</span></li><li><span className="font-bold text-slate-700">4. 运行验证</span><span className="mt-1 block">实际启动 PairDETR 与 SAM 2.1；两者都可用后才显示安装完成。</span></li></ol><p className="mt-3 text-xs leading-5 text-slate-500">离线包可以放在任意磁盘，不要手动拆分模型或复制环境文件。修复时请重新接入原部署盘并选择同版本离线包。</p></div>
+    {busy && <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50 p-3" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.progress}>
+      <div className="flex justify-between gap-3 text-xs font-bold text-blue-700"><span>{progress.message || '正在处理高级引擎'}</span><span>{Math.round(progress.progress)}%</span></div>
+      <div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-600 transition-[width]" style={{ width: `${Math.max(2, progress.progress)}%` }} /></div>
+    </div>}
+  </section>;
+};
 
 const LogSettings = ({ onNotice }: { onNotice: (message: string, duration?: number) => void }) => {
   const appDialog = useAppDialog();
@@ -132,6 +206,7 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
   const [saving, setSaving] = useState(false);
   const update = <K extends keyof AppConfig,>(key: K, value: AppConfig[K]) => setDraft(current => ({ ...current, [key]: value }));
   const teamRetouchSettings = (draft.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || draft.personDetection;
+  const teamRetouchComponent = components.find(component => component.id === 'team-retouch');
   const researchSettings = (draft.componentSettings['research-tools'] as AppConfig['research'] | undefined) || draft.research;
   const updateTeamRetouchSettings = (next: AppConfig['personDetection']) => setDraft(current => ({ ...current, personDetection: next, componentSettings: { ...current.componentSettings, 'team-retouch': next } }));
   const updateResearchSettings = (next: AppConfig['research']) => setDraft(current => ({ ...current, research: next, componentSettings: { ...current.componentSettings, 'research-tools': next } }));
@@ -160,6 +235,12 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
     {activeSection === 'components' && <ComponentSettings components={components} installPath={componentInstallPath} loading={componentsLoading} onRefresh={onRefreshComponents} onComponentsChanged={onComponentsChanged} onNotice={onNotice}/>}
     {activeSection === 'team-retouch' && <>
     <section><h4 className="text-sm font-bold text-slate-800">多人修脸</h4><p className="mt-1 text-sm leading-6 text-slate-500">通常手机修图软件能导出的画质长边不超过 4000 像素，因此建议将单张工作图裁剪到 4000 像素以内。相邻人物会尽量合并到同一张工作图。</p></section>
+    <div className="border-t border-slate-100 pt-6"><TeamRetouchEngineSettings component={teamRetouchComponent} onRefresh={onRefreshComponents} onNotice={onNotice}/></div>
+    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">默认识别模式</h4><p className="mt-1 text-xs leading-5 text-slate-500">“多人修脸”界面仍可为单次任务临时切换。高级模式不可用时，只有“自动”会安全降级。</p><div className="mt-3 grid gap-3 md:grid-cols-3">{([
+      ['auto', '自动（推荐）', '高级可用时使用高级方案，否则使用基础方案完成任务。'],
+      ['basic', '基础模式', '固定使用 RTMDet，不启动 WSL，速度快且资源占用较低。'],
+      ['advanced', '高级模式', '必须使用 PairDETR + SAM2；不可用时停止并提示修复。'],
+    ] as const).map(([mode, label, description]) => <label key={mode} className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.backendMode === mode ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'} ${mode === 'advanced' && !teamRetouchComponent?.advancedAvailable ? 'opacity-60' : ''}`}><input type="radio" name="team-retouch-backend-mode" value={mode} checked={teamRetouchSettings.backendMode === mode} disabled={mode === 'advanced' && !teamRetouchComponent?.advancedAvailable} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, backendMode: mode })} className="mr-2"/><span className="font-bold text-slate-800">{label}</span><span className="mt-2 block text-xs leading-5 text-slate-500">{description}</span></label>)}</div></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">人物超过 4000 像素时</h4><div className="mt-3 grid gap-3 md:grid-cols-2"><label className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.oversizeCropMode === 'face-centered' ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="oversize-crop-mode" value="face-centered" checked={teamRetouchSettings.oversizeCropMode === 'face-centered'} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: 'face-centered' })} className="mr-2"/><span className="font-bold text-slate-800">保持 4000 像素（推荐）</span><span className="mt-2 block text-xs leading-5 text-slate-500">以脸为中心裁剪，可能只保留脸和部分身体；更适合手机传输与修图。</span></label><label className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.oversizeCropMode === 'expand' ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="oversize-crop-mode" value="expand" checked={teamRetouchSettings.oversizeCropMode === 'expand'} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: 'expand' })} className="mr-2"/><span className="font-bold text-slate-800">扩大裁剪，保留完整人物</span><span className="mt-2 block text-xs leading-5 text-slate-500">工作图可以超过 4000 像素，完整保留人物，但可能会使部分手机后期软件无法导出原尺寸而影响成图画质。</span></label></div></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">人物检测</h4><label className="settings-check"><input type="checkbox" checked={teamRetouchSettings.useGpu} onChange={event => updateTeamRetouchSettings({ ...teamRetouchSettings, useGpu: event.target.checked })}/><span><span className="block">优先使用 GPU 进行全身人物检测</span><span className="mt-1 block text-xs leading-5 text-slate-500">关闭时固定使用 CPU；开启后若显卡不支持或运行失败，组件会自动回退 CPU。</span></span></label></section>
     </>}

@@ -1605,7 +1605,7 @@ def team_patch_update(db, payload: dict):
     for source, target in mapping.items():
         if source in payload:
             fields.append(f"{target}=?")
-            values.append(str(payload[source] or ""))
+            values.append(None if source == "mergedVersionId" and not payload[source] else str(payload[source] or ""))
     if "editedPatchPath" in payload:
         fields.append("edited_patch_path=?")
         values.append(canonical_path(payload["editedPatchPath"]) if payload["editedPatchPath"] else None)

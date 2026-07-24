@@ -11,6 +11,7 @@ const {
   copyFileAtomic,
   copyPlannedFiles,
   moveFileAtomic,
+  movePathAtomic,
   removeCreatedPasteTargets,
   uniqueDestination,
 } = require('../electron/services/file-transfer-service.cjs');
@@ -51,6 +52,27 @@ const run = async () => {
     await moveFileAtomic(moveSource, moveTarget);
     assert.strictEqual(fs.existsSync(moveSource), false);
     assert.strictEqual(fs.readFileSync(moveTarget, 'utf8'), 'move');
+
+    const crossVolumeSource = path.join(root, 'cross-volume-source.bin');
+    const crossVolumeTarget = path.join(root, 'cross-volume-target.bin');
+    fs.writeFileSync(crossVolumeSource, 'cross-volume move');
+    const crossVolumeResult = await movePathAtomic(crossVolumeSource, crossVolumeTarget, {
+      renameFile: async () => { throw Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' }); },
+    });
+    assert.strictEqual(crossVolumeResult.copied, true);
+    assert.strictEqual(fs.existsSync(crossVolumeSource), false);
+    assert.strictEqual(fs.readFileSync(crossVolumeTarget, 'utf8'), 'cross-volume move');
+
+    const crossVolumeDirectorySource = path.join(root, 'cross-volume-directory-source');
+    const crossVolumeDirectoryTarget = path.join(root, 'cross-volume-directory-target');
+    fs.mkdirSync(path.join(crossVolumeDirectorySource, 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(crossVolumeDirectorySource, 'nested', 'photo.jpg'), 'directory move');
+    await movePathAtomic(crossVolumeDirectorySource, crossVolumeDirectoryTarget, {
+      renameFile: async () => { throw Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' }); },
+    });
+    assert.strictEqual(fs.existsSync(crossVolumeDirectorySource), false);
+    assert.strictEqual(fs.readFileSync(path.join(crossVolumeDirectoryTarget, 'nested', 'photo.jpg'), 'utf8'), 'directory move');
+    assert.strictEqual(fs.readdirSync(root).some(name => name.endsWith('.photoflow-part')), false);
 
     const cancelSource = path.join(root, 'cancel-source.bin');
     const cancelTarget = path.join(root, 'cancel-target.bin');

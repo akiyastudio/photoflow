@@ -338,11 +338,12 @@ const removeCreatedPasteTargets = async targets => {
 const moveFileAtomic = async (source, destination, options = {}) => {
   const sourceInfo = await assertRegularFile(source);
   const target = path.resolve(destination);
+  const renameFile = options.renameFile || fs.promises.rename.bind(fs.promises);
   if (options.isCancelled?.()) throw cancelledError();
   if (fs.existsSync(target)) throw Object.assign(new Error(`目标文件已存在：${path.basename(target)}`), { code: 'EEXIST' });
   await fs.promises.mkdir(path.dirname(target), { recursive: true });
   try {
-    await fs.promises.rename(sourceInfo.path, target);
+    await renameFile(sourceInfo.path, target);
     options.onProgress?.({ bytesCopied: sourceInfo.stat.size, totalBytes: sourceInfo.stat.size });
     return { source: sourceInfo.path, destination: target, bytes: sourceInfo.stat.size, copied: false };
   } catch (error) {
@@ -356,6 +357,43 @@ const moveFileAtomic = async (source, destination, options = {}) => {
   }
   await fs.promises.rm(sourceInfo.path, { force: true });
   return { ...result, copied: true };
+};
+
+const movePathAtomic = async (source, destination, options = {}) => {
+  const resolvedSource = path.resolve(source);
+  const target = path.resolve(destination);
+  const sourceStat = await fs.promises.stat(resolvedSource);
+  if (sourceStat.isFile()) return moveFileAtomic(resolvedSource, target, options);
+  if (!sourceStat.isDirectory()) throw new Error(`不是可移动的文件或文件夹：${path.basename(resolvedSource)}`);
+  if (fs.existsSync(target)) throw Object.assign(new Error(`目标已存在：${path.basename(target)}`), { code: 'EEXIST' });
+
+  await fs.promises.mkdir(path.dirname(target), { recursive: true });
+  const renameFile = options.renameFile || fs.promises.rename.bind(fs.promises);
+  try {
+    await renameFile(resolvedSource, target);
+    return { source: resolvedSource, destination: target, copied: false };
+  } catch (error) {
+    if (error?.code !== 'EXDEV') throw error;
+  }
+
+  // A directory cannot be renamed across volumes. Copy it under a hidden,
+  // unique name on the destination volume first, then expose it with a
+  // same-volume rename so an incomplete tree never appears at the final path.
+  const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.photoflow-part`);
+  try {
+    await fs.promises.cp(resolvedSource, temporary, {
+      recursive: true,
+      preserveTimestamps: true,
+      errorOnExist: true,
+      force: false,
+    });
+    await fs.promises.rename(temporary, target);
+  } catch (error) {
+    await fs.promises.rm(temporary, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+  await fs.promises.rm(resolvedSource, { recursive: true, force: false });
+  return { source: resolvedSource, destination: target, copied: true };
 };
 
 module.exports = {
@@ -373,6 +411,7 @@ module.exports = {
   copySmallFileAtomic,
   isInside,
   moveFileAtomic,
+  movePathAtomic,
   removeCreatedPasteTargets,
   throwIfCancelled,
   uniqueDestination,
