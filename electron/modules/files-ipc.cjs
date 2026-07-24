@@ -393,6 +393,8 @@ const registerFileOperationsIpc = context => {
         ? `无法读取源文件${affectedName ? `“${affectedName}”` : ''}，文件可能正被其他程序占用或当前账户没有读取权限`
         : transferStage === 'prepare-target'
           ? `无法在目标文件夹创建${affectedName ? `“${affectedName}”` : '文件'}，请检查目标文件夹权限`
+        : transferStage === 'sync-temporary'
+          ? `无法完成文件${affectedName ? `“${affectedName}”` : ''}的安全写入校验，源文件已保留`
         : transferStage === 'copy-data'
           ? `复制文件${affectedName ? `“${affectedName}”` : ''}时被系统拒绝，请关闭正在读取该文件的程序后重试`
           : transferStage === 'commit-target'

@@ -54,10 +54,12 @@ try {
   assert(componentBuilder.includes('zipfile.ZIP_DEFLATED'));
   assert(componentBuilder.includes("'--collect-binaries', 'onnxruntime'"));
   assert(!componentBuilder.includes("'--collect-all', 'onnxruntime'"));
+  assert(componentBuilder.includes('Git LFS pointer or incomplete'), 'component builds must reject an unsmudged model pointer');
 
   const advancedBridge = fs.readFileSync(path.join(repositoryRoot, 'components', 'team-retouch', 'advanced_bridge.py'), 'utf8');
   assert(advancedBridge.includes('DEFAULT_DISTROS = ("PhotoFlowNative", "PhotoflowLab")'), 'advanced backend must support both WSL distribution names');
   assert(advancedBridge.includes('WSL_E_DISTRO_NOT_FOUND'), 'advanced backend must fall through only when a distribution is absent');
+  assert(advancedBridge.includes('HCS/ERROR_PATH_NOT_FOUND'), 'advanced backend must skip a registered distro whose VHDX is missing');
   assert(advancedBridge.includes('PHOTOFLOW_WSL_DISTRO'), 'custom WSL distribution override must remain supported');
   assert(advancedBridge.includes('class AdvancedBatchSession'), 'batch retouch must keep advanced models resident for the batch lifetime');
   assert(advancedBridge.includes('payload_b64'), 'persistent WSL requests must preserve Unicode paths');

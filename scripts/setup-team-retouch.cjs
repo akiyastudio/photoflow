@@ -8,6 +8,7 @@ const venvPython = process.platform === 'win32'
   ? path.join(venvRoot, 'Scripts', 'python.exe')
   : path.join(venvRoot, 'bin', 'python');
 const systemPython = process.platform === 'win32' ? 'python' : 'python3';
+const modelPath = path.join(root, 'components', 'team-retouch', 'models', 'rtmdet-ins_m_640x640.onnx');
 
 const run = (command, args) => {
   const result = spawnSync(command, args, { cwd: root, stdio: 'inherit' });
@@ -17,6 +18,7 @@ const run = (command, args) => {
 
 try {
   if (process.platform !== 'win32') throw new Error('多人修脸的 DirectML 运行库目前只支持 Windows');
+  if (!fs.existsSync(modelPath) || fs.statSync(modelPath).size < 1024 * 1024) throw new Error('人物检测模型尚未通过 Git LFS 下载，请先执行 git lfs pull');
   if (!fs.existsSync(venvPython)) run(systemPython, ['-m', 'venv', venvRoot]);
   // OpenCV packages share the same cv2 directory. Uninstall every variant
   // before reinstalling the one supported build so stale DLLs cannot leak into

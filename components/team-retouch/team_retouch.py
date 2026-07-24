@@ -63,7 +63,27 @@ def asset_path(*parts):
 
 
 def model_path(name=RTMDET_MODEL_NAME):
-    return asset_path("models", name)
+    path = asset_path("models", name)
+    if path.stat().st_size < 1024 * 1024:
+        prefix = path.read_bytes()[:256]
+        if prefix.startswith(b"version https://git-lfs.github.com/spec/v1"):
+            raise RuntimeError("人物检测模型尚未通过 Git LFS 下载，请在项目目录执行 git lfs pull 后重试")
+        raise RuntimeError(f"人物检测模型不完整：{path.name}（仅 {path.stat().st_size} 字节）")
+    return path
+
+
+def advanced_fallback_reason(error):
+    detail = str(error)
+    normalized = detail.upper()
+    unavailable_markers = (
+        "WSL_E_DISTRO_NOT_FOUND", "HCS/ERROR_PATH_NOT_FOUND",
+        "HCS_E_PATH_NOT_FOUND", "E_ACCESSDENIED",
+        "高级后端不可用", "高级后端未安装",
+    )
+    if any(marker.upper() in normalized for marker in unavailable_markers):
+        return "高级后端未安装，已使用 RTMDet"
+    compact = " ".join(detail.split())
+    return f"高级后端异常，已使用 RTMDet：{compact[-240:]}"
 
 
 def create_session(preference="auto"):
@@ -491,7 +511,7 @@ def detect(input_path, output_dir, preference="auto", delivery_dir=None, deliver
         advanced_backend = True
         emit_progress(78, "人物识别完成，正在把图片切小")
     except Exception as error:
-        fallback_reasons.append(f"高级后端降级为 RTMDet：{error}")
+        fallback_reasons.append(advanced_fallback_reason(error))
         emit_progress(58, "正在使用基础识别结果把图片切小")
 
     for item in fused:

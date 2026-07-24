@@ -47,6 +47,16 @@ def decode_process_output(value):
     return value.decode("utf-8", errors="replace").strip()
 
 
+def is_unavailable_distro_error(error):
+    detail = str(error).upper()
+    return any(marker in detail for marker in (
+        "WSL_E_DISTRO_NOT_FOUND",
+        "HCS/ERROR_PATH_NOT_FOUND",
+        "HCS_E_PATH_NOT_FOUND",
+        "Wsl/Service/CreateInstance/MountDisk/HCS/ERROR_PATH_NOT_FOUND".upper(),
+    ))
+
+
 def run_process(args, timeout=900):
     result = subprocess.run(
         args, check=False, capture_output=True, timeout=timeout,
@@ -74,7 +84,7 @@ def run_shell(command, timeout=900):
         try:
             return run_process(["wsl.exe", "-d", candidate, "--", "bash", "-lc", command], timeout)
         except RuntimeError as error:
-            if "WSL_E_DISTRO_NOT_FOUND" not in str(error):
+            if not is_unavailable_distro_error(error):
                 raise
             missing_errors.append(f"{candidate}: {error}")
     raise RuntimeError("；".join(missing_errors) or "没有可用的多人修脸 WSL 发行版")
@@ -107,7 +117,7 @@ class _WslJsonService:
                     self.process = process
                     self.distro = candidate
                     return
-            if "WSL_E_DISTRO_NOT_FOUND" not in errors[-1]:
+            if not is_unavailable_distro_error(errors[-1]):
                 break
         raise RuntimeError("；".join(errors))
 
