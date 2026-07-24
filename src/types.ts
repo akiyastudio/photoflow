@@ -12,6 +12,7 @@ export type ProjectStatus = '未分类' | '策划中' | '待拍摄' | '后期中
 export interface TeamRetouchComponentSettings {
   useGpu: boolean;
   oversizeCropMode: 'face-centered' | 'expand';
+  backendMode: 'auto' | 'basic' | 'advanced';
 }
 export interface ResearchToolsComponentSettings {
   defaultDir: string;
@@ -217,8 +218,8 @@ export interface TeamPatchTask {
 
 export interface TeamPatchBundle extends MediaVersionBundle {
   tasks: TeamPatchTask[];
-  detection?: { detector: string; backend?: 'gpu' | 'cpu' | string; provider?: string; width: number; height: number; personCount?: number; workTileEdge?: number; needsReviewCount?: number; fallbackReason?: string };
-  merge?: { outputPath: string; mergedCount: number; conflictPixels: number; seamScore: number; needsReview?: boolean };
+  detection?: { detector: string; backend?: 'gpu' | 'cpu' | string; provider?: string; requestedMode?: 'auto' | 'basic' | 'advanced'; advancedBackend?: boolean; width: number; height: number; personCount?: number; workTileEdge?: number; needsReviewCount?: number; fallbackReason?: string };
+  merge?: { outputPath: string; outputProgressId?: string; versionId?: string; mergedCount: number; conflictPixels: number; seamScore: number; needsReview?: boolean };
 }
 
 export interface TeamPatchReturnMatch {
@@ -248,7 +249,7 @@ export interface TeamPatchReturnBatchResult {
   missingTaskCount?: number;
   mergedCount?: number;
   matches: TeamPatchReturnMatch[];
-  merges: Array<{ photoId: string; photoName: string; success: boolean; skipped?: boolean; outputPath?: string; needsReview?: boolean; error?: string }>;
+  merges: Array<{ photoId: string; photoName: string; relativePath?: string; success: boolean; skipped?: boolean; outputPath?: string; versionId?: string; baseVersionId?: string; needsReview?: boolean; error?: string }>;
   error?: string;
 }
 
@@ -269,10 +270,15 @@ export interface ComponentStatus {
   advancedAvailable?: boolean;
   mergeAvailable?: boolean;
   provider?: string;
+  advancedProvider?: string;
   providers?: string[];
   runtimeError?: string;
   gpuError?: string;
   advancedError?: string;
+  advancedDataPath?: string;
+  advancedSizeBytes?: number;
+  advancedFreeBytes?: number;
+  advancedState?: 'ready' | 'not-installed' | 'repair-needed';
 }
 
 export interface ProjectFileOperationProgress {
@@ -329,6 +335,11 @@ export interface IElectronAPI {
   getCursorScreenPoint: () => Promise<{ x: number; y: number }>;
   installComponent: (componentId: string) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>;
   uninstallComponent: (componentId: string) => Promise<{ success: boolean; error?: string }>;
+  checkTeamRetouchAdvancedRequirements: () => Promise<{ success: boolean; message?: string; error?: string }>;
+  installTeamRetouchAdvanced: (options?: { repair?: boolean }) => Promise<{ success: boolean; cancelled?: boolean; restartRequired?: boolean; error?: string }>;
+  uninstallTeamRetouchAdvanced: () => Promise<{ success: boolean; error?: string }>;
+  openTeamRetouchAdvancedFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
+  onTeamRetouchAdvancedProgress: (callback: (value: { phase: string; progress?: number; message: string }) => void) => () => void;
   getDrives: () => Promise<string[]>;
   setTheme: (theme: Theme) => Promise<void>;
   minimizeWindow: () => void;
@@ -373,17 +384,20 @@ export interface IElectronAPI {
   compareVersionFolders: (workspacePath: string, status: ProjectStatus, projectName: string, referenceRelativePath: string, sourceRelativePath: string) => Promise<{ success: boolean; matches: Array<{ source: string; reference: string; target: string; confidence: string; distance: number }>; unmatched: string[]; unmatchedReference: string[]; error?: string }>;
   commitVersionBatch: (workspacePath: string, status: ProjectStatus, projectName: string, request: { folderA: string; folderB: string; importKey: string; displayName?: string; renameSources?: boolean; copyMissingReferences?: string[]; matches: Array<{ reference: string; source: string; target?: string; distance: number; confidence: string }> }) => Promise<{ success: boolean; alreadyCommitted?: boolean; referenceBatch?: VersionBatch; batch?: VersionBatch; renamedCount?: number; renameErrors?: Array<{ source: string; target: string; error: string }>; copiedMissingCount?: number; copyMissingErrors?: Array<{ name: string; error: string }>; error?: string }>;
   getTeamPatches: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<TeamPatchBundle>;
-  detectTeamPatchPeople: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; baseVersionId: string }) => Promise<TeamPatchBundle>;
+  detectTeamPatchPeople: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; baseVersionId: string; backendMode?: 'auto' | 'basic' | 'advanced' }) => Promise<TeamPatchBundle>;
   onTeamPatchDetectionProgress: (callback: (value: { photoId: string; baseVersionId: string; progress: number; message: string }) => void) => () => void;
-  detectTeamPatchBatch: (workspacePath: string, status: ProjectStatus, name: string, request: { relativePaths: string[] }) => Promise<{ success: boolean; persistentBackend?: boolean; results: Array<{ relativePath: string; name: string; success: boolean; photoId?: string; baseVersionId?: string; personCount?: number; workTileCount?: number; error?: string }>; error?: string }>;
+  detectTeamPatchBatch: (workspacePath: string, status: ProjectStatus, name: string, request: { relativePaths: string[]; backendMode?: 'auto' | 'basic' | 'advanced' }) => Promise<{ success: boolean; persistentBackend?: boolean; requestedMode?: string; advancedUsedCount?: number; fallbackCount?: number; results: Array<{ relativePath: string; name: string; success: boolean; photoId?: string; baseVersionId?: string; personCount?: number; workTileCount?: number; deliveryDirectory?: string; detector?: string; fallbackReason?: string; error?: string }>; error?: string }>;
   onTeamPatchBatchProgress: (callback: (value: { itemIndex: number; itemCount: number; relativePath: string; itemName: string; progress: number; message: string }) => void) => () => void;
   updateTeamPatch: (workspacePath: string, request: { taskId: string; personName?: string; assignee?: string; needsReview?: boolean; reviewReason?: string }) => Promise<{ success: boolean; tasks: TeamPatchTask[]; error?: string }>;
   cleanupTeamPatches: (workspacePath: string, request: { photoId: string; baseVersionId: string }) => Promise<TeamPatchBundle & { removedArtifactCount?: number }>;
   uploadTeamPatch: (workspacePath: string, request: { photoId: string; taskId: string }) => Promise<{ success: boolean; cancelled?: boolean; tasks: TeamPatchTask[]; error?: string }>;
-  returnTeamPatchBatch: (workspacePath: string, status: ProjectStatus, name: string, request: { relativePaths: string[] }) => Promise<TeamPatchReturnBatchResult>;
+  removeTeamPatchUpload: (workspacePath: string, request: { photoId: string; taskId: string }) => Promise<{ success: boolean; tasks: TeamPatchTask[]; removedArtifactCount?: number; error?: string }>;
+  selectTeamPatchReturns: (projectName: string) => Promise<{ success: boolean; cancelled?: boolean; files?: string[]; error?: string }>;
+  returnTeamPatchBatch: (workspacePath: string, status: ProjectStatus, name: string, request: { relativePaths: string[]; returnedFiles?: string[]; outputProgressId?: string }) => Promise<TeamPatchReturnBatchResult>;
   onTeamPatchReturnBatchProgress: (callback: (value: { phase: 'matching' | 'importing' | 'merging' | 'complete' | string; progress: number; message: string }) => void) => () => void;
   openTeamPatch: (filePath: string) => Promise<{ success: boolean; error?: string }>;
-  mergeTeamPatches: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; baseVersionId: string; versionName?: string }) => Promise<TeamPatchBundle>;
+  openTeamPatchFolder: (filePath: string) => Promise<{ success: boolean; path?: string; error?: string }>;
+  mergeTeamPatches: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; baseVersionId: string; outputProgressId: string; versionName?: string }) => Promise<TeamPatchBundle>;
   getMediaThumbnail: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache'], requestedSize?: number, priority?: 0 | 1 | 2 | 3, queueOrder?: number) => Promise<{ success: boolean; taskId?: string; state?: ThumbnailState; previewUrl?: string; mediaUrl?: string; usingImportedPreview?: boolean; importedVideoWithoutPreview?: boolean; cacheLayer?: 'memory' | 'disk' | 'source'; error?: string }>;
   cancelMediaThumbnail: (filePath: string, requestedSize?: number) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
   onThumbnailStateChanged: (callback: (update: { filePath: string; state: ThumbnailState; previewUrls?: Partial<Record<'small' | 'medium' | 'large', string>>; error?: string }) => void) => () => void;

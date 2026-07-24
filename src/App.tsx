@@ -92,7 +92,7 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   homeOrder: DEFAULT_HOME_ORDER,
   birthdayEnabled: true,
   componentSettings: {
-    'team-retouch': { useGpu: true, oversizeCropMode: 'face-centered' },
+    'team-retouch': { useGpu: true, oversizeCropMode: 'face-centered', backendMode: 'auto' },
     'research-tools': {
       defaultDir: `${userPath}/Downloads`,
       sensitivity: 'standard',
@@ -127,7 +127,8 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   },
   personDetection: {
     useGpu: true,
-    oversizeCropMode: 'face-centered'
+    oversizeCropMode: 'face-centered',
+    backendMode: 'auto'
   },
   smartMatch: {
     imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME,
@@ -349,6 +350,7 @@ const App: React.FC = () => {
             const personDetectionSettings: AppConfig['personDetection'] = {
               useGpu: storedPersonDetection?.useGpu ?? fileConfig.personDetection?.useGpu ?? true,
               oversizeCropMode: storedPersonDetection?.oversizeCropMode ?? fileConfig.personDetection?.oversizeCropMode ?? 'face-centered',
+              backendMode: storedPersonDetection?.backendMode ?? fileConfig.personDetection?.backendMode ?? 'auto',
             };
             const configuredImageSource = fileConfig.smartMatch?.imageSourceFolderName;
             const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;
@@ -650,7 +652,7 @@ const App: React.FC = () => {
         })}</div>}
         {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={refreshComponents} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} onNotice={showNotice}/>}
         {activeTab === 'about' && <AboutPage/>}
-        {openProjects.map(project => { const active = activeTab === 'project' && selectedProject?.path === project.path; return <div key={project.path} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace active={active} project={project} workspacePath={config.workspacePath} installedComponentIds={installedComponentIds} initialPanel={projectOperations[project.path] ?? null} importConfig={config.smartImport} brollConfig={config.brollImport} fileImportConfig={config.fileImport} conversionConfig={config.imageConversion} matchConfig={config.smartMatch} mediaCacheConfig={config.mediaCache} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onMediaCacheConfigChange={(mediaCache: AppConfig['mediaCache']) => handleConfigUpdate({ ...config, mediaCache })} onNotice={showNotice} onProjectMoved={nextProject => { setOpenProjects(current => current.map(item => item.path === project.path ? nextProject : item)); setProjectOperations(current => { if (nextProject.path === project.path) return current; const next = { ...current, [nextProject.path]: current[project.path] ?? null }; delete next[project.path]; return next; }); setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { closeProjectTab(project.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} /></div>; })}
+        {openProjects.map(project => { const active = activeTab === 'project' && selectedProject?.path === project.path; return <div key={project.path} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace active={active} project={project} workspacePath={config.workspacePath} installedComponentIds={installedComponentIds} teamRetouchStatus={components.find(component => component.id === 'team-retouch')} teamRetouchSettings={(config.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || config.personDetection} initialPanel={projectOperations[project.path] ?? null} importConfig={config.smartImport} brollConfig={config.brollImport} fileImportConfig={config.fileImport} conversionConfig={config.imageConversion} matchConfig={config.smartMatch} mediaCacheConfig={config.mediaCache} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onMediaCacheConfigChange={(mediaCache: AppConfig['mediaCache']) => handleConfigUpdate({ ...config, mediaCache })} onNotice={showNotice} onProjectMoved={nextProject => { setOpenProjects(current => current.map(item => item.path === project.path ? nextProject : item)); setProjectOperations(current => { if (nextProject.path === project.path) return current; const next = { ...current, [nextProject.path]: current[project.path] ?? null }; delete next[project.path]; return next; }); setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { closeProjectTab(project.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} /></div>; })}
 
         {activeTab === 'converter' && (
           <RequirePlugin scriptName="png_to_jpg.py" title="PNG 转 JPG" desc="需要该引擎来执行图片格式的批量转换。">

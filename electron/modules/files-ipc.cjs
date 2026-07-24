@@ -168,28 +168,35 @@ const registerFileOperationsIpc = context => {
           }
         }
         if (!clipboardSnapshot?.sources?.length) throw new Error('剪贴板中没有文件或文件夹');
-        const folderConflicts = [];
+        const pasteConflicts = [];
         for (const source of clipboardSnapshot.sources) {
-          if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) continue;
+          if (!fs.existsSync(source)) continue;
           const destination = path.join(destinationDir, path.basename(source));
           if (path.resolve(destination) === path.resolve(source) || !fs.existsSync(destination)) continue;
-          if (fs.statSync(destination).isDirectory()) folderConflicts.push({ source, destination });
+          pasteConflicts.push({ source, destination, isDirectory: fs.statSync(destination).isDirectory() });
         }
-        if (folderConflicts.length) {
-          const names = folderConflicts.slice(0, 6).map(item => `“${path.basename(item.destination)}”`).join('、');
-          const more = folderConflicts.length > 6 ? ` 等 ${folderConflicts.length} 个文件夹` : '';
+        let replacedConflicts = [];
+        if (pasteConflicts.length) {
+          const names = pasteConflicts.slice(0, 6).map(item => `“${path.basename(item.destination)}”`).join('、');
+          const fileCount = pasteConflicts.filter(item => !item.isDirectory).length;
+          const folderCount = pasteConflicts.length - fileCount;
+          const conflictSummary = [fileCount ? `${fileCount} 个文件` : '', folderCount ? `${folderCount} 个文件夹` : ''].filter(Boolean).join('和');
+          const more = pasteConflicts.length > 6 ? ` 等 ${conflictSummary}` : '';
           const confirmation = await dialog.showMessageBox(mainWindow, {
             type: 'warning',
-            title: '目标位置已有同名文件夹',
+            title: '目标位置已有同名项目',
             message: `目标位置已有 ${names}${more}`,
-            detail: '继续后，目标位置原有的同名文件夹会先移入系统回收站，再粘贴剪贴板中的文件夹。此操作不会直接永久删除原文件夹。',
-            buttons: ['替换并继续', '取消'],
+            detail: `发现 ${conflictSummary}。选择替换后，目标位置原有的同名项目会先移入系统回收站；选择保留两者时，新项目会自动重命名。`,
+            buttons: ['替换并继续', '保留两者', '取消'],
             defaultId: 1,
-            cancelId: 1,
+            cancelId: 2,
             noLink: true,
           });
-          if (confirmation.response !== 0) return { success: false, cancelled: true, count: 0 };
-          for (const conflict of folderConflicts) await recycleBinService.trash(conflict.destination);
+          if (confirmation.response === 2) return { success: false, cancelled: true, count: 0 };
+          if (confirmation.response === 0) {
+            for (const conflict of pasteConflicts) await recycleBinService.trash(conflict.destination);
+            replacedConflicts = pasteConflicts;
+          }
         }
         const operationId = crypto.randomUUID();
         const job = { cancelled: false, finishing: false };
@@ -258,7 +265,7 @@ const registerFileOperationsIpc = context => {
           if (count) await pushUndoOperation(clipboardSnapshot.operation === 'cut'
             ? { kind: 'move', moves: topLevelTargets }
             : { kind: 'remove-created', paths: topLevelTargets.map(item => item.destination), label: '粘贴' });
-          return { success: true, count, operationId, replacedCount: folderConflicts.length, replacedNames: folderConflicts.map(item => path.basename(item.destination)) };
+          return { success: true, count, operationId, replacedCount: replacedConflicts.length, replacedNames: replacedConflicts.map(item => path.basename(item.destination)) };
         } catch (error) {
           // Once cut finalization starts, keeping the completed copies is the only
           // data-safe fallback if removing a source fails partway through.

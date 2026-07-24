@@ -1,6 +1,72 @@
 const registerSystemIpc = context => {
   const { Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, undefined, writeLog } = context;
   const activePythonTasks = new Map();
+  let advancedOperation = null;
+
+  const advancedStateRoot = () => path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'PhotoFlow', 'components', 'team-retouch', 'advanced');
+  const defaultAdvancedInstallRoot = () => path.join(advancedStateRoot(), 'wsl', 'PhotoFlowNative');
+  const legacyAdvancedInstallRoot = () => path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'PhotoFlow', 'wsl', 'PhotoFlowNative');
+  const readAdvancedStorage = async () => {
+    let installRoot = '';
+    try {
+      const raw = await fs.promises.readFile(path.join(advancedStateRoot(), 'install-state.json'), 'utf8');
+      installRoot = String(JSON.parse(raw.replace(/^\uFEFF/, '')).installRoot || '');
+    } catch { /* fall through to known locations */ }
+    const candidates = [installRoot, defaultAdvancedInstallRoot(), legacyAdvancedInstallRoot()].filter(Boolean);
+    let vhdPath = '';
+    let sizeBytes = 0;
+    for (const candidate of candidates) {
+      const possibleVhd = path.join(candidate, 'ext4.vhdx');
+      const stat = await fs.promises.stat(possibleVhd).catch(() => null);
+      if (!stat?.isFile()) continue;
+      installRoot = candidate;
+      vhdPath = possibleVhd;
+      sizeBytes = stat.size;
+      break;
+    }
+    installRoot ||= defaultAdvancedInstallRoot();
+    let probePath = installRoot;
+    while (!fs.existsSync(probePath) && path.dirname(probePath) !== probePath) probePath = path.dirname(probePath);
+    const disk = await fs.promises.statfs(probePath).catch(() => null);
+    const freeBytes = disk ? Number(disk.bavail) * Number(disk.bsize) : 0;
+    return { installRoot, vhdPath, sizeBytes, freeBytes };
+  };
+
+  const resolveAdvancedInstaller = (component, fileName) => app.isPackaged
+    ? path.join(component.path, 'advanced-installer', fileName)
+    : path.resolve(component.path, '..', '..', 'scripts', fileName);
+
+  const installerProgress = message => {
+    const text = String(message || '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '').trim();
+    if (!text) return null;
+    const markers = [
+      ['Checking WSL', 2, '正在检查 WSL 2、NVIDIA 驱动和磁盘空间'],
+      ['Extracting verified package', 8, '正在解压高级引擎离线包'],
+      ['Verifying package SHA256', 48, '正在校验离线包完整性与版本'],
+      ['Replacing the registered', 65, '正在替换需要修复的高级环境'],
+      ['Installing PhotoFlowNative', 72, '正在安装 PhotoFlowNative 虚拟磁盘'],
+      ['offline environment is ready', 97, '高级引擎离线环境准备完成'],
+    ];
+    const marker = markers.find(([needle]) => text.includes(needle));
+    return marker ? { phase: 'installing', progress: marker[1], message: marker[2] } : null;
+  };
+
+  const runAdvancedPowerShell = (event, scriptPath, args = []) => new Promise((resolve, reject) => {
+    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, ...args], {
+      cwd: path.dirname(scriptPath), windowsHide: true,
+    });
+    let output = '';
+    const consume = chunk => {
+      const text = chunk.toString('utf8');
+      output = (output + text).slice(-16000);
+      const progress = installerProgress(text);
+      if (progress && !event.sender.isDestroyed()) event.sender.send('team-retouch-advanced-progress', progress);
+    };
+    child.stdout.on('data', consume);
+    child.stderr.on('data', consume);
+    child.once('error', reject);
+    child.once('exit', code => code === 0 ? resolve(output) : reject(new Error(output.trim() || `高级环境操作失败（退出代码 ${code}）`)));
+  });
 
   ipcMain.on('renderer-error-log', (_event, message, details) => {
     writeLog('error', `Renderer: ${String(message || '未知错误').slice(0, 500)}`, String(details || '').slice(0, 4000));
@@ -39,14 +105,17 @@ const registerSystemIpc = context => {
     const gpu = components.find(component => component.id === 'team-retouch');
     if (gpu?.installed) {
       try {
-        const probe = await pluginService.runJson('team-retouch', ['probe'], 15000);
+        // A cold WSL start can take longer than 15 seconds even when the
+        // advanced runtime is healthy. Avoid caching a false "not installed" state.
+        const probe = await pluginService.runJson('team-retouch', ['probe'], 60000);
         const runtimeAvailable = Boolean(probe.componentAvailable ?? probe.cpuAvailable);
         Object.assign(gpu, {
           runtimeAvailable,
           gpuAvailable: Boolean(probe.gpuAvailable),
           advancedAvailable: Boolean(probe.advancedAvailable),
           mergeAvailable: Boolean(probe.mergeAvailable),
-          provider: probe.advancedAvailable ? `${probe.provider || 'ONNX'} + PairDETR/SAM 2.1` : (probe.provider || ''),
+          provider: probe.provider || '',
+          advancedProvider: probe.advancedAvailable ? 'PairDETR + SAM 2.1 · NVIDIA CUDA' : '',
           providers: Array.isArray(probe.providers) ? probe.providers : [],
           runtimeError: runtimeAvailable ? '' : (probe.runtimeError || probe.error || ''),
           gpuError: probe.gpuAvailable || !runtimeAvailable ? '' : (probe.gpuError || probe.error || ''),
@@ -55,6 +124,13 @@ const registerSystemIpc = context => {
       } catch (error) {
         Object.assign(gpu, { runtimeAvailable: false, provider: '', providers: [], runtimeError: error.message || String(error) });
       }
+      const storage = await readAdvancedStorage();
+      Object.assign(gpu, {
+        advancedDataPath: storage.installRoot,
+        advancedSizeBytes: storage.sizeBytes,
+        advancedFreeBytes: storage.freeBytes,
+        advancedState: gpu.advancedAvailable ? 'ready' : storage.vhdPath ? 'repair-needed' : 'not-installed',
+      });
     }
     return { success: true, components, installPath: pluginService.installRoot };
   });
@@ -184,6 +260,88 @@ const registerSystemIpc = context => {
       await shell.trashItem(componentPath);
       writeLog('info', 'Component uninstalled', { componentId, componentPath });
       return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('team-retouch-advanced-preflight', async event => {
+    if (advancedOperation) return { success: false, error: '另一项高级环境操作正在进行' };
+    try {
+      const component = (await pluginService.listWithSizes()).find(item => item.id === 'team-retouch');
+      if (!component?.installed) throw new Error('请先安装“多人修脸”基础组件');
+      const installer = resolveAdvancedInstaller(component, 'setup-team-retouch-advanced.ps1');
+      if (!(await fs.promises.stat(installer).catch(() => null))?.isFile()) throw new Error('高级环境离线安装器未随组件提供');
+      advancedOperation = runAdvancedPowerShell(event, installer, ['-CheckOnly']);
+      const output = await advancedOperation;
+      const message = output.split(/\r?\n/).find(line => line.includes('OFFLINE_PREFLIGHT_OK'))?.split('|').slice(1).join(' · ') || 'WSL 2、NVIDIA 显卡与磁盘空间检查通过';
+      return { success: true, message };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    } finally {
+      advancedOperation = null;
+    }
+  });
+
+  ipcMain.handle('team-retouch-advanced-install', async (event, options = {}) => {
+    if (advancedOperation) return { success: false, error: '另一项高级环境操作正在进行' };
+    try {
+      const component = (await pluginService.listWithSizes()).find(item => item.id === 'team-retouch');
+      if (!component?.installed) throw new Error('请先安装“多人修脸”基础组件');
+      const installer = resolveAdvancedInstaller(component, 'setup-team-retouch-advanced.ps1');
+      if (!(await fs.promises.stat(installer).catch(() => null))?.isFile()) throw new Error('高级环境安装器未随组件提供，请重新构建或安装组件');
+      const choice = await dialog.showOpenDialog(mainWindow, {
+        title: options.repair ? '选择用于修复的高级引擎离线包' : '选择多人修脸高级引擎离线包',
+        properties: ['openFile'],
+        filters: [{ name: 'PhotoFlow 高级引擎离线包', extensions: ['zip', 'json', 'vhdx'] }],
+      });
+      if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true };
+      const packagePath = path.resolve(choice.filePaths[0]);
+      const installRoot = defaultAdvancedInstallRoot();
+      if (!event.sender.isDestroyed()) event.sender.send('team-retouch-advanced-progress', { phase: 'starting', progress: 1, message: '正在读取高级引擎离线包' });
+      advancedOperation = runAdvancedPowerShell(event, installer, ['-InstallRoot', installRoot, '-PackagePath', packagePath, '-ExpectedComponentVersion', component.version, ...(options.repair ? ['-Repair'] : [])]);
+      await advancedOperation;
+      if (!event.sender.isDestroyed()) event.sender.send('team-retouch-advanced-progress', { phase: 'verifying', progress: 98, message: '正在实际加载 PairDETR 与 SAM 2.1' });
+      const runtimeProbe = await pluginService.runJson('team-retouch', ['probe-advanced-runtime'], 4 * 60 * 1000);
+      if (!runtimeProbe.pairDetrReady || !runtimeProbe.sam2Ready) throw new Error('高级模型服务没有全部进入可用状态');
+      if (!event.sender.isDestroyed()) event.sender.send('team-retouch-advanced-progress', { phase: 'complete', progress: 100, message: '高级引擎安装并验证完成' });
+      writeLog('info', 'Team retouch advanced environment installed from offline package', { installRoot, packagePath, repair: Boolean(options.repair) });
+      return { success: true };
+    } catch (error) {
+      writeLog('error', 'Unable to install team retouch advanced environment', { error: error.message || String(error) });
+      return { success: false, error: error.message || String(error) };
+    } finally {
+      advancedOperation = null;
+    }
+  });
+
+  ipcMain.handle('team-retouch-advanced-uninstall', async event => {
+    if (advancedOperation) return { success: false, error: '另一项高级环境操作正在进行' };
+    try {
+      const component = (await pluginService.listWithSizes()).find(item => item.id === 'team-retouch');
+      if (!component?.installed) throw new Error('多人修脸组件未安装');
+      const uninstaller = resolveAdvancedInstaller(component, 'uninstall-team-retouch-advanced.ps1');
+      if (!(await fs.promises.stat(uninstaller).catch(() => null))?.isFile()) throw new Error('高级环境卸载器不存在');
+      if (!event.sender.isDestroyed()) event.sender.send('team-retouch-advanced-progress', { phase: 'uninstalling', progress: 20, message: '正在停止并删除高级引擎' });
+      advancedOperation = runAdvancedPowerShell(event, uninstaller);
+      await advancedOperation;
+      writeLog('info', 'Team retouch advanced environment uninstalled');
+      return { success: true };
+    } catch (error) {
+      writeLog('error', 'Unable to uninstall team retouch advanced environment', { error: error.message || String(error) });
+      return { success: false, error: error.message || String(error) };
+    } finally {
+      advancedOperation = null;
+    }
+  });
+
+  ipcMain.handle('team-retouch-advanced-open-folder', async () => {
+    try {
+      const storage = await readAdvancedStorage();
+      await fs.promises.mkdir(storage.installRoot, { recursive: true });
+      const error = await shell.openPath(storage.installRoot);
+      if (error) throw new Error(error);
+      return { success: true, path: storage.installRoot };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }

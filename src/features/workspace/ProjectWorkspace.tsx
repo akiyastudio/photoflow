@@ -7,7 +7,7 @@ import { useAppDialog } from '../../components/AppDialogProvider';
 import { MediaCacheSettings } from '../settings/SettingsFeature';
 import { ConverterView, ImportCard, MatchView } from '../tools/ToolViews';
 import { PROJECT_STATUS_LABELS } from '../../types';
-import type { AppConfig, MediaMetadataField, MediaVersion, MediaVersionBundle, ProgressFolder, ProjectFileEntry, ThumbnailState, WorkspaceProject } from '../../types';
+import type { AppConfig, ComponentStatus, MediaMetadataField, MediaVersion, MediaVersionBundle, ProgressFolder, ProjectFileEntry, ThumbnailState, WorkspaceProject } from '../../types';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
 
 const CONTEXT_MENU_VIEWPORT_MARGIN = 8;
@@ -357,11 +357,13 @@ const formatBatchRenameLetter = (index: number, letterCase: 'upper' | 'lower') =
 
 const PROJECT_STATUSES: Array<WorkspaceProject['status']> = ['策划中', '待拍摄', '后期中', '已归档'];
 
-const ProjectWorkspace = ({ active, project, workspacePath, installedComponentIds, initialPanel, importConfig, brollConfig, fileImportConfig, conversionConfig, matchConfig, mediaCacheConfig, onImportConfigChange, onMatchConfigChange, onMediaCacheConfigChange, onNotice, onProjectMoved, onDeleted }: {
+const ProjectWorkspace = ({ active, project, workspacePath, installedComponentIds, teamRetouchStatus, teamRetouchSettings, initialPanel, importConfig, brollConfig, fileImportConfig, conversionConfig, matchConfig, mediaCacheConfig, onImportConfigChange, onMatchConfigChange, onMediaCacheConfigChange, onNotice, onProjectMoved, onDeleted }: {
   active: boolean;
   project: WorkspaceProject;
   workspacePath: string;
   installedComponentIds: ReadonlySet<string>;
+  teamRetouchStatus?: ComponentStatus;
+  teamRetouchSettings: AppConfig['personDetection'];
   initialPanel: 'import' | 'broll' | 'match' | null;
   importConfig: AppConfig['smartImport'];
   brollConfig: AppConfig['brollImport'];
@@ -1648,7 +1650,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         ? `已移入回收站 ${result.count} 个项目`
         : operation === 'paste'
           ? result.replacedCount
-            ? `已粘贴 ${result.count} 个项目；${result.replacedCount} 个同名文件夹的原内容已移入回收站`
+            ? `已粘贴 ${result.count} 个项目；${result.replacedCount} 个同名项目的原内容已移入回收站`
             : `已粘贴 ${result.count} 个项目`
           : '操作完成');
       setSelectedPaths([]);
@@ -2322,7 +2324,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         <section className="mt-5 border-t border-slate-200 pt-5"><h4 className="mb-2 text-sm font-bold text-slate-700">预览</h4><div className="max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50">{batchRenameEntries.slice(0, 20).map((entry, index) => <div key={entry.path} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 border-b border-slate-200 px-3 py-2 text-xs last:border-0"><span className="truncate text-slate-500" title={entry.name}>{entry.name}</span><ArrowRight size={13} className="text-slate-300"/><span className="truncate font-medium text-slate-700" title={batchRenameNames[index]}>{batchRenameNames[index] || '（空文件名）'}</span></div>)}{batchRenameEntries.length > 20 && <p className="px-3 py-2 text-center text-xs text-slate-400">另有 {batchRenameEntries.length - 20} 个项目</p>}</div></section>
       </div><footer className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-5 py-4"><p className="text-xs text-slate-500">重命名使用临时文件过渡，不会因名称互换产生冲突。</p><div className="flex gap-2"><button onClick={() => setBatchRenameOpen(false)} className="dialog-secondary">取消</button><button onClick={commitBatchRename} disabled={!batchRenameNames.length || batchRenameNames.some(name => !name) || batchExtensionMode === 'replace' && !batchExtensionValue.trim() || new Set(batchRenameNames.map(name => name.toLocaleLowerCase())).size !== batchRenameNames.length || renameCommitRef.current} className="dialog-primary">批量重命名</button></div></footer></div></div>}
       {versionEntry && <VersionManager entry={versionEntry} workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} onNotice={onNotice} onVersionStateChanged={() => { void loadFinalVersionSummary(); if (finalViewOpen) void loadFinalViewEntries(); }} onClose={() => { setVersionEntry(null); void loadFinalVersionSummary(); if (finalViewOpen) void loadFinalViewEntries(); }}/>} 
-      {teamRetouchAvailable && teamRetouchEntries.length > 0 && <TeamRetouchManager entries={teamRetouchEntries} workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} onNotice={onNotice} onClose={() => setTeamRetouchEntries([])}/>}
+      {teamRetouchAvailable && teamRetouchEntries.length > 0 && <TeamRetouchManager entries={teamRetouchEntries} workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} defaultBackendMode={teamRetouchSettings.backendMode || 'auto'} componentStatus={teamRetouchStatus} onNotice={onNotice} onClose={() => setTeamRetouchEntries([])}/>}
 
       <section className="flex min-h-[220px] min-w-0 flex-auto flex-col">
         <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={event => (event.target as HTMLElement).closest<HTMLElement>('[data-entry-path]')?.focus({ preventScroll: true })} onPointerDown={startSelectionDrag} onPointerMove={updateSelectionDrag} onPointerUp={finishSelectionDrag} onPointerCancel={finishSelectionDrag} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} className={`relative -mx-6 min-h-[220px] flex-1 select-none px-6 outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>

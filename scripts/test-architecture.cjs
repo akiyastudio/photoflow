@@ -16,6 +16,7 @@ const settingsFeature = read('src/features/settings/SettingsFeature.tsx');
 const requirePlugin = read('src/features/plugins/RequirePlugin.tsx');
 const recycleBinFailure = read('src/utils/recycleBinFailure.ts');
 const recycleBinService = read('electron/services/recycle-bin-service.cjs');
+const filesIpc = read('electron/modules/files-ipc.cjs');
 const nativeRecycleBinService = read('electron/native/RecycleBinService.cs');
 const packageJson = JSON.parse(read('package.json'));
 assert(/\btsc\s+-b\b/.test(packageJson.scripts.build), 'production build must type-check referenced TypeScript projects');
@@ -44,6 +45,8 @@ assert(projectWorkspace.includes('isRecycleBinFailure(result.error, result.error
 assert(/missingDirectory && !requestedPath[\s\S]*?onDeleted\(\)/.test(projectWorkspace), 'an externally deleted open project must close its stale tab');
 assert(nativeRecycleBinService.includes('EnsureRecycleCapacity(sourcePath, allowUnknownCapacity)'), 'native trash must reject items that exceed the per-volume Recycle Bin capacity');
 assert(nativeRecycleBinService.includes('sourceBytes >= capacityBytes'), 'native trash capacity preflight must fail closed before Windows offers permanent deletion');
+assert(filesIpc.includes("buttons: ['替换并继续', '保留两者', '取消']"), 'paste conflicts must let the user replace, keep both, or cancel');
+assert(/pasteConflicts\.push\(\{ source, destination, isDirectory:/.test(filesIpc), 'paste conflict detection must include same-name files as well as folders');
 
 const electronSources = fs.readdirSync(path.join(root, 'electron'), { recursive: true })
   .filter(name => name.endsWith('.cjs'))

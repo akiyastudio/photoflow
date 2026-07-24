@@ -19,8 +19,9 @@ ENGINE = ROOT / "components" / "team-retouch" / "team_retouch.py"
 sys.path.insert(0, str(ENGINE.parent))
 sys.path.insert(0, str(ROOT / "python"))
 
-from team_retouch import centered_work_crop, emit_progress, load_mask, match_returned_batch, maximize_assignment, plan_work_tiles, restore_patches, save_mask  # noqa: E402
-from workspace_db import connect, team_patch_replace  # noqa: E402
+from team_retouch import box_coverage_by_crop, centered_work_crop, emit_progress, load_mask, mask_bounds, match_returned_batch, maximize_assignment, plan_work_tiles, reposition_crop_to_avoid_bystanders, restore_patches, save_mask  # noqa: E402
+from patch_merge import safe_exif_bytes, save_tiff  # noqa: E402
+from workspace_db import connect, team_patch_replace, team_patch_update  # noqa: E402
 
 
 def main():
@@ -130,14 +131,46 @@ def main():
         assert np.mean(np.abs(merged_rgb[105:145, 130:175].astype(np.int16) - base[105:145, 130:175].astype(np.int16))) > 1
         assert np.max(np.abs(merged_rgb[58:70, 82:94].astype(np.int16) - base[58:70, 82:94].astype(np.int16))) <= 1
 
+        # Corrupt source offsets are omitted. If any unexpected EXIF block
+        # still reaches the writer, saving retries without EXIF.
+        class CorruptExif(dict):
+            def get_ifd(self, _tag):
+                raise OSError("invalid EXIF IFD offset")
+
+        class CorruptExifImage:
+            def getexif(self):
+                return CorruptExif({271: "PhotoFlow Test", 34665: 18446744073709551615})
+
+        portable_exif = safe_exif_bytes(CorruptExifImage())
+        assert portable_exif and b"PhotoFlow Test" in portable_exif
+        fallback_path = test_root / "invalid-exif-fallback.tif"
+        save_tiff(fallback_path, base, {"exif": b"not-exif", "dpi": (300, 300)})
+        with Image.open(fallback_path) as fallback_image:
+            assert fallback_image.size == (width, height)
+
         portrait_crop = centered_work_crop([2400, 2500, 2800, 3300], 6000, 7000)
-        assert portrait_crop == [1266, 900, 2667, 4000]
-        assert abs(portrait_crop[2] / portrait_crop[3] - 2 / 3) < 0.001
+        assert 2500 <= max(portrait_crop[2:]) < 4000
+        assert any(abs(portrait_crop[2] / portrait_crop[3] - ratio) < 0.001 for ratio in (1 / 2, 2 / 3))
         edge_crop = centered_work_crop([0, 100, 500, 900], 4608, 3074)
-        assert edge_crop == [0, 0, 2049, 3074]
+        assert edge_crop[0] == 0 and 2500 <= max(edge_crop[2:]) < 4000
+
+        # When there is empty space on one side, slide the crop away from an
+        # adjacent bystander instead of cutting half of that person into view.
+        focus_box = [3000, 500, 3500, 2500]
+        bystander_box = [3600, 500, 4100, 2500]
+        shifted_crop = reposition_crop_to_avoid_bystanders(
+            [2500, 100, 1867, 2800], focus_box, 6000, 4000, [bystander_box],
+        )
+        assert box_coverage_by_crop(bystander_box, shifted_crop) == 0
+
+        # Hair, props and flowing clothes can extend outside a detector's body
+        # box. The segmentation extent must enlarge the planning boundary.
+        proxy_mask = np.zeros((100, 200), dtype=bool)
+        proxy_mask[10:91, 20:181] = True
+        assert mask_bounds(proxy_mask, 0.25, 1200, 800) == [80.0, 40.0, 724.0, 364.0]
 
         # Nearby people share one normal-size work image, while distant people
-        # remain separate. A group can contain at most three people.
+        # remain separate. Dense neighboring people may share a tile.
         nearby = [{"box": box} for box in (
             [500, 500, 1400, 3200], [1500, 600, 2400, 3250],
         )]
@@ -155,6 +188,60 @@ def main():
         )]
         crowd_tiles = plan_work_tiles(crowd, 8192, 5464)
         assert len(crowd_tiles) == 1 and crowd_tiles[0]["indices"] == [0, 1, 2]
+
+        # A dense lineup must be split into spatially continuous groups. The
+        # planner used to optimize tile count first and could produce groups
+        # such as 3/6/8 whose crop visibly contained several unassigned people.
+        lineup = [{"box": [300 + index * 650, 500, 800 + index * 650, 2700]} for index in range(9)]
+        lineup_tiles = plan_work_tiles(lineup, 8192, 5464)
+        assert [tile["indices"] for tile in lineup_tiles] == [[0, 1, 2], [3, 4, 5], [6, 7, 8]]
+        for tile in lineup_tiles:
+            selected = set(tile["indices"])
+            crop = tile["crop"]
+            crop_box = [crop[0], crop[1], crop[0] + crop[2], crop[1] + crop[3]]
+            for index, item in enumerate(lineup):
+                if index in selected:
+                    continue
+                box = item["box"]
+                overlap_width = max(0, min(box[2], crop_box[2]) - max(box[0], crop_box[0]))
+                overlap_height = max(0, min(box[3], crop_box[3]) - max(box[1], crop_box[1]))
+                assert overlap_width * overlap_height == 0
+
+        # Detection indices are not necessarily left-to-right because poses
+        # change vertical centers. Grouping must still follow spatial order.
+        staggered = [{
+            "box": [300 + index * 650, top, 800 + index * 650, top + 2000],
+            "physicalRank": index,
+        } for index, top in enumerate((800, 300, 900, 350, 1000, 400, 1100, 450, 1200))]
+        detection_order = sorted(staggered, key=lambda item: ((item["box"][1] + item["box"][3]) / 2, (item["box"][0] + item["box"][2]) / 2))
+        staggered_tiles = plan_work_tiles(detection_order, 8192, 5464)
+        assert len(staggered_tiles) == 3
+        for tile in staggered_tiles:
+            ranks = sorted(detection_order[index]["physicalRank"] for index in tile["indices"])
+            assert ranks[-1] - ranks[0] + 1 == len(ranks)
+
+        # Regression geometry from a real nine-person edge case: person 7 is
+        # at the right image boundary, so a fixed 2:3 crop necessarily showed
+        # roughly 75% of person 5. Adaptive square/narrow crops must keep the
+        # plan to three tiles while making person 7's tile clean.
+        edge_group_boxes = [
+            [3712, 2033, 4760, 4696], [2866, 2238, 3820, 4476],
+            [4628, 2564, 5340, 4320], [2020, 2612, 2728, 4288],
+            [6184, 2584, 6744, 4380], [292, 2570, 1338, 4424],
+            [7076, 2510, 7732, 4588], [5416, 3110, 6504, 4680],
+            [1008, 3186, 2276, 4652],
+        ]
+        edge_group_items = [{"box": box, "planningBox": box} for box in edge_group_boxes]
+        edge_group_tiles = plan_work_tiles(edge_group_items, 8192, 5464)
+        assert len(edge_group_tiles) == 3
+        person_seven_tile = next(tile for tile in edge_group_tiles if 6 in tile["indices"])
+        assert box_coverage_by_crop(edge_group_boxes[4], person_seven_tile["crop"]) == 0
+        person_two_tile = next(tile for tile in edge_group_tiles if 1 in tile["indices"])
+        assert person_two_tile["crop"][1] <= edge_group_boxes[1][1] - 80
+        for tile in edge_group_tiles:
+            for index, box in enumerate(edge_group_boxes):
+                if index not in tile["indices"]:
+                    assert box_coverage_by_crop(box, tile["crop"]) < 0.8
 
         # An individual taller than 4000 px grows beyond the normal limit and
         # remains completely inside the crop.
@@ -178,8 +265,8 @@ def main():
             {"box": [800, 100, 2100, 5200], "faceBox": [1200, 180, 1600, 650]},
             {"box": [2200, 120, 3500, 5250], "faceBox": [2600, 200, 3000, 670]},
         ], 6000, 7000, oversize_crop_mode="face-centered")
-        assert len(oversized_pair) == 1 and oversized_pair[0]["indices"] == [0, 1]
-        assert max(oversized_pair[0]["crop"][2:]) <= 4000
+        assert len(oversized_pair) == 2
+        assert all(max(tile["crop"][2:]) <= 4000 for tile in oversized_pair)
 
         # Group membership survives the workspace database round-trip while
         # old databases gain the new column through connect() migration.
@@ -204,6 +291,18 @@ def main():
             "mask": {"width": width, "height": height, "scale": 1}, "status": "exported",
         }]})
         assert [member["personIndex"] for member in stored["tasks"][0]["members"]] == [1, 2]
+        uploaded_path = test_root / "uploaded-group.png"
+        Image.fromarray(edited, "RGB").save(uploaded_path)
+        uploaded = team_patch_update(db, {
+            "taskId": "group-task", "editedPatchPath": str(uploaded_path), "status": "uploaded",
+        })
+        assert uploaded["tasks"][0]["editedPatchPath"] == str(uploaded_path.resolve())
+        removed = team_patch_update(db, {
+            "taskId": "group-task", "editedPatchPath": None, "status": "exported",
+            "mergedVersionId": None, "mergeMetrics": {},
+        })
+        assert removed["tasks"][0]["editedPatchPath"] is None
+        assert removed["tasks"][0]["status"] == "exported"
         db.close()
         print("team-retouch merge regression test passed")
 
