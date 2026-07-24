@@ -7,6 +7,7 @@ const {
   DEFAULT_SMALL_FILE_CONCURRENCY,
   assertInside,
   collectCopyPlan,
+  commitTemporaryFile,
   copyFileAtomic,
   copyPlannedFiles,
   moveFileAtomic,
@@ -25,6 +26,18 @@ const run = async () => {
     await copyFileAtomic(source, copy, { onProgress: value => { lastProgress = value.bytesCopied; } });
     assert.strictEqual(lastProgress, fs.statSync(source).size);
     assert.deepStrictEqual(fs.readFileSync(copy), fs.readFileSync(source));
+
+    const fallbackTemporary = path.join(root, '.fallback.photoflow-part');
+    const fallbackTarget = path.join(root, 'fallback.bin');
+    fs.writeFileSync(fallbackTemporary, 'rename fallback');
+    const fallbackResult = await commitTemporaryFile(fallbackTemporary, fallbackTarget, {
+      allowCopyFallback: true,
+      maxAttempts: 1,
+      renameFile: async () => { throw Object.assign(new Error('simulated Windows scanner lock'), { code: 'EPERM' }); },
+    });
+    assert.strictEqual(fallbackResult.strategy, 'copy-fallback');
+    assert.strictEqual(fs.readFileSync(fallbackTarget, 'utf8'), 'rename fallback');
+    assert.strictEqual(fs.existsSync(fallbackTemporary), false);
 
     const moveSource = path.join(root, 'move-source.bin');
     const moveTarget = path.join(root, 'move-target.bin');

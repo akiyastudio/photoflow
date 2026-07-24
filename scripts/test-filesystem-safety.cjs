@@ -55,7 +55,9 @@ const runJson = (command, args) => {
     const progressPath = path.join(projectPath, '待处理图片');
     fs.mkdirSync(projectPath);
     fs.mkdirSync(progressPath);
-    runJson(python, [script, 'add', '--root', workspace, '--database', database, '--payload', JSON.stringify({ name: 'progress-project', status: '未分类', relativePath: 'progress-project' })]);
+    runJson(python, [script, 'add', '--root', workspace, '--database', database, '--payload', JSON.stringify({ name: 'progress-project', status: '未分类', relativePath: 'progress-project', extra: { projectDate: { year: 2026, month: 7, precision: 'month' } } })]);
+    const datedProject = runJson(python, [script, 'init', '--root', workspace, '--database', database]).projects.find(project => project.name === 'progress-project');
+    assert.deepStrictEqual(JSON.parse(datedProject.extra_json).projectDate, { year: 2026, month: 7, precision: 'month' }, 'project date metadata must survive catalog reloads');
     const selectionPath = path.join(projectPath, '图片选片');
     fs.mkdirSync(selectionPath);
     const selectedOriginal = path.join(selectionPath, 'selected.jpg');
@@ -64,6 +66,11 @@ const runJson = (command, args) => {
       projectName: 'progress-project', mediaKind: 'image', versionKey: '0',
       displayName: '图片选片（原图）', folderPath: selectionPath, trackingEnabled: true,
     })]);
+    const repeatedSelectionProgress = runJson(python, [script, 'progress_register', '--root', workspace, '--database', database, '--payload', JSON.stringify({
+      projectName: 'progress-project', mediaKind: 'image', versionKey: '0',
+      displayName: '图片选片（原图）', folderPath: selectionPath, trackingEnabled: true,
+    })]);
+    assert.strictEqual(repeatedSelectionProgress.progressFolder.versionKey, '0', 'ensuring the selection baseline repeatedly must be idempotent');
     runJson(python, [script, 'batch_register_baseline', '--root', workspace, '--database', database, '--payload', JSON.stringify({
       projectName: 'progress-project', folderPath: selectionPath, versionName: '图片选片（原图）',
     })]);

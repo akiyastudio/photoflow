@@ -386,8 +386,20 @@ const registerFileOperationsIpc = context => {
       throw new Error('不支持的文件操作');
     } catch (error) {
       const errorCode = error && typeof error === 'object' ? error.code : '';
+      const transferStage = error && typeof error === 'object' ? error.transferStage : '';
+      const affectedPath = error && typeof error === 'object' ? (error.sourcePath || error.destinationPath) : '';
+      const affectedName = affectedPath ? path.basename(affectedPath) : '';
+      const accessFailure = transferStage === 'inspect-source'
+        ? `无法读取源文件${affectedName ? `“${affectedName}”` : ''}，文件可能正被其他程序占用或当前账户没有读取权限`
+        : transferStage === 'prepare-target'
+          ? `无法在目标文件夹创建${affectedName ? `“${affectedName}”` : '文件'}，请检查目标文件夹权限`
+        : transferStage === 'copy-data'
+          ? `复制文件${affectedName ? `“${affectedName}”` : ''}时被系统拒绝，请关闭正在读取该文件的程序后重试`
+          : transferStage === 'commit-target'
+            ? `写入目标文件${affectedName ? `“${affectedName}”` : ''}时被系统拒绝，请检查目标文件夹权限`
+            : '文件正在被其他程序占用或没有访问权限，请关闭相关程序后重试';
       const errorMessage = errorCode === 'EPERM' || errorCode === 'EBUSY' || errorCode === 'EACCES'
-        ? '文件正在被其他程序占用或没有访问权限，请关闭相关程序后重试'
+        ? accessFailure
         : errorCode === 'ENOSPC'
           ? '目标磁盘空间不足，操作已停止；已创建的不完整副本会自动清理'
           : errorCode === 'ENAMETOOLONG'
@@ -397,8 +409,8 @@ const registerFileOperationsIpc = context => {
               : errorCode === 'ENOENT' || errorCode === 'ENOTDIR'
                 ? '操作中的文件或文件夹已在外部移动或删除，请刷新后重试'
                 : error.message || String(error);
-      writeLog('error', 'Project file operation failed', { projectName, operation, targetRelativePath, count: relativePaths.length, error: errorMessage });
-      return { success: false, error: errorMessage, errorCode: errorCode || undefined };
+      writeLog('error', 'Project file operation failed', { projectName, operation, targetRelativePath, count: relativePaths.length, errorCode: errorCode || undefined, transferStage: transferStage || undefined, sourcePath: error?.sourcePath, destinationPath: error?.destinationPath, nativeError: error?.message || String(error), error: errorMessage });
+      return { success: false, error: errorMessage, errorCode: errorCode || undefined, transferStage: transferStage || undefined };
     }
   });
 };

@@ -33,7 +33,13 @@ export const PROJECT_STATUS_LABELS: Record<ProjectStatus, string> = {
   后期中: '后期中',
   已归档: '已归档'
 };
-export interface WorkspaceProject { name: string; path: string; status: ProjectStatus; updatedAt: number; }
+export interface ProjectDate {
+  year: number;
+  month: number;
+  day?: number;
+  precision: 'month' | 'day';
+}
+export interface WorkspaceProject { name: string; path: string; status: ProjectStatus; updatedAt: number; projectDate?: ProjectDate; }
 export interface WorkspaceStatusGroup { status: ProjectStatus; projects: WorkspaceProject[]; }
 
 export interface AppConfig {
@@ -333,7 +339,7 @@ export interface IElectronAPI {
   getWorkspaceProjects: (workspacePath: string) => Promise<{ success: boolean; root?: string; statuses: WorkspaceStatusGroup[]; error?: string }> ;
   onWorkspaceFilesChanged: (callback: (change: { root: string; fileName: string }) => void) => () => void;
   onWorkspaceProjectsChanged: (callback: (change: { root: string }) => void) => () => void;
-  createWorkspaceProject: (workspacePath: string, date: string, name: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
+  createWorkspaceProject: (workspacePath: string, date: ProjectDate | null, name: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   renameWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, nextName: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   renameProjectFolder: (workspacePath: string, status: ProjectStatus, name: string, folderName: string, nextName: string) => Promise<{ success: boolean; folder?: { name: string; path: string; updatedAt: number }; error?: string }> ;
   createProjectFolder: (workspacePath: string, status: ProjectStatus, name: string, folderName: string, relativePath?: string, makeUnique?: boolean) => Promise<{ success: boolean; folder?: { name: string; path: string; relativePath?: string; updatedAt: number }; error?: string }> ;
