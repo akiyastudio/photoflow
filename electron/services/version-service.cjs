@@ -25,6 +25,7 @@ const createVersionService = ({ repository }) => ({
   deleteTeamIdentity: (root, payload) => repository.deleteTeamIdentity(root, payload),
   replaceTeamPatches: (root, payload) => repository.replaceTeamPatches(root, payload),
   updateTeamPatch: (root, payload) => repository.updateTeamPatch(root, payload),
+  deleteTeamPatch: (root, payload) => repository.deleteTeamPatch(root, payload),
   cleanupTeamPatches: (root, payload) => repository.cleanupTeamPatches(root, payload),
 });
 

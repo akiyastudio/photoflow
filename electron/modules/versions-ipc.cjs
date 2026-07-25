@@ -30,7 +30,41 @@ const registerVersionIpc = context => {
     const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
     const outputDirectory = path.resolve(projectPath, '多人修脸');
     if (!isInside(projectPath, outputDirectory) || path.basename(outputDirectory) !== '多人修脸') throw new Error('工作流程目录无效');
-    return { projectPath, outputDirectory, manifestPath: path.join(outputDirectory, '.photoflow-workflow.json') };
+    const workflowDataDirectory = path.join(getWorkspaceDataRoot(workspacePath), 'team-retouch', 'workflows');
+    const workflowKey = crypto.createHash('sha256').update(`${String(status)}\0${String(projectName)}`).digest('hex');
+    return {
+      projectPath,
+      outputDirectory,
+      workflowDataDirectory,
+      manifestPath: path.join(workflowDataDirectory, `${workflowKey}.json`),
+      legacyManifestPath: path.join(outputDirectory, '.photoflow-workflow.json'),
+    };
+  };
+  const readTeamWorkflowManifest = async (workspaceRoot, status, projectName) => {
+    const target = teamWorkflowOutput(workspaceRoot, status, projectName);
+    let sourcePath = target.manifestPath;
+    if (!fs.existsSync(sourcePath) && fs.existsSync(target.legacyManifestPath)) sourcePath = target.legacyManifestPath;
+    if (!fs.existsSync(sourcePath)) return { ...target, manifest: null };
+    const manifest = JSON.parse(await fs.promises.readFile(sourcePath, 'utf8'));
+    if (sourcePath === target.legacyManifestPath) {
+      await fs.promises.mkdir(target.workflowDataDirectory, { recursive: true });
+      await fs.promises.writeFile(target.manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+      await fs.promises.rm(target.legacyManifestPath, { force: true });
+    }
+    return { ...target, manifest };
+  };
+  const replaceFileAtomic = async (sourcePath, destinationPath) => {
+    if (!fs.existsSync(destinationPath)) return copyFileAtomic(sourcePath, destinationPath);
+    const backupPath = `${destinationPath}.${crypto.randomUUID()}.photoflow-backup`;
+    await fs.promises.rename(destinationPath, backupPath);
+    try {
+      await copyFileAtomic(sourcePath, destinationPath);
+      await fs.promises.rm(backupPath, { force: true });
+    } catch (error) {
+      await fs.promises.rm(destinationPath, { force: true }).catch(() => undefined);
+      await fs.promises.rename(backupPath, destinationPath).catch(() => undefined);
+      throw error;
+    }
   };
   const resolveWorkflowSource = async (workspaceRoot, item) => {
     const patches = await versionService.listTeamPatches(workspaceRoot, item.photoId);
@@ -43,9 +77,8 @@ const registerVersionIpc = context => {
   };
   const refreshDownstreamWorkflowFiles = async (workspaceRoot, status, projectName, taskId, personIndex, sourcePath) => {
     if (!status || !projectName || !sourcePath || !fs.existsSync(sourcePath)) return;
-    const { outputDirectory, manifestPath } = teamWorkflowOutput(workspaceRoot, status, projectName);
-    if (!fs.existsSync(manifestPath)) return;
-    const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+    const { outputDirectory, manifestPath, workflowDataDirectory, manifest } = await readTeamWorkflowManifest(workspaceRoot, status, projectName);
+    if (!manifest) return;
     const sourceGroups = (manifest.groups || []).filter(group => (group.items || []).some(item => item.taskId === taskId && Number(item.personIndex) === Number(personIndex)));
     if (!sourceGroups.length) return;
     const completedWeek = Math.min(...sourceGroups.map(group => Number(group.week) || 1));
@@ -61,13 +94,16 @@ const registerVersionIpc = context => {
         const destination = path.join(parsed.dir, `${parsed.name}${extension}`);
         if (!isInside(outputDirectory, destination)) continue;
         await fs.promises.mkdir(path.dirname(destination), { recursive: true });
-        await copyFileAtomic(sourcePath, destination);
+        await replaceFileAtomic(sourcePath, destination);
         if (path.resolve(oldDestination) !== path.resolve(destination)) await fs.promises.rm(oldDestination, { force: true }).catch(() => undefined);
         item.relativePath = path.relative(outputDirectory, destination).replace(/\\/g, '/');
         changed = true;
       }
     }
-    if (changed) await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+    if (changed) {
+      await fs.promises.mkdir(workflowDataDirectory, { recursive: true });
+      await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+    }
   };
   const removeCleanupArtifacts = async (workspaceRoot, cleanup = {}) => {
     const dataRoot = path.resolve(getWorkspaceDataRoot(workspaceRoot));
@@ -596,13 +632,18 @@ const registerVersionIpc = context => {
   ipcMain.handle('workspace-team-project', async (_event, workspacePath, projectName) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
-      const [workspace, similarities] = await Promise.all([
-        versionService.getTeamProjectWorkspace(workspaceRoot, projectName),
-        readTeamIdentitySimilarities(workspaceRoot, projectName),
-      ]);
-      return { ...workspace, similarities };
+      return await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
     } catch (error) {
       return { success: false, photos: [], identities: [], assignments: [], error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-team-identity-similarities', async (_event, workspacePath, projectName) => {
+    try {
+      const similarities = await readTeamIdentitySimilarities(ensureWorkspace(workspacePath), projectName);
+      return { success: true, similarities };
+    } catch (error) {
+      return { success: false, similarities: [], error: error.message || String(error) };
     }
   });
 
@@ -653,6 +694,7 @@ const registerVersionIpc = context => {
       const workingWorkspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
       const currentByKey = new Map((workingWorkspace.assignments || []).map(item => [teamSubjectKey(item), item]));
       const currentIdentities = new Map((workingWorkspace.identities || []).map(item => [item.id, item]));
+      const assignedKeys = new Set([...currentByKey].filter(([, assignment]) => assignment.identityId).map(([key]) => key));
       let created = 0;
       let nextCandidateNumber = Math.max(0, ...(workingWorkspace.identities || []).map(identity => Number(String(identity.name || '').match(/^待确认人物\s+(\d+)$/)?.[1] || 0))) + 1;
       for (const cluster of suggested.clusters || []) {
@@ -674,6 +716,23 @@ const registerVersionIpc = context => {
             if (current?.source === 'manual' || current?.identityId && !isGeneratedTeamIdentity(currentIdentities.get(current.identityId))) continue;
             await versionService.assignTeamIdentity(workspaceRoot, { projectName, ...member, identityId, confidence, source: 'suggested' });
           }
+        }
+        for (const member of members) assignedKeys.add(member.key);
+      }
+      // A single photo cannot prove that two people are the same identity, and
+      // low-quality subjects may not enter any cluster. Still create isolated
+      // review candidates so the recognition step can immediately show an
+      // editable person name instead of leaving blank fields.
+      for (const subject of subjects) {
+        if (assignedKeys.has(subject.key)) continue;
+        const saved = await versionService.saveTeamIdentity(workspaceRoot, {
+          projectName,
+          name: `待确认人物 ${nextCandidateNumber++}`,
+          assignments: [{ ...subject, confidence: .35, source: 'suggested' }],
+        });
+        if (saved.identityId) {
+          assignedKeys.add(subject.key);
+          created += 1;
         }
       }
       return { ...(await versionService.getTeamProjectWorkspace(workspaceRoot, projectName)), similarities: suggested.similarities || [], suggestedCount: created, candidateGroupCount: suggested.clusters?.length || 0, method: suggested.method || 'sface-osnet-gallery-v3', faceBackend: suggested.faceBackend, bodyBackend: suggested.bodyBackend, unmatchedCount: suggested.unmatchedCount, provider: suggested.provider };
@@ -727,7 +786,7 @@ const registerVersionIpc = context => {
     let backupDirectory = '';
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
-      const { projectPath, outputDirectory } = teamWorkflowOutput(workspaceRoot, status, projectName);
+      const { projectPath, outputDirectory, workflowDataDirectory, manifestPath, legacyManifestPath } = teamWorkflowOutput(workspaceRoot, status, projectName);
       if (fs.existsSync(outputDirectory) && !request.replace) return { success: true, requiresConfirmation: true, path: outputDirectory };
 
       stagingDirectory = path.join(projectPath, `.photoflow-team-workflow-${crypto.randomUUID()}`);
@@ -768,8 +827,6 @@ const registerVersionIpc = context => {
         });
       }
       if (!manifest.groups.length || !count) throw new Error('没有可生成的工作流程任务');
-      await fs.promises.writeFile(path.join(stagingDirectory, '.photoflow-workflow.json'), JSON.stringify(manifest, null, 2), 'utf8');
-
       if (fs.existsSync(outputDirectory)) {
         backupDirectory = path.join(projectPath, `.photoflow-team-workflow-previous-${crypto.randomUUID()}`);
         await fs.promises.rename(outputDirectory, backupDirectory);
@@ -785,6 +842,12 @@ const registerVersionIpc = context => {
         await fs.promises.rm(backupDirectory, { recursive: true, force: true });
         backupDirectory = '';
       }
+      await fs.promises.mkdir(workflowDataDirectory, { recursive: true });
+      const pendingManifestPath = `${manifestPath}.${crypto.randomUUID()}.tmp`;
+      await fs.promises.writeFile(pendingManifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+      await fs.promises.rm(manifestPath, { force: true });
+      await fs.promises.rename(pendingManifestPath, manifestPath);
+      await fs.promises.rm(legacyManifestPath, { force: true });
       return { success: true, count, groupCount: manifest.groups.length, path: outputDirectory };
     } catch (error) {
       if (stagingDirectory) await fs.promises.rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
@@ -795,9 +858,8 @@ const registerVersionIpc = context => {
   ipcMain.handle('workspace-team-identity-export', async (_event, workspacePath, status, projectName, request = {}) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
-      const { outputDirectory, manifestPath } = teamWorkflowOutput(workspaceRoot, status, projectName);
-      if (!fs.existsSync(manifestPath)) throw new Error('请先生成工作流程');
-      const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+      const { outputDirectory, manifest } = await readTeamWorkflowManifest(workspaceRoot, status, projectName);
+      if (!manifest) throw new Error('请先生成工作流程');
       const group = (manifest.groups || []).find(item => Number(item.week) === Number(request.week) && String(item.identityId || '') === String(request.identityId || ''));
       if (!group?.relativePath) throw new Error('任务文件夹不存在，请重新生成工作流程');
       const groupDirectory = path.resolve(outputDirectory, group.relativePath);
@@ -1120,16 +1182,71 @@ const registerVersionIpc = context => {
   });
 
   ipcMain.handle('workspace-team-patch-update', async (_event, workspacePath, request = {}) => {
+    let cropManifestPath = '';
+    let croppedPatchPath = '';
+    let cropTargetPath = '';
+    let cropBackupPath = '';
     try {
       pluginService.requireCapability('team-retouch.detect');
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      let normalizedCrop;
+      if (request.crop !== undefined) {
+        if (!request.photoId) throw new Error('缺少图片信息，无法调整工作图范围');
+        const patchResult = await versionService.listTeamPatches(workspaceRoot, request.photoId);
+        const task = (patchResult.tasks || []).find(item => item.id === request.taskId);
+        if (!task) throw new Error('人物工作图不存在');
+        if (task.editedPatchPath) throw new Error('已有返图的工作图不能调整范围，请先删除返图');
+        normalizedCrop = Object.fromEntries(['x', 'y', 'width', 'height'].map(key => [key, Math.round(Number(request.crop?.[key]) || 0)]));
+        if (normalizedCrop.x < 0 || normalizedCrop.y < 0 || normalizedCrop.width < 1 || normalizedCrop.height < 1) throw new Error('工作图范围无效');
+        const bundle = await versionService.getPhoto(workspaceRoot, request.photoId);
+        const base = (bundle.versions || []).find(version => version.id === task.baseVersionId);
+        if (!base || base.fileMissing || !fs.existsSync(base.filePath)) throw new Error('基础图片不存在，无法重新裁图');
+        const batchDirectory = path.join(getWorkspaceDataRoot(workspaceRoot), 'team-retouch', 'batches');
+        await fs.promises.mkdir(batchDirectory, { recursive: true });
+        const token = crypto.randomUUID();
+        cropManifestPath = path.join(batchDirectory, `recrop-${token}.json`);
+        croppedPatchPath = path.join(batchDirectory, `recrop-${token}.png`);
+        await fs.promises.writeFile(cropManifestPath, JSON.stringify({ tasks: [{ ...task, crop: normalizedCrop, patchPath: croppedPatchPath }] }), 'utf8');
+        await pluginService.runJson('team-retouch', ['restore', '--input', base.filePath, '--manifest', cropManifestPath], 10 * 60 * 1000);
+        cropTargetPath = task.patchPath;
+        cropBackupPath = `${task.patchPath}.${crypto.randomUUID()}.photoflow-backup`;
+        await fs.promises.rename(cropTargetPath, cropBackupPath);
+        await copyFileAtomic(croppedPatchPath, cropTargetPath);
+      }
       const payload = {
         taskId: request.taskId,
         ...(request.personName !== undefined ? { personName: String(request.personName).trim().slice(0, 80) || '未命名人物' } : {}),
         ...(request.assignee !== undefined ? { assignee: String(request.assignee).trim().slice(0, 80) } : {}),
+        ...(normalizedCrop ? { crop: normalizedCrop } : {}),
         ...(request.needsReview !== undefined ? { needsReview: Boolean(request.needsReview) } : {}),
         ...(request.reviewReason !== undefined ? { reviewReason: String(request.reviewReason).trim().slice(0, 300) } : {}),
       };
-      return await versionService.updateTeamPatch(ensureWorkspace(workspacePath), payload);
+      const updated = await versionService.updateTeamPatch(workspaceRoot, payload);
+      if (cropBackupPath) {
+        await fs.promises.rm(cropBackupPath, { force: true });
+        cropBackupPath = '';
+      }
+      return updated;
+    } catch (error) {
+      if (cropBackupPath && fs.existsSync(cropBackupPath)) {
+        if (cropTargetPath) await fs.promises.rm(cropTargetPath, { force: true }).catch(() => undefined);
+        await fs.promises.rename(cropBackupPath, cropTargetPath).catch(() => undefined);
+        cropBackupPath = '';
+      }
+      return { success: false, error: error.message || String(error), tasks: [] };
+    } finally {
+      if (cropManifestPath) await fs.promises.rm(cropManifestPath, { force: true }).catch(() => undefined);
+      if (croppedPatchPath) await fs.promises.rm(croppedPatchPath, { force: true }).catch(() => undefined);
+    }
+  });
+
+  ipcMain.handle('workspace-team-patch-delete', async (_event, workspacePath, request = {}) => {
+    try {
+      pluginService.requireCapability('team-retouch.detect');
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const result = await versionService.deleteTeamPatch(workspaceRoot, { taskId: request.taskId });
+      const removedArtifactCount = await removeCleanupArtifacts(workspaceRoot, { teamArtifactPaths: result.artifactPaths || [] });
+      return { success: true, tasks: result.tasks || [], removedArtifactCount };
     } catch (error) {
       return { success: false, error: error.message || String(error), tasks: [] };
     }

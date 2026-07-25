@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT / "python"))
 from team_retouch import box_coverage_by_crop, centered_work_crop, emit_progress, identify_people, load_mask, mask_bounds, match_returned_batch, maximize_assignment, plan_work_tiles, reposition_crop_to_avoid_bystanders, restore_patches, save_mask  # noqa: E402
 from identity_engine import constrained_clusters, ranked_similarity_pairs  # noqa: E402
 from patch_merge import safe_exif_bytes, save_tiff  # noqa: E402
-from workspace_db import connect, team_identity_assign, team_identity_complete, team_identity_save, team_patch_replace, team_patch_update, team_project_register_photo, team_project_unregister_photo, team_project_workspace  # noqa: E402
+from workspace_db import connect, team_identity_assign, team_identity_complete, team_identity_save, team_patch_delete, team_patch_replace, team_patch_update, team_project_register_photo, team_project_unregister_photo, team_project_workspace  # noqa: E402
 
 
 def main():
@@ -304,6 +304,9 @@ def main():
         })
         assert removed["tasks"][0]["editedPatchPath"] is None
         assert removed["tasks"][0]["status"] == "exported"
+        adjusted_crop = {"x": 64, "y": 40, "width": 176, "height": 152}
+        adjusted = team_patch_update(db, {"taskId": "group-task", "crop": adjusted_crop, "needsReview": False})
+        assert adjusted["tasks"][0]["crop"] == adjusted_crop
 
         workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
         assert len(workspace["photos"]) == 1 and len(workspace["photos"][0]["tasks"]) == 1
@@ -414,6 +417,11 @@ def main():
         ])
         assert ranked[0]["leftKey"] == "x" and ranked[0]["rightKey"] == "y"
         assert ranked[0]["score"] > ranked[-1]["score"]
+        deleted = team_patch_delete(db, {"taskId": "group-task"})
+        assert deleted["tasks"] == []
+        assert str(restored_path.resolve()) in deleted["artifactPaths"]
+        workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
+        assert not workspace["assignments"]
         db.close()
         print("team-retouch merge regression test passed")
 

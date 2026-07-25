@@ -1868,12 +1868,45 @@ def team_patch_update(db, payload: dict):
     if "reviewReason" in payload:
         fields.append("review_reason=?")
         values.append(str(payload["reviewReason"] or ""))
+    if "crop" in payload:
+        crop = payload.get("crop") or {}
+        normalized_crop = {key: int(crop.get(key, 0)) for key in ("x", "y", "width", "height")}
+        if normalized_crop["x"] < 0 or normalized_crop["y"] < 0 or normalized_crop["width"] < 1 or normalized_crop["height"] < 1:
+            raise ValueError("工作图范围无效")
+        fields.append("crop_json=?")
+        values.append(json.dumps(normalized_crop, ensure_ascii=False))
     fields.append("updated_at=?")
     values.append(int(time.time() * 1000))
     values.append(row["id"])
     db.execute(f"UPDATE team_patch_tasks SET {', '.join(fields)} WHERE id=?", values)
     db.commit()
     return team_patch_list(db, {"photoId": row["photo_id"]})
+
+
+def team_patch_delete(db, payload: dict):
+    row = db.execute(
+        """SELECT task.*,photos.project_id FROM team_patch_tasks task
+           JOIN photos ON photos.id=task.photo_id WHERE task.id=? AND task.is_deleted=0""",
+        (payload["taskId"],),
+    ).fetchone()
+    if row is None:
+        raise ValueError("人物工作图不存在")
+    members = json.loads(row["members_json"] or "[]") or [{"personIndex": row["person_index"]}]
+    person_indices = sorted({int(member.get("personIndex") or 0) for member in members if int(member.get("personIndex") or 0) > 0})
+    candidates = team_artifact_paths([row])
+    db.execute("DELETE FROM team_patch_tasks WHERE id=?", (row["id"],))
+    if person_indices:
+        placeholders = ",".join("?" for _ in person_indices)
+        db.execute(
+            f"""DELETE FROM team_person_assignments
+                WHERE photo_id=? AND base_version_id=? AND person_index IN ({placeholders})""",
+            (row["photo_id"], row["base_version_id"], *person_indices),
+        )
+    cleanup_empty_generated_team_identities(db, row["project_id"])
+    db.commit()
+    result = team_patch_list(db, {"photoId": row["photo_id"]})
+    result["artifactPaths"] = unreferenced_team_artifact_paths(db, candidates)
+    return result
 
 
 def sync_directories(root: str, db):
@@ -2193,6 +2226,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = team_patch_update(db, payload)
         db.close()
         return result
+    elif action == "team_patch_delete":
+        result = team_patch_delete(db, payload)
+        db.close()
+        return result
     elif action == "team_patch_cleanup":
         result = team_patch_cleanup(db, payload)
         db.close()
@@ -2227,7 +2264,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "add", "status", "rename", "delete", "restore_project", "deleted_projects_list", "purge_deleted_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "batch_register_baseline", "batch_commit_compare", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_complete", "team_identity_delete", "team_patch_replace", "team_patch_update", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
+    parser.add_argument("action", nargs="?", choices=("init", "add", "status", "rename", "delete", "restore_project", "deleted_projects_list", "purge_deleted_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "batch_register_baseline", "batch_commit_compare", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_complete", "team_identity_delete", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")
