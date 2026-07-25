@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 from event_protocol import emit  # noqa: E402
+from rename import build_jpg_proxy_index, find_selection_jpg_proxy_folder, visual_reference_path  # noqa: E402
 from research import perceptual_hash  # noqa: E402
 
 
@@ -73,6 +74,51 @@ def main():
             "distance": 0,
         }]
         assert any(event["type"] == "success" and event["message"] == "所有任务结束" for event in events)
+
+    with TemporaryDirectory() as temporary_directory:
+        project_directory = Path(temporary_directory) / "project"
+        reference_directory = project_directory / "图片选片"
+        jpg_directory = project_directory / "jpg"
+        source_directory = project_directory / "图片后期_1"
+        reference_directory.mkdir(parents=True)
+        jpg_directory.mkdir()
+        source_directory.mkdir()
+        # The RAW contents are intentionally invalid. The comparison must use
+        # the same-stem JPG as a visual proxy while keeping the RAW filename as V0.
+        (reference_directory / "IMG_1234.CR3").write_bytes(b"not-a-decodable-raw")
+        Image.new("RGB", (32, 24), (38, 91, 143)).save(jpg_directory / "IMG_1234.JPG")
+        Image.new("RGB", (32, 24), (38, 91, 143)).save(source_directory / "retouched.jpg")
+
+        result = subprocess.run([
+            sys.executable,
+            str(ROOT / "python" / "rename.py"),
+            "--folder_a", str(reference_directory),
+            "--folder_b", str(source_directory),
+            "--preview",
+        ], capture_output=True, text=True, encoding="utf-8", timeout=30, check=False)
+        assert result.returncode == 0, result.stderr
+        events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        preview = next(event for event in events if event["type"] == "preview")
+        assert preview["data"]["matches"] == [{
+            "source": "retouched.jpg",
+            "reference": "IMG_1234.CR3",
+            "target": "IMG_1234.jpg",
+            "confidence": "高",
+            "distance": 0,
+        }]
+        assert any(
+            event["type"] == "log" and "同名 JPG" in event["message"]
+            for event in events
+        )
+
+        nested_jpg_directory = jpg_directory / "second-card"
+        nested_jpg_directory.mkdir()
+        Image.new("RGB", (32, 24), (38, 91, 143)).save(nested_jpg_directory / "IMG_1234.jpg")
+        proxy_index = build_jpg_proxy_index(str(jpg_directory))
+        assert "img_1234" not in proxy_index, "duplicate camera names must not select an unsafe V0 proxy"
+        assert find_selection_jpg_proxy_folder(str(reference_directory)) == str(jpg_directory)
+        assert find_selection_jpg_proxy_folder(str(source_directory)) is None
+        assert visual_reference_path(str(reference_directory / "IMG_1234.CR3"), proxy_index).endswith("IMG_1234.CR3")
     print("research-tools regression tests passed")
 
 

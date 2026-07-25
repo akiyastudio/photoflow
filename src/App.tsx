@@ -182,7 +182,14 @@ const App: React.FC = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem('photoflow:sidebar-collapsed') === 'true');
   const [windowMaximized, setWindowMaximized] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
-  const [components, setComponents] = useState<ComponentStatus[]>([]);
+  const [components, setComponents] = useState<ComponentStatus[]>(() => {
+    try {
+      const cached = JSON.parse(window.localStorage.getItem('photoflow:components-cache') || '[]');
+      return Array.isArray(cached) ? cached : [];
+    } catch {
+      return [];
+    }
+  });
   const [componentInstallPath, setComponentInstallPath] = useState('');
   const [componentsLoading, setComponentsLoading] = useState(true);
   const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed).map(component => component.id)), [components]);
@@ -268,6 +275,7 @@ const App: React.FC = () => {
       const result = await window.electronAPI.getComponents();
       if (!result.success) throw new Error(result.error || '无法读取组件状态');
       setComponents(result.components || []);
+      window.localStorage.setItem('photoflow:components-cache', JSON.stringify(result.components || []));
       setComponentInstallPath(result.installPath || '');
     } catch (error) {
       setComponents([]);
@@ -655,7 +663,7 @@ const App: React.FC = () => {
         })}</div>}
         {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={refreshComponents} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} onNotice={showNotice}/>}
         {activeTab === 'about' && <AboutPage/>}
-        {openProjects.map(project => { const active = activeTab === 'project' && selectedProject?.path === project.path; return <div key={project.path} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace active={active} project={project} workspacePath={config.workspacePath} installedComponentIds={installedComponentIds} teamRetouchStatus={components.find(component => component.id === 'team-retouch')} teamRetouchSettings={(config.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || config.personDetection} initialPanel={projectOperations[project.path] ?? null} importConfig={config.smartImport} brollConfig={config.brollImport} fileImportConfig={config.fileImport} conversionConfig={config.imageConversion} matchConfig={config.smartMatch} mediaCacheConfig={config.mediaCache} defaultFolderSort={config.defaultFolderSort} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onMediaCacheConfigChange={(mediaCache: AppConfig['mediaCache']) => handleConfigUpdate({ ...config, mediaCache })} onNotice={showNotice} onProjectMoved={nextProject => { setOpenProjects(current => current.map(item => item.path === project.path ? nextProject : item)); setProjectOperations(current => { if (nextProject.path === project.path) return current; const next = { ...current, [nextProject.path]: current[project.path] ?? null }; delete next[project.path]; return next; }); setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { closeProjectTab(project.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} /></div>; })}
+        {openProjects.map(project => { const active = activeTab === 'project' && selectedProject?.path === project.path; return <div key={project.path} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace active={active} project={project} workspacePath={config.workspacePath} installedComponentIds={installedComponentIds} componentsLoading={componentsLoading} teamRetouchStatus={components.find(component => component.id === 'team-retouch')} teamRetouchSettings={(config.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || config.personDetection} initialPanel={projectOperations[project.path] ?? null} importConfig={config.smartImport} brollConfig={config.brollImport} fileImportConfig={config.fileImport} conversionConfig={config.imageConversion} matchConfig={config.smartMatch} mediaCacheConfig={config.mediaCache} defaultFolderSort={config.defaultFolderSort} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onMediaCacheConfigChange={(mediaCache: AppConfig['mediaCache']) => handleConfigUpdate({ ...config, mediaCache })} onNotice={showNotice} onProjectMoved={nextProject => { setOpenProjects(current => current.map(item => item.path === project.path ? nextProject : item)); setProjectOperations(current => { if (nextProject.path === project.path) return current; const next = { ...current, [nextProject.path]: current[project.path] ?? null }; delete next[project.path]; return next; }); setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { closeProjectTab(project.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} /></div>; })}
 
         {activeTab === 'converter' && (
           <RequirePlugin scriptName="png_to_jpg.py" title="PNG 转 JPG" desc="需要该引擎来执行图片格式的批量转换。">

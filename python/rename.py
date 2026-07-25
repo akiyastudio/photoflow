@@ -12,6 +12,47 @@ IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tif', '.
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.m4v', '.mkv', '.webm', '.crm')
 RAW_EXTENSIONS = ('.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw')
 FFMPEG_IMAGE_EXTENSIONS = ('.heic', '.avif') + RAW_EXTENSIONS
+JPG_PROXY_EXTENSIONS = ('.jpg', '.jpeg')
+IMAGE_SELECTION_FOLDER_NAME = '图片选片'
+
+
+def find_selection_jpg_proxy_folder(reference_folder):
+    """Find the project's JPG originals used only as visual proxies for RAW V0 files."""
+    reference_folder = os.path.abspath(reference_folder)
+    if os.path.basename(reference_folder).casefold() != IMAGE_SELECTION_FOLDER_NAME.casefold():
+        return None
+    project_folder = os.path.dirname(reference_folder)
+    try:
+        candidates = [
+            entry.path for entry in os.scandir(project_folder)
+            if entry.is_dir() and entry.name.casefold() == 'jpg'
+        ]
+    except OSError:
+        return None
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def build_jpg_proxy_index(proxy_folder):
+    """Index unique JPG/JPEG files by basename without claiming them as versions."""
+    candidates = {}
+    if not proxy_folder:
+        return candidates
+    for directory, _directory_names, file_names in os.walk(proxy_folder):
+        for file_name in file_names:
+            if not file_name.lower().endswith(JPG_PROXY_EXTENSIONS):
+                continue
+            stem = os.path.splitext(file_name)[0].casefold()
+            candidates.setdefault(stem, []).append(os.path.join(directory, file_name))
+    # A duplicated camera filename is ambiguous. Falling back to the RAW preview
+    # is safer than linking a returned edit to the wrong photo.
+    return {stem: paths[0] for stem, paths in candidates.items() if len(paths) == 1}
+
+
+def visual_reference_path(reference_path, jpg_proxy_index):
+    if os.path.splitext(reference_path)[1].lower() not in RAW_EXTENSIONS:
+        return reference_path
+    return jpg_proxy_index.get(os.path.splitext(os.path.basename(reference_path))[0].casefold(), reference_path)
+
 
 def load_visual_frame(media_path):
     extension = os.path.splitext(media_path)[1].lower()
@@ -82,6 +123,9 @@ def copy_unmatched_a_files(unmatched_files_a, folder_a):
 
 def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_only=False, move_unmatched=False):
     media_extensions = IMAGE_EXTENSIONS + FFMPEG_IMAGE_EXTENSIONS + VIDEO_EXTENSIONS
+    jpg_proxy_folder = find_selection_jpg_proxy_folder(folder_a)
+    jpg_proxy_index = build_jpg_proxy_index(jpg_proxy_folder)
+    proxy_count = 0
     
     # 1. 分析 文件夹A
     log_info("正在分析 文件夹A (参照组)...")
@@ -89,9 +133,18 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
     list_a = [f for f in os.listdir(folder_a) if f.lower().endswith(media_extensions)]
     for i, f in enumerate(list_a):
         path = os.path.join(folder_a, f)
-        h_coarse, h_fine = calculate_hashes(path)
+        visual_path = visual_reference_path(path, jpg_proxy_index)
+        h_coarse, h_fine = calculate_hashes(visual_path)
+        if h_coarse is None and visual_path != path:
+            # A corrupt or unreadable proxy must not make a decodable RAW worse.
+            visual_path = path
+            h_coarse, h_fine = calculate_hashes(path)
+        if h_coarse is not None and visual_path != path:
+            proxy_count += 1
         if h_coarse is not None: files_a[f] = (path, h_coarse, h_fine, 'video' if f.lower().endswith(VIDEO_EXTENSIONS) else 'image')
         if i % 10 == 0: log_progress(f"分析 A: {i}/{len(list_a)}", int(i/len(list_a)*20))
+    if proxy_count:
+        log_info(f"已使用 {proxy_count} 个同名 JPG 作为图片选片 RAW 的 V0 视觉代理")
 
     # 2. 分析 文件夹B
     log_info("正在分析 文件夹B (待处理组)...")

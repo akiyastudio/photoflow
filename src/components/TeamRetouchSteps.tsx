@@ -7,8 +7,8 @@ type Props = {
 };
 
 const steps: Array<{ id: TeamRetouchStep; number: number; label: string }> = [
-  { id: 'detect', number: 1, label: '人物识别（裁图）' },
-  { id: 'people', number: 2, label: '人物和照片' },
+  { id: 'detect', number: 1, label: '人物识别' },
+  { id: 'people', number: 2, label: '标记人物' },
   { id: 'workflow', number: 3, label: '工作流程' },
 ];
 

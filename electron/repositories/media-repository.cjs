@@ -25,6 +25,7 @@ const createMediaRepository = client => ({
   deleteTeamIdentity: (root, payload) => client.call(root, 'team_identity_delete', payload),
   replaceTeamPatches: (root, payload) => client.call(root, 'team_patch_replace', payload),
   updateTeamPatch: (root, payload) => client.call(root, 'team_patch_update', payload),
+  deleteTeamPatch: (root, payload) => client.call(root, 'team_patch_delete', payload),
   cleanupTeamPatches: (root, payload) => client.call(root, 'team_patch_cleanup', payload),
   stop: () => client.stop(),
 });
