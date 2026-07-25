@@ -1,5 +1,5 @@
 const registerFileOperationsIpc = context => {
-  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertExistingInside, assertInside, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, mainWindow, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, removeCreatedPasteTargets, screen, throwIfCancelled, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertExistingInside, assertInside, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, mainWindow, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, removeCreatedPasteTargets, screen, throwIfCancelled, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
 
   ipcMain.handle('workspace-file-details', async (_event, workspacePath, status, projectName, relativePaths = []) => {
     try {
@@ -151,7 +151,13 @@ const registerFileOperationsIpc = context => {
       if (operation === 'copy' || operation === 'cut') {
         if (!sources.length) throw new Error('未选择文件');
         fileOperationState.projectFileClipboard = { operation, sources };
-        void writeSystemFileClipboard(sources, operation).catch(error => writeLog('warn', 'Unable to sync project files to the system clipboard', error));
+        try {
+          await writeSystemFileClipboard(sources, operation);
+        } catch (error) {
+          fileOperationState.projectFileClipboard = null;
+          writeLog('warn', 'Unable to sync project files to the system clipboard', error);
+          throw new Error(`无法写入 Windows 文件剪贴板：${error.message || String(error)}`);
+        }
         return { success: true, count: sources.length };
       }
       if (operation === 'paste') {
@@ -208,16 +214,52 @@ const registerFileOperationsIpc = context => {
         publish({ phase: 'scanning', progress: 0, currentName: '', bytesCopied: 0, totalBytes: 0 });
         try {
           const topLevelTargets = [];
-          const plan = [];
+          const reservedTargets = new Set();
+          const pathKey = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
           for (const source of clipboardSnapshot.sources) {
             throwIfCancelled(() => job.cancelled);
             if (!fs.existsSync(source)) continue;
+            if (clipboardSnapshot.operation === 'cut' && pathKey(path.dirname(source)) === pathKey(destinationDir)) continue;
             let destination = path.join(destinationDir, path.basename(source));
             const parsed = path.parse(destination);
             let index = 1;
-            while (fs.existsSync(destination)) destination = path.join(destinationDir, `${parsed.name} (${index++})${parsed.ext}`);
+            while (fs.existsSync(destination) || reservedTargets.has(pathKey(destination))) destination = path.join(destinationDir, `${parsed.name} (${index++})${parsed.ext}`);
             if (destination === source || destination.startsWith(source + path.sep)) throw new Error('不能将文件夹粘贴到自身内部');
+            reservedTargets.add(pathKey(destination));
             topLevelTargets.push({ source, destination });
+          }
+
+          const destinationVolume = path.parse(destinationDir).root.toLocaleLowerCase();
+          const sameVolumeCut = clipboardSnapshot.operation === 'cut'
+            && process.platform === 'win32'
+            && topLevelTargets.every(item => path.parse(item.source).root.toLocaleLowerCase() === destinationVolume);
+          if (sameVolumeCut) {
+            const moved = [];
+            publish({ phase: 'moving', progress: 0, currentName: '', bytesCopied: 0, totalBytes: 0, filesCopied: 0, totalFiles: topLevelTargets.length });
+            try {
+              for (const [index, item] of topLevelTargets.entries()) {
+                throwIfCancelled(() => job.cancelled);
+                publish({ phase: 'moving', progress: Math.round(index / Math.max(1, topLevelTargets.length) * 100), currentName: path.basename(item.source), bytesCopied: 0, totalBytes: 0, filesCopied: index, totalFiles: topLevelTargets.length });
+                await movePathAtomic(item.source, item.destination, { isCancelled: () => job.cancelled });
+                moved.push(item);
+              }
+            } catch (error) {
+              for (const item of [...moved].reverse()) {
+                if (fs.existsSync(item.destination) && !fs.existsSync(item.source)) await movePathAtomic(item.destination, item.source).catch(() => undefined);
+              }
+              throw error;
+            }
+            fileOperationState.projectFileClipboard = null;
+            clipboard.clear();
+            const count = topLevelTargets.length;
+            publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied: 0, totalBytes: 0, filesCopied: count, totalFiles: count, count });
+            writeLog('info', 'Project files moved by same-volume rename', { projectName, targetRelativePath, count, operationId });
+            if (count) await pushUndoOperation({ kind: 'move', moves: topLevelTargets });
+            return { success: true, count, operationId, replacedCount: replacedConflicts.length, replacedNames: replacedConflicts.map(item => path.basename(item.destination)) };
+          }
+
+          const plan = [];
+          for (const { source, destination } of topLevelTargets) {
             await collectCopyPlan(source, destination, plan, { isCancelled: () => job.cancelled });
           }
           const totalBytes = plan.reduce((sum, entry) => sum + entry.size, 0);
@@ -255,7 +297,7 @@ const registerFileOperationsIpc = context => {
           if (clipboardSnapshot.operation === 'cut') {
             job.finishing = true;
             publish({ phase: 'finishing', progress: 99, currentName: '正在移除源文件', bytesCopied, totalBytes, filesCopied, totalFiles });
-            for (const source of clipboardSnapshot.sources) await fs.promises.rm(source, { recursive: true, force: true });
+            for (const { source } of topLevelTargets) await fs.promises.rm(source, { recursive: true, force: true });
             fileOperationState.projectFileClipboard = null;
             if (process.platform === 'win32') clipboard.clear();
           }
@@ -289,6 +331,7 @@ const registerFileOperationsIpc = context => {
           if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', { operationId, operation: 'trash', ...payload });
         };
         let processedCount = 0;
+        let permanentCount = 0;
         const undoItems = [];
         const workspaceRoot = ensureWorkspace(workspacePath);
         let persistedTrashRecord = null;
@@ -303,14 +346,15 @@ const registerFileOperationsIpc = context => {
             publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
             const originalIdentity = await capturePathIdentity(source);
             const recycled = await recycleBinService.trash(source);
-            undoItems.push({ original: source, originalIdentity, recyclePidl: recycled.recyclePidl, preciseRestore: recycled.preciseRestore !== false });
+            if (recycled.recyclePidl) undoItems.push({ original: source, originalIdentity, recyclePidl: recycled.recyclePidl, preciseRestore: recycled.preciseRestore !== false });
+            if (recycled.permanent) permanentCount += 1;
             processedCount += 1;
             publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
           }
           publish({ phase: 'complete', progress: 100, currentName: '', processedCount, totalCount });
           writeLog('info', 'Project files moved to trash', { projectName, count: processedCount, operationId });
           await persistTrashUndo();
-          return { success: true, count: processedCount, operationId };
+          return { success: true, count: processedCount, permanentCount, operationId };
         } catch (error) {
           await persistTrashUndo().catch(persistError => writeLog('error', 'Unable to persist partial trash undo record', persistError));
           publish({ phase: 'failed', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: '', processedCount, totalCount, error: error.message || String(error) });

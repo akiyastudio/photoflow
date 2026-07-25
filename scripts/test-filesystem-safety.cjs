@@ -131,6 +131,22 @@ const runJson = (command, args) => {
     const finalsAfterRename = runJson(python, [script, 'final_version_list', '--root', workspace, '--database', database, '--payload', JSON.stringify({ projectName: 'progress-project' })]);
     assert.strictEqual(path.resolve(finalsAfterRename.versions[0].filePath), path.resolve(externallyRenamedSource), 'a final batch version must follow an external source rename');
 
+    const datedRenameSource = path.join(workspace, '26-7 old-name');
+    const datedRenameTarget = path.join(workspace, '26-8-2 new-name');
+    fs.mkdirSync(datedRenameSource);
+    runJson(python, [script, 'add', '--root', workspace, '--database', database, '--payload', JSON.stringify({
+      name: '26-7 old-name', status: '策划中', relativePath: '26-7 old-name',
+      extra: { projectDate: { year: 2026, month: 7, precision: 'month' } },
+    })]);
+    fs.renameSync(datedRenameSource, datedRenameTarget);
+    runJson(python, [script, 'rename', '--root', workspace, '--database', database, '--payload', JSON.stringify({
+      name: '26-7 old-name', nextName: '26-8-2 new-name', relativePath: '26-8-2 new-name',
+      projectDate: { year: 2026, month: 8, day: 2, precision: 'day' },
+    })]);
+    const renamedDatedProject = runJson(python, [script, 'init', '--root', workspace, '--database', database]).projects.find(project => project.name === '26-8-2 new-name');
+    assert(renamedDatedProject, 'renamed project must remain in the workspace catalog');
+    assert.deepStrictEqual(JSON.parse(renamedDatedProject.extra_json).projectDate, { year: 2026, month: 8, day: 2, precision: 'day' }, 'renaming a project must update its date metadata');
+
     if (process.platform === 'win32') {
       const helper = path.join(__dirname, '..', 'electron', 'bin', 'recycle-bin-service.exe');
       if (fs.existsSync(helper)) {

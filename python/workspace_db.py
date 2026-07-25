@@ -1803,7 +1803,22 @@ def mutate(root: str, database: str, action: str, payload: dict):
             raise ValueError("无效的项目状态")
         db.execute("UPDATE projects SET status=?, updated_at=? WHERE is_deleted=0 AND name=? COLLATE NOCASE", (payload["status"], now, payload["name"]))
     elif action == "rename":
-        db.execute("UPDATE projects SET name=?, relative_path=?, updated_at=? WHERE is_deleted=0 AND name=? COLLATE NOCASE", (payload["nextName"], payload["relativePath"], now, payload["name"]))
+        extra_json = None
+        if "projectDate" in payload:
+            row = db.execute("SELECT extra_json FROM projects WHERE is_deleted=0 AND name=? COLLATE NOCASE", (payload["name"],)).fetchone()
+            try:
+                extra = json.loads((row["extra_json"] if row else "") or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                extra = {}
+            if payload.get("projectDate"):
+                extra["projectDate"] = payload["projectDate"]
+            else:
+                extra.pop("projectDate", None)
+            extra_json = json.dumps(extra, ensure_ascii=False)
+        if extra_json is None:
+            db.execute("UPDATE projects SET name=?, relative_path=?, updated_at=? WHERE is_deleted=0 AND name=? COLLATE NOCASE", (payload["nextName"], payload["relativePath"], now, payload["name"]))
+        else:
+            db.execute("UPDATE projects SET name=?, relative_path=?, extra_json=?, updated_at=? WHERE is_deleted=0 AND name=? COLLATE NOCASE", (payload["nextName"], payload["relativePath"], extra_json, now, payload["name"]))
     elif action == "delete":
         db.execute("UPDATE projects SET is_deleted=1, updated_at=? WHERE name=? COLLATE NOCASE", (now, payload["name"]))
     elif action == "restore_project":

@@ -7,7 +7,7 @@ import { useAppDialog } from '../../components/AppDialogProvider';
 import { MediaCacheSettings } from '../settings/SettingsFeature';
 import { ConverterView, ImportCard, MatchView } from '../tools/ToolViews';
 import { PROJECT_STATUS_LABELS } from '../../types';
-import type { AppConfig, ComponentStatus, MediaMetadataField, MediaVersion, MediaVersionBundle, ProgressFolder, ProjectFileEntry, ThumbnailState, WorkspaceProject } from '../../types';
+import type { AppConfig, ComponentStatus, MediaMetadataField, MediaVersion, MediaVersionBundle, ProgressFolder, ProjectFileEntry, ProjectFileSortField, ShellNewFileType, ThumbnailState, WorkspaceProject } from '../../types';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
 
 const CONTEXT_MENU_VIEWPORT_MARGIN = 8;
@@ -357,7 +357,7 @@ const formatBatchRenameLetter = (index: number, letterCase: 'upper' | 'lower') =
 
 const PROJECT_STATUSES: Array<WorkspaceProject['status']> = ['策划中', '待拍摄', '后期中', '已归档'];
 
-const ProjectWorkspace = ({ active, project, workspacePath, installedComponentIds, teamRetouchStatus, teamRetouchSettings, initialPanel, importConfig, brollConfig, fileImportConfig, conversionConfig, matchConfig, mediaCacheConfig, onImportConfigChange, onMatchConfigChange, onMediaCacheConfigChange, onNotice, onProjectMoved, onDeleted }: {
+const ProjectWorkspace = ({ active, project, workspacePath, installedComponentIds, teamRetouchStatus, teamRetouchSettings, initialPanel, importConfig, brollConfig, fileImportConfig, conversionConfig, matchConfig, mediaCacheConfig, defaultFolderSort, onImportConfigChange, onMatchConfigChange, onMediaCacheConfigChange, onNotice, onProjectMoved, onDeleted }: {
   active: boolean;
   project: WorkspaceProject;
   workspacePath: string;
@@ -371,6 +371,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   conversionConfig: AppConfig['imageConversion'];
   matchConfig: AppConfig['smartMatch'];
   mediaCacheConfig: AppConfig['mediaCache'];
+  defaultFolderSort: ProjectFileSortField;
   onImportConfigChange: (config: AppConfig['smartImport']) => void;
   onMatchConfigChange: (config: AppConfig['smartMatch']) => void;
   onMediaCacheConfigChange: (config: AppConfig['mediaCache']) => void;
@@ -387,11 +388,18 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   const [directoryHistory, setDirectoryHistory] = useState<{ back: string[]; forward: string[] }>({ back: [], forward: [] });
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid');
   const [gridIconSize, setGridIconSize] = useState(132);
-  const [sortField, setSortField] = useState<'name' | 'date' | 'size'>('name');
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+  const [sortField, setSortField] = useState<ProjectFileSortField>(defaultFolderSort);
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>(defaultFolderSort === 'name' ? 'asc' : 'desc');
+  useEffect(() => {
+    setSortField(defaultFolderSort);
+    setSortDirection(defaultFolderSort === 'name' ? 'asc' : 'desc');
+  }, [defaultFolderSort]);
   const [showSortMenu, setShowSortMenu] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  useEffect(() => {
+    if (searchQuery && !searchOpen) setSearchOpen(true);
+  }, [searchQuery, searchOpen]);
   const projectWorkspaceRef = useRef<HTMLDivElement>(null);
   const projectColumnLayoutRef = useRef<HTMLDivElement>(null);
   const filesColumnRef = useRef<HTMLDivElement>(null);
@@ -449,6 +457,9 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   const [panel, setPanel] = useState<ProjectPanel>(initialPanel);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
   const [showCreateMenu, setShowCreateMenu] = useState(false);
+  const [shellNewTypes, setShellNewTypes] = useState<ShellNewFileType[]>([]);
+  const [shellNewTypesLoaded, setShellNewTypesLoaded] = useState(false);
+  const [shellNewTypesLoading, setShellNewTypesLoading] = useState(false);
   const [showImportMenu, setShowImportMenu] = useState(false);
   const [progressSetup, setProgressSetup] = useState<ProgressSetupDraft | null>(null);
   const [progressCompare, setProgressCompare] = useState<ProgressCompareConfirmation | null>(null);
@@ -716,7 +727,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     };
   }, [active, workspacePath, project.path, project.status, project.name, mediaCacheConfig.directory, mediaCacheConfig.maxSizeGB, finalViewOpen, loadFinalViewEntries]);
   useEffect(() => {
-    const closeMenus = () => { setFileMenu(null); setSurfaceMenu(null); setShowStatusMenu(false); setShowCreateMenu(false); setShowImportMenu(false); setShowSortMenu(false); setSearchOpen(false); };
+    const closeMenus = () => { setFileMenu(null); setSurfaceMenu(null); setShowStatusMenu(false); setShowCreateMenu(false); setShowImportMenu(false); setShowSortMenu(false); };
     window.addEventListener('click', closeMenus);
     window.addEventListener('photoflow-menu-open', closeMenus);
     return () => { window.removeEventListener('click', closeMenus); window.removeEventListener('photoflow-menu-open', closeMenus); };
@@ -958,6 +969,34 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     setSelectedPaths([relativePath]);
     setInlineRenamePath(relativePath);
     setInlineRenameValue(result.folder?.name || '新建文件夹');
+  };
+  const loadShellNewTypes = async () => {
+    if (shellNewTypesLoaded || shellNewTypesLoading) return;
+    setShellNewTypesLoading(true);
+    try {
+      const result = await window.electronAPI.getShellNewFileTypes();
+      if (!result.success) { onNotice(`读取 Windows 新建文件类型失败：${result.error || '未知错误'}`); return; }
+      setShellNewTypes(result.types);
+      setShellNewTypesLoaded(true);
+    } finally {
+      setShellNewTypesLoading(false);
+    }
+  };
+  const toggleCreateMenu = () => {
+    const next = !showCreateMenu;
+    window.dispatchEvent(new Event('photoflow-menu-open'));
+    setShowCreateMenu(next);
+    if (next) void loadShellNewTypes();
+  };
+  const createShellNewFile = async (type: ShellNewFileType) => {
+    setShowCreateMenu(false);
+    const result = await window.electronAPI.createProjectShellNewFile(workspacePath, project.status, project.name, currentRelativePath, type.id);
+    if (!result.success || !result.file) { onNotice(`新建${type.label}失败：${result.error || '未知错误'}`); return; }
+    directoryEntriesCacheRef.current.delete(currentRelativePath);
+    await refresh();
+    setSelectedPaths([result.file.relativePath]);
+    setInlineRenamePath(result.file.relativePath);
+    setInlineRenameValue(result.file.name);
   };
   const compareProgressKeys = (left: string, right: string) => {
     const leftParts = left.split('_').map(Number);
@@ -1295,6 +1334,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       else onNotice(`删除项目失败：${result.error || '未知错误'}`);
       return;
     }
+    if (result.permanent) onNotice('项目已按 Windows 确认永久删除');
     onDeleted();
   };
   const openPngConverter = async (folderPath: string) => {
@@ -1566,7 +1606,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     setTeamRetouchEntries(targets);
   };
   const openProjectEntriesInPhotoshop = async (entries: ProjectFileEntry[]) => {
-    const imagePaths = entries.filter(entry => entry.kind === 'image').map(entry => entry.relativePath);
+    const imagePaths = entries.filter(entry => entry.kind === 'image' || entry.kind === 'raw').map(entry => entry.relativePath);
     if (!imagePaths.length) return;
     const result = await window.electronAPI.openProjectEntriesInPhotoshop(workspacePath, project.status, project.name, imagePaths);
     if (!result.success) onNotice(`用 Photoshop 打开失败：${result.error || '无法打开文件'}`);
@@ -1647,7 +1687,9 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       if (operation === 'paste') setCutPaths([]);
       if (operation === 'trash') setCutPaths(current => current.filter(path => !targetPaths.includes(path)));
       onNotice(operation === 'trash'
-        ? `已移入回收站 ${result.count} 个项目`
+        ? result.permanentCount
+          ? `已删除 ${result.count} 个项目，其中 ${result.permanentCount} 个已按 Windows 确认永久删除`
+          : `已移入回收站 ${result.count} 个项目`
         : operation === 'paste'
           ? result.replacedCount
             ? `已粘贴 ${result.count} 个项目；${result.replacedCount} 个同名项目的原内容已移入回收站`
@@ -1675,13 +1717,16 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         return;
       }
       if (target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
-      if (!target || !filesSurfaceRef.current?.contains(target)) return;
+      if (!target) return;
+      const insideFileSurface = Boolean(filesSurfaceRef.current?.contains(target));
       let handled = false;
 
       if (commandKey && !event.altKey && !event.shiftKey && key === 'a') {
-        setSelectedPaths(activeFileEntries.map(entry => entry.relativePath));
-        onNotice(`已选择 ${activeFileEntries.length} 个项目`);
+        setSelectedPaths(displayedFileEntries.map(entry => entry.relativePath));
+        onNotice(`已选择 ${displayedFileEntries.length} 个项目`);
         handled = true;
+      } else if (!insideFileSurface) {
+        return;
       } else if (commandKey && !event.altKey && !event.shiftKey && key === 'c' && selectedPaths.length) {
         void runFileOperation('copy');
         handled = true;
@@ -2003,6 +2048,10 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey);
       return;
     }
+    if (event.ctrlKey || event.metaKey) {
+      toggleSelected(entry.relativePath);
+      return;
+    }
     if (entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video') {
       openPreviewAndMetadata(entry);
       if (selectedPaths.length) toggleSelected(entry.relativePath);
@@ -2174,7 +2223,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openPreviewAndMetadata(entry); }}><PanelLeftOpen size={14}/>打开预览和详细信息</button>}
         {fileMenu.entry.kind !== 'folder' && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openProjectEntry(entry); }}><ExternalLink size={14}/>用默认方式打开</button>}
         {officeImageExtractorAvailable && isOfficeOpenXmlEntry(fileMenu.entry) && <button className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(isOfficeOpenXmlEntry) : [fileMenu.entry]; setFileMenu(null); void extractOfficeImages(entries); }}><ImageIcon size={14}/>提取图片{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(isOfficeOpenXmlEntry).length > 1 ? `（${selectedEntries.filter(isOfficeOpenXmlEntry).length} 个文档）` : ''}</button>}
-        {photoshopAvailable && fileMenu.entry.kind === 'image' && <button className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(entry => entry.kind === 'image') : [fileMenu.entry]; setFileMenu(null); void openProjectEntriesInPhotoshop(entries); }}><PhotoshopIcon size={14}/>用 Photoshop 打开{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(entry => entry.kind === 'image').length > 1 ? `（${selectedEntries.filter(entry => entry.kind === 'image').length} 个）` : ''}</button>}
+        {photoshopAvailable && (fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw') && <button className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(entry => entry.kind === 'image' || entry.kind === 'raw') : [fileMenu.entry]; setFileMenu(null); void openProjectEntriesInPhotoshop(entries); }}><PhotoshopIcon size={14}/>用 Photoshop 打开{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(entry => entry.kind === 'image' || entry.kind === 'raw').length > 1 ? `（${selectedEntries.filter(entry => entry.kind === 'image' || entry.kind === 'raw').length} 个）` : ''}</button>}
         {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <><div className="my-1 border-t border-slate-100"/><button disabled={!canSelectFileMenuMedia} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); selectMediaFiles(targets); }}><CheckCircle2 size={14}/>选片</button><button disabled={!hasVersionTrackingForEntry(fileMenu.entry)} title={hasVersionTrackingForEntry(fileMenu.entry) ? '管理素材的历史版本' : '请先导入版本进度并开启项目跟踪'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openVersions(entry); }}><GitBranch size={14}/>版本管理</button>{teamRetouchAvailable && fileMenu.entry.kind === 'image' && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openTeamRetouch(entry); }}><UsersRound size={14}/>多人修脸</button>}</>}
         {fileMenu.entry.kind !== 'folder' && <div className="my-1 border-t border-slate-100"/>}
         <button disabled={finalViewOpen} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); beginRename(targets); }}><Edit size={14}/>{fileMenuTargetPaths.length > 1 ? '批量重命名' : '重命名'}</button>
@@ -2185,7 +2234,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         {fileMenu.entry.kind === 'folder' && <button className="project-menu-item" onClick={() => { setFileMenu(null); openPngConverter(fileMenu.entry.path); }}><ImageIcon size={14}/>PNG 转 JPG</button>}
         <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); copyEntryPath(entry); }}><FileText size={14}/>{fileMenu.entry.kind === 'folder' ? '复制文件夹地址' : '复制文件地址'}</button>
         <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openEntryDetails(entry); }}><Info size={14}/>详细信息</button>
-        <button className="project-menu-item" onClick={() => { const path = fileMenu.entry.relativePath; if (fileMenuEntrySelected) setSelectedPaths(current => current.filter(item => item !== path)); else { selectionAnchorPathRef.current = path; setSelectedPaths(current => [...current, path]); setSearchOpen(false); setSearchQuery(''); requestFileReveal(path); } setFileMenu(null); }}>{fileMenuEntrySelected ? <X size={14}/> : <CheckSquare size={14}/>} {fileMenuEntrySelected ? '取消选择' : '选择'}</button>
+        <button className="project-menu-item" onClick={() => { const path = fileMenu.entry.relativePath; if (fileMenuEntrySelected) setSelectedPaths(current => current.filter(item => item !== path)); else { selectionAnchorPathRef.current = path; setSelectedPaths(current => [...current, path]); requestFileReveal(path); } setFileMenu(null); }}>{fileMenuEntrySelected ? <X size={14}/> : <CheckSquare size={14}/>} {fileMenuEntrySelected ? '取消选择' : '选择'}</button>
         <button disabled={finalViewOpen} className="project-menu-item project-menu-danger" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('trash', undefined, targets); }}><Trash2 size={14}/>删除</button>
       </ViewportContextMenu>, document.body)}
       {surfaceMenu && createPortal(<ViewportContextMenu x={surfaceMenu.x} y={surfaceMenu.y} widthClass="w-56">
@@ -2224,11 +2273,17 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       <div className="project-toolbar-wrap sticky top-0 z-30 -mx-6 w-[calc(100%+3rem)] bg-slate-50">
       <div className="project-toolbar flex w-full flex-nowrap items-center border-b border-slate-200 px-6 py-1">
         <div className="relative" onClick={event => event.stopPropagation()}>
-          <button onClick={() => { const next = !showCreateMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowCreateMenu(next); }} title="新建" aria-label="新建" aria-haspopup="menu" aria-expanded={showCreateMenu} className="project-action-button"><FolderPlus size={16}/>新建</button>
-          {showCreateMenu && <div className="absolute left-0 top-full z-40 mt-1 w-48 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">
-            <button className="project-menu-item" onClick={() => void openProgressSetup('create')}>新建进度</button>
+          <button onClick={toggleCreateMenu} title="新建" aria-label="新建" aria-haspopup="menu" aria-expanded={showCreateMenu} className="project-action-button"><FolderPlus size={16}/>新建</button>
+          {showCreateMenu && <div className="absolute left-0 top-full z-40 mt-1 w-72 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">
+            <button className="project-menu-item" onClick={() => void openProgressSetup('create')}><FolderPlus size={14}/>新建进度</button>
             <div className="my-1 border-t border-slate-100"/>
-            <button className="project-menu-item" onClick={() => void createFolder()}>新建文件夹</button>
+            <button className="project-menu-item" onClick={() => void createFolder()}><Folder size={14}/>文件夹</button>
+            <p className="px-2 pb-1 pt-2 text-[11px] font-bold text-slate-400">Windows 文件类型</p>
+            <div className="max-h-72 overflow-y-auto">
+              {shellNewTypesLoading && <p className="px-2 py-2 text-xs text-slate-400">正在读取系统新建菜单…</p>}
+              {!shellNewTypesLoading && shellNewTypes.map(type => <button key={type.id} className="project-menu-item" onClick={() => void createShellNewFile(type)}>{type.iconDataUrl ? <img src={type.iconDataUrl} alt="" className="h-4 w-4 shrink-0 object-contain"/> : <File size={14}/>}<span className="min-w-0 flex-1 truncate">{type.label}</span><span className="ml-auto font-mono text-[10px] text-slate-400">{type.extension}</span></button>)}
+              {!shellNewTypesLoading && shellNewTypesLoaded && !shellNewTypes.length && <p className="px-2 py-2 text-xs text-slate-400">系统没有可用的新建文件类型</p>}
+            </div>
           </div>}
         </div>
         <div className="relative" onClick={event => event.stopPropagation()}>
@@ -2253,7 +2308,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
           <button onClick={() => togglePanel('import')} title="从 SD 卡导入" aria-label="从 SD 卡导入" className="project-action-button"><MemoryStick size={16}/>从 SD 卡导入</button>
           <button onClick={() => togglePanel('match')} title="从文件名选片" aria-label="从文件名选片" className="project-action-button"><FileText size={16}/>从文件名选片</button>
           <button aria-disabled={!canSelectMedia} title="选片" onClick={() => void selectMediaFiles()} className={`project-action-button ${canSelectMedia ? '' : 'cursor-not-allowed opacity-50'}`}><CheckCircle2 size={16}/>选片</button>
-          {photoshopAvailable && <button disabled={!selectedEntries.length || selectedEntries.some(entry => entry.kind !== 'image')} onClick={() => void openProjectEntriesInPhotoshop(selectedEntries)} title={selectedEntries.length > 1 ? `在 Photoshop 中打开 ${selectedEntries.length} 张图片` : '在 Photoshop 中打开'} aria-label="在 Photoshop 中打开所选图片" className="project-action-button"><PhotoshopIcon size={16}/>在 PS 中打开{selectedEntries.length > 1 ? `（${selectedEntries.length} 张）` : ''}</button>}
+          {photoshopAvailable && <button disabled={!selectedEntries.length || selectedEntries.some(entry => entry.kind !== 'image' && entry.kind !== 'raw')} onClick={() => void openProjectEntriesInPhotoshop(selectedEntries)} title={selectedEntries.length > 1 ? `在 Photoshop 中打开 ${selectedEntries.length} 张图片或 RAW` : '在 Photoshop 中打开'} aria-label="在 Photoshop 中打开所选图片或 RAW" className="project-action-button"><PhotoshopIcon size={16}/>在 PS 中打开{selectedEntries.length > 1 ? `（${selectedEntries.length} 张）` : ''}</button>}
         </div>
         <div className="contents">
           <button disabled={selectedProgressFolder ? !selectedProgressFolderIsRoot : selectedEntries.length !== 1 || !hasVersionTrackingForEntry(selectedEntries[0])} onClick={() => selectedProgressFolder ? void openMarkProgress(selectedProgressFolder) : openVersions()} title={selectedProgressFolder ? selectedProgressFolderIsRoot ? selectedRegisteredProgressFolder ? '修改当前进度版本' : '标记当前文件夹为进度' : '进度文件夹必须位于项目根目录' : '版本管理'} aria-label={selectedProgressFolder ? selectedRegisteredProgressFolder ? '修改进度版本' : '标记进度' : '版本管理'} className="project-action-button"><GitBranch size={16}/>{selectedProgressFolder ? selectedRegisteredProgressFolder ? '修改进度版本' : '标记进度' : '版本管理'}</button>
@@ -2636,7 +2691,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, photoshopAvailable, final
   const previewPane = <section onContextMenu={onContextMenu} style={fullscreen ? undefined : { width }} className={`flex min-h-0 shrink-0 flex-col bg-slate-50 ${fullscreen ? 'fixed inset-x-0 bottom-0 top-10 z-40 w-screen' : ''}`}>
     <header className="flex min-h-14 shrink-0 items-center justify-between border-b border-slate-200 px-3 py-2">
       <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wider text-slate-400">预览</p><p className="truncate text-sm font-semibold text-slate-700">{entry?.name || '未选择媒体'}</p></div>
-      <div className="flex items-center gap-1">{entry && <>{(finalVersionAvailable || finalVersion) && <button type="button" disabled={finalVersionLoading || finalVersionBusy || !finalVersion || finalVersion.fileMissing} onClick={onToggleFinal} title={finalVersion?.isFinal ? '取消标记最终版' : finalVersionLoading ? '正在读取最终版状态' : '标记为最终版'} className={`group min-w-[96px] rounded-md border px-2.5 py-1.5 text-[11px] font-medium transition hover:!border-red-300 hover:!bg-red-50 hover:!text-red-700 disabled:opacity-40 ${finalVersion?.isFinal ? 'border-red-200 bg-red-50 text-red-600' : 'border-slate-200 bg-slate-50 text-slate-500'}`}>{finalVersionBusy ? '处理中…' : finalVersionLoading ? '读取最终版状态…' : finalVersion?.isFinal ? <><span className="group-hover:hidden">已标记最终版</span><span className="hidden group-hover:inline">取消标记最终版</span></> : '标记为最终版'}</button>}{!fullscreen && <button type="button" onClick={() => setFullscreen(true)} title="全屏查看预览图" aria-label="全屏查看预览图" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Maximize2 size={16}/></button>}{photoshopAvailable && entry.kind === 'image' && <button type="button" onClick={onOpenInPhotoshop} title="使用 Photoshop 打开" aria-label="使用 Photoshop 打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><PhotoshopIcon size={16}/></button>}<button type="button" onClick={onOpen} title="使用系统默认应用打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><ExternalLink size={16}/></button></>}{fullscreen ? <button type="button" onClick={() => setFullscreen(false)} title="缩小预览（Esc）" aria-label="缩小预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Minimize2 size={16}/></button> : <button type="button" onClick={onClose} title="关闭预览" aria-label="关闭预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X size={16}/></button>}</div>
+      <div className="flex items-center gap-1">{entry && <>{(finalVersionAvailable || finalVersion) && <button type="button" disabled={finalVersionLoading || finalVersionBusy || !finalVersion || finalVersion.fileMissing} onClick={onToggleFinal} title={finalVersion?.isFinal ? '取消标记最终版' : finalVersionLoading ? '正在读取最终版状态' : '标记为最终版'} className={`group min-w-[96px] rounded-md border px-2.5 py-1.5 text-[11px] font-medium transition hover:!border-red-300 hover:!bg-red-50 hover:!text-red-700 disabled:opacity-40 ${finalVersion?.isFinal ? 'border-red-200 bg-red-50 text-red-600' : 'border-slate-200 bg-slate-50 text-slate-500'}`}>{finalVersionBusy ? '处理中…' : finalVersionLoading ? '读取最终版状态…' : finalVersion?.isFinal ? <><span className="group-hover:hidden">已标记最终版</span><span className="hidden group-hover:inline">取消标记最终版</span></> : '标记为最终版'}</button>}{!fullscreen && <button type="button" onClick={() => setFullscreen(true)} title="全屏查看预览图" aria-label="全屏查看预览图" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Maximize2 size={16}/></button>}{photoshopAvailable && (entry.kind === 'image' || entry.kind === 'raw') && <button type="button" onClick={onOpenInPhotoshop} title="使用 Photoshop 打开" aria-label="使用 Photoshop 打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><PhotoshopIcon size={16}/></button>}<button type="button" onClick={onOpen} title="使用系统默认应用打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><ExternalLink size={16}/></button></>}{fullscreen ? <button type="button" onClick={() => setFullscreen(false)} title="缩小预览（Esc）" aria-label="缩小预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Minimize2 size={16}/></button> : <button type="button" onClick={onClose} title="关闭预览" aria-label="关闭预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X size={16}/></button>}</div>
     </header>
     <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-slate-50">
       {!entry && <div className="max-w-[220px] text-center"><ImageIcon size={38} strokeWidth={1.4} className="mx-auto text-slate-600"/><p className="mt-3 text-sm font-medium text-slate-300">点击图片、RAW 或视频文件</p><p className="mt-1 text-xs leading-5 text-slate-500">此处会显示大图或轻量视频预览</p></div>}

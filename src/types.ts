@@ -8,6 +8,7 @@ export type ToolType = 'home' | 'project' | 'settings' | 'about' | 'dashboard' |
 
 export type Theme = 'light' | 'dark' | 'system';
 export type HomeCardId = 'birthday' | 'import' | 'research' | 'converter';
+export type ProjectFileSortField = 'name' | 'date' | 'size';
 export type ProjectStatus = '未分类' | '策划中' | '待拍摄' | '后期中' | '已归档';
 export interface TeamRetouchComponentSettings {
   useGpu: boolean;
@@ -47,6 +48,8 @@ export interface AppConfig {
   theme: Theme;
   workspacePath: string;
   autoCleanupDeletedProjectData: boolean;
+  createPlanningFolder: boolean;
+  defaultFolderSort: ProjectFileSortField;
   homeOrder: HomeCardId[];
   birthdayEnabled: boolean;
   componentSettings: ComponentSettingsMap;
@@ -100,6 +103,14 @@ export interface ProjectFileEntry {
   createdAt: number;
   updatedAt: number;
   previewUrl?: string;
+}
+
+export interface ShellNewFileType {
+  id: string;
+  extension: string;
+  label: string;
+  method: 'null' | 'data' | 'template';
+  iconDataUrl?: string;
 }
 
 export type ThumbnailState = 'NOT_READY' | 'QUEUED' | 'GENERATING' | 'READY' | 'STALE' | 'FAILED' | 'MISSING';
@@ -284,7 +295,7 @@ export interface ComponentStatus {
 export interface ProjectFileOperationProgress {
   operationId: string;
   operation: 'paste' | 'trash' | 'import-broll';
-  phase: 'scanning' | 'copying' | 'splitting' | 'finishing' | 'trashing' | 'complete' | 'cancelled' | 'failed';
+  phase: 'scanning' | 'moving' | 'copying' | 'splitting' | 'finishing' | 'trashing' | 'complete' | 'cancelled' | 'failed';
   progress: number;
   currentName?: string;
   bytesCopied?: number;
@@ -350,14 +361,16 @@ export interface IElectronAPI {
   getWorkspaceProjects: (workspacePath: string) => Promise<{ success: boolean; root?: string; statuses: WorkspaceStatusGroup[]; error?: string }> ;
   onWorkspaceFilesChanged: (callback: (change: { root: string; fileName: string }) => void) => () => void;
   onWorkspaceProjectsChanged: (callback: (change: { root: string }) => void) => () => void;
-  createWorkspaceProject: (workspacePath: string, date: ProjectDate | null, name: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
-  renameWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, nextName: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
+  createWorkspaceProject: (workspacePath: string, date: ProjectDate | null, name: string, options?: { createPlanningFolder?: boolean }) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
+  renameWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, date: ProjectDate | null, nextName: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   renameProjectFolder: (workspacePath: string, status: ProjectStatus, name: string, folderName: string, nextName: string) => Promise<{ success: boolean; folder?: { name: string; path: string; updatedAt: number }; error?: string }> ;
   createProjectFolder: (workspacePath: string, status: ProjectStatus, name: string, folderName: string, relativePath?: string, makeUnique?: boolean) => Promise<{ success: boolean; folder?: { name: string; path: string; relativePath?: string; updatedAt: number }; error?: string }> ;
+  getShellNewFileTypes: () => Promise<{ success: boolean; types: ShellNewFileType[]; error?: string }>;
+  createProjectShellNewFile: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, typeId: string) => Promise<{ success: boolean; file?: { name: string; path: string; relativePath: string; extension: string; updatedAt: number }; error?: string }>;
   undoLastRename: (workspacePath?: string) => Promise<{ success: boolean; message?: string; project?: WorkspaceProject; error?: string }> ;
   moveWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, nextStatus: ProjectStatus) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   archiveImportedProjects: (workspacePath: string, projectNames?: string[]) => Promise<{ success: boolean; projects: WorkspaceProject[]; error?: string }>;
-  trashWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; operationId?: string; error?: string; errorCode?: string }>;
+  trashWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; operationId?: string; permanent?: boolean; error?: string; errorCode?: string }>;
   cleanupDeletedWorkspaceProjects: (workspacePath: string) => Promise<{ success: boolean; checkedCount: number; cleanedCount: number; outcomes: Array<{ projectId: string; name: string; cleaned: boolean; status: 'in_recycle_bin' | 'missing' | 'restored' | 'unknown'; removedArtifactCount?: number }>; error?: string }>;
 
   getProjectContents: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; folders: Array<{ name: string; path: string; updatedAt: number }>;error?: string }> ;
@@ -407,7 +420,7 @@ export interface IElectronAPI {
   onAppError: (callback: (message: string) => void) => () => void;
   getRawPreview: (filePath: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; previewUrl?: string; error?: string }>;
   folderHasPng: (folderPath: string) => Promise<{ success: boolean; hasPng?: boolean; error?: string }>;
-  projectFileOperation: (workspacePath: string, status: ProjectStatus, projectName: string, operation: 'trash' | 'copy' | 'cut' | 'paste' | 'rename' | 'select' | 'move' | 'import', paths: string[], targetRelativePath?: string, nextName?: string, options?: { imageDestFolderName?: string; videoDestFolderName?: string; renameNames?: string[] }) => Promise<{ success: boolean; cancelled?: boolean; count?: number; imageCount?: number; videoCount?: number; operationId?: string; replacedCount?: number; replacedNames?: string[]; error?: string; errorCode?: string }>;
+  projectFileOperation: (workspacePath: string, status: ProjectStatus, projectName: string, operation: 'trash' | 'copy' | 'cut' | 'paste' | 'rename' | 'select' | 'move' | 'import', paths: string[], targetRelativePath?: string, nextName?: string, options?: { imageDestFolderName?: string; videoDestFolderName?: string; renameNames?: string[] }) => Promise<{ success: boolean; cancelled?: boolean; count?: number; permanentCount?: number; imageCount?: number; videoCount?: number; operationId?: string; replacedCount?: number; replacedNames?: string[]; error?: string; errorCode?: string }>;
   getProjectFileClipboardStatus: () => Promise<{ success: boolean; hasFiles: boolean }>;
   startProjectFileDrag: (workspacePath: string, status: ProjectStatus, projectName: string, paths: string[]) => void;
   onProjectFileDragEnd: (callback: (result: { paths: string[]; clientX: number; clientY: number; insideWindow: boolean }) => void) => () => void;

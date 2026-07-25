@@ -40,7 +40,6 @@ const runJson = (command, args, timeoutMs = 120000) => new Promise((resolve, rej
 });
 
 const createRecycleBinService = ({ app, shell, projectRoot }) => {
-  const capabilityByRoot = new Map();
   const executable = () => app.isPackaged
     ? path.join(process.resourcesPath, 'recycle-bin-service.exe')
     : path.join(projectRoot, 'electron', 'bin', 'recycle-bin-service.exe');
@@ -50,21 +49,6 @@ const createRecycleBinService = ({ app, shell, projectRoot }) => {
   const trash = async filePath => {
     const resolved = path.resolve(filePath);
     if (nativeAvailable()) {
-      const parsed = path.parse(resolved);
-      const capabilityKey = parsed.root.toLocaleLowerCase();
-      let supported = capabilityByRoot.get(capabilityKey);
-      if (supported === undefined) {
-        const sourceStat = await fs.promises.stat(resolved);
-        const checkDirectory = sourceStat.isDirectory() ? resolved : path.dirname(resolved);
-        const result = await runJson(executable(), ['check', '--directory', checkDirectory]);
-        supported = Boolean(result.supported);
-        capabilityByRoot.set(capabilityKey, supported);
-        if (!supported) {
-          const error = new Error(result.reason || '该磁盘没有可用的系统回收站，已取消删除');
-          error.code = 'RECYCLE_UNAVAILABLE';
-          throw error;
-        }
-      }
       return runJson(executable(), ['trash', '--path', resolved]);
     }
     if (process.platform === 'win32') {
