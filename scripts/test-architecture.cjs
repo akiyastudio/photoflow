@@ -12,11 +12,14 @@ const lines = value => value.split(/\r?\n/).length;
 const main = read('electron/main.cjs');
 const app = read('src/App.tsx');
 const projectWorkspace = read('src/features/workspace/ProjectWorkspace.tsx');
+const projectNavigator = read('src/components/ProjectNavigator.tsx');
 const settingsFeature = read('src/features/settings/SettingsFeature.tsx');
 const requirePlugin = read('src/features/plugins/RequirePlugin.tsx');
 const recycleBinFailure = read('src/utils/recycleBinFailure.ts');
 const recycleBinService = read('electron/services/recycle-bin-service.cjs');
 const filesIpc = read('electron/modules/files-ipc.cjs');
+const workspaceIpc = read('electron/modules/workspace-ipc.cjs');
+const shellNewService = read('electron/services/shell-new-service.cjs');
 const nativeRecycleBinService = read('electron/native/RecycleBinService.cs');
 const packageJson = JSON.parse(read('package.json'));
 assert(/\btsc\s+-b\b/.test(packageJson.scripts.build), 'production build must type-check referenced TypeScript projects');
@@ -43,10 +46,30 @@ assert(recycleBinFailure.includes('拒绝访问') && recycleBinFailure.includes(
 assert(recycleBinService.includes("args[0] === 'trash' ? 'RECYCLE_BIN_FAILED'"), 'native trash failures must expose a stable structured error code');
 assert(projectWorkspace.includes('isRecycleBinFailure(result.error, result.errorCode)'), 'project and ordinary file deletion must use structured recycle-bin errors');
 assert(/missingDirectory && !requestedPath[\s\S]*?onDeleted\(\)/.test(projectWorkspace), 'an externally deleted open project must close its stale tab');
-assert(nativeRecycleBinService.includes('EnsureRecycleCapacity(sourcePath, allowUnknownCapacity)'), 'native trash must reject items that exceed the per-volume Recycle Bin capacity');
-assert(nativeRecycleBinService.includes('sourceBytes >= capacityBytes'), 'native trash capacity preflight must fail closed before Windows offers permanent deletion');
+assert(!nativeRecycleBinService.includes('EnsureRecycleCapacity') && !nativeRecycleBinService.includes('CalculateSourceSize'), 'trash must not pre-scan folder size before handing deletion to Windows');
+assert(nativeRecycleBinService.includes('FOF_WANTNUKEWARNING') && nativeRecycleBinService.includes('{ "permanent", permanent }'), 'Windows must warn before a non-recyclable item is permanently deleted and report that outcome');
 assert(filesIpc.includes("buttons: ['替换并继续', '保留两者', '取消']"), 'paste conflicts must let the user replace, keep both, or cancel');
 assert(/pasteConflicts\.push\(\{ source, destination, isDirectory:/.test(filesIpc), 'paste conflict detection must include same-name files as well as folders');
+assert(filesIpc.includes("writeLog('info', 'Project files moved by same-volume rename'"), 'same-volume cut/paste must use filesystem moves instead of copy-then-delete');
+assert(filesIpc.includes('await movePathAtomic(item.source, item.destination'), 'same-volume cut/paste must use the safe move primitive');
+assert(filesIpc.includes('await writeSystemFileClipboard(sources, operation)'), 'copy/cut must wait until the Windows file clipboard is ready');
+assert(main.includes("$data.SetData('Preferred DropEffect', $false, [byte[]]$effectBytes)"), 'Windows cut clipboard data must expose a DWORD-compatible Preferred DropEffect');
+assert(projectNavigator.includes("(showNew || renameProject) && <ProjectDialog title={renameProject ? '重命名项目' : '新建项目'}"), 'project create and rename must share the same editor panel');
+assert(projectNavigator.includes('createPortal(<div className="fixed inset-x-0 bottom-0 top-10 z-[500]') && projectNavigator.includes('disabled={isCreating || !nextProjectDisplayName}'), 'project editor must escape sidebar stacking and allow a date-only name');
+assert(projectNavigator.includes('const legacyMonthDay = project.name.match') && projectNavigator.includes('"9-12-2" becomes date YY-9-12 plus name "2"') && projectNavigator.includes('setEditor(projectEditorValue(project))'), 'legacy M-D and M-D-name projects must reopen with the current year and an optional name');
+assert(projectNavigator.includes('type="number" min="0" max="2099"') && projectNavigator.includes('type="number" min="1" max="12"'), 'project date fields must resist Chromium text autofill restoring stale visible values');
+assert(app.includes("createPlanningFolder: true") && app.includes("defaultFolderSort: 'date'"), 'project creation and folder sorting defaults must be explicit');
+assert(settingsFeature.includes('新建项目时自动创建“策划”文件夹') && settingsFeature.includes('文件夹默认排序方式'), 'general settings must expose project folder creation and default sorting');
+assert(projectNavigator.includes('createWorkspaceProject(workspacePath, projectDate(), name, { createPlanningFolder })'), 'project creation must forward the planning-folder preference');
+assert(workspaceIpc.includes("options?.createPlanningFolder !== false") && workspaceIpc.includes("path.join(projectPath, '策划')"), 'workspace creation must default to creating the planning folder while allowing opt-out');
+assert(projectWorkspace.includes('useState<ProjectFileSortField>(defaultFolderSort)') && projectWorkspace.includes("defaultFolderSort === 'name' ? 'asc' : 'desc'"), 'project folders must initialize from the configured sort mode');
+assert(projectWorkspace.includes("entries.filter(entry => entry.kind === 'image' || entry.kind === 'raw')"), 'Photoshop actions must include RAW files');
+assert(/if \(event\.ctrlKey \|\| event\.metaKey\) \{\s*toggleSelected\(entry\.relativePath\)/.test(projectWorkspace), 'Ctrl-click must toggle selection instead of opening an entry');
+assert(projectWorkspace.includes('setSelectedPaths(displayedFileEntries.map(entry => entry.relativePath))'), 'Ctrl+A must select the current displayed folder contents');
+assert(shellNewService.includes("Registry::HKEY_CLASSES_ROOT") && shellNewService.includes("Command and handler-based entries are intentionally not executed"), 'ShellNew discovery must be read-only and must not execute registered commands');
+assert(!shellNewService.includes('runPowerShellJson(DISCOVERY_SCRIPT).catch(() => [])') && shellNewService.includes('const nextTypes = normalized.slice(0, 80)') && shellNewService.indexOf('cachedTypes = nextTypes') > shellNewService.indexOf('app.getFileIcon(iconSource'), 'ShellNew discovery failures must remain retryable and cache publication must be atomic');
+assert(projectWorkspace.includes('createProjectShellNewFile') && projectWorkspace.includes('Windows 文件类型'), 'the top New menu must expose supported Windows ShellNew file types');
+assert(shellNewService.includes("app.getFileIcon(iconSource, { size: 'normal' })") && projectWorkspace.includes('type.iconDataUrl'), 'the top New menu must display Windows-associated file type icons');
 
 const electronSources = fs.readdirSync(path.join(root, 'electron'), { recursive: true })
   .filter(name => name.endsWith('.cjs'))

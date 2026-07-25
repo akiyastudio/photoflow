@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus, X } from 'lucide-react';
 import { PROJECT_STATUS_LABELS } from '../types';
 import type { ProjectDate, ProjectStatus, WorkspaceProject, WorkspaceStatusGroup } from '../types';
@@ -29,10 +30,46 @@ const parseProjectDateText = (value: string) => {
   }
   return { year: String(year).slice(-2), month: String(month), day: day === undefined ? '' : String(day) };
 };
+const formatProjectDateText = (value?: ProjectDate) => value
+  ? `${String(value.year).slice(-2)}-${value.month}${value.precision === 'day' && value.day ? `-${value.day}` : ''}`
+  : '';
+const projectEditorValue = (project: WorkspaceProject) => {
+  if (project.projectDate) {
+    const dateText = formatProjectDateText(project.projectDate);
+    return {
+      year: String(project.projectDate.year).slice(-2),
+      month: String(project.projectDate.month),
+      day: project.projectDate.precision === 'day' && project.projectDate.day ? String(project.projectDate.day) : '',
+      quickDate: dateText,
+      name: project.name.startsWith(`${dateText} `) ? project.name.slice(dateText.length + 1) : project.name === dateText ? '' : project.name,
+    };
+  }
 
-export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData, selectedProject, onSelectProject, onProjectAction, onWorkspaceResolved }: {
+  const currentFormat = project.name.match(/^((?:\d{2}|\d{4})[-/.]\d{1,2}(?:[-/.]\d{1,2})?)(?:\s+(.+))?$/);
+  const parsedCurrent = currentFormat ? parseProjectDateText(currentFormat[1]) : null;
+  if (parsedCurrent) return { ...parsedCurrent, quickDate: currentFormat![1], name: currentFormat![2] || '' };
+
+  // Older projects used M-D or M-D-name. Supply the current year when opening
+  // the editor; for example, "9-12-2" becomes date YY-9-12 plus name "2".
+  const legacyMonthDay = project.name.match(/^(\d{1,2})[-/.](\d{1,2})(?:[-\s]+(.+))?$/);
+  if (legacyMonthDay) {
+    const now = new Date();
+    const month = Number(legacyMonthDay[1]);
+    const day = Number(legacyMonthDay[2]);
+    const checked = new Date(now.getFullYear(), month - 1, day);
+    if (checked.getFullYear() === now.getFullYear() && checked.getMonth() === month - 1 && checked.getDate() === day) {
+      const year = String(now.getFullYear()).slice(-2);
+      return { year, month: String(month), day: String(day), quickDate: `${year}-${month}-${day}`, name: legacyMonthDay[3] || '' };
+    }
+  }
+
+  return { year: '', month: '', day: '', quickDate: '', name: project.name };
+};
+
+export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData, createPlanningFolder, selectedProject, onSelectProject, onProjectAction, onWorkspaceResolved }: {
   workspacePath: string;
   autoCleanupDeletedProjectData: boolean;
+  createPlanningFolder: boolean;
   selectedProject: WorkspaceProject | null;
   onSelectProject: (project: WorkspaceProject, replacePath?: string) => void;
   onProjectAction: (action: Action, project: WorkspaceProject) => void;
@@ -56,22 +93,19 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
   const [menu, setMenu] = useState<{ project: WorkspaceProject; x: number; y: number } | null>(null);
   const [showNew, setShowNew] = useState(false);
   const initialDate = initialProjectDate();
-  const [year, setYear] = useState(initialDate.year);
-  const [month, setMonth] = useState(initialDate.month);
-  const [day, setDay] = useState(initialDate.day);
-  const [quickDate, setQuickDate] = useState(`${initialDate.year}-${initialDate.month}-${initialDate.day}`);
-  const [name, setName] = useState('');
+  const [editor, setEditor] = useState({ year: initialDate.year, month: initialDate.month, day: initialDate.day, quickDate: `${initialDate.year}-${initialDate.month}-${initialDate.day}`, name: '' });
+  const { year, month, day, quickDate, name } = editor;
+  const setYear = (value: string) => setEditor(current => ({ ...current, year: value }));
+  const setMonth = (value: string) => setEditor(current => ({ ...current, month: value }));
+  const setDay = (value: string) => setEditor(current => ({ ...current, day: value }));
+  const setName = (value: string) => setEditor(current => ({ ...current, name: value }));
   const [renameProject, setRenameProject] = useState<WorkspaceProject | null>(null);
-  const [renameValue, setRenameValue] = useState('');
   const [newProjectError, setNewProjectError] = useState('');
   const [createNotice, setCreateNotice] = useState('');
   const [isCreating, setIsCreating] = useState(false);
   const resetProjectDate = () => {
     const value = initialProjectDate();
-    setYear(value.year);
-    setMonth(value.month);
-    setDay(value.day);
-    setQuickDate(`${value.year}-${value.month}-${value.day}`);
+    setEditor(current => ({ ...current, year: value.year, month: value.month, day: value.day, quickDate: `${value.year}-${value.month}-${value.day}` }));
   };
   const openNewProject = () => {
     resetProjectDate();
@@ -79,13 +113,21 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
     setNewProjectError('');
     setShowNew(true);
   };
+  const openRenameProject = (project: WorkspaceProject) => {
+    setEditor(projectEditorValue(project));
+    setNewProjectError('');
+    setRenameProject(project);
+  };
+  const closeProjectEditor = () => {
+    setShowNew(false);
+    setRenameProject(null);
+    setNewProjectError('');
+  };
   const applyQuickDate = (value: string) => {
-    setQuickDate(value);
     const parsed = parseProjectDateText(value);
-    if (!parsed) return;
-    setYear(parsed.year);
-    setMonth(parsed.month);
-    setDay(parsed.day);
+    setEditor(current => parsed
+      ? { ...current, quickDate: value, year: parsed.year, month: parsed.month, day: parsed.day }
+      : { ...current, quickDate: value });
   };
   const projectDate = (): ProjectDate | null => {
     if (!year.trim() && !month.trim() && !day.trim()) return null;
@@ -93,7 +135,8 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
     const normalizedYear = Number(year) < 100 ? Number(year) + 2000 : Number(year);
     return { year: normalizedYear, month: Number(month), ...(day.trim() ? { day: Number(day) } : {}), precision: day.trim() ? 'day' : 'month' };
   };
-  const formattedDate = year && month ? `${String(year).slice(-2)}-${Number(month)}${day ? `-${Number(day)}` : ''}` : '';
+  const formattedDate = year.trim() && month.trim() ? `${String(year).trim().slice(-2)}-${Number(month)}${day.trim() ? `-${Number(day)}` : ''}` : '';
+  const nextProjectDisplayName = [formattedDate, name.trim()].filter(Boolean).join(' ');
 
   const refresh = async () => {
     if (!workspacePath.trim()) {
@@ -144,7 +187,7 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
     setNewProjectError('');
     setIsCreating(true);
     try {
-      const result = await window.electronAPI.createWorkspaceProject(workspacePath, projectDate(), name);
+      const result = await window.electronAPI.createWorkspaceProject(workspacePath, projectDate(), name, { createPlanningFolder });
       if (!result.success || !result.project) {
         setNewProjectError(result.error || '新建项目失败');
         return;
@@ -166,14 +209,22 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
   };
   const rename = async () => {
     if (!renameProject) return;
-    const nextName = renameValue.trim();
-    if (!nextName || nextName === renameProject.name) { setRenameProject(null); return; }
-    const result = await window.electronAPI.renameWorkspaceProject(workspacePath, renameProject.status, renameProject.name, nextName);
-    if (!result.success) setError(result.error || '重命名失败');
-    else if (result.project && selectedProject?.path === renameProject.path) onSelectProject(result.project, renameProject.path);
-    setRenameProject(null);
-    setRenameValue('');
-    refresh();
+    setNewProjectError('');
+    setIsCreating(true);
+    try {
+      const result = await window.electronAPI.renameWorkspaceProject(workspacePath, renameProject.status, renameProject.name, projectDate(), name);
+      if (!result.success || !result.project) {
+        setNewProjectError(result.error || '重命名失败');
+        return;
+      }
+      if (selectedProject?.path === renameProject.path) onSelectProject(result.project, renameProject.path);
+      closeProjectEditor();
+      refresh();
+    } catch (renameError) {
+      setNewProjectError(renameError instanceof Error ? renameError.message : '重命名失败');
+    } finally {
+      setIsCreating(false);
+    }
   };
   const move = async (project: WorkspaceProject, status: ProjectStatus) => {
     if (status === project.status) return;
@@ -194,6 +245,9 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
     if (!result.success) {
       if (isRecycleBinFailure(result.error, result.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
       else setError(result.error || '删除项目失败');
+    } else if (result.permanent) {
+      setCreateNotice(`项目“${project.name}”已按 Windows 确认永久删除`);
+      window.setTimeout(() => setCreateNotice(''), 3000);
     }
     refresh();
   };
@@ -216,10 +270,25 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
       })}
       {error && <p className="mt-2 px-2 text-xs text-red-500">{error}</p>}
     </nav>
-    {menu && <div className="fixed z-[300] w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" style={{ left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 360) }} onClick={event => event.stopPropagation()}><button className="project-menu-item" onClick={() => { setRenameProject(menu.project); setRenameValue(menu.project.name); setMenu(null); }}>重命名</button><div className="my-1 border-t border-slate-100"/><p className="px-2 py-1 text-[11px] font-bold text-slate-400">更改状态</p>{STATUSES.filter(status => status !== '未分类').map(status => { const isCurrentStatus = status === menu.project.status; return <button key={status} aria-current={isCurrentStatus ? 'true' : undefined} className={`project-menu-item ${isCurrentStatus ? 'bg-blue-50 font-bold text-blue-700' : ''}`} onClick={() => { move(menu.project, status); setMenu(null); }}>{PROJECT_STATUS_LABELS[status]}{isCurrentStatus ? '（当前）' : ''}</button>; })}<div className="my-1 border-t border-slate-100"/><button className="project-menu-item" onClick={() => { onProjectAction('import', menu.project); setMenu(null); }}>从 SD 卡导入</button><button className="project-menu-item" onClick={() => { onProjectAction('broll', menu.project); setMenu(null); }}>导入花絮</button><button className="project-menu-item" onClick={() => { onProjectAction('match', menu.project); setMenu(null); }}>从文件名选片</button><div className="my-1 border-t border-slate-100"/><button className="project-menu-item text-red-500 hover:bg-red-50" onClick={() => { trash(menu.project); setMenu(null); }}>删除项目</button></div>}
-    {renameProject && <ProjectDialog title="重命名项目" onClose={() => { setRenameProject(null); setRenameValue(''); }}><label className="form-label">项目名称</label><input autoFocus value={renameValue} onChange={event => setRenameValue(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void rename(); }} className="form-input"/><div className="mt-5 flex justify-end gap-2"><button onClick={() => { setRenameProject(null); setRenameValue(''); }} className="dialog-secondary">取消</button><button onClick={() => void rename()} disabled={!renameValue.trim()} className="dialog-primary">确认重命名</button></div></ProjectDialog>}
-    {showNew && <ProjectDialog title="新建项目" onClose={() => { setShowNew(false); setNewProjectError(''); }}><p className="text-xs text-slate-500">日期精确到日时可自动匹配 SD 卡；只填年月时，导入前会询问目标项目。</p><label className="form-label">快速输入日期</label><input value={quickDate} onChange={event => applyQuickDate(event.target.value)} placeholder="例如：26-7-17 或 26-7" className="form-input"/><div className="mt-3 grid grid-cols-3 gap-2"><label className="text-xs font-medium text-slate-500">年<input list="project-year-options" value={year} onChange={event => setYear(event.target.value)} placeholder="26" inputMode="numeric" className="form-input mt-1"/></label><label className="text-xs font-medium text-slate-500">月<input list="project-month-options" value={month} onChange={event => setMonth(event.target.value)} placeholder="7" inputMode="numeric" className="form-input mt-1"/></label><label className="text-xs font-medium text-slate-500">日（可不填）<input list="project-day-options" value={day} onChange={event => setDay(event.target.value)} placeholder="17" inputMode="numeric" className="form-input mt-1"/></label></div><datalist id="project-year-options">{Array.from({ length: 8 }, (_, index) => { const value = new Date().getFullYear() - 2 + index; return <option key={value} value={String(value).slice(-2)}/>; })}</datalist><datalist id="project-month-options">{Array.from({ length: 12 }, (_, index) => <option key={index + 1} value={index + 1}/>)}</datalist><datalist id="project-day-options">{Array.from({ length: 31 }, (_, index) => <option key={index + 1} value={index + 1}/>)}</datalist><label className="form-label">项目名称</label><input value={name} onChange={event => setName(event.target.value)} placeholder="例如：春日写真" className="form-input"/><p className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">将创建：<strong className="text-slate-700">{[formattedDate, name.trim()].filter(Boolean).join(' ') || '请填写日期或名称'}</strong></p>{newProjectError && <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{newProjectError}</div>}<div className="mt-5 flex justify-end gap-2"><button onClick={() => { setShowNew(false); setNewProjectError(''); }} className="dialog-secondary">取消</button><button onClick={createProject} disabled={isCreating || (!formattedDate && !name.trim())} className="dialog-primary">{isCreating ? '创建中…' : '创建'}</button></div></ProjectDialog>}
+    {menu && <div className="fixed z-[300] w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" style={{ left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 360) }} onClick={event => event.stopPropagation()}><button className="project-menu-item" onClick={() => { openRenameProject(menu.project); setMenu(null); }}>重命名</button><div className="my-1 border-t border-slate-100"/><p className="px-2 py-1 text-[11px] font-bold text-slate-400">更改状态</p>{STATUSES.filter(status => status !== '未分类').map(status => { const isCurrentStatus = status === menu.project.status; return <button key={status} aria-current={isCurrentStatus ? 'true' : undefined} className={`project-menu-item ${isCurrentStatus ? 'bg-blue-50 font-bold text-blue-700' : ''}`} onClick={() => { move(menu.project, status); setMenu(null); }}>{PROJECT_STATUS_LABELS[status]}{isCurrentStatus ? '（当前）' : ''}</button>; })}<div className="my-1 border-t border-slate-100"/><button className="project-menu-item" onClick={() => { onProjectAction('import', menu.project); setMenu(null); }}>从 SD 卡导入</button><button className="project-menu-item" onClick={() => { onProjectAction('broll', menu.project); setMenu(null); }}>导入花絮</button><button className="project-menu-item" onClick={() => { onProjectAction('match', menu.project); setMenu(null); }}>从文件名选片</button><div className="my-1 border-t border-slate-100"/><button className="project-menu-item text-red-500 hover:bg-red-50" onClick={() => { trash(menu.project); setMenu(null); }}>删除项目</button></div>}
+    {(showNew || renameProject) && <ProjectDialog title={renameProject ? '重命名项目' : '新建项目'} onClose={closeProjectEditor}>
+      <form autoComplete="off" onSubmit={event => { event.preventDefault(); if (!isCreating && nextProjectDisplayName) void (renameProject ? rename() : createProject()); }}>
+        <p className="text-xs text-slate-500">日期精确到日时可自动匹配 SD 卡；只填年月时，导入前会询问目标项目。项目名称可以留空，只使用日期。</p>
+        <label className="form-label">快速输入日期</label>
+        <input value={quickDate} onInput={event => applyQuickDate(event.currentTarget.value)} autoComplete="off" placeholder="例如：26-7-17 或 26-7" className="form-input"/>
+        <div className="mt-3 grid grid-cols-3 gap-2">
+          <label className="text-xs font-medium text-slate-500">年<input type="number" min="0" max="2099" value={year} onInput={event => setYear(event.currentTarget.value)} autoComplete="off" placeholder="26" inputMode="numeric" className="form-input mt-1"/></label>
+          <label className="text-xs font-medium text-slate-500">月<input type="number" min="1" max="12" value={month} onInput={event => setMonth(event.currentTarget.value)} autoComplete="off" placeholder="7" inputMode="numeric" className="form-input mt-1"/></label>
+          <label className="text-xs font-medium text-slate-500">日（可不填）<input type="number" min="1" max="31" value={day} onInput={event => setDay(event.currentTarget.value)} autoComplete="off" placeholder="17" inputMode="numeric" className="form-input mt-1"/></label>
+        </div>
+        <label className="form-label">项目名称（可不填）</label>
+        <input value={name} onInput={event => setName(event.currentTarget.value)} autoComplete="off" placeholder="例如：春日写真" className="form-input"/>
+        <p className="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">{renameProject ? '将重命名为' : '将创建'}：<strong className="text-slate-700">{nextProjectDisplayName || '请填写日期或名称'}</strong></p>
+        {newProjectError && <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{newProjectError}</div>}
+        <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={closeProjectEditor} disabled={isCreating} className="dialog-secondary">取消</button><button type="submit" disabled={isCreating || !nextProjectDisplayName} className="dialog-primary">{isCreating ? renameProject ? '重命名中…' : '创建中…' : renameProject ? '确认重命名' : '创建'}</button></div>
+      </form>
+    </ProjectDialog>}
   </>;
 };
 
-const ProjectDialog = ({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) => <div className="fixed inset-0 z-[250] flex items-center justify-center bg-slate-950/40 p-4"><div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="mb-3 flex items-center justify-between"><h3 className="font-bold text-slate-800">{title}</h3><button onClick={onClose} className="rounded p-1 text-slate-500 hover:bg-slate-100"><X size={18}/></button></div>{children}</div></div>;
+const ProjectDialog = ({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) => createPortal(<div className="fixed inset-x-0 bottom-0 top-10 z-[500] overflow-y-auto bg-slate-950/40 p-4"><div className="flex min-h-full items-center justify-center"><div role="dialog" aria-modal="true" aria-label={title} className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="mb-3 flex items-center justify-between"><h3 className="font-bold text-slate-800">{title}</h3><button onClick={onClose} aria-label="关闭" className="rounded p-1 text-slate-500 hover:bg-slate-100"><X size={18}/></button></div>{children}</div></div></div>, document.body);

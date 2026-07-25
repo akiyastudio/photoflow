@@ -1,5 +1,5 @@
 const registerWorkspaceIpc = context => {
-  const { Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog } = context;
+  const { Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog } = context;
   const officeOpenXmlExtensions = new Set([
     '.docx', '.docm', '.dotx', '.dotm',
     '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam',
@@ -148,7 +148,7 @@ const registerWorkspaceIpc = context => {
     }
   });
   
-  ipcMain.handle('workspace-create-project', async (_event, workspacePath, date, name) => {
+  ipcMain.handle('workspace-create-project', async (_event, workspacePath, date, name, options) => {
     try {
       const projectDate = normalizeProjectDate(date);
       const datePart = formatProjectDate(projectDate);
@@ -161,7 +161,7 @@ const registerWorkspaceIpc = context => {
       const projectPath = getProjectPath(workspacePath, '策划中', projectName);
       if (fs.existsSync(projectPath)) throw new Error('同名项目已存在');
       fs.mkdirSync(projectPath, { recursive: false });
-      fs.mkdirSync(path.join(projectPath, '策划'), { recursive: true });
+      if (options?.createPlanningFolder !== false) fs.mkdirSync(path.join(projectPath, '策划'), { recursive: true });
       await mutateWorkspaceCatalog(root, 'addProject', { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath), extra: projectDate ? { projectDate } : {} });
       writeLog('info', 'Project created', { projectName, projectPath });
       return { success: true, project: { name: projectName, path: projectPath, status: '策划中', updatedAt: Date.now(), projectDate: projectDate || undefined } };
@@ -170,9 +170,13 @@ const registerWorkspaceIpc = context => {
     }
   });
   
-  ipcMain.handle('workspace-rename-project', async (_event, workspacePath, status, projectName, nextName) => {
+  ipcMain.handle('workspace-rename-project', async (_event, workspacePath, status, projectName, dateOrNextName, nextName) => {
     try {
-      const cleanedName = cleanProjectName(nextName || '');
+      const legacyCall = typeof dateOrNextName === 'string' && nextName === undefined;
+      const projectDate = legacyCall ? undefined : normalizeProjectDate(dateOrNextName);
+      const cleanedName = legacyCall
+        ? cleanProjectName(dateOrNextName)
+        : [formatProjectDate(projectDate), cleanProjectName(nextName || '')].filter(Boolean).join(' ');
       if (!cleanedName) throw new Error('项目名称不能为空');
       const root = ensureWorkspace(workspacePath);
       const catalog = workspaceCatalogs.get(root) || await refreshWorkspaceCatalog(root);
@@ -181,11 +185,14 @@ const registerWorkspaceIpc = context => {
       const source = getProjectPath(workspacePath, status, projectName);
       const destination = path.join(path.dirname(source), cleanedName);
       if (!fs.existsSync(source)) throw new Error('项目不存在');
-      if (fs.existsSync(destination)) throw new Error('同名项目已存在');
-      await fs.promises.rename(source, destination);
-      await mutateWorkspaceCatalog(root, 'renameProject', { name: projectName, nextName: cleanedName, relativePath: path.relative(root, destination) });
-      await pushUndoOperation({ kind: 'project', source, destination, status, workspaceRoot: root, beforeName: projectName, afterName: cleanedName });
-      return { success: true, project: { name: cleanedName, path: destination, status, updatedAt: Date.now() } };
+      if (cleanedName !== projectName) {
+        if (fs.existsSync(destination)) throw new Error('同名项目已存在');
+        await fs.promises.rename(source, destination);
+      }
+      const previousProjectDate = readProjectDate(catalog.byName.get(projectName.toLocaleLowerCase()));
+      await mutateWorkspaceCatalog(root, 'renameProject', { name: projectName, nextName: cleanedName, relativePath: path.relative(root, destination), ...(legacyCall ? {} : { projectDate }) });
+      if (cleanedName !== projectName) await pushUndoOperation({ kind: 'project', source, destination, status, workspaceRoot: root, beforeName: projectName, afterName: cleanedName, beforeProjectDate: previousProjectDate, afterProjectDate: projectDate });
+      return { success: true, project: { name: cleanedName, path: destination, status, updatedAt: Date.now(), projectDate: projectDate === undefined ? previousProjectDate : projectDate || undefined } };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -211,6 +218,28 @@ const registerWorkspaceIpc = context => {
       fs.mkdirSync(folderPath);
       await pushUndoOperation({ kind: 'remove-created', paths: [folderPath], label: '新建文件夹' });
       return { success: true, folder: { name: actualName, path: folderPath, relativePath: path.relative(projectPath, folderPath), updatedAt: Date.now() } };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-shell-new-types', async () => {
+    try {
+      return { success: true, types: await shellNewService.list() };
+    } catch (error) {
+      return { success: false, types: [], error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-create-shell-new-file', async (_event, workspacePath, status, projectName, relativePath, typeId) => {
+    try {
+      const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const requestedParent = path.resolve(projectPath, relativePath || '.');
+      const parentPath = assertExistingInside(projectPath, requestedParent, '新建文件位置', true);
+      if (!(await fs.promises.stat(parentPath)).isDirectory()) throw new Error('新建文件位置不是文件夹');
+      const created = await shellNewService.create(typeId, parentPath, uniqueDestination);
+      await pushUndoOperation({ kind: 'remove-created', paths: [created.path], label: '新建文件' });
+      return { success: true, file: { ...created, relativePath: path.relative(projectPath, created.path), updatedAt: Date.now() } };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -392,8 +421,8 @@ const registerWorkspaceIpc = context => {
       await fs.promises.rename(operation.destination, operation.source);
       const response = { success: true, message: `已撤销重命名：${operation.afterName} → ${operation.beforeName}` };
       if (operation.kind === 'project') {
-        await mutateWorkspaceCatalog(operation.workspaceRoot, 'renameProject', { name: operation.afterName, nextName: operation.beforeName, relativePath: path.relative(operation.workspaceRoot, operation.source) });
-        response.project = { name: operation.beforeName, path: operation.source, status: operation.status, updatedAt: Date.now() };
+        await mutateWorkspaceCatalog(operation.workspaceRoot, 'renameProject', { name: operation.afterName, nextName: operation.beforeName, relativePath: path.relative(operation.workspaceRoot, operation.source), ...(Object.prototype.hasOwnProperty.call(operation, 'beforeProjectDate') ? { projectDate: operation.beforeProjectDate || null } : {}) });
+        response.project = { name: operation.beforeName, path: operation.source, status: operation.status, updatedAt: Date.now(), projectDate: operation.beforeProjectDate };
       }
       return response;
     } catch (error) {
@@ -458,13 +487,24 @@ const registerWorkspaceIpc = context => {
       const root = ensureWorkspace(workspacePath);
       const originalIdentity = await capturePathIdentity(projectPath);
       const recycled = await recycleBinService.trash(projectPath);
-      const item = { original: projectPath, originalIdentity, recyclePidl: recycled.recyclePidl, preciseRestore: recycled.preciseRestore !== false };
       const projectCatalog = { name: projectName, status };
-      const record = await workspaceRepository.addUndoRecord(root, { kind: 'trash', payload: { items: [item], projectCatalog } });
-      await pushUndoOperation({ kind: 'trash', workspaceRoot: root, persistentId: record.id, items: [item], projectCatalog });
+      if (recycled.recyclePidl) {
+        const item = { original: projectPath, originalIdentity, recyclePidl: recycled.recyclePidl, preciseRestore: recycled.preciseRestore !== false };
+        const record = await workspaceRepository.addUndoRecord(root, { kind: 'trash', payload: { items: [item], projectCatalog } });
+        await pushUndoOperation({ kind: 'trash', workspaceRoot: root, persistentId: record.id, items: [item], projectCatalog });
+      }
       await mutateWorkspaceCatalog(root, 'softDeleteProject', { name: projectName });
+      if (recycled.permanent) {
+        const deleted = await workspaceRepository.listDeletedProjects(root);
+        const deletedProject = (deleted.projects || []).find(item => item.name.toLocaleLowerCase() === projectName.toLocaleLowerCase());
+        if (deletedProject) {
+          const purgeResult = await workspaceRepository.purgeDeletedProject(root, deletedProject.id);
+          await removeInternalProjectArtifacts(root, purgeResult);
+          await refreshWorkspaceCatalog(root);
+        }
+      }
       publish({ phase: 'complete', progress: 100, currentName: projectName, processedCount: 1, totalCount: 1 });
-      return { success: true, operationId };
+      return { success: true, operationId, permanent: Boolean(recycled.permanent) };
     } catch (error) {
       publish({ phase: 'failed', progress: 0, currentName: projectName, error: error.message || String(error) });
       return { success: false, error: error.message || String(error), errorCode: error?.code || undefined };

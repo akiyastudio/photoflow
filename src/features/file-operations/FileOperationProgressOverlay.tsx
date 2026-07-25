@@ -18,6 +18,7 @@ const operationTitle = (progress: ProjectFileOperationProgress, cancelling: bool
     return '正在导入花絮…';
   }
   if (progress.phase === 'scanning') return '正在准备粘贴…';
+  if (progress.phase === 'moving') return '正在移动文件…';
   if (progress.phase === 'finishing') return '正在完成剪切…';
   return '正在粘贴文件';
 };
