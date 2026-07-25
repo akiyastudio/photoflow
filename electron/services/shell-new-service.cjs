@@ -17,6 +17,8 @@ const COMMON_LABELS = new Map([
 ]);
 const COMMON_ORDER = ['.txt', '.rtf', '.bmp', '.docx', '.doc', '.pptx', '.ppt', '.xlsx', '.xls', '.psd', '.zip'];
 const EMPTY_BMP_BASE64 = Buffer.from('424d3a0000000000000036000000280000000100000001000000010018000000000004000000130b0000130b00000000000000000000ffffff00', 'hex').toString('base64');
+const CACHE_VERSION = 1;
+const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 const DISCOVERY_SCRIPT = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
@@ -89,16 +91,50 @@ const safeBaseName = value => String(value || '').trim().replace(/[<>:"/\\|?*\x0
 const createShellNewService = ({ app } = {}) => {
   let cachedTypes = null;
   let loading = null;
+  const cachePath = () => app?.getPath ? path.join(app.getPath('userData'), 'shell-new-types-cache.json') : '';
+  const readPersistentCache = async () => {
+    const filePath = cachePath();
+    if (!filePath) return null;
+    try {
+      const stat = await fs.promises.stat(filePath);
+      if (!stat.isFile() || stat.size > 4 * 1024 * 1024) return null;
+      const parsed = JSON.parse(await fs.promises.readFile(filePath, 'utf8'));
+      if (parsed?.version !== CACHE_VERSION || !Number.isFinite(parsed.savedAt) || !Array.isArray(parsed.types)) return null;
+      const types = parsed.types.filter(item => /^\.[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$/.test(item?.extension || '') && ['null', 'data', 'template'].includes(item?.method)).slice(0, 80);
+      if (!types.length) return null;
+      return { savedAt: parsed.savedAt, types };
+    } catch {
+      return null;
+    }
+  };
+  const writePersistentCache = async types => {
+    const filePath = cachePath();
+    if (!filePath) return;
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.promises.writeFile(filePath, JSON.stringify({ version: CACHE_VERSION, savedAt: Date.now(), types }), 'utf8');
+  };
 
-  const list = async () => {
+  const list = async ({ refresh = false } = {}) => {
     const publicType = item => ({ id: item.id, extension: item.extension, label: item.label, method: item.method, iconDataUrl: item.iconDataUrl || '' });
     if (loading) return loading;
-    if (cachedTypes) return cachedTypes.map(publicType);
+    if (!refresh && cachedTypes) return cachedTypes.map(publicType);
     loading = (async () => {
+      const persistentCache = await readPersistentCache();
+      if (!refresh && persistentCache && Date.now() - persistentCache.savedAt < CACHE_MAX_AGE_MS) {
+        cachedTypes = persistentCache.types;
+        return cachedTypes.map(publicType);
+      }
       // Do not turn a transient registry/PowerShell failure into a permanently
       // cached three-item fallback menu. Let the IPC layer report it and retry
       // the next time the user opens the menu.
-      const discovered = process.platform === 'win32' ? await runPowerShellJson(DISCOVERY_SCRIPT) : [];
+      let discovered;
+      try {
+        discovered = process.platform === 'win32' ? await runPowerShellJson(DISCOVERY_SCRIPT) : [];
+      } catch (error) {
+        if (!persistentCache) throw error;
+        cachedTypes = persistentCache.types;
+        return cachedTypes.map(publicType);
+      }
       const normalized = (Array.isArray(discovered) ? discovered : [discovered]).filter(item => /^\.[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$/.test(item?.extension || '')).map(item => ({
         id: item.extension.toLocaleLowerCase(),
         extension: item.extension.toLocaleLowerCase(),
@@ -140,6 +176,7 @@ const createShellNewService = ({ app } = {}) => {
       // Publish the complete snapshot only after every descriptor and icon is
       // ready, so concurrent menu requests cannot observe a partial result.
       cachedTypes = nextTypes;
+      await writePersistentCache(cachedTypes).catch(() => undefined);
       return cachedTypes.map(publicType);
     })().finally(() => { loading = null; });
     return loading;

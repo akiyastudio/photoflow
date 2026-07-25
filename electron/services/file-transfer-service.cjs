@@ -62,13 +62,13 @@ const assertRegularFile = async filePath => {
   return { path: resolved, stat };
 };
 
-const uniqueDestination = (directory, fileName, reserved = new Set()) => {
+const uniqueDestination = (directory, fileName, reserved = new Set(), isDirectory = false) => {
   const parsed = path.parse(fileName);
   let index = 1;
   let destination = path.join(directory, parsed.base);
   const key = value => process.platform === 'win32' ? value.toLocaleLowerCase() : value;
   while (fs.existsSync(destination) || reserved.has(key(destination))) {
-    destination = path.join(directory, `${parsed.name} (${index++})${parsed.ext}`);
+    destination = path.join(directory, isDirectory ? `${parsed.base} (${index++})` : `${parsed.name} (${index++})${parsed.ext}`);
   }
   reserved.add(key(destination));
   return destination;
@@ -186,34 +186,79 @@ const copyFileAtomic = async (source, destination, options = {}) => {
 
 const collectCopyPlan = async (source, destination, plan, options = {}) => {
   const { isCancelled = () => false } = options;
-  const visitDirectory = async (directorySource, directoryDestination) => {
+  const identityFromStat = stat => ({
+    device: stat.dev.toString(),
+    inode: stat.ino.toString(),
+    size: stat.size.toString(),
+    modifiedMs: stat.mtimeMs,
+  });
+  const visitDirectory = async (directorySource, directoryDestination, directoryEntry) => {
     throwIfCancelled(isCancelled);
     const entries = await fs.promises.readdir(directorySource, { withFileTypes: true }).catch(error => { throw attachTransferContext(error, 'inspect-source', directorySource, directoryDestination); });
+    directoryEntry.children = entries.map(entry => entry.name).sort((left, right) => left.localeCompare(right));
     for (const entry of entries) {
       throwIfCancelled(isCancelled);
       const entrySource = path.join(directorySource, entry.name);
       const entryDestination = path.join(directoryDestination, entry.name);
       if (entry.isDirectory()) {
-        plan.push({ kind: 'directory', source: entrySource, destination: entryDestination, size: 0 });
-        await visitDirectory(entrySource, entryDestination);
+        const stat = await fs.promises.lstat(entrySource).catch(error => { throw attachTransferContext(error, 'inspect-source', entrySource, entryDestination); });
+        const childDirectory = { kind: 'directory', source: entrySource, destination: entryDestination, size: 0, sourceIdentity: identityFromStat(stat), children: [] };
+        plan.push(childDirectory);
+        await visitDirectory(entrySource, entryDestination, childDirectory);
         continue;
       }
       if (!entry.isFile()) throw new Error(`不支持复制此文件类型：${entry.name}`);
       const stat = await fs.promises.lstat(entrySource).catch(error => { throw attachTransferContext(error, 'inspect-source', entrySource, entryDestination); });
-      plan.push({ kind: 'file', source: entrySource, destination: entryDestination, size: stat.size, mode: stat.mode, atime: stat.atime, mtime: stat.mtime });
+      plan.push({ kind: 'file', source: entrySource, destination: entryDestination, size: stat.size, mode: stat.mode, atime: stat.atime, mtime: stat.mtime, sourceIdentity: identityFromStat(stat) });
     }
   };
 
   throwIfCancelled(isCancelled);
   const stat = await fs.promises.lstat(source).catch(error => { throw attachTransferContext(error, 'inspect-source', source, destination); });
   if (stat.isDirectory()) {
-    plan.push({ kind: 'directory', source, destination, size: 0 });
-    await visitDirectory(source, destination);
+    const rootDirectory = { kind: 'directory', source, destination, size: 0, sourceIdentity: identityFromStat(stat), children: [] };
+    plan.push(rootDirectory);
+    await visitDirectory(source, destination, rootDirectory);
     return plan;
   }
   if (!stat.isFile()) throw new Error(`不支持复制此文件类型：${path.basename(source)}`);
-  plan.push({ kind: 'file', source, destination, size: stat.size, mode: stat.mode, atime: stat.atime, mtime: stat.mtime });
+  plan.push({ kind: 'file', source, destination, size: stat.size, mode: stat.mode, atime: stat.atime, mtime: stat.mtime, sourceIdentity: identityFromStat(stat) });
   return plan;
+};
+
+const assertCopyPlanSourcesUnchanged = async plan => {
+  for (const entry of plan) {
+    let stat;
+    try { stat = await fs.promises.lstat(entry.source); }
+    catch { throw new Error(`剪切源已不存在：${path.basename(entry.source)}`); }
+    const expected = entry.sourceIdentity;
+    const currentDevice = stat.dev.toString();
+    const currentInode = stat.ino.toString();
+    const stableIdentity = expected?.device !== '0' && expected?.inode !== '0' && currentDevice !== '0' && currentInode !== '0';
+    if (stableIdentity && (currentDevice !== expected.device || currentInode !== expected.inode)) throw new Error(`剪切源已被替换：${path.basename(entry.source)}`);
+    if (entry.kind === 'file') {
+      if (!stat.isFile() || stat.size.toString() !== expected?.size || stat.mtimeMs !== expected?.modifiedMs) throw new Error(`剪切源在复制期间发生变化：${path.basename(entry.source)}`);
+      continue;
+    }
+    if (!stat.isDirectory()) throw new Error(`剪切源类型发生变化：${path.basename(entry.source)}`);
+    const children = (await fs.promises.readdir(entry.source)).sort((left, right) => left.localeCompare(right));
+    if (children.length !== entry.children.length || children.some((name, index) => name !== entry.children[index])) throw new Error(`剪切源文件夹在复制期间发生变化：${path.basename(entry.source)}`);
+  }
+};
+
+const removeCopiedSources = async plan => {
+  await assertCopyPlanSourcesUnchanged(plan);
+  const files = plan.filter(entry => entry.kind === 'file');
+  const directories = plan.filter(entry => entry.kind === 'directory').sort((left, right) => right.source.length - left.source.length);
+  for (const entry of files) {
+    await assertCopyPlanSourcesUnchanged([entry]);
+    await fs.promises.rm(entry.source, { force: false });
+  }
+  for (const entry of directories) {
+    const children = await fs.promises.readdir(entry.source);
+    if (children.length) throw new Error(`剪切源文件夹出现了未复制的新内容：${path.basename(entry.source)}`);
+    await fs.promises.rmdir(entry.source);
+  }
 };
 
 const copySmallFileAtomic = async (entry, options = {}) => {
@@ -245,6 +290,7 @@ const copySmallFileAtomic = async (entry, options = {}) => {
 const copyPlannedFiles = async (plan, options = {}) => {
   const {
     destinationRoot,
+    diskSpaceChecked = false,
     durable = false,
     smallFileThreshold = DEFAULT_SMALL_FILE_THRESHOLD,
     smallFileConcurrency = DEFAULT_SMALL_FILE_CONCURRENCY,
@@ -258,7 +304,7 @@ const copyPlannedFiles = async (plan, options = {}) => {
   const smallFiles = files.filter(entry => entry.size <= smallFileThreshold);
   const largeFiles = files.filter(entry => entry.size > smallFileThreshold);
   const totalBytes = files.reduce((sum, entry) => sum + entry.size, 0);
-  if (destinationRoot) await assertDiskSpace(destinationRoot, totalBytes);
+  if (destinationRoot && !diskSpaceChecked) await assertDiskSpace(destinationRoot, totalBytes);
 
   for (const entry of directories) {
     throwIfCancelled(isCancelled);
@@ -401,6 +447,7 @@ module.exports = {
   DEFAULT_SMALL_FILE_CONCURRENCY,
   DEFAULT_SMALL_FILE_THRESHOLD,
   assertDiskSpace,
+  assertCopyPlanSourcesUnchanged,
   assertExistingInside,
   assertInside,
   assertRegularFile,
@@ -412,6 +459,7 @@ module.exports = {
   isInside,
   moveFileAtomic,
   movePathAtomic,
+  removeCopiedSources,
   removeCreatedPasteTargets,
   throwIfCancelled,
   uniqueDestination,

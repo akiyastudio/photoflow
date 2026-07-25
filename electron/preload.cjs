@@ -42,7 +42,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   renameWorkspaceProject: (workspacePath, status, name, date, nextName) => ipcRenderer.invoke('workspace-rename-project', workspacePath, status, name, date, nextName),
   renameProjectFolder: (workspacePath, status, name, folderName, nextName) => ipcRenderer.invoke('workspace-rename-project-folder', workspacePath, status, name, folderName, nextName),
   createProjectFolder: (workspacePath, status, name, folderName, relativePath, makeUnique) => ipcRenderer.invoke('workspace-create-project-folder', workspacePath, status, name, folderName, relativePath, makeUnique),
-  getShellNewFileTypes: () => ipcRenderer.invoke('workspace-shell-new-types'),
+  getShellNewFileTypes: (refresh = false) => ipcRenderer.invoke('workspace-shell-new-types', refresh),
   createProjectShellNewFile: (workspacePath, status, name, relativePath, typeId) => ipcRenderer.invoke('workspace-create-shell-new-file', workspacePath, status, name, relativePath, typeId),
   undoLastRename: (workspacePath) => ipcRenderer.invoke('workspace-undo-rename', workspacePath),
   moveWorkspaceProject: (workspacePath, status, name, nextStatus) => ipcRenderer.invoke('workspace-move-project', workspacePath, status, name, nextStatus),

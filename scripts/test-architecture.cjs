@@ -49,7 +49,16 @@ assert(/missingDirectory && !requestedPath[\s\S]*?onDeleted\(\)/.test(projectWor
 assert(!nativeRecycleBinService.includes('EnsureRecycleCapacity') && !nativeRecycleBinService.includes('CalculateSourceSize'), 'trash must not pre-scan folder size before handing deletion to Windows');
 assert(nativeRecycleBinService.includes('FOF_WANTNUKEWARNING') && nativeRecycleBinService.includes('{ "permanent", permanent }'), 'Windows must warn before a non-recyclable item is permanently deleted and report that outcome');
 assert(filesIpc.includes("buttons: ['替换并继续', '保留两者', '取消']"), 'paste conflicts must let the user replace, keep both, or cancel');
-assert(/pasteConflicts\.push\(\{ source, destination, isDirectory:/.test(filesIpc), 'paste conflict detection must include same-name files as well as folders');
+assert(/requestedItems\.filter\(item => item\.conflict\)[\s\S]*?isDirectory: fs\.statSync\(item\.desiredDestination\)\.isDirectory\(\)/.test(filesIpc), 'paste conflict detection must include same-name files as well as folders');
+assert(/operation === 'paste'[\s\S]*?activeProjectFileOperations\.set\(operationId, job\)[\s\S]*?await readSystemFileClipboard\(\)/.test(filesIpc), 'paste must acquire its concurrency lock before reading the clipboard');
+assert(/if \(process\.platform === 'win32'\) throw new Error\(`[\s\S]*?Windows[\s\S]*?fileOperationState\.projectFileClipboard/.test(filesIpc), 'Windows clipboard failures must not fall back to stale internal clipboard state');
+assert(filesIpc.includes('const destinationDir = assertExistingInside(root, requestedDestination'), 'paste destinations must be checked through their real filesystem path');
+assert(filesIpc.includes('`.photoflow-paste-${operationId}`') && filesIpc.includes('await fs.promises.rename(item.stagedDestination, item.destination)'), 'copied trees must remain hidden until their top-level atomic commit');
+assert(filesIpc.includes('`.photoflow-replace-${operationId}`') && filesIpc.indexOf('await stageReplacements();', filesIpc.indexOf('await copyPlannedFiles(plan')) > filesIpc.indexOf('await copyPlannedFiles(plan'), 'replacement targets must be staged only after incoming copies are complete');
+assert(filesIpc.includes('samePathIdentity(destination, replacementIdentities.get(pathKey(destination)))'), 'a replacement must reject a target changed after user confirmation');
+assert(filesIpc.includes('await removeCopiedSources(plan)'), 'cross-volume cut must validate the source snapshot before removal');
+assert(workspaceIpc.includes('isInternalFileOperationEntry(entry.name)'), 'temporary transfer and recovery entries must remain hidden from project browsing');
+assert(workspaceIpc.includes("operation.kind === 'paste-replace'"), 'replacement paste operations must have a transactional undo path');
 assert(filesIpc.includes("writeLog('info', 'Project files moved by same-volume rename'"), 'same-volume cut/paste must use filesystem moves instead of copy-then-delete');
 assert(filesIpc.includes('await movePathAtomic(item.source, item.destination'), 'same-volume cut/paste must use the safe move primitive');
 assert(filesIpc.includes('await writeSystemFileClipboard(sources, operation)'), 'copy/cut must wait until the Windows file clipboard is ready');
@@ -68,8 +77,10 @@ assert(/if \(event\.ctrlKey \|\| event\.metaKey\) \{\s*toggleSelected\(entry\.re
 assert(projectWorkspace.includes('setSelectedPaths(displayedFileEntries.map(entry => entry.relativePath))'), 'Ctrl+A must select the current displayed folder contents');
 assert(shellNewService.includes("Registry::HKEY_CLASSES_ROOT") && shellNewService.includes("Command and handler-based entries are intentionally not executed"), 'ShellNew discovery must be read-only and must not execute registered commands');
 assert(!shellNewService.includes('runPowerShellJson(DISCOVERY_SCRIPT).catch(() => [])') && shellNewService.includes('const nextTypes = normalized.slice(0, 80)') && shellNewService.indexOf('cachedTypes = nextTypes') > shellNewService.indexOf('app.getFileIcon(iconSource'), 'ShellNew discovery failures must remain retryable and cache publication must be atomic');
+assert(shellNewService.includes("shell-new-types-cache.json") && shellNewService.includes('CACHE_MAX_AGE_MS') && shellNewService.includes('writePersistentCache(cachedTypes)'), 'ShellNew types and icons must persist across app launches instead of rescanning every time');
 assert(projectWorkspace.includes('createProjectShellNewFile') && projectWorkspace.includes('Windows 文件类型'), 'the top New menu must expose supported Windows ShellNew file types');
 assert(shellNewService.includes("app.getFileIcon(iconSource, { size: 'normal' })") && projectWorkspace.includes('type.iconDataUrl'), 'the top New menu must display Windows-associated file type icons');
+assert(projectWorkspace.includes('project-menu-item flex items-center gap-2') && projectWorkspace.includes('重新扫描 Windows 新建文件类型'), 'ShellNew menu rows must place text beside the icon and expose manual refresh');
 
 const electronSources = fs.readdirSync(path.join(root, 'electron'), { recursive: true })
   .filter(name => name.endsWith('.cjs'))
