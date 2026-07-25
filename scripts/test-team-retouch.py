@@ -19,9 +19,10 @@ ENGINE = ROOT / "components" / "team-retouch" / "team_retouch.py"
 sys.path.insert(0, str(ENGINE.parent))
 sys.path.insert(0, str(ROOT / "python"))
 
-from team_retouch import box_coverage_by_crop, centered_work_crop, emit_progress, load_mask, mask_bounds, match_returned_batch, maximize_assignment, plan_work_tiles, reposition_crop_to_avoid_bystanders, restore_patches, save_mask  # noqa: E402
+from team_retouch import box_coverage_by_crop, centered_work_crop, emit_progress, identify_people, load_mask, mask_bounds, match_returned_batch, maximize_assignment, plan_work_tiles, reposition_crop_to_avoid_bystanders, restore_patches, save_mask  # noqa: E402
+from identity_engine import constrained_clusters, ranked_similarity_pairs  # noqa: E402
 from patch_merge import safe_exif_bytes, save_tiff  # noqa: E402
-from workspace_db import connect, team_patch_replace, team_patch_update  # noqa: E402
+from workspace_db import connect, team_identity_assign, team_identity_complete, team_identity_save, team_patch_replace, team_patch_update, team_project_register_photo, team_project_unregister_photo, team_project_workspace  # noqa: E402
 
 
 def main():
@@ -303,6 +304,116 @@ def main():
         })
         assert removed["tasks"][0]["editedPatchPath"] is None
         assert removed["tasks"][0]["status"] == "exported"
+
+        workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
+        assert len(workspace["photos"]) == 1 and len(workspace["photos"][0]["tasks"]) == 1
+        identity = team_identity_save(db, {
+            "projectName": "Test", "name": "Alice", "assignments": [{
+                "photoId": "photo", "baseVersionId": "version", "personIndex": 1,
+                "confidence": 1, "source": "manual",
+            }],
+        })
+        assert identity["success"]
+        assert team_identity_complete(db, {
+            "photoId": "photo", "baseVersionId": "version", "personIndex": 1, "completed": True,
+        })["success"]
+        workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
+        assert workspace["identities"][0]["name"] == "Alice"
+        assert workspace["assignments"][0]["completed"] is True
+
+        candidate = team_identity_save(db, {
+            "projectName": "Test", "name": "\u5f85\u786e\u8ba4\u4eba\u7269 8", "assignments": [{
+                "photoId": "photo", "baseVersionId": "version", "personIndex": 2,
+                "confidence": .8, "source": "suggested",
+            }],
+        })
+        assert candidate["success"]
+        assert team_identity_assign(db, {
+            "projectName": "Test", "photoId": "photo", "baseVersionId": "version", "personIndex": 2,
+            "identityId": identity["identityId"], "confidence": 1, "source": "manual",
+        })["success"]
+        workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
+        assert all(item["id"] != candidate["identityId"] for item in workspace["identities"])
+
+        db.execute("""INSERT INTO photos(id,project_id,media_type,original_name,display_name,original_file_path,created_at,updated_at)
+                      VALUES(?,?,?,?,?,?,?,?)""",
+                   ("empty-photo", "project", "image", "empty.png", "empty.png", str(base_path), 1, 1))
+        db.execute("""INSERT INTO versions(id,photo_id,version_number,version_name,file_path,file_path_key,created_at,updated_at)
+                      VALUES(?,?,?,?,?,?,?,?)""",
+                   ("empty-version", "empty-photo", 0, "原片", str(base_path), str(base_path).casefold() + ":empty", 1, 1))
+        db.commit()
+        assert team_project_register_photo(db, {"projectName": "Test", "photoId": "empty-photo", "baseVersionId": "empty-version"})["success"]
+        workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
+        assert any(photo["photoId"] == "empty-photo" and not photo["tasks"] for photo in workspace["photos"])
+        assert team_project_unregister_photo(db, {"photoId": "empty-photo"})["success"]
+
+        identity_a = np.zeros((180, 240, 3), dtype=np.uint8)
+        identity_b = identity_a.copy()
+        different = identity_a.copy()
+        first_identity_path = test_root / "identity-a.png"
+        second_identity_path = test_root / "identity-b.png"
+        different_identity_path = test_root / "identity-other.png"
+        Image.fromarray(identity_a, "RGB").save(first_identity_path)
+        Image.fromarray(identity_b, "RGB").save(second_identity_path)
+        Image.fromarray(different, "RGB").save(different_identity_path)
+        identify_manifest = test_root / "identify.json"
+        identify_manifest.write_text(json.dumps({"subjects": [
+            {"key": "a", "photoId": "photo-a", "path": str(first_identity_path), "bbox": {"x": 10, "y": 5, "width": 220, "height": 170}},
+            {"key": "b", "photoId": "photo-b", "path": str(second_identity_path), "bbox": {"x": 10, "y": 5, "width": 220, "height": 170}},
+            {"key": "c", "photoId": "photo-b", "path": str(different_identity_path), "bbox": {"x": 10, "y": 5, "width": 220, "height": 170}},
+        ]}), encoding="utf-8")
+        class FakeIdentityRuntime:
+            provider = "test"
+
+            def describe(self, _rgb, item):
+                vector = np.asarray([1, 0, 0], dtype=np.float32) if item["key"] in {"a", "b"} else np.asarray([0, 1, 0], dtype=np.float32)
+                return {
+                    "key": item["key"], "photoId": item["photoId"], "manualIdentityId": None,
+                    "face": vector, "faceQuality": .9, "faceBox": None,
+                    "body": vector, "bodyQuality": .9,
+                }
+
+            def embed_bodies(self, _descriptors):
+                return None
+
+        with redirect_stdout(io.StringIO()):
+            clustered = identify_people(identify_manifest, runtime=FakeIdentityRuntime())
+        groups = [{member["key"] for member in cluster["members"]} for cluster in clustered["clusters"]]
+        assert groups == [{"a", "b"}]
+        assert clustered["unmatchedCount"] == 1
+        same_photo = [
+            {"key": "x", "photoId": "one", "manualIdentityId": None, "face": np.asarray([1, 0], dtype=np.float32), "faceQuality": .9, "body": np.asarray([1, 0], dtype=np.float32), "bodyQuality": .9},
+            {"key": "y", "photoId": "one", "manualIdentityId": None, "face": np.asarray([1, 0], dtype=np.float32), "faceQuality": .9, "body": np.asarray([1, 0], dtype=np.float32), "bodyQuality": .9},
+        ]
+        assert constrained_clusters(same_photo) == []
+        conflicting_manual = [
+            {**same_photo[0], "photoId": "one", "manualIdentityId": "alice"},
+            {**same_photo[1], "photoId": "two", "manualIdentityId": "bob"},
+        ]
+        assert constrained_clusters(conflicting_manual) == []
+        gallery = [
+            {"key": "alice-front", "photoId": "p1", "manualIdentityId": "alice", "face": np.asarray([1, 0], dtype=np.float32), "faceQuality": .9, "body": np.asarray([1, 0], dtype=np.float32), "bodyQuality": .9},
+            {"key": "alice-profile", "photoId": "p2", "manualIdentityId": "alice", "face": np.asarray([.17, .985], dtype=np.float32), "faceQuality": .9, "body": np.asarray([0, 1], dtype=np.float32), "bodyQuality": .9},
+            {"key": "alice-new", "photoId": "p3", "manualIdentityId": None, "face": np.asarray([1, 0], dtype=np.float32), "faceQuality": .9, "body": np.asarray([1, 0], dtype=np.float32), "bodyQuality": .9},
+        ]
+        gallery_clusters = constrained_clusters(gallery)
+        assert len(gallery_clusters) == 1
+        assert {item["key"] for item in gallery_clusters[0]["members"]} == {"alice-front", "alice-profile", "alice-new"}
+        assert gallery_clusters[0]["evidence"] == "manual-gallery"
+
+        ambiguous = [
+            {"key": "alice", "photoId": "a", "manualIdentityId": "alice", "face": np.asarray([1, 0], dtype=np.float32), "faceQuality": .9, "body": np.asarray([1, 0], dtype=np.float32), "bodyQuality": .9},
+            {"key": "bob", "photoId": "b", "manualIdentityId": "bob", "face": np.asarray([.99, .141], dtype=np.float32), "faceQuality": .9, "body": np.asarray([1, 0], dtype=np.float32), "bodyQuality": .9},
+            {"key": "unknown", "photoId": "c", "manualIdentityId": None, "face": np.asarray([1, 0], dtype=np.float32), "faceQuality": .9, "body": np.asarray([1, 0], dtype=np.float32), "bodyQuality": .9},
+        ]
+        assert constrained_clusters(ambiguous) == []
+        ranked = ranked_similarity_pairs([
+            {**same_photo[0], "photoId": "one"},
+            {**same_photo[1], "photoId": "two"},
+            {**same_photo[1], "key": "z", "photoId": "three", "face": np.asarray([0, 1], dtype=np.float32), "body": np.asarray([0, 1], dtype=np.float32)},
+        ])
+        assert ranked[0]["leftKey"] == "x" and ranked[0]["rightKey"] == "y"
+        assert ranked[0]["score"] > ranked[-1]["score"]
         db.close()
         print("team-retouch merge regression test passed")
 

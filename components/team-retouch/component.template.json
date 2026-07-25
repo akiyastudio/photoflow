@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "team-retouch",
-  "version": "26.7.24.4",
+  "version": "26.7.26.7",
   "platforms": ["win32"],
   "architectures": ["x64"],
   "entrypoints": {

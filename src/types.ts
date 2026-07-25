@@ -233,6 +233,50 @@ export interface TeamPatchBundle extends MediaVersionBundle {
   merge?: { outputPath: string; outputProgressId?: string; versionId?: string; mergedCount: number; conflictPixels: number; seamScore: number; needsReview?: boolean };
 }
 
+export interface TeamIdentity {
+  id: string;
+  name: string;
+  color: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface TeamPersonAssignment {
+  photoId: string;
+  baseVersionId: string;
+  personIndex: number;
+  identityId?: string;
+  confidence: number;
+  source: 'manual' | 'suggested' | string;
+  completed: boolean;
+  updatedAt: number;
+}
+
+export interface TeamProjectPhoto {
+  photoId: string;
+  baseVersionId: string;
+  name: string;
+  relativePath: string;
+  sourcePath: string;
+  tasks: TeamPatchTask[];
+}
+
+export interface TeamIdentityWorkspace {
+  success: boolean;
+  photos: TeamProjectPhoto[];
+  identities: TeamIdentity[];
+  assignments: TeamPersonAssignment[];
+  similarities?: Array<{
+    leftKey: string;
+    rightKey: string;
+    score: number;
+    faceScore?: number;
+    bodyScore: number;
+    evidence: 'face+body' | 'body-only' | string;
+  }>;
+  error?: string;
+}
+
 export interface TeamPatchReturnMatch {
   returnId: string;
   sourceName: string;
@@ -280,6 +324,10 @@ export interface ComponentStatus {
   gpuAvailable?: boolean;
   advancedAvailable?: boolean;
   mergeAvailable?: boolean;
+  identityAvailable?: boolean;
+  faceBackend?: string;
+  bodyBackend?: string;
+  identityError?: string;
   provider?: string;
   advancedProvider?: string;
   providers?: string[];
@@ -350,6 +398,7 @@ export interface IElectronAPI {
   installTeamRetouchAdvanced: (options?: { repair?: boolean }) => Promise<{ success: boolean; cancelled?: boolean; restartRequired?: boolean; error?: string }>;
   uninstallTeamRetouchAdvanced: () => Promise<{ success: boolean; error?: string }>;
   openTeamRetouchAdvancedFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
+  openTeamRetouchIdentityModelsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
   onTeamRetouchAdvancedProgress: (callback: (value: { phase: string; progress?: number; message: string }) => void) => () => void;
   getDrives: () => Promise<string[]>;
   setTheme: (theme: Theme) => Promise<void>;
@@ -397,13 +446,24 @@ export interface IElectronAPI {
   compareVersionFolders: (workspacePath: string, status: ProjectStatus, projectName: string, referenceRelativePath: string, sourceRelativePath: string) => Promise<{ success: boolean; matches: Array<{ source: string; reference: string; target: string; confidence: string; distance: number }>; unmatched: string[]; unmatchedReference: string[]; error?: string }>;
   commitVersionBatch: (workspacePath: string, status: ProjectStatus, projectName: string, request: { folderA: string; folderB: string; importKey: string; displayName?: string; renameSources?: boolean; copyMissingReferences?: string[]; matches: Array<{ reference: string; source: string; target?: string; distance: number; confidence: string }> }) => Promise<{ success: boolean; alreadyCommitted?: boolean; referenceBatch?: VersionBatch; batch?: VersionBatch; renamedCount?: number; renameErrors?: Array<{ source: string; target: string; error: string }>; copiedMissingCount?: number; copyMissingErrors?: Array<{ name: string; error: string }>; error?: string }>;
   getTeamPatches: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<TeamPatchBundle>;
+  getTeamProjectWorkspace: (workspacePath: string, name: string) => Promise<TeamIdentityWorkspace>;
+  registerTeamProjectPhotos: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<TeamIdentityWorkspace>;
+  suggestTeamIdentities: (workspacePath: string, name: string) => Promise<TeamIdentityWorkspace & { suggestedCount?: number; candidateGroupCount?: number; unmatchedCount?: number; method?: string; faceBackend?: string; bodyBackend?: string; provider?: string }>;
+  saveTeamIdentity: (workspacePath: string, request: { projectName: string; identityId?: string; name: string; assignments?: Array<{ photoId: string; baseVersionId: string; personIndex: number; confidence?: number; source?: string; completed?: boolean }> }) => Promise<{ success: boolean; identityId?: string; error?: string }>;
+  assignTeamIdentity: (workspacePath: string, request: { projectName: string; photoId: string; baseVersionId: string; personIndex: number; identityId?: string; confidence?: number; source?: string; completed?: boolean }) => Promise<{ success: boolean; error?: string }>;
+  completeTeamIdentity: (workspacePath: string, request: { photoId: string; baseVersionId: string; personIndex: number; completed: boolean }) => Promise<{ success: boolean; error?: string }>;
+  deleteTeamIdentity: (workspacePath: string, request: { projectName: string; identityId: string }) => Promise<{ success: boolean; error?: string }>;
+  removeProjectTeamPhoto: (workspacePath: string, request: { photoId: string; baseVersionId: string }) => Promise<{ success: boolean; removedArtifactCount?: number; error?: string }>;
+  generateTeamWorkflow: (workspacePath: string, status: ProjectStatus, name: string, request: { replace?: boolean; groups: Array<{ week: number; identityId: string; identityName: string; items: Array<{ photoId: string; baseVersionId: string; personIndex: number; taskId: string; photoName: string }> }> }) => Promise<{ success: boolean; requiresConfirmation?: boolean; count?: number; groupCount?: number; path?: string; error?: string }>;
+  exportTeamIdentityTasks: (workspacePath: string, status: ProjectStatus, name: string, request: { week: number; identityId: string }) => Promise<{ success: boolean; count?: number; path?: string; error?: string }>;
+  returnTeamWorkflowBatch: (workspacePath: string, name: string, request: { status: ProjectStatus; returnedFiles: string[]; items: Array<{ photoId: string; baseVersionId: string; personIndex: number; taskId: string; taskOrder: number[] }> }) => Promise<TeamPatchReturnBatchResult>;
   detectTeamPatchPeople: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; baseVersionId: string; backendMode?: 'auto' | 'basic' | 'advanced' }) => Promise<TeamPatchBundle>;
   onTeamPatchDetectionProgress: (callback: (value: { photoId: string; baseVersionId: string; progress: number; message: string }) => void) => () => void;
   detectTeamPatchBatch: (workspacePath: string, status: ProjectStatus, name: string, request: { relativePaths: string[]; backendMode?: 'auto' | 'basic' | 'advanced' }) => Promise<{ success: boolean; persistentBackend?: boolean; requestedMode?: string; advancedUsedCount?: number; fallbackCount?: number; results: Array<{ relativePath: string; name: string; success: boolean; photoId?: string; baseVersionId?: string; personCount?: number; workTileCount?: number; deliveryDirectory?: string; detector?: string; fallbackReason?: string; error?: string }>; error?: string }>;
   onTeamPatchBatchProgress: (callback: (value: { itemIndex: number; itemCount: number; relativePath: string; itemName: string; progress: number; message: string }) => void) => () => void;
   updateTeamPatch: (workspacePath: string, request: { taskId: string; personName?: string; assignee?: string; needsReview?: boolean; reviewReason?: string }) => Promise<{ success: boolean; tasks: TeamPatchTask[]; error?: string }>;
   cleanupTeamPatches: (workspacePath: string, request: { photoId: string; baseVersionId: string }) => Promise<TeamPatchBundle & { removedArtifactCount?: number }>;
-  uploadTeamPatch: (workspacePath: string, request: { photoId: string; taskId: string }) => Promise<{ success: boolean; cancelled?: boolean; tasks: TeamPatchTask[]; error?: string }>;
+  uploadTeamPatch: (workspacePath: string, request: { photoId: string; taskId: string; personIndex?: number; projectName?: string; status?: ProjectStatus }) => Promise<{ success: boolean; cancelled?: boolean; tasks: TeamPatchTask[]; error?: string }>;
   removeTeamPatchUpload: (workspacePath: string, request: { photoId: string; taskId: string }) => Promise<{ success: boolean; tasks: TeamPatchTask[]; removedArtifactCount?: number; error?: string }>;
   selectTeamPatchReturns: (projectName: string) => Promise<{ success: boolean; cancelled?: boolean; files?: string[]; error?: string }>;
   returnTeamPatchBatch: (workspacePath: string, status: ProjectStatus, name: string, request: { relativePaths: string[]; returnedFiles?: string[]; outputProgressId?: string }) => Promise<TeamPatchReturnBatchResult>;

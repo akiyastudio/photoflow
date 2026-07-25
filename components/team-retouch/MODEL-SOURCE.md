@@ -13,6 +13,42 @@ fallback.
 - Input: 640 × 640 letterboxed BGR image
 - Local SHA-256: run `Get-FileHash models/rtmdet-ins_m_640x640.onnx`
 
+## Cross-photo identity models
+
+Identity suggestions run locally and use three fixed model assets:
+
+- `face_detection_yunet_2023mar.onnx` from OpenCV Zoo's YuNet face detector.
+  The model directory is MIT licensed. Local SHA-256:
+  `8F2383E4DD3CFBB4553EA8718107FC0423210DC964F9F4280604804ED2552FA4`.
+- `face_recognition_sface_2021dec.onnx` from OpenCV Zoo's SFace recognizer.
+  Consult the license shipped in that upstream model directory. Local SHA-256:
+  `0BA9FBFA01B5270C96627C4EF784DA859931E02F04419C829E83484087C34E79`.
+- `osnet_x0_25_msmt17.onnx`, exported from Kaiyang Zhou's MIT-licensed
+  Torchreid `osnet_x0_25_msmt17_combineall` checkpoint hosted in the official
+  `kaiyangzhou/osnet` Hugging Face repository. The reproducible conversion
+  helper is `scripts/export-team-retouch-osnet.py`. Local SHA-256:
+  `9213AE24C79D7CA1620E7FDEF0BCB03DC6FD8921EBAB336D61DC0BC2BED92E76`.
+
+YuNet supplies five facial landmarks, SFace supplies aligned face embeddings,
+and OSNet supplies 512-dimensional full-body appearance embeddings. OSNet is a
+supporting signal only; body-only matches remain review candidates.
+
+## Experimental identity models (not distributed)
+
+For local evaluation, the identity engine can use an AdaFace IR-18 face model
+and an OSNet x1.0 body model from `.model-lab/`. These files are intentionally
+excluded from the component and application packages. The stable packaged
+fallback remains SFace plus OSNet x0.25.
+
+- AdaFace upstream: `mk-minchul/AdaFace`. The reproducible conversion helper is
+  `scripts/export-team-retouch-adaface.py`.
+- OSNet x1.0 upstream: the official `kaiyangzhou/osnet` Hugging Face repository.
+  It uses the same `scripts/export-team-retouch-osnet.py` conversion helper.
+
+The engine also accepts explicit local paths through
+`PHOTOFLOW_ADAFACE_MODEL` and `PHOTOFLOW_OSNET_MODEL`. This allows development
+and accuracy testing without changing what is redistributed to end users.
+
 ## Optional advanced backend
 
 PairDETR and SAM 2.1 remain in their isolated WSL CUDA environments because

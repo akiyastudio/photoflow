@@ -1,6 +1,6 @@
 param(
     [string]$DistroName = 'PhotoFlowNative',
-    [string]$ComponentVersion = '26.7.24.4',
+    [string]$ComponentVersion = '26.7.26.4',
     [Parameter(Mandatory = $true)][string]$OutputPath
 )
 

@@ -21,6 +21,8 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
+from identity_engine import IdentityRuntime, add_occlusion_estimates, constrained_clusters, ranked_similarity_pairs
+
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -1034,8 +1036,8 @@ class UnavailableAdvancedRunner:
 def detect_batch(manifest_path, preference="auto", oversize_crop_mode="face-centered", advanced_mode="auto"):
     payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     items = payload.get("items") or []
-    if len(items) < 2:
-        raise ValueError("批量识别至少需要两张图片")
+    if not items:
+        raise ValueError("请至少提供一张图片")
     session_bundle = create_session(preference)
     batch_runner = None
     advanced_session = None
@@ -1091,10 +1093,46 @@ def detect_batch(manifest_path, preference="auto", oversize_crop_mode="face-cent
     }
 
 
+def identify_people(manifest_path, runtime=None, provider="auto"):
+    payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    subjects = payload.get("subjects") or []
+    if not subjects:
+        return {"success": True, "clusters": [], "subjectCount": 0, "method": "face-osnet-gallery-v3"}
+    runtime = runtime or IdentityRuntime(asset_path("models", "face_detection_yunet_2023mar.onnx").parent, provider)
+    images, image_shapes, descriptors = {}, {}, []
+    for item in subjects:
+        image_path = os.path.abspath(item["path"])
+        if image_path not in images:
+            images[image_path] = load_rgb(image_path)
+        image_shapes[str(item.get("photoId") or "")] = images[image_path].shape[:2]
+    add_occlusion_estimates(subjects, image_shapes)
+    for index, item in enumerate(subjects, start=1):
+        image_path = os.path.abspath(item["path"])
+        descriptors.append(runtime.describe(images[image_path], item))
+        emit_progress(5 + 38 * index / len(subjects), f"检测并对齐人脸 {index}/{len(subjects)}")
+    runtime.embed_bodies(descriptors)
+    emit_progress(72, "已提取 OSNet 人体特征，正在执行受约束聚类")
+    clusters = constrained_clusters(descriptors)
+    similarities = ranked_similarity_pairs(descriptors)
+    emit_progress(100, "跨图片人物候选分组完成")
+    return {
+        "success": True, "subjectCount": len(subjects),
+        "clusters": clusters,
+        "similarities": similarities,
+        "unmatchedCount": len(subjects) - len({member["key"] for cluster in clusters for member in cluster["members"]}),
+        "method": f"{getattr(runtime, 'face_backend', 'test-face')}-{getattr(runtime, 'body_backend', 'test-body')}-gallery-v3",
+        "faceBackend": getattr(runtime, "face_backend", "test-face"),
+        "bodyBackend": getattr(runtime, "body_backend", "test-body"),
+        "provider": runtime.provider,
+    }
+
+
 def probe():
     providers = []
-    cpu_available = gpu_available = merge_available = advanced_available = False
-    runtime_errors, gpu_error, advanced_error = [], "", ""
+    cpu_available = gpu_available = merge_available = advanced_available = identity_available = False
+    face_backend = ""
+    body_backend = ""
+    runtime_errors, gpu_error, advanced_error, identity_error = [], "", "", ""
     try:
         from patch_merge import merge as _merge
         merge_available = callable(_merge)
@@ -1120,14 +1158,25 @@ def probe():
         advanced_available, advanced_error = probe_advanced()
     except Exception as error:
         advanced_error = str(error)
+    try:
+        identity_runtime = IdentityRuntime(asset_path("models", "face_detection_yunet_2023mar.onnx").parent, "cpu")
+        identity_runtime.body_session.run(None, {identity_runtime.body_input_name: np.zeros((1, 3, 256, 128), dtype=np.float32)})
+        face_backend = identity_runtime.face_backend
+        body_backend = identity_runtime.body_backend
+        identity_available = True
+    except Exception as error:
+        identity_error = str(error)
     runtime_error = "；".join(runtime_errors)
     return {
         "success": True, "componentAvailable": cpu_available and merge_available,
         "cpuAvailable": cpu_available, "gpuAvailable": gpu_available,
         "advancedAvailable": advanced_available, "mergeAvailable": merge_available,
+        "identityAvailable": identity_available,
+        "faceBackend": face_backend,
+        "bodyBackend": body_backend,
         "provider": "DmlExecutionProvider" if gpu_available else "CPUExecutionProvider" if cpu_available else "",
         "providers": providers, "runtimeError": runtime_error, "gpuError": gpu_error,
-        "advancedError": advanced_error, "error": runtime_error or gpu_error,
+        "advancedError": advanced_error, "identityError": identity_error, "error": runtime_error or gpu_error,
     }
 
 
@@ -1144,7 +1193,7 @@ def probe_advanced_runtime():
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("probe", "probe-advanced-runtime", "detect", "detect-batch", "match-batch", "restore", "merge"))
+    parser.add_argument("action", choices=("probe", "probe-advanced-runtime", "detect", "detect-batch", "identify", "match-batch", "restore", "merge"))
     parser.add_argument("--input")
     parser.add_argument("--output-dir")
     parser.add_argument("--delivery-dir")
@@ -1176,6 +1225,11 @@ def run(args_list=None):
         if not args.manifest:
             parser.error("match-batch requires --manifest")
         emit(match_returned_batch(os.path.abspath(args.manifest)))
+        return
+    if args.action == "identify":
+        if not args.manifest:
+            parser.error("identify requires --manifest")
+        emit(identify_people(os.path.abspath(args.manifest), provider=args.provider))
         return
     if args.action == "restore":
         if not args.input or not args.manifest:

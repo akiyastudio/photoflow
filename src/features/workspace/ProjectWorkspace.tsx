@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import { FolderInput, FolderPlus, Folder, Image as ImageIcon, ScanSearch, Play, Trash2, Edit, X, Plus, Loader2, CheckCircle2, ExternalLink, Video, ChevronDown, ChevronUp, File, FileImage, MemoryStick, LayoutList, Grid2X2, FileText, Copy, Scissors as Cut, ClipboardPaste, CheckSquare, ArrowLeft, ArrowRight, Camera, Aperture, Timer, Gauge, Ruler, Calendar, Activity, Volume2, PanelLeftOpen, ArrowUpDown, ArrowUp, ArrowDown, Search, Info, GripVertical, Maximize2, Minimize2, GitBranch, UsersRound, Heart, RefreshCw } from 'lucide-react';
 import { VersionManager } from '../../components/VersionManager';
 import { TeamRetouchManager } from '../../components/TeamRetouchManager';
+import { PersonIdentityManager } from '../../components/PersonIdentityManager';
+import type { TeamRetouchStep } from '../../components/TeamRetouchSteps';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { MediaCacheSettings } from '../settings/SettingsFeature';
 import { ConverterView, ImportCard, MatchView } from '../tools/ToolViews';
@@ -473,6 +475,8 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   const [conversionTarget, setConversionTarget] = useState('');
   const [versionEntry, setVersionEntry] = useState<ProjectFileEntry | null>(null);
   const [teamRetouchEntries, setTeamRetouchEntries] = useState<ProjectFileEntry[]>([]);
+  const [teamRetouchHistory, setTeamRetouchHistory] = useState<ProjectFileEntry[]>([]);
+  const [teamRetouchStep, setTeamRetouchStep] = useState<TeamRetouchStep | null>(null);
   const [finalVersionSummary, setFinalVersionSummary] = useState({ count: 0, availableCount: 0, missingCount: 0 });
   const [finalExporting, setFinalExporting] = useState(false);
   const [finalViewOpen, setFinalViewOpen] = useState(false);
@@ -494,6 +498,17 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   const officeImageExtractorAvailable = installedComponentIds.has('office-media-extractor');
   const teamRetouchAvailable = installedComponentIds.has('team-retouch');
 
+  const loadTeamRetouchHistory = useCallback(async () => {
+    if (!teamRetouchAvailable) { setTeamRetouchHistory([]); return; }
+    const result = await window.electronAPI.getTeamProjectWorkspace(workspacePath, project.name);
+    if (!result.success) return;
+    setTeamRetouchHistory(result.photos.map(photo => {
+      const name = photo.sourcePath.split(/[\\/]/).pop() || photo.name;
+      const extension = name.includes('.') ? `.${name.split('.').pop()}`.toLocaleLowerCase() : '';
+      return { name, path: photo.sourcePath, relativePath: photo.relativePath, kind: 'image' as const, extension, size: -1, createdAt: 0, updatedAt: Math.max(0, ...photo.tasks.map(task => task.updatedAt || 0)) };
+    }));
+  }, [teamRetouchAvailable, workspacePath, project.name]);
+
   useEffect(() => {
     if (!progressCompare?.matches.length) {
       setActiveProgressCompareSource('');
@@ -503,8 +518,9 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   }, [progressCompare]);
 
   useEffect(() => {
-    if (!teamRetouchAvailable) setTeamRetouchEntries([]);
-  }, [teamRetouchAvailable]);
+    if (!teamRetouchAvailable) { setTeamRetouchEntries([]); setTeamRetouchStep(null); }
+    void loadTeamRetouchHistory();
+  }, [teamRetouchAvailable, loadTeamRetouchHistory]);
 
   useEffect(() => {
     window.localStorage.setItem('photoflow:files-column-width', String(Math.round(columnWidths.files)));
@@ -1590,16 +1606,29 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       setFinalExporting(false);
     }
   };
-  const openTeamRetouch = (entry?: ProjectFileEntry) => {
+  const openTeamRetouch = async (entry?: ProjectFileEntry) => {
     const targets = entry
       ? (selectedPaths.includes(entry.relativePath) ? selectedEntries : [entry])
       : selectedEntries;
-    if (!targets.length || targets.some(target => target.kind !== 'image')) {
+    const validTargets = targets.filter(target => target.kind === 'image');
+    if (targets.length && validTargets.length !== targets.length && !teamRetouchHistory.length) {
       onNotice('请选择 JPG、PNG、TIFF、HEIC 等成片图片；不能混选文件夹、RAW 或视频');
       return;
     }
+    if (!targets.length && !teamRetouchHistory.length) {
+      onNotice('请选择至少一张成片图片开始多人修脸');
+      return;
+    }
+    const combined = new Map<string, ProjectFileEntry>();
+    for (const item of [...teamRetouchHistory, ...validTargets]) combined.set(item.relativePath.toLocaleLowerCase(), item);
+    if (validTargets.length) {
+      const registered = await window.electronAPI.registerTeamProjectPhotos(workspacePath, project.status, project.name, validTargets.map(target => target.relativePath));
+      if (!registered.success) { onNotice(`加入多人修脸失败：${registered.error || '未知错误'}`); return; }
+      void loadTeamRetouchHistory();
+    }
     setVersionEntry(null);
-    setTeamRetouchEntries(targets);
+    setTeamRetouchEntries([...combined.values()]);
+    setTeamRetouchStep('detect');
   };
   const openProjectEntriesInPhotoshop = async (entries: ProjectFileEntry[]) => {
     const imagePaths = entries.filter(entry => entry.kind === 'image' || entry.kind === 'raw').map(entry => entry.relativePath);
@@ -2313,7 +2342,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         <div className="contents">
           <button disabled={selectedProgressFolder ? !selectedProgressFolderIsRoot : selectedEntries.length !== 1 || !hasVersionTrackingForEntry(selectedEntries[0])} onClick={() => selectedProgressFolder ? void openMarkProgress(selectedProgressFolder) : openVersions()} title={selectedProgressFolder ? selectedProgressFolderIsRoot ? selectedRegisteredProgressFolder ? '修改当前进度版本' : '标记当前文件夹为进度' : '进度文件夹必须位于项目根目录' : '版本管理'} aria-label={selectedProgressFolder ? selectedRegisteredProgressFolder ? '修改进度版本' : '标记进度' : '版本管理'} className="project-action-button"><GitBranch size={16}/>{selectedProgressFolder ? selectedRegisteredProgressFolder ? '修改进度版本' : '标记进度' : '版本管理'}</button>
           {finalVersionSummary.count > 0 && <button disabled={finalViewLoading} onClick={() => void openFinalVersionView()} title={`浏览最终版（${finalVersionSummary.availableCount} 张${finalVersionSummary.missingCount ? `，${finalVersionSummary.missingCount} 张文件丢失` : ''}）`} aria-label="浏览所有已标记最终版的图片" aria-pressed={finalViewOpen} className={`project-action-button !text-emerald-600 hover:!bg-emerald-50 ${finalViewOpen ? '!bg-emerald-50' : ''}`}>{finalViewLoading ? <Loader2 size={16} className="animate-spin"/> : <Heart size={16} fill="currentColor"/>}</button>}
-          {teamRetouchAvailable && <button disabled={!selectedEntries.length || selectedEntries.some(entry => entry.kind !== 'image')} onClick={() => openTeamRetouch()} title="多人修脸" aria-label="多人修脸" className="project-action-button"><UsersRound size={16}/>多人修脸{selectedEntries.length > 1 ? `（${selectedEntries.length} 张）` : ''}</button>}
+          {teamRetouchAvailable && <button type="button" onClick={() => void openTeamRetouch()} title={selectedEntries.some(entry => entry.kind === 'image') ? '打开多人修脸并加入所选图片' : teamRetouchHistory.length ? `打开多人修脸（项目已有 ${teamRetouchHistory.length} 张）` : '多人修脸'} className="project-action-button"><UsersRound size={16}/>多人修脸{teamRetouchHistory.length ? `（${teamRetouchHistory.length} 张）` : ''}</button>}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1 pl-3"><button onClick={() => setViewMode('grid')} title="图标模式" className={`rounded-md p-1.5 ${viewMode === 'grid' ? 'bg-slate-200 text-slate-800' : 'text-slate-500 hover:bg-slate-200'}`}><Grid2X2 size={17}/></button><button onClick={() => setViewMode('list')} title="列表模式" className={`rounded-md p-1.5 ${viewMode === 'list' ? 'bg-slate-200 text-slate-800' : 'text-slate-500 hover:bg-slate-200'}`}><LayoutList size={17}/></button>{viewMode === 'grid' && <input aria-label="图标大小" title="图标大小" type="range" min="80" max="360" step="4" value={gridIconSize} onChange={event => setGridIconSize(Number(event.target.value))} className="compact-hide-slider ml-2 w-24 accent-blue-600"/>}<span aria-hidden className="mx-1 h-5 w-px bg-slate-200"/><div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !showSortMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowSortMenu(next); }} title="排序" aria-label="排序" aria-haspopup="menu" aria-expanded={showSortMenu} className="project-action-button"><ArrowUpDown size={16}/>排序</button>{showSortMenu && <div className="sort-menu absolute right-0 top-full z-40 mt-1 w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">{([['name', '文件名'], ['date', '修改日期'], ['size', '大小']] as const).map(([field, label]) => <button key={field} type="button" onClick={() => setSortField(field)} className={`project-menu-item ${sortField === field ? 'bg-blue-50 font-bold text-blue-600' : ''}`}>{label}</button>)}<div className="my-1 border-t border-slate-100"/><button type="button" onClick={() => setSortDirection('asc')} className={`project-menu-item ${sortDirection === 'asc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowUp size={14}/><span>递增</span></button><button type="button" onClick={() => setSortDirection('desc')} className={`project-menu-item ${sortDirection === 'desc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowDown size={14}/><span>递减</span></button></div>}</div><div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !searchOpen; window.dispatchEvent(new Event('photoflow-menu-open')); setSearchOpen(next); }} title="查找文件（Ctrl+F）" aria-label="查找文件" aria-expanded={searchOpen} className={`project-action-button ${searchOpen || searchQuery ? 'bg-blue-50 text-blue-600' : ''}`}><Search size={16}/>查找文件</button>{searchOpen && <div className="absolute right-0 top-full z-40 mt-1 w-64 rounded-lg border border-slate-200 bg-white p-2 shadow-xl"><div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2"><Search size={15} className="shrink-0 text-slate-400"/><input ref={searchInputRef} autoFocus value={searchQuery} onChange={event => setSearchQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { setSearchOpen(false); setSearchQuery(''); } }} placeholder="输入文件名" className="min-w-0 flex-1 bg-transparent py-2 text-sm text-slate-800 outline-none"/>{searchQuery && <button type="button" onClick={() => setSearchQuery('')} title="清除查找" className="rounded p-0.5 text-slate-400 hover:bg-slate-200"><X size={14}/></button>}</div></div>}</div></div>
       </div>
@@ -2379,7 +2408,21 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         <section className="mt-5 border-t border-slate-200 pt-5"><h4 className="mb-2 text-sm font-bold text-slate-700">预览</h4><div className="max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50">{batchRenameEntries.slice(0, 20).map((entry, index) => <div key={entry.path} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 border-b border-slate-200 px-3 py-2 text-xs last:border-0"><span className="truncate text-slate-500" title={entry.name}>{entry.name}</span><ArrowRight size={13} className="text-slate-300"/><span className="truncate font-medium text-slate-700" title={batchRenameNames[index]}>{batchRenameNames[index] || '（空文件名）'}</span></div>)}{batchRenameEntries.length > 20 && <p className="px-3 py-2 text-center text-xs text-slate-400">另有 {batchRenameEntries.length - 20} 个项目</p>}</div></section>
       </div><footer className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-5 py-4"><p className="text-xs text-slate-500">重命名使用临时文件过渡，不会因名称互换产生冲突。</p><div className="flex gap-2"><button onClick={() => setBatchRenameOpen(false)} className="dialog-secondary">取消</button><button onClick={commitBatchRename} disabled={!batchRenameNames.length || batchRenameNames.some(name => !name) || batchExtensionMode === 'replace' && !batchExtensionValue.trim() || new Set(batchRenameNames.map(name => name.toLocaleLowerCase())).size !== batchRenameNames.length || renameCommitRef.current} className="dialog-primary">批量重命名</button></div></footer></div></div>}
       {versionEntry && <VersionManager entry={versionEntry} workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} onNotice={onNotice} onVersionStateChanged={() => { void loadFinalVersionSummary(); if (finalViewOpen) void loadFinalViewEntries(); }} onClose={() => { setVersionEntry(null); void loadFinalVersionSummary(); if (finalViewOpen) void loadFinalViewEntries(); }}/>} 
-      {teamRetouchAvailable && teamRetouchEntries.length > 0 && <TeamRetouchManager entries={teamRetouchEntries} workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} defaultBackendMode={teamRetouchSettings.backendMode || 'auto'} componentStatus={teamRetouchStatus} onNotice={onNotice} onClose={() => setTeamRetouchEntries([])}/>}
+      {teamRetouchAvailable && teamRetouchStep === 'detect' && teamRetouchEntries.length > 0 && <TeamRetouchManager
+        entries={teamRetouchEntries}
+        workspacePath={workspacePath}
+        project={project}
+        cacheConfig={mediaCacheConfig}
+        defaultBackendMode={teamRetouchSettings.backendMode || 'auto'}
+        componentStatus={teamRetouchStatus}
+        activeStep={teamRetouchStep}
+        onStepChange={setTeamRetouchStep}
+        onNotice={onNotice}
+        onEntriesChange={setTeamRetouchEntries}
+        onProjectChanged={() => void loadTeamRetouchHistory()}
+        onClose={() => { setTeamRetouchStep(null); setTeamRetouchEntries([]); void loadTeamRetouchHistory(); }}
+      />}
+      {teamRetouchAvailable && (teamRetouchStep === 'people' || teamRetouchStep === 'workflow') && <PersonIdentityManager workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} activeStep={teamRetouchStep} onStepChange={setTeamRetouchStep} onNotice={onNotice} onProjectChanged={() => void loadTeamRetouchHistory()} onClose={() => { setTeamRetouchStep(null); setTeamRetouchEntries([]); void loadTeamRetouchHistory(); }}/>} 
 
       <section className="flex min-h-[220px] min-w-0 flex-auto flex-col">
         <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={event => (event.target as HTMLElement).closest<HTMLElement>('[data-entry-path]')?.focus({ preventScroll: true })} onPointerDown={startSelectionDrag} onPointerMove={updateSelectionDrag} onPointerUp={finishSelectionDrag} onPointerCancel={finishSelectionDrag} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} className={`relative -mx-6 min-h-[220px] flex-1 select-none px-6 outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
