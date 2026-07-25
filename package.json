@@ -2,7 +2,7 @@
   "name": "photoflow",
   "productName": "照片流",
   "private": true,
-  "version": "26.7.24",
+  "version": "26.7.26",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -27,6 +27,7 @@
     "test:office-media": ".venv\\Scripts\\python.exe scripts\\test-office-media-extractor.py",
     "test:research": ".venv\\Scripts\\python.exe scripts\\test-research.py",
     "test:team-retouch": ".venv\\Scripts\\python.exe scripts\\test-team-retouch.py",
+    "test:team-workflow": "node scripts/test-team-workflow.mjs",
     "preview": "vite preview",
     "electron": "npm run build:shell-thumbnail && npm run build:recycle-bin-service && wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
     "electron:dev": "concurrently -k \"cross-env BROWSER=none npm run dev\" \"npm run electron\"",

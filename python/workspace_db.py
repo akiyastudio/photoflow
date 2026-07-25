@@ -228,6 +228,36 @@ def connect(root: str, database: str):
         CREATE INDEX IF NOT EXISTS team_patch_photo ON team_patch_tasks(photo_id, base_version_id, is_deleted);
         CREATE INDEX IF NOT EXISTS team_patch_base_version ON team_patch_tasks(base_version_id);
         CREATE INDEX IF NOT EXISTS team_patch_merged_version ON team_patch_tasks(merged_version_id);
+        CREATE TABLE IF NOT EXISTS team_retouch_photos (
+            photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            base_version_id TEXT NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS team_retouch_photo_project ON team_retouch_photos(project_id, updated_at);
+        CREATE TABLE IF NOT EXISTS team_person_identities (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            color TEXT NOT NULL DEFAULT '#2563eb',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS team_person_identity_project ON team_person_identities(project_id, created_at);
+        CREATE TABLE IF NOT EXISTS team_person_assignments (
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+            base_version_id TEXT NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
+            person_index INTEGER NOT NULL,
+            identity_id TEXT REFERENCES team_person_identities(id) ON DELETE SET NULL,
+            confidence REAL NOT NULL DEFAULT 0,
+            source TEXT NOT NULL DEFAULT 'manual',
+            completed INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (photo_id, base_version_id, person_index)
+        );
+        CREATE INDEX IF NOT EXISTS team_person_assignment_project ON team_person_assignments(project_id, identity_id);
         CREATE TABLE IF NOT EXISTS undo_records (
             id TEXT PRIMARY KEY,
             kind TEXT NOT NULL,
@@ -254,7 +284,16 @@ def connect(root: str, database: str):
         db.execute("ALTER TABLE team_patch_tasks ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0")
     if "review_reason" not in patch_columns:
         db.execute("ALTER TABLE team_patch_tasks ADD COLUMN review_reason TEXT NOT NULL DEFAULT ''")
-    for key, value in (("schema_version", "8"), ("workspace_root", root)):
+    db.execute(
+        """INSERT OR IGNORE INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at)
+           SELECT task.photo_id,photos.project_id,task.base_version_id,MIN(task.created_at),MAX(task.updated_at)
+           FROM team_patch_tasks task JOIN photos ON photos.id=task.photo_id
+           WHERE task.is_deleted=0 AND task.updated_at=(
+             SELECT MAX(latest.updated_at) FROM team_patch_tasks latest
+             WHERE latest.photo_id=task.photo_id AND latest.is_deleted=0
+           ) GROUP BY task.photo_id"""
+    )
+    for key, value in (("schema_version", "10"), ("workspace_root", root)):
         current = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         if current is None:
             db.execute("INSERT INTO meta(key, value) VALUES (?, ?)", (key, value))
@@ -1535,12 +1574,209 @@ def serialize_team_patch(row):
     }
 
 
+def is_generated_team_identity_name(name):
+    prefix = "\u5f85\u786e\u8ba4\u4eba\u7269 "
+    value = str(name or "")
+    return value.startswith(prefix) and value[len(prefix):].isdigit()
+
+
+def cleanup_empty_generated_team_identities(db, project_id):
+    rows = db.execute(
+        """SELECT identity.id,identity.name
+           FROM team_person_identities identity
+           LEFT JOIN team_person_assignments assignment ON assignment.identity_id=identity.id
+           WHERE identity.project_id=?
+           GROUP BY identity.id
+           HAVING COUNT(assignment.identity_id)=0""",
+        (project_id,),
+    ).fetchall()
+    stale_ids = [row["id"] for row in rows if is_generated_team_identity_name(row["name"])]
+    if stale_ids:
+        db.executemany("DELETE FROM team_person_identities WHERE id=?", ((identity_id,) for identity_id in stale_ids))
+    return len(stale_ids)
+
+
 def team_patch_list(db, payload: dict):
     rows = db.execute(
         """SELECT * FROM team_patch_tasks WHERE photo_id=? AND is_deleted=0
            ORDER BY person_index, created_at""", (payload["photoId"],)
     ).fetchall()
     return {"success": True, "tasks": [serialize_team_patch(row) for row in rows]}
+
+
+def team_project_workspace(root: str, db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    if cleanup_empty_generated_team_identities(db, project["id"]):
+        db.commit()
+    project_path = os.path.join(os.path.abspath(root), project["relative_path"])
+    rows = db.execute(
+        """SELECT task.*, photos.display_name AS photo_name, photos.original_name, photos.current_version_id,
+                  versions.file_path AS source_path
+           FROM team_patch_tasks task
+           JOIN photos ON photos.id=task.photo_id AND photos.is_deleted=0
+           JOIN versions ON versions.id=task.base_version_id AND versions.is_deleted=0
+           WHERE photos.project_id=? AND task.is_deleted=0
+           ORDER BY photos.created_at, task.photo_id, task.person_index""",
+        (project["id"],),
+    ).fetchall()
+    groups = {}
+    for row in rows:
+        key = f'{row["photo_id"]}:{row["base_version_id"]}'
+        if key not in groups:
+            relative_path = os.path.relpath(row["source_path"], project_path)
+            groups[key] = {
+                "photoId": row["photo_id"], "baseVersionId": row["base_version_id"],
+                "name": row["photo_name"] or os.path.splitext(row["original_name"])[0],
+                "relativePath": relative_path, "sourcePath": row["source_path"], "tasks": [],
+                "currentVersionId": row["current_version_id"], "latestTaskAt": 0,
+            }
+        groups[key]["tasks"].append(serialize_team_patch(row))
+        groups[key]["latestTaskAt"] = max(groups[key]["latestTaskAt"], int(row["updated_at"] or 0))
+    selected_groups = {}
+    for group in groups.values():
+        current = selected_groups.get(group["photoId"])
+        group_is_current = group["baseVersionId"] == group["currentVersionId"]
+        current_is_current = current and current["baseVersionId"] == current["currentVersionId"]
+        if current is None or group_is_current and not current_is_current or group_is_current == current_is_current and group["latestTaskAt"] > current["latestTaskAt"]:
+            selected_groups[group["photoId"]] = group
+    registered = db.execute(
+        """SELECT registered.photo_id,registered.base_version_id,registered.created_at,registered.updated_at,
+                  photos.display_name,photos.original_name,versions.file_path AS source_path
+           FROM team_retouch_photos registered
+           JOIN photos ON photos.id=registered.photo_id AND photos.is_deleted=0
+           JOIN versions ON versions.id=registered.base_version_id AND versions.is_deleted=0
+           WHERE registered.project_id=? ORDER BY registered.created_at""",
+        (project["id"],),
+    ).fetchall()
+    for row in registered:
+        key = f'{row["photo_id"]}:{row["base_version_id"]}'
+        group = groups.get(key) or {
+            "photoId": row["photo_id"], "baseVersionId": row["base_version_id"],
+            "name": row["display_name"] or os.path.splitext(row["original_name"])[0],
+            "relativePath": os.path.relpath(row["source_path"], project_path),
+            "sourcePath": row["source_path"], "tasks": [], "currentVersionId": row["base_version_id"],
+            "latestTaskAt": int(row["updated_at"] or 0),
+        }
+        selected_groups[row["photo_id"]] = group
+    photos = []
+    for group in selected_groups.values():
+        group.pop("currentVersionId", None)
+        group.pop("latestTaskAt", None)
+        photos.append(group)
+    identities = [dict(row) for row in db.execute(
+        "SELECT id,name,color,created_at AS createdAt,updated_at AS updatedAt FROM team_person_identities WHERE project_id=? ORDER BY created_at",
+        (project["id"],),
+    ).fetchall()]
+    assignments = [dict(row) for row in db.execute(
+        """SELECT photo_id AS photoId,base_version_id AS baseVersionId,person_index AS personIndex,
+                  identity_id AS identityId,confidence,source,completed,updated_at AS updatedAt
+           FROM team_person_assignments WHERE project_id=?""",
+        (project["id"],),
+    ).fetchall()]
+    for item in assignments:
+        item["completed"] = bool(item["completed"])
+    return {"success": True, "photos": photos, "identities": identities, "assignments": assignments}
+
+
+def team_project_register_photo(db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    photo = db.execute("SELECT id,project_id FROM photos WHERE id=? AND is_deleted=0", (payload["photoId"],)).fetchone()
+    version = db.execute("SELECT id,photo_id FROM versions WHERE id=? AND is_deleted=0", (payload["baseVersionId"],)).fetchone()
+    if photo is None or photo["project_id"] != project["id"] or version is None or version["photo_id"] != photo["id"]:
+        raise ValueError("多人修脸图片或基础版本不属于当前项目")
+    timestamp = int(time.time() * 1000)
+    db.execute(
+        """INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)
+           ON CONFLICT(photo_id) DO UPDATE SET base_version_id=excluded.base_version_id,updated_at=excluded.updated_at""",
+        (photo["id"], project["id"], version["id"], timestamp, timestamp),
+    )
+    db.commit()
+    return {"success": True}
+
+
+def team_project_unregister_photo(db, payload: dict):
+    db.execute("DELETE FROM team_retouch_photos WHERE photo_id=?", (payload["photoId"],))
+    db.commit()
+    return {"success": True}
+
+
+def team_identity_save(db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    timestamp = int(time.time() * 1000)
+    identity_id = str(payload.get("identityId") or uuid.uuid4())
+    name = str(payload.get("name") or "未命名人物").strip()[:80] or "未命名人物"
+    existing = db.execute("SELECT id FROM team_person_identities WHERE id=? AND project_id=?", (identity_id, project["id"])).fetchone()
+    if existing:
+        db.execute("UPDATE team_person_identities SET name=?,updated_at=? WHERE id=?", (name, timestamp, identity_id))
+    else:
+        colors = ("#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#059669", "#0891b2", "#4f46e5")
+        count = db.execute("SELECT COUNT(*) FROM team_person_identities WHERE project_id=?", (project["id"],)).fetchone()[0]
+        db.execute(
+            "INSERT INTO team_person_identities(id,project_id,name,color,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            (identity_id, project["id"], name, colors[count % len(colors)], timestamp, timestamp),
+        )
+    for assignment in payload.get("assignments") or []:
+        db.execute(
+            """INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,identity_id,confidence,source,completed,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(photo_id,base_version_id,person_index) DO UPDATE SET
+                 identity_id=excluded.identity_id,confidence=excluded.confidence,source=excluded.source,updated_at=excluded.updated_at""",
+            (project["id"], assignment["photoId"], assignment["baseVersionId"], int(assignment["personIndex"]),
+             identity_id, float(assignment.get("confidence", 1)), str(assignment.get("source") or "manual"),
+             int(bool(assignment.get("completed", False))), timestamp),
+        )
+    db.commit()
+    return {"success": True, "identityId": identity_id}
+
+
+def team_identity_assign(db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    identity_id = payload.get("identityId") or None
+    if identity_id and db.execute("SELECT id FROM team_person_identities WHERE id=? AND project_id=?", (identity_id, project["id"])).fetchone() is None:
+        raise ValueError("人物身份不存在")
+    timestamp = int(time.time() * 1000)
+    existing = db.execute(
+        "SELECT identity_id,completed FROM team_person_assignments WHERE photo_id=? AND base_version_id=? AND person_index=?",
+        (payload["photoId"], payload["baseVersionId"], int(payload["personIndex"])),
+    ).fetchone()
+    completed = bool(payload.get("completed", False))
+    if not identity_id or existing and existing["identity_id"] != identity_id:
+        completed = False
+    db.execute(
+        """INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,identity_id,confidence,source,completed,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(photo_id,base_version_id,person_index) DO UPDATE SET
+             identity_id=excluded.identity_id,confidence=excluded.confidence,source=excluded.source,
+             completed=excluded.completed,updated_at=excluded.updated_at""",
+        (project["id"], payload["photoId"], payload["baseVersionId"], int(payload["personIndex"]), identity_id,
+         float(payload.get("confidence", 1)), str(payload.get("source") or "manual"), int(completed), timestamp),
+    )
+    previous_identity_id = existing["identity_id"] if existing else None
+    if previous_identity_id and previous_identity_id != identity_id:
+        cleanup_empty_generated_team_identities(db, project["id"])
+    db.commit()
+    return {"success": True}
+
+
+def team_identity_complete(db, payload: dict):
+    timestamp = int(time.time() * 1000)
+    result = db.execute(
+        """UPDATE team_person_assignments SET completed=?,updated_at=?
+           WHERE photo_id=? AND base_version_id=? AND person_index=?""",
+        (int(bool(payload.get("completed"))), timestamp, payload["photoId"], payload["baseVersionId"], int(payload["personIndex"])),
+    )
+    if result.rowcount != 1:
+        raise ValueError("请先给这个人物标记身份")
+    db.commit()
+    return {"success": True}
+
+
+def team_identity_delete(db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    db.execute("UPDATE team_person_assignments SET completed=0 WHERE identity_id=? AND project_id=?", (payload["identityId"], project["id"]))
+    db.execute("DELETE FROM team_person_identities WHERE id=? AND project_id=?", (payload["identityId"], project["id"]))
+    db.commit()
+    return {"success": True}
 
 
 def team_patch_replace(db, payload: dict):
@@ -1551,6 +1787,13 @@ def team_patch_replace(db, payload: dict):
     ).fetchall()
     db.execute(
         "DELETE FROM team_patch_tasks WHERE photo_id=? AND base_version_id=?",
+        (payload["photoId"], payload["baseVersionId"]),
+    )
+    # Person indices are produced by the detector and can change after a new
+    # recognition pass. Keeping old identity links would silently attach names
+    # to the wrong body, so the user must confirm them again.
+    db.execute(
+        "DELETE FROM team_person_assignments WHERE photo_id=? AND base_version_id=?",
         (payload["photoId"], payload["baseVersionId"]),
     )
     for task in payload.get("tasks", []):
@@ -1583,11 +1826,15 @@ def team_patch_cleanup(db, payload: dict):
     ).fetchall()
     if not rows:
         return {**team_patch_list(db, {"photoId": payload["photoId"]}), "artifactPaths": [], "cleanedCount": 0}
-    if any(row["status"] != "merged" for row in rows):
+    if not payload.get("force") and any(row["status"] != "merged" for row in rows):
         raise ValueError("仍有未完成的多人修脸任务，不能清理工作数据")
     candidates = team_artifact_paths(rows)
     db.execute(
         "DELETE FROM team_patch_tasks WHERE photo_id=? AND base_version_id=?",
+        (payload["photoId"], payload["baseVersionId"]),
+    )
+    db.execute(
+        "DELETE FROM team_person_assignments WHERE photo_id=? AND base_version_id=?",
         (payload["photoId"], payload["baseVersionId"]),
     )
     db.commit()
@@ -1910,6 +2157,34 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = team_patch_list(db, payload)
         db.close()
         return result
+    elif action == "team_project_workspace":
+        result = team_project_workspace(root, db, payload)
+        db.close()
+        return result
+    elif action == "team_project_register_photo":
+        result = team_project_register_photo(db, payload)
+        db.close()
+        return result
+    elif action == "team_project_unregister_photo":
+        result = team_project_unregister_photo(db, payload)
+        db.close()
+        return result
+    elif action == "team_identity_save":
+        result = team_identity_save(db, payload)
+        db.close()
+        return result
+    elif action == "team_identity_assign":
+        result = team_identity_assign(db, payload)
+        db.close()
+        return result
+    elif action == "team_identity_complete":
+        result = team_identity_complete(db, payload)
+        db.close()
+        return result
+    elif action == "team_identity_delete":
+        result = team_identity_delete(db, payload)
+        db.close()
+        return result
     elif action == "team_patch_replace":
         result = team_patch_replace(db, payload)
         db.close()
@@ -1952,7 +2227,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "add", "status", "rename", "delete", "restore_project", "deleted_projects_list", "purge_deleted_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "batch_register_baseline", "batch_commit_compare", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_patch_replace", "team_patch_update", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
+    parser.add_argument("action", nargs="?", choices=("init", "add", "status", "rename", "delete", "restore_project", "deleted_projects_list", "purge_deleted_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "batch_register_baseline", "batch_commit_compare", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_complete", "team_identity_delete", "team_patch_replace", "team_patch_update", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")

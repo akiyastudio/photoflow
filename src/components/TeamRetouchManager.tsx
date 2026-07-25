@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Copy, ExternalLink, FolderOpen, Loader2, RefreshCw, ScanFace, Sparkles, Trash2, Upload, UserRound, UsersRound, Wand2, X } from 'lucide-react';
 import type { AppConfig, ComponentStatus, MediaVersion, ProgressFolder, ProjectFileEntry, TeamPatchBundle, TeamPatchReturnBatchResult, TeamPatchTask, WorkspaceProject } from '../types';
 import { useAppDialog } from './AppDialogProvider';
+import { TeamRetouchSteps, type TeamRetouchStep } from './TeamRetouchSteps';
 import { VersionManager } from './VersionManager';
 
 type Props = {
@@ -11,11 +12,15 @@ type Props = {
   cacheConfig: AppConfig['mediaCache'];
   defaultBackendMode: AppConfig['personDetection']['backendMode'];
   componentStatus?: ComponentStatus;
+  activeStep: TeamRetouchStep;
+  onStepChange: (step: TeamRetouchStep) => void;
   onClose: () => void;
   onNotice: (message: string) => void;
+  onEntriesChange?: (entries: ProjectFileEntry[]) => void;
+  onProjectChanged?: () => void;
 };
 
-type PhotoCardProps = Omit<Props, 'entries'> & {
+type PhotoCardProps = Omit<Props, 'entries' | 'activeStep' | 'onStepChange'> & {
   entry: ProjectFileEntry;
   refreshToken?: number;
 };
@@ -140,7 +145,7 @@ const useTeamOutputProgress = (sourceFilePath: string, workspacePath: string, pr
 
 const OutputProgressPicker = ({ controller, disabled }: { controller: ReturnType<typeof useTeamOutputProgress>; disabled: boolean }) => <label className="flex min-w-0 items-center gap-2 text-xs text-slate-500"><span className="shrink-0 font-bold text-slate-600">合成保存到</span><select aria-label="合成结果目标进度" value={controller.targetProgressId} disabled={disabled} onChange={event => controller.setTargetProgressId(event.target.value)} className="min-w-48 max-w-72 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-bold text-slate-700 disabled:opacity-50"><option value="__new__">新建下一图片进度（推荐）</option>{controller.folders.map(folder => <option key={folder.id} value={folder.id}>_{folder.versionKey} · {folder.displayName}</option>)}</select><span className="hidden max-w-64 truncate text-slate-400 xl:inline" title={controller.sourceProgress?.displayName || parentDirectory(controller.folders[0]?.folderPath || '')}>同一来源进度会记住此选择，也可随时更改</span></label>;
 
-const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defaultBackendMode, componentStatus, onClose, onNotice, refreshToken = 0 }: PhotoCardProps) => {
+const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defaultBackendMode, componentStatus, onClose, onNotice, onEntriesChange, onProjectChanged, refreshToken = 0 }: PhotoCardProps) => {
   const appDialog = useAppDialog();
   const [bundle, setBundle] = useState<TeamPatchBundle>({ success: true, versions: [], tasks: [] });
   const [loading, setLoading] = useState(true);
@@ -199,7 +204,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defa
     if (!bundle.photo || !baseVersion) return;
     if (tasks.length && !await appDialog.confirm({
       title: '确定重新识别吗？',
-      message: '重新检测会替换当前基础版本下的任务清单。',
+      message: '重新检测会替换当前基础版本下的任务清单；人物编号可能变化，因此这张图已有的身份标注和完成状态也会清除。',
       confirmLabel: '重新识别',
       tone: 'danger',
     })) return;
@@ -217,6 +222,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defa
       const engine = result.detection?.advancedBackend ? '高级模式' : '基础模式';
       onNotice(`${engine}识别到 ${personCount} 个人物，已合并成 ${result.tasks.length} 张工作图${reviewCount ? `；其中 ${reviewCount} 张需要确认` : ''}${fallback}`);
     }
+    onProjectChanged?.();
   };
 
   const updateTask = async (task: TeamPatchTask, changes: { personName?: string; assignee?: string; needsReview?: boolean; reviewReason?: string }) => {
@@ -287,25 +293,25 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defa
     if (result.merge?.versionId) setCompareVersionIds([baseVersion.id, result.merge.versionId]);
   };
 
-  const cleanupCompleted = async () => {
-    if (!bundle.photo || !baseVersion || !tasks.length) return;
+  const removeFromProject = async () => {
+    if (!bundle.photo || !baseVersion) return;
     if (!await appDialog.confirm({
-      title: '确定清理已完成工作数据吗？',
-      message: '已生成的合成版本会保留，但工作图、上传图和任务记录会删除，之后不能直接重新合并；如需再次处理，需要重新识别。',
-      confirmLabel: '清理工作数据',
+      title: `从多人修脸中删除“${bundle.photo.displayName || entry.name}”？`,
+      message: '会删除这张图片的工作图、遮罩、返图、人物标注和流程完成状态；原照片及已经生成的合成版本不会删除。',
+      confirmLabel: '删除多人修脸数据',
       tone: 'danger',
     })) return;
-    setBusy('cleanup');
-    const result = await window.electronAPI.cleanupTeamPatches(workspacePath, { photoId: bundle.photo.id, baseVersionId: baseVersion.id });
+    setBusy('remove-photo');
+    const result = await window.electronAPI.removeProjectTeamPhoto(workspacePath, { photoId: bundle.photo.id, baseVersionId: baseVersion.id });
     setBusy('');
-    if (!result.success) { onNotice(`清理多人修脸工作数据失败：${result.error || '未知错误'}`); return; }
-    setBundle(normalizeVisibleBundle(result));
-    onNotice(`已清理完成任务的工作数据${result.removedArtifactCount ? `（${result.removedArtifactCount} 项）` : ''}，合成版本已保留`);
+    if (!result.success) { onNotice(`删除多人修脸图片失败：${result.error || '未知错误'}`); return; }
+    onNotice(`已删除“${bundle.photo.displayName || entry.name}”的多人修脸执行数据`);
+    onProjectChanged?.();
+    onEntriesChange?.([]);
   };
 
   const uploadedCount = tasks.filter(task => task.editedPatchPath).length;
   const mergedCount = tasks.filter(task => task.status === 'merged').length;
-  const canCleanupCompleted = tasks.length > 0 && tasks.every(task => task.status === 'merged');
   const advancedReady = Boolean(componentStatus?.advancedAvailable);
 
   const openFolder = async (filePath: string, label: string) => {
@@ -317,7 +323,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defa
   return <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 shadow-sm">
     <header className="flex min-h-16 shrink-0 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-3">
       <div className="flex min-w-0 items-center gap-3"><span className="rounded-xl bg-violet-50 p-2 text-violet-600"><UsersRound size={20}/></span><div className="min-w-0"><h2 className="truncate font-bold text-slate-900">多人修脸 · {bundle.photo?.displayName || entry.name}</h2><p className="mt-0.5 truncate text-xs text-slate-500">工作图 {tasks.length} · 手机回传 {uploadedCount}/{tasks.length} · 合回版本 {mergedCount ? '完成' : '待处理'}</p></div></div>
-      <div className="ml-auto flex flex-wrap items-center justify-end gap-2"><select aria-label="识别模式" value={backendMode} onChange={event => setBackendMode(event.target.value as AppConfig['personDetection']['backendMode'])} disabled={Boolean(busy)} title="自动模式会在高级引擎不可用时使用基础方案" className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-bold text-slate-700"><option value="auto">自动（推荐）</option><option value="basic">基础模式</option><option value="advanced" disabled={!advancedReady}>高级模式{advancedReady ? '' : '（不可用）'}</option></select><select aria-label="基础版本" value={baseVersion?.id || ''} onChange={event => setBaseVersionId(event.target.value)} disabled={Boolean(busy)} className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-bold text-slate-700">{bundle.versions.filter(version => !version.fileMissing).map(version => <option key={version.id} value={version.id}>基础 V{version.versionNumber} · {version.versionName}</option>)}</select><button disabled={!baseVersion || Boolean(busy)} onClick={() => void detect()} className="dialog-secondary inline-flex items-center gap-2">{busy === 'detect' ? <Loader2 size={15} className="animate-spin"/> : tasks.length ? <RefreshCw size={15}/> : <ScanFace size={15}/>} {tasks.length ? '重新识别' : 'AI识别并规划'}</button><button disabled={!uploadedCount || Boolean(busy)} onClick={() => void merge()} className="dialog-primary inline-flex items-center gap-2">{busy === 'merge' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}自动合回原尺寸</button>{canCleanupCompleted && <button type="button" disabled={Boolean(busy)} onClick={() => void cleanupCompleted()} title="清理已完成工作数据" className="rounded-md border border-slate-200 p-2 text-slate-500 hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:opacity-40">{busy === 'cleanup' ? <Loader2 size={15} className="animate-spin"/> : <Trash2 size={15}/>}</button>}</div>
+      <div className="ml-auto flex flex-wrap items-center justify-end gap-2"><select aria-label="识别模式" value={backendMode} onChange={event => setBackendMode(event.target.value as AppConfig['personDetection']['backendMode'])} disabled={Boolean(busy)} title="自动模式会在高级引擎不可用时使用基础方案" className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-bold text-slate-700"><option value="auto">自动（推荐）</option><option value="basic">基础模式</option><option value="advanced" disabled={!advancedReady}>高级模式{advancedReady ? '' : '（不可用）'}</option></select><select aria-label="基础版本" value={baseVersion?.id || ''} onChange={event => setBaseVersionId(event.target.value)} disabled={Boolean(busy)} className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-bold text-slate-700">{bundle.versions.filter(version => !version.fileMissing).map(version => <option key={version.id} value={version.id}>基础 V{version.versionNumber} · {version.versionName}</option>)}</select><button disabled={!baseVersion || Boolean(busy)} onClick={() => void detect()} className="dialog-secondary inline-flex items-center gap-2">{busy === 'detect' ? <Loader2 size={15} className="animate-spin"/> : tasks.length ? <RefreshCw size={15}/> : <ScanFace size={15}/>} {tasks.length ? '重新识别' : 'AI识别并规划'}</button><button disabled={!uploadedCount || Boolean(busy)} onClick={() => void merge()} className="dialog-primary inline-flex items-center gap-2">{busy === 'merge' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}自动合回原尺寸</button>{baseVersion && <button type="button" disabled={Boolean(busy)} onClick={() => void removeFromProject()} title="从项目的多人修脸中删除这张图片" className="rounded-md border border-red-200 p-2 text-red-600 hover:bg-red-50 disabled:opacity-40">{busy === 'remove-photo' ? <Loader2 size={15} className="animate-spin"/> : <Trash2 size={15}/>}</button>}</div>
     </header>
     {tasks.length > 0 && deliveryFolder && <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-emerald-100 bg-emerald-50 px-5 py-2.5 text-xs text-emerald-700"><CheckCircle2 size={15}/><span className="font-bold">已生成 {tasks.length} 张工作图</span><span className="min-w-0 flex-1 truncate font-mono text-[11px] text-emerald-600" title={deliveryFolder}>{deliveryFolder}</span><button type="button" onClick={() => void openFolder(tasks[0].patchPath, '交付文件夹')} className="dialog-secondary inline-flex items-center gap-1.5"><FolderOpen size={13}/>打开交付文件夹</button><button type="button" onClick={() => void navigator.clipboard.writeText(deliveryFolder).then(() => onNotice('交付文件夹路径已复制')).catch(() => onNotice('复制交付文件夹路径失败'))} className="dialog-secondary inline-flex items-center gap-1.5"><Copy size={13}/>复制路径</button><button type="button" onClick={() => document.getElementById(`team-patch-${tasks.find(task => !task.editedPatchPath)?.id || tasks[0].id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })} className="dialog-primary inline-flex items-center gap-1.5"><Upload size={13}/>开始上传返回图</button></div>}
     {lastMerge?.outputPath && <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-violet-100 bg-violet-50 px-5 py-2.5 text-xs text-violet-700"><CheckCircle2 size={15}/><span className="font-bold">合成版本已保存到目标进度</span><button type="button" onClick={() => lastMerge.versionId && baseVersion && setCompareVersionIds([baseVersion.id, lastMerge.versionId])} className="dialog-primary">对比合成前后</button><button type="button" onClick={() => void openFolder(lastMerge.outputPath, '合成结果文件夹')} className="dialog-secondary inline-flex items-center gap-1.5"><FolderOpen size={13}/>打开结果文件夹</button></div>}
@@ -348,7 +354,7 @@ type BatchResult = {
   error?: string;
 };
 
-const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, defaultBackendMode, componentStatus, onClose, onNotice, onCompare }: Props & { onCompare: (entry: ProjectFileEntry, versionIds: string[]) => void }) => {
+const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, defaultBackendMode, componentStatus, activeStep, onStepChange, onClose, onNotice, onEntriesChange, onProjectChanged, onCompare }: Props & { onCompare: (entry: ProjectFileEntry, versionIds: string[]) => void }) => {
   const isMultiple = entries.length > 1;
   const [running, setRunning] = useState(false);
   const [returning, setReturning] = useState(false);
@@ -358,7 +364,19 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
   const [returnProgress, setReturnProgress] = useState({ phase: '', progress: 0, message: '准备接收返回图片' });
   const [backendMode, setBackendMode] = useState(defaultBackendMode || 'auto');
   const [refreshToken, setRefreshToken] = useState(0);
+  const [unrecognizedPaths, setUnrecognizedPaths] = useState<string[]>([]);
+  const [checkingEntries, setCheckingEntries] = useState(true);
   const outputProgress = useTeamOutputProgress(entries[0]?.path || '', workspacePath, project, onNotice);
+
+  useEffect(() => {
+    let active = true;
+    setCheckingEntries(true);
+    Promise.all(entries.map(async entry => {
+      const result = await window.electronAPI.getTeamPatches(workspacePath, project.status, project.name, entry.relativePath);
+      return !result.success || !result.tasks.length ? entry.relativePath : '';
+    })).then(paths => { if (active) { setUnrecognizedPaths(paths.filter(Boolean)); setCheckingEntries(false); } }).catch(() => { if (active) setCheckingEntries(false); });
+    return () => { active = false; };
+  }, [entries, workspacePath, project.status, project.name, refreshToken]);
 
   useEffect(() => window.electronAPI.onTeamPatchBatchProgress(value => {
     setProgress({ itemIndex: value.itemIndex, itemCount: value.itemCount, progress: value.progress, itemName: value.itemName, message: value.message });
@@ -369,19 +387,24 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
   }), []);
 
   const runBatch = async () => {
+    if (checkingEntries) return;
+    const targetEntries = unrecognizedPaths.length
+      ? entries.filter(entry => unrecognizedPaths.includes(entry.relativePath))
+      : entries;
     setRunning(true);
     setResults([]);
-    setProgress({ itemIndex: 0, itemCount: entries.length, progress: 0, itemName: '', message: '正在启动批量推理服务' });
-    const result = await window.electronAPI.detectTeamPatchBatch(workspacePath, project.status, project.name, { relativePaths: entries.map(entry => entry.relativePath), backendMode });
+    setProgress({ itemIndex: 0, itemCount: targetEntries.length, progress: 0, itemName: '', message: '正在启动批量推理服务' });
+    const result = await window.electronAPI.detectTeamPatchBatch(workspacePath, project.status, project.name, { relativePaths: targetEntries.map(entry => entry.relativePath), backendMode });
     setRunning(false);
     setResults(result.results || []);
     setRefreshToken(current => current + 1);
+    onProjectChanged?.();
     if (!result.success) {
       onNotice(`识别全部图片失败：${result.error || '未知错误'}`);
       return;
     }
     const successCount = result.results.filter(item => item.success).length;
-    onNotice(`${isMultiple ? '全部图片' : '图片'}识别完成：${successCount}/${entries.length} 张成功；${result.advancedUsedCount || 0} 张使用高级模式${result.fallbackCount ? `，${result.fallbackCount} 张降级到基础模式` : ''}；推理服务已关闭并释放显存`);
+    onNotice(`${unrecognizedPaths.length ? '新增图片' : isMultiple ? '全部图片' : '图片'}识别完成：${successCount}/${targetEntries.length} 张成功；${result.advancedUsedCount || 0} 张使用高级模式${result.fallbackCount ? `，${result.fallbackCount} 张降级到基础模式` : ''}；推理服务已关闭并释放显存`);
   };
 
   const receiveBatch = async () => {
@@ -426,7 +449,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
       : '可在“设置 → 多人修脸”安装高级方案。';
 
   return <div className="fixed inset-x-0 bottom-0 top-10 z-[310] flex flex-col bg-slate-50">
-    <header className="flex min-h-16 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-3"><span className="rounded-xl bg-violet-50 p-2 text-violet-600"><UsersRound size={20}/></span><div><h2 className="font-bold text-slate-900">多人修脸 · {entries.length} 张图片</h2><p className="mt-0.5 text-xs text-slate-500">{isMultiple ? '所有图片在同一页连续处理；也可以一次导入全部手机返图并自动匹配、合成。' : 'AI识别人后规划工作图；手机修完后可导入返图并自动合回原尺寸。'}</p></div><div className="ml-auto flex flex-wrap items-center justify-end gap-2"><select aria-label="识别模式" value={backendMode} onChange={event => setBackendMode(event.target.value as AppConfig['personDetection']['backendMode'])} disabled={running || returning} className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-bold text-slate-700"><option value="auto">自动（推荐）</option><option value="basic">基础模式</option><option value="advanced" disabled={!componentStatus?.advancedAvailable}>高级模式{componentStatus?.advancedAvailable ? '' : '（不可用）'}</option></select><button disabled={running || returning} onClick={() => void runBatch()} className="dialog-secondary inline-flex items-center gap-2">{running ? <Loader2 size={15} className="animate-spin"/> : <ScanFace size={15}/>} {results.length ? isMultiple ? '重新识别全部图片' : '重新识别图片' : isMultiple ? '识别全部图片' : '识别图片'}</button><button disabled={running || returning} onClick={() => void receiveBatch()} className="dialog-primary inline-flex items-center gap-2">{returning ? <Loader2 size={15} className="animate-spin"/> : <Upload size={15}/>} {isMultiple ? '批量导入返图并合图' : '导入返图并合图'}</button><button disabled={running || returning} onClick={onClose} className="rounded-md p-2 text-slate-500 hover:bg-slate-100 disabled:opacity-40"><X size={20}/></button></div></header>
+    <header className="flex min-h-16 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-3"><span className="rounded-xl bg-violet-50 p-2 text-violet-600"><UsersRound size={20}/></span><div><h2 className="font-bold text-slate-900">多人修脸 · {entries.length} 张图片</h2><p className="mt-0.5 text-xs text-slate-500">先识别并裁图，再确认跨图片人物身份，最后生成和执行接力工作流程。</p></div><TeamRetouchSteps value={activeStep} onChange={onStepChange} disabled={running || returning}/><div className="ml-auto flex flex-wrap items-center justify-end gap-2"><select aria-label="识别模式" value={backendMode} onChange={event => setBackendMode(event.target.value as AppConfig['personDetection']['backendMode'])} disabled={running || returning} className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-bold text-slate-700"><option value="auto">自动（推荐）</option><option value="basic">基础模式</option><option value="advanced" disabled={!componentStatus?.advancedAvailable}>高级模式{componentStatus?.advancedAvailable ? '' : '（不可用）'}</option></select><button disabled={running || returning || checkingEntries} onClick={() => void runBatch()} className="dialog-secondary inline-flex items-center gap-2">{running || checkingEntries ? <Loader2 size={15} className="animate-spin"/> : <ScanFace size={15}/>} {checkingEntries ? '检查新增图片…' : unrecognizedPaths.length ? `识别新增图片（${unrecognizedPaths.length} 张）` : isMultiple ? '重新识别全部图片' : '重新识别图片'}</button><button disabled={running || returning} onClick={() => void receiveBatch()} className="dialog-primary inline-flex items-center gap-2">{returning ? <Loader2 size={15} className="animate-spin"/> : <Upload size={15}/>} {isMultiple ? '批量导入返图并合图' : '导入返图并合图'}</button><button disabled={running || returning} onClick={onClose} className="rounded-md p-2 text-slate-500 hover:bg-slate-100 disabled:opacity-40"><X size={20}/></button></div></header>
     <div className={`border-b px-5 py-2 text-xs ${componentStatus?.advancedAvailable ? 'border-violet-100 bg-violet-50 text-violet-700' : advancedNeedsRepair ? 'border-amber-100 bg-amber-50 text-amber-700' : 'border-blue-100 bg-blue-50 text-blue-700'}`}><span className="font-bold">{advancedStatusLabel}</span><span className="ml-2 opacity-80">{advancedStatusDetail}</span></div>
     <div className="flex flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-2"><OutputProgressPicker controller={outputProgress} disabled={running || returning}/></div>
     {running && <div className="border-b border-blue-100 bg-blue-50 px-5 py-3"><div className="flex items-center justify-between gap-4 text-xs"><span className="font-bold text-blue-700">{progress.itemIndex ? `${progress.itemIndex}/${progress.itemCount} · ${progress.itemName} · ` : ''}{progress.message}</span><span className="tabular-nums text-blue-600">{Math.round(overallProgress)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-600 transition-[width] duration-500" style={{ width: `${overallProgress}%` }}/></div></div>}
@@ -438,7 +461,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
         const result = resultByPath.get(entry.relativePath);
         return <section key={entry.relativePath} className="space-y-2">
           {result && !result.success && <div className="flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs font-bold text-red-600"><X size={14}/><span>{result.error || `${entry.name} 识别失败`}</span></div>}
-          <TeamRetouchPhotoCard entry={entry} workspacePath={workspacePath} project={project} cacheConfig={cacheConfig} defaultBackendMode={defaultBackendMode} componentStatus={componentStatus} onClose={onClose} onNotice={onNotice} refreshToken={refreshToken}/>
+          <TeamRetouchPhotoCard entry={entry} workspacePath={workspacePath} project={project} cacheConfig={cacheConfig} defaultBackendMode={defaultBackendMode} componentStatus={componentStatus} onClose={onClose} onNotice={onNotice} onProjectChanged={onProjectChanged} onEntriesChange={() => { const next = entries.filter(candidate => candidate.relativePath !== entry.relativePath); onEntriesChange?.(next); if (!next.length) onClose(); }} refreshToken={refreshToken}/>
         </section>;
       })}
       <p className="text-xs leading-5 text-slate-500">批量导入返图时，自动比对不依赖文件名和元数据；系统使用画面结构与局部特征做整批一一匹配。相似结果会留给人工确认，不会冒险合成。</p>

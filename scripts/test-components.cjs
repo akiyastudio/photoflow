@@ -96,10 +96,29 @@ try {
   assert(teamRetouchManager.includes('同一来源进度会记住此选择'), 'team-retouch output progress must be shared by source progress and remain editable');
   assert(teamRetouchManager.includes('initialCompareIds'), 'successful merges must open the existing version comparison flow');
   assert(teamRetouchManager.includes('打开交付文件夹'), 'cropped images must expose their delivery folders');
+  const personIdentityManager = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'PersonIdentityManager.tsx'), 'utf8');
+  const teamRetouchSteps = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'TeamRetouchSteps.tsx'), 'utf8');
+  const projectWorkspace = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
+  assert(teamRetouchSteps.includes('人物识别（裁图）') && teamRetouchSteps.includes('人物和照片') && teamRetouchSteps.includes('工作流程'), 'team retouch must expose one shared three-step workflow');
+  assert(teamRetouchManager.includes('<TeamRetouchSteps') && personIdentityManager.includes('<TeamRetouchSteps'), 'all team-retouch panels must reuse the same step navigation');
+  assert(!projectWorkspace.includes('多人修脸菜单'), 'project toolbar must not expose a separate team-retouch dropdown menu');
+  assert(projectWorkspace.includes("setTeamRetouchStep('detect')"), 'the single team-retouch entry must start at person detection and cropping');
+  assert(personIdentityManager.includes('批量导入返图并识别'), 'workflow must expose batch returned-image recognition');
+  assert(personIdentityManager.includes('generateTeamWorkflow'), 'workflow must generate its project-local week and identity folders');
+  assert(personIdentityManager.includes('打开任务文件夹'), 'generated workflow groups must open their persistent project folders');
+  assert(personIdentityManager.includes('删除并重新生成'), 'workflow regeneration must require destructive confirmation');
+  assert(personIdentityManager.includes('returnTeamWorkflowBatch'), 'workflow batch returns must use the dedicated non-merging import path');
+  assert(personIdentityManager.includes('taskOrder: workflow'), 'workflow returns must send the exact displayed hand-off order');
   const versionsIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
   assert(versionsIpc.includes('resolveTeamOutputProgress'), 'team-retouch merges must resolve a registered target progress');
   assert(versionsIpc.includes('合成结果不能写回当前来源进度'), 'team-retouch merges must reject the source folder as their output');
   assert(versionsIpc.includes("ipcMain.handle('workspace-team-patch-open-folder'"), 'delivery and merged-result folders must have a scoped open action');
+  assert(versionsIpc.includes("ipcMain.handle('workspace-team-workflow-return-batch'"), 'workflow batch returns must have a dedicated IPC handler');
+  assert(versionsIpc.includes("ipcMain.handle('workspace-team-workflow-generate'"), 'workflow generation must have a dedicated IPC handler');
+  assert(versionsIpc.includes("path.resolve(projectPath, '多人修脸')"), 'workflow output must remain inside the project-local team-retouch folder');
+  assert(versionsIpc.includes('refreshDownstreamWorkflowFiles'), 'returned edits must refresh generated downstream workflow files');
+  assert(versionsIpc.includes('readyTeamWorkflowSubjects(workspace, request.items || [])'), 'workflow return matching must revalidate the currently unlocked person in the main process');
+  assert(versionsIpc.includes('suppliedOrder.length !== group.length'), 'workflow return validation must reject incomplete or altered task orders');
 
   for (const component of Object.values(PLUGIN_DEFINITIONS)) {
     assert.match(component.version, /^\d{2}\.\d{1,2}\.\d{1,2}\.\d+$/, `${component.id} must use the date revision version format`);
@@ -113,6 +132,8 @@ try {
   assert(systemIpc.includes("ipcMain.handle('team-retouch-advanced-install'"), 'settings must be able to install or repair the advanced environment');
   assert(systemIpc.includes("ipcMain.handle('team-retouch-advanced-preflight'"), 'settings must check offline prerequisites before installation');
   assert(systemIpc.includes("ipcMain.handle('team-retouch-advanced-uninstall'"), 'settings must be able to remove the advanced environment');
+  assert(systemIpc.includes("ipcMain.handle('team-retouch-identity-models-open-folder'"), 'settings must open the user-managed identity model directory');
+  assert(settingsFeature.includes('实验人物识别模型 · 用户自备'), 'settings must explain self-managed AdaFace and OSNet identity models');
 
   const registry = createComponentRegistry({
     resourcesPath,

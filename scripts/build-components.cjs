@@ -33,7 +33,12 @@ const definitions = {
   'team-retouch': {
     source: path.join(root, 'components', 'team-retouch', 'team_retouch.py'),
     template: path.join(root, 'components', 'team-retouch', 'component.template.json'),
-    models: [path.join(root, 'components', 'team-retouch', 'models', 'rtmdet-ins_m_640x640.onnx')],
+    models: [
+      { path: path.join(root, 'components', 'team-retouch', 'models', 'rtmdet-ins_m_640x640.onnx'), minBytes: 100 * 1024 * 1024 },
+      { path: path.join(root, 'components', 'team-retouch', 'models', 'face_detection_yunet_2023mar.onnx'), minBytes: 200 * 1024 },
+      { path: path.join(root, 'components', 'team-retouch', 'models', 'face_recognition_sface_2021dec.onnx'), minBytes: 30 * 1024 * 1024 },
+      { path: path.join(root, 'components', 'team-retouch', 'models', 'osnet_x0_25_msmt17.onnx'), minBytes: 700 * 1024 },
+    ],
     advancedScripts: [
       path.join(root, 'components', 'team-retouch', 'advanced', 'pairdetr_service.py'),
       path.join(root, 'components', 'team-retouch', 'advanced', 'sam2_service.py'),
@@ -45,7 +50,7 @@ const definitions = {
     pyInstallerArgs: [
       '--collect-binaries', 'onnxruntime',
       '--paths', path.join(root, 'components', 'team-retouch'),
-      '--hidden-import', 'patch_merge', '--hidden-import', 'advanced_bridge',
+      '--hidden-import', 'patch_merge', '--hidden-import', 'advanced_bridge', '--hidden-import', 'identity_engine',
       '--exclude-module', 'scipy', '--exclude-module', 'matplotlib',
       '--exclude-module', 'torch', '--exclude-module', 'torchvision', '--exclude-module', 'torchaudio',
     ],
@@ -110,11 +115,13 @@ const build = id => {
   if (!definition) throw new Error(`Unknown component: ${id}`);
   if (!fs.existsSync(definition.source) || !fs.existsSync(definition.template)) throw new Error(`Component source is incomplete: ${id}`);
   for (const model of definition.models || []) {
-    if (!fs.existsSync(model)) throw new Error(`Team-retouch model is missing: ${model}\nSee components/team-retouch/MODEL-SOURCE.md`);
-    const stat = fs.statSync(model);
-    const prefix = fs.readFileSync(model).subarray(0, 256).toString('utf8');
-    if (stat.size < 1024 * 1024 || prefix.startsWith('version https://git-lfs.github.com/spec/v1')) {
-      throw new Error(`Team-retouch model is a Git LFS pointer or incomplete: ${model}\nRun git lfs pull before building.`);
+    const modelPath = typeof model === 'string' ? model : model.path;
+    const minBytes = typeof model === 'string' ? 1024 * 1024 : model.minBytes;
+    if (!fs.existsSync(modelPath)) throw new Error(`Team-retouch model is missing: ${modelPath}\nSee components/team-retouch/MODEL-SOURCE.md`);
+    const stat = fs.statSync(modelPath);
+    const prefix = fs.readFileSync(modelPath).subarray(0, 256).toString('utf8');
+    if (stat.size < minBytes || prefix.startsWith('version https://git-lfs.github.com/spec/v1')) {
+      throw new Error(`Team-retouch model is a Git LFS pointer or incomplete: ${modelPath}\nRun git lfs pull before building.`);
     }
   }
   for (const script of definition.advancedScripts || []) {
@@ -138,7 +145,7 @@ const build = id => {
   if (!relativeTarget || relativeTarget.startsWith('..') || path.isAbsolute(relativeTarget)) throw new Error(`Unsafe component output path: ${target}`);
   fs.rmSync(target, { recursive: true, force: true });
   const dataSeparator = process.platform === 'win32' ? ';' : ':';
-  const modelArgs = (definition.models || []).flatMap(model => ['--add-data', `${model}${dataSeparator}models`]);
+  const modelArgs = (definition.models || []).flatMap(model => ['--add-data', `${typeof model === 'string' ? model : model.path}${dataSeparator}models`]);
   const advancedArgs = (definition.advancedScripts || []).flatMap(script => ['--add-data', `${script}${dataSeparator}advanced`]);
   const result = spawnSync(python, [
     '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm',

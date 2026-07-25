@@ -4,6 +4,7 @@ const registerSystemIpc = context => {
   let advancedOperation = null;
 
   const advancedStateRoot = () => path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'PhotoFlow', 'components', 'team-retouch', 'advanced');
+  const identityModelRoot = () => path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'PhotoFlow', 'experimental-models');
   const defaultAdvancedInstallRoot = () => path.join(advancedStateRoot(), 'wsl', 'PhotoFlowNative');
   const legacyAdvancedInstallRoot = () => path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'PhotoFlow', 'wsl', 'PhotoFlowNative');
   const readAdvancedStorage = async () => {
@@ -114,6 +115,10 @@ const registerSystemIpc = context => {
           gpuAvailable: Boolean(probe.gpuAvailable),
           advancedAvailable: Boolean(probe.advancedAvailable),
           mergeAvailable: Boolean(probe.mergeAvailable),
+          identityAvailable: Boolean(probe.identityAvailable),
+          faceBackend: probe.faceBackend || '',
+          bodyBackend: probe.bodyBackend || '',
+          identityError: probe.identityError || '',
           provider: probe.provider || '',
           advancedProvider: probe.advancedAvailable ? 'PairDETR + SAM 2.1 · NVIDIA CUDA' : '',
           providers: Array.isArray(probe.providers) ? probe.providers : [],
@@ -342,6 +347,18 @@ const registerSystemIpc = context => {
       const error = await shell.openPath(storage.installRoot);
       if (error) throw new Error(error);
       return { success: true, path: storage.installRoot };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('team-retouch-identity-models-open-folder', async () => {
+    try {
+      const target = identityModelRoot();
+      await fs.promises.mkdir(target, { recursive: true });
+      const error = await shell.openPath(target);
+      if (error) throw new Error(error);
+      return { success: true, path: target };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
