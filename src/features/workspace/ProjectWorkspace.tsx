@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { FolderInput, FolderPlus, Folder, Image as ImageIcon, ScanSearch, Play, Trash2, Edit, X, Plus, Loader2, CheckCircle2, ExternalLink, Video, ChevronDown, ChevronUp, File, FileImage, MemoryStick, LayoutList, Grid2X2, FileText, Copy, Scissors as Cut, ClipboardPaste, CheckSquare, ArrowLeft, ArrowRight, Camera, Aperture, Timer, Gauge, Ruler, Calendar, Activity, Volume2, PanelLeftOpen, ArrowUpDown, ArrowUp, ArrowDown, Search, Info, GripVertical, Maximize2, Minimize2, GitBranch, UsersRound, Heart } from 'lucide-react';
+import { FolderInput, FolderPlus, Folder, Image as ImageIcon, ScanSearch, Play, Trash2, Edit, X, Plus, Loader2, CheckCircle2, ExternalLink, Video, ChevronDown, ChevronUp, File, FileImage, MemoryStick, LayoutList, Grid2X2, FileText, Copy, Scissors as Cut, ClipboardPaste, CheckSquare, ArrowLeft, ArrowRight, Camera, Aperture, Timer, Gauge, Ruler, Calendar, Activity, Volume2, PanelLeftOpen, ArrowUpDown, ArrowUp, ArrowDown, Search, Info, GripVertical, Maximize2, Minimize2, GitBranch, UsersRound, Heart, RefreshCw } from 'lucide-react';
 import { VersionManager } from '../../components/VersionManager';
 import { TeamRetouchManager } from '../../components/TeamRetouchManager';
 import { useAppDialog } from '../../components/AppDialogProvider';
@@ -970,11 +970,11 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     setInlineRenamePath(relativePath);
     setInlineRenameValue(result.folder?.name || '新建文件夹');
   };
-  const loadShellNewTypes = async () => {
-    if (shellNewTypesLoaded || shellNewTypesLoading) return;
+  const loadShellNewTypes = async (refresh = false) => {
+    if (shellNewTypesLoading || shellNewTypesLoaded && !refresh) return;
     setShellNewTypesLoading(true);
     try {
-      const result = await window.electronAPI.getShellNewFileTypes();
+      const result = await window.electronAPI.getShellNewFileTypes(refresh);
       if (!result.success) { onNotice(`读取 Windows 新建文件类型失败：${result.error || '未知错误'}`); return; }
       setShellNewTypes(result.types);
       setShellNewTypesLoaded(true);
@@ -1480,8 +1480,6 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       setSelectedPaths(current => current.includes(entry.relativePath) ? current : [entry.relativePath]);
     }
     setFileMenu({ entry, x: event.clientX, y: event.clientY });
-    setClipboardHasFiles(false);
-    void window.electronAPI.getProjectFileClipboardStatus().then(result => setClipboardHasFiles(result.success && result.hasFiles));
   };
   const openSurfaceMenu = (event: React.MouseEvent<HTMLDivElement>) => {
     if ((event.target as HTMLElement).closest('[data-entry-path]')) return;
@@ -1493,8 +1491,6 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     selectionAnchorPathRef.current = '';
     setSelectedPaths([]);
     setSurfaceMenu({ x: event.clientX, y: event.clientY });
-    setClipboardHasFiles(false);
-    void window.electronAPI.getProjectFileClipboardStatus().then(result => setClipboardHasFiles(result.success && result.hasFiles));
   };
   const showDirectory = (relativePath: string) => {
     const normalizedPath = relativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
@@ -1692,7 +1688,11 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
           : `已移入回收站 ${result.count} 个项目`
         : operation === 'paste'
           ? result.replacedCount
-            ? `已粘贴 ${result.count} 个项目；${result.replacedCount} 个同名项目的原内容已移入回收站`
+            ? result.replacedRetainedCount
+              ? `已粘贴 ${result.count} 个项目；替换了 ${result.replacedCount} 个同名项目，其中 ${result.replacedRetainedCount} 个原项目因回收站操作失败而保留为安全恢复副本${result.replacedPermanentCount ? `，另有 ${result.replacedPermanentCount} 个已按 Windows 确认永久删除，此次替换无法撤销` : ''}`
+              : result.replacedPermanentCount
+              ? `已粘贴 ${result.count} 个项目；替换了 ${result.replacedCount} 个同名项目，其中 ${result.replacedPermanentCount} 个原项目已按 Windows 确认永久删除，此次替换无法撤销`
+              : `已粘贴 ${result.count} 个项目；${result.replacedCount} 个同名项目的原内容已移入回收站`
             : `已粘贴 ${result.count} 个项目`
           : '操作完成');
       setSelectedPaths([]);
@@ -2278,10 +2278,10 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
             <button className="project-menu-item" onClick={() => void openProgressSetup('create')}><FolderPlus size={14}/>新建进度</button>
             <div className="my-1 border-t border-slate-100"/>
             <button className="project-menu-item" onClick={() => void createFolder()}><Folder size={14}/>文件夹</button>
-            <p className="px-2 pb-1 pt-2 text-[11px] font-bold text-slate-400">Windows 文件类型</p>
+            <div className="flex items-center justify-between px-2 pb-1 pt-2"><p className="text-[11px] font-bold text-slate-400">Windows 文件类型</p><button type="button" title="重新扫描 Windows 新建文件类型" aria-label="重新扫描 Windows 新建文件类型" disabled={shellNewTypesLoading} onClick={() => void loadShellNewTypes(true)} className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"><RefreshCw size={12} className={shellNewTypesLoading ? 'animate-spin' : ''}/></button></div>
             <div className="max-h-72 overflow-y-auto">
               {shellNewTypesLoading && <p className="px-2 py-2 text-xs text-slate-400">正在读取系统新建菜单…</p>}
-              {!shellNewTypesLoading && shellNewTypes.map(type => <button key={type.id} className="project-menu-item" onClick={() => void createShellNewFile(type)}>{type.iconDataUrl ? <img src={type.iconDataUrl} alt="" className="h-4 w-4 shrink-0 object-contain"/> : <File size={14}/>}<span className="min-w-0 flex-1 truncate">{type.label}</span><span className="ml-auto font-mono text-[10px] text-slate-400">{type.extension}</span></button>)}
+              {!shellNewTypesLoading && shellNewTypes.map(type => <button key={type.id} className="project-menu-item flex items-center gap-2" onClick={() => void createShellNewFile(type)}>{type.iconDataUrl ? <img src={type.iconDataUrl} alt="" className="h-4 w-4 shrink-0 object-contain"/> : <File size={14} className="shrink-0"/>}<span className="min-w-0 flex-1 truncate">{type.label}</span><span className="ml-auto shrink-0 font-mono text-[10px] text-slate-400">{type.extension}</span></button>)}
               {!shellNewTypesLoading && shellNewTypesLoaded && !shellNewTypes.length && <p className="px-2 py-2 text-xs text-slate-400">系统没有可用的新建文件类型</p>}
             </div>
           </div>}

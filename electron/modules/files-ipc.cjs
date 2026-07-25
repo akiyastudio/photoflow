@@ -1,5 +1,5 @@
 const registerFileOperationsIpc = context => {
-  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertExistingInside, assertInside, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, mainWindow, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, removeCreatedPasteTargets, screen, throwIfCancelled, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, mainWindow, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
 
   ipcMain.handle('workspace-file-details', async (_event, workspacePath, status, projectName, relativePaths = []) => {
     try {
@@ -64,15 +64,18 @@ const registerFileOperationsIpc = context => {
   });
   
   ipcMain.handle('workspace-file-clipboard-status', async () => {
-    const internalSources = fileOperationState.projectFileClipboard?.sources?.filter(source => fs.existsSync(source)) || [];
-    if (internalSources.length) return { success: true, hasFiles: true };
     try {
       const systemClipboard = await readSystemFileClipboard();
-      const systemSources = systemClipboard?.sources?.filter(source => fs.existsSync(path.resolve(source))) || [];
-      return { success: true, hasFiles: systemSources.length > 0 };
-    } catch {
-      return { success: true, hasFiles: Boolean(fileOperationState.projectFileClipboard?.sources?.some(source => fs.existsSync(source))) };
+      if (systemClipboard) {
+        const systemSources = systemClipboard.sources?.filter(source => fs.existsSync(path.resolve(source))) || [];
+        return { success: true, hasFiles: systemSources.length > 0 };
+      }
+    } catch (error) {
+      writeLog('warn', 'Unable to inspect the system file clipboard', error);
+      if (process.platform === 'win32') return { success: false, hasFiles: false, error: error.message || String(error) };
     }
+    if (process.platform === 'win32') return { success: true, hasFiles: false };
+    return { success: true, hasFiles: Boolean(fileOperationState.projectFileClipboard?.sources?.some(source => fs.existsSync(source))) };
   });
   
   ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, projectName, operation, relativePaths = [], targetRelativePath = '', nextName = '', options = {}) => {
@@ -150,7 +153,7 @@ const registerFileOperationsIpc = context => {
       }
       if (operation === 'copy' || operation === 'cut') {
         if (!sources.length) throw new Error('未选择文件');
-        fileOperationState.projectFileClipboard = { operation, sources };
+        fileOperationState.projectFileClipboard = process.platform === 'win32' ? null : { operation, sources };
         try {
           await writeSystemFileClipboard(sources, operation);
         } catch (error) {
@@ -162,78 +165,159 @@ const registerFileOperationsIpc = context => {
       }
       if (operation === 'paste') {
         if (activeProjectFileOperations.size) throw new Error('已有文件粘贴任务正在进行');
-        const destinationDir = resolveInsideProject(targetRelativePath);
-        if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
-        let clipboardSnapshot = fileOperationState.projectFileClipboard?.sources?.length ? { operation: fileOperationState.projectFileClipboard.operation, sources: [...fileOperationState.projectFileClipboard.sources] } : null;
-        if (!clipboardSnapshot) {
-          try {
-            const systemClipboard = await readSystemFileClipboard();
-            if (systemClipboard?.sources?.length) clipboardSnapshot = { operation: systemClipboard.operation, sources: systemClipboard.sources.map(source => path.resolve(source)) };
-          } catch (error) {
-            writeLog('warn', 'Unable to read project files from the system clipboard', error);
-          }
-        }
-        if (!clipboardSnapshot?.sources?.length) throw new Error('剪贴板中没有文件或文件夹');
-        const pasteConflicts = [];
-        for (const source of clipboardSnapshot.sources) {
-          if (!fs.existsSync(source)) continue;
-          const destination = path.join(destinationDir, path.basename(source));
-          if (path.resolve(destination) === path.resolve(source) || !fs.existsSync(destination)) continue;
-          pasteConflicts.push({ source, destination, isDirectory: fs.statSync(destination).isDirectory() });
-        }
-        let replacedConflicts = [];
-        if (pasteConflicts.length) {
-          const names = pasteConflicts.slice(0, 6).map(item => `“${path.basename(item.destination)}”`).join('、');
-          const fileCount = pasteConflicts.filter(item => !item.isDirectory).length;
-          const folderCount = pasteConflicts.length - fileCount;
-          const conflictSummary = [fileCount ? `${fileCount} 个文件` : '', folderCount ? `${folderCount} 个文件夹` : ''].filter(Boolean).join('和');
-          const more = pasteConflicts.length > 6 ? ` 等 ${conflictSummary}` : '';
-          const confirmation = await dialog.showMessageBox(mainWindow, {
-            type: 'warning',
-            title: '目标位置已有同名项目',
-            message: `目标位置已有 ${names}${more}`,
-            detail: `发现 ${conflictSummary}。选择替换后，目标位置原有的同名项目会先移入系统回收站；选择保留两者时，新项目会自动重命名。`,
-            buttons: ['替换并继续', '保留两者', '取消'],
-            defaultId: 1,
-            cancelId: 2,
-            noLink: true,
-          });
-          if (confirmation.response === 2) return { success: false, cancelled: true, count: 0 };
-          if (confirmation.response === 0) {
-            for (const conflict of pasteConflicts) await recycleBinService.trash(conflict.destination);
-            replacedConflicts = pasteConflicts;
-          }
-        }
         const operationId = crypto.randomUUID();
         const job = { cancelled: false, finishing: false };
         const createdTargets = [];
+        const stagedReplacements = [];
+        const committedTargets = [];
+        let topLevelTargets = [];
+        let incomingRoot = '';
+        let replacementRoot = '';
         activeProjectFileOperations.set(operationId, job);
         const publish = payload => {
           if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', { operationId, operation: 'paste', ...payload });
         };
         publish({ phase: 'scanning', progress: 0, currentName: '', bytesCopied: 0, totalBytes: 0 });
         try {
-          const topLevelTargets = [];
-          const reservedTargets = new Set();
-          const pathKey = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
-          for (const source of clipboardSnapshot.sources) {
-            throwIfCancelled(() => job.cancelled);
-            if (!fs.existsSync(source)) continue;
+          const requestedDestination = resolveInsideProject(targetRelativePath);
+          if (!fs.existsSync(requestedDestination) || !fs.statSync(requestedDestination).isDirectory()) throw new Error('目标文件夹不存在');
+          const destinationDir = assertExistingInside(root, requestedDestination, '粘贴目标文件夹', true);
+          let clipboardSnapshot = null;
+          try {
+            const systemClipboard = await readSystemFileClipboard();
+            if (systemClipboard) {
+              const systemSources = (systemClipboard.sources || []).map(source => path.resolve(source)).filter(source => fs.existsSync(source));
+              if (systemSources.length) clipboardSnapshot = { operation: systemClipboard.operation, sources: systemSources };
+            }
+          } catch (error) {
+            if (process.platform === 'win32') throw new Error(`无法读取 Windows 文件剪贴板：${error.message || String(error)}`);
+            writeLog('warn', 'Unable to read system file clipboard; using internal fallback', error);
+          }
+          if (!clipboardSnapshot && process.platform !== 'win32' && fileOperationState.projectFileClipboard?.sources?.length) {
+            clipboardSnapshot = { operation: fileOperationState.projectFileClipboard.operation, sources: [...fileOperationState.projectFileClipboard.sources] };
+          }
+          if (!clipboardSnapshot?.sources?.length) throw new Error('剪贴板中没有文件或文件夹');
+
+          const pathKey = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+          const uniqueSources = [];
+          const seenSources = new Set();
+          for (const candidate of clipboardSnapshot.sources) {
+            const source = path.resolve(candidate);
+            const key = pathKey(source);
+            if (seenSources.has(key) || !fs.existsSync(source)) continue;
+            seenSources.add(key);
+            uniqueSources.push(source);
+          }
+          const requestedItems = [];
+          for (const source of uniqueSources) {
             if (clipboardSnapshot.operation === 'cut' && pathKey(path.dirname(source)) === pathKey(destinationDir)) continue;
-            let destination = path.join(destinationDir, path.basename(source));
-            const parsed = path.parse(destination);
-            let index = 1;
-            while (fs.existsSync(destination) || reservedTargets.has(pathKey(destination))) destination = path.join(destinationDir, `${parsed.name} (${index++})${parsed.ext}`);
-            if (destination === source || destination.startsWith(source + path.sep)) throw new Error('不能将文件夹粘贴到自身内部');
-            reservedTargets.add(pathKey(destination));
-            topLevelTargets.push({ source, destination });
+            const sourceStat = await fs.promises.lstat(source);
+            if (!sourceStat.isFile() && !sourceStat.isDirectory()) throw new Error(`不支持粘贴此文件类型：${path.basename(source)}`);
+            if (sourceStat.isDirectory() && pathKey(destinationDir).startsWith(`${pathKey(source)}${path.sep}`)) throw new Error('不能将文件夹粘贴到自身内部');
+            const desiredDestination = path.join(destinationDir, path.basename(source));
+            const sameSource = pathKey(desiredDestination) === pathKey(source);
+            const conflict = !sameSource && fs.existsSync(desiredDestination);
+            requestedItems.push({ source, sourceStat, desiredDestination, sameSource, conflict, conflictIdentity: conflict ? await capturePathIdentity(desiredDestination) : null });
+          }
+
+          const pasteConflicts = requestedItems.filter(item => item.conflict).map(item => ({ source: item.source, destination: item.desiredDestination, isDirectory: fs.statSync(item.desiredDestination).isDirectory() }));
+          let replaceConflicts = false;
+          if (pasteConflicts.length) {
+            const names = pasteConflicts.slice(0, 6).map(item => `“${path.basename(item.destination)}”`).join('、');
+            const fileCount = pasteConflicts.filter(item => !item.isDirectory).length;
+            const folderCount = pasteConflicts.length - fileCount;
+            const conflictSummary = [fileCount ? `${fileCount} 个文件` : '', folderCount ? `${folderCount} 个文件夹` : ''].filter(Boolean).join('和');
+            const more = pasteConflicts.length > 6 ? ` 等 ${conflictSummary}` : '';
+            const confirmation = await dialog.showMessageBox(mainWindow, {
+              type: 'warning',
+              title: '目标位置已有同名项目',
+              message: `目标位置已有 ${names}${more}`,
+              detail: `发现 ${conflictSummary}。选择替换后，仅在新内容准备完成时替换旧项目；选择保留两者时，新项目会自动重命名。`,
+              buttons: ['替换并继续', '保留两者', '取消'],
+              defaultId: 1,
+              cancelId: 2,
+              noLink: true,
+            });
+            if (confirmation.response === 2) return { success: false, cancelled: true, count: 0, operationId };
+            replaceConflicts = confirmation.response === 0;
+          }
+
+          topLevelTargets = [];
+          const reservedTargets = new Set();
+          const replacedDestinations = new Set();
+          const replacementIdentities = new Map();
+          for (const item of requestedItems) {
+            throwIfCancelled(() => job.cancelled);
+            const desiredKey = pathKey(item.desiredDestination);
+            let destination;
+            if (replaceConflicts && item.conflict && !reservedTargets.has(desiredKey)) {
+              destination = item.desiredDestination;
+              reservedTargets.add(desiredKey);
+              replacedDestinations.add(desiredKey);
+              replacementIdentities.set(desiredKey, item.conflictIdentity);
+            } else {
+              destination = uniqueDestination(destinationDir, path.basename(item.source), reservedTargets, item.sourceStat.isDirectory());
+            }
+            topLevelTargets.push({ source: item.source, destination });
           }
 
           const destinationVolume = path.parse(destinationDir).root.toLocaleLowerCase();
           const sameVolumeCut = clipboardSnapshot.operation === 'cut'
             && process.platform === 'win32'
             && topLevelTargets.every(item => path.parse(item.source).root.toLocaleLowerCase() === destinationVolume);
+          const plan = [];
+          if (!sameVolumeCut) {
+            incomingRoot = path.join(destinationDir, `.photoflow-paste-${operationId}`);
+            for (const [index, target] of topLevelTargets.entries()) {
+              target.stagedDestination = path.join(incomingRoot, `${index}-${path.basename(target.destination)}`);
+              await collectCopyPlan(target.source, target.stagedDestination, plan, { isCancelled: () => job.cancelled });
+            }
+            await assertDiskSpace(destinationDir, plan.reduce((sum, entry) => sum + entry.size, 0));
+          }
+
+          const stageReplacements = async () => {
+            if (!replacedDestinations.size || replacementRoot) return;
+            replacementRoot = path.join(destinationDir, `.photoflow-replace-${operationId}`);
+            await fs.promises.mkdir(replacementRoot, { recursive: false });
+            for (const [index, destination] of [...replacedDestinations].map(key => topLevelTargets.find(item => pathKey(item.destination) === key)?.destination).filter(Boolean).entries()) {
+              if (!await samePathIdentity(destination, replacementIdentities.get(pathKey(destination)))) throw new Error(`同名项目“${path.basename(destination)}”在确认后发生变化，请重新粘贴`);
+              const backup = path.join(replacementRoot, `${index}-${path.basename(destination)}`);
+              const originalIdentity = await capturePathIdentity(destination);
+              await fs.promises.rename(destination, backup);
+              stagedReplacements.push({ original: destination, backup, originalIdentity });
+            }
+          };
+
+          const rollbackStagedReplacements = async () => {
+            for (const item of [...stagedReplacements].reverse()) {
+              if (!fs.existsSync(item.backup)) continue;
+              if (fs.existsSync(item.original)) await fs.promises.rm(item.original, { recursive: true, force: true });
+              await fs.promises.rename(item.backup, item.original);
+            }
+            if (replacementRoot && !stagedReplacements.some(item => fs.existsSync(item.backup))) await fs.promises.rm(replacementRoot, { recursive: true, force: true }).catch(() => undefined);
+          };
+
+          const finalizeReplacements = async () => {
+            const items = [];
+            let permanentCount = 0;
+            let retainedCount = 0;
+            for (const item of stagedReplacements) {
+              try {
+                const recycled = await recycleBinService.trash(item.backup);
+                if (recycled.permanent) permanentCount += 1;
+                items.push({ original: item.original, originalIdentity: item.originalIdentity, recyclePidl: recycled.recyclePidl || '', preciseRestore: recycled.preciseRestore !== false, permanent: Boolean(recycled.permanent) });
+              } catch (error) {
+                retainedCount += 1;
+                writeLog('warn', 'Unable to recycle staged replacement; retaining internal undo backup', { path: item.original, error: error.message || String(error) });
+                items.push({ original: item.original, originalIdentity: item.originalIdentity, backup: item.backup, backupRoot: replacementRoot, permanent: false });
+              }
+            }
+            if (replacementRoot && !items.some(item => item.backup)) await fs.promises.rm(replacementRoot, { recursive: true, force: true }).catch(() => undefined);
+            return { items, permanentCount, retainedCount };
+          };
+
           if (sameVolumeCut) {
+            await stageReplacements();
             const moved = [];
             publish({ phase: 'moving', progress: 0, currentName: '', bytesCopied: 0, totalBytes: 0, filesCopied: 0, totalFiles: topLevelTargets.length });
             try {
@@ -247,21 +331,22 @@ const registerFileOperationsIpc = context => {
               for (const item of [...moved].reverse()) {
                 if (fs.existsSync(item.destination) && !fs.existsSync(item.source)) await movePathAtomic(item.destination, item.source).catch(() => undefined);
               }
+              await rollbackStagedReplacements();
               throw error;
             }
+            job.finishing = true;
             fileOperationState.projectFileClipboard = null;
-            clipboard.clear();
+            try { clipboard.clear(); } catch (error) { writeLog('warn', 'Unable to clear completed cut clipboard', error); }
             const count = topLevelTargets.length;
+            const replacements = await finalizeReplacements();
+            if (count) await pushUndoOperation(replacements.items.length ? { kind: 'paste-replace', mode: 'cut', moves: topLevelTargets, items: replacements.items, backupRoot: replacementRoot } : { kind: 'move', moves: topLevelTargets }).catch(error => {
+              writeLog('warn', 'Unable to record paste undo history', error);
+            });
             publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied: 0, totalBytes: 0, filesCopied: count, totalFiles: count, count });
             writeLog('info', 'Project files moved by same-volume rename', { projectName, targetRelativePath, count, operationId });
-            if (count) await pushUndoOperation({ kind: 'move', moves: topLevelTargets });
-            return { success: true, count, operationId, replacedCount: replacedConflicts.length, replacedNames: replacedConflicts.map(item => path.basename(item.destination)) };
+            return { success: true, count, operationId, replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
           }
 
-          const plan = [];
-          for (const { source, destination } of topLevelTargets) {
-            await collectCopyPlan(source, destination, plan, { isCancelled: () => job.cancelled });
-          }
           const totalBytes = plan.reduce((sum, entry) => sum + entry.size, 0);
           const totalFiles = plan.filter(entry => entry.kind === 'file').length;
           let bytesCopied = 0;
@@ -276,13 +361,16 @@ const registerFileOperationsIpc = context => {
               : Math.min(99, Math.round(filesCopied / Math.max(1, totalFiles) * 100));
             publish({ phase: 'copying', progress, currentName, bytesCopied, totalBytes, filesCopied, totalFiles });
           };
-          const topLevelTargetPaths = new Set(topLevelTargets.map(item => item.destination));
+          await fs.promises.mkdir(incomingRoot, { recursive: false });
+          createdTargets.push(incomingRoot);
+          const topLevelTargetPaths = new Set(topLevelTargets.map(item => item.stagedDestination));
           const markCreatedTarget = destination => {
             if (topLevelTargetPaths.has(destination) && !createdTargets.includes(destination)) createdTargets.push(destination);
           };
           reportCopyProgress('', true);
           const transferStats = await copyPlannedFiles(plan, {
             destinationRoot: destinationDir,
+            diskSpaceChecked: true,
             durable: clipboardSnapshot.operation === 'cut',
             isCancelled: () => job.cancelled,
             onCreated: markCreatedTarget,
@@ -294,24 +382,70 @@ const registerFileOperationsIpc = context => {
             },
           });
           throwIfCancelled(() => job.cancelled);
+          await stageReplacements();
+          try {
+            for (const item of topLevelTargets) {
+              throwIfCancelled(() => job.cancelled);
+              await fs.promises.rename(item.stagedDestination, item.destination);
+              committedTargets.push(item);
+            }
+            await fs.promises.rm(incomingRoot, { recursive: true, force: true });
+            createdTargets.length = 0;
+          } catch (error) {
+            for (const item of [...committedTargets].reverse()) {
+              if (fs.existsSync(item.destination) && !fs.existsSync(item.stagedDestination)) await fs.promises.rename(item.destination, item.stagedDestination).catch(() => undefined);
+            }
+            await rollbackStagedReplacements().catch(() => undefined);
+            throw error;
+          }
           if (clipboardSnapshot.operation === 'cut') {
             job.finishing = true;
             publish({ phase: 'finishing', progress: 99, currentName: '正在移除源文件', bytesCopied, totalBytes, filesCopied, totalFiles });
-            for (const { source } of topLevelTargets) await fs.promises.rm(source, { recursive: true, force: true });
+            await removeCopiedSources(plan);
             fileOperationState.projectFileClipboard = null;
             if (process.platform === 'win32') clipboard.clear();
           }
           const count = topLevelTargets.length;
+          const replacements = await finalizeReplacements();
+          if (count) await pushUndoOperation(replacements.items.length
+            ? { kind: 'paste-replace', mode: clipboardSnapshot.operation, moves: topLevelTargets, items: replacements.items, backupRoot: replacementRoot }
+            : clipboardSnapshot.operation === 'cut'
+              ? { kind: 'move', moves: topLevelTargets }
+              : { kind: 'remove-created', paths: topLevelTargets.map(item => item.destination), label: '粘贴' }).catch(error => {
+                writeLog('warn', 'Unable to record paste undo history', error);
+              });
           publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied, totalBytes, filesCopied, totalFiles, count });
           writeLog('info', 'Project files pasted', { projectName, targetRelativePath, count, operationId, ...transferStats });
-          if (count) await pushUndoOperation(clipboardSnapshot.operation === 'cut'
-            ? { kind: 'move', moves: topLevelTargets }
-            : { kind: 'remove-created', paths: topLevelTargets.map(item => item.destination), label: '粘贴' });
-          return { success: true, count, operationId, replacedCount: replacedConflicts.length, replacedNames: replacedConflicts.map(item => path.basename(item.destination)) };
+          return { success: true, count, operationId, replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
         } catch (error) {
           // Once cut finalization starts, keeping the completed copies is the only
           // data-safe fallback if removing a source fails partway through.
-          if (!job.finishing) await removeCreatedPasteTargets(createdTargets);
+          if (!job.finishing) {
+            await removeCreatedPasteTargets(createdTargets);
+            for (const item of [...stagedReplacements].reverse()) {
+              if (!fs.existsSync(item.backup)) continue;
+              if (fs.existsSync(item.original)) await fs.promises.rm(item.original, { recursive: true, force: true }).catch(() => undefined);
+              await fs.promises.rename(item.backup, item.original).catch(() => undefined);
+            }
+            if (replacementRoot && !stagedReplacements.some(item => fs.existsSync(item.backup))) await fs.promises.rm(replacementRoot, { recursive: true, force: true }).catch(() => undefined);
+          } else {
+            const recoveryNames = [];
+            const reservedRecovery = new Set(topLevelTargets.map(item => process.platform === 'win32' ? path.resolve(item.destination).toLowerCase() : path.resolve(item.destination)));
+            for (const item of [...stagedReplacements].reverse()) {
+              if (!fs.existsSync(item.backup)) continue;
+              if (fs.existsSync(item.original)) {
+                const stat = await fs.promises.lstat(item.original).catch(() => null);
+                const recovery = uniqueDestination(path.dirname(item.original), path.basename(item.original), reservedRecovery, Boolean(stat?.isDirectory()));
+                await fs.promises.rename(item.original, recovery).catch(() => undefined);
+                if (fs.existsSync(recovery)) recoveryNames.push(path.basename(recovery));
+              }
+              if (!fs.existsSync(item.original)) await fs.promises.rename(item.backup, item.original).catch(() => undefined);
+            }
+            const retainedReplacementBackup = stagedReplacements.some(item => fs.existsSync(item.backup));
+            if (replacementRoot && !retainedReplacementBackup) await fs.promises.rm(replacementRoot, { recursive: true, force: true }).catch(() => undefined);
+            if (recoveryNames.length) error.message = `${error.message || String(error)}；原同名项目已恢复，已复制的新内容保留为 ${recoveryNames.join('、')}`;
+            else if (retainedReplacementBackup) error.message = `${error.message || String(error)}；旧内容的恢复副本已安全保留，请不要继续修改目标文件并重试撤销`;
+          }
           if (error?.code === CANCELLED_CODE) {
             publish({ phase: 'cancelled', progress: 0, currentName: '' });
             writeLog('info', 'Project file paste cancelled', { projectName, operationId });

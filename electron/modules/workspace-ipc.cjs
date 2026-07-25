@@ -1,5 +1,6 @@
 const registerWorkspaceIpc = context => {
   const { Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog } = context;
+  const isInternalFileOperationEntry = name => name.toLowerCase().endsWith('.photoflow-part') || /^\.photoflow-(?:paste|replace|undo)-/i.test(name);
   const officeOpenXmlExtensions = new Set([
     '.docx', '.docm', '.dotx', '.dotm',
     '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam',
@@ -223,9 +224,9 @@ const registerWorkspaceIpc = context => {
     }
   });
 
-  ipcMain.handle('workspace-shell-new-types', async () => {
+  ipcMain.handle('workspace-shell-new-types', async (_event, refresh = false) => {
     try {
-      return { success: true, types: await shellNewService.list() };
+      return { success: true, types: await shellNewService.list({ refresh }) };
     } catch (error) {
       return { success: false, types: [], error: error.message || String(error) };
     }
@@ -352,6 +353,77 @@ const registerWorkspaceIpc = context => {
           await fs.promises.rm(item.backupRoot, { recursive: true, force: true });
         }
         return { success: true, message: `已撤销导入 ${operation.items.length} 个文件` };
+      }
+      if (operation.kind === 'paste-replace') {
+        const moves = Array.isArray(operation.moves) ? operation.moves : [];
+        const replacementItems = Array.isArray(operation.items) ? operation.items : [];
+        if (replacementItems.some(item => item.permanent || (!item.backup && !item.recyclePidl))) {
+          throw new Error('部分被替换的原项目已由 Windows 永久删除，无法完整撤销此次粘贴');
+        }
+        for (const move of moves) await assertUndoIdentity(operation, move.destination);
+        const destinationKeys = new Set(moves.map(move => path.resolve(move.destination).toLocaleLowerCase()));
+        if (operation.mode === 'cut' && moves.some(move => fs.existsSync(move.source) && !destinationKeys.has(path.resolve(move.source).toLocaleLowerCase()))) {
+          throw new Error('剪切源位置已被占用，无法安全撤销此次粘贴');
+        }
+        for (const item of replacementItems) {
+          if (item.backup) {
+            if (!fs.existsSync(item.backup)) throw new Error(`被替换项目“${path.basename(item.original)}”的恢复副本已不存在`);
+          } else {
+            const probe = await recycleBinService.probe(item.recyclePidl);
+            if (!probe.exists) throw Object.assign(new Error(`回收站中的“${path.basename(item.original)}”已不存在，无法撤销替换`), { code: 'PASTE_REPLACEMENT_MISSING' });
+          }
+        }
+
+        const undoRoot = path.join(path.dirname(moves[0]?.destination || replacementItems[0].original), `.photoflow-undo-paste-${crypto.randomUUID()}`);
+        const stagedNewItems = [];
+        const restoredOldItems = [];
+        let preserveUndoRoot = false;
+        await fs.promises.mkdir(undoRoot, { recursive: false });
+        try {
+          for (const [index, move] of moves.entries()) {
+            const temporary = path.join(undoRoot, `new-${index}-${path.basename(move.destination)}`);
+            await fs.promises.rename(move.destination, temporary);
+            stagedNewItems.push({ ...move, temporary, movedToSource: false });
+          }
+          for (const item of replacementItems) {
+            if (item.backup) await fs.promises.rename(item.backup, item.original);
+            else await recycleBinService.restore({ recyclePidl: item.recyclePidl, originalPath: item.original });
+            restoredOldItems.push(item);
+          }
+          if (operation.mode === 'cut') {
+            for (const item of stagedNewItems) {
+              await movePathAtomic(item.temporary, item.source);
+              item.movedToSource = true;
+            }
+          } else {
+            for (const item of stagedNewItems) await fs.promises.rm(item.temporary, { recursive: true, force: true });
+          }
+        } catch (error) {
+          for (const [index, item] of [...restoredOldItems].reverse().entries()) {
+            if (!fs.existsSync(item.original)) continue;
+            const rollbackBackup = path.join(undoRoot, `old-${index}-${path.basename(item.original)}`);
+            try {
+              await fs.promises.rename(item.original, rollbackBackup);
+              item.backup = rollbackBackup;
+              item.backupRoot = undoRoot;
+              item.recyclePidl = '';
+              item.permanent = false;
+              preserveUndoRoot = true;
+            } catch { /* a later recovery attempt can report the occupied path */ }
+          }
+          for (const item of [...stagedNewItems].reverse()) {
+            try {
+              if (item.movedToSource && fs.existsSync(item.source) && !fs.existsSync(item.temporary)) await movePathAtomic(item.source, item.temporary);
+              if (fs.existsSync(item.temporary) && !fs.existsSync(item.destination)) await fs.promises.rename(item.temporary, item.destination);
+            } catch { /* best-effort rollback; preserve every reachable copy */ }
+          }
+          if (!preserveUndoRoot) await fs.promises.rm(undoRoot, { recursive: true, force: true }).catch(() => undefined);
+          throw error;
+        }
+        await fs.promises.rm(undoRoot, { recursive: true, force: true }).catch(() => undefined);
+        const backupRoots = new Set(replacementItems.map(item => item.backupRoot).filter(Boolean));
+        for (const backupRoot of backupRoots) await fs.promises.rm(backupRoot, { recursive: true, force: true }).catch(() => undefined);
+        return { success: true, message: `已撤销粘贴并恢复 ${replacementItems.length} 个被替换项目` };
       }
       if (operation.kind === 'external-move') {
         for (const move of operation.moves) await assertUndoIdentity(operation, move.destination);
@@ -540,7 +612,7 @@ const registerWorkspaceIpc = context => {
       mediaRuntimeState.activeMediaCacheConfig = { maxSizeGB: normalizeMediaCacheSizeGB(cacheConfig?.maxSizeGB), directory: cacheConfig?.directory || '' };
       const directoryEntries = await fs.promises.readdir(currentPath, { withFileTypes: true });
       const entries = directoryEntries
-        .filter(entry => !entry.isSymbolicLink() && !HIDDEN_SYSTEM_ENTRY_NAMES.has(entry.name.toLowerCase()))
+        .filter(entry => !entry.isSymbolicLink() && !HIDDEN_SYSTEM_ENTRY_NAMES.has(entry.name.toLowerCase()) && !isInternalFileOperationEntry(entry.name))
         .map(entry => {
           const entryPath = path.join(currentPath, entry.name);
           const extension = entry.isDirectory() ? '' : path.extname(entry.name).toLowerCase();

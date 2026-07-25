@@ -29,7 +29,7 @@ const addUndoIdentities = async operation => {
     ? operation.paths || []
     : operation.kind === 'project' || operation.kind === 'folder'
       ? [operation.destination]
-      : ['files', 'move', 'external-move'].includes(operation.kind)
+      : ['files', 'move', 'external-move', 'paste-replace'].includes(operation.kind)
         ? (operation.moves || []).map(move => move.destination)
         : operation.kind === 'broll-import'
           ? [...(operation.createdPaths || []), ...(operation.moves || []).map(move => move.destination)]
