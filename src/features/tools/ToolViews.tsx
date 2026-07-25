@@ -988,7 +988,7 @@ const ResearchView = ({
       {!embedded && <h2 className="text-2xl font-bold text-slate-800">调研整理</h2>}
       <div className={embedded ? 'space-y-6' : 'bg-white border border-slate-200 rounded-xl p-6 space-y-6'}>
         <div className="space-y-2">
-          <p className="mt-2 text-gray-600">这个功能会整理从小红书/抖音爬取下来的文件，对视频执行转场识别，把每一个分镜的视频帧截取一帧下来。</p>
+          <p className="mt-2 text-gray-600">这个功能会整理从小红书/抖音爬取下来的文件，对视频执行转场识别，把每一个分镜的视频帧截取一帧下来。这个功能需要搭配一个Tampermonkey浏览器插件使用。</p>
         </div>
         {/* 路径设置 */}
         <div className="space-y-2">
