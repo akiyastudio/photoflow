@@ -578,7 +578,7 @@ const App: React.FC = () => {
           <div title="拖动窗口" className={`flex min-w-0 items-center gap-2 px-1.5 py-1 ${sidebarCollapsed || renderedSidebarWidth < 190 ? 'hidden' : ''}`}>
             <img src="./app-logo.svg" className="brand-logo h-5 w-5 shrink-0" alt="" />
             <span className="truncate text-sm font-bold text-slate-800">照片流</span>
-            <span className="shrink-0 font-mono text-[10px] text-slate-400">v26.7.26</span>
+            <span className="shrink-0 font-mono text-[10px] text-slate-400">v26.7.27</span>
           </div>
         </div>
         <div className="flex min-w-0 flex-1">

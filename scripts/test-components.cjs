@@ -121,7 +121,12 @@ assert(teamRetouchManager.includes('photoProcessingMessages') && teamRetouchMana
 assert(teamRetouchManager.includes("visibleProcessingMessage = processingMessage || (busy === 'detect'"), 'single-photo recognition must use the same card-local blocking treatment as false-positive removal');
 assert(!teamRetouchManager.includes('disabled={Boolean(busy) || identityState.identifying}'), 'background identity matching must not disable every person confirmation row');
 assert(teamRetouchManager.includes("event.key !== 'Escape' || busy") && teamRetouchManager.includes('dialogRef.current'), 'the identity confirmation dialog must close with Escape unless a save is in progress');
-assert(teamRetouchManager.includes("taskFullyMarked ? '已确认' : '待标记'"), 'an unmarked work image must not be displayed as confirmed');
+assert(teamRetouchManager.includes("taskFullyMarked ? '已标记' : '未标记'"), 'work-image status must distinguish marked and unmarked images without a redundant confirmation step');
+assert(!teamRetouchManager.includes('确认无误'), 'recognition review must not require a redundant confirmation button');
+assert(teamRetouchManager.includes('FullscreenImageViewer') && teamRetouchManager.includes('ImageZoomButton'), 'recognition images must support full-window viewing');
+assert(teamRetouchManager.includes('Math.round(task.crop.width)') && teamRetouchManager.includes('Math.round(task.crop.height)') && teamRetouchManager.includes(' px'), 'work-image previews must display their dimensions');
+assert(teamRetouchManager.includes('openNextUnmarkedIdentity') && teamRetouchManager.includes('未标记 {unmarkedIdentityCount}'), 'the unmarked counter must open the next unmarked person');
+assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity candidate selection must prevent duplicate assignments from the same photo');
   const personIdentityManager = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'PersonIdentityManager.tsx'), 'utf8');
   const teamRetouchSteps = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'TeamRetouchSteps.tsx'), 'utf8');
   const projectWorkspace = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
@@ -165,8 +170,8 @@ assert(teamRetouchManager.includes("taskFullyMarked ? '已确认' : '待标记'"
   assert(versionsIpc.includes('refreshDownstreamWorkflowFiles'), 'returned edits must refresh generated downstream workflow files');
   assert(versionsIpc.includes('refreshWorkflowTaskSourceFiles') && versionsIpc.includes('thumbnailService.invalidateSources([cropTargetPath])'), 'recropping must refresh generated workflow copies and invalidate the old thumbnail');
   assert(versionsIpc.includes('readyTeamWorkflowSubjects(workspace, request.items || [])'), 'workflow return matching must revalidate the currently unlocked person in the main process');
-  assert(versionsIpc.includes('if (task.needsReview) continue;'), 'unconfirmed work images must remain outside downstream workflow handling');
-  assert(versionsIpc.includes('reviewTaskIds.has(String(item.taskId))'), 'workflow generation must reject stale requests containing unconfirmed work images');
+  assert(!versionsIpc.includes('if (task.needsReview) continue;'), 'suggested-review work images must remain available for identity marking and workflow generation');
+  assert(!versionsIpc.includes('reviewTaskIds.has(String(item.taskId))'), 'suggested-review status must be advisory instead of blocking workflow generation');
   assert(versionsIpc.includes('const latestWorkspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);'), 'background identity matching must preserve manual decisions made while inference is running');
   assert(versionsIpc.includes('suppliedOrder.length !== group.length'), 'workflow return validation must reject incomplete or altered task orders');
 

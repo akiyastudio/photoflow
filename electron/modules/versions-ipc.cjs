@@ -1,3 +1,7 @@
+const { CANCELLED_CODE: WORKFLOW_CANCELLED_CODE, buildWorkflowPlan, copyWorkflowPlan } = require('../services/team-workflow-generation.cjs');
+
+const workflowGenerationJobs = new Map();
+
 const registerVersionIpc = context => {
   const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog } = context;
   const teamDataDirectory = (workspaceRoot, photoId, baseVersionId) => path.join(getWorkspaceDataRoot(workspaceRoot), 'team-retouch', photoId, baseVersionId);
@@ -17,6 +21,7 @@ const registerVersionIpc = context => {
     return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
   };
   const safeWorkflowSegment = (value, fallback) => String(value || fallback).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim().slice(0, 60) || fallback;
+  const workflowGenerationKey = (workspacePath, status, projectName) => `${path.resolve(workspacePath).toLocaleLowerCase()}\0${String(status)}\0${String(projectName).toLocaleLowerCase()}`;
   const chineseWeekNumber = value => {
     const number = Math.max(1, Math.floor(Number(value) || 1));
     const digits = ['', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
@@ -657,7 +662,6 @@ const registerVersionIpc = context => {
     const taskSubjects = new Map();
     for (const photo of workspace.photos || []) {
       for (const task of photo.tasks || []) {
-        if (task.needsReview) continue;
         const members = task.members?.length ? task.members : [{ personIndex: task.personIndex, bbox: task.bbox }];
         const group = [];
         for (const member of members) {
@@ -829,22 +833,35 @@ const registerVersionIpc = context => {
       const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
       if (!workspace.success) throw new Error(workspace.error || '无法读取人物识别结果');
       const validSubjects = new Map(teamSubjects(workspace).map(subject => [subject.key, subject]));
-      const assignments = [];
-      const includedKeys = new Set();
+      const anchorSubjectKey = String(request.anchorSubjectKey || '');
+      const requestedAssignments = [];
+      const requestedKeys = new Set();
       for (const item of Array.isArray(request.assignments) ? request.assignments : []) {
         const key = teamSubjectKey(item);
         const subject = validSubjects.get(key);
-        if (!subject || includedKeys.has(key)) continue;
-        includedKeys.add(key);
-        assignments.push({
+        if (!subject || requestedKeys.has(key)) continue;
+        requestedKeys.add(key);
+        requestedAssignments.push({
+          key,
           photoId: subject.photoId,
           baseVersionId: subject.baseVersionId,
           personIndex: subject.personIndex,
           confidence: Number.isFinite(Number(item.confidence)) ? Math.max(0, Math.min(1, Number(item.confidence))) : 1,
         });
       }
-      const anchorSubjectKey = String(request.anchorSubjectKey || '');
-      if (!includedKeys.has(anchorSubjectKey)) throw new Error('当前人物必须包含在本次标记范围内');
+      if (!requestedKeys.has(anchorSubjectKey)) throw new Error('当前人物必须包含在本次标记范围内');
+      const includedPhotoKeys = new Set();
+      let duplicateSkippedCount = 0;
+      const assignments = [
+        ...requestedAssignments.filter(assignment => assignment.key === anchorSubjectKey),
+        ...requestedAssignments.filter(assignment => assignment.key !== anchorSubjectKey),
+      ].filter(assignment => {
+        const photoKey = `${assignment.photoId}:${assignment.baseVersionId}`;
+        if (includedPhotoKeys.has(photoKey)) { duplicateSkippedCount += 1; return false; }
+        includedPhotoKeys.add(photoKey);
+        return true;
+      }).map(({ key: _key, ...assignment }) => assignment);
+      const includedKeys = new Set(assignments.map(teamSubjectKey));
       if (!assignments.length) throw new Error('没有需要标记的人物');
       const targetIdentityId = String(request.identityId || '');
       const clearAssignments = [];
@@ -864,7 +881,6 @@ const registerVersionIpc = context => {
           indexes.add(Number(assignment.personIndex));
           includedByPhoto.set(key, indexes);
         }
-        if ([...includedByPhoto.values()].some(indexes => indexes.size > 1)) throw new Error('同一张照片中的不同人物不能标记为同一个身份');
         for (const current of workspace.assignments || []) {
           if (current.identityId !== targetIdentityId) continue;
           const currentKey = teamSubjectKey(current);
@@ -888,7 +904,7 @@ const registerVersionIpc = context => {
         clearAssignments,
       });
       const updatedWorkspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
-      return { ...updatedWorkspace, identityId: confirmed.identityId, updatedCount: confirmed.updatedCount, autoReleasedCount: clearAssignments.length };
+      return { ...updatedWorkspace, identityId: confirmed.identityId, updatedCount: confirmed.updatedCount, autoReleasedCount: clearAssignments.length, duplicateSkippedCount };
     } catch (error) {
       return { success: false, photos: [], identities: [], assignments: [], error: error.message || String(error) };
     }
@@ -1177,90 +1193,187 @@ const registerVersionIpc = context => {
     }
   });
 
-  ipcMain.handle('workspace-team-workflow-generate', async (_event, workspacePath, status, projectName, request = {}) => {
+  ipcMain.handle('workspace-team-workflow-status', async (_event, workspacePath, status, projectName) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const job = workflowGenerationJobs.get(workflowGenerationKey(workspaceRoot, status, projectName));
+      return { success: true, job: job?.snapshot || null };
+    } catch (error) {
+      return { success: false, job: null, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-team-workflow-cancel', async (_event, operationId) => {
+    const job = [...workflowGenerationJobs.values()].find(candidate => candidate.operationId === String(operationId || '') && candidate.snapshot?.state === 'running');
+    if (!job) return { success: true, cancelled: false };
+    job.cancelled = true;
+    job.snapshot = { ...job.snapshot, phase: 'cancelling', message: '正在安全停止，已完成的文件下次会直接复用' };
+    return { success: true, cancelled: true };
+  });
+
+  ipcMain.handle('workspace-team-workflow-generate', async (event, workspacePath, status, projectName, request = {}) => {
     let stagingDirectory = '';
     let backupDirectory = '';
+    let pendingManifestPath = '';
+    let checkpointReady = false;
+    let stageCommitted = false;
+    let job = null;
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       const { projectPath, outputDirectory, workflowDataDirectory, manifestPath, legacyManifestPath } = teamWorkflowOutput(workspaceRoot, status, projectName);
       if (fs.existsSync(outputDirectory) && !request.replace) return { success: true, requiresConfirmation: true, path: outputDirectory };
-      const currentWorkspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
-      const reviewTaskIds = new Set((currentWorkspace.photos || []).flatMap(photo => (photo.tasks || []).filter(task => task.needsReview).map(task => String(task.id))));
+      const jobKey = workflowGenerationKey(workspaceRoot, status, projectName);
+      const existingJob = workflowGenerationJobs.get(jobKey);
+      if (existingJob?.snapshot?.state === 'running') {
+        return { success: true, alreadyRunning: true, operationId: existingJob.operationId };
+      }
+      const operationId = String(request.operationId || crypto.randomUUID());
+      job = {
+        operationId,
+        cancelled: false,
+        snapshot: {
+          operationId,
+          projectName: String(projectName),
+          state: 'running',
+          phase: 'preparing',
+          progress: 0,
+          completedFiles: 0,
+          totalFiles: 0,
+          copiedBytes: 0,
+          totalBytes: 0,
+          currentName: '',
+          message: '正在一次性读取工作图任务…',
+        },
+      };
+      workflowGenerationJobs.set(jobKey, job);
+      let lastProgressAt = 0;
+      const publish = (update, force = false) => {
+        const now = Date.now();
+        const totalBytes = Number(update.totalBytes ?? job.snapshot.totalBytes) || 0;
+        const copiedBytes = Number(update.copiedBytes ?? job.snapshot.copiedBytes) || 0;
+        const totalFiles = Number(update.totalFiles ?? job.snapshot.totalFiles) || 0;
+        const completedFiles = Number(update.completedFiles ?? job.snapshot.completedFiles) || 0;
+        const progress = totalBytes > 0 ? copiedBytes / totalBytes * 100 : totalFiles > 0 ? completedFiles / totalFiles * 100 : Number(update.progress ?? job.snapshot.progress) || 0;
+        job.snapshot = { ...job.snapshot, ...update, totalBytes, copiedBytes, totalFiles, completedFiles, progress: Math.max(0, Math.min(100, progress)) };
+        if (!force && now - lastProgressAt < 120) return;
+        lastProgressAt = now;
+        if (!event.sender.isDestroyed()) event.sender.send('workspace-team-workflow-progress', job.snapshot);
+      };
+      publish({}, true);
 
-      stagingDirectory = path.join(projectPath, `.photoflow-team-workflow-${crypto.randomUUID()}`);
-      await fs.promises.mkdir(stagingDirectory, { recursive: false });
+      const currentWorkspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+      if (job.cancelled) throw Object.assign(new Error('工作流程生成已取消'), { code: WORKFLOW_CANCELLED_CODE });
+      stagingDirectory = path.join(projectPath, '.photoflow-team-workflow-staging');
+      const workflowSettings = {
+        preferredIdentityOrder: Array.isArray(request.preferredIdentityOrder) ? request.preferredIdentityOrder.map(String) : [],
+        preferredIdentityId: Array.isArray(request.preferredIdentityOrder) ? String(request.preferredIdentityOrder[0] || '') || undefined : String(request.preferredIdentityId || '') || undefined,
+      };
+      const plan = await buildWorkflowPlan({
+        groups: request.groups || [],
+        workspace: currentWorkspace,
+        stagingDirectory,
+        safeSegment: safeWorkflowSegment,
+        weekName: week => `第${chineseWeekNumber(week)}周`,
+      });
+      if (job.cancelled) throw Object.assign(new Error('工作流程生成已取消'), { code: WORKFLOW_CANCELLED_CODE });
+      if (!plan.manifestGroups.length || !plan.files.length) throw new Error('没有可生成的工作流程任务');
+      const fingerprint = crypto.createHash('sha256').update(`${plan.fingerprint}\0${JSON.stringify(workflowSettings)}`).digest('hex');
+      const checkpointPath = path.join(stagingDirectory, '.photoflow-workflow-checkpoint.json');
+      let checkpoint = null;
+      if (fs.existsSync(checkpointPath)) {
+        try { checkpoint = JSON.parse(await fs.promises.readFile(checkpointPath, 'utf8')); }
+        catch { checkpoint = null; }
+      }
+      if (fs.existsSync(stagingDirectory) && checkpoint?.fingerprint !== fingerprint) {
+        await fs.promises.rm(stagingDirectory, { recursive: true, force: true });
+      }
+      await fs.promises.mkdir(stagingDirectory, { recursive: true });
+      const pendingCheckpointPath = `${checkpointPath}.${crypto.randomUUID()}.tmp`;
+      await fs.promises.writeFile(pendingCheckpointPath, JSON.stringify({ version: 1, fingerprint, projectName, status, updatedAt: Date.now() }, null, 2), 'utf8');
+      await replaceFileAtomic(pendingCheckpointPath, checkpointPath);
+      await fs.promises.rm(pendingCheckpointPath, { force: true });
+      checkpointReady = true;
+      publish({
+        phase: 'copying',
+        totalFiles: plan.files.length,
+        totalBytes: plan.totalBytes,
+        message: checkpoint?.fingerprint === fingerprint ? '正在检查并续传上次已完成的工作图…' : '正在并发复制工作图…',
+      }, true);
+
+      await copyWorkflowPlan({
+        files: plan.files,
+        totalBytes: plan.totalBytes,
+        copyFileAtomic,
+        concurrency: 3,
+        isCancelled: () => job.cancelled,
+        onProgress: value => publish({
+          ...value,
+          message: value.phase === 'resuming' ? '正在复用上次已完成的工作图…' : value.phase === 'finalizing' ? '正在提交工作流程…' : '正在并发复制工作图…',
+        }, value.phase === 'finalizing'),
+      });
+      if (job.cancelled) throw Object.assign(new Error('工作流程生成已取消'), { code: WORKFLOW_CANCELLED_CODE });
+
       const manifest = {
         version: 1,
         projectName,
         status,
         generatedAt: Date.now(),
-        workflowSettings: {
-          preferredIdentityOrder: Array.isArray(request.preferredIdentityOrder) ? request.preferredIdentityOrder.map(String) : [],
-          preferredIdentityId: Array.isArray(request.preferredIdentityOrder) ? String(request.preferredIdentityOrder[0] || '') || undefined : String(request.preferredIdentityId || '') || undefined,
-        },
-        groups: [],
+        workflowSettings,
+        groups: plan.manifestGroups,
       };
-      const usedFoldersByWeek = new Map();
-      let count = 0;
-      for (const group of request.groups || []) {
-        const week = Math.max(1, Math.floor(Number(group.week) || 1));
-        const weekName = `第${chineseWeekNumber(week)}周`;
-        const usedFolders = usedFoldersByWeek.get(week) || new Set();
-        const baseIdentityName = safeWorkflowSegment(group.identityName, '未命名人物');
-        let identityFolderName = baseIdentityName;
-        let suffix = 2;
-        while (usedFolders.has(identityFolderName.toLocaleLowerCase())) identityFolderName = `${baseIdentityName}_${suffix++}`;
-        usedFolders.add(identityFolderName.toLocaleLowerCase());
-        usedFoldersByWeek.set(week, usedFolders);
-        const groupDirectory = path.join(stagingDirectory, weekName, identityFolderName);
-        await fs.promises.mkdir(groupDirectory, { recursive: true });
-        const reserved = new Set();
-        const manifestItems = [];
-        for (const item of group.items || []) {
-          if (reviewTaskIds.has(String(item.taskId))) continue;
-          const sourcePath = await resolveWorkflowSource(workspaceRoot, item);
-          if (!sourcePath) continue;
-          const baseName = `${safeWorkflowSegment(item.photoName, '图片')}_人物${item.personIndex}${path.extname(sourcePath) || '.png'}`;
-          const destination = uniqueDestination(groupDirectory, baseName, reserved);
-          reserved.add(path.resolve(destination).toLocaleLowerCase());
-          await copyFileAtomic(sourcePath, destination);
-          manifestItems.push({ ...item, relativePath: path.relative(stagingDirectory, destination).replace(/\\/g, '/') });
-          count += 1;
-        }
-        manifest.groups.push({
-          week,
-          identityId: String(group.identityId || ''),
-          identityName: String(group.identityName || identityFolderName),
-          relativePath: path.relative(stagingDirectory, groupDirectory).replace(/\\/g, '/'),
-          items: manifestItems,
-        });
-      }
-      if (!manifest.groups.length || !count) throw new Error('没有可生成的工作流程任务');
+      await fs.promises.mkdir(workflowDataDirectory, { recursive: true });
+      pendingManifestPath = `${manifestPath}.${crypto.randomUUID()}.tmp`;
+      await fs.promises.writeFile(pendingManifestPath, JSON.stringify(manifest, null, 2), 'utf8');
       if (fs.existsSync(outputDirectory)) {
         backupDirectory = path.join(projectPath, `.photoflow-team-workflow-previous-${crypto.randomUUID()}`);
         await fs.promises.rename(outputDirectory, backupDirectory);
       }
       try {
         await fs.promises.rename(stagingDirectory, outputDirectory);
+        stageCommitted = true;
         stagingDirectory = '';
       } catch (error) {
         if (backupDirectory && fs.existsSync(backupDirectory) && !fs.existsSync(outputDirectory)) await fs.promises.rename(backupDirectory, outputDirectory).catch(() => undefined);
         throw error;
       }
+      await replaceFileAtomic(pendingManifestPath, manifestPath);
+      await fs.promises.rm(pendingManifestPath, { force: true });
+      pendingManifestPath = '';
+      await fs.promises.rm(legacyManifestPath, { force: true });
+      await fs.promises.rm(path.join(outputDirectory, path.basename(checkpointPath)), { force: true });
+      checkpointReady = false;
       if (backupDirectory) {
         await fs.promises.rm(backupDirectory, { recursive: true, force: true });
         backupDirectory = '';
       }
-      await fs.promises.mkdir(workflowDataDirectory, { recursive: true });
-      const pendingManifestPath = `${manifestPath}.${crypto.randomUUID()}.tmp`;
-      await fs.promises.writeFile(pendingManifestPath, JSON.stringify(manifest, null, 2), 'utf8');
-      await fs.promises.rm(manifestPath, { force: true });
-      await fs.promises.rename(pendingManifestPath, manifestPath);
-      await fs.promises.rm(legacyManifestPath, { force: true });
-      return { success: true, count, groupCount: manifest.groups.length, path: outputDirectory };
+      publish({ state: 'completed', phase: 'complete', progress: 100, completedFiles: plan.files.length, copiedBytes: plan.totalBytes, message: '工作流程生成完成' }, true);
+      return { success: true, operationId, count: plan.files.length, groupCount: manifest.groups.length, path: outputDirectory };
     } catch (error) {
-      if (stagingDirectory) await fs.promises.rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
-      return { success: false, error: error.message || String(error) };
+      const cancelled = job?.cancelled || error?.code === WORKFLOW_CANCELLED_CODE;
+      if (job) {
+        job.snapshot = { ...job.snapshot, state: cancelled ? 'cancelled' : 'failed', phase: cancelled ? 'cancelled' : 'failed', message: cancelled ? '已停止；再次生成会从现有进度继续' : `生成失败：${error.message || String(error)}`, error: cancelled ? undefined : error.message || String(error) };
+        if (!event.sender.isDestroyed()) event.sender.send('workspace-team-workflow-progress', job.snapshot);
+      }
+      if (pendingManifestPath) await fs.promises.rm(pendingManifestPath, { force: true }).catch(() => undefined);
+      if (stageCommitted) {
+        const workspaceRoot = ensureWorkspace(workspacePath);
+        const { projectPath, outputDirectory } = teamWorkflowOutput(workspaceRoot, status, projectName);
+        const resumeDirectory = path.join(projectPath, '.photoflow-team-workflow-staging');
+        if (fs.existsSync(outputDirectory) && !fs.existsSync(resumeDirectory)) {
+          await fs.promises.rename(outputDirectory, resumeDirectory).catch(() => undefined);
+          if (fs.existsSync(resumeDirectory)) {
+            stagingDirectory = resumeDirectory;
+            checkpointReady = true;
+          }
+        }
+      }
+      if (stagingDirectory && !checkpointReady) await fs.promises.rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
+      if (backupDirectory && fs.existsSync(backupDirectory)) {
+        const workspaceRoot = ensureWorkspace(workspacePath);
+        const { outputDirectory } = teamWorkflowOutput(workspaceRoot, status, projectName);
+        if (!fs.existsSync(outputDirectory)) await fs.promises.rename(backupDirectory, outputDirectory).catch(() => undefined);
+      }
+      return { success: false, cancelled, resumable: Boolean(checkpointReady), operationId: job?.operationId, error: cancelled ? undefined : error.message || String(error) };
     }
   });
 
