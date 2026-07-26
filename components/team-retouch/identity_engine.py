@@ -33,6 +33,7 @@ def _experimental_adaface_path(model_directory):
         pass
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
+        candidates.append(Path(local_app_data) / "PhotoFlow" / "components" / "team-retouch" / "identity-models" / EXPERIMENTAL_ADAFACE_MODEL)
         candidates.append(Path(local_app_data) / "PhotoFlow" / "experimental-models" / EXPERIMENTAL_ADAFACE_MODEL)
     return next((path for path in candidates if path.is_file() and path.stat().st_size > 20_000_000), None)
 
@@ -48,6 +49,7 @@ def _experimental_osnet_path(model_directory):
         pass
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
+        candidates.append(Path(local_app_data) / "PhotoFlow" / "components" / "team-retouch" / "identity-models" / EXPERIMENTAL_OSNET_MODEL)
         candidates.append(Path(local_app_data) / "PhotoFlow" / "experimental-models" / EXPERIMENTAL_OSNET_MODEL)
     return next((path for path in candidates if path.is_file() and path.stat().st_size > 2_000_000), None)
 

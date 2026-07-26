@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { FolderOpen, HardDrive, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, ScanSearch, Loader2, FileImage, Cpu, CheckCircle2, AlertTriangle, Wrench, ExternalLink } from 'lucide-react';
+import { FolderOpen, HardDrive, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, ScanSearch, Loader2, FileImage, Cpu, Wrench, ExternalLink, AtSign, Scale } from 'lucide-react';
 import type { AppConfig, ComponentStatus } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
+import { FORMAL_MODEL_LICENSES } from '../../licenses/modelLicenses';
+import { THIRD_PARTY_SOFTWARE_LICENSES } from '../../licenses/softwareLicenses';
 
 const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
 };
-export type SettingsSection = 'general' | 'storage' | 'components' | 'import' | 'team-retouch' | 'research-tools' | 'office-media-extractor';
+export type SettingsSection = 'general' | 'storage' | 'components' | 'import' | 'team-retouch' | 'research-tools' | 'office-media-extractor' | 'about';
 
 const WorkspaceFolderPicker = ({ value, onChange }: { value: string; onChange: (path: string) => void }) => {
   const choose = async () => {
@@ -31,6 +33,39 @@ const formatStorageSize = (sizeBytes = 0) => sizeBytes >= 1024 ** 3
   ? `${(sizeBytes / 1024 ** 3).toFixed(sizeBytes >= 10 * 1024 ** 3 ? 1 : 2)} GB`
   : sizeBytes > 0 ? `${(sizeBytes / 1024 ** 2).toFixed(0)} MB` : '0 MB';
 
+const IdentityModelPackSettings = ({ component, adafaceReady, osnetX1Ready, onInstall }: { component?: ComponentStatus; adafaceReady: boolean; osnetX1Ready: boolean; onInstall: () => void | Promise<void> }) => {
+  const [installing, setInstalling] = useState(false);
+  const install = async () => {
+    if (installing) return;
+    setInstalling(true);
+    try { await onInstall(); } finally { setInstalling(false); }
+  };
+  const basicReady = Boolean(component?.installed && component.identityAvailable);
+  const enhancedReady = adafaceReady && osnetX1Ready;
+  return <section className="mt-5">
+    <div className="flex items-start gap-3">
+      <span className="rounded-lg bg-cyan-100 p-2 text-cyan-700"><ScanSearch size={18}/></span>
+      <div><h5 className="font-bold text-slate-800">跨图片人物身份识别</h5><p className="mt-1 text-xs leading-5 text-slate-500">根据脸部与身体特征，将多张照片里的同一个人归到一起。基础版随组件安装；增强版是可选模型包。</p></div>
+    </div>
+    <div className="mt-3 grid gap-4 lg:grid-cols-2">
+      <article className="rounded-xl border border-slate-200 bg-white p-4">
+        <div className="flex items-center justify-between gap-3"><h6 className="font-bold text-slate-800">基础版 · YuNet + SFace + OSNet x0.25</h6><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${basicReady ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>{basicReady ? '可用' : '不可用'}</span></div>
+        <p className="mt-2 text-xs leading-5 text-slate-500">提供人脸检测、人脸特征比较和身体外观辅助识别。</p>
+        <p className="mt-3 text-xs font-bold text-slate-700">安装：随“多人修脸”基础组件自动安装，无需额外操作。</p>
+        <p className="mt-1 text-xs leading-5 text-slate-500">硬件：CPU 可运行；Intel、AMD、NVIDIA 显卡可选用 DirectML 加速，不要求 CUDA 或 WSL。</p>
+      </article>
+      <article className={`rounded-xl border p-4 ${enhancedReady ? 'border-cyan-200 bg-cyan-50/30' : 'border-slate-200 bg-white'}`}>
+        <div className="flex flex-wrap items-center justify-between gap-3"><h6 className="font-bold text-slate-800">增强版 · AdaFace IR-18 + OSNet x1.0</h6><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${enhancedReady ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{enhancedReady ? '已启用' : '未安装'}</span></div>
+        <p className="mt-2 text-xs leading-5 text-slate-500">改善低质量人脸和身体特征识别；无需 Python、PyTorch 或自行编译。</p>
+        <p className="mt-3 text-xs font-bold text-slate-700">安装：将 <code>PhotoFlow-team-retouch-identity-models-*.zip</code> 放入上方目录，再点击安装。</p>
+        <p className="mt-1 text-xs leading-5 text-slate-500">硬件：与基础版相同，CPU 可运行；DirectML 显卡仅用于加速，不要求 NVIDIA。</p>
+        <div className="mt-4 flex justify-end"><button type="button" onClick={() => void install()} disabled={installing || !component?.installed} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{installing ? <Loader2 size={14} className="animate-spin"/> : <Download size={14}/>}安装身份识别增强包</button></div>
+        {component?.identityError && <p className="mt-3 break-all rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-700">人物身份识别模型检测失败：{component.identityError}</p>}
+      </article>
+    </div>
+  </section>;
+};
+
 const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { component?: ComponentStatus; onRefresh: () => void | Promise<void>; onNotice: (message: string, duration?: number) => void }) => {
   const appDialog = useAppDialog();
   const [busy, setBusy] = useState<'check' | 'install' | 'repair' | 'uninstall' | ''>('');
@@ -40,19 +75,19 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
   }), []);
   const install = async (repair = false) => {
     if (busy || !await appDialog.confirm({
-      title: repair ? '修复高级引擎吗？' : '安装高级引擎吗？',
+      title: repair ? '修复人物检测增强版吗？' : '安装人物检测增强版吗？',
       message: repair
-        ? '修复需要重新选择与当前组件版本一致的高级引擎离线包。程序不会联网下载，基础引擎不会受到影响。'
-        : '程序不会联网下载。请选择从部署盘或移动硬盘取得的高级引擎离线包；安装后约占 20–30 GB，建议预留 35 GB。',
-      confirmLabel: repair ? '选择离线包并修复' : '选择离线包',
+        ? '程序将从上方显示的“多人修脸组件目录”读取并校验当前版本的高级包，然后替换需要修复的环境。'
+        : '请先把 PhotoFlow 提供的高级引擎 ZIP 放入上方显示的“多人修脸组件目录”。程序会校验版本和 SHA-256，然后注册预封装环境；用户不需要编译。',
+      confirmLabel: repair ? '修复检测增强包' : '安装检测增强包',
     })) return;
     setBusy(repair ? 'repair' : 'install');
     setProgress({ progress: 1, message: repair ? '正在准备修复' : '正在准备安装' });
     try {
       const result = await window.electronAPI.installTeamRetouchAdvanced({ repair });
       if (result.cancelled) return;
-      if (!result.success) { onNotice(`高级引擎${repair ? '修复' : '安装'}失败：${result.error || '未知错误'}`, 8000); return; }
-      onNotice(`高级引擎已${repair ? '修复' : '安装'}并通过运行验证`);
+      if (!result.success) { onNotice(`人物检测增强版${repair ? '修复' : '安装'}失败：${result.error || '未知错误'}`, 8000); return; }
+      onNotice(`人物检测增强版已${repair ? '修复' : '安装'}并通过运行验证`);
       await onRefresh();
     } finally { setBusy(''); }
   };
@@ -68,26 +103,28 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
   };
   const uninstall = async () => {
     if (busy || !await appDialog.confirm({
-      title: '卸载多人修脸高级引擎吗？',
-      message: `将注销 PhotoFlowNative 并删除高级模型、Python 环境和虚拟磁盘，预计释放 ${formatStorageSize(component?.advancedSizeBytes)}。基础多人修脸仍可继续使用。`,
-      confirmLabel: '卸载高级引擎', tone: 'danger',
+      title: '卸载人物检测增强版吗？',
+      message: `将注销 PhotoFlowNative 并删除 PairDETR、SAM 2.1、Python 环境和虚拟磁盘，预计释放 ${formatStorageSize(component?.advancedSizeBytes)}。两个基础版和身份识别增强版不受影响。`,
+      confirmLabel: '卸载检测增强版', tone: 'danger',
     })) return;
     setBusy('uninstall');
     setProgress({ progress: 20, message: '正在停止并删除高级引擎' });
     try {
       const result = await window.electronAPI.uninstallTeamRetouchAdvanced();
-      if (!result.success) { onNotice(`卸载高级引擎失败：${result.error || '未知错误'}`, 8000); return; }
-      onNotice('高级引擎已卸载，基础多人修脸不受影响');
+      if (!result.success) { onNotice(`卸载人物检测增强版失败：${result.error || '未知错误'}`, 8000); return; }
+      onNotice('人物检测增强版已卸载，基础版不受影响');
       await onRefresh();
     } finally { setBusy(''); }
   };
-  const openFolder = async () => {
-    const result = await window.electronAPI.openTeamRetouchAdvancedFolder();
-    if (!result.success) onNotice(`打开高级引擎目录失败：${result.error || '未知错误'}`);
-  };
   const openIdentityModelsFolder = async () => {
     const result = await window.electronAPI.openTeamRetouchIdentityModelsFolder();
-    if (!result.success) onNotice(`打开实验模型目录失败：${result.error || '未知错误'}`);
+    if (!result.success) onNotice(`打开多人修脸组件目录失败：${result.error || '未知错误'}`);
+  };
+  const installIdentityModels = async () => {
+    const result = await window.electronAPI.installTeamRetouchIdentityModels();
+    if (!result.success) { onNotice(`安装增强人物识别模型失败：${result.error || '未知错误'}`, 8000); return; }
+    onNotice('增强人物识别模型已安装并通过校验');
+    await onRefresh();
   };
   const baseAvailable = Boolean(component?.installed && component.runtimeAvailable);
   const advancedReady = Boolean(component?.advancedAvailable);
@@ -95,15 +132,47 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
   const adafaceReady = component?.faceBackend === 'adaface-ir18-experimental';
   const osnetX1Ready = component?.bodyBackend === 'osnet-x1-experimental';
   return <section>
-    <div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="text-sm font-bold text-slate-800">识别引擎与安装状态</h4><p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">基础引擎随“多人修脸”组件安装；高级引擎是可选的独立 WSL 环境，不会放进程序安装目录，应用升级和清理源码不会删除它。</p></div><button type="button" onClick={() => void onRefresh()} disabled={Boolean(busy)} className="dialog-secondary inline-flex items-center gap-2"><RotateCcw size={15} className={busy ? 'animate-spin' : ''}/>重新检测</button></div>
-    <div className="mt-4 grid gap-4 lg:grid-cols-2">
-      <article className="rounded-xl border border-slate-200 bg-white p-4"><div className="flex items-start gap-3"><span className="rounded-lg bg-blue-50 p-2 text-blue-600"><Cpu size={18}/></span><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><h5 className="font-bold text-slate-800">基础方案 · RTMDet</h5><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${baseAvailable ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>{baseAvailable ? '可用' : '不可用'}</span></div><p className="mt-2 text-xs leading-5 text-slate-500">检测人物、生成基础人物蒙版、规划工作图并自动拼回。支持 CPU 及 Intel、AMD、NVIDIA 的 DirectML GPU，体积小、启动快。</p><p className="mt-3 text-xs text-slate-500">{component?.provider ? `当前运行：${component.provider}` : component?.runtimeError || '等待组件状态'}</p><p className="mt-1 text-xs text-slate-400">组件占用：{formatStorageSize(component?.sizeBytes)}</p></div></div></article>
-      <article className={`rounded-xl border p-4 ${advancedReady ? 'border-violet-200 bg-violet-50/30' : needsRepair ? 'border-amber-200 bg-amber-50/40' : 'border-slate-200 bg-white'}`}><div className="flex items-start gap-3"><span className={`rounded-lg p-2 ${advancedReady ? 'bg-violet-100 text-violet-700' : needsRepair ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{advancedReady ? <CheckCircle2 size={18}/> : needsRepair ? <AlertTriangle size={18}/> : <UsersRound size={18}/>}</span><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><h5 className="font-bold text-slate-800">高级方案 · PairDETR + SAM 2.1</h5><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${advancedReady ? 'bg-violet-100 text-violet-700' : needsRepair ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{advancedReady ? '可用' : needsRepair ? '需要修复' : '未安装'}</span></div><p className="mt-2 text-xs leading-5 text-slate-500">增加脸与身体的对应关系和精细人物分割，更适合多人密集、互相遮挡和复杂姿势。高级方案通过离线安装包部署，程序不会联网下载。</p><div className="mt-3 space-y-1 text-xs text-slate-500">{component?.advancedProvider && <p>当前运行：{component.advancedProvider}</p>}<p>当前占用：{component?.advancedSizeBytes ? formatStorageSize(component.advancedSizeBytes) : '未安装'}</p><p>离线包通常约 10–15 GB · 安装后约 20–30 GB · 建议预留 35 GB</p>{component?.advancedFreeBytes ? <p>目标磁盘剩余：{formatStorageSize(component.advancedFreeBytes)}</p> : null}<p className="break-all font-mono text-[11px] text-slate-400">{component?.advancedDataPath || '等待检测安装位置'}</p></div>{component?.advancedError && !advancedReady && <p className="mt-2 break-all rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-700">{component.advancedError}</p>}</div></div><div className="mt-4 flex flex-wrap justify-end gap-2"><button type="button" onClick={() => void checkRequirements()} disabled={Boolean(busy) || !baseAvailable} className="dialog-secondary disabled:opacity-45">检查本机条件</button>{advancedReady ? <><button type="button" onClick={() => void openFolder()} disabled={Boolean(busy)} className="dialog-secondary inline-flex items-center gap-2"><FolderOpen size={14}/>打开安装目录</button><button type="button" onClick={() => void install(true)} disabled={Boolean(busy)} className="dialog-secondary inline-flex items-center gap-2"><Wrench size={14}/>选择离线包修复</button><button type="button" onClick={() => void uninstall()} disabled={Boolean(busy)} className="rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">卸载高级引擎</button></> : needsRepair ? <button type="button" onClick={() => void install(true)} disabled={Boolean(busy)} className="dialog-primary inline-flex items-center gap-2"><Wrench size={14}/>选择离线包修复</button> : <button type="button" onClick={() => void install(false)} disabled={Boolean(busy) || !baseAvailable} className="dialog-primary disabled:opacity-45">选择离线安装包</button>}</div></article>
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div><h4 className="text-sm font-bold text-slate-800">识别能力与安装</h4><p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">人物检测与裁图、跨图片人物身份识别都有基础版和可选增强版。基础版随“多人修脸”组件安装；增强包只需放入同一个目录后点击安装。</p></div>
+      <button type="button" onClick={() => void onRefresh()} disabled={Boolean(busy)} className="dialog-secondary inline-flex items-center gap-2"><RotateCcw size={15} className={busy ? 'animate-spin' : ''}/>重新检测</button>
     </div>
-    <div className="mt-4 rounded-xl border border-cyan-200 bg-cyan-50/40 p-4"><div className="flex flex-wrap items-start gap-3"><span className="rounded-lg bg-cyan-100 p-2 text-cyan-700"><ScanSearch size={18}/></span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h5 className="font-bold text-slate-800">实验人物识别模型 · 用户自备</h5><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${adafaceReady ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>AdaFace IR-18：{adafaceReady ? '已启用' : '未启用'}</span><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${osnetX1Ready ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>OSNet x1.0：{osnetX1Ready ? '已启用' : '未启用'}</span></div><p className="mt-2 text-xs leading-5 text-slate-600">这两个模型只增强跨图片人物身份识别，不替代 PairDETR + SAM 2.1 的人物检测与分割。程序不会代为下载，也不会把模型收入安装包；你可以从上游自行取得权重并转换为 ONNX。</p></div></div><ol className="mt-4 grid gap-3 text-xs leading-5 text-slate-600 md:grid-cols-2"><li className="rounded-lg bg-white/80 p-3"><span className="font-bold text-slate-800">1. 获取官方文件</span><span className="mt-1 block">AdaFace：下载官方 R18 WebFace4M checkpoint 和仓库中的 <code>net.py</code>。OSNet：下载官方 <code>osnet_x1_0_msmt17</code> checkpoint 和 Torchreid 的 <code>osnet.py</code>。</span></li><li className="rounded-lg bg-white/80 p-3"><span className="font-bold text-slate-800">2. 转换为 ONNX</span><span className="mt-1 block">先取得 PhotoFlow 源码，再使用 <code>scripts/export-team-retouch-adaface.py</code> 与 <code>scripts/export-team-retouch-osnet.py</code>；转换环境需要 Python、PyTorch 和 ONNX。</span></li><li className="rounded-lg bg-white/80 p-3"><span className="font-bold text-slate-800">3. 使用固定文件名</span><span className="mt-1 block break-all font-mono text-[11px]">adaface_ir18_webface4m.onnx<br/>osnet_x1_0_msmt17.onnx</span></li><li className="rounded-lg bg-white/80 p-3"><span className="font-bold text-slate-800">4. 放入模型目录并验证</span><span className="mt-1 block">把一个或两个 ONNX 文件放入下方目录，点击“重新检测”。两者可以单独启用；缺少的模型会自动退回 SFace 或 OSNet x0.25。</span></li></ol><details className="mt-3 rounded-lg border border-cyan-200 bg-white/80 px-3 py-2 text-xs text-slate-600"><summary className="cursor-pointer font-bold text-cyan-800">展开 PowerShell 转换命令示例</summary><div className="mt-2 space-y-2"><p>把示例中的源码路径和权重路径替换为你下载的实际文件：</p><pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-slate-950 p-3 font-mono text-[11px] leading-5 text-slate-100">{`python .\\scripts\\export-team-retouch-adaface.py --source "C:\\模型\\AdaFace\\net.py" --weights "C:\\模型\\AdaFace\\adaface_ir18_webface4m.ckpt" --architecture ir_18 --output "$env:LOCALAPPDATA\\PhotoFlow\\experimental-models\\adaface_ir18_webface4m.onnx"\n\npython .\\scripts\\export-team-retouch-osnet.py --source "C:\\模型\\deep-person-reid\\torchreid\\models\\osnet.py" --weights "C:\\模型\\osnet_x1_0_msmt17.pth" --architecture osnet_x1_0 --output "$env:LOCALAPPDATA\\PhotoFlow\\experimental-models\\osnet_x1_0_msmt17.onnx"`}</pre></div></details><div className="mt-4 flex flex-wrap gap-2"><button type="button" onClick={() => void openIdentityModelsFolder()} className="dialog-primary inline-flex items-center gap-2"><FolderOpen size={14}/>打开实验模型目录</button><button type="button" onClick={() => window.electronAPI.openExternal('https://github.com/mk-minchul/AdaFace')} className="dialog-secondary inline-flex items-center gap-2">AdaFace 官方仓库<ExternalLink size={13}/></button><button type="button" onClick={() => window.electronAPI.openExternal('https://huggingface.co/kaiyangzhou/osnet')} className="dialog-secondary inline-flex items-center gap-2">OSNet 官方模型<ExternalLink size={13}/></button><button type="button" onClick={() => window.electronAPI.openExternal('https://github.com/akiyastudio/photoflow/blob/main/components/team-retouch/MODEL-SOURCE.md')} className="dialog-secondary inline-flex items-center gap-2">查看转换说明<ExternalLink size={13}/></button></div><p className="mt-3 text-[11px] leading-5 text-cyan-800">自行下载仍需遵守上游模型、训练数据和人脸信息处理要求；软件是否收费不会消除这些授权义务。</p>{component?.identityError && <p className="mt-2 break-all rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-700">人物识别模型检测失败：{component.identityError}</p>}</div>
-    <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-4"><h5 className="text-xs font-bold text-slate-700">离线安装方式</h5><ol className="mt-2 grid gap-2 text-xs leading-5 text-slate-500 md:grid-cols-4"><li><span className="font-bold text-slate-700">1. 准备电脑</span><span className="mt-1 block">离线安装 NVIDIA 驱动并启用 WSL 2；如有需要，完成系统重启。</span></li><li><span className="font-bold text-slate-700">2. 接入部署盘</span><span className="mt-1 block">从移动硬盘或部署盘取得与当前组件版本一致的高级引擎离线包。</span></li><li><span className="font-bold text-slate-700">3. 选择离线包</span><span className="mt-1 block">程序校验包版本、路径安全性和 VHDX 的 SHA256 后导入，不会访问网络。</span></li><li><span className="font-bold text-slate-700">4. 运行验证</span><span className="mt-1 block">实际启动 PairDETR 与 SAM 2.1；两者都可用后才显示安装完成。</span></li></ol><p className="mt-3 text-xs leading-5 text-slate-500">离线包可以放在任意磁盘，不要手动拆分模型或复制环境文件。修复时请重新接入原部署盘并选择同版本离线包。</p></div>
+    <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4">
+      <div className="min-w-0 flex-1"><p className="text-xs font-bold text-slate-700">多人修脸组件目录</p><p className="mt-1 break-all font-mono text-[11px] leading-5 text-slate-600">{component?.packagePath || '等待读取组件目录'}</p><p className="mt-1 text-xs text-slate-500">两个增强 ZIP 都原样放在这里，无需解压；程序会按文件名识别并校验。</p></div>
+      <button type="button" onClick={() => void openIdentityModelsFolder()} className="dialog-secondary inline-flex items-center gap-2"><FolderOpen size={14}/>打开目录</button>
+    </div>
+
+    <section className="mt-5">
+      <div className="flex items-start gap-3"><span className="rounded-lg bg-blue-50 p-2 text-blue-600"><Cpu size={18}/></span><div><h5 className="font-bold text-slate-800">人物检测与裁图</h5><p className="mt-1 text-xs leading-5 text-slate-500">识别照片中的人物、确定裁图范围并生成蒙版。</p></div></div>
+      <div className="mt-3 grid gap-4 lg:grid-cols-2">
+        <article className="rounded-xl border border-slate-200 bg-white p-4">
+          <div className="flex items-center justify-between gap-3"><h6 className="font-bold text-slate-800">基础版 · RTMDet</h6><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${baseAvailable ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>{baseAvailable ? '可用' : '不可用'}</span></div>
+          <p className="mt-2 text-xs leading-5 text-slate-500">适合普通人物检测和基础实例分割，启动快，并可在高级版不可用时继续完成任务。</p>
+          <p className="mt-3 text-xs font-bold text-slate-700">安装：随“多人修脸”基础组件自动安装，无需额外操作。</p>
+          <p className="mt-1 text-xs leading-5 text-slate-500">硬件：CPU 可运行；Intel、AMD、NVIDIA 显卡可选用 DirectML 加速。</p>
+          <div className="mt-3 space-y-1 text-xs text-slate-400"><p>{component?.provider ? `当前运行：${component.provider}` : component?.runtimeError || '等待组件状态'}</p><p>组件占用：{formatStorageSize(component?.sizeBytes)}</p></div>
+        </article>
+        <article className={`rounded-xl border p-4 ${advancedReady ? 'border-violet-200 bg-violet-50/30' : needsRepair ? 'border-amber-200 bg-amber-50/40' : 'border-slate-200 bg-white'}`}>
+          <div className="flex items-center justify-between gap-3"><h6 className="font-bold text-slate-800">增强版 · PairDETR + SAM 2.1</h6><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${advancedReady ? 'bg-violet-100 text-violet-700' : needsRepair ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{advancedReady ? '可用' : needsRepair ? '需要修复' : '未安装'}</span></div>
+          <p className="mt-2 text-xs leading-5 text-slate-500">改善多人密集、相互遮挡、脸与身体对应及精细分割。</p>
+          <p className="mt-3 text-xs font-bold text-slate-700">安装：将 <code>PhotoFlow-team-retouch-advanced-*.zip</code> 放入上方目录，再检查条件并安装。</p>
+          <div className="mt-3 rounded-lg border border-violet-100 bg-white/70 p-3 text-xs leading-5 text-slate-600">
+            <p className="font-bold text-slate-700">安装硬性条件</p>
+            <p>Windows x64、WSL 2、支持 WSL CUDA 的 NVIDIA 显卡与驱动、目标磁盘至少 35 GB 可用空间。</p>
+            <p className="mt-1 text-slate-500">建议：至少 8 GB 显存、16 GB 系统内存；超大图片和多人密集场景建议更高。显存与内存是性能建议，不作为安装硬门槛。</p>
+          </div>
+          <div className="mt-3 space-y-1 text-xs text-slate-400">{component?.advancedProvider && <p>当前运行：{component.advancedProvider}</p>}<p>当前占用：{component?.advancedSizeBytes ? formatStorageSize(component.advancedSizeBytes) : '未安装'}</p>{component?.advancedFreeBytes ? <p>目标磁盘剩余：{formatStorageSize(component.advancedFreeBytes)}</p> : null}</div>
+          {component?.advancedError && !advancedReady && <p className="mt-3 break-all rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-700">{component.advancedError}</p>}
+          <div className="mt-4 flex flex-wrap justify-end gap-2">
+            <button type="button" title="检查 WSL 2、NVIDIA 显卡与驱动、目标磁盘空间" onClick={() => void checkRequirements()} disabled={Boolean(busy) || !baseAvailable} className="dialog-secondary disabled:opacity-45">检查安装条件</button>
+            {advancedReady ? <><button type="button" onClick={() => void install(true)} disabled={Boolean(busy)} className="dialog-secondary inline-flex items-center gap-2"><Wrench size={14}/>修复增强包</button><button type="button" onClick={() => void uninstall()} disabled={Boolean(busy)} className="rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">卸载增强版</button></> : needsRepair ? <button type="button" onClick={() => void install(true)} disabled={Boolean(busy)} className="dialog-primary inline-flex items-center gap-2"><Wrench size={14}/>修复增强包</button> : <button type="button" onClick={() => void install(false)} disabled={Boolean(busy) || !baseAvailable} className="dialog-primary disabled:opacity-45">安装检测增强包</button>}
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <IdentityModelPackSettings component={component} adafaceReady={adafaceReady} osnetX1Ready={osnetX1Ready} onInstall={installIdentityModels}/>
     {busy && <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50 p-3" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.progress}>
-      <div className="flex justify-between gap-3 text-xs font-bold text-blue-700"><span>{progress.message || '正在处理高级引擎'}</span><span>{Math.round(progress.progress)}%</span></div>
+      <div className="flex justify-between gap-3 text-xs font-bold text-blue-700"><span>{progress.message || '正在处理人物检测增强版'}</span><span>{Math.round(progress.progress)}%</span></div>
       <div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-600 transition-[width]" style={{ width: `${Math.max(2, progress.progress)}%` }} /></div>
     </div>}
   </section>;
@@ -143,8 +212,8 @@ const LogSettings = ({ onNotice }: { onNotice: (message: string, duration?: numb
 const ComponentSettings = ({ components, installPath, loading, onRefresh, onComponentsChanged, onNotice }: { components: ComponentStatus[]; installPath: string; loading: boolean; onRefresh: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onNotice: (message: string, duration?: number) => void }) => {
   const appDialog = useAppDialog();
   const [busyId, setBusyId] = useState('');
-  const openFolder = async () => {
-    const result = await window.electronAPI.openComponentsFolder();
+  const openFolder = async (componentId?: string) => {
+    const result = await window.electronAPI.openComponentsFolder(componentId);
     if (!result.success) onNotice(`打开组件文件夹失败：${result.error || '未知错误'}`);
   };
   const install = async (component: ComponentStatus) => {
@@ -174,14 +243,14 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     } finally { setBusyId(''); }
   };
   return <section>
-    <div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="text-sm font-bold text-slate-800">组件安装与卸载</h4><p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">在这里管理可选组件。安装时请选择已解压、包含 component.json 的组件文件夹。</p></div><div className="flex gap-2"><button type="button" onClick={() => void onRefresh()} disabled={loading} className="dialog-secondary inline-flex items-center gap-2"><RotateCcw size={15} className={loading ? 'animate-spin' : ''}/>刷新状态</button><button type="button" onClick={() => void openFolder()} className="dialog-secondary inline-flex items-center gap-2"><FolderOpen size={15}/>打开组件文件夹</button></div></div>
-    {installPath && <div className="mt-3 break-all rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-xs text-slate-600">{installPath}</div>}
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="text-sm font-bold text-slate-800">组件安装与卸载</h4><p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">所有额外功能均以预编译 ZIP 发布，不需要安装 Python 或自行编译。每个组件只有一个目录，该组件的基础包和扩展包都放在里面。</p></div><div className="flex gap-2"><button type="button" onClick={() => void onRefresh()} disabled={loading} className="dialog-secondary inline-flex items-center gap-2"><RotateCcw size={15} className={loading ? 'animate-spin' : ''}/>刷新状态</button><button type="button" onClick={() => void openFolder()} className="dialog-secondary inline-flex items-center gap-2"><FolderOpen size={15}/>打开组件根目录</button></div></div>
+    {installPath && <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"><p className="text-xs font-bold text-slate-500">组件根目录</p><p className="mt-1 break-all font-mono text-xs text-slate-600">{installPath}</p></div>}
     <div className="mt-4 grid gap-3 sm:grid-cols-2">{components.map(component => {
       const stateText = !component.installed ? (component.compatible ? '未安装' : '不兼容') : component.source === 'development' ? '开发组件' : '已安装';
       const stateClass = component.installed ? 'text-emerald-700 bg-emerald-50 border-emerald-200' : component.compatible ? 'text-slate-600 bg-slate-50 border-slate-200' : 'text-amber-700 bg-amber-50 border-amber-200';
       const busy = busyId === component.id;
       const canUninstall = component.installed && component.source === 'application';
-      return <article key={component.id} className="flex flex-col rounded-xl border border-slate-200 p-4"><div className="flex items-start justify-between gap-3"><div><h5 className="text-sm font-bold text-slate-800">{component.name}</h5><p className="mt-1 text-xs leading-5 text-slate-500">{component.description}</p></div><span className={`shrink-0 rounded-full border px-2 py-1 text-[11px] font-bold ${stateClass}`}>{stateText}</span></div><p className="mt-3 text-xs text-slate-500">{component.installed ? [component.version && `版本 ${component.version}`, formatComponentSize(component.sizeBytes)].filter(Boolean).join(' · ') : `组件 ID：${component.id}`}</p>{component.error && <p className="mt-2 break-all text-xs leading-5 text-amber-700">{component.error}</p>}<div className="mt-auto flex justify-end pt-4">{!component.installed ? <button type="button" onClick={() => void install(component)} disabled={Boolean(busyId)} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}{component.compatible ? '安装组件' : '重新安装'}</button> : canUninstall ? <button type="button" onClick={() => void uninstall(component)} disabled={Boolean(busyId)} className="inline-flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}卸载组件</button> : <span className="text-xs text-slate-400">{component.source === 'development' ? '开发环境中由源码提供' : '随应用提供，不能单独卸载'}</span>}</div></article>;
+      return <article key={component.id} className="flex flex-col rounded-xl border border-slate-200 p-4"><div className="flex items-start justify-between gap-3"><div><h5 className="text-sm font-bold text-slate-800">{component.name}</h5><p className="mt-1 text-xs leading-5 text-slate-500">{component.description}</p></div><span className={`shrink-0 rounded-full border px-2 py-1 text-[11px] font-bold ${stateClass}`}>{stateText}</span></div><p className="mt-3 text-xs text-slate-500">{component.installed ? [component.version && `版本 ${component.version}`, formatComponentSize(component.sizeBytes)].filter(Boolean).join(' · ') : `组件 ID：${component.id}`}</p>{component.packagePath && <p className="mt-2 break-all font-mono text-[11px] leading-5 text-slate-400">{component.packagePath}</p>}{component.error && <p className="mt-2 break-all text-xs leading-5 text-amber-700">{component.error}</p>}<div className="mt-auto flex justify-end gap-2 pt-4"><button type="button" onClick={() => void openFolder(component.id)} className="dialog-secondary inline-flex items-center gap-1.5"><FolderOpen size={13}/>打开目录</button>{!component.installed ? <button type="button" onClick={() => void install(component)} disabled={Boolean(busyId)} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}{component.compatible ? '安装组件' : '重新安装'}</button> : canUninstall ? <button type="button" onClick={() => void uninstall(component)} disabled={Boolean(busyId)} className="inline-flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}卸载组件</button> : <span className="text-xs text-slate-400">{component.source === 'development' ? '开发环境中由源码提供' : '随应用提供，不能单独卸载'}</span>}</div></article>;
     })}</div>
     {!loading && !components.length && <p className="mt-4 text-sm text-slate-500">没有读取到组件注册信息。</p>}
   </section>;
@@ -205,6 +274,7 @@ const SettingsNavigator = ({ activeSection, components, onSelect }: { activeSect
     <div className="flex items-center gap-2 px-3 pb-3 pt-2 text-sm font-bold text-slate-800"><Settings size={17} className="text-blue-600"/>设置</div>
     <div className="space-y-1">{items.map(renderItem)}</div>
     <div className="mt-3 border-t border-slate-200 pt-3"><p className="px-3 pb-1.5 text-[11px] font-bold tracking-wide text-slate-400">组件</p><div className="space-y-1">{componentItems.map(renderItem)}</div></div>
+    <div className="mt-3 border-t border-slate-200 pt-3">{renderItem({ id: 'about', label: '关于', description: '版本、项目与开源许可', icon: <AtSign size={18}/> })}</div>
   </nav>;
 };
 
@@ -227,7 +297,7 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
       setSaving(false);
     }
   };
-  return <section className="flex min-h-full w-full flex-col bg-white"><header className="sticky top-0 z-20 flex items-center justify-between gap-4 border-b border-slate-200 bg-slate-100 p-5"><h3 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Settings size={20} className="text-blue-600"/>设置</h3><button type="button" onClick={() => void save()} disabled={!draft.workspacePath.trim() || saving} className="dialog-primary disabled:cursor-not-allowed disabled:opacity-45">{saving ? '保存中…' : '保存设置'}</button></header><div className="mx-auto w-full max-w-4xl space-y-7 p-6">
+  return <section className="flex min-h-full w-full flex-col bg-white"><header className="sticky top-0 z-20 flex items-center justify-between gap-4 border-b border-slate-200 bg-slate-100 p-5"><h3 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Settings size={20} className="text-blue-600"/>设置</h3>{activeSection !== 'about' && <button type="button" onClick={() => void save()} disabled={!draft.workspacePath.trim() || saving} className="dialog-primary disabled:cursor-not-allowed disabled:opacity-45">{saving ? '保存中…' : '保存设置'}</button>}</header><div className="mx-auto w-full max-w-4xl space-y-7 p-6">
     {activeSection === 'general' && <>
     <section><h4 className="text-sm font-bold text-slate-800">界面配色</h4><div className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">{([['system', '适应系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([theme, label]) => <button key={theme} onClick={() => update('theme', theme)} className={`rounded-md px-4 py-2 text-sm font-bold transition ${draft.theme === theme ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}</div></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">工作目录</h4><p className="mt-1 text-sm leading-6 text-slate-500">项目会直接放在选中的客户文件夹中；只有选择磁盘根目录时，才会使用根目录下的“照片流”文件夹。</p><div className="mt-4"><WorkspaceFolderPicker value={draft.workspacePath} onChange={workspacePath => update('workspacePath', workspacePath)}/></div></section>
@@ -242,15 +312,14 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
     </>}
     {activeSection === 'components' && <ComponentSettings components={components} installPath={componentInstallPath} loading={componentsLoading} onRefresh={onRefreshComponents} onComponentsChanged={onComponentsChanged} onNotice={onNotice}/>}
     {activeSection === 'team-retouch' && <>
-    <section><h4 className="text-sm font-bold text-slate-800">多人修脸</h4><p className="mt-1 text-sm leading-6 text-slate-500">通常手机修图软件能导出的画质长边不超过 4000 像素，因此建议将单张工作图裁剪到 4000 像素以内。相邻人物会尽量合并到同一张工作图。</p></section>
+    <section><h4 className="text-sm font-bold text-slate-800">多人修脸</h4><label className="settings-check"><input type="checkbox" checked={teamRetouchSettings.useGpu} onChange={event => updateTeamRetouchSettings({ ...teamRetouchSettings, useGpu: event.target.checked })}/><span><span className="block">优先使用 GPU 进行全身人物检测</span><span className="mt-1 block text-xs leading-5 text-slate-500">关闭时固定使用 CPU；开启后若显卡不支持或运行失败，基础检测会自动回退 CPU。</span></span></label></section>
     <div className="border-t border-slate-100 pt-6"><TeamRetouchEngineSettings component={teamRetouchComponent} onRefresh={onRefreshComponents} onNotice={onNotice}/></div>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">默认识别模式</h4><p className="mt-1 text-xs leading-5 text-slate-500">“多人修脸”界面仍可为单次任务临时切换。高级模式不可用时，只有“自动”会安全降级。</p><div className="mt-3 grid gap-3 md:grid-cols-3">{([
       ['auto', '自动（推荐）', '高级可用时使用高级方案，否则使用基础方案完成任务。'],
       ['basic', '基础模式', '固定使用 RTMDet，不启动 WSL，速度快且资源占用较低。'],
       ['advanced', '高级模式', '必须使用 PairDETR + SAM2；不可用时停止并提示修复。'],
     ] as const).map(([mode, label, description]) => <label key={mode} className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.backendMode === mode ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'} ${mode === 'advanced' && !teamRetouchComponent?.advancedAvailable ? 'opacity-60' : ''}`}><input type="radio" name="team-retouch-backend-mode" value={mode} checked={teamRetouchSettings.backendMode === mode} disabled={mode === 'advanced' && !teamRetouchComponent?.advancedAvailable} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, backendMode: mode })} className="mr-2"/><span className="font-bold text-slate-800">{label}</span><span className="mt-2 block text-xs leading-5 text-slate-500">{description}</span></label>)}</div></section>
-    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">人物超过 4000 像素时</h4><div className="mt-3 grid gap-3 md:grid-cols-2"><label className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.oversizeCropMode === 'face-centered' ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="oversize-crop-mode" value="face-centered" checked={teamRetouchSettings.oversizeCropMode === 'face-centered'} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: 'face-centered' })} className="mr-2"/><span className="font-bold text-slate-800">保持 4000 像素（推荐）</span><span className="mt-2 block text-xs leading-5 text-slate-500">以脸为中心裁剪，可能只保留脸和部分身体；更适合手机传输与修图。</span></label><label className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.oversizeCropMode === 'expand' ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="oversize-crop-mode" value="expand" checked={teamRetouchSettings.oversizeCropMode === 'expand'} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: 'expand' })} className="mr-2"/><span className="font-bold text-slate-800">扩大裁剪，保留完整人物</span><span className="mt-2 block text-xs leading-5 text-slate-500">工作图可以超过 4000 像素，完整保留人物，但可能会使部分手机后期软件无法导出原尺寸而影响成图画质。</span></label></div></section>
-    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">人物检测</h4><label className="settings-check"><input type="checkbox" checked={teamRetouchSettings.useGpu} onChange={event => updateTeamRetouchSettings({ ...teamRetouchSettings, useGpu: event.target.checked })}/><span><span className="block">优先使用 GPU 进行全身人物检测</span><span className="mt-1 block text-xs leading-5 text-slate-500">关闭时固定使用 CPU；开启后若显卡不支持或运行失败，组件会自动回退 CPU。</span></span></label></section>
+    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">人物超过 4000 像素时</h4><p className="mt-1 text-xs leading-5 text-slate-500">通常手机修图软件能导出的画质长边不超过 4000 像素，因此建议将单张工作图裁剪到 4000 像素以内。相邻人物会尽量合并到同一张工作图。</p><div className="mt-3 grid gap-3 md:grid-cols-2"><label className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.oversizeCropMode === 'face-centered' ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="oversize-crop-mode" value="face-centered" checked={teamRetouchSettings.oversizeCropMode === 'face-centered'} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: 'face-centered' })} className="mr-2"/><span className="font-bold text-slate-800">保持 4000 像素（推荐）</span><span className="mt-2 block text-xs leading-5 text-slate-500">以脸为中心裁剪，可能只保留脸和部分身体；更适合手机传输与修图。</span></label><label className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.oversizeCropMode === 'expand' ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="oversize-crop-mode" value="expand" checked={teamRetouchSettings.oversizeCropMode === 'expand'} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: 'expand' })} className="mr-2"/><span className="font-bold text-slate-800">扩大裁剪，保留完整人物</span><span className="mt-2 block text-xs leading-5 text-slate-500">工作图可以超过 4000 像素，完整保留人物，但可能会使部分手机后期软件无法导出原尺寸而影响成图画质。</span></label></div></section>
     </>}
     {activeSection === 'research-tools' && <>
     <section><h4 className="text-sm font-bold text-slate-800">调研整理</h4><p className="mt-1 text-sm leading-6 text-slate-500">设置调研素材读取目录、转场检测灵敏度和短片段过滤规则。</p></section>
@@ -266,7 +335,81 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">导入设置</h4><label className="settings-check"><input type="checkbox" checked={draft.fileImport.preserveOriginal} onChange={event => update('fileImport', { preserveOriginal: event.target.checked })}/><span><span className="block">导入后保留原始文件</span><span className="mt-1 block text-xs leading-5 text-slate-500">开启此项后导入的文件会保留源文件。这可能会导致大量的文件重复。</span></span></label><label className="settings-check"><input type="checkbox" checked={draft.brollImport.splitLargeFiles} onChange={event => update('brollImport', { ...draft.brollImport, splitLargeFiles: event.target.checked })}/><span><span className="block">花絮视频超过 4GB 时自动分割</span><span className="mt-1 block text-xs leading-5 text-slate-500">用于兼容 FAT32 和部分云盘的单文件大小限制。</span></span></label></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">PNG 转 JPG</h4><label className="form-label">默认导出 JPG 画质，此为在文件夹选择该功能之后的默认媒体文件转换画质。此功能用于部分软件无法直接打开png文件的情况。</label><select value={draft.imageConversion.jpgQuality} onChange={event => update('imageConversion', { jpgQuality: Number(event.target.value) })} className="form-input"><option value={100}>最高（100）</option><option value={95}>高（95）</option><option value={85}>标准（85）</option><option value={75}>节省空间（75）</option></select></section>
     </>}
+    {activeSection === 'about' && <AboutSettings/>}
   </div></section>;
+};
+
+const AboutSettings = () => {
+  const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'latest' | 'error'>('idle');
+  const checkForUpdates = async () => {
+    setUpdateStatus('checking');
+    const result = await window.electronAPI.checkForUpdates();
+    setUpdateStatus(result.success && !result.updateAvailable ? 'latest' : result.success ? 'idle' : 'error');
+  };
+  const openExternal = (url: string) => window.electronAPI.openExternal(url);
+
+  return <div className="space-y-7 text-sm leading-6 text-slate-600">
+    <section>
+      <p className="text-lg font-bold text-slate-800">by秋也寻</p>
+      <div className="mt-1 flex flex-wrap items-center gap-3">
+        <p className="font-medium text-blue-600">版本 26.7.26</p>
+        <button type="button" onClick={() => void checkForUpdates()} disabled={updateStatus === 'checking'} className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-0.5 text-xs font-bold leading-5 text-blue-700 transition hover:bg-blue-100 disabled:cursor-wait disabled:opacity-60">{updateStatus === 'checking' ? '正在检查…' : '检查更新'}</button>
+        {updateStatus === 'latest' && <span className="text-xs text-emerald-600">已是最新版本</span>}
+        {updateStatus === 'error' && <span className="text-xs text-red-500">检查失败，请稍后重试</span>}
+      </div>
+    </section>
+
+    <section className="rounded-xl border border-blue-100 bg-blue-50 p-4">
+      <h4 className="text-base font-bold text-slate-800">项目与联系</h4>
+      <div className="mt-3 flex flex-col items-start gap-2 leading-5">
+        <button type="button" onClick={() => openExternal('https://github.com/akiyastudio/photoflow')} className="inline-flex items-center gap-1.5 break-all text-left font-medium text-blue-600 hover:underline">https://github.com/akiyastudio/photoflow <ExternalLink size={13} className="shrink-0"/></button>
+        <button type="button" onClick={() => openExternal('mailto:akiyastudio@qq.com')} className="inline-flex items-center gap-1.5 font-medium text-blue-600 hover:underline">akiyastudio@qq.com <ExternalLink size={13}/></button>
+      </div>
+    </section>
+
+    <section className="border-t border-slate-200 pt-5"><h4 className="text-base font-bold text-slate-800">使用提示</h4><p className="mt-1">软件尚未经过充分测试。使用前请备份重要数据；作者不对使用本软件造成的损失负责。</p></section>
+
+    <section className="border-t border-slate-200 pt-6">
+      <div className="flex items-center gap-2"><Scale size={18} className="text-blue-600"/><h4 className="text-base font-bold text-slate-800">开源许可</h4></div>
+      <p className="mt-2 text-xs leading-5 text-slate-500">这里列出随主程序、可选组件和增强包分发的主要第三方软件与模型。许可证归其各自权利人所有；非商业使用也必须遵守相应条款。</p>
+      <h5 className="mt-5 font-bold text-slate-800">模型与权重</h5>
+      <p className="mt-1 text-xs leading-5 text-slate-500">SHA-256 对应软件实际随附文件；下载地址指向上游原始权重时，其哈希可能与软件转换后的 ONNX 不同。</p>
+      <div className="mt-4 space-y-4">
+        {FORMAL_MODEL_LICENSES.map(model => <article key={model.bundledFile} className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <div className="flex flex-wrap items-start justify-between gap-3"><div><h5 className="font-bold text-slate-900">{model.name}</h5><p className="mt-0.5 text-xs text-slate-500">{model.purpose}</p></div><span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-bold text-slate-600">{model.license}</span></div>
+          <dl className="mt-4 grid gap-x-5 gap-y-3 text-xs md:grid-cols-[7rem_minmax(0,1fr)]">
+            <dt className="font-bold text-slate-500">随附文件</dt><dd className="break-all font-mono text-slate-700">{model.bundledFile}</dd>
+            <dt className="font-bold text-slate-500">版本</dt><dd className="text-slate-700">{model.version}</dd>
+            <dt className="font-bold text-slate-500">SHA-256</dt><dd className="break-all font-mono text-slate-700">{model.sha256}</dd>
+            <dt className="font-bold text-slate-500">下载说明</dt><dd className="text-slate-700">{model.downloadNote}</dd>
+          </dl>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button type="button" onClick={() => openExternal(model.sourceUrl)} className="dialog-secondary inline-flex items-center gap-1.5 text-xs">来源 <ExternalLink size={13}/></button>
+            <button type="button" onClick={() => openExternal(model.downloadUrl)} className="dialog-secondary inline-flex items-center gap-1.5 text-xs">下载 <ExternalLink size={13}/></button>
+          </div>
+          <details className="mt-4 rounded-lg border border-slate-200 bg-white">
+            <summary className="cursor-pointer select-none px-3 py-2 text-xs font-bold text-slate-700">许可证全文</summary>
+            <pre className="max-h-80 overflow-auto whitespace-pre-wrap border-t border-slate-200 p-3 font-mono text-[11px] leading-5 text-slate-600">{model.licenseText}</pre>
+          </details>
+        </article>)}
+      </div>
+
+      <h5 className="mt-7 font-bold text-slate-800">第三方软件与运行库</h5>
+      <p className="mt-1 text-xs leading-5 text-slate-500">构建工具若没有进入发行包则不在此列。Chromium 和高级 WSL 镜像还包含大量传递依赖，发布包应同时保留其机器可读的完整第三方声明。</p>
+      <div className="mt-4 space-y-5">
+        {(['主程序', '本地组件', '人物检测增强包'] as const).map(group => <section key={group}>
+          <h6 className="text-xs font-bold text-slate-500">{group}</h6>
+          <div className="mt-2 grid gap-3 md:grid-cols-2">
+            {THIRD_PARTY_SOFTWARE_LICENSES.filter(item => item.group === group).map(item => <article key={`${item.group}-${item.name}`} className={`rounded-xl border p-4 ${item.attention ? 'border-amber-200 bg-amber-50/50' : 'border-slate-200 bg-slate-50'}`}>
+              <div className="flex flex-wrap items-start justify-between gap-2"><div><h6 className="font-bold text-slate-900">{item.name}</h6><p className="mt-0.5 text-xs text-slate-500">{item.version} · {item.purpose}</p></div><span className={`rounded-full border bg-white px-2.5 py-1 text-[11px] font-bold ${item.attention ? 'border-amber-200 text-amber-700' : 'border-slate-200 text-slate-600'}`}>{item.license}</span></div>
+              {item.note && <p className={`mt-3 text-xs leading-5 ${item.attention ? 'text-amber-800' : 'text-slate-600'}`}>{item.note}</p>}
+              <div className="mt-3 flex flex-wrap gap-2"><button type="button" onClick={() => openExternal(item.sourceUrl)} className="dialog-secondary inline-flex items-center gap-1.5 text-xs">来源 <ExternalLink size={13}/></button><button type="button" onClick={() => openExternal(item.licenseUrl)} className="dialog-secondary inline-flex items-center gap-1.5 text-xs">许可证 <ExternalLink size={13}/></button></div>
+            </article>)}
+          </div>
+        </section>)}
+      </div>
+    </section>
+  </div>;
 };
 
 const MediaCacheSettings = ({ config, onChange }: { config: AppConfig['mediaCache']; onChange: (config: AppConfig['mediaCache']) => void }) => {

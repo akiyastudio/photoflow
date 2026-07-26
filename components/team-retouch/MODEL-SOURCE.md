@@ -33,17 +33,23 @@ YuNet supplies five facial landmarks, SFace supplies aligned face embeddings,
 and OSNet supplies 512-dimensional full-body appearance embeddings. OSNet is a
 supporting signal only; body-only matches remain review candidates.
 
-## Experimental identity models (not distributed)
+## Optional identity model pack
 
-For local evaluation, the identity engine can use an AdaFace IR-18 face model
-and an OSNet x1.0 body model from `.model-lab/`. These files are intentionally
-excluded from the component and application packages. The stable packaged
-fallback remains SFace plus OSNet x0.25.
+The identity engine can use an AdaFace IR-18 face model and an OSNet x1.0 body
+model. They remain outside the base application and component, but release
+builds publish them as a prepared optional model pack. End users do not need
+Python, PyTorch, the upstream repositories, or a local ONNX conversion step.
+The stable packaged fallback remains SFace plus OSNet x0.25.
 
 - AdaFace upstream: `mk-minchul/AdaFace`. The reproducible conversion helper is
   `scripts/export-team-retouch-adaface.py`.
 - OSNet x1.0 upstream: the official `kaiyangzhou/osnet` Hugging Face repository.
   It uses the same `scripts/export-team-retouch-osnet.py` conversion helper.
+
+The prepared ZIP is built with `npm run build:model-packs`. It is placed,
+without extraction, in `%LOCALAPPDATA%/PhotoFlow/components/team-retouch` and
+installed from Settings. The ZIP includes a manifest, SHA-256 values, upstream
+links, and license texts.
 
 The engine also accepts explicit local paths through
 `PHOTOFLOW_ADAFACE_MODEL` and `PHOTOFLOW_OSNET_MODEL`. This allows development

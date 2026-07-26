@@ -3,11 +3,6 @@
 @tailwind utilities;
 
 .brand-logo { object-fit: contain; }
-
-.brand-logo-dark { filter: brightness(1.35) saturate(.9); }
-.brand-logo-dark-only { display: none; }
-html.dark .brand-logo-light-only { display: none; }
-html.dark .brand-logo-dark-only { display: block; }
 .app-titlebar { -webkit-app-region: no-drag; }
 .app-titlebar-brand-region, .app-window-drag-region { -webkit-app-region: drag; cursor:default; }
 .app-titlebar-control {

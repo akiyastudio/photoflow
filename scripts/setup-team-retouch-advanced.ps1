@@ -45,13 +45,33 @@ $gpuNames = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinu
 if (-not ($gpuNames | Where-Object { $_ -match 'NVIDIA' })) {
     throw 'The advanced engine requires an NVIDIA GPU and an offline-installed driver that supports CUDA in WSL 2.'
 }
+$nvidiaSmi = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
+$nvidiaSmiPath = if ($nvidiaSmi) { $nvidiaSmi.Source } else { '' }
+if (-not $nvidiaSmi) {
+    $systemNvidiaSmi = Join-Path $env:WINDIR 'System32\nvidia-smi.exe'
+    if (Test-Path -LiteralPath $systemNvidiaSmi -PathType Leaf) { $nvidiaSmiPath = $systemNvidiaSmi }
+}
+if (-not $nvidiaSmiPath) {
+    throw 'NVIDIA driver diagnostics are unavailable. Install a current NVIDIA driver with WSL 2 CUDA support and try again.'
+}
+$gpuStatus = @(& $nvidiaSmiPath --query-gpu=name,driver_version,memory.total --format=csv,noheader,nounits 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $gpuStatus.Count) {
+    throw 'The NVIDIA driver is not responding. Reinstall or update the NVIDIA driver before installing the advanced engine.'
+}
+$gpuSummary = ($gpuStatus | ForEach-Object {
+    $parts = ([string]$_).Split(',') | ForEach-Object { $_.Trim() }
+    if ($parts.Count -ge 3) {
+        $vramGb = [math]::Round(([double]$parts[2]) / 1024, 1)
+        "$($parts[0]), driver $($parts[1]), $vramGb GB VRAM"
+    } else { ([string]$_).Trim() }
+} | Where-Object { $_ }) -join '; '
 $driveRoot = [IO.Path]::GetPathRoot($InstallRoot)
 $drive = if ($driveRoot) { [IO.DriveInfo]::new($driveRoot) } else { $null }
 if ($drive -and $drive.IsReady -and $drive.AvailableFreeSpace -lt 35GB -and -not (Test-Path -LiteralPath $stableVhd -PathType Leaf)) {
     throw "The target disk needs at least 35 GB free. Available: $([math]::Round($drive.AvailableFreeSpace / 1GB, 1)) GB"
 }
 if ($CheckOnly) {
-    Write-Host "OFFLINE_PREFLIGHT_OK|WSL 2 and NVIDIA are ready|$([math]::Round($drive.AvailableFreeSpace / 1GB, 1)) GB free"
+    Write-Host "OFFLINE_PREFLIGHT_OK|WSL 2 ready|$gpuSummary|$([math]::Round($drive.AvailableFreeSpace / 1GB, 1)) GB free"
     exit 0
 }
 if (-not $PackagePath.Trim()) { throw 'Select a PhotoFlow advanced engine offline package.' }
@@ -108,7 +128,7 @@ try {
     $actualHash = (Get-FileHash -LiteralPath $sourceVhd -Algorithm SHA256).Hash.ToLowerInvariant()
     if (-not $manifest.vhdSha256 -or $actualHash -ne ([string]$manifest.vhdSha256).ToLowerInvariant()) { throw 'The advanced engine disk checksum does not match the package manifest.' }
 
-    $distroNames = @(& wsl.exe --list --quiet) | ForEach-Object { $_.Replace([char]0, '').Trim() } | Where-Object { $_ }
+    $distroNames = @(& wsl.exe --list --quiet) | ForEach-Object { $_.Replace([string][char]0, '').Trim() } | Where-Object { $_ }
     $registered = $distroNames -contains $DistroName
     if ($registered -and -not $Repair) { throw 'The advanced environment is already registered. Use Repair to replace it from an offline package.' }
     if ($registered) {

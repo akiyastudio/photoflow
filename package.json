@@ -13,6 +13,8 @@
     "build": "tsc -b && vite build",
     "build:python": "node scripts/prepare-ffmpeg.cjs && node scripts/build-python.cjs",
     "build:components": "node scripts/build-components.cjs",
+    "build:model-packs": "node scripts/build-team-retouch-identity-model-pack.cjs",
+    "build:advanced-package": "node scripts/build-team-retouch-advanced-package.cjs",
     "setup:team-retouch": "node scripts/setup-team-retouch.cjs",
     "build:team-retouch": "npm run setup:team-retouch && node scripts/build-components.cjs --only team-retouch",
     "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
@@ -32,7 +34,7 @@
     "electron": "npm run build:shell-thumbnail && npm run build:recycle-bin-service && wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
     "electron:dev": "concurrently -k \"cross-env BROWSER=none npm run dev\" \"npm run electron\"",
     "cleanup:electron-artifacts": "node scripts/cleanup-electron-artifacts.cjs",
-    "electron:build": "npm run generate:icon && npm run build && npm run build:python && npm run build:components && npm run build:shell-thumbnail && npm run build:recycle-bin-service && electron-builder && npm run cleanup:electron-artifacts"
+    "electron:build": "npm run generate:icon && npm run build && npm run build:python && npm run build:components && npm run build:model-packs && npm run build:shell-thumbnail && npm run build:recycle-bin-service && electron-builder && npm run cleanup:electron-artifacts"
   },
   "build": {
     "appId": "com.photoflow.toolkit",
