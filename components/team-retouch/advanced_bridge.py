@@ -87,7 +87,7 @@ def run_shell(command, timeout=900):
             if not is_unavailable_distro_error(error):
                 raise
             missing_errors.append(f"{candidate}: {error}")
-    raise RuntimeError("；".join(missing_errors) or "没有可用的多人修脸 WSL 发行版")
+    raise RuntimeError("；".join(missing_errors) or "没有可用的团片协作 WSL 发行版")
 
 
 class _WslJsonService:

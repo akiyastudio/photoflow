@@ -53,26 +53,32 @@ Function PhotoFlowComponentPage
   Pop $1
   ${NSD_CreateCheckbox} 0 40u 100% 14u "多人裁片修图（GPU/CPU 人物检测与高分辨率拼回）"
   Pop $PhotoFlowGpuComponentCheckbox
-  ${NSD_Uncheck} $PhotoFlowGpuComponentCheckbox
   ${If} $PhotoFlowGpuComponentArchive == ""
+    ${NSD_Uncheck} $PhotoFlowGpuComponentCheckbox
     ${NSD_SetText} $PhotoFlowGpuComponentCheckbox "多人裁片修图（安装介质中未找到）"
     EnableWindow $PhotoFlowGpuComponentCheckbox 0
+  ${Else}
+    ${NSD_Check} $PhotoFlowGpuComponentCheckbox
   ${EndIf}
 
   ${NSD_CreateCheckbox} 0 64u 100% 14u "调研整理（视频分镜、图片去重与资料整理）"
   Pop $PhotoFlowResearchComponentCheckbox
-  ${NSD_Uncheck} $PhotoFlowResearchComponentCheckbox
   ${If} $PhotoFlowResearchComponentArchive == ""
+    ${NSD_Uncheck} $PhotoFlowResearchComponentCheckbox
     ${NSD_SetText} $PhotoFlowResearchComponentCheckbox "调研整理（安装介质中未找到）"
     EnableWindow $PhotoFlowResearchComponentCheckbox 0
+  ${Else}
+    ${NSD_Check} $PhotoFlowResearchComponentCheckbox
   ${EndIf}
 
   ${NSD_CreateCheckbox} 0 88u 100% 14u "Office 图片提取（提取 Word、PowerPoint、Excel 内嵌图片）"
   Pop $PhotoFlowOfficeMediaComponentCheckbox
-  ${NSD_Uncheck} $PhotoFlowOfficeMediaComponentCheckbox
   ${If} $PhotoFlowOfficeMediaComponentArchive == ""
+    ${NSD_Uncheck} $PhotoFlowOfficeMediaComponentCheckbox
     ${NSD_SetText} $PhotoFlowOfficeMediaComponentCheckbox "Office 图片提取（安装介质中未找到）"
     EnableWindow $PhotoFlowOfficeMediaComponentCheckbox 0
+  ${Else}
+    ${NSD_Check} $PhotoFlowOfficeMediaComponentCheckbox
   ${EndIf}
 
   ${NSD_CreateLabel} 0 116u 100% 26u "安装后也可以在照片流的“组件管理”中单独安装或卸载。"

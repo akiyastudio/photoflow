@@ -166,6 +166,7 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
     # 3. 收集并计算所有候选匹配对 (粗筛)
     log_info("正在进行深度交叉比对...")
     potential_matches = []
+    best_candidates_b = {}
     
     total_a = len(files_a)
     for idx, (file_a, (path_a, coarse_a, fine_a, kind_a)) in enumerate(files_a.items()):
@@ -173,9 +174,12 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
             if kind_a != kind_b:
                 continue
             rough_dist = hamming_distance(coarse_a, coarse_b)
+            fine_dist = hamming_distance(fine_a, fine_b)
+            candidate = (fine_dist, rough_dist, file_a)
+            if file_b not in best_candidates_b or candidate < best_candidates_b[file_b]:
+                best_candidates_b[file_b] = candidate
             # 如果粗略差距在阈值内，视为候选对象
             if rough_dist <= threshold:
-                fine_dist = hamming_distance(fine_a, fine_b)
                 # Very different fine hashes are more likely a false match than
                 # an edited version of the same frame.
                 if fine_dist <= 96:
@@ -240,7 +244,32 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
             log_progress(f"重命名进度: {idx}/{total_matches}", 50 + int(idx/total_matches*40))
 
     # 5. 处理未匹配
-    unmatched_b = [f for f in files_b if f not in processed_b]
+    unmatched_b = [f for f in list_b if f not in processed_b]
+    suggestions = []
+    for file_b in unmatched_b:
+        candidate = best_candidates_b.get(file_b)
+        if candidate is None:
+            continue
+        fine_dist, _rough_dist, file_a = candidate
+        name, _reference_ext = os.path.splitext(file_a)
+        _current_name, ext = os.path.splitext(file_b)
+        new_name = f"{name}{ext}"
+        new_path_b = os.path.join(folder_b, new_name)
+        counter = 1
+        source_path_b = os.path.join(folder_b, file_b)
+        while (new_name.casefold() in reserved_targets
+               or (os.path.exists(new_path_b) and os.path.normcase(os.path.abspath(new_path_b)) != os.path.normcase(os.path.abspath(source_path_b)))):
+            new_name = f"{name}_{counter}{ext}"
+            new_path_b = os.path.join(folder_b, new_name)
+            counter += 1
+        reserved_targets.add(new_name.casefold())
+        suggestions.append({
+            "source": file_b,
+            "reference": file_a,
+            "target": new_name,
+            "confidence": "候选",
+            "distance": fine_dist,
+        })
     if unmatched_b and not preview_only and move_unmatched:
         sub_folder = os.path.join(folder_b, "未匹配的图片")
         os.makedirs(sub_folder, exist_ok=True)
@@ -258,7 +287,7 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
     
     stats = (f"待处理组匹配成功:{len(processed_b)}/{len(files_b)}, 参照组已被匹配:{sum(1 for v in matched_a.values() if v>0)}/{len(files_a)}")
     if preview_only:
-        emit('preview', f"预览完成：找到 {len(preview_matches)} 个匹配", {"matches": preview_matches, "unmatched": unmatched_b, "unmatchedReference": unmatched_a})
+        emit('preview', f"预览完成：找到 {len(preview_matches)} 个匹配", {"matches": preview_matches, "suggestions": suggestions, "unmatched": unmatched_b, "unmatchedReference": unmatched_a})
         log_success(f"预览完成，尚未修改文件。{stats}")
         return True
     log_success(f"完成! {stats}")

@@ -151,8 +151,11 @@ const normalizeMediaCacheSizeGB = (value, fallback = 50) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
 };
-const workspaceWatchChanges = new Set();
+const workspaceWatchChanges = new Map();
 const mediaTrackingTimers = new Map();
+const isInternalWorkspaceChange = fileName => String(fileName || '')
+  .split(/[\\/]/)
+  .some(segment => segment.toLowerCase().endsWith('.photoflow-part') || /^\.photoflow-(?:paste|replace|undo)-/i.test(segment));
 const trackedVersionThumbnailCopies = new Map();
 const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
@@ -742,7 +745,9 @@ const reconcileWorkspaceState = async root => {
       metadata: { root },
     }, async task => {
       task.report(5, '正在读取项目目录');
+      const previousProjectsSnapshot = JSON.stringify(workspaceCatalogs.get(root)?.projects || []);
       const catalog = await refreshWorkspaceCatalog(root);
+      const catalogChanged = previousProjectsSnapshot !== JSON.stringify(catalog.projects || []);
       let completed = 0;
       for (const project of catalog.projects) {
         scheduleMediaTrackingScan(root, project.name);
@@ -752,11 +757,13 @@ const reconcileWorkspaceState = async root => {
         completed += 1;
         task.report(10 + Math.round((completed / Math.max(1, catalog.projects.length)) * 85), `正在核对 ${project.name}`);
       }
-      if (mainWindow && !mainWindow.isDestroyed()) {
+      if (catalogChanged && mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('workspace-projects-changed', { root, reconciled: true });
-        mainWindow.webContents.send('workspace-files-changed', { root, fileName: '', reconciled: true });
       }
-      writeLog('info', 'Periodic workspace reconciliation completed', { root, projects: catalog.projects.length });
+      // File changes are delivered by the workspace watcher. A blank periodic
+      // file event forced every open directory to redraw even when nothing on
+      // disk had changed.
+      writeLog('info', 'Periodic workspace reconciliation completed', { root, projects: catalog.projects.length, catalogChanged });
       return catalog;
     });
   } catch (error) {
@@ -800,11 +807,20 @@ const watchWorkspace = (root) => {
   if (watchedWorkspacePath === root && workspaceWatcher) return;
   stopWorkspaceWatcher();
   try {
-    workspaceWatcher = fs.watch(root, { recursive: process.platform !== 'linux' }, (_eventType, fileName) => {
-      if (fileName) workspaceWatchChanges.add(String(fileName));
+    workspaceWatcher = fs.watch(root, { recursive: process.platform !== 'linux' }, (eventType, fileName) => {
+      // File operations are assembled in hidden staging paths and committed
+      // atomically. Watching those temporary writes caused thumbnail work and
+      // repeated renderer refreshes for every file in a large copy operation.
+      if (isInternalWorkspaceChange(fileName)) return;
+      if (!fileName) return;
+      const changedName = String(fileName);
+      const normalizedEventType = eventType === 'rename' ? 'rename' : 'change';
+      if (workspaceWatchChanges.get(changedName) !== 'rename') workspaceWatchChanges.set(changedName, normalizedEventType);
       if (workspaceWatchTimer) clearTimeout(workspaceWatchTimer);
       workspaceWatchTimer = setTimeout(() => {
-        const changedNames = [...workspaceWatchChanges];
+        const changedEntries = [...workspaceWatchChanges];
+        const changedNames = changedEntries.map(([changedName]) => changedName);
+        const changedEventTypes = new Map(changedEntries);
         workspaceWatchChanges.clear();
         if (thumbnailService) {
           const changesByProject = new Map();
@@ -835,8 +851,8 @@ const watchWorkspace = (root) => {
         if (!changedNames.length) for (const project of catalog?.projects || []) changedProjects.add(project.name);
         for (const projectName of changedProjects) scheduleMediaTrackingScan(root, projectName);
         if (mainWindow && !mainWindow.isDestroyed()) {
-          for (const changedName of changedNames.length ? changedNames : ['']) {
-            mainWindow.webContents.send('workspace-files-changed', { root, fileName: changedName });
+          for (const changedName of changedNames) {
+            mainWindow.webContents.send('workspace-files-changed', { root, fileName: changedName, eventType: changedEventTypes.get(changedName) || 'rename' });
           }
         }
         if (catalogMayHaveChanged) {
@@ -1704,6 +1720,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('before-quit', () => {
+  pluginService?.stop?.();
   stopWorkspaceWatcher();
   stopShellThumbnailProcess();
   workspaceDatabase.stop();

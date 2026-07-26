@@ -28,8 +28,8 @@ const registerVersionIpc = context => {
   };
   const teamWorkflowOutput = (workspacePath, status, projectName) => {
     const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-    const outputDirectory = path.resolve(projectPath, '多人修脸');
-    if (!isInside(projectPath, outputDirectory) || path.basename(outputDirectory) !== '多人修脸') throw new Error('工作流程目录无效');
+    const outputDirectory = path.resolve(projectPath, '团片协作');
+    if (!isInside(projectPath, outputDirectory) || path.basename(outputDirectory) !== '团片协作') throw new Error('工作流程目录无效');
     const workflowDataDirectory = path.join(getWorkspaceDataRoot(workspacePath), 'team-retouch', 'workflows');
     const workflowKey = crypto.createHash('sha256').update(`${String(status)}\0${String(projectName)}`).digest('hex');
     return {
@@ -104,6 +104,23 @@ const registerVersionIpc = context => {
       await fs.promises.mkdir(workflowDataDirectory, { recursive: true });
       await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
     }
+  };
+  const refreshWorkflowTaskSourceFiles = async (workspaceRoot, status, projectName, taskId, sourcePath) => {
+    if (!status || !projectName || !taskId || !sourcePath || !fs.existsSync(sourcePath)) return 0;
+    const { outputDirectory, manifest } = await readTeamWorkflowManifest(workspaceRoot, status, projectName);
+    if (!manifest) return 0;
+    let refreshedCount = 0;
+    for (const group of manifest.groups || []) {
+      for (const item of group.items || []) {
+        if (item.taskId !== taskId || !item.relativePath) continue;
+        const destination = path.resolve(outputDirectory, item.relativePath);
+        if (!isInside(outputDirectory, destination)) continue;
+        await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+        await replaceFileAtomic(sourcePath, destination);
+        refreshedCount += 1;
+      }
+    }
+    return refreshedCount;
   };
   const removeCleanupArtifacts = async (workspaceRoot, cleanup = {}) => {
     const dataRoot = path.resolve(getWorkspaceDataRoot(workspaceRoot));
@@ -370,12 +387,13 @@ const registerVersionIpc = context => {
       return {
         success: true,
         matches: Array.isArray(preview.data?.matches) ? preview.data.matches : [],
+        suggestions: Array.isArray(preview.data?.suggestions) ? preview.data.suggestions : [],
         unmatched: Array.isArray(preview.data?.unmatched) ? preview.data.unmatched : [],
         unmatchedReference: Array.isArray(preview.data?.unmatchedReference) ? preview.data.unmatchedReference : [],
       };
     } catch (error) {
       writeLog('error', 'Unable to compare progress version folders', { projectName, referenceRelativePath, sourceRelativePath, error: error.message || String(error) });
-      return { success: false, error: error.message || String(error), matches: [], unmatched: [], unmatchedReference: [] };
+      return { success: false, error: error.message || String(error), matches: [], suggestions: [], unmatched: [], unmatchedReference: [] };
     }
   });
   
@@ -553,6 +571,10 @@ const registerVersionIpc = context => {
     getWorkspaceDataRoot(workspaceRoot), 'team-retouch', 'identity-similarities',
     `${crypto.createHash('sha256').update(String(projectName)).digest('hex')}.json`,
   );
+  const teamWorkflowSettingsPath = (workspaceRoot, projectName) => path.join(
+    getWorkspaceDataRoot(workspaceRoot), 'team-retouch', 'workflow-settings',
+    `${crypto.createHash('sha256').update(String(projectName)).digest('hex')}.json`,
+  );
   const readTeamIdentitySimilarities = async (workspaceRoot, projectName) => {
     try {
       const payload = JSON.parse(await fs.promises.readFile(teamIdentitySimilarityPath(workspaceRoot, projectName), 'utf8'));
@@ -566,7 +588,44 @@ const registerVersionIpc = context => {
     await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
     await fs.promises.writeFile(outputPath, JSON.stringify({ updatedAt: Date.now(), similarities }), 'utf8');
   };
+  const readTeamWorkflowSettings = async (workspaceRoot, projectName) => {
+    try {
+      const payload = JSON.parse(await fs.promises.readFile(teamWorkflowSettingsPath(workspaceRoot, projectName), 'utf8'));
+      const preferredIdentityOrder = Array.isArray(payload.preferredIdentityOrder)
+        ? [...new Set(payload.preferredIdentityOrder.map(String).filter(Boolean))]
+        : String(payload.preferredIdentityId || '') ? [String(payload.preferredIdentityId)] : [];
+      return { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined };
+    } catch {
+      return {};
+    }
+  };
+  const writeTeamWorkflowSettings = async (workspaceRoot, projectName, settings) => {
+    const outputPath = teamWorkflowSettingsPath(workspaceRoot, projectName);
+    await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
+    const pendingPath = `${outputPath}.${crypto.randomUUID()}.tmp`;
+    const preferredIdentityOrder = [...new Set((settings.preferredIdentityOrder || []).map(String).filter(Boolean))];
+    await fs.promises.writeFile(pendingPath, JSON.stringify({
+      updatedAt: Date.now(),
+      preferredIdentityOrder,
+      preferredIdentityId: preferredIdentityOrder[0] || undefined,
+    }, null, 2), 'utf8');
+    await fs.promises.rm(outputPath, { force: true });
+    await fs.promises.rename(pendingPath, outputPath);
+  };
   const isGeneratedTeamIdentity = identity => /^待确认人物\s+\d+$/.test(String(identity?.name || ''));
+  const teamBboxIou = (left, right) => {
+    const leftRight = Number(left?.x || 0) + Number(left?.width || 0);
+    const leftBottom = Number(left?.y || 0) + Number(left?.height || 0);
+    const rightRight = Number(right?.x || 0) + Number(right?.width || 0);
+    const rightBottom = Number(right?.y || 0) + Number(right?.height || 0);
+    const intersectionWidth = Math.max(0, Math.min(leftRight, rightRight) - Math.max(Number(left?.x || 0), Number(right?.x || 0)));
+    const intersectionHeight = Math.max(0, Math.min(leftBottom, rightBottom) - Math.max(Number(left?.y || 0), Number(right?.y || 0)));
+    const intersection = intersectionWidth * intersectionHeight;
+    const leftArea = Math.max(0, Number(left?.width || 0)) * Math.max(0, Number(left?.height || 0));
+    const rightArea = Math.max(0, Number(right?.width || 0)) * Math.max(0, Number(right?.height || 0));
+    const union = leftArea + rightArea - intersection;
+    return union > 0 ? intersection / union : 0;
+  };
   const teamSubjects = workspace => {
     const subjects = new Map();
     const assignments = new Map((workspace.assignments || []).map(item => [teamSubjectKey(item), item]));
@@ -581,6 +640,8 @@ const registerVersionIpc = context => {
             key,
             photoId: photo.photoId, baseVersionId: photo.baseVersionId, personIndex: member.personIndex,
             photoName: photo.name, path: photo.sourcePath, bbox: member.bbox, faceBox: member.faceBox || null,
+            taskId: task.id,
+            taskOrder: members.map(item => Number(item.personIndex)),
             manualIdentityId: assignment?.identityId && assignment.source === 'manual' ? assignment.identityId : undefined,
           };
           if (!subjects.has(subject.key)) subjects.set(subject.key, subject);
@@ -596,6 +657,7 @@ const registerVersionIpc = context => {
     const taskSubjects = new Map();
     for (const photo of workspace.photos || []) {
       for (const task of photo.tasks || []) {
+        if (task.needsReview) continue;
         const members = task.members?.length ? task.members : [{ personIndex: task.personIndex, bbox: task.bbox }];
         const group = [];
         for (const member of members) {
@@ -632,7 +694,11 @@ const registerVersionIpc = context => {
   ipcMain.handle('workspace-team-project', async (_event, workspacePath, projectName) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
-      return await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+      const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+      const settings = await readTeamWorkflowSettings(workspaceRoot, projectName);
+      const identityIds = new Set((workspace.identities || []).map(identity => identity.id));
+      const preferredIdentityOrder = (settings.preferredIdentityOrder || []).filter(identityId => identityIds.has(identityId));
+      return { ...workspace, workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined } };
     } catch (error) {
       return { success: false, photos: [], identities: [], assignments: [], error: error.message || String(error) };
     }
@@ -680,13 +746,17 @@ const registerVersionIpc = context => {
       await fs.promises.writeFile(manifestPath, JSON.stringify({ subjects }, null, 2), 'utf8');
       const suggested = await pluginService.runJson('team-retouch', ['identify', '--manifest', manifestPath], 60 * 60 * 1000);
       await writeTeamIdentitySimilarities(workspaceRoot, projectName, suggested.similarities || []);
-      const generatedIdentityIds = new Set((workspace.identities || []).filter(isGeneratedTeamIdentity).map(item => item.id));
-      const manuallyAnchoredIds = new Set((workspace.assignments || []).filter(item => item.source === 'manual' && item.identityId).map(item => item.identityId));
-      for (const assignment of workspace.assignments || []) {
+      // Identity inference is intentionally allowed to run in the background while
+      // the user confirms people. Re-read before cleanup so a result produced from
+      // an older snapshot never removes a manual choice made during inference.
+      const latestWorkspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+      const generatedIdentityIds = new Set((latestWorkspace.identities || []).filter(isGeneratedTeamIdentity).map(item => item.id));
+      const manuallyAnchoredIds = new Set((latestWorkspace.assignments || []).filter(item => ['manual', 'manual-group'].includes(item.source) && item.identityId).map(item => item.identityId));
+      for (const assignment of latestWorkspace.assignments || []) {
         if (assignment.source !== 'suggested' || !generatedIdentityIds.has(assignment.identityId)) continue;
         await versionService.assignTeamIdentity(workspaceRoot, { projectName, ...assignment, identityId: undefined, confidence: 0, source: 'suggested', completed: false });
       }
-      for (const identity of workspace.identities || []) {
+      for (const identity of latestWorkspace.identities || []) {
         if (generatedIdentityIds.has(identity.id) && !manuallyAnchoredIds.has(identity.id)) {
           await versionService.deleteTeamIdentity(workspaceRoot, { projectName, identityId: identity.id });
         }
@@ -751,6 +821,78 @@ const registerVersionIpc = context => {
     try { return await versionService.assignTeamIdentity(ensureWorkspace(workspacePath), request); }
     catch (error) { return { success: false, error: error.message || String(error) }; }
   });
+  ipcMain.handle('workspace-team-identity-confirm-group', async (_event, workspacePath, request = {}) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const projectName = String(request.projectName || '').trim();
+      if (!projectName) throw new Error('项目名称不能为空');
+      const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+      if (!workspace.success) throw new Error(workspace.error || '无法读取人物识别结果');
+      const validSubjects = new Map(teamSubjects(workspace).map(subject => [subject.key, subject]));
+      const assignments = [];
+      const includedKeys = new Set();
+      for (const item of Array.isArray(request.assignments) ? request.assignments : []) {
+        const key = teamSubjectKey(item);
+        const subject = validSubjects.get(key);
+        if (!subject || includedKeys.has(key)) continue;
+        includedKeys.add(key);
+        assignments.push({
+          photoId: subject.photoId,
+          baseVersionId: subject.baseVersionId,
+          personIndex: subject.personIndex,
+          confidence: Number.isFinite(Number(item.confidence)) ? Math.max(0, Math.min(1, Number(item.confidence))) : 1,
+        });
+      }
+      const anchorSubjectKey = String(request.anchorSubjectKey || '');
+      if (!includedKeys.has(anchorSubjectKey)) throw new Error('当前人物必须包含在本次标记范围内');
+      if (!assignments.length) throw new Error('没有需要标记的人物');
+      const targetIdentityId = String(request.identityId || '');
+      const clearAssignments = [];
+      const assignmentByKey = new Map((workspace.assignments || []).map(item => [teamSubjectKey(item), item]));
+      for (const assignment of assignments) {
+        const key = teamSubjectKey(assignment);
+        const current = assignmentByKey.get(key);
+        if (key !== anchorSubjectKey && targetIdentityId && current?.identityId && current.identityId !== targetIdentityId && ['manual', 'manual-group'].includes(current.source)) {
+          throw new Error('候选组中包含已经人工确认的其他人物，请先取消勾选冲突项');
+        }
+      }
+      if (targetIdentityId) {
+        const includedByPhoto = new Map();
+        for (const assignment of assignments) {
+          const key = `${assignment.photoId}:${assignment.baseVersionId}`;
+          const indexes = includedByPhoto.get(key) || new Set();
+          indexes.add(Number(assignment.personIndex));
+          includedByPhoto.set(key, indexes);
+        }
+        if ([...includedByPhoto.values()].some(indexes => indexes.size > 1)) throw new Error('同一张照片中的不同人物不能标记为同一个身份');
+        for (const current of workspace.assignments || []) {
+          if (current.identityId !== targetIdentityId) continue;
+          const currentKey = teamSubjectKey(current);
+          if (!validSubjects.has(currentKey)) continue;
+          const indexes = includedByPhoto.get(`${current.photoId}:${current.baseVersionId}`);
+          if (!indexes || indexes.has(Number(current.personIndex))) continue;
+          if (['manual', 'manual-group'].includes(current.source)) throw new Error('同一张照片中已有其他人工确认的人物使用该身份，请检查识别结果');
+          clearAssignments.push({
+            photoId: current.photoId,
+            baseVersionId: current.baseVersionId,
+            personIndex: Number(current.personIndex),
+          });
+        }
+      }
+      const confirmed = await versionService.confirmTeamIdentityGroup(workspaceRoot, {
+        projectName,
+        anchorSubjectKey,
+        identityId: targetIdentityId || undefined,
+        name: String(request.name || '').trim() || undefined,
+        assignments,
+        clearAssignments,
+      });
+      const updatedWorkspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+      return { ...updatedWorkspace, identityId: confirmed.identityId, updatedCount: confirmed.updatedCount, autoReleasedCount: clearAssignments.length };
+    } catch (error) {
+      return { success: false, photos: [], identities: [], assignments: [], error: error.message || String(error) };
+    }
+  });
   ipcMain.handle('workspace-team-identity-complete', async (_event, workspacePath, request = {}) => {
     try { return await versionService.completeTeamIdentity(ensureWorkspace(workspacePath), request); }
     catch (error) { return { success: false, error: error.message || String(error) }; }
@@ -758,6 +900,260 @@ const registerVersionIpc = context => {
   ipcMain.handle('workspace-team-identity-delete', async (_event, workspacePath, request = {}) => {
     try { return await versionService.deleteTeamIdentity(ensureWorkspace(workspacePath), request); }
     catch (error) { return { success: false, error: error.message || String(error) }; }
+  });
+  ipcMain.handle('workspace-team-workflow-settings-save', async (_event, workspacePath, request = {}) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const projectName = String(request.projectName || '').trim();
+      if (!projectName) throw new Error('项目名称不能为空');
+      const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+      const workflowStarted = (workspace.assignments || []).some(assignment => assignment.completed)
+        || (workspace.photos || []).some(photo => (photo.tasks || []).some(task => Boolean(task.editedPatchPath) || !['', 'exported'].includes(String(task.status || 'exported'))));
+      if (workflowStarted) throw new Error('已有任务返图或完成，不能再修改优先开工人物');
+      const requestedOrder = Array.isArray(request.preferredIdentityOrder)
+        ? request.preferredIdentityOrder
+        : request.preferredIdentityId ? [request.preferredIdentityId] : [];
+      const preferredIdentityOrder = [...new Set(requestedOrder.map(String).filter(Boolean))];
+      const identityIds = new Set((workspace.identities || []).map(identity => identity.id));
+      const assignedIdentityIds = new Set((workspace.assignments || []).map(assignment => assignment.identityId).filter(Boolean));
+      if (preferredIdentityOrder.some(identityId => !identityIds.has(identityId))) throw new Error('排序中包含不存在的人物，请刷新后重试');
+      if (preferredIdentityOrder.some(identityId => !assignedIdentityIds.has(identityId))) throw new Error('排序中的人物还没有任何任务');
+      const workflowSettings = { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined };
+      await writeTeamWorkflowSettings(workspaceRoot, projectName, workflowSettings);
+      return { success: true, workflowSettings };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-team-person-exclude', async (event, workspacePath, status, projectName, request = {}) => {
+    try {
+      pluginService.requireCapability('team-retouch.detect');
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+      const subjectKey = `${request.photoId}:${request.baseVersionId}:${Number(request.personIndex)}`;
+      const oldSubjects = teamSubjects(workspace);
+      const selectedSubject = oldSubjects.find(subject => subject.key === subjectKey);
+      if (!selectedSubject) throw new Error('人物实例不存在，可能已经被移除');
+      const photoWorkspace = (workspace.photos || []).find(photo => photo.photoId === request.photoId && photo.baseVersionId === request.baseVersionId);
+      const selectedTask = photoWorkspace?.tasks?.find(task => (task.members?.length ? task.members : [{ personIndex: task.personIndex }]).some(member => Number(member.personIndex) === Number(request.personIndex)));
+      if (!selectedTask) throw new Error('找不到人物对应的工作图');
+      const protectedTask = (photoWorkspace.tasks || []).find(task => task.editedPatchPath || !['', 'exported'].includes(String(task.status || 'exported')));
+      if (protectedTask) {
+        throw new Error('这张图片已有返图或合成记录，不能重新计算工作图；请先清理对应返图');
+      }
+
+      const bundle = await versionService.getPhoto(workspaceRoot, request.photoId);
+      const base = bundle.versions?.find(version => version.id === request.baseVersionId);
+      if (!base || base.fileMissing || !fs.existsSync(base.filePath)) throw new Error('基础版本文件不存在');
+      const currentExclusions = await versionService.listTeamPersonExclusions(workspaceRoot, {
+        projectName, photoId: request.photoId, baseVersionId: request.baseVersionId,
+      });
+      const excludedBoxes = [...(currentExclusions.exclusions || []).map(item => item.bbox), selectedSubject.bbox];
+      const outputDirectory = path.join(teamDataDirectory(workspaceRoot, request.photoId, request.baseVersionId), 'analysis');
+      const exportDirectory = deliveryDirectory(bundle.photo, base.filePath);
+      const savedConfig = readSavedConfig();
+      const personDetection = savedConfig.componentSettings?.['team-retouch'] || savedConfig.personDetection || {};
+      const oversizeCropMode = personDetection.oversizeCropMode === 'expand' ? 'expand' : 'face-centered';
+      const requestedMode = 'stored';
+      await fs.promises.mkdir(outputDirectory, { recursive: true });
+      const rebuildManifestPath = path.join(outputDirectory, `rebuild-${crypto.randomUUID()}.json`);
+      await fs.promises.writeFile(rebuildManifestPath, JSON.stringify({
+        removePersonIndex: Number(request.personIndex),
+        detector: selectedTask.detector || 'stored-detection',
+        tasks: photoWorkspace.tasks || [],
+      }, null, 2), 'utf8');
+      let detected;
+      try {
+        detected = await pluginService.runJson(
+          'team-retouch',
+          [
+            'rebuild', '--input', base.filePath, '--manifest', rebuildManifestPath,
+            '--output-dir', outputDirectory, '--delivery-dir', exportDirectory,
+            '--delivery-prefix', deliveryName(bundle.photo, base.filePath),
+            '--oversize-crop-mode', oversizeCropMode,
+          ],
+          60 * 60 * 1000,
+          message => {
+            if (message?.type !== 'progress' || event.sender.isDestroyed()) return;
+            event.sender.send('workspace-team-patch-detect-progress', {
+              photoId: request.photoId,
+              baseVersionId: request.baseVersionId,
+              progress: Math.max(0, Math.min(100, Number(message.progress) || 0)),
+              message: String(message.message || '正在移除误识别人物并重新计算工作图'),
+            });
+          },
+        );
+      } finally {
+        await fs.promises.rm(rebuildManifestPath, { force: true }).catch(() => undefined);
+      }
+      const expectedPersonCount = oldSubjects.filter(subject => subject.photoId === request.photoId && subject.baseVersionId === request.baseVersionId).length - 1;
+      if (Number(detected.personCount) !== expectedPersonCount || Number(detected.removedPersonCount) !== 1) {
+        throw new Error(`本地重建人物数量异常：预期 ${expectedPersonCount}，实际 ${Number(detected.personCount) || 0}`);
+      }
+      const missingExports = (detected.tasks || []).filter(task => !task.patchPath || !fs.existsSync(task.patchPath));
+      if (missingExports.length) throw new Error(`重新生成工作图失败（缺少 ${missingExports.length} 个文件）`);
+
+      const oldAssignments = new Map((workspace.assignments || []).map(assignment => [teamSubjectKey(assignment), assignment]));
+      const detectedTasks = (detected.tasks || []).map(task => ({ ...task }));
+      const taskMatches = (photoWorkspace.tasks || []).flatMap(oldTask => detectedTasks.map(newTask => ({
+        oldTask,
+        newTask,
+        score: teamBboxIou(oldTask.bbox, newTask.bbox),
+      }))).filter(match => match.score >= .2).sort((left, right) => right.score - left.score);
+      const usedOldTaskIds = new Set();
+      const usedNewTasks = new Set();
+      for (const match of taskMatches) {
+        if (usedOldTaskIds.has(match.oldTask.id) || usedNewTasks.has(match.newTask)) continue;
+        usedOldTaskIds.add(match.oldTask.id);
+        usedNewTasks.add(match.newTask);
+        match.newTask.id = match.oldTask.id;
+      }
+      const patchResult = await versionService.replaceTeamPatches(workspaceRoot, {
+        photoId: request.photoId,
+        baseVersionId: request.baseVersionId,
+        tasks: detectedTasks,
+      });
+      await versionService.addTeamPersonExclusion(workspaceRoot, {
+        projectName,
+        photoId: request.photoId,
+        baseVersionId: request.baseVersionId,
+        bbox: selectedSubject.bbox,
+        reason: 'false-positive',
+      });
+      await versionService.registerTeamProjectPhoto(workspaceRoot, {
+        projectName, photoId: request.photoId, baseVersionId: request.baseVersionId,
+      });
+      await removeCleanupArtifacts(workspaceRoot, { teamArtifactPaths: patchResult.artifactPaths || [] });
+
+      // Do not read the workspace before restoring assignments. Workspace reads
+      // clean empty generated identities, and replacing the patches temporarily
+      // removes every assignment for this photo. Reading here used to delete a
+      // temporary identity moments before it was assigned back to a matched body.
+      const newSubjects = (patchResult.tasks || []).flatMap(task => {
+        const members = task.members?.length ? task.members : [{ personIndex: task.personIndex, bbox: task.bbox }];
+        const taskOrder = members.map(member => Number(member.personIndex));
+        return members.map(member => ({
+          key: `${request.photoId}:${request.baseVersionId}:${Number(member.personIndex)}`,
+          photoId: request.photoId,
+          baseVersionId: request.baseVersionId,
+          personIndex: Number(member.personIndex),
+          bbox: member.bbox,
+          faceBox: member.faceBox || null,
+          taskId: task.id,
+          taskOrder,
+        }));
+      });
+      const oldCandidates = oldSubjects.filter(subject => subject.key !== subjectKey && subject.photoId === request.photoId && subject.baseVersionId === request.baseVersionId && oldAssignments.get(subject.key)?.identityId);
+      const matches = oldCandidates.flatMap(oldSubject => newSubjects.map(newSubject => ({
+        oldSubject,
+        newSubject,
+        score: teamBboxIou(oldSubject.bbox, newSubject.bbox),
+      }))).filter(match => match.score >= .42).sort((left, right) => right.score - left.score);
+      const usedOld = new Set();
+      const usedNew = new Set();
+      const subjectRemap = new Map();
+      for (const match of matches) {
+        if (usedOld.has(match.oldSubject.key) || usedNew.has(match.newSubject.key)) continue;
+        const assignment = oldAssignments.get(match.oldSubject.key);
+        await versionService.assignTeamIdentity(workspaceRoot, {
+          projectName,
+          photoId: match.newSubject.photoId,
+          baseVersionId: match.newSubject.baseVersionId,
+          personIndex: match.newSubject.personIndex,
+          identityId: assignment.identityId,
+          confidence: assignment.confidence,
+          source: assignment.source,
+          completed: assignment.completed,
+        });
+        usedOld.add(match.oldSubject.key);
+        usedNew.add(match.newSubject.key);
+        subjectRemap.set(match.oldSubject.key, match.newSubject);
+      }
+      let workflowRefreshCount = 0;
+      let workflowWarning = '';
+      try {
+        const workflow = await readTeamWorkflowManifest(workspaceRoot, status, projectName);
+        if (workflow.manifest) {
+          let changed = false;
+          for (const group of workflow.manifest.groups || []) {
+            const nextItems = [];
+            for (const item of group.items || []) {
+              if (item.photoId !== request.photoId || item.baseVersionId !== request.baseVersionId) {
+                nextItems.push(item);
+                continue;
+              }
+              const oldKey = `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`;
+              const remapped = subjectRemap.get(oldKey);
+              const destination = item.relativePath ? path.resolve(workflow.outputDirectory, item.relativePath) : '';
+              if (!remapped) {
+                if (destination && isInside(workflow.outputDirectory, destination)) await fs.promises.rm(destination, { force: true }).catch(() => undefined);
+                changed = true;
+                continue;
+              }
+              const updatedItem = {
+                ...item,
+                personIndex: remapped.personIndex,
+                taskId: remapped.taskId,
+                taskOrder: remapped.taskOrder,
+              };
+              const sourcePath = await resolveWorkflowSource(workspaceRoot, updatedItem);
+              if (sourcePath && destination && isInside(workflow.outputDirectory, destination)) {
+                await replaceFileAtomic(sourcePath, destination);
+                workflowRefreshCount += 1;
+              }
+              nextItems.push(updatedItem);
+              changed = true;
+            }
+            group.items = nextItems;
+          }
+          workflow.manifest.groups = (workflow.manifest.groups || []).filter(group => (group.items || []).length);
+          if (changed) {
+            await fs.promises.mkdir(workflow.workflowDataDirectory, { recursive: true });
+            const pendingPath = `${workflow.manifestPath}.${crypto.randomUUID()}.tmp`;
+            await fs.promises.writeFile(pendingPath, JSON.stringify(workflow.manifest, null, 2), 'utf8');
+            await fs.promises.rm(workflow.manifestPath, { force: true });
+            await fs.promises.rename(pendingPath, workflow.manifestPath);
+          }
+        }
+      } catch (error) {
+        workflowWarning = `误识别人物已移除，但同步已有任务文件夹失败：${error.message || String(error)}`;
+        writeLog('warn', 'Unable to refresh workflow after excluding subject', {
+          projectName, photoId: request.photoId, baseVersionId: request.baseVersionId,
+          error: error.message || String(error),
+        });
+      }
+      await writeTeamIdentitySimilarities(workspaceRoot, projectName, []);
+      const updatedWorkspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+      return {
+        ...bundle,
+        ...updatedWorkspace,
+        tasks: patchResult.tasks || [],
+        excludedPersonCount: excludedBoxes.length,
+        removedPersonCount: 1,
+        workflowRefreshCount,
+        warning: workflowWarning || undefined,
+        detection: {
+          detector: detected.detector,
+          backend: detected.backend || 'cpu',
+          provider: detected.provider || '',
+          requestedMode: detected.requestedMode || requestedMode,
+          advancedBackend: Boolean(detected.advancedBackend),
+          width: detected.width,
+          height: detected.height,
+          personCount: detected.personCount ?? 0,
+          workTileEdge: detected.workTileEdge || 4000,
+          needsReviewCount: detected.needsReviewCount || 0,
+          fallbackReason: detected.fallbackReason || '',
+        },
+      };
+    } catch (error) {
+      writeLog('error', 'Unable to exclude false-positive team retouch subject', {
+        projectName, photoId: request.photoId, baseVersionId: request.baseVersionId,
+        personIndex: request.personIndex, error: error.message || String(error),
+      });
+      return { success: false, photos: [], identities: [], assignments: [], versions: [], tasks: [], error: error.message || String(error) };
+    }
   });
 
   ipcMain.handle('workspace-team-project-remove-photo', async (_event, workspacePath, request = {}) => {
@@ -788,10 +1184,22 @@ const registerVersionIpc = context => {
       const workspaceRoot = ensureWorkspace(workspacePath);
       const { projectPath, outputDirectory, workflowDataDirectory, manifestPath, legacyManifestPath } = teamWorkflowOutput(workspaceRoot, status, projectName);
       if (fs.existsSync(outputDirectory) && !request.replace) return { success: true, requiresConfirmation: true, path: outputDirectory };
+      const currentWorkspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+      const reviewTaskIds = new Set((currentWorkspace.photos || []).flatMap(photo => (photo.tasks || []).filter(task => task.needsReview).map(task => String(task.id))));
 
       stagingDirectory = path.join(projectPath, `.photoflow-team-workflow-${crypto.randomUUID()}`);
       await fs.promises.mkdir(stagingDirectory, { recursive: false });
-      const manifest = { version: 1, projectName, status, generatedAt: Date.now(), groups: [] };
+      const manifest = {
+        version: 1,
+        projectName,
+        status,
+        generatedAt: Date.now(),
+        workflowSettings: {
+          preferredIdentityOrder: Array.isArray(request.preferredIdentityOrder) ? request.preferredIdentityOrder.map(String) : [],
+          preferredIdentityId: Array.isArray(request.preferredIdentityOrder) ? String(request.preferredIdentityOrder[0] || '') || undefined : String(request.preferredIdentityId || '') || undefined,
+        },
+        groups: [],
+      };
       const usedFoldersByWeek = new Map();
       let count = 0;
       for (const group of request.groups || []) {
@@ -809,6 +1217,7 @@ const registerVersionIpc = context => {
         const reserved = new Set();
         const manifestItems = [];
         for (const item of group.items || []) {
+          if (reviewTaskIds.has(String(item.taskId))) continue;
           const sourcePath = await resolveWorkflowSource(workspaceRoot, item);
           if (!sourcePath) continue;
           const baseName = `${safeWorkflowSegment(item.photoName, '图片')}_人物${item.personIndex}${path.extname(sourcePath) || '.png'}`;
@@ -986,7 +1395,7 @@ const registerVersionIpc = context => {
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       const filePath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
       const extension = path.extname(filePath).toLowerCase();
-      if (!IMAGE_EXTENSIONS.has(extension)) throw new Error('多人修脸目前支持 JPG、PNG、TIFF、HEIC 等成片格式，不直接处理 RAW 或视频');
+      if (!IMAGE_EXTENSIONS.has(extension)) throw new Error('团片协作目前支持 JPG、PNG、TIFF、HEIC 等成片格式，不直接处理 RAW 或视频');
       const bundle = await versionService.getMedia(workspaceRoot, { projectName, filePath });
       const patchResult = await versionService.listTeamPatches(workspaceRoot, bundle.photo.id);
       let tasks = patchResult.tasks || [];
@@ -1025,7 +1434,18 @@ const registerVersionIpc = context => {
           }
       }
       tasks = tasks.map(task => ({ ...task, patchMissing: !task.patchPath || !fs.existsSync(task.patchPath) }));
-      return { ...bundle, tasks };
+      const baseVersionIds = [...new Set([
+        bundle.photo?.currentVersionId,
+        ...(bundle.versions || []).map(version => version.id),
+        ...tasks.map(task => task.baseVersionId),
+      ].filter(Boolean))];
+      const exclusionResults = await Promise.all(baseVersionIds.map(baseVersionId => versionService.listTeamPersonExclusions(workspaceRoot, {
+        projectName, photoId: bundle.photo.id, baseVersionId,
+      })));
+      const excludedPersonCounts = Object.fromEntries(baseVersionIds.map((baseVersionId, index) => [
+        baseVersionId, exclusionResults[index].exclusions?.length || 0,
+      ]));
+      return { ...bundle, tasks, excludedPersonCounts };
     } catch (error) {
       return { success: false, error: error.message || String(error), versions: [], tasks: [] };
     }
@@ -1037,10 +1457,13 @@ const registerVersionIpc = context => {
       const bundle = await versionService.getPhoto(workspaceRoot, request.photoId);
       const base = bundle.versions?.find(version => version.id === request.baseVersionId);
       if (!base || base.fileMissing || !fs.existsSync(base.filePath)) throw new Error('基础版本文件不存在');
-      if (!IMAGE_EXTENSIONS.has(path.extname(base.filePath).toLowerCase())) throw new Error('多人修脸目前不直接处理 RAW 或视频');
+      if (!IMAGE_EXTENSIONS.has(path.extname(base.filePath).toLowerCase())) throw new Error('团片协作目前不直接处理 RAW 或视频');
       const outputDirectory = path.join(teamDataDirectory(workspaceRoot, request.photoId, request.baseVersionId), 'analysis');
       const exportDirectory = deliveryDirectory(bundle.photo, base.filePath);
-      const detectionArgs = ['detect', '--input', base.filePath, '--output-dir', outputDirectory, '--delivery-dir', exportDirectory, '--delivery-prefix', deliveryName(bundle.photo, base.filePath)];
+      const listedExclusions = request.restoreExcluded ? { exclusions: [] } : await versionService.listTeamPersonExclusions(workspaceRoot, {
+        projectName, photoId: request.photoId, baseVersionId: request.baseVersionId,
+      });
+      const detectionArgs = ['detect', '--input', base.filePath, '--output-dir', outputDirectory, '--delivery-dir', exportDirectory, '--delivery-prefix', deliveryName(bundle.photo, base.filePath), '--excluded-boxes', JSON.stringify((listedExclusions.exclusions || []).map(item => item.bbox))];
       const savedConfig = readSavedConfig();
       const personDetection = savedConfig.componentSettings?.['team-retouch'] || savedConfig.personDetection || {};
       const useGpu = personDetection.useGpu !== false;
@@ -1070,10 +1493,13 @@ const registerVersionIpc = context => {
         baseVersionId: request.baseVersionId,
         tasks: detected.tasks || [],
       });
+      if (request.restoreExcluded) await versionService.clearTeamPersonExclusions(workspaceRoot, {
+        projectName, photoId: request.photoId, baseVersionId: request.baseVersionId,
+      });
       await versionService.registerTeamProjectPhoto(workspaceRoot, { projectName, photoId: request.photoId, baseVersionId: request.baseVersionId });
       await removeCleanupArtifacts(workspaceRoot, { teamArtifactPaths: patchResult.artifactPaths || [] });
       writeLog('info', 'Team retouch people detected', { projectName, photoId: request.photoId, baseVersionId: request.baseVersionId, personCount: detected.personCount || patchResult.tasks.length, workTileCount: patchResult.tasks.length, detector: detected.detector });
-      return { success: true, photo: bundle.photo, versions: bundle.versions, tasks: patchResult.tasks, detection: { detector: detected.detector, backend: detected.backend || 'cpu', provider: detected.provider || '', requestedMode: detected.requestedMode || requestedMode, advancedBackend: Boolean(detected.advancedBackend), width: detected.width, height: detected.height, personCount: detected.personCount || patchResult.tasks.length, workTileEdge: detected.workTileEdge || 4000, needsReviewCount: detected.needsReviewCount || 0, fallbackReason: detected.fallbackReason || '' } };
+      return { success: true, photo: bundle.photo, versions: bundle.versions, tasks: patchResult.tasks, excludedPersonCount: request.restoreExcluded ? 0 : listedExclusions.exclusions?.length || 0, detection: { detector: detected.detector, backend: detected.backend || 'cpu', provider: detected.provider || '', requestedMode: detected.requestedMode || requestedMode, advancedBackend: Boolean(detected.advancedBackend), width: detected.width, height: detected.height, personCount: detected.personCount ?? patchResult.tasks.length, workTileEdge: detected.workTileEdge || 4000, needsReviewCount: detected.needsReviewCount || 0, fallbackReason: detected.fallbackReason || '' } };
     } catch (error) {
       writeLog('error', 'Unable to detect team retouch subjects', { projectName, error: error.message || String(error) });
       return { success: false, error: error.message || String(error), versions: [], tasks: [] };
@@ -1104,6 +1530,9 @@ const registerVersionIpc = context => {
             key: relativePath, name: bundle.photo.displayName || path.basename(filePath), input: base.filePath,
             outputDir: outputDirectory, deliveryDir: deliveryDirectory(bundle.photo, base.filePath),
             deliveryPrefix: deliveryName(bundle.photo, base.filePath),
+            excludedBoxes: (await versionService.listTeamPersonExclusions(workspaceRoot, {
+              projectName, photoId: bundle.photo.id, baseVersionId: base.id,
+            })).exclusions?.map(exclusion => exclusion.bbox) || [],
           },
         });
       }
@@ -1222,11 +1651,24 @@ const registerVersionIpc = context => {
         ...(request.reviewReason !== undefined ? { reviewReason: String(request.reviewReason).trim().slice(0, 300) } : {}),
       };
       const updated = await versionService.updateTeamPatch(workspaceRoot, payload);
+      let workflowRefreshCount = 0;
+      let warning;
+      if (cropTargetPath) {
+        await thumbnailService.invalidateSources([cropTargetPath]).catch(error => {
+          writeLog('warn', 'Unable to invalidate recropped team patch thumbnail', { taskId: request.taskId, error: error.message || String(error) });
+        });
+        try {
+          workflowRefreshCount = await refreshWorkflowTaskSourceFiles(workspaceRoot, request.status, request.projectName, request.taskId, cropTargetPath);
+        } catch (error) {
+          warning = `工作图已重新裁切，但同步到已有工作区失败：${error.message || String(error)}`;
+          writeLog('warn', 'Unable to refresh recropped team patch in workflow workspace', { taskId: request.taskId, error: error.message || String(error) });
+        }
+      }
       if (cropBackupPath) {
         await fs.promises.rm(cropBackupPath, { force: true });
         cropBackupPath = '';
       }
-      return updated;
+      return { ...updated, workflowRefreshCount, warning };
     } catch (error) {
       if (cropBackupPath && fs.existsSync(cropBackupPath)) {
         if (cropTargetPath) await fs.promises.rm(cropTargetPath, { force: true }).catch(() => undefined);
@@ -1360,7 +1802,7 @@ const registerVersionIpc = context => {
       manifestPath = path.join(mergeDirectory, `merge-${versionId}.json`);
       await fs.promises.writeFile(manifestPath, JSON.stringify({ photoId: request.photoId, baseVersionId: base.id, tasks }, null, 2), 'utf8');
       const merged = await pluginService.runJson('team-retouch', ['merge', '--input', base.filePath, '--manifest', manifestPath, '--output', createdPath], 60 * 60 * 1000);
-      const versionName = cleanVersionName(request.versionName) || `多人修脸合成 ${nextNumber}`;
+      const versionName = cleanVersionName(request.versionName) || `团片协作合成 ${nextNumber}`;
       const conflictThreshold = Math.max(500, Number(merged.width || 0) * Number(merged.height || 0) * 0.00005);
       const needsReview = Boolean(merged.needsReview) || Number(merged.conflictPixels || 0) > conflictThreshold;
       const note = `由 ${merged.mergedCount} 张人物工作图自动合回原尺寸；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(conflictThreshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`;

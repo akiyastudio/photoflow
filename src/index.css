@@ -263,6 +263,7 @@ html.dark .workflow-task-card { border-color: #273244; background: #090c12; }
 .project-menu-item { display: block; width: 100%; border-radius: .4rem; padding: .5rem; text-align: left; font-size: .875rem; color: #475569; }
 .project-menu-item:hover { background: #f1f5f9; color: #0f172a; }
 .project-context-menu .project-menu-item { display: flex; align-items: center; gap: .5rem; }
+.project-create-menu .project-menu-item { display:flex; align-items:center; gap:.5rem; }
 .sort-menu .project-menu-item { display:flex; align-items:center; gap:.5rem; }
 .project-context-menu .project-menu-item:disabled { cursor: not-allowed; opacity: .45; }
 .project-context-menu .project-menu-item:disabled:hover { background: transparent; color: #475569; }

@@ -33,6 +33,33 @@ const formatStorageSize = (sizeBytes = 0) => sizeBytes >= 1024 ** 3
   ? `${(sizeBytes / 1024 ** 3).toFixed(sizeBytes >= 10 * 1024 ** 3 ? 1 : 2)} GB`
   : sizeBytes > 0 ? `${(sizeBytes / 1024 ** 2).toFixed(0)} MB` : '0 MB';
 
+const offerPackageCleanup = async ({ appDialog, kind, componentId, label, packageSizeBytes, repairHint, onNotice }: {
+  appDialog: ReturnType<typeof useAppDialog>;
+  kind: 'component' | 'identity-models' | 'advanced';
+  componentId?: string;
+  label: string;
+  packageSizeBytes?: number;
+  repairHint?: string;
+  onNotice: (message: string, duration?: number) => void;
+}) => {
+  if (!packageSizeBytes) return;
+  const size = formatStorageSize(packageSizeBytes);
+  if (!await appDialog.confirm({
+    title: '删除已使用的安装包吗？',
+    message: `${label}已经安装并通过校验。删除原 ZIP 可以立即释放约 ${size} 空间，已安装的功能不会受影响。`,
+    detail: repairHint || '以后如需重新安装，需要再次把对应 ZIP 复制到组件目录。',
+    confirmLabel: `删除并释放 ${size}`,
+    cancelLabel: '保留安装包',
+    tone: 'danger',
+  })) return;
+  const deleted = await window.electronAPI.deleteComponentPackage(kind, componentId);
+  if (!deleted.success) {
+    onNotice(`删除安装包失败：${deleted.error || '未知错误'}`, 6000);
+    return;
+  }
+  onNotice(`安装包已删除，释放约 ${formatStorageSize(deleted.deletedBytes || packageSizeBytes)}`);
+};
+
 const IdentityModelPackSettings = ({ component, adafaceReady, osnetX1Ready, onInstall }: { component?: ComponentStatus; adafaceReady: boolean; osnetX1Ready: boolean; onInstall: () => void | Promise<void> }) => {
   const [installing, setInstalling] = useState(false);
   const install = async () => {
@@ -51,7 +78,7 @@ const IdentityModelPackSettings = ({ component, adafaceReady, osnetX1Ready, onIn
       <article className="rounded-xl border border-slate-200 bg-white p-4">
         <div className="flex items-center justify-between gap-3"><h6 className="font-bold text-slate-800">基础版 · YuNet + SFace + OSNet x0.25</h6><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${basicReady ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>{basicReady ? '可用' : '不可用'}</span></div>
         <p className="mt-2 text-xs leading-5 text-slate-500">提供人脸检测、人脸特征比较和身体外观辅助识别。</p>
-        <p className="mt-3 text-xs font-bold text-slate-700">安装：随“多人修脸”基础组件自动安装，无需额外操作。</p>
+        <p className="mt-3 text-xs font-bold text-slate-700">安装：随“团片协作”基础组件自动安装，无需额外操作。</p>
         <p className="mt-1 text-xs leading-5 text-slate-500">硬件：CPU 可运行；Intel、AMD、NVIDIA 显卡可选用 DirectML 加速，不要求 CUDA 或 WSL。</p>
       </article>
       <article className={`rounded-xl border p-4 ${enhancedReady ? 'border-cyan-200 bg-cyan-50/30' : 'border-slate-200 bg-white'}`}>
@@ -77,8 +104,8 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
     if (busy || !await appDialog.confirm({
       title: repair ? '修复人物检测增强版吗？' : '安装人物检测增强版吗？',
       message: repair
-        ? '程序将从上方显示的“多人修脸组件目录”读取并校验当前版本的高级包，然后替换需要修复的环境。'
-        : '请先把 PhotoFlow 提供的高级引擎 ZIP 放入上方显示的“多人修脸组件目录”。程序会校验版本和 SHA-256，然后注册预封装环境；用户不需要编译。',
+        ? '程序将从上方显示的“团片协作组件目录”读取并校验当前版本的高级包，然后替换需要修复的环境。'
+        : '请先把 PhotoFlow 提供的高级引擎 ZIP 放入上方显示的“团片协作组件目录”。程序会校验版本和 SHA-256，然后注册预封装环境；用户不需要编译。',
       confirmLabel: repair ? '修复检测增强包' : '安装检测增强包',
     })) return;
     setBusy(repair ? 'repair' : 'install');
@@ -88,6 +115,7 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
       if (result.cancelled) return;
       if (!result.success) { onNotice(`人物检测增强版${repair ? '修复' : '安装'}失败：${result.error || '未知错误'}`, 8000); return; }
       onNotice(`人物检测增强版已${repair ? '修复' : '安装'}并通过运行验证`);
+      await offerPackageCleanup({ appDialog, kind: 'advanced', label: '人物检测增强包', packageSizeBytes: result.packageSizeBytes, repairHint: '以后如需修复或重新安装人物检测增强版，需要再次把高级引擎 ZIP 复制到团片协作组件目录。', onNotice });
       await onRefresh();
     } finally { setBusy(''); }
   };
@@ -118,12 +146,13 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
   };
   const openIdentityModelsFolder = async () => {
     const result = await window.electronAPI.openTeamRetouchIdentityModelsFolder();
-    if (!result.success) onNotice(`打开多人修脸组件目录失败：${result.error || '未知错误'}`);
+    if (!result.success) onNotice(`打开团片协作组件目录失败：${result.error || '未知错误'}`);
   };
   const installIdentityModels = async () => {
     const result = await window.electronAPI.installTeamRetouchIdentityModels();
     if (!result.success) { onNotice(`安装增强人物识别模型失败：${result.error || '未知错误'}`, 8000); return; }
     onNotice('增强人物识别模型已安装并通过校验');
+    await offerPackageCleanup({ appDialog, kind: 'identity-models', label: '身份识别增强包', packageSizeBytes: result.packageSizeBytes, onNotice });
     await onRefresh();
   };
   const baseAvailable = Boolean(component?.installed && component.runtimeAvailable);
@@ -133,11 +162,11 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
   const osnetX1Ready = component?.bodyBackend === 'osnet-x1-experimental';
   return <section>
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div><h4 className="text-sm font-bold text-slate-800">识别能力与安装</h4><p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">人物检测与裁图、跨图片人物身份识别都有基础版和可选增强版。基础版随“多人修脸”组件安装；增强包只需放入同一个目录后点击安装。</p></div>
+      <div><h4 className="text-sm font-bold text-slate-800">识别能力与安装</h4><p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">人物检测与裁图、跨图片人物身份识别都有基础版和可选增强版。基础版随“团片协作”组件安装；增强包只需放入同一个目录后点击安装。</p></div>
       <button type="button" onClick={() => void onRefresh()} disabled={Boolean(busy)} className="dialog-secondary inline-flex items-center gap-2"><RotateCcw size={15} className={busy ? 'animate-spin' : ''}/>重新检测</button>
     </div>
     <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4">
-      <div className="min-w-0 flex-1"><p className="text-xs font-bold text-slate-700">多人修脸组件目录</p><p className="mt-1 break-all font-mono text-[11px] leading-5 text-slate-600">{component?.packagePath || '等待读取组件目录'}</p><p className="mt-1 text-xs text-slate-500">两个增强 ZIP 都原样放在这里，无需解压；程序会按文件名识别并校验。</p></div>
+      <div className="min-w-0 flex-1"><p className="text-xs font-bold text-slate-700">团片协作组件目录</p><p className="mt-1 break-all font-mono text-[11px] leading-5 text-slate-600">{component?.packagePath || '等待读取组件目录'}</p><p className="mt-1 text-xs text-slate-500">两个增强 ZIP 都原样放在这里，无需解压；程序会按文件名识别并校验。</p></div>
       <button type="button" onClick={() => void openIdentityModelsFolder()} className="dialog-secondary inline-flex items-center gap-2"><FolderOpen size={14}/>打开目录</button>
     </div>
 
@@ -147,7 +176,7 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
         <article className="rounded-xl border border-slate-200 bg-white p-4">
           <div className="flex items-center justify-between gap-3"><h6 className="font-bold text-slate-800">基础版 · RTMDet</h6><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${baseAvailable ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>{baseAvailable ? '可用' : '不可用'}</span></div>
           <p className="mt-2 text-xs leading-5 text-slate-500">适合普通人物检测和基础实例分割，启动快，并可在高级版不可用时继续完成任务。</p>
-          <p className="mt-3 text-xs font-bold text-slate-700">安装：随“多人修脸”基础组件自动安装，无需额外操作。</p>
+          <p className="mt-3 text-xs font-bold text-slate-700">安装：随“团片协作”基础组件自动安装，无需额外操作。</p>
           <p className="mt-1 text-xs leading-5 text-slate-500">硬件：CPU 可运行；Intel、AMD、NVIDIA 显卡可选用 DirectML 加速。</p>
           <div className="mt-3 space-y-1 text-xs text-slate-400"><p>{component?.provider ? `当前运行：${component.provider}` : component?.runtimeError || '等待组件状态'}</p><p>组件占用：{formatStorageSize(component?.sizeBytes)}</p></div>
         </article>
@@ -224,6 +253,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
       if (!result.success) { onNotice(`安装“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
       if (result.cancelled) return;
       onNotice(`已安装“${component.name}”`);
+      await offerPackageCleanup({ appDialog, kind: 'component', componentId: component.id, label: `“${component.name}”组件`, packageSizeBytes: result.packageSizeBytes, onNotice });
       await onComponentsChanged();
     } finally { setBusyId(''); }
   };
@@ -265,12 +295,12 @@ const SettingsNavigator = ({ activeSection, components, onSelect }: { activeSect
     { id: 'components', label: '组件管理', description: '安装与卸载可选组件', icon: <Puzzle size={18}/> },
   ];
   const componentItems = ([
-    { id: 'team-retouch', componentId: 'team-retouch', label: '多人修脸', description: 'AI识别人物并把图片切小', icon: <UsersRound size={18}/> },
+    { id: 'team-retouch', componentId: 'team-retouch', label: '团片协作', description: 'AI识别人物并把图片切小', icon: <UsersRound size={18}/> },
     { id: 'research-tools', componentId: 'research-tools', label: '调研整理', description: '视频分镜与资料整理', icon: <ScanSearch size={18}/> },
     { id: 'office-media-extractor', componentId: 'office-media-extractor', label: 'Office 图片提取', description: '提取文档中的内嵌图片', icon: <FileImage size={18}/> },
   ] as Array<{ id: SettingsSection; componentId: string; label: string; description: string; icon: React.ReactNode }>).filter(item => installedComponentIds.has(item.componentId));
   const renderItem = (item: typeof items[number]) => <button key={item.id} type="button" aria-current={activeSection === item.id ? 'page' : undefined} onClick={() => onSelect(item.id)} className={`flex w-full items-start gap-3 rounded-lg px-3 py-3 text-left transition ${activeSection === item.id ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'}`}><span className={`mt-0.5 shrink-0 ${activeSection === item.id ? 'text-blue-600' : 'text-slate-400'}`}>{item.icon}</span><span className="min-w-0"><span className="block text-sm font-bold">{item.label}</span><span className={`mt-0.5 block text-xs leading-5 ${activeSection === item.id ? 'text-blue-600/80' : 'text-slate-400'}`}>{item.description}</span></span></button>;
-  return <nav aria-label="设置分类" className="flex min-h-0 flex-1 flex-col border-r border-slate-200 p-3">
+  return <nav aria-label="设置分类" className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain border-r border-slate-200 p-3">
     <div className="flex items-center gap-2 px-3 pb-3 pt-2 text-sm font-bold text-slate-800"><Settings size={17} className="text-blue-600"/>设置</div>
     <div className="space-y-1">{items.map(renderItem)}</div>
     <div className="mt-3 border-t border-slate-200 pt-3"><p className="px-3 pb-1.5 text-[11px] font-bold tracking-wide text-slate-400">组件</p><div className="space-y-1">{componentItems.map(renderItem)}</div></div>
@@ -312,9 +342,9 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
     </>}
     {activeSection === 'components' && <ComponentSettings components={components} installPath={componentInstallPath} loading={componentsLoading} onRefresh={onRefreshComponents} onComponentsChanged={onComponentsChanged} onNotice={onNotice}/>}
     {activeSection === 'team-retouch' && <>
-    <section><h4 className="text-sm font-bold text-slate-800">多人修脸</h4><label className="settings-check"><input type="checkbox" checked={teamRetouchSettings.useGpu} onChange={event => updateTeamRetouchSettings({ ...teamRetouchSettings, useGpu: event.target.checked })}/><span><span className="block">优先使用 GPU 进行全身人物检测</span><span className="mt-1 block text-xs leading-5 text-slate-500">关闭时固定使用 CPU；开启后若显卡不支持或运行失败，基础检测会自动回退 CPU。</span></span></label></section>
+    <section><h4 className="text-sm font-bold text-slate-800">团片协作</h4><label className="settings-check"><input type="checkbox" checked={teamRetouchSettings.useGpu} onChange={event => updateTeamRetouchSettings({ ...teamRetouchSettings, useGpu: event.target.checked })}/><span><span className="block">优先使用 GPU 进行全身人物检测</span><span className="mt-1 block text-xs leading-5 text-slate-500">关闭时固定使用 CPU；开启后若显卡不支持或运行失败，基础检测会自动回退 CPU。</span></span></label></section>
     <div className="border-t border-slate-100 pt-6"><TeamRetouchEngineSettings component={teamRetouchComponent} onRefresh={onRefreshComponents} onNotice={onNotice}/></div>
-    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">默认识别模式</h4><p className="mt-1 text-xs leading-5 text-slate-500">“多人修脸”界面仍可为单次任务临时切换。高级模式不可用时，只有“自动”会安全降级。</p><div className="mt-3 grid gap-3 md:grid-cols-3">{([
+    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">默认识别模式</h4><p className="mt-1 text-xs leading-5 text-slate-500">“团片协作”界面仍可为单次任务临时切换。高级模式不可用时，只有“自动”会安全降级。</p><div className="mt-3 grid gap-3 md:grid-cols-3">{([
       ['auto', '自动（推荐）', '高级可用时使用高级方案，否则使用基础方案完成任务。'],
       ['basic', '基础模式', '固定使用 RTMDet，不启动 WSL，速度快且资源占用较低。'],
       ['advanced', '高级模式', '必须使用 PairDETR + SAM2；不可用时停止并提示修复。'],

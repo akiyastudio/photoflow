@@ -27,7 +27,7 @@ export const useTeamOutputProgress = (sourceFilePath: string, workspacePath: str
       const source = imageFolders.find(folder => normalizeDirectory(folder.folderPath) === sourceDirectory);
       const candidates = imageFolders.filter(folder => !folder.folderMissing && normalizeDirectory(folder.folderPath) !== sourceDirectory);
       const remembered = candidates.find(folder => folder.id === (window.localStorage.getItem(`photoflow:team-retouch-output:${workspacePath}|${project.name}|${source?.id || sourceDirectory}`) || ''));
-      const related = [...candidates].reverse().find(folder => folder.parentProgressId === source?.id && folder.displayName.includes('多人修脸合成'));
+      const related = [...candidates].reverse().find(folder => folder.parentProgressId === source?.id && folder.displayName.includes('团片协作合成'));
       setFolders(imageFolders);
       setSourceProgress(source);
       setTargetProgressIdState(remembered?.id || related?.id || '__new__');
@@ -49,7 +49,7 @@ export const useTeamOutputProgress = (sourceFilePath: string, workspacePath: str
     const imageFolders = latest.progressFolders.filter(folder => folder.mediaKind === 'image');
     const latestSource = imageFolders.find(folder => normalizeDirectory(folder.folderPath) === sourceDirectory);
     const nextRoot = imageFolders.filter(folder => !folder.versionKey.includes('_')).reduce((highest, folder) => Math.max(highest, Number(folder.versionKey) || 0), 0) + 1;
-    const created = await window.electronAPI.createProgressFolder(workspacePath, project.status, project.name, { mediaKind: 'image', versionKey: String(nextRoot), parentProgressId: latestSource?.id || sourceProgress?.id, displayName: `图片后期_${nextRoot}_多人修脸合成` });
+    const created = await window.electronAPI.createProgressFolder(workspacePath, project.status, project.name, { mediaKind: 'image', versionKey: String(nextRoot), parentProgressId: latestSource?.id || sourceProgress?.id, displayName: `图片后期_${nextRoot}_团片协作合成` });
     if (!created.success || !created.progressFolder) throw new Error(created.error || '无法新建合成目标进度');
     setFolders(current => [...current, created.progressFolder as ProgressFolder]);
     setTargetProgressIdState(created.progressFolder.id);

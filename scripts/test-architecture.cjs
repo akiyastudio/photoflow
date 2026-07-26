@@ -32,11 +32,13 @@ assert(lines(app) < 1000, 'App.tsx exceeded the architecture size budget');
 assert(!/run(?:Workspace|Media)Database/.test(`${main}\n${read('electron/modules/workspace-ipc.cjs')}\n${read('electron/modules/versions-ipc.cjs')}`), 'IPC code bypassed repositories');
 assert.strictEqual((app.match(/electronAPI\.getComponents\(/g) || []).length, 1, 'App must be the single renderer owner of component status');
 assert(!settingsFeature.includes('electronAPI.getComponents('), 'settings must consume App component state instead of fetching it');
+assert(settingsFeature.includes("title: '删除已使用的安装包吗？'") && settingsFeature.includes('删除并释放 ${size}') && settingsFeature.includes("kind: 'component'") && settingsFeature.includes("kind: 'identity-models'") && settingsFeature.includes("kind: 'advanced'"), 'every in-app component installer must offer standard-dialog package cleanup with the actual size');
 assert(!projectWorkspace.includes('electronAPI.getComponents('), 'project workspace must consume App component state instead of fetching it');
 assert(!requirePlugin.includes('electronAPI.getComponents('), 'component contributions must not independently fetch component state');
 assert(app.includes("card !== 'research' || installedComponentIds.has('research-tools')"), 'research home contribution must be hidden when its component is not installed');
 assert(!app.includes('尚未安装调研整理组件'), 'uninstalled component contributions must not leave placeholder UI');
 assert(projectWorkspace.includes("teamRetouchAvailable && fileMenu.entry.kind === 'image'"), 'team retouch context-menu contribution must require the installed component');
+assert(projectWorkspace.includes("onNotice('正在加载团片协作数据…', 30000)") && projectWorkspace.includes('teamRetouchOpening || !teamRetouchInstalled && componentsLoading') && projectWorkspace.includes('团片协作已加载，共 ${combined.size} 张图片'), 'opening team retouch must immediately expose loading, completion, and busy-button feedback');
 assert(settingsFeature.includes('filter(item => installedComponentIds.has(item.componentId))'), 'component settings contributions must require the installed component');
 assert(app.includes("componentSettings: { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings, 'research-tools': researchSettings }"), 'legacy component config must migrate into componentSettings');
 for (const code of ['RECYCLE_BIN_FAILED', 'RECYCLE_UNAVAILABLE', 'RECYCLE_SERVICE_MISSING', 'EPERM', 'EACCES', 'EBUSY']) {
@@ -80,7 +82,10 @@ assert(!shellNewService.includes('runPowerShellJson(DISCOVERY_SCRIPT).catch(() =
 assert(shellNewService.includes("shell-new-types-cache.json") && shellNewService.includes('CACHE_MAX_AGE_MS') && shellNewService.includes('writePersistentCache(cachedTypes)'), 'ShellNew types and icons must persist across app launches instead of rescanning every time');
 assert(projectWorkspace.includes('createProjectShellNewFile') && projectWorkspace.includes('Windows 文件类型'), 'the top New menu must expose supported Windows ShellNew file types');
 assert(shellNewService.includes("app.getFileIcon(iconSource, { size: 'normal' })") && projectWorkspace.includes('type.iconDataUrl'), 'the top New menu must display Windows-associated file type icons');
-assert(projectWorkspace.includes('project-menu-item flex items-center gap-2') && projectWorkspace.includes('重新扫描 Windows 新建文件类型'), 'ShellNew menu rows must place text beside the icon and expose manual refresh');
+assert(read('src/index.css').includes('.project-create-menu .project-menu-item { display:flex; align-items:center; gap:.5rem; }') && projectWorkspace.includes('project-create-menu') && projectWorkspace.includes('重新扫描 Windows 新建文件类型'), 'ShellNew menu rows must place text beside the icon and expose manual refresh');
+assert(projectWorkspace.includes('setProgressSetup(makeProgressDraft') && projectWorkspace.includes('void loadProgressFolders();'), 'the progress editor must open from cached state before refreshing progress folders');
+assert(settingsFeature.includes('overflow-y-auto overscroll-contain'), 'the settings navigator must scroll when its component list exceeds the viewport');
+assert(main.includes('isInternalWorkspaceChange(fileName)'), 'workspace watching must ignore hidden file-operation staging writes');
 
 const electronSources = fs.readdirSync(path.join(root, 'electron'), { recursive: true })
   .filter(name => name.endsWith('.cjs'))

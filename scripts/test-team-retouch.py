@@ -19,10 +19,10 @@ ENGINE = ROOT / "components" / "team-retouch" / "team_retouch.py"
 sys.path.insert(0, str(ENGINE.parent))
 sys.path.insert(0, str(ROOT / "python"))
 
-from team_retouch import box_coverage_by_crop, centered_work_crop, emit_progress, identify_people, load_mask, mask_bounds, match_returned_batch, maximize_assignment, plan_work_tiles, reposition_crop_to_avoid_bystanders, restore_patches, save_mask  # noqa: E402
+from team_retouch import bounded_planning_box, box_coverage_by_crop, centered_work_crop, emit_progress, excluded_detection_indices, identify_people, load_mask, mask_bounds, match_returned_batch, matches_exclusion, maximize_assignment, plan_work_tiles, rebuild_without_person, reposition_crop_to_avoid_bystanders, restore_patches, save_mask, spatially_order_people  # noqa: E402
 from identity_engine import constrained_clusters, ranked_similarity_pairs  # noqa: E402
 from patch_merge import safe_exif_bytes, save_tiff  # noqa: E402
-from workspace_db import connect, team_identity_assign, team_identity_complete, team_identity_save, team_patch_delete, team_patch_replace, team_patch_update, team_project_register_photo, team_project_unregister_photo, team_project_workspace  # noqa: E402
+from workspace_db import connect, team_identity_assign, team_identity_complete, team_identity_confirm_group, team_identity_save, team_patch_delete, team_patch_replace, team_patch_update, team_person_exclusion_add, team_person_exclusion_clear, team_person_exclusion_list, team_project_register_photo, team_project_unregister_photo, team_project_workspace  # noqa: E402
 
 
 def main():
@@ -31,6 +31,10 @@ def main():
         emit_progress(34, "正在确认每个人的位置")
     progress = json.loads(progress_output.getvalue())
     assert progress == {"type": "progress", "progress": 34, "message": "正在确认每个人的位置"}
+    assert matches_exclusion([10, 10, 60, 100], [12, 8, 62, 102])
+    assert not matches_exclusion([10, 10, 60, 100], [120, 10, 170, 100])
+    overlapping_people = [{"box": [10, 10, 60, 100]}, {"box": [20, 10, 70, 100]}]
+    assert excluded_detection_indices(overlapping_people, [[10, 10, 60, 100]]) == {0}
 
     with tempfile.TemporaryDirectory(prefix="photoflow-team-retouch-test-") as directory:
         test_root = Path(directory)
@@ -71,6 +75,45 @@ def main():
         full_mask[80:170, 105:205] = 255
         save_mask(mask_path, full_mask)
         assert np.array_equal(load_mask(mask_path), full_mask)
+
+        # Removing one false positive must deterministically retain every other
+        # stored person. Legacy tasks have only a group mask, so this also
+        # covers the compatibility path used by already-recognized projects.
+        rebuild_mask_path = test_root / "legacy-group-mask.png"
+        legacy_mask = np.zeros((height, width), dtype=np.uint8)
+        legacy_members = []
+        for person_index, x in enumerate((20, 120, 220), start=1):
+            legacy_mask[55:205, x:x + 60] = 255
+            legacy_members.append({
+                "personIndex": person_index,
+                "confidence": 0.9,
+                "bbox": {"x": x, "y": 55, "width": 60, "height": 150},
+            })
+        save_mask(rebuild_mask_path, legacy_mask)
+        rebuild_request = test_root / "rebuild-request.json"
+        rebuild_request.write_text(json.dumps({
+            "removePersonIndex": 2,
+            "detector": "legacy-test",
+            "tasks": [{
+                "id": "legacy-task",
+                "personIndex": 1,
+                "confidence": 0.9,
+                "bbox": {"x": 20, "y": 55, "width": 260, "height": 150},
+                "members": legacy_members,
+                "maskPath": str(rebuild_mask_path),
+            }],
+        }), encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            rebuilt = rebuild_without_person(
+                base_path, rebuild_request, test_root / "rebuilt-analysis",
+                test_root / "rebuilt-delivery", "8196", "expand",
+            )
+        assert rebuilt["removedPersonCount"] == 1
+        assert rebuilt["personCount"] == 2
+        rebuilt_members = [member for task in rebuilt["tasks"] for member in task["members"]]
+        assert sorted(member["previousPersonIndex"] for member in rebuilt_members) == [1, 3]
+        assert sorted(member["personIndex"] for member in rebuilt_members) == [1, 2]
+        assert all(Path(task["patchPath"]).is_file() and Path(task["maskPath"]).is_file() for task in rebuilt["tasks"])
 
         # Returned phone images lose names/metadata and may be resized,
         # compressed, blurred and recolored. Content matching must still
@@ -169,6 +212,20 @@ def main():
         proxy_mask = np.zeros((100, 200), dtype=bool)
         proxy_mask[10:91, 20:181] = True
         assert mask_bounds(proxy_mask, 0.25, 1200, 800) == [80.0, 40.0, 724.0, 364.0]
+
+        # Detector output order and leaked instance masks must not scramble a
+        # crowd. Numbering follows the actual body boxes from left to right,
+        # while a contaminated mask can enlarge its body only within bounds.
+        unordered_people = [
+            {"box": [1700, 500, 2200, 3000], "physicalRank": 2},
+            {"box": [300, 600, 800, 3000], "physicalRank": 0},
+            {"box": [1000, 450, 1500, 3000], "physicalRank": 1},
+        ]
+        assert [item["physicalRank"] for item in spatially_order_people(unordered_people)] == [0, 1, 2]
+        bounded = bounded_planning_box(
+            [1700, 500, 2200, 3000], [250, 300, 2250, 3200], 8192, 5464,
+        )
+        assert bounded[0] >= 1475 and bounded[2] <= 2425
 
         # Nearby people share one normal-size work image, while distant people
         # remain separate. Dense neighboring people may share a tile.
@@ -331,12 +388,59 @@ def main():
             }],
         })
         assert candidate["success"]
+        confirmed_candidate = team_identity_confirm_group(db, {
+            "projectName": "Test",
+            "anchorSubjectKey": "photo:version:2",
+            "identityId": candidate["identityId"],
+            "assignments": [{
+                "photoId": "photo", "baseVersionId": "version", "personIndex": 2,
+                "confidence": 1,
+            }],
+        })
+        assert confirmed_candidate["updatedCount"] == 1
+        workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
+        confirmed_assignment = next(item for item in workspace["assignments"] if item["personIndex"] == 2)
+        assert confirmed_assignment["source"] == "manual"
+        assert team_identity_assign(db, {
+            "projectName": "Test", "photoId": "photo", "baseVersionId": "version", "personIndex": 2,
+            "identityId": identity["identityId"], "confidence": .7, "source": "suggested",
+        })["success"]
+        released_candidate = team_identity_confirm_group(db, {
+            "projectName": "Test",
+            "anchorSubjectKey": "photo:version:1",
+            "identityId": identity["identityId"],
+            "assignments": [{
+                "photoId": "photo", "baseVersionId": "version", "personIndex": 1,
+                "confidence": 1,
+            }],
+            "clearAssignments": [{
+                "photoId": "photo", "baseVersionId": "version", "personIndex": 2,
+            }],
+        })
+        assert released_candidate["updatedCount"] == 1
+        workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
+        assert all(item["personIndex"] != 2 for item in workspace["assignments"])
         assert team_identity_assign(db, {
             "projectName": "Test", "photoId": "photo", "baseVersionId": "version", "personIndex": 2,
             "identityId": identity["identityId"], "confidence": 1, "source": "manual",
         })["success"]
         workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
         assert all(item["id"] != candidate["identityId"] for item in workspace["identities"])
+        excluded = team_person_exclusion_add(db, {
+            "projectName": "Test", "photoId": "photo", "baseVersionId": "version",
+            "bbox": {"x": 60, "y": 12, "width": 50, "height": 88},
+        })
+        assert excluded["success"]
+        exclusions = team_person_exclusion_list(db, {
+            "projectName": "Test", "photoId": "photo", "baseVersionId": "version",
+        })
+        assert len(exclusions["exclusions"]) == 1
+        assert exclusions["exclusions"][0]["bbox"]["width"] == 50
+        workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
+        assert workspace["photos"][0]["excludedPersonCount"] == 1
+        assert team_person_exclusion_clear(db, {
+            "projectName": "Test", "photoId": "photo", "baseVersionId": "version",
+        })["clearedCount"] == 1
 
         db.execute("""INSERT INTO photos(id,project_id,media_type,original_name,display_name,original_file_path,created_at,updated_at)
                       VALUES(?,?,?,?,?,?,?,?)""",

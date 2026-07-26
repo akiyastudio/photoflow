@@ -13,6 +13,7 @@ import type { AppConfig, ComponentStatus, MediaMetadataField, MediaVersion, Medi
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
 
 const CONTEXT_MENU_VIEWPORT_MARGIN = 8;
+const FILE_VIRTUAL_OVERSCAN_ROWS = 10;
 const OFFICE_OPEN_XML_EXTENSIONS = new Set([
   '.docx', '.docm', '.dotx', '.dotm',
   '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam',
@@ -69,6 +70,14 @@ const CollapsiblePanel = ({ title, onClose, children }: { title: string; onClose
 // only probe the memory/disk layers and enqueue or reprioritize a task.
 const requestThumbnail = <T,>(task: () => Promise<T>) => task();
 const thumbnailSizeLabel = (requestedSize: number) => requestedSize <= 320 ? 'small' : requestedSize <= 640 ? 'medium' : 'large';
+const mediaThumbnailPreviewCache = new Map<string, string>();
+const mediaThumbnailPreviewKey = (filePath: string, requestedSize: number) => `${filePath.toLocaleLowerCase()}|${requestedSize}`;
+const rememberMediaThumbnailPreview = (key: string, url: string) => {
+  if (mediaThumbnailPreviewCache.size >= 2000 && !mediaThumbnailPreviewCache.has(key)) {
+    mediaThumbnailPreviewCache.delete(mediaThumbnailPreviewCache.keys().next().value as string);
+  }
+  mediaThumbnailPreviewCache.set(key, url);
+};
 
 const useThumbnailUpdates = (
   filePath: string,
@@ -205,6 +214,7 @@ type ProgressCompareConfirmation = {
   progressFolder: ProgressFolder;
   parentFolder: ProgressFolder;
   matches: CompareMatch[];
+  suggestions: CompareMatch[];
   acceptedSources: string[];
   unmatchedSources: string[];
   unmatchedReferences: string[];
@@ -387,6 +397,8 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   const [progressFolders, setProgressFolders] = useState<ProgressFolder[]>([]);
   const [fileEntries, setFileEntries] = useState<ProjectFileEntry[]>([]);
   const [virtualWindow, setVirtualWindow] = useState({ start: 0, end: 120, top: 0, bottom: 0, rowHeight: 0, columns: 1 });
+  const virtualWindowRef = useRef(virtualWindow);
+  virtualWindowRef.current = virtualWindow;
   const [currentRelativePath, setCurrentRelativePath] = useState('');
   const [directoryHistory, setDirectoryHistory] = useState<{ back: string[]; forward: string[] }>({ back: [], forward: [] });
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid');
@@ -440,7 +452,10 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   const [viewportStatus, setViewportStatus] = useState<{ path: string; fileNumber: number; total: number; captureDateTime?: string } | null>(null);
   const [previewPaneOpen, setPreviewPaneOpen] = useState(false);
   const fileRevealRequestIdRef = useRef(0);
-  const [pendingFileReveal, setPendingFileReveal] = useState<{ path: string; requestId: number } | null>(null);
+  const [pendingFileReveal, setPendingFileReveal] = useState<{ path: string; requestId: number; align: 'nearest' | 'center' } | null>(null);
+  const previousPaneLayoutRef = useRef('');
+  const paneLayoutRevealPendingRef = useRef(false);
+  const paneLayoutRevealPathRef = useRef('');
   const [metadataPaneOpen, setMetadataPaneOpen] = useState(false);
   const [columnWidths, setColumnWidths] = useState(() => ({
     files: readStoredNumber('photoflow:files-column-width', 560),
@@ -478,6 +493,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   const [teamRetouchEntries, setTeamRetouchEntries] = useState<ProjectFileEntry[]>([]);
   const [teamRetouchHistory, setTeamRetouchHistory] = useState<ProjectFileEntry[]>([]);
   const [teamRetouchStep, setTeamRetouchStep] = useState<TeamRetouchStep | null>(null);
+  const [teamRetouchOpening, setTeamRetouchOpening] = useState(false);
   const [finalVersionSummary, setFinalVersionSummary] = useState({ count: 0, availableCount: 0, missingCount: 0 });
   const [finalExporting, setFinalExporting] = useState(false);
   const [finalViewOpen, setFinalViewOpen] = useState(false);
@@ -487,9 +503,9 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   const [previewVersionLoading, setPreviewVersionLoading] = useState(false);
   const [previewVersionBusy, setPreviewVersionBusy] = useState(false);
   const [drives, setDrives] = useState<string[]>([]);
-  const requestFileReveal = useCallback((path: string) => {
+  const requestFileReveal = useCallback((path: string, align: 'nearest' | 'center' = 'nearest') => {
     fileRevealRequestIdRef.current += 1;
-    setPendingFileReveal({ path, requestId: fileRevealRequestIdRef.current });
+    setPendingFileReveal({ path, requestId: fileRevealRequestIdRef.current, align });
   }, []);
 
   useEffect(() => {
@@ -512,11 +528,12 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
   }, [teamRetouchAvailable, workspacePath, project.name]);
 
   useEffect(() => {
-    if (!progressCompare?.matches.length) {
+    const candidates = progressCompare ? [...progressCompare.matches, ...progressCompare.suggestions] : [];
+    if (!candidates.length) {
       setActiveProgressCompareSource('');
       return;
     }
-    setActiveProgressCompareSource(current => progressCompare.matches.some(match => match.source === current) ? current : progressCompare.matches[0].source);
+    setActiveProgressCompareSource(current => candidates.some(match => match.source === current) ? current : candidates[0].source);
   }, [progressCompare]);
 
   useEffect(() => {
@@ -542,7 +559,9 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
 
   useEffect(() => {
     if (!active) return;
-    const fetchDrives = () => window.electronAPI?.getDrives?.().then(setDrives);
+    const fetchDrives = () => window.electronAPI?.getDrives?.().then(nextDrives => setDrives(current =>
+      current.length === nextDrives.length && current.every((drive, index) => drive === nextDrives[index]) ? current : nextDrives
+    ));
     fetchDrives();
     const intervalId = window.setInterval(fetchDrives, 3000);
     return () => window.clearInterval(intervalId);
@@ -732,6 +751,19 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       const changedPath = (change.fileName || '').replace(/\\/g, '/');
       // A change in another project should never make a photo-heavy folder redraw.
       if (changedPath && changedPath !== projectPrefix && !changedPath.startsWith(`${projectPrefix}/`)) return;
+      // Content writes are handled by thumbnail/media tracking. Re-reading the
+      // whole directory is only necessary when its membership may have changed.
+      if (change.eventType === 'change') return;
+      if (changedPath) {
+        const projectRelativePath = changedPath === projectPrefix ? '' : changedPath.slice(projectPrefix.length + 1);
+        const changedParentPath = projectRelativePath.split('/').slice(0, -1).join('/');
+        const currentPath = currentRelativePathRef.current.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+        const affectsCurrentDirectory = !projectRelativePath
+          || changedParentPath === currentPath
+          || projectRelativePath === currentPath
+          || Boolean(currentPath && currentPath.startsWith(`${projectRelativePath}/`));
+        if (!affectsCurrentDirectory) return;
+      }
       directoryEntriesCacheRef.current.clear();
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
@@ -780,7 +812,6 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     const update = () => {
       window.cancelAnimationFrame(frameId);
       frameId = window.requestAnimationFrame(() => {
-        if (fileRevealPathRef.current) return;
         const containerRect = container.getBoundingClientRect();
         const surfaceRect = surface.getBoundingClientRect();
         const surfaceTop = surfaceRect.top - containerRect.top + container.scrollTop;
@@ -792,8 +823,8 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         const measuredGridPitch = measuredItem && viewMode === 'grid' ? measuredItem.getBoundingClientRect().height + 12 : 0;
         const rowHeight = viewMode === 'list' ? 48 : measuredGridPitch || cellWidth + 68;
         const rowCount = Math.ceil(displayedFileEntries.length / columns);
-        const firstRow = Math.max(0, Math.floor(visibleTop / rowHeight) - 4);
-        const lastRow = Math.min(rowCount, Math.ceil((visibleTop + container.clientHeight) / rowHeight) + 4);
+        const firstRow = Math.max(0, Math.floor(visibleTop / rowHeight) - FILE_VIRTUAL_OVERSCAN_ROWS);
+        const lastRow = Math.min(rowCount, Math.ceil((visibleTop + container.clientHeight) / rowHeight) + FILE_VIRTUAL_OVERSCAN_ROWS);
         const next = {
           start: firstRow * columns,
           end: Math.min(displayedFileEntries.length, lastRow * columns),
@@ -1079,11 +1110,14 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     }
     return { mode, mediaKind, relation: actualRelation, parentProgressId: parentId, versionKey, progressName: '', trackingEnabled: mode !== 'create', renameSources: false, copyMissingFromParent: false };
   };
-  const openProgressSetup = async (mode: 'create' | 'import') => {
+  const openProgressSetup = (mode: 'create' | 'import') => {
     setShowCreateMenu(false);
     setShowImportMenu(false);
-    const latestFolders = await loadProgressFolders();
-    setProgressSetup(makeProgressDraft(mode, 'image', 'root', '', latestFolders));
+    // The cached list is already loaded when the project opens. Render the
+    // editor immediately and reconcile the list in the background instead of
+    // making the dialog wait on a database IPC round trip.
+    setProgressSetup(makeProgressDraft(mode, 'image', 'root', '', progressFolders));
+    void loadProgressFolders();
   };
   const openMarkProgress = async (entry: ProjectFileEntry) => {
     const targetRelativePath = entry.relativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
@@ -1238,6 +1272,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
           progressFolder,
           parentFolder,
           matches: compared.matches,
+          suggestions: compared.suggestions,
           acceptedSources: compared.matches.filter(match => match.confidence !== '低').map(match => match.source),
           unmatchedSources: compared.unmatched,
           unmatchedReferences: compared.unmatchedReference,
@@ -1289,6 +1324,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         progressFolder,
         parentFolder,
         matches: compared.matches,
+        suggestions: compared.suggestions,
         acceptedSources: compared.matches.filter(match => match.confidence !== '低').map(match => match.source),
         unmatchedSources: compared.unmatched,
         unmatchedReferences: compared.unmatchedReference,
@@ -1308,14 +1344,17 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     setProgressSubmitting(true);
     setProgressTask('正在确认版本关系并写入素材历史…');
     const accepted = new Set(progressCompare.acceptedSources);
+    const candidates = [...progressCompare.matches, ...progressCompare.suggestions];
+    const acceptedMatches = candidates.filter(match => accepted.has(match.source));
+    const acceptedReferences = new Set(acceptedMatches.map(match => match.reference));
     const result = await window.electronAPI.commitVersionBatch(workspacePath, project.status, project.name, {
       folderA: progressCompare.parentFolder.folderPath,
       folderB: progressCompare.progressFolder.folderPath,
       importKey: crypto.randomUUID(),
       displayName: progressCompare.progressFolder.displayName,
       renameSources: progressCompare.renameSources,
-      copyMissingReferences: progressCompare.copyMissingFromParent ? progressCompare.unmatchedReferences : [],
-      matches: progressCompare.matches.filter(match => accepted.has(match.source)),
+      copyMissingReferences: progressCompare.copyMissingFromParent ? progressCompare.unmatchedReferences.filter(reference => !acceptedReferences.has(reference)) : [],
+      matches: acceptedMatches,
     });
     setProgressSubmitting(false);
     setProgressTask('');
@@ -1609,6 +1648,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     }
   };
   const openTeamRetouch = async (entry?: ProjectFileEntry) => {
+    if (teamRetouchOpening) return;
     const targets = entry
       ? (selectedPaths.includes(entry.relativePath) ? selectedEntries : [entry])
       : selectedEntries;
@@ -1618,19 +1658,28 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       return;
     }
     if (!targets.length && !teamRetouchHistory.length) {
-      onNotice('请选择至少一张成片图片开始多人修脸');
+      onNotice('请选择至少一张成片图片开始团片协作');
       return;
     }
-    const combined = new Map<string, ProjectFileEntry>();
-    for (const item of [...teamRetouchHistory, ...validTargets]) combined.set(item.relativePath.toLocaleLowerCase(), item);
-    if (validTargets.length) {
-      const registered = await window.electronAPI.registerTeamProjectPhotos(workspacePath, project.status, project.name, validTargets.map(target => target.relativePath));
-      if (!registered.success) { onNotice(`加入多人修脸失败：${registered.error || '未知错误'}`); return; }
-      void loadTeamRetouchHistory();
+    setTeamRetouchOpening(true);
+    onNotice('正在加载团片协作数据…', 30000);
+    try {
+      const combined = new Map<string, ProjectFileEntry>();
+      for (const item of [...teamRetouchHistory, ...validTargets]) combined.set(item.relativePath.toLocaleLowerCase(), item);
+      if (validTargets.length) {
+        const registered = await window.electronAPI.registerTeamProjectPhotos(workspacePath, project.status, project.name, validTargets.map(target => target.relativePath));
+        if (!registered.success) throw new Error(registered.error || '未知错误');
+        void loadTeamRetouchHistory();
+      }
+      setVersionEntry(null);
+      setTeamRetouchEntries([...combined.values()]);
+      setTeamRetouchStep('detect');
+      onNotice(`团片协作已加载，共 ${combined.size} 张图片`);
+    } catch (error) {
+      onNotice(`打开团片协作失败：${error instanceof Error ? error.message : String(error)}`, 7000);
+    } finally {
+      setTeamRetouchOpening(false);
     }
-    setVersionEntry(null);
-    setTeamRetouchEntries([...combined.values()]);
-    setTeamRetouchStep('detect');
   };
   const openProjectEntriesInPhotoshop = async (entries: ProjectFileEntry[]) => {
     const imagePaths = entries.filter(entry => entry.kind === 'image' || entry.kind === 'raw').map(entry => entry.relativePath);
@@ -1658,7 +1707,10 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     const additive = event.ctrlKey || event.metaKey;
     selectionDragRef.current = { startX: event.clientX, startY: event.clientY, initialPaths: additive ? selectedPaths : [], additive, started: false };
     if (!additive) {
-      if (previewPath) requestFileReveal(previewPath);
+      if (previewPath && (previewPaneOpen || metadataPaneOpen)) {
+        paneLayoutRevealPathRef.current = previewPath;
+        paneLayoutRevealPendingRef.current = true;
+      }
       setSelectedPaths([]);
       setPreviewPath('');
       setViewportCurrentPath('');
@@ -1856,72 +1908,70 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     onNotice(nextFinalState ? '已标记为最终版' : '已取消最终版');
   };
   const previewImageEntries = displayedFileEntries.filter(entry => entry.kind === 'image' || entry.kind === 'raw');
-  const scrollFileEntryIntoView = useCallback((relativePath: string) => {
+  const scrollFileEntryIntoView = useCallback((relativePath: string, align: 'nearest' | 'center' = 'nearest') => {
     const container = filesColumnRef.current;
     const surface = filesSurfaceRef.current;
-    if (displayedFileEntries.findIndex(entry => entry.relativePath === relativePath) < 0 || !container || !surface) return false;
+    const fileIndex = displayedFileEntries.findIndex(entry => entry.relativePath === relativePath);
+    if (fileIndex < 0 || !container || !surface) return false;
+
+    const findRenderedNode = () => Array.from(surface.querySelectorAll<HTMLElement>('[data-entry-path]')).find(item => item.dataset.entryPath === relativePath);
+    const revealRenderedNode = () => {
+      const node = findRenderedNode();
+      if (!node) return false;
+      const containerRect = container.getBoundingClientRect();
+      const nodeRect = node.getBoundingClientRect();
+      const fullyVisible = nodeRect.top >= containerRect.top
+        && nodeRect.bottom <= containerRect.bottom
+        && nodeRect.left >= containerRect.left
+        && nodeRect.right <= containerRect.right;
+      if (align === 'center') node.scrollIntoView({ block: 'center', inline: 'nearest' });
+      else if (!fullyVisible) node.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      return true;
+    };
+
+    window.cancelAnimationFrame(fileRevealFrameRef.current);
+    fileRevealPathRef.current = '';
+    if (revealRenderedNode()) return true;
 
     fileRevealPathRef.current = relativePath;
-    window.cancelAnimationFrame(fileRevealFrameRef.current);
-    let previousSurfaceWidth = -1;
-    let stableWidthFrames = 0;
-    let measureAttempts = 0;
-    const revealAfterVirtualRender = (targetRow: number, rowHeight: number) => {
-      fileRevealFrameRef.current = window.requestAnimationFrame(() => {
-        fileRevealFrameRef.current = window.requestAnimationFrame(() => {
-          if (fileRevealPathRef.current !== relativePath) return;
-          const node = Array.from(surface.querySelectorAll<HTMLElement>('[data-entry-path]')).find(item => item.dataset.entryPath === relativePath);
-          fileRevealPathRef.current = '';
-          if (node) {
-            node.scrollIntoView({ block: 'center', inline: 'nearest' });
-            node.focus({ preventScroll: true });
-            return;
-          }
-          const containerRect = container.getBoundingClientRect();
-          const surfaceRect = surface.getBoundingClientRect();
-          const surfaceTop = surfaceRect.top - containerRect.top + container.scrollTop;
-          container.scrollTo({ top: Math.max(0, surfaceTop + targetRow * rowHeight - Math.max(0, container.clientHeight - rowHeight) / 2) });
-        });
-      });
-    };
-    const measureStableLayout = () => {
+    fileRevealFrameRef.current = window.requestAnimationFrame(() => {
       if (fileRevealPathRef.current !== relativePath) return;
       const surfaceWidth = Math.max(1, surface.clientWidth);
-      stableWidthFrames = Math.abs(surfaceWidth - previousSurfaceWidth) < 1 ? stableWidthFrames + 1 : 0;
-      previousSurfaceWidth = surfaceWidth;
-      measureAttempts += 1;
-      if (stableWidthFrames < 1 && measureAttempts < 8) {
-        fileRevealFrameRef.current = window.requestAnimationFrame(measureStableLayout);
-        return;
-      }
-
-      const fileIndex = displayedFileEntries.findIndex(entry => entry.relativePath === relativePath);
-      if (fileIndex < 0) {
-        fileRevealPathRef.current = '';
-        return;
-      }
       const columns = viewMode === 'list' ? 1 : Math.max(1, Math.floor((surfaceWidth + 12) / (gridIconSize + 12)));
       const cellWidth = viewMode === 'list' ? surfaceWidth : (surfaceWidth - (columns - 1) * 12) / columns;
       const measuredItem = surface.querySelector<HTMLElement>('[data-entry-path]');
-      const measuredRowHeight = measuredItem
-        ? measuredItem.getBoundingClientRect().height + (viewMode === 'list' ? 0 : 12)
-        : 0;
+      const measuredRowHeight = measuredItem ? measuredItem.getBoundingClientRect().height + (viewMode === 'list' ? 0 : 12) : 0;
       const rowHeight = measuredRowHeight || (viewMode === 'list' ? 48 : cellWidth + 68);
       const targetRow = Math.floor(fileIndex / columns);
-      const rowCount = Math.ceil(displayedFileEntries.length / columns);
-      const firstRow = Math.max(0, targetRow - 4);
-      const lastRow = Math.min(rowCount, targetRow + 5);
-      setVirtualWindow({
-        start: firstRow * columns,
-        end: Math.min(displayedFileEntries.length, lastRow * columns),
-        top: firstRow * rowHeight,
-        bottom: Math.max(0, (rowCount - lastRow) * rowHeight),
-        rowHeight,
-        columns,
-      });
-      revealAfterVirtualRender(targetRow, rowHeight);
-    };
-    fileRevealFrameRef.current = window.requestAnimationFrame(measureStableLayout);
+      const targetTop = targetRow * rowHeight;
+      const targetBottom = targetTop + rowHeight;
+      const headerHeight = viewMode === 'list' ? 32 : 0;
+      const containerRect = container.getBoundingClientRect();
+      const surfaceRect = surface.getBoundingClientRect();
+      const surfaceTop = surfaceRect.top - containerRect.top + container.scrollTop;
+      const visibleTop = Math.max(0, container.scrollTop - surfaceTop - headerHeight);
+      const visibleHeight = Math.max(rowHeight, container.clientHeight - headerHeight);
+      const nextVisibleTop = targetTop < visibleTop
+        ? targetTop
+        : targetBottom > visibleTop + visibleHeight ? targetBottom - visibleHeight : visibleTop;
+      container.scrollTo({ top: Math.max(0, surfaceTop + headerHeight + nextVisibleTop) });
+
+      let attempts = 0;
+      const finishReveal = () => {
+        if (fileRevealPathRef.current !== relativePath) return;
+        if (revealRenderedNode()) {
+          fileRevealPathRef.current = '';
+          return;
+        }
+        attempts += 1;
+        if (attempts >= 12) {
+          fileRevealPathRef.current = '';
+          return;
+        }
+        fileRevealFrameRef.current = window.requestAnimationFrame(finishReveal);
+      };
+      fileRevealFrameRef.current = window.requestAnimationFrame(finishReveal);
+    });
     return true;
   }, [displayedFileEntries, gridIconSize, viewMode]);
   useEffect(() => () => {
@@ -1929,12 +1979,39 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     fileRevealPathRef.current = '';
   }, []);
   useEffect(() => {
-    if (!pendingFileReveal || !scrollFileEntryIntoView(pendingFileReveal.path)) return;
+    if (!pendingFileReveal || !scrollFileEntryIntoView(pendingFileReveal.path, pendingFileReveal.align)) return;
     setPendingFileReveal(current => current?.requestId === pendingFileReveal.requestId ? null : current);
   }, [pendingFileReveal, scrollFileEntryIntoView]);
   useEffect(() => {
-    if (previewPath) requestFileReveal(previewPath);
-  }, [previewPath, previewPaneOpen, metadataPaneOpen, requestFileReveal]);
+    const paneLayout = `${previewPaneOpen}:${metadataPaneOpen}`;
+    const paneLayoutChanged = previousPaneLayoutRef.current !== '' && previousPaneLayoutRef.current !== paneLayout;
+    previousPaneLayoutRef.current = paneLayout;
+    if (paneLayoutChanged) paneLayoutRevealPendingRef.current = true;
+    const revealPath = previewPath || paneLayoutRevealPathRef.current;
+    if (!revealPath) return;
+    let frameId = 0;
+    let previousWidth = -1;
+    let stableFrames = 0;
+    let attempts = 0;
+    const revealAfterStableLayout = () => {
+      const width = filesSurfaceRef.current?.clientWidth || 0;
+      stableFrames = width > 0 && Math.abs(width - previousWidth) < 1 ? stableFrames + 1 : 0;
+      previousWidth = width;
+      attempts += 1;
+      const expectedColumns = viewMode === 'list' ? 1 : Math.max(1, Math.floor((width + 12) / (gridIconSize + 12)));
+      const virtualLayoutReady = virtualWindowRef.current.columns === expectedColumns && virtualWindowRef.current.rowHeight > 0;
+      if ((stableFrames >= 2 && virtualLayoutReady) || attempts >= 24) {
+        const align = paneLayoutRevealPendingRef.current ? 'center' : 'nearest';
+        paneLayoutRevealPendingRef.current = false;
+        if (paneLayoutRevealPathRef.current === revealPath) paneLayoutRevealPathRef.current = '';
+        requestFileReveal(revealPath, align);
+        return;
+      }
+      frameId = window.requestAnimationFrame(revealAfterStableLayout);
+    };
+    frameId = window.requestAnimationFrame(revealAfterStableLayout);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [previewPath, previewPaneOpen, metadataPaneOpen, requestFileReveal, viewMode, gridIconSize]);
   useEffect(() => {
     let active = true;
     if (!viewportCurrentEntry || viewportCurrentFileNumber <= 0) {
@@ -2248,6 +2325,10 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
     };
   }, [viewMode]);
 
+  const progressCompareCandidates = progressCompare ? [...progressCompare.matches, ...progressCompare.suggestions] : [];
+  const progressCompareAcceptedReferences = new Set(progressCompareCandidates.filter(match => progressCompare?.acceptedSources.includes(match.source)).map(match => match.reference));
+  const progressCompareMissingReferences = progressCompare?.unmatchedReferences.filter(reference => !progressCompareAcceptedReferences.has(reference)) || [];
+
   return (
     <div ref={projectWorkspaceRef} className="flex h-full w-full min-w-0 flex-col animate-in fade-in duration-300">
       {fileMenu && createPortal(<ViewportContextMenu x={fileMenu.x} y={fileMenu.y} widthClass="w-52">
@@ -2255,7 +2336,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         {fileMenu.entry.kind !== 'folder' && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openProjectEntry(entry); }}><ExternalLink size={14}/>用默认方式打开</button>}
         {officeImageExtractorAvailable && isOfficeOpenXmlEntry(fileMenu.entry) && <button className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(isOfficeOpenXmlEntry) : [fileMenu.entry]; setFileMenu(null); void extractOfficeImages(entries); }}><ImageIcon size={14}/>提取图片{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(isOfficeOpenXmlEntry).length > 1 ? `（${selectedEntries.filter(isOfficeOpenXmlEntry).length} 个文档）` : ''}</button>}
         {photoshopAvailable && (fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw') && <button className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(entry => entry.kind === 'image' || entry.kind === 'raw') : [fileMenu.entry]; setFileMenu(null); void openProjectEntriesInPhotoshop(entries); }}><PhotoshopIcon size={14}/>用 Photoshop 打开{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(entry => entry.kind === 'image' || entry.kind === 'raw').length > 1 ? `（${selectedEntries.filter(entry => entry.kind === 'image' || entry.kind === 'raw').length} 个）` : ''}</button>}
-        {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <><div className="my-1 border-t border-slate-100"/><button disabled={!canSelectFileMenuMedia} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); selectMediaFiles(targets); }}><CheckCircle2 size={14}/>选片</button><button disabled={!hasVersionTrackingForEntry(fileMenu.entry)} title={hasVersionTrackingForEntry(fileMenu.entry) ? '管理素材的历史版本' : '请先导入版本进度并开启项目跟踪'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openVersions(entry); }}><GitBranch size={14}/>版本管理</button>{teamRetouchAvailable && fileMenu.entry.kind === 'image' && <button disabled={!teamRetouchInstalled} title={teamRetouchInstalled ? '多人修脸' : '正在检查多人修脸组件'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openTeamRetouch(entry); }}>{!teamRetouchInstalled && componentsLoading ? <Loader2 size={14} className="animate-spin"/> : <UsersRound size={14}/>}多人修脸</button>}</>}
+        {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <><div className="my-1 border-t border-slate-100"/><button disabled={!canSelectFileMenuMedia} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); selectMediaFiles(targets); }}><CheckCircle2 size={14}/>选片</button><button disabled={!hasVersionTrackingForEntry(fileMenu.entry)} title={hasVersionTrackingForEntry(fileMenu.entry) ? '管理素材的历史版本' : '请先导入版本进度并开启项目跟踪'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openVersions(entry); }}><GitBranch size={14}/>版本管理</button>{teamRetouchAvailable && fileMenu.entry.kind === 'image' && <button disabled={!teamRetouchInstalled || teamRetouchOpening} title={!teamRetouchInstalled ? '正在检查团片协作组件' : teamRetouchOpening ? '正在加载团片协作数据' : '团片协作'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openTeamRetouch(entry); }}>{teamRetouchOpening || !teamRetouchInstalled && componentsLoading ? <Loader2 size={14} className="animate-spin"/> : <UsersRound size={14}/>}团片协作</button>}</>}
         {fileMenu.entry.kind !== 'folder' && <div className="my-1 border-t border-slate-100"/>}
         <button disabled={finalViewOpen} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); beginRename(targets); }}><Edit size={14}/>{fileMenuTargetPaths.length > 1 ? '批量重命名' : '重命名'}</button>
         <button disabled={finalViewOpen} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('cut', undefined, targets); }}><Cut size={14}/>剪切</button>
@@ -2305,7 +2386,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
       <div className="project-toolbar flex w-full flex-nowrap items-center border-b border-slate-200 px-6 py-1">
         <div className="relative" onClick={event => event.stopPropagation()}>
           <button onClick={toggleCreateMenu} title="新建" aria-label="新建" aria-haspopup="menu" aria-expanded={showCreateMenu} className="project-action-button"><FolderPlus size={16}/>新建</button>
-          {showCreateMenu && <div className="absolute left-0 top-full z-40 mt-1 w-72 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">
+          {showCreateMenu && <div className="project-create-menu absolute left-0 top-full z-40 mt-1 w-72 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">
             <button className="project-menu-item" onClick={() => void openProgressSetup('create')}><FolderPlus size={14}/>新建进度</button>
             <div className="my-1 border-t border-slate-100"/>
             <button className="project-menu-item" onClick={() => void createFolder()}><Folder size={14}/>文件夹</button>
@@ -2344,7 +2425,7 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         <div className="contents">
           <button disabled={selectedProgressFolder ? !selectedProgressFolderIsRoot : selectedEntries.length !== 1 || !hasVersionTrackingForEntry(selectedEntries[0])} onClick={() => selectedProgressFolder ? void openMarkProgress(selectedProgressFolder) : openVersions()} title={selectedProgressFolder ? selectedProgressFolderIsRoot ? selectedRegisteredProgressFolder ? '修改当前进度版本' : '标记当前文件夹为进度' : '进度文件夹必须位于项目根目录' : '版本管理'} aria-label={selectedProgressFolder ? selectedRegisteredProgressFolder ? '修改进度版本' : '标记进度' : '版本管理'} className="project-action-button"><GitBranch size={16}/>{selectedProgressFolder ? selectedRegisteredProgressFolder ? '修改进度版本' : '标记进度' : '版本管理'}</button>
           {finalVersionSummary.count > 0 && <button disabled={finalViewLoading} onClick={() => void openFinalVersionView()} title={`浏览最终版（${finalVersionSummary.availableCount} 张${finalVersionSummary.missingCount ? `，${finalVersionSummary.missingCount} 张文件丢失` : ''}）`} aria-label="浏览所有已标记最终版的图片" aria-pressed={finalViewOpen} className={`project-action-button !text-emerald-600 hover:!bg-emerald-50 ${finalViewOpen ? '!bg-emerald-50' : ''}`}>{finalViewLoading ? <Loader2 size={16} className="animate-spin"/> : <Heart size={16} fill="currentColor"/>}</button>}
-          {teamRetouchAvailable && <button type="button" disabled={!teamRetouchInstalled} onClick={() => void openTeamRetouch()} title={!teamRetouchInstalled ? '正在检查多人修脸组件' : selectedEntries.some(entry => entry.kind === 'image') ? '打开多人修脸并加入所选图片' : teamRetouchHistory.length ? `打开多人修脸（项目已有 ${teamRetouchHistory.length} 张）` : '多人修脸'} className="project-action-button">{!teamRetouchInstalled && componentsLoading ? <Loader2 size={16} className="animate-spin"/> : <UsersRound size={16}/>}多人修脸{teamRetouchHistory.length ? `（${teamRetouchHistory.length} 张）` : ''}</button>}
+          {teamRetouchAvailable && <button type="button" disabled={!teamRetouchInstalled || teamRetouchOpening} onClick={() => void openTeamRetouch()} title={!teamRetouchInstalled ? '正在检查团片协作组件' : teamRetouchOpening ? '正在加载团片协作数据' : selectedEntries.some(entry => entry.kind === 'image') ? '打开团片协作并加入所选图片' : teamRetouchHistory.length ? `打开团片协作（项目已有 ${teamRetouchHistory.length} 张）` : '团片协作'} className="project-action-button">{teamRetouchOpening || !teamRetouchInstalled && componentsLoading ? <Loader2 size={16} className="animate-spin"/> : <UsersRound size={16}/>}团片协作{teamRetouchHistory.length ? `（${teamRetouchHistory.length} 张）` : ''}</button>}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1 pl-3"><button onClick={() => setViewMode('grid')} title="图标模式" className={`rounded-md p-1.5 ${viewMode === 'grid' ? 'bg-slate-200 text-slate-800' : 'text-slate-500 hover:bg-slate-200'}`}><Grid2X2 size={17}/></button><button onClick={() => setViewMode('list')} title="列表模式" className={`rounded-md p-1.5 ${viewMode === 'list' ? 'bg-slate-200 text-slate-800' : 'text-slate-500 hover:bg-slate-200'}`}><LayoutList size={17}/></button>{viewMode === 'grid' && <input aria-label="图标大小" title="图标大小" type="range" min="80" max="360" step="4" value={gridIconSize} onChange={event => setGridIconSize(Number(event.target.value))} className="compact-hide-slider ml-2 w-24 accent-blue-600"/>}<span aria-hidden className="mx-1 h-5 w-px bg-slate-200"/><div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !showSortMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowSortMenu(next); }} title="排序" aria-label="排序" aria-haspopup="menu" aria-expanded={showSortMenu} className="project-action-button"><ArrowUpDown size={16}/>排序</button>{showSortMenu && <div className="sort-menu absolute right-0 top-full z-40 mt-1 w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">{([['name', '文件名'], ['date', '修改日期'], ['size', '大小']] as const).map(([field, label]) => <button key={field} type="button" onClick={() => setSortField(field)} className={`project-menu-item ${sortField === field ? 'bg-blue-50 font-bold text-blue-600' : ''}`}>{label}</button>)}<div className="my-1 border-t border-slate-100"/><button type="button" onClick={() => setSortDirection('asc')} className={`project-menu-item ${sortDirection === 'asc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowUp size={14}/><span>递增</span></button><button type="button" onClick={() => setSortDirection('desc')} className={`project-menu-item ${sortDirection === 'desc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowDown size={14}/><span>递减</span></button></div>}</div><div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !searchOpen; window.dispatchEvent(new Event('photoflow-menu-open')); setSearchOpen(next); }} title="查找文件（Ctrl+F）" aria-label="查找文件" aria-expanded={searchOpen} className={`project-action-button ${searchOpen || searchQuery ? 'bg-blue-50 text-blue-600' : ''}`}><Search size={16}/>查找文件</button>{searchOpen && <div className="absolute right-0 top-full z-40 mt-1 w-64 rounded-lg border border-slate-200 bg-white p-2 shadow-xl"><div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2"><Search size={15} className="shrink-0 text-slate-400"/><input ref={searchInputRef} autoFocus value={searchQuery} onChange={event => setSearchQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { setSearchOpen(false); setSearchQuery(''); } }} placeholder="输入文件名" className="min-w-0 flex-1 bg-transparent py-2 text-sm text-slate-800 outline-none"/>{searchQuery && <button type="button" onClick={() => setSearchQuery('')} title="清除查找" className="rounded p-0.5 text-slate-400 hover:bg-slate-200"><X size={14}/></button>}</div></div>}</div></div>
       </div>
@@ -2377,14 +2458,14 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         <footer className="flex items-center justify-end gap-2 border-t border-slate-200 bg-slate-50 px-5 py-4"><button type="button" onClick={() => setProgressSetup(null)} disabled={progressSubmitting} className="dialog-secondary">取消</button><button type="button" onClick={() => void submitProgressSetup()} disabled={progressSubmitting || !progressVersionIsValid(progressSetup) || progressNameHasConflict(progressSetup)} className="dialog-primary inline-flex items-center gap-2">{progressSubmitting && <Loader2 size={15} className="animate-spin"/>}{progressSetup.mode === 'create' ? '创建文件夹' : progressSetup.mode === 'import' ? '选择文件并导入' : progressSetup.existingProgressId ? '保存进度修改' : '标记当前文件夹'}</button></footer>
       </div></div>}
       {progressCompare && <div role="dialog" aria-modal="true" aria-label="确认版本关系" className="fixed inset-0 z-[345] flex items-center justify-center bg-slate-950/50 p-4"><div className="flex h-[min(92vh,820px)] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
-        <header className="border-b border-slate-200 px-5 py-4"><h3 className="text-lg font-bold text-slate-800">确认版本关系</h3><p className="mt-1 text-xs text-slate-500">_{progressCompare.parentFolder.versionKey} “{progressCompare.parentFolder.displayName}” → _{progressCompare.progressFolder.versionKey} “{progressCompare.progressFolder.displayName}”</p></header>
+        <header className="border-b border-slate-200 px-5 py-4"><h3 className="text-lg font-bold text-slate-800">确认版本关系</h3><p className="mt-1 text-xs text-slate-500">“{progressCompare.parentFolder.displayName}” → “{progressCompare.progressFolder.displayName}”</p></header>
         <div className="grid min-h-0 flex-1 grid-cols-[minmax(280px,0.85fr)_minmax(0,1.65fr)] gap-4 overflow-hidden p-5">
-          <div className="flex min-h-0 flex-col"><div className="mb-3 flex flex-wrap gap-2 text-xs"><span className="rounded-full bg-blue-50 px-2.5 py-1 text-blue-700">识别匹配 {progressCompare.matches.length}</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-emerald-700">已选继承 {progressCompare.acceptedSources.length}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-600">新素材 {progressCompare.unmatchedSources.length + progressCompare.matches.length - progressCompare.acceptedSources.length}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-600">旧版未返回 {progressCompare.unmatchedReferences.length}</span></div>
-            {progressCompare.matches.length ? <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-200">{progressCompare.matches.map(match => { const accepted = progressCompare.acceptedSources.includes(match.source); const activeMatch = activeProgressCompareSource === match.source; return <div key={match.source} role="button" tabIndex={0} onClick={() => setActiveProgressCompareSource(match.source)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setActiveProgressCompareSource(match.source); } }} className={`grid cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border-b px-3 py-2.5 text-xs last:border-0 ${activeMatch ? 'border-blue-100 bg-blue-50 ring-1 ring-inset ring-blue-300' : 'border-slate-100 hover:bg-slate-50'}`}><input type="checkbox" checked={accepted} aria-label={`将 ${match.source} 作为继承版本`} onClick={event => event.stopPropagation()} onChange={() => setProgressCompare(current => current ? { ...current, acceptedSources: accepted ? current.acceptedSources.filter(source => source !== match.source) : [...current.acceptedSources, match.source] } : current)}/><span className="min-w-0"><span className="block truncate font-medium text-slate-700" title={match.source}>当前 · {match.source}</span><span className="mt-1 block truncate text-slate-400" title={match.reference}>上一版 · {match.reference}</span></span><span className={`rounded-full px-2 py-0.5 font-bold ${match.confidence === '高' ? 'bg-emerald-50 text-emerald-600' : match.confidence === '中' ? 'bg-amber-50 text-amber-600' : 'bg-red-50 text-red-500'}`}>{match.confidence}</span></div>; })}</div> : <p className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">没有识别到继承关系。确认后，新版本中的文件都会作为新素材建立跟踪。</p>}
+          <div className="flex min-h-0 flex-col"><div className="mb-3 flex flex-wrap gap-2 text-xs"><span className="rounded-full bg-blue-50 px-2.5 py-1 text-blue-700">识别匹配 {progressCompare.matches.length}</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-emerald-700">已选继承 {progressCompare.acceptedSources.length}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-600">新素材 {progressCompare.unmatchedSources.length + progressCompare.matches.length - progressCompare.acceptedSources.length}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-600">旧版未返回 {progressCompareMissingReferences.length}</span></div>
+            {progressCompareCandidates.length ? <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-200">{progressCompareCandidates.map(match => { const accepted = progressCompare.acceptedSources.includes(match.source); const activeMatch = activeProgressCompareSource === match.source; const suggested = progressCompare.suggestions.some(candidate => candidate.source === match.source); return <div key={match.source} role="button" tabIndex={0} onClick={() => setActiveProgressCompareSource(match.source)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setActiveProgressCompareSource(match.source); } }} className={`grid cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 border-b px-3 py-2.5 text-xs last:border-0 ${activeMatch ? 'border-blue-100 bg-blue-50 ring-1 ring-inset ring-blue-300' : 'border-slate-100 hover:bg-slate-50'}`}><input type="checkbox" checked={accepted} aria-label={`将 ${match.source} 作为继承版本`} onClick={event => event.stopPropagation()} onChange={() => setProgressCompare(current => current ? { ...current, acceptedSources: accepted ? current.acceptedSources.filter(source => source !== match.source) : [...current.acceptedSources, match.source] } : current)}/><span className="min-w-0"><span className="block truncate font-medium text-slate-700" title={match.source}>当前 · {match.source}</span><span className="mt-1 block truncate text-slate-400" title={match.reference}>上一版 · {match.reference}</span></span><span className={`rounded-full px-2 py-0.5 font-bold ${suggested ? 'bg-slate-100 text-slate-500' : match.confidence === '高' ? 'bg-emerald-50 text-emerald-600' : match.confidence === '中' ? 'bg-amber-50 text-amber-600' : 'bg-red-50 text-red-500'}`}>{suggested ? '最佳候选' : match.confidence}</span></div>; })}</div> : <p className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">没有可用于建立继承关系的素材。</p>}
             {progressCompare.renameSources && <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">确认后，会把已勾选的新版本文件同步改为继承自上一版本的名称。</p>}
-            {progressCompare.copyMissingFromParent && <p className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-700">确认后，会从上一版本复制当前缺失的 {progressCompare.unmatchedReferences.length} 个媒体文件，并将它们登记为继承版本。</p>}
+            {progressCompare.copyMissingFromParent && <p className="mt-3 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-700">确认后，会从上一版本复制当前缺失的 {progressCompareMissingReferences.length} 个媒体文件，并将它们登记为继承版本。</p>}
           </div>
-          <ProgressPairPreview match={progressCompare.matches.find(match => match.source === activeProgressCompareSource)} parentFolder={progressCompare.parentFolder} progressFolder={progressCompare.progressFolder} cacheConfig={mediaCacheConfig}/>
+          <ProgressPairPreview match={progressCompareCandidates.find(match => match.source === activeProgressCompareSource)} parentFolder={progressCompare.parentFolder} progressFolder={progressCompare.progressFolder} cacheConfig={mediaCacheConfig}/>
         </div>
         <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-slate-50 px-5 py-4"><button type="button" onClick={() => void disableProgressTracking()} disabled={progressSubmitting} className="dialog-secondary">{progressCompare.sourceMode === 'mark' ? '只标记进度，不开启跟踪' : '保留导入，但不开启跟踪'}</button><button type="button" onClick={() => void commitProgressCompare()} disabled={progressSubmitting} className="dialog-primary inline-flex items-center gap-2">{progressSubmitting && <Loader2 size={15} className="animate-spin"/>}确认并建立跟踪</button></footer>
       </div></div>}
@@ -2410,21 +2491,34 @@ const ProjectWorkspace = ({ active, project, workspacePath, installedComponentId
         <section className="mt-5 border-t border-slate-200 pt-5"><h4 className="mb-2 text-sm font-bold text-slate-700">预览</h4><div className="max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50">{batchRenameEntries.slice(0, 20).map((entry, index) => <div key={entry.path} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 border-b border-slate-200 px-3 py-2 text-xs last:border-0"><span className="truncate text-slate-500" title={entry.name}>{entry.name}</span><ArrowRight size={13} className="text-slate-300"/><span className="truncate font-medium text-slate-700" title={batchRenameNames[index]}>{batchRenameNames[index] || '（空文件名）'}</span></div>)}{batchRenameEntries.length > 20 && <p className="px-3 py-2 text-center text-xs text-slate-400">另有 {batchRenameEntries.length - 20} 个项目</p>}</div></section>
       </div><footer className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-5 py-4"><p className="text-xs text-slate-500">重命名使用临时文件过渡，不会因名称互换产生冲突。</p><div className="flex gap-2"><button onClick={() => setBatchRenameOpen(false)} className="dialog-secondary">取消</button><button onClick={commitBatchRename} disabled={!batchRenameNames.length || batchRenameNames.some(name => !name) || batchExtensionMode === 'replace' && !batchExtensionValue.trim() || new Set(batchRenameNames.map(name => name.toLocaleLowerCase())).size !== batchRenameNames.length || renameCommitRef.current} className="dialog-primary">批量重命名</button></div></footer></div></div>}
       {versionEntry && <VersionManager entry={versionEntry} workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} onNotice={onNotice} onVersionStateChanged={() => { void loadFinalVersionSummary(); if (finalViewOpen) void loadFinalViewEntries(); }} onClose={() => { setVersionEntry(null); void loadFinalVersionSummary(); if (finalViewOpen) void loadFinalViewEntries(); }}/>} 
-      {teamRetouchAvailable && teamRetouchStep === 'detect' && teamRetouchEntries.length > 0 && <TeamRetouchManager
+      {teamRetouchAvailable && (teamRetouchStep === 'detect' || teamRetouchStep === 'people') && teamRetouchEntries.length > 0 && <TeamRetouchManager
         entries={teamRetouchEntries}
         workspacePath={workspacePath}
         project={project}
         cacheConfig={mediaCacheConfig}
         defaultBackendMode={teamRetouchSettings.backendMode || 'auto'}
         componentStatus={teamRetouchStatus}
-        activeStep={teamRetouchStep}
+        activeStep={teamRetouchStep === 'people' ? 'detect' : teamRetouchStep}
         onStepChange={setTeamRetouchStep}
         onNotice={onNotice}
         onEntriesChange={setTeamRetouchEntries}
         onProjectChanged={() => void loadTeamRetouchHistory()}
         onClose={() => { setTeamRetouchStep(null); setTeamRetouchEntries([]); void loadTeamRetouchHistory(); }}
       />}
-      {teamRetouchAvailable && (teamRetouchStep === 'people' || teamRetouchStep === 'workflow') && <PersonIdentityManager workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} activeStep={teamRetouchStep} onStepChange={setTeamRetouchStep} onNotice={onNotice} onProjectChanged={() => void loadTeamRetouchHistory()} onClose={() => { setTeamRetouchStep(null); setTeamRetouchEntries([]); void loadTeamRetouchHistory(); }}/>} 
+      {teamRetouchAvailable && teamRetouchStep === 'workflow' && <PersonIdentityManager
+        workspacePath={workspacePath}
+        project={project}
+        cacheConfig={mediaCacheConfig}
+        activeStep={teamRetouchStep}
+        onStepChange={setTeamRetouchStep}
+        onNotice={onNotice}
+        onProjectChanged={() => void loadTeamRetouchHistory()}
+        onClose={() => {
+          setTeamRetouchStep(null);
+          setTeamRetouchEntries([]);
+          void loadTeamRetouchHistory();
+        }}
+      />}
 
       <section className="flex min-h-[220px] min-w-0 flex-auto flex-col">
         <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={event => (event.target as HTMLElement).closest<HTMLElement>('[data-entry-path]')?.focus({ preventScroll: true })} onPointerDown={startSelectionDrag} onPointerMove={updateSelectionDrag} onPointerUp={finishSelectionDrag} onPointerCancel={finishSelectionDrag} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} className={`relative -mx-6 min-h-[220px] flex-1 select-none px-6 outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
@@ -2970,7 +3064,9 @@ const HOVER_VIDEO_PLAY_DELAY_MS = 300;
 let activeHoverVideo: HTMLVideoElement | null = null;
 
 const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large = false }: { entry: ProjectFileEntry; cacheConfig: AppConfig['mediaCache']; requestedSize: number; queueOrder: number; large?: boolean }) => {
-  const [preview, setPreview] = useState<{ url?: string; size: number }>({ url: entry.previewUrl, size: entry.previewUrl ? 320 : 0 });
+  const previewCacheKey = mediaThumbnailPreviewKey(entry.path, requestedSize);
+  const cachedPreviewUrl = mediaThumbnailPreviewCache.get(previewCacheKey);
+  const [preview, setPreview] = useState<{ url?: string; size: number }>({ url: cachedPreviewUrl || entry.previewUrl, size: cachedPreviewUrl ? requestedSize : entry.previewUrl ? 320 : 0 });
   const [videoUrl, setVideoUrl] = useState<string>();
   const [videoActivated, setVideoActivated] = useState(false);
   const [videoUnavailable, setVideoUnavailable] = useState(false);
@@ -2987,7 +3083,7 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
   const thumbnailRequestRef = useRef<{ key: string; promoted: boolean; promise: ReturnType<typeof window.electronAPI.getMediaThumbnail> }>();
   useThumbnailUpdates(entry.path, requestedSize, (state, url) => {
     if (state === 'READY') {
-      if (url) setPreview({ url, size: requestedSize });
+      if (url) { rememberMediaThumbnailPreview(previewCacheKey, url); setPreview({ url, size: requestedSize }); }
       setLoading(false);
     } else if (state === 'FAILED' || state === 'MISSING') {
       setLoading(false);
@@ -3014,7 +3110,6 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
     if (result.mediaUrl) setVideoUrl(result.mediaUrl);
     if (result.importedVideoWithoutPreview) setVideoUnavailable(true);
   };
-  useEffect(() => () => { void window.electronAPI.cancelMediaThumbnail(entry.path, requestedSize); }, [entry.path, requestedSize]);
   useEffect(() => {
     if (preview.size >= requestedSize || !container.current) return;
     let active = true;
@@ -3025,7 +3120,7 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
       requestThumbnail(() => requestTileThumbnail(1))
         .then(result => {
           if (!active) return;
-          if (result.previewUrl) setPreview({ url: result.previewUrl, size: requestedSize });
+          if (result.previewUrl) { rememberMediaThumbnailPreview(previewCacheKey, result.previewUrl); setPreview({ url: result.previewUrl, size: requestedSize }); }
           captureVideoResource(result);
           if (result.state !== 'QUEUED' && result.state !== 'GENERATING') setLoading(false);
         })
@@ -3033,7 +3128,7 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
     }, { rootMargin: '240px' });
     observer.observe(container.current);
     return () => { active = false; observer.disconnect(); };
-  }, [entry.path, entry.kind, preview.size, cacheConfig, requestedSize, queueOrder]);
+  }, [entry.path, entry.kind, preview.size, cacheConfig, requestedSize, queueOrder, previewCacheKey]);
   useEffect(() => {
     if (!container.current) return;
     const observer = new IntersectionObserver(([item]) => {
