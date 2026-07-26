@@ -2,7 +2,7 @@
   "name": "photoflow",
   "productName": "照片流",
   "private": true,
-  "version": "26.7.26",
+  "version": "26.7.27",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {

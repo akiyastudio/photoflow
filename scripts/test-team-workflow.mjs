@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { scheduleWorkflowWeeks } from '../src/utils/teamWorkflow.ts';
+import workflowGeneration from '../electron/services/team-workflow-generation.cjs';
+
+const { buildWorkflowPlan, copyWorkflowPlan } = workflowGeneration;
 
 const entry = (taskId, identityId, personIndex) => ({
   key: `${taskId}:${identityId}`,
@@ -109,4 +115,79 @@ assertTaskWeeksAreUnique(uneven, unevenSchedule);
 assertPreferredOrder(uneven, unevenSchedule, ['4', '5']);
 assert.equal(unevenSchedule.get('small:4'), 1);
 
-console.log('Team workflow scheduling tests passed.');
+// Workflow generation must resolve every source from the one project snapshot
+// and copy with bounded concurrency. A second run reuses completed files.
+const workflowRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'photoflow-team-workflow-'));
+try {
+  const sourceDirectory = path.join(workflowRoot, 'sources');
+  const stagingDirectory = path.join(workflowRoot, 'staging');
+  await fs.promises.mkdir(sourceDirectory, { recursive: true });
+  const sources = await Promise.all([1, 2, 3, 4].map(async index => {
+    const sourcePath = path.join(sourceDirectory, `${index}.png`);
+    await fs.promises.writeFile(sourcePath, Buffer.alloc(1024 * index, index));
+    return sourcePath;
+  }));
+  const workspace = {
+    photos: [{
+      photoId: 'photo',
+      baseVersionId: 'base',
+      tasks: sources.map((sourcePath, index) => ({ id: `task-${index + 1}`, baseVersionId: 'base', personIndex: index + 1, members: [{ personIndex: index + 1 }], patchPath: sourcePath })),
+    }],
+  };
+  const groups = [{
+    week: 1,
+    identityId: 'identity',
+    identityName: '测试人物',
+    items: sources.map((_, index) => ({ photoId: 'photo', baseVersionId: 'base', taskId: `task-${index + 1}`, personIndex: index + 1, photoName: '同名图片' })),
+  }];
+  const plan = await buildWorkflowPlan({
+    groups,
+    workspace,
+    stagingDirectory,
+    safeSegment: value => value,
+    weekName: week => `第${week}周`,
+  });
+  assert.equal(plan.files.length, 4);
+  assert.equal(plan.totalBytes, 1024 * 10);
+  assert.equal(new Set(plan.files.map(file => file.destination)).size, 4);
+  assert.ok(plan.manifestGroups[0].items.every(item => item.relativePath.startsWith('第1周/测试人物/')));
+
+  let activeCopies = 0;
+  let maximumCopies = 0;
+  let copyCount = 0;
+  const copyFileAtomic = async (source, destination, options) => {
+    activeCopies += 1;
+    maximumCopies = Math.max(maximumCopies, activeCopies);
+    copyCount += 1;
+    try {
+      await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+      await new Promise(resolve => setTimeout(resolve, 15));
+      await fs.promises.copyFile(source, destination);
+      const sourceStat = await fs.promises.stat(source);
+      await fs.promises.utimes(destination, sourceStat.atime, sourceStat.mtime);
+      options.onProgress({ bytesCopied: sourceStat.size, totalBytes: sourceStat.size });
+    } finally {
+      activeCopies -= 1;
+    }
+  };
+  const progress = [];
+  await copyWorkflowPlan({ files: plan.files, totalBytes: plan.totalBytes, copyFileAtomic, concurrency: 3, onProgress: value => progress.push(value) });
+  assert.equal(copyCount, 4);
+  assert.equal(maximumCopies, 3);
+  assert.equal(progress.at(-1).completedFiles, 4);
+  assert.equal(progress.at(-1).copiedBytes, plan.totalBytes);
+
+  copyCount = 0;
+  const resumedProgress = [];
+  await copyWorkflowPlan({ files: plan.files, totalBytes: plan.totalBytes, copyFileAtomic, concurrency: 3, onProgress: value => resumedProgress.push(value) });
+  assert.equal(copyCount, 0);
+  assert.equal(resumedProgress.at(-1).completedFiles, 4);
+  await assert.rejects(
+    copyWorkflowPlan({ files: plan.files, totalBytes: plan.totalBytes, copyFileAtomic, isCancelled: () => true }),
+    error => error?.code === 'EOPCANCELLED',
+  );
+} finally {
+  await fs.promises.rm(workflowRoot, { recursive: true, force: true });
+}
+
+console.log('Team workflow scheduling and generation tests passed.');

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
-import { AlertTriangle, CheckCircle2, ExternalLink, Loader2, RefreshCw, ScanFace, SlidersHorizontal, Trash2, UserRound, UsersRound, Wand2, X } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { AlertTriangle, ExternalLink, Loader2, Maximize2, RefreshCw, ScanFace, SlidersHorizontal, Trash2, UserRound, UsersRound, Wand2, X } from 'lucide-react';
 import type { AppConfig, ComponentStatus, MediaVersion, ProjectFileEntry, TeamIdentity, TeamIdentityWorkspace, TeamPatchBundle, TeamPatchTask, TeamPersonAssignment, TeamProjectPhoto, WorkspaceProject } from '../types';
 import { useAppDialog } from './AppDialogProvider';
 import { TeamRetouchSteps, type TeamRetouchStep } from './TeamRetouchSteps';
@@ -33,9 +34,23 @@ type IdentitySubject = {
   identity?: TeamIdentity;
 };
 
+const identitySubjectPhotoKey = (subject: IdentitySubject) => `${subject.photo.photoId}:${subject.photo.baseVersionId}`;
+const uniqueIdentitySubjectsPerPhoto = (subjects: IdentitySubject[], anchorKey: string) => {
+  const anchor = subjects.find(subject => subject.key === anchorKey);
+  const ordered = anchor ? [anchor, ...subjects.filter(subject => subject.key !== anchorKey)] : subjects;
+  const usedPhotos = new Set<string>();
+  return ordered.filter(subject => {
+    const photoKey = identitySubjectPhotoKey(subject);
+    if (usedPhotos.has(photoKey)) return false;
+    usedPhotos.add(photoKey);
+    return true;
+  });
+};
+
 const assignmentKey = (photoId: string, baseVersionId: string, personIndex: number) => `${photoId}:${baseVersionId}:${personIndex}`;
 const membersOf = (task: TeamPatchTask) => task.members?.length ? task.members : [{ personIndex: task.personIndex, bbox: task.bbox }];
 const isGeneratedIdentity = (identity?: TeamIdentity) => Boolean(identity && /^待确认人物\s+\d+$/.test(identity.name));
+const isUnmarkedIdentitySubject = (subject: IdentitySubject) => !subject.identity || isGeneratedIdentity(subject.identity);
 const identitySubjectsFromWorkspace = (workspace: TeamIdentityWorkspace): IdentitySubject[] => {
   const assignments = new Map(workspace.assignments.map(item => [assignmentKey(item.photoId, item.baseVersionId, item.personIndex), item]));
   const identities = new Map(workspace.identities.map(item => [item.id, item]));
@@ -129,9 +144,32 @@ const useLazyPreview = (filePath: string | undefined, cacheConfig: AppConfig['me
   return url;
 };
 
+const FullscreenImageViewer = ({ url, filePath, cacheConfig, title, details, onClose }: { url: string; filePath?: string; cacheConfig?: AppConfig['mediaCache']; title: string; details?: string; onClose: () => void }) => {
+  const [displayUrl, setDisplayUrl] = useState(url);
+  useEffect(() => {
+    let active = true;
+    setDisplayUrl(url);
+    if (filePath && cacheConfig) void window.electronAPI.getMediaOriginal(filePath, 'image', cacheConfig).then(result => {
+      if (active && result.mediaUrl) setDisplayUrl(result.mediaUrl);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [url, filePath, cacheConfig]);
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); onClose(); }
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [onClose]);
+  return createPortal(<div role="dialog" aria-modal="true" aria-label={`全窗口浏览：${title}`} className="fixed inset-0 z-[700] flex flex-col bg-slate-950/95" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><header className="flex h-14 shrink-0 items-center gap-3 border-b border-white/10 px-5 text-white"><div className="min-w-0"><h3 className="truncate text-sm font-bold">{title}</h3>{details && <p className="mt-0.5 text-xs text-slate-400">{details}</p>}</div><button type="button" onClick={onClose} title="关闭全窗口浏览" className="ml-auto rounded-md p-2 text-slate-300 hover:bg-white/10 hover:text-white"><X size={20}/></button></header><div className="flex min-h-0 flex-1 items-center justify-center p-4"><img src={displayUrl} alt={title} className="max-h-full max-w-full object-contain"/></div></div>, document.body);
+};
+
+const ImageZoomButton = ({ disabled, onClick }: { disabled?: boolean; onClick: () => void }) => <button type="button" disabled={disabled} onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.preventDefault(); event.stopPropagation(); onClick(); }} title="全窗口浏览图片" aria-label="全窗口浏览图片" className="absolute bottom-2 right-2 z-20 rounded-md border border-white/20 bg-black/75 p-1.5 text-white shadow-lg transition hover:bg-blue-600 disabled:hidden"><Maximize2 size={15}/></button>;
+
 const PatchPreview = ({ task, cacheConfig, enabled = true, onPickPerson }: { task: TeamPatchTask; cacheConfig: AppConfig['mediaCache']; enabled?: boolean; onPickPerson?: (personIndex: number) => void }) => {
   const url = useLazyPreview(task.patchPath, cacheConfig, 480, `${task.updatedAt}:${task.crop.x}:${task.crop.y}:${task.crop.width}:${task.crop.height}`, enabled);
-  return <div className="relative flex h-44 items-center justify-center overflow-hidden rounded-lg bg-slate-950">
+  const [fullscreen, setFullscreen] = useState(false);
+  return <><div className="relative flex h-44 items-center justify-center overflow-hidden rounded-lg bg-slate-950">
     {url ? <svg className="h-full w-full" viewBox={`0 0 ${task.crop.width} ${task.crop.height}`} preserveAspectRatio="xMidYMid meet"><image href={url} width={task.crop.width} height={task.crop.height}/>{membersOf(task).map(member => {
       const x = Math.max(0, member.bbox.x - task.crop.x);
       const y = Math.max(0, member.bbox.y - task.crop.y);
@@ -145,11 +183,13 @@ const PatchPreview = ({ task, cacheConfig, enabled = true, onPickPerson }: { tas
       return <g key={member.personIndex} onClick={() => onPickPerson?.(member.personIndex)} className={onPickPerson ? 'cursor-pointer' : undefined}><rect x={x} y={y} width={width} height={height} fill={`${color}12`} stroke={color} strokeWidth={Math.max(2, task.crop.width / 420)}/><rect x={x} y={labelY} width={labelWidth} height={labelHeight} rx={fontSize * .2} fill={color}/><text x={x + fontSize * .35} y={labelY + fontSize * 1.05} fill="#020617" fontSize={fontSize} fontWeight="800">人物 {member.personIndex}</text></g>;
     })}</svg> : <Loader2 className="animate-spin text-slate-500"/>}
     <span className="absolute left-2 top-2 rounded bg-black/70 px-2 py-1 text-[10px] font-bold text-white">识别工作图</span>
-  </div>;
+    <ImageZoomButton disabled={!url} onClick={() => setFullscreen(true)}/>
+  </div><p className="mt-1.5 text-center text-[11px] font-medium tabular-nums text-slate-500">{Math.round(task.crop.width)} × {Math.round(task.crop.height)} px</p>{fullscreen && url && <FullscreenImageViewer url={url} filePath={task.patchPath} cacheConfig={cacheConfig} title="识别工作图" details={`${Math.round(task.crop.width)} × ${Math.round(task.crop.height)} px`} onClose={() => setFullscreen(false)}/>}</>;
 };
 
 const IdentitySubjectThumb = ({ subject, cacheConfig, compact = false }: { subject: IdentitySubject; cacheConfig: AppConfig['mediaCache']; compact?: boolean }) => {
   const url = useLazyPreview(subject.task.patchPath, cacheConfig, compact ? 320 : 480, `${subject.task.updatedAt}:${subject.personIndex}`);
+  const [fullscreen, setFullscreen] = useState(false);
   const x = Math.max(0, subject.bbox.x - subject.task.crop.x);
   const y = Math.max(0, subject.bbox.y - subject.task.crop.y);
   const boxWidth = Math.max(1, Math.min(subject.bbox.width, subject.task.crop.width - x));
@@ -163,10 +203,10 @@ const IdentitySubjectThumb = ({ subject, cacheConfig, compact = false }: { subje
   const centerY = y + boxHeight / 2;
   const viewX = Math.max(0, Math.min(subject.task.crop.width - viewWidth, centerX - viewWidth / 2));
   const viewY = Math.max(0, Math.min(subject.task.crop.height - viewHeight, centerY - viewHeight / 2));
-  return <div className="relative aspect-[4/3] overflow-hidden rounded-lg bg-slate-950">
+  return <><div className="relative aspect-[4/3] overflow-hidden rounded-lg bg-slate-950">
     {url ? <svg className="block h-full w-full" viewBox={`${viewX} ${viewY} ${viewWidth} ${viewHeight}`} preserveAspectRatio="xMidYMid meet"><image href={url} width={subject.task.crop.width} height={subject.task.crop.height}/><rect x={x} y={y} width={boxWidth} height={boxHeight} fill="none" stroke="#facc15" strokeWidth={Math.max(3, viewWidth / 180)}/></svg> : <div className="absolute inset-0 flex items-center justify-center"><Loader2 className="animate-spin text-slate-500"/></div>}
-    <span className="absolute inset-x-0 bottom-0 truncate bg-black/70 px-2 py-1 text-[10px] font-bold text-white">{subject.photo.name} · 人物 {subject.personIndex}</span>
-  </div>;
+    <span className="absolute inset-x-0 bottom-0 truncate bg-black/70 py-1 pl-2 pr-11 text-[10px] font-bold text-white">{subject.photo.name} · 人物 {subject.personIndex}</span><ImageZoomButton disabled={!url} onClick={() => setFullscreen(true)}/>
+  </div>{fullscreen && url && <FullscreenImageViewer url={url} filePath={subject.task.patchPath} cacheConfig={cacheConfig} title={`${subject.photo.name} · 人物 ${subject.personIndex}`} details={`${Math.round(subject.task.crop.width)} × ${Math.round(subject.task.crop.height)} px`} onClose={() => setFullscreen(false)}/>}</>;
 };
 
 const IdentityPicker = ({ subject, candidates, allSubjects, identities, includedKeys, cacheConfig, busy, busyLabel, onToggleCandidate, onOnlyCurrent, onConfirm, onCreate, onClear, onExclude, onRename, onDelete, onClose }: {
@@ -207,7 +247,7 @@ const IdentityPicker = ({ subject, candidates, allSubjects, identities, included
     <div className="flex max-h-[94vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
       <header className="flex items-center gap-4 border-b border-slate-200 px-5 py-4"><div><h3 className="font-bold text-slate-900">这是谁？</h3><p className="mt-1 text-xs text-slate-500">确认一个人物后，可一次应用到系统识别出的整组相同人物。</p></div><span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700">本次将标记 {includedKeys.size} 个实例</span><button disabled={busy} onClick={onClose} className="ml-auto rounded-md p-2 text-slate-500 hover:bg-slate-100 disabled:opacity-50"><X size={19}/></button></header>
       <div className="grid min-h-0 flex-1 grid-cols-[280px_minmax(0,1fr)]">
-        <aside className="overflow-y-auto border-r border-slate-200 bg-slate-50 p-5"><p className="mb-2 text-xs font-bold text-slate-500">当前人物</p><IdentitySubjectThumb subject={subject} cacheConfig={cacheConfig}/><p className="mt-3 text-sm font-bold text-slate-800">{currentIdentity && !isGeneratedIdentity(currentIdentity) ? currentIdentity.name : '尚未人工确认'}</p><p className="mt-1 text-xs text-slate-500">{subject.assignment?.source === 'manual' ? '已人工确认' : subject.assignment?.source === 'manual-group' ? '由人工确认组传播' : subject.assignment?.identityId ? `自动候选 · ${Math.round((subject.assignment.confidence || 0) * 100)}%` : '未标记'}</p><div className="mt-5 space-y-2"><button disabled={busy} onClick={onCreate} className="dialog-primary w-full">这是一个新人物</button><button disabled={busy} onClick={onClear} className="dialog-secondary w-full">设为未标记</button><button disabled={busy} onClick={onExclude} className="w-full rounded-md border border-red-200 px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-50"><Trash2 size={13} className="mr-1.5 inline"/>识别错误，移除此人物</button>{currentIdentity && !isGeneratedIdentity(currentIdentity) && <><button disabled={busy} onClick={() => onRename(currentIdentity)} className="dialog-secondary w-full">修改“{currentIdentity.name}”姓名</button><button disabled={busy} onClick={() => onDelete(currentIdentity)} className="w-full rounded-md border border-red-200 px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50">删除这个人物身份</button></>}</div></aside>
+        <aside className="overflow-y-auto border-r border-slate-200 bg-slate-50 p-5"><p className="mb-2 text-xs font-bold text-slate-500">当前人物</p><IdentitySubjectThumb subject={subject} cacheConfig={cacheConfig}/><p className="mt-3 text-sm font-bold text-slate-800">{currentIdentity && !isGeneratedIdentity(currentIdentity) ? currentIdentity.name : '未标记'}</p><p className="mt-1 text-xs text-slate-500">{!currentIdentity || isGeneratedIdentity(currentIdentity) ? '未标记' : subject.assignment?.source === 'manual' ? '已人工确认' : subject.assignment?.source === 'manual-group' ? '由人工确认组传播' : `自动候选 · ${Math.round((subject.assignment?.confidence || 0) * 100)}%`}</p><div className="mt-5 space-y-2"><button disabled={busy} onClick={onCreate} className="dialog-primary w-full">这是一个新人物</button><button disabled={busy} onClick={onClear} className="dialog-secondary w-full">设为未标记</button><button disabled={busy} onClick={onExclude} className="w-full rounded-md border border-red-200 px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-50"><Trash2 size={13} className="mr-1.5 inline"/>识别错误，移除此人物</button>{currentIdentity && !isGeneratedIdentity(currentIdentity) && <><button disabled={busy} onClick={() => onRename(currentIdentity)} className="dialog-secondary w-full">修改“{currentIdentity.name}”姓名</button><button disabled={busy} onClick={() => onDelete(currentIdentity)} className="w-full rounded-md border border-red-200 px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50">删除这个人物身份</button></>}</div></aside>
         <section className="min-h-0 overflow-y-auto p-5">
           <div className="flex items-center gap-3"><div><h4 className="text-sm font-bold text-slate-800">系统认为是同一个人的候选图</h4><p className="mt-1 text-xs text-slate-500">默认勾选整组；有误的图片可以取消勾选，当前人物不能取消。</p></div><button disabled={busy} onClick={onOnlyCurrent} className="dialog-secondary ml-auto">仅标记当前人物</button></div>
           <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">{candidates.map(candidate => { const included = includedKeys.has(candidate.key); const isAnchor = candidate.key === subject.key; return <label key={candidate.key} className={`relative cursor-pointer overflow-hidden rounded-xl border bg-white p-2 transition ${included ? 'border-blue-500 ring-2 ring-blue-100' : 'border-slate-200 opacity-65'}`}><input type="checkbox" checked={included} disabled={busy || isAnchor} onChange={() => onToggleCandidate(candidate.key)} className="absolute left-3 top-3 z-10 h-4 w-4 accent-blue-600"/><IdentitySubjectThumb subject={candidate} cacheConfig={cacheConfig} compact/><div className="mt-2 flex items-center justify-between gap-2 text-[10px]"><span className="font-bold text-slate-600">{isAnchor ? '当前人物' : candidate.assignment?.source === 'suggested' ? '自动候选' : '同组人物'}</span><span className="text-slate-400">{Math.round((candidate.assignment?.confidence || 0) * 100)}%</span></div></label>; })}</div>
@@ -297,7 +337,8 @@ const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange }: { prev
 const taskIdentityNames = (task: TeamPatchTask, photoId: string, baseVersionId: string, assignments: Map<string, TeamPersonAssignment>, identities: Map<string, TeamIdentity>) => {
   const names = membersOf(task).map(member => {
     const identityId = assignments.get(assignmentKey(photoId, baseVersionId, member.personIndex))?.identityId;
-    return identityId ? identities.get(identityId)?.name : undefined;
+    const identity = identityId ? identities.get(identityId) : undefined;
+    return identity && !isGeneratedIdentity(identity) ? identity.name : undefined;
   }).filter((value): value is string => Boolean(value));
   return [...new Set(names)];
 };
@@ -321,6 +362,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defa
   const backendMode = defaultBackendMode || 'auto';
   const [cropEditor, setCropEditor] = useState<{ task: TeamPatchTask; crop: Crop } | null>(null);
   const [detectionProgress, setDetectionProgress] = useState({ progress: 0, message: '等待识别操作' });
+  const [sourceFullscreen, setSourceFullscreen] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
   const initialWorkspaceBundleRef = useRef(Boolean(initialPhoto));
   const [previewEnabled, setPreviewEnabled] = useState(false);
@@ -393,12 +435,6 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defa
     return result;
   };
 
-  const confirmTask = async (task: TeamPatchTask) => {
-    const unmarked = membersOf(task).filter(member => !assignments.get(assignmentKey(task.photoId, task.baseVersionId, member.personIndex))?.identityId);
-    if (unmarked.length) { onNotice(`请先标记这张工作图中的 ${unmarked.length} 个人物`); return; }
-    if (await updateTask(task, { needsReview: false, reviewReason: '' })) onNotice('已确认人物归属与裁剪范围');
-  };
-
   const saveCrop = async () => {
     if (!cropEditor) return;
     setBusy(`crop:${cropEditor.task.id}`);
@@ -427,27 +463,35 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defa
     onEntriesChange?.([]);
   };
 
-  const identifiedCount = tasks.reduce((total, task) => total + membersOf(task).filter(member => assignments.get(assignmentKey(task.photoId, task.baseVersionId, member.personIndex))?.identityId).length, 0);
+  const identifiedCount = tasks.reduce((total, task) => total + membersOf(task).filter(member => {
+    const identityId = assignments.get(assignmentKey(task.photoId, task.baseVersionId, member.personIndex))?.identityId;
+    const identity = identityId ? identities.get(identityId) : undefined;
+    return identity && !isGeneratedIdentity(identity);
+  }).length, 0);
   const personCount = tasks.reduce((total, task) => total + membersOf(task).length, 0);
   const excludedPersonCount = baseVersion ? bundle.excludedPersonCounts?.[baseVersion.id] ?? bundle.excludedPersonCount ?? 0 : 0;
   const visibleProcessingMessage = processingMessage || (busy === 'detect' ? `${detectionProgress.message} · ${Math.round(detectionProgress.progress)}%` : '');
 
   return <div ref={cardRef} aria-busy={Boolean(visibleProcessingMessage)} className={`relative ${cropEditor ? 'overflow-visible' : 'overflow-hidden'} rounded-2xl border border-slate-200 bg-slate-50 shadow-sm`} style={cropEditor ? undefined : { contentVisibility: 'auto', containIntrinsicSize: '900px' }}>
     {visibleProcessingMessage && <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-200/85 backdrop-grayscale"><div className="flex max-w-sm items-center gap-3 rounded-xl border border-slate-300 bg-white px-5 py-4 text-sm font-bold text-slate-700 shadow-xl"><Loader2 size={18} className="shrink-0 animate-spin text-blue-600"/><span>{visibleProcessingMessage}</span></div></div>}
-    <header className="flex min-h-16 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-3"><div className="min-w-0"><h3 className="truncate font-bold text-slate-900">{bundle.photo?.displayName || entry.name}</h3><p className="mt-0.5 text-xs text-slate-500">{tasks.length} 张工作图 · {identifiedCount}/{personCount} 个人物已标记 · {tasks.filter(task => task.needsReview).length} 张待确认{excludedPersonCount ? ` · 已排除 ${excludedPersonCount} 个误识别` : ''}</p></div><div className="ml-auto flex flex-wrap items-center gap-2"><button disabled={!baseVersion || Boolean(busy)} onClick={() => void detect()} className="dialog-secondary inline-flex items-center gap-2">{busy === 'detect' ? <Loader2 size={15} className="animate-spin"/> : tasks.length ? <RefreshCw size={15}/> : <ScanFace size={15}/>} {tasks.length ? '重新识别本图' : '识别本图'}</button>{excludedPersonCount > 0 && <button disabled={!baseVersion || Boolean(busy)} onClick={() => void detect(true)} className="dialog-secondary inline-flex items-center gap-2"><RefreshCw size={15}/>恢复已排除（{excludedPersonCount}）</button>}{baseVersion && <button disabled={Boolean(busy)} onClick={() => void removeFromProject()} title="从项目团片协作中删除这张图片" className="rounded-md border border-red-200 p-2 text-red-600 hover:bg-red-50"><Trash2 size={15}/></button>}</div></header>
+    <header className="flex min-h-16 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-3"><div className="min-w-0"><h3 className="truncate font-bold text-slate-900">{bundle.photo?.displayName || entry.name}</h3><p className="mt-0.5 text-xs text-slate-500">{tasks.length} 张工作图 · {identifiedCount}/{personCount} 个人物已标记{tasks.some(task => task.needsReview) ? ` · ${tasks.filter(task => task.needsReview).length} 张建议检查` : ''}{excludedPersonCount ? ` · 已排除 ${excludedPersonCount} 个误识别` : ''}</p></div><div className="ml-auto flex flex-wrap items-center gap-2"><button disabled={!baseVersion || Boolean(busy)} onClick={() => void detect()} className="dialog-secondary inline-flex items-center gap-2">{busy === 'detect' ? <Loader2 size={15} className="animate-spin"/> : tasks.length ? <RefreshCw size={15}/> : <ScanFace size={15}/>} {tasks.length ? '重新识别本图' : '识别本图'}</button>{excludedPersonCount > 0 && <button disabled={!baseVersion || Boolean(busy)} onClick={() => void detect(true)} className="dialog-secondary inline-flex items-center gap-2"><RefreshCw size={15}/>恢复已排除（{excludedPersonCount}）</button>}{baseVersion && <button disabled={Boolean(busy)} onClick={() => void removeFromProject()} title="从项目团片协作中删除这张图片" className="rounded-md border border-red-200 p-2 text-red-600 hover:bg-red-50"><Trash2 size={15}/></button>}</div></header>
     {busy === 'detect' && <div className="border-b border-blue-100 bg-blue-50 px-5 py-3"><div className="flex justify-between text-xs font-bold text-blue-700"><span>{detectionProgress.message}</span><span>{Math.round(detectionProgress.progress)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full bg-blue-600" style={{ width: `${detectionProgress.progress}%` }}/></div></div>}
     {loading ? <div className="flex min-h-64 items-center justify-center gap-2 text-slate-500"><Loader2 className="animate-spin"/>正在读取人物数据…</div> : <div className="grid grid-cols-[minmax(320px,.9fr)_minmax(440px,1.1fr)]">
-      <section className="border-r border-slate-200 bg-slate-950 p-4"><div className="relative mx-auto flex min-h-[500px] items-center justify-center overflow-hidden rounded-xl bg-black">{previewUrl ? <svg className="max-h-[calc(100vh-190px)] w-full" viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} preserveAspectRatio="xMidYMid meet"><image href={previewUrl} width={imageSize.width} height={imageSize.height} onLoad={() => { if (tasks.length) return; const image = new Image(); image.onload = () => setImageSize({ width: image.naturalWidth || 1, height: image.naturalHeight || 1 }); image.src = previewUrl; }}/>{tasks.map((task, index) => <g key={task.id}><rect x={task.crop.x} y={task.crop.y} width={task.crop.width} height={task.crop.height} fill="rgba(59,130,246,.06)" stroke={task.needsReview ? '#fb923c' : '#60a5fa'} strokeWidth={Math.max(3, imageSize.width / 900)}/>{membersOf(task).map(member => { const color = personColor(member.personIndex); const fontSize = Math.max(20, imageSize.width / 100); return <g key={member.personIndex}><rect x={member.bbox.x} y={member.bbox.y} width={member.bbox.width} height={member.bbox.height} fill={`${color}0d`} stroke={color} strokeWidth={Math.max(2, imageSize.width / 1300)}/><text x={member.bbox.x + fontSize * .25} y={Math.max(fontSize, member.bbox.y - fontSize * .25)} fill={color} fontSize={fontSize} fontWeight="800" paintOrder="stroke" stroke="rgba(0,0,0,.85)" strokeWidth="5">人物 {member.personIndex}</text></g>; })}<text x={task.crop.x + 10} y={task.crop.y + 28} fill="white" fontSize={Math.max(20, imageSize.width / 85)} fontWeight="700" paintOrder="stroke" stroke="rgba(0,0,0,.75)" strokeWidth="5">工作图 {index + 1}</text></g>)}</svg> : <Loader2 className="animate-spin text-slate-500"/>}</div><p className="mt-3 text-xs leading-5 text-slate-400">蓝框是工作图范围；每个人物使用独立颜色和编号，并与右侧人物标记行对应。橙色工作图需要人工确认。</p></section>
+      <section className="border-r border-slate-200 bg-slate-950 p-4"><div className="relative mx-auto flex min-h-[500px] items-center justify-center overflow-hidden rounded-xl bg-black">{previewUrl ? <svg className="max-h-[calc(100vh-190px)] w-full" viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} preserveAspectRatio="xMidYMid meet"><image href={previewUrl} width={imageSize.width} height={imageSize.height} onLoad={() => { if (tasks.length) return; const image = new Image(); image.onload = () => setImageSize({ width: image.naturalWidth || 1, height: image.naturalHeight || 1 }); image.src = previewUrl; }}/>{tasks.map((task, index) => <g key={task.id}><rect x={task.crop.x} y={task.crop.y} width={task.crop.width} height={task.crop.height} fill="rgba(59,130,246,.06)" stroke={task.needsReview ? '#fb923c' : '#60a5fa'} strokeWidth={Math.max(3, imageSize.width / 900)}/>{membersOf(task).map(member => { const color = personColor(member.personIndex); const fontSize = Math.max(20, imageSize.width / 100); return <g key={member.personIndex}><rect x={member.bbox.x} y={member.bbox.y} width={member.bbox.width} height={member.bbox.height} fill={`${color}0d`} stroke={color} strokeWidth={Math.max(2, imageSize.width / 1300)}/><text x={member.bbox.x + fontSize * .25} y={Math.max(fontSize, member.bbox.y - fontSize * .25)} fill={color} fontSize={fontSize} fontWeight="800" paintOrder="stroke" stroke="rgba(0,0,0,.85)" strokeWidth="5">人物 {member.personIndex}</text></g>; })}<text x={task.crop.x + 10} y={task.crop.y + 28} fill="white" fontSize={Math.max(20, imageSize.width / 85)} fontWeight="700" paintOrder="stroke" stroke="rgba(0,0,0,.75)" strokeWidth="5">工作图 {index + 1}</text></g>)}</svg> : <Loader2 className="animate-spin text-slate-500"/>}<ImageZoomButton disabled={!previewUrl} onClick={() => setSourceFullscreen(true)}/></div><p className="mt-3 text-xs leading-5 text-slate-400">蓝框是工作图范围；每个人物使用独立颜色和编号，并与右侧人物标记行对应。橙色框表示建议检查，有误可直接删除工作图。</p>{sourceFullscreen && previewUrl && <FullscreenImageViewer url={previewUrl} filePath={baseVersion?.filePath} cacheConfig={cacheConfig} title={bundle.photo?.displayName || entry.name} details={`${imageSize.width} × ${imageSize.height} px`} onClose={() => setSourceFullscreen(false)}/>}</section>
       <section className="p-5">{!tasks.length ? <div className="flex min-h-96 flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center"><ScanFace size={34} className="text-violet-500"/><h4 className="mt-3 font-bold text-slate-800">识别人物并生成工作图</h4><p className="mt-2 text-sm text-slate-500">这一步只识别、裁图和标记人物，不上传返图，也不进行合成。</p><button onClick={() => void detect()} className="dialog-primary mt-4">开始识别</button></div> : <div className="grid gap-4 xl:grid-cols-2">{tasks.map((task, taskIndex) => {
         const names = taskIdentityNames(task, task.photoId, task.baseVersionId, assignments, identities);
         const taskMembers = membersOf(task);
-        const taskMarkedCount = taskMembers.filter(member => assignments.get(assignmentKey(task.photoId, task.baseVersionId, member.personIndex))?.identityId).length;
+        const taskMarkedCount = taskMembers.filter(member => {
+          const identityId = assignments.get(assignmentKey(task.photoId, task.baseVersionId, member.personIndex))?.identityId;
+          const identity = identityId ? identities.get(identityId) : undefined;
+          return identity && !isGeneratedIdentity(identity);
+        }).length;
         const taskFullyMarked = taskMarkedCount === taskMembers.length;
-        return <article key={task.id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><header className="flex items-start gap-3"><span className={`rounded-full p-2 ${task.needsReview ? 'bg-amber-50 text-amber-600' : taskFullyMarked ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>{task.needsReview ? <AlertTriangle size={17}/> : <UserRound size={17}/>}</span><div className="min-w-0 flex-1"><h4 className="text-sm font-bold text-slate-800">工作图 {taskIndex + 1}</h4><p className="mt-1 truncate text-xs text-slate-500" title={names.join('、')}>{taskMarkedCount ? `人物标记 ${taskMarkedCount}/${taskMembers.length} · ${names.join('、')}` : `${taskMembers.length} 个人物尚未标记`}</p></div><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${task.needsReview ? 'bg-amber-50 text-amber-600' : taskFullyMarked ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500'}`}>{task.needsReview ? '需要确认' : taskFullyMarked ? '已确认' : '待标记'}</span></header>
+        return <article key={task.id} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"><header className="flex items-start gap-3"><span className={`rounded-full p-2 ${task.needsReview ? 'bg-amber-50 text-amber-600' : taskFullyMarked ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>{task.needsReview ? <AlertTriangle size={17}/> : <UserRound size={17}/>}</span><div className="min-w-0 flex-1"><h4 className="text-sm font-bold text-slate-800">工作图 {taskIndex + 1}</h4><p className="mt-1 truncate text-xs text-slate-500" title={names.join('、')}>{taskMarkedCount ? `人物标记 ${taskMarkedCount}/${taskMembers.length}${names.length ? ` · ${names.join('、')}` : ''}` : `${taskMembers.length} 个人物尚未标记`}</p></div><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${task.needsReview ? 'bg-amber-50 text-amber-600' : taskFullyMarked ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-500'}`}>{task.needsReview ? '建议检查' : taskFullyMarked ? '已标记' : '未标记'}</span></header>
           {task.reviewReason && <p className="mt-2 rounded-md bg-amber-50 px-2.5 py-2 text-xs text-amber-700">{task.reviewReason}</p>}
           <PatchPreview task={task} cacheConfig={cacheConfig} enabled={previewEnabled} onPickPerson={personIndex => onPickIdentity(assignmentKey(task.photoId, task.baseVersionId, personIndex))}/>
-          <div className="mt-3 space-y-2 rounded-lg bg-slate-50 p-2.5"><p className="text-[10px] font-bold text-slate-500">识别并标记人物</p>{taskMembers.map(member => { const subjectKey = assignmentKey(task.photoId, task.baseVersionId, member.personIndex); const assignment = assignments.get(subjectKey); const identity = assignment?.identityId ? identities.get(assignment.identityId) : undefined; const generated = isGeneratedIdentity(identity); const label = identity && !generated ? identity.name : generated ? identity?.name : '未标记'; const status = assignment?.source === 'manual' ? '已人工确认' : assignment?.source === 'manual-group' ? '组内确认' : assignment?.identityId ? '自动候选' : '等待标记'; return <button type="button" key={subjectKey} disabled={Boolean(busy)} onClick={() => onPickIdentity(subjectKey)} className="flex w-full items-center gap-2 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-left transition hover:border-blue-400 hover:bg-blue-50 disabled:opacity-50"><span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: personColor(member.personIndex) }}/><span className="w-14 text-xs font-bold text-slate-500">人物 {member.personIndex}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${status === '已人工确认' ? 'bg-emerald-50 text-emerald-700' : status === '组内确认' ? 'bg-blue-50 text-blue-700' : status === '自动候选' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{status}</span><span className="min-w-0 flex-1 truncate text-xs font-bold text-slate-700">{label}</span><span className="text-[10px] font-bold text-blue-600">看图确认</span></button>; })}<p className="pt-1 text-[10px] text-slate-400">点击人物框或人物行，看图选择已有身份、新建人物，并可一次应用到整组相同人物。</p></div>
-          <div className="mt-3 flex flex-wrap gap-2"><button disabled={task.patchMissing} onClick={() => void window.electronAPI.openTeamPatch(task.patchPath)} className="dialog-secondary inline-flex items-center gap-1.5"><ExternalLink size={13}/>打开工作图</button><button onClick={() => setCropEditor({ task, crop: { ...task.crop } })} className="dialog-secondary inline-flex items-center gap-1.5"><SlidersHorizontal size={13}/>调整范围</button>{task.needsReview && <button disabled={Boolean(busy)} onClick={() => void confirmTask(task)} className="dialog-primary inline-flex items-center gap-1.5"><CheckCircle2 size={13}/>确认无误</button>}<button disabled={Boolean(busy)} onClick={() => void deleteTask(task)} className="inline-flex items-center gap-1.5 rounded-md border border-red-200 px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50"><Trash2 size={13}/>识别错误，删除</button></div>
+          <div className="mt-3 space-y-2 rounded-lg bg-slate-50 p-2.5"><p className="text-[10px] font-bold text-slate-500">识别并标记人物</p>{taskMembers.map(member => { const subjectKey = assignmentKey(task.photoId, task.baseVersionId, member.personIndex); const assignment = assignments.get(subjectKey); const identity = assignment?.identityId ? identities.get(assignment.identityId) : undefined; const generated = isGeneratedIdentity(identity); const label = identity && !generated ? identity.name : '未标记'; const status = !identity || generated ? '未标记' : assignment?.source === 'manual' ? '已人工确认' : assignment?.source === 'manual-group' ? '组内确认' : '自动候选'; return <button type="button" key={subjectKey} disabled={Boolean(busy)} onClick={() => onPickIdentity(subjectKey)} className="flex w-full items-center gap-2 rounded-md border border-slate-200 bg-white px-2.5 py-2 text-left transition hover:border-blue-400 hover:bg-blue-50 disabled:opacity-50"><span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: personColor(member.personIndex) }}/><span className="w-14 text-xs font-bold text-slate-500">人物 {member.personIndex}</span><span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${status === '已人工确认' ? 'bg-emerald-50 text-emerald-700' : status === '组内确认' ? 'bg-blue-50 text-blue-700' : status === '自动候选' ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{status}</span><span className="min-w-0 flex-1 truncate text-xs font-bold text-slate-700">{label}</span><span className="text-[10px] font-bold text-blue-600">{identity && !generated ? '看图修改' : '去标记'}</span></button>; })}<p className="pt-1 text-[10px] text-slate-400">点击人物框或人物行，看图选择已有身份、新建人物，并可一次应用到整组相同人物。</p></div>
+          <div className="mt-3 flex flex-wrap gap-2"><button disabled={task.patchMissing} onClick={() => void window.electronAPI.openTeamPatch(task.patchPath)} className="dialog-secondary inline-flex items-center gap-1.5"><ExternalLink size={13}/>打开工作图</button><button onClick={() => setCropEditor({ task, crop: { ...task.crop } })} className="dialog-secondary inline-flex items-center gap-1.5"><SlidersHorizontal size={13}/>调整范围</button><button disabled={Boolean(busy)} onClick={() => void deleteTask(task)} className="inline-flex items-center gap-1.5 rounded-md border border-red-200 px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50"><Trash2 size={13}/>识别错误，删除</button></div>
         </article>;
       })}</div>}</section>
     </div>}
@@ -483,6 +527,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
   const [photoRefreshTokens, setPhotoRefreshTokens] = useState<Record<string, number>>({});
   const [photoProcessingMessages, setPhotoProcessingMessages] = useState<Record<string, string>>({});
   const identifyingRef = useRef(false);
+  const lastUnmarkedSubjectKeyRef = useRef('');
   const identitySubjects = useMemo(() => identitySubjectsFromWorkspace(identityState), [identityState]);
   const unrecognizedPaths = useMemo(() => entries
     .filter(entry => !(workspacePhotoForEntry(identityState.photos, entry)?.tasks.length))
@@ -495,7 +540,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
     const candidates = identityId && (isGeneratedIdentity(selectedIdentitySubject.identity) || source === 'suggested')
       ? identitySubjects.filter(subject => subject.assignment?.identityId === identityId && (isGeneratedIdentity(selectedIdentitySubject.identity) || subject.assignment?.source === 'suggested' || subject.key === selectedIdentitySubject.key))
       : [selectedIdentitySubject];
-    return [selectedIdentitySubject, ...candidates.filter(subject => subject.key !== selectedIdentitySubject.key)];
+    return [selectedIdentitySubject, ...candidates.filter(subject => subject.key !== selectedIdentitySubject.key).sort((left, right) => (right.assignment?.confidence || 0) - (left.assignment?.confidence || 0))];
   }, [selectedIdentitySubject, identitySubjects]);
 
   const loadIdentities = async (syncLabels = false) => {
@@ -520,13 +565,26 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
     const candidates = identityId && (isGeneratedIdentity(subject.identity) || source === 'suggested')
       ? identitySubjects.filter(candidate => candidate.assignment?.identityId === identityId && (isGeneratedIdentity(subject.identity) || candidate.assignment?.source === 'suggested' || candidate.key === subject.key))
       : [subject];
-    setIncludedIdentityKeys(new Set([subject.key, ...candidates.map(candidate => candidate.key)]));
+    const uniqueCandidates = uniqueIdentitySubjectsPerPhoto([subject, ...candidates], subject.key);
+    setIncludedIdentityKeys(new Set(uniqueCandidates.map(candidate => candidate.key)));
+    if (isUnmarkedIdentitySubject(subject)) lastUnmarkedSubjectKeyRef.current = subject.key;
     setIdentityPickerKey(subject.key);
+  };
+
+  const openNextUnmarkedIdentity = () => {
+    if (!identitySubjects.some(isUnmarkedIdentitySubject)) { onNotice('当前没有未标记人物'); return; }
+    const lastIndex = identitySubjects.findIndex(subject => subject.key === lastUnmarkedSubjectKeyRef.current);
+    const ordered = lastIndex >= 0 ? [...identitySubjects.slice(lastIndex + 1), ...identitySubjects.slice(0, lastIndex + 1)] : identitySubjects;
+    const nextSubject = ordered.find(isUnmarkedIdentitySubject);
+    if (nextSubject) openIdentityPicker(nextSubject.key);
   };
 
   const confirmIdentitySelection = async (identityId?: string, name?: string) => {
     if (!selectedIdentitySubject || !includedIdentityKeys.has(selectedIdentitySubject.key)) return;
-    const assignments = identitySubjects.filter(subject => includedIdentityKeys.has(subject.key)).map(subject => ({
+    const selectedSubjects = identitySubjects.filter(subject => includedIdentityKeys.has(subject.key));
+    const uniqueSelectedSubjects = uniqueIdentitySubjectsPerPhoto(selectedSubjects, selectedIdentitySubject.key);
+    const duplicateCount = selectedSubjects.length - uniqueSelectedSubjects.length;
+    const assignments = uniqueSelectedSubjects.map(subject => ({
       photoId: subject.photo.photoId,
       baseVersionId: subject.photo.baseVersionId,
       personIndex: subject.personIndex,
@@ -550,7 +608,30 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
     onProjectChanged?.();
     const identity = result.identities.find(item => item.id === result.identityId);
     const releaseNote = result.autoReleasedCount ? `；同图中 ${result.autoReleasedCount} 个自动候选已让位` : '';
-    onNotice(identity ? `已将 ${result.updatedCount || assignments.length} 个人物实例标记为“${identity.name}”${releaseNote}` : `已将 ${result.updatedCount || assignments.length} 个人物实例设为未标记`);
+    const skippedDuplicates = Math.max(duplicateCount, result.duplicateSkippedCount || 0);
+    const duplicateNote = skippedDuplicates ? `；已自动取消 ${skippedDuplicates} 张同图重复候选` : '';
+    onNotice(identity ? `已将 ${result.updatedCount || assignments.length} 个人物实例标记为“${identity.name}”${releaseNote}${duplicateNote}` : `已将 ${result.updatedCount || assignments.length} 个人物实例设为未标记${duplicateNote}`);
+  };
+
+  const toggleIdentityCandidate = (key: string) => {
+    const candidate = identitySubjects.find(subject => subject.key === key);
+    if (!candidate || !selectedIdentitySubject || key === selectedIdentitySubject.key) return;
+    setIncludedIdentityKeys(current => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        const duplicate = identitySubjects.find(subject => subject.key !== key && next.has(subject.key) && identitySubjectPhotoKey(subject) === identitySubjectPhotoKey(candidate));
+        if (duplicate?.key === selectedIdentitySubject.key) {
+          onNotice('当前图片中的人物优先保留，已跳过这张同图重复候选');
+          return current;
+        }
+        if (duplicate) next.delete(duplicate.key);
+        next.add(key);
+      }
+      next.add(selectedIdentitySubject.key);
+      return next;
+    });
   };
 
   const createIdentityFromPicker = async () => {
@@ -655,12 +736,12 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
   const resultByPath = new Map(results.map(result => [result.relativePath, result]));
   const advancedNeedsRepair = componentStatus?.advancedState === 'repair-needed';
   const confirmedIdentityCount = identitySubjects.filter(subject => subject.identity && !isGeneratedIdentity(subject.identity) && ['manual', 'manual-group'].includes(subject.assignment?.source || '')).length;
-  const candidateIdentityCount = identitySubjects.filter(subject => subject.assignment?.identityId && (isGeneratedIdentity(subject.identity) || subject.assignment?.source === 'suggested')).length;
-  const unmarkedIdentityCount = Math.max(0, identitySubjects.length - confirmedIdentityCount - candidateIdentityCount);
+  const candidateIdentityCount = identitySubjects.filter(subject => subject.identity && !isGeneratedIdentity(subject.identity) && subject.assignment?.source === 'suggested').length;
+  const unmarkedIdentityCount = identitySubjects.filter(isUnmarkedIdentitySubject).length;
 
   return <div className="fixed inset-x-0 bottom-0 top-10 z-[310] flex flex-col bg-slate-50"><header className="flex min-h-16 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-3"><span className="rounded-xl bg-violet-50 p-2 text-violet-600"><UsersRound size={20}/></span><div><h2 className="font-bold text-slate-900">团片协作 · {entries.length} 张图片</h2><p className="mt-0.5 text-xs text-slate-500">识别并裁图时同步标记人物；确认后再生成工作流程。</p></div><TeamRetouchSteps value={activeStep} onChange={onStepChange} disabled={running}/><div className="ml-auto flex items-center gap-2"><button disabled={running || identityLoading} onClick={() => void runBatch()} className="dialog-secondary inline-flex items-center gap-2">{running || identityLoading ? <Loader2 size={15} className="animate-spin"/> : <ScanFace size={15}/>} {identityLoading ? '读取项目数据…' : unrecognizedPaths.length ? `识别新增图片（${unrecognizedPaths.length} 张）` : entries.length > 1 ? '重新识别全部图片' : '重新识别图片'}</button><button disabled={running || identityLoading || identityState.identifying} onClick={() => void identifyAndSync()} className="dialog-primary inline-flex items-center gap-2">{identityState.identifying ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}重新自动标记人物</button><button onClick={onClose} className="rounded-md p-2 text-slate-500 hover:bg-slate-100"><X size={20}/></button></div></header>
     <div className={`border-b px-5 py-2 text-xs ${componentStatus?.advancedAvailable ? 'border-violet-100 bg-violet-50 text-violet-700' : advancedNeedsRepair ? 'border-amber-100 bg-amber-50 text-amber-700' : 'border-blue-100 bg-blue-50 text-blue-700'}`}><span className="font-bold">{componentStatus?.advancedAvailable ? '高级引擎可用' : advancedNeedsRepair ? '高级引擎需要修复' : '基础可用 · 高级未安装'}</span></div>
-    {!!identitySubjects.length && <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-5 py-2 text-xs"><span className="font-bold text-slate-700">人物标记</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 font-bold text-emerald-700">已确认 {confirmedIdentityCount}</span><span className="rounded-full bg-amber-50 px-2.5 py-1 font-bold text-amber-700">自动候选 {candidateIdentityCount}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-slate-600">未标记 {unmarkedIdentityCount}</span><span className="ml-auto text-slate-500">点击人物框或人物行即可看图确认，并应用到整组相同人物</span></div>}
+    {!!identitySubjects.length && <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-5 py-2 text-xs"><span className="font-bold text-slate-700">人物标记</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 font-bold text-emerald-700">已确认 {confirmedIdentityCount}</span>{candidateIdentityCount > 0 && <span className="rounded-full bg-amber-50 px-2.5 py-1 font-bold text-amber-700">自动候选 {candidateIdentityCount}</span>}<button type="button" disabled={!unmarkedIdentityCount || identityLoading || identityState.identifying} onClick={openNextUnmarkedIdentity} title="打开下一个未标记人物" className="rounded-full bg-slate-100 px-2.5 py-1 font-bold text-slate-600 transition hover:bg-blue-50 hover:text-blue-700 disabled:cursor-default disabled:opacity-50">未标记 {unmarkedIdentityCount}{unmarkedIdentityCount ? ' · 下一个' : ''}</button><span className="ml-auto text-slate-500">点击“未标记”可连续找到下一处，也可直接点击人物框或人物行</span></div>}
     {running && <div className="border-b border-blue-100 bg-blue-50 px-5 py-3"><div className="flex justify-between text-xs font-bold text-blue-700"><span>{progress.itemIndex ? `${progress.itemIndex}/${progress.itemCount} · ${progress.itemName} · ` : ''}{progress.message}</span><span>{Math.round(overallProgress)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full bg-blue-600" style={{ width: `${overallProgress}%` }}/></div></div>}
     <main className="min-h-0 flex-1 overflow-y-auto p-6"><div className="mx-auto max-w-[1600px] space-y-6">{identityLoading
       ? <div className="flex min-h-52 items-center justify-center rounded-xl border border-slate-200 bg-white text-sm font-bold text-slate-600"><Loader2 size={18} className="mr-2 animate-spin text-blue-600"/>正在读取整个项目的人物与工作图数据…</div>
@@ -679,12 +760,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
       cacheConfig={cacheConfig}
       busy={identityPickerBusy}
       busyLabel={identityPickerBusyLabel}
-      onToggleCandidate={key => setIncludedIdentityKeys(current => {
-        const next = new Set(current);
-        if (next.has(key)) next.delete(key); else next.add(key);
-        next.add(selectedIdentitySubject.key);
-        return next;
-      })}
+      onToggleCandidate={toggleIdentityCandidate}
       onOnlyCurrent={() => setIncludedIdentityKeys(new Set([selectedIdentitySubject.key]))}
       onConfirm={identityId => void confirmIdentitySelection(identityId)}
       onCreate={() => void createIdentityFromPicker()}

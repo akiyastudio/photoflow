@@ -1,6 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, FolderOutput, GripVertical, Loader2, Trash2, Upload, UserRound, UsersRound, Wand2, X } from 'lucide-react';
-import type { AppConfig, TeamIdentity, TeamIdentityWorkspace, TeamPatchReturnBatchResult, TeamPatchTask, TeamPersonAssignment, TeamProjectPhoto, ThumbnailState, WorkspaceProject } from '../types';
+import type { AppConfig, TeamIdentity, TeamIdentityWorkspace, TeamPatchReturnBatchResult, TeamPatchTask, TeamPersonAssignment, TeamProjectPhoto, TeamWorkflowGenerationProgress, ThumbnailState, WorkspaceProject } from '../types';
 import { scheduleWorkflowWeeks } from '../utils/teamWorkflow';
 import { useAppDialog } from './AppDialogProvider';
 import { TeamRetouchSteps, type TeamRetouchStep } from './TeamRetouchSteps';
@@ -33,6 +33,7 @@ type Subject = {
 const assignmentKey = (photoId: string, baseVersionId: string, personIndex: number) => `${photoId}:${baseVersionId}:${personIndex}`;
 const isGeneratedIdentity = (identity: TeamIdentity) => /^\u5f85\u786e\u8ba4\u4eba\u7269\s+\d+$/.test(identity.name);
 const similarityPairKey = (left: string, right: string) => left < right ? `${left}|${right}` : `${right}|${left}`;
+const formatWorkflowBytes = (bytes: number) => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
 
 const IDENTITY_THUMBNAIL_SIZE = 384;
 type IdentityThumbnailListener = (state: ThumbnailState, url?: string) => void;
@@ -208,6 +209,7 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
   const [assigningSubject, setAssigningSubject] = useState<Subject | null>(null);
   const [workflowReturnResult, setWorkflowReturnResult] = useState<TeamPatchReturnBatchResult | null>(null);
   const [workflowReturnProgress, setWorkflowReturnProgress] = useState({ progress: 0, message: '' });
+  const [workflowGeneration, setWorkflowGeneration] = useState<TeamWorkflowGenerationProgress | null>(null);
   const [similarities, setSimilarities] = useState<NonNullable<TeamIdentityWorkspace['similarities']>>([]);
   const [showAllSubjects, setShowAllSubjects] = useState(false);
   const [draggedWorkflowIdentityId, setDraggedWorkflowIdentityId] = useState('');
@@ -224,6 +226,16 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
   useEffect(() => window.electronAPI.onTeamPatchReturnBatchProgress(value => {
     setWorkflowReturnProgress({ progress: value.progress, message: value.message });
   }), []);
+  useEffect(() => {
+    let active = true;
+    const unsubscribe = window.electronAPI.onTeamWorkflowGenerationProgress(value => {
+      if (value.projectName === project.name) setWorkflowGeneration(value);
+    });
+    void window.electronAPI.getTeamWorkflowGenerationStatus(workspacePath, project.status, project.name).then(result => {
+      if (active && result.success && result.job) setWorkflowGeneration(result.job);
+    });
+    return () => { active = false; unsubscribe(); };
+  }, [workspacePath, project.status, project.name]);
   const subjects = useMemo(() => subjectsFromWorkspace(workspace), [workspace]);
   const similarityByPair = useMemo(() => new Map(similarities.map(item => [similarityPairKey(item.leftKey, item.rightKey), item])), [similarities]);
   const similarityFor = (left: string, right: string) => similarityByPair.get(similarityPairKey(left, right));
@@ -500,6 +512,7 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
   const splitIdentityCount = [...identityWeeks.values()].filter(usedWeeks => usedWeeks.size > 1).length;
   const personWeekCount = [...identityWeeks.values()].reduce((total, usedWeeks) => total + usedWeeks.size, 0);
   const readyWorkflowItems = workflow.filter(item => item.identity && item.ready && !item.assignment?.completed);
+  const workflowGenerating = workflowGeneration?.state === 'running';
   const generateWorkflow = async () => {
     const groups = [...workflowGroups.values()].map(group => ({
       week: group.week,
@@ -513,10 +526,14 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
         photoName: item.photo.name,
       })),
     }));
-    setBusy('generate-workflow');
-    let result = await window.electronAPI.generateTeamWorkflow(workspacePath, project.status, project.name, { preferredIdentityOrder, groups });
-    setBusy('');
+    const run = (replace = false) => {
+      const operationId = crypto.randomUUID();
+      setWorkflowGeneration({ operationId, projectName: project.name, state: 'running', phase: 'preparing', progress: 0, completedFiles: 0, totalFiles: 0, copiedBytes: 0, totalBytes: 0, currentName: '', message: '正在准备工作流程…' });
+      return window.electronAPI.generateTeamWorkflow(workspacePath, project.status, project.name, { operationId, preferredIdentityOrder, groups, replace });
+    };
+    let result = await run();
     if (result.requiresConfirmation) {
+      setWorkflowGeneration(null);
       const confirmed = await appDialog.confirm({
         title: '重新生成工作流程？',
         message: '项目“团片协作”文件夹中上一次生成的周次、角色目录及任务图片将被删除，然后按照当前人物标注和排期重新生成。',
@@ -524,13 +541,22 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
         tone: 'danger',
       });
       if (!confirmed) return;
-      setBusy('generate-workflow');
-      result = await window.electronAPI.generateTeamWorkflow(workspacePath, project.status, project.name, { preferredIdentityOrder, groups, replace: true });
-      setBusy('');
+      result = await run(true);
     }
-    if (!result.success) { onNotice(`生成工作流程失败：${result.error || '未知错误'}`); return; }
+    if (result.alreadyRunning) return;
+    if (!result.success) {
+      if (result.cancelled) onNotice(result.resumable ? '已停止生成；下次会从现有进度继续' : '已停止生成工作流程');
+      else onNotice(`生成工作流程失败：${result.error || '未知错误'}`);
+      return;
+    }
     onNotice(`工作流程已保存到项目“团片协作”文件夹：${result.groupCount || 0} 个角色批次，${result.count || 0} 张任务图`);
     onProjectChanged();
+  };
+  const cancelWorkflowGeneration = async () => {
+    if (!workflowGeneration?.operationId || !workflowGenerating) return;
+    setWorkflowGeneration(current => current ? { ...current, phase: 'cancelling', message: '正在安全停止…' } : current);
+    const result = await window.electronAPI.cancelTeamWorkflowGeneration(workflowGeneration.operationId);
+    if (!result.success) onNotice(`停止生成失败：${result.error || '未知错误'}`);
   };
 
   const mergeablePhotos = workspace.photos.filter(photo => {
@@ -572,10 +598,31 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
       <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-2.5">
         <span className="text-xs font-bold text-slate-700">流程概览</span><span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-bold text-violet-700">{weeks.length} 周</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{personWeekCount} 个批次</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{splitIdentityCount} 人跨周</span><span className="text-xs text-slate-500">当前可接收 {readyWorkflowItems.length} 张返图</span>
         <label title={workflowOrderLocked ? '已有任务返图或完成，开工顺序已锁定' : '加入多个人物后，可在下方拖拽调整优先顺序'} className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-600"><span>优先队列</span><select value="" disabled={Boolean(busy) || workflowOrderLocked || !availableWorkflowIdentities.length} onChange={event => void addPreferredIdentity(event.target.value)} className="max-w-44 bg-transparent text-xs font-medium text-slate-700 outline-none disabled:cursor-not-allowed disabled:text-slate-400"><option value="">{preferredIdentityOrder.length ? `已排序 ${preferredIdentityOrder.length} 人 · 添加人物` : '自动排期 · 添加人物'}</option>{availableWorkflowIdentities.map(identity => <option key={identity.id} value={identity.id}>{identity.name}</option>)}</select>{busy === 'workflow-settings' && <Loader2 size={13} className="animate-spin"/>}</label>
-        {workflowOrderLocked && <span className="text-[11px] text-amber-600">已有返图，顺序已锁定</span>}<TeamOutputProgressPicker controller={outputProgress} disabled={Boolean(busy)}/><button disabled={!workflowGroups.size || Boolean(busy)} onClick={() => void generateWorkflow()} className="dialog-secondary ml-auto inline-flex items-center gap-2">{busy === 'generate-workflow' ? <Loader2 size={15} className="animate-spin"/> : <FolderOutput size={15}/>}生成工作流程</button><button disabled={!readyWorkflowItems.length || Boolean(busy)} onClick={() => void receiveWorkflowBatch(readyWorkflowItems)} className="dialog-primary inline-flex items-center gap-2">{busy === 'workflow-return' ? <Loader2 size={15} className="animate-spin"/> : <Upload size={15}/>}批量导入返图并识别</button><button disabled={!mergeablePhotos.length || Boolean(busy)} onClick={() => void mergeCompletedPhotos()} className="dialog-primary inline-flex items-center gap-2">{busy === 'merge-workflow' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}合成已完成图片（{mergeablePhotos.length}）</button>
+        {workflowOrderLocked && <span className="text-[11px] text-amber-600">已有返图，顺序已锁定</span>}<TeamOutputProgressPicker controller={outputProgress} disabled={Boolean(busy)}/><button disabled={!workflowGroups.size || Boolean(busy) || workflowGenerating} onClick={() => void generateWorkflow()} className="dialog-secondary ml-auto inline-flex items-center gap-2">{workflowGenerating ? <Loader2 size={15} className="animate-spin"/> : <FolderOutput size={15}/>} {workflowGenerating ? `生成中 ${Math.round(workflowGeneration.progress)}%` : '生成工作流程'}</button><button disabled={!readyWorkflowItems.length || Boolean(busy)} onClick={() => void receiveWorkflowBatch(readyWorkflowItems)} className="dialog-primary inline-flex items-center gap-2">{busy === 'workflow-return' ? <Loader2 size={15} className="animate-spin"/> : <Upload size={15}/>}批量导入返图并识别</button><button disabled={!mergeablePhotos.length || Boolean(busy)} onClick={() => void mergeCompletedPhotos()} className="dialog-primary inline-flex items-center gap-2">{busy === 'merge-workflow' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}合成已完成图片（{mergeablePhotos.length}）</button>
       </div>
       {!!preferredWorkflowIdentities.length && <div className="flex min-h-12 flex-wrap items-center gap-2 border-b border-violet-100 bg-violet-50/70 px-5 py-2"><span className="mr-1 text-xs font-bold text-violet-800">拖拽开工顺序</span>{preferredWorkflowIdentities.map((identity, index) => <div key={identity.id} draggable={!workflowOrderLocked && !busy} onDragStart={event => { setDraggedWorkflowIdentityId(identity.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', identity.id); }} onDragOver={event => { if (!workflowOrderLocked && !busy) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; } }} onDrop={event => { event.preventDefault(); const sourceIdentityId = draggedWorkflowIdentityId || event.dataTransfer.getData('text/plain'); setDraggedWorkflowIdentityId(''); void movePreferredIdentity(sourceIdentityId, identity.id); }} onDragEnd={() => setDraggedWorkflowIdentityId('')} className={`inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-white py-1 pl-1.5 pr-2 text-xs font-bold text-violet-800 shadow-sm ${draggedWorkflowIdentityId === identity.id ? 'opacity-40' : ''} ${workflowOrderLocked || busy ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'}`}><GripVertical size={13} className="text-violet-400"/><span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-violet-100 px-1 text-[10px] text-violet-700">{index + 1}</span><span className="max-w-32 truncate">{identity.name}</span><button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void removePreferredIdentity(identity.id)} title={`将“${identity.name}”交回自动排期`} className="ml-0.5 rounded-full p-0.5 text-violet-400 hover:bg-violet-100 hover:text-violet-700 disabled:opacity-40"><X size={12}/></button></div>)}<span className="text-[11px] text-violet-600">未加入的人物继续自动安排</span><button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void savePreferredIdentityOrder([], '已恢复自动排期；如已生成工作流程，请重新生成')} className="ml-auto text-xs font-bold text-violet-700 hover:text-violet-900 disabled:opacity-40">全部恢复自动</button></div>}
     </>}
+    {workflowGenerating && workflowGeneration && <div className="border-b border-blue-100 bg-blue-50 px-5 py-3">
+      <div className="flex items-center gap-4 text-xs">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-4 font-bold text-blue-700">
+            <span className="truncate">{workflowGeneration.message}{workflowGeneration.currentName ? ` · ${workflowGeneration.currentName}` : ''}</span>
+            <span className="shrink-0 tabular-nums">{Math.round(workflowGeneration.progress)}%</span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-blue-600">
+            <span>{workflowGeneration.completedFiles}/{workflowGeneration.totalFiles || '—'} 张</span>
+            <span>{formatWorkflowBytes(workflowGeneration.copiedBytes)}{workflowGeneration.totalBytes ? ` / ${formatWorkflowBytes(workflowGeneration.totalBytes)}` : ''}</span>
+            <span>可继续查看和标记人物；离开页面后任务仍会继续</span>
+          </div>
+          <div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100">
+            <div className="h-full rounded-full bg-blue-600 transition-[width] duration-300" style={{ width: `${workflowGeneration.progress}%` }}/>
+          </div>
+        </div>
+        <button type="button" disabled={workflowGeneration.phase === 'cancelling'} onClick={() => void cancelWorkflowGeneration()} className="shrink-0 rounded-md border border-blue-200 bg-white px-3 py-2 font-bold text-blue-700 hover:bg-blue-100 disabled:opacity-50">
+          {workflowGeneration.phase === 'cancelling' ? '正在停止…' : '停止'}
+        </button>
+      </div>
+    </div>}
     {busy === 'workflow-return' && <div className="border-b border-emerald-100 bg-emerald-50 px-5 py-3"><div className="flex items-center justify-between gap-4 text-xs"><span className="font-bold text-emerald-700">{workflowReturnProgress.message}</span><span className="tabular-nums text-emerald-600">{Math.round(workflowReturnProgress.progress)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-emerald-100"><div className="h-full rounded-full bg-emerald-600 transition-[width] duration-500" style={{ width: `${workflowReturnProgress.progress}%` }}/></div></div>}
     {tab === 'workflow' && workflowReturnResult?.success && <div className="max-h-52 overflow-y-auto border-b border-slate-200 bg-white"><div className="sticky top-0 z-10 flex flex-wrap items-center gap-3 border-b border-slate-100 bg-white px-5 py-2 text-xs"><span className="font-bold text-slate-700">本次批量返图</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 font-bold text-emerald-700">已完成 {workflowReturnResult.acceptedCount || 0}</span><span className="rounded-full bg-amber-50 px-2.5 py-1 font-bold text-amber-700">待确认 {workflowReturnResult.reviewCount || 0}</span>{Boolean(workflowReturnResult.missingTaskCount) && <span className="text-slate-500">另有 {workflowReturnResult.missingTaskCount} 张当前任务未收到可靠返图</span>}</div>{workflowReturnResult.matches.map(match => <div key={match.returnId} className="grid grid-cols-[minmax(140px,1fr)_24px_minmax(180px,1.2fr)_110px] items-center gap-3 border-b border-slate-100 px-5 py-2 text-xs last:border-0"><span className="truncate font-medium text-slate-700" title={match.sourceName}>{match.sourceName}</span><span className="text-center text-slate-300">→</span><span className="truncate text-slate-600">{match.matched ? `${match.photoName} · ${match.personName}` : '未找到候选任务'}</span><span className={`justify-self-end rounded-full px-2.5 py-1 font-bold ${match.accepted ? 'bg-emerald-50 text-emerald-700' : match.confidence === 'medium' ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-600'}`}>{match.accepted ? `已完成 ${Math.round(match.score * 100)}%` : '请单独上传确认'}</span></div>)}</div>}
     {tab === 'workflow' && workflowReturnResult && !workflowReturnResult.success && <div className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">{workflowReturnResult.error || '批量返图失败'}</div>}
