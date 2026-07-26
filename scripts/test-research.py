@@ -76,6 +76,36 @@ def main():
         assert any(event["type"] == "success" and event["message"] == "所有任务结束" for event in events)
 
     with TemporaryDirectory() as temporary_directory:
+        reference_directory = Path(temporary_directory) / "reference"
+        source_directory = Path(temporary_directory) / "source"
+        reference_directory.mkdir()
+        source_directory.mkdir()
+        pixels = np.random.default_rng(42).integers(0, 256, size=(48, 64, 3), dtype=np.uint8)
+        Image.fromarray(pixels, "RGB").save(reference_directory / "reference.jpg")
+        Image.fromarray(pixels, "RGB").save(source_directory / "new-material.jpg")
+
+        result = subprocess.run([
+            sys.executable,
+            str(ROOT / "python" / "rename.py"),
+            "--folder_a", str(reference_directory),
+            "--folder_b", str(source_directory),
+            "--threshold", "-1",
+            "--preview",
+        ], capture_output=True, text=True, encoding="utf-8", timeout=30, check=False)
+        assert result.returncode == 0, result.stderr
+        events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        preview = next(event for event in events if event["type"] == "preview")
+        assert preview["data"]["matches"] == []
+        assert preview["data"]["unmatched"] == ["new-material.jpg"]
+        assert preview["data"]["suggestions"] == [{
+            "source": "new-material.jpg",
+            "reference": "reference.jpg",
+            "target": "reference.jpg",
+            "confidence": "候选",
+            "distance": 0,
+        }]
+
+    with TemporaryDirectory() as temporary_directory:
         project_directory = Path(temporary_directory) / "project"
         reference_directory = project_directory / "图片选片"
         jpg_directory = project_directory / "jpg"

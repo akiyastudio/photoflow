@@ -23,7 +23,7 @@ const run = (command, args) => {
 };
 
 try {
-  if (process.platform !== 'win32') throw new Error('多人修脸的 DirectML 运行库目前只支持 Windows');
+  if (process.platform !== 'win32') throw new Error('团片协作的 DirectML 运行库目前只支持 Windows');
   for (const [name, minBytes] of requiredModels) {
     const modelPath = path.join(modelRoot, name);
     if (!fs.existsSync(modelPath) || fs.statSync(modelPath).size < minBytes) throw new Error(`Team-retouch model is missing or incomplete: ${name}`);

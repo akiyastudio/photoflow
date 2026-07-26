@@ -43,9 +43,9 @@
 - 对比两轮后期文件并建立版本关系，记录备注、作者、当前版本与最终版状态。
 - 汇总并导出项目中已经标记的最终版本。
 
-### 多人修脸
+### 团片协作
 
-安装 `多人修脸` 组件后，可以把一张高分辨率合照拆成适合多人协作的小图：
+安装 `团片协作` 组件后，可以把一张高分辨率合照拆成适合多人协作的小图：
 
 1. AI 检测画面中的人物并规划裁切范围。
 2. 为每个人填写名称和接收人，导出修图小图。
@@ -168,7 +168,7 @@ pip install -r requirements.txt
 npm run electron:dev
 ```
 
-完整媒体与组件构建还需要相应的 FFmpeg、OpenCV、ONNX Runtime / DirectML 依赖。多人修脸开发环境可通过以下命令准备：
+完整媒体与组件构建还需要相应的 FFmpeg、OpenCV、ONNX Runtime / DirectML 依赖。团片协作开发环境可通过以下命令准备：
 
 ```powershell
 npm run setup:team-retouch
@@ -197,7 +197,7 @@ npm run test:thumbnail-pipeline
 npm run test:components
 ```
 
-仓库还包含选片、数据维护、Office 图片提取、调研整理和多人修脸等专项测试，具体命令见 `package.json`。
+仓库还包含选片、数据维护、Office 图片提取、调研整理和团片协作等专项测试，具体命令见 `package.json`。
 
 ## 技术架构
 

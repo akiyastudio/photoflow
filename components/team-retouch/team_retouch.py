@@ -44,10 +44,11 @@ def emit(result):
 
 
 def emit_progress(progress, message):
-    emit({
+    payload = {
         "type": "progress", "progress": max(0, min(100, int(progress))),
         "message": str(message), **PROGRESS_CONTEXT,
-    })
+    }
+    emit(payload)
 
 
 def component_directory():
@@ -62,7 +63,7 @@ def asset_path(*parts):
     for candidate in candidates:
         if candidate.is_file():
             return candidate
-    raise FileNotFoundError(f"多人修脸模型或脚本不存在：{candidates[0]}")
+    raise FileNotFoundError(f"团片协作模型或脚本不存在：{candidates[0]}")
 
 
 def model_path(name=RTMDET_MODEL_NAME):
@@ -190,6 +191,56 @@ def box_iou(left, right):
     right_area = max(0.0, right[2] - right[0]) * max(0.0, right[3] - right[1])
     union = left_area + right_area - intersection
     return intersection / union if union else 0.0
+
+
+def exclusion_xyxy(value):
+    if not isinstance(value, dict):
+        return None
+    x = float(value.get("x", 0))
+    y = float(value.get("y", 0))
+    width = float(value.get("width", 0))
+    height = float(value.get("height", 0))
+    if x < 0 or y < 0 or width <= 0 or height <= 0:
+        return None
+    return [x, y, x + width, y + height]
+
+
+def matches_exclusion(box, exclusion):
+    overlap = box_iou(box, exclusion)
+    if overlap >= 0.45:
+        return True
+    intersection_width = max(0.0, min(box[2], exclusion[2]) - max(box[0], exclusion[0]))
+    intersection_height = max(0.0, min(box[3], exclusion[3]) - max(box[1], exclusion[1]))
+    intersection = intersection_width * intersection_height
+    smaller_area = min(
+        max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1]),
+        max(0.0, exclusion[2] - exclusion[0]) * max(0.0, exclusion[3] - exclusion[1]),
+    )
+    return smaller_area > 0 and intersection / smaller_area >= 0.72
+
+
+def excluded_detection_indices(items, exclusions):
+    """Match each saved exclusion to at most one newly detected person."""
+    candidates = []
+    for exclusion_index, exclusion in enumerate(exclusions):
+        exclusion_center = ((exclusion[0] + exclusion[2]) / 2, (exclusion[1] + exclusion[3]) / 2)
+        exclusion_diagonal = max(1.0, math.hypot(exclusion[2] - exclusion[0], exclusion[3] - exclusion[1]))
+        for person_index, item in enumerate(items):
+            box = item["box"]
+            if not matches_exclusion(box, exclusion):
+                continue
+            overlap = box_iou(box, exclusion)
+            person_center = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+            center_distance = math.hypot(person_center[0] - exclusion_center[0], person_center[1] - exclusion_center[1]) / exclusion_diagonal
+            candidates.append((overlap, -center_distance, exclusion_index, person_index))
+    matched_exclusions = set()
+    matched_people = set()
+    for _overlap, _center_distance, exclusion_index, person_index in sorted(candidates, reverse=True):
+        if exclusion_index in matched_exclusions or person_index in matched_people:
+            continue
+        matched_exclusions.add(exclusion_index)
+        matched_people.add(person_index)
+    return matched_people
 
 
 def fuse_boxes(rtmdet, pair_boxes):
@@ -403,6 +454,44 @@ def mask_bounds(mask, scale, image_width, image_height):
     ], image_width, image_height)
 
 
+def bounded_planning_box(body_box, visible_box, image_width, image_height):
+    """Use segmentation details without letting a leaked mask reorder a crowd.
+
+    Instance masks can occasionally include a neighbouring person.  The body
+    detector remains the stable source of spatial order, while the mask may
+    enlarge the planning box only by a bounded amount for hair, clothes and
+    props extending beyond the detected body.
+    """
+    body_box = clamp_box(body_box, image_width, image_height)
+    if visible_box is None:
+        return body_box
+    visible_box = clamp_box(visible_box, image_width, image_height)
+    body_width = max(1.0, float(body_box[2]) - float(body_box[0]))
+    body_height = max(1.0, float(body_box[3]) - float(body_box[1]))
+    allowed = [
+        float(body_box[0]) - body_width * 0.45,
+        float(body_box[1]) - body_height * 0.20,
+        float(body_box[2]) + body_width * 0.45,
+        float(body_box[3]) + body_height * 0.20,
+    ]
+    return clamp_box([
+        min(float(body_box[0]), max(float(visible_box[0]), allowed[0])),
+        min(float(body_box[1]), max(float(visible_box[1]), allowed[1])),
+        max(float(body_box[2]), min(float(visible_box[2]), allowed[2])),
+        max(float(body_box[3]), min(float(visible_box[3]), allowed[3])),
+    ], image_width, image_height)
+
+
+def spatially_order_people(items):
+    """Return stable left-to-right person numbering for a detected group."""
+    return sorted(items, key=lambda item: (
+        (float(item["box"][0]) + float(item["box"][2])) / 2,
+        (float(item["box"][1]) + float(item["box"][3])) / 2,
+        float(item["box"][0]),
+        float(item["box"][1]),
+    ))
+
+
 def box_coverage_by_crop(box, crop):
     """Return how much of a detected person is visible inside a work crop."""
     crop_box = [crop[0], crop[1], crop[0] + crop[2], crop[1] + crop[3]]
@@ -457,9 +546,11 @@ def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, overs
         return []
 
     candidate_cache = {}
+    # Detection boxes, unlike segmentation extents, cannot suddenly span a
+    # neighbouring person.  They are therefore the source of group order.
     centers = [
-        ((float(item.get("planningBox", item["box"])[0]) + float(item.get("planningBox", item["box"])[2])) / 2,
-         (float(item.get("planningBox", item["box"])[1]) + float(item.get("planningBox", item["box"])[3])) / 2)
+        ((float(item["box"][0]) + float(item["box"][2])) / 2,
+         (float(item["box"][1]) + float(item["box"][3])) / 2)
         for item in items
     ]
     x_span = max(center[0] for center in centers) - min(center[0] for center in centers)
@@ -603,9 +694,206 @@ def overlap_review_reasons(items):
     return ["；".join(dict.fromkeys(values)) for values in reasons]
 
 
+def box_payload(box):
+    return {
+        "x": max(0, int(math.floor(box[0]))),
+        "y": max(0, int(math.floor(box[1]))),
+        "width": max(1, int(math.ceil(box[2] - box[0]))),
+        "height": max(1, int(math.ceil(box[3] - box[1]))),
+    }
+
+
+def payload_box(value):
+    if not isinstance(value, dict):
+        return None
+    x = float(value.get("x", 0))
+    y = float(value.get("y", 0))
+    width = float(value.get("width", 0))
+    height = float(value.get("height", 0))
+    if width <= 0 or height <= 0:
+        return None
+    return [x, y, x + width, y + height]
+
+
+def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, detector,
+                        oversize_crop_mode="expand", progress_message="正在重新生成工作图"):
+    """Build crops and masks from an already-known, deterministic person set."""
+    height, width = rgb.shape[:2]
+    people = spatially_order_people(people)
+    if not people:
+        return people, []
+    proxy_width, proxy_height, proxy_scale = proxy_size(width, height)
+    person_mask_directory = output_root / "person-masks"
+    person_mask_directory.mkdir(parents=True, exist_ok=True)
+    for index, person in enumerate(people, start=1):
+        person_mask_path = person_mask_directory / f"person-{index:02d}-{uuid.uuid4()}.png"
+        save_mask(person_mask_path, person["mask"])
+        person["maskPath"] = str(person_mask_path)
+
+    tiles = plan_work_tiles(people, width, height, oversize_crop_mode=oversize_crop_mode)
+    emit_progress(78, f"{progress_message}：共 {len(tiles)} 张")
+    tasks = []
+    mask_directory = output_root / "masks"
+    mask_directory.mkdir(parents=True, exist_ok=True)
+    for index, tile in enumerate(tiles, start=1):
+        emit_progress(78 + round(index / max(1, len(tiles)) * 19), f"正在生成第 {index}/{len(tiles)} 张工作图")
+        members = [people[person_index] for person_index in tile["indices"]]
+        final_mask = np.logical_or.reduce([member["mask"] for member in members])
+        task_id = str(uuid.uuid4())
+        mask_file = mask_directory / f"group-{index:02d}-{task_id}.png"
+        save_mask(mask_file, final_mask)
+        crop_x, crop_y, crop_width, crop_height = tile["crop"]
+        patch_path = delivery_root / f"{delivery_name}_人物{index:02d}.png"
+        Image.fromarray(rgb[crop_y:crop_y + crop_height, crop_x:crop_x + crop_width], "RGB").save(
+            patch_path, format="PNG", compress_level=3
+        )
+        member_payload = []
+        for person_index, member in zip(tile["indices"], members):
+            member_payload.append({
+                "personIndex": person_index + 1,
+                "previousPersonIndex": int(member.get("previousPersonIndex") or person_index + 1),
+                "confidence": float(member.get("score", 1)),
+                "faceBox": box_payload(member["faceBox"]) if member.get("faceBox") else None,
+                "bbox": box_payload(member["box"]),
+                "planningBox": box_payload(member.get("planningBox", member["box"])),
+                "maskPath": member["maskPath"],
+                "reviewReason": str(member.get("reviewReason") or ""),
+            })
+        member_numbers = [str(member["personIndex"]) for member in member_payload]
+        reason = "；".join(dict.fromkeys(
+            member.get("reviewReason", "") for member in members if member.get("reviewReason")
+        ))
+        tasks.append({
+            "id": task_id,
+            "personIndex": index,
+            "personName": f"人物 {'、'.join(member_numbers)}",
+            "assignee": "",
+            "detector": detector,
+            "confidence": min(float(member.get("score", 1)) for member in members),
+            "bbox": box_payload(tile["box"]),
+            "members": member_payload,
+            "crop": {"x": crop_x, "y": crop_y, "width": crop_width, "height": crop_height},
+            "patchPath": str(patch_path),
+            "maskPath": str(mask_file),
+            "mask": {"width": proxy_width, "height": proxy_height, "scale": proxy_scale},
+            "needsReview": bool(reason),
+            "reviewReason": reason,
+            "status": "exported",
+        })
+    return people, tasks
+
+
+def rebuild_without_person(input_path, manifest_path, output_dir, delivery_dir=None,
+                           delivery_prefix=None, oversize_crop_mode="expand"):
+    """Remove exactly one stored person and rebuild crops without model inference."""
+    emit_progress(5, "正在读取现有人物结果")
+    rgb = load_rgb(input_path)
+    height, width = rgb.shape[:2]
+    with open(manifest_path, "r", encoding="utf-8") as source:
+        request = json.load(source)
+    remove_person_index = int(request.get("removePersonIndex") or 0)
+    if remove_person_index < 1:
+        raise ValueError("没有指定需要移除的人物")
+    output_root = Path(output_dir)
+    output_root.mkdir(parents=True, exist_ok=True)
+    delivery_root = Path(delivery_dir or output_root)
+    delivery_root.mkdir(parents=True, exist_ok=True)
+    delivery_name = Path(delivery_prefix or Path(input_path).stem).name
+    proxy_width, proxy_height, proxy_scale = proxy_size(width, height)
+    seen = set()
+    people = []
+    removed = 0
+    group_masks = {}
+    emit_progress(20, "正在移除所选误识别人物")
+    for task in request.get("tasks") or []:
+        members = task.get("members") or [{
+            "personIndex": task.get("personIndex"),
+            "confidence": task.get("confidence", 1),
+            "bbox": task.get("bbox"),
+        }]
+        for member in members:
+            person_index = int(member.get("personIndex") or 0)
+            if person_index in seen or person_index < 1:
+                continue
+            seen.add(person_index)
+            if person_index == remove_person_index:
+                removed += 1
+                continue
+            box = payload_box(member.get("bbox"))
+            if not box:
+                continue
+            mask_path = str(member.get("maskPath") or "")
+            if mask_path and os.path.exists(mask_path):
+                person_mask = load_mask(mask_path) > 0
+            else:
+                group_mask_path = str(task.get("maskPath") or "")
+                if group_mask_path not in group_masks:
+                    group_masks[group_mask_path] = load_mask(group_mask_path) > 0 if group_mask_path and os.path.exists(group_mask_path) else None
+                group_mask = group_masks[group_mask_path]
+                person_mask = np.zeros((proxy_height, proxy_width), dtype=bool)
+                x1 = max(0, min(proxy_width, int(math.floor(box[0] / proxy_scale))))
+                y1 = max(0, min(proxy_height, int(math.floor(box[1] / proxy_scale))))
+                x2 = max(x1 + 1, min(proxy_width, int(math.ceil(box[2] / proxy_scale))))
+                y2 = max(y1 + 1, min(proxy_height, int(math.ceil(box[3] / proxy_scale))))
+                person_mask[y1:y2, x1:x2] = True
+                if group_mask is not None:
+                    if group_mask.shape != person_mask.shape:
+                        group_mask = cv2.resize(group_mask.astype(np.uint8), (proxy_width, proxy_height), interpolation=cv2.INTER_NEAREST) > 0
+                    clipped_mask = np.logical_and(group_mask, person_mask)
+                    if clipped_mask.any():
+                        person_mask = clipped_mask
+            if person_mask.shape != (proxy_height, proxy_width):
+                person_mask = cv2.resize(person_mask.astype(np.uint8), (proxy_width, proxy_height), interpolation=cv2.INTER_NEAREST) > 0
+            visible_box = mask_bounds(person_mask, proxy_scale, width, height)
+            planning_box = payload_box(member.get("planningBox")) or bounded_planning_box(box, visible_box, width, height)
+            people.append({
+                "box": clamp_box(box, width, height),
+                "faceBox": payload_box(member.get("faceBox")),
+                "score": float(member.get("confidence", task.get("confidence", 1))),
+                "source": "stored",
+                "mask": person_mask,
+                "planningBox": clamp_box(planning_box, width, height),
+                "previousPersonIndex": person_index,
+            })
+    if removed != 1:
+        raise ValueError(f"需要移除的人物数量异常：{removed}")
+    review_reasons = overlap_review_reasons(people)
+    for index, person in enumerate(people):
+        person["reviewReason"] = review_reasons[index]
+    detector = str(request.get("detector") or "stored-detection")
+    people, tasks = generate_work_tasks(
+        rgb, people, output_root, delivery_root, delivery_name, detector,
+        oversize_crop_mode=oversize_crop_mode,
+        progress_message="正在按剩余人物重新规划工作图",
+    )
+    output_manifest = output_root / "manifest.json"
+    output_manifest.write_text(json.dumps({
+        "source": str(input_path), "width": width, "height": height,
+        "personCount": len(people), "workTileEdge": WORK_TILE_EDGE,
+        "oversizeCropMode": oversize_crop_mode, "tasks": tasks,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    emit_progress(100, f"完成：已移除 1 个人物，保留 {len(people)} 个人物")
+    return {
+        "success": True,
+        "detector": detector,
+        "backend": "stored",
+        "provider": "none",
+        "requestedMode": "stored",
+        "advancedBackend": detector == "rtmdet-pairdetr-sam2",
+        "width": width,
+        "height": height,
+        "workTileEdge": WORK_TILE_EDGE,
+        "personCount": len(people),
+        "removedPersonCount": 1,
+        "needsReviewCount": sum(bool(task["needsReview"]) for task in tasks),
+        "tasks": tasks,
+        "manifestPath": str(output_manifest),
+    }
+
+
 def detect(input_path, output_dir, preference="auto", delivery_dir=None, delivery_prefix=None,
            oversize_crop_mode="expand", advanced_runner=None, session_bundle=None,
-           advanced_mode="auto"):
+           advanced_mode="auto", excluded_boxes=None):
     emit_progress(2, "正在读取原图")
     rgb = load_rgb(input_path)
     height, width = rgb.shape[:2]
@@ -666,6 +954,17 @@ def detect(input_path, output_dir, preference="auto", delivery_dir=None, deliver
         if item.get("faceBox"):
             item["faceBox"] = clamp_box(item["faceBox"], width, height)
 
+    exclusions = [box for box in (exclusion_xyxy(value) for value in (excluded_boxes or [])) if box]
+    if exclusions:
+        excluded_indices = excluded_detection_indices(fused, exclusions)
+        retained_indices = [index for index in range(len(fused)) if index not in excluded_indices]
+        removed_count = len(fused) - len(retained_indices)
+        fused = [fused[index] for index in retained_indices]
+        if sam_masks:
+            sam_masks = [sam_masks[index] for index in retained_indices]
+        if removed_count:
+            emit_progress(60, f"已按人工排除记录忽略 {removed_count} 个误识别人物")
+
     review_reasons = overlap_review_reasons(fused)
     proxy_width, proxy_height, proxy_scale = proxy_size(width, height)
     people = []
@@ -690,7 +989,7 @@ def detect(input_path, output_dir, preference="auto", delivery_dir=None, deliver
                 interpolation=cv2.INTER_NEAREST,
             ) > 0
         visible_box = mask_bounds(final_mask, proxy_scale, width, height)
-        planning_box = union_box([item["box"], visible_box]) if visible_box else item["box"]
+        planning_box = bounded_planning_box(item["box"], visible_box, width, height)
         people.append({
             **item,
             "mask": final_mask,
@@ -698,64 +997,12 @@ def detect(input_path, output_dir, preference="auto", delivery_dir=None, deliver
             "reviewReason": review_reasons[person_index],
         })
 
-    tiles = plan_work_tiles(people, width, height, oversize_crop_mode=oversize_crop_mode)
-    emit_progress(78, f"人物识别完成，正在生成 {len(tiles)} 张工作图")
-    tasks = []
-    mask_directory = output_root / "masks"
-    mask_directory.mkdir(parents=True, exist_ok=True)
-    for index, tile in enumerate(tiles, start=1):
-        emit_progress(78 + round(index / max(1, len(tiles)) * 19), f"正在生成第 {index}/{len(tiles)} 张工作图")
-        members = [people[person_index] for person_index in tile["indices"]]
-        final_mask = np.logical_or.reduce([member["mask"] for member in members])
-        task_id = str(uuid.uuid4())
-        mask_file = mask_directory / f"group-{index:02d}-{task_id}.png"
-        save_mask(mask_file, final_mask)
-        crop_x, crop_y, crop_width, crop_height = tile["crop"]
-        patch_path = delivery_root / f"{delivery_name}_人物{index:02d}.png"
-        Image.fromarray(rgb[crop_y:crop_y + crop_height, crop_x:crop_x + crop_width], "RGB").save(
-            patch_path, format="PNG", compress_level=3
-        )
-        box = tile["box"]
-        bbox = {
-            "x": max(0, int(math.floor(box[0]))), "y": max(0, int(math.floor(box[1]))),
-            "width": max(1, int(math.ceil(box[2] - box[0]))),
-            "height": max(1, int(math.ceil(box[3] - box[1]))),
-        }
-        member_payload = []
-        for person_index, member in zip(tile["indices"], members):
-            member_box = member["box"]
-            member_payload.append({
-                "personIndex": person_index + 1,
-                "confidence": float(member["score"]),
-                "faceBox": ({
-                    "x": max(0, int(math.floor(member["faceBox"][0]))),
-                    "y": max(0, int(math.floor(member["faceBox"][1]))),
-                    "width": max(1, int(math.ceil(member["faceBox"][2] - member["faceBox"][0]))),
-                    "height": max(1, int(math.ceil(member["faceBox"][3] - member["faceBox"][1]))),
-                } if member.get("faceBox") else None),
-                "bbox": {
-                    "x": max(0, int(math.floor(member_box[0]))),
-                    "y": max(0, int(math.floor(member_box[1]))),
-                    "width": max(1, int(math.ceil(member_box[2] - member_box[0]))),
-                    "height": max(1, int(math.ceil(member_box[3] - member_box[1]))),
-                },
-            })
-        member_numbers = [str(member["personIndex"]) for member in member_payload]
-        reason = "；".join(dict.fromkeys(
-            member["reviewReason"] for member in members if member["reviewReason"]
-        ))
-        tasks.append({
-            "id": task_id, "personIndex": index,
-            "personName": f"人物 {'、'.join(member_numbers)}", "assignee": "",
-            "detector": "rtmdet-pairdetr-sam2" if advanced_backend else "rtmdet-ins-m",
-            "confidence": min(float(member["score"]) for member in members), "bbox": bbox,
-            "members": member_payload,
-            "crop": {"x": crop_x, "y": crop_y, "width": crop_width, "height": crop_height},
-            "patchPath": str(patch_path), "maskPath": str(mask_file),
-            "mask": {"width": proxy_width, "height": proxy_height, "scale": proxy_scale},
-            "needsReview": bool(reason), "reviewReason": reason,
-            "status": "exported",
-        })
+    detector = "rtmdet-pairdetr-sam2" if advanced_backend else "rtmdet-ins-m"
+    people, tasks = generate_work_tasks(
+        rgb, people, output_root, delivery_root, delivery_name, detector,
+        oversize_crop_mode=oversize_crop_mode,
+        progress_message="人物识别完成，正在生成工作图",
+    )
 
     manifest_path = output_root / "manifest.json"
     manifest_path.write_text(json.dumps({
@@ -766,7 +1013,7 @@ def detect(input_path, output_dir, preference="auto", delivery_dir=None, deliver
     emit_progress(100, f"完成：{len(fused)} 个人物已生成 {len(tasks)} 张工作图")
     return {
         "success": True,
-        "detector": "rtmdet-pairdetr-sam2" if advanced_backend else "rtmdet-ins-m",
+        "detector": detector,
         "backend": backend, "provider": session.get_providers()[0],
         "requestedMode": advanced_mode, "advancedBackend": advanced_backend,
         "providers": providers, "fallbackReason": "；".join(fallback_reasons),
@@ -1033,15 +1280,16 @@ class UnavailableAdvancedRunner:
         raise RuntimeError(self.error)
 
 
-def detect_batch(manifest_path, preference="auto", oversize_crop_mode="face-centered", advanced_mode="auto"):
+def detect_batch(manifest_path, preference="auto", oversize_crop_mode="face-centered", advanced_mode="auto",
+                 session_bundle=None, batch_runner=None):
     payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     items = payload.get("items") or []
     if not items:
         raise ValueError("请至少提供一张图片")
-    session_bundle = create_session(preference)
-    batch_runner = None
+    session_bundle = session_bundle or create_session(preference)
+    owns_advanced_session = batch_runner is None
     advanced_session = None
-    if advanced_mode != "basic":
+    if advanced_mode != "basic" and owns_advanced_session:
         try:
             from advanced_bridge import AdvancedBatchSession
             advanced_session = AdvancedBatchSession()
@@ -1069,6 +1317,7 @@ def detect_batch(manifest_path, preference="auto", oversize_crop_mode="face-cent
                     os.path.abspath(item["input"]), os.path.abspath(item["outputDir"]),
                     preference, os.path.abspath(item["deliveryDir"]), item.get("deliveryPrefix"),
                     oversize_crop_mode, batch_runner, session_bundle, advanced_mode,
+                    item.get("excludedBoxes") or [],
                 )
                 results.append({
                     "success": True, "key": item.get("key"), "name": item.get("name"),
@@ -1081,7 +1330,7 @@ def detect_batch(manifest_path, preference="auto", oversize_crop_mode="face-cent
                 })
     finally:
         PROGRESS_CONTEXT.clear()
-        if advanced_session:
+        if advanced_session and owns_advanced_session:
             advanced_session.__exit__(None, None, None)
     return {
         "success": any(item.get("success") for item in results),
@@ -1191,9 +1440,9 @@ def probe_advanced_runtime():
         }
 
 
-def run(args_list=None):
+def create_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("probe", "probe-advanced-runtime", "detect", "detect-batch", "identify", "match-batch", "restore", "merge"))
+    parser.add_argument("action", choices=("probe", "probe-advanced-runtime", "detect", "detect-batch", "identify", "match-batch", "restore", "rebuild", "merge"))
     parser.add_argument("--input")
     parser.add_argument("--output-dir")
     parser.add_argument("--delivery-dir")
@@ -1203,6 +1452,12 @@ def run(args_list=None):
     parser.add_argument("--provider", choices=("auto", "gpu", "cpu"), default="auto")
     parser.add_argument("--advanced-mode", choices=("auto", "basic", "advanced"), default="auto")
     parser.add_argument("--oversize-crop-mode", choices=("face-centered", "expand"), default="face-centered")
+    parser.add_argument("--excluded-boxes", default="[]")
+    return parser
+
+
+def run(args_list=None):
+    parser = create_parser()
     args = parser.parse_args(args_list)
     if args.action == "probe":
         emit(probe())
@@ -1236,12 +1491,22 @@ def run(args_list=None):
             parser.error("restore requires --input and --manifest")
         emit(restore_patches(os.path.abspath(args.input), os.path.abspath(args.manifest)))
         return
+    if args.action == "rebuild":
+        if not args.input or not args.manifest or not args.output_dir:
+            parser.error("rebuild requires --input, --manifest and --output-dir")
+        emit(rebuild_without_person(
+            os.path.abspath(args.input), os.path.abspath(args.manifest), os.path.abspath(args.output_dir),
+            os.path.abspath(args.delivery_dir) if args.delivery_dir else None,
+            args.delivery_prefix, args.oversize_crop_mode,
+        ))
+        return
     if not args.input or not args.output_dir:
         parser.error("detect requires --input and --output-dir")
     emit(detect(
         os.path.abspath(args.input), os.path.abspath(args.output_dir), args.provider,
         os.path.abspath(args.delivery_dir) if args.delivery_dir else None,
         args.delivery_prefix, args.oversize_crop_mode, advanced_mode=args.advanced_mode,
+        excluded_boxes=json.loads(args.excluded_boxes or "[]"),
     ))
 
 

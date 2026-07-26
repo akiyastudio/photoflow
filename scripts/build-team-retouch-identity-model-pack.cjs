@@ -93,13 +93,13 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 `, 'utf8');
-fs.writeFileSync(path.join(outputRoot, 'README-install.txt'), `PhotoFlow 多人修脸增强人物识别模型包
+fs.writeFileSync(path.join(outputRoot, 'README-install.txt'), `PhotoFlow 团片协作增强人物识别模型包
 
-1. 在 PhotoFlow 中打开“设置 → 多人修脸 → 打开目录”。
+1. 在 PhotoFlow 中打开“设置 → 团片协作 → 打开目录”。
 2. 把本 ZIP 原样放入该目录，不需要解压。
-3. 返回“设置 → 多人修脸”，点击增强人物识别模型的安装按钮。
+3. 返回“设置 → 团片协作”，点击增强人物识别模型的安装按钮。
 
-多人修脸组件目录：%LOCALAPPDATA%\\PhotoFlow\\components\\team-retouch
+团片协作组件目录：%LOCALAPPDATA%\\PhotoFlow\\components\\team-retouch
 `, 'utf8');
 
 const python = process.platform === 'win32'

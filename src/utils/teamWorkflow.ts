@@ -6,6 +6,11 @@ export type WorkflowScheduleEntry = {
   identityName?: string;
 };
 
+export type WorkflowScheduleOptions = {
+  preferredIdentityOrder?: string[];
+  preferredIdentityId?: string;
+};
+
 type RankedEntry = WorkflowScheduleEntry & {
   scheduleIdentityId: string;
   rank: number;
@@ -77,16 +82,33 @@ const minimumCostAssignment = (costs: number[][]) => {
   return assignment;
 };
 
-const scheduleScore = (entries: RankedEntry[], weeks: Map<string, number>) => {
+const scheduleScore = (entries: RankedEntry[], weeks: Map<string, number>, preferredIdentityOrder: string[] = []) => {
   const identityWeeks = new Map<string, Set<number>>();
+  const preferenceRank = new Map(preferredIdentityOrder.map((identityId, index) => [identityId, index]));
+  let preferenceViolations = 0;
   let priorityWeekCost = 0;
   for (const entry of entries) {
     const week = weeks.get(entry.key) || 1;
+    if (preferredIdentityOrder[0] && entry.identityId === preferredIdentityOrder[0] && week !== 1) preferenceViolations += 1;
     if (entry.identityId) {
       const used = identityWeeks.get(entry.identityId) || new Set<number>();
       used.add(week);
       identityWeeks.set(entry.identityId, used);
       priorityWeekCost += week * Math.max(1, entries.length - entry.rank);
+    }
+  }
+  const entriesByTask = new Map<string, RankedEntry[]>();
+  for (const entry of entries) {
+    const members = entriesByTask.get(entry.taskId) || [];
+    members.push(entry);
+    entriesByTask.set(entry.taskId, members);
+  }
+  for (const members of entriesByTask.values()) {
+    const preferredMembers = members
+      .filter(member => member.identityId && preferenceRank.has(member.identityId))
+      .sort((left, right) => preferenceRank.get(left.identityId!)! - preferenceRank.get(right.identityId!)!);
+    for (let index = 1; index < preferredMembers.length; index += 1) {
+      if ((weeks.get(preferredMembers[index - 1].key) || 1) >= (weeks.get(preferredMembers[index].key) || 1)) preferenceViolations += 1;
     }
   }
   let fragmentation = 0;
@@ -95,13 +117,12 @@ const scheduleScore = (entries: RankedEntry[], weeks: Map<string, number>) => {
     fragmentation += Math.max(0, used.size - 1);
     if (used.size > 1) span += Math.max(...used) - Math.min(...used);
   }
-  return [fragmentation, span, priorityWeekCost];
+  return [preferenceViolations, fragmentation, span, priorityWeekCost];
 };
 
-export const scheduleWorkflowWeeks = (sourceEntries: WorkflowScheduleEntry[]) => {
+export const scheduleWorkflowWeeks = (sourceEntries: WorkflowScheduleEntry[], options: WorkflowScheduleOptions = {}) => {
   const result = new Map<string, number>();
   if (!sourceEntries.length) return result;
-
   const identityCounts = new Map<string, number>();
   const identityNames = new Map<string, string>();
   for (const entry of sourceEntries) {
@@ -109,8 +130,15 @@ export const scheduleWorkflowWeeks = (sourceEntries: WorkflowScheduleEntry[]) =>
     identityCounts.set(entry.identityId, (identityCounts.get(entry.identityId) || 0) + 1);
     identityNames.set(entry.identityId, entry.identityName || entry.identityId);
   }
+  const requestedPreferredIdentityOrder = Array.isArray(options.preferredIdentityOrder) && options.preferredIdentityOrder.length
+    ? options.preferredIdentityOrder
+    : options.preferredIdentityId ? [options.preferredIdentityId] : [];
+  const preferredIdentityOrder = [...new Set(requestedPreferredIdentityOrder.map(String))].filter(identityId => identityCounts.has(identityId));
+  const preferredIdentityId = preferredIdentityOrder[0] || '';
+  const preferenceRank = new Map(preferredIdentityOrder.map((identityId, index) => [identityId, index]));
   const identityIds = [...identityCounts.keys()].sort((left, right) =>
-    (identityCounts.get(right) || 0) - (identityCounts.get(left) || 0)
+    (preferenceRank.get(left) ?? Number.MAX_SAFE_INTEGER) - (preferenceRank.get(right) ?? Number.MAX_SAFE_INTEGER)
+    || (identityCounts.get(right) || 0) - (identityCounts.get(left) || 0)
     || (identityNames.get(left) || left).localeCompare(identityNames.get(right) || right)
     || left.localeCompare(right));
   const identityRank = new Map(identityIds.map((identityId, index) => [identityId, index]));
@@ -159,6 +187,11 @@ export const scheduleWorkflowWeeks = (sourceEntries: WorkflowScheduleEntry[]) =>
   const preferredWeek = new Map<string, number>();
   const preferredLoad = Array(weekCount).fill(0) as number[];
   for (const identityId of orderedScheduleIds) {
+    if (identityId === preferredIdentityId) {
+      preferredWeek.set(identityId, 1);
+      preferredLoad[0] += 1;
+      continue;
+    }
     let bestWeek = 1;
     let bestCost = Number.POSITIVE_INFINITY;
     for (let week = 1; week <= weekCount; week += 1) {
@@ -194,7 +227,26 @@ export const scheduleWorkflowWeeks = (sourceEntries: WorkflowScheduleEntry[]) =>
         return (addsActivation ? 1_000_000 : 0) + spanGrowth * 10_000 + offPreferred * priorityStrength * 10 + week;
       });
     });
-    return minimumCostAssignment(costs).map(column => column + 1);
+    const assignedWeeks = minimumCostAssignment(costs).map(column => column + 1);
+    const preferredMemberIndexes = members
+      .map((member, index) => ({ index, rank: member.identityId ? preferenceRank.get(member.identityId) : undefined }))
+      .filter((item): item is { index: number; rank: number } => item.rank !== undefined)
+      .sort((left, right) => left.rank - right.rank);
+    if (preferredMemberIndexes.length > 1) {
+      const orderedWeeks = preferredMemberIndexes.map(item => assignedWeeks[item.index]).sort((left, right) => left - right);
+      preferredMemberIndexes.forEach((item, index) => { assignedWeeks[item.index] = orderedWeeks[index]; });
+    }
+    const firstPreferredIndex = members.findIndex(member => member.identityId === preferredIdentityId);
+    if (firstPreferredIndex >= 0 && assignedWeeks[firstPreferredIndex] !== 1) {
+      const weekOneIndex = assignedWeeks.indexOf(1);
+      if (weekOneIndex >= 0) [assignedWeeks[firstPreferredIndex], assignedWeeks[weekOneIndex]] = [assignedWeeks[weekOneIndex], assignedWeeks[firstPreferredIndex]];
+      else assignedWeeks[firstPreferredIndex] = 1;
+    }
+    if (preferredMemberIndexes.length > 1) {
+      const orderedWeeks = preferredMemberIndexes.map(item => assignedWeeks[item.index]).sort((left, right) => left - right);
+      preferredMemberIndexes.forEach((item, index) => { assignedWeeks[item.index] = orderedWeeks[index]; });
+    }
+    return assignedWeeks;
   };
 
   for (const task of tasks) {
@@ -211,7 +263,7 @@ export const scheduleWorkflowWeeks = (sourceEntries: WorkflowScheduleEntry[]) =>
   // Coordinate-descent passes can remove fragmentation introduced by task
   // processing order. A candidate is accepted only when the global objective
   // improves, so the loop is deterministic and cannot oscillate.
-  let currentScore = scheduleScore(entries, result);
+  let currentScore = scheduleScore(entries, result, preferredIdentityOrder);
   for (let pass = 0; pass < 6; pass += 1) {
     let improved = false;
     for (const task of tasks) {
@@ -222,7 +274,7 @@ export const scheduleWorkflowWeeks = (sourceEntries: WorkflowScheduleEntry[]) =>
       const candidateWeeks = assignTask(task.members);
       const previousWeeks = task.members.map(member => result.get(member.key)!);
       task.members.forEach((member, index) => result.set(member.key, candidateWeeks[index]));
-      const candidateScore = scheduleScore(entries, result);
+      const candidateScore = scheduleScore(entries, result, preferredIdentityOrder);
       if (compareNumbers(candidateScore, currentScore) < 0) {
         currentScore = candidateScore;
         improved = true;
