@@ -4,7 +4,7 @@ export interface LogEntry {
   type: 'info' | 'success' | 'warning' | 'error';
 }
 
-export type ToolType = 'home' | 'project' | 'settings' | 'about' | 'dashboard' | 'converter' | 'match' | 'video_split';
+export type ToolType = 'home' | 'project' | 'settings' | 'dashboard' | 'converter' | 'match' | 'video_split';
 
 export type Theme = 'light' | 'dark' | 'system';
 export type HomeCardId = 'birthday' | 'import' | 'research' | 'converter';
@@ -334,7 +334,7 @@ export interface ComponentStatus {
   runtimeError?: string;
   gpuError?: string;
   advancedError?: string;
-  advancedDataPath?: string;
+  packagePath?: string;
   advancedSizeBytes?: number;
   advancedFreeBytes?: number;
   advancedState?: 'ready' | 'not-installed' | 'repair-needed';
@@ -387,7 +387,7 @@ export interface IElectronAPI {
   checkForUpdates: () => Promise<{ success: boolean; updateAvailable?: boolean; currentVersion?: string; latestVersion?: string; url?: string; notes?: string; error?: string }>;
   checkScript: (scriptName: string) => Promise<boolean>;
   getComponents: () => Promise<{ success: boolean; components: ComponentStatus[]; installPath: string; error?: string }>;
-  openComponentsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
+  openComponentsFolder: (componentId?: string) => Promise<{ success: boolean; path?: string; error?: string }>;
   openLogsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
   clearLogs: () => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
   clearInterfaceCache: () => Promise<{ success: boolean; clearedBytes?: number; error?: string }>;
@@ -397,8 +397,8 @@ export interface IElectronAPI {
   checkTeamRetouchAdvancedRequirements: () => Promise<{ success: boolean; message?: string; error?: string }>;
   installTeamRetouchAdvanced: (options?: { repair?: boolean }) => Promise<{ success: boolean; cancelled?: boolean; restartRequired?: boolean; error?: string }>;
   uninstallTeamRetouchAdvanced: () => Promise<{ success: boolean; error?: string }>;
-  openTeamRetouchAdvancedFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
   openTeamRetouchIdentityModelsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
+  installTeamRetouchIdentityModels: () => Promise<{ success: boolean; error?: string }>;
   onTeamRetouchAdvancedProgress: (callback: (value: { phase: string; progress?: number; message: string }) => void) => () => void;
   getDrives: () => Promise<string[]>;
   setTheme: (theme: Theme) => Promise<void>;

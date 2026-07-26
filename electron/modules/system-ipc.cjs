@@ -1,10 +1,12 @@
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, undefined, writeLog } = context;
   const activePythonTasks = new Map();
   let advancedOperation = null;
 
-  const advancedStateRoot = () => path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'PhotoFlow', 'components', 'team-retouch', 'advanced');
-  const identityModelRoot = () => path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'PhotoFlow', 'experimental-models');
+  const componentRoot = componentId => path.join(pluginService.installRoot, String(componentId));
+  const teamRetouchRoot = () => componentRoot('team-retouch');
+  const advancedStateRoot = () => path.join(teamRetouchRoot(), 'advanced');
+  const identityModelRoot = () => path.join(teamRetouchRoot(), 'identity-models');
   const defaultAdvancedInstallRoot = () => path.join(advancedStateRoot(), 'wsl', 'PhotoFlowNative');
   const legacyAdvancedInstallRoot = () => path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'PhotoFlow', 'wsl', 'PhotoFlowNative');
   const readAdvancedStorage = async () => {
@@ -36,6 +38,46 @@ const registerSystemIpc = context => {
   const resolveAdvancedInstaller = (component, fileName) => app.isPackaged
     ? path.join(component.path, 'advanced-installer', fileName)
     : path.resolve(component.path, '..', '..', 'scripts', fileName);
+
+  const resolvePreparedPackage = async (packageRoot, pattern, description) => {
+    await fs.promises.mkdir(packageRoot, { recursive: true });
+    const entries = await fs.promises.readdir(packageRoot, { withFileTypes: true });
+    const archives = entries
+      .filter(entry => entry.isFile() && pattern.test(entry.name))
+      .map(entry => path.join(packageRoot, entry.name));
+    if (archives.length > 1) throw new Error(`组件安装包目录中存在多个${description}版本，请只保留一个 ZIP`);
+    if (archives.length === 1) return archives[0];
+    throw new Error(`未在组件安装包目录中找到${description}：${packageRoot}`);
+  };
+  const resolveAdvancedPackage = () => resolvePreparedPackage(teamRetouchRoot(), /^PhotoFlow-team-retouch-advanced-.*\.zip$/i, '高级引擎包 PhotoFlow-team-retouch-advanced-*.zip');
+  const resolveIdentityPackage = () => resolvePreparedPackage(teamRetouchRoot(), /^PhotoFlow-team-retouch-identity-models-.*\.zip$/i, '人物识别模型包 PhotoFlow-team-retouch-identity-models-*.zip');
+  const resolveComponentPackage = componentId => resolvePreparedPackage(componentRoot(componentId), new RegExp(`^PhotoFlow-${String(componentId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-.*-${process.platform}-${process.arch}\\.zip$`, 'i'), `“${componentId}”组件包`);
+
+  const runPackageCommand = (command, args) => new Promise((resolve, reject) => {
+    const child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    child.stdout.on('data', chunk => { output = (output + chunk.toString('utf8')).slice(-64000); });
+    child.stderr.on('data', chunk => { output = (output + chunk.toString('utf8')).slice(-64000); });
+    child.once('error', reject);
+    child.once('exit', code => code === 0 ? resolve(output) : reject(new Error(output.trim() || `安装包读取失败（退出代码 ${code}）`)));
+  });
+  const extractPreparedPackage = async (archivePath, target) => {
+    const listing = await runPackageCommand('tar.exe', ['-tf', archivePath]);
+    const entries = String(listing).split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+    if (!entries.length) throw new Error('安装包为空');
+    for (const entry of entries) {
+      const normalized = entry.replace(/\\/g, '/');
+      if (normalized.startsWith('/') || /^[a-z]:/i.test(normalized) || normalized.split('/').some(segment => segment === '..')) throw new Error(`安装包包含不安全路径：${entry}`);
+    }
+    await fs.promises.mkdir(target, { recursive: true });
+    await runPackageCommand('tar.exe', ['-xf', archivePath, '-C', target]);
+  };
+  const fileSha256 = async filePath => {
+    const hash = crypto.createHash('sha256');
+    const data = await fs.promises.readFile(filePath);
+    hash.update(data);
+    return hash.digest('hex');
+  };
 
   const installerProgress = message => {
     const text = String(message || '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '').trim();
@@ -103,6 +145,7 @@ const registerSystemIpc = context => {
   
   ipcMain.handle('components-list', async () => {
     const components = await pluginService.listWithSizes();
+    for (const component of components) component.packagePath = componentRoot(component.id);
     const gpu = components.find(component => component.id === 'team-retouch');
     if (gpu?.installed) {
       try {
@@ -131,7 +174,6 @@ const registerSystemIpc = context => {
       }
       const storage = await readAdvancedStorage();
       Object.assign(gpu, {
-        advancedDataPath: storage.installRoot,
         advancedSizeBytes: storage.sizeBytes,
         advancedFreeBytes: storage.freeBytes,
         advancedState: gpu.advancedAvailable ? 'ready' : storage.vhdPath ? 'repair-needed' : 'not-installed',
@@ -140,9 +182,16 @@ const registerSystemIpc = context => {
     return { success: true, components, installPath: pluginService.installRoot };
   });
   
-  ipcMain.handle('components-open-folder', async () => {
+  ipcMain.handle('components-open-folder', async (_event, componentId = '') => {
     try {
-      const installPath = pluginService.ensureInstallRoot();
+      const installRoot = pluginService.ensureInstallRoot();
+      let installPath = installRoot;
+      if (componentId) {
+        const known = (await pluginService.listWithSizes()).find(component => component.id === componentId);
+        if (!known) throw new Error(`未知组件：${componentId}`);
+        installPath = componentRoot(componentId);
+        await fs.promises.mkdir(installPath, { recursive: true });
+      }
       const error = await shell.openPath(installPath);
       if (error) throw new Error(error);
       return { success: true, path: installPath };
@@ -195,20 +244,19 @@ const registerSystemIpc = context => {
   ipcMain.handle('components-install', async (_event, componentId) => {
     let stagingPath = '';
     let backupPath = '';
+    let packageStagePath = '';
     try {
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，请在打包版本中测试安装');
       const knownComponent = (await pluginService.listWithSizes()).find(component => component.id === componentId);
       if (!knownComponent) throw new Error(`未知组件：${componentId}`);
-      const choice = await dialog.showOpenDialog(mainWindow, {
-        title: `选择“${knownComponent.name}”组件文件夹`,
-        properties: ['openDirectory'],
-      });
-      if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true };
-
-      const selectedPath = path.resolve(choice.filePaths[0]);
+      const archivePath = await resolveComponentPackage(componentId);
+      packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${process.pid}-${Date.now()}`);
+      await extractPreparedPackage(archivePath, packageStagePath);
+      const selectedPath = packageStagePath;
       const directManifest = path.join(selectedPath, 'component.json');
       const nestedPath = path.join(selectedPath, String(componentId));
-      const componentRoot = fs.existsSync(directManifest) ? selectedPath : nestedPath;
+      const nestedRuntimePath = path.join(nestedPath, 'runtime');
+      const componentRoot = fs.existsSync(directManifest) ? selectedPath : fs.existsSync(path.join(nestedRuntimePath, 'component.json')) ? nestedRuntimePath : nestedPath;
       const manifestPath = path.join(componentRoot, 'component.json');
       if (!fs.existsSync(manifestPath)) throw new Error('所选文件夹中没有 component.json');
       const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
@@ -223,7 +271,9 @@ const registerSystemIpc = context => {
       if (!(await fs.promises.stat(sourceEntry).catch(() => null))?.isFile()) throw new Error(`组件入口不存在：${relativeEntry}`);
 
       const installRoot = pluginService.ensureInstallRoot();
-      const destination = path.join(installRoot, String(componentId));
+      const container = path.join(installRoot, String(componentId));
+      await fs.promises.mkdir(container, { recursive: true });
+      const destination = path.join(container, 'runtime');
       stagingPath = path.join(installRoot, `.${componentId}-install-${process.pid}-${Date.now()}`);
       await fs.promises.cp(componentRoot, stagingPath, { recursive: true, force: false, errorOnExist: true });
       if (fs.existsSync(destination)) {
@@ -249,6 +299,7 @@ const registerSystemIpc = context => {
     } finally {
       if (stagingPath) await fs.promises.rm(stagingPath, { recursive: true, force: true }).catch(() => undefined);
       if (backupPath) await fs.promises.rm(backupPath, { recursive: true, force: true }).catch(() => undefined);
+      if (packageStagePath) await fs.promises.rm(packageStagePath, { recursive: true, force: true }).catch(() => undefined);
     }
   });
 
@@ -260,10 +311,11 @@ const registerSystemIpc = context => {
       if (component.source !== 'application') throw new Error('此组件随应用提供，不能单独卸载');
       const installRoot = path.resolve(pluginService.installRoot);
       const componentPath = path.resolve(component.path);
-      const relative = path.relative(installRoot, componentPath);
-      if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || path.basename(componentPath) !== componentId) throw new Error('组件目录校验失败');
-      await shell.trashItem(componentPath);
-      writeLog('info', 'Component uninstalled', { componentId, componentPath });
+      const containerPath = path.basename(componentPath) === 'runtime' ? path.dirname(componentPath) : componentPath;
+      const relative = path.relative(installRoot, containerPath);
+      if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || path.basename(containerPath) !== componentId) throw new Error('组件目录校验失败');
+      await shell.trashItem(containerPath);
+      writeLog('info', 'Component uninstalled', { componentId, componentPath: containerPath });
       return { success: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
@@ -295,13 +347,7 @@ const registerSystemIpc = context => {
       if (!component?.installed) throw new Error('请先安装“多人修脸”基础组件');
       const installer = resolveAdvancedInstaller(component, 'setup-team-retouch-advanced.ps1');
       if (!(await fs.promises.stat(installer).catch(() => null))?.isFile()) throw new Error('高级环境安装器未随组件提供，请重新构建或安装组件');
-      const choice = await dialog.showOpenDialog(mainWindow, {
-        title: options.repair ? '选择用于修复的高级引擎离线包' : '选择多人修脸高级引擎离线包',
-        properties: ['openFile'],
-        filters: [{ name: 'PhotoFlow 高级引擎离线包', extensions: ['zip', 'json', 'vhdx'] }],
-      });
-      if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true };
-      const packagePath = path.resolve(choice.filePaths[0]);
+      const packagePath = await resolveAdvancedPackage();
       const installRoot = defaultAdvancedInstallRoot();
       if (!event.sender.isDestroyed()) event.sender.send('team-retouch-advanced-progress', { phase: 'starting', progress: 1, message: '正在读取高级引擎离线包' });
       advancedOperation = runAdvancedPowerShell(event, installer, ['-InstallRoot', installRoot, '-PackagePath', packagePath, '-ExpectedComponentVersion', component.version, ...(options.repair ? ['-Repair'] : [])]);
@@ -340,27 +386,79 @@ const registerSystemIpc = context => {
     }
   });
 
-  ipcMain.handle('team-retouch-advanced-open-folder', async () => {
-    try {
-      const storage = await readAdvancedStorage();
-      await fs.promises.mkdir(storage.installRoot, { recursive: true });
-      const error = await shell.openPath(storage.installRoot);
-      if (error) throw new Error(error);
-      return { success: true, path: storage.installRoot };
-    } catch (error) {
-      return { success: false, error: error.message || String(error) };
-    }
-  });
-
   ipcMain.handle('team-retouch-identity-models-open-folder', async () => {
     try {
-      const target = identityModelRoot();
+      const target = teamRetouchRoot();
       await fs.promises.mkdir(target, { recursive: true });
       const error = await shell.openPath(target);
       if (error) throw new Error(error);
       return { success: true, path: target };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('team-retouch-identity-models-install', async () => {
+    let stagePath = '';
+    const prepared = [];
+    const backups = [];
+    const installedTargets = [];
+    try {
+      const component = (await pluginService.listWithSizes()).find(item => item.id === 'team-retouch');
+      if (!component?.installed) throw new Error('请先安装“多人修脸”组件');
+      const archivePath = await resolveIdentityPackage();
+      stagePath = path.join(app.getPath('temp'), `photoflow-identity-package-${process.pid}-${Date.now()}`);
+      await extractPreparedPackage(archivePath, stagePath);
+      const manifestPath = path.join(stagePath, 'model-pack.json');
+      const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+      if (Number(manifest.formatVersion) !== 1 || manifest.id !== 'team-retouch-identity-models') throw new Error('这不是受支持的人物识别模型包');
+      if (String(manifest.version) !== String(component.version)) throw new Error(`模型包版本 ${manifest.version || '未知'} 与多人修脸组件版本 ${component.version} 不一致`);
+      if (Array.isArray(manifest.platforms) && !manifest.platforms.includes(process.platform)) throw new Error(`模型包不支持 ${process.platform}`);
+      if (Array.isArray(manifest.architectures) && !manifest.architectures.includes(process.arch)) throw new Error(`模型包不支持 ${process.arch}`);
+      const expectedFiles = new Set(['adaface_ir18_webface4m.onnx', 'osnet_x1_0_msmt17.onnx']);
+      const models = Array.isArray(manifest.models) ? manifest.models : [];
+      if (models.length !== expectedFiles.size) throw new Error('人物识别模型包文件数量不正确');
+      const targetRoot = identityModelRoot();
+      await fs.promises.mkdir(targetRoot, { recursive: true });
+      for (const model of models) {
+        const fileName = String(model.file || '');
+        if (!expectedFiles.delete(fileName) || path.basename(fileName) !== fileName) throw new Error(`模型包包含未知文件：${fileName || '未命名'}`);
+        const source = path.join(stagePath, fileName);
+        const stat = await fs.promises.stat(source).catch(() => null);
+        if (!stat?.isFile() || stat.size !== Number(model.sizeBytes)) throw new Error(`模型文件大小不正确：${fileName}`);
+        const actualHash = await fileSha256(source);
+        if (!model.sha256 || actualHash !== String(model.sha256).toLowerCase()) throw new Error(`模型文件 SHA-256 不匹配：${fileName}`);
+        const target = path.join(targetRoot, fileName);
+        const temporary = path.join(targetRoot, `.${fileName}.install-${process.pid}-${Date.now()}`);
+        await fs.promises.copyFile(source, temporary);
+        prepared.push({ fileName, target, temporary });
+      }
+      if (expectedFiles.size) throw new Error('人物识别模型包缺少必需模型');
+      for (const item of prepared) {
+        if (fs.existsSync(item.target)) {
+          const backup = `${item.target}.backup-${process.pid}-${Date.now()}`;
+          await fs.promises.rename(item.target, backup);
+          backups.push({ target: item.target, backup });
+        }
+        await fs.promises.rename(item.temporary, item.target);
+        installedTargets.push(item.target);
+      }
+      for (const fileName of ['model-pack.json', 'LICENSE-AdaFace.txt', 'LICENSE-OSNet.txt', 'README-install.txt']) {
+        const source = path.join(stagePath, fileName);
+        if ((await fs.promises.stat(source).catch(() => null))?.isFile()) await fs.promises.copyFile(source, path.join(targetRoot, fileName));
+      }
+      for (const item of backups) await fs.promises.rm(item.backup, { force: true }).catch(() => undefined);
+      writeLog('info', 'Prepared identity model package installed', { archivePath, targetRoot, version: component.version });
+      return { success: true };
+    } catch (error) {
+      for (const target of installedTargets.reverse()) await fs.promises.rm(target, { force: true }).catch(() => undefined);
+      for (const item of backups.reverse()) {
+        if (fs.existsSync(item.backup)) await fs.promises.rename(item.backup, item.target).catch(() => undefined);
+      }
+      return { success: false, error: error.message || String(error) };
+    } finally {
+      for (const item of prepared) await fs.promises.rm(item.temporary, { force: true }).catch(() => undefined);
+      if (stagePath) await fs.promises.rm(stagePath, { recursive: true, force: true }).catch(() => undefined);
     }
   });
   

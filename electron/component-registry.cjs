@@ -31,19 +31,22 @@ const directorySize = async root => {
   return size;
 };
 
-const createComponentRegistry = ({ resourcesPath, executablePath, projectRoot, isPackaged, platform = process.platform, arch = process.arch }) => {
+const createComponentRegistry = ({ resourcesPath, executablePath, projectRoot, userComponentRoot, isPackaged, platform = process.platform, arch = process.arch }) => {
   const installRoot = isPackaged
-    ? path.join(path.dirname(executablePath), 'components')
+    ? path.resolve(userComponentRoot || path.join(path.dirname(executablePath), 'components'))
     : path.join(projectRoot, 'components');
   const roots = isPackaged
     ? [
       { source: 'application', path: installRoot },
+      { source: 'legacy-application', path: path.join(path.dirname(executablePath), 'components') },
       { source: 'bundled', path: path.join(resourcesPath, 'components') },
     ]
     : [{ source: 'development', path: installRoot }];
 
   const inspectAt = (definition, root) => {
-    const componentRoot = path.join(root.path, definition.id);
+    const containerRoot = path.join(root.path, definition.id);
+    const nestedRuntimeRoot = path.join(containerRoot, 'runtime');
+    const componentRoot = fs.existsSync(path.join(nestedRuntimeRoot, 'component.json')) ? nestedRuntimeRoot : containerRoot;
     const manifestPath = path.join(componentRoot, 'component.json');
     if (!fs.existsSync(manifestPath)) return null;
     try {
@@ -99,7 +102,7 @@ const createComponentRegistry = ({ resourcesPath, executablePath, projectRoot, i
       installed: false,
       compatible: true,
       version: '',
-      path: path.join(installRoot, id),
+      path: path.join(installRoot, id, 'runtime'),
       source: 'missing',
       sizeBytes: 0,
     };

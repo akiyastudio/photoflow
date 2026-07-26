@@ -13,28 +13,45 @@ files named `PhotoFlow-<component-id>-<version>-win32-<arch>.zip` and extracts
 the selected archives automatically. No pre-created `components` directory is
 required.
 
-The legacy expanded-directory layout remains supported:
-
-Copy the complete component directory into the PhotoFlow installation folder:
+Each component has one application-data directory:
 
 ```text
-<PhotoFlow installation directory>\components\team-retouch
-<PhotoFlow installation directory>\components\research-tools
-<PhotoFlow installation directory>\components\office-media-extractor
+%LOCALAPPDATA%\PhotoFlow\components\team-retouch
+%LOCALAPPDATA%\PhotoFlow\components\research-tools
+%LOCALAPPDATA%\PhotoFlow\components\office-media-extractor
 ```
 
-Then restart PhotoFlow or use **设置 → 可选功能组件 → 刷新状态**. This folder
-is beside `Photoflow.exe`; if PhotoFlow was installed under `Program Files`,
-copying or upgrading a component may require administrator permission.
+All component ZIPs contain self-contained executables; end users do not install
+Python or compile the component.
+
+## Additional model and engine packages
+
+Every optional runtime is distributed as a prepared ZIP. All packages belonging
+to one component are placed, without extraction, in that component's single
+directory. For multi-person retouch this is:
+
+`%LOCALAPPDATA%\PhotoFlow\components\team-retouch`
+
+- `PhotoFlow-<component-id>-*.zip`: installed by the matching component button.
+- `PhotoFlow-team-retouch-identity-models-*.zip`: installs prepared AdaFace
+  IR-18 and OSNet x1.0 ONNX files.
+- `PhotoFlow-team-retouch-advanced-*.zip`: verifies and registers the prepared
+  PairDETR + SAM 2.1 WSL virtual disk.
+
+WSL registration is the only additional system operation that cannot be
+completed by copying files alone. PhotoFlow performs it after explicit user
+confirmation because it creates a registered WSL distribution and uses tens
+of gigabytes of disk space.
 
 `npm run electron:build` also creates one ZIP package per component in
-`release`. Each ZIP contains the correctly named top-level component directory;
-extract that directory into `<PhotoFlow installation directory>\components`.
+`release`. Copy each generated ZIP into its component directory and install it
+from Settings.
 
-Packaged builds also scan these locations in order:
+Packaged builds scan these locations in order:
 
-1. `components` beside `Photoflow.exe` (offline install, upgrade, or installer choice)
-2. `resources\components` inside the application (legacy/bundled fallback)
+1. `%LOCALAPPDATA%\PhotoFlow\components` (component containers and runtimes)
+2. `components` beside `Photoflow.exe` (legacy installer and upgrade compatibility)
+3. `resources\components` inside the application (legacy/bundled fallback)
 
 ## Manifest contract
 
