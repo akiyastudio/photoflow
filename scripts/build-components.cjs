@@ -9,7 +9,7 @@ const venvPython = process.platform === 'win32'
   : path.join(root, '.venv', 'bin', 'python');
 const python = fs.existsSync(venvPython) ? venvPython : 'python';
 const requested = process.argv.includes('--only') ? process.argv[process.argv.indexOf('--only') + 1] : '';
-const componentIds = requested ? [requested] : ['research-tools', 'office-media-extractor', ...(process.platform === 'win32' ? ['team-retouch'] : [])];
+const componentIds = requested ? [requested] : (process.platform === 'win32' ? ['team-retouch'] : []);
 
 const definitions = {
   'research-tools': {

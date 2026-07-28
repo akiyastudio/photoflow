@@ -4,6 +4,7 @@ import { TaskProgress } from '../../components/TaskStatus';
 import { RequirePlugin } from '../../features/plugins/RequirePlugin';
 import type { AppConfig, LogEntry, WorkspaceProject } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
+import { useEscapeLayer } from '../../components/LayerProvider';
 
 const IMAGE_SELECTION_FOLDER_NAME = '图片选片';
 const VIDEO_SELECTION_FOLDER_NAME = '视频选片';
@@ -326,7 +327,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
     const args = ['--sd_path', currentDriveRef.current || selectedDrives[0] || config?.sdPath || '', '--dest_path', resolvedDestinationPath];
     if (Object.keys(routes).length) args.push('--project_routes', JSON.stringify(routes));
     if (!usesProjectRouting) args.push('--direct_project');
-    if (type === 'work' && config?.generateVideoPreview) args.push('--generate_video_preview');
+    if (type === 'work' && config?.generateVideoPreview) args.push('--generate_video_preview', '--video_preview_quality', config.videoPreviewQuality);
     if (type === 'work' && config?.splitLargeFiles) args.push('--split_large_files');
     runCmd(type === 'broll' ? 'broll' : 'import', args);
   };
@@ -396,7 +397,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
       args.push('--sd_path', currentDriveRef.current || selectedDrives[0] || config.sdPath);
       args.push('--dest_path', resolvedDestinationPath);
       if (config.generateVideoPreview) {
-        args.push('--generate_video_preview');
+        args.push('--generate_video_preview', '--video_preview_quality', config.videoPreviewQuality);
       }
       if (config.splitLargeFiles) {
         args.push('--split_large_files');
@@ -584,6 +585,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
 
 const BirthdayManagerModal = ({ onClose, onDataChanged }: { onClose: () => void, onDataChanged: () => void }) => {
   const appDialog = useAppDialog();
+  useEscapeLayer(true, onClose);
   const [birthdays, setBirthdays] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [newName, setNewName] = useState('');
@@ -649,7 +651,7 @@ const BirthdayManagerModal = ({ onClose, onDataChanged }: { onClose: () => void,
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-50/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
       <div className="absolute inset-0" onClick={onClose}></div>
-      <div className="bg-white border border-slate-200 w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[80vh] relative z-10">
+      <div role="dialog" aria-modal="true" aria-label="生日列表" className="bg-white border border-slate-200 w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col max-h-[80vh] relative z-10">
         <div className="p-6 border-b border-slate-200 flex justify-between items-center bg-slate-200 rounded-t-2xl">
           <div><h3 className="text-xl font-bold text-slate-800">生日列表</h3></div>
           <button onClick={onClose} className="p-2 hover:bg-slate-700 rounded-full text-slate-500 hover:text-slate-800 transition cursor-pointer"><X size={24} /></button>
@@ -970,14 +972,14 @@ const ResearchView = ({
   onUpdateConfig
 }: {
   embedded?: boolean;
-  config: AppConfig['research'];
-  onUpdateConfig: (newConfig: AppConfig['research']) => void;
+  config: AppConfig['inspirationLibrary'];
+  onUpdateConfig: (newConfig: AppConfig['inspirationLibrary']) => void;
 }) => {
   const { logs, isRunning, progress, statusMsg, start } = usePythonTask('research.py', '准备就绪');
 
   const runAnalysis = () => {
     start([
-      '--path', config.defaultDir,
+      '--path', config.rootPath,
       '--sensitivity', config.sensitivity,
       '--min_duration', config.minDuration.toString()
     ], '正在初始化引擎...');
@@ -985,25 +987,25 @@ const ResearchView = ({
 
   return (
     <div className="w-full space-y-6">
-      {!embedded && <h2 className="text-2xl font-bold text-slate-800">调研整理</h2>}
+      {!embedded && <h2 className="text-2xl font-bold text-slate-800">灵感库</h2>}
       <div className={embedded ? 'space-y-6' : 'bg-white border border-slate-200 rounded-xl p-6 space-y-6'}>
         <div className="space-y-2">
-          <p className="mt-2 text-gray-600">这个功能会整理从小红书/抖音爬取下来的文件，对视频执行转场识别，把每一个分镜的视频帧截取一帧下来。这个功能需要搭配一个Tampermonkey浏览器插件使用。</p>
+          <p className="mt-2 text-gray-600">这个功能会整理从小红书/抖音爬取下来的文件，对视频执行转场识别，并从每个分镜中挑选清晰、非黑画面导出；找不到合格画面的分镜会跳过。这个功能需要搭配一个 Tampermonkey 浏览器插件使用。</p>
         </div>
         {/* 路径设置 */}
         <div className="space-y-2">
            <label className="text-xs font-semibold text-slate-500 uppercase">读取目录</label>
            <input
              type="text"
-             value={config.defaultDir}
-             onChange={(e) => onUpdateConfig({...config, defaultDir: e.target.value})}
+             value={config.rootPath}
+             onChange={(e) => onUpdateConfig({...config, rootPath: e.target.value})}
              className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-slate-900 font-mono text-sm focus:border-blue-500 outline-none"
            />
         </div>
         <div className="grid gap-4 md:grid-cols-2">
           <div>
             <label className="form-label">检测灵敏度</label>
-            <select value={config.sensitivity} onChange={event => onUpdateConfig({ ...config, sensitivity: event.target.value as AppConfig['research']['sensitivity'] })} className="form-input"><option value="low">低</option><option value="standard">标准</option><option value="high">高</option></select>
+            <select value={config.sensitivity} onChange={event => onUpdateConfig({ ...config, sensitivity: event.target.value as AppConfig['inspirationLibrary']['sensitivity'] })} className="form-input"><option value="low">低</option><option value="standard">标准</option><option value="high">高</option></select>
             <p className="mt-1 text-xs leading-5 text-slate-500">{{ low: '只保留明显硬切，截图最少。', standard: '兼顾硬切、渐变与误判率。', high: '识别更多轻微转场，截图更多。' }[config.sensitivity]}</p>
           </div>
           <div>

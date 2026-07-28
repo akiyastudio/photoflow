@@ -7,8 +7,16 @@ import {
   Gift,
   PanelLeftClose,
   PanelLeftOpen,
+  ChevronLeft,
+  ChevronRight,
+  GitBranch,
   Home,
+  UsersRound,
+  Lightbulb,
+  Image as ImageIcon,
 } from 'lucide-react';
+import { useAppDialog } from './components/AppDialogProvider';
+import { useEscapeLayer } from './components/LayerProvider';
 import { ProjectNavigator } from './components/ProjectNavigator';
 import { FileOperationProgressOverlay } from './features/file-operations/FileOperationProgressOverlay';
 import { ProjectWorkspace } from './features/workspace/ProjectWorkspace';
@@ -17,17 +25,22 @@ import { RequirePlugin } from './features/plugins/RequirePlugin';
 import { BackgroundTaskIndicator } from './features/background-tasks/BackgroundTaskIndicator';
 import { SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
 import type { SettingsSection } from './features/settings/SettingsFeature';
-import { ConverterView, DashboardView, HomePanel, MatchView, ResearchView, VideoSplitView } from './features/tools/ToolViews';
+import { ConverterView, DashboardView, MatchView, VideoSplitView } from './features/tools/ToolViews';
+import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
+import type { InspirationSection } from './features/inspiration/InspirationLibrary';
 import type { AppConfig, ComponentStatus, HomeCardId, ProjectFileOperationProgress, ToolType, WorkspaceProject } from './types';
 
-const DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'research', 'converter'];
+const DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'inspiration', 'converter'];
+type WorkspaceToolKind = 'version' | 'team';
+type WorkspaceToolTab = { projectPath: string; kind: WorkspaceToolKind; label: string; busy: boolean };
 const localDateKey = () => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 };
 const normalizeHomeOrder = (value: unknown): HomeCardId[] => {
   const valid = new Set<HomeCardId>(DEFAULT_HOME_ORDER);
-  const ordered = (Array.isArray(value) ? value : []).filter((card): card is HomeCardId => valid.has(card as HomeCardId));
+  const migrated = (Array.isArray(value) ? value : []).map(card => card === 'research' ? 'inspiration' : card);
+  const ordered = migrated.filter((card): card is HomeCardId => valid.has(card as HomeCardId));
   return [...new Set([...ordered, ...DEFAULT_HOME_ORDER])];
 };
 const IMAGE_SELECTION_FOLDER_NAME = '图片选片';
@@ -36,6 +49,7 @@ const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
 };
+const normalizeVideoPreviewQuality = (value: unknown): AppConfig['smartImport']['videoPreviewQuality'] => value === 'high' ? value : 'medium';
 
 const clampNumber = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, value));
 const readStoredNumber = (key: string, fallback: number) => {
@@ -93,12 +107,7 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   homeOrder: DEFAULT_HOME_ORDER,
   birthdayEnabled: true,
   componentSettings: {
-    'team-retouch': { useGpu: true, oversizeCropMode: 'face-centered', backendMode: 'auto' },
-    'research-tools': {
-      defaultDir: `${userPath}/Downloads`,
-      sensitivity: 'standard',
-      minDuration: 0.2
-    }
+    'team-retouch': { useGpu: true, oversizeCropMode: 'face-centered', backendMode: 'auto' }
   },
   mediaCache: {
     maxSizeGB: 50,
@@ -113,6 +122,7 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
     destPath: `${userPath}/Desktop`,
     backupEnabled: false,
     generateVideoPreview: false,
+    videoPreviewQuality: 'medium',
     splitLargeFiles: false,
     backupPath: isMac ? `${userPath}/Pictures/Backup` : "D:/Backup"
   },
@@ -126,6 +136,11 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   imageConversion: {
     jpgQuality: 100
   },
+  inspirationLibrary: {
+    rootPath: '',
+    sensitivity: 'standard',
+    minDuration: 0.2
+  },
   personDetection: {
     useGpu: true,
     oversizeCropMode: 'face-centered',
@@ -138,7 +153,7 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
     videoSourceFolderName: 'mov'
   },
   research: {
-    defaultDir: `${userPath}/Downloads`,
+    defaultDir: '',
     sensitivity: 'standard',
     minDuration: 0.2
   }
@@ -156,8 +171,14 @@ interface PythonEvent {
 // --- 主组件 ---
 
 const App: React.FC = () => {
+  const appDialog = useAppDialog();
   const [activeTab, setActiveTab] = useState<ToolType>('home');
   const [settingsTabOpen, setSettingsTabOpen] = useState(false);
+  const [inspirationTabOpen, setInspirationTabOpen] = useState(false);
+  const [converterTabOpen, setConverterTabOpen] = useState(false);
+  const [inspirationSection, setInspirationSection] = useState<InspirationSection>('home');
+  const [inspirationRelativePath, setInspirationRelativePath] = useState('');
+  const [inspirationNavigationRequest, setInspirationNavigationRequest] = useState<{ path: string; id: number }>();
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
   const [showWorkspaceSetup, setShowWorkspaceSetup] = useState(false);
 
@@ -166,6 +187,7 @@ const App: React.FC = () => {
   const [updateInfo, setUpdateInfo] = useState<{version: string, url: string, notes: string} | null>(null);
   const [selectedProject, setSelectedProject] = useState<WorkspaceProject | null>(null);
   const [openProjects, setOpenProjects] = useState<WorkspaceProject[]>([]);
+  const [workspaceToolTabs, setWorkspaceToolTabs] = useState<WorkspaceToolTab[]>([]);
   const [projectOperations, setProjectOperations] = useState<Record<string, 'import' | 'broll' | 'match' | null>>({});
   const [, setProjectDestination] = useState<string | null>(null);
   const [undoNotice, setUndoNotice] = useState('');
@@ -180,6 +202,8 @@ const App: React.FC = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem('photoflow:sidebar-collapsed') === 'true');
   const [windowMaximized, setWindowMaximized] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const titlebarTabsRef = useRef<HTMLDivElement>(null);
+  const [titlebarTabScroll, setTitlebarTabScroll] = useState({ overflow: false, canScrollLeft: false, canScrollRight: false });
   const [components, setComponents] = useState<ComponentStatus[]>(() => {
     try {
       const cached = JSON.parse(window.localStorage.getItem('photoflow:components-cache') || '[]');
@@ -196,8 +220,6 @@ const App: React.FC = () => {
     if (componentsLoading) return;
     const componentIdBySection: Partial<Record<SettingsSection, string>> = {
       'team-retouch': 'team-retouch',
-      'research-tools': 'research-tools',
-      'office-media-extractor': 'office-media-extractor'
     };
     const componentId = componentIdBySection[settingsSection];
     if (componentId && !installedComponentIds.has(componentId)) setSettingsSection('components');
@@ -210,6 +232,57 @@ const App: React.FC = () => {
   useEffect(() => {
     window.localStorage.setItem('photoflow:sidebar-collapsed', String(sidebarCollapsed));
   }, [sidebarCollapsed]);
+
+  const updateTitlebarTabScroll = useCallback(() => {
+    const element = titlebarTabsRef.current;
+    if (!element) return;
+    const overflow = element.scrollWidth > element.clientWidth + 1;
+    const next = {
+      overflow,
+      canScrollLeft: overflow && element.scrollLeft > 1,
+      canScrollRight: overflow && element.scrollLeft + element.clientWidth < element.scrollWidth - 1,
+    };
+    setTitlebarTabScroll(current => current.overflow === next.overflow
+      && current.canScrollLeft === next.canScrollLeft
+      && current.canScrollRight === next.canScrollRight ? current : next);
+  }, []);
+
+  useEffect(() => {
+    const element = titlebarTabsRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(updateTitlebarTabScroll);
+    observer.observe(element);
+    element.addEventListener('scroll', updateTitlebarTabScroll, { passive: true });
+    updateTitlebarTabScroll();
+    return () => {
+      observer.disconnect();
+      element.removeEventListener('scroll', updateTitlebarTabScroll);
+    };
+  }, [configLoaded, converterTabOpen, inspirationTabOpen, openProjects.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const element = titlebarTabsRef.current;
+      element?.querySelector<HTMLElement>('[data-active-tab="true"]')?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+      updateTitlebarTabScroll();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [configLoaded, activeTab, converterTabOpen, inspirationTabOpen, selectedProject?.path, openProjects.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
+
+  const scrollTitlebarTabs = (direction: -1 | 1) => {
+    const element = titlebarTabsRef.current;
+    if (!element) return;
+    element.scrollBy({ left: direction * Math.max(180, element.clientWidth * 0.65), behavior: 'smooth' });
+  };
+
+  const handleTitlebarTabWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    const element = event.currentTarget;
+    if (element.scrollWidth <= element.clientWidth + 1) return;
+    const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+    if (!delta) return;
+    event.preventDefault();
+    element.scrollBy({ left: delta, behavior: 'auto' });
+  };
 
   useEffect(() => {
     window.electronAPI.isWindowMaximized().then(setWindowMaximized);
@@ -290,6 +363,14 @@ const App: React.FC = () => {
 
   useEffect(() => { void refreshComponents(); }, [refreshComponents]);
 
+  useEffect(() => window.electronAPI.onComponentsStatusChanged(result => {
+    if (!result.success) return;
+    const nextComponents = result.components || [];
+    setComponents(nextComponents);
+    window.localStorage.setItem('photoflow:components-cache', JSON.stringify(nextComponents));
+    setComponentInstallPath(result.installPath || '');
+  }), []);
+
   useEffect(() => {
     const report = (message: string, details?: string) => {
       showNotice(`发生错误：${message}`, 5000);
@@ -350,10 +431,11 @@ const App: React.FC = () => {
             const userPath = await window.electronAPI.getUserPath();
             const storedResearch = fileConfig.componentSettings?.['research-tools'] as AppConfig['research'] | undefined;
             const legacyResearch = storedResearch || fileConfig.research;
-            const downloadPath = legacyResearch?.defaultDir || (userPath ? `${userPath}/Downloads` : '');
+            const downloadPath = fileConfig.inspirationLibrary?.rootPath || legacyResearch?.defaultDir || (userPath ? `${userPath}/Downloads` : '');
             const legacyThreshold = legacyResearch?.ssimThreshold;
-            const researchSensitivity = legacyResearch?.sensitivity ?? (legacyThreshold !== undefined && legacyThreshold >= 0.98 ? 'high' : legacyThreshold !== undefined && legacyThreshold <= 0.85 ? 'low' : 'standard');
-            const researchSettings: AppConfig['research'] = { ...legacyResearch, defaultDir: downloadPath, sensitivity: researchSensitivity, minDuration: legacyResearch?.minDuration ?? 0.2 };
+            const inspirationSensitivity = fileConfig.inspirationLibrary?.sensitivity ?? legacyResearch?.sensitivity ?? (legacyThreshold !== undefined && legacyThreshold >= 0.98 ? 'high' : legacyThreshold !== undefined && legacyThreshold <= 0.85 ? 'low' : 'standard');
+            const inspirationLibrary: AppConfig['inspirationLibrary'] = { rootPath: downloadPath, sensitivity: inspirationSensitivity, minDuration: fileConfig.inspirationLibrary?.minDuration ?? legacyResearch?.minDuration ?? 0.2 };
+            const researchSettings: AppConfig['research'] = { defaultDir: inspirationLibrary.rootPath, sensitivity: inspirationLibrary.sensitivity, minDuration: inspirationLibrary.minDuration };
             const storedPersonDetection = fileConfig.componentSettings?.['team-retouch'] as AppConfig['personDetection'] | undefined;
             const personDetectionSettings: AppConfig['personDetection'] = {
               useGpu: storedPersonDetection?.useGpu ?? fileConfig.personDetection?.useGpu ?? true,
@@ -363,7 +445,10 @@ const App: React.FC = () => {
             const configuredImageSource = fileConfig.smartMatch?.imageSourceFolderName;
             const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;
             const savedSdPaths = (Array.isArray(fileConfig.smartImport?.sdPaths) && fileConfig.smartImport.sdPaths.length ? fileConfig.smartImport.sdPaths : fileConfig.smartImport?.sdPath ? [fileConfig.smartImport.sdPath] : []).map((drive: string) => isMac ? drive : drive.replace(/\\/g, '/').replace(/\/DCIM\/?$/i, '/'));
-            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, componentSettings: { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings, 'research-tools': researchSettings }, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false, splitLargeFiles: fileConfig.smartImport?.splitLargeFiles ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true }, fileImport: { preserveOriginal: fileConfig.fileImport?.preserveOriginal ?? false }, imageConversion: { jpgQuality: fileConfig.imageConversion?.jpgQuality ?? 100 }, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: !configuredImageSource || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: !configuredVideoSource || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
+            const componentSettings = { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings };
+            delete componentSettings['research-tools'];
+            delete componentSettings['office-media-extractor'];
+            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, componentSettings, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: fileConfig.smartImport?.splitLargeFiles ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true }, fileImport: { preserveOriginal: fileConfig.fileImport?.preserveOriginal ?? false }, imageConversion: { jpgQuality: fileConfig.imageConversion?.jpgQuality ?? 100 }, inspirationLibrary, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: !configuredImageSource || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: !configuredVideoSource || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
             if (normalizedConfig.workspacePath) {
               const workspace = await window.electronAPI.getWorkspaceProjects(normalizedConfig.workspacePath);
               if (workspace.success && workspace.root) normalizedConfig = { ...normalizedConfig, workspacePath: workspace.root };
@@ -371,7 +456,7 @@ const App: React.FC = () => {
               setShowWorkspaceSetup(true);
             }
             setConfig(normalizedConfig);
-            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.createPlanningFolder === undefined || fileConfig.defaultFolderSort === undefined || fileConfig.birthdayEnabled === undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.splitLargeFiles === undefined || !fileConfig.brollImport || !fileConfig.fileImport || !fileConfig.imageConversion || fileConfig.personDetection?.useGpu === undefined || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || !fileConfig.research?.sensitivity || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
+            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.createPlanningFolder === undefined || fileConfig.defaultFolderSort === undefined || fileConfig.birthdayEnabled === undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.videoPreviewQuality !== normalizedConfig.smartImport.videoPreviewQuality || fileConfig.smartImport?.splitLargeFiles === undefined || !fileConfig.brollImport || !fileConfig.fileImport || !fileConfig.imageConversion || !fileConfig.inspirationLibrary || fileConfig.personDetection?.useGpu === undefined || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             console.log('📋 Configuration loaded from file');
           } else {
             if (window.electronAPI?.getUserPath) {
@@ -436,7 +521,23 @@ const App: React.FC = () => {
       if (target?.closest('input, textarea, select, [contenteditable="true"], [role="textbox"]')) return;
       if (!target?.closest('[data-photoflow-file-surface="true"]')) return;
       event.preventDefault();
-      const result = await window.electronAPI.undoLastRename(config?.workspacePath);
+      const undoWorkspacePath = activeTab === 'inspiration' ? config?.inspirationLibrary.rootPath : config?.workspacePath;
+      let result = await window.electronAPI.undoLastRename(undoWorkspacePath);
+      if (result.requiresDecision?.kind === 'restore-conflict') {
+        const decision = result.requiresDecision;
+        const policy = await appDialog.choice({
+          title: '原位置已有同名项目',
+          message: decision.message,
+          detail: decision.detail,
+          choices: [
+            { value: 'rename', label: '改名恢复' },
+            { value: 'overwrite', label: '覆盖恢复', tone: 'danger' },
+          ],
+          defaultValue: 'rename',
+        });
+        if (policy !== 'rename' && policy !== 'overwrite') { showNotice('已取消撤销'); return; }
+        result = await window.electronAPI.undoLastRename(undoWorkspacePath, { restoreConflictPolicy: policy });
+      }
       showNotice(result.success ? (result.message || '\u5df2\u64a4\u9500\u4e0a\u4e00\u6b21\u91cd\u547d\u540d') : (result.error || '\u6682\u65e0\u53ef\u64a4\u9500\u7684\u91cd\u547d\u540d'));
       if (result.success) {
         if (result.project) {
@@ -447,7 +548,7 @@ const App: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [config?.workspacePath, showNotice, selectedProject?.path]);
+  }, [activeTab, appDialog, config?.inspirationLibrary.rootPath, config?.workspacePath, showNotice, selectedProject?.path]);
 
   const reorderHomeCards = (target: HomeCardId) => {
     if (!draggedHomeCard || draggedHomeCard === target) return;
@@ -501,10 +602,74 @@ const App: React.FC = () => {
     setProjectDestination(project.path);
     setActiveTab('project');
   };
+  const openWorkspaceToolTab = (project: WorkspaceProject, kind: WorkspaceToolKind, label: string) => {
+    setOpenProjects(current => current.some(item => item.path === project.path) ? current : [...current, project]);
+    setWorkspaceToolTabs(current => {
+      const existing = current.find(tab => tab.projectPath === project.path && tab.kind === kind);
+      return existing
+        ? current.map(tab => tab === existing ? { ...tab, label } : tab)
+        : [...current, { projectPath: project.path, kind, label, busy: false }];
+    });
+    setSelectedProject(project);
+    setProjectDestination(project.path);
+    setActiveTab(kind === 'version' ? 'project-version' : 'project-team');
+  };
+  const activateWorkspaceToolTab = (project: WorkspaceProject, kind: WorkspaceToolKind) => {
+    setSelectedProject(project);
+    setProjectDestination(project.path);
+    setActiveTab(kind === 'version' ? 'project-version' : 'project-team');
+  };
+  const updateWorkspaceToolTabBusy = useCallback((projectPath: string, kind: WorkspaceToolKind, busy: boolean) => {
+    setWorkspaceToolTabs(current => {
+      let changed = false;
+      const next = current.map(tab => {
+        if (tab.projectPath !== projectPath || tab.kind !== kind || tab.busy === busy) return tab;
+        changed = true;
+        return { ...tab, busy };
+      });
+      return changed ? next : current;
+    });
+  }, []);
+  const closeWorkspaceToolTab = async (projectPath: string, kind: WorkspaceToolKind) => {
+    const tab = workspaceToolTabs.find(item => item.projectPath === projectPath && item.kind === kind);
+    if (kind === 'team' && tab?.busy && !await appDialog.confirm({
+      title: '团片任务仍在运行',
+      message: '关闭标签不会取消后台任务；稍后重新打开团片协作可以继续查看进度。',
+      confirmLabel: '关闭标签',
+    })) return;
+    setWorkspaceToolTabs(current => current.filter(item => item.projectPath !== projectPath || item.kind !== kind));
+    const closingActiveTab = selectedProject?.path === projectPath
+      && activeTab === (kind === 'version' ? 'project-version' : 'project-team');
+    if (closingActiveTab) setActiveTab('project');
+  };
   const showHomeTab = () => {
     setSelectedProject(null);
     setProjectDestination(null);
     setActiveTab('home');
+  };
+  const openInspirationTab = (section: InspirationSection = 'home') => {
+    setInspirationTabOpen(true);
+    setInspirationSection(section);
+    setSelectedProject(null);
+    setActiveTab('inspiration');
+  };
+  const closeInspirationTab = () => {
+    setInspirationTabOpen(false);
+    if (activeTab === 'inspiration') showHomeTab();
+  };
+  const navigateInspiration = (path: string) => {
+    setInspirationSection('browser');
+    setInspirationNavigationRequest({ path, id: Date.now() });
+    setActiveTab('inspiration');
+  };
+  const openConverterTab = () => {
+    setConverterTabOpen(true);
+    setSelectedProject(null);
+    setActiveTab('converter');
+  };
+  const closeConverterTab = () => {
+    setConverterTabOpen(false);
+    if (activeTab === 'converter') showHomeTab();
   };
   const openSettingsTab = () => {
     setSettingsTabOpen(true);
@@ -514,10 +679,17 @@ const App: React.FC = () => {
     setSettingsTabOpen(false);
     if (activeTab === 'settings') showHomeTab();
   };
-  const closeProjectTab = (projectPath: string) => {
+  const closeProjectTab = async (projectPath: string, force = false) => {
+    const runningTeamTab = workspaceToolTabs.find(tab => tab.projectPath === projectPath && tab.kind === 'team' && tab.busy);
+    if (!force && runningTeamTab && !await appDialog.confirm({
+      title: '团片任务仍在运行',
+      message: '关闭项目标签会同时关闭它的团片标签，但不会取消后台任务。',
+      confirmLabel: '关闭项目标签',
+    })) return;
     const closingIndex = openProjects.findIndex(project => project.path === projectPath);
     const remaining = openProjects.filter(project => project.path !== projectPath);
     setOpenProjects(remaining);
+    setWorkspaceToolTabs(current => current.filter(tab => tab.projectPath !== projectPath));
     setProjectOperations(current => {
       const next = { ...current };
       delete next[projectPath];
@@ -578,20 +750,35 @@ const App: React.FC = () => {
           <div title="拖动窗口" className={`flex min-w-0 items-center gap-2 px-1.5 py-1 ${sidebarCollapsed || renderedSidebarWidth < 190 ? 'hidden' : ''}`}>
             <img src="./app-logo.svg" className="brand-logo h-5 w-5 shrink-0" alt="" />
             <span className="truncate text-sm font-bold text-slate-800">照片流</span>
-            <span className="shrink-0 font-mono text-[10px] text-slate-400">v26.7.27</span>
+            <span className="shrink-0 font-mono text-[10px] text-slate-400">v26.7.28</span>
           </div>
         </div>
         <div className="flex min-w-0 flex-1">
-          <div className="scrollbar-hide flex min-w-0 shrink items-end gap-0 overflow-x-auto px-2 pt-1.5">
-            <button type="button" onClick={showHomeTab} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[92px] max-w-[180px] items-center gap-2 rounded-t-lg border px-3 text-xs font-medium transition ${activeTab === 'home' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
+          {titlebarTabScroll.overflow && <button type="button" aria-label="向左滚动标签" title="向左滚动标签" disabled={!titlebarTabScroll.canScrollLeft} onClick={() => scrollTitlebarTabs(-1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronLeft size={15}/></button>}
+          <div ref={titlebarTabsRef} onWheel={handleTitlebarTabWheel} aria-label="已打开的窗口" className="titlebar-tabs-scroll scrollbar-hide flex min-w-0 shrink items-end gap-0 overflow-x-auto px-2 pt-1.5">
+            <button type="button" data-active-tab={activeTab === 'home'} onClick={showHomeTab} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[92px] max-w-[180px] items-center gap-2 rounded-t-lg border px-3 text-xs font-medium transition ${activeTab === 'home' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
               <Home size={14} className="shrink-0"/><span className="truncate">主页</span>
             </button>
-            {openProjects.map(project => <div key={project.path} title={project.name} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[120px] max-w-[220px] items-center rounded-t-lg border text-xs font-medium transition ${selectedProject?.path === project.path && activeTab === 'project' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
-              <button type="button" onClick={() => openProjectTab(project, projectOperations[project.path] ?? null)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Folder size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{project.name}</span></button>
-              <button type="button" aria-label={`关闭 ${project.name}`} title={`关闭 ${project.name}`} onClick={() => closeProjectTab(project.path)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
-            </div>)}
-            {settingsTabOpen && <div className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[108px] max-w-[180px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'settings' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={openSettingsTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Settings size={14} className="shrink-0"/><span className="truncate">设置</span></button><button type="button" aria-label="关闭设置" title="关闭设置" onClick={closeSettingsTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}
+            {inspirationTabOpen && <div data-active-tab={activeTab === 'inspiration'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[112px] max-w-[190px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'inspiration' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={() => openInspirationTab(inspirationSection)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Lightbulb size={14} className="shrink-0"/><span className="truncate">灵感库</span></button><button type="button" aria-label="关闭灵感库" title="关闭灵感库" onClick={closeInspirationTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}
+            {converterTabOpen && <div data-active-tab={activeTab === 'converter'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[126px] max-w-[200px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'converter' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={openConverterTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><ImageIcon size={14} className="shrink-0"/><span className="truncate">PNG 转 JPG</span></button><button type="button" aria-label="关闭 PNG 转 JPG" title="关闭 PNG 转 JPG" onClick={closeConverterTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}
+            {openProjects.map(project => <React.Fragment key={project.path}>
+              <div title={project.name} data-active-tab={selectedProject?.path === project.path && activeTab === 'project'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[120px] max-w-[220px] items-center rounded-t-lg border text-xs font-medium transition ${selectedProject?.path === project.path && activeTab === 'project' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
+                <button type="button" onClick={() => openProjectTab(project, projectOperations[project.path] ?? null)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Folder size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{project.name}</span></button>
+                <button type="button" aria-label={`关闭 ${project.name}`} title={`关闭 ${project.name}`} onClick={() => void closeProjectTab(project.path)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
+              </div>
+              {workspaceToolTabs.filter(tab => tab.projectPath === project.path).map(tab => {
+                const tabType = tab.kind === 'version' ? 'project-version' : 'project-team';
+                const isActive = selectedProject?.path === project.path && activeTab === tabType;
+                const Icon = tab.kind === 'version' ? GitBranch : UsersRound;
+                return <div key={`${project.path}:${tab.kind}`} title={tab.label} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[128px] max-w-[230px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
+                  <button type="button" onClick={() => activateWorkspaceToolTab(project, tab.kind)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Icon size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{tab.label}</span>{tab.kind === 'team' && tab.busy && <span aria-label="任务运行中" title="任务运行中" className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-violet-500"/>}</button>
+                  <button type="button" aria-label={`关闭 ${tab.label}`} title={`关闭 ${tab.label}`} onClick={() => void closeWorkspaceToolTab(project.path, tab.kind)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
+                </div>;
+              })}
+            </React.Fragment>)}
+            {settingsTabOpen && <div data-active-tab={activeTab === 'settings'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[108px] max-w-[180px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'settings' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={openSettingsTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Settings size={14} className="shrink-0"/><span className="truncate">设置</span></button><button type="button" aria-label="关闭设置" title="关闭设置" onClick={closeSettingsTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}
           </div>
+          {titlebarTabScroll.overflow && <button type="button" aria-label="向右滚动标签" title="向右滚动标签" disabled={!titlebarTabScroll.canScrollRight} onClick={() => scrollTitlebarTabs(1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronRight size={15}/></button>}
           <div aria-label="拖动窗口" className="app-window-drag-region min-w-8 flex-1"/>
         </div>
         <BackgroundTaskIndicator/>
@@ -607,13 +794,16 @@ const App: React.FC = () => {
       <aside style={{ width: sidebarCollapsed ? 0 : renderedSidebarWidth }} className="relative z-30 flex min-w-0 shrink-0 flex-col overflow-hidden bg-white transition-[width] duration-200">
         {activeTab === 'settings'
           ? <SettingsNavigator activeSection={settingsSection} components={components} onSelect={setSettingsSection}/>
-          : <><ProjectNavigator
+          : activeTab === 'inspiration'
+            ? <InspirationLibraryNavigator rootPath={config.inspirationLibrary.rootPath} currentRelativePath={inspirationRelativePath} section={inspirationSection} onOpenHome={() => setInspirationSection('home')} onNavigate={navigateInspiration} onOpenSettings={openSettingsTab}/>
+            : <><ProjectNavigator
           workspacePath={config.workspacePath}
           autoCleanupDeletedProjectData={config.autoCleanupDeletedProjectData}
           createPlanningFolder={config.createPlanningFolder}
           selectedProject={selectedProject}
           onSelectProject={(project, replacePath) => openProjectTab(project, null, replacePath)}
           onProjectAction={handleProjectAction}
+          onProjectDeleted={project => void closeProjectTab(project.path, true)}
           onWorkspaceResolved={workspacePath => { if (config.workspacePath.trim() && workspacePath !== config.workspacePath) handleConfigUpdate({ ...config, workspacePath }); }}
 
         />
@@ -626,8 +816,8 @@ const App: React.FC = () => {
       {!sidebarCollapsed && <ColumnResizeHandle label="调整项目栏宽度" onDrag={deltaX => setSidebarWidth(width => clampNumber(width + deltaX, 128, 420))}/>}
 
       {/* Main Content */}
-      <main className={`relative min-w-0 flex-1 bg-slate-50 ${activeTab === 'project' ? 'overflow-hidden p-0' : activeTab === 'settings' ? 'overflow-auto p-0' : 'overflow-auto p-8'}`}>
-        {activeTab === 'home' && <div className="mx-auto max-w-6xl space-y-4">{homeOrder.filter(card => (card !== 'birthday' || config.birthdayEnabled) && (card !== 'research' || installedComponentIds.has('research-tools'))).map(card => {
+      <main className={`relative min-w-0 flex-1 bg-slate-50 ${activeTab.startsWith('project') || activeTab === 'inspiration' ? 'overflow-hidden p-0' : activeTab === 'settings' ? 'overflow-auto p-0' : 'overflow-auto p-8'}`}>
+        {activeTab === 'home' && <div className="mx-auto max-w-6xl space-y-4">{homeOrder.filter(card => card !== 'birthday' || config.birthdayEnabled).map(card => {
           const dragProps = {
             draggable: true,
             onDragStart: () => setDraggedHomeCard(card),
@@ -639,17 +829,28 @@ const App: React.FC = () => {
               setDraggedHomeCard(null);
             }
           };
+          if (card === 'converter') return null;
           const content = card === 'birthday'
             ? <DashboardView section="birthday" workspacePath={config.workspacePath} config={config.smartImport} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} dragProps={dragProps}/>
             : card === 'import'
               ? <DashboardView section="import" workspacePath={config.workspacePath} config={config.smartImport} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onImportComplete={handleHomeImportComplete} dragProps={dragProps}/>
-              : card === 'research'
-                ? <HomePanel title="调研整理" {...dragProps}><ResearchView embedded config={(config.componentSettings['research-tools'] as AppConfig['research'] | undefined) || config.research} onUpdateConfig={(research: AppConfig['research']) => handleConfigUpdate({ ...config, research, componentSettings: { ...config.componentSettings, 'research-tools': research } })}/></HomePanel>
-                : <HomePanel title="PNG 转 JPG" {...dragProps}><RequirePlugin embedded scriptName="png_to_jpg.py" title="PNG 转 JPG" desc="需要该引擎来执行图片格式的批量转换。"><ConverterView embedded defaultQuality={config.imageConversion.jpgQuality} /></RequirePlugin></HomePanel>;
+              : <div className="grid grid-cols-2 gap-4">
+                  <button type="button" onClick={() => openInspirationTab('home')} className="group flex min-w-0 items-center gap-4 rounded-xl border border-slate-200 bg-white px-5 py-5 text-left transition hover:border-blue-400 hover:bg-blue-50 hover:shadow-sm">
+                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-amber-50 text-amber-600"><Lightbulb size={22}/></span>
+                    <span className="min-w-0 flex-1"><span className="block text-base font-bold text-slate-800">灵感库</span><span className="mt-1 block truncate text-xs text-slate-500">整理、浏览与收集灵感素材</span></span>
+                    <ChevronRight size={19} className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-blue-500"/>
+                  </button>
+                  <button type="button" onClick={openConverterTab} className="group flex min-w-0 items-center gap-4 rounded-xl border border-slate-200 bg-white px-5 py-5 text-left transition hover:border-blue-400 hover:bg-blue-50 hover:shadow-sm">
+                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-600"><ImageIcon size={22}/></span>
+                    <span className="min-w-0 flex-1"><span className="block text-base font-bold text-slate-800">PNG 转 JPG</span><span className="mt-1 block truncate text-xs text-slate-500">批量转换图片格式</span></span>
+                    <ChevronRight size={19} className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-blue-500"/>
+                  </button>
+                </div>;
           return <div key={card} className={draggedHomeCard === card ? 'opacity-40' : undefined}>{content}</div>;
         })}</div>}
+        {activeTab === 'inspiration' && <InspirationLibraryPage active={activeTab === 'inspiration'} section={inspirationSection} navigationRequest={inspirationNavigationRequest} config={config} components={components} componentsLoading={componentsLoading} onUpdateConfig={handleConfigUpdate} onDirectoryChange={setInspirationRelativePath} onNotice={showNotice}/>}
         {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={refreshComponents} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} onNotice={showNotice}/>}
-        {openProjects.map(project => { const active = activeTab === 'project' && selectedProject?.path === project.path; return <div key={project.path} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace active={active} project={project} workspacePath={config.workspacePath} installedComponentIds={installedComponentIds} componentsLoading={componentsLoading} teamRetouchStatus={components.find(component => component.id === 'team-retouch')} teamRetouchSettings={(config.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || config.personDetection} initialPanel={projectOperations[project.path] ?? null} importConfig={config.smartImport} brollConfig={config.brollImport} fileImportConfig={config.fileImport} conversionConfig={config.imageConversion} matchConfig={config.smartMatch} mediaCacheConfig={config.mediaCache} defaultFolderSort={config.defaultFolderSort} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onMediaCacheConfigChange={(mediaCache: AppConfig['mediaCache']) => handleConfigUpdate({ ...config, mediaCache })} onNotice={showNotice} onProjectMoved={nextProject => { setOpenProjects(current => current.map(item => item.path === project.path ? nextProject : item)); setProjectOperations(current => { if (nextProject.path === project.path) return current; const next = { ...current, [nextProject.path]: current[project.path] ?? null }; delete next[project.path]; return next; }); setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { closeProjectTab(project.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} /></div>; })}
+        {openProjects.map(project => { const active = activeTab.startsWith('project') && selectedProject?.path === project.path; const activeView = activeTab === 'project-version' ? 'version' : activeTab === 'project-team' ? 'team' : 'project'; return <div key={project.path} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace active={active} activeView={activeView} project={project} workspacePath={config.workspacePath} installedComponentIds={installedComponentIds} componentsLoading={componentsLoading} teamRetouchStatus={components.find(component => component.id === 'team-retouch')} teamRetouchSettings={(config.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || config.personDetection} initialPanel={projectOperations[project.path] ?? null} importConfig={config.smartImport} brollConfig={config.brollImport} fileImportConfig={config.fileImport} conversionConfig={config.imageConversion} matchConfig={config.smartMatch} mediaCacheConfig={config.mediaCache} defaultFolderSort={config.defaultFolderSort} onOpenToolTab={(kind, label) => openWorkspaceToolTab(project, kind, label)} onCloseToolTab={kind => void closeWorkspaceToolTab(project.path, kind)} onToolTabBusyChange={(kind, busy) => updateWorkspaceToolTabBusy(project.path, kind, busy)} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onMediaCacheConfigChange={(mediaCache: AppConfig['mediaCache']) => handleConfigUpdate({ ...config, mediaCache })} onNotice={showNotice} onProjectMoved={nextProject => { setOpenProjects(current => current.map(item => item.path === project.path ? nextProject : item)); setWorkspaceToolTabs(current => current.map(tab => tab.projectPath === project.path ? { ...tab, projectPath: nextProject.path, label: tab.kind === 'team' ? `团片 · ${nextProject.name}` : tab.label } : tab)); setProjectOperations(current => { if (nextProject.path === project.path) return current; const next = { ...current, [nextProject.path]: current[project.path] ?? null }; delete next[project.path]; return next; }); setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { void closeProjectTab(project.path, true); window.dispatchEvent(new Event('workspace-projects-changed')); }} /></div>; })}
 
         {activeTab === 'converter' && (
           <RequirePlugin scriptName="png_to_jpg.py" title="PNG 转 JPG" desc="需要该引擎来执行图片格式的批量转换。">
@@ -686,6 +887,7 @@ const UpdateModal = ({
   url: string,
   onClose: () => void
 }) => {
+  useEscapeLayer(true, onClose);
   const handleUpdate = () => {
     if (window.electronAPI?.openExternal) {
       window.electronAPI.openExternal(url);
@@ -694,7 +896,7 @@ const UpdateModal = ({
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-50/80 backdrop-blur-sm p-4 animate-in fade-in duration-300">
-      <div className="bg-white border border-blue-500/30 w-full max-w-md rounded-2xl shadow-2xl flex flex-col relative overflow-hidden">
+      <div role="dialog" aria-modal="true" aria-label={`发现新版本 ${version}`} className="bg-white border border-blue-500/30 w-full max-w-md rounded-2xl shadow-2xl flex flex-col relative overflow-hidden">
         {/* 装饰背景 */}
         <div className="absolute top-0 right-0 p-16 bg-blue-500/20 blur-3xl rounded-full -translate-y-1/2 translate-x-1/2 pointer-events-none"></div>
 

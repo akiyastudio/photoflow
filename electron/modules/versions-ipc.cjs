@@ -3,7 +3,7 @@ const { CANCELLED_CODE: WORKFLOW_CANCELLED_CODE, buildWorkflowPlan, copyWorkflow
 const workflowGenerationJobs = new Map();
 
 const registerVersionIpc = context => {
-  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog } = context;
+  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog } = context;
   const teamDataDirectory = (workspaceRoot, photoId, baseVersionId) => path.join(getWorkspaceDataRoot(workspaceRoot), 'team-retouch', photoId, baseVersionId);
   const deliveryName = (photo, basePath) => path.parse(photo?.originalName || photo?.displayName || basePath).name;
   const deliveryDirectory = (photo, basePath) => path.join(path.dirname(photo?.originalFilePath || basePath), `${deliveryName(photo, basePath)}_裁切`);
@@ -164,6 +164,59 @@ const registerVersionIpc = context => {
       writeLog('warn', 'Unable to clear deleted version thumbnail cache', { error: error.message || String(error) });
     });
     return removed.size;
+  };
+
+  const queueCleanupArtifacts = (workspaceRoot, cleanup = {}, title = '清理版本内部文件') => {
+    const snapshot = {
+      deletedVersions: [...(cleanup.deletedVersions || [])],
+      teamArtifactPaths: [...(cleanup.teamArtifactPaths || [])],
+      teamDataKeys: cleanup.teamDataKeys ? [...cleanup.teamDataKeys] : undefined,
+      sourcePaths: [...(cleanup.sourcePaths || [])],
+    };
+    const execute = async task => {
+      task?.report(20, title);
+      const removedArtifactCount = await removeCleanupArtifacts(workspaceRoot, snapshot);
+      task?.report(100, '内部文件清理完成');
+      return { removedArtifactCount };
+    };
+    if (!backgroundTasks?.run) {
+      setTimeout(() => void execute().catch(error => writeLog('warn', 'Deferred artifact cleanup failed', { error: error.message || String(error) })), 0);
+      return;
+    }
+    const dedupeKey = `internal-artifact-cleanup:${crypto.randomUUID()}`;
+    const run = () => backgroundTasks.run({
+      type: 'internal-artifact-cleanup',
+      title,
+      dedupeKey,
+      cancellable: false,
+      metadata: { workspaceRoot },
+    }, execute, run);
+    setTimeout(() => void run().catch(error => writeLog('warn', 'Deferred artifact cleanup failed', { error: error.message || String(error) })), 250);
+  };
+
+  const queueFilesystemCleanup = (paths, title = '清理旧工作流文件') => {
+    const targets = [...new Set((paths || []).filter(Boolean).map(candidate => path.resolve(candidate)))];
+    if (!targets.length) return;
+    const execute = async task => {
+      task?.report(20, title);
+      for (const target of targets) await fs.promises.rm(target, { recursive: true, force: true }).catch(error => {
+        writeLog('warn', 'Deferred filesystem cleanup failed', { path: target, error: error.message || String(error) });
+      });
+      task?.report(100, '旧文件清理完成');
+      return { removedCount: targets.length };
+    };
+    if (!backgroundTasks?.run) {
+      setTimeout(() => void execute(), 0);
+      return;
+    }
+    const dedupeKey = `internal-filesystem-cleanup:${crypto.randomUUID()}`;
+    const run = () => backgroundTasks.run({
+      type: 'internal-filesystem-cleanup',
+      title,
+      dedupeKey,
+      cancellable: false,
+    }, execute, run);
+    setTimeout(() => void run().catch(error => writeLog('warn', 'Deferred filesystem cleanup failed', { error: error.message || String(error) })), 250);
   };
 
   ipcMain.handle('workspace-media-versions', async (_event, workspacePath, status, projectName, relativePath) => {
@@ -485,35 +538,33 @@ const registerVersionIpc = context => {
   ipcMain.handle('workspace-version-relocate', async (_event, workspacePath, status, projectName, request = {}) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
-      const choice = await dialog.showOpenDialog(mainWindow, {
-        title: '重新定位版本文件',
-        properties: ['openFile'],
-        filters: [{ name: '图片和视频', extensions: [...new Set([...IMAGE_EXTENSIONS, ...RAW_EXTENSIONS, ...VIDEO_EXTENSIONS])].map(value => value.slice(1)) }, { name: '所有文件', extensions: ['*'] }]
-      });
-      if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, versions: [] };
-      const filePath = path.resolve(choice.filePaths[0]);
-      let result = await versionService.relocateVersion(workspaceRoot, {
+      let filePath = request.filePath ? path.resolve(request.filePath) : '';
+      if (!filePath) {
+        const choice = await dialog.showOpenDialog(mainWindow, {
+          title: '重新定位版本文件',
+          properties: ['openFile'],
+          filters: [{ name: '图片和视频', extensions: [...new Set([...IMAGE_EXTENSIONS, ...RAW_EXTENSIONS, ...VIDEO_EXTENSIONS])].map(value => value.slice(1)) }, { name: '所有文件', extensions: ['*'] }]
+        });
+        if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, versions: [] };
+        filePath = path.resolve(choice.filePaths[0]);
+      }
+      if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) throw new Error('重新定位的文件不存在');
+      const result = await versionService.relocateVersion(workspaceRoot, {
         versionId: request.versionId,
         filePath,
-        force: false,
+        force: request.force === true,
       });
       if (result.fingerprintMismatch) {
-        const confirmation = await dialog.showMessageBox(mainWindow, {
-          type: 'warning',
-          title: '文件内容不一致',
-          message: '所选文件与原版本的内容指纹不一致',
-          detail: '继续会保留原 Photo ID 和 Version ID，但把该版本标记为“内容已变化”。',
-          buttons: ['仍然重新定位', '取消'],
-          defaultId: 1,
-          cancelId: 1,
-          noLink: true,
-        });
-        if (confirmation.response !== 0) return { success: true, cancelled: true, versions: [] };
-        result = await versionService.relocateVersion(workspaceRoot, {
-          versionId: request.versionId,
-          filePath,
-          force: true,
-        });
+        return {
+          success: true,
+          versions: [],
+          requiresDecision: {
+            kind: 'version-fingerprint-mismatch',
+            filePath,
+            message: '所选文件与原版本的内容指纹不一致',
+            detail: '继续会保留原 Photo ID 和 Version ID，但把该版本标记为“内容已变化”。',
+          },
+        };
       }
       if (!result.success) return result;
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
@@ -532,7 +583,7 @@ const registerVersionIpc = context => {
       const version = bundle.versions?.find(item => item.id === request.versionId);
       if (!version) throw new Error('版本不存在');
       const result = await versionService.deleteVersion(workspaceRoot, request.versionId);
-      await removeCleanupArtifacts(workspaceRoot, result);
+      queueCleanupArtifacts(workspaceRoot, result, '清理已删除版本的内部文件');
       let warning;
       if (request.trashFile && fs.existsSync(version.filePath)) {
         try { await recycleBinService.trash(version.filePath); }
@@ -556,8 +607,8 @@ const registerVersionIpc = context => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       const result = await versionService.deleteProjectMissingVersion(workspaceRoot, versionId);
-      const removedArtifactCount = await removeCleanupArtifacts(workspaceRoot, result);
-      return { ...result, removedArtifactCount };
+      queueCleanupArtifacts(workspaceRoot, result, '清理缺失版本的内部文件');
+      return { ...result, cleanupQueued: true };
     } catch (error) {
       return { success: false, deletedCount: 0, error: error.message || String(error) };
     }
@@ -599,7 +650,9 @@ const registerVersionIpc = context => {
       const preferredIdentityOrder = Array.isArray(payload.preferredIdentityOrder)
         ? [...new Set(payload.preferredIdentityOrder.map(String).filter(Boolean))]
         : String(payload.preferredIdentityId || '') ? [String(payload.preferredIdentityId)] : [];
-      return { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined };
+      const sameWeekIdentityIds = [...new Set((payload.sameWeekIdentityIds || []).map(String).filter(Boolean))]
+        .filter(identityId => preferredIdentityOrder.slice(1).includes(identityId));
+      return { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds };
     } catch {
       return {};
     }
@@ -609,10 +662,13 @@ const registerVersionIpc = context => {
     await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
     const pendingPath = `${outputPath}.${crypto.randomUUID()}.tmp`;
     const preferredIdentityOrder = [...new Set((settings.preferredIdentityOrder || []).map(String).filter(Boolean))];
+    const sameWeekIdentityIds = [...new Set((settings.sameWeekIdentityIds || []).map(String).filter(Boolean))]
+      .filter(identityId => preferredIdentityOrder.slice(1).includes(identityId));
     await fs.promises.writeFile(pendingPath, JSON.stringify({
       updatedAt: Date.now(),
       preferredIdentityOrder,
       preferredIdentityId: preferredIdentityOrder[0] || undefined,
+      sameWeekIdentityIds,
     }, null, 2), 'utf8');
     await fs.promises.rm(outputPath, { force: true });
     await fs.promises.rename(pendingPath, outputPath);
@@ -702,7 +758,8 @@ const registerVersionIpc = context => {
       const settings = await readTeamWorkflowSettings(workspaceRoot, projectName);
       const identityIds = new Set((workspace.identities || []).map(identity => identity.id));
       const preferredIdentityOrder = (settings.preferredIdentityOrder || []).filter(identityId => identityIds.has(identityId));
-      return { ...workspace, workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined } };
+      const sameWeekIdentityIds = (settings.sameWeekIdentityIds || []).filter(identityId => preferredIdentityOrder.slice(1).includes(identityId));
+      return { ...workspace, workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds } };
     } catch (error) {
       return { success: false, photos: [], identities: [], assignments: [], error: error.message || String(error) };
     }
@@ -934,14 +991,19 @@ const registerVersionIpc = context => {
       const assignedIdentityIds = new Set((workspace.assignments || []).map(assignment => assignment.identityId).filter(Boolean));
       if (preferredIdentityOrder.some(identityId => !identityIds.has(identityId))) throw new Error('排序中包含不存在的人物，请刷新后重试');
       if (preferredIdentityOrder.some(identityId => !assignedIdentityIds.has(identityId))) throw new Error('排序中的人物还没有任何任务');
-      const workflowSettings = { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined };
+      const requestedSameWeekIdentityIds = [...new Set((request.sameWeekIdentityIds || []).map(String).filter(Boolean))];
+      if (requestedSameWeekIdentityIds.some(identityId => !preferredIdentityOrder.slice(1).includes(identityId))) throw new Error('同周关系必须连接优先队列中相邻的人物');
+      const workflowSettings = {
+        preferredIdentityOrder,
+        preferredIdentityId: preferredIdentityOrder[0] || undefined,
+        sameWeekIdentityIds: requestedSameWeekIdentityIds,
+      };
       await writeTeamWorkflowSettings(workspaceRoot, projectName, workflowSettings);
       return { success: true, workflowSettings };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
   });
-
   ipcMain.handle('workspace-team-person-exclude', async (event, workspacePath, status, projectName, request = {}) => {
     try {
       pluginService.requireCapability('team-retouch.detect');
@@ -1040,7 +1102,7 @@ const registerVersionIpc = context => {
       await versionService.registerTeamProjectPhoto(workspaceRoot, {
         projectName, photoId: request.photoId, baseVersionId: request.baseVersionId,
       });
-      await removeCleanupArtifacts(workspaceRoot, { teamArtifactPaths: patchResult.artifactPaths || [] });
+      queueCleanupArtifacts(workspaceRoot, { teamArtifactPaths: patchResult.artifactPaths || [] }, '清理已替换的团队修图文件');
 
       // Do not read the workspace before restoring assignments. Workspace reads
       // clean empty generated identities, and replacing the patches temporarily
@@ -1183,11 +1245,11 @@ const registerVersionIpc = context => {
         artifactPaths.push(...(result.artifactPaths || []));
       }
       await versionService.unregisterTeamProjectPhoto(workspaceRoot, { photoId: request.photoId });
-      const removedArtifactCount = await removeCleanupArtifacts(workspaceRoot, {
+      queueCleanupArtifacts(workspaceRoot, {
         teamArtifactPaths: artifactPaths,
         teamDataKeys: baseVersionIds.map(baseVersionId => ({ photoId: request.photoId, baseVersionId })),
-      });
-      return { success: true, removedArtifactCount };
+      }, '清理已移除照片的团队数据');
+      return { success: true, cleanupQueued: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -1267,6 +1329,7 @@ const registerVersionIpc = context => {
       const workflowSettings = {
         preferredIdentityOrder: Array.isArray(request.preferredIdentityOrder) ? request.preferredIdentityOrder.map(String) : [],
         preferredIdentityId: Array.isArray(request.preferredIdentityOrder) ? String(request.preferredIdentityOrder[0] || '') || undefined : String(request.preferredIdentityId || '') || undefined,
+        sameWeekIdentityIds: Array.isArray(request.sameWeekIdentityIds) ? request.sameWeekIdentityIds.map(String) : [],
       };
       const plan = await buildWorkflowPlan({
         groups: request.groups || [],
@@ -1288,6 +1351,10 @@ const registerVersionIpc = context => {
         await fs.promises.rm(stagingDirectory, { recursive: true, force: true });
       }
       await fs.promises.mkdir(stagingDirectory, { recursive: true });
+      for (const group of plan.manifestGroups) {
+        const groupDirectory = path.resolve(stagingDirectory, group.relativePath);
+        if (isInside(stagingDirectory, groupDirectory)) await fs.promises.mkdir(groupDirectory, { recursive: true });
+      }
       const pendingCheckpointPath = `${checkpointPath}.${crypto.randomUUID()}.tmp`;
       await fs.promises.writeFile(pendingCheckpointPath, JSON.stringify({ version: 1, fingerprint, projectName, status, updatedAt: Date.now() }, null, 2), 'utf8');
       await replaceFileAtomic(pendingCheckpointPath, checkpointPath);
@@ -1343,8 +1410,9 @@ const registerVersionIpc = context => {
       await fs.promises.rm(path.join(outputDirectory, path.basename(checkpointPath)), { force: true });
       checkpointReady = false;
       if (backupDirectory) {
-        await fs.promises.rm(backupDirectory, { recursive: true, force: true });
+        const previousWorkflowDirectory = backupDirectory;
         backupDirectory = '';
+        queueFilesystemCleanup([previousWorkflowDirectory], '清理旧的团队工作流目录');
       }
       publish({ state: 'completed', phase: 'complete', progress: 100, completedFiles: plan.files.length, copiedBytes: plan.totalBytes, message: '工作流程生成完成' }, true);
       return { success: true, operationId, count: plan.files.length, groupCount: manifest.groups.length, path: outputDirectory };
@@ -1610,7 +1678,7 @@ const registerVersionIpc = context => {
         projectName, photoId: request.photoId, baseVersionId: request.baseVersionId,
       });
       await versionService.registerTeamProjectPhoto(workspaceRoot, { projectName, photoId: request.photoId, baseVersionId: request.baseVersionId });
-      await removeCleanupArtifacts(workspaceRoot, { teamArtifactPaths: patchResult.artifactPaths || [] });
+      queueCleanupArtifacts(workspaceRoot, { teamArtifactPaths: patchResult.artifactPaths || [] }, '清理旧人物检测文件');
       writeLog('info', 'Team retouch people detected', { projectName, photoId: request.photoId, baseVersionId: request.baseVersionId, personCount: detected.personCount || patchResult.tasks.length, workTileCount: patchResult.tasks.length, detector: detected.detector });
       return { success: true, photo: bundle.photo, versions: bundle.versions, tasks: patchResult.tasks, excludedPersonCount: request.restoreExcluded ? 0 : listedExclusions.exclusions?.length || 0, detection: { detector: detected.detector, backend: detected.backend || 'cpu', provider: detected.provider || '', requestedMode: detected.requestedMode || requestedMode, advancedBackend: Boolean(detected.advancedBackend), width: detected.width, height: detected.height, personCount: detected.personCount ?? patchResult.tasks.length, workTileEdge: detected.workTileEdge || 4000, needsReviewCount: detected.needsReviewCount || 0, fallbackReason: detected.fallbackReason || '' } };
     } catch (error) {
@@ -1693,7 +1761,7 @@ const registerVersionIpc = context => {
           photoId: item.bundle.photo.id, baseVersionId: item.base.id, tasks: result.tasks || [],
         });
         await versionService.registerTeamProjectPhoto(workspaceRoot, { projectName, photoId: item.bundle.photo.id, baseVersionId: item.base.id });
-        await removeCleanupArtifacts(workspaceRoot, { teamArtifactPaths: patchResult.artifactPaths || [] });
+        queueCleanupArtifacts(workspaceRoot, { teamArtifactPaths: patchResult.artifactPaths || [] }, '清理旧人物检测文件');
         results.push({
           relativePath: item.relativePath, name: item.name, success: true,
           photoId: item.bundle.photo.id, baseVersionId: item.base.id,
@@ -1800,8 +1868,8 @@ const registerVersionIpc = context => {
       pluginService.requireCapability('team-retouch.detect');
       const workspaceRoot = ensureWorkspace(workspacePath);
       const result = await versionService.deleteTeamPatch(workspaceRoot, { taskId: request.taskId });
-      const removedArtifactCount = await removeCleanupArtifacts(workspaceRoot, { teamArtifactPaths: result.artifactPaths || [] });
-      return { success: true, tasks: result.tasks || [], removedArtifactCount };
+      queueCleanupArtifacts(workspaceRoot, { teamArtifactPaths: result.artifactPaths || [] }, '清理已删除的修图任务文件');
+      return { success: true, tasks: result.tasks || [], cleanupQueued: true };
     } catch (error) {
       return { success: false, error: error.message || String(error), tasks: [] };
     }
@@ -1818,11 +1886,11 @@ const registerVersionIpc = context => {
         photoId: request.photoId,
         baseVersionId: request.baseVersionId,
       });
-      const removedArtifactCount = await removeCleanupArtifacts(workspaceRoot, {
+      queueCleanupArtifacts(workspaceRoot, {
         teamArtifactPaths: result.artifactPaths || [],
         teamDataKeys: [{ photoId: request.photoId, baseVersionId: request.baseVersionId }],
-      });
-      return { success: true, photo: bundle.photo, versions: bundle.versions, tasks: result.tasks || [], removedArtifactCount };
+      }, '清理团队修图任务文件');
+      return { success: true, photo: bundle.photo, versions: bundle.versions, tasks: result.tasks || [], cleanupQueued: true };
     } catch (error) {
       return { success: false, error: error.message || String(error), versions: [], tasks: [] };
     }
@@ -1836,6 +1904,9 @@ const registerVersionIpc = context => {
       const patchResult = await versionService.listTeamPatches(workspaceRoot, request.photoId);
       const task = patchResult.tasks.find(item => item.id === request.taskId);
       if (!task) throw new Error('人物修图任务不存在');
+      const personIndex = Number(request.personIndex);
+      const taskMembers = task.members?.length ? task.members : [{ personIndex: task.personIndex }];
+      if (!Number.isInteger(personIndex) || !taskMembers.some(member => Number(member.personIndex) === personIndex)) throw new Error('人物不属于这个修图任务');
       const choice = await dialog.showOpenDialog(mainWindow, {
         title: `上传 ${task.personName} 的修图结果`,
         properties: ['openFile'],
@@ -1846,18 +1917,19 @@ const registerVersionIpc = context => {
       if (!IMAGE_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) throw new Error('请选择 JPG、PNG、TIFF、HEIC 等图片文件');
       const uploadDirectory = path.join(teamDataDirectory(workspaceRoot, task.photoId, task.baseVersionId), 'uploads');
       await fs.promises.mkdir(uploadDirectory, { recursive: true });
-      copiedPath = path.join(uploadDirectory, `${task.id}${path.extname(sourcePath).toLowerCase()}`);
+      copiedPath = path.join(uploadDirectory, `${task.id}-${crypto.randomUUID()}${path.extname(sourcePath).toLowerCase()}`);
       await fs.promises.copyFile(sourcePath, copiedPath);
       const updated = await versionService.updateTeamPatch(workspaceRoot, {
         taskId: task.id,
         editedPatchPath: copiedPath,
         status: 'uploaded',
+        assignmentCompletion: { personIndex, completed: true },
       });
-      await refreshDownstreamWorkflowFiles(workspaceRoot, request.status, request.projectName, task.id, request.personIndex, copiedPath).catch(error => {
+      await refreshDownstreamWorkflowFiles(workspaceRoot, request.status, request.projectName, task.id, personIndex, copiedPath).catch(error => {
         writeLog('warn', 'Unable to refresh downstream workflow task file', { projectName: request.projectName, taskId: task.id, error: error.message || String(error) });
       });
       if (task.editedPatchPath && path.resolve(task.editedPatchPath) !== path.resolve(copiedPath)) {
-        await removeCleanupArtifacts(workspaceRoot, { teamArtifactPaths: [task.editedPatchPath] });
+        queueCleanupArtifacts(workspaceRoot, { teamArtifactPaths: [task.editedPatchPath] }, '清理旧的修图上传文件');
       }
       copiedPath = '';
       return updated;
@@ -1874,18 +1946,26 @@ const registerVersionIpc = context => {
       const patchResult = await versionService.listTeamPatches(workspaceRoot, request.photoId);
       const task = patchResult.tasks.find(item => item.id === request.taskId);
       if (!task) throw new Error('人物修图任务不存在');
-      if (!task.editedPatchPath) return patchResult;
-      const editedPatchPath = task.editedPatchPath;
+      const personIndex = Number(request.personIndex);
+      const taskMembers = task.members?.length ? task.members : [{ personIndex: task.personIndex }];
+      if (!Number.isInteger(personIndex) || !taskMembers.some(member => Number(member.personIndex) === personIndex)) throw new Error('人物不属于这个修图任务');
+      const editedPatchPath = task.editedPatchPath || '';
       const updated = await versionService.updateTeamPatch(workspaceRoot, {
         taskId: task.id,
         editedPatchPath: null,
         status: 'exported',
         mergedVersionId: null,
         mergeMetrics: {},
+        assignmentCompletion: { personIndex, completed: false },
       });
-      const removedArtifactCount = await removeCleanupArtifacts(workspaceRoot, { teamArtifactPaths: [editedPatchPath] });
-      writeLog('info', 'Team retouch uploaded patch removed', { photoId: task.photoId, taskId: task.id, removedArtifactCount });
-      return { ...updated, removedArtifactCount };
+      let warning = '';
+      await refreshDownstreamWorkflowFiles(workspaceRoot, request.status, request.projectName, task.id, personIndex, task.patchPath).catch(error => {
+        warning = `返图和完成标记已删除，但同步后续任务文件失败：${error.message || String(error)}`;
+        writeLog('warn', 'Unable to restore downstream workflow task file', { projectName: request.projectName, taskId: task.id, error: error.message || String(error) });
+      });
+      if (editedPatchPath) queueCleanupArtifacts(workspaceRoot, { teamArtifactPaths: [editedPatchPath] }, '清理已移除的修图上传文件');
+      writeLog('info', 'Team retouch uploaded patch removed', { photoId: task.photoId, taskId: task.id, cleanupQueued: Boolean(editedPatchPath) });
+      return { ...updated, cleanupQueued: Boolean(editedPatchPath), warning: warning || undefined };
     } catch (error) {
       return { success: false, error: error.message || String(error), tasks: [] };
     }

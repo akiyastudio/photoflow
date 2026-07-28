@@ -139,13 +139,15 @@ class MemoryThumbnailCache {
     if (!item) return null;
     this.items.delete(key);
     this.items.set(key, item);
-    return item.dataUrl;
+    return item.filePath;
   }
 
-  put(key, previewUrl, bytes) {
+  put(key, filePath, bytes) {
     const current = this.items.get(key);
     if (current) this.totalBytes -= current.bytes;
-    const item = { bytes, dataUrl: previewUrl };
+    // Cache the durable thumbnail path, not its expiring media-access URL.
+    // A fresh grant must be issued every time the thumbnail is returned.
+    const item = { bytes, filePath };
     this.items.delete(key);
     this.items.set(key, item);
     this.totalBytes += item.bytes;
@@ -155,7 +157,7 @@ class MemoryThumbnailCache {
       this.items.delete(oldestKey);
       this.totalBytes -= oldest.bytes;
     }
-    return item.dataUrl;
+    return item.filePath;
   }
 
   deleteFile(filePath) {
@@ -175,7 +177,8 @@ class MemoryThumbnailCache {
 
 class ThumbnailPipeline {
   constructor({ getRunConfig, databasePath, getCacheDir, cacheFilePath, generateThumbnailSet,
-    toPreviewUrl, trimCache, notify, log, concurrency = 2, maxBackgroundTasks = 1000 }) {
+    toPreviewUrl, trimCache, notify, log, concurrency = 2, maxBackgroundTasks = 1000,
+    sourceStabilityDelayMs = 350, sourceStabilityProbeMs = 100 }) {
     this.databaseConfig = { getRunConfig, databasePath, log };
     this.database = new ThumbnailDatabaseClient(this.databaseConfig);
     this.getCacheDir = getCacheDir;
@@ -198,6 +201,9 @@ class ThumbnailPipeline {
     this.projectScanPumpTimer = null;
     this.thumbnailPumpTimer = null;
     this.backgroundResumeTimer = null;
+    this.sourceChangeVersions = new Map();
+    this.sourceStabilityDelayMs = sourceStabilityDelayMs;
+    this.sourceStabilityProbeMs = sourceStabilityProbeMs;
     this.lastForegroundActivityAt = Date.now();
     this.directoryIdleDelayMs = 1500;
     this.projectIdleDelayMs = 5000;
@@ -265,9 +271,9 @@ class ThumbnailPipeline {
       handle = null;
       const now = new Date();
       void fs.promises.utimes(target, now, now).catch(() => undefined);
-      const dataUrl = this.memory.put(this.cacheKey(filePath, stat, size.label), this.toPreviewUrl(target), thumbnailStat.size);
+      const cachedPath = this.memory.put(this.cacheKey(filePath, stat, size.label), target, thumbnailStat.size);
       void this.database.call('touch_thumbnail', { file_path: filePath, size_label: size.label }).catch(() => undefined);
-      return { dataUrl, target };
+      return { previewUrl: this.toPreviewUrl(cachedPath), target };
     } catch {
       await handle?.close().catch(() => undefined);
       // A second renderer request can arrive while the worker for this source
@@ -292,8 +298,8 @@ class ThumbnailPipeline {
     }
 
     if (!requireDisk && !forceRegenerate) {
-      const memoryUrl = this.memory.get(this.cacheKey(sourcePath, stat, size.label));
-      if (memoryUrl) return { success: true, state: 'READY', previewUrl: memoryUrl, cacheLayer: 'memory', mediaUrl: kind === 'video' ? null : undefined };
+      const memoryPath = this.memory.get(this.cacheKey(sourcePath, stat, size.label));
+      if (memoryPath) return { success: true, state: 'READY', previewUrl: this.toPreviewUrl(memoryPath), cacheLayer: 'memory', mediaUrl: kind === 'video' ? null : undefined };
     }
 
     // Merge the request into an existing task before touching its output. This
@@ -305,7 +311,7 @@ class ThumbnailPipeline {
 
     if (!forceRegenerate) {
       const disk = await this.readDisk(sourcePath, stat, cacheConfig, size);
-      if (disk) return { success: true, state: 'READY', previewUrl: disk.dataUrl, cacheLayer: 'disk', mediaUrl: kind === 'video' ? null : undefined };
+      if (disk) return { success: true, state: 'READY', previewUrl: disk.previewUrl, cacheLayer: 'disk', mediaUrl: kind === 'video' ? null : undefined };
     }
 
     // The database index is durable metadata, not a prerequisite for showing
@@ -457,7 +463,8 @@ class ThumbnailPipeline {
         for (const item of generated) {
           task.completedSizes.add(item.sizeLabel);
           const bytes = metadata.find(record => record.sizeLabel === item.sizeLabel)?.fileSize || 0;
-          urls[item.sizeLabel] = this.memory.put(this.cacheKey(filePath, stat, item.sizeLabel), this.toPreviewUrl(item.path), bytes);
+          const cachedPath = this.memory.put(this.cacheKey(filePath, stat, item.sizeLabel), item.path, bytes);
+          urls[item.sizeLabel] = this.toPreviewUrl(cachedPath);
         }
         this.notify({ filePath, state: 'READY', previewUrls: urls });
         void this.database.call('mark_ready', {
@@ -599,28 +606,54 @@ class ThumbnailPipeline {
     const videoExtensions = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv']);
     const rawExtensions = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
     const mediaExtensions = new Set([...imageExtensions, ...videoExtensions, ...rawExtensions]);
-    const mediaPaths = filePaths.filter(filePath => mediaExtensions.has(path.extname(filePath).toLowerCase()));
+    const mediaPaths = [...new Map(filePaths
+      .filter(filePath => mediaExtensions.has(path.extname(filePath).toLowerCase()))
+      .map(filePath => [pathKey(filePath), path.resolve(filePath)])).values()];
     const needsProjectScan = filePaths.some(filePath => !mediaExtensions.has(path.extname(filePath).toLowerCase()));
 
-    // Watcher responsiveness must not depend on SQLite. New or modified media
-    // enters the nearby queue immediately; the durable index catches up in a
-    // best-effort background call.
-    for (const filePath of mediaPaths) {
-      const extension = path.extname(filePath).toLowerCase();
-      const kind = videoExtensions.has(extension) ? 'video' : rawExtensions.has(extension) ? 'raw' : 'image';
+    // Editors often emit several watcher events while a file is still being
+    // replaced. Keep the old thumbnail visible during that short window, then
+    // invalidate it only after size and mtime have settled. A newer event
+    // supersedes the pending probe for the same path.
+    const changed = await Promise.all(mediaPaths.map(async filePath => {
+      const key = pathKey(filePath);
+      const version = (this.sourceChangeVersions.get(key) || 0) + 1;
+      this.sourceChangeVersions.set(key, version);
       this.memory.deleteFile(filePath);
+      await new Promise(resolve => setTimeout(resolve, this.sourceStabilityDelayMs));
+      if (this.sourceChangeVersions.get(key) !== version) return null;
       try {
-        const stat = await fs.promises.stat(filePath);
+        let stat = await fs.promises.stat(filePath);
         if (!stat.isFile()) throw new Error('not a file');
-        this.notify({ filePath, state: 'QUEUED' });
-        this.enqueue({ filePath, kind, cacheConfig, stat, persistState: false, requestedSizes: [THUMBNAIL_SIZES[0]] }, PRIORITY.nearby);
+        await new Promise(resolve => setTimeout(resolve, this.sourceStabilityProbeMs));
+        if (this.sourceChangeVersions.get(key) !== version) return null;
+        const confirmed = await fs.promises.stat(filePath);
+        if (!confirmed.isFile()) throw new Error('not a file');
+        if (confirmed.size !== stat.size || confirmed.mtimeMs !== stat.mtimeMs) {
+          await new Promise(resolve => setTimeout(resolve, this.sourceStabilityDelayMs));
+          if (this.sourceChangeVersions.get(key) !== version) return null;
+          stat = await fs.promises.stat(filePath);
+          if (!stat.isFile()) throw new Error('not a file');
+        } else {
+          stat = confirmed;
+        }
+        this.sourceChangeVersions.delete(key);
+        const extension = path.extname(filePath).toLowerCase();
+        const kind = videoExtensions.has(extension) ? 'video' : rawExtensions.has(extension) ? 'raw' : 'image';
+        this.notify({ filePath, state: 'STALE', sourceMtimeMs: stat.mtimeMs, sourceSize: stat.size });
+        this.enqueue({ filePath, kind, cacheConfig, stat, persistState: false, requestedSizes: [THUMBNAIL_SIZES[0]], forceRegenerate: true }, PRIORITY.nearby);
+        return filePath;
       } catch {
+        if (this.sourceChangeVersions.get(key) !== version) return null;
+        this.sourceChangeVersions.delete(key);
         this.notify({ filePath, state: 'MISSING' });
+        return null;
       }
-    }
+    }));
+    const changedMediaPaths = changed.filter(Boolean);
 
-    if (mediaPaths.length) {
-      void this.database.call('sync_paths', { project_root: projectRoot, paths: mediaPaths, calculate_hash: false }, 60 * 1000)
+    if (changedMediaPaths.length) {
+      void this.database.call('sync_paths', { project_root: projectRoot, paths: changedMediaPaths, calculate_hash: false }, 60 * 1000)
         .catch(error => this.log('warn', 'Thumbnail watcher index update deferred', { projectRoot, error: error.message || String(error) }));
     }
     if (needsProjectScan) void this.scanProject(projectRoot, cacheConfig);
@@ -659,6 +692,7 @@ class ThumbnailPipeline {
     if (this.backgroundResumeTimer) clearTimeout(this.backgroundResumeTimer);
     this.projectScanPumpTimer = null;
     this.thumbnailPumpTimer = null;
+    this.sourceChangeVersions.clear();
     this.backgroundResumeTimer = null;
     this.memory.clear();
     this.database.stop();

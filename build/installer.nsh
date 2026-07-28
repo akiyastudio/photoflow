@@ -5,14 +5,8 @@
 Var PhotoFlowDesktopShortcutCheckbox
 Var PhotoFlowCreateDesktopShortcut
 Var PhotoFlowGpuComponentCheckbox
-Var PhotoFlowResearchComponentCheckbox
-Var PhotoFlowOfficeMediaComponentCheckbox
 Var PhotoFlowInstallGpuComponent
-Var PhotoFlowInstallResearchComponent
-Var PhotoFlowInstallOfficeMediaComponent
 Var PhotoFlowGpuComponentArchive
-Var PhotoFlowResearchComponentArchive
-Var PhotoFlowOfficeMediaComponentArchive
 
 !macro customPageAfterChangeDir
   Page custom PhotoFlowComponentPage PhotoFlowComponentPageLeave
@@ -21,22 +15,10 @@ Var PhotoFlowOfficeMediaComponentArchive
 
 Function PhotoFlowComponentPage
   StrCpy $PhotoFlowGpuComponentArchive ""
-  StrCpy $PhotoFlowResearchComponentArchive ""
-  StrCpy $PhotoFlowOfficeMediaComponentArchive ""
   ClearErrors
   FindFirst $0 $1 "$EXEDIR\PhotoFlow-team-retouch-*-win32-*.zip"
   IfErrors +3
     StrCpy $PhotoFlowGpuComponentArchive "$EXEDIR\$1"
-    FindClose $0
-  ClearErrors
-  FindFirst $0 $1 "$EXEDIR\PhotoFlow-research-tools-*-win32-*.zip"
-  IfErrors +3
-    StrCpy $PhotoFlowResearchComponentArchive "$EXEDIR\$1"
-    FindClose $0
-  ClearErrors
-  FindFirst $0 $1 "$EXEDIR\PhotoFlow-office-media-extractor-*-win32-*.zip"
-  IfErrors +3
-    StrCpy $PhotoFlowOfficeMediaComponentArchive "$EXEDIR\$1"
     FindClose $0
 
   GetDlgItem $0 $HWNDPARENT 1037
@@ -61,35 +43,13 @@ Function PhotoFlowComponentPage
     ${NSD_Check} $PhotoFlowGpuComponentCheckbox
   ${EndIf}
 
-  ${NSD_CreateCheckbox} 0 64u 100% 14u "调研整理（视频分镜、图片去重与资料整理）"
-  Pop $PhotoFlowResearchComponentCheckbox
-  ${If} $PhotoFlowResearchComponentArchive == ""
-    ${NSD_Uncheck} $PhotoFlowResearchComponentCheckbox
-    ${NSD_SetText} $PhotoFlowResearchComponentCheckbox "调研整理（安装介质中未找到）"
-    EnableWindow $PhotoFlowResearchComponentCheckbox 0
-  ${Else}
-    ${NSD_Check} $PhotoFlowResearchComponentCheckbox
-  ${EndIf}
-
-  ${NSD_CreateCheckbox} 0 88u 100% 14u "Office 图片提取（提取 Word、PowerPoint、Excel 内嵌图片）"
-  Pop $PhotoFlowOfficeMediaComponentCheckbox
-  ${If} $PhotoFlowOfficeMediaComponentArchive == ""
-    ${NSD_Uncheck} $PhotoFlowOfficeMediaComponentCheckbox
-    ${NSD_SetText} $PhotoFlowOfficeMediaComponentCheckbox "Office 图片提取（安装介质中未找到）"
-    EnableWindow $PhotoFlowOfficeMediaComponentCheckbox 0
-  ${Else}
-    ${NSD_Check} $PhotoFlowOfficeMediaComponentCheckbox
-  ${EndIf}
-
-  ${NSD_CreateLabel} 0 116u 100% 26u "安装后也可以在照片流的“组件管理”中单独安装或卸载。"
+  ${NSD_CreateLabel} 0 70u 100% 26u "灵感库与 Office 图片提取已经内置在主程序中，无需另行安装。"
   Pop $1
   nsDialogs::Show
 FunctionEnd
 
 Function PhotoFlowComponentPageLeave
   ${NSD_GetState} $PhotoFlowGpuComponentCheckbox $PhotoFlowInstallGpuComponent
-  ${NSD_GetState} $PhotoFlowResearchComponentCheckbox $PhotoFlowInstallResearchComponent
-  ${NSD_GetState} $PhotoFlowOfficeMediaComponentCheckbox $PhotoFlowInstallOfficeMediaComponent
 FunctionEnd
 
 Function PhotoFlowShortcutPage
@@ -124,24 +84,6 @@ FunctionEnd
       Pop $0
       ${If} $0 != "success"
         MessageBox MB_OK|MB_ICONEXCLAMATION "多人裁片修图组件解压失败：$0"
-      ${EndIf}
-    ${EndIf}
-  ${EndIf}
-  ${If} $PhotoFlowInstallResearchComponent == ${BST_CHECKED}
-    ${If} $PhotoFlowResearchComponentArchive != ""
-      nsisunz::Unzip "$PhotoFlowResearchComponentArchive" "$INSTDIR\components"
-      Pop $0
-      ${If} $0 != "success"
-        MessageBox MB_OK|MB_ICONEXCLAMATION "调研整理组件解压失败：$0"
-      ${EndIf}
-    ${EndIf}
-  ${EndIf}
-  ${If} $PhotoFlowInstallOfficeMediaComponent == ${BST_CHECKED}
-    ${If} $PhotoFlowOfficeMediaComponentArchive != ""
-      nsisunz::Unzip "$PhotoFlowOfficeMediaComponentArchive" "$INSTDIR\components"
-      Pop $0
-      ${If} $0 != "success"
-        MessageBox MB_OK|MB_ICONEXCLAMATION "Office 图片提取组件解压失败：$0"
       ${EndIf}
     ${EndIf}
   ${EndIf}

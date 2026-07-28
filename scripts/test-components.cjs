@@ -42,9 +42,8 @@ try {
   const installer = fs.readFileSync(path.join(repositoryRoot, 'build', 'installer.nsh'), 'utf8');
   assert(!installer.includes('release\\components'), 'base installer must not embed optional components');
   assert(installer.includes('$EXEDIR\\PhotoFlow-team-retouch-*-win32-*.zip'), 'installer must discover team-retouch archives beside itself');
-  assert(installer.includes('$EXEDIR\\PhotoFlow-research-tools-*-win32-*.zip'), 'installer must discover research archives beside itself');
-  assert.strictEqual((installer.match(/\$\{NSD_Check\}/g) || []).length, 3, 'installer must preselect every component archive found beside it');
-  assert(installer.includes('$EXEDIR\\PhotoFlow-office-media-extractor-*-win32-*.zip'), 'installer must discover Office media extractor archives beside itself');
+  assert(!installer.includes('PhotoFlow-research-tools-') && !installer.includes('PhotoFlow-office-media-extractor-'), 'built-in inspiration and Office tools must not be offered as optional component archives');
+  assert.strictEqual((installer.match(/\$\{NSD_Check\}/g) || []).length, 1, 'installer must only preselect the optional team-retouch archive');
   assert(installer.includes('nsisunz::Unzip'), 'installer must extract component archives');
   assert(!installer.includes('$EXEDIR\\components'), 'legacy component folders beside the installer must not be supported');
   assert(!installer.includes('仍兼容旧方式'), 'installer must not advertise the removed legacy component flow');
@@ -120,7 +119,9 @@ assert(teamRetouchManager.includes('识别错误，移除此人物') && teamReto
 assert(teamRetouchManager.includes('photoProcessingMessages') && teamRetouchManager.includes('正在移除误识别人物并重新计算工作图'), 'false-positive recomputation must block only the affected photo card with visible progress');
 assert(teamRetouchManager.includes("visibleProcessingMessage = processingMessage || (busy === 'detect'"), 'single-photo recognition must use the same card-local blocking treatment as false-positive removal');
 assert(!teamRetouchManager.includes('disabled={Boolean(busy) || identityState.identifying}'), 'background identity matching must not disable every person confirmation row');
-assert(teamRetouchManager.includes("event.key !== 'Escape' || busy") && teamRetouchManager.includes('dialogRef.current'), 'the identity confirmation dialog must close with Escape unless a save is in progress');
+const layerProvider = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'LayerProvider.tsx'), 'utf8');
+assert(teamRetouchManager.includes('useEscapeLayer(true, onClose, !busy)') && !teamRetouchManager.includes('dialogRef.current'), 'the identity confirmation dialog must use the shared Escape layer and stay open while saving');
+assert(layerProvider.includes("event.key !== 'Escape'") && layerProvider.includes('layersRef.current') && layerProvider.includes('stopImmediatePropagation'), 'Escape handling must be centralized in a topmost-layer stack');
 assert(teamRetouchManager.includes("taskFullyMarked ? '已标记' : '未标记'"), 'work-image status must distinguish marked and unmarked images without a redundant confirmation step');
 assert(!teamRetouchManager.includes('确认无误'), 'recognition review must not require a redundant confirmation button');
 assert(teamRetouchManager.includes('FullscreenImageViewer') && teamRetouchManager.includes('ImageZoomButton'), 'recognition images must support full-window viewing');
@@ -134,7 +135,8 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(teamRetouchSteps.includes('人物识别与标记') && teamRetouchSteps.includes('任务编排与返图') && !teamRetouchSteps.includes("id: 'people'"), 'team retouch must expose the integrated two-step workflow');
   assert(teamRetouchManager.includes('<TeamRetouchSteps') && personIdentityManager.includes('<TeamRetouchSteps'), 'all team-retouch panels must reuse the same step navigation');
   assert(!projectWorkspace.includes('团片协作菜单'), 'project toolbar must not expose a separate team-retouch dropdown menu');
-  assert(projectWorkspace.includes("setTeamRetouchStep('detect')"), 'the single team-retouch entry must start at person detection and cropping');
+  assert(projectWorkspace.includes("setTeamRetouchStep(current => current || 'detect')"), 'the single team-retouch entry must start at person detection without resetting an existing tab');
+  assert(appSource.includes("'project-version'") && appSource.includes("'project-team'") && projectWorkspace.includes("onOpenToolTab('version'") && projectWorkspace.includes("onOpenToolTab('team'"), 'version management and team retouch must open in reusable project tool tabs');
   assert(appSource.includes('photoflow:components-cache') && appSource.includes('componentsLoading={componentsLoading}'), 'installed component state must be restored before opening a project');
   assert(projectWorkspace.includes('teamRetouchInstalled || componentsLoading'), 'the team-retouch toolbar entry must render immediately while component status is refreshing');
   assert(personIdentityManager.includes('批量导入返图并识别'), 'workflow must expose batch returned-image recognition');
@@ -145,7 +147,10 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(personIdentityManager.includes('删除并重新生成'), 'workflow regeneration must require destructive confirmation');
   assert(personIdentityManager.includes('returnTeamWorkflowBatch'), 'workflow batch returns must use the dedicated non-merging import path');
   assert(personIdentityManager.includes('taskOrder: workflow'), 'workflow returns must send the exact displayed hand-off order');
-  assert(personIdentityManager.includes('subjects.filter(subject => !subject.task.needsReview)'), 'unconfirmed work images must not appear in the downstream workflow planner');
+  assert(!personIdentityManager.includes('subjects.filter(subject => !subject.task.needsReview)'), 'suggested-review work images must remain available in the downstream workflow planner');
+  assert(personIdentityManager.includes('sameWeekIdentityIds') && personIdentityManager.includes("? '＋' : '→'") && personIdentityManager.includes('toggleSameWeekIdentity'), 'priority labels must switch between same-week and next-week scheduling');
+  assert(!personIdentityManager.includes('无需修图') && !personIdentityManager.includes('setTeamWorkflowNoRetouch'), 'workflow tasks must always be generated before the user decides whether to upload a return');
+  assert(personIdentityManager.includes('}上传</button>') && personIdentityManager.includes('删除返图') && personIdentityManager.includes('取消标记'), 'workflow task actions must expose the compact upload and reversible completion states');
   const versionsIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
   const pluginService = fs.readFileSync(path.join(repositoryRoot, 'electron', 'services', 'plugin-service.cjs'), 'utf8');
   assert(!versionsIpc.includes('runWarmJson') && (versionsIpc.match(/pluginService\.runJson\(\s*'team-retouch'/g) || []).length >= 4, 'every team-retouch operation must start an isolated component process');
@@ -164,6 +169,8 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(versionsIpc.includes("ipcMain.handle('workspace-team-patch-open-folder'"), 'delivery and merged-result folders must have a scoped open action');
   assert(versionsIpc.includes("ipcMain.handle('workspace-team-workflow-return-batch'"), 'workflow batch returns must have a dedicated IPC handler');
   assert(versionsIpc.includes("ipcMain.handle('workspace-team-workflow-generate'"), 'workflow generation must have a dedicated IPC handler');
+  assert(!versionsIpc.includes("ipcMain.handle('workspace-team-workflow-no-retouch'") && !versionsIpc.includes('syncWorkflowNoRetouchFile'), 'the removed no-retouch workflow must not leave a second completion path');
+  assert(versionsIpc.includes('assignmentCompletion: { personIndex, completed: true }') && versionsIpc.includes('assignmentCompletion: { personIndex, completed: false }'), 'single uploads and removals must update the return and completion state together');
   assert(versionsIpc.includes("path.resolve(projectPath, '团片协作')"), 'workflow output must remain inside the project-local team-retouch folder');
   assert(versionsIpc.includes("'team-retouch', 'workflows'"), 'workflow metadata must live in workspace user data');
   assert(versionsIpc.includes('legacyManifestPath'), 'legacy project-local workflow metadata must migrate automatically');
@@ -220,19 +227,13 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
     arch: 'x64',
   });
 
-  assert.strictEqual(registry.list().length, 3);
+  assert.strictEqual(registry.list().length, 1);
   assert.strictEqual(registry.resolve('team-retouch'), null);
   assert.strictEqual(registry.resolve('office-media-extractor'), null);
   const installRoot = userComponentRoot;
   assert.strictEqual(registry.ensureInstallRoot(), installRoot);
 
-  writeComponent(path.join(resourcesPath, 'components'), 'research-tools', '1.0.0');
-  assert.strictEqual(registry.resolve('research-tools').source, 'bundled');
-  assert.strictEqual(registry.resolve('research-tools').version, '1.0.0');
-
-  writeComponent(installRoot, 'research-tools', '2.0.0');
-  assert.strictEqual(registry.resolve('research-tools').source, 'application');
-  assert.strictEqual(registry.resolve('research-tools').version, '2.0.0');
+  assert.strictEqual(registry.resolve('research-tools'), null);
 
   const invalidDirectory = path.join(installRoot, 'team-retouch');
   fs.mkdirSync(invalidDirectory, { recursive: true });

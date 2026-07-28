@@ -4,6 +4,7 @@ import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus, X } from 'lu
 import { PROJECT_STATUS_LABELS } from '../types';
 import type { ProjectDate, ProjectStatus, WorkspaceProject, WorkspaceStatusGroup } from '../types';
 import { useAppDialog } from './AppDialogProvider';
+import { useEscapeLayer } from './LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../utils/recycleBinFailure';
 
 const STATUSES: ProjectStatus[] = ['未分类', '策划中', '待拍摄', '后期中', '已归档'];
@@ -66,13 +67,14 @@ const projectEditorValue = (project: WorkspaceProject) => {
   return { year: '', month: '', day: '', quickDate: '', name: project.name };
 };
 
-export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData, createPlanningFolder, selectedProject, onSelectProject, onProjectAction, onWorkspaceResolved }: {
+export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData, createPlanningFolder, selectedProject, onSelectProject, onProjectAction, onProjectDeleted, onWorkspaceResolved }: {
   workspacePath: string;
   autoCleanupDeletedProjectData: boolean;
   createPlanningFolder: boolean;
   selectedProject: WorkspaceProject | null;
   onSelectProject: (project: WorkspaceProject, replacePath?: string) => void;
   onProjectAction: (action: Action, project: WorkspaceProject) => void;
+  onProjectDeleted: (project: WorkspaceProject) => void;
   onWorkspaceResolved: (workspacePath: string) => void;
 }) => {
   const appDialog = useAppDialog();
@@ -249,9 +251,14 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
       setCreateNotice(`项目“${project.name}”已按 Windows 确认永久删除`);
       window.setTimeout(() => setCreateNotice(''), 3000);
     }
+    if (result.success) onProjectDeleted(project);
     refresh();
   };
   const openProject = async (project: WorkspaceProject) => {
+    if (project.availability === 'missing') {
+      setError('项目文件夹当前不可用；数据库记录和历史版本已保留。恢复原文件夹后会自动重新连接。');
+      return;
+    }
     const result = await window.electronAPI.openWorkspaceProject(workspacePath, project.status, project.name);
     if (!result.success) setError(result.error || '无法打开文件夹');
   };
@@ -265,7 +272,7 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
         const isOpen = expanded[status];
         return <section key={status} className="border-t border-slate-200 py-2 first:border-t-0">
           <button type="button" onClick={() => setExpanded(current => ({ ...current, [status]: !current[status] }))} className="flex w-full items-center gap-1.5 rounded-md px-2 py-2 text-left text-xs font-bold tracking-wide text-slate-500 hover:bg-slate-100 hover:text-slate-800">{isOpen ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span>{PROJECT_STATUS_LABELS[status]}</span><span className="ml-auto font-mono text-[10px] text-slate-400">{projects.length}</span></button>
-          {isOpen && <div className="mt-1 space-y-1">{projects.map(project => <div key={project.path} className={`project-row group flex items-center gap-1 rounded-lg text-sm transition ${selectedProject?.path === project.path ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'}`}><button title={project.name} onClick={() => onSelectProject(project)} onContextMenu={event => { event.preventDefault(); window.dispatchEvent(new Event('photoflow-menu-open')); setMenu({ project, x: event.clientX, y: event.clientY }); }} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left"><Folder size={15} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{project.name}</span></button><button type="button" aria-label="打开项目文件夹" title="打开项目文件夹" onClick={() => openProject(project)} className="project-open-button mr-1 rounded p-1.5"><FolderOpen size={15}/></button></div>)}{!projects.length && <p className="px-7 py-1 text-xs text-slate-400">暂无项目</p>}</div>}
+          {isOpen && <div className="mt-1 space-y-1">{projects.map(project => { const unavailable = project.availability === 'missing'; return <div key={project.path} className={`project-row group flex items-center gap-1 rounded-lg text-sm transition ${unavailable ? 'bg-amber-50 text-amber-700' : selectedProject?.path === project.path ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'}`}><button title={unavailable ? `${project.name}（文件夹不可用，数据已保留）` : project.name} disabled={unavailable} onClick={() => onSelectProject(project)} onContextMenu={event => { event.preventDefault(); if (unavailable) return; window.dispatchEvent(new Event('photoflow-menu-open')); setMenu({ project, x: event.clientX, y: event.clientY }); }} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left disabled:cursor-not-allowed"><Folder size={15} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{project.name}</span>{unavailable && <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">离线</span>}</button><button type="button" aria-label="打开项目文件夹" title={unavailable ? '项目文件夹不可用' : '打开项目文件夹'} disabled={unavailable} onClick={() => openProject(project)} className="project-open-button mr-1 rounded p-1.5 disabled:cursor-not-allowed disabled:opacity-40"><FolderOpen size={15}/></button></div>; })}{!projects.length && <p className="px-7 py-1 text-xs text-slate-400">暂无项目</p>}</div>}
         </section>;
       })}
       {error && <p className="mt-2 px-2 text-xs text-red-500">{error}</p>}
@@ -291,4 +298,7 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
   </>;
 };
 
-const ProjectDialog = ({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) => createPortal(<div className="fixed inset-x-0 bottom-0 top-10 z-[500] overflow-y-auto bg-slate-950/40 p-4"><div className="flex min-h-full items-center justify-center"><div role="dialog" aria-modal="true" aria-label={title} className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="mb-3 flex items-center justify-between"><h3 className="font-bold text-slate-800">{title}</h3><button onClick={onClose} aria-label="关闭" className="rounded p-1 text-slate-500 hover:bg-slate-100"><X size={18}/></button></div>{children}</div></div></div>, document.body);
+const ProjectDialog = ({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) => {
+  useEscapeLayer(true, onClose);
+  return createPortal(<div className="fixed inset-x-0 bottom-0 top-10 z-[500] overflow-y-auto bg-slate-950/40 p-4"><div className="flex min-h-full items-center justify-center"><div role="dialog" aria-modal="true" aria-label={title} className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="mb-3 flex items-center justify-between"><h3 className="font-bold text-slate-800">{title}</h3><button onClick={onClose} aria-label="关闭" className="rounded p-1 text-slate-500 hover:bg-slate-100"><X size={18}/></button></div>{children}</div></div></div>, document.body);
+};

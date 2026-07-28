@@ -12,6 +12,17 @@ import gc
 from event_protocol import ask_user, log_error, log_info, log_progress, log_status, log_success
 from ffmpeg_utils import get_ffmpeg_exe
 
+VIDEO_PREVIEW_QUALITY_PROFILES = {
+    'medium': {
+        'label': '中', 'preset': 'medium', 'video_bitrate': '4M',
+        'maxrate': '5M', 'bufsize': '8M', 'audio_bitrate': '128k',
+    },
+    'high': {
+        'label': '高', 'preset': 'medium', 'video_bitrate': '10M',
+        'maxrate': '12M', 'bufsize': '20M', 'audio_bitrate': '192k',
+    },
+}
+
 # --- 2. 辅助工具函数 ---
 def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024, on_progress=None):
     bytes_copied = 0
@@ -155,8 +166,27 @@ def classify_files_by_type(folder_path):
                 shutil.move(src_path, dst_path)
                 break
 
-def generate_video_previews(target_folder):
+def normalize_video_preview_quality(quality):
+    return quality if quality in VIDEO_PREVIEW_QUALITY_PROFILES else 'medium'
+
+
+def build_video_preview_command(ffmpeg_exe, input_path, output_path, quality='medium'):
+    profile = VIDEO_PREVIEW_QUALITY_PROFILES[normalize_video_preview_quality(quality)]
+    return [
+        ffmpeg_exe, '-y', '-i', input_path,
+        '-map', '0:v:0', '-map', '0:a?',
+        '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', '-pix_fmt', 'yuv420p',
+        '-c:v', 'libx264', '-preset', profile['preset'],
+        '-b:v', profile['video_bitrate'], '-maxrate', profile['maxrate'], '-bufsize', profile['bufsize'],
+        '-c:a', 'aac', '-b:a', profile['audio_bitrate'],
+        '-movflags', '+faststart', output_path,
+    ]
+
+
+def generate_video_previews(target_folder, quality='medium'):
     """Create H.264 MP4 previews for the already classified video files."""
+    quality = normalize_video_preview_quality(quality)
+    profile = VIDEO_PREVIEW_QUALITY_PROFILES[quality]
     source_dir = os.path.join(target_folder, 'mov')
     if not os.path.isdir(source_dir):
         return 0, 0
@@ -174,7 +204,7 @@ def generate_video_previews(target_folder):
     ffmpeg_exe = get_ffmpeg_exe()
     succeeded = 0
 
-    log_info(f"正在生成 {len(video_files)} 个视频预览版...")
+    log_info(f"正在生成 {len(video_files)} 个{profile['label']}质量视频预览版...")
     for index, file_name in enumerate(video_files, start=1):
         input_path = os.path.join(source_dir, file_name)
         output_name = f"{Path(file_name).stem}.mp4"
@@ -182,15 +212,7 @@ def generate_video_previews(target_folder):
         if os.path.exists(output_path):
             output_path = os.path.join(output_dir, f"{Path(file_name).stem}_{int(time.time())}.mp4")
 
-        command = [
-            ffmpeg_exe, '-y', '-i', input_path,
-            '-map', '0:v:0', '-map', '0:a?',
-            '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', '-pix_fmt', 'yuv420p',
-            '-c:v', 'libx264', '-preset', 'medium',
-            '-b:v', '4M', '-maxrate', '5M', '-bufsize', '8M',
-            '-c:a', 'aac', '-b:a', '128k',
-            '-movflags', '+faststart', output_path
-        ]
+        command = build_video_preview_command(ffmpeg_exe, input_path, output_path, quality)
         result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
         if result.returncode == 0:
             succeeded += 1
@@ -245,7 +267,7 @@ def split_large_videos(target_folder):
             emit('warning', f'视频分割失败，已保留原文件 {file_name}：{detail}')
     return split_count
 # --- 3. 核心导入流程 ---
-def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_threshold_hours=2.0, should_split=None, generate_video_preview=False, split_large_files=False, project_routes=None, direct_project=False):
+def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_threshold_hours=2.0, should_split=None, generate_video_preview=False, split_large_files=False, project_routes=None, direct_project=False, video_preview_quality='medium'):
     # 临时存放区（即使出错也保留，直到确认安全）
     temp_dir = os.path.join(dest_path, "_PhotoFlow_Safety_Temp")
     
@@ -404,7 +426,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
                 if split_count:
                     log_info(f'大文件分割完成：共处理 {split_count} 个视频')
             if generate_video_preview:
-                preview_count, video_count = generate_video_previews(target_folder)
+                preview_count, video_count = generate_video_previews(target_folder, video_preview_quality)
                 if video_count:
                     log_info(f"视频预览完成：{preview_count}/{video_count} 个文件已保存到 mov_预览")
         # Step 5: 最终校验与清理 SD 卡
@@ -554,6 +576,7 @@ def run(args_list):
     parser.add_argument("--time_gap", type=float, default=2.0)
     parser.add_argument("--should_split", type=str, default="")
     parser.add_argument("--generate_video_preview", action="store_true")
+    parser.add_argument("--video_preview_quality", choices=tuple(VIDEO_PREVIEW_QUALITY_PROFILES), default="medium")
     parser.add_argument("--split_large_files", action="store_true")
     parser.add_argument("--projects_json", default="[]")
     parser.add_argument("--project_routes", default="{}")
@@ -571,7 +594,7 @@ def run(args_list):
     elif args.stage == 'plan':
         stage_plan_import(args.sd_path, args.projects_json, args.import_type, args.time_gap)
     elif args.stage == 'import':
-        stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files, json.loads(args.project_routes or '{}'), args.direct_project)
+        stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files, json.loads(args.project_routes or '{}'), args.direct_project, args.video_preview_quality)
     elif args.stage == 'broll':
         stage_import_broll(args.sd_path, args.dest_path, json.loads(args.project_routes or '{}'))
 

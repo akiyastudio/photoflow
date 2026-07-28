@@ -188,7 +188,6 @@ const run = async () => {
     fs.writeFileSync(currentSystem, 'new clipboard');
     fs.writeFileSync(path.join(conflictProject, 'same.jpg'), 'existing destination');
     const handlers = new Map();
-    let conflictPrompt;
     registerFileOperationsIpc({
       Array, Boolean, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
       ipcMain: { handle: (name, handler) => handlers.set(name, handler), on: () => {} },
@@ -196,16 +195,16 @@ const run = async () => {
       assertInside, assertExistingInside, capturePathIdentity, samePathIdentity,
       fileOperationState: { projectFileClipboard: { operation: 'copy', sources: [staleInternal] } },
       readSystemFileClipboard: async () => ({ operation: 'copy', sources: [currentSystem] }),
-      dialog: { showMessageBox: async (_window, options) => { conflictPrompt = options; return { response: 2 }; } },
       mainWindow: null, writeLog: () => {},
     });
     const conflictResult = await handlers.get('workspace-file-operation')(
       { sender: { isDestroyed: () => false, send: () => {} } },
       'workspace', '策划中', 'project', 'paste', [], '',
     );
-    assert.strictEqual(conflictResult.cancelled, true);
-    assert.deepStrictEqual(conflictPrompt.buttons, ['替换并继续', '保留两者', '取消']);
-    assert(conflictPrompt.message.includes('same.jpg'), 'the current Windows clipboard item must drive conflict detection');
+    assert.strictEqual(conflictResult.success, true);
+    assert.strictEqual(conflictResult.requiresDecision.kind, 'paste-conflict');
+    assert(conflictResult.requiresDecision.message.includes('same.jpg'), 'the current Windows clipboard item must drive conflict detection');
+    assert.strictEqual(fs.readFileSync(path.join(conflictProject, 'same.jpg'), 'utf8'), 'existing destination', 'decision preflight must not modify the destination');
 
     const failureProject = path.join(root, 'replacement-failure-project');
     const failureExternal = path.join(root, 'replacement-failure-external');
@@ -222,14 +221,13 @@ const run = async () => {
       fs, path, getProjectPath: () => failureProject, activeProjectFileOperations: new Map(),
       fileOperationState: { projectFileClipboard: null },
       readSystemFileClipboard: async () => ({ operation: 'copy', sources: [failureSource] }),
-      dialog: { showMessageBox: async () => ({ response: 0 }) },
       mainWindow: null, writeLog: () => {}, assertInside, assertExistingInside, assertDiskSpace, capturePathIdentity, samePathIdentity,
       collectCopyPlan, copyPlannedFiles: async () => { throw new Error('simulated copy failure'); },
       removeCreatedPasteTargets, throwIfCancelled, uniqueDestination,
     });
     const failureResult = await failureHandlers.get('workspace-file-operation')(
       { sender: { isDestroyed: () => false, send: () => {} } },
-      'workspace', '策划中', 'project', 'paste', [], '',
+      'workspace', '策划中', 'project', 'paste', [], '', '', { pasteConflictPolicy: 'replace' },
     );
     assert.strictEqual(failureResult.success, false);
     assert.strictEqual(fs.readFileSync(failureTarget, 'utf8'), 'original content', 'a failed replacement must not touch the old target');
@@ -251,7 +249,6 @@ const run = async () => {
       fs, path, getProjectPath: () => successProject, activeProjectFileOperations: new Map(),
       fileOperationState: { projectFileClipboard: null }, clipboard: { clear: () => {} },
       readSystemFileClipboard: async () => ({ operation: 'copy', sources: [successSource] }),
-      dialog: { showMessageBox: async () => ({ response: 0 }) },
       mainWindow: null, writeLog: () => {}, assertInside, assertExistingInside, assertDiskSpace, capturePathIdentity, samePathIdentity,
       collectCopyPlan, copyPlannedFiles, removeCreatedPasteTargets, throwIfCancelled, uniqueDestination,
       recycleBinService: { trash: async () => { throw new Error('simulated recycle failure'); } },
@@ -259,7 +256,7 @@ const run = async () => {
     });
     const successResult = await successHandlers.get('workspace-file-operation')(
       { sender: { isDestroyed: () => false, send: () => {} } },
-      'workspace', '策划中', 'project', 'paste', [], '',
+      'workspace', '策划中', 'project', 'paste', [], '', '', { pasteConflictPolicy: 'replace' },
     );
     assert.strictEqual(successResult.success, true);
     assert.strictEqual(successResult.replacedRetainedCount, 1);
@@ -279,6 +276,31 @@ const run = async () => {
     assert.strictEqual(undoReplacementResult.success, true);
     assert.strictEqual(fs.readFileSync(successTarget, 'utf8'), 'restorable original');
     assert.strictEqual(fs.readdirSync(successProject).some(name => name.startsWith('.photoflow-')), false);
+
+    const occupiedRestorePath = path.join(root, 'occupied-restore.txt');
+    fs.writeFileSync(occupiedRestorePath, 'new occupant');
+    const restoreHandlers = new Map();
+    const restoreHistory = [{
+      kind: 'trash',
+      items: [{ original: occupiedRestorePath, originalIdentity: { device: '-1', inode: '-1', size: '0', modifiedNs: '0', directory: false }, recyclePidl: 'restore-item' }],
+    }];
+    registerWorkspaceIpc({
+      Array, Boolean, Date, Error, Math, Object, Promise, Set, String, undefined, crypto,
+      ipcMain: { handle: (name, handler) => restoreHandlers.set(name, handler) }, fs, path, renameHistory: restoreHistory,
+      pathExists: async value => fs.existsSync(value), samePathIdentity,
+      recycleBinService: {
+        probe: async () => ({ exists: true }),
+        restore: async ({ originalPath }) => { fs.writeFileSync(originalPath, 'restored item'); },
+      },
+    });
+    const restoreDecision = await restoreHandlers.get('workspace-undo-rename')(null, '');
+    assert.strictEqual(restoreDecision.requiresDecision.kind, 'restore-conflict');
+    assert.strictEqual(fs.readFileSync(occupiedRestorePath, 'utf8'), 'new occupant', 'restore decision preflight must not replace the occupied path');
+    assert.strictEqual(restoreHistory.length, 1, 'a deferred restore must remain undoable after cancelling the dialog');
+    const renamedRestore = await restoreHandlers.get('workspace-undo-rename')(null, '', { restoreConflictPolicy: 'rename' });
+    assert.strictEqual(renamedRestore.success, true);
+    assert.strictEqual(fs.readFileSync(occupiedRestorePath, 'utf8'), 'new occupant');
+    assert.strictEqual(fs.readFileSync(path.join(root, 'occupied-restore (已恢复).txt'), 'utf8'), 'restored item');
 
     const concurrencyHandlers = new Map();
     const activeOperations = new Map();

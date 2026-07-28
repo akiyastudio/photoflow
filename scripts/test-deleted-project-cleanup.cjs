@@ -46,11 +46,35 @@ try {
   assert.strictEqual(deleted[0].recyclePidl, 'test-pidl');
 
   fs.rmSync(projectPath, { recursive: true });
+  const cleanupPlan = run('deleted_project_cleanup_plan', { projectId: deleted[0].id });
+  assert.strictEqual(cleanupPlan.name, projectName);
+  assert.strictEqual(cleanupPlan.photoIds.length, 1);
+  assert.strictEqual(run('deleted_projects_list').projects.length, 1, 'cleanup planning must not purge recoverable database state');
   const purged = run('purge_deleted_project', { projectId: deleted[0].id });
   assert.strictEqual(purged.name, projectName);
   assert.strictEqual(purged.photoIds.length, 1);
   assert.strictEqual(run('deleted_projects_list').projects.length, 0);
   assert.strictEqual(run('undo_record_latest').record, null);
+
+  const permanentProjectName = 'permanent-project';
+  const permanentProjectPath = path.join(workspace, permanentProjectName);
+  fs.mkdirSync(permanentProjectPath, { recursive: true });
+  run('init');
+  run('undo_record_add', {
+    kind: 'project-cleanup',
+    payload: {
+      items: [{ original: permanentProjectPath, permanent: true }],
+      projectCatalog: { name: permanentProjectName, status: '未分类' },
+    },
+  });
+  run('delete', { name: permanentProjectName });
+  fs.rmSync(permanentProjectPath, { recursive: true });
+  const permanentDeleted = run('deleted_projects_list').projects.find(project => project.name === permanentProjectName);
+  assert(permanentDeleted);
+  assert.strictEqual(permanentDeleted.permanent, true);
+  assert.strictEqual(run('undo_record_latest').record, null, 'cleanup-only records must never appear as user undo operations');
+  run('purge_deleted_project', { projectId: permanentDeleted.id });
+  assert.strictEqual(run('deleted_projects_list').projects.length, 0);
   process.stdout.write('Deleted project cleanup tests passed.\n');
 } finally {
   fs.rmSync(testRoot, { recursive: true, force: true });

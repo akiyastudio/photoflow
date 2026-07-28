@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "components" / "office-media-extractor" / "office_media_extractor.py"
+SOURCE = ROOT / "python" / "office_media_extract.py"
 SPEC = importlib.util.spec_from_file_location("office_media_extractor", SOURCE)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader

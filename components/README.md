@@ -17,8 +17,6 @@ Each component has one application-data directory:
 
 ```text
 %LOCALAPPDATA%\PhotoFlow\components\team-retouch
-%LOCALAPPDATA%\PhotoFlow\components\research-tools
-%LOCALAPPDATA%\PhotoFlow\components\office-media-extractor
 ```
 
 All component ZIPs contain self-contained executables; end users do not install
@@ -65,9 +63,8 @@ The current component IDs are:
   GPU/CPU person detection, lossless crop export, high-resolution alignment,
   color matching, overlap blending, and recomposition. When it is missing the
   whole team-retouch workflow is unavailable.
-- `research-tools`: research image/video organization and scene extraction.
-- `office-media-extractor`: extracts embedded images from Office Open XML Word,
-  PowerPoint, and Excel documents into a sibling `<document>_media` directory.
+The inspiration library, scene organizer, and Office image extractor are part
+of the main application and are not component IDs.
 
 Run `npm run setup:team-retouch` once to create/prepare the development virtual
 environment and verify that the DirectML provider is available. Run
@@ -75,5 +72,5 @@ environment and verify that the DirectML provider is available. Run
 under `release/components/team-retouch`; the packaged component includes ONNX
 Runtime and does not require Python on the user's machine.
 
-`npm run build:components` builds every optional component. Components remain
+`npm run build:components` builds the optional team-retouch component. Components remain
 separate from the base PhotoFlow installer so the core application stays small.

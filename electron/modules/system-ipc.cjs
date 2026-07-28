@@ -1,5 +1,5 @@
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, undefined, writeLog } = context;
   const activePythonTasks = new Map();
   let advancedOperation = null;
 
@@ -35,6 +35,134 @@ const registerSystemIpc = context => {
     return { installRoot, vhdPath, sizeBytes, freeBytes };
   };
 
+  const componentStatusCachePath = path.join(app.getPath('userData'), 'component-status-cache.json');
+  let componentStatusCache = { updatedAt: 0, components: [] };
+  try {
+    const parsed = JSON.parse(fs.readFileSync(componentStatusCachePath, 'utf8'));
+    if (Array.isArray(parsed?.components)) componentStatusCache = parsed;
+  } catch { /* the cache is optional */ }
+  let componentStatusDirty = false;
+  let componentStatusRefreshActive = false;
+  let componentStatusGeneration = 0;
+
+  const mergeCachedComponentStatuses = components => components.map(component => {
+    const cached = componentStatusCache.components.find(item => item.id === component.id);
+    const compatibleCache = cached
+      && cached.installed === component.installed
+      && String(cached.version || '') === String(component.version || '');
+    return {
+      ...(compatibleCache ? cached : {}),
+      ...component,
+      sizeBytes: compatibleCache ? Number(cached.sizeBytes || 0) : Number(component.sizeBytes || 0),
+      packagePath: componentRoot(component.id),
+    };
+  });
+
+  const refreshDetailedComponentStatuses = async task => {
+    const refreshGeneration = componentStatusGeneration;
+    task?.report(5, '正在后台读取组件占用空间');
+    const components = await pluginService.listWithSizes();
+    for (const component of components) component.packagePath = componentRoot(component.id);
+    const gpu = components.find(component => component.id === 'team-retouch');
+    if (gpu?.installed) {
+      try {
+        const probe = await pluginService.runJson('team-retouch', ['probe'], 60000);
+        const runtimeAvailable = Boolean(probe.componentAvailable ?? probe.cpuAvailable);
+        Object.assign(gpu, {
+          runtimeAvailable,
+          gpuAvailable: Boolean(probe.gpuAvailable),
+          advancedAvailable: Boolean(probe.advancedAvailable),
+          mergeAvailable: Boolean(probe.mergeAvailable),
+          identityAvailable: Boolean(probe.identityAvailable),
+          faceBackend: probe.faceBackend || '',
+          bodyBackend: probe.bodyBackend || '',
+          identityError: probe.identityError || '',
+          provider: probe.provider || '',
+          advancedProvider: probe.advancedAvailable ? 'PairDETR + SAM 2.1 · NVIDIA CUDA' : '',
+          providers: Array.isArray(probe.providers) ? probe.providers : [],
+          runtimeError: runtimeAvailable ? '' : (probe.runtimeError || probe.error || ''),
+          gpuError: probe.gpuAvailable || !runtimeAvailable ? '' : (probe.gpuError || probe.error || ''),
+          advancedError: probe.advancedAvailable ? '' : (probe.advancedError || ''),
+        });
+      } catch (error) {
+        Object.assign(gpu, { runtimeAvailable: false, provider: '', providers: [], runtimeError: error.message || String(error) });
+      }
+      const storage = await readAdvancedStorage();
+      Object.assign(gpu, {
+        advancedSizeBytes: storage.sizeBytes,
+        advancedFreeBytes: storage.freeBytes,
+        advancedState: gpu.advancedAvailable ? 'ready' : storage.vhdPath ? 'repair-needed' : 'not-installed',
+      });
+    }
+    componentStatusCache = { updatedAt: Date.now(), components };
+    componentStatusDirty = componentStatusGeneration !== refreshGeneration;
+    await fs.promises.writeFile(componentStatusCachePath, JSON.stringify(componentStatusCache), 'utf8').catch(error => {
+      writeLog('warn', 'Unable to persist component status cache', { error: error.message || String(error) });
+    });
+    task?.report(100, '组件状态已刷新');
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('components-status-changed', {
+      success: true,
+      components,
+      installPath: pluginService.installRoot,
+    });
+    return { count: components.length };
+  };
+
+  const queueComponentStatusRefresh = (force = false) => {
+    if (componentStatusRefreshActive) return;
+    if (!force && !componentStatusDirty && Date.now() - Number(componentStatusCache.updatedAt || 0) < 5 * 60 * 1000) return;
+    componentStatusRefreshActive = true;
+    const execute = async task => {
+      try { return await refreshDetailedComponentStatuses(task); }
+      finally {
+        componentStatusRefreshActive = false;
+        if (componentStatusDirty) setTimeout(() => queueComponentStatusRefresh(true), 100);
+      }
+    };
+    if (!backgroundTasks?.run) {
+      setTimeout(() => void execute().catch(error => writeLog('warn', 'Background component status refresh failed', { error: error.message || String(error) })), 0);
+      return;
+    }
+    const run = () => backgroundTasks.run({
+      type: 'component-status-refresh',
+      title: '刷新组件状态',
+      dedupeKey: 'component-status-refresh',
+      cancellable: false,
+    }, execute, run);
+    setTimeout(() => void run().catch(error => writeLog('warn', 'Background component status refresh failed', { error: error.message || String(error) })), 100);
+  };
+
+  const invalidateComponentStatus = () => {
+    componentStatusGeneration += 1;
+    componentStatusDirty = true;
+    queueComponentStatusRefresh(true);
+  };
+
+  const queueSystemFilesystemCleanup = (paths, title) => {
+    const targets = [...new Set((paths || []).filter(Boolean).map(candidate => path.resolve(candidate)))];
+    if (!targets.length) return;
+    const execute = async task => {
+      task?.report(10, title);
+      for (const target of targets) await fs.promises.rm(target, { recursive: true, force: true }).catch(error => {
+        writeLog('warn', 'Deferred system cleanup failed', { path: target, error: error.message || String(error) });
+      });
+      task?.report(100, '清理完成');
+      return { removedCount: targets.length };
+    };
+    if (!backgroundTasks?.run) {
+      setTimeout(() => void execute(), 0);
+      return;
+    }
+    const dedupeKey = `system-filesystem-cleanup:${crypto.randomUUID()}`;
+    const run = () => backgroundTasks.run({
+      type: 'system-filesystem-cleanup',
+      title,
+      dedupeKey,
+      cancellable: false,
+    }, execute, run);
+    setTimeout(() => void run().catch(error => writeLog('warn', 'Deferred system cleanup failed', { error: error.message || String(error) })), 250);
+  };
+
   const resolveAdvancedInstaller = (component, fileName) => app.isPackaged
     ? path.join(component.path, 'advanced-installer', fileName)
     : path.resolve(component.path, '..', '..', 'scripts', fileName);
@@ -62,7 +190,7 @@ const registerSystemIpc = context => {
       archivePath = await resolveAdvancedPackage();
       allowedRoot = teamRetouchRoot();
     } else if (kind === 'component') {
-      const known = (await pluginService.listWithSizes()).find(component => component.id === componentId);
+      const known = pluginService.list().find(component => component.id === componentId);
       if (!known) throw new Error(`未知组件：${componentId}`);
       archivePath = await resolveComponentPackage(componentId);
       allowedRoot = componentRoot(componentId);
@@ -169,41 +297,8 @@ const registerSystemIpc = context => {
   ipcMain.handle('cursor-screen-point', () => screen.getCursorScreenPoint());
   
   ipcMain.handle('components-list', async () => {
-    const components = await pluginService.listWithSizes();
-    for (const component of components) component.packagePath = componentRoot(component.id);
-    const gpu = components.find(component => component.id === 'team-retouch');
-    if (gpu?.installed) {
-      try {
-        // A cold WSL start can take longer than 15 seconds even when the
-        // advanced runtime is healthy. Avoid caching a false "not installed" state.
-        const probe = await pluginService.runJson('team-retouch', ['probe'], 60000);
-        const runtimeAvailable = Boolean(probe.componentAvailable ?? probe.cpuAvailable);
-        Object.assign(gpu, {
-          runtimeAvailable,
-          gpuAvailable: Boolean(probe.gpuAvailable),
-          advancedAvailable: Boolean(probe.advancedAvailable),
-          mergeAvailable: Boolean(probe.mergeAvailable),
-          identityAvailable: Boolean(probe.identityAvailable),
-          faceBackend: probe.faceBackend || '',
-          bodyBackend: probe.bodyBackend || '',
-          identityError: probe.identityError || '',
-          provider: probe.provider || '',
-          advancedProvider: probe.advancedAvailable ? 'PairDETR + SAM 2.1 · NVIDIA CUDA' : '',
-          providers: Array.isArray(probe.providers) ? probe.providers : [],
-          runtimeError: runtimeAvailable ? '' : (probe.runtimeError || probe.error || ''),
-          gpuError: probe.gpuAvailable || !runtimeAvailable ? '' : (probe.gpuError || probe.error || ''),
-          advancedError: probe.advancedAvailable ? '' : (probe.advancedError || ''),
-        });
-      } catch (error) {
-        Object.assign(gpu, { runtimeAvailable: false, provider: '', providers: [], runtimeError: error.message || String(error) });
-      }
-      const storage = await readAdvancedStorage();
-      Object.assign(gpu, {
-        advancedSizeBytes: storage.sizeBytes,
-        advancedFreeBytes: storage.freeBytes,
-        advancedState: gpu.advancedAvailable ? 'ready' : storage.vhdPath ? 'repair-needed' : 'not-installed',
-      });
-    }
+    const components = mergeCachedComponentStatuses(pluginService.list());
+    queueComponentStatusRefresh();
     return { success: true, components, installPath: pluginService.installRoot };
   });
   
@@ -212,7 +307,7 @@ const registerSystemIpc = context => {
       const installRoot = pluginService.ensureInstallRoot();
       let installPath = installRoot;
       if (componentId) {
-        const known = (await pluginService.listWithSizes()).find(component => component.id === componentId);
+        const known = pluginService.list().find(component => component.id === componentId);
         if (!known) throw new Error(`未知组件：${componentId}`);
         installPath = componentRoot(componentId);
         await fs.promises.mkdir(installPath, { recursive: true });
@@ -272,7 +367,7 @@ const registerSystemIpc = context => {
     let packageStagePath = '';
     try {
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，请在打包版本中测试安装');
-      const knownComponent = (await pluginService.listWithSizes()).find(component => component.id === componentId);
+      const knownComponent = pluginService.list().find(component => component.id === componentId);
       if (!knownComponent) throw new Error(`未知组件：${componentId}`);
       const archivePath = await resolveComponentPackage(componentId);
       const packageSizeBytes = (await fs.promises.stat(archivePath)).size;
@@ -314,10 +409,11 @@ const registerSystemIpc = context => {
         backupPath = '';
         throw error;
       }
-      if (backupPath) {
-        await shell.trashItem(backupPath).catch(error => writeLog('warn', 'Unable to recycle replaced component backup', { componentId, backupPath, error: error.message || String(error) }));
-        backupPath = '';
-      }
+      const cleanupPaths = [backupPath, packageStagePath].filter(Boolean);
+      backupPath = '';
+      packageStagePath = '';
+      queueSystemFilesystemCleanup(cleanupPaths, `清理“${componentId}”组件旧文件`);
+      invalidateComponentStatus();
       writeLog('info', 'Component installed', { componentId, destination });
       return { success: true, packageSizeBytes };
     } catch (error) {
@@ -345,7 +441,7 @@ const registerSystemIpc = context => {
   ipcMain.handle('components-uninstall', async (_event, componentId) => {
     try {
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，不能在应用内卸载');
-      const component = (await pluginService.listWithSizes()).find(item => item.id === componentId);
+      const component = pluginService.list().find(item => item.id === componentId);
       if (!component?.installed) throw new Error('组件尚未安装');
       if (component.source !== 'application') throw new Error('此组件随应用提供，不能单独卸载');
       const installRoot = path.resolve(pluginService.installRoot);
@@ -354,6 +450,7 @@ const registerSystemIpc = context => {
       const relative = path.relative(installRoot, containerPath);
       if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || path.basename(containerPath) !== componentId) throw new Error('组件目录校验失败');
       await shell.trashItem(containerPath);
+      invalidateComponentStatus();
       writeLog('info', 'Component uninstalled', { componentId, componentPath: containerPath });
       return { success: true };
     } catch (error) {
@@ -364,7 +461,7 @@ const registerSystemIpc = context => {
   ipcMain.handle('team-retouch-advanced-preflight', async event => {
     if (advancedOperation) return { success: false, error: '另一项高级环境操作正在进行' };
     try {
-      const component = (await pluginService.listWithSizes()).find(item => item.id === 'team-retouch');
+      const component = pluginService.list().find(item => item.id === 'team-retouch');
       if (!component?.installed) throw new Error('请先安装“团片协作”基础组件');
       const installer = resolveAdvancedInstaller(component, 'setup-team-retouch-advanced.ps1');
       if (!(await fs.promises.stat(installer).catch(() => null))?.isFile()) throw new Error('高级环境离线安装器未随组件提供');
@@ -382,7 +479,7 @@ const registerSystemIpc = context => {
   ipcMain.handle('team-retouch-advanced-install', async (event, options = {}) => {
     if (advancedOperation) return { success: false, error: '另一项高级环境操作正在进行' };
     try {
-      const component = (await pluginService.listWithSizes()).find(item => item.id === 'team-retouch');
+      const component = pluginService.list().find(item => item.id === 'team-retouch');
       if (!component?.installed) throw new Error('请先安装“团片协作”基础组件');
       const installer = resolveAdvancedInstaller(component, 'setup-team-retouch-advanced.ps1');
       if (!(await fs.promises.stat(installer).catch(() => null))?.isFile()) throw new Error('高级环境安装器未随组件提供，请重新构建或安装组件');
@@ -397,6 +494,7 @@ const registerSystemIpc = context => {
       if (!runtimeProbe.pairDetrReady || !runtimeProbe.sam2Ready) throw new Error('高级模型服务没有全部进入可用状态');
       if (!event.sender.isDestroyed()) event.sender.send('team-retouch-advanced-progress', { phase: 'complete', progress: 100, message: '高级引擎安装并验证完成' });
       writeLog('info', 'Team retouch advanced environment installed from offline package', { installRoot, packagePath, repair: Boolean(options.repair) });
+      invalidateComponentStatus();
       return { success: true, packageSizeBytes };
     } catch (error) {
       writeLog('error', 'Unable to install team retouch advanced environment', { error: error.message || String(error) });
@@ -409,13 +507,14 @@ const registerSystemIpc = context => {
   ipcMain.handle('team-retouch-advanced-uninstall', async event => {
     if (advancedOperation) return { success: false, error: '另一项高级环境操作正在进行' };
     try {
-      const component = (await pluginService.listWithSizes()).find(item => item.id === 'team-retouch');
+      const component = pluginService.list().find(item => item.id === 'team-retouch');
       if (!component?.installed) throw new Error('团片协作组件未安装');
       const uninstaller = resolveAdvancedInstaller(component, 'uninstall-team-retouch-advanced.ps1');
       if (!(await fs.promises.stat(uninstaller).catch(() => null))?.isFile()) throw new Error('高级环境卸载器不存在');
       if (!event.sender.isDestroyed()) event.sender.send('team-retouch-advanced-progress', { phase: 'uninstalling', progress: 20, message: '正在停止并删除高级引擎' });
       advancedOperation = runAdvancedPowerShell(event, uninstaller);
       await advancedOperation;
+      invalidateComponentStatus();
       writeLog('info', 'Team retouch advanced environment uninstalled');
       return { success: true };
     } catch (error) {
@@ -444,7 +543,7 @@ const registerSystemIpc = context => {
     const backups = [];
     const installedTargets = [];
     try {
-      const component = (await pluginService.listWithSizes()).find(item => item.id === 'team-retouch');
+      const component = pluginService.list().find(item => item.id === 'team-retouch');
       if (!component?.installed) throw new Error('请先安装“团片协作”组件');
       const archivePath = await resolveIdentityPackage();
       const packageSizeBytes = (await fs.promises.stat(archivePath)).size;
@@ -488,7 +587,12 @@ const registerSystemIpc = context => {
         const source = path.join(stagePath, fileName);
         if ((await fs.promises.stat(source).catch(() => null))?.isFile()) await fs.promises.copyFile(source, path.join(targetRoot, fileName));
       }
-      for (const item of backups) await fs.promises.rm(item.backup, { force: true }).catch(() => undefined);
+      const cleanupPaths = [stagePath, ...backups.map(item => item.backup), ...prepared.map(item => item.temporary)].filter(Boolean);
+      stagePath = '';
+      backups.splice(0);
+      prepared.splice(0);
+      queueSystemFilesystemCleanup(cleanupPaths, '清理人物识别模型安装临时文件');
+      invalidateComponentStatus();
       writeLog('info', 'Prepared identity model package installed', { archivePath, targetRoot, version: component.version });
       return { success: true, packageSizeBytes };
     } catch (error) {
@@ -717,7 +821,6 @@ const registerSystemIpc = context => {
   ipcMain.handle('check-script', async (event, scriptName) => {
     try {
       const baseName = scriptName.replace('.py', '');
-      if (baseName === 'research') return Boolean(pluginService.inspect('research-tools')?.installed);
       if (!app.isPackaged) {
         console.log(`[开发模式] 自动放行组件检查: ${scriptName}`);
         return true; 
@@ -726,7 +829,7 @@ const registerSystemIpc = context => {
       const isWin = process.platform === 'win32';
       const exeSuffix = isWin ? '.exe' : '';
       // 打包后去 resources/python 目录下寻找 Python 引擎文件
-      const executableName = baseName === 'thumbnail_image' ? 'thumbnail-image-worker' : baseName === 'workspace_db' ? 'workspace-db-worker' : MERGED_PYTHON_TOOLS.has(baseName) ? 'tools' : baseName;
+      const executableName = baseName === 'thumbnail_image' ? 'thumbnail-image-worker' : baseName === 'workspace_db' ? 'workspace-db-worker' : MERGED_PYTHON_TOOLS.has(baseName) ? 'tools' : INSPIRATION_PYTHON_TOOLS.has(baseName) ? 'inspiration-tools' : baseName;
       const scriptPath = path.join(process.resourcesPath, 'python', executableName, `${executableName}${exeSuffix}`);
       return fs.existsSync(scriptPath);
       
