@@ -99,6 +99,7 @@ const registerBrollImportIpc = ({
   writeLog,
   pushUndoOperation,
   activeOperations,
+  getTelemetry,
 }) => {
   ipcMain.handle('workspace-import-broll', async (event, workspacePath, status, projectName, options = {}) => {
     const operationId = crypto.randomUUID();
@@ -223,6 +224,12 @@ const registerBrollImportIpc = ({
       const warning = warningParts.join('；');
       publish({ phase: 'complete', progress: 100, currentName: '花絮导入完成', bytesCopied: totalBytes, totalBytes, filesCopied: sources.length, totalFiles: sources.length });
       writeLog('info', 'B-roll imported', { projectPath, count: sources.length, splitCount, clearedCount, totalBytes, warning });
+      const telemetry = getTelemetry?.();
+      telemetry?.track('photos_imported', {
+        count_bucket: telemetry.countBucket(sources.length),
+        source: 'broll',
+        media_kind: 'mixed',
+      });
       return { success: true, operationId, count: sources.length, splitCount, clearedCount, warning: warning || undefined };
     } catch (error) {
       for (const move of [...moves].reverse()) {

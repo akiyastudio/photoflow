@@ -1,7 +1,17 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+const trackFeature = feature => ipcRenderer.send('telemetry-track', 'feature_used', { feature });
+const invokeFeature = (feature, channel, ...args) => {
+  trackFeature(feature);
+  return ipcRenderer.invoke(channel, ...args);
+};
+
 contextBridge.exposeInMainWorld('electronAPI', {
-  runScript: (scriptName, args, requestId) => ipcRenderer.send('run-python', scriptName, args, requestId),
+  runScript: (scriptName, args, requestId) => {
+    const feature = String(scriptName || '').replace(/\.py$/i, '').replace(/[^a-z0-9_]/gi, '_').slice(0, 48);
+    if (feature) trackFeature(feature);
+    ipcRenderer.send('run-python', scriptName, args, requestId);
+  },
   cancelPythonTask: (requestId) => ipcRenderer.invoke('cancel-python', requestId),
   getBirthdays: () => ipcRenderer.invoke('get-birthdays'),
   saveBirthdays: (data) => ipcRenderer.invoke('save-birthdays', data),
@@ -53,9 +63,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   trashWorkspaceProject: (workspacePath, status, name) => ipcRenderer.invoke('workspace-trash-project', workspacePath, status, name),
   cleanupDeletedWorkspaceProjects: (workspacePath) => ipcRenderer.invoke('workspace-cleanup-deleted-projects', workspacePath),
   getProjectContents: (workspacePath, status, name) => ipcRenderer.invoke('workspace-project-contents', workspacePath, status, name),
+  watchFileRoot: (workspacePath, status, name) => ipcRenderer.invoke('workspace-watch-file-root', workspacePath, status, name),
+  unwatchFileRoot: (workspacePath, status, name) => ipcRenderer.invoke('workspace-unwatch-file-root', workspacePath, status, name),
   browseProjectFiles: (workspacePath, status, name, relativePath, cacheConfig) => ipcRenderer.invoke('workspace-browse-files', workspacePath, status, name, relativePath, cacheConfig),
+  resolveProjectShortcut: (workspacePath, status, name, relativePath) => ipcRenderer.invoke('workspace-resolve-shortcut', workspacePath, status, name, relativePath),
   searchProjectFiles: (workspacePath, status, name, scopeRelativePath, query) => ipcRenderer.invoke('workspace-search-files', workspacePath, status, name, scopeRelativePath, query),
-  extractOfficeImages: (workspacePath, status, name, relativePaths) => ipcRenderer.invoke('workspace-extract-office-images', workspacePath, status, name, relativePaths),
+  listRecentProjectFiles: (workspacePath, status, name, scopeRelativePath, limit, cursor) => ipcRenderer.invoke('workspace-recent-files', workspacePath, status, name, scopeRelativePath, limit, cursor),
+  listWorkspaceFolders: (workspacePath, status, name) => ipcRenderer.invoke('workspace-folder-tree', workspacePath, status, name),
+  addInspirationToProject: (inspirationRoot, targetWorkspacePath, targetStatus, targetProjectName, relativePaths) => ipcRenderer.invoke('workspace-add-inspiration-to-project', inspirationRoot, targetWorkspacePath, targetStatus, targetProjectName, relativePaths),
+  extractOfficeImages: (workspacePath, status, name, relativePaths) => invokeFeature('office_media_extract', 'workspace-extract-office-images', workspacePath, status, name, relativePaths),
   getProjectFileDetails: (workspacePath, status, name, relativePaths) => ipcRenderer.invoke('workspace-file-details', workspacePath, status, name, relativePaths),
   getProjectEntryDetails: (workspacePath, status, name, relativePath) => ipcRenderer.invoke('workspace-entry-details', workspacePath, status, name, relativePath),
   getMediaVersions: (workspacePath, status, name, relativePath) => ipcRenderer.invoke('workspace-media-versions', workspacePath, status, name, relativePath),
@@ -70,11 +86,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ensureSelectionBaseline: (workspacePath, status, projectName) => ipcRenderer.invoke('workspace-selection-baseline-ensure', workspacePath, status, projectName),
   getFinalVersionSummary: (workspacePath, projectName) => ipcRenderer.invoke('workspace-final-version-summary', workspacePath, projectName),
   browseFinalVersions: (workspacePath, status, projectName) => ipcRenderer.invoke('workspace-final-version-browse', workspacePath, status, projectName),
-  exportFinalVersions: (workspacePath, status, projectName) => ipcRenderer.invoke('workspace-final-version-export', workspacePath, status, projectName),
+  exportFinalVersions: (workspacePath, status, projectName) => invokeFeature('final_version_export', 'workspace-final-version-export', workspacePath, status, projectName),
   createProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-create-progress-folder', workspacePath, status, projectName, request),
   registerProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-progress-register', workspacePath, status, projectName, request),
   registerVersionBaseline: (workspacePath, status, projectName, relativePath) => ipcRenderer.invoke('workspace-version-register-baseline', workspacePath, status, projectName, relativePath),
-  compareVersionFolders: (workspacePath, status, projectName, referenceRelativePath, sourceRelativePath) => ipcRenderer.invoke('workspace-version-compare-preview', workspacePath, status, projectName, referenceRelativePath, sourceRelativePath),
+  compareVersionFolders: (workspacePath, status, projectName, referenceRelativePath, sourceRelativePath) => invokeFeature('version_folder_compare', 'workspace-version-compare-preview', workspacePath, status, projectName, referenceRelativePath, sourceRelativePath),
   commitVersionBatch: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-version-batch-commit', workspacePath, status, projectName, request),
   getTeamPatches: (workspacePath, status, projectName, relativePath) => ipcRenderer.invoke('workspace-team-patches', workspacePath, status, projectName, relativePath),
   getTeamProjectWorkspace: (workspacePath, projectName) => ipcRenderer.invoke('workspace-team-project', workspacePath, projectName),
@@ -89,13 +105,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveTeamWorkflowSettings: (workspacePath, request) => ipcRenderer.invoke('workspace-team-workflow-settings-save', workspacePath, request),
   excludeTeamPerson: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-team-person-exclude', workspacePath, status, projectName, request),
   removeProjectTeamPhoto: (workspacePath, request) => ipcRenderer.invoke('workspace-team-project-remove-photo', workspacePath, request),
-  generateTeamWorkflow: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-team-workflow-generate', workspacePath, status, projectName, request),
+  generateTeamWorkflow: (workspacePath, status, projectName, request) => invokeFeature('team_workflow_generate', 'workspace-team-workflow-generate', workspacePath, status, projectName, request),
   getTeamWorkflowGenerationStatus: (workspacePath, status, projectName) => ipcRenderer.invoke('workspace-team-workflow-status', workspacePath, status, projectName),
   cancelTeamWorkflowGeneration: (operationId) => ipcRenderer.invoke('workspace-team-workflow-cancel', operationId),
   onTeamWorkflowGenerationProgress: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-team-workflow-progress', subscription); return () => ipcRenderer.removeListener('workspace-team-workflow-progress', subscription); },
   exportTeamIdentityTasks: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-team-identity-export', workspacePath, status, projectName, request),
   returnTeamWorkflowBatch: (workspacePath, projectName, request) => ipcRenderer.invoke('workspace-team-workflow-return-batch', workspacePath, projectName, request),
-  detectTeamPatchPeople: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-team-patch-detect', workspacePath, status, projectName, request),
+  detectTeamPatchPeople: (workspacePath, status, projectName, request) => invokeFeature('team_person_detect', 'workspace-team-patch-detect', workspacePath, status, projectName, request),
   onTeamPatchDetectionProgress: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-team-patch-detect-progress', subscription); return () => ipcRenderer.removeListener('workspace-team-patch-detect-progress', subscription); },
   detectTeamPatchBatch: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-team-patch-detect-batch', workspacePath, status, projectName, request),
   onTeamPatchBatchProgress: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-team-patch-detect-batch-progress', subscription); return () => ipcRenderer.removeListener('workspace-team-patch-detect-batch-progress', subscription); },
@@ -109,16 +125,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onTeamPatchReturnBatchProgress: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-team-patch-return-batch-progress', subscription); return () => ipcRenderer.removeListener('workspace-team-patch-return-batch-progress', subscription); },
   openTeamPatch: (filePath) => ipcRenderer.invoke('workspace-team-patch-open', filePath),
   openTeamPatchFolder: (filePath) => ipcRenderer.invoke('workspace-team-patch-open-folder', filePath),
-  mergeTeamPatches: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-team-patch-merge', workspacePath, status, projectName, request),
+  mergeTeamPatches: (workspacePath, status, projectName, request) => invokeFeature('team_patch_merge', 'workspace-team-patch-merge', workspacePath, status, projectName, request),
   getMediaThumbnail: (filePath, kind, cacheConfig, requestedSize, priority, queueOrder) => ipcRenderer.invoke('media-thumbnail', filePath, kind, cacheConfig, requestedSize, priority, queueOrder),
   cancelMediaThumbnail: (filePath, requestedSize) => ipcRenderer.invoke('media-thumbnail-cancel', filePath, requestedSize),
   onThumbnailStateChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('thumbnail-state-changed', subscription); return () => ipcRenderer.removeListener('thumbnail-state-changed', subscription); },
   getMediaOriginal: (filePath, kind, cacheConfig) => ipcRenderer.invoke('media-original', filePath, kind, cacheConfig),
   getMediaMetadata: (filePath) => ipcRenderer.invoke('media-metadata', filePath),
   reportRendererError: (message, details) => ipcRenderer.send('renderer-error-log', message, details),
+  trackTelemetry: (eventName, properties) => ipcRenderer.send('telemetry-track', eventName, properties),
   onAppError: (callback) => { const subscription = (_event, message) => callback(message); ipcRenderer.on('app-error', subscription); return () => ipcRenderer.removeListener('app-error', subscription); },
   getRawPreview: (filePath, cacheConfig) => ipcRenderer.invoke('media-raw-preview', filePath, cacheConfig),
-  folderHasPng: (folderPath) => ipcRenderer.invoke('folder-has-png', folderPath),
   projectFileOperation: (workspacePath, status, projectName, operation, paths, targetRelativePath, nextName, options) => ipcRenderer.invoke('workspace-file-operation', workspacePath, status, projectName, operation, paths, targetRelativePath, nextName, options),
   getProjectFileClipboardStatus: () => ipcRenderer.invoke('workspace-file-clipboard-status'),
   startProjectFileDrag: (workspacePath, status, projectName, paths) => ipcRenderer.send('workspace-start-file-drag', workspacePath, status, projectName, paths),
@@ -136,7 +152,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openWorkspaceProject: (workspacePath, status, name, folderName) => ipcRenderer.invoke('workspace-open-project', workspacePath, status, name, folderName),
   openProjectEntry: (workspacePath, status, name, relativePath) => ipcRenderer.invoke('workspace-open-entry', workspacePath, status, name, relativePath),
   getPhotoshopStatus: () => ipcRenderer.invoke('photoshop-status'),
-  openProjectEntriesInPhotoshop: (workspacePath, status, name, relativePaths) => ipcRenderer.invoke('workspace-open-entry-photoshop', workspacePath, status, name, relativePaths),
+  openProjectEntriesInPhotoshop: (workspacePath, status, name, relativePaths) => invokeFeature('photoshop_open', 'workspace-open-entry-photoshop', workspacePath, status, name, relativePaths),
   copyProjectEntryPath: (workspacePath, status, name, relativePath) => ipcRenderer.invoke('workspace-copy-entry-path', workspacePath, status, name, relativePath),
   getFileIcon: (filePath) => ipcRenderer.invoke('workspace-entry-file-icon', filePath),
   importProjectFiles: (workspacePath, status, name, relativePath, options) => ipcRenderer.invoke('workspace-import-files', workspacePath, status, name, relativePath, options),

@@ -34,6 +34,8 @@ const runJson = (command, args) => {
     const outsideFile = path.join(outside, 'secret.txt');
     fs.writeFileSync(outsideFile, 'secret');
     await assert.rejects(() => broker.authorizeInput(outsideFile), /未经授权|不在已授权/);
+    broker.grantRoot(outside);
+    assert.strictEqual(await broker.authorizeInput(outsideFile), fs.realpathSync(outsideFile), 'a validated external browser root must authorize its returned media files');
     const token = broker.grantPath(original);
     assert.strictEqual(broker.resolveToken(token), path.resolve(original));
     assert.strictEqual(broker.resolveToken('forged-token'), null);

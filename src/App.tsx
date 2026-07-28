@@ -13,7 +13,6 @@ import {
   Home,
   UsersRound,
   Lightbulb,
-  Image as ImageIcon,
 } from 'lucide-react';
 import { useAppDialog } from './components/AppDialogProvider';
 import { useEscapeLayer } from './components/LayerProvider';
@@ -25,12 +24,11 @@ import { RequirePlugin } from './features/plugins/RequirePlugin';
 import { BackgroundTaskIndicator } from './features/background-tasks/BackgroundTaskIndicator';
 import { SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
 import type { SettingsSection } from './features/settings/SettingsFeature';
-import { ConverterView, DashboardView, MatchView, VideoSplitView } from './features/tools/ToolViews';
+import { DashboardView, MatchView, VideoSplitView } from './features/tools/ToolViews';
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
-import type { InspirationSection } from './features/inspiration/InspirationLibrary';
 import type { AppConfig, ComponentStatus, HomeCardId, ProjectFileOperationProgress, ToolType, WorkspaceProject } from './types';
 
-const DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'inspiration', 'converter'];
+const DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'inspiration'];
 type WorkspaceToolKind = 'version' | 'team';
 type WorkspaceToolTab = { projectPath: string; kind: WorkspaceToolKind; label: string; busy: boolean };
 const localDateKey = () => {
@@ -39,7 +37,7 @@ const localDateKey = () => {
 };
 const normalizeHomeOrder = (value: unknown): HomeCardId[] => {
   const valid = new Set<HomeCardId>(DEFAULT_HOME_ORDER);
-  const migrated = (Array.isArray(value) ? value : []).map(card => card === 'research' ? 'inspiration' : card);
+  const migrated = Array.isArray(value) ? value : [];
   const ordered = migrated.filter((card): card is HomeCardId => valid.has(card as HomeCardId));
   return [...new Set([...ordered, ...DEFAULT_HOME_ORDER])];
 };
@@ -100,6 +98,10 @@ const isMac = window.navigator.userAgent.includes('Mac');
 
 const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   theme: 'system',
+  telemetry: {
+    enabled: true,
+    crashReports: true,
+  },
   workspacePath: '',
   autoCleanupDeletedProjectData: true,
   createPlanningFolder: true,
@@ -133,13 +135,8 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   fileImport: {
     preserveOriginal: false
   },
-  imageConversion: {
-    jpgQuality: 100
-  },
   inspirationLibrary: {
-    rootPath: '',
-    sensitivity: 'standard',
-    minDuration: 0.2
+    rootPath: ''
   },
   personDetection: {
     useGpu: true,
@@ -153,7 +150,6 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
     videoSourceFolderName: 'mov'
   },
   research: {
-    defaultDir: '',
     sensitivity: 'standard',
     minDuration: 0.2
   }
@@ -175,8 +171,6 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ToolType>('home');
   const [settingsTabOpen, setSettingsTabOpen] = useState(false);
   const [inspirationTabOpen, setInspirationTabOpen] = useState(false);
-  const [converterTabOpen, setConverterTabOpen] = useState(false);
-  const [inspirationSection, setInspirationSection] = useState<InspirationSection>('home');
   const [inspirationRelativePath, setInspirationRelativePath] = useState('');
   const [inspirationNavigationRequest, setInspirationNavigationRequest] = useState<{ path: string; id: number }>();
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
@@ -258,7 +252,7 @@ const App: React.FC = () => {
       observer.disconnect();
       element.removeEventListener('scroll', updateTitlebarTabScroll);
     };
-  }, [configLoaded, converterTabOpen, inspirationTabOpen, openProjects.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
+  }, [configLoaded, inspirationTabOpen, openProjects.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -267,7 +261,7 @@ const App: React.FC = () => {
       updateTitlebarTabScroll();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [configLoaded, activeTab, converterTabOpen, inspirationTabOpen, selectedProject?.path, openProjects.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
+  }, [configLoaded, activeTab, inspirationTabOpen, selectedProject?.path, openProjects.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
 
   const scrollTitlebarTabs = (direction: -1 | 1) => {
     const element = titlebarTabsRef.current;
@@ -428,14 +422,15 @@ const App: React.FC = () => {
         if (window.electronAPI?.loadConfig) {
           const fileConfig = await window.electronAPI.loadConfig();
           if (fileConfig) {
-            const userPath = await window.electronAPI.getUserPath();
             const storedResearch = fileConfig.componentSettings?.['research-tools'] as AppConfig['research'] | undefined;
             const legacyResearch = storedResearch || fileConfig.research;
-            const downloadPath = fileConfig.inspirationLibrary?.rootPath || legacyResearch?.defaultDir || (userPath ? `${userPath}/Downloads` : '');
+            const legacyInspiration = fileConfig.inspirationLibrary as AppConfig['inspirationLibrary'] & Partial<AppConfig['research']>;
             const legacyThreshold = legacyResearch?.ssimThreshold;
-            const inspirationSensitivity = fileConfig.inspirationLibrary?.sensitivity ?? legacyResearch?.sensitivity ?? (legacyThreshold !== undefined && legacyThreshold >= 0.98 ? 'high' : legacyThreshold !== undefined && legacyThreshold <= 0.85 ? 'low' : 'standard');
-            const inspirationLibrary: AppConfig['inspirationLibrary'] = { rootPath: downloadPath, sensitivity: inspirationSensitivity, minDuration: fileConfig.inspirationLibrary?.minDuration ?? legacyResearch?.minDuration ?? 0.2 };
-            const researchSettings: AppConfig['research'] = { defaultDir: inspirationLibrary.rootPath, sensitivity: inspirationLibrary.sensitivity, minDuration: inspirationLibrary.minDuration };
+            const inspirationLibrary: AppConfig['inspirationLibrary'] = { rootPath: legacyInspiration?.rootPath || '' };
+            const researchSettings: AppConfig['research'] = {
+              sensitivity: legacyResearch?.sensitivity ?? legacyInspiration?.sensitivity ?? (legacyThreshold !== undefined && legacyThreshold >= 0.98 ? 'high' : legacyThreshold !== undefined && legacyThreshold <= 0.85 ? 'low' : 'standard'),
+              minDuration: legacyResearch?.minDuration ?? legacyInspiration?.minDuration ?? 0.2,
+            };
             const storedPersonDetection = fileConfig.componentSettings?.['team-retouch'] as AppConfig['personDetection'] | undefined;
             const personDetectionSettings: AppConfig['personDetection'] = {
               useGpu: storedPersonDetection?.useGpu ?? fileConfig.personDetection?.useGpu ?? true,
@@ -448,7 +443,7 @@ const App: React.FC = () => {
             const componentSettings = { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings };
             delete componentSettings['research-tools'];
             delete componentSettings['office-media-extractor'];
-            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, componentSettings, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: fileConfig.smartImport?.splitLargeFiles ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true }, fileImport: { preserveOriginal: fileConfig.fileImport?.preserveOriginal ?? false }, imageConversion: { jpgQuality: fileConfig.imageConversion?.jpgQuality ?? 100 }, inspirationLibrary, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: !configuredImageSource || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: !configuredVideoSource || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
+            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', telemetry: { enabled: true, crashReports: true }, workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, componentSettings, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: fileConfig.smartImport?.splitLargeFiles ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true }, fileImport: { preserveOriginal: fileConfig.fileImport?.preserveOriginal ?? false }, inspirationLibrary, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: !configuredImageSource || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: !configuredVideoSource || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
             if (normalizedConfig.workspacePath) {
               const workspace = await window.electronAPI.getWorkspaceProjects(normalizedConfig.workspacePath);
               if (workspace.success && workspace.root) normalizedConfig = { ...normalizedConfig, workspacePath: workspace.root };
@@ -456,7 +451,7 @@ const App: React.FC = () => {
               setShowWorkspaceSetup(true);
             }
             setConfig(normalizedConfig);
-            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.createPlanningFolder === undefined || fileConfig.defaultFolderSort === undefined || fileConfig.birthdayEnabled === undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.videoPreviewQuality !== normalizedConfig.smartImport.videoPreviewQuality || fileConfig.smartImport?.splitLargeFiles === undefined || !fileConfig.brollImport || !fileConfig.fileImport || !fileConfig.imageConversion || !fileConfig.inspirationLibrary || fileConfig.personDetection?.useGpu === undefined || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
+            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.telemetry?.enabled !== true || fileConfig.telemetry?.crashReports !== true || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.createPlanningFolder === undefined || fileConfig.defaultFolderSort === undefined || fileConfig.birthdayEnabled === undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.videoPreviewQuality !== normalizedConfig.smartImport.videoPreviewQuality || fileConfig.smartImport?.splitLargeFiles === undefined || !fileConfig.brollImport || !fileConfig.fileImport || !fileConfig.inspirationLibrary || JSON.stringify(fileConfig.research) !== JSON.stringify(researchSettings) || fileConfig.personDetection?.useGpu === undefined || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             console.log('📋 Configuration loaded from file');
           } else {
             if (window.electronAPI?.getUserPath) {
@@ -485,6 +480,11 @@ const App: React.FC = () => {
 
     loadConfig();
   }, []);
+
+  useEffect(() => {
+    if (!configLoaded) return;
+    window.electronAPI?.trackTelemetry?.('feature_opened', { feature: activeTab });
+  }, [activeTab, configLoaded]);
 
   useEffect(() => {
     if (!config) return;
@@ -582,6 +582,12 @@ const App: React.FC = () => {
     }
   };
 
+  const getDefaultSettings = useCallback(async () => {
+    const userPath = await window.electronAPI.getUserPath().catch(() => '');
+    const defaults = DEFAULT_CONFIG(userPath || '');
+    return { ...defaults, workspacePath: config?.workspacePath || '' };
+  }, [config?.workspacePath]);
+
   const handleWorkspaceSetup = async (newConfig: AppConfig) => {
     await handleConfigUpdate(newConfig);
     setShowWorkspaceSetup(false);
@@ -647,9 +653,8 @@ const App: React.FC = () => {
     setProjectDestination(null);
     setActiveTab('home');
   };
-  const openInspirationTab = (section: InspirationSection = 'home') => {
+  const openInspirationTab = () => {
     setInspirationTabOpen(true);
-    setInspirationSection(section);
     setSelectedProject(null);
     setActiveTab('inspiration');
   };
@@ -658,18 +663,9 @@ const App: React.FC = () => {
     if (activeTab === 'inspiration') showHomeTab();
   };
   const navigateInspiration = (path: string) => {
-    setInspirationSection('browser');
+    setInspirationTabOpen(true);
     setInspirationNavigationRequest({ path, id: Date.now() });
     setActiveTab('inspiration');
-  };
-  const openConverterTab = () => {
-    setConverterTabOpen(true);
-    setSelectedProject(null);
-    setActiveTab('converter');
-  };
-  const closeConverterTab = () => {
-    setConverterTabOpen(false);
-    if (activeTab === 'converter') showHomeTab();
   };
   const openSettingsTab = () => {
     setSettingsTabOpen(true);
@@ -750,7 +746,6 @@ const App: React.FC = () => {
           <div title="拖动窗口" className={`flex min-w-0 items-center gap-2 px-1.5 py-1 ${sidebarCollapsed || renderedSidebarWidth < 190 ? 'hidden' : ''}`}>
             <img src="./app-logo.svg" className="brand-logo h-5 w-5 shrink-0" alt="" />
             <span className="truncate text-sm font-bold text-slate-800">照片流</span>
-            <span className="shrink-0 font-mono text-[10px] text-slate-400">v26.7.28</span>
           </div>
         </div>
         <div className="flex min-w-0 flex-1">
@@ -759,8 +754,7 @@ const App: React.FC = () => {
             <button type="button" data-active-tab={activeTab === 'home'} onClick={showHomeTab} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[92px] max-w-[180px] items-center gap-2 rounded-t-lg border px-3 text-xs font-medium transition ${activeTab === 'home' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
               <Home size={14} className="shrink-0"/><span className="truncate">主页</span>
             </button>
-            {inspirationTabOpen && <div data-active-tab={activeTab === 'inspiration'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[112px] max-w-[190px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'inspiration' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={() => openInspirationTab(inspirationSection)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Lightbulb size={14} className="shrink-0"/><span className="truncate">灵感库</span></button><button type="button" aria-label="关闭灵感库" title="关闭灵感库" onClick={closeInspirationTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}
-            {converterTabOpen && <div data-active-tab={activeTab === 'converter'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[126px] max-w-[200px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'converter' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={openConverterTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><ImageIcon size={14} className="shrink-0"/><span className="truncate">PNG 转 JPG</span></button><button type="button" aria-label="关闭 PNG 转 JPG" title="关闭 PNG 转 JPG" onClick={closeConverterTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}
+            {inspirationTabOpen && <div data-active-tab={activeTab === 'inspiration'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[112px] max-w-[190px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'inspiration' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={openInspirationTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Lightbulb size={14} className="shrink-0"/><span className="truncate">灵感库</span></button><button type="button" aria-label="关闭灵感库" title="关闭灵感库" onClick={closeInspirationTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}
             {openProjects.map(project => <React.Fragment key={project.path}>
               <div title={project.name} data-active-tab={selectedProject?.path === project.path && activeTab === 'project'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[120px] max-w-[220px] items-center rounded-t-lg border text-xs font-medium transition ${selectedProject?.path === project.path && activeTab === 'project' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
                 <button type="button" onClick={() => openProjectTab(project, projectOperations[project.path] ?? null)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Folder size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{project.name}</span></button>
@@ -792,11 +786,9 @@ const App: React.FC = () => {
       {showWorkspaceSetup ? <WorkspaceSetupPage config={config} onSave={handleWorkspaceSetup}/> : <div className="flex min-h-0 flex-1">
       {/* Sidebar */}
       <aside style={{ width: sidebarCollapsed ? 0 : renderedSidebarWidth }} className="relative z-30 flex min-w-0 shrink-0 flex-col overflow-hidden bg-white transition-[width] duration-200">
-        {activeTab === 'settings'
-          ? <SettingsNavigator activeSection={settingsSection} components={components} onSelect={setSettingsSection}/>
-          : activeTab === 'inspiration'
-            ? <InspirationLibraryNavigator rootPath={config.inspirationLibrary.rootPath} currentRelativePath={inspirationRelativePath} section={inspirationSection} onOpenHome={() => setInspirationSection('home')} onNavigate={navigateInspiration} onOpenSettings={openSettingsTab}/>
-            : <><ProjectNavigator
+        {activeTab === 'settings' && <SettingsNavigator activeSection={settingsSection} components={components} onSelect={setSettingsSection}/>}
+        {inspirationTabOpen && <div className={activeTab === 'inspiration' ? 'contents' : 'hidden'}><InspirationLibraryNavigator active={activeTab === 'inspiration'} rootPath={config.inspirationLibrary.rootPath} targetWorkspacePath={config.workspacePath} currentRelativePath={inspirationRelativePath} onNavigate={navigateInspiration} onOpenSettings={openSettingsTab} onNotice={showNotice}/></div>}
+        {activeTab !== 'settings' && activeTab !== 'inspiration' && <><ProjectNavigator
           workspacePath={config.workspacePath}
           autoCleanupDeletedProjectData={config.autoCleanupDeletedProjectData}
           createPlanningFolder={config.createPlanningFolder}
@@ -829,34 +821,22 @@ const App: React.FC = () => {
               setDraggedHomeCard(null);
             }
           };
-          if (card === 'converter') return null;
           const content = card === 'birthday'
             ? <DashboardView section="birthday" workspacePath={config.workspacePath} config={config.smartImport} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} dragProps={dragProps}/>
             : card === 'import'
               ? <DashboardView section="import" workspacePath={config.workspacePath} config={config.smartImport} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onImportComplete={handleHomeImportComplete} dragProps={dragProps}/>
-              : <div className="grid grid-cols-2 gap-4">
-                  <button type="button" onClick={() => openInspirationTab('home')} className="group flex min-w-0 items-center gap-4 rounded-xl border border-slate-200 bg-white px-5 py-5 text-left transition hover:border-blue-400 hover:bg-blue-50 hover:shadow-sm">
+              : <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                  <button type="button" onClick={openInspirationTab} className="group flex min-w-0 items-center gap-4 rounded-xl border border-slate-200 bg-white px-5 py-5 text-left transition hover:border-blue-400 hover:bg-blue-50 hover:shadow-sm">
                     <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-amber-50 text-amber-600"><Lightbulb size={22}/></span>
                     <span className="min-w-0 flex-1"><span className="block text-base font-bold text-slate-800">灵感库</span><span className="mt-1 block truncate text-xs text-slate-500">整理、浏览与收集灵感素材</span></span>
-                    <ChevronRight size={19} className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-blue-500"/>
-                  </button>
-                  <button type="button" onClick={openConverterTab} className="group flex min-w-0 items-center gap-4 rounded-xl border border-slate-200 bg-white px-5 py-5 text-left transition hover:border-blue-400 hover:bg-blue-50 hover:shadow-sm">
-                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-600"><ImageIcon size={22}/></span>
-                    <span className="min-w-0 flex-1"><span className="block text-base font-bold text-slate-800">PNG 转 JPG</span><span className="mt-1 block truncate text-xs text-slate-500">批量转换图片格式</span></span>
                     <ChevronRight size={19} className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-blue-500"/>
                   </button>
                 </div>;
           return <div key={card} className={draggedHomeCard === card ? 'opacity-40' : undefined}>{content}</div>;
         })}</div>}
-        {activeTab === 'inspiration' && <InspirationLibraryPage active={activeTab === 'inspiration'} section={inspirationSection} navigationRequest={inspirationNavigationRequest} config={config} components={components} componentsLoading={componentsLoading} onUpdateConfig={handleConfigUpdate} onDirectoryChange={setInspirationRelativePath} onNotice={showNotice}/>}
-        {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={refreshComponents} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} onNotice={showNotice}/>}
-        {openProjects.map(project => { const active = activeTab.startsWith('project') && selectedProject?.path === project.path; const activeView = activeTab === 'project-version' ? 'version' : activeTab === 'project-team' ? 'team' : 'project'; return <div key={project.path} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace active={active} activeView={activeView} project={project} workspacePath={config.workspacePath} installedComponentIds={installedComponentIds} componentsLoading={componentsLoading} teamRetouchStatus={components.find(component => component.id === 'team-retouch')} teamRetouchSettings={(config.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || config.personDetection} initialPanel={projectOperations[project.path] ?? null} importConfig={config.smartImport} brollConfig={config.brollImport} fileImportConfig={config.fileImport} conversionConfig={config.imageConversion} matchConfig={config.smartMatch} mediaCacheConfig={config.mediaCache} defaultFolderSort={config.defaultFolderSort} onOpenToolTab={(kind, label) => openWorkspaceToolTab(project, kind, label)} onCloseToolTab={kind => void closeWorkspaceToolTab(project.path, kind)} onToolTabBusyChange={(kind, busy) => updateWorkspaceToolTabBusy(project.path, kind, busy)} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onMediaCacheConfigChange={(mediaCache: AppConfig['mediaCache']) => handleConfigUpdate({ ...config, mediaCache })} onNotice={showNotice} onProjectMoved={nextProject => { setOpenProjects(current => current.map(item => item.path === project.path ? nextProject : item)); setWorkspaceToolTabs(current => current.map(tab => tab.projectPath === project.path ? { ...tab, projectPath: nextProject.path, label: tab.kind === 'team' ? `团片 · ${nextProject.name}` : tab.label } : tab)); setProjectOperations(current => { if (nextProject.path === project.path) return current; const next = { ...current, [nextProject.path]: current[project.path] ?? null }; delete next[project.path]; return next; }); setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { void closeProjectTab(project.path, true); window.dispatchEvent(new Event('workspace-projects-changed')); }} /></div>; })}
-
-        {activeTab === 'converter' && (
-          <RequirePlugin scriptName="png_to_jpg.py" title="PNG 转 JPG" desc="需要该引擎来执行图片格式的批量转换。">
-            <ConverterView defaultQuality={config.imageConversion.jpgQuality} />
-          </RequirePlugin>
-        )}
+        {inspirationTabOpen && <div className={activeTab === 'inspiration' ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage active={activeTab === 'inspiration'} navigationRequest={inspirationNavigationRequest} config={config} components={components} componentsLoading={componentsLoading} onUpdateConfig={handleConfigUpdate} onDirectoryChange={setInspirationRelativePath} onNotice={showNotice}/></div>}
+        {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={refreshComponents} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} getDefaultSettings={getDefaultSettings} onNotice={showNotice}/>}
+        {openProjects.map(project => { const active = activeTab.startsWith('project') && selectedProject?.path === project.path; const activeView = activeTab === 'project-version' ? 'version' : activeTab === 'project-team' ? 'team' : 'project'; return <div key={project.path} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace active={active} activeView={activeView} project={project} workspacePath={config.workspacePath} inspirationLibraryRootPath={config.inspirationLibrary.rootPath} installedComponentIds={installedComponentIds} componentsLoading={componentsLoading} teamRetouchStatus={components.find(component => component.id === 'team-retouch')} teamRetouchSettings={(config.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || config.personDetection} initialPanel={projectOperations[project.path] ?? null} importConfig={config.smartImport} brollConfig={config.brollImport} fileImportConfig={config.fileImport} matchConfig={config.smartMatch} researchConfig={config.research} mediaCacheConfig={config.mediaCache} defaultFolderSort={config.defaultFolderSort} onOpenInspirationPath={navigateInspiration} onOpenToolTab={(kind, label) => openWorkspaceToolTab(project, kind, label)} onCloseToolTab={kind => void closeWorkspaceToolTab(project.path, kind)} onToolTabBusyChange={(kind, busy) => updateWorkspaceToolTabBusy(project.path, kind, busy)} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onResearchConfigChange={(research: AppConfig['research']) => handleConfigUpdate({ ...config, research })} onMediaCacheConfigChange={(mediaCache: AppConfig['mediaCache']) => handleConfigUpdate({ ...config, mediaCache })} onNotice={showNotice} onProjectMoved={nextProject => { setOpenProjects(current => current.map(item => item.path === project.path ? nextProject : item)); setWorkspaceToolTabs(current => current.map(tab => tab.projectPath === project.path ? { ...tab, projectPath: nextProject.path, label: tab.kind === 'team' ? `团片 · ${nextProject.name}` : tab.label } : tab)); setProjectOperations(current => { if (nextProject.path === project.path) return current; const next = { ...current, [nextProject.path]: current[project.path] ?? null }; delete next[project.path]; return next; }); setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { void closeProjectTab(project.path, true); window.dispatchEvent(new Event('workspace-projects-changed')); }} /></div>; })}
 
         {activeTab === 'match' && (
           <RequirePlugin scriptName="catch.py" title="选片" desc="需要该引擎来根据关键词提取对应的 RAW 照片。">

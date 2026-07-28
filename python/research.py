@@ -415,12 +415,24 @@ def run(args_list):
     parser.add_argument("--sensitivity", choices=("low", "standard", "high"), help="转场检测灵敏度")
     parser.add_argument("--threshold", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--min_duration", type=float, default=0.2, help="最短镜头时长（秒）")
+    parser.add_argument("--organize-data", action="store_true", help="把目录中的 TXT 文件移入 data 文件夹")
     args = parser.parse_args(args_list)
     target = Path(args.path)
-    if not target.is_dir():
+    if not target.exists():
         log_error(f"路径不存在：{target}")
         return
-    videos = [path for path in target.iterdir() if path.suffix.lower() in VIDEO_EXTENSIONS]
+    if target.is_file():
+        if target.suffix.lower() not in VIDEO_EXTENSIONS:
+            log_error(f"不是支持的视频文件：{target}")
+            return
+        videos = [target]
+        working_directory = target.parent
+    elif target.is_dir():
+        videos = [path for path in target.iterdir() if path.suffix.lower() in VIDEO_EXTENSIONS]
+        working_directory = target
+    else:
+        log_error(f"无法读取路径：{target}")
+        return
     log_progress("扫描视频文件…", 0)
     sensitivity = args.sensitivity or normalize_sensitivity(args.threshold)
     for index, video in enumerate(videos, 1):
@@ -428,8 +440,12 @@ def run(args_list):
         log_progress(f"处理视频：{index}/{len(videos)}", int(index / max(1, len(videos)) * 90))
     if not videos:
         log_info("目录中未找到视频文件，跳过分镜识别")
-    process_images_deduplication(target)
-    move_txt_files(target)
+    # A single-video request is used by the file browser's “提取分镜帧” action.
+    # It must not reorganize unrelated images or text files in that directory.
+    if target.is_dir():
+        process_images_deduplication(working_directory)
+        if args.organize_data:
+            move_txt_files(working_directory)
     log_progress("任务全部完成", 100)
     log_success("所有任务处理完毕")
 

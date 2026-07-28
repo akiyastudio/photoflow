@@ -1,0 +1,102 @@
+const fs = require('fs');
+const path = require('path');
+
+const createFileRootWatcherService = ({
+  getMainWindow,
+  getThumbnailService,
+  getMediaCacheConfig,
+  isInternalChange,
+  isSuppressedChange,
+  writeLog,
+}) => {
+  const watchers = new Map();
+  const comparable = value => {
+    const resolved = path.resolve(value);
+    return process.platform === 'win32' ? resolved.toLocaleLowerCase() : resolved;
+  };
+  const pathIsInside = (parent, candidate) => {
+    const relative = path.relative(parent, candidate);
+    return !relative || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  };
+  const publish = (root, changedEntries) => {
+    const mainWindow = getMainWindow();
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    for (const [changedName, eventType] of changedEntries) {
+      mainWindow.webContents.send('workspace-files-changed', { root, fileName: changedName, eventType });
+    }
+  };
+  const acquire = rootPath => {
+    const root = path.resolve(rootPath);
+    const key = comparable(root);
+    const existing = watchers.get(key);
+    if (existing) {
+      existing.references += 1;
+      return { success: true, root };
+    }
+    const state = { root, references: 1, watcher: null, timer: null, changes: new Map() };
+    try {
+      state.watcher = fs.watch(root, { recursive: process.platform !== 'linux' }, (eventType, fileName) => {
+        if (!fileName || isInternalChange(fileName) || isSuppressedChange(root, fileName)) return;
+        const changedName = String(fileName);
+        const normalizedEventType = eventType === 'rename' ? 'rename' : 'change';
+        if (state.changes.get(changedName) !== 'rename') state.changes.set(changedName, normalizedEventType);
+        if (state.timer) clearTimeout(state.timer);
+        state.timer = setTimeout(() => {
+          state.timer = null;
+          const changedEntries = [...state.changes];
+          state.changes.clear();
+          const thumbnailService = getThumbnailService();
+          if (thumbnailService && changedEntries.length) {
+            const changedPaths = changedEntries.map(([changedName]) => path.join(root, changedName));
+            void thumbnailService.syncChangedPaths(root, changedPaths, getMediaCacheConfig()).catch(error => {
+              writeLog('warn', 'Unable to update file-root thumbnails', { root, error: error.message || String(error) });
+            });
+          }
+          publish(root, changedEntries);
+        }, 200);
+      });
+      state.watcher.on('error', error => {
+        writeLog('warn', 'File-root watcher stopped', { root, error: error.message || String(error) });
+        if (state.timer) clearTimeout(state.timer);
+        state.watcher?.close();
+        watchers.delete(key);
+        const mainWindow = getMainWindow();
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('workspace-files-changed', { root, fileName: '', eventType: 'rename', watcherFailed: true });
+      });
+      watchers.set(key, state);
+      return { success: true, root };
+    } catch (error) {
+      writeLog('warn', 'Unable to watch file root', { root, error: error.message || String(error) });
+      return { success: false, root, error: error.message || String(error) };
+    }
+  };
+  const release = rootPath => {
+    const key = comparable(rootPath);
+    const state = watchers.get(key);
+    if (!state) return;
+    state.references -= 1;
+    if (state.references > 0) return;
+    if (state.timer) clearTimeout(state.timer);
+    state.watcher?.close();
+    watchers.delete(key);
+  };
+  const discardChangesInside = targetPath => {
+    const suppressed = comparable(targetPath);
+    for (const state of watchers.values()) {
+      for (const changedName of state.changes.keys()) {
+        const candidate = comparable(path.resolve(state.root, changedName));
+        if (pathIsInside(suppressed, candidate)) state.changes.delete(changedName);
+      }
+    }
+  };
+  const stop = () => {
+    for (const state of watchers.values()) {
+      if (state.timer) clearTimeout(state.timer);
+      state.watcher?.close();
+    }
+    watchers.clear();
+  };
+  return { acquire, release, discardChangesInside, stop };
+};
+
+module.exports = { createFileRootWatcherService };
