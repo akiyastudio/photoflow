@@ -1,6 +1,6 @@
 const registerWorkspaceIpc = context => {
-  const { Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog } = context;
-  const isInternalFileOperationEntry = name => name.toLowerCase().endsWith('.photoflow-part') || /^\.photoflow-(?:paste|replace|undo)-/i.test(name);
+  const { Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suppressWorkspaceWatchPath, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
+  const isInternalFileOperationEntry = name => name.toLowerCase().endsWith('.photoflow-part') || /^\.photoflow-(?:paste|replace|undo|team-workflow-)/i.test(name);
   const officeOpenXmlExtensions = new Set([
     '.docx', '.docm', '.dotx', '.dotm',
     '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam',
@@ -52,6 +52,9 @@ const registerWorkspaceIpc = context => {
     if (await pathExists(originalPath)) {
       return { ...project, originalPath, recycleStatus: 'restored', statusDetail: '原项目路径已重新出现' };
     }
+    if (project.permanent) {
+      return { ...project, originalPath, recycleStatus: 'missing', statusDetail: '项目已由 Windows 永久删除' };
+    }
     if (!project.recyclePidl || !recycleBinService.nativeAvailable()) {
       return { ...project, originalPath, recycleStatus: 'unknown', statusDetail: '当前无法可靠检查系统回收站，已保留数据' };
     }
@@ -74,30 +77,38 @@ const registerWorkspaceIpc = context => {
         path.join(dataRoot, 'team-retouch', photoId),
       ]),
     ];
-    let removedCount = 0;
-    for (const candidate of new Set(candidates)) {
-      if (!candidate) continue;
+    const safeCandidates = [...new Set(candidates)].flatMap(candidate => {
+      if (!candidate) return [];
       const resolved = path.resolve(candidate);
       const relative = path.relative(dataRoot, resolved);
-      if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue;
-      try {
-        await fs.promises.rm(resolved, { recursive: true, force: true });
-        removedCount += 1;
-      } catch (error) {
-        writeLog('warn', 'Unable to remove deleted project artifact', { path: resolved, error: error.message || String(error) });
-      }
+      return !relative || relative.startsWith('..') || path.isAbsolute(relative) ? [] : [resolved];
+    });
+    let removedCount = 0;
+    for (let offset = 0; offset < safeCandidates.length; offset += 8) {
+      const results = await Promise.all(safeCandidates.slice(offset, offset + 8).map(async resolved => {
+        try {
+          await fs.promises.rm(resolved, { recursive: true, force: true });
+          return true;
+        } catch (error) {
+          writeLog('warn', 'Unable to remove deleted project artifact', { path: resolved, error: error.message || String(error) });
+          return false;
+        }
+      }));
+      removedCount += results.filter(Boolean).length;
     }
     return removedCount;
   };
 
-  const purgeConfirmedDeletedProject = async (root, project) => {
-    const inspected = await inspectDeletedProject(root, project);
-    if (inspected.recycleStatus !== 'missing') return { cleaned: false, status: inspected.recycleStatus };
-    const purgeResult = await workspaceRepository.purgeDeletedProject(root, project.id);
-    const removedArtifactCount = await removeInternalProjectArtifacts(root, purgeResult);
-    await thumbnailService.invalidateSources(purgeResult.sourcePaths || []).catch(error => {
+  const purgeDeletedProjectData = async (root, project, task) => {
+    task?.report(15, `正在准备清理“${project.name}”的数据`);
+    const cleanupPlan = await workspaceRepository.getDeletedProjectCleanupPlan(root, project.id);
+    task?.report(35, `正在清理“${project.name}”的缩略图和内部文件`);
+    const removedArtifactCount = await removeInternalProjectArtifacts(root, cleanupPlan);
+    await thumbnailService.invalidateSources(cleanupPlan.sourcePaths || []).catch(error => {
       writeLog('warn', 'Unable to clear deleted project thumbnail cache', { project: project.name, error: error.message || String(error) });
     });
+    task?.report(80, `正在完成“${project.name}”的数据清理`);
+    const purgeResult = await workspaceRepository.purgeDeletedProject(root, project.id);
     for (let index = renameHistory.length - 1; index >= 0; index -= 1) {
       const operation = renameHistory[index];
       if (operation.projectCatalog?.name?.toLocaleLowerCase() === project.name.toLocaleLowerCase()
@@ -109,7 +120,60 @@ const registerWorkspaceIpc = context => {
       photoCount: purgeResult.photoIds?.length || 0,
       removedArtifactCount,
     });
+    return { removedArtifactCount, purgeResult };
+  };
+
+  const purgeConfirmedDeletedProject = async (root, project) => {
+    const inspected = await inspectDeletedProject(root, project);
+    if (inspected.recycleStatus !== 'missing') return { cleaned: false, status: inspected.recycleStatus };
+    const { removedArtifactCount } = await purgeDeletedProjectData(root, project);
     return { cleaned: true, status: 'missing', removedArtifactCount };
+  };
+
+  const queuePermanentProjectCleanup = (root, projectName) => {
+    const run = () => backgroundTasks.run({
+      type: 'deleted-project-cleanup',
+      title: `清理已永久删除项目：${projectName}`,
+      dedupeKey: `deleted-project-cleanup:${root}:${projectName.toLocaleLowerCase()}`,
+      cancellable: false,
+      metadata: { root, projectName },
+    }, async task => {
+      const deleted = await workspaceRepository.listDeletedProjects(root);
+      const project = (deleted.projects || []).find(item => item.name.toLocaleLowerCase() === projectName.toLocaleLowerCase());
+      if (!project) return { skipped: true };
+      return purgeDeletedProjectData(root, project, task);
+    }, run);
+    setTimeout(() => {
+      void run().catch(error => {
+        writeLog('warn', 'Permanent project cleanup deferred until a later startup', {
+          root,
+          project: projectName,
+          error: error.message || String(error),
+        });
+      });
+    }, 1000);
+  };
+
+  const queueWorkspaceMaintenance = root => {
+    if (!workspaceMaintenanceRepository?.runMaintenance) return;
+    const run = () => backgroundTasks.run({
+      type: 'workspace-database-maintenance',
+      title: '维护项目数据库',
+      dedupeKey: `workspace-database-maintenance:${root}`,
+      cancellable: false,
+      metadata: { root },
+    }, async task => {
+      task.report(10, '正在检查项目数据库');
+      const result = await workspaceMaintenanceRepository.runMaintenance(root);
+      task.report(100, '项目数据库维护完成');
+      return result;
+    }, run);
+    setTimeout(() => {
+      void run().catch(error => writeLog('warn', 'Workspace database maintenance deferred', {
+        root,
+        error: error.message || String(error),
+      }));
+    }, 1000);
   };
 
   ipcMain.handle('workspace-cleanup-deleted-projects', async (_event, workspacePath) => {
@@ -132,12 +196,22 @@ const registerWorkspaceIpc = context => {
       const root = ensureWorkspace(workspacePath);
       watchWorkspace(root);
       const catalog = await refreshWorkspaceCatalog(root);
+      queueWorkspaceMaintenance(root);
       const statuses = WORKSPACE_STATUSES.map(status => {
         const projects = catalog.projects
           .filter(project => project.status === status)
           .map(project => {
             const projectPath = path.resolve(root, project.relative_path);
-            return { name: project.name, path: projectPath, status, updatedAt: fs.existsSync(projectPath) ? fs.statSync(projectPath).mtimeMs : project.updated_at, projectDate: readProjectDate(project) };
+            return {
+              name: project.name,
+              path: projectPath,
+              status,
+              updatedAt: fs.existsSync(projectPath) ? fs.statSync(projectPath).mtimeMs : project.updated_at,
+              projectDate: readProjectDate(project),
+              availability: project.availability || 'available',
+              missingSince: project.missing_since || undefined,
+              missingChecks: project.missing_checks || 0,
+            };
           })
           .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
         return { status, projects };
@@ -264,7 +338,7 @@ const registerWorkspaceIpc = context => {
     }
   });
   
-  ipcMain.handle('workspace-undo-rename', async (_event, workspacePath = '') => {
+  ipcMain.handle('workspace-undo-rename', async (_event, workspacePath = '', options = {}) => {
     let operation;
     try {
       operation = renameHistory.pop();
@@ -280,6 +354,41 @@ const registerWorkspaceIpc = context => {
         return { success: true, message: `已撤销${operation.label || '文件操作'} ${operation.paths.length} 个项目` };
       }
       if (operation.kind === 'trash') {
+        const restoreConflictPolicy = ['rename', 'overwrite'].includes(options?.restoreConflictPolicy) ? options.restoreConflictPolicy : '';
+        const restoreConflicts = [];
+        for (const item of operation.items) {
+          if (item.backup) {
+            if (await pathExists(item.original) || !await pathExists(item.backup)) throw new Error('原位置已被占用，或旧版恢复副本不可用');
+            continue;
+          }
+          if (!await pathExists(path.parse(item.original).root)) {
+            throw Object.assign(new Error('原文件所在磁盘当前未连接，连接磁盘后可以再次撤销'), { code: 'RESTORE_VOLUME_UNAVAILABLE' });
+          }
+          const originalExists = await pathExists(item.original);
+          if (originalExists && await samePathIdentity(item.original, item.originalIdentity)) continue;
+          if (originalExists) restoreConflicts.push(item);
+          const probe = await recycleBinService.probe(item.recyclePidl);
+          if (!probe.exists) {
+            if (operation.persistentId && operation.workspaceRoot) await workspaceRepository.markUndoRecordUnavailable(operation.workspaceRoot, operation.persistentId);
+            throw Object.assign(new Error('系统回收站中的文件已不存在，可能已经被还原或清空'), { code: 'RECYCLE_ITEM_MISSING' });
+          }
+        }
+        if (restoreConflicts.length && !restoreConflictPolicy) {
+          renameHistory.push(operation);
+          const names = restoreConflicts.slice(0, 6).map(item => path.basename(item.original));
+          return {
+            success: true,
+            requiresDecision: {
+              kind: 'restore-conflict',
+              names,
+              conflictCount: restoreConflicts.length,
+              message: restoreConflicts.length === 1
+                ? `“${names[0]}”的原位置已被其他项目占用`
+                : `${restoreConflicts.length} 个项目的原位置已被同名项目占用`,
+              detail: '可以改名恢复，也可以把当前同名项目移入系统回收站后覆盖恢复。',
+            },
+          };
+        }
         for (const item of operation.items) {
           // Compatibility for deletion records created by older app versions.
           if (item.backup) {
@@ -296,18 +405,8 @@ const registerWorkspaceIpc = context => {
           }
           if (await pathExists(item.original)) {
             if (await samePathIdentity(item.original, item.originalIdentity)) continue;
-            const choice = await dialog.showMessageBox(mainWindow, {
-              type: 'warning',
-              title: '原位置已有同名项目',
-              message: `“${path.basename(item.original)}”的原位置已被其他项目占用`,
-              detail: '可以改名恢复，也可以把当前同名项目移入系统回收站后覆盖恢复。',
-              buttons: ['改名恢复', '覆盖恢复', '取消'],
-              defaultId: 0,
-              cancelId: 2,
-              noLink: true,
-            });
-            if (choice.response === 2) throw Object.assign(new Error('已取消撤销'), { code: 'UNDO_CANCELLED' });
-            if (choice.response === 0) {
+            if (!restoreConflictPolicy) throw new Error('原位置在检查后被占用，请重新撤销');
+            if (restoreConflictPolicy === 'rename') {
               const parsed = path.parse(item.original);
               let index = 1;
               do { restoreTarget = path.join(parsed.dir, `${parsed.name} (已恢复${index > 1 ? ` ${index}` : ''})${parsed.ext}`); index += 1; }
@@ -549,6 +648,7 @@ const registerWorkspaceIpc = context => {
   
   ipcMain.handle('workspace-trash-project', async (event, workspacePath, status, projectName) => {
     const operationId = crypto.randomUUID();
+    let suppressedProjectPath = '';
     const publish = payload => {
       if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', { operationId, operation: 'trash', ...payload });
     };
@@ -558,28 +658,30 @@ const registerWorkspaceIpc = context => {
       publish({ phase: 'trashing', progress: 0, currentName: projectName, processedCount: 0, totalCount: 1 });
       const root = ensureWorkspace(workspacePath);
       const originalIdentity = await capturePathIdentity(projectPath);
+      cancelMediaTrackingScan(root, projectName);
+      suppressWorkspaceWatchPath(projectPath);
+      suppressedProjectPath = projectPath;
       const recycled = await recycleBinService.trash(projectPath);
       const projectCatalog = { name: projectName, status };
       if (recycled.recyclePidl) {
         const item = { original: projectPath, originalIdentity, recyclePidl: recycled.recyclePidl, preciseRestore: recycled.preciseRestore !== false };
         const record = await workspaceRepository.addUndoRecord(root, { kind: 'trash', payload: { items: [item], projectCatalog } });
         await pushUndoOperation({ kind: 'trash', workspaceRoot: root, persistentId: record.id, items: [item], projectCatalog });
+      } else if (recycled.permanent) {
+        await workspaceRepository.addUndoRecord(root, {
+          kind: 'project-cleanup',
+          payload: { items: [{ original: projectPath, originalIdentity, permanent: true }], projectCatalog },
+        });
       }
       await mutateWorkspaceCatalog(root, 'softDeleteProject', { name: projectName });
-      if (recycled.permanent) {
-        const deleted = await workspaceRepository.listDeletedProjects(root);
-        const deletedProject = (deleted.projects || []).find(item => item.name.toLocaleLowerCase() === projectName.toLocaleLowerCase());
-        if (deletedProject) {
-          const purgeResult = await workspaceRepository.purgeDeletedProject(root, deletedProject.id);
-          await removeInternalProjectArtifacts(root, purgeResult);
-          await refreshWorkspaceCatalog(root);
-        }
-      }
       publish({ phase: 'complete', progress: 100, currentName: projectName, processedCount: 1, totalCount: 1 });
+      if (recycled.permanent) queuePermanentProjectCleanup(root, projectName);
       return { success: true, operationId, permanent: Boolean(recycled.permanent) };
     } catch (error) {
       publish({ phase: 'failed', progress: 0, currentName: projectName, error: error.message || String(error) });
       return { success: false, error: error.message || String(error), errorCode: error?.code || undefined };
+    } finally {
+      if (suppressedProjectPath) releaseWorkspaceWatchPath(suppressedProjectPath);
     }
   });
   
@@ -623,12 +725,56 @@ const registerWorkspaceIpc = context => {
       const directoryIndex = thumbnailService.indexDirectory(root, currentPath, entries, mediaRuntimeState.activeMediaCacheConfig);
       if (!relativePath) {
         void directoryIndex.then(indexed => indexed && thumbnailService.scanProject(root, mediaRuntimeState.activeMediaCacheConfig));
-        scheduleMediaTrackingScan(ensureWorkspace(workspacePath), projectName);
+        if (projectName !== '.__photoflow_inspiration__') scheduleMediaTrackingScan(ensureWorkspace(workspacePath), projectName);
       }
       return { success: true, path: path.relative(root, currentPath), entries };
     } catch (error) {
       writeLog('warn', 'Unable to browse project directory', { projectName, relativePath, error: error.message || String(error) });
       return { success: false, missingDirectory: error?.code === 'ENOENT' || error?.code === 'ENOTDIR', error: error.message || String(error), entries: [] };
+    }
+  });
+
+  ipcMain.handle('workspace-search-files', async (_event, workspacePath, status, projectName, scopeRelativePath = '', query = '') => {
+    try {
+      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const requestedScope = assertInside(root, path.resolve(root, scopeRelativePath || '.'), '搜索范围', true);
+      const scope = assertExistingInside(root, requestedScope, '搜索范围', true);
+      const scopeStat = await fs.promises.stat(scope);
+      if (!scopeStat.isDirectory()) throw new Error('搜索范围不是文件夹');
+      const needle = String(query || '').trim().toLocaleLowerCase('zh-CN');
+
+      const entries = [];
+      const pending = [scope];
+      while (pending.length) {
+        const directory = pending.pop();
+        let children;
+        try {
+          children = await fs.promises.readdir(directory, { withFileTypes: true });
+        } catch (error) {
+          writeLog('warn', 'Unable to read a project search directory', { directory, error: error.message || String(error) });
+          continue;
+        }
+        for (const child of children) {
+          if (child.isSymbolicLink() || HIDDEN_SYSTEM_ENTRY_NAMES.has(child.name.toLowerCase()) || isInternalFileOperationEntry(child.name)) continue;
+          const childPath = path.join(directory, child.name);
+          if (child.isDirectory()) {
+            pending.push(childPath);
+            if (!needle || child.name.toLocaleLowerCase('zh-CN').includes(needle)) {
+              entries.push({ name: child.name, path: childPath, relativePath: path.relative(root, childPath), kind: 'folder', extension: '', size: -1, createdAt: 0, updatedAt: 0 });
+            }
+            continue;
+          }
+          if (!child.isFile() || needle && !child.name.toLocaleLowerCase('zh-CN').includes(needle)) continue;
+          const extension = path.extname(child.name).toLowerCase();
+          const kind = IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
+          entries.push({ name: child.name, path: childPath, relativePath: path.relative(root, childPath), kind, extension, size: -1, createdAt: 0, updatedAt: 0 });
+        }
+      }
+      entries.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+      return { success: true, scope: path.relative(root, scope), entries };
+    } catch (error) {
+      writeLog('warn', 'Unable to search project files', { projectName, scopeRelativePath, error: error.message || String(error) });
+      return { success: false, entries: [], error: error.message || String(error) };
     }
   });
   
@@ -721,7 +867,6 @@ const registerWorkspaceIpc = context => {
 
   ipcMain.handle('workspace-extract-office-images', async (_event, workspacePath, status, projectName, relativePaths = []) => {
     try {
-      pluginService.requireCapability('office-media.extract');
       const requestedPaths = Array.isArray(relativePaths) ? relativePaths.slice(0, 50) : [];
       if (!requestedPaths.length) throw new Error('没有选择 Office 文档');
       const targets = requestedPaths.map(relativePath => resolveProjectEntry(workspacePath, status, projectName, relativePath));
@@ -731,7 +876,7 @@ const registerWorkspaceIpc = context => {
         }
       }
       const args = ['extract', ...targets.flatMap(target => ['--input', target])];
-      const result = await pluginService.runJson('office-media-extractor', args, 20 * 60 * 1000);
+      const result = await runPythonJsonAction('office_media_extract.py', args, 20 * 60 * 1000);
       if (!result?.success) throw new Error(result?.error || '提取图片失败');
       mainWindow?.webContents.send('workspace-files-changed', { root: getProjectPath(workspacePath, status, projectName), fileName: '' });
       return { ...result, results: Array.isArray(result.results) ? result.results : [] };

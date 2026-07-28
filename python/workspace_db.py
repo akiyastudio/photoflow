@@ -6,7 +6,6 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import sqlite3
 import sys
 import time
@@ -21,6 +20,350 @@ IMAGE_EXTENSIONS = {
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".crm"}
 SQLITE_BUSY_TIMEOUT_MS = 15_000
 LEGACY_PROGRESS_MIGRATION_KEY = "legacy_progress_folders_migrated"
+TARGET_SCHEMA_VERSION = 13
+INTEGRITY_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
+MIGRATION_BACKUP_LIMIT = 5
+AUTOMATIC_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000
+AUTOMATIC_BACKUP_LIMIT = 7
+
+
+def _table_columns(db, table: str) -> set[str]:
+    return {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _meta_value(db, key: str):
+    row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+    return row["value"] if row is not None else None
+
+
+def _set_meta(db, key: str, value):
+    db.execute(
+        """INSERT INTO meta(key,value) VALUES(?,?)
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+        (key, str(value)),
+    )
+
+
+def _backup_before_migration(db, database: str, schema_version: int) -> str:
+    backup_dir = os.path.join(os.path.dirname(database), "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup_path = os.path.join(
+        backup_dir,
+        f"{os.path.basename(database)}.v{schema_version}.{stamp}.{uuid.uuid4().hex[:6]}.bak",
+    )
+    backup = sqlite3.connect(backup_path)
+    try:
+        db.backup(backup)
+        if backup.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise RuntimeError("迁移备份完整性检查失败")
+    finally:
+        backup.close()
+    prefix = f"{os.path.basename(database)}.v"
+    backups = sorted(
+        (
+            os.path.join(backup_dir, name)
+            for name in os.listdir(backup_dir)
+            if name.startswith(prefix) and name.endswith(".bak")
+        ),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+    for stale_path in backups[MIGRATION_BACKUP_LIMIT:]:
+        try:
+            os.remove(stale_path)
+        except OSError:
+            pass
+    return backup_path
+
+
+def _automatic_backup_if_due(db, database: str):
+    now = int(time.time() * 1000)
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        last_attempt = int(_meta_value(db, "last_automatic_backup_attempt_at") or 0)
+        if now - last_attempt < AUTOMATIC_BACKUP_INTERVAL_MS:
+            db.rollback()
+            return
+        _set_meta(db, "last_automatic_backup_attempt_at", now)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    backup_dir = os.path.join(os.path.dirname(database), "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup_path = os.path.join(
+        backup_dir,
+        f"{os.path.basename(database)}.auto.{stamp}.{uuid.uuid4().hex[:6]}.bak",
+    )
+    try:
+        backup = sqlite3.connect(backup_path)
+        try:
+            db.backup(backup)
+            if backup.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise RuntimeError("自动备份完整性检查失败")
+        finally:
+            backup.close()
+        backups = sorted(
+            (
+                os.path.join(backup_dir, name)
+                for name in os.listdir(backup_dir)
+                if name.startswith(f"{os.path.basename(database)}.auto.") and name.endswith(".bak")
+            ),
+            key=os.path.getmtime,
+            reverse=True,
+        )
+        for stale_path in backups[AUTOMATIC_BACKUP_LIMIT:]:
+            try:
+                os.remove(stale_path)
+            except OSError:
+                pass
+        _set_meta(db, "last_automatic_backup_at", now)
+        _set_meta(db, "last_automatic_backup", backup_path)
+        _set_meta(db, "last_automatic_backup_error", "")
+    except Exception as error:
+        try:
+            os.remove(backup_path)
+        except OSError:
+            pass
+        _set_meta(db, "last_automatic_backup_error", str(error))
+    db.commit()
+
+
+def _migration_11(db):
+    columns = _table_columns(db, "projects")
+    if "filesystem_id" not in columns:
+        db.execute("ALTER TABLE projects ADD COLUMN filesystem_id TEXT")
+    if "is_deleted" not in columns:
+        db.execute("ALTER TABLE projects ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
+    patch_columns = _table_columns(db, "team_patch_tasks")
+    if "mask_path" not in patch_columns:
+        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN mask_path TEXT")
+    if "mask_json" not in patch_columns:
+        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN mask_json TEXT NOT NULL DEFAULT '{}'")
+    if "members_json" not in patch_columns:
+        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN members_json TEXT NOT NULL DEFAULT '[]'")
+    if "needs_review" not in patch_columns:
+        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0")
+    if "review_reason" not in patch_columns:
+        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN review_reason TEXT NOT NULL DEFAULT ''")
+    db.execute(
+        """INSERT OR IGNORE INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at)
+           SELECT task.photo_id,photos.project_id,task.base_version_id,MIN(task.created_at),MAX(task.updated_at)
+           FROM team_patch_tasks task JOIN photos ON photos.id=task.photo_id
+           WHERE task.is_deleted=0 AND task.updated_at=(
+             SELECT MAX(latest.updated_at) FROM team_patch_tasks latest
+             WHERE latest.photo_id=task.photo_id AND latest.is_deleted=0
+           ) GROUP BY task.photo_id"""
+    )
+
+
+def _migration_12(db):
+    """Make every file record owned by a real version and discard legacy orphans."""
+    removed = db.execute(
+        """SELECT COUNT(*) FROM file_records
+           WHERE owner_type!='version' OR NOT EXISTS(
+             SELECT 1 FROM versions WHERE versions.id=file_records.owner_id
+           )"""
+    ).fetchone()[0]
+    foreign_keys = db.execute("PRAGMA foreign_key_list(file_records)").fetchall()
+    has_owner_fk = any(row[2] == "versions" and row[3] == "owner_id" and row[4] == "id" for row in foreign_keys)
+    if not has_owner_fk:
+        db.execute("DROP TABLE IF EXISTS file_records_v12")
+        db.execute(
+            """CREATE TABLE file_records_v12 (
+                id TEXT PRIMARY KEY,
+                owner_type TEXT NOT NULL CHECK(owner_type='version'),
+                owner_id TEXT NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
+                current_path TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                extension TEXT NOT NULL,
+                windows_file_id TEXT,
+                volume_id TEXT,
+                file_size INTEGER NOT NULL CHECK(file_size>=0),
+                modified_at INTEGER,
+                quick_hash TEXT,
+                full_hash TEXT,
+                missing INTEGER NOT NULL DEFAULT 0 CHECK(missing IN (0,1)),
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(owner_type, owner_id)
+            )"""
+        )
+        db.execute(
+            """INSERT INTO file_records_v12
+               SELECT records.* FROM file_records records
+               JOIN versions ON versions.id=records.owner_id
+               WHERE records.owner_type='version'"""
+        )
+        db.execute("DROP TABLE file_records")
+        db.execute("ALTER TABLE file_records_v12 RENAME TO file_records")
+    else:
+        db.execute(
+            """DELETE FROM file_records
+               WHERE owner_type!='version' OR NOT EXISTS(
+                 SELECT 1 FROM versions WHERE versions.id=file_records.owner_id
+               )"""
+        )
+    _set_meta(db, "migration_12_orphan_file_records_removed", removed)
+
+
+def _repair_version_flags(db):
+    for duplicate in db.execute(
+        """SELECT photo_id FROM versions
+           WHERE is_current=1 AND is_deleted=0 GROUP BY photo_id HAVING COUNT(*)>1"""
+    ).fetchall():
+        photo_id = duplicate[0]
+        preferred = db.execute(
+            """SELECT versions.id FROM versions JOIN photos ON photos.id=versions.photo_id
+               WHERE versions.photo_id=? AND versions.is_current=1 AND versions.is_deleted=0
+               ORDER BY versions.id=photos.current_version_id DESC, versions.version_number DESC LIMIT 1""",
+            (photo_id,),
+        ).fetchone()[0]
+        db.execute("UPDATE versions SET is_current=(id=?) WHERE photo_id=? AND is_deleted=0", (preferred, photo_id))
+    for duplicate in db.execute(
+        """SELECT photo_id FROM versions
+           WHERE is_final=1 AND is_deleted=0 GROUP BY photo_id HAVING COUNT(*)>1"""
+    ).fetchall():
+        photo_id = duplicate[0]
+        preferred = db.execute(
+            """SELECT id FROM versions WHERE photo_id=? AND is_final=1 AND is_deleted=0
+               ORDER BY version_number DESC, updated_at DESC LIMIT 1""",
+            (photo_id,),
+        ).fetchone()[0]
+        db.execute("UPDATE versions SET is_final=(id=?) WHERE photo_id=? AND is_deleted=0", (preferred, photo_id))
+
+
+def _migration_13(db):
+    columns = _table_columns(db, "projects")
+    if "availability" not in columns:
+        db.execute(
+            "ALTER TABLE projects ADD COLUMN availability TEXT NOT NULL DEFAULT 'available' "
+            "CHECK(availability IN ('available','missing'))"
+        )
+    if "missing_since" not in columns:
+        db.execute("ALTER TABLE projects ADD COLUMN missing_since INTEGER")
+    if "missing_checks" not in columns:
+        db.execute("ALTER TABLE projects ADD COLUMN missing_checks INTEGER NOT NULL DEFAULT 0 CHECK(missing_checks>=0)")
+    _repair_version_flags(db)
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS versions_one_current "
+        "ON versions(photo_id) WHERE is_current=1 AND is_deleted=0"
+    )
+    db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS versions_one_final "
+        "ON versions(photo_id) WHERE is_final=1 AND is_deleted=0"
+    )
+    db.execute(
+        """CREATE TRIGGER IF NOT EXISTS versions_parent_same_photo_insert
+           BEFORE INSERT ON versions WHEN NEW.parent_version_id IS NOT NULL
+           AND NOT EXISTS(SELECT 1 FROM versions parent WHERE parent.id=NEW.parent_version_id AND parent.photo_id=NEW.photo_id)
+           BEGIN SELECT RAISE(ABORT,'parent version belongs to another photo'); END"""
+    )
+    db.execute(
+        """CREATE TRIGGER IF NOT EXISTS versions_parent_same_photo_update
+           BEFORE UPDATE OF parent_version_id,photo_id ON versions WHEN NEW.parent_version_id IS NOT NULL
+           AND NOT EXISTS(SELECT 1 FROM versions parent WHERE parent.id=NEW.parent_version_id AND parent.photo_id=NEW.photo_id)
+           BEGIN SELECT RAISE(ABORT,'parent version belongs to another photo'); END"""
+    )
+    db.execute(
+        """CREATE TRIGGER IF NOT EXISTS photos_current_version_same_photo
+           BEFORE UPDATE OF current_version_id ON photos WHEN NEW.current_version_id IS NOT NULL
+           AND NOT EXISTS(SELECT 1 FROM versions WHERE id=NEW.current_version_id AND photo_id=NEW.id AND is_deleted=0)
+           BEGIN SELECT RAISE(ABORT,'current version belongs to another photo'); END"""
+    )
+    guards = (
+        (
+            "version_batches_parent_project",
+            "version_batches",
+            "parent_batch_id,project_id",
+            "NEW.parent_batch_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM version_batches parent WHERE parent.id=NEW.parent_batch_id AND parent.project_id=NEW.project_id)",
+            "parent batch belongs to another project",
+        ),
+        (
+            "progress_folders_parent_project",
+            "progress_folders",
+            "parent_progress_id,project_id,media_kind",
+            "NEW.parent_progress_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM progress_folders parent WHERE parent.id=NEW.parent_progress_id AND parent.project_id=NEW.project_id AND parent.media_kind=NEW.media_kind)",
+            "parent progress folder belongs to another project or media kind",
+        ),
+        (
+            "batch_items_owner_consistency",
+            "batch_items",
+            "batch_id,photo_id,version_id",
+            "NOT EXISTS(SELECT 1 FROM version_batches batch JOIN photos ON photos.project_id=batch.project_id JOIN versions ON versions.photo_id=photos.id WHERE batch.id=NEW.batch_id AND photos.id=NEW.photo_id AND versions.id=NEW.version_id)",
+            "batch item owners are inconsistent",
+        ),
+        (
+            "team_retouch_photo_consistency",
+            "team_retouch_photos",
+            "project_id,photo_id,base_version_id",
+            "NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=NEW.project_id AND photos.id=NEW.photo_id AND versions.id=NEW.base_version_id)",
+            "team retouch photo owners are inconsistent",
+        ),
+        (
+            "team_assignment_consistency",
+            "team_person_assignments",
+            "project_id,photo_id,base_version_id,identity_id",
+            "NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=NEW.project_id AND photos.id=NEW.photo_id AND versions.id=NEW.base_version_id) OR (NEW.identity_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM team_person_identities identity WHERE identity.id=NEW.identity_id AND identity.project_id=NEW.project_id))",
+            "team assignment owners are inconsistent",
+        ),
+        (
+            "team_exclusion_consistency",
+            "team_person_exclusions",
+            "project_id,photo_id,base_version_id",
+            "NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=NEW.project_id AND photos.id=NEW.photo_id AND versions.id=NEW.base_version_id)",
+            "team exclusion owners are inconsistent",
+        ),
+    )
+    for name, table, update_columns, condition, message in guards:
+        db.execute(
+            f"""CREATE TRIGGER IF NOT EXISTS {name}_insert
+                BEFORE INSERT ON {table} WHEN {condition}
+                BEGIN SELECT RAISE(ABORT,'{message}'); END"""
+        )
+        db.execute(
+            f"""CREATE TRIGGER IF NOT EXISTS {name}_update
+                BEFORE UPDATE OF {update_columns} ON {table} WHEN {condition}
+                BEGIN SELECT RAISE(ABORT,'{message}'); END"""
+        )
+
+
+MIGRATIONS = {
+    11: _migration_11,
+    12: _migration_12,
+    13: _migration_13,
+}
+
+
+def _check_integrity(db, force: bool = False):
+    now = int(time.time() * 1000)
+    last_check = int(_meta_value(db, "last_integrity_check_at") or 0)
+    if not force and now - last_check < INTEGRITY_CHECK_INTERVAL_MS:
+        return
+    quick_check = [row[0] for row in db.execute("PRAGMA quick_check").fetchall()]
+    foreign_key_errors = db.execute("PRAGMA foreign_key_check").fetchall()
+    business_checks = {
+        "photos.current_version": """SELECT COUNT(*) FROM photos WHERE current_version_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM versions WHERE versions.id=photos.current_version_id AND versions.photo_id=photos.id AND versions.is_deleted=0)""",
+        "versions.parent": """SELECT COUNT(*) FROM versions child WHERE parent_version_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM versions parent WHERE parent.id=child.parent_version_id AND parent.photo_id=child.photo_id)""",
+        "version_batches.parent": """SELECT COUNT(*) FROM version_batches child WHERE parent_batch_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM version_batches parent WHERE parent.id=child.parent_batch_id AND parent.project_id=child.project_id)""",
+        "progress_folders.parent": """SELECT COUNT(*) FROM progress_folders child WHERE parent_progress_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM progress_folders parent WHERE parent.id=child.parent_progress_id AND parent.project_id=child.project_id AND parent.media_kind=child.media_kind)""",
+        "batch_items.owner": """SELECT COUNT(*) FROM batch_items item WHERE NOT EXISTS(SELECT 1 FROM version_batches batch JOIN photos ON photos.project_id=batch.project_id JOIN versions ON versions.photo_id=photos.id WHERE batch.id=item.batch_id AND photos.id=item.photo_id AND versions.id=item.version_id)""",
+        "team_retouch_photos.owner": """SELECT COUNT(*) FROM team_retouch_photos item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id)""",
+        "team_person_assignments.owner": """SELECT COUNT(*) FROM team_person_assignments item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id) OR (item.identity_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM team_person_identities identity WHERE identity.id=item.identity_id AND identity.project_id=item.project_id))""",
+        "team_person_exclusions.owner": """SELECT COUNT(*) FROM team_person_exclusions item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id)""",
+    }
+    business_errors = {name: db.execute(query).fetchone()[0] for name, query in business_checks.items()}
+    business_errors = {name: count for name, count in business_errors.items() if count}
+    if quick_check != ["ok"] or foreign_key_errors or business_errors:
+        raise RuntimeError(
+            f"数据库完整性检查失败：quick_check={quick_check[:3]}，foreign_key_errors={len(foreign_key_errors)}，business_errors={business_errors}"
+        )
+    _set_meta(db, "last_integrity_check_at", now)
+    _set_meta(db, "last_integrity_check_result", "ok")
+    db.commit()
 
 
 def connect(root: str, database: str):
@@ -37,6 +380,23 @@ def connect(root: str, database: str):
     journal_mode = db.execute("PRAGMA journal_mode").fetchone()[0]
     if str(journal_mode).casefold() != "wal":
         db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA foreign_keys=ON")
+    existing_tables = {
+        row[0] for row in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+    }
+    db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    db.commit()
+    schema_value = _meta_value(db, "schema_version")
+    schema_version = int(schema_value or 0)
+    is_fresh = not (existing_tables - {"meta"})
+    if schema_version > TARGET_SCHEMA_VERSION:
+        db.close()
+        raise RuntimeError(f"数据库版本 {schema_version} 高于当前软件支持的 {TARGET_SCHEMA_VERSION}")
+    backup_path = None
+    if not is_fresh and schema_version < TARGET_SCHEMA_VERSION:
+        backup_path = _backup_before_migration(db, database, schema_version)
     db.executescript("""
         PRAGMA foreign_keys=ON;
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -47,6 +407,9 @@ def connect(root: str, database: str):
             relative_path TEXT NOT NULL UNIQUE,
             filesystem_id TEXT,
             is_deleted INTEGER NOT NULL DEFAULT 0,
+            availability TEXT NOT NULL DEFAULT 'available' CHECK(availability IN ('available','missing')),
+            missing_since INTEGER,
+            missing_checks INTEGER NOT NULL DEFAULT 0 CHECK(missing_checks>=0),
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             extra_json TEXT NOT NULL DEFAULT '{}'
@@ -174,18 +537,18 @@ def connect(root: str, database: str):
         CREATE INDEX IF NOT EXISTS batch_items_source_file ON batch_items(source_file_id);
         CREATE TABLE IF NOT EXISTS file_records (
             id TEXT PRIMARY KEY,
-            owner_type TEXT NOT NULL,
-            owner_id TEXT NOT NULL,
+            owner_type TEXT NOT NULL CHECK(owner_type='version'),
+            owner_id TEXT NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
             current_path TEXT NOT NULL,
             file_name TEXT NOT NULL,
             extension TEXT NOT NULL,
             windows_file_id TEXT,
             volume_id TEXT,
-            file_size INTEGER NOT NULL,
+            file_size INTEGER NOT NULL CHECK(file_size>=0),
             modified_at INTEGER,
             quick_hash TEXT,
             full_hash TEXT,
-            missing INTEGER NOT NULL DEFAULT 0,
+            missing INTEGER NOT NULL DEFAULT 0 CHECK(missing IN (0,1)),
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             UNIQUE(owner_type, owner_id)
@@ -279,38 +642,28 @@ def connect(root: str, database: str):
         );
         CREATE INDEX IF NOT EXISTS undo_records_ready ON undo_records(state, created_at DESC);
     """)
-    columns = {row[1] for row in db.execute("PRAGMA table_info(projects)").fetchall()}
-    if "filesystem_id" not in columns:
-        db.execute("ALTER TABLE projects ADD COLUMN filesystem_id TEXT")
-    if "is_deleted" not in columns:
-        db.execute("ALTER TABLE projects ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
-    patch_columns = {row[1] for row in db.execute("PRAGMA table_info(team_patch_tasks)").fetchall()}
-    if "mask_path" not in patch_columns:
-        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN mask_path TEXT")
-    if "mask_json" not in patch_columns:
-        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN mask_json TEXT NOT NULL DEFAULT '{}'")
-    if "members_json" not in patch_columns:
-        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN members_json TEXT NOT NULL DEFAULT '[]'")
-    if "needs_review" not in patch_columns:
-        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0")
-    if "review_reason" not in patch_columns:
-        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN review_reason TEXT NOT NULL DEFAULT ''")
-    db.execute(
-        """INSERT OR IGNORE INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at)
-           SELECT task.photo_id,photos.project_id,task.base_version_id,MIN(task.created_at),MAX(task.updated_at)
-           FROM team_patch_tasks task JOIN photos ON photos.id=task.photo_id
-           WHERE task.is_deleted=0 AND task.updated_at=(
-             SELECT MAX(latest.updated_at) FROM team_patch_tasks latest
-             WHERE latest.photo_id=task.photo_id AND latest.is_deleted=0
-           ) GROUP BY task.photo_id"""
-    )
-    for key, value in (("schema_version", "11"), ("workspace_root", root)):
-        current = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
-        if current is None:
-            db.execute("INSERT INTO meta(key, value) VALUES (?, ?)", (key, value))
-        elif current["value"] != value:
-            db.execute("UPDATE meta SET value=? WHERE key=?", (value, key))
+    if is_fresh:
+        with db:
+            _migration_13(db)
+            _set_meta(db, "schema_version", TARGET_SCHEMA_VERSION)
+    else:
+        for next_version in range(schema_version + 1, TARGET_SCHEMA_VERSION + 1):
+            migration = MIGRATIONS.get(next_version)
+            if migration is None:
+                db.close()
+                raise RuntimeError(f"缺少数据库迁移：{next_version}")
+            with db:
+                migration(db)
+                _set_meta(db, "schema_version", next_version)
+    _set_meta(db, "workspace_root", root)
+    if backup_path:
+        _set_meta(db, "last_migration_backup", backup_path)
     db.commit()
+    # A fresh database and a migration must be verified before it is exposed.
+    # Routine daily maintenance is dispatched by Electron on a separate worker
+    # so opening the project list never waits for a full integrity scan/backup.
+    if backup_path or is_fresh:
+        _check_integrity(db, force=True)
     return db
 
 
@@ -579,6 +932,8 @@ def mark_missing_project_versions(db, project_id: str):
 
 def media_sync_project(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
+    if "availability" in project.keys() and project["availability"] == "missing":
+        return {"success": True, "count": 0, "thumbnailCandidates": [], "projectUnavailable": True}
     project_path = os.path.join(os.path.abspath(root), project["relative_path"])
     # Mark disappeared sources first so a same-content file discovered on a
     # different volume can retain its Photo ID instead of becoming a duplicate.
@@ -2058,6 +2413,23 @@ def team_patch_update(db, payload: dict):
     row = db.execute("SELECT * FROM team_patch_tasks WHERE id=? AND is_deleted=0", (payload["taskId"],)).fetchone()
     if row is None:
         raise ValueError("人物修图任务不存在")
+    assignment_completion = payload.get("assignmentCompletion")
+    assignment_person_index = None
+    if assignment_completion is not None:
+        if not isinstance(assignment_completion, dict):
+            raise ValueError("人物完成状态无效")
+        assignment_person_index = int(assignment_completion.get("personIndex") or 0)
+        members = json.loads(row["members_json"] or "[]") or [{"personIndex": row["person_index"]}]
+        member_indices = {int(member.get("personIndex") or 0) for member in members}
+        if assignment_person_index < 1 or assignment_person_index not in member_indices:
+            raise ValueError("人物不属于这个修图任务")
+        assignment = db.execute(
+            """SELECT 1 FROM team_person_assignments
+               WHERE photo_id=? AND base_version_id=? AND person_index=?""",
+            (row["photo_id"], row["base_version_id"], assignment_person_index),
+        ).fetchone()
+        if assignment is None:
+            raise ValueError("请先给这个人物标记身份")
     fields, values = [], []
     mapping = {"personName": "person_name", "assignee": "assignee", "status": "status", "mergedVersionId": "merged_version_id"}
     for source, target in mapping.items():
@@ -2086,11 +2458,22 @@ def team_patch_update(db, payload: dict):
             raise ValueError("工作图范围无效")
         fields.append("crop_json=?")
         values.append(json.dumps(normalized_crop, ensure_ascii=False))
+    timestamp = int(time.time() * 1000)
     fields.append("updated_at=?")
-    values.append(int(time.time() * 1000))
+    values.append(timestamp)
     values.append(row["id"])
-    db.execute(f"UPDATE team_patch_tasks SET {', '.join(fields)} WHERE id=?", values)
-    db.commit()
+    try:
+        db.execute(f"UPDATE team_patch_tasks SET {', '.join(fields)} WHERE id=?", values)
+        if assignment_person_index is not None:
+            db.execute(
+                """UPDATE team_person_assignments SET completed=?,updated_at=?
+                   WHERE photo_id=? AND base_version_id=? AND person_index=?""",
+                (int(bool(assignment_completion.get("completed"))), timestamp, row["photo_id"], row["base_version_id"], assignment_person_index),
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     return team_patch_list(db, {"photoId": row["photo_id"]})
 
 
@@ -2136,26 +2519,26 @@ def sync_directories(root: str, db):
         row = by_path.get(relative_path.casefold())
         if row is not None:
             if row["is_deleted"]:
-                if identity and identity == row["filesystem_id"]:
-                    db.execute("UPDATE projects SET is_deleted=0, updated_at=? WHERE id=?", (now, row["id"]))
-                else:
-                    db.execute("DELETE FROM projects WHERE id=?", (row["id"],))
-                    row = None
-            if row is None:
-                project_id = str(uuid.uuid4())
                 db.execute(
-                    "INSERT INTO projects(id,name,status,relative_path,filesystem_id,is_deleted,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                    (project_id, entry.name, "未分类", relative_path, identity, 0, now, now),
+                    """UPDATE projects SET is_deleted=0,filesystem_id=?,availability='available',
+                       missing_since=NULL,missing_checks=0,updated_at=? WHERE id=?""",
+                    (identity, now, row["id"]),
                 )
-                seen_ids.add(project_id)
-                continue
             seen_ids.add(row["id"])
-            if identity and identity != row["filesystem_id"]:
-                db.execute("UPDATE projects SET filesystem_id=?, updated_at=? WHERE id=?", (identity, now, row["id"]))
+            if identity != row["filesystem_id"] or row["availability"] != "available" or row["missing_checks"]:
+                db.execute(
+                    """UPDATE projects SET filesystem_id=?,availability='available',missing_since=NULL,
+                       missing_checks=0,updated_at=? WHERE id=?""",
+                    (identity, now, row["id"]),
+                )
             continue
         renamed_row = by_identity.get(identity) if identity else None
         if renamed_row is not None and renamed_row["id"] not in seen_ids:
-            db.execute("UPDATE projects SET name=?, relative_path=?, is_deleted=0, updated_at=? WHERE id=?", (entry.name, relative_path, now, renamed_row["id"]))
+            db.execute(
+                """UPDATE projects SET name=?,relative_path=?,is_deleted=0,availability='available',
+                   missing_since=NULL,missing_checks=0,updated_at=? WHERE id=?""",
+                (entry.name, relative_path, now, renamed_row["id"]),
+            )
             seen_ids.add(renamed_row["id"])
             continue
         project_id = str(uuid.uuid4())
@@ -2167,7 +2550,11 @@ def sync_directories(root: str, db):
 
     for row in rows:
         if not row["is_deleted"] and row["id"] not in seen_ids and not os.path.isdir(os.path.join(root, row["relative_path"])):
-            db.execute("DELETE FROM projects WHERE id=?", (row["id"],))
+            db.execute(
+                """UPDATE projects SET availability='missing',missing_since=COALESCE(missing_since,?),
+                   missing_checks=missing_checks+1,updated_at=? WHERE id=?""",
+                (now, now, row["id"]),
+            )
     db.commit()
 
 
@@ -2181,7 +2568,9 @@ def load(root: str, database: str):
 
 def deleted_projects_list(db):
     records_by_name = {}
-    for record in db.execute("SELECT * FROM undo_records WHERE kind='trash' ORDER BY created_at DESC").fetchall():
+    for record in db.execute(
+        "SELECT * FROM undo_records WHERE kind IN ('trash','project-cleanup') ORDER BY created_at DESC"
+    ).fetchall():
         try:
             payload = json.loads(record["payload_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -2197,6 +2586,7 @@ def deleted_projects_list(db):
             "originalPath": str(item.get("original") or ""),
             "recyclePidl": str(item.get("recyclePidl") or ""),
             "preciseRestore": bool(item.get("preciseRestore", True)),
+            "permanent": bool(item.get("permanent", False)),
         }
 
     rows = db.execute(
@@ -2222,7 +2612,7 @@ def deleted_projects_list(db):
     return {"success": True, "projects": projects}
 
 
-def purge_deleted_project(db, payload: dict):
+def deleted_project_cleanup_plan(db, payload: dict):
     project_id = str(payload.get("projectId") or "")
     project = db.execute("SELECT * FROM projects WHERE id=? AND is_deleted=1", (project_id,)).fetchone()
     if project is None:
@@ -2253,7 +2643,9 @@ def purge_deleted_project(db, payload: dict):
         db.execute(f"DELETE FROM file_records WHERE owner_type='version' AND owner_id IN ({placeholders})", version_ids)
 
     removed_undo_ids = []
-    for record in db.execute("SELECT id,payload_json FROM undo_records WHERE kind='trash'").fetchall():
+    for record in db.execute(
+        "SELECT id,payload_json FROM undo_records WHERE kind IN ('trash','project-cleanup')"
+    ).fetchall():
         try:
             record_payload = json.loads(record["payload_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -2261,12 +2653,7 @@ def purge_deleted_project(db, payload: dict):
         catalog = record_payload.get("projectCatalog") or {}
         if str(catalog.get("name") or "").casefold() == str(project["name"]).casefold():
             removed_undo_ids.append(record["id"])
-    if removed_undo_ids:
-        placeholders = ",".join("?" for _ in removed_undo_ids)
-        db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", removed_undo_ids)
 
-    db.execute("DELETE FROM projects WHERE id=? AND is_deleted=1", (project_id,))
-    db.commit()
     return {
         "success": True,
         "name": project["name"],
@@ -2277,9 +2664,29 @@ def purge_deleted_project(db, payload: dict):
     }
 
 
+def purge_deleted_project(db, payload: dict):
+    result = deleted_project_cleanup_plan(db, payload)
+    project_id = str(payload.get("projectId") or "")
+    removed_undo_ids = result["removedUndoIds"]
+    if removed_undo_ids:
+        placeholders = ",".join("?" for _ in removed_undo_ids)
+        db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", removed_undo_ids)
+
+    db.execute("DELETE FROM projects WHERE id=? AND is_deleted=1", (project_id,))
+    db.commit()
+    return result
+
+
 def mutate(root: str, database: str, action: str, payload: dict):
     db = connect(root, database)
     now = int(time.time() * 1000)
+    if action == "maintenance_run":
+        try:
+            _check_integrity(db)
+            _automatic_backup_if_due(db, database)
+            return {"success": True}
+        finally:
+            db.close()
     if action == "add":
         if payload["status"] not in STATUSES:
             raise ValueError("无效的项目状态")
@@ -2323,6 +2730,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         )
     elif action == "deleted_projects_list":
         result = deleted_projects_list(db)
+        db.close()
+        return result
+    elif action == "deleted_project_cleanup_plan":
+        result = deleted_project_cleanup_plan(db, payload)
         db.close()
         return result
     elif action == "purge_deleted_project":
@@ -2471,7 +2882,9 @@ def mutate(root: str, database: str, action: str, payload: dict):
         db.close()
         return {"success": True, "id": record_id}
     elif action == "undo_record_latest":
-        row = db.execute("SELECT * FROM undo_records WHERE state='ready' ORDER BY created_at DESC LIMIT 1").fetchone()
+        row = db.execute(
+            "SELECT * FROM undo_records WHERE state='ready' AND kind='trash' ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
         db.close()
         if row is None:
             return {"success": True, "record": None}
@@ -2491,7 +2904,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "add", "status", "rename", "delete", "restore_project", "deleted_projects_list", "purge_deleted_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "batch_register_baseline", "batch_commit_compare", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
+    parser.add_argument("action", nargs="?", choices=("init", "maintenance_run", "add", "status", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "batch_register_baseline", "batch_commit_compare", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")

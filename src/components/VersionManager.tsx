@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import type { AppConfig, MediaMetadataField, MediaVersion, MediaVersionBundle, ProjectFileEntry, WorkspaceProject } from '../types';
 import { useAppDialog } from './AppDialogProvider';
+import { useEscapeLayer } from './LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG } from '../utils/recycleBinFailure';
 
 type VersionManagerProps = {
@@ -205,14 +206,7 @@ const SingleVersionView = ({ version, cacheConfig, busy, onClose, onNotice, onTo
     return () => { active = false; };
   }, [version.id, version.filePath, version.fileModifiedAt, version.fileMissing]);
   useEffect(() => window.localStorage.setItem('photoflow:version-metadata-width', String(Math.round(metadataWidth))), [metadataWidth]);
-  useEffect(() => {
-    if (!fullscreen) return;
-    const exitFullscreen = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setFullscreen(false);
-    };
-    window.addEventListener('keydown', exitFullscreen, true);
-    return () => window.removeEventListener('keydown', exitFullscreen, true);
-  }, [fullscreen]);
+  useEscapeLayer(fullscreen, () => setFullscreen(false));
 
   const groupedMetadata = useMemo(() => metadataFields.reduce((groups, field) => {
     const fields = groups.get(field.group) || [];
@@ -283,6 +277,7 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
   const [selectedId, setSelectedId] = useState('');
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [editing, setEditing] = useState<MediaVersion | null>(null);
+  useEscapeLayer(Boolean(editing), () => setEditing(null), !busy);
   const initialCompareAppliedRef = useRef('');
   const [editNote, setEditNote] = useState('');
   const [treeWidth, setTreeWidth] = useState(() => {
@@ -414,11 +409,30 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
   const relocateVersion = async (version: MediaVersion) => {
     if (!bundle.photo) return;
     setBusy(true);
-    const result = await window.electronAPI.relocateMediaVersion(workspacePath, project.status, project.name, {
+    let result = await window.electronAPI.relocateMediaVersion(workspacePath, project.status, project.name, {
       photoId: bundle.photo.id,
       versionId: version.id,
     });
     setBusy(false);
+    if (result.requiresDecision?.kind === 'version-fingerprint-mismatch') {
+      const decision = result.requiresDecision;
+      const action = await appDialog.choice({
+        title: '文件内容不一致',
+        message: decision.message,
+        detail: decision.detail,
+        choices: [{ value: 'relocate', label: '仍然重新定位' }],
+        cancelDefault: true,
+      });
+      if (action !== 'relocate') return;
+      setBusy(true);
+      result = await window.electronAPI.relocateMediaVersion(workspacePath, project.status, project.name, {
+        photoId: bundle.photo.id,
+        versionId: version.id,
+        filePath: decision.filePath,
+        force: true,
+      });
+      setBusy(false);
+    }
     if (result.cancelled) return;
     if (!result.success) { onNotice(`重新定位失败：${result.error || '未知错误'}`); return; }
     setBundle(normalizeVisibleVersionBundle(result));
@@ -471,6 +485,6 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
       <main className="flex min-w-0 flex-1 overflow-hidden">{selected ? <SingleVersionView version={selected} cacheConfig={cacheConfig} busy={busy} onClose={onClose} onNotice={onNotice} onToggleFinal={() => void updateVersion({ versionId: selected.id, isFinal: !selected.isFinal }, selected.isFinal ? '已取消最终版' : '已标记为最终版')} onEditNote={() => { setEditing(selected); setEditNote(selected.note); }} onMakeCurrent={() => void updateVersion({ versionId: selected.id, makeCurrent: true }, '已切换当前版本')} onRelocate={() => void relocateVersion(selected)} onDelete={() => void deleteVersion(selected)}/> : <div className="flex h-full flex-1 items-center justify-center text-slate-400">请选择一个版本</div>}</main>
       {bundle.photo && compareVersions.length === 2 && <div className="absolute inset-y-0 right-0 z-20 bg-slate-950" style={{ left: treeWidth + 1 }}><CompareView left={compareVersions[0]} right={compareVersions[1]} cacheConfig={cacheConfig} workspacePath={workspacePath} photoId={bundle.photo.id} initialMode={initialCompareMode} onClose={() => setCompareIds([])}/></div>}
     </div>}
-    {editing && <div className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><header className="flex items-center justify-between"><h3 className="font-bold text-slate-800">编辑版本说明 · V{editing.versionNumber}</h3><button onClick={() => setEditing(null)}><X size={18}/></button></header><label className="form-label">版本说明</label><textarea autoFocus rows={5} value={editNote} onChange={event => setEditNote(event.target.value)} placeholder="记录本次进度的修改内容" className="form-input resize-none"/><p className="mt-3 text-xs text-slate-500">版本名称由进度规则生成，不在这里修改。</p><footer className="mt-5 flex justify-end gap-2"><button onClick={() => setEditing(null)} className="dialog-secondary">取消</button><button disabled={busy} onClick={() => void updateVersion({ versionId: editing.id, note: editNote }, '版本说明已更新')} className="dialog-primary">保存</button></footer></div></div>}
+    {editing && <div className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><div role="dialog" aria-modal="true" aria-label={`编辑版本说明 V${editing.versionNumber}`} className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><header className="flex items-center justify-between"><h3 className="font-bold text-slate-800">编辑版本说明 · V{editing.versionNumber}</h3><button onClick={() => setEditing(null)}><X size={18}/></button></header><label className="form-label">版本说明</label><textarea autoFocus rows={5} value={editNote} onChange={event => setEditNote(event.target.value)} placeholder="记录本次进度的修改内容" className="form-input resize-none"/><p className="mt-3 text-xs text-slate-500">版本名称由进度规则生成，不在这里修改。</p><footer className="mt-5 flex justify-end gap-2"><button onClick={() => setEditing(null)} className="dialog-secondary">取消</button><button disabled={busy} onClick={() => void updateVersion({ versionId: editing.id, note: editNote }, '版本说明已更新')} className="dialog-primary">保存</button></footer></div></div>}
   </div>;
 };

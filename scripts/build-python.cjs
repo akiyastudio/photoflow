@@ -25,6 +25,19 @@ const result = spawnSync(python, [
 if (result.error) throw result.error;
 if ((result.status ?? 1) !== 0) process.exit(result.status ?? 1);
 
+const inspirationTools = spawnSync(python, [
+  '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm', '--specpath', 'build/specs',
+  '--name', 'inspiration-tools', '--exclude-module', 'imageio_ffmpeg',
+  '--exclude-module', 'scipy', '--exclude-module', 'matplotlib',
+  '--exclude-module', 'torch', '--exclude-module', 'torchvision',
+  '--exclude-module', 'torchaudio', '--exclude-module', 'triton',
+  '--hidden-import', 'research', '--hidden-import', 'office_media_extract',
+  'inspiration_tools.py',
+], { cwd: join(root, 'python'), stdio: 'inherit' });
+
+if (inspirationTools.error) throw inspirationTools.error;
+if ((inspirationTools.status ?? 1) !== 0) process.exit(inspirationTools.status ?? 1);
+
 const thumbnailWorker = spawnSync(python, [
   '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm', '--specpath', 'build/specs',
   '--name', 'thumbnail-image-worker',

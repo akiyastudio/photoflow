@@ -16,6 +16,9 @@ from send2trash import send2trash
 VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".m4v", ".webm"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 PREVIEW_WIDTH = 384
+QUALITY_WIDTH = 640
+MIN_FRAME_SHARPNESS = 24.0
+BLACK_FRAME_LUMA_P99 = 18.0
 
 
 def configure_text_streams():
@@ -189,14 +192,41 @@ def find_boundaries(scores, fps, sensitivity, min_duration):
     return selected
 
 
-def calculate_frame_quality(frame):
+def frame_quality_metrics(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    height, width = gray.shape[:2]
+    longest_edge = max(height, width)
+    if longest_edge > QUALITY_WIDTH:
+        scale = QUALITY_WIDTH / longest_edge
+        gray = cv2.resize(
+            gray,
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
     sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
     mean = float(gray.mean())
     clipped = float(((gray <= 5) | (gray >= 250)).mean())
+    luma_p99 = float(np.percentile(gray, 99))
+    black_pixel_ratio = float((gray <= 12).mean())
+    is_black = luma_p99 <= BLACK_FRAME_LUMA_P99 or (mean <= 10.0 and black_pixel_ratio >= 0.98)
+    is_blurry = sharpness < MIN_FRAME_SHARPNESS
     # Extreme exposure and nearly blank frames should not win merely due to noise.
     exposure = max(0.0, 1.0 - abs(mean - 128.0) / 128.0) * (1.0 - clipped)
-    return sharpness * (0.35 + 0.65 * exposure), sharpness, mean
+    return {
+        "quality": sharpness * (0.35 + 0.65 * exposure),
+        "sharpness": sharpness,
+        "brightness": mean,
+        "luma_p99": luma_p99,
+        "black_pixel_ratio": black_pixel_ratio,
+        "is_black": is_black,
+        "is_blurry": is_blurry,
+    }
+
+
+def calculate_frame_quality(frame):
+    """Keep the legacy tuple contract for callers that only need ranking data."""
+    metrics = frame_quality_metrics(frame)
+    return metrics["quality"], metrics["sharpness"], metrics["brightness"]
 
 
 def extract_best_frames(video_path, shots, fps, original_name):
@@ -207,6 +237,8 @@ def extract_best_frames(video_path, shots, fps, original_name):
     output_dir = os.path.dirname(video_path)
     base_name = sanitize_filename(os.path.splitext(original_name)[0])
     metadata = []
+    skipped_black_shots = 0
+    skipped_blurry_shots = 0
     for number, (start, end) in enumerate(shots, 1):
         length = end - start + 1
         margin = min(max(2, round(fps * 0.15)), max(0, (length - 1) // 3))
@@ -215,19 +247,39 @@ def extract_best_frames(video_path, shots, fps, original_name):
         cap.set(cv2.CAP_PROP_POS_FRAMES, search_start)
 
         best = None
+        sampled_count = 0
+        non_black_count = 0
         for frame_index in range(search_start, search_end + 1):
             ok, frame = cap.read()
             if not ok:
                 break
             if (frame_index - search_start) % stride:
                 continue
-            quality, sharpness, brightness = calculate_frame_quality(frame)
-            if best is None or quality > best[0]:
-                best = (quality, sharpness, brightness, frame_index, frame)
+            sampled_count += 1
+            metrics = frame_quality_metrics(frame)
+            if metrics["is_black"]:
+                continue
+            non_black_count += 1
+            if metrics["is_blurry"]:
+                continue
+            if best is None or metrics["quality"] > best[0]:
+                best = (
+                    metrics["quality"],
+                    metrics["sharpness"],
+                    metrics["brightness"],
+                    metrics["luma_p99"],
+                    metrics["black_pixel_ratio"],
+                    frame_index,
+                    frame,
+                )
 
         if best is None:
+            if sampled_count and not non_black_count:
+                skipped_black_shots += 1
+            elif non_black_count:
+                skipped_blurry_shots += 1
             continue
-        _, sharpness, brightness, frame_index, frame = best
+        _, sharpness, brightness, luma_p99, black_pixel_ratio, frame_index, frame = best
         filename = f"{base_name}_{number:03d}_{frame_index / fps:.3f}s.jpg"
         output_path = os.path.join(output_dir, filename)
         ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
@@ -243,9 +295,16 @@ def extract_best_frames(video_path, shots, fps, original_name):
             "selected_frame": frame_index,
             "sharpness": round(sharpness, 2),
             "brightness": round(brightness, 2),
+            "luma_p99": round(luma_p99, 2),
+            "black_pixel_ratio": round(black_pixel_ratio, 4),
             "file": filename,
         })
     cap.release()
+    if skipped_black_shots or skipped_blurry_shots:
+        log_info(
+            f"{original_name}：质量筛选跳过 {skipped_black_shots} 个黑场分镜、"
+            f"{skipped_blurry_shots} 个无清晰候选帧的分镜"
+        )
     return metadata
 
 

@@ -32,8 +32,15 @@ const createWorkspaceService = ({ repository, catalogs, statuses, assertInside, 
 
   const getProjectPath = (workspacePath, status, projectName) => {
     if (!statuses.includes(status)) throw new Error('无效的项目状态');
+    if (projectName === '.__photoflow_inspiration__') {
+      const inspirationRoot = path.resolve(String(workspacePath || '').trim());
+      if (!fs.existsSync(inspirationRoot)) throw new Error('灵感库文件夹不存在');
+      assertExistingInside(path.dirname(inspirationRoot), inspirationRoot, '灵感库路径', true);
+      return inspirationRoot;
+    }
     const root = ensureRoot(workspacePath);
     const row = catalogs.get(root)?.byName.get(String(projectName).toLocaleLowerCase());
+    if (row?.availability === 'missing') throw new Error('项目文件夹当前不可用，请恢复文件夹或重新连接工作区');
     const relativePath = row?.relative_path || projectName;
     const projectPath = path.resolve(root, relativePath);
     assertInside(root, projectPath, '项目路径');

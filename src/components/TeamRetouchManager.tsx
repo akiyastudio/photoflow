@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom';
 import { AlertTriangle, ExternalLink, Loader2, Maximize2, RefreshCw, ScanFace, SlidersHorizontal, Trash2, UserRound, UsersRound, Wand2, X } from 'lucide-react';
 import type { AppConfig, ComponentStatus, MediaVersion, ProjectFileEntry, TeamIdentity, TeamIdentityWorkspace, TeamPatchBundle, TeamPatchTask, TeamPersonAssignment, TeamProjectPhoto, WorkspaceProject } from '../types';
 import { useAppDialog } from './AppDialogProvider';
+import { useEscapeLayer } from './LayerProvider';
 import { TeamRetouchSteps, type TeamRetouchStep } from './TeamRetouchSteps';
 
 type Props = {
@@ -19,6 +20,7 @@ type Props = {
   onNotice: (message: string) => void;
   onEntriesChange?: (entries: ProjectFileEntry[]) => void;
   onProjectChanged?: () => void;
+  onBusyChange?: (busy: boolean) => void;
 };
 
 type BatchResult = { relativePath: string; name: string; success: boolean; error?: string };
@@ -154,13 +156,7 @@ const FullscreenImageViewer = ({ url, filePath, cacheConfig, title, details, onC
     }).catch(() => undefined);
     return () => { active = false; };
   }, [url, filePath, cacheConfig]);
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); onClose(); }
-    };
-    window.addEventListener('keydown', handleKeyDown, true);
-    return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [onClose]);
+  useEscapeLayer(true, onClose);
   return createPortal(<div role="dialog" aria-modal="true" aria-label={`全窗口浏览：${title}`} className="fixed inset-0 z-[700] flex flex-col bg-slate-950/95" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><header className="flex h-14 shrink-0 items-center gap-3 border-b border-white/10 px-5 text-white"><div className="min-w-0"><h3 className="truncate text-sm font-bold">{title}</h3>{details && <p className="mt-0.5 text-xs text-slate-400">{details}</p>}</div><button type="button" onClick={onClose} title="关闭全窗口浏览" className="ml-auto rounded-md p-2 text-slate-300 hover:bg-white/10 hover:text-white"><X size={20}/></button></header><div className="flex min-h-0 flex-1 items-center justify-center p-4"><img src={displayUrl} alt={title} className="max-h-full max-w-full object-contain"/></div></div>, document.body);
 };
 
@@ -228,22 +224,10 @@ const IdentityPicker = ({ subject, candidates, allSubjects, identities, included
   onDelete: (identity: TeamIdentity) => void;
   onClose: () => void;
 }) => {
-  const dialogRef = useRef<HTMLDivElement>(null);
   const availableIdentities = identities.filter(identity => !isGeneratedIdentity(identity));
   const currentIdentity = subject.identity;
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || busy) return;
-      const dialogs = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
-      if (dialogs.item(dialogs.length - 1) !== dialogRef.current) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      onClose();
-    };
-    window.addEventListener('keydown', handleKeyDown, true);
-    return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [busy, onClose]);
-  return <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="确认人物身份" className="fixed inset-0 z-[470] flex items-center justify-center bg-slate-950/75 p-5" onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+  useEscapeLayer(true, onClose, !busy);
+  return <div role="dialog" aria-modal="true" aria-label="确认人物身份" className="fixed inset-0 z-[470] flex items-center justify-center bg-slate-950/75 p-5" onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose(); }}>
     <div className="flex max-h-[94vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
       <header className="flex items-center gap-4 border-b border-slate-200 px-5 py-4"><div><h3 className="font-bold text-slate-900">这是谁？</h3><p className="mt-1 text-xs text-slate-500">确认一个人物后，可一次应用到系统识别出的整组相同人物。</p></div><span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-bold text-blue-700">本次将标记 {includedKeys.size} 个实例</span><button disabled={busy} onClick={onClose} className="ml-auto rounded-md p-2 text-slate-500 hover:bg-slate-100 disabled:opacity-50"><X size={19}/></button></header>
       <div className="grid min-h-0 flex-1 grid-cols-[280px_minmax(0,1fr)]">
@@ -361,6 +345,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defa
   const [busy, setBusy] = useState('');
   const backendMode = defaultBackendMode || 'auto';
   const [cropEditor, setCropEditor] = useState<{ task: TeamPatchTask; crop: Crop } | null>(null);
+  useEscapeLayer(Boolean(cropEditor), () => setCropEditor(null), !busy.startsWith('crop:'));
   const [detectionProgress, setDetectionProgress] = useState({ progress: 0, message: '等待识别操作' });
   const [sourceFullscreen, setSourceFullscreen] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -511,7 +496,7 @@ const syncTaskLabels = async (workspacePath: string, workspace: TeamIdentityWork
   })));
 };
 
-const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, defaultBackendMode, componentStatus, activeStep, onStepChange, onClose, onNotice, onEntriesChange, onProjectChanged }: Props) => {
+const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, defaultBackendMode, componentStatus, activeStep, onStepChange, onClose, onNotice, onEntriesChange, onProjectChanged, onBusyChange }: Props) => {
   const appDialog = useAppDialog();
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<BatchResult[]>([]);
@@ -528,6 +513,9 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
   const [photoProcessingMessages, setPhotoProcessingMessages] = useState<Record<string, string>>({});
   const identifyingRef = useRef(false);
   const lastUnmarkedSubjectKeyRef = useRef('');
+  useEffect(() => {
+    onBusyChange?.(running || Boolean(identityState.identifying) || identityPickerBusy);
+  }, [identityPickerBusy, identityState.identifying, onBusyChange, running]);
   const identitySubjects = useMemo(() => identitySubjectsFromWorkspace(identityState), [identityState]);
   const unrecognizedPaths = useMemo(() => entries
     .filter(entry => !(workspacePhotoForEntry(identityState.photos, entry)?.tasks.length))

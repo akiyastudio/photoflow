@@ -19,10 +19,66 @@ sys.path.insert(0, str(ROOT / "python"))
 
 from event_protocol import emit  # noqa: E402
 from rename import build_jpg_proxy_index, find_selection_jpg_proxy_folder, visual_reference_path  # noqa: E402
-from research import perceptual_hash  # noqa: E402
+import research as research_module  # noqa: E402
+from research import frame_quality_metrics, perceptual_hash  # noqa: E402
 
 
 def main():
+    black_frame = np.zeros((72, 96, 3), dtype=np.uint8)
+    noisy_black_frame = np.random.default_rng(7).integers(0, 12, size=(72, 96, 3), dtype=np.uint8)
+    checkerboard = (np.indices((72, 96)).sum(axis=0) % 2 * 255).astype(np.uint8)
+    sharp_frame = np.repeat(checkerboard[:, :, None], 3, axis=2)
+    blurry_frame = research_module.cv2.GaussianBlur(sharp_frame, (0, 0), 4)
+    assert frame_quality_metrics(black_frame)["is_black"]
+    assert frame_quality_metrics(noisy_black_frame)["is_black"]
+    assert not frame_quality_metrics(sharp_frame)["is_black"]
+    assert not frame_quality_metrics(sharp_frame)["is_blurry"]
+    assert frame_quality_metrics(blurry_frame)["is_blurry"]
+
+    class FakeCapture:
+        def __init__(self, frames):
+            self.frames = frames
+            self.position = 0
+
+        def isOpened(self):
+            return True
+
+        def set(self, property_id, value):
+            assert property_id == research_module.cv2.CAP_PROP_POS_FRAMES
+            self.position = int(value)
+            return True
+
+        def read(self):
+            if self.position >= len(self.frames):
+                return False, None
+            frame = self.frames[self.position]
+            self.position += 1
+            return True, frame.copy()
+
+        def release(self):
+            return None
+
+    quality_test_frames = [
+        black_frame, blurry_frame, sharp_frame,
+        black_frame, noisy_black_frame, black_frame,
+        blurry_frame, blurry_frame, blurry_frame,
+    ]
+    original_open_video = research_module.open_video
+    with TemporaryDirectory() as temporary_directory:
+        research_module.open_video = lambda _path: FakeCapture(quality_test_frames)
+        try:
+            selected = research_module.extract_best_frames(
+                str(Path(temporary_directory) / "quality-test.mp4"),
+                [(0, 2), (3, 5), (6, 8)],
+                25.0,
+                "quality-test.mp4",
+            )
+        finally:
+            research_module.open_video = original_open_video
+        assert len(selected) == 1
+        assert selected[0]["selected_frame"] == 2
+        assert (Path(temporary_directory) / selected[0]["file"]).is_file()
+
     expected_hashes = [
         "8ced96f8550e7330",
         "8027cd645f2f5336",

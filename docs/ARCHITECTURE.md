@@ -31,8 +31,8 @@ file workflows.
 - `electron/repositories`: the only JavaScript modules that know Python
   database action names. IPC and services call domain methods instead.
 - `electron/plugins`: the optional-plugin catalog and capability mapping.
-  Team retouch and research tools are resolved through `PluginService`, not
-  through hard-coded executable paths in IPC handlers.
+  Team retouch is resolved through `PluginService`. Inspiration-library scene
+  analysis and Office image extraction are bundled core workers.
 - `electron/native/RecycleBinService.cs`: Windows-only operating-system adapter
   for verified recycle, exact-item restore, and recycle capability probing.
 - `electron/thumbnail-pipeline.cjs`: thumbnail scheduling and cache domain.
@@ -43,8 +43,10 @@ file workflows.
   are stored in SQLite.
 - `src/features/workspace`: the project browser, preview, metadata, version and
   team-retouch workspace UI.
-- `src/features/tools`: import, birthday, conversion, research, matching and
+- `src/features/tools`: import, birthday, conversion, inspiration, matching and
   video-splitting tools.
+- `src/features/inspiration`: the built-in inspiration-library shell and its
+  hierarchical navigation. It reuses the workspace file browser.
 - `src/features/settings`, `src/features/plugins`, and
   `src/features/background-tasks`: settings, plugin availability and observable
   background-task UI. `src/App.tsx` is now the 684-line application shell
@@ -68,8 +70,9 @@ the shared `ProjectFileOperationProgress` type.
 4. Workspace reconciliation, thumbnail generation and cache cleanup publish
    observable task state through an in-process event bus. The renderer can list,
    cancel and retry supported tasks.
-5. Team retouch and research tools are optional capability-based plugins. Core
-   workspace, filesystem, media, thumbnail and version features remain bundled.
+5. Team retouch remains an optional capability-based plugin. The inspiration
+   library, scene organizer and Office image extractor are bundled core
+   capabilities and use a dedicated visual-tools worker.
 
 `npm run test:architecture` enforces the important entry-file size, IPC
 registration, repository and plugin capability contracts.

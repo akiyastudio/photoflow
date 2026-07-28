@@ -25,6 +25,10 @@
 .window-glyph-close::before { transform:rotate(45deg); }
 .window-glyph-close::after { transform:rotate(-45deg); }
 .workspace-tab.is-active { border-bottom-color: transparent; box-shadow: 0 -1px 0 rgb(15 23 42 / .02); }
+.titlebar-tabs-scroll { overscroll-behavior-x: contain; scroll-behavior: smooth; }
+.titlebar-tab-scroll-button { display:flex; width:24px; flex:none; align-items:center; justify-content:center; color:#64748b; }
+.titlebar-tab-scroll-button:hover:not(:disabled) { background:#f1f5f9; color:#0f172a; }
+.titlebar-tab-scroll-button:disabled { color:#cbd5e1; }
 .win11-spinner { width: 24px; height: 24px; border: 3px solid rgb(148 163 184 / .28); border-top-color: #fff; border-radius: 9999px; animation: win11-spin .8s linear infinite; }
 @keyframes win11-spin { to { transform: rotate(360deg); } }
 
@@ -75,21 +79,28 @@
 /* Weeks stack vertically. Each person gets one compact horizontal task lane. */
 .workflow-board-view {
   display: flex;
-  height: 100%;
-  min-height: 0;
+  min-height: 100%;
   flex-direction: column;
+}
+main:has(> div > .workflow-board-view) {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+main:has(> div > .workflow-board-view) > div {
+  width: 100%;
+  height: auto;
+  min-height: 100%;
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
 }
 .workflow-board-view > .space-y-7 {
   display: flex;
-  flex: 1;
-  min-height: 0;
+  flex: none;
   flex-direction: column;
   gap: 1.25rem;
-  overflow-x: hidden;
-  overflow-y: auto;
-  padding: 0 .35rem .5rem 0;
-  scrollbar-width: thin;
-  scrollbar-color: #64748b transparent;
+  overflow: visible;
+  padding-bottom: .5rem;
 }
 .workflow-board-view > .space-y-7 > section {
   display: flex;
@@ -118,7 +129,7 @@
 .workflow-person-lane {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(260px, 310px) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 270px) minmax(0, 1fr);
 }
 .workflow-person-summary {
   min-width: 0;
@@ -147,14 +158,24 @@
   display: grid;
   width: 220px;
   flex: none;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: .55rem;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: .45rem;
   align-content: start;
   contain: paint;
   overflow: hidden;
   border: 1px solid #e2e8f0;
   border-radius: .55rem;
   background: #fff;
+}
+.workflow-task-card > .workflow-task-action {
+  min-width: 0;
+  height: 2rem;
+  gap: .3rem;
+  padding: 0 .5rem;
+  border-radius: .4rem;
+  font-size: .7rem;
+  line-height: 1;
+  white-space: nowrap;
 }
 .workflow-task-thumbnail,
 .workflow-task-card > .min-w-0 {
@@ -191,6 +212,7 @@ html.dark .workflow-board-view > .space-y-7 > section > h3 {
 }
 html.dark .workflow-person-summary { border-color: #273244; }
 html.dark .workflow-task-card { border-color: #273244; background: #090c12; }
+.project-navigator-scroll { padding-left:.5rem; padding-right:.5rem; }
 .project-navigator-scroll::-webkit-scrollbar { width:6px; }
 .project-navigator-scroll::-webkit-scrollbar-track { background:#fff; }
 /* Recovered workspace UI primitives */
@@ -314,10 +336,17 @@ html.dark .app-titlebar { background:#090c12; border-color:#1f2937; }
 html.dark .window-control-button { --window-glyph-bg:#090c12; }
 html.dark .window-control-button:hover { --window-glyph-bg:#111827; }
 html.dark .workspace-tab.is-active { border-color:#1f2937; border-bottom-color:transparent; background:#030407; }
+html.dark .titlebar-tab-scroll-button { color:#94a3b8; }
+html.dark .titlebar-tab-scroll-button:hover:not(:disabled) { background:#111827; color:#f8fafc; }
+html.dark .titlebar-tab-scroll-button:disabled { color:#374151; }
 
 .settings-check { display:flex; align-items:flex-start; gap:.65rem; margin-top:1rem; border:1px solid #e2e8f0; border-radius:.6rem; padding:.75rem; background:#f8fafc; color:#334155; font-size:.875rem; line-height:1.4; cursor:pointer; }
 .settings-check input { margin-top:.12rem; flex:none; accent-color:#2563eb; }
-.project-open-button { visibility: hidden; opacity: 0; transition: opacity .15s, background .15s; }
+.project-row { position:relative; }
+.project-row > button:first-child { padding-right:.5rem; transition:padding-right .15s; }
+.project-row:hover > button:first-child,
+.project-row:focus-within > button:first-child { padding-right:2.75rem; }
+.project-open-button { position:absolute; right:.25rem; top:50%; margin-right:0; visibility:hidden; opacity:0; transform:translateY(-50%); transition:opacity .15s, background .15s; }
 .project-row:hover .project-open-button, .project-row:focus-within .project-open-button { visibility: visible; opacity: 1; }
 .project-open-button:hover { background:rgb(255 255 255 / .2); }
 .birthday-panel { border:1px solid #a78bfa; background:#f5f3ff; }

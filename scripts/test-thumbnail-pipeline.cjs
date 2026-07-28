@@ -6,18 +6,20 @@ const { ThumbnailPipeline, PRIORITY, isThumbnailSizeSufficient } = require('../e
 
 const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(124), Buffer.from([0xff, 0xd9])]);
 
-const createPipeline = ({ root, target, generate, notify = () => undefined, log = () => undefined }) => {
+const createPipeline = ({ root, target, generate, toPreviewUrl = filePath => filePath, notify = () => undefined, log = () => undefined, sourceStabilityDelayMs = 20, sourceStabilityProbeMs = 10 }) => {
   const pipeline = new ThumbnailPipeline({
     getRunConfig: () => { throw new Error('database service must not start during this test'); },
     databasePath: path.join(root, 'thumbnail-index.sqlite3'),
     getCacheDir: () => root,
     cacheFilePath: () => target,
     generateThumbnailSet: generate,
-    toPreviewUrl: filePath => filePath,
+    toPreviewUrl,
     trimCache: () => undefined,
     notify,
     log,
     concurrency: 1,
+    sourceStabilityDelayMs,
+    sourceStabilityProbeMs,
   });
   pipeline.database.call = async () => ({ success: true });
   return pipeline;
@@ -79,6 +81,50 @@ const run = async () => {
     assert.equal(queued.state, 'QUEUED');
     assert.equal(fs.existsSync(protectedTarget), true, 'a reader must not delete output owned by an in-flight task');
     protectedPipeline.stop();
+
+    const cachedTarget = path.join(temporaryRoot, 'cached.jpg');
+    fs.writeFileSync(cachedTarget, jpeg);
+    let grants = 0;
+    const cachedPipeline = createPipeline({
+      root: temporaryRoot,
+      target: cachedTarget,
+      generate: async () => [],
+      toPreviewUrl: filePath => `preview://${++grants}/${path.basename(filePath)}`,
+    });
+    const diskHit = await cachedPipeline.request({ filePath: source, kind: 'image', requestedSize: 640, priority: PRIORITY.visible });
+    const memoryHit = await cachedPipeline.request({ filePath: source, kind: 'image', requestedSize: 640, priority: PRIORITY.visible });
+    assert.equal(diskHit.cacheLayer, 'disk');
+    assert.equal(memoryHit.cacheLayer, 'memory');
+    assert.notEqual(memoryHit.previewUrl, diskHit.previewUrl, 'a memory hit must issue a fresh media URL instead of reusing an expiring grant');
+    assert.equal(grants, 2);
+    cachedPipeline.stop();
+
+    const changedTarget = path.join(temporaryRoot, 'changed.jpg');
+    const changedNotifications = [];
+    let changedNotify = () => undefined;
+    let changedSizes = [];
+    const changedPipeline = createPipeline({
+      root: temporaryRoot,
+      target: changedTarget,
+      notify: update => { changedNotifications.push(update); changedNotify(update); },
+      generate: async (_filePath, _stat, _kind, _config, sizes) => {
+        changedSizes = sizes.map(size => size.label);
+        fs.writeFileSync(changedTarget, jpeg);
+        return sizes.map(size => ({ sizeLabel: size.label, pixelSize: size.pixels, path: changedTarget }));
+      },
+    });
+    fs.writeFileSync(source, 'externally modified source');
+    const changedResultPromise = waitForTerminalState(notify => { changedNotify = notify; });
+    const changedSync = await changedPipeline.syncChangedPaths(temporaryRoot, [source], {});
+    const changedResult = await changedResultPromise;
+    const sourceStat = fs.statSync(source);
+    const staleUpdate = changedNotifications.find(update => update.state === 'STALE');
+    assert.equal(changedSync.queued, 1);
+    assert.equal(staleUpdate?.sourceSize, sourceStat.size, 'a stale notification must publish the new source size');
+    assert.equal(staleUpdate?.sourceMtimeMs, sourceStat.mtimeMs, 'a stale notification must publish the new source mtime');
+    assert.deepEqual(changedSizes, ['small'], 'the watcher should warm only the small tier; visible renderers request their actual tier');
+    assert.equal(changedResult.state, 'READY');
+    changedPipeline.stop();
 
     const failureTarget = path.join(temporaryRoot, 'failure.jpg');
     let failureNotify = () => undefined;

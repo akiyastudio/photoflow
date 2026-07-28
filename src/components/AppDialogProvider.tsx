@@ -1,7 +1,24 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { X } from 'lucide-react';
+import { useEscapeLayer } from './LayerProvider';
 
 type DialogTone = 'primary' | 'danger';
+
+type ChoiceDialogOption = {
+  value: string;
+  label: string;
+  tone?: DialogTone;
+};
+
+type ChoiceDialogOptions = {
+  title: string;
+  message: string;
+  detail?: string;
+  choices: ChoiceDialogOption[];
+  cancelLabel?: string;
+  defaultValue?: string;
+  cancelDefault?: boolean;
+};
 
 type ConfirmDialogOptions = {
   title: string;
@@ -32,8 +49,8 @@ type PromptDialogOptions = {
 
 type DialogRequest = {
   id: number;
-  kind: 'alert' | 'confirm' | 'prompt';
-  options: AlertDialogOptions | ConfirmDialogOptions | PromptDialogOptions;
+  kind: 'alert' | 'confirm' | 'prompt' | 'choice';
+  options: AlertDialogOptions | ConfirmDialogOptions | PromptDialogOptions | ChoiceDialogOptions;
   resolve: (value: boolean | string | null) => void;
 };
 
@@ -41,6 +58,7 @@ type AppDialogApi = {
   alert: (options: AlertDialogOptions) => Promise<void>;
   confirm: (options: ConfirmDialogOptions) => Promise<boolean>;
   prompt: (options: PromptDialogOptions) => Promise<string | null>;
+  choice: (options: ChoiceDialogOptions) => Promise<string | null>;
 };
 
 const AppDialogContext = createContext<AppDialogApi | null>(null);
@@ -52,7 +70,7 @@ const AppDialogProvider = ({ children }: { children: ReactNode }) => {
   const [promptValue, setPromptValue] = useState('');
   const active = queue[0];
 
-  const enqueue = useCallback((kind: DialogRequest['kind'], options: AlertDialogOptions | ConfirmDialogOptions | PromptDialogOptions) => new Promise<boolean | string | null>(resolve => {
+  const enqueue = useCallback((kind: DialogRequest['kind'], options: AlertDialogOptions | ConfirmDialogOptions | PromptDialogOptions | ChoiceDialogOptions) => new Promise<boolean | string | null>(resolve => {
     setQueue(current => [...current, { id: nextId.current++, kind, options, resolve }]);
   }), []);
 
@@ -61,6 +79,10 @@ const AppDialogProvider = ({ children }: { children: ReactNode }) => {
     confirm: async options => (await enqueue('confirm', options)) === true,
     prompt: async options => {
       const result = await enqueue('prompt', options);
+      return typeof result === 'string' ? result : null;
+    },
+    choice: async options => {
+      const result = await enqueue('choice', options);
       return typeof result === 'string' ? result : null;
     },
   }), [enqueue]);
@@ -77,16 +99,7 @@ const AppDialogProvider = ({ children }: { children: ReactNode }) => {
     resolvingId.current = null;
   }, [active]);
 
-  useEffect(() => {
-    if (!active) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      finish(active.kind === 'confirm' ? false : null);
-    };
-    window.addEventListener('keydown', handleKeyDown, true);
-    return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [active, finish]);
+  useEscapeLayer(Boolean(active), () => finish(active?.kind === 'confirm' ? false : null));
 
   const submitPrompt = (event: FormEvent) => {
     event.preventDefault();
@@ -97,6 +110,7 @@ const AppDialogProvider = ({ children }: { children: ReactNode }) => {
   const alertOptions = active?.kind === 'alert' ? options as AlertDialogOptions : null;
   const confirmOptions = active?.kind === 'confirm' ? options as ConfirmDialogOptions : null;
   const promptOptions = active?.kind === 'prompt' ? options as PromptDialogOptions : null;
+  const choiceOptions = active?.kind === 'choice' ? options as ChoiceDialogOptions : null;
   const confirmClass = (confirmOptions?.tone || alertOptions?.tone) === 'danger'
     ? 'rounded-md bg-red-600 px-3 py-2 text-sm font-bold text-white transition hover:bg-red-500'
     : 'dialog-primary';
@@ -113,12 +127,14 @@ const AppDialogProvider = ({ children }: { children: ReactNode }) => {
         {options.detail && <p className="mt-2 text-xs leading-5 text-slate-500">{options.detail}</p>}
         {promptOptions && <input autoFocus value={promptValue} onChange={event => setPromptValue(event.target.value)} placeholder={promptOptions.placeholder} className="form-input mt-4"/>}
         <div className="mt-5 flex justify-end gap-2">
-          {!alertOptions && <button type="button" onClick={() => finish(active.kind === 'confirm' ? false : null)} className="dialog-secondary">{confirmOptions?.cancelLabel || promptOptions?.cancelLabel || '取消'}</button>}
+          {!alertOptions && <button type="button" autoFocus={Boolean(choiceOptions?.cancelDefault)} onClick={() => finish(active.kind === 'confirm' ? false : null)} className="dialog-secondary">{confirmOptions?.cancelLabel || promptOptions?.cancelLabel || choiceOptions?.cancelLabel || '取消'}</button>}
           {alertOptions
             ? <button type="button" autoFocus onClick={() => finish(null)} className={confirmClass}>{alertOptions.confirmLabel || '知道了'}</button>
             : confirmOptions
             ? <button type="button" autoFocus onClick={() => finish(true)} className={confirmClass}>{confirmOptions.confirmLabel || '确认'}</button>
-            : <button type="submit" disabled={!promptValue.trim()} className="dialog-primary">{promptOptions?.confirmLabel || '确认'}</button>}
+            : promptOptions
+            ? <button type="submit" disabled={!promptValue.trim()} className="dialog-primary">{promptOptions.confirmLabel || '确认'}</button>
+            : choiceOptions?.choices.map(choice => <button key={choice.value} type="button" autoFocus={choice.value === choiceOptions.defaultValue} onClick={() => finish(choice.value)} className={choice.tone === 'danger' ? 'rounded-md bg-red-600 px-3 py-2 text-sm font-bold text-white transition hover:bg-red-500' : 'dialog-primary'}>{choice.label}</button>)}
         </div>
       </form>
     </div>}
@@ -134,4 +150,4 @@ const useAppDialog = () => {
 // Provider and hook intentionally live together so every dialog uses the same queue.
 // eslint-disable-next-line react-refresh/only-export-components
 export { AppDialogProvider, useAppDialog };
-export type { AlertDialogOptions, ConfirmDialogOptions, PromptDialogOptions };
+export type { AlertDialogOptions, ChoiceDialogOptions, ChoiceDialogOption, ConfirmDialogOptions, PromptDialogOptions };

@@ -11,7 +11,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
-from classify import build_capture_groups, stage_import_and_organize, stage_import_broll, stage_plan_import  # noqa: E402
+from classify import build_capture_groups, build_video_preview_command, stage_import_and_organize, stage_import_broll, stage_plan_import  # noqa: E402
+
+
+for quality, expected in {
+    'medium': ('4M', '5M', '128k', 'medium'),
+    'high': ('10M', '12M', '192k', 'medium'),
+}.items():
+    command = build_video_preview_command('ffmpeg', 'input.mov', 'output.mp4', quality)
+    assert command[command.index('-b:v') + 1] == expected[0]
+    assert command[command.index('-maxrate') + 1] == expected[1]
+    assert command[command.index('-b:a') + 1] == expected[2]
+    assert command[command.index('-preset') + 1] == expected[3]
+assert build_video_preview_command('ffmpeg', 'input.mov', 'output.mp4', 'unknown') == build_video_preview_command('ffmpeg', 'input.mov', 'output.mp4', 'medium')
 
 
 with tempfile.TemporaryDirectory(prefix="photoflow-classify-test-") as temporary:

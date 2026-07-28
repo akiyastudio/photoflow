@@ -1,8 +1,10 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { AlertTriangle, CheckCircle2, FolderOutput, GripVertical, Loader2, Trash2, Upload, UserRound, UsersRound, Wand2, X } from 'lucide-react';
 import type { AppConfig, TeamIdentity, TeamIdentityWorkspace, TeamPatchReturnBatchResult, TeamPatchTask, TeamPersonAssignment, TeamProjectPhoto, TeamWorkflowGenerationProgress, ThumbnailState, WorkspaceProject } from '../types';
 import { scheduleWorkflowWeeks } from '../utils/teamWorkflow';
 import { useAppDialog } from './AppDialogProvider';
+import { useEscapeLayer } from './LayerProvider';
 import { TeamRetouchSteps, type TeamRetouchStep } from './TeamRetouchSteps';
 import { TeamOutputProgressPicker } from './TeamRetouchOutputProgress';
 import { useTeamOutputProgress } from './useTeamOutputProgress';
@@ -16,6 +18,7 @@ type Props = {
   onClose: () => void;
   onNotice: (message: string) => void;
   onProjectChanged: () => void;
+  onBusyChange?: (busy: boolean) => void;
 };
 
 type Subject = {
@@ -162,7 +165,7 @@ const SubjectThumb = memo(({ subject, cacheConfig, interactive = true }: { subje
 
 type WorkflowItem = Subject & { week: number; ready: boolean; blockedBy: string[] };
 
-const buildWorkflow = (subjects: Subject[], identities: TeamIdentity[], preferredIdentityOrder: string[] = []) => {
+const buildWorkflow = (subjects: Subject[], identities: TeamIdentity[], preferredIdentityOrder: string[] = [], sameWeekIdentityIds: string[] = []) => {
   const subjectCounts = new Map<string, number>();
   for (const subject of subjects) if (subject.identity) subjectCounts.set(subject.identity.id, (subjectCounts.get(subject.identity.id) || 0) + 1);
   const preferenceRank = new Map(preferredIdentityOrder.map((identityId, index) => [identityId, index]));
@@ -185,7 +188,7 @@ const buildWorkflow = (subjects: Subject[], identities: TeamIdentity[], preferre
     personIndex: subject.personIndex,
     identityId: subject.identity?.id,
     identityName: subject.identity?.name,
-  })), { preferredIdentityOrder });
+  })), { preferredIdentityOrder, sameWeekIdentityIds });
   const items: WorkflowItem[] = [];
   for (const members of byTask.values()) {
     const ordered = [...members].sort((left, right) => (scheduledWeeks.get(left.key) || 1) - (scheduledWeeks.get(right.key) || 1) || orderOf(left) - orderOf(right) || left.personIndex - right.personIndex);
@@ -200,14 +203,16 @@ const buildWorkflow = (subjects: Subject[], identities: TeamIdentity[], preferre
   return items.sort((left, right) => left.week - right.week || orderOf(left) - orderOf(right) || left.photo.name.localeCompare(right.photo.name));
 };
 
-export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, activeStep, onStepChange, onClose, onNotice, onProjectChanged }: Props) => {
+export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, activeStep, onStepChange, onClose, onNotice, onProjectChanged, onBusyChange }: Props) => {
   const appDialog = useAppDialog();
   const [workspace, setWorkspace] = useState<TeamIdentityWorkspace>({ success: true, photos: [], identities: [], assignments: [] });
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const tab = activeStep;
   const [assigningSubject, setAssigningSubject] = useState<Subject | null>(null);
+  useEscapeLayer(Boolean(assigningSubject), () => setAssigningSubject(null), !busy);
   const [workflowReturnResult, setWorkflowReturnResult] = useState<TeamPatchReturnBatchResult | null>(null);
+  useEscapeLayer(Boolean(workflowReturnResult), () => setWorkflowReturnResult(null), busy !== 'workflow-return');
   const [workflowReturnProgress, setWorkflowReturnProgress] = useState({ progress: 0, message: '' });
   const [workflowGeneration, setWorkflowGeneration] = useState<TeamWorkflowGenerationProgress | null>(null);
   const [similarities, setSimilarities] = useState<NonNullable<TeamIdentityWorkspace['similarities']>>([]);
@@ -263,7 +268,11 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
     const availableIds = new Set(workflowIdentityOptions.map(identity => identity.id));
     return [...new Set(storedOrder)].filter(identityId => availableIds.has(identityId));
   }, [workflowIdentityOptions, workspace.workflowSettings]);
-  const workflow = useMemo(() => buildWorkflow(subjects.filter(subject => !subject.task.needsReview), workspace.identities, preferredIdentityOrder), [subjects, workspace.identities, preferredIdentityOrder]);
+  const sameWeekIdentityIds = useMemo(() => {
+    const requested = new Set(workspace.workflowSettings?.sameWeekIdentityIds || []);
+    return preferredIdentityOrder.slice(1).filter(identityId => requested.has(identityId));
+  }, [preferredIdentityOrder, workspace.workflowSettings?.sameWeekIdentityIds]);
+  const workflow = useMemo(() => buildWorkflow(subjects, workspace.identities, preferredIdentityOrder, sameWeekIdentityIds), [subjects, workspace.identities, preferredIdentityOrder, sameWeekIdentityIds]);
   const preferredWorkflowIdentities = preferredIdentityOrder.map(identityId => workflowIdentityOptions.find(identity => identity.id === identityId)).filter((identity): identity is TeamIdentity => Boolean(identity));
   const availableWorkflowIdentities = workflowIdentityOptions.filter(identity => !preferredIdentityOrder.includes(identity.id));
   const workflowOrderLocked = workspace.assignments.some(assignment => assignment.completed)
@@ -401,16 +410,18 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
     const result = await window.electronAPI.deleteTeamIdentity(workspacePath, { projectName: project.name, identityId: identity.id });
     if (!result.success) onNotice(`删除人物失败：${result.error || '未知错误'}`); else void load(false);
   };
-  const savePreferredIdentityOrder = async (identityOrder: string[], successMessage: string) => {
+  const savePreferredIdentityOrder = async (identityOrder: string[], requestedSameWeekIdentityIds: string[], successMessage: string) => {
     if (workflowOrderLocked) {
       onNotice('已有任务返图或完成，开工顺序已锁定');
       return;
     }
     const nextOrder = [...new Set(identityOrder)].filter(identityId => workflowIdentityOptions.some(identity => identity.id === identityId));
+    const nextSameWeekIdentityIds = [...new Set(requestedSameWeekIdentityIds)].filter(identityId => nextOrder.slice(1).includes(identityId));
     setBusy('workflow-settings');
     const result = await window.electronAPI.saveTeamWorkflowSettings(workspacePath, {
       projectName: project.name,
       preferredIdentityOrder: nextOrder,
+      sameWeekIdentityIds: nextSameWeekIdentityIds,
     });
     setBusy('');
     if (!result.success) {
@@ -419,18 +430,18 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
     }
     setWorkspace(current => ({
       ...current,
-      workflowSettings: result.workflowSettings || { preferredIdentityOrder: nextOrder, preferredIdentityId: nextOrder[0] },
+      workflowSettings: result.workflowSettings || { ...current.workflowSettings, preferredIdentityOrder: nextOrder, preferredIdentityId: nextOrder[0], sameWeekIdentityIds: nextSameWeekIdentityIds },
     }));
     onNotice(successMessage);
   };
   const addPreferredIdentity = async (identityId: string) => {
     if (!identityId || preferredIdentityOrder.includes(identityId)) return;
     const identityName = workflowIdentityOptions.find(identity => identity.id === identityId)?.name || '该人物';
-    await savePreferredIdentityOrder([...preferredIdentityOrder, identityId], `已将“${identityName}”加入优先队列；如已生成工作流程，请重新生成`);
+    await savePreferredIdentityOrder([...preferredIdentityOrder, identityId], sameWeekIdentityIds, `已将“${identityName}”加入优先队列；如已生成工作流程，请重新生成`);
   };
   const removePreferredIdentity = async (identityId: string) => {
     const nextOrder = preferredIdentityOrder.filter(currentId => currentId !== identityId);
-    await savePreferredIdentityOrder(nextOrder, nextOrder.length ? '已更新优先队列；如已生成工作流程，请重新生成' : '已恢复自动排期；如已生成工作流程，请重新生成');
+    await savePreferredIdentityOrder(nextOrder, sameWeekIdentityIds.filter(currentId => currentId !== identityId), nextOrder.length ? '已更新优先队列；如已生成工作流程，请重新生成' : '已恢复自动排期；如已生成工作流程，请重新生成');
   };
   const movePreferredIdentity = async (sourceIdentityId: string, targetIdentityId: string) => {
     if (!sourceIdentityId || sourceIdentityId === targetIdentityId) return;
@@ -440,18 +451,49 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
     const nextOrder = [...preferredIdentityOrder];
     const [moved] = nextOrder.splice(sourceIndex, 1);
     nextOrder.splice(targetIndex, 0, moved);
-    await savePreferredIdentityOrder(nextOrder, '已保存新的开工优先顺序；如已生成工作流程，请重新生成');
+    await savePreferredIdentityOrder(nextOrder, sameWeekIdentityIds, '已保存新的开工优先顺序；如已生成工作流程，请重新生成');
+  };
+  const toggleSameWeekIdentity = async (identityId: string) => {
+    if (!preferredIdentityOrder.slice(1).includes(identityId)) return;
+    const joinsPrevious = sameWeekIdentityIds.includes(identityId);
+    const nextSameWeekIdentityIds = joinsPrevious
+      ? sameWeekIdentityIds.filter(currentId => currentId !== identityId)
+      : [...sameWeekIdentityIds, identityId];
+    await savePreferredIdentityOrder(
+      preferredIdentityOrder,
+      nextSameWeekIdentityIds,
+      joinsPrevious ? '已改为下一周开始；如已生成工作流程，请重新生成' : '已改为与前一人物同周开始；如已生成工作流程，请重新生成',
+    );
   };
   const toggleComplete = async (item: WorkflowItem) => {
     const completed = !item.assignment?.completed;
+    setBusy(`complete:${item.key}`);
     const result = await window.electronAPI.completeTeamIdentity(workspacePath, { photoId: item.photo.photoId, baseVersionId: item.photo.baseVersionId, personIndex: item.personIndex, completed });
+    setBusy('');
     if (!result.success) onNotice(`更新完成状态失败：${result.error || '未知错误'}`); else void load(false);
   };
   const upload = async (item: WorkflowItem) => {
     setBusy(`upload:${item.key}`);
     const result = await window.electronAPI.uploadTeamPatch(workspacePath, { photoId: item.photo.photoId, taskId: item.task.id, personIndex: item.personIndex, projectName: project.name, status: project.status });
     setBusy('');
-    if (!result.success) onNotice(`上传返图失败：${result.error || '未知错误'}`); else if (!result.cancelled) { onNotice('返图已接收，可以标记这个人物已完成'); void load(false); }
+    if (!result.success) onNotice(`上传返图失败：${result.error || '未知错误'}`); else if (!result.cancelled) { onNotice('返图已上传并标记完成'); void load(false); onProjectChanged(); }
+  };
+  const removeUpload = async (item: WorkflowItem) => {
+    setBusy(`remove-upload:${item.key}`);
+    const result = await window.electronAPI.removeTeamPatchUpload(workspacePath, {
+      photoId: item.photo.photoId,
+      taskId: item.task.id,
+      personIndex: item.personIndex,
+      projectName: project.name,
+      status: project.status,
+    });
+    setBusy('');
+    if (!result.success) onNotice(`删除返图失败：${result.error || '未知错误'}`);
+    else {
+      await load(false);
+      onProjectChanged();
+      onNotice(result.warning || '返图已删除，并已撤销完成标记');
+    }
   };
   const openTaskFolder = async (identity: TeamIdentity, week: number) => {
     setBusy(`open:${week}:${identity.id}`);
@@ -513,6 +555,9 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
   const personWeekCount = [...identityWeeks.values()].reduce((total, usedWeeks) => total + usedWeeks.size, 0);
   const readyWorkflowItems = workflow.filter(item => item.identity && item.ready && !item.assignment?.completed);
   const workflowGenerating = workflowGeneration?.state === 'running';
+  useEffect(() => {
+    onBusyChange?.(Boolean(busy) || workflowGenerating);
+  }, [busy, onBusyChange, workflowGenerating]);
   const generateWorkflow = async () => {
     const groups = [...workflowGroups.values()].map(group => ({
       week: group.week,
@@ -521,15 +566,15 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
       items: group.items.map(item => ({
         photoId: item.photo.photoId,
         baseVersionId: item.photo.baseVersionId,
-        personIndex: item.personIndex,
-        taskId: item.task.id,
-        photoName: item.photo.name,
+          personIndex: item.personIndex,
+          taskId: item.task.id,
+          photoName: item.photo.name,
       })),
     }));
     const run = (replace = false) => {
       const operationId = crypto.randomUUID();
       setWorkflowGeneration({ operationId, projectName: project.name, state: 'running', phase: 'preparing', progress: 0, completedFiles: 0, totalFiles: 0, copiedBytes: 0, totalBytes: 0, currentName: '', message: '正在准备工作流程…' });
-      return window.electronAPI.generateTeamWorkflow(workspacePath, project.status, project.name, { operationId, preferredIdentityOrder, groups, replace });
+      return window.electronAPI.generateTeamWorkflow(workspacePath, project.status, project.name, { operationId, preferredIdentityOrder, sameWeekIdentityIds, groups, replace });
     };
     let result = await run();
     if (result.requiresConfirmation) {
@@ -562,7 +607,7 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
   const mergeablePhotos = workspace.photos.filter(photo => {
     const photoSubjects = subjects.filter(subject => subject.photo.photoId === photo.photoId && subject.photo.baseVersionId === photo.baseVersionId);
     return photo.tasks.length > 0
-      && photo.tasks.every(task => Boolean(task.editedPatchPath))
+      && photo.tasks.some(task => Boolean(task.editedPatchPath))
       && photo.tasks.some(task => task.status !== 'merged')
       && photoSubjects.length > 0
       && photoSubjects.every(subject => Boolean(subject.assignment?.completed));
@@ -600,7 +645,7 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
         <label title={workflowOrderLocked ? '已有任务返图或完成，开工顺序已锁定' : '加入多个人物后，可在下方拖拽调整优先顺序'} className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-600"><span>优先队列</span><select value="" disabled={Boolean(busy) || workflowOrderLocked || !availableWorkflowIdentities.length} onChange={event => void addPreferredIdentity(event.target.value)} className="max-w-44 bg-transparent text-xs font-medium text-slate-700 outline-none disabled:cursor-not-allowed disabled:text-slate-400"><option value="">{preferredIdentityOrder.length ? `已排序 ${preferredIdentityOrder.length} 人 · 添加人物` : '自动排期 · 添加人物'}</option>{availableWorkflowIdentities.map(identity => <option key={identity.id} value={identity.id}>{identity.name}</option>)}</select>{busy === 'workflow-settings' && <Loader2 size={13} className="animate-spin"/>}</label>
         {workflowOrderLocked && <span className="text-[11px] text-amber-600">已有返图，顺序已锁定</span>}<TeamOutputProgressPicker controller={outputProgress} disabled={Boolean(busy)}/><button disabled={!workflowGroups.size || Boolean(busy) || workflowGenerating} onClick={() => void generateWorkflow()} className="dialog-secondary ml-auto inline-flex items-center gap-2">{workflowGenerating ? <Loader2 size={15} className="animate-spin"/> : <FolderOutput size={15}/>} {workflowGenerating ? `生成中 ${Math.round(workflowGeneration.progress)}%` : '生成工作流程'}</button><button disabled={!readyWorkflowItems.length || Boolean(busy)} onClick={() => void receiveWorkflowBatch(readyWorkflowItems)} className="dialog-primary inline-flex items-center gap-2">{busy === 'workflow-return' ? <Loader2 size={15} className="animate-spin"/> : <Upload size={15}/>}批量导入返图并识别</button><button disabled={!mergeablePhotos.length || Boolean(busy)} onClick={() => void mergeCompletedPhotos()} className="dialog-primary inline-flex items-center gap-2">{busy === 'merge-workflow' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}合成已完成图片（{mergeablePhotos.length}）</button>
       </div>
-      {!!preferredWorkflowIdentities.length && <div className="flex min-h-12 flex-wrap items-center gap-2 border-b border-violet-100 bg-violet-50/70 px-5 py-2"><span className="mr-1 text-xs font-bold text-violet-800">拖拽开工顺序</span>{preferredWorkflowIdentities.map((identity, index) => <div key={identity.id} draggable={!workflowOrderLocked && !busy} onDragStart={event => { setDraggedWorkflowIdentityId(identity.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', identity.id); }} onDragOver={event => { if (!workflowOrderLocked && !busy) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; } }} onDrop={event => { event.preventDefault(); const sourceIdentityId = draggedWorkflowIdentityId || event.dataTransfer.getData('text/plain'); setDraggedWorkflowIdentityId(''); void movePreferredIdentity(sourceIdentityId, identity.id); }} onDragEnd={() => setDraggedWorkflowIdentityId('')} className={`inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-white py-1 pl-1.5 pr-2 text-xs font-bold text-violet-800 shadow-sm ${draggedWorkflowIdentityId === identity.id ? 'opacity-40' : ''} ${workflowOrderLocked || busy ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'}`}><GripVertical size={13} className="text-violet-400"/><span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-violet-100 px-1 text-[10px] text-violet-700">{index + 1}</span><span className="max-w-32 truncate">{identity.name}</span><button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void removePreferredIdentity(identity.id)} title={`将“${identity.name}”交回自动排期`} className="ml-0.5 rounded-full p-0.5 text-violet-400 hover:bg-violet-100 hover:text-violet-700 disabled:opacity-40"><X size={12}/></button></div>)}<span className="text-[11px] text-violet-600">未加入的人物继续自动安排</span><button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void savePreferredIdentityOrder([], '已恢复自动排期；如已生成工作流程，请重新生成')} className="ml-auto text-xs font-bold text-violet-700 hover:text-violet-900 disabled:opacity-40">全部恢复自动</button></div>}
+      {!!preferredWorkflowIdentities.length && <div className="flex min-h-12 flex-wrap items-center gap-2 border-b border-violet-100 bg-violet-50/70 px-5 py-2"><span className="mr-1 text-xs font-bold text-violet-800">拖拽开工顺序</span>{preferredWorkflowIdentities.map((identity, index) => <div key={identity.id} className="contents">{index > 0 && <button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void toggleSameWeekIdentity(identity.id)} title={sameWeekIdentityIds.includes(identity.id) ? `“${identity.name}”与前一人物同周开始，点击改为下一周` : `“${identity.name}”在前一人物之后开始，点击改为同周`} className={`rounded-full border px-2 py-1 text-xs font-black transition disabled:opacity-40 ${sameWeekIdentityIds.includes(identity.id) ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-violet-200 bg-white text-violet-500'}`}>{sameWeekIdentityIds.includes(identity.id) ? '＋' : '→'}</button>}<div draggable={!workflowOrderLocked && !busy} onDragStart={event => { setDraggedWorkflowIdentityId(identity.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', identity.id); }} onDragOver={event => { if (!workflowOrderLocked && !busy) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; } }} onDrop={event => { event.preventDefault(); const sourceIdentityId = draggedWorkflowIdentityId || event.dataTransfer.getData('text/plain'); setDraggedWorkflowIdentityId(''); void movePreferredIdentity(sourceIdentityId, identity.id); }} onDragEnd={() => setDraggedWorkflowIdentityId('')} className={`inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-white py-1 pl-1.5 pr-2 text-xs font-bold text-violet-800 shadow-sm ${draggedWorkflowIdentityId === identity.id ? 'opacity-40' : ''} ${workflowOrderLocked || busy ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'}`}><GripVertical size={13} className="text-violet-400"/><span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-violet-100 px-1 text-[10px] text-violet-700">{index + 1}</span><span className="max-w-32 truncate">{identity.name}</span><button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void removePreferredIdentity(identity.id)} title={`将“${identity.name}”交回自动排期`} className="ml-0.5 rounded-full p-0.5 text-violet-400 hover:bg-violet-100 hover:text-violet-700 disabled:opacity-40"><X size={12}/></button></div></div>)}<span className="text-[11px] text-violet-600">点击 ＋/→ 切换同周或下一周；未加入的人物继续自动安排</span><button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void savePreferredIdentityOrder([], [], '已恢复自动排期；如已生成工作流程，请重新生成')} className="ml-auto text-xs font-bold text-violet-700 hover:text-violet-900 disabled:opacity-40">全部恢复自动</button></div>}
     </>}
     {workflowGenerating && workflowGeneration && <div className="border-b border-blue-100 bg-blue-50 px-5 py-3">
       <div className="flex items-center gap-4 text-xs">
@@ -624,12 +669,11 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
       </div>
     </div>}
     {busy === 'workflow-return' && <div className="border-b border-emerald-100 bg-emerald-50 px-5 py-3"><div className="flex items-center justify-between gap-4 text-xs"><span className="font-bold text-emerald-700">{workflowReturnProgress.message}</span><span className="tabular-nums text-emerald-600">{Math.round(workflowReturnProgress.progress)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-emerald-100"><div className="h-full rounded-full bg-emerald-600 transition-[width] duration-500" style={{ width: `${workflowReturnProgress.progress}%` }}/></div></div>}
-    {tab === 'workflow' && workflowReturnResult?.success && <div className="max-h-52 overflow-y-auto border-b border-slate-200 bg-white"><div className="sticky top-0 z-10 flex flex-wrap items-center gap-3 border-b border-slate-100 bg-white px-5 py-2 text-xs"><span className="font-bold text-slate-700">本次批量返图</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 font-bold text-emerald-700">已完成 {workflowReturnResult.acceptedCount || 0}</span><span className="rounded-full bg-amber-50 px-2.5 py-1 font-bold text-amber-700">待确认 {workflowReturnResult.reviewCount || 0}</span>{Boolean(workflowReturnResult.missingTaskCount) && <span className="text-slate-500">另有 {workflowReturnResult.missingTaskCount} 张当前任务未收到可靠返图</span>}</div>{workflowReturnResult.matches.map(match => <div key={match.returnId} className="grid grid-cols-[minmax(140px,1fr)_24px_minmax(180px,1.2fr)_110px] items-center gap-3 border-b border-slate-100 px-5 py-2 text-xs last:border-0"><span className="truncate font-medium text-slate-700" title={match.sourceName}>{match.sourceName}</span><span className="text-center text-slate-300">→</span><span className="truncate text-slate-600">{match.matched ? `${match.photoName} · ${match.personName}` : '未找到候选任务'}</span><span className={`justify-self-end rounded-full px-2.5 py-1 font-bold ${match.accepted ? 'bg-emerald-50 text-emerald-700' : match.confidence === 'medium' ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-600'}`}>{match.accepted ? `已完成 ${Math.round(match.score * 100)}%` : '请单独上传确认'}</span></div>)}</div>}
-    {tab === 'workflow' && workflowReturnResult && !workflowReturnResult.success && <div className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm text-red-700">{workflowReturnResult.error || '批量返图失败'}</div>}
     {loading ? <div className="flex flex-1 items-center justify-center text-sm text-slate-500"><Loader2 className="mr-2 animate-spin"/>正在读取项目人物…</div> : !workspace.photos.length ? <div className="flex flex-1 flex-col items-center justify-center text-center"><UsersRound size={42} className="text-slate-300"/><h3 className="mt-4 font-bold text-slate-700">还没有完成第一步</h3><p className="mt-2 text-sm text-slate-500">请先在“人物识别”中加入图片并完成识别裁图。</p><button onClick={() => onStepChange('detect')} className="dialog-primary mt-5">返回人物识别</button></div> : <main ref={peopleScrollRef} className={`min-h-0 flex-1 p-6 ${tab === 'workflow' ? 'overflow-hidden' : 'overflow-y-auto'}`}><div className={`mx-auto max-w-[1800px] ${tab === 'workflow' ? 'h-full' : 'min-h-full'}`}><div className={tab === 'workflow' ? 'workflow-board-view' : 'min-h-full'}>
       {tab === 'people' ? <><div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4"><div className="min-w-0 flex-1"><h3 className="text-sm font-bold text-blue-800">自动分组是候选，不是最终身份</h3><p className="mt-1 text-xs leading-5 text-blue-700">系统使用对齐后的人脸身份特征，并用 OSNet 人体特征辅助侧脸和遮挡场景；同一照片中的人物不会自动归为同一身份。证据不足的人保持未标注，请点击缩略图看图确认。</p></div>{subjects.length > 18 && <button onClick={() => setShowAllSubjects(current => !current)} className="dialog-secondary">{showAllSubjects ? '每组只显示前 18 张' : '显示全部人物图'}</button>}<button disabled={Boolean(busy)} onClick={() => void suggest()} className="dialog-primary inline-flex items-center gap-2">{busy === 'suggest' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}自动识别同一个人</button><button onClick={() => void createIdentity()} className="dialog-secondary">新建人物</button></div>
-        <div className="space-y-5">{[...workspace.identities, { id: '__unassigned__', name: '未标注人物', color: '#64748b', createdAt: 0, updatedAt: 0 }].map(identity => { const items = grouped.get(identity.id) || []; if (!items.length && identity.id === '__unassigned__') return null; const visibleItems = showAllSubjects ? items : items.slice(0, 18); return <section key={identity.id} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm" style={{ contentVisibility: 'auto', containIntrinsicSize: '420px' }}><header className="flex items-center gap-3 border-b border-slate-100 px-4 py-3"><span className="h-3 w-3 rounded-full" style={{ background: identity.color }}/>{identity.id === '__unassigned__' ? <h3 className="font-bold text-slate-700">未标注人物</h3> : <input defaultValue={identity.name} onBlur={event => void renameIdentity(identity, event.target.value)} className="min-w-40 rounded border border-transparent px-1 py-1 font-bold text-slate-800 hover:border-slate-200 focus:border-blue-400 focus:outline-none"/>}<span className="text-xs text-slate-400">{items.length} 张人物实例 · {new Set(items.map(item => item.photo.photoId)).size} 张照片{!showAllSubjects && items.length > visibleItems.length ? ` · 当前显示 ${visibleItems.length} 张` : ''}</span>{identity.id !== '__unassigned__' && <button onClick={() => void removeIdentity(identity)} title="删除人物身份" className="ml-auto rounded p-2 text-slate-400 hover:bg-red-50 hover:text-red-600"><Trash2 size={15}/></button>}</header><div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-6">{visibleItems.map(subject => <div key={subject.key} data-team-person-key={subject.key} className="space-y-2"><SubjectThumb subject={subject} cacheConfig={cacheConfig}/><select value={subject.identity?.id || ''} onChange={event => void assign(subject, event.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700"><option value="">未标注</option>{workspace.identities.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}</select>{subject.assignment?.source === 'suggested' && <p className="text-[10px] text-amber-600">自动候选 · {Math.round(subject.assignment.confidence * 100)}% · 请人工确认</p>}</div>)}</div></section>; })}</div></> : <>{!workspace.identities.length ? <div className="rounded-xl border border-dashed border-slate-300 p-10 text-center text-sm text-slate-500">请先在“标记人物”中确认身份。</div> : <div className="space-y-7">{weeks.map(week => <section key={week}><h3 className="mb-3 text-sm font-bold text-slate-700">第 {week} 周</h3><div className="space-y-4">{[...workflowGroups.values()].filter(group => group.week === week).map(group => { const pending = group.items.filter(item => !item.assignment?.completed); const ready = pending.filter(item => item.ready); return <article key={`${week}:${group.identity.id}`} className="workflow-person-lane overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"><header className="workflow-person-summary flex items-center gap-3 border-b border-slate-100 p-4"><span className="h-3 w-3 shrink-0 rounded-full" style={{ background: group.identity.color }}/><div className="min-w-0"><h4 className="truncate font-bold text-slate-800">{group.identity.name}</h4><p className="mt-1 text-xs leading-5 text-slate-400">本周 {group.items.length} 张<br/>可分发 {ready.length} 张 · 已完成 {group.items.length - pending.length} 张</p></div><button disabled={Boolean(busy)} onClick={() => void openTaskFolder(group.identity, week)} className="dialog-primary ml-auto inline-flex shrink-0 items-center gap-2">{busy === `open:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <FolderOutput size={14}/>}打开任务文件夹</button></header><div className="workflow-task-strip">{group.items.map(item => <div key={item.key} className="workflow-task-card border-r border-slate-100 p-3 last:border-0"><div className="workflow-task-thumbnail shrink-0"><SubjectThumb subject={item} cacheConfig={cacheConfig}/></div><div className="min-w-0"><p className="truncate text-sm font-bold text-slate-700">{item.photo.name} · 人物 {item.personIndex}</p><p className={`mt-1 truncate text-xs ${item.assignment?.completed ? 'text-emerald-600' : item.ready ? 'text-blue-600' : 'text-amber-600'}`} title={item.blockedBy.join('、')}>{item.assignment?.completed ? '已完成' : item.ready ? '可以分发' : `等待 ${item.blockedBy.join('、')} 完成`}</p></div><button disabled={!item.ready || Boolean(busy)} onClick={() => void upload(item)} className="dialog-secondary inline-flex items-center justify-center gap-1.5">{busy === `upload:${item.key}` ? <Loader2 size={13} className="animate-spin"/> : <Upload size={13}/>}上传返图</button><button disabled={!item.assignment || !item.ready && !item.assignment.completed} onClick={() => void toggleComplete(item)} className={`inline-flex items-center justify-center gap-1.5 rounded-md border px-3 py-2 text-xs font-bold ${item.assignment?.completed ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 text-slate-600'}`}>{item.assignment?.completed ? <CheckCircle2 size={13}/> : <AlertTriangle size={13}/>} {item.assignment?.completed ? '已完成' : '标记完成'}</button></div>)}</div></article>; })}</div></section>)}</div>}</>}
+        <div className="space-y-5">{[...workspace.identities, { id: '__unassigned__', name: '未标注人物', color: '#64748b', createdAt: 0, updatedAt: 0 }].map(identity => { const items = grouped.get(identity.id) || []; if (!items.length && identity.id === '__unassigned__') return null; const visibleItems = showAllSubjects ? items : items.slice(0, 18); return <section key={identity.id} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm" style={{ contentVisibility: 'auto', containIntrinsicSize: '420px' }}><header className="flex items-center gap-3 border-b border-slate-100 px-4 py-3"><span className="h-3 w-3 rounded-full" style={{ background: identity.color }}/>{identity.id === '__unassigned__' ? <h3 className="font-bold text-slate-700">未标注人物</h3> : <input defaultValue={identity.name} onBlur={event => void renameIdentity(identity, event.target.value)} className="min-w-40 rounded border border-transparent px-1 py-1 font-bold text-slate-800 hover:border-slate-200 focus:border-blue-400 focus:outline-none"/>}<span className="text-xs text-slate-400">{items.length} 张人物实例 · {new Set(items.map(item => item.photo.photoId)).size} 张照片{!showAllSubjects && items.length > visibleItems.length ? ` · 当前显示 ${visibleItems.length} 张` : ''}</span>{identity.id !== '__unassigned__' && <button onClick={() => void removeIdentity(identity)} title="删除人物身份" className="ml-auto rounded p-2 text-slate-400 hover:bg-red-50 hover:text-red-600"><Trash2 size={15}/></button>}</header><div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-6">{visibleItems.map(subject => <div key={subject.key} data-team-person-key={subject.key} className="space-y-2"><SubjectThumb subject={subject} cacheConfig={cacheConfig}/><select value={subject.identity?.id || ''} onChange={event => void assign(subject, event.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700"><option value="">未标注</option>{workspace.identities.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}</select>{subject.assignment?.source === 'suggested' && <p className="text-[10px] text-amber-600">自动候选 · {Math.round(subject.assignment.confidence * 100)}% · 请人工确认</p>}</div>)}</div></section>; })}</div></> : <>{!workspace.identities.length ? <div className="rounded-xl border border-dashed border-slate-300 p-10 text-center text-sm text-slate-500">请先在“标记人物”中确认身份。</div> : <div className="space-y-7">{weeks.map(week => <section key={week}><h3 className="mb-3 text-sm font-bold text-slate-700">第 {week} 周</h3><div className="space-y-4">{[...workflowGroups.values()].filter(group => group.week === week).map(group => { const pending = group.items.filter(item => !item.assignment?.completed); const ready = pending.filter(item => item.ready); return <article key={`${week}:${group.identity.id}`} className="workflow-person-lane overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"><header className="workflow-person-summary flex items-center gap-3 border-b border-slate-100 p-4"><span className="h-3 w-3 shrink-0 rounded-full" style={{ background: group.identity.color }}/><div className="min-w-0"><h4 className="truncate font-bold text-slate-800">{group.identity.name}</h4><p className="mt-1 text-xs leading-5 text-slate-400">本周 {group.items.length} 张<br/>可分发 {ready.length} 张 · 已完成 {group.items.length - pending.length} 张</p></div><button disabled={Boolean(busy)} onClick={() => void openTaskFolder(group.identity, week)} className="dialog-primary ml-auto inline-flex shrink-0 items-center gap-2">{busy === `open:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <FolderOutput size={14}/>}打开任务文件夹</button></header><div className="workflow-task-strip">{group.items.map(item => <div key={item.key} className="workflow-task-card border-r border-slate-100 p-3 last:border-0"><div className="workflow-task-thumbnail shrink-0"><SubjectThumb subject={item} cacheConfig={cacheConfig}/></div><div className="min-w-0"><p className="truncate text-sm font-bold text-slate-700">{item.photo.name} · 人物 {item.personIndex}</p><p className={`mt-1 truncate text-xs ${item.assignment?.completed ? 'text-emerald-600' : item.ready ? 'text-blue-600' : 'text-amber-600'}`} title={item.blockedBy.join('、')}>{item.assignment?.completed ? '已标记' : item.ready ? '可以分发' : `等待 ${item.blockedBy.join('、')} 完成`}</p></div><button disabled={!item.ready || Boolean(busy)} onClick={() => void upload(item)} className="workflow-task-action dialog-secondary inline-flex items-center justify-center">{busy === `upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : <Upload size={12}/>}上传</button><button disabled={!item.assignment || Boolean(busy) || !item.ready && !item.assignment.completed} onClick={() => void (item.assignment?.completed && item.task.editedPatchPath ? removeUpload(item) : toggleComplete(item))} title={item.assignment?.completed ? item.task.editedPatchPath ? '删除返图并撤销完成标记' : '撤销完成标记' : '不上传返图，直接标记完成'} className={`workflow-task-action group inline-flex items-center justify-center rounded-md border font-bold transition ${item.assignment?.completed ? item.task.editedPatchPath ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-red-200 hover:bg-red-50 hover:text-red-600' : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-amber-200 hover:bg-amber-50 hover:text-amber-700' : 'border-slate-200 text-slate-600'}`}>{busy === `complete:${item.key}` || busy === `remove-upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : item.assignment?.completed ? <><CheckCircle2 size={12} className="group-hover:hidden"/>{item.task.editedPatchPath ? <Trash2 size={12} className="hidden group-hover:block"/> : <X size={12} className="hidden group-hover:block"/>}</> : <AlertTriangle size={12}/>} {item.assignment?.completed ? <><span className="group-hover:hidden">已标记</span><span className="hidden group-hover:inline">{item.task.editedPatchPath ? '删除返图' : '取消标记'}</span></> : '标记完成'}</button></div>)}</div></article>; })}</div></section>)}</div>}</>}
     </div></div></main>}
+    {workflowReturnResult && createPortal(<div role="dialog" aria-modal="true" aria-label="批量返图结果" className="fixed inset-0 z-[460] flex items-center justify-center bg-slate-950/55 p-5" onMouseDown={event => { if (event.target === event.currentTarget && busy !== 'workflow-return') setWorkflowReturnResult(null); }}><div className="flex max-h-[82vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><header className="flex items-start gap-4 border-b border-slate-200 px-5 py-4"><div className="min-w-0 flex-1"><h3 className="font-bold text-slate-900">批量返图结果</h3>{workflowReturnResult.success ? <div className="mt-2 flex flex-wrap gap-2 text-xs"><span className="rounded-full bg-emerald-50 px-2.5 py-1 font-bold text-emerald-700">已完成 {workflowReturnResult.acceptedCount || 0}</span><span className="rounded-full bg-amber-50 px-2.5 py-1 font-bold text-amber-700">待确认 {workflowReturnResult.reviewCount || 0}</span>{Boolean(workflowReturnResult.missingTaskCount) && <span className="px-1 py-1 text-slate-500">另有 {workflowReturnResult.missingTaskCount} 张当前任务未收到可靠返图</span>}</div> : <p className="mt-1 text-sm text-red-600">{workflowReturnResult.error || '批量返图失败'}</p>}</div><button type="button" onClick={() => setWorkflowReturnResult(null)} disabled={busy === 'workflow-return'} className="rounded-md p-2 text-slate-500 hover:bg-slate-100 disabled:opacity-40"><X size={19}/></button></header>{workflowReturnResult.success && <div className="min-h-0 flex-1 overflow-y-auto"><div className="grid grid-cols-[minmax(140px,1fr)_24px_minmax(180px,1.2fr)_120px] gap-3 border-b border-slate-100 bg-slate-50 px-5 py-2 text-xs font-bold text-slate-500"><span>返图文件</span><span/><span>匹配任务</span><span className="text-right">结果</span></div>{workflowReturnResult.matches.map(match => <div key={match.returnId} className="grid grid-cols-[minmax(140px,1fr)_24px_minmax(180px,1.2fr)_120px] items-center gap-3 border-b border-slate-100 px-5 py-3 text-xs last:border-0"><span className="truncate font-medium text-slate-700" title={match.sourceName}>{match.sourceName}</span><span className="text-center text-slate-300">→</span><span className="truncate text-slate-600">{match.matched ? `${match.photoName} · ${match.personName}` : '未找到候选任务'}</span><span className={`justify-self-end rounded-full px-2.5 py-1 font-bold ${match.accepted ? 'bg-emerald-50 text-emerald-700' : match.confidence === 'medium' ? 'bg-amber-50 text-amber-700' : 'bg-red-50 text-red-600'}`}>{match.accepted ? `已完成 ${Math.round(match.score * 100)}%` : '请单独上传确认'}</span></div>)}</div>}<footer className="flex justify-end border-t border-slate-200 bg-slate-50 px-5 py-3"><button type="button" onClick={() => setWorkflowReturnResult(null)} className="dialog-primary">完成</button></footer></div></div>, document.body)}
     {assigningSubject && <div role="dialog" aria-modal="true" aria-label="看图修改人物归属" className="fixed inset-0 z-[450] flex items-center justify-center bg-slate-950/70 p-5" onMouseDown={event => { if (event.target === event.currentTarget) setAssigningSubject(null); }}><div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><header className="flex items-center gap-3 border-b border-slate-200 px-5 py-4"><div><h3 className="font-bold text-slate-900">这是谁？</h3><p className="mt-1 text-xs text-slate-500">左边是识别错误的人；从右边选择同一个人的代表图，不需要记“待确认人物”编号。</p></div><button onClick={() => setAssigningSubject(null)} className="ml-auto rounded-md p-2 text-slate-500 hover:bg-slate-100"><X size={19}/></button></header><div className="grid min-h-0 flex-1 grid-cols-[300px_minmax(0,1fr)]"><aside className="border-r border-slate-200 bg-slate-50 p-5"><p className="mb-2 text-xs font-bold text-slate-500">待修改</p><SubjectThumb subject={assigningSubject} cacheConfig={cacheConfig} interactive={false}/><p className="mt-3 text-sm font-bold text-slate-800">{assigningSubject.photo.name} · 人物 {assigningSubject.personIndex}</p><p className="mt-1 text-xs text-slate-500">当前：{assigningSubject.identity?.name || '未标注'}</p><div className="mt-5 space-y-2"><button onClick={() => void assign(assigningSubject, '')} className="dialog-secondary w-full">设为未标注</button><button onClick={() => void createIdentityForSubject(assigningSubject)} className="dialog-primary w-full">这是一个新人物</button></div></aside><section className="min-h-0 overflow-y-auto p-5"><h4 className="mb-3 text-sm font-bold text-slate-700">选择同一个人</h4><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{pickerIdentities.map(identity => { const examples = grouped.get(identity.id) || []; const representative = examples.find(item => item.key !== assigningSubject.key) || examples[0]; return <button key={identity.id} onClick={() => void assign(assigningSubject, identity.id)} className={`overflow-hidden rounded-xl border bg-white text-left transition hover:border-blue-400 hover:shadow-md ${assigningSubject.identity?.id === identity.id ? 'border-blue-500 ring-2 ring-blue-100' : 'border-slate-200'}`}>{representative ? <SubjectThumb subject={representative} cacheConfig={cacheConfig} interactive={false}/> : <div className="flex aspect-[4/3] items-center justify-center bg-slate-100 text-slate-400"><UserRound/></div>}<div className="flex items-center gap-2 p-3"><span className="h-2.5 w-2.5 rounded-full" style={{ background: identity.color }}/><span className="min-w-0 flex-1 truncate text-sm font-bold text-slate-800">{identity.name}</span><span className="text-[10px] text-slate-400">{examples.length} 张</span></div></button>; })}</div></section></div></div></div>}
   </div>;
 };

@@ -115,6 +115,21 @@ assertTaskWeeksAreUnique(uneven, unevenSchedule);
 assertPreferredOrder(uneven, unevenSchedule, ['4', '5']);
 assert.equal(unevenSchedule.get('small:4'), 1);
 
+// Adjacent priority identities can explicitly share their start week when
+// they do not compete for the same work image. Without the join they retain
+// the existing staggered first/second-week behavior.
+const parallel = [
+  entry('left', '1', 1), entry('left', '3', 2),
+  entry('right', '2', 1), entry('right', '4', 2),
+];
+const staggeredParallel = scheduleWorkflowWeeks(parallel, { preferredIdentityOrder: ['1', '2'] });
+assert.equal(staggeredParallel.get('left:1'), 1);
+assert.equal(staggeredParallel.get('right:2'), 2);
+const joinedParallel = scheduleWorkflowWeeks(parallel, { preferredIdentityOrder: ['1', '2'], sameWeekIdentityIds: ['2'] });
+assertTaskWeeksAreUnique(parallel, joinedParallel);
+assert.equal(joinedParallel.get('left:1'), 1);
+assert.equal(joinedParallel.get('right:2'), 1);
+
 // Workflow generation must resolve every source from the one project snapshot
 // and copy with bounded concurrency. A second run reuses completed files.
 const workflowRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'photoflow-team-workflow-'));
@@ -151,7 +166,6 @@ try {
   assert.equal(plan.totalBytes, 1024 * 10);
   assert.equal(new Set(plan.files.map(file => file.destination)).size, 4);
   assert.ok(plan.manifestGroups[0].items.every(item => item.relativePath.startsWith('第1周/测试人物/')));
-
   let activeCopies = 0;
   let maximumCopies = 0;
   let copyCount = 0;

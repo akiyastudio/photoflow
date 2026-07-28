@@ -152,10 +152,39 @@ const normalizeMediaCacheSizeGB = (value, fallback = 50) => {
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
 };
 const workspaceWatchChanges = new Map();
+const workspaceWatchSuppressions = new Map();
 const mediaTrackingTimers = new Map();
 const isInternalWorkspaceChange = fileName => String(fileName || '')
   .split(/[\\/]/)
-  .some(segment => segment.toLowerCase().endsWith('.photoflow-part') || /^\.photoflow-(?:paste|replace|undo)-/i.test(segment));
+  .some(segment => segment.toLowerCase().endsWith('.photoflow-part') || segment.toLowerCase() === '.photoflow-workspace-id' || /^\.photoflow-(?:paste|replace|undo|team-workflow-)/i.test(segment));
+const comparableWorkspacePath = value => {
+  const resolved = path.resolve(value);
+  return process.platform === 'win32' ? resolved.toLocaleLowerCase() : resolved;
+};
+const pathIsInside = (parent, candidate) => {
+  const relative = path.relative(parent, candidate);
+  return !relative || (!relative.startsWith('..') && !path.isAbsolute(relative));
+};
+const isSuppressedWorkspaceChange = (root, fileName) => {
+  const candidate = comparableWorkspacePath(path.resolve(root, String(fileName || '')));
+  return [...workspaceWatchSuppressions.keys()].some(suppressed => pathIsInside(suppressed, candidate));
+};
+const suppressWorkspaceWatchPath = targetPath => {
+  const suppressed = comparableWorkspacePath(targetPath);
+  workspaceWatchSuppressions.set(suppressed, (workspaceWatchSuppressions.get(suppressed) || 0) + 1);
+  for (const changedName of workspaceWatchChanges.keys()) {
+    const candidate = comparableWorkspacePath(path.resolve(watchedWorkspacePath || path.dirname(targetPath), changedName));
+    if (pathIsInside(suppressed, candidate)) workspaceWatchChanges.delete(changedName);
+  }
+};
+const releaseWorkspaceWatchPath = (targetPath, delayMs = 750) => {
+  const suppressed = comparableWorkspacePath(targetPath);
+  setTimeout(() => {
+    const count = workspaceWatchSuppressions.get(suppressed) || 0;
+    if (count <= 1) workspaceWatchSuppressions.delete(suppressed);
+    else workspaceWatchSuppressions.set(suppressed, count - 1);
+  }, Math.max(0, delayMs));
+};
 const trackedVersionThumbnailCopies = new Map();
 const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
@@ -378,6 +407,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1024,
     height: 768,
+    show: false,
     icon: app.isPackaged ? undefined : path.join(__dirname, '../build/icon.ico'),
     backgroundColor: '#f8fafc',
     frame: false,
@@ -397,6 +427,12 @@ function createWindow() {
   mainWindow.on('maximize', sendMaximizedState);
   mainWindow.on('unmaximize', sendMaximizedState);
   mainWindow.center();
+  mainWindow.once('ready-to-show', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.maximize();
+    mainWindow.show();
+    sendMaximizedState();
+  });
 
   const isDev = process.env.NODE_ENV === 'development';
 
@@ -410,6 +446,7 @@ function createWindow() {
 
 // 根据环境获取可执行文件和参数
 const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'thumbnail_db', 'video_preview']);
+const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract']);
 
 const getDevelopmentPython = () => {
   const isWin = process.platform === 'win32';
@@ -425,8 +462,6 @@ const getRunConfig = (scriptName, args) => {
   const baseName = scriptName.replace('.py', '');
 
   const isWin = process.platform === 'win32';
-
-  if (baseName === 'research') return pluginService.resolveRunConfig('research-tools', args);
 
   if (app.isPackaged) {
     // 生产环境：根据平台决定是否有 .exe 后缀
@@ -446,6 +481,12 @@ const getRunConfig = (scriptName, args) => {
     if (MERGED_PYTHON_TOOLS.has(baseName)) {
       return {
         command: path.join(process.resourcesPath, 'python', 'tools', `tools${exeSuffix}`),
+        args: [baseName, ...args]
+      };
+    }
+    if (INSPIRATION_PYTHON_TOOLS.has(baseName)) {
+      return {
+        command: path.join(process.resourcesPath, 'python', 'inspiration-tools', `inspiration-tools${exeSuffix}`),
         args: [baseName, ...args]
       };
     }
@@ -650,9 +691,44 @@ const getResourceBirthdaysPath = () => {
 
 const WORKSPACE_STATUSES = ['未分类', '策划中', '待拍摄', '后期中', '已归档'];
 
-const getWorkspaceStorageKey = root => {
+const legacyWorkspaceStorageKey = root => {
   const identity = process.platform === 'win32' ? root.toLocaleLowerCase() : root;
   return crypto.createHash('sha256').update(identity).digest('hex').slice(0, 24);
+};
+
+const workspaceStorageKeys = new Map();
+const getWorkspaceStorageKey = root => {
+  const resolvedRoot = path.resolve(root);
+  const cached = workspaceStorageKeys.get(resolvedRoot);
+  if (cached) return cached;
+  const markerPath = path.join(resolvedRoot, '.photoflow-workspace-id');
+  const readMarker = () => {
+    try {
+      const value = fs.readFileSync(markerPath, 'utf8').trim().toLowerCase();
+      return /^[a-f0-9]{24,64}$/.test(value) ? value : '';
+    } catch {
+      return '';
+    }
+  };
+  let key = readMarker();
+  if (!key) {
+    const legacyKey = legacyWorkspaceStorageKey(resolvedRoot);
+    const databaseDir = path.join(app.getPath('userData'), 'workspace-data');
+    const hasLegacyData = fs.existsSync(path.join(databaseDir, `${legacyKey}.sqlite3`)) || fs.existsSync(path.join(databaseDir, legacyKey));
+    key = hasLegacyData ? legacyKey : crypto.randomUUID().replaceAll('-', '');
+    try {
+      fs.writeFileSync(markerPath, `${key}\n`, { encoding: 'utf8', flag: 'wx' });
+    } catch (error) {
+      const concurrentlyCreated = readMarker();
+      if (concurrentlyCreated) key = concurrentlyCreated;
+      else {
+        key = legacyKey;
+        writeLog('warn', 'Unable to persist stable workspace identity; using path identity for this session', { root: resolvedRoot, error: error.message || String(error) });
+      }
+    }
+  }
+  workspaceStorageKeys.set(resolvedRoot, key);
+  return key;
 };
 
 const getWorkspaceDatabasePath = root => {
@@ -694,6 +770,15 @@ const workspaceDatabase = new PythonDatabaseClient({
   defaultTimeoutMs: 2 * 60 * 1000,
 });
 const workspaceRepository = createWorkspaceRepository(workspaceDatabase);
+// Run routine integrity checks and backups in an independent process so they
+// cannot hold up interactive project-catalog requests.
+const workspaceMaintenanceDatabase = new PythonDatabaseClient({
+  getRunConfig,
+  getDatabasePath: getWorkspaceDatabasePath,
+  writeLog,
+  defaultTimeoutMs: 30 * 60 * 1000,
+});
+const workspaceMaintenanceRepository = createWorkspaceRepository(workspaceMaintenanceDatabase);
 // Media scans can hash files and must never block project navigation/status
 // updates. A second worker shares the WAL database safely while keeping the
 // catalog service responsive.
@@ -726,6 +811,7 @@ const stopWorkspaceWatcher = () => {
   workspaceWatcher = null;
   watchedWorkspacePath = '';
   workspaceWatchChanges.clear();
+  workspaceWatchSuppressions.clear();
   if (workspaceReconciliationTimer) clearInterval(workspaceReconciliationTimer);
   workspaceReconciliationTimer = null;
   workspaceReconciliationRunning = false;
@@ -750,8 +836,8 @@ const reconcileWorkspaceState = async root => {
       const catalogChanged = previousProjectsSnapshot !== JSON.stringify(catalog.projects || []);
       let completed = 0;
       for (const project of catalog.projects) {
-        scheduleMediaTrackingScan(root, project.name);
-        if (thumbnailService) {
+        if (project.availability !== 'missing') scheduleMediaTrackingScan(root, project.name);
+        if (thumbnailService && project.availability !== 'missing') {
           await thumbnailService.scanProject(path.join(root, project.relative_path), mediaRuntimeState.activeMediaCacheConfig);
         }
         completed += 1;
@@ -780,6 +866,8 @@ const startWorkspaceReconciliation = root => {
 
 const scheduleMediaTrackingScan = (root, projectName) => {
   if (!projectName) return;
+  const project = workspaceCatalogs.get(root)?.byName.get(projectName.toLocaleLowerCase());
+  if (project?.availability === 'missing') return;
   const key = `${root}\0${projectName.toLocaleLowerCase()}`;
   const previous = mediaTrackingTimers.get(key);
   if (previous) clearTimeout(previous);
@@ -803,6 +891,14 @@ const scheduleMediaTrackingScan = (root, projectName) => {
   }, 1500));
 };
 
+const cancelMediaTrackingScan = (root, projectName) => {
+  if (!projectName) return;
+  const key = `${root}\0${projectName.toLocaleLowerCase()}`;
+  const timer = mediaTrackingTimers.get(key);
+  if (timer) clearTimeout(timer);
+  mediaTrackingTimers.delete(key);
+};
+
 const watchWorkspace = (root) => {
   if (watchedWorkspacePath === root && workspaceWatcher) return;
   stopWorkspaceWatcher();
@@ -813,6 +909,7 @@ const watchWorkspace = (root) => {
       // repeated renderer refreshes for every file in a large copy operation.
       if (isInternalWorkspaceChange(fileName)) return;
       if (!fileName) return;
+      if (isSuppressedWorkspaceChange(root, fileName)) return;
       const changedName = String(fileName);
       const normalizedEventType = eventType === 'rename' ? 'rename' : 'change';
       if (workspaceWatchChanges.get(changedName) !== 'rename') workspaceWatchChanges.set(changedName, normalizedEventType);
@@ -1707,11 +1804,11 @@ app.whenReady().then(async () => {
   writeLog('info', 'Application started', { version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, deletedExpiredLogFiles: deletedLogFiles });
   createWindow();
 
-  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, undefined, writeLog });
-  registerWorkspaceIpc({ Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceRepository, writeLog });
-  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, mainWindow, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard });
+  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, undefined, writeLog });
+  registerWorkspaceIpc({ Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suppressWorkspaceWatchPath, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
+  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, cancelMediaTrackingScan, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
-  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
+  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
 
   setTimeout(checkForUpdates, 3000);
   app.on('activate', () => {
@@ -1724,6 +1821,7 @@ app.on('before-quit', () => {
   stopWorkspaceWatcher();
   stopShellThumbnailProcess();
   workspaceDatabase.stop();
+  workspaceMaintenanceDatabase.stop();
   mediaDatabase.stop();
   thumbnailImageWorkerPool?.stop();
   originalImageWorkerPool?.stop();

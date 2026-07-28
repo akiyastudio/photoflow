@@ -374,6 +374,20 @@ def main():
             }],
         })
         assert identity["success"]
+        atomic_uploaded = team_patch_update(db, {
+            "taskId": "group-task", "editedPatchPath": str(uploaded_path), "status": "uploaded",
+            "assignmentCompletion": {"personIndex": 1, "completed": True},
+        })
+        assert atomic_uploaded["tasks"][0]["editedPatchPath"] == str(uploaded_path.resolve())
+        workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
+        assert next(item for item in workspace["assignments"] if item["personIndex"] == 1)["completed"] is True
+        atomic_removed = team_patch_update(db, {
+            "taskId": "group-task", "editedPatchPath": None, "status": "exported",
+            "assignmentCompletion": {"personIndex": 1, "completed": False},
+        })
+        assert atomic_removed["tasks"][0]["editedPatchPath"] is None
+        workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
+        assert next(item for item in workspace["assignments"] if item["personIndex"] == 1)["completed"] is False
         assert team_identity_complete(db, {
             "photoId": "photo", "baseVersionId": "version", "personIndex": 1, "completed": True,
         })["success"]

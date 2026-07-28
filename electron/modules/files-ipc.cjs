@@ -1,5 +1,5 @@
 const registerFileOperationsIpc = context => {
-  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, mainWindow, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, cancelMediaTrackingScan, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
 
   ipcMain.handle('workspace-file-details', async (_event, workspacePath, status, projectName, relativePaths = []) => {
     try {
@@ -79,8 +79,14 @@ const registerFileOperationsIpc = context => {
   });
   
   ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, projectName, operation, relativePaths = [], targetRelativePath = '', nextName = '', options = {}) => {
+    let suppressedProjectRoot = '';
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      if (new Set(['import', 'move', 'paste', 'trash', 'select', 'rename']).has(operation)) {
+        cancelMediaTrackingScan?.(ensureWorkspace(workspacePath), projectName);
+        suppressWorkspaceWatchPath?.(root);
+        suppressedProjectRoot = root;
+      }
       const resolveInsideProject = relativePath => {
         const target = path.resolve(root, relativePath || '.');
         if (target !== root && !target.startsWith(root + path.sep)) throw new Error('无效的文件路径');
@@ -149,7 +155,14 @@ const registerFileOperationsIpc = context => {
         for (const entry of movePlan) await fs.promises.rename(entry.source, entry.destination);
         writeLog('info', 'Project files moved by internal drag', { projectName, targetRelativePath, count: movePlan.length });
         if (movePlan.length) await pushUndoOperation({ kind: 'move', moves: movePlan });
-        return { success: true, count: movePlan.length };
+        return {
+          success: true,
+          count: movePlan.length,
+          moves: movePlan.map(entry => ({
+            sourceRelativePath: path.relative(root, entry.source),
+            destinationRelativePath: path.relative(root, entry.destination),
+          })),
+        };
       }
       if (operation === 'copy' || operation === 'cut') {
         if (!sources.length) throw new Error('未选择文件');
@@ -228,18 +241,24 @@ const registerFileOperationsIpc = context => {
             const folderCount = pasteConflicts.length - fileCount;
             const conflictSummary = [fileCount ? `${fileCount} 个文件` : '', folderCount ? `${folderCount} 个文件夹` : ''].filter(Boolean).join('和');
             const more = pasteConflicts.length > 6 ? ` 等 ${conflictSummary}` : '';
-            const confirmation = await dialog.showMessageBox(mainWindow, {
-              type: 'warning',
-              title: '目标位置已有同名项目',
-              message: `目标位置已有 ${names}${more}`,
-              detail: `发现 ${conflictSummary}。选择替换后，仅在新内容准备完成时替换旧项目；选择保留两者时，新项目会自动重命名。`,
-              buttons: ['替换并继续', '保留两者', '取消'],
-              defaultId: 1,
-              cancelId: 2,
-              noLink: true,
-            });
-            if (confirmation.response === 2) return { success: false, cancelled: true, count: 0, operationId };
-            replaceConflicts = confirmation.response === 0;
+            const conflictPolicy = ['replace', 'keep-both'].includes(options?.pasteConflictPolicy) ? options.pasteConflictPolicy : '';
+            if (!conflictPolicy) {
+              publish({ phase: 'complete', progress: 100, currentName: '', count: 0, decisionRequired: true });
+              return {
+                success: true,
+                count: 0,
+                operationId,
+                requiresDecision: {
+                  kind: 'paste-conflict',
+                  names: pasteConflicts.slice(0, 6).map(item => path.basename(item.destination)),
+                  fileCount,
+                  folderCount,
+                  message: `目标位置已有 ${names}${more}`,
+                  detail: `发现 ${conflictSummary}。选择替换后，仅在新内容准备完成时替换旧项目；选择保留两者时，新项目会自动重命名。`,
+                },
+              };
+            }
+            replaceConflicts = conflictPolicy === 'replace';
           }
 
           topLevelTargets = [];
@@ -598,6 +617,8 @@ const registerFileOperationsIpc = context => {
                 : error.message || String(error);
       writeLog('error', 'Project file operation failed', { projectName, operation, targetRelativePath, count: relativePaths.length, errorCode: errorCode || undefined, transferStage: transferStage || undefined, sourcePath: error?.sourcePath, destinationPath: error?.destinationPath, nativeError: error?.message || String(error), error: errorMessage });
       return { success: false, error: errorMessage, errorCode: errorCode || undefined, transferStage: transferStage || undefined };
+    } finally {
+      if (suppressedProjectRoot) releaseWorkspaceWatchPath?.(suppressedProjectRoot);
     }
   });
 };
