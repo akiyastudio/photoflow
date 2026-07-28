@@ -32,62 +32,62 @@ def run(args_list):
         sys.stderr.reconfigure(encoding='utf-8')
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("path", nargs='?', help="要处理的目录路径")
+    parser.add_argument("paths", nargs='+', help="要处理的文件或目录路径")
     parser.add_argument("--quality", type=int, default=100)
     args = parser.parse_args(args_list)
 
-    # 获取路径
-    directory = args.path
-    
-    if not directory:
-        log_error("未提供目录路径")
-        return
-
-    # 清理路径引号
-    directory = directory.strip('"')
-
-    if not os.path.exists(directory):
-        log_error(f"错误：目录 '{directory}' 不存在。")
-        return
-
-    # 扫描 PNG 文件
-    try:
-        all_files = os.listdir(directory)
-    except Exception as e:
-        log_error(f"无法读取目录: {str(e)}")
+    # 扫描所选文件以及所选目录的当前层级。路径可能同时包含目录和其中的
+    # 文件，因此以规范化绝对路径去重。
+    candidate_files = []
+    for raw_path in args.paths:
+        target_path = raw_path.strip('"')
+        if os.path.isfile(target_path):
+            candidate_files.append(target_path)
+            continue
+        if os.path.isdir(target_path):
+            try:
+                candidate_files.extend(
+                    os.path.join(target_path, name) for name in os.listdir(target_path)
+                )
+            except OSError as error:
+                log_error(f"无法读取目录 '{target_path}': {str(error)}")
+                return
+            continue
+        log_error(f"路径不存在：'{target_path}'")
         return
 
     # 不只看扩展名：部分素材虽然以 .jpg 命名，内容实际上是 PNG。
     png_files = []
-    for filename in all_files:
-        file_path = os.path.join(directory, filename)
-        if not os.path.isfile(file_path):
+    seen_paths = set()
+    for file_path in candidate_files:
+        normalized_path = os.path.normcase(os.path.abspath(file_path))
+        if normalized_path in seen_paths or not os.path.isfile(file_path):
             continue
+        seen_paths.add(normalized_path)
         try:
             with open(file_path, 'rb') as source:
                 is_png = source.read(8) == b'\x89PNG\r\n\x1a\n'
             if is_png:
-                png_files.append(filename)
+                png_files.append(file_path)
         except OSError:
             continue
     total_files = len(png_files)
 
     if total_files == 0:
-        log_success(f"在 '{directory}' 中未发现 PNG 文件。")
+        log_success("所选文件或文件夹中未发现 PNG 文件。")
         return
 
     log_info(f"找到 {total_files} 个 PNG 文件，准备开始转换...")
     
     success_count = 0
     
-    for index, filename in enumerate(png_files):
-        file_path = os.path.join(directory, filename)
-        
+    for index, file_path in enumerate(png_files):
+        filename = os.path.basename(file_path)
         try:
             with Image.open(file_path) as img:
                 rgb_img = convert_to_srgb(img)
                 jpg_filename = os.path.splitext(filename)[0] + '.jpg'
-                jpg_file_path = os.path.join(directory, jpg_filename)
+                jpg_file_path = os.path.join(os.path.dirname(file_path), jpg_filename)
                 
                 rgb_img.save(
                     jpg_file_path,
@@ -108,7 +108,7 @@ def run(args_list):
         except Exception as e:
             log_error(f"转换失败 '{filename}': {str(e)}")
 
-    emit('success', f"处理完成！成功转换 {success_count}/{total_files} 个文件。")
+    log_success(f"处理完成！成功转换 {success_count}/{total_files} 个文件。")
 
 if __name__ == "__main__":
     try:

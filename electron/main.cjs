@@ -28,6 +28,9 @@ const { createFileSystemService } = require('./services/file-system-service.cjs'
 const { createThumbnailService } = require('./services/thumbnail-service.cjs');
 const { createMediaService } = require('./services/media-service.cjs');
 const { createVersionService } = require('./services/version-service.cjs');
+const { createTelemetryService } = require('./services/telemetry-service.cjs');
+const { createFileRootWatcherService } = require('./services/file-root-watcher-service.cjs');
+const cloudConfig = require('./cloud-config.cjs');
 const { registerBackgroundTasksIpc } = require('./modules/background-tasks-ipc.cjs');
 
 // Keep user-facing OS labels localized while runtime data stays in a stable,
@@ -104,6 +107,7 @@ const findLatestPhotoshop = () => {
 };
 
 let mainWindow;
+let telemetryService;
 let workspaceWatcher = null;
 let watchedWorkspacePath = '';
 let workspaceWatchTimer = null;
@@ -141,6 +145,7 @@ const shellThumbnailRequests = new Map();
 let shellThumbnailUnavailableLogged = false;
 let thumbnailPipeline = null;
 let thumbnailService = null;
+let fileRootWatcherService = null;
 let mediaService = null;
 let thumbnailImageWorkerPool = null;
 let originalImageWorkerPool = null;
@@ -176,6 +181,7 @@ const suppressWorkspaceWatchPath = targetPath => {
     const candidate = comparableWorkspacePath(path.resolve(watchedWorkspacePath || path.dirname(targetPath), changedName));
     if (pathIsInside(suppressed, candidate)) workspaceWatchChanges.delete(changedName);
   }
+  fileRootWatcherService?.discardChangesInside(targetPath);
 };
 const releaseWorkspaceWatchPath = (targetPath, delayMs = 750) => {
   const suppressed = comparableWorkspacePath(targetPath);
@@ -426,12 +432,24 @@ function createWindow() {
   };
   mainWindow.on('maximize', sendMaximizedState);
   mainWindow.on('unmaximize', sendMaximizedState);
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || input.key !== 'F11' || input.isAutoRepeat) return;
+    event.preventDefault();
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.setFullScreen(!mainWindow.isFullScreen());
+  });
   mainWindow.center();
   mainWindow.once('ready-to-show', () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.maximize();
     mainWindow.show();
     sendMaximizedState();
+  });
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    telemetryService?.reportCrash('renderer', new Error(`Renderer process exited: ${details.reason}`), {
+      reason: details.reason,
+      exit_code: details.exitCode,
+    });
   });
 
   const isDev = process.env.NODE_ENV === 'development';
@@ -597,12 +615,37 @@ const UPDATE_CONFIG = {
 const checkForUpdates = async () => {
   if (!mainWindow) return { success: false, error: '主窗口尚未就绪' };
   try {
+    const currentVersion = app.getVersion();
+    if (cloudConfig.apiBaseUrl) {
+      const query = new URLSearchParams({
+        platform: process.platform,
+        arch: process.arch,
+        channel: cloudConfig.updateChannel || 'stable',
+        currentVersion,
+      });
+      const response = await fetch(`${cloudConfig.apiBaseUrl.replace(/\/+$/, '')}/v1/updates?${query}`);
+      if (!response.ok) throw new Error(`更新服务返回 ${response.status}`);
+      const data = await response.json();
+      const result = {
+        success: true,
+        updateAvailable: data.updateAvailable === true,
+        currentVersion,
+        latestVersion: data.latestVersion,
+        url: data.downloadUrl,
+        notes: data.notes || '',
+        sha256: data.sha256 || '',
+        mandatory: data.mandatory === true,
+      };
+      telemetryService?.track('update_checked', { update_available: result.updateAvailable });
+      if (result.updateAvailable) mainWindow.webContents.send('update-available', { version: result.latestVersion, url: result.url, notes: result.notes });
+      return result;
+    }
     const response = await fetch(`https://api.github.com/repos/${UPDATE_CONFIG.owner}/${UPDATE_CONFIG.repo}/releases/latest`, { headers: { 'User-Agent': 'PhotoFlow-App' } });
     if (!response.ok) return { success: false, error: `更新服务返回 ${response.status}` };
     const data = await response.json();
     const latestVersion = data.tag_name.replace(/^v/, '');
-    const currentVersion = app.getVersion();
     const updateAvailable = latestVersion !== currentVersion && compareVersions(latestVersion, currentVersion) > 0;
+    telemetryService?.track('update_checked', { update_available: updateAvailable, source: 'github_fallback' });
     console.log(`Current: ${currentVersion}, Latest: ${latestVersion}`);
     if (updateAvailable) mainWindow.webContents.send('update-available', { version: latestVersion, url: data.html_url, notes: data.body || '' });
     return { success: true, updateAvailable, currentVersion, latestVersion, url: data.html_url, notes: data.body || '' };
@@ -652,13 +695,19 @@ const getConfigPath = () => {
   return path.join(getConfigDir(), 'photoflow_config.json');
 };
 
+const enforceInternalBetaTelemetry = config => ({
+  ...(config && typeof config === 'object' ? config : {}),
+  telemetry: { enabled: true, crashReports: true },
+});
+
 const readSavedConfig = () => {
   try {
     const configPath = getConfigPath();
-    return fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
+    const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
+    return enforceInternalBetaTelemetry(config);
   } catch (error) {
     writeLog('warn', 'Unable to read saved configuration', { error: error.message || String(error) });
-    return {};
+    return enforceInternalBetaTelemetry({});
   }
 };
 
@@ -818,6 +867,15 @@ const stopWorkspaceWatcher = () => {
   for (const timer of mediaTrackingTimers.values()) clearTimeout(timer);
   mediaTrackingTimers.clear();
 };
+
+const stopFileRootWatchers = () => {
+  fileRootWatcherService?.stop();
+};
+
+const acquireFileRootWatcher = rootPath => fileRootWatcherService?.acquire(rootPath)
+  || { success: false, root: path.resolve(rootPath), error: '文件根目录监听服务尚未初始化' };
+
+const releaseFileRootWatcher = rootPath => fileRootWatcherService?.release(rootPath);
 
 const reconcileWorkspaceState = async root => {
   if (workspaceReconciliationRunning || watchedWorkspacePath !== root) return;
@@ -1514,6 +1572,14 @@ thumbnailPipeline = new ThumbnailPipeline({
   maxBackgroundTasks: 1000,
 });
 thumbnailService = createThumbnailService({ pipeline: thumbnailPipeline, backgroundTasks });
+fileRootWatcherService = createFileRootWatcherService({
+  getMainWindow: () => mainWindow,
+  getThumbnailService: () => thumbnailService,
+  getMediaCacheConfig: () => mediaRuntimeState.activeMediaCacheConfig,
+  isInternalChange: isInternalWorkspaceChange,
+  isSuppressedChange: isSuppressedWorkspaceChange,
+  writeLog,
+});
 mediaService = createMediaService({ accessService: mediaAccessService, thumbnailService, toMediaUrl });
 
 
@@ -1786,6 +1852,7 @@ registerBrollImportIpc({
   writeLog,
   pushUndoOperation,
   activeOperations: activeProjectFileOperations,
+  getTelemetry: () => telemetryService,
 });
 registerBackgroundTasksIpc({ ipcMain, eventBus, backgroundTasks, getMainWindow: () => mainWindow });
 app.whenReady().then(async () => {
@@ -1802,10 +1869,22 @@ app.whenReady().then(async () => {
   });
   const deletedLogFiles = await cleanupExpiredLogs();
   writeLog('info', 'Application started', { version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, deletedExpiredLogFiles: deletedLogFiles });
+  telemetryService = createTelemetryService({
+    app,
+    fs,
+    path,
+    crypto,
+    getConfig: readSavedConfig,
+    getLogDir,
+    writeLog,
+    apiBaseUrl: cloudConfig.apiBaseUrl,
+    ingestKey: cloudConfig.ingestKey,
+  });
+  telemetryService.start();
   createWindow();
 
-  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, undefined, writeLog });
-  registerWorkspaceIpc({ Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suppressWorkspaceWatchPath, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
+  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, telemetryService, undefined, writeLog });
+  registerWorkspaceIpc({ Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, acquireFileRootWatcher, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, cancelMediaTrackingScan, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
@@ -1817,8 +1896,10 @@ app.whenReady().then(async () => {
 });
 
 app.on('before-quit', () => {
+  telemetryService?.stop();
   pluginService?.stop?.();
   stopWorkspaceWatcher();
+  stopFileRootWatchers();
   stopShellThumbnailProcess();
   workspaceDatabase.stop();
   workspaceMaintenanceDatabase.stop();
@@ -1837,10 +1918,12 @@ app.on('window-all-closed', () => {
 });
 process.on('uncaughtException', (error) => {
   writeLog('error', 'Uncaught main-process exception', error);
+  telemetryService?.reportCrash('main_uncaught_exception', error);
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app-error', error.message || '主进程发生未知错误');
 });
 
 process.on('unhandledRejection', (reason) => {
   writeLog('error', 'Unhandled main-process promise rejection', reason);
+  telemetryService?.reportCrash('main_unhandled_rejection', reason);
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('app-error', reason instanceof Error ? reason.message : String(reason || '后台操作失败'));
 });

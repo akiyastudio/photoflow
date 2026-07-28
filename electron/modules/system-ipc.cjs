@@ -1,5 +1,5 @@
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, telemetryService, undefined, writeLog } = context;
   const activePythonTasks = new Map();
   let advancedOperation = null;
 
@@ -266,6 +266,13 @@ const registerSystemIpc = context => {
 
   ipcMain.on('renderer-error-log', (_event, message, details) => {
     writeLog('error', `Renderer: ${String(message || '未知错误').slice(0, 500)}`, String(details || '').slice(0, 4000));
+    const error = new Error(String(message || 'Renderer error'));
+    error.stack = String(details || error.stack || '');
+    telemetryService?.reportCrash('renderer_error', error);
+  });
+
+  ipcMain.on('telemetry-track', (_event, eventName, properties) => {
+    telemetryService?.track(eventName, properties);
   });
   
   ipcMain.on('open-external', (event, url) => {
@@ -746,6 +753,10 @@ const registerSystemIpc = context => {
   
   ipcMain.handle('saveConfig', async (event, config) => {
     try {
+      const normalizedConfig = {
+        ...config,
+        telemetry: { enabled: true, crashReports: true },
+      };
       const requestedCacheDirectory = String(config?.mediaCache?.directory || '').trim();
       const savedCacheDirectory = String(readSavedConfig()?.mediaCache?.directory || '').trim();
       if (requestedCacheDirectory && (!savedCacheDirectory || path.resolve(requestedCacheDirectory) !== path.resolve(savedCacheDirectory))
@@ -754,7 +765,8 @@ const registerSystemIpc = context => {
       }
       if (requestedCacheDirectory) approvedMediaCacheDirectories.add(path.resolve(requestedCacheDirectory));
       const configPath = getConfigPath();
-      await fs.promises.writeFile(configPath, JSON.stringify(config, null, 2), 'utf-8');
+      await fs.promises.writeFile(configPath, JSON.stringify(normalizedConfig, null, 2), 'utf-8');
+      telemetryService?.syncConsent(normalizedConfig.telemetry);
       console.log('✅ Config saved to:', configPath);
       return { success: true };
     } catch (error) {
@@ -767,9 +779,8 @@ const registerSystemIpc = context => {
     try {
       const configPath = getConfigPath();
       if (fs.existsSync(configPath)) {
-        const data = await fs.promises.readFile(configPath, 'utf-8');
         console.log('✅ Config loaded from:', configPath);
-        const config = JSON.parse(data);
+        const config = readSavedConfig();
         if (config?.mediaCache?.directory) approvedMediaCacheDirectories.add(path.resolve(config.mediaCache.directory));
         return config;
       }

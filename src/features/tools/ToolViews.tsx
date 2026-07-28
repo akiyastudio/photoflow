@@ -32,6 +32,15 @@ const formatTransferBytes = (bytes: number) => {
   const value = bytes / 1024 ** unitIndex;
   return `${value.toFixed(value >= 100 || unitIndex === 0 ? 0 : value >= 10 ? 1 : 2)} ${units[unitIndex]}`;
 };
+const importCountBucket = (count: number) => count <= 20
+  ? '1-20'
+  : count <= 100
+    ? '21-100'
+    : count <= 500
+      ? '101-500'
+      : count <= 2000
+        ? '501-2000'
+        : '2001+';
 
 const usePythonTask = (scriptName: string, initialStatus: string) => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -246,6 +255,14 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
 
         case 'success':
           {
+            const importedCount = Number(event.data?.importedCount);
+            if (Number.isFinite(importedCount) && importedCount > 0) {
+              window.electronAPI.trackTelemetry('photos_imported', {
+                count_bucket: importCountBucket(importedCount),
+                source: currentDriveTypeRef.current === 'broll' ? 'sd_broll' : 'sd_work',
+                media_kind: 'mixed',
+              });
+            }
             const importedNames = Array.isArray(event.data?.projectNames) ? event.data.projectNames.map(String) : [];
             importedProjectNamesRef.current = Array.from(new Set([...importedProjectNamesRef.current, ...importedNames]));
             const nextDrive = importQueueRef.current.shift();
@@ -872,36 +889,18 @@ const HomePanel = ({ title, initiallyOpen = false, tone, children, ...dragProps 
   return <section className={`rounded-xl overflow-hidden ${isBirthday ? 'birthday-panel' : 'border border-slate-200 bg-white'}`}><button {...dragProps} onClick={() => setOpen(value => !value)} className={`flex w-full items-center justify-between px-5 py-4 text-left ${dragProps.draggable ? 'cursor-grab active:cursor-grabbing' : ''} ${isBirthday ? 'birthday-panel-header' : ''}`}><span className={`text-base font-bold ${isBirthday ? 'birthday-panel-title' : 'text-slate-800'}`}>{title}</span><span className={isBirthday ? 'birthday-panel-icon' : 'text-slate-400'}>{open ? <ChevronUp size={18}/> : <ChevronDown size={18}/>}</span></button>{open && <div className={`border-t p-5 animate-in slide-in-from-top-1 duration-200 ${isBirthday ? 'birthday-panel-body' : 'border-slate-100'}`}>{children}</div>}</section>;
 };
 
-const ConverterView = ({ embedded = false, initialTargetPath = "", defaultQuality = 100 }: { embedded?: boolean; initialTargetPath?: string; defaultQuality?: number }) => {
-  const [targetPath, setTargetPath] = useState(initialTargetPath);
-  const [quality, setQuality] = useState(defaultQuality);
+const ConverterView = ({ embedded = false, initialTargetPath = "", initialTargetPaths }: { embedded?: boolean; initialTargetPath?: string; initialTargetPaths?: string[] }) => {
+  const [targetPaths, setTargetPaths] = useState<string[]>(() => initialTargetPaths?.filter(Boolean) || (initialTargetPath ? [initialTargetPath] : []));
+  const [quality, setQuality] = useState(100);
   const { logs, isRunning, progress, start } = usePythonTask('png_to_jpg.py', '进度');
 
-  useEffect(() => { setTargetPath(initialTargetPath); }, [initialTargetPath]);
-  useEffect(() => { setQuality(defaultQuality); }, [defaultQuality]);
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      // 获取拖入的路径 (Electron环境)
-      // @ts-ignore
-      const path = e.dataTransfer.files[0].path;
-      if (path) {
-        setTargetPath(path);
-      }
-    }
-  };
+  useEffect(() => {
+    setTargetPaths(initialTargetPaths?.filter(Boolean) || (initialTargetPath ? [initialTargetPath] : []));
+  }, [initialTargetPath, initialTargetPaths]);
 
   const startConversion = () => {
-    if (!targetPath.trim()) return;
-    start([targetPath, '--quality', quality.toString()], '正在转换…');
+    if (!targetPaths.length) return;
+    start(['--quality', quality.toString(), ...targetPaths], '正在转换…');
   };
 
   return (
@@ -911,24 +910,22 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", defaultQualit
 
         {/* Path Input with Drag & Drop */}
         <div className="space-y-2">
-            <label className="text-xs font-semibold text-slate-500 uppercase">目标文件夹</label>
+            <label className="text-xs font-semibold text-slate-500 uppercase">目标文件或文件夹{targetPaths.length > 1 ? `（${targetPaths.length} 项）` : ''}</label>
             <div className="relative">
-                <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">
+                <div className="absolute left-3 top-3 text-slate-500">
                     <FolderInput size={18} />
                 </div>
-                <input
-                  type="text"
-                  value={targetPath}
-                  onChange={(e) => setTargetPath(e.target.value)}
-                  onDrop={handleDrop}
-                  onDragOver={handleDragOver}
-                  placeholder="粘贴路径或者拖入文件夹"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-10 pr-4 py-3 text-slate-900 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm"
+                <textarea
+                  value={targetPaths.join('\n')}
+                  readOnly
+                  rows={Math.min(5, Math.max(1, targetPaths.length))}
+                  aria-label="要转换的文件或文件夹"
+                  className="w-full resize-none rounded-lg border border-slate-200 bg-slate-50 py-3 pl-10 pr-4 font-mono text-sm text-slate-700"
                 />
             </div>
             <p className="text-xs text-slate-600 flex items-center gap-1">
                <AlertCircle size={12}/>
-               输入路径，点击开始，路径里面的.png文件会被转为.jpg，原始的.png文件会移入回收站
+               所选 PNG 文件及文件夹当前层级内的 PNG 会转为 JPG，原始 PNG 会移入回收站
             </p>
         </div>
 
@@ -949,9 +946,9 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", defaultQualit
           idleMessage={isRunning ? '正在转换…' : '进度'}
           action={<button
                 onClick={startConversion}
-                disabled={!targetPath || isRunning}
+                disabled={!targetPaths.length || isRunning}
                 className={`px-8 py-2 rounded-lg font-bold transition flex items-center gap-2 ${
-                  isRunning || !targetPath
+                  isRunning || !targetPaths.length
                     ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200 shadow-none'
                     : 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-500/20'
                 }`}
@@ -969,43 +966,59 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", defaultQualit
 const ResearchView = ({
   embedded = false,
   config,
-  onUpdateConfig
+  onUpdateConfig,
+  initialTargetPath = '',
+  targetKind = 'file',
+  hasTxtFiles = false,
 }: {
   embedded?: boolean;
-  config: AppConfig['inspirationLibrary'];
-  onUpdateConfig: (newConfig: AppConfig['inspirationLibrary']) => void;
+  config: AppConfig['research'];
+  onUpdateConfig: (newConfig: AppConfig['research']) => void;
+  initialTargetPath?: string;
+  targetKind?: 'file' | 'folder';
+  hasTxtFiles?: boolean;
 }) => {
   const { logs, isRunning, progress, statusMsg, start } = usePythonTask('research.py', '准备就绪');
+  const [targetPath, setTargetPath] = useState(initialTargetPath);
+  const [organizeData, setOrganizeData] = useState(true);
+
+  useEffect(() => {
+    setTargetPath(initialTargetPath);
+    setOrganizeData(true);
+  }, [initialTargetPath]);
 
   const runAnalysis = () => {
-    start([
-      '--path', config.rootPath,
+    const args = [
+      '--path', targetPath,
       '--sensitivity', config.sensitivity,
       '--min_duration', config.minDuration.toString()
-    ], '正在初始化引擎...');
+    ];
+    if (targetKind === 'folder' && hasTxtFiles && organizeData) args.push('--organize-data');
+    start(args, '正在初始化引擎...');
   };
 
   return (
     <div className="w-full space-y-6">
-      {!embedded && <h2 className="text-2xl font-bold text-slate-800">灵感库</h2>}
+      {!embedded && <h2 className="text-2xl font-bold text-slate-800">提取分镜帧</h2>}
       <div className={embedded ? 'space-y-6' : 'bg-white border border-slate-200 rounded-xl p-6 space-y-6'}>
         <div className="space-y-2">
-          <p className="mt-2 text-gray-600">这个功能会整理从小红书/抖音爬取下来的文件，对视频执行转场识别，并从每个分镜中挑选清晰、非黑画面导出；找不到合格画面的分镜会跳过。这个功能需要搭配一个 Tampermonkey 浏览器插件使用。</p>
+          <p className="mt-2 text-gray-600">对视频的分镜执行转场识别，并从每个分镜中挑选清晰的画面导出。</p>
         </div>
         {/* 路径设置 */}
         <div className="space-y-2">
-           <label className="text-xs font-semibold text-slate-500 uppercase">读取目录</label>
+           <label className="text-xs font-semibold text-slate-500 uppercase">读取目录或视频</label>
            <input
              type="text"
-             value={config.rootPath}
-             onChange={(e) => onUpdateConfig({...config, rootPath: e.target.value})}
-             className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-slate-900 font-mono text-sm focus:border-blue-500 outline-none"
+             value={targetPath}
+             readOnly
+             aria-label={targetKind === 'folder' ? '要处理的文件夹' : '要处理的视频'}
+             className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-slate-700 font-mono text-sm outline-none"
            />
         </div>
         <div className="grid gap-4 md:grid-cols-2">
           <div>
             <label className="form-label">检测灵敏度</label>
-            <select value={config.sensitivity} onChange={event => onUpdateConfig({ ...config, sensitivity: event.target.value as AppConfig['inspirationLibrary']['sensitivity'] })} className="form-input"><option value="low">低</option><option value="standard">标准</option><option value="high">高</option></select>
+            <select value={config.sensitivity} onChange={event => onUpdateConfig({ ...config, sensitivity: event.target.value as AppConfig['research']['sensitivity'] })} className="form-input"><option value="low">低</option><option value="standard">标准</option><option value="high">高</option></select>
             <p className="mt-1 text-xs leading-5 text-slate-500">{{ low: '只保留明显硬切，截图最少。', standard: '兼顾硬切、渐变与误判率。', high: '识别更多轻微转场，截图更多。' }[config.sensitivity]}</p>
           </div>
           <div>
@@ -1014,6 +1027,7 @@ const ResearchView = ({
             <p className="mt-1 text-xs leading-5 text-slate-500">数值越大，短暂画面会被过滤，最终导出的截图越少。</p>
           </div>
         </div>
+        {targetKind === 'folder' && hasTxtFiles && <label className="settings-check"><input type="checkbox" checked={organizeData} onChange={event => setOrganizeData(event.target.checked)}/><span><span className="block">整理 data 文件</span><span className="mt-1 block text-xs leading-5 text-slate-500">处理完成后，将当前目录中的 TXT 文件移入 data 文件夹。</span></span></label>}
 
         <TaskProgress
           logs={logs}
@@ -1022,7 +1036,7 @@ const ResearchView = ({
           idleMessage={statusMsg}
           action={<button
                onClick={runAnalysis}
-               disabled={isRunning}
+               disabled={isRunning || !targetPath.trim()}
                className={`px-6 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
                  isRunning
                   ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none'

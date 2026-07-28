@@ -1,11 +1,18 @@
 const registerWorkspaceIpc = context => {
-  const { Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suppressWorkspaceWatchPath, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
+  const { Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, acquireFileRootWatcher, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
   const isInternalFileOperationEntry = name => name.toLowerCase().endsWith('.photoflow-part') || /^\.photoflow-(?:paste|replace|undo|team-workflow-)/i.test(name);
   const officeOpenXmlExtensions = new Set([
     '.docx', '.docm', '.dotx', '.dotm',
     '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam',
     '.xlsx', '.xlsm', '.xltx', '.xltm', '.xlam', '.xlsb',
   ]);
+  const recentFileSessions = new Map();
+  const pruneRecentFileSessions = () => {
+    const expiry = Date.now() - 10 * 60 * 1000;
+    for (const [cursor, session] of recentFileSessions) {
+      if (session.touchedAt < expiry) recentFileSessions.delete(cursor);
+    }
+  };
 
   const readProjectDate = project => {
     try {
@@ -239,6 +246,7 @@ const registerWorkspaceIpc = context => {
       if (options?.createPlanningFolder !== false) fs.mkdirSync(path.join(projectPath, '策划'), { recursive: true });
       await mutateWorkspaceCatalog(root, 'addProject', { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath), extra: projectDate ? { projectDate } : {} });
       writeLog('info', 'Project created', { projectName, projectPath });
+      telemetryService?.track('project_created', { planning_folder: options?.createPlanningFolder !== false });
       return { success: true, project: { name: projectName, path: projectPath, status: '策划中', updatedAt: Date.now(), projectDate: projectDate || undefined } };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
@@ -702,6 +710,28 @@ const registerWorkspaceIpc = context => {
       return { success: false, error: error.message || String(error), folders: [] };
     }
   });
+
+  ipcMain.handle('workspace-watch-file-root', async (_event, workspacePath, status, projectName) => {
+    try {
+      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      mediaService.grantRoot(root);
+      return acquireFileRootWatcher(root);
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-unwatch-file-root', async (_event, workspacePath, status, projectName) => {
+    try {
+      let root;
+      try { root = path.resolve(getProjectPath(workspacePath, status, projectName)); }
+      catch { root = path.resolve(String(workspacePath || '')); }
+      releaseFileRootWatcher(root);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
   
   ipcMain.handle('workspace-browse-files', async (_event, workspacePath, status, projectName, relativePath = '', cacheConfig = {}) => {
     try {
@@ -711,6 +741,7 @@ const registerWorkspaceIpc = context => {
       const currentPath = assertExistingInside(root, requestedPath, '文件夹路径', true);
       const currentStat = await fs.promises.stat(currentPath);
       if (!currentStat.isDirectory()) throw new Error('文件夹不存在');
+      mediaService.grantRoot(root);
       mediaRuntimeState.activeMediaCacheConfig = { maxSizeGB: normalizeMediaCacheSizeGB(cacheConfig?.maxSizeGB), directory: cacheConfig?.directory || '' };
       const directoryEntries = await fs.promises.readdir(currentPath, { withFileTypes: true });
       const entries = directoryEntries
@@ -718,7 +749,7 @@ const registerWorkspaceIpc = context => {
         .map(entry => {
           const entryPath = path.join(currentPath, entry.name);
           const extension = entry.isDirectory() ? '' : path.extname(entry.name).toLowerCase();
-          const kind = entry.isDirectory() ? 'folder' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
+          const kind = entry.isDirectory() ? 'folder' : extension === '.lnk' ? 'shortcut' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
           return { name: entry.name, path: entryPath, relativePath: path.relative(root, entryPath), kind, extension, size: -1, createdAt: 0, updatedAt: 0 };
         })
         .sort((a, b) => (a.kind === 'folder' ? 0 : 1) - (b.kind === 'folder' ? 0 : 1) || a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
@@ -734,6 +765,27 @@ const registerWorkspaceIpc = context => {
     }
   });
 
+  ipcMain.handle('workspace-resolve-shortcut', async (_event, workspacePath, status, projectName, relativePath = '') => {
+    try {
+      if (process.platform !== 'win32') throw new Error('快捷方式解析目前仅支持 Windows');
+      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const requestedPath = assertInside(root, path.resolve(root, relativePath), '快捷方式路径');
+      const shortcutPath = assertExistingInside(root, requestedPath, '快捷方式路径');
+      if (path.extname(shortcutPath).toLowerCase() !== '.lnk') throw new Error('所选项目不是 Windows 快捷方式');
+      const shortcutStat = await fs.promises.stat(shortcutPath);
+      if (!shortcutStat.isFile()) throw new Error('快捷方式文件不存在');
+      const details = shell.readShortcutLink(shortcutPath);
+      const target = path.resolve(String(details?.target || ''));
+      if (!details?.target) throw new Error('快捷方式没有有效目标');
+      const targetStat = await fs.promises.stat(target);
+      if (!targetStat.isDirectory() && !targetStat.isFile()) throw new Error('快捷方式目标类型不受支持');
+      return { success: true, target, targetKind: targetStat.isDirectory() ? 'folder' : 'file' };
+    } catch (error) {
+      writeLog('warn', 'Unable to resolve project shortcut', { projectName, relativePath, error: error.message || String(error) });
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
   ipcMain.handle('workspace-search-files', async (_event, workspacePath, status, projectName, scopeRelativePath = '', query = '') => {
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
@@ -741,6 +793,7 @@ const registerWorkspaceIpc = context => {
       const scope = assertExistingInside(root, requestedScope, '搜索范围', true);
       const scopeStat = await fs.promises.stat(scope);
       if (!scopeStat.isDirectory()) throw new Error('搜索范围不是文件夹');
+      mediaService.grantRoot(root);
       const needle = String(query || '').trim().toLocaleLowerCase('zh-CN');
 
       const entries = [];
@@ -766,7 +819,7 @@ const registerWorkspaceIpc = context => {
           }
           if (!child.isFile() || needle && !child.name.toLocaleLowerCase('zh-CN').includes(needle)) continue;
           const extension = path.extname(child.name).toLowerCase();
-          const kind = IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
+          const kind = extension === '.lnk' ? 'shortcut' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
           entries.push({ name: child.name, path: childPath, relativePath: path.relative(root, childPath), kind, extension, size: -1, createdAt: 0, updatedAt: 0 });
         }
       }
@@ -775,6 +828,218 @@ const registerWorkspaceIpc = context => {
     } catch (error) {
       writeLog('warn', 'Unable to search project files', { projectName, scopeRelativePath, error: error.message || String(error) });
       return { success: false, entries: [], error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-recent-files', async (_event, workspacePath, status, projectName, scopeRelativePath = '', requestedLimit = 120, requestedCursor = '') => {
+    try {
+      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const requestedScope = assertInside(root, path.resolve(root, scopeRelativePath || '.'), '最近文件范围', true);
+      const scope = assertExistingInside(root, requestedScope, '最近文件范围', true);
+      const scopeStat = await fs.promises.stat(scope);
+      if (!scopeStat.isDirectory()) throw new Error('最近文件范围不是文件夹');
+      mediaService.grantRoot(root);
+      const pageSize = Math.min(240, Math.max(1, Number(requestedLimit) || 120));
+      pruneRecentFileSessions();
+      let cursor = String(requestedCursor || '');
+      let session = cursor ? recentFileSessions.get(cursor) : null;
+      if (cursor && (!session || session.root !== root || session.scope !== scope)) throw new Error('递归显示会话已失效，请重新打开递归显示');
+      if (!session) {
+        while (recentFileSessions.size >= 16) {
+          const oldest = [...recentFileSessions.entries()].sort((left, right) => left[1].touchedAt - right[1].touchedAt)[0];
+          if (!oldest) break;
+          recentFileSessions.delete(oldest[0]);
+        }
+        cursor = crypto.randomUUID();
+        session = {
+          root,
+          scope,
+          pending: [{ directory: scope, priority: Number.MAX_SAFE_INTEGER, offset: 0, virtualPath: path.relative(root, scope).replace(/\\/g, '/'), viaShortcut: false }],
+          visitedDirectories: new Set([path.resolve(scope).toLowerCase()]),
+          candidates: [],
+          scannedDirectories: 0,
+          inspectedEntries: 0,
+          touchedAt: Date.now(),
+        };
+        recentFileSessions.set(cursor, session);
+      }
+      if (!session.visitedDirectories) {
+        session.visitedDirectories = new Set([
+          path.resolve(scope).toLowerCase(),
+          ...session.pending.map(candidate => path.resolve(candidate.directory).toLowerCase()),
+        ]);
+      }
+      session.touchedAt = Date.now();
+      const maximumDirectoriesPerPage = 64;
+      const maximumInspectedEntriesPerPage = 4000;
+      let pageScannedDirectories = 0;
+      let pageInspectedEntries = 0;
+      while (session.pending.length && pageScannedDirectories < maximumDirectoriesPerPage && pageInspectedEntries < maximumInspectedEntriesPerPage) {
+        session.pending.sort((left, right) => right.priority - left.priority);
+        const current = session.pending.shift();
+        let children;
+        try {
+          children = await fs.promises.readdir(current.directory, { withFileTypes: true });
+        } catch (error) {
+          writeLog('warn', 'Unable to read a recent-files directory', { directory: current.directory, error: error.message || String(error) });
+          continue;
+        }
+        pageScannedDirectories += 1;
+        session.scannedDirectories += 1;
+        const allVisibleChildren = children
+          .filter(child => !child.isSymbolicLink() && !HIDDEN_SYSTEM_ENTRY_NAMES.has(child.name.toLowerCase()) && !isInternalFileOperationEntry(child.name));
+        const startOffset = Math.max(0, Number(current.offset) || 0);
+        const visibleChildren = allVisibleChildren.slice(startOffset, startOffset + Math.max(0, maximumInspectedEntriesPerPage - pageInspectedEntries));
+        if (startOffset + visibleChildren.length < allVisibleChildren.length) {
+          session.pending.push({ ...current, offset: startOffset + visibleChildren.length });
+        }
+        pageInspectedEntries += visibleChildren.length;
+        session.inspectedEntries += visibleChildren.length;
+        for (let offset = 0; offset < visibleChildren.length; offset += 64) {
+          const batch = visibleChildren.slice(offset, offset + 64);
+          const inspected = await Promise.all(batch.map(async child => {
+            const childPath = path.join(current.directory, child.name);
+            try {
+              return { child, childPath, stat: await fs.promises.stat(childPath) };
+            } catch (error) {
+              writeLog('warn', 'Unable to inspect a recent-files entry', { path: childPath, error: error.message || String(error) });
+              return null;
+            }
+          }));
+          for (const item of inspected) {
+            if (!item) continue;
+            const virtualRelativePath = [current.virtualPath, item.child.name].filter(Boolean).join('/');
+            if (item.stat.isDirectory()) {
+              const directoryKey = path.resolve(item.childPath).toLowerCase();
+              if (!session.visitedDirectories.has(directoryKey)) {
+                session.visitedDirectories.add(directoryKey);
+                session.pending.push({ directory: item.childPath, priority: item.stat.mtimeMs || item.stat.birthtimeMs || 0, offset: 0, virtualPath: virtualRelativePath, viaShortcut: current.viaShortcut });
+              }
+              continue;
+            }
+            if (!item.stat.isFile()) continue;
+            const extension = path.extname(item.child.name).toLowerCase();
+            const kind = extension === '.lnk' ? 'shortcut' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
+            session.candidates.push({ name: item.child.name, path: item.childPath, relativePath: virtualRelativePath, kind, extension, size: item.stat.size, createdAt: item.stat.birthtimeMs || item.stat.ctimeMs || 0, updatedAt: item.stat.mtimeMs || 0, viaShortcut: Boolean(current.viaShortcut) });
+            if (extension === '.lnk' && process.platform === 'win32') {
+              try {
+                const details = shell.readShortcutLink(item.childPath);
+                const target = details?.target ? path.resolve(String(details.target)) : '';
+                if (!target) continue;
+                const targetStat = await fs.promises.stat(target);
+                const directoryKey = path.resolve(target).toLowerCase();
+                if (!targetStat.isDirectory() || session.visitedDirectories.has(directoryKey)) continue;
+                session.visitedDirectories.add(directoryKey);
+                mediaService.grantRoot(target);
+                session.pending.push({ directory: target, priority: targetStat.mtimeMs || targetStat.birthtimeMs || item.stat.mtimeMs || 0, offset: 0, virtualPath: virtualRelativePath, viaShortcut: true });
+              } catch (error) {
+                writeLog('warn', 'Unable to follow a recent-files folder shortcut', { shortcut: item.childPath, error: error.message || String(error) });
+              }
+            }
+          }
+        }
+        if (session.candidates.length >= pageSize) {
+          const recentThreshold = [...session.candidates].sort((left, right) => right.updatedAt - left.updatedAt)[pageSize - 1]?.updatedAt || 0;
+          const newestPendingDirectory = session.pending.reduce((newest, candidate) => Math.max(newest, candidate.priority), 0);
+          if (newestPendingDirectory <= recentThreshold) break;
+        }
+      }
+      session.candidates.sort((left, right) => right.updatedAt - left.updatedAt || left.relativePath.localeCompare(right.relativePath, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+      const entries = session.candidates.splice(0, pageSize);
+      const hasMore = session.pending.length > 0 || session.candidates.length > 0;
+      if (!hasMore) recentFileSessions.delete(cursor);
+      return {
+        success: true,
+        scope: path.relative(root, scope),
+        entries,
+        cursor: hasMore ? cursor : undefined,
+        hasMore,
+        truncated: hasMore,
+        scannedDirectories: session.scannedDirectories,
+      };
+    } catch (error) {
+      writeLog('warn', 'Unable to list recent project files', { projectName, scopeRelativePath, error: error.message || String(error) });
+      return { success: false, entries: [], error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-folder-tree', async (_event, workspacePath, status, projectName) => {
+    try {
+      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const folders = [];
+      const pending = [{ directory: root, relativePath: '', depth: 0 }];
+      const maximumFolders = 20000;
+      while (pending.length) {
+        const current = pending.pop();
+        let children;
+        try {
+          children = await fs.promises.readdir(current.directory, { withFileTypes: true });
+        } catch (error) {
+          writeLog('warn', 'Unable to read a folder-tree directory', { directory: current.directory, error: error.message || String(error) });
+          continue;
+        }
+        const directories = children
+          .filter(child => child.isDirectory() && !child.isSymbolicLink() && !HIDDEN_SYSTEM_ENTRY_NAMES.has(child.name.toLowerCase()) && !isInternalFileOperationEntry(child.name))
+          .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+        for (const child of directories) {
+          const childPath = path.join(current.directory, child.name);
+          const relativePath = path.relative(root, childPath).replace(/\\/g, '/');
+          folders.push({ name: child.name, relativePath, parentRelativePath: current.relativePath, depth: current.depth });
+          if (folders.length >= maximumFolders) break;
+        }
+        if (folders.length >= maximumFolders) break;
+        for (let index = directories.length - 1; index >= 0; index -= 1) {
+          const child = directories[index];
+          const childPath = path.join(current.directory, child.name);
+          pending.push({ directory: childPath, relativePath: path.relative(root, childPath).replace(/\\/g, '/'), depth: current.depth + 1 });
+        }
+      }
+      folders.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+      return { success: true, folders, truncated: folders.length >= maximumFolders };
+    } catch (error) {
+      return { success: false, folders: [], error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-add-inspiration-to-project', async (_event, inspirationRoot, targetWorkspacePath, targetStatus, targetProjectName, relativePaths) => {
+    const createdTargets = [];
+    try {
+      const sourceRoot = path.resolve(getProjectPath(inspirationRoot, '未分类', '.__photoflow_inspiration__'));
+      const targetRoot = path.resolve(getProjectPath(targetWorkspacePath, targetStatus, targetProjectName));
+      const planningFolder = path.join(targetRoot, '策划');
+      await fs.promises.mkdir(planningFolder, { recursive: true });
+      const requestedPaths = [...new Set((Array.isArray(relativePaths) ? relativePaths : []).map(value => String(value || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')).filter(Boolean))];
+      if (!requestedPaths.length) throw new Error('请先选择要汇聚的文件或文件夹');
+      const reserved = new Set();
+      let fileCount = 0;
+      let shortcutCount = 0;
+      for (const relativePath of requestedPaths) {
+        const source = path.resolve(resolveProjectEntry(inspirationRoot, '未分类', '.__photoflow_inspiration__', relativePath));
+        assertExistingInside(sourceRoot, source, '灵感素材');
+        const stat = await fs.promises.stat(source);
+        if (stat.isDirectory()) {
+          if (process.platform !== 'win32') throw new Error('文件夹快捷方式目前仅支持 Windows');
+          const shortcutPath = uniqueDestination(planningFolder, `${path.basename(source)}.lnk`, reserved);
+          const created = shell.writeShortcutLink(shortcutPath, { target: source, cwd: source, description: `灵感库：${path.basename(source)}` });
+          if (!created) throw new Error(`无法创建文件夹快捷方式：${path.basename(source)}`);
+          createdTargets.push(shortcutPath);
+          shortcutCount += 1;
+          continue;
+        }
+        if (!stat.isFile()) throw new Error(`不支持的灵感素材：${path.basename(source)}`);
+        const destination = uniqueDestination(planningFolder, path.basename(source), reserved);
+        await copyFileAtomic(source, destination);
+        createdTargets.push(destination);
+        fileCount += 1;
+      }
+      if (createdTargets.length) await pushUndoOperation({ kind: 'remove-created', paths: createdTargets, label: '灵感汇聚' });
+      mainWindow?.webContents.send('workspace-files-changed', { root: targetRoot, fileName: '策划', eventType: 'rename' });
+      writeLog('info', 'Inspiration items added to project planning folder', { targetProjectName, fileCount, shortcutCount, planningFolder });
+      return { success: true, count: createdTargets.length, fileCount, shortcutCount, planningFolder };
+    } catch (error) {
+      for (const target of [...createdTargets].reverse()) await fs.promises.rm(target, { force: true }).catch(() => undefined);
+      writeLog('error', 'Unable to add inspiration items to project', error);
+      return { success: false, error: error.message || String(error) };
     }
   });
   
@@ -947,6 +1212,11 @@ const registerWorkspaceIpc = context => {
       if (preserveOriginal && createdTargets.length) await pushUndoOperation({ kind: 'remove-created', paths: createdTargets, label: '导入' });
       if (!preserveOriginal && moves.length) await pushUndoOperation({ kind: 'external-move', moves });
       writeLog('info', 'Files imported into current project directory', { projectName, relativePath, count: choice.filePaths.length, preserveOriginal });
+      telemetryService?.track('photos_imported', {
+        count_bucket: telemetryService.countBucket(choice.filePaths.length),
+        source: 'project_files',
+        preserve_original: preserveOriginal,
+      });
       return { success: true, count: choice.filePaths.length };
     } catch (error) {
       for (const move of [...moves].reverse()) {
@@ -1019,6 +1289,12 @@ const registerWorkspaceIpc = context => {
       if (preserveOriginal) await pushUndoOperation({ kind: 'remove-created', paths: [destinationDir], label: '导入版本进度' });
       else if (moves.length) await pushUndoOperation({ kind: 'external-move', moves });
       writeLog('info', 'Progress version files imported', { projectName, folderName: cleanedName, mediaKind, count: choice.filePaths.length, preserveOriginal });
+      telemetryService?.track('photos_imported', {
+        count_bucket: telemetryService.countBucket(choice.filePaths.length),
+        source: 'progress_version',
+        media_kind: mediaKind,
+        preserve_original: preserveOriginal,
+      });
       return {
         success: true,
         count: choice.filePaths.length,

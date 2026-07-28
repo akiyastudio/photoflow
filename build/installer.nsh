@@ -33,7 +33,7 @@ Function PhotoFlowComponentPage
 
   ${NSD_CreateLabel} 0 2u 100% 30u "组件不会放进基础安装包。请把 PhotoFlow-组件名-版本-win32-架构.zip 放在安装程序旁边；未选择或未找到时，基础程序仍可正常安装。"
   Pop $1
-  ${NSD_CreateCheckbox} 0 40u 100% 14u "多人裁片修图（GPU/CPU 人物检测与高分辨率拼回）"
+  ${NSD_CreateCheckbox} 0 40u 100% 14u "团片协作（人物检测与高分辨率拼回）"
   Pop $PhotoFlowGpuComponentCheckbox
   ${If} $PhotoFlowGpuComponentArchive == ""
     ${NSD_Uncheck} $PhotoFlowGpuComponentCheckbox
@@ -43,7 +43,7 @@ Function PhotoFlowComponentPage
     ${NSD_Check} $PhotoFlowGpuComponentCheckbox
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 70u 100% 26u "灵感库与 Office 图片提取已经内置在主程序中，无需另行安装。"
+  ${NSD_CreateLabel} 0 70u 100% 26u ""
   Pop $1
   nsDialogs::Show
 FunctionEnd

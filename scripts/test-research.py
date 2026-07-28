@@ -79,6 +79,41 @@ def main():
         assert selected[0]["selected_frame"] == 2
         assert (Path(temporary_directory) / selected[0]["file"]).is_file()
 
+    with TemporaryDirectory() as temporary_directory:
+        selected_video = Path(temporary_directory) / "selected-video.mp4"
+        selected_video.write_bytes(b"video placeholder")
+        analyzed_paths = []
+        original_analyze_video = research_module.analyze_video
+        original_deduplication = research_module.process_images_deduplication
+        original_move_txt_files = research_module.move_txt_files
+        research_module.analyze_video = lambda video_path, _sensitivity, _min_duration: analyzed_paths.append(video_path)
+        research_module.process_images_deduplication = lambda _directory: (_ for _ in ()).throw(AssertionError("single-video mode must not deduplicate sibling images"))
+        research_module.move_txt_files = lambda _directory: (_ for _ in ()).throw(AssertionError("single-video mode must not move sibling text files"))
+        try:
+            research_module.run(["--path", str(selected_video), "--sensitivity", "standard", "--min_duration", "0.2"])
+        finally:
+            research_module.analyze_video = original_analyze_video
+            research_module.process_images_deduplication = original_deduplication
+            research_module.move_txt_files = original_move_txt_files
+        assert analyzed_paths == [str(selected_video)]
+
+    with TemporaryDirectory() as temporary_directory:
+        target_directory = Path(temporary_directory)
+        (target_directory / "notes.txt").write_text("metadata", encoding="utf-8")
+        move_calls = []
+        original_deduplication = research_module.process_images_deduplication
+        original_move_txt_files = research_module.move_txt_files
+        research_module.process_images_deduplication = lambda _directory: None
+        research_module.move_txt_files = lambda directory: move_calls.append(directory)
+        try:
+            research_module.run(["--path", str(target_directory), "--sensitivity", "standard"])
+            assert move_calls == [], "folder mode must not organize TXT files unless the panel option is enabled"
+            research_module.run(["--path", str(target_directory), "--sensitivity", "standard", "--organize-data"])
+        finally:
+            research_module.process_images_deduplication = original_deduplication
+            research_module.move_txt_files = original_move_txt_files
+        assert move_calls == [target_directory], "the data option must forward TXT organization for folder mode"
+
     expected_hashes = [
         "8ced96f8550e7330",
         "8027cd645f2f5336",

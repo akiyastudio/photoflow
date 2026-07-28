@@ -4,6 +4,7 @@ const path = require('path');
 
 const createMediaAccessService = ({ getWorkspaceRoots, getAdditionalRoots = () => [] }) => {
   const grants = new Map();
+  const rootGrants = new Map();
   const TOKEN_TTL_MS = 60 * 60 * 1000;
 
   const isInside = (root, candidate) => {
@@ -24,7 +25,9 @@ const createMediaAccessService = ({ getWorkspaceRoots, getAdditionalRoots = () =
       return grant.path;
     }
     const candidate = await realExistingPath(value);
-    const roots = [...getWorkspaceRoots(), ...getAdditionalRoots()].filter(Boolean);
+    const now = Date.now();
+    for (const [root, expiresAt] of rootGrants) if (expiresAt < now) rootGrants.delete(root);
+    const roots = [...getWorkspaceRoots(), ...getAdditionalRoots(), ...rootGrants.keys()].filter(Boolean);
     for (const rootValue of roots) {
       try {
         const root = await fs.promises.realpath(path.resolve(rootValue));
@@ -32,6 +35,13 @@ const createMediaAccessService = ({ getWorkspaceRoots, getAdditionalRoots = () =
       } catch { /* unavailable roots do not grant access */ }
     }
     throw new Error('媒体文件不在已授权的工作区或缓存目录中');
+  };
+
+  const grantRoot = value => {
+    const root = path.resolve(String(value || ''));
+    rootGrants.set(root, Date.now() + TOKEN_TTL_MS);
+    while (rootGrants.size > 64) rootGrants.delete(rootGrants.keys().next().value);
+    return root;
   };
 
   const grantPath = value => {
@@ -56,7 +66,7 @@ const createMediaAccessService = ({ getWorkspaceRoots, getAdditionalRoots = () =
     return grant.path;
   };
 
-  return { authorizeInput, grantPath, resolveToken };
+  return { authorizeInput, grantRoot, grantPath, resolveToken };
 };
 
 module.exports = { createMediaAccessService };

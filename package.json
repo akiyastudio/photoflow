@@ -29,6 +29,7 @@
     "test:components": "node scripts/test-components.cjs",
     "test:office-media": ".venv\\Scripts\\python.exe scripts\\test-office-media-extractor.py",
     "test:research": ".venv\\Scripts\\python.exe scripts\\test-research.py",
+    "test:inspiration-gather": "node scripts/test-inspiration-gather.cjs",
     "test:team-retouch": ".venv\\Scripts\\python.exe scripts\\test-team-retouch.py",
     "test:team-workflow": "node scripts/test-team-workflow.mjs",
     "preview": "vite preview",

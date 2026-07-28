@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { FolderOpen, HardDrive, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, ScanSearch, Loader2, Cpu, Wrench, ExternalLink, AtSign, Scale } from 'lucide-react';
 import type { AppConfig, ComponentStatus } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
@@ -290,7 +290,7 @@ const SettingsNavigator = ({ activeSection, components, onSelect }: { activeSect
   const installedComponentIds = new Set(components.filter(component => component.installed).map(component => component.id));
   const items: Array<{ id: SettingsSection; label: string; description: string; icon: React.ReactNode }> = [
     { id: 'general', label: '常规', description: '界面、工作目录与首页', icon: <Settings size={18}/> },
-    { id: 'storage', label: '存储与转换', description: '缓存位置与输出质量', icon: <HardDrive size={18}/> },
+    { id: 'storage', label: '存储', description: '缓存、日志与清理', icon: <HardDrive size={18}/> },
     { id: 'import', label: '导入', description: 'SD 卡、工作文件与花絮', icon: <Download size={18}/> },
     { id: 'inspiration-library', label: '灵感库', description: '素材整理、文档图片与项目策划', icon: <ScanSearch size={18}/> },
     { id: 'components', label: '组件管理', description: '安装与卸载可选组件', icon: <Puzzle size={18}/> },
@@ -307,44 +307,61 @@ const SettingsNavigator = ({ activeSection, components, onSelect }: { activeSect
   </nav>;
 };
 
-const SettingsPage = ({ activeSection, config, components, componentInstallPath, componentsLoading, onRefreshComponents, onComponentsChanged, onSave, onNotice }: { activeSection: SettingsSection; config: AppConfig; components: ComponentStatus[]; componentInstallPath: string; componentsLoading: boolean; onRefreshComponents: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onSave: (config: AppConfig) => boolean | Promise<boolean>; onNotice: (message: string, duration?: number) => void }) => {
+const SettingsPage = ({ activeSection, config, components, componentInstallPath, componentsLoading, onRefreshComponents, onComponentsChanged, onSave, getDefaultSettings, onNotice }: { activeSection: SettingsSection; config: AppConfig; components: ComponentStatus[]; componentInstallPath: string; componentsLoading: boolean; onRefreshComponents: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onSave: (config: AppConfig) => boolean | Promise<boolean>; getDefaultSettings: () => AppConfig | Promise<AppConfig>; onNotice: (message: string, duration?: number) => void }) => {
+  const appDialog = useAppDialog();
   const [draft, setDraft] = useState(config);
-  const [saving, setSaving] = useState(false);
-  const update = <K extends keyof AppConfig,>(key: K, value: AppConfig[K]) => setDraft(current => ({ ...current, [key]: value }));
+  const pendingSaveRef = useRef<AppConfig | null>(null);
+  const savingRef = useRef(false);
+  const flushPendingSettings = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    let changed = false;
+    try {
+      while (pendingSaveRef.current) {
+        const next = pendingSaveRef.current;
+        pendingSaveRef.current = null;
+        changed = await onSave({ ...next, workspacePath: next.workspacePath.trim() }) || changed;
+      }
+    } finally {
+      savingRef.current = false;
+    }
+    if (changed) onNotice('已更改设置');
+    if (pendingSaveRef.current) void flushPendingSettings();
+  };
+  const commitSettings = (next: AppConfig) => {
+    setDraft(next);
+    pendingSaveRef.current = next;
+    void flushPendingSettings();
+  };
+  const update = <K extends keyof AppConfig,>(key: K, value: AppConfig[K]) => commitSettings({ ...draft, [key]: value });
   const teamRetouchSettings = (draft.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || draft.personDetection;
   const teamRetouchComponent = components.find(component => component.id === 'team-retouch');
   const inspirationLibrarySettings = draft.inspirationLibrary;
-  const updateTeamRetouchSettings = (next: AppConfig['personDetection']) => setDraft(current => ({ ...current, personDetection: next, componentSettings: { ...current.componentSettings, 'team-retouch': next } }));
-  const updateInspirationLibrarySettings = (next: AppConfig['inspirationLibrary']) => setDraft(current => ({ ...current, inspirationLibrary: next }));
-  const updateInspirationLibraryRoot = async (rootPath: string) => {
-    if (saving) return;
-    const nextDraft = { ...draft, inspirationLibrary: { ...inspirationLibrarySettings, rootPath } };
-    setDraft(nextDraft);
-    setSaving(true);
-    try {
-      const saved = await onSave({ ...nextDraft, workspacePath: nextDraft.workspacePath.trim() });
-      if (saved) onNotice('灵感库文件夹已更新');
-      else setDraft(draft);
-    } finally {
-      setSaving(false);
-    }
+  const updateTeamRetouchSettings = (next: AppConfig['personDetection']) => commitSettings({ ...draft, personDetection: next, componentSettings: { ...draft.componentSettings, 'team-retouch': next } });
+  const updateInspirationLibrarySettings = (next: AppConfig['inspirationLibrary']) => commitSettings({ ...draft, inspirationLibrary: next });
+  const updateInspirationLibraryRoot = (rootPath: string) => updateInspirationLibrarySettings({ ...inspirationLibrarySettings, rootPath });
+  const restoreDefaults = async () => {
+    if (!await appDialog.confirm({
+      title: '恢复默认设置吗？',
+      message: '除当前工作目录外，界面、导入、存储、灵感库和组件偏好都会恢复为默认值。更改会立即生效。',
+      confirmLabel: '恢复默认设置',
+    })) return;
+    const defaults = await getDefaultSettings();
+    commitSettings({ ...defaults, workspacePath: draft.workspacePath.trim() || defaults.workspacePath });
   };
-  const save = async () => {
-    const workspacePath = draft.workspacePath.trim();
-    if (!workspacePath || saving) return;
-    setSaving(true);
-    try {
-      if (await onSave({ ...draft, workspacePath })) onNotice('已保存');
-    } finally {
-      setSaving(false);
-    }
-  };
-  return <section className="flex min-h-full w-full flex-col bg-white"><header className="sticky top-0 z-20 flex items-center justify-between gap-4 border-b border-slate-200 bg-slate-100 p-5"><h3 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Settings size={20} className="text-blue-600"/>设置</h3>{activeSection !== 'about' && <button type="button" onClick={() => void save()} disabled={!draft.workspacePath.trim() || saving} className="dialog-primary disabled:cursor-not-allowed disabled:opacity-45">{saving ? '保存中…' : '保存设置'}</button>}</header><div className="mx-auto w-full max-w-4xl space-y-7 p-6">
+  return <section className="flex min-h-full w-full flex-col bg-white"><header className="sticky top-0 z-20 flex items-center border-b border-slate-200 bg-slate-100 p-5"><h3 className="flex items-center gap-2 text-xl font-bold text-slate-800"><Settings size={20} className="text-blue-600"/>设置</h3></header><div className="mx-auto w-full max-w-4xl space-y-7 p-6">
     {activeSection === 'general' && <>
     <section><h4 className="text-sm font-bold text-slate-800">界面配色</h4><div className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">{([['system', '适应系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([theme, label]) => <button key={theme} onClick={() => update('theme', theme)} className={`rounded-md px-4 py-2 text-sm font-bold transition ${draft.theme === theme ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}</div></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">工作目录</h4><p className="mt-1 text-sm leading-6 text-slate-500">项目会直接放在选中的客户文件夹中；只有选择磁盘根目录时，才会使用根目录下的“照片流”文件夹。</p><div className="mt-4"><WorkspaceFolderPicker value={draft.workspacePath} onChange={workspacePath => update('workspacePath', workspacePath)}/></div></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">项目与文件夹</h4><div className="mt-5"><label className="form-label">文件夹默认排序方式</label><select value={draft.defaultFolderSort} onChange={event => update('defaultFolderSort', event.target.value as AppConfig['defaultFolderSort'])} className="form-input"><option value="date">修改日期（最新优先）</option><option value="name">文件名（A–Z）</option><option value="size">大小（从大到小）</option></select><p className="mt-2 text-xs leading-5 text-slate-500">打开项目文件夹时采用此顺序；仍可在文件浏览器的“排序”菜单中临时调整。</p></div></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">角色生日</h4><label className="settings-check"><input type="checkbox" checked={draft.birthdayEnabled} onChange={event => update('birthdayEnabled', event.target.checked)}/>在首页显示角色生日</label></section>
+    <section className="border-t border-slate-100 pt-6">
+      <h4 className="text-sm font-bold text-slate-800">隐私与使用统计</h4>
+      <p className="mt-1 text-xs leading-5 text-slate-500">内测版期间默认开启且暂时无法关闭。统计只包含匿名安装 ID、软件版本、功能代号和导入数量区间，不上传照片、文件名、路径或项目名称。</p>
+      <label className="settings-check cursor-not-allowed"><input type="checkbox" checked disabled title="内测版暂时无法关闭"/><span><span className="block">发送匿名使用统计</span><span className="mt-1 block text-xs leading-5 text-slate-500">内测版暂时无法关闭；用于计算激活、留存和高频功能。</span></span></label>
+      <label className="settings-check cursor-not-allowed"><input type="checkbox" checked disabled title="内测版暂时无法关闭"/><span><span className="block">自动发送崩溃报告</span><span className="mt-1 block text-xs leading-5 text-slate-500">内测版暂时无法关闭；仅上传错误堆栈和脱敏后的错误日志尾部。</span></span></label>
+    </section>
+    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">恢复默认设置</h4><p className="mt-1 text-sm leading-6 text-slate-500">保留当前工作目录，将其他应用设置恢复为初始值。</p><button type="button" onClick={() => void restoreDefaults()} className="dialog-secondary mt-4 inline-flex items-center gap-2"><RotateCcw size={15}/>恢复默认设置</button></section>
     </>}
     {activeSection === 'storage' && <>
     <section><h4 className="text-sm font-bold text-slate-800">缩略图缓存</h4><p className="mt-1 text-sm text-slate-500">设置图片、RAW 和视频缩略图缓存的容量与位置，并可按时间清理。版本历史预览固定保存在 AppData，不会写入项目目录。</p><div className="mt-4"><MediaCacheSettings config={draft.mediaCache} onChange={mediaCache => update('mediaCache', mediaCache)}/></div></section>
@@ -364,16 +381,14 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">人物超过 4000 像素时</h4><p className="mt-1 text-xs leading-5 text-slate-500">通常手机修图软件能导出的画质长边不超过 4000 像素，因此建议将单张工作图裁剪到 4000 像素以内。相邻人物会尽量合并到同一张工作图。</p><div className="mt-3 grid gap-3 md:grid-cols-2"><label className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.oversizeCropMode === 'face-centered' ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="oversize-crop-mode" value="face-centered" checked={teamRetouchSettings.oversizeCropMode === 'face-centered'} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: 'face-centered' })} className="mr-2"/><span className="font-bold text-slate-800">保持 4000 像素（推荐）</span><span className="mt-2 block text-xs leading-5 text-slate-500">以脸为中心裁剪，可能只保留脸和部分身体；更适合手机传输与修图。</span></label><label className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.oversizeCropMode === 'expand' ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="oversize-crop-mode" value="expand" checked={teamRetouchSettings.oversizeCropMode === 'expand'} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: 'expand' })} className="mr-2"/><span className="font-bold text-slate-800">扩大裁剪，保留完整人物</span><span className="mt-2 block text-xs leading-5 text-slate-500">工作图可以超过 4000 像素，完整保留人物，但可能会使部分手机后期软件无法导出原尺寸而影响成图画质。</span></label></div></section>
     </>}
     {activeSection === 'inspiration-library' && <>
-    <section><h4 className="text-sm font-bold text-slate-800">灵感库</h4><p className="mt-1 text-sm leading-6 text-slate-500">灵感收集、视频分镜整理和 Office 图片提取均为主程序内置功能。</p></section>
-    <section className="border-t border-slate-100 pt-6"><label className="form-label">灵感库文件夹</label><WorkspaceFolderPicker value={inspirationLibrarySettings.rootPath} onChange={rootPath => void updateInspirationLibraryRoot(rootPath)}/><p className="mt-2 text-xs leading-5 text-slate-500">选择后立即保存。灵感库页面会直接浏览这个文件夹，整理任务也从这里读取素材。</p></section>
-    <section className="grid gap-5 border-t border-slate-100 pt-6 md:grid-cols-2"><div><label className="form-label">检测灵敏度</label><select value={inspirationLibrarySettings.sensitivity} onChange={event => updateInspirationLibrarySettings({ ...inspirationLibrarySettings, sensitivity: event.target.value as AppConfig['inspirationLibrary']['sensitivity'] })} className="form-input"><option value="low">低</option><option value="standard">标准</option><option value="high">高</option></select><p className="mt-2 text-xs leading-5 text-slate-500">{{ low: '只保留明显硬切，截图最少。', standard: '兼顾硬切、渐变与误判率。', high: '识别更多轻微转场，截图更多。' }[inspirationLibrarySettings.sensitivity]}</p></div><div><label className="form-label">最小片段时长（秒）</label><input type="number" min="0.05" max="5" step="0.05" value={inspirationLibrarySettings.minDuration} onChange={event => updateInspirationLibrarySettings({ ...inspirationLibrarySettings, minDuration: Math.min(5, Math.max(0.05, Number(event.target.value) || 0.05)) })} className="form-input"/><p className="mt-2 text-xs leading-5 text-slate-500">数值越大，短暂画面会被过滤，最终导出的截图越少。</p></div></section>
+    <section><h4 className="text-sm font-bold text-slate-800">灵感库</h4><p className="mt-1 text-sm leading-6 text-slate-500">灵感浏览、项目策划汇聚和 Office 图片提取均为主程序内置功能。</p></section>
+    <section className="border-t border-slate-100 pt-6"><label className="form-label">灵感库文件夹</label><WorkspaceFolderPicker value={inspirationLibrarySettings.rootPath} onChange={rootPath => void updateInspirationLibraryRoot(rootPath)}/><p className="mt-2 text-xs leading-5 text-slate-500">选择后立即保存。灵感库页面会直接浏览这个文件夹。</p></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">项目策划文件夹</h4><label className="settings-check"><input type="checkbox" checked={draft.createPlanningFolder} onChange={event => update('createPlanningFolder', event.target.checked)}/><span><span className="block">新建项目时自动创建“策划”文件夹</span><span className="mt-1 block text-xs leading-5 text-slate-500">默认开启。关闭后只创建项目根目录，不会影响已有项目。</span></span></label></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">Office 图片提取</h4><p className="mt-2 text-sm leading-6 text-slate-500">在项目或灵感库的文件浏览器中右键 Word、PowerPoint 或 Excel 文档并选择“提取图片”。图片会保存到文档同目录的“文档名_media”文件夹；重名时自动追加编号，不覆盖已有内容。</p></section>
     </>}
     {activeSection === 'import' && <>
     <section><h4 className="text-sm font-bold text-slate-800">从 SD 卡导入</h4><label className="settings-check"><input type="checkbox" checked={draft.smartImport.autoStart} onChange={event => update('smartImport', { ...draft.smartImport, autoStart: event.target.checked })}/>应用启动时自动读取 SD 卡</label><label className="settings-check"><input type="checkbox" checked={draft.smartImport.splitLargeFiles} onChange={event => update('smartImport', { ...draft.smartImport, splitLargeFiles: event.target.checked })}/><span><span className="block">超过 4GB 的视频自动分割</span><span className="mt-1 block text-xs leading-5 text-slate-500">用于兼容部分老旧 U 盘的 FAT32 单文件大小限制，以及某些云盘的单文件上传限制。</span></span></label><label className="settings-check"><input type="checkbox" checked={draft.smartImport.generateVideoPreview} onChange={event => update('smartImport', { ...draft.smartImport, generateVideoPreview: event.target.checked })}/><span><span className="block">生成视频预览</span><span className="mt-1 block text-xs leading-5 text-slate-500">为导入到“mov”的大型视频生成 H.264 文件，储存在“mov_预览”并作为软件内快速播放源。关闭后不会在浏览时临时转码这些导入视频；其他普通视频仍可照常预览。</span></span></label><div className={`ml-7 mt-3 max-w-xl ${draft.smartImport.generateVideoPreview ? '' : 'opacity-50'}`}><label className="form-label" htmlFor="video-preview-quality">预览质量</label><select id="video-preview-quality" value={draft.smartImport.videoPreviewQuality} disabled={!draft.smartImport.generateVideoPreview} onChange={event => update('smartImport', { ...draft.smartImport, videoPreviewQuality: event.target.value as AppConfig['smartImport']['videoPreviewQuality'] })} className="form-input disabled:cursor-not-allowed"><option value="medium">中（默认 · 约 4 Mbps）</option><option value="high">高（约 10 Mbps）</option></select><p className="mt-2 text-xs leading-5 text-slate-500">{{ medium: '保持当前预览质量，生成速度和文件大小较均衡。', high: '接近 Adobe 匹配源高比特率，画面细节更好，文件也会明显增大。' }[draft.smartImport.videoPreviewQuality]}</p></div></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">导入设置</h4><label className="settings-check"><input type="checkbox" checked={draft.fileImport.preserveOriginal} onChange={event => update('fileImport', { preserveOriginal: event.target.checked })}/><span><span className="block">导入后保留原始文件</span><span className="mt-1 block text-xs leading-5 text-slate-500">开启此项后导入的文件会保留源文件。这可能会导致大量的文件重复。</span></span></label><label className="settings-check"><input type="checkbox" checked={draft.brollImport.splitLargeFiles} onChange={event => update('brollImport', { ...draft.brollImport, splitLargeFiles: event.target.checked })}/><span><span className="block">花絮视频超过 4GB 时自动分割</span><span className="mt-1 block text-xs leading-5 text-slate-500">用于兼容 FAT32 和部分云盘的单文件大小限制。</span></span></label></section>
-    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">PNG 转 JPG</h4><label className="form-label">默认导出 JPG 画质，此为在文件夹选择该功能之后的默认媒体文件转换画质。此功能用于部分软件无法直接打开png文件的情况。</label><select value={draft.imageConversion.jpgQuality} onChange={event => update('imageConversion', { jpgQuality: Number(event.target.value) })} className="form-input"><option value={100}>最高（100）</option><option value={95}>高（95）</option><option value={85}>标准（85）</option><option value={75}>节省空间（75）</option></select></section>
     </>}
     {activeSection === 'about' && <AboutSettings/>}
   </div></section>;

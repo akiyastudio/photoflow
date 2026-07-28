@@ -58,7 +58,7 @@
 
 - **PNG 转 JPG**：批量转换并设置 JPG 输出质量。
 - **视频切割**：按 4 GB 无损分段过长的 MOV / MP4 素材。
-- **调研整理**：整理图片和视频、图片去重，并通过转场检测提取代表帧。这个功能需要搭配一个Tampermonkey浏览器插件使用。
+- **提取分镜帧**：在文件浏览器中对单个视频或整个文件夹执行转场检测，提取清晰、非黑画面，并可整理同层数据文件。
 - **Office 图片提取**：从 DOCX、PPTX 和 XLSX 中提取内嵌图片。
 - **角色生日**：可选的首页角色生日提醒，也可以完全关闭。
 
@@ -78,7 +78,7 @@
 | 组件 | 功能 | 支持平台 |
 | --- | --- | --- |
 | `team-retouch` | 人物检测、裁切、对齐与合回 | Windows x64 |
-| `research-tools` | 视频分镜、图片去重与调研整理 | Windows / macOS |
+| `research-tools` | 视频分镜帧提取与图片去重 | Windows / macOS |
 | `office-media-extractor` | 提取 Word、PowerPoint、Excel 内嵌图片 | Windows / macOS |
 
 推荐在安装主程序时，把组件 ZIP 放在安装程序旁边一并安装。如果需要在软件安装后安装组件，目前需要解压组件zip后把完整组件目录放到：
@@ -197,7 +197,7 @@ npm run test:thumbnail-pipeline
 npm run test:components
 ```
 
-仓库还包含选片、数据维护、Office 图片提取、调研整理和团片协作等专项测试，具体命令见 `package.json`。
+仓库还包含选片、数据维护、Office 图片提取、分镜帧提取和团片协作等专项测试，具体命令见 `package.json`。
 
 ## 技术架构
 

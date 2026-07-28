@@ -213,8 +213,8 @@ html.dark .workflow-board-view > .space-y-7 > section > h3 {
 html.dark .workflow-person-summary { border-color: #273244; }
 html.dark .workflow-task-card { border-color: #273244; background: #090c12; }
 .project-navigator-scroll { padding-left:.5rem; padding-right:.5rem; }
-.project-navigator-scroll::-webkit-scrollbar { width:6px; }
-.project-navigator-scroll::-webkit-scrollbar-track { background:#fff; }
+.project-navigator-scroll::-webkit-scrollbar, .inspiration-navigator-scroll::-webkit-scrollbar { width:6px; }
+.project-navigator-scroll::-webkit-scrollbar-track, .inspiration-navigator-scroll::-webkit-scrollbar-track { background:#fff; }
 /* Recovered workspace UI primitives */
 .project-action-button {
   display: inline-flex;
@@ -245,6 +245,16 @@ html.dark .workflow-task-card { border-color: #273244; background: #090c12; }
   background: transparent;
 }
 .project-toolbar .project-action-button svg { width: 1rem; height: 1rem; }
+.project-toolbar .inspiration-target-button {
+  width: auto;
+  max-width: 11rem;
+  justify-content: flex-start;
+  gap: .35rem;
+  padding: 0 .55rem;
+  font-size: .75rem;
+  border-radius: .45rem;
+}
+.project-toolbar .inspiration-target-button span { min-width:0; max-width:8.5rem; }
 .project-toolbar .project-action-button:hover { background: #eff6ff; }
 .project-toolbar .project-action-danger:hover { background: #fef2f2; }
 .project-toolbar .project-action-button:disabled { color:#94a3b8; cursor:not-allowed; opacity:.5; }
@@ -328,7 +338,7 @@ html.dark .project-toolbar .project-action-button:hover { background:#111827; }
 html.dark .toolbar-divider { background:#1f2937; }
 html.dark .column-resize-handle { border-color:#1f2937; background:transparent; }
 html.dark .column-resize-handle:hover, html.dark .column-resize-handle:focus-visible { border-color:#3b82f6; }
-html.dark .project-navigator-scroll::-webkit-scrollbar-track { background:#090c12; }
+html.dark .project-navigator-scroll::-webkit-scrollbar-track, html.dark .inspiration-navigator-scroll::-webkit-scrollbar-track { background:#090c12; }
 html.dark .file-list-heading { background:#090c12; }
 html.dark .project-menu-item { color: #d1d5db; }
 html.dark .terminal-scroll::-webkit-scrollbar-thumb { background: #64748b; }

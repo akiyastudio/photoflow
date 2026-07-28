@@ -91,22 +91,6 @@ const registerMediaIpc = context => {
     } catch (error) { return { success: false, error: error.message || String(error) }; }
   });
   
-  ipcMain.handle('folder-has-png', async (_event, folderPath) => {
-    try {
-      const target = await mediaService.authorizeInput(folderPath);
-      if (!(await fs.promises.stat(target)).isDirectory()) throw new Error('文件夹不存在');
-      for (const entry of await fs.promises.readdir(target, { withFileTypes: true })) {
-        if (!entry.isFile()) continue;
-        const handle = await fs.promises.open(path.join(target, entry.name), 'r');
-        const header = Buffer.alloc(8);
-        try { await handle.read(header, 0, 8, 0); }
-        finally { await handle.close(); }
-        if (header.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return { success: true, hasPng: true };
-      }
-      return { success: true, hasPng: false };
-    } catch (error) { return { success: false, error: error.message || String(error) }; }
-  });
-  
   ipcMain.handle('choose-cache-directory', async () => {
     const choice = await dialog.showOpenDialog(mainWindow, { title: '选择缩略图缓存目录', properties: ['openDirectory', 'createDirectory'] });
     if (!choice.canceled && choice.filePaths[0]) approvedMediaCacheDirectories.add(path.resolve(choice.filePaths[0]));
