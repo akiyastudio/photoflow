@@ -23,6 +23,14 @@ const createWorkspaceService = ({ repository, catalogs, statuses, assertInside, 
     return catalog;
   };
 
+  const reconcileCatalog = async root => {
+    const response = await repository.syncCatalog(root);
+    const projects = Array.isArray(response.projects) ? response.projects : [];
+    const catalog = { projects, byName: new Map(projects.map(project => [project.name.toLocaleLowerCase(), project])) };
+    catalogs.set(root, catalog);
+    return catalog;
+  };
+
   const mutateCatalog = async (root, mutation, payload) => {
     const method = repository[mutation];
     if (typeof method !== 'function') throw new Error(`未知工作区变更：${mutation}`);
@@ -50,7 +58,7 @@ const createWorkspaceService = ({ repository, catalogs, statuses, assertInside, 
 
   const cleanProjectName = value => String(value || '').trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
 
-  return { resolveRoot, ensureRoot, refreshCatalog, mutateCatalog, getProjectPath, cleanProjectName };
+  return { resolveRoot, ensureRoot, refreshCatalog, reconcileCatalog, mutateCatalog, getProjectPath, cleanProjectName };
 };
 
 module.exports = { createWorkspaceService };

@@ -16,6 +16,8 @@ const createVersionService = ({ repository }) => ({
   updateProgressTree: (root, payload) => repository.updateProgressTree(root, payload),
   registerBatchBaseline: (root, payload) => repository.registerBatchBaseline(root, payload),
   commitBatchCompare: (root, payload) => repository.commitBatchCompare(root, payload),
+  listBatchOperations: (root, batchId) => repository.listBatchOperations(root, batchId),
+  retryBatchOperations: (root, batchId) => repository.retryBatchOperations(root, batchId),
   listTeamPatches: (root, photoId) => repository.listTeamPatches(root, photoId),
   getTeamProjectWorkspace: (root, projectName) => repository.getTeamProjectWorkspace(root, projectName),
   registerTeamProjectPhoto: (root, payload) => repository.registerTeamProjectPhoto(root, payload),

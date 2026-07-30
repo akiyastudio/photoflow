@@ -569,7 +569,7 @@ const AboutSettings = () => {
     <section>
       <p className="text-lg font-bold text-slate-800">by秋也寻</p>
       <div className="mt-1 flex flex-wrap items-center gap-3">
-        <p className="font-medium text-blue-600">版本 26.7.29</p>
+        <p className="font-medium text-blue-600">版本 26.7.30</p>
         <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-bold leading-5 text-amber-700">内测版</span>
         <button type="button" onClick={() => void checkForUpdates()} disabled={updateStatus === 'checking'} className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-0.5 text-xs font-bold leading-5 text-blue-700 transition hover:bg-blue-100 disabled:cursor-wait disabled:opacity-60">{updateStatus === 'checking' ? '正在检查…' : '检查更新'}</button>
         {updateStatus === 'latest' && <span className="text-xs text-emerald-600">已是最新版本</span>}

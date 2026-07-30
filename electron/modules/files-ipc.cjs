@@ -1,7 +1,7 @@
 const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = require('../services/protected-project-folder.cjs');
 
 const registerFileOperationsIpc = context => {
-  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, cancelMediaTrackingScan, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
 
   ipcMain.handle('workspace-file-details', async (_event, workspacePath, status, projectName, relativePaths = []) => {
     try {
@@ -78,6 +78,32 @@ const registerFileOperationsIpc = context => {
     }
     if (process.platform === 'win32') return { success: true, hasFiles: false };
     return { success: true, hasFiles: Boolean(fileOperationState.projectFileClipboard?.sources?.some(source => fs.existsSync(source))) };
+  });
+
+  ipcMain.handle('workspace-cancel-file-cut', async (_event, workspacePath, status, projectName, relativePaths = []) => {
+    try {
+      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const sources = Array.from(new Set(relativePaths.map(relativePath => {
+        if (typeof relativePath !== 'string' || !relativePath) throw new Error('无效的剪切路径');
+        return assertInside(root, path.resolve(root, relativePath), '剪切路径', true);
+      })));
+      if (!sources.length) return { success: true, cleared: false, hasFiles: false };
+      if (process.platform === 'win32') {
+        const result = await cancelSystemFileCut(sources);
+        return { success: true, ...result };
+      }
+      const current = fileOperationState.projectFileClipboard;
+      const currentSources = current?.sources || [];
+      const expectedKeys = new Set(sources.map(source => path.resolve(source)));
+      const matchesExpectedCut = current?.operation === 'cut'
+        && currentSources.length === expectedKeys.size
+        && currentSources.every(source => expectedKeys.has(path.resolve(source)));
+      if (matchesExpectedCut) fileOperationState.projectFileClipboard = null;
+      return { success: true, cleared: matchesExpectedCut, hasFiles: !matchesExpectedCut && currentSources.some(source => fs.existsSync(source)) };
+    } catch (error) {
+      writeLog('warn', 'Unable to cancel project file cut', error);
+      return { success: false, cleared: false, hasFiles: false, error: error.message || String(error) };
+    }
   });
   
   ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, projectName, operation, relativePaths = [], targetRelativePath = '', nextName = '', options = {}) => {

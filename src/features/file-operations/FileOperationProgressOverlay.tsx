@@ -17,6 +17,21 @@ const operationTitle = (progress: ProjectFileOperationProgress, cancelling: bool
     if (progress.phase === 'finishing') return '正在完成花絮导入…';
     return '正在导入花絮…';
   }
+  if (progress.operation === 'import-progress') {
+    if (progress.phase === 'scanning') return '正在准备进度导入…';
+    if (progress.phase === 'finishing') return '正在登记版本进度…';
+    return '正在导入版本进度…';
+  }
+  if (progress.operation === 'import-files') {
+    if (progress.phase === 'scanning') return '正在准备文件导入…';
+    if (progress.phase === 'finishing') return '正在完成文件导入…';
+    return progress.phase === 'moving' ? '正在移动导入文件…' : '正在复制导入文件…';
+  }
+  if (progress.operation === 'import-sd' || progress.operation === 'import-negative') {
+    if (progress.phase === 'scanning') return progress.operation === 'import-negative' ? '正在准备底片导入…' : '正在扫描 SD 卡…';
+    if (progress.phase === 'finishing') return '正在完成媒体导入…';
+    return progress.operation === 'import-negative' ? '正在导入底片…' : '正在从 SD 卡导入…';
+  }
   if (progress.phase === 'scanning') return '正在准备粘贴…';
   if (progress.phase === 'moving') return '正在移动文件…';
   if (progress.phase === 'finishing') return '正在完成剪切…';

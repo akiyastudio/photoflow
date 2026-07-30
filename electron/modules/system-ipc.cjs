@@ -581,7 +581,8 @@ const registerSystemIpc = context => {
       });
       return;
     }
-    const cancellable = scriptName === 'catch.py' && /^[a-z0-9-]{8,80}$/i.test(normalizedRequestId);
+    const cancellableClassify = scriptName === 'classify.py' && ['import', 'broll'].includes(classifyStage);
+    const cancellable = (scriptName === 'catch.py' || cancellableClassify) && /^[a-z0-9-]{8,80}$/i.test(normalizedRequestId);
     const cancelFile = cancellable ? path.join(app.getPath('temp'), `photoflow-cancel-${normalizedRequestId}.flag`) : '';
     const runtimeArgs = cancellable ? [...args, '--cancel_file', cancelFile] : args;
     const destinationArgumentIndex = scriptName === 'classify.py' ? args.indexOf('--dest_path') : -1;

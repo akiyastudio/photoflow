@@ -1307,8 +1307,13 @@ def match_returned_batch(manifest_path):
         candidate = candidates[candidate_index]
         alternatives = [{
             "taskId": candidates[index].get("taskId"),
+            "photoId": candidates[index].get("photoId"),
+            "baseVersionId": candidates[index].get("baseVersionId"),
+            "personIndex": candidates[index].get("personIndex"),
+            "identityId": candidates[index].get("identityId"),
             "personName": candidates[index].get("personName"),
             "photoName": candidates[index].get("photoName"),
+            "patchPath": candidates[index].get("patchPath"),
             "score": round(float(scores[row_index][index]), 4),
         } for index in ranked[:3]]
         matches.append({

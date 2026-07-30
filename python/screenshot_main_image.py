@@ -141,6 +141,12 @@ def _candidate_rectangles(
     unique: list[tuple[int, int, int, int]] = []
     for rectangle in candidates:
         rectangle = _snap_rectangle_to_boundaries(image, rectangle, (row_difference, column_difference))
+        rectangle = _expand_weak_single_sided_crops(
+            rectangle,
+            (row_difference, column_difference),
+            width,
+            height,
+        )
         if rectangle[2] - rectangle[0] < min_width or rectangle[3] - rectangle[1] < min_height:
             continue
         if not any(sum(abs(a - b) for a, b in zip(rectangle, saved)) < (width + height) * 0.025 for saved in unique):
@@ -181,6 +187,41 @@ def _snap_rectangle_to_boundaries(
         _snap_edge(column_difference, right, max(4, width // 45), width),
         _snap_edge(row_difference, bottom, max(4, height // 45), height),
     )
+
+
+def _expand_weak_single_sided_crops(
+    rectangle: tuple[int, int, int, int],
+    differences: tuple[np.ndarray, np.ndarray],
+    width: int,
+    height: int,
+) -> tuple[int, int, int, int]:
+    """Do not remove one side of a screenshot without a credible boundary.
+
+    Texture masks frequently stop at the subject rather than at the edge of the
+    actual picture.  When that happens the old detector could keep the outer
+    edge on one side and cut through the artwork on the other.  Expanding a
+    weak, single-sided crop is intentionally conservative: missing a little UI
+    is preferable to deleting part of the main image.
+    """
+    row_difference, column_difference = differences
+    left, top, right, bottom = rectangle
+    row_threshold = max(3.0, float(np.percentile(row_difference, 78)) * 1.35)
+    column_threshold = max(3.0, float(np.percentile(column_difference, 78)) * 1.35)
+
+    if left > 0 and right >= width:
+        if float(column_difference[min(len(column_difference) - 1, left - 1)]) < column_threshold:
+            left = 0
+    elif left <= 0 and right < width:
+        if float(column_difference[min(len(column_difference) - 1, right - 1)]) < column_threshold:
+            right = width
+
+    if top > 0 and bottom >= height:
+        if float(row_difference[min(len(row_difference) - 1, top - 1)]) < row_threshold:
+            top = 0
+    elif top <= 0 and bottom < height:
+        if float(row_difference[min(len(row_difference) - 1, bottom - 1)]) < row_threshold:
+            bottom = height
+    return left, top, right, bottom
 
 
 def _outside_strip_score(values: np.ndarray, rectangle: tuple[int, int, int, int]) -> float:
@@ -252,6 +293,24 @@ def _score_candidate(
         np.clip(boundary_values[2] / (column_scale * 2.5), 0.0, 1.0),
         np.clip(boundary_values[3] / (column_scale * 2.5), 0.0, 1.0),
     ]))
+    # A screenshot often contains a full-width image between a status/header
+    # strip and a footer strip.  Two exceptionally strong opposing transitions
+    # are much better frame evidence than a dense subject-shaped texture blob.
+    horizontal_frame = (
+        width_ratio >= 0.90
+        and top > 0
+        and bottom < height
+        and boundary_values[0] >= row_scale * 4.0
+        and boundary_values[1] >= row_scale * 4.0
+    )
+    vertical_frame = (
+        height_ratio >= 0.90
+        and left > 0
+        and right < width
+        and boundary_values[2] >= column_scale * 4.0
+        and boundary_values[3] >= column_scale * 4.0
+    )
+    frame = 1.0 if horizontal_frame or vertical_frame else 0.0
 
     # A text-only note normally has many edges but low continuous texture and low color activity.
     text_like_penalty = 0.0
@@ -273,6 +332,7 @@ def _score_candidate(
         + 0.06 * width_score
         + 0.04 * center_score
         + 0.04 * margin_score
+        + 0.25 * frame
         - text_like_penalty
     )
     features = {
@@ -283,6 +343,7 @@ def _score_candidate(
         "contrast": contrast,
         "margin": margin_ratio,
         "boundary": boundary,
+        "frame": frame,
     }
     return float(np.clip(score, 0.0, 1.0)), features
 

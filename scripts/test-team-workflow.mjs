@@ -166,6 +166,31 @@ try {
   assert.equal(plan.totalBytes, 1024 * 10);
   assert.equal(new Set(plan.files.map(file => file.destination)).size, 4);
   assert.ok(plan.manifestGroups[0].items.every(item => item.relativePath.startsWith('第1周/测试人物/')));
+
+  // A shared crop is a baton. Generating A -> B must materialize only A's
+  // current input; B stays in the manifest but receives no file yet.
+  const sequentialPlan = await buildWorkflowPlan({
+    groups: [
+      { week: 1, identityId: 'a', identityName: 'A', items: [{ photoId: 'photo', baseVersionId: 'base', taskId: 'shared', personIndex: 1, photoName: '接力图' }] },
+      { week: 2, identityId: 'b', identityName: 'B', items: [{ photoId: 'photo', baseVersionId: 'base', taskId: 'shared', personIndex: 2, photoName: '接力图' }] },
+    ],
+    workspace: {
+      assignments: [
+        { photoId: 'photo', baseVersionId: 'base', personIndex: 1, completed: false },
+        { photoId: 'photo', baseVersionId: 'base', personIndex: 2, completed: false },
+      ],
+      photos: [{
+        photoId: 'photo', baseVersionId: 'base',
+        tasks: [{ id: 'shared', baseVersionId: 'base', personIndex: 1, members: [{ personIndex: 1 }, { personIndex: 2 }], patchPath: sources[0] }],
+      }],
+    },
+    stagingDirectory: path.join(workflowRoot, 'sequential'),
+    safeSegment: value => value,
+    weekName: week => `第${week}周`,
+  });
+  assert.equal(sequentialPlan.files.length, 1);
+  assert.equal(sequentialPlan.manifestGroups[0].items[0].available, true);
+  assert.equal(sequentialPlan.manifestGroups[1].items[0].available, false);
   let activeCopies = 0;
   let maximumCopies = 0;
   let copyCount = 0;

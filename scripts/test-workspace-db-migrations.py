@@ -201,6 +201,11 @@ def test_existing_v1_can_receive_v0(temp_root):
     reconciled = workspace_db.batch_commit_compare(workspace_root, db, payload)
     assert reconciled["success"] is True and reconciled["reconciled"] is True
     assert reconciled["renamedCount"] == 1
+    logged_rename = db.execute(
+        "SELECT status,attempt_count FROM batch_file_operations WHERE batch_id=? AND operation_type='rename'",
+        (failed_batch["id"],),
+    ).fetchone()
+    assert logged_rename is not None and logged_rename["status"] == "succeeded" and logged_rename["attempt_count"] == 1
     assert os.path.isfile(os.path.join(v1_folder, "IMG_0001_renamed.jpg"))
     assert not os.path.exists(v1_path)
     assert db.execute("SELECT COUNT(*) FROM version_batches WHERE project_id=?", (project_id,)).fetchone()[0] == 2
@@ -227,6 +232,22 @@ def test_existing_v1_can_receive_v0(temp_root):
         row[0] for row in db.execute("SELECT source_name FROM batch_items WHERE batch_id=?", (failed_batch["id"],)).fetchall()
     }
     assert refreshed_sources == {"IMG_0001_renamed.jpg", "NEW_0003.jpg"}
+
+    occupied_path = os.path.join(v1_folder, "occupied.jpg")
+    with open(occupied_path, "wb") as output:
+        output.write(b"unrelated-file")
+    workspace_db.plan_confirmed_batch_renames(db, failed_batch["id"], v1_folder, [
+        {"source": "NEW_0003.jpg", "target": "occupied.jpg"},
+    ])
+    db.commit()
+    needs_repair = workspace_db.apply_pending_batch_operations(db, failed_batch["id"])
+    assert needs_repair["repairRequired"] is True and needs_repair["renameErrors"]
+    assert db.execute("SELECT status FROM version_batches WHERE id=?", (failed_batch["id"],)).fetchone()[0] == "needs_repair"
+    os.unlink(occupied_path)
+    repaired = workspace_db.batch_retry_operations(db, {"batchId": failed_batch["id"]})
+    assert repaired["success"] is True and repaired["repairRequired"] is False
+    assert os.path.isfile(os.path.join(v1_folder, "occupied.jpg"))
+    assert not os.path.exists(new_source_path)
     workspace_db._check_integrity(db, force=True)
     db.close()
 
@@ -280,6 +301,84 @@ def test_progress_tree_version_remap(temp_root):
     db.close()
 
 
+def test_tiered_fingerprint_rejects_same_edges(temp_root):
+    first = os.path.join(temp_root, "fingerprint-a.bin")
+    second = os.path.join(temp_root, "fingerprint-b.bin")
+    edge = b"e" * (128 * 1024)
+    with open(first, "wb") as output:
+        output.write(edge + b"middle-a" + edge)
+    with open(second, "wb") as output:
+        output.write(edge + b"middle-b" + edge)
+    assert os.path.getsize(first) == os.path.getsize(second)
+    assert workspace_db.quick_fingerprint(first) == workspace_db.quick_fingerprint(second)
+    assert workspace_db.full_fingerprint(first) != workspace_db.full_fingerprint(second)
+
+
+def test_full_hash_is_deferred_and_cached(temp_root):
+    workspace_root = os.path.join(temp_root, "deferred-hash-workspace")
+    project_path = os.path.join(workspace_root, "hash-project")
+    os.makedirs(project_path)
+    database = os.path.join(temp_root, "deferred-hash.sqlite3")
+    db = workspace_db.connect(workspace_root, database)
+    workspace_db.sync_directories(workspace_root, db)
+    project = workspace_db.project_row(db, "hash-project")
+    media_path = os.path.join(project_path, "new-file.jpg")
+    with open(media_path, "wb") as output:
+        output.write(b"new-media-with-no-candidate")
+
+    original_full_fingerprint = workspace_db.full_fingerprint
+    calls = []
+
+    def counted_full_fingerprint(file_path):
+        calls.append(file_path)
+        return original_full_fingerprint(file_path)
+
+    workspace_db.full_fingerprint = counted_full_fingerprint
+    try:
+        pending_hashes = []
+        workspace_db.sync_media_file(db, project, media_path, pending_hashes)
+        assert calls == [], "a brand-new file must not be fully hashed during its DB transaction"
+        assert len(pending_hashes) == 1
+        db.commit()
+        assert workspace_db.backfill_full_fingerprints(db, pending_hashes) == 1
+        assert len(calls) == 1
+        assert db.execute("SELECT full_hash FROM file_records").fetchone()[0]
+
+        pending_hashes = []
+        workspace_db.sync_media_file(db, project, media_path, pending_hashes)
+        db.commit()
+        workspace_db.backfill_full_fingerprints(db, pending_hashes)
+        assert len(calls) == 1, "an unchanged file must reuse its cached full hash"
+    finally:
+        workspace_db.full_fingerprint = original_full_fingerprint
+        db.close()
+
+
+def test_project_list_is_read_only_until_catalog_sync(temp_root):
+    workspace_root = os.path.join(temp_root, "readonly-catalog-workspace")
+    os.makedirs(workspace_root)
+    database = os.path.join(temp_root, "readonly-catalog.sqlite3")
+    initialized = workspace_db.connect(workspace_root, database)
+    initialized.close()
+    os.mkdir(os.path.join(workspace_root, "externally-created-project"))
+
+    snapshot = workspace_db.load(workspace_root, database)
+    assert snapshot["projects"] == [], "project-list reads must not reconcile folders or acquire a write lock"
+    synced = workspace_db.mutate(workspace_root, database, "catalog_sync", {})
+    assert [project["name"] for project in synced["projects"]] == ["externally-created-project"]
+    assert [project["name"] for project in workspace_db.load(workspace_root, database)["projects"]] == ["externally-created-project"]
+
+    writer = workspace_db.connect(workspace_root, database)
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute("UPDATE meta SET value=value WHERE key='schema_version'")
+    try:
+        locked_snapshot = workspace_db.load(workspace_root, database)
+        assert [project["name"] for project in locked_snapshot["projects"]] == ["externally-created-project"]
+    finally:
+        writer.rollback()
+        writer.close()
+
+
 def main():
     temp_root = tempfile.mkdtemp(prefix="photoflow-db-migration-")
     try:
@@ -292,7 +391,11 @@ def main():
         create_legacy_database(database, project_id, photo_id, version_id)
 
         db = workspace_db.connect(workspace_root, database)
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "13"
+        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "15"
+        assignment_columns = {row[1] for row in db.execute("PRAGMA table_info(team_person_assignments)").fetchall()}
+        assert {"completion_kind", "edited_patch_path", "completed_at"} <= assignment_columns
+        assert "tracking_state" in {row[1] for row in db.execute("PRAGMA table_info(progress_folders)").fetchall()}
+        assert db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='batch_file_operations'").fetchone()
         assert db.execute("SELECT COUNT(*) FROM file_records").fetchone()[0] == 1
         assert db.execute("SELECT value FROM meta WHERE key='migration_12_orphan_file_records_removed'").fetchone()[0] == "1"
         owner_foreign_keys = db.execute("PRAGMA foreign_key_list(file_records)").fetchall()
@@ -344,6 +447,9 @@ def main():
         db.close()
         test_existing_v1_can_receive_v0(temp_root)
         test_progress_tree_version_remap(temp_root)
+        test_tiered_fingerprint_rejects_same_edges(temp_root)
+        test_full_hash_is_deferred_and_cached(temp_root)
+        test_project_list_is_read_only_until_catalog_sync(temp_root)
         print("workspace database migration tests passed")
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)

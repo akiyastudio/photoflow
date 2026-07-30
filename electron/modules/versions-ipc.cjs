@@ -17,12 +17,28 @@ const registerVersionIpc = context => {
     return nextBase;
   };
   const validProgressFolderName = value => Boolean(value && path.basename(value) === value && !/[<>:"/\\|?*\x00-\x1f]/.test(value) && !/[. ]$/.test(value));
-  const resolveTeamOutputProgress = async (workspaceRoot, projectName, progressId) => {
+  const compareProgressKeys = (left, right) => {
+    const leftParts = String(left || '').split('_').map(Number);
+    const rightParts = String(right || '').split('_').map(Number);
+    for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+      if ((leftParts[index] ?? -1) !== (rightParts[index] ?? -1)) return (leftParts[index] ?? -1) - (rightParts[index] ?? -1);
+    }
+    return 0;
+  };
+  const resolveTeamOutputProgress = async (workspaceRoot, projectName, progressId, sourcePaths = []) => {
     if (!progressId) throw new Error('请先选择或新建合成结果的目标进度');
     const listed = await versionService.listProgress(workspaceRoot, projectName);
     const progress = (listed.progressFolders || []).find(item => item.id === progressId);
     if (!progress || progress.mediaKind !== 'image') throw new Error('合成结果的目标图片进度不存在');
     if (progress.folderMissing || !fs.existsSync(progress.folderPath)) throw new Error(`目标进度文件夹不存在：${progress.displayName}`);
+    const sourceDirectories = new Set(sourcePaths.filter(Boolean).map(filePath => path.resolve(path.dirname(filePath)).toLocaleLowerCase()));
+    const sourceProgress = [...(listed.progressFolders || [])]
+      .filter(item => item.mediaKind === 'image' && sourceDirectories.has(path.resolve(item.folderPath).toLocaleLowerCase()))
+      .sort((left, right) => compareProgressKeys(left.versionKey, right.versionKey))
+      .at(-1);
+    if (sourceProgress && compareProgressKeys(progress.versionKey, sourceProgress.versionKey) <= 0) {
+      throw new Error(`合成结果必须保存到高于当前来源 V${sourceProgress.versionKey} 的图片进度`);
+    }
     return progress;
   };
   const isInside = (root, candidate) => {
@@ -80,6 +96,16 @@ const registerVersionIpc = context => {
       throw error;
     }
   };
+  const writeTeamWorkflowManifest = async (workflowDataDirectory, manifestPath, manifest) => {
+    await fs.promises.mkdir(workflowDataDirectory, { recursive: true });
+    const pendingPath = `${manifestPath}.${crypto.randomUUID()}.tmp`;
+    try {
+      await fs.promises.writeFile(pendingPath, JSON.stringify(manifest, null, 2), 'utf8');
+      await replaceFileAtomic(pendingPath, manifestPath);
+    } finally {
+      await fs.promises.rm(pendingPath, { force: true }).catch(() => undefined);
+    }
+  };
   const resolveWorkflowSource = async (workspaceRoot, item) => {
     const patches = await versionService.listTeamPatches(workspaceRoot, item.photoId);
     const task = patches.tasks.find(candidate => candidate.id === item.taskId && candidate.baseVersionId === item.baseVersionId);
@@ -93,31 +119,95 @@ const registerVersionIpc = context => {
     if (!status || !projectName || !sourcePath || !fs.existsSync(sourcePath)) return;
     const { outputDirectory, manifestPath, workflowDataDirectory, manifest } = await readTeamWorkflowManifest(workspaceRoot, status, projectName);
     if (!manifest) return;
-    const sourceGroups = (manifest.groups || []).filter(group => (group.items || []).some(item => item.taskId === taskId && Number(item.personIndex) === Number(personIndex)));
-    if (!sourceGroups.length) return;
-    const completedWeek = Math.min(...sourceGroups.map(group => Number(group.week) || 1));
-    const extension = path.extname(sourcePath).toLowerCase() || '.png';
-    let changed = false;
-    for (const group of manifest.groups || []) {
-      if ((Number(group.week) || 1) <= completedWeek) continue;
-      for (const item of group.items || []) {
-        if (item.taskId !== taskId || !item.relativePath) continue;
-        const oldDestination = path.resolve(outputDirectory, item.relativePath);
-        if (!isInside(outputDirectory, oldDestination)) continue;
-        const parsed = path.parse(oldDestination);
-        const destination = path.join(parsed.dir, `${parsed.name}${extension}`);
-        if (!isInside(outputDirectory, destination)) continue;
-        await fs.promises.mkdir(path.dirname(destination), { recursive: true });
-        await replaceFileAtomic(sourcePath, destination);
-        if (path.resolve(oldDestination) !== path.resolve(destination)) await fs.promises.rm(oldDestination, { force: true }).catch(() => undefined);
-        item.relativePath = path.relative(outputDirectory, destination).replace(/\\/g, '/');
-        changed = true;
+    const chain = [];
+    for (const [groupIndex, group] of (manifest.groups || []).entries()) {
+      for (const [itemIndex, item] of (group.items || []).entries()) {
+        if (String(item.taskId) === String(taskId)) chain.push({ group, item, groupIndex, itemIndex });
       }
     }
-    if (changed) {
-      await fs.promises.mkdir(workflowDataDirectory, { recursive: true });
-      await fs.promises.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+    chain.sort((left, right) => (Number(left.group.week) || 1) - (Number(right.group.week) || 1) || left.groupIndex - right.groupIndex || left.itemIndex - right.itemIndex || Number(left.item.personIndex) - Number(right.item.personIndex));
+    const sourceIndex = chain.findIndex(entry => Number(entry.item.personIndex) === Number(personIndex));
+    if (sourceIndex < 0) return;
+    const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+    const assignments = new Map((workspace.assignments || []).map(item => [`${item.photoId}\0${item.baseVersionId}\0${Number(item.personIndex)}`, item]));
+
+    // A task image is a baton: after one person finishes, remove every stale
+    // future copy and materialize only the direct next unfinished hand-off.
+    for (let index = sourceIndex; index < chain.length; index += 1) {
+      const entry = chain[index];
+      entry.item.available = false;
+      if (!entry.item.relativePath) continue;
+      const stalePath = path.resolve(outputDirectory, entry.item.relativePath);
+      if (isInside(outputDirectory, stalePath)) await fs.promises.rm(stalePath, { force: true }).catch(() => undefined);
     }
+
+    let nextIndex = sourceIndex + 1;
+    while (nextIndex < chain.length) {
+      const next = chain[nextIndex];
+      const assignment = assignments.get(`${next.item.photoId}\0${next.item.baseVersionId}\0${Number(next.item.personIndex)}`);
+      if (assignment?.completed) {
+        nextIndex += 1;
+        continue;
+      }
+      if (assignment?.completionKind === 'skip-requested') {
+        await versionService.completeTeamIdentity(workspaceRoot, {
+          photoId: next.item.photoId,
+          baseVersionId: next.item.baseVersionId,
+          personIndex: next.item.personIndex,
+          completed: true,
+          completionKind: 'no-retouch',
+        });
+        nextIndex += 1;
+        continue;
+      }
+      if (!next.item.relativePath) break;
+      const oldDestination = path.resolve(outputDirectory, next.item.relativePath);
+      if (!isInside(outputDirectory, oldDestination)) break;
+      const parsed = path.parse(oldDestination);
+      const extension = path.extname(sourcePath).toLowerCase() || parsed.ext || '.png';
+      const destination = path.join(parsed.dir, `${parsed.name}${extension}`);
+      if (!isInside(outputDirectory, destination)) break;
+      await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+      await replaceFileAtomic(sourcePath, destination);
+      if (path.resolve(oldDestination) !== path.resolve(destination)) await fs.promises.rm(oldDestination, { force: true }).catch(() => undefined);
+      next.item.relativePath = path.relative(outputDirectory, destination).replace(/\\/g, '/');
+      next.item.available = true;
+      break;
+    }
+    await writeTeamWorkflowManifest(workflowDataDirectory, manifestPath, manifest);
+  };
+  const rewindWorkflowFiles = async (workspaceRoot, status, projectName, taskId, personIndex, sourcePath) => {
+    if (!status || !projectName || !sourcePath || !fs.existsSync(sourcePath)) return;
+    const { outputDirectory, manifestPath, workflowDataDirectory, manifest } = await readTeamWorkflowManifest(workspaceRoot, status, projectName);
+    if (!manifest) return;
+    const chain = [];
+    for (const [groupIndex, group] of (manifest.groups || []).entries()) {
+      for (const [itemIndex, item] of (group.items || []).entries()) {
+        if (String(item.taskId) === String(taskId)) chain.push({ group, item, groupIndex, itemIndex });
+      }
+    }
+    chain.sort((left, right) => (Number(left.group.week) || 1) - (Number(right.group.week) || 1) || left.groupIndex - right.groupIndex || left.itemIndex - right.itemIndex);
+    const targetIndex = chain.findIndex(entry => Number(entry.item.personIndex) === Number(personIndex));
+    if (targetIndex < 0) return;
+    for (let index = targetIndex; index < chain.length; index += 1) {
+      const entry = chain[index];
+      entry.item.available = index === targetIndex;
+      if (!entry.item.relativePath) continue;
+      const oldPath = path.resolve(outputDirectory, entry.item.relativePath);
+      if (!isInside(outputDirectory, oldPath)) continue;
+      if (index > targetIndex) {
+        await fs.promises.rm(oldPath, { force: true }).catch(() => undefined);
+        continue;
+      }
+      const parsed = path.parse(oldPath);
+      const extension = path.extname(sourcePath).toLowerCase() || parsed.ext || '.png';
+      const destination = path.join(parsed.dir, `${parsed.name}${extension}`);
+      await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+      await replaceFileAtomic(sourcePath, destination);
+      if (path.resolve(oldPath) !== path.resolve(destination)) await fs.promises.rm(oldPath, { force: true }).catch(() => undefined);
+      entry.item.relativePath = path.relative(outputDirectory, destination).replace(/\\/g, '/');
+    }
+    await writeTeamWorkflowManifest(workflowDataDirectory, manifestPath, manifest);
   };
   const refreshWorkflowTaskSourceFiles = async (workspaceRoot, status, projectName, taskId, sourcePath) => {
     if (!status || !projectName || !taskId || !sourcePath || !fs.existsSync(sourcePath)) return 0;
@@ -126,7 +216,7 @@ const registerVersionIpc = context => {
     let refreshedCount = 0;
     for (const group of manifest.groups || []) {
       for (const item of group.items || []) {
-        if (item.taskId !== taskId || !item.relativePath) continue;
+        if (item.taskId !== taskId || !item.available || !item.relativePath) continue;
         const destination = path.resolve(outputDirectory, item.relativePath);
         if (!isInside(outputDirectory, destination)) continue;
         await fs.promises.mkdir(path.dirname(destination), { recursive: true });
@@ -291,7 +381,8 @@ const registerVersionIpc = context => {
           versionKey: '0',
           displayName: definition.displayName,
           folderPath,
-          trackingEnabled: true,
+          trackingEnabled: false,
+          trackingState: 'pending_compare',
         });
         const baseline = await versionService.registerBatchBaseline(workspaceRoot, {
           projectName,
@@ -454,6 +545,7 @@ const registerVersionIpc = context => {
         displayName: request.displayName || path.basename(folderPath),
         folderPath,
         trackingEnabled: Boolean(request.trackingEnabled),
+        trackingState: request.trackingState,
         progressId: request.progressId,
       });
     } catch (error) {
@@ -530,6 +622,9 @@ const registerVersionIpc = context => {
           trackingEnabled: progress.id === current.id
             ? request.trackingEnabled === undefined ? Boolean(current.trackingEnabled) : Boolean(request.trackingEnabled)
             : Boolean(progress.trackingEnabled),
+          trackingState: progress.id === current.id
+            ? request.trackingState || current.trackingState
+            : progress.trackingState,
         };
       });
 
@@ -582,6 +677,7 @@ const registerVersionIpc = context => {
         displayName: update.displayName,
         folderPath: update.folderPath,
         trackingEnabled: update.trackingEnabled,
+        trackingState: update.trackingState,
       }));
       const updated = await versionService.updateProgressTree(workspaceRoot, {
         projectName,
@@ -675,11 +771,12 @@ const registerVersionIpc = context => {
       const matches = (Array.isArray(request.matches) ? request.matches : []).slice(0, 20000).map(match => {
         const reference = String(match.reference || '');
         const source = String(match.source || '');
-        if (!reference || path.basename(reference) !== reference || !source || path.basename(source) !== source) throw new Error('匹配结果包含无效文件名');
+        const target = String(match.target || source);
+        if (!reference || path.basename(reference) !== reference || !source || path.basename(source) !== source || !target || path.basename(target) !== target) throw new Error('匹配结果包含无效文件名');
         return {
           reference,
           source,
-          target: String(match.target || source),
+          target,
           distance: Number.isFinite(Number(match.distance)) ? Number(match.distance) : 1000000,
           confidence: String(match.confidence || '').slice(0, 20),
         };
@@ -718,6 +815,33 @@ const registerVersionIpc = context => {
     } catch (error) {
       await Promise.all(copiedMissingPaths.map(filePath => fs.promises.rm(filePath, { force: true }).catch(() => undefined)));
       writeLog('error', 'Unable to commit version batch', { projectName, error: error.message || String(error) });
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-version-batch-operations', async (_event, workspacePath, batchId) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const normalizedBatchId = String(batchId || '');
+      if (!/^[0-9a-f-]{36}$/i.test(normalizedBatchId)) throw new Error('版本批次标识无效');
+      return await versionService.listBatchOperations(workspaceRoot, normalizedBatchId);
+    } catch (error) {
+      return { success: false, operations: [], error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-version-batch-retry', async (_event, workspacePath, batchId) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const normalizedBatchId = String(batchId || '');
+      if (!/^[0-9a-f-]{36}$/i.test(normalizedBatchId)) throw new Error('版本批次标识无效');
+      const result = await versionService.retryBatchOperations(workspaceRoot, normalizedBatchId);
+      writeLog(result.success ? 'info' : 'warn', 'Version batch repair attempted', {
+        batchId: normalizedBatchId,
+        remainingErrors: result.renameErrors?.length || 0,
+      });
+      return result;
+    } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
   });
@@ -955,7 +1079,7 @@ const registerVersionIpc = context => {
     return ready;
   };
 
-  ipcMain.handle('workspace-team-project', async (_event, workspacePath, projectName) => {
+  ipcMain.handle('workspace-team-project', async (_event, workspacePath, projectName, status) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
@@ -963,8 +1087,22 @@ const registerVersionIpc = context => {
       const identityIds = new Set((workspace.identities || []).map(identity => identity.id));
       const preferredIdentityOrder = (settings.preferredIdentityOrder || []).filter(identityId => identityIds.has(identityId));
       const sameWeekIdentityIds = (settings.sameWeekIdentityIds || []).filter(identityId => preferredIdentityOrder.slice(1).includes(identityId));
-      return { ...workspace, workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds } };
+      const workflowTarget = status ? await readTeamWorkflowManifest(workspaceRoot, status, projectName) : null;
+      const workflowManifest = workflowTarget?.manifest || null;
+      const workflowGenerated = Boolean(workflowManifest && Number(workflowManifest.version) >= 2);
+      const workflowAvailableKeys = workflowGenerated
+        ? (workflowManifest.groups || []).flatMap(group => (group.items || []).filter(item => {
+          if (!item.available || !item.relativePath) return false;
+          const itemPath = path.resolve(workflowTarget.outputDirectory, item.relativePath);
+          return isInside(workflowTarget.outputDirectory, itemPath) && fs.existsSync(itemPath);
+        }).map(item => `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`))
+        : [];
+      return { ...workspace, workflowGenerated, workflowAvailableKeys, workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds } };
     } catch (error) {
+      writeLog('error', 'Unable to load team retouch project workspace', {
+        projectName: String(projectName || ''),
+        error: error.message || String(error),
+      });
       return { success: false, photos: [], identities: [], assignments: [], error: error.message || String(error) };
     }
   });
@@ -1174,7 +1312,52 @@ const registerVersionIpc = context => {
     }
   });
   ipcMain.handle('workspace-team-identity-complete', async (_event, workspacePath, request = {}) => {
-    try { return await versionService.completeTeamIdentity(ensureWorkspace(workspacePath), request); }
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!request.taskId || !request.projectName || !request.status || !Array.isArray(request.taskOrder)) {
+        return await versionService.completeTeamIdentity(workspaceRoot, request);
+      }
+      const workflow = await readTeamWorkflowManifest(workspaceRoot, request.status, request.projectName);
+      if (!workflow.manifest) throw new Error('请先生成工作流程');
+      const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, request.projectName);
+      const photo = (workspace.photos || []).find(item => item.photoId === request.photoId && item.baseVersionId === request.baseVersionId);
+      const task = photo?.tasks?.find(item => String(item.id) === String(request.taskId));
+      if (!task) throw new Error('人物修图任务不存在');
+      const assignments = new Map((workspace.assignments || [])
+        .filter(item => item.photoId === request.photoId && item.baseVersionId === request.baseVersionId)
+        .map(item => [Number(item.personIndex), item]));
+      const ordered = request.taskOrder.map(Number).map(personIndex => assignments.get(personIndex)).filter(Boolean);
+      if (ordered.length !== request.taskOrder.length || new Set(request.taskOrder.map(Number)).size !== request.taskOrder.length) throw new Error('工作流程顺序无效，请刷新后重试');
+      const personIndex = Number(request.personIndex);
+      const targetIndex = request.taskOrder.map(Number).indexOf(personIndex);
+      if (targetIndex < 0) throw new Error('人物不属于这个工作流程任务');
+      if (request.completed) {
+        const current = ordered.find(item => !item.completed);
+        if (!current || Number(current.personIndex) !== personIndex) {
+          await versionService.completeTeamIdentity(workspaceRoot, { ...request, completed: false, completionKind: 'skip-requested' });
+          return { success: true, deferred: true };
+        }
+        const sourcePath = task.editedPatchPath && fs.existsSync(task.editedPatchPath) ? task.editedPatchPath : task.patchPath;
+        await versionService.completeTeamIdentity(workspaceRoot, { ...request, completed: true, completionKind: 'no-retouch' });
+        let warning = '';
+        await refreshDownstreamWorkflowFiles(workspaceRoot, request.status, request.projectName, task.id, personIndex, sourcePath).catch(error => {
+          warning = `已标记不用修，但下一位任务文件生成失败：${error.message || String(error)}`;
+          writeLog('warn', 'Unable to advance no-retouch workflow task', { projectName: request.projectName, taskId: task.id, error: error.message || String(error) });
+        });
+        return { success: true, warning: warning || undefined };
+      }
+      if (ordered.slice(targetIndex + 1).some(item => item.completed)) throw new Error('后续人物已经完成，请按倒序先撤销后续任务');
+      const predecessorPath = ordered.slice(0, targetIndex).reverse().map(item => item.editedPatchPath).find(filePath => filePath && fs.existsSync(filePath));
+      const sourcePath = predecessorPath || task.patchPath;
+      await versionService.updateTeamPatch(workspaceRoot, {
+        taskId: task.id,
+        editedPatchPath: predecessorPath || null,
+        status: predecessorPath ? 'uploaded' : 'exported',
+        assignmentCompletion: { personIndex, completed: false, completionKind: '' },
+      });
+      await rewindWorkflowFiles(workspaceRoot, request.status, request.projectName, task.id, personIndex, sourcePath);
+      return { success: true };
+    }
     catch (error) { return { success: false, error: error.message || String(error) }; }
   });
   ipcMain.handle('workspace-team-identity-delete', async (_event, workspacePath, request = {}) => {
@@ -1559,6 +1742,7 @@ const registerVersionIpc = context => {
       }
       await fs.promises.mkdir(stagingDirectory, { recursive: true });
       for (const group of plan.manifestGroups) {
+        if (!(group.items || []).some(item => item.available)) continue;
         const groupDirectory = path.resolve(stagingDirectory, group.relativePath);
         if (isInside(stagingDirectory, groupDirectory)) await fs.promises.mkdir(groupDirectory, { recursive: true });
       }
@@ -1588,7 +1772,7 @@ const registerVersionIpc = context => {
       if (job.cancelled) throw Object.assign(new Error('工作流程生成已取消'), { code: WORKFLOW_CANCELLED_CODE });
 
       const manifest = {
-        version: 1,
+        version: 2,
         projectName,
         status,
         generatedAt: Date.now(),
@@ -1659,9 +1843,15 @@ const registerVersionIpc = context => {
       if (!manifest) throw new Error('请先生成工作流程');
       const group = (manifest.groups || []).find(item => Number(item.week) === Number(request.week) && String(item.identityId || '') === String(request.identityId || ''));
       if (!group?.relativePath) throw new Error('任务文件夹不存在，请重新生成工作流程');
+      const availableItems = (group.items || []).filter(item => {
+        if (!item.available || !item.relativePath) return false;
+        const itemPath = path.resolve(outputDirectory, item.relativePath);
+        return isInside(outputDirectory, itemPath) && fs.existsSync(itemPath);
+      });
+      if (!availableItems.length) throw new Error('本周任务仍在等待上一位返图');
       const groupDirectory = path.resolve(outputDirectory, group.relativePath);
       if (!isInside(outputDirectory, groupDirectory) || !fs.existsSync(groupDirectory)) throw new Error('任务文件夹不存在，请重新生成工作流程');
-      return { success: true, count: (group.items || []).length, path: groupDirectory };
+      return { success: true, count: availableItems.length, path: groupDirectory };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -1694,6 +1884,7 @@ const registerVersionIpc = context => {
       const returned = selectedFiles.map((filePath, index) => ({
         returnId: `workflow-return-${index + 1}`,
         path: path.resolve(filePath),
+        mediaPath: request.returnedFiles[index],
         sourceName: path.basename(filePath),
       })).filter(item => IMAGE_EXTENSIONS.has(path.extname(item.path).toLowerCase()));
       if (!returned.length) throw new Error('请选择 JPG、PNG、TIFF、HEIC 等返图文件');
@@ -1715,12 +1906,13 @@ const registerVersionIpc = context => {
       );
 
       const accepted = [];
+      let handoffFailureCount = 0;
       const highMatches = (matched.matches || []).filter(item => item.confidence === 'high' && item.taskId);
       for (const [index, match] of highMatches.entries()) {
         const extension = path.extname(match.path).toLowerCase();
         const uploadDirectory = path.join(teamDataDirectory(workspaceRoot, match.photoId, match.baseVersionId), 'uploads');
         await fs.promises.mkdir(uploadDirectory, { recursive: true });
-        const copiedPath = path.join(uploadDirectory, `${match.taskId}${extension}`);
+        const copiedPath = path.join(uploadDirectory, `${match.taskId}-${crypto.randomUUID()}${extension}`);
         await fs.promises.copyFile(match.path, copiedPath);
         await versionService.updateTeamPatch(workspaceRoot, {
           taskId: match.taskId,
@@ -1734,8 +1926,11 @@ const registerVersionIpc = context => {
           baseVersionId: match.baseVersionId,
           personIndex: match.personIndex,
           completed: true,
+          completionKind: 'returned',
+          editedPatchPath: copiedPath,
         });
         await refreshDownstreamWorkflowFiles(workspaceRoot, request.status, projectName, match.taskId, match.personIndex, copiedPath).catch(error => {
+          handoffFailureCount += 1;
           writeLog('warn', 'Unable to refresh downstream workflow task file', { projectName, taskId: match.taskId, error: error.message || String(error) });
         });
         accepted.push({ ...match, accepted: true });
@@ -1767,12 +1962,55 @@ const registerVersionIpc = context => {
         reviewCount,
         missingTaskCount,
         mergedCount: 0,
+        warning: handoffFailureCount ? `${handoffFailureCount} 张返图已保存，但下一位任务文件生成失败，请重新生成工作流程后继续` : undefined,
       };
     } catch (error) {
       writeLog('error', 'Unable to match returned workflow images', { projectName, error: error.message || String(error) });
       return { success: false, error: error.message || String(error), matches: [], merges: [] };
     } finally {
       if (manifestPath) await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined);
+    }
+  });
+
+  ipcMain.handle('workspace-team-workflow-return-confirm', async (_event, workspacePath, projectName, request = {}) => {
+    let copiedPath = '';
+    let warning = '';
+    try {
+      pluginService.requireCapability('team-retouch.detect');
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+      const [candidate] = readyTeamWorkflowSubjects(workspace, [{
+        photoId: request.photoId,
+        baseVersionId: request.baseVersionId,
+        personIndex: request.personIndex,
+        taskId: request.taskId,
+        taskOrder: request.taskOrder,
+      }]);
+      if (!candidate || String(candidate.task.id) !== String(request.taskId)) throw new Error('该候选任务当前不可确认，请刷新工作流程后重试');
+
+      const sourcePath = path.resolve(await mediaService.authorizeInput(String(request.returnedPath || '')));
+      if (!fs.existsSync(sourcePath) || !IMAGE_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) throw new Error('返图文件不存在或格式不受支持');
+      const uploadDirectory = path.join(teamDataDirectory(workspaceRoot, candidate.photoId, candidate.baseVersionId), 'uploads');
+      await fs.promises.mkdir(uploadDirectory, { recursive: true });
+      copiedPath = path.join(uploadDirectory, `${candidate.task.id}-${crypto.randomUUID()}${path.extname(sourcePath).toLowerCase()}`);
+      await fs.promises.copyFile(sourcePath, copiedPath);
+      await versionService.updateTeamPatch(workspaceRoot, {
+        taskId: candidate.task.id,
+        editedPatchPath: copiedPath,
+        status: 'uploaded',
+        needsReview: false,
+        reviewReason: '',
+        assignmentCompletion: { personIndex: candidate.personIndex, completed: true },
+      });
+      await refreshDownstreamWorkflowFiles(workspaceRoot, request.status, projectName, candidate.task.id, candidate.personIndex, copiedPath).catch(error => {
+        warning = `返图已保存，但下一位任务文件生成失败：${error.message || String(error)}`;
+        writeLog('warn', 'Unable to refresh downstream workflow task file after visual confirmation', { projectName, taskId: candidate.task.id, error: error.message || String(error) });
+      });
+      copiedPath = '';
+      return { success: true, taskId: candidate.task.id, warning: warning || undefined };
+    } catch (error) {
+      if (copiedPath) await fs.promises.rm(copiedPath, { force: true }).catch(() => undefined);
+      return { success: false, error: error.message || String(error) };
     }
   });
   
@@ -2132,14 +2370,14 @@ const registerVersionIpc = context => {
         status: 'uploaded',
         assignmentCompletion: { personIndex, completed: true },
       });
+      let warning = '';
       await refreshDownstreamWorkflowFiles(workspaceRoot, request.status, request.projectName, task.id, personIndex, copiedPath).catch(error => {
+        warning = `返图已保存，但下一位任务文件生成失败：${error.message || String(error)}`;
         writeLog('warn', 'Unable to refresh downstream workflow task file', { projectName: request.projectName, taskId: task.id, error: error.message || String(error) });
       });
-      if (task.editedPatchPath && path.resolve(task.editedPatchPath) !== path.resolve(copiedPath)) {
-        queueCleanupArtifacts(workspaceRoot, { teamArtifactPaths: [task.editedPatchPath] }, '清理旧的修图上传文件');
-      }
+      // Earlier returns remain immutable history for their exact person node.
       copiedPath = '';
-      return updated;
+      return { ...updated, warning: warning || undefined };
     } catch (error) {
       if (copiedPath) await fs.promises.rm(copiedPath, { force: true }).catch(() => undefined);
       return { success: false, error: error.message || String(error), tasks: [] };
@@ -2156,17 +2394,33 @@ const registerVersionIpc = context => {
       const personIndex = Number(request.personIndex);
       const taskMembers = task.members?.length ? task.members : [{ personIndex: task.personIndex }];
       if (!Number.isInteger(personIndex) || !taskMembers.some(member => Number(member.personIndex) === personIndex)) throw new Error('人物不属于这个修图任务');
-      const editedPatchPath = task.editedPatchPath || '';
+      const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, request.projectName);
+      const assignments = new Map((workspace.assignments || [])
+        .filter(item => item.photoId === task.photoId && item.baseVersionId === task.baseVersionId)
+        .map(item => [Number(item.personIndex), item]));
+      const workflow = await readTeamWorkflowManifest(workspaceRoot, request.status, request.projectName);
+      const chain = [];
+      for (const [groupIndex, group] of (workflow.manifest?.groups || []).entries()) {
+        for (const [itemIndex, item] of (group.items || []).entries()) if (String(item.taskId) === String(task.id)) chain.push({ group, item, groupIndex, itemIndex });
+      }
+      chain.sort((left, right) => (Number(left.group.week) || 1) - (Number(right.group.week) || 1) || left.groupIndex - right.groupIndex || left.itemIndex - right.itemIndex);
+      const targetIndex = chain.findIndex(entry => Number(entry.item.personIndex) === personIndex);
+      if (targetIndex < 0) throw new Error('工作流程任务不存在，请重新生成工作流程');
+      if (chain.slice(targetIndex + 1).some(entry => assignments.get(Number(entry.item.personIndex))?.completed)) throw new Error('后续人物已经完成，请按倒序先删除后续返图');
+      const predecessorPath = chain.slice(0, targetIndex).reverse()
+        .map(entry => assignments.get(Number(entry.item.personIndex))?.editedPatchPath)
+        .find(filePath => filePath && fs.existsSync(filePath));
+      const editedPatchPath = assignments.get(personIndex)?.editedPatchPath || '';
       const updated = await versionService.updateTeamPatch(workspaceRoot, {
         taskId: task.id,
-        editedPatchPath: null,
-        status: 'exported',
+        editedPatchPath: predecessorPath || null,
+        status: predecessorPath ? 'uploaded' : 'exported',
         mergedVersionId: null,
         mergeMetrics: {},
-        assignmentCompletion: { personIndex, completed: false },
+        assignmentCompletion: { personIndex, completed: false, completionKind: '' },
       });
       let warning = '';
-      await refreshDownstreamWorkflowFiles(workspaceRoot, request.status, request.projectName, task.id, personIndex, task.patchPath).catch(error => {
+      await rewindWorkflowFiles(workspaceRoot, request.status, request.projectName, task.id, personIndex, predecessorPath || task.patchPath).catch(error => {
         warning = `返图和完成标记已删除，但同步后续任务文件失败：${error.message || String(error)}`;
         writeLog('warn', 'Unable to restore downstream workflow task file', { projectName: request.projectName, taskId: task.id, error: error.message || String(error) });
       });
@@ -2189,7 +2443,8 @@ const registerVersionIpc = context => {
       const patchResult = await versionService.listTeamPatches(workspaceRoot, request.photoId);
       const tasks = patchResult.tasks.filter(task => task.baseVersionId === base.id && task.editedPatchPath && fs.existsSync(task.editedPatchPath));
       if (!tasks.length) throw new Error('请至少上传一张工作图的修图结果');
-      const outputProgress = await resolveTeamOutputProgress(workspaceRoot, projectName, request.outputProgressId);
+      const teamWorkspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+      const outputProgress = await resolveTeamOutputProgress(workspaceRoot, projectName, request.outputProgressId, (teamWorkspace.photos || []).map(photo => photo.sourcePath));
       if (path.resolve(outputProgress.folderPath).toLocaleLowerCase() === path.resolve(path.dirname(base.filePath)).toLocaleLowerCase()) {
         throw new Error('合成结果不能写回当前来源进度，请选择其他进度');
       }

@@ -1,5 +1,6 @@
 const createWorkspaceRepository = client => ({
   load: root => client.call(root, 'init'),
+  syncCatalog: root => client.call(root, 'catalog_sync', {}),
   runMaintenance: root => client.call(root, 'maintenance_run', {}),
   addProject: (root, payload) => client.call(root, 'add', payload),
   renameProject: (root, payload) => client.call(root, 'rename', payload),
