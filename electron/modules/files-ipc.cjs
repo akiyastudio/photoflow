@@ -1,3 +1,5 @@
+const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = require('../services/protected-project-folder.cjs');
+
 const registerFileOperationsIpc = context => {
   const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, cancelMediaTrackingScan, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
 
@@ -547,6 +549,9 @@ const registerFileOperationsIpc = context => {
       }
       if (operation === 'rename') {
         if (!sources.length || !nextName.trim()) throw new Error('请选择文件并输入新名称');
+        if (sources.some(source => isProtectedProjectFolderPath({ fs, path, projectRoot: root, candidate: source }))) {
+          throw new Error('该文件夹由项目工作流管理，不能使用普通重命名；进度文件夹请使用“修改进度”');
+        }
         const baseName = nextName.trim();
         const explicitNames = Array.isArray(options.renameNames) && options.renameNames.length === sources.length ? options.renameNames.map(name => String(name).trim()) : null;
         const destinations = sources.map((source, index) => {
@@ -555,6 +560,10 @@ const registerFileOperationsIpc = context => {
           if (!fileName || path.basename(fileName) !== fileName || /[<>:"/\\|?*\x00-\x1f]/.test(fileName) || /[. ]$/.test(fileName)) throw new Error(`无效的文件名：${fileName || '空文件名'}`);
           return path.join(path.dirname(source), fileName);
         });
+        if (sources.some((source, index) => path.dirname(source).toLocaleLowerCase() === root.toLocaleLowerCase()
+          && fs.statSync(source).isDirectory() && isProtectedProjectFolderName(path.basename(destinations[index])))) {
+          throw new Error('该名称保留给项目工作流使用，请输入其他文件夹名称');
+        }
         const normalizedDestinations = destinations.map(destination => path.resolve(destination).toLocaleLowerCase());
         if (new Set(normalizedDestinations).size !== normalizedDestinations.length) throw new Error('生成的新文件名存在重复');
         const normalizedSources = new Set(sources.map(source => path.resolve(source).toLocaleLowerCase()));

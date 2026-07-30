@@ -1,56 +1,52 @@
 !include "nsDialogs.nsh"
 !include "LogicLib.nsh"
 
-!ifndef BUILD_UNINSTALLER
-Var PhotoFlowDesktopShortcutCheckbox
-Var PhotoFlowCreateDesktopShortcut
-Var PhotoFlowGpuComponentCheckbox
-Var PhotoFlowInstallGpuComponent
-Var PhotoFlowGpuComponentArchive
+!ifdef BUILD_UNINSTALLER
+Var PhotoFlowDeleteUserDataCheckbox
+Var PhotoFlowDeleteUserData
 
-!macro customPageAfterChangeDir
-  Page custom PhotoFlowComponentPage PhotoFlowComponentPageLeave
-  Page custom PhotoFlowShortcutPage PhotoFlowShortcutPageLeave
+!macro customUnInit
+  StrCpy $PhotoFlowDeleteUserData ${BST_UNCHECKED}
 !macroend
 
-Function PhotoFlowComponentPage
-  StrCpy $PhotoFlowGpuComponentArchive ""
-  ClearErrors
-  FindFirst $0 $1 "$EXEDIR\PhotoFlow-team-retouch-*-win32-*.zip"
-  IfErrors +3
-    StrCpy $PhotoFlowGpuComponentArchive "$EXEDIR\$1"
-    FindClose $0
+!macro customUnWelcomePage
+  UninstPage custom un.PhotoFlowUninstallOptionsPage un.PhotoFlowUninstallOptionsPageLeave
+!macroend
 
+Function un.PhotoFlowUninstallOptionsPage
   GetDlgItem $0 $HWNDPARENT 1037
-  SendMessage $0 0x000C 0 "STR:可选功能组件"
+  SendMessage $0 0x000C 0 "STR:卸载照片流"
   GetDlgItem $0 $HWNDPARENT 1038
-  SendMessage $0 0x000C 0 "STR:选择要从离线安装介质复制的组件"
+  SendMessage $0 0x000C 0 "STR:选择是否同时清理本机用户数据"
   nsDialogs::Create 1018
   Pop $0
   ${If} $0 == error
     Abort
   ${EndIf}
 
-  ${NSD_CreateLabel} 0 2u 100% 30u "组件不会放进基础安装包。请把 PhotoFlow-组件名-版本-win32-架构.zip 放在安装程序旁边；未选择或未找到时，基础程序仍可正常安装。"
+  ${NSD_CreateLabel} 0 4u 100% 28u "卸载程序会移除照片流应用。默认保留设置和缓存，便于以后重新安装后继续使用。"
   Pop $1
-  ${NSD_CreateCheckbox} 0 40u 100% 14u "团片协作（人物检测与高分辨率拼回）"
-  Pop $PhotoFlowGpuComponentCheckbox
-  ${If} $PhotoFlowGpuComponentArchive == ""
-    ${NSD_Uncheck} $PhotoFlowGpuComponentCheckbox
-    ${NSD_SetText} $PhotoFlowGpuComponentCheckbox "多人裁片修图（安装介质中未找到）"
-    EnableWindow $PhotoFlowGpuComponentCheckbox 0
-  ${Else}
-    ${NSD_Check} $PhotoFlowGpuComponentCheckbox
-  ${EndIf}
+  ${NSD_CreateCheckbox} 0 42u 100% 16u "同时清空照片流的用户数据和注册表"
+  Pop $PhotoFlowDeleteUserDataCheckbox
+  ${NSD_Uncheck} $PhotoFlowDeleteUserDataCheckbox
+  ${NSD_CreateLabel} 0 68u 100% 46u "勾选后将永久删除设置、日志、索引、默认缩略图缓存、可选组件及高级环境。不会删除工作区、项目中的照片和视频，也不会删除用户指定到其他位置的缓存目录。"
+  Pop $1
 
-  ${NSD_CreateLabel} 0 70u 100% 26u ""
-  Pop $1
   nsDialogs::Show
 FunctionEnd
 
-Function PhotoFlowComponentPageLeave
-  ${NSD_GetState} $PhotoFlowGpuComponentCheckbox $PhotoFlowInstallGpuComponent
+Function un.PhotoFlowUninstallOptionsPageLeave
+  ${NSD_GetState} $PhotoFlowDeleteUserDataCheckbox $PhotoFlowDeleteUserData
 FunctionEnd
+!endif
+
+!ifndef BUILD_UNINSTALLER
+Var PhotoFlowDesktopShortcutCheckbox
+Var PhotoFlowCreateDesktopShortcut
+
+!macro customPageAfterChangeDir
+  Page custom PhotoFlowShortcutPage PhotoFlowShortcutPageLeave
+!macroend
 
 Function PhotoFlowShortcutPage
   GetDlgItem $0 $HWNDPARENT 1037
@@ -77,16 +73,6 @@ Function PhotoFlowShortcutPageLeave
 FunctionEnd
 
 !macro customInstall
-  CreateDirectory "$INSTDIR\components"
-  ${If} $PhotoFlowInstallGpuComponent == ${BST_CHECKED}
-    ${If} $PhotoFlowGpuComponentArchive != ""
-      nsisunz::Unzip "$PhotoFlowGpuComponentArchive" "$INSTDIR\components"
-      Pop $0
-      ${If} $0 != "success"
-        MessageBox MB_OK|MB_ICONEXCLAMATION "多人裁片修图组件解压失败：$0"
-      ${EndIf}
-    ${EndIf}
-  ${EndIf}
   ${If} $PhotoFlowCreateDesktopShortcut == ${BST_CHECKED}
     CreateShortCut "$newDesktopLink" "$appExe" "" "$appExe" 0 "" "" "${APP_DESCRIPTION}"
     ClearErrors
@@ -98,5 +84,28 @@ FunctionEnd
 
 !macro customUnInstall
   Delete "$DESKTOP\${SHORTCUT_NAME}.lnk"
+  ${If} $PhotoFlowDeleteUserData == ${BST_CHECKED}
+    DetailPrint "正在清理照片流用户数据和专属运行环境..."
+    nsExec::ExecToLog '"$SYSDIR\wsl.exe" --terminate PhotoFlowNative'
+    Pop $0
+    nsExec::ExecToLog '"$SYSDIR\wsl.exe" --unregister PhotoFlowNative'
+    Pop $0
+    nsExec::ExecToLog '"$SYSDIR\wsl.exe" --terminate PhotoflowLab'
+    Pop $0
+    nsExec::ExecToLog '"$SYSDIR\wsl.exe" --unregister PhotoflowLab'
+    Pop $0
+
+    RMDir /r "$APPDATA\Photoflow"
+    RMDir /r "$LOCALAPPDATA\PhotoFlow"
+    RMDir /r "$TEMP\photoflow"
+    RMDir /r "$TEMP\Photoflow-shell-new-icons"
+
+    DeleteRegKey HKCU "Software\PhotoFlow"
+    DeleteRegKey HKCU "Software\Photoflow"
+    DeleteRegKey HKCU "Software\Classes\photoflow"
+    DeleteRegKey HKCU "Software\Classes\com.photoflow.toolkit"
+    DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Notifications\Settings\com.photoflow.toolkit"
+    DeleteRegValue HKCU "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" "$INSTDIR\Photoflow.exe"
+  ${EndIf}
   System::Call 'Shell32::SHChangeNotify(i 0x8000000, i 0, i 0, i 0)'
 !macroend

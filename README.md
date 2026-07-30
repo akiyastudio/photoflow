@@ -222,6 +222,12 @@ SQLite worker · Python 工具 · FFmpeg · ONNX · Windows C# 辅助程序
 
 更详细的模块边界和依赖规则见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，文件操作风险与恢复策略见 [docs/FILESYSTEM_AUDIT.md](docs/FILESYSTEM_AUDIT.md)。
 
+## 版权与许可
+
+照片流自主代码属于专有软件，Copyright (c) 2026 秋也，保留所有权利。未经版权所有者明确书面授权，不得复制、修改、分发或再许可。完整条款见 [LICENSE](LICENSE)。
+
+仓库及发行包包含的第三方软件和模型继续适用各自的许可证；照片流的专有许可不覆盖或限制第三方许可证已经授予的权利。相关说明见 [开源软件与模型许可说明](docs/legal/OPEN_SOURCE_NOTICES.md)。
+
 ## 反馈
 
 遇到问题时，请在 [GitHub Issues](https://github.com/akiyastudio/photoflow/issues) 中说明系统版本、照片流版本、操作步骤和错误提示。请勿上传包含客户隐私的原片；如需提供日志，请先检查并移除个人路径、文件名等敏感信息。

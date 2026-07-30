@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <title>照片流 · 数据中心</title>
+  <link rel="stylesheet" href="/admin/styles.css">
+</head>
+<body>
+  <div class="login-shell" id="login-shell">
+    <main class="login-card" aria-labelledby="login-title">
+      <div class="brand-mark" aria-hidden="true">流</div>
+      <p class="eyebrow">PHOTOFLOW ANALYTICS</p>
+      <h1 id="login-title">照片流数据中心</h1>
+      <p class="login-description">输入云函数中的管理 Token，查看匿名使用统计与崩溃概览。</p>
+      <form id="login-form">
+        <label for="token-input">管理 Token</label>
+        <div class="token-field">
+          <input id="token-input" name="token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required>
+          <button class="text-button" id="toggle-token" type="button" aria-label="显示 Token">显示</button>
+        </div>
+        <p class="form-error" id="login-error" role="alert" hidden></p>
+        <button class="primary-button login-button" id="login-button" type="submit">进入数据中心</button>
+      </form>
+      <p class="security-note">Token 只保存在当前页面内存中，刷新或关闭页面后会清除。</p>
+    </main>
+  </div>
+
+  <div class="app-shell" id="app-shell" hidden>
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-mark small" aria-hidden="true">流</div>
+        <div>
+          <strong>照片流</strong>
+          <span>数据中心</span>
+        </div>
+      </div>
+      <nav aria-label="数据中心导航">
+        <a class="nav-item active" href="#overview">数据概览</a>
+        <a class="nav-item" href="#activity">活跃趋势</a>
+        <a class="nav-item" href="#features">功能分析</a>
+        <a class="nav-item" href="#stability">稳定性</a>
+      </nav>
+      <div class="sidebar-footer">
+        <span class="status-dot"></span>
+        <span>CloudBase 已连接</span>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">OVERVIEW</p>
+          <h1>使用情况概览</h1>
+        </div>
+        <div class="topbar-actions">
+          <label class="period-control" for="period-select">
+            <span>统计周期</span>
+            <select id="period-select">
+              <option value="7">近 7 天</option>
+              <option value="30" selected>近 30 天</option>
+              <option value="90">近 90 天</option>
+            </select>
+          </label>
+          <button class="secondary-button" id="refresh-button" type="button">刷新数据</button>
+          <button class="ghost-button" id="logout-button" type="button">退出</button>
+        </div>
+      </header>
+
+      <div class="banner error-banner" id="dashboard-error" role="alert" hidden>
+        <span id="dashboard-error-text"></span>
+        <button id="retry-button" type="button">重试</button>
+      </div>
+      <div class="banner warning-banner" id="truncated-warning" hidden>
+        数据量已达到当前汇总接口的扫描上限，本页可能只包含部分结果。
+      </div>
+
+      <section id="overview" aria-labelledby="overview-title">
+        <div class="section-heading visually-hidden">
+          <h2 id="overview-title">核心指标</h2>
+        </div>
+        <div class="kpi-grid">
+          <article class="kpi-card accent-blue">
+            <span class="kpi-label">新增激活</span>
+            <strong class="kpi-value" id="activation-count">—</strong>
+            <span class="kpi-caption">首次出现的匿名安装</span>
+          </article>
+          <article class="kpi-card accent-cyan">
+            <span class="kpi-label">活跃安装</span>
+            <strong class="kpi-value" id="active-installations">—</strong>
+            <span class="kpi-caption">周期内至少启动一次</span>
+          </article>
+          <article class="kpi-card accent-violet">
+            <span class="kpi-label">创建项目</span>
+            <strong class="kpi-value" id="project-count">—</strong>
+            <span class="kpi-caption">项目创建事件总次数</span>
+          </article>
+          <article class="kpi-card accent-amber">
+            <span class="kpi-label">更新检查</span>
+            <strong class="kpi-value" id="update-check-count">—</strong>
+            <span class="kpi-caption" id="update-check-caption">发现可用更新 — 次</span>
+          </article>
+          <article class="kpi-card accent-red">
+            <span class="kpi-label">崩溃报告</span>
+            <strong class="kpi-value" id="crash-count">—</strong>
+            <span class="kpi-caption" id="crash-caption">影响 — 个匿名安装</span>
+          </article>
+        </div>
+      </section>
+
+      <section class="content-grid activity-grid" id="activity" aria-labelledby="activity-title">
+        <article class="panel chart-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">ACTIVITY</p>
+              <h2 id="activity-title">每日活跃安装</h2>
+            </div>
+            <div class="metric-summary">
+              <strong id="latest-dau">—</strong>
+              <span>最近一天</span>
+            </div>
+          </div>
+          <div class="line-chart" id="daily-active-chart" role="img" aria-label="每日活跃安装趋势图"></div>
+        </article>
+
+        <article class="panel retention-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">RETENTION</p>
+              <h2>用户留存</h2>
+            </div>
+          </div>
+          <div class="retention-list">
+            <div class="retention-item">
+              <div><strong>D1</strong><span>次日留存</span></div>
+              <strong class="retention-rate" id="retention-d1">—</strong>
+              <span class="retention-detail" id="retention-d1-detail">— / —</span>
+            </div>
+            <div class="retention-item">
+              <div><strong>D7</strong><span>7 日留存</span></div>
+              <strong class="retention-rate" id="retention-d7">—</strong>
+              <span class="retention-detail" id="retention-d7-detail">— / —</span>
+            </div>
+            <div class="retention-item">
+              <div><strong>D30</strong><span>30 日留存</span></div>
+              <strong class="retention-rate" id="retention-d30">—</strong>
+              <span class="retention-detail" id="retention-d30-detail">— / —</span>
+            </div>
+          </div>
+          <p class="panel-footnote">留存率 = 在目标日期再次启动的安装数 ÷ 对应新增安装数</p>
+        </article>
+      </section>
+
+      <section class="content-grid feature-grid" id="features" aria-labelledby="features-title">
+        <article class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">FEATURES</p>
+              <h2 id="features-title">高频功能事件</h2>
+            </div>
+            <span class="panel-hint">打开与使用次数合计</span>
+          </div>
+          <div class="bar-chart-list" id="feature-chart"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">IMPORTS</p>
+              <h2>照片导入区间</h2>
+            </div>
+            <span class="panel-hint">每次导入的数量分布</span>
+          </div>
+          <div class="bucket-chart" id="import-chart"></div>
+        </article>
+      </section>
+
+      <section class="panel stability-panel" id="stability" aria-labelledby="stability-title">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-kicker">STABILITY</p>
+            <h2 id="stability-title">崩溃概览</h2>
+          </div>
+          <span class="panel-hint">仅展示脱敏后的汇总信息</span>
+        </div>
+        <div class="crash-grid">
+          <div class="crash-column">
+            <h3>按应用版本</h3>
+            <div class="rank-list" id="crashes-by-version"></div>
+          </div>
+          <div class="crash-column">
+            <h3>按错误类型</h3>
+            <div class="rank-list" id="crashes-by-error"></div>
+          </div>
+          <div class="crash-column">
+            <h3>按进程类型</h3>
+            <div class="rank-list" id="crashes-by-process"></div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="page-footer">
+        <span id="generated-at">尚未加载数据</span>
+        <span>所有用户标识均为不可逆哈希值</span>
+      </footer>
+    </main>
+  </div>
+
+  <div class="loading-overlay" id="loading-overlay" aria-live="polite" hidden>
+    <div class="spinner" aria-hidden="true"></div>
+    <span>正在读取统计数据…</span>
+  </div>
+
+  <script src="/admin/app.js" defer></script>
+</body>
+</html>

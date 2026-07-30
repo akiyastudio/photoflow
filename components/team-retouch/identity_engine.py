@@ -16,42 +16,41 @@ import numpy as np
 
 
 FACE_DETECTOR_MODEL = "face_detection_yunet_2023mar.onnx"
-FACE_RECOGNIZER_MODEL = "face_recognition_sface_2021dec.onnx"
-BODY_REID_MODEL = "osnet_x0_25_msmt17.onnx"
-EXPERIMENTAL_ADAFACE_MODEL = "adaface_ir18_webface4m.onnx"
-EXPERIMENTAL_OSNET_MODEL = "osnet_x1_0_msmt17.onnx"
+FACE_RECOGNIZER_MODEL = "adaface_ir18_webface4m.onnx"
+BODY_REID_MODEL = "osnet_x1_0_msmt17.onnx"
+ADAFACE_LANDMARK_TEMPLATE = np.asarray([
+    [38.2946, 51.6963],
+    [73.5318, 51.5014],
+    [56.0252, 71.7366],
+    [41.5493, 92.3655],
+    [70.7299, 92.2041],
+], dtype=np.float32)
 
 
-def _experimental_adaface_path(model_directory):
-    candidates = []
-    configured = os.environ.get("PHOTOFLOW_ADAFACE_MODEL")
+def _model_path(model_directory, file_name, minimum_size, environment_name, development_subdirectory):
+    candidates = [Path(model_directory) / file_name]
+    configured = os.environ.get(environment_name)
     if configured:
         candidates.append(Path(configured))
     try:
-        candidates.append(model_directory.parents[2] / ".model-lab" / "adaface" / EXPERIMENTAL_ADAFACE_MODEL)
+        candidates.append(Path(model_directory).parents[2] / ".model-lab" / development_subdirectory / file_name)
     except IndexError:
         pass
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        candidates.append(Path(local_app_data) / "PhotoFlow" / "components" / "team-retouch" / "identity-models" / EXPERIMENTAL_ADAFACE_MODEL)
-        candidates.append(Path(local_app_data) / "PhotoFlow" / "experimental-models" / EXPERIMENTAL_ADAFACE_MODEL)
-    return next((path for path in candidates if path.is_file() and path.stat().st_size > 20_000_000), None)
+    model_path = next((path for path in candidates if path.is_file() and path.stat().st_size >= minimum_size), None)
+    if model_path is None:
+        raise RuntimeError(f"人物身份识别模型缺失或不完整：{file_name}")
+    return model_path
 
 
-def _experimental_osnet_path(model_directory):
-    candidates = []
-    configured = os.environ.get("PHOTOFLOW_OSNET_MODEL")
-    if configured:
-        candidates.append(Path(configured))
-    try:
-        candidates.append(model_directory.parents[2] / ".model-lab" / "osnet" / EXPERIMENTAL_OSNET_MODEL)
-    except IndexError:
-        pass
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        candidates.append(Path(local_app_data) / "PhotoFlow" / "components" / "team-retouch" / "identity-models" / EXPERIMENTAL_OSNET_MODEL)
-        candidates.append(Path(local_app_data) / "PhotoFlow" / "experimental-models" / EXPERIMENTAL_OSNET_MODEL)
-    return next((path for path in candidates if path.is_file() and path.stat().st_size > 2_000_000), None)
+def _align_face(source_bgr, raw_face):
+    landmarks = np.asarray(raw_face[4:14], dtype=np.float32).reshape(5, 2)
+    transform, _inliers = cv2.estimateAffinePartial2D(landmarks, ADAFACE_LANDMARK_TEMPLATE, method=cv2.LMEDS)
+    if transform is None:
+        x, y, width, height = (float(value) for value in raw_face[:4])
+        x1, y1 = max(0, int(x)), max(0, int(y))
+        x2, y2 = min(source_bgr.shape[1], int(x + width)), min(source_bgr.shape[0], int(y + height))
+        return cv2.resize(source_bgr[y1:y2, x1:x2], (112, 112), interpolation=cv2.INTER_AREA)
+    return cv2.warpAffine(source_bgr, transform, (112, 112), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
 
 
 def _unit(vector):
@@ -84,18 +83,15 @@ class IdentityRuntime:
     def __init__(self, model_directory, provider="auto"):
         model_directory = Path(model_directory)
         face_detector_path = model_directory / FACE_DETECTOR_MODEL
-        face_recognizer_path = model_directory / FACE_RECOGNIZER_MODEL
-        experimental_body_path = _experimental_osnet_path(model_directory)
-        body_reid_path = experimental_body_path or model_directory / BODY_REID_MODEL
-        for path, minimum in ((face_detector_path, 200_000), (face_recognizer_path, 30_000_000), (body_reid_path, 700_000)):
-            if not path.is_file() or path.stat().st_size < minimum:
-                raise RuntimeError(f"人物身份识别模型缺失或不完整：{path.name}")
+        if not face_detector_path.is_file() or face_detector_path.stat().st_size < 200_000:
+            raise RuntimeError(f"人物身份识别模型缺失或不完整：{FACE_DETECTOR_MODEL}")
+        face_recognizer_path = _model_path(model_directory, FACE_RECOGNIZER_MODEL, 20_000_000, "PHOTOFLOW_ADAFACE_MODEL", "adaface")
+        body_reid_path = _model_path(model_directory, BODY_REID_MODEL, 2_000_000, "PHOTOFLOW_OSNET_MODEL", "osnet")
 
         # Candidate filtering is constrained by the detected body and expected
         # head position, so a lower detector threshold recovers difficult faces
         # without accepting arbitrary faces elsewhere in the photograph.
         self.face_detector = cv2.FaceDetectorYN_create(str(face_detector_path), "", (320, 320), .52, .3, 5000)
-        self.face_recognizer = cv2.FaceRecognizerSF_create(str(face_recognizer_path), "")
 
         try:
             import onnxruntime as ort
@@ -110,19 +106,13 @@ class IdentityRuntime:
             providers = ["DmlExecutionProvider", "CPUExecutionProvider"]
         self.body_session = ort.InferenceSession(str(body_reid_path), sess_options=options, providers=providers)
         self.body_input_name = self.body_session.get_inputs()[0].name
+        self.adaface_session = ort.InferenceSession(str(face_recognizer_path), sess_options=options, providers=providers)
+        self.adaface_input_name = self.adaface_session.get_inputs()[0].name
         self.provider = self.body_session.get_providers()[0]
-        self.body_backend = "osnet-x1-experimental" if experimental_body_path else "osnet-x0.25"
-        self.face_backend = "sface"
-        self.adaface_session = None
-        adaface_path = _experimental_adaface_path(model_directory)
-        if adaface_path:
-            self.adaface_session = ort.InferenceSession(str(adaface_path), sess_options=options, providers=providers)
-            self.adaface_input_name = self.adaface_session.get_inputs()[0].name
-            self.face_backend = "adaface-ir18-experimental"
+        self.body_backend = "osnet-x1"
+        self.face_backend = "adaface-ir18"
 
     def _face_feature(self, aligned):
-        if self.adaface_session is None:
-            return _unit(self.face_recognizer.feature(aligned)), None
         tensor = aligned.astype(np.float32) / 127.5 - 1.0
         tensor = np.ascontiguousarray(tensor.transpose(2, 0, 1)[None])
         embedding, feature_norm = self.adaface_session.run(None, {self.adaface_input_name: tensor})
@@ -203,7 +193,7 @@ class IdentityRuntime:
 
         if candidates:
             face = max(candidates, key=lambda candidate: candidate[0])[1]
-            aligned = self.face_recognizer.alignCrop(source_bgr, face)
+            aligned = _align_face(source_bgr, face)
             feature, model_quality = self._face_feature(aligned)
             face_width, face_height = float(face[2]), float(face[3])
             sharpness = float(cv2.Laplacian(cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY), cv2.CV_32F).var())

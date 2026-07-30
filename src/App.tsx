@@ -22,11 +22,12 @@ import { ProjectWorkspace } from './features/workspace/ProjectWorkspace';
 import { AppErrorBoundary } from './features/app/AppErrorBoundary';
 import { RequirePlugin } from './features/plugins/RequirePlugin';
 import { BackgroundTaskIndicator } from './features/background-tasks/BackgroundTaskIndicator';
-import { SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
+import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
 import type { SettingsSection } from './features/settings/SettingsFeature';
 import { DashboardView, MatchView, VideoSplitView } from './features/tools/ToolViews';
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
-import type { AppConfig, ComponentStatus, HomeCardId, ProjectFileOperationProgress, ToolType, WorkspaceProject } from './types';
+import { PROJECT_TOOLBAR_ACTION_IDS } from './types';
+import type { AppConfig, ComponentStatus, HomeCardId, ProjectFileOperationProgress, ProjectToolbarActionId, ToolType, WorkspaceProject } from './types';
 
 const DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'inspiration'];
 type WorkspaceToolKind = 'version' | 'team';
@@ -40,6 +41,20 @@ const normalizeHomeOrder = (value: unknown): HomeCardId[] => {
   const migrated = Array.isArray(value) ? value : [];
   const ordered = migrated.filter((card): card is HomeCardId => valid.has(card as HomeCardId));
   return [...new Set([...ordered, ...DEFAULT_HOME_ORDER])];
+};
+const normalizeProjectToolbar = (value: unknown): AppConfig['projectToolbar'] => {
+  const source = value && typeof value === 'object' ? value as Partial<AppConfig['projectToolbar']> : {};
+  const valid = new Set<ProjectToolbarActionId>(PROJECT_TOOLBAR_ACTION_IDS);
+  const order = Array.isArray(source.order) ? source.order.filter((id): id is ProjectToolbarActionId => valid.has(id as ProjectToolbarActionId)) : [];
+  const hidden = Array.isArray(source.hidden) ? source.hidden.filter((id): id is ProjectToolbarActionId => valid.has(id as ProjectToolbarActionId)) : [];
+  if (order.length && !order.includes('screenshot-main-image')) {
+    const storyboardIndex = order.indexOf('storyboard');
+    order.splice(storyboardIndex < 0 ? order.length : storyboardIndex + 1, 0, 'screenshot-main-image');
+  }
+  return {
+    order: [...new Set([...order, ...PROJECT_TOOLBAR_ACTION_IDS])],
+    hidden: [...new Set(hidden)],
+  };
 };
 const IMAGE_SELECTION_FOLDER_NAME = '图片选片';
 const VIDEO_SELECTION_FOLDER_NAME = '视频选片';
@@ -99,13 +114,14 @@ const isMac = window.navigator.userAgent.includes('Mac');
 const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   theme: 'system',
   telemetry: {
-    enabled: true,
-    crashReports: true,
+    enabled: false,
+    crashReports: false,
   },
   workspacePath: '',
   autoCleanupDeletedProjectData: true,
   createPlanningFolder: true,
   defaultFolderSort: 'date',
+  projectToolbar: normalizeProjectToolbar(undefined),
   homeOrder: DEFAULT_HOME_ORDER,
   birthdayEnabled: true,
   componentSettings: {
@@ -178,6 +194,8 @@ const App: React.FC = () => {
 
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [configLoaded, setConfigLoaded] = useState(false);
+  const [privacyStateLoaded, setPrivacyStateLoaded] = useState(false);
+  const [privacyConsentRequired, setPrivacyConsentRequired] = useState(true);
   const [updateInfo, setUpdateInfo] = useState<{version: string, url: string, notes: string} | null>(null);
   const [selectedProject, setSelectedProject] = useState<WorkspaceProject | null>(null);
   const [openProjects, setOpenProjects] = useState<WorkspaceProject[]>([]);
@@ -201,7 +219,9 @@ const App: React.FC = () => {
   const [components, setComponents] = useState<ComponentStatus[]>(() => {
     try {
       const cached = JSON.parse(window.localStorage.getItem('photoflow:components-cache') || '[]');
-      return Array.isArray(cached) ? cached : [];
+      return Array.isArray(cached)
+        ? cached.filter(component => component && !['application', 'legacy-application', 'bundled'].includes(String(component.source || '')))
+        : [];
     } catch {
       return [];
     }
@@ -443,7 +463,7 @@ const App: React.FC = () => {
             const componentSettings = { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings };
             delete componentSettings['research-tools'];
             delete componentSettings['office-media-extractor'];
-            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', telemetry: { enabled: true, crashReports: true }, workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, componentSettings, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: fileConfig.smartImport?.splitLargeFiles ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true }, fileImport: { preserveOriginal: fileConfig.fileImport?.preserveOriginal ?? false }, inspirationLibrary, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: !configuredImageSource || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: !configuredVideoSource || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
+            let normalizedConfig = { ...fileConfig, theme: fileConfig.theme ?? 'system', telemetry: { enabled: fileConfig.telemetry?.enabled === true, crashReports: fileConfig.telemetry?.crashReports === true }, workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', projectToolbar: normalizeProjectToolbar(fileConfig.projectToolbar), homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, componentSettings, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: fileConfig.smartImport?.splitLargeFiles ?? false }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false, clearSource: fileConfig.brollImport?.clearSource ?? true }, fileImport: { preserveOriginal: fileConfig.fileImport?.preserveOriginal ?? false }, inspirationLibrary, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: !configuredImageSource || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: !configuredVideoSource || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
             if (normalizedConfig.workspacePath) {
               const workspace = await window.electronAPI.getWorkspaceProjects(normalizedConfig.workspacePath);
               if (workspace.success && workspace.root) normalizedConfig = { ...normalizedConfig, workspacePath: workspace.root };
@@ -451,7 +471,7 @@ const App: React.FC = () => {
               setShowWorkspaceSetup(true);
             }
             setConfig(normalizedConfig);
-            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.telemetry?.enabled !== true || fileConfig.telemetry?.crashReports !== true || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.createPlanningFolder === undefined || fileConfig.defaultFolderSort === undefined || fileConfig.birthdayEnabled === undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.videoPreviewQuality !== normalizedConfig.smartImport.videoPreviewQuality || fileConfig.smartImport?.splitLargeFiles === undefined || !fileConfig.brollImport || !fileConfig.fileImport || !fileConfig.inspirationLibrary || JSON.stringify(fileConfig.research) !== JSON.stringify(researchSettings) || fileConfig.personDetection?.useGpu === undefined || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
+            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.createPlanningFolder === undefined || fileConfig.defaultFolderSort === undefined || fileConfig.birthdayEnabled === undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.videoPreviewQuality !== normalizedConfig.smartImport.videoPreviewQuality || fileConfig.smartImport?.splitLargeFiles === undefined || !fileConfig.brollImport || !fileConfig.fileImport || !fileConfig.inspirationLibrary || JSON.stringify(fileConfig.research) !== JSON.stringify(researchSettings) || fileConfig.personDetection?.useGpu === undefined || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || JSON.stringify(fileConfig.projectToolbar) !== JSON.stringify(normalizedConfig.projectToolbar) || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             console.log('📋 Configuration loaded from file');
           } else {
             if (window.electronAPI?.getUserPath) {
@@ -480,6 +500,13 @@ const App: React.FC = () => {
 
     loadConfig();
   }, []);
+
+  useEffect(() => {
+    if (!configLoaded) return;
+    void window.electronAPI.getPrivacyConsentState().then(state => {
+      setPrivacyConsentRequired(state.privacyNoticeVersion !== state.currentPrivacyNoticeVersion || state.termsVersion !== state.currentTermsVersion);
+    }).catch(() => setPrivacyConsentRequired(true)).finally(() => setPrivacyStateLoaded(true));
+  }, [configLoaded]);
 
   useEffect(() => {
     if (!configLoaded) return;
@@ -585,12 +612,22 @@ const App: React.FC = () => {
   const getDefaultSettings = useCallback(async () => {
     const userPath = await window.electronAPI.getUserPath().catch(() => '');
     const defaults = DEFAULT_CONFIG(userPath || '');
-    return { ...defaults, workspacePath: config?.workspacePath || '' };
+    return { ...defaults, telemetry: { enabled: true, crashReports: true }, workspacePath: config?.workspacePath || '' };
   }, [config?.workspacePath]);
 
   const handleWorkspaceSetup = async (newConfig: AppConfig) => {
     await handleConfigUpdate(newConfig);
     setShowWorkspaceSetup(false);
+  };
+  const acceptInternalBetaPrivacy = async () => {
+    if (!config) return;
+    const consent = await window.electronAPI.savePrivacyConsent({ acceptCore: true });
+    if (!consent.success) {
+      showNotice(`保存隐私确认失败：${consent.error || '未知错误'}`, 6000);
+      return;
+    }
+    const saved = await handleConfigUpdate({ ...config, telemetry: { enabled: true, crashReports: true } });
+    if (saved) setPrivacyConsentRequired(false);
   };
   const openProjectTab = (project: WorkspaceProject, operation: 'import' | 'broll' | 'match' | null = null, replacePath?: string) => {
     setOpenProjects(current => {
@@ -709,7 +746,7 @@ const App: React.FC = () => {
   const handleProjectAction = (action: 'import' | 'broll' | 'match', project: WorkspaceProject) => {
     openProjectTab(project, action);
   };
-  if (!configLoaded || !config) {
+  if (!configLoaded || !config || !privacyStateLoaded) {
     return (
       <div className="flex h-screen w-full items-center justify-center overflow-hidden bg-slate-950 text-white">
         <div className="flex flex-col items-center gap-6 text-center">
@@ -723,6 +760,8 @@ const App: React.FC = () => {
       </div>
     );
   }
+
+  if (privacyConsentRequired) return <PrivacyConsentPage onAccept={acceptInternalBetaPrivacy}/>;
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden bg-slate-50 text-slate-900 font-sans selection:bg-blue-500/30">
@@ -836,7 +875,7 @@ const App: React.FC = () => {
         })}</div>}
         {inspirationTabOpen && <div className={activeTab === 'inspiration' ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage active={activeTab === 'inspiration'} navigationRequest={inspirationNavigationRequest} config={config} components={components} componentsLoading={componentsLoading} onUpdateConfig={handleConfigUpdate} onDirectoryChange={setInspirationRelativePath} onNotice={showNotice}/></div>}
         {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={refreshComponents} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} getDefaultSettings={getDefaultSettings} onNotice={showNotice}/>}
-        {openProjects.map(project => { const active = activeTab.startsWith('project') && selectedProject?.path === project.path; const activeView = activeTab === 'project-version' ? 'version' : activeTab === 'project-team' ? 'team' : 'project'; return <div key={project.path} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace active={active} activeView={activeView} project={project} workspacePath={config.workspacePath} inspirationLibraryRootPath={config.inspirationLibrary.rootPath} installedComponentIds={installedComponentIds} componentsLoading={componentsLoading} teamRetouchStatus={components.find(component => component.id === 'team-retouch')} teamRetouchSettings={(config.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || config.personDetection} initialPanel={projectOperations[project.path] ?? null} importConfig={config.smartImport} brollConfig={config.brollImport} fileImportConfig={config.fileImport} matchConfig={config.smartMatch} researchConfig={config.research} mediaCacheConfig={config.mediaCache} defaultFolderSort={config.defaultFolderSort} onOpenInspirationPath={navigateInspiration} onOpenToolTab={(kind, label) => openWorkspaceToolTab(project, kind, label)} onCloseToolTab={kind => void closeWorkspaceToolTab(project.path, kind)} onToolTabBusyChange={(kind, busy) => updateWorkspaceToolTabBusy(project.path, kind, busy)} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onResearchConfigChange={(research: AppConfig['research']) => handleConfigUpdate({ ...config, research })} onMediaCacheConfigChange={(mediaCache: AppConfig['mediaCache']) => handleConfigUpdate({ ...config, mediaCache })} onNotice={showNotice} onProjectMoved={nextProject => { setOpenProjects(current => current.map(item => item.path === project.path ? nextProject : item)); setWorkspaceToolTabs(current => current.map(tab => tab.projectPath === project.path ? { ...tab, projectPath: nextProject.path, label: tab.kind === 'team' ? `团片 · ${nextProject.name}` : tab.label } : tab)); setProjectOperations(current => { if (nextProject.path === project.path) return current; const next = { ...current, [nextProject.path]: current[project.path] ?? null }; delete next[project.path]; return next; }); setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { void closeProjectTab(project.path, true); window.dispatchEvent(new Event('workspace-projects-changed')); }} /></div>; })}
+        {openProjects.map(project => { const active = activeTab.startsWith('project') && selectedProject?.path === project.path; const activeView = activeTab === 'project-version' ? 'version' : activeTab === 'project-team' ? 'team' : 'project'; return <div key={project.path} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace active={active} activeView={activeView} project={project} workspacePath={config.workspacePath} inspirationLibraryRootPath={config.inspirationLibrary.rootPath} installedComponentIds={installedComponentIds} componentsLoading={componentsLoading} teamRetouchStatus={components.find(component => component.id === 'team-retouch')} teamRetouchSettings={(config.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || config.personDetection} projectToolbar={config.projectToolbar} initialPanel={projectOperations[project.path] ?? null} importConfig={config.smartImport} brollConfig={config.brollImport} fileImportConfig={config.fileImport} matchConfig={config.smartMatch} researchConfig={config.research} mediaCacheConfig={config.mediaCache} defaultFolderSort={config.defaultFolderSort} onOpenInspirationPath={navigateInspiration} onOpenToolTab={(kind, label) => openWorkspaceToolTab(project, kind, label)} onCloseToolTab={kind => void closeWorkspaceToolTab(project.path, kind)} onToolTabBusyChange={(kind, busy) => updateWorkspaceToolTabBusy(project.path, kind, busy)} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })} onResearchConfigChange={(research: AppConfig['research']) => handleConfigUpdate({ ...config, research })} onMediaCacheConfigChange={(mediaCache: AppConfig['mediaCache']) => handleConfigUpdate({ ...config, mediaCache })} onNotice={showNotice} onProjectMoved={nextProject => { setOpenProjects(current => current.map(item => item.path === project.path ? nextProject : item)); setWorkspaceToolTabs(current => current.map(tab => tab.projectPath === project.path ? { ...tab, projectPath: nextProject.path, label: tab.kind === 'team' ? `团片 · ${nextProject.name}` : tab.label } : tab)); setProjectOperations(current => { if (nextProject.path === project.path) return current; const next = { ...current, [nextProject.path]: current[project.path] ?? null }; delete next[project.path]; return next; }); setSelectedProject(nextProject); setProjectDestination(nextProject.path); window.dispatchEvent(new Event('workspace-projects-changed')); }} onDeleted={() => { void closeProjectTab(project.path, true); window.dispatchEvent(new Event('workspace-projects-changed')); }} /></div>; })}
 
         {activeTab === 'match' && (
           <RequirePlugin scriptName="catch.py" title="选片" desc="需要该引擎来根据关键词提取对应的 RAW 照片。">
@@ -896,6 +935,7 @@ const UpdateModal = ({
             <p className="text-sm text-slate-800 whitespace-pre-wrap">{notes}</p>
           </div>
         </div>
+
 
         <div className="p-6 pt-2 flex gap-3 z-10">
           <button

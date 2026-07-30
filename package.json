@@ -2,7 +2,8 @@
   "name": "photoflow",
   "productName": "照片流",
   "private": true,
-  "version": "26.7.28",
+  "license": "UNLICENSED",
+  "version": "26.7.29",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -13,8 +14,12 @@
     "build": "tsc -b && vite build",
     "build:python": "node scripts/prepare-ffmpeg.cjs && node scripts/build-python.cjs",
     "build:components": "node scripts/build-components.cjs --only team-retouch",
-    "build:model-packs": "node scripts/build-team-retouch-identity-model-pack.cjs",
     "build:advanced-package": "node scripts/build-team-retouch-advanced-package.cjs",
+    "build:advanced-video-decoder": "node scripts/build-advanced-video-decoder.cjs",
+    "build:media-runtime:ffmpeg": "bash scripts/media-runtime/build-ffmpeg-windows.sh",
+    "build:media-runtime:libmpv": "bash scripts/media-runtime/build-libmpv-lgpl-windows.sh",
+    "verify:media-runtime": "node scripts/media-runtime/verify-runtime.cjs ffmpeg",
+    "test:media-runtime-policy": "node scripts/media-runtime/test-runtime-policy.cjs",
     "setup:team-retouch": "node scripts/setup-team-retouch.cjs",
     "build:team-retouch": "npm run setup:team-retouch && node scripts/build-components.cjs --only team-retouch",
     "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
@@ -27,8 +32,10 @@
     "test:database-migrations": ".venv\\Scripts\\python.exe scripts\\test-workspace-db-migrations.py",
     "test:architecture": "node scripts/test-architecture.cjs",
     "test:components": "node scripts/test-components.cjs",
+    "test:advanced-video": "node scripts/test-advanced-video-service.cjs",
     "test:office-media": ".venv\\Scripts\\python.exe scripts\\test-office-media-extractor.py",
     "test:research": ".venv\\Scripts\\python.exe scripts\\test-research.py",
+    "test:screenshot-main-image": ".venv\\Scripts\\python.exe scripts\\test-screenshot-main-image.py",
     "test:inspiration-gather": "node scripts/test-inspiration-gather.cjs",
     "test:team-retouch": ".venv\\Scripts\\python.exe scripts\\test-team-retouch.py",
     "test:team-workflow": "node scripts/test-team-workflow.mjs",
@@ -36,7 +43,7 @@
     "electron": "npm run build:shell-thumbnail && npm run build:recycle-bin-service && wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
     "electron:dev": "concurrently -k \"cross-env BROWSER=none npm run dev\" \"npm run electron\"",
     "cleanup:electron-artifacts": "node scripts/cleanup-electron-artifacts.cjs",
-    "electron:build": "npm run generate:icon && npm run build && npm run build:python && npm run build:components && npm run build:model-packs && npm run build:shell-thumbnail && npm run build:recycle-bin-service && electron-builder && npm run cleanup:electron-artifacts"
+    "electron:build": "npm run generate:icon && npm run build && npm run build:python && npm run build:shell-thumbnail && npm run build:recycle-bin-service && electron-builder && npm run cleanup:electron-artifacts"
   },
   "build": {
     "appId": "com.photoflow.toolkit",
@@ -83,6 +90,10 @@
           "to": "python/ffmpeg.zip"
         },
         {
+          "from": "python/dist/ffmpeg-runtime-manifest.json",
+          "to": "python/ffmpeg-runtime-manifest.json"
+        },
+        {
           "from": "electron/bin/shell-thumbnail.exe",
           "to": "shell-thumbnail.exe"
         },
@@ -95,6 +106,7 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "license": "docs/legal/INSTALLER_NOTICE.txt",
       "createDesktopShortcut": false,
       "include": "build/installer.nsh",
       "shortcutName": "照片流",
@@ -134,6 +146,13 @@
       {
         "from": "python/birthdays.json",
         "to": "python/birthdays.json"
+      },
+      {
+        "from": "docs/legal",
+        "to": "legal",
+        "filter": [
+          "*.md"
+        ]
       }
     ]
   },

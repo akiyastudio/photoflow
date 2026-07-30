@@ -18,8 +18,8 @@ if (fs.existsSync(unpackedDirectory)) {
   console.log(`Removed unpacked application directory: ${unpackedDirectory}`);
 }
 
-// Component ZIPs use the PhotoFlow-<component> prefix and must remain beside
-// the NSIS installer. Remove only legacy application ZIP artifacts.
+// Standalone component ZIPs are separate release artifacts and are never
+// consumed by the NSIS installer. Remove only legacy application ZIP artifacts.
 const productPrefix = `${packageJson.productName}-`;
 if (fs.existsSync(outputDirectory)) {
   for (const entry of fs.readdirSync(outputDirectory, { withFileTypes: true })) {

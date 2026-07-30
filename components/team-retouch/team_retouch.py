@@ -360,7 +360,8 @@ def expanded_planning_box(box, image_width, image_height, margin_ratio=0.08):
     ]
 
 
-def planned_work_crop(box, image_width, image_height, edge=WORK_TILE_EDGE, allow_oversize=True, margin_ratio=0.08):
+def planned_work_crop(box, image_width, image_height, edge=WORK_TILE_EDGE, allow_oversize=True,
+                      margin_ratio=0.08, prefer_edge_fill=False):
     """Return an adaptive phone-friendly crop containing a complete person/group.
 
     Normal work images use at most ``edge`` pixels on their longest side. If a
@@ -382,7 +383,7 @@ def planned_work_crop(box, image_width, image_height, edge=WORK_TILE_EDGE, allow
         if required_scale > maximum_scale:
             continue
         context_scale = min(float(MIN_WORK_TILE_EDGE) / max(ratio_width, ratio_height), maximum_scale)
-        scale = max(required_scale, context_scale)
+        scale = maximum_scale if prefer_edge_fill else max(required_scale, context_scale)
         crop_width = math.ceil(ratio_width * scale)
         crop_height = math.ceil(ratio_height * scale)
         # Integer crop origins sometimes need one extra pixel to contain a
@@ -439,6 +440,33 @@ def estimated_face_box(body_box):
         center_x + body_width * 0.14,
         float(body_box[1]) + body_height * 0.24,
     ]
+
+
+def face_shoulder_planning_box(item, image_width, image_height):
+    """Return the protected head-and-shoulders region for a 4000px work tile."""
+    body_box = clamp_box(item.get("planningBox", item["box"]), image_width, image_height)
+    face_box = clamp_box(
+        item.get("faceBox") or estimated_face_box(item["box"]),
+        image_width, image_height,
+    )
+    body_width = max(1.0, body_box[2] - body_box[0])
+    body_height = max(1.0, body_box[3] - body_box[1])
+    face_width = max(1.0, face_box[2] - face_box[0])
+    face_height = max(1.0, face_box[3] - face_box[1])
+    center_x = (face_box[0] + face_box[2]) / 2
+
+    # The face remains the anchor, while the protected width follows the
+    # detected upper body closely enough to keep both shoulders visible.
+    shoulder_width = max(face_width * 2.6, body_width * 0.82)
+    top = min(body_box[1], face_box[1] - face_height * 0.18)
+    bottom = max(
+        face_box[3] + face_height * 1.35,
+        body_box[1] + body_height * 0.34,
+    )
+    return clamp_box([
+        center_x - shoulder_width / 2, top,
+        center_x + shoulder_width / 2, bottom,
+    ], image_width, image_height)
 
 
 def mask_bounds(mask, scale, image_width, image_height):
@@ -577,17 +605,44 @@ def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, overs
                 planning_box, image_width, image_height, edge,
                 allow_oversize=False, margin_ratio=focus_margin_ratio,
             )
-            # Face-centered cropping is a last resort for one genuinely
-            # oversized person. Never use it to force several people into a
-            # tile whose complete outlines do not fit; split that group.
-            if crop is None and oversize_crop_mode == "face-centered" and len(key) == 1:
+            # When complete bodies exceed the work-tile edge, keep nearby
+            # people together by falling back to the union of their faces.
+            # This restores the original group-photo behavior: one retoucher
+            # receives one coherent area instead of one crop per person.
+            if crop is None and oversize_crop_mode == "face-centered":
                 focus_boxes = [
-                    clamp_box(items[index].get("faceBox") or estimated_face_box(items[index]["box"]), image_width, image_height)
+                    face_shoulder_planning_box(items[index], image_width, image_height)
                     for index in key
                 ]
                 focus_box = union_box(focus_boxes)
                 focus_margin_ratio = 0.08
-                crop = planned_work_crop(focus_box, image_width, image_height, edge, allow_oversize=False)
+                crop = planned_work_crop(
+                    focus_box, image_width, image_height, edge,
+                    allow_oversize=False, prefer_edge_fill=True,
+                )
+            if crop is None and oversize_crop_mode == "expand" and len(key) > 1:
+                padded_group = expanded_planning_box(
+                    planning_box, image_width, image_height, focus_margin_ratio,
+                )
+                padded_members = [
+                    expanded_planning_box(
+                        items[index].get("planningBox", items[index]["box"]),
+                        image_width, image_height, focus_margin_ratio,
+                    )
+                    for index in key
+                ]
+                group_width = padded_group[2] - padded_group[0]
+                group_height = padded_group[3] - padded_group[1]
+                intrinsic_width = max(member[2] - member[0] for member in padded_members)
+                intrinsic_height = max(member[3] - member[1] for member in padded_members)
+                # Share an unavoidably oversized crop, but do not make a crop
+                # oversized merely to connect people who are far apart.
+                if ((group_width <= edge or intrinsic_width > edge)
+                        and (group_height <= edge or intrinsic_height > edge)):
+                    crop = planned_work_crop(
+                        planning_box, image_width, image_height, edge,
+                        allow_oversize=True, margin_ratio=focus_margin_ratio,
+                    )
             if crop is None and len(key) == 1:
                 crop = planned_work_crop(box, image_width, image_height, edge, allow_oversize=True)
             if crop is None:

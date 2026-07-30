@@ -1,3 +1,5 @@
+const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = require('../services/protected-project-folder.cjs');
+
 const registerWorkspaceIpc = context => {
   const { Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, acquireFileRootWatcher, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
   const isInternalFileOperationEntry = name => name.toLowerCase().endsWith('.photoflow-part') || /^\.photoflow-(?:paste|replace|undo|team-workflow-)/i.test(name);
@@ -6,6 +8,7 @@ const registerWorkspaceIpc = context => {
     '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam',
     '.xlsx', '.xlsm', '.xltx', '.xltm', '.xlam', '.xlsb',
   ]);
+  const screenshotMainImageExtensions = new Set(['.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp']);
   const recentFileSessions = new Map();
   const pruneRecentFileSessions = () => {
     const expiry = Date.now() - 10 * 60 * 1000;
@@ -337,6 +340,10 @@ const registerWorkspaceIpc = context => {
       const destination = path.resolve(projectPath, cleanedName);
       if (!source.startsWith(projectPath + path.sep) || !destination.startsWith(projectPath + path.sep)) throw new Error('无效的文件夹路径');
       if (!fs.existsSync(source) || !fs.statSync(source).isDirectory()) throw new Error('文件夹不存在');
+      if (isProtectedProjectFolderPath({ fs, path, projectRoot: projectPath, candidate: source })) {
+        throw new Error('该文件夹由项目工作流管理，不能使用普通重命名');
+      }
+      if (isProtectedProjectFolderName(cleanedName)) throw new Error('该名称保留给项目工作流使用');
       if (fs.existsSync(destination)) throw new Error('同名文件夹已存在');
       await fs.promises.rename(source, destination);
       await pushUndoOperation({ kind: 'folder', source, destination, beforeName: folderName, afterName: cleanedName });
@@ -1147,6 +1154,63 @@ const registerWorkspaceIpc = context => {
       return { ...result, results: Array.isArray(result.results) ? result.results : [] };
     } catch (error) {
       writeLog('warn', 'Office image extraction failed', { projectName, error: error.message || String(error) });
+      return { success: false, error: error.message || String(error), results: [] };
+    }
+  });
+
+  ipcMain.handle('workspace-extract-screenshot-main-images', async (event, workspacePath, status, projectName, relativePaths = [], options = {}) => {
+    const requestId = String(options?.requestId || '');
+    const publish = payload => {
+      if (requestId && !event.sender.isDestroyed()) event.sender.send('workspace-screenshot-main-image-progress', { requestId, ...payload });
+    };
+    try {
+      const requestedPaths = Array.isArray(relativePaths) ? relativePaths.slice(0, 2000) : [];
+      if (!requestedPaths.length) throw new Error('没有选择图片');
+      const targets = requestedPaths.map(relativePath => resolveProjectEntry(workspacePath, status, projectName, relativePath));
+      for (const target of targets) {
+        if (!fs.statSync(target).isFile() || !screenshotMainImageExtensions.has(path.extname(target).toLowerCase())) {
+          throw new Error(`不支持此图片格式：${path.basename(target)}`);
+        }
+      }
+      const results = [];
+      publish({ phase: 'extracting', progress: 0, processedCount: 0, totalCount: targets.length, message: '正在准备识别截图主图…' });
+      for (let offset = 0; offset < targets.length; offset += 60) {
+        const chunk = targets.slice(offset, offset + 60);
+        const args = ['extract', ...chunk.flatMap(target => ['--input', target])];
+        const payload = await runPythonJsonAction('screenshot_main_image.py', args, 30 * 60 * 1000, message => {
+          if (message?.type !== 'progress') return;
+          const processedCount = Math.max(0, Math.min(targets.length, offset + Number(message.processedCount || 0)));
+          const currentName = String(message.currentName || '');
+          const displayIndex = message.phase === 'item-start' ? Math.min(targets.length, processedCount + 1) : processedCount;
+          publish({
+            phase: 'extracting',
+            progress: Math.round(processedCount / Math.max(1, targets.length) * 100),
+            processedCount,
+            totalCount: targets.length,
+            currentName,
+            message: `${message.phase === 'item-complete' ? '已处理' : '正在识别'} ${displayIndex}/${targets.length}${currentName ? ` · ${currentName}` : ''}`,
+          });
+        });
+        if (!payload?.success && !Array.isArray(payload?.results)) throw new Error(payload?.error || '提取截图主图失败');
+        results.push(...(Array.isArray(payload.results) ? payload.results : []));
+      }
+      const croppedCount = results.filter(result => result?.cropped).length;
+      const skippedCount = results.filter(result => result?.skipped).length;
+      const failedCount = results.filter(result => !result?.success).length;
+      publish({ phase: 'complete', progress: 100, processedCount: targets.length, totalCount: targets.length, message: '主图识别完成' });
+      mainWindow?.webContents.send('workspace-files-changed', { root: getProjectPath(workspacePath, status, projectName), fileName: '' });
+      return {
+        success: failedCount < results.length,
+        inputCount: results.length,
+        croppedCount,
+        skippedCount,
+        failedCount,
+        results,
+        ...(failedCount === results.length ? { error: results[0]?.error || '提取截图主图失败' } : {}),
+      };
+    } catch (error) {
+      publish({ phase: 'failed', progress: 0, message: `提取失败：${error.message || String(error)}` });
+      writeLog('warn', 'Screenshot main image extraction failed', { projectName, error: error.message || String(error) });
       return { success: false, error: error.message || String(error), results: [] };
     }
   });

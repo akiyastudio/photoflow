@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { FolderOpen, HardDrive, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, ScanSearch, Loader2, Cpu, Wrench, ExternalLink, AtSign, Scale } from 'lucide-react';
-import type { AppConfig, ComponentStatus } from '../../types';
+import { FolderOpen, HardDrive, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, ScanSearch, Loader2, Cpu, Wrench, ExternalLink, AtSign, Scale, GripVertical, MemoryStick, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, Crop, Heart, ShieldCheck } from 'lucide-react';
+import { PROJECT_TOOLBAR_ACTION_IDS } from '../../types';
+import type { AppConfig, ComponentStatus, LegalDocumentId, PrivacyConsentState, ProjectToolbarActionId } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { FORMAL_MODEL_LICENSES } from '../../licenses/modelLicenses';
 import { THIRD_PARTY_SOFTWARE_LICENSES } from '../../licenses/softwareLicenses';
@@ -9,7 +10,31 @@ const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
 };
-export type SettingsSection = 'general' | 'storage' | 'components' | 'import' | 'team-retouch' | 'inspiration-library' | 'about';
+export type SettingsSection = 'general' | 'privacy' | 'storage' | 'components' | 'import' | 'team-retouch' | 'inspiration-library' | 'about';
+
+export const PrivacyConsentPage = ({ onAccept }: { onAccept: () => void | Promise<void> }) => {
+  const [acceptedLegal, setAcceptedLegal] = useState(false);
+  const [acceptedTelemetry, setAcceptedTelemetry] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const ready = acceptedLegal && acceptedTelemetry;
+  const open = (id: 'privacy' | 'terms' | 'information-list' | 'third-parties') => void window.electronAPI.openLegalDocument(id);
+  const accept = async () => {
+    if (!ready || saving) return;
+    setSaving(true);
+    try { await onAccept(); } finally { setSaving(false); }
+  };
+  return <main className="fixed inset-0 z-[1200] flex items-center justify-center overflow-auto bg-slate-950/90 p-6">
+    <section className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-white p-7 shadow-2xl">
+      <div className="flex items-start gap-4"><span className="rounded-2xl bg-blue-50 p-3 text-blue-600"><ShieldCheck size={28}/></span><div><h1 className="text-xl font-bold text-slate-900">内测版隐私与数据确认</h1><p className="mt-2 text-sm leading-6 text-slate-600">照片流当前为受控内测版。参加内测必须发送使用统计和崩溃报告；不同意时不能进入本次内测，可退出软件。统计不上传照片、文件名、完整路径或项目名称等隐私信息。</p></div></div>
+      <div className="mt-6 space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+        <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={acceptedLegal} onChange={event => setAcceptedLegal(event.target.checked)} className="mt-1"/><span className="text-sm leading-6 text-slate-700">我已阅读并同意 <button type="button" onClick={event => { event.preventDefault(); open('terms'); }} className="font-bold text-blue-600 hover:underline">《用户协议》</button> 和 <button type="button" onClick={event => { event.preventDefault(); open('privacy'); }} className="font-bold text-blue-600 hover:underline">《隐私政策》</button></span></label>
+        <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={acceptedTelemetry} onChange={event => setAcceptedTelemetry(event.target.checked)} className="mt-1"/><span><span className="block text-sm font-bold text-slate-700">同意发送使用统计和崩溃报告（内测必选）</span><span className="mt-1 block text-xs leading-5 text-slate-500">使用统计包括随机安装ID、会话ID、版本、平台、功能代号、时间和数量区间；崩溃报告包括错误类型、调用栈和脱敏后的日志尾部。</span></span></label>
+      </div>
+      <div className="mt-4 flex flex-wrap gap-3 text-xs"><button type="button" onClick={() => open('information-list')} className="font-bold text-blue-600 hover:underline">查看个人信息清单</button><button type="button" onClick={() => open('third-parties')} className="font-bold text-blue-600 hover:underline">查看第三方服务清单</button></div>
+      <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => window.electronAPI.closeWindow()} className="dialog-secondary">不同意并退出</button><button type="button" disabled={!ready || saving} onClick={() => void accept()} className="dialog-primary disabled:cursor-not-allowed disabled:opacity-45">{saving ? '正在保存…' : '同意并进入内测'}</button></div>
+    </section>
+  </main>;
+};
 
 const WorkspaceFolderPicker = ({ value, onChange }: { value: string; onChange: (path: string) => void }) => {
   const choose = async () => {
@@ -33,10 +58,9 @@ const formatStorageSize = (sizeBytes = 0) => sizeBytes >= 1024 ** 3
   ? `${(sizeBytes / 1024 ** 3).toFixed(sizeBytes >= 10 * 1024 ** 3 ? 1 : 2)} GB`
   : sizeBytes > 0 ? `${(sizeBytes / 1024 ** 2).toFixed(0)} MB` : '0 MB';
 
-const offerPackageCleanup = async ({ appDialog, kind, componentId, label, packageSizeBytes, repairHint, onNotice }: {
+const offerPackageCleanup = async ({ appDialog, kind, label, packageSizeBytes, repairHint, onNotice }: {
   appDialog: ReturnType<typeof useAppDialog>;
-  kind: 'component' | 'identity-models' | 'advanced';
-  componentId?: string;
+  kind: 'advanced';
   label: string;
   packageSizeBytes?: number;
   repairHint?: string;
@@ -52,7 +76,7 @@ const offerPackageCleanup = async ({ appDialog, kind, componentId, label, packag
     cancelLabel: '保留安装包',
     tone: 'danger',
   })) return;
-  const deleted = await window.electronAPI.deleteComponentPackage(kind, componentId);
+  const deleted = await window.electronAPI.deleteComponentPackage(kind);
   if (!deleted.success) {
     onNotice(`删除安装包失败：${deleted.error || '未知错误'}`, 6000);
     return;
@@ -60,33 +84,19 @@ const offerPackageCleanup = async ({ appDialog, kind, componentId, label, packag
   onNotice(`安装包已删除，释放约 ${formatStorageSize(deleted.deletedBytes || packageSizeBytes)}`);
 };
 
-const IdentityModelPackSettings = ({ component, adafaceReady, osnetX1Ready, onInstall }: { component?: ComponentStatus; adafaceReady: boolean; osnetX1Ready: boolean; onInstall: () => void | Promise<void> }) => {
-  const [installing, setInstalling] = useState(false);
-  const install = async () => {
-    if (installing) return;
-    setInstalling(true);
-    try { await onInstall(); } finally { setInstalling(false); }
-  };
-  const basicReady = Boolean(component?.installed && component.identityAvailable);
-  const enhancedReady = adafaceReady && osnetX1Ready;
+const IdentityModelSettings = ({ component }: { component?: ComponentStatus }) => {
+  const ready = Boolean(component?.installed && component.identityAvailable && component.faceBackend === 'adaface-ir18' && component.bodyBackend === 'osnet-x1');
   return <section className="mt-5">
     <div className="flex items-start gap-3">
       <span className="rounded-lg bg-cyan-100 p-2 text-cyan-700"><ScanSearch size={18}/></span>
-      <div><h5 className="font-bold text-slate-800">跨图片人物身份识别</h5><p className="mt-1 text-xs leading-5 text-slate-500">根据脸部与身体特征，将多张照片里的同一个人归到一起。基础版随组件安装；增强版是可选模型包。</p></div>
+      <div><h5 className="font-bold text-slate-800">跨图片人物身份识别</h5><p className="mt-1 text-xs leading-5 text-slate-500">根据脸部与身体特征，将多张照片里的同一个人归到一起。</p></div>
     </div>
-    <div className="mt-3 grid gap-4 lg:grid-cols-2">
-      <article className="rounded-xl border border-slate-200 bg-white p-4">
-        <div className="flex items-center justify-between gap-3"><h6 className="font-bold text-slate-800">基础版 · YuNet + SFace + OSNet x0.25</h6><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${basicReady ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-600'}`}>{basicReady ? '可用' : '不可用'}</span></div>
-        <p className="mt-2 text-xs leading-5 text-slate-500">提供人脸检测、人脸特征比较和身体外观辅助识别。</p>
-        <p className="mt-3 text-xs font-bold text-slate-700">安装：随“团片协作”基础组件自动安装，无需额外操作。</p>
-        <p className="mt-1 text-xs leading-5 text-slate-500">硬件：CPU 可运行；Intel、AMD、NVIDIA 显卡可选用 DirectML 加速，不要求 CUDA 或 WSL。</p>
-      </article>
-      <article className={`rounded-xl border p-4 ${enhancedReady ? 'border-cyan-200 bg-cyan-50/30' : 'border-slate-200 bg-white'}`}>
-        <div className="flex flex-wrap items-center justify-between gap-3"><h6 className="font-bold text-slate-800">增强版 · AdaFace IR-18 + OSNet x1.0</h6><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${enhancedReady ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{enhancedReady ? '已启用' : '未安装'}</span></div>
+    <div className="mt-3">
+      <article className={`rounded-xl border p-4 ${ready ? 'border-cyan-200 bg-cyan-50/30' : 'border-amber-200 bg-amber-50/40'}`}>
+        <div className="flex flex-wrap items-center justify-between gap-3"><h6 className="font-bold text-slate-800">YuNet + AdaFace IR-18 + OSNet x1.0</h6><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${ready ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{ready ? '可用' : '需要更新组件'}</span></div>
         <p className="mt-2 text-xs leading-5 text-slate-500">改善低质量人脸和身体特征识别；无需 Python、PyTorch 或自行编译。</p>
-        <p className="mt-3 text-xs font-bold text-slate-700">安装：将 <code>PhotoFlow-team-retouch-identity-models-*.zip</code> 放入上方目录，再点击安装。</p>
-        <p className="mt-1 text-xs leading-5 text-slate-500">硬件：与基础版相同，CPU 可运行；DirectML 显卡仅用于加速，不要求 NVIDIA。</p>
-        <div className="mt-4 flex justify-end"><button type="button" onClick={() => void install()} disabled={installing || !component?.installed} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{installing ? <Loader2 size={14} className="animate-spin"/> : <Download size={14}/>}安装身份识别增强包</button></div>
+        <p className="mt-3 text-xs font-bold text-slate-700">安装：三个模型均随“团片协作”组件安装，无需额外模型包。</p>
+        <p className="mt-1 text-xs leading-5 text-slate-500">硬件：CPU 可运行；Intel、AMD、NVIDIA 显卡可选用 DirectML 加速，不要求 CUDA 或 WSL。</p>
         {component?.identityError && <p className="mt-3 break-all rounded-md bg-amber-50 px-2.5 py-2 text-xs leading-5 text-amber-700">人物身份识别模型检测失败：{component.identityError}</p>}
       </article>
     </div>
@@ -105,7 +115,7 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
       title: repair ? '修复人物检测增强版吗？' : '安装人物检测增强版吗？',
       message: repair
         ? '程序将从上方显示的“团片协作组件目录”读取并校验当前版本的高级包，然后替换需要修复的环境。'
-        : '请先把 PhotoFlow 提供的高级引擎 ZIP 放入上方显示的“团片协作组件目录”。程序会校验版本和 SHA-256，然后注册预封装环境；用户不需要编译。',
+        : '请先把照片流提供的高级引擎 ZIP 放入上方显示的“团片协作组件目录”。程序会校验版本和 SHA-256，然后注册预封装环境；用户不需要编译。',
       confirmLabel: repair ? '修复检测增强包' : '安装检测增强包',
     })) return;
     setBusy(repair ? 'repair' : 'install');
@@ -132,7 +142,7 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
   const uninstall = async () => {
     if (busy || !await appDialog.confirm({
       title: '卸载人物检测增强版吗？',
-      message: `将注销 PhotoFlowNative 并删除 PairDETR、SAM 2.1、Python 环境和虚拟磁盘，预计释放 ${formatStorageSize(component?.advancedSizeBytes)}。两个基础版和身份识别增强版不受影响。`,
+      message: `将注销照片流本地增强环境并删除 PairDETR、SAM 2.1、Python 环境和虚拟磁盘，预计释放 ${formatStorageSize(component?.advancedSizeBytes)}。两个基础版和身份识别增强版不受影响。`,
       confirmLabel: '卸载检测增强版', tone: 'danger',
     })) return;
     setBusy('uninstall');
@@ -144,30 +154,21 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
       await onRefresh();
     } finally { setBusy(''); }
   };
-  const openIdentityModelsFolder = async () => {
-    const result = await window.electronAPI.openTeamRetouchIdentityModelsFolder();
+  const openComponentFolder = async () => {
+    const result = await window.electronAPI.openComponentsFolder('team-retouch');
     if (!result.success) onNotice(`打开团片协作组件目录失败：${result.error || '未知错误'}`);
-  };
-  const installIdentityModels = async () => {
-    const result = await window.electronAPI.installTeamRetouchIdentityModels();
-    if (!result.success) { onNotice(`安装增强人物识别模型失败：${result.error || '未知错误'}`, 8000); return; }
-    onNotice('增强人物识别模型已安装并通过校验');
-    await offerPackageCleanup({ appDialog, kind: 'identity-models', label: '身份识别增强包', packageSizeBytes: result.packageSizeBytes, onNotice });
-    await onRefresh();
   };
   const baseAvailable = Boolean(component?.installed && component.runtimeAvailable);
   const advancedReady = Boolean(component?.advancedAvailable);
   const needsRepair = component?.advancedState === 'repair-needed';
-  const adafaceReady = component?.faceBackend === 'adaface-ir18-experimental';
-  const osnetX1Ready = component?.bodyBackend === 'osnet-x1-experimental';
   return <section>
     <div className="flex flex-wrap items-start justify-between gap-3">
-      <div><h4 className="text-sm font-bold text-slate-800">识别能力与安装</h4><p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">人物检测与裁图、跨图片人物身份识别都有基础版和可选增强版。基础版随“团片协作”组件安装；增强包只需放入同一个目录后点击安装。</p></div>
+      <div><h4 className="text-sm font-bold text-slate-800">识别能力与安装</h4><p className="mt-1 max-w-3xl text-sm leading-6 text-slate-500">人物检测与裁图保留 RTMDet 基础版和可选 CUDA 增强版；跨图片人物身份识别统一使用随组件安装的增强模型。</p></div>
       <button type="button" onClick={() => void onRefresh()} disabled={Boolean(busy)} className="dialog-secondary inline-flex items-center gap-2"><RotateCcw size={15} className={busy ? 'animate-spin' : ''}/>重新检测</button>
     </div>
     <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4">
-      <div className="min-w-0 flex-1"><p className="text-xs font-bold text-slate-700">团片协作组件目录</p><p className="mt-1 break-all font-mono text-[11px] leading-5 text-slate-600">{component?.packagePath || '等待读取组件目录'}</p><p className="mt-1 text-xs text-slate-500">两个增强 ZIP 都原样放在这里，无需解压；程序会按文件名识别并校验。</p></div>
-      <button type="button" onClick={() => void openIdentityModelsFolder()} className="dialog-secondary inline-flex items-center gap-2"><FolderOpen size={14}/>打开目录</button>
+      <div className="min-w-0 flex-1"><p className="text-xs font-bold text-slate-700">团片协作组件目录</p><p className="mt-1 break-all font-mono text-[11px] leading-5 text-slate-600">{component?.packagePath || '等待读取组件目录'}</p><p className="mt-1 text-xs text-slate-500">人物检测增强 ZIP 原样放在这里，无需解压；身份识别模型已经包含在组件 ZIP 中。</p></div>
+      <button type="button" onClick={() => void openComponentFolder()} className="dialog-secondary inline-flex items-center gap-2"><FolderOpen size={14}/>打开目录</button>
     </div>
 
     <section className="mt-5">
@@ -183,7 +184,7 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
         <article className={`rounded-xl border p-4 ${advancedReady ? 'border-violet-200 bg-violet-50/30' : needsRepair ? 'border-amber-200 bg-amber-50/40' : 'border-slate-200 bg-white'}`}>
           <div className="flex items-center justify-between gap-3"><h6 className="font-bold text-slate-800">增强版 · PairDETR + SAM 2.1</h6><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${advancedReady ? 'bg-violet-100 text-violet-700' : needsRepair ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>{advancedReady ? '可用' : needsRepair ? '需要修复' : '未安装'}</span></div>
           <p className="mt-2 text-xs leading-5 text-slate-500">改善多人密集、相互遮挡、脸与身体对应及精细分割。</p>
-          <p className="mt-3 text-xs font-bold text-slate-700">安装：将 <code>PhotoFlow-team-retouch-advanced-*.zip</code> 放入上方目录，再检查条件并安装。</p>
+          <p className="mt-3 text-xs font-bold text-slate-700">安装：将照片流团片协作高级包 ZIP 放入上方目录，再检查条件并安装。</p>
           <div className="mt-3 rounded-lg border border-violet-100 bg-white/70 p-3 text-xs leading-5 text-slate-600">
             <p className="font-bold text-slate-700">安装硬性条件</p>
             <p>Windows x64、WSL 2、支持 WSL CUDA 的 NVIDIA 显卡与驱动、目标磁盘至少 35 GB 可用空间。</p>
@@ -199,7 +200,7 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
       </div>
     </section>
 
-    <IdentityModelPackSettings component={component} adafaceReady={adafaceReady} osnetX1Ready={osnetX1Ready} onInstall={installIdentityModels}/>
+    <IdentityModelSettings component={component}/>
     {busy && <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50 p-3" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.progress}>
       <div className="flex justify-between gap-3 text-xs font-bold text-blue-700"><span>{progress.message || '正在处理人物检测增强版'}</span><span>{Math.round(progress.progress)}%</span></div>
       <div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-600 transition-[width]" style={{ width: `${Math.max(2, progress.progress)}%` }} /></div>
@@ -250,10 +251,9 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     setBusyId(component.id);
     try {
       const result = await window.electronAPI.installComponent(component.id);
-      if (!result.success) { onNotice(`安装“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
       if (result.cancelled) return;
+      if (!result.success) { onNotice(`安装“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
       onNotice(`已安装“${component.name}”`);
-      await offerPackageCleanup({ appDialog, kind: 'component', componentId: component.id, label: `“${component.name}”组件`, packageSizeBytes: result.packageSizeBytes, onNotice });
       await onComponentsChanged();
     } finally { setBusyId(''); }
   };
@@ -273,14 +273,14 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     } finally { setBusyId(''); }
   };
   return <section>
-    <div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="text-sm font-bold text-slate-800">组件安装与卸载</h4><p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">所有额外功能均以预编译 ZIP 发布，不需要安装 Python 或自行编译。每个组件只有一个目录，该组件的基础包和扩展包都放在里面。</p></div><div className="flex gap-2"><button type="button" onClick={() => void onRefresh()} disabled={loading} className="dialog-secondary inline-flex items-center gap-2"><RotateCcw size={15} className={loading ? 'animate-spin' : ''}/>刷新状态</button><button type="button" onClick={() => void openFolder()} className="dialog-secondary inline-flex items-center gap-2"><FolderOpen size={15}/>打开组件根目录</button></div></div>
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="text-sm font-bold text-slate-800">组件安装与卸载</h4><p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">点击安装后直接选择预编译 ZIP。照片流会在临时目录中解压、校验并复制到用户组件目录，不会移动或删除你选择的原 ZIP；不需要安装 Python 或自行编译。</p></div><div className="flex gap-2"><button type="button" onClick={() => void onRefresh()} disabled={loading} className="dialog-secondary inline-flex items-center gap-2"><RotateCcw size={15} className={loading ? 'animate-spin' : ''}/>刷新状态</button><button type="button" onClick={() => void openFolder()} className="dialog-secondary inline-flex items-center gap-2"><FolderOpen size={15}/>打开组件根目录</button></div></div>
     {installPath && <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"><p className="text-xs font-bold text-slate-500">组件根目录</p><p className="mt-1 break-all font-mono text-xs text-slate-600">{installPath}</p></div>}
     <div className="mt-4 grid gap-3 sm:grid-cols-2">{components.map(component => {
       const stateText = !component.installed ? (component.compatible ? '未安装' : '不兼容') : component.source === 'development' ? '开发组件' : '已安装';
       const stateClass = component.installed ? 'text-emerald-700 bg-emerald-50 border-emerald-200' : component.compatible ? 'text-slate-600 bg-slate-50 border-slate-200' : 'text-amber-700 bg-amber-50 border-amber-200';
       const busy = busyId === component.id;
-      const canUninstall = component.installed && component.source === 'application';
-      return <article key={component.id} className="flex flex-col rounded-xl border border-slate-200 p-4"><div className="flex items-start justify-between gap-3"><div><h5 className="text-sm font-bold text-slate-800">{component.name}</h5><p className="mt-1 text-xs leading-5 text-slate-500">{component.description}</p></div><span className={`shrink-0 rounded-full border px-2 py-1 text-[11px] font-bold ${stateClass}`}>{stateText}</span></div><p className="mt-3 text-xs text-slate-500">{component.installed ? [component.version && `版本 ${component.version}`, formatComponentSize(component.sizeBytes)].filter(Boolean).join(' · ') : `组件 ID：${component.id}`}</p>{component.packagePath && <p className="mt-2 break-all font-mono text-[11px] leading-5 text-slate-400">{component.packagePath}</p>}{component.error && <p className="mt-2 break-all text-xs leading-5 text-amber-700">{component.error}</p>}<div className="mt-auto flex justify-end gap-2 pt-4"><button type="button" onClick={() => void openFolder(component.id)} className="dialog-secondary inline-flex items-center gap-1.5"><FolderOpen size={13}/>打开目录</button>{!component.installed ? <button type="button" onClick={() => void install(component)} disabled={Boolean(busyId)} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}{component.compatible ? '安装组件' : '重新安装'}</button> : canUninstall ? <button type="button" onClick={() => void uninstall(component)} disabled={Boolean(busyId)} className="inline-flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}卸载组件</button> : <span className="text-xs text-slate-400">{component.source === 'development' ? '开发环境中由源码提供' : '随应用提供，不能单独卸载'}</span>}</div></article>;
+      const canUninstall = component.installed && component.source === 'user';
+      return <article key={component.id} className="flex flex-col rounded-xl border border-slate-200 p-4"><div className="flex items-start justify-between gap-3"><div><h5 className="text-sm font-bold text-slate-800">{component.name}</h5><p className="mt-1 text-xs leading-5 text-slate-500">{component.description}</p></div><span className={`shrink-0 rounded-full border px-2 py-1 text-[11px] font-bold ${stateClass}`}>{stateText}</span></div><p className="mt-3 text-xs text-slate-500">{component.installed ? [component.version && `版本 ${component.version}`, formatComponentSize(component.sizeBytes)].filter(Boolean).join(' · ') : `组件 ID：${component.id}`}</p>{component.packagePath && <p className="mt-2 break-all font-mono text-[11px] leading-5 text-slate-400">{component.packagePath}</p>}{component.error && <p className="mt-2 break-all text-xs leading-5 text-amber-700">{component.error}</p>}<div className="mt-auto flex justify-end gap-2 pt-4"><button type="button" onClick={() => void openFolder(component.id)} className="dialog-secondary inline-flex items-center gap-1.5"><FolderOpen size={13}/>打开目录</button>{!component.installed ? <button type="button" onClick={() => void install(component)} disabled={Boolean(busyId)} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}{component.compatible ? '安装组件' : '重新安装'}</button> : canUninstall ? <button type="button" onClick={() => void uninstall(component)} disabled={Boolean(busyId)} className="inline-flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}卸载组件</button> : <span className="text-xs text-slate-400">{component.source === 'development' ? '开发环境中由源码提供' : '组件不在用户组件目录中'}</span>}</div></article>;
     })}</div>
     {!loading && !components.length && <p className="mt-4 text-sm text-slate-500">没有读取到组件注册信息。</p>}
   </section>;
@@ -303,8 +303,62 @@ const SettingsNavigator = ({ activeSection, components, onSelect }: { activeSect
     <div className="flex items-center gap-2 px-3 pb-3 pt-2 text-sm font-bold text-slate-800"><Settings size={17} className="text-blue-600"/>设置</div>
     <div className="space-y-1">{items.map(renderItem)}</div>
     <div className="mt-3 border-t border-slate-200 pt-3"><p className="px-3 pb-1.5 text-[11px] font-bold tracking-wide text-slate-400">组件</p><div className="space-y-1">{componentItems.map(renderItem)}</div></div>
-    <div className="mt-3 border-t border-slate-200 pt-3">{renderItem({ id: 'about', label: '关于', description: '版本、项目与开源许可', icon: <AtSign size={18}/> })}</div>
+    <div className="mt-3 space-y-1 border-t border-slate-200 pt-3">
+      {renderItem({ id: 'about', label: '关于', description: '版本、项目与开源许可', icon: <AtSign size={18}/> })}
+      {renderItem({ id: 'privacy', label: '隐私与数据', description: '内测统计、人脸信息与法律文件', icon: <ShieldCheck size={18}/> })}
+    </div>
   </nav>;
+};
+
+const PROJECT_TOOLBAR_ITEMS: Record<ProjectToolbarActionId, { label: string; description: string; icon: React.ReactNode }> = {
+  'smart-import': { label: '从 SD 卡导入', description: '打开项目的 SD 卡整理导入面板', icon: <MemoryStick size={17}/> },
+  'filename-selection': { label: '从文件名选片', description: '按文件名把选中的素材整理到选片文件夹', icon: <FileText size={17}/> },
+  'select-media': { label: '选片', description: '把当前选择的图片或视频加入选片结果', icon: <CheckCircle2 size={17}/> },
+  storyboard: { label: '提取分镜帧', description: '从所选视频或文件夹提取分镜帧', icon: <Video size={17}/> },
+  'screenshot-main-image': { label: '提取截图主图', description: '从所选截图中识别并截取主要图片区域', icon: <Crop size={17}/> },
+  photoshop: { label: '在 PS 中打开', description: '把所选图片或 RAW 发送到 Photoshop', icon: <span className="flex h-[17px] w-[17px] items-center justify-center rounded border border-blue-400 text-[9px] font-bold text-blue-600">Ps</span> },
+  'png-converter': { label: 'PNG 转 JPG', description: '转换所选 PNG 文件或文件夹', icon: <ImageIcon size={17}/> },
+  'version-management': { label: '版本管理', description: '管理素材版本或标记进度文件夹', icon: <GitBranch size={17}/> },
+  'team-retouch': { label: '团片协作', description: '打开项目的团片协作工作区', icon: <UsersRound size={17}/> },
+  'final-versions': { label: '浏览最终版', description: '浏览项目中所有已经标记为最终版的图片', icon: <Heart size={17}/> },
+};
+
+const ProjectToolbarSettingsEditor = ({ value, onChange }: { value: AppConfig['projectToolbar']; onChange: (value: AppConfig['projectToolbar']) => void }) => {
+  const [draggedId, setDraggedId] = useState<ProjectToolbarActionId>();
+  const hidden = new Set(value.hidden);
+  const reorder = (source: ProjectToolbarActionId, target: ProjectToolbarActionId) => {
+    if (source === target) return;
+    const next = [...value.order];
+    const sourceIndex = next.indexOf(source);
+    const targetIndex = next.indexOf(target);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    next.splice(sourceIndex, 1);
+    next.splice(targetIndex, 0, source);
+    onChange({ ...value, order: next });
+  };
+  const move = (id: ProjectToolbarActionId, offset: -1 | 1) => {
+    const index = value.order.indexOf(id);
+    const target = value.order[index + offset];
+    if (target) reorder(id, target);
+  };
+  const toggle = (id: ProjectToolbarActionId) => onChange({
+    ...value,
+    hidden: hidden.has(id) ? value.hidden.filter(item => item !== id) : [...value.hidden, id],
+  });
+  return <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-slate-50/60">
+    {value.order.map((id, index) => {
+      const item = PROJECT_TOOLBAR_ITEMS[id];
+      const visible = !hidden.has(id);
+      return <div key={id} onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }} onDrop={event => { event.preventDefault(); if (draggedId) reorder(draggedId, id); setDraggedId(undefined); }} className={`flex items-center gap-3 border-b border-slate-200 px-3 py-3 last:border-b-0 ${draggedId === id ? 'bg-blue-50 opacity-60' : 'bg-white'}`}>
+        <button type="button" draggable onDragStart={event => { setDraggedId(id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', id); }} onDragEnd={() => setDraggedId(undefined)} title="拖动调整顺序" aria-label={`拖动“${item.label}”调整顺序`} className="cursor-grab rounded p-1 text-slate-400 hover:bg-slate-100 active:cursor-grabbing"><GripVertical size={17}/></button>
+        <span className={`shrink-0 ${visible ? 'text-blue-600' : 'text-slate-300'}`}>{item.icon}</span>
+        <span className={`min-w-0 flex-1 ${visible ? '' : 'opacity-50'}`}><span className="block text-sm font-bold text-slate-700">{item.label}</span><span className="mt-0.5 block text-xs text-slate-400">{item.description}</span></span>
+        <div className="flex shrink-0 items-center gap-1"><button type="button" disabled={index === 0} onClick={() => move(id, -1)} title="上移" aria-label={`上移“${item.label}”`} className="rounded p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-25"><ChevronUp size={15}/></button><button type="button" disabled={index === value.order.length - 1} onClick={() => move(id, 1)} title="下移" aria-label={`下移“${item.label}”`} className="rounded p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-25"><ChevronDown size={15}/></button></div>
+        <label className="flex shrink-0 cursor-pointer items-center gap-2 text-xs font-medium text-slate-600"><input type="checkbox" checked={visible} onChange={() => toggle(id)}/>显示</label>
+      </div>;
+    })}
+    <div className="flex items-center justify-between gap-3 border-t border-slate-200 bg-slate-50 px-3 py-2.5"><span className="text-xs text-slate-400">拖动左侧手柄自由排序，更改会立即保存。</span><button type="button" onClick={() => onChange({ order: [...PROJECT_TOOLBAR_ACTION_IDS], hidden: [] })} className="text-xs font-bold text-blue-600 hover:text-blue-700">恢复默认</button></div>
+  </div>;
 };
 
 const SettingsPage = ({ activeSection, config, components, componentInstallPath, componentsLoading, onRefreshComponents, onComponentsChanged, onSave, getDefaultSettings, onNotice }: { activeSection: SettingsSection; config: AppConfig; components: ComponentStatus[]; componentInstallPath: string; componentsLoading: boolean; onRefreshComponents: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onSave: (config: AppConfig) => boolean | Promise<boolean>; getDefaultSettings: () => AppConfig | Promise<AppConfig>; onNotice: (message: string, duration?: number) => void }) => {
@@ -354,15 +408,11 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
     <section><h4 className="text-sm font-bold text-slate-800">界面配色</h4><div className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">{([['system', '适应系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([theme, label]) => <button key={theme} onClick={() => update('theme', theme)} className={`rounded-md px-4 py-2 text-sm font-bold transition ${draft.theme === theme ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}</div></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">工作目录</h4><p className="mt-1 text-sm leading-6 text-slate-500">项目会直接放在选中的客户文件夹中；只有选择磁盘根目录时，才会使用根目录下的“照片流”文件夹。</p><div className="mt-4"><WorkspaceFolderPicker value={draft.workspacePath} onChange={workspacePath => update('workspacePath', workspacePath)}/></div></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">项目与文件夹</h4><div className="mt-5"><label className="form-label">文件夹默认排序方式</label><select value={draft.defaultFolderSort} onChange={event => update('defaultFolderSort', event.target.value as AppConfig['defaultFolderSort'])} className="form-input"><option value="date">修改日期（最新优先）</option><option value="name">文件名（A–Z）</option><option value="size">大小（从大到小）</option></select><p className="mt-2 text-xs leading-5 text-slate-500">打开项目文件夹时采用此顺序；仍可在文件浏览器的“排序”菜单中临时调整。</p></div></section>
+    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">项目工具栏</h4><p className="mt-1 text-sm leading-6 text-slate-500">调整项目文件浏览器中工作流按钮的显示状态和排列顺序。Photoshop、团片协作等按钮仍会根据组件是否可用自动隐藏。</p><ProjectToolbarSettingsEditor value={draft.projectToolbar} onChange={projectToolbar => update('projectToolbar', projectToolbar)}/></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">角色生日</h4><label className="settings-check"><input type="checkbox" checked={draft.birthdayEnabled} onChange={event => update('birthdayEnabled', event.target.checked)}/>在首页显示角色生日</label></section>
-    <section className="border-t border-slate-100 pt-6">
-      <h4 className="text-sm font-bold text-slate-800">隐私与使用统计</h4>
-      <p className="mt-1 text-xs leading-5 text-slate-500">内测版期间默认开启且暂时无法关闭。统计只包含匿名安装 ID、软件版本、功能代号和导入数量区间，不上传照片、文件名、路径或项目名称。</p>
-      <label className="settings-check cursor-not-allowed"><input type="checkbox" checked disabled title="内测版暂时无法关闭"/><span><span className="block">发送匿名使用统计</span><span className="mt-1 block text-xs leading-5 text-slate-500">内测版暂时无法关闭；用于计算激活、留存和高频功能。</span></span></label>
-      <label className="settings-check cursor-not-allowed"><input type="checkbox" checked disabled title="内测版暂时无法关闭"/><span><span className="block">自动发送崩溃报告</span><span className="mt-1 block text-xs leading-5 text-slate-500">内测版暂时无法关闭；仅上传错误堆栈和脱敏后的错误日志尾部。</span></span></label>
-    </section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">恢复默认设置</h4><p className="mt-1 text-sm leading-6 text-slate-500">保留当前工作目录，将其他应用设置恢复为初始值。</p><button type="button" onClick={() => void restoreDefaults()} className="dialog-secondary mt-4 inline-flex items-center gap-2"><RotateCcw size={15}/>恢复默认设置</button></section>
     </>}
+    {activeSection === 'privacy' && <PrivacySettings onNotice={onNotice}/>}
     {activeSection === 'storage' && <>
     <section><h4 className="text-sm font-bold text-slate-800">缩略图缓存</h4><p className="mt-1 text-sm text-slate-500">设置图片、RAW 和视频缩略图缓存的容量与位置，并可按时间清理。版本历史预览固定保存在 AppData，不会写入项目目录。</p><div className="mt-4"><MediaCacheSettings config={draft.mediaCache} onChange={mediaCache => update('mediaCache', mediaCache)}/></div></section>
     <InterfaceCacheSettings onNotice={onNotice}/>
@@ -378,7 +428,7 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
       ['basic', '基础模式', '固定使用 RTMDet，不启动 WSL，速度快且资源占用较低。'],
       ['advanced', '高级模式', '必须使用 PairDETR + SAM2；不可用时停止并提示修复。'],
     ] as const).map(([mode, label, description]) => <label key={mode} className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.backendMode === mode ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'} ${mode === 'advanced' && !teamRetouchComponent?.advancedAvailable ? 'opacity-60' : ''}`}><input type="radio" name="team-retouch-backend-mode" value={mode} checked={teamRetouchSettings.backendMode === mode} disabled={mode === 'advanced' && !teamRetouchComponent?.advancedAvailable} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, backendMode: mode })} className="mr-2"/><span className="font-bold text-slate-800">{label}</span><span className="mt-2 block text-xs leading-5 text-slate-500">{description}</span></label>)}</div></section>
-    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">人物超过 4000 像素时</h4><p className="mt-1 text-xs leading-5 text-slate-500">通常手机修图软件能导出的画质长边不超过 4000 像素，因此建议将单张工作图裁剪到 4000 像素以内。相邻人物会尽量合并到同一张工作图。</p><div className="mt-3 grid gap-3 md:grid-cols-2"><label className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.oversizeCropMode === 'face-centered' ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="oversize-crop-mode" value="face-centered" checked={teamRetouchSettings.oversizeCropMode === 'face-centered'} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: 'face-centered' })} className="mr-2"/><span className="font-bold text-slate-800">保持 4000 像素（推荐）</span><span className="mt-2 block text-xs leading-5 text-slate-500">以脸为中心裁剪，可能只保留脸和部分身体；更适合手机传输与修图。</span></label><label className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.oversizeCropMode === 'expand' ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="oversize-crop-mode" value="expand" checked={teamRetouchSettings.oversizeCropMode === 'expand'} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: 'expand' })} className="mr-2"/><span className="font-bold text-slate-800">扩大裁剪，保留完整人物</span><span className="mt-2 block text-xs leading-5 text-slate-500">工作图可以超过 4000 像素，完整保留人物，但可能会使部分手机后期软件无法导出原尺寸而影响成图画质。</span></label></div></section>
+    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">人物超过 4000 像素时</h4><p className="mt-1 text-xs leading-5 text-slate-500">通常手机修图软件能导出的画质长边不超过 4000 像素。相邻人物只有在脸到肩膀区域都能完整放入时才会合并，放不下会自动拆分为更多工作图。</p><div className="mt-3 grid gap-3 md:grid-cols-2"><label className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.oversizeCropMode === 'face-centered' ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="oversize-crop-mode" value="face-centered" checked={teamRetouchSettings.oversizeCropMode === 'face-centered'} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: 'face-centered' })} className="mr-2"/><span className="font-bold text-slate-800">保持 4000 像素（推荐）</span><span className="mt-2 block text-xs leading-5 text-slate-500">优先完整保留每个人的脸到肩膀，并在原图允许时将工作图长边扩展到 4000 像素；一张装不下会自动拆分。</span></label><label className={`cursor-pointer rounded-xl border p-4 transition ${teamRetouchSettings.oversizeCropMode === 'expand' ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="oversize-crop-mode" value="expand" checked={teamRetouchSettings.oversizeCropMode === 'expand'} onChange={() => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: 'expand' })} className="mr-2"/><span className="font-bold text-slate-800">扩大裁剪，保留完整人物</span><span className="mt-2 block text-xs leading-5 text-slate-500">工作图可以超过 4000 像素，完整保留人物，但可能会使部分手机后期软件无法导出原尺寸而影响成图画质。</span></label></div></section>
     </>}
     {activeSection === 'inspiration-library' && <>
     <section><h4 className="text-sm font-bold text-slate-800">灵感库</h4><p className="mt-1 text-sm leading-6 text-slate-500">灵感浏览、项目策划汇聚和 Office 图片提取均为主程序内置功能。</p></section>
@@ -387,11 +437,86 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">Office 图片提取</h4><p className="mt-2 text-sm leading-6 text-slate-500">在项目或灵感库的文件浏览器中右键 Word、PowerPoint 或 Excel 文档并选择“提取图片”。图片会保存到文档同目录的“文档名_media”文件夹；重名时自动追加编号，不覆盖已有内容。</p></section>
     </>}
     {activeSection === 'import' && <>
-    <section><h4 className="text-sm font-bold text-slate-800">从 SD 卡导入</h4><label className="settings-check"><input type="checkbox" checked={draft.smartImport.autoStart} onChange={event => update('smartImport', { ...draft.smartImport, autoStart: event.target.checked })}/>应用启动时自动读取 SD 卡</label><label className="settings-check"><input type="checkbox" checked={draft.smartImport.splitLargeFiles} onChange={event => update('smartImport', { ...draft.smartImport, splitLargeFiles: event.target.checked })}/><span><span className="block">超过 4GB 的视频自动分割</span><span className="mt-1 block text-xs leading-5 text-slate-500">用于兼容部分老旧 U 盘的 FAT32 单文件大小限制，以及某些云盘的单文件上传限制。</span></span></label><label className="settings-check"><input type="checkbox" checked={draft.smartImport.generateVideoPreview} onChange={event => update('smartImport', { ...draft.smartImport, generateVideoPreview: event.target.checked })}/><span><span className="block">生成视频预览</span><span className="mt-1 block text-xs leading-5 text-slate-500">为导入到“mov”的大型视频生成 H.264 文件，储存在“mov_预览”并作为软件内快速播放源。关闭后不会在浏览时临时转码这些导入视频；其他普通视频仍可照常预览。</span></span></label><div className={`ml-7 mt-3 max-w-xl ${draft.smartImport.generateVideoPreview ? '' : 'opacity-50'}`}><label className="form-label" htmlFor="video-preview-quality">预览质量</label><select id="video-preview-quality" value={draft.smartImport.videoPreviewQuality} disabled={!draft.smartImport.generateVideoPreview} onChange={event => update('smartImport', { ...draft.smartImport, videoPreviewQuality: event.target.value as AppConfig['smartImport']['videoPreviewQuality'] })} className="form-input disabled:cursor-not-allowed"><option value="medium">中（默认 · 约 4 Mbps）</option><option value="high">高（约 10 Mbps）</option></select><p className="mt-2 text-xs leading-5 text-slate-500">{{ medium: '保持当前预览质量，生成速度和文件大小较均衡。', high: '接近 Adobe 匹配源高比特率，画面细节更好，文件也会明显增大。' }[draft.smartImport.videoPreviewQuality]}</p></div></section>
+    <section><h4 className="text-sm font-bold text-slate-800">从 SD 卡导入</h4><label className="settings-check"><input type="checkbox" checked={draft.smartImport.autoStart} onChange={event => update('smartImport', { ...draft.smartImport, autoStart: event.target.checked })}/>应用启动时自动读取 SD 卡</label><label className="settings-check"><input type="checkbox" checked={draft.smartImport.splitLargeFiles} onChange={event => update('smartImport', { ...draft.smartImport, splitLargeFiles: event.target.checked })}/><span><span className="block">超过 4GB 的视频自动分割</span><span className="mt-1 block text-xs leading-5 text-slate-500">用于兼容部分老旧 U 盘的 FAT32 单文件大小限制，以及某些云盘的单文件上传限制。</span></span></label><label className="settings-check"><input type="checkbox" checked={draft.smartImport.generateVideoPreview} onChange={event => update('smartImport', { ...draft.smartImport, generateVideoPreview: event.target.checked })}/><span><span className="block">生成视频预览</span><span className="mt-1 block text-xs leading-5 text-slate-500">为导入到“mov”的大型视频生成 H.264 文件，储存在“mov_预览”并作为软件内快速播放源。关闭后不会在浏览时临时转码这些导入视频；其他普通视频仍可照常预览。</span></span></label><fieldset disabled={!draft.smartImport.generateVideoPreview} className={`ml-7 mt-3 max-w-xl ${draft.smartImport.generateVideoPreview ? '' : 'opacity-50'}`}><legend className="text-xs font-bold text-slate-700">预览质量</legend><div className="mt-3 grid gap-3 md:grid-cols-2">{([
+      ['medium', '中（默认 · 约 4 Mbps）', '保持当前预览质量，生成速度和文件大小较均衡。'],
+      ['high', '高（约 10 Mbps）', '接近 Adobe 匹配源高比特率，画面细节更好，文件也会明显增大。'],
+    ] as const).map(([quality, label, description]) => <label key={quality} className={`rounded-xl border p-4 transition ${draft.smartImport.generateVideoPreview ? 'cursor-pointer' : 'cursor-not-allowed'} ${draft.smartImport.videoPreviewQuality === quality ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="video-preview-quality" value={quality} checked={draft.smartImport.videoPreviewQuality === quality} onChange={() => update('smartImport', { ...draft.smartImport, videoPreviewQuality: quality })} className="mr-2"/><span className="font-bold text-slate-800">{label}</span><span className="mt-2 block text-xs leading-5 text-slate-500">{description}</span></label>)}</div></fieldset></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">导入设置</h4><label className="settings-check"><input type="checkbox" checked={draft.fileImport.preserveOriginal} onChange={event => update('fileImport', { preserveOriginal: event.target.checked })}/><span><span className="block">导入后保留原始文件</span><span className="mt-1 block text-xs leading-5 text-slate-500">开启此项后导入的文件会保留源文件。这可能会导致大量的文件重复。</span></span></label><label className="settings-check"><input type="checkbox" checked={draft.brollImport.splitLargeFiles} onChange={event => update('brollImport', { ...draft.brollImport, splitLargeFiles: event.target.checked })}/><span><span className="block">花絮视频超过 4GB 时自动分割</span><span className="mt-1 block text-xs leading-5 text-slate-500">用于兼容 FAT32 和部分云盘的单文件大小限制。</span></span></label></section>
     </>}
     {activeSection === 'about' && <AboutSettings/>}
   </div></section>;
+};
+
+const PrivacySettings = ({ onNotice }: { onNotice: (message: string, duration?: number) => void }) => {
+  const appDialog = useAppDialog();
+  const [state, setState] = useState<PrivacyConsentState | null>(null);
+  useEffect(() => { void window.electronAPI.getPrivacyConsentState().then(setState); }, []);
+  const open = async (id: LegalDocumentId) => {
+    const result = await window.electronAPI.openLegalDocument(id);
+    if (!result.success) onNotice(`打开法律文件失败：${result.error || '未知错误'}`, 5000);
+  };
+  const setFaceConsent = async (granted: boolean) => {
+    if (granted && !await appDialog.confirm({
+      title: '单独同意处理人脸信息',
+      message: '人物身份识别会在本机提取人脸身份特征和身体外观特征，用于跨照片生成同一人物候选分组。',
+      detail: '请确认已取得被摄者或其监护人的合法授权。照片和特征不会因该功能自动上传；自动结果必须人工确认。',
+      confirmLabel: '单独同意',
+      cancelLabel: '暂不启用',
+    })) return;
+    if (!granted && !await appDialog.confirm({
+      title: '撤回人脸识别同意吗？',
+      message: '撤回后将停止新的跨照片人物身份识别。已有项目中的人物名称、候选分组和工作图不会自动删除。',
+      detail: '如需删除已有结果，请在相应项目中删除人物身份或清理项目数据。',
+      confirmLabel: '撤回同意',
+      cancelLabel: '保留',
+      tone: 'danger',
+    })) return;
+    const result = await window.electronAPI.savePrivacyConsent({ faceRecognitionGranted: granted });
+    if (!result.success || !result.state) { onNotice(`保存人脸识别选择失败：${result.error || '未知错误'}`, 5000); return; }
+    setState(result.state);
+    onNotice(granted ? '已单独同意本地人脸身份识别' : '已撤回人脸身份识别同意');
+  };
+  const clearTelemetry = async () => {
+    if (!await appDialog.confirm({
+      title: '重置本机统计标识吗？',
+      message: '将删除尚未发送的统计与崩溃队列，并生成新的随机安装ID。已经发送到服务器的数据不会因此自动删除。',
+      confirmLabel: '清除并重置',
+      cancelLabel: '取消',
+      tone: 'danger',
+    })) return;
+    const result = await window.electronAPI.clearTelemetryLocalData();
+    onNotice(result.success ? '本机统计标识和待发送队列已重置' : `清理失败：${result.error || '未知错误'}`, 5000);
+  };
+  const leaveInternalBeta = async () => {
+    if (!await appDialog.confirm({
+      title: '撤回同意并退出内测吗？',
+      message: '撤回后，照片流将停止发送新的使用统计和崩溃报告并立即退出。下次启动仍需重新同意才能进入内测。',
+      detail: '此操作会清除本机待发送队列并重置随机安装ID，但不会自动删除服务器已经接收的数据；如需删除请通过隐私政策中的联系方式提出请求。',
+      confirmLabel: '撤回并退出',
+      cancelLabel: '继续参加内测',
+      tone: 'danger',
+    })) return;
+    await window.electronAPI.savePrivacyConsent({ revokeCore: true });
+    await window.electronAPI.clearTelemetryLocalData();
+    window.electronAPI.closeWindow();
+  };
+  const legalDocuments: Array<[LegalDocumentId, string, string]> = [
+    ['privacy', '隐私政策', '数据处理、保存期限和用户权利'],
+    ['terms', '用户协议', '内测资格、软件许可和使用责任'],
+    ['face', '人脸信息处理规则', '敏感个人信息的单独说明'],
+    ['information-list', '个人信息清单', '逐项列明本地和联网数据'],
+    ['third-parties', '第三方服务清单', '腾讯云及主动访问的外部链接'],
+    ['permissions', '权限与文件访问说明', '工作目录、磁盘和外部程序'],
+    ['children', '儿童个人信息规则', '不满十四周岁被摄者信息'],
+    ['customer-data', '客户数据处理条款', '影楼和摄影工作室使用规则'],
+    ['open-source', '开源许可证说明', '第三方软件和模型许可'],
+  ];
+  return <div className="space-y-7">
+    <section><div className="flex items-center gap-2"><ShieldCheck size={19} className="text-blue-600"/><h4 className="text-base font-bold text-slate-800">内测数据要求</h4></div><p className="mt-2 text-sm leading-6 text-slate-500">当前内测资格要求使用统计和崩溃报告始终开启。不同意时软件不会进入主界面。统计使用的是可区分安装实例的随机ID，属于去标识化数据，不应理解为绝对匿名。</p><label className="settings-check cursor-not-allowed"><input type="checkbox" checked disabled/><span><span className="block">发送使用统计（内测必须）</span><span className="mt-1 block text-xs leading-5 text-slate-500">随机安装ID、会话ID、版本、平台、功能代号、时间及时区、数量区间。</span></span></label><label className="settings-check cursor-not-allowed"><input type="checkbox" checked disabled/><span><span className="block">发送崩溃报告（内测必须）</span><span className="mt-1 block text-xs leading-5 text-slate-500">错误类型、调用栈和脱敏后的错误日志尾部。</span></span></label><div className="mt-3 flex flex-wrap gap-2"><button type="button" onClick={() => void clearTelemetry()} className="dialog-secondary inline-flex items-center gap-2"><Trash2 size={14}/>重置本机统计标识与队列</button><button type="button" onClick={() => void leaveInternalBeta()} className="rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50">撤回同意并退出内测</button></div></section>
+    <section className="border-t border-slate-100 pt-6"><h4 className="text-base font-bold text-slate-800">人脸身份识别</h4><p className="mt-1 text-sm leading-6 text-slate-500">普通人物检测、裁图和手工标记无需启用跨照片身份识别。首次自动识别同一人物时仍会再次显示单独确认。</p><label className="settings-check"><input type="checkbox" checked={state?.faceRecognitionGranted === true} disabled={!state} onChange={event => void setFaceConsent(event.target.checked)}/><span><span className="block">允许在本机处理人脸特征以识别同一人物</span><span className="mt-1 block text-xs leading-5 text-slate-500">可随时撤回；撤回不会自动删除已经生成的项目数据。</span></span></label><button type="button" onClick={() => void open('face')} className="text-xs font-bold text-blue-600 hover:underline">查看《人脸信息处理规则》</button></section>
+    <section className="border-t border-slate-100 pt-6"><h4 className="text-base font-bold text-slate-800">法律与数据说明</h4><div className="mt-4 grid gap-3 md:grid-cols-2">{legalDocuments.map(([id, label, description]) => <button type="button" key={id} onClick={() => void open(id)} className="rounded-xl border border-slate-200 bg-white p-4 text-left transition hover:border-blue-300 hover:bg-blue-50"><span className="flex items-center justify-between gap-2 font-bold text-slate-800">{label}<ExternalLink size={14} className="text-blue-500"/></span><span className="mt-1 block text-xs leading-5 text-slate-500">{description}</span></button>)}</div></section>
+    <section className="border-t border-slate-100 pt-6 text-xs leading-5 text-slate-500"><p>当前隐私政策版本：{state?.currentPrivacyNoticeVersion || '读取中'}</p><p>当前用户协议版本：{state?.currentTermsVersion || '读取中'}</p><p>联系方式：akiyastudio@qq.com</p></section>
+  </div>;
 };
 
 const AboutSettings = () => {
@@ -407,7 +532,7 @@ const AboutSettings = () => {
     <section>
       <p className="text-lg font-bold text-slate-800">by秋也寻</p>
       <div className="mt-1 flex flex-wrap items-center gap-3">
-        <p className="font-medium text-blue-600">版本 26.7.28</p>
+        <p className="font-medium text-blue-600">版本 26.7.29</p>
         <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-bold leading-5 text-amber-700">内测版</span>
         <button type="button" onClick={() => void checkForUpdates()} disabled={updateStatus === 'checking'} className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-0.5 text-xs font-bold leading-5 text-blue-700 transition hover:bg-blue-100 disabled:cursor-wait disabled:opacity-60">{updateStatus === 'checking' ? '正在检查…' : '检查更新'}</button>
         {updateStatus === 'latest' && <span className="text-xs text-emerald-600">已是最新版本</span>}

@@ -13,6 +13,7 @@ const createVersionService = ({ repository }) => ({
   recordCompare: (root, payload) => repository.recordCompare(root, payload),
   listProgress: (root, projectName) => repository.listProgress(root, projectName),
   registerProgress: (root, payload) => repository.registerProgress(root, payload),
+  updateProgressTree: (root, payload) => repository.updateProgressTree(root, payload),
   registerBatchBaseline: (root, payload) => repository.registerBatchBaseline(root, payload),
   commitBatchCompare: (root, payload) => repository.commitBatchCompare(root, payload),
   listTeamPatches: (root, photoId) => repository.listTeamPatches(root, photoId),

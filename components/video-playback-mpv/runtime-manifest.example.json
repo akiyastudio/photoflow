@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "kind": "photoflow-libmpv-runtime",
+  "platform": "windows-x64",
+  "license": "LGPL-2.1-or-later",
+  "mpv": {
+    "version": "0.41.0",
+    "repository": "https://github.com/mpv-player/mpv.git",
+    "ref": "v0.41.0",
+    "commit": "填写实际完整提交哈希"
+  },
+  "mesonOptions": [
+    "-Dgpl=false",
+    "-Dlibmpv=true",
+    "-Dcplayer=false",
+    "-Dbuild-date=false"
+  ],
+  "linkedFfmpeg": {
+    "version": "填写实际版本",
+    "commit": "填写实际完整提交哈希",
+    "license": "LGPL-2.1-or-later",
+    "configureFlags": [
+      "--disable-autodetect",
+      "--disable-network",
+      "--disable-gpl",
+      "--disable-nonfree"
+    ]
+  },
+  "files": [
+    {
+      "file": "libmpv-2.dll",
+      "sha256": "填写 64 位 SHA-256"
+    }
+  ],
+  "complianceArtifacts": {
+    "sourceArchive": {
+      "file": "libmpv-lgpl-corresponding-source.zip",
+      "sha256": "填写 64 位 SHA-256"
+    },
+    "licenseArchive": {
+      "file": "libmpv-lgpl-licenses.zip",
+      "sha256": "填写 64 位 SHA-256"
+    }
+  }
+}

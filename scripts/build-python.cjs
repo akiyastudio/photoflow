@@ -32,6 +32,7 @@ const inspirationTools = spawnSync(python, [
   '--exclude-module', 'torch', '--exclude-module', 'torchvision',
   '--exclude-module', 'torchaudio', '--exclude-module', 'triton',
   '--hidden-import', 'research', '--hidden-import', 'office_media_extract',
+  '--hidden-import', 'screenshot_main_image',
   'inspiration_tools.py',
 ], { cwd: join(root, 'python'), stdio: 'inherit' });
 

@@ -1,0 +1,41 @@
+name: Build audited media runtime
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - media-runtime.lock.json
+      - scripts/media-runtime/**
+      - .github/workflows/build-media-runtime.yml
+
+permissions:
+  contents: read
+
+jobs:
+  ffmpeg-windows-x64:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            git
+            make
+            diffutils
+            pkgconf
+            nasm
+            yasm
+            mingw-w64-ucrt-x86_64-gcc
+      - name: Build minimal FFmpeg and compliance archives
+        shell: msys2 {0}
+        run: bash scripts/media-runtime/build-ffmpeg-windows.sh
+      - name: Upload runtime and corresponding source together
+        uses: actions/upload-artifact@v4
+        with:
+          name: photoflow-media-runtime-windows-x64
+          path: release/media-runtime/*
+          if-no-files-found: error
+          retention-days: 90

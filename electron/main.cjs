@@ -13,6 +13,7 @@ const { registerWorkspaceIpc } = require('./modules/workspace-ipc.cjs');
 const { registerFileOperationsIpc } = require('./modules/files-ipc.cjs');
 const { registerMediaIpc } = require('./modules/media-ipc.cjs');
 const { registerVersionIpc } = require('./modules/versions-ipc.cjs');
+const { registerAdvancedVideoIpc } = require('./modules/advanced-video-ipc.cjs');
 const { createRecycleBinService } = require('./services/recycle-bin-service.cjs');
 const { createShellNewService } = require('./services/shell-new-service.cjs');
 const { createMediaAccessService } = require('./services/media-access-service.cjs');
@@ -29,6 +30,7 @@ const { createThumbnailService } = require('./services/thumbnail-service.cjs');
 const { createMediaService } = require('./services/media-service.cjs');
 const { createVersionService } = require('./services/version-service.cjs');
 const { createTelemetryService } = require('./services/telemetry-service.cjs');
+const { createPrivacyService } = require('./privacy-service.cjs');
 const { createFileRootWatcherService } = require('./services/file-root-watcher-service.cjs');
 const cloudConfig = require('./cloud-config.cjs');
 const { registerBackgroundTasksIpc } = require('./modules/background-tasks-ipc.cjs');
@@ -39,11 +41,13 @@ app.setPath('userData', path.join(app.getPath('appData'), 'Photoflow'));
 app.setName('照片流');
 
 const projectRoot = path.join(__dirname, '..');
+const privacyService = createPrivacyService({ app, fs, path, shell, projectRoot });
+const userComponentRoot = process.env.LOCALAPPDATA
+  ? path.join(process.env.LOCALAPPDATA, 'PhotoFlow', 'components')
+  : path.join(app.getPath('userData'), 'components');
 const componentRegistry = createComponentRegistry({
-  resourcesPath: process.resourcesPath,
-  executablePath: process.execPath,
   projectRoot,
-  userComponentRoot: path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'PhotoFlow', 'components'),
+  userComponentRoot,
   isPackaged: app.isPackaged,
 });
 
@@ -464,7 +468,7 @@ function createWindow() {
 
 // 根据环境获取可执行文件和参数
 const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'thumbnail_db', 'video_preview']);
-const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract']);
+const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract', 'screenshot_main_image']);
 
 const getDevelopmentPython = () => {
   const isWin = process.platform === 'win32';
@@ -569,8 +573,8 @@ const runJsonCommand = (run, label, timeoutMs = 20 * 60 * 1000, onMessage) => ne
 
 pluginService = createPluginService({ app, projectRoot, registry: componentRegistry, getDevelopmentPython, runJsonCommand });
 
-const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000) =>
-  runJsonCommand(getRunConfig(scriptName, args), scriptName, timeoutMs);
+const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, onMessage) =>
+  runJsonCommand(getRunConfig(scriptName, args), scriptName, timeoutMs, onMessage);
 
 const runPythonEventAction = (scriptName, args, timeoutMs = 20 * 60 * 1000) => new Promise((resolve, reject) => {
   const run = getRunConfig(scriptName, args);
@@ -606,65 +610,41 @@ const runPythonEventAction = (scriptName, args, timeoutMs = 20 * 60 * 1000) => n
   }, timeoutMs);
 });
 
-// 检查更新
-const UPDATE_CONFIG = {
-  owner: 'akiyastudio',
-  repo: 'photoflow'
-};
-
 const checkForUpdates = async () => {
   if (!mainWindow) return { success: false, error: '主窗口尚未就绪' };
   try {
+    if (!cloudConfig.apiBaseUrl) return { success: false, error: '未配置腾讯云更新服务' };
     const currentVersion = app.getVersion();
-    if (cloudConfig.apiBaseUrl) {
-      const query = new URLSearchParams({
-        platform: process.platform,
-        arch: process.arch,
-        channel: cloudConfig.updateChannel || 'stable',
-        currentVersion,
-      });
-      const response = await fetch(`${cloudConfig.apiBaseUrl.replace(/\/+$/, '')}/v1/updates?${query}`);
-      if (!response.ok) throw new Error(`更新服务返回 ${response.status}`);
-      const data = await response.json();
-      const result = {
-        success: true,
-        updateAvailable: data.updateAvailable === true,
-        currentVersion,
-        latestVersion: data.latestVersion,
-        url: data.downloadUrl,
-        notes: data.notes || '',
-        sha256: data.sha256 || '',
-        mandatory: data.mandatory === true,
-      };
-      telemetryService?.track('update_checked', { update_available: result.updateAvailable });
-      if (result.updateAvailable) mainWindow.webContents.send('update-available', { version: result.latestVersion, url: result.url, notes: result.notes });
-      return result;
-    }
-    const response = await fetch(`https://api.github.com/repos/${UPDATE_CONFIG.owner}/${UPDATE_CONFIG.repo}/releases/latest`, { headers: { 'User-Agent': 'PhotoFlow-App' } });
-    if (!response.ok) return { success: false, error: `更新服务返回 ${response.status}` };
+    const query = new URLSearchParams({
+      platform: process.platform,
+      arch: process.arch,
+      channel: cloudConfig.updateChannel || 'stable',
+      currentVersion,
+    });
+    const response = await fetch(`${cloudConfig.apiBaseUrl.replace(/\/+$/, '')}/v1/updates?${query}`);
+    if (!response.ok) throw new Error(`更新服务返回 ${response.status}`);
     const data = await response.json();
-    const latestVersion = data.tag_name.replace(/^v/, '');
-    const updateAvailable = latestVersion !== currentVersion && compareVersions(latestVersion, currentVersion) > 0;
-    telemetryService?.track('update_checked', { update_available: updateAvailable, source: 'github_fallback' });
-    console.log(`Current: ${currentVersion}, Latest: ${latestVersion}`);
-    if (updateAvailable) mainWindow.webContents.send('update-available', { version: latestVersion, url: data.html_url, notes: data.body || '' });
-    return { success: true, updateAvailable, currentVersion, latestVersion, url: data.html_url, notes: data.body || '' };
+    const result = {
+      success: true,
+      updateAvailable: data.updateAvailable === true,
+      currentVersion,
+      latestVersion: data.latestVersion,
+      url: data.downloadUrl,
+      notes: data.notes || '',
+      sha256: data.sha256 || '',
+      mandatory: data.mandatory === true,
+    };
+    telemetryService?.track('update_checked', { update_available: result.updateAvailable });
+    if (result.updateAvailable) mainWindow.webContents.send('update-available', {
+      version: result.latestVersion,
+      url: result.url,
+      notes: result.notes,
+    });
+    return result;
   } catch (error) {
     console.error('Update check failed:', error);
     return { success: false, error: error.message || String(error) };
   }
-};
-
-const compareVersions = (a, b) => {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    const na = pa[i] || 0;
-    const nb = pb[i] || 0;
-    if (na > nb) return 1;
-    if (nb > na) return -1;
-  }
-  return 0;
 };
 
 // 添加打开外部链接的 IPC 处理
@@ -695,19 +675,22 @@ const getConfigPath = () => {
   return path.join(getConfigDir(), 'photoflow_config.json');
 };
 
-const enforceInternalBetaTelemetry = config => ({
-  ...(config && typeof config === 'object' ? config : {}),
-  telemetry: { enabled: true, crashReports: true },
-});
-
 const readSavedConfig = () => {
   try {
     const configPath = getConfigPath();
     const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
-    return enforceInternalBetaTelemetry(config);
+    return {
+      ...(config && typeof config === 'object' ? config : {}),
+      telemetry: privacyService.hasCoreConsent()
+        ? {
+            enabled: true,
+            crashReports: true,
+          }
+        : { enabled: false, crashReports: false },
+    };
   } catch (error) {
     writeLog('warn', 'Unable to read saved configuration', { error: error.message || String(error) });
-    return enforceInternalBetaTelemetry({});
+    return { telemetry: { enabled: false, crashReports: false } };
   }
 };
 
@@ -1676,6 +1659,7 @@ const runWindowsClipboardScript = script => new Promise((resolve, reject) => {
   child.on('close', code => finish(code === 0 ? null : new Error(stderr.trim() || `PowerShell 退出，代码 ${code}`), stdout.trim()));
 });
 
+let systemFileClipboardWriteQueue = Promise.resolve();
 const writeSystemFileClipboard = async (sources, operation) => {
   if (process.platform !== 'win32') return false;
   const payload = Buffer.from(JSON.stringify({ sources, operation }), 'utf8').toString('base64');
@@ -1690,12 +1674,17 @@ $data = New-Object System.Windows.Forms.DataObject
 $data.SetFileDropList($files)
 $effect = if ($payload.operation -eq 'cut') { 2 } else { 1 }
 $effectBytes = [System.BitConverter]::GetBytes([int]$effect)
-$data.SetData('Preferred DropEffect', $false, [byte[]]$effectBytes)
+$effectStream = New-Object System.IO.MemoryStream
+$effectStream.Write($effectBytes, 0, $effectBytes.Length)
+$effectStream.Position = 0
+$data.SetData('Preferred DropEffect', $false, $effectStream)
 for ($attempt = 0; $attempt -lt 5; $attempt++) {
   try { [System.Windows.Forms.Clipboard]::SetDataObject($data, $true); exit 0 }
   catch { if ($attempt -eq 4) { throw }; Start-Sleep -Milliseconds 80 }
 }`;
-  await runWindowsClipboardScript(script);
+  const write = systemFileClipboardWriteQueue.catch(() => undefined).then(() => runWindowsClipboardScript(script));
+  systemFileClipboardWriteQueue = write.catch(() => undefined);
+  await write;
   return true;
 };
 
@@ -1883,11 +1872,12 @@ app.whenReady().then(async () => {
   telemetryService.start();
   createWindow();
 
-  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, telemetryService, undefined, writeLog });
+  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, privacyService, process, readSavedConfig, screen, shell, spawn, telemetryService, undefined, writeLog });
   registerWorkspaceIpc({ Array, Boolean, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, acquireFileRootWatcher, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, cancelMediaTrackingScan, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
-  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
+  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
+  registerAdvancedVideoIpc({ BrowserWindow, app, crypto, ipcMain, mediaService, path, pluginService, spawn, writeLog });
 
   setTimeout(checkForUpdates, 3000);
   app.on('activate', () => {

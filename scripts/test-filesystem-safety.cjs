@@ -86,6 +86,11 @@ const runJson = (command, args) => {
       projectName: 'progress-project', folderPath: selectionPath, versionName: '图片选片（原图）',
     })]);
     assert.strictEqual(refreshedBaseline.batch.itemCount, 2, 'later selections must join the existing V0 baseline');
+    fs.unlinkSync(selectedOriginal);
+    const prunedBaseline = runJson(python, [script, 'batch_register_baseline', '--root', workspace, '--database', database, '--payload', JSON.stringify({
+      projectName: 'progress-project', folderPath: selectionPath, versionName: '图片选片（原图）',
+    })]);
+    assert.strictEqual(prunedBaseline.batch.itemCount, 1, 'refreshing a V0 baseline must remove files that no longer exist in the selection folder');
     runJson(python, [script, 'progress_register', '--root', workspace, '--database', database, '--payload', JSON.stringify({
       projectName: 'progress-project', mediaKind: 'image', versionKey: '2',
       displayName: '图片后期_2_调色', folderPath: progressPath, trackingEnabled: false,

@@ -36,8 +36,8 @@ const definitions = {
     models: [
       { path: path.join(root, 'components', 'team-retouch', 'models', 'rtmdet-ins_m_640x640.onnx'), minBytes: 100 * 1024 * 1024 },
       { path: path.join(root, 'components', 'team-retouch', 'models', 'face_detection_yunet_2023mar.onnx'), minBytes: 200 * 1024 },
-      { path: path.join(root, 'components', 'team-retouch', 'models', 'face_recognition_sface_2021dec.onnx'), minBytes: 30 * 1024 * 1024 },
-      { path: path.join(root, 'components', 'team-retouch', 'models', 'osnet_x0_25_msmt17.onnx'), minBytes: 700 * 1024 },
+      { path: path.join(root, '.model-lab', 'adaface', 'adaface_ir18_webface4m.onnx'), minBytes: 80 * 1024 * 1024 },
+      { path: path.join(root, '.model-lab', 'osnet', 'osnet_x1_0_msmt17.onnx'), minBytes: 7 * 1024 * 1024 },
     ],
     advancedScripts: [
       path.join(root, 'components', 'team-retouch', 'advanced', 'pairdetr_service.py'),

@@ -102,6 +102,63 @@ def hamming_distance(hash1, hash2):
     if hash1 is None or hash2 is None: return float('inf')
     return bin(hash1 ^ hash2).count('1')
 
+
+def media_kind(file_name):
+    return 'video' if file_name.lower().endswith(VIDEO_EXTENSIONS) else 'image'
+
+
+def unique_stem_index(file_names):
+    """Return only unambiguous, case-insensitive filename stems."""
+    candidates = {}
+    for file_name in file_names:
+        stem = os.path.splitext(file_name)[0].casefold()
+        candidates.setdefault(stem, []).append(file_name)
+    return {stem: names[0] for stem, names in candidates.items() if len(names) == 1}
+
+
+def lightweight_image_dimensions(media_path):
+    """Read image dimensions without decoding pixels or launching FFmpeg."""
+    extension = os.path.splitext(media_path)[1].lower()
+    if extension not in IMAGE_EXTENSIONS:
+        return None
+    try:
+        with Image.open(media_path) as image:
+            width, height = image.size
+        if width > 0 and height > 0:
+            return width, height
+    except Exception:
+        pass
+    return None
+
+
+def lightweight_capture_time(media_path):
+    """Read the original capture timestamp when an ordinary image retains it."""
+    extension = os.path.splitext(media_path)[1].lower()
+    if extension not in IMAGE_EXTENSIONS:
+        return None
+    try:
+        with Image.open(media_path) as image:
+            exif = image.getexif()
+            value = exif.get(36867) or exif.get(36868)  # DateTimeOriginal / DateTimeDigitized
+        return str(value).strip() if value else None
+    except Exception:
+        return None
+
+
+def filename_dimensions_compatible(reference_path, source_path, jpg_proxy_index, tolerance=0.08):
+    """Reject obvious aspect-ratio or retained capture-time conflicts."""
+    reference_visual_path = visual_reference_path(reference_path, jpg_proxy_index)
+    reference_dimensions = lightweight_image_dimensions(reference_visual_path)
+    source_dimensions = lightweight_image_dimensions(source_path)
+    if reference_dimensions is not None and source_dimensions is not None:
+        reference_ratio = max(reference_dimensions) / min(reference_dimensions)
+        source_ratio = max(source_dimensions) / min(source_dimensions)
+        if abs(reference_ratio - source_ratio) / max(reference_ratio, source_ratio) > tolerance:
+            return False
+    reference_capture_time = lightweight_capture_time(reference_visual_path)
+    source_capture_time = lightweight_capture_time(source_path)
+    return not (reference_capture_time and source_capture_time and reference_capture_time != source_capture_time)
+
 def copy_unmatched_a_files(unmatched_files_a, folder_a):
     if not unmatched_files_a: return
     unmatched_a_folder = os.path.join(folder_a, "未匹配的图片_A")
@@ -126,12 +183,48 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
     jpg_proxy_folder = find_selection_jpg_proxy_folder(folder_a)
     jpg_proxy_index = build_jpg_proxy_index(jpg_proxy_folder)
     proxy_count = 0
+    list_a = [f for f in os.listdir(folder_a) if f.lower().endswith(media_extensions)]
+    list_b = [f for f in os.listdir(folder_b) if f.lower().endswith(media_extensions)]
+    all_a = {f: (os.path.join(folder_a, f), media_kind(f)) for f in list_a}
+    all_b = {f: (os.path.join(folder_b, f), media_kind(f)) for f in list_b}
+
+    if not all_a:
+        log_error("文件夹A 中没有可用于对照的图片或视频")
+        return False
+    if not all_b:
+        log_error("文件夹B 中没有图片或视频")
+        return False
+
+    # Resolve safe filename matches before starting any expensive media decode.
+    # Only unique stems are eligible; duplicates and obvious metadata conflicts
+    # deliberately fall through to the existing visual matcher.
+    unique_a = unique_stem_index(list_a)
+    unique_b = unique_stem_index(list_b)
+    filename_matches = []
+    filename_conflicts = []
+    for file_b in list_b:
+        stem = os.path.splitext(file_b)[0].casefold()
+        if unique_b.get(stem) != file_b or stem not in unique_a:
+            continue
+        file_a = unique_a[stem]
+        path_a, kind_a = all_a[file_a]
+        path_b, kind_b = all_b[file_b]
+        if kind_a != kind_b or not filename_dimensions_compatible(path_a, path_b, jpg_proxy_index):
+            filename_conflicts.append(file_b)
+            continue
+        filename_matches.append((file_a, file_b))
+
+    filename_sources = {file_b for _file_a, file_b in filename_matches}
+    unresolved_b = [file_b for file_b in list_b if file_b not in filename_sources]
+    if filename_matches:
+        log_info(f"已按唯一同名主文件名直接匹配 {len(filename_matches)} 个文件")
+    if filename_conflicts:
+        log_info(f"有 {len(filename_conflicts)} 个同名文件的媒体类型、宽高比或拍摄时间不一致，改用视觉匹配确认")
     
     # 1. 分析 文件夹A
     log_info("正在分析 文件夹A (参照组)...")
     files_a = {}
-    list_a = [f for f in os.listdir(folder_a) if f.lower().endswith(media_extensions)]
-    for i, f in enumerate(list_a):
+    for i, f in enumerate(list_a if unresolved_b else []):
         path = os.path.join(folder_a, f)
         visual_path = visual_reference_path(path, jpg_proxy_index)
         h_coarse, h_fine = calculate_hashes(visual_path)
@@ -149,23 +242,23 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
     # 2. 分析 文件夹B
     log_info("正在分析 文件夹B (待处理组)...")
     files_b = {}
-    list_b = [f for f in os.listdir(folder_b) if f.lower().endswith(media_extensions)]
-    for i, f in enumerate(list_b):
+    for i, f in enumerate(unresolved_b):
         path = os.path.join(folder_b, f)
         h_coarse, h_fine = calculate_hashes(path)
         if h_coarse is not None: files_b[f] = (path, h_coarse, h_fine, 'video' if f.lower().endswith(VIDEO_EXTENSIONS) else 'image')
-        if i % 10 == 0: log_progress(f"分析 B: {i}/{len(list_b)}", 20 + int(i/len(list_b)*20))
+        if i % 10 == 0: log_progress(f"分析 B: {i}/{len(unresolved_b)}", 20 + int(i/len(unresolved_b)*20))
 
-    if not files_a:
+    if not files_a and not filename_matches:
         log_error("文件夹A 中没有可用于对照的图片或视频")
         return False
-    if not files_b:
+    if not files_b and not filename_matches:
         log_error("文件夹B 中没有图片或视频")
         return False
 
     # 3. 收集并计算所有候选匹配对 (粗筛)
     log_info("正在进行深度交叉比对...")
-    potential_matches = []
+    # A negative distance gives safe filename matches first allocation priority.
+    potential_matches = [(-1, -1, file_a, file_b) for file_a, file_b in filename_matches]
     best_candidates_b = {}
     
     total_a = len(files_a)
@@ -195,7 +288,7 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
     # 4. 执行重命名 (最优分配)
     log_info("开始执行精准重命名...")
     processed_b = set()
-    matched_a = {f: 0 for f in files_a}
+    matched_a = {f: 0 for f in list_a}
     preview_matches = []
     reserved_targets = set()
     
@@ -205,7 +298,7 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
         if file_b in processed_b:
             continue
             
-        path_b = files_b[file_b][0]
+        path_b = all_b[file_b][0]
         name, _reference_ext = os.path.splitext(file_a)
         _current_name, ext = os.path.splitext(file_b)
         
@@ -226,8 +319,9 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
             new_path_b = os.path.join(folder_b, new_name)
             c += 1
         
-        confidence = "高" if fine_dist <= 40 else "中" if fine_dist <= 72 else "低"
-        preview_matches.append({"source": file_b, "reference": file_a, "target": new_name, "confidence": confidence, "distance": fine_dist})
+        filename_match = fine_dist < 0
+        confidence = "高" if filename_match or fine_dist <= 40 else "中" if fine_dist <= 72 else "低"
+        preview_matches.append({"source": file_b, "reference": file_a, "target": new_name, "confidence": confidence, "distance": 0 if filename_match else fine_dist})
         reserved_targets.add(new_name.casefold())
         if preview_only or os.path.normcase(os.path.abspath(path_b)) == os.path.normcase(os.path.abspath(new_path_b)):
             processed_b.add(file_b)
@@ -274,7 +368,7 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
         sub_folder = os.path.join(folder_b, "未匹配的图片")
         os.makedirs(sub_folder, exist_ok=True)
         for f in unmatched_b:
-            src = files_b[f][0]
+            src = all_b[f][0]
             dst = os.path.join(sub_folder, f)
             c = 1
             while os.path.exists(dst):
@@ -283,9 +377,9 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
                 c += 1
             shutil.move(src, dst)
 
-    unmatched_a = [f for f in files_a if matched_a[f] == 0]
+    unmatched_a = [f for f in list_a if matched_a[f] == 0]
     
-    stats = (f"待处理组匹配成功:{len(processed_b)}/{len(files_b)}, 参照组已被匹配:{sum(1 for v in matched_a.values() if v>0)}/{len(files_a)}")
+    stats = (f"待处理组匹配成功:{len(processed_b)}/{len(all_b)}, 参照组已被匹配:{sum(1 for v in matched_a.values() if v>0)}/{len(all_a)}")
     if preview_only:
         emit('preview', f"预览完成：找到 {len(preview_matches)} 个匹配", {"matches": preview_matches, "suggestions": suggestions, "unmatched": unmatched_b, "unmatchedReference": unmatched_a})
         log_success(f"预览完成，尚未修改文件。{stats}")

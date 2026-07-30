@@ -13,6 +13,7 @@ const createMediaRepository = client => ({
   recordCompare: (root, payload) => client.call(root, 'media_record_compare', payload),
   listProgress: (root, projectName) => client.call(root, 'progress_list', { projectName }),
   registerProgress: (root, payload) => client.call(root, 'progress_register', payload),
+  updateProgressTree: (root, payload) => client.call(root, 'progress_update_tree', payload),
   registerBatchBaseline: (root, payload) => client.call(root, 'batch_register_baseline', payload),
   commitBatchCompare: (root, payload) => client.call(root, 'batch_commit_compare', payload),
   listTeamPatches: (root, photoId) => client.call(root, 'team_patch_list', { photoId }),

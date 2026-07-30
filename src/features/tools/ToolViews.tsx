@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
-import { FolderInput, ScanSearch, HardDrive, Play, Trash2, AlertCircle, Edit, X, Plus, User, Loader2, RotateCcw, Download, Scissors, Video, ChevronDown, ChevronUp } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { FolderInput, ScanSearch, HardDrive, Play, Trash2, AlertCircle, Edit, X, Plus, User, Loader2, RotateCcw, Download, Scissors, Video, ChevronDown, ChevronUp, Crop } from 'lucide-react';
 import { TaskProgress } from '../../components/TaskStatus';
 import { RequirePlugin } from '../../features/plugins/RequirePlugin';
-import type { AppConfig, LogEntry, WorkspaceProject } from '../../types';
+import type { AppConfig, LogEntry, ProjectStatus, WorkspaceProject } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
+import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
 
 const IMAGE_SELECTION_FOLDER_NAME = '图片选片';
 const VIDEO_SELECTION_FOLDER_NAME = '视频选片';
@@ -608,6 +609,7 @@ const BirthdayManagerModal = ({ onClose, onDataChanged }: { onClose: () => void,
   const [newName, setNewName] = useState('');
   const [newMonth, setNewMonth] = useState('');
   const [newDay, setNewDay] = useState('');
+  const [formError, setFormError] = useState('');
 
   useEffect(() => {
     const load = async () => {
@@ -622,9 +624,8 @@ const BirthdayManagerModal = ({ onClose, onDataChanged }: { onClose: () => void,
 
   const sortedBirthdays = Object.entries(birthdays).sort(([, dateA], [, dateB]) => {
     const parse = (d: string) => {
-       const clean = d.replace('月', '.').replace('日', '');
-       const parts = clean.split('.');
-       return { m: parseInt(parts[0]) || 0, d: parseInt(parts[1]) || 0 };
+       const match = d.trim().match(/^(\d{1,2})(?:\.|月\.?)(\d{1,2})日?$/);
+       return { m: Number(match?.[1] || 0), d: Number(match?.[2] || 0) };
     };
     const a = parse(dateA);
     const b = parse(dateB);
@@ -633,18 +634,25 @@ const BirthdayManagerModal = ({ onClose, onDataChanged }: { onClose: () => void,
   });
 
   const handleSave = async () => {
-    if (!newName.trim() || !newMonth || !newDay) return;
-    const m = parseInt(newMonth).toString();
-    const d = parseInt(newDay).toString();
-    const dateStr = `${m}月.${d}日`;
-    const newData = { ...birthdays, [newName]: dateStr };
+    const name = newName.trim();
+    const month = Number(newMonth);
+    const day = Number(newDay);
+    if (!name) { setFormError('请输入姓名。'); return; }
+    if (!Number.isInteger(month) || month < 1 || month > 12) { setFormError('月份必须是 1–12 的整数。'); return; }
+    if (!Number.isInteger(day) || day < 1 || day > 31) { setFormError('日期必须是 1–31 的整数。'); return; }
+    const probe = new Date(2000, month - 1, day);
+    if (probe.getMonth() !== month - 1 || probe.getDate() !== day) { setFormError('该月份中不存在这个日期。'); return; }
+    const dateStr = `${month}.${day}`;
+    const newData = { ...birthdays, [name]: dateStr };
 
     if (window.electronAPI) {
-      await window.electronAPI.saveBirthdays(newData);
+      const result = await window.electronAPI.saveBirthdays(newData);
+      if (!result.success) { setFormError(`保存失败：${result.error || '未知错误'}`); return; }
       setBirthdays(newData);
       setNewName('');
       setNewMonth('');
       setNewDay('');
+      setFormError('');
       onDataChanged();
     }
   };
@@ -688,10 +696,11 @@ const BirthdayManagerModal = ({ onClose, onDataChanged }: { onClose: () => void,
         <div className="p-6 border-t border-slate-200 bg-white rounded-b-2xl">
            <div className="flex gap-3">
               <input placeholder="Name" value={newName} onChange={e => setNewName(e.target.value)} className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-slate-800" />
-              <input placeholder="M" type="number" value={newMonth} onChange={e => setNewMonth(e.target.value)} className="w-16 bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-center text-slate-800" />
-              <input placeholder="D" type="number" value={newDay} onChange={e => setNewDay(e.target.value)} className="w-16 bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-center text-slate-800" />
-              <button onClick={handleSave} className="bg-blue-500 text-slate-800 px-4 py-2 rounded-lg flex items-center gap-2"><Plus size={16} /> Add</button>
+              <input aria-label="月份" placeholder="月" type="number" min="1" max="12" step="1" value={newMonth} onChange={e => { setNewMonth(e.target.value); setFormError(''); }} className="w-20 bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-center text-slate-800" />
+              <input aria-label="日期" placeholder="日" type="number" min="1" max="31" step="1" value={newDay} onChange={e => { setNewDay(e.target.value); setFormError(''); }} className="w-20 bg-slate-50 border border-slate-200 rounded-lg px-2 py-2 text-center text-slate-800" />
+              <button onClick={handleSave} className="bg-blue-500 text-white px-4 py-2 rounded-lg flex items-center gap-2"><Plus size={16} /> 添加</button>
            </div>
+           {formError && <p role="alert" className="mt-2 text-sm text-red-600">{formError}</p>}
         </div>
       </div>
     </div>
@@ -766,11 +775,10 @@ const DashboardView = ({
 
   // 解析 "M月.D日" 格式
   const parseBirthday = (dateStr: string) => {
-    const cleanStr = dateStr.replace('月', '.').replace('日', '');
-    const parts = cleanStr.split('.');
+    const match = dateStr.trim().match(/^(\d{1,2})(?:\.|月\.?)(\d{1,2})日?$/);
     return {
-      month: parseInt(parts[0]) || 0,
-      day: parseInt(parts[1]) || 0
+      month: Number(match?.[1] || 0),
+      day: Number(match?.[2] || 0)
     };
   };
 
@@ -787,6 +795,8 @@ const DashboardView = ({
 
       Object.entries(data).forEach(([name, dateStr]) => {
         const { month, day } = parseBirthday(dateStr);
+        const probe = new Date(2000, month - 1, day);
+        if (month < 1 || month > 12 || day < 1 || day > 31 || probe.getMonth() !== month - 1 || probe.getDate() !== day) return;
         if (month === currentMonth || month === nextMonth) {
           let targetYear = today.getFullYear();
           if (currentMonth === 12 && month === 1) targetYear += 1;
@@ -961,6 +971,139 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
 
     </div>
   );
+};
+
+type ScreenshotMainImageSummary = Awaited<ReturnType<typeof window.electronAPI.extractScreenshotMainImages>> & {
+  recycledOriginalCount?: number;
+  permanentOriginalCount?: number;
+  recycleError?: string;
+};
+
+const ScreenshotMainImageView = ({
+  embedded = false,
+  workspacePath,
+  projectStatus,
+  projectName,
+  initialRelativePaths,
+}: {
+  embedded?: boolean;
+  workspacePath: string;
+  projectStatus: ProjectStatus;
+  projectName: string;
+  initialRelativePaths: string[];
+}) => {
+  const appDialog = useAppDialog();
+  const [targetPaths, setTargetPaths] = useState(() => initialRelativePaths.filter(Boolean));
+  const [isRunning, setIsRunning] = useState(false);
+  const [preserveOriginal, setPreserveOriginal] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [statusMessage, setStatusMessage] = useState('进度');
+  const [summary, setSummary] = useState<ScreenshotMainImageSummary | null>(null);
+  const requestIdRef = React.useRef('');
+  const preserveOriginalRef = React.useRef(false);
+  const outputFolders = useMemo(() => Array.from(new Set((summary?.results || []).flatMap(result => result.output ? [result.output.replace(/[\\/][^\\/]+$/, '')] : []))), [summary]);
+  const progressLogs = useMemo<LogEntry[]>(() => summary ? [{
+    timestamp: new Date().toLocaleTimeString(),
+    message: summary.recycleError
+      ? `主图已生成，但原图未能移入回收站：${summary.recycleError}`
+      : summary.success
+        ? `处理完成：已生成 ${summary.croppedCount || 0} 张主图`
+        : summary.error || '提取失败',
+    type: summary.recycleError || !summary.success ? 'error' : 'success',
+  }] : [], [summary]);
+
+  useEffect(() => {
+    setTargetPaths(initialRelativePaths.filter(Boolean));
+    setSummary(null);
+    setProgress(0);
+    setStatusMessage('进度');
+  }, [initialRelativePaths]);
+
+  useEffect(() => window.electronAPI.onScreenshotMainImageProgress(value => {
+    if (!requestIdRef.current || value.requestId !== requestIdRef.current) return;
+    const extractionProgress = Math.max(0, Math.min(100, Number(value.progress) || 0));
+    setProgress(preserveOriginalRef.current ? extractionProgress : extractionProgress * .9);
+    if (value.message) setStatusMessage(value.message);
+  }), []);
+
+  const startExtraction = async () => {
+    if (!targetPaths.length || isRunning) return;
+    const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    requestIdRef.current = requestId;
+    preserveOriginalRef.current = preserveOriginal;
+    setIsRunning(true);
+    setSummary(null);
+    setProgress(0);
+    setStatusMessage('正在准备识别截图主图…');
+    try {
+      const extraction = await window.electronAPI.extractScreenshotMainImages(workspacePath, projectStatus, projectName, targetPaths, { requestId });
+      let nextSummary: ScreenshotMainImageSummary = extraction;
+      const croppedRelativePaths = targetPaths.filter((_relativePath, index) => extraction.results[index]?.success && extraction.results[index]?.cropped);
+      if (!preserveOriginal && croppedRelativePaths.length) {
+        setProgress(90);
+        setStatusMessage(`正在将 ${croppedRelativePaths.length} 张原图移入回收站…`);
+        const recycled = await window.electronAPI.projectFileOperation(workspacePath, projectStatus, projectName, 'trash', croppedRelativePaths);
+        if (recycled.success) {
+          nextSummary = { ...extraction, recycledOriginalCount: recycled.count || 0, permanentOriginalCount: recycled.permanentCount || 0 };
+        } else {
+          const recycleError = recycled.error || '原图未能移入回收站';
+          nextSummary = { ...extraction, success: false, recycleError, error: recycleError };
+          if (isRecycleBinFailure(recycled.error, recycled.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
+        }
+      }
+      setSummary(nextSummary);
+      setProgress(nextSummary.recycleError ? 90 : 100);
+      setStatusMessage(nextSummary.recycleError ? '主图已生成，但回收原图失败' : nextSummary.success ? '处理完成' : nextSummary.error || '提取失败');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSummary({ success: false, results: [], error: message });
+      setStatusMessage(message);
+    } finally {
+      requestIdRef.current = '';
+      setIsRunning(false);
+    }
+  };
+
+  return <div className="w-full space-y-6">
+    {!embedded && <h2 className="text-2xl font-bold text-slate-800">提取截图主图</h2>}
+    <div className={embedded ? 'space-y-5' : 'space-y-5 rounded-xl border border-slate-200 bg-white p-6'}>
+      <div className="space-y-2">
+        <p className="text-sm leading-6 text-slate-600">自动识别截图中的主图矩形，排除导航栏、正文和操作区。置信度不足时会跳过；成功生成主图后，原图默认移入回收站。</p>
+        <label className="text-xs font-semibold uppercase text-slate-500">待处理图片（{targetPaths.length} 张）</label>
+        <div className="relative">
+          <Crop size={18} className="absolute left-3 top-3 text-slate-500"/>
+          <textarea value={targetPaths.join('\n')} readOnly rows={Math.min(6, Math.max(2, targetPaths.length))} aria-label="待提取主图的图片" className="w-full resize-none rounded-lg border border-slate-200 bg-slate-50 py-3 pl-10 pr-4 font-mono text-sm text-slate-700"/>
+        </div>
+        <p className="flex items-center gap-1 text-xs text-slate-500"><AlertCircle size={12}/>结果保存在原图旁，文件名增加“_主图”；重复执行会自动使用新名称。</p>
+        <label className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          <input type="checkbox" checked={preserveOriginal} disabled={isRunning} onChange={event => setPreserveOriginal(event.currentTarget.checked)} className="mt-0.5 h-4 w-4 accent-blue-600"/>
+          <span><span className="font-bold">保留原图</span><span className="mt-1 block text-xs leading-5 text-slate-500">默认关闭；关闭时仅把成功裁剪的原图移入系统回收站，跳过或失败的图片保持不变。</span></span>
+        </label>
+      </div>
+
+      {summary && <div role="status" className={`rounded-lg border p-4 text-sm ${summary.success ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
+        <p className="font-bold">{summary.success ? `已生成 ${summary.croppedCount || 0} 张主图，跳过 ${summary.skippedCount || 0} 张，失败 ${summary.failedCount || 0} 张` : summary.error || '提取失败'}</p>
+        {summary.recycledOriginalCount !== undefined && <p className="mt-2 text-xs">已处理 {summary.recycledOriginalCount} 张原图{summary.permanentOriginalCount ? `；其中 ${summary.permanentOriginalCount} 张经 Windows 警告确认后永久删除` : '，均已移入回收站'}。</p>}
+        {!!outputFolders.length && <div className="mt-2 space-y-1 text-xs"><span className="font-semibold">保存位置：</span>{outputFolders.map(folder => <p key={folder} className="break-all font-mono" title={folder}>{folder}</p>)}</div>}
+        {!!summary.results.length && <div className="mt-3 max-h-40 space-y-1 overflow-y-auto text-xs">
+          {summary.results.map((result, index) => <p key={`${result.input}-${index}`} className="truncate" title={result.output || result.reason || result.error}>
+            {result.cropped ? `已生成：${result.output}` : result.skipped ? `已跳过：${result.inputName}（${result.reason}）` : `失败：${result.inputName}（${result.error || '未知错误'}）`}
+          </p>)}
+        </div>}
+      </div>}
+
+      <TaskProgress
+        logs={progressLogs}
+        progress={progress}
+        isRunning={isRunning}
+        idleMessage={statusMessage}
+        action={<button type="button" onClick={() => void startExtraction()} disabled={!targetPaths.length || isRunning} className={`flex items-center gap-2 rounded-lg px-8 py-2.5 font-bold transition ${!targetPaths.length || isRunning ? 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400 shadow-none' : 'bg-blue-600 text-white shadow-lg shadow-blue-500/20 hover:bg-blue-500'}`}>
+          {isRunning ? <Loader2 size={18} className="animate-spin"/> : <Crop size={18}/>}
+          {isRunning ? '正在提取…' : `提取主图${targetPaths.length > 1 ? `（${targetPaths.length} 张）` : ''}`}
+        </button>}
+      />
+    </div>
+  </div>;
 };
 
 const ResearchView = ({
@@ -1233,4 +1376,4 @@ const VideoSplitView = () => {
 
 // --- 组件 ---
 
-export { DashboardView, HomePanel, ImportCard, ConverterView, ResearchView, MatchView, VideoSplitView };
+export { DashboardView, HomePanel, ImportCard, ConverterView, ScreenshotMainImageView, ResearchView, MatchView, VideoSplitView };
