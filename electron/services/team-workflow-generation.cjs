@@ -54,6 +54,26 @@ const buildWorkflowPlan = async ({
   stat = fs.promises.stat.bind(fs.promises),
 }) => {
   const workspaceTasks = mapWorkspaceTasks(workspace);
+  const assignments = new Map((workspace.assignments || []).map(item => [`${item.photoId}\0${item.baseVersionId}\0${Number(item.personIndex)}`, item]));
+  const chainItems = new Map();
+  for (const [groupIndex, group] of (groups || []).entries()) {
+    for (const [itemIndex, item] of (group.items || []).entries()) {
+      const current = chainItems.get(String(item.taskId)) || [];
+      current.push({ ...item, week: Math.max(1, Math.floor(Number(group.week) || 1)), groupIndex, itemIndex });
+      chainItems.set(String(item.taskId), current);
+    }
+  }
+  const activeItems = new Map();
+  for (const [taskId, items] of chainItems) {
+    const ordered = items.sort((left, right) => left.week - right.week || left.groupIndex - right.groupIndex || left.itemIndex - right.itemIndex || Number(left.personIndex) - Number(right.personIndex));
+    const activeIndex = ordered.findIndex(item => !assignments.get(`${item.photoId}\0${item.baseVersionId}\0${Number(item.personIndex)}`)?.completed);
+    if (activeIndex < 0) continue;
+    const active = ordered[activeIndex];
+    const predecessorReturn = ordered.slice(0, activeIndex).reverse()
+      .map(item => assignments.get(`${item.photoId}\0${item.baseVersionId}\0${Number(item.personIndex)}`)?.editedPatchPath)
+      .find(filePath => filePath && exists(filePath));
+    activeItems.set(`${taskId}\0${Number(active.personIndex)}`, { sourcePath: predecessorReturn || '', allowLegacyLatest: activeIndex > 0 });
+  }
   const usedFoldersByWeek = new Map();
   const manifestGroups = [];
   const files = [];
@@ -77,13 +97,17 @@ const buildWorkflowPlan = async ({
       const containsPerson = (task.members?.length ? task.members : [{ personIndex: task.personIndex }])
         .some(member => Number(member.personIndex) === Number(item.personIndex));
       if (!containsPerson) continue;
-      const sourcePath = task.editedPatchPath && exists(task.editedPatchPath) ? task.editedPatchPath : task.patchPath;
-      if (!sourcePath || !exists(sourcePath)) continue;
-      const baseName = `${safeSegment(item.photoName, '图片')}_人物${item.personIndex}${path.extname(sourcePath) || '.png'}`;
+      const activeKey = `${item.taskId}\0${Number(item.personIndex)}`;
+      const activeState = activeItems.get(activeKey);
+      const sourcePath = activeState?.sourcePath
+        || (activeState?.allowLegacyLatest && task.editedPatchPath && exists(task.editedPatchPath) ? task.editedPatchPath : task.patchPath);
+      const baseName = `${safeSegment(item.photoName, '图片')}_人物${item.personIndex}${path.extname(sourcePath || task.patchPath) || '.png'}`;
       const destination = uniquePlannedDestination(groupDirectory, baseName, reserved);
-      const manifestItem = { ...item, relativePath: path.relative(stagingDirectory, destination).replace(/\\/g, '/') };
+      const manifestItem = { ...item, available: activeItems.has(activeKey), relativePath: path.relative(stagingDirectory, destination).replace(/\\/g, '/') };
       manifestItems.push(manifestItem);
-      files.push({ sourcePath, destination, photoName: String(item.photoName || ''), personIndex: Number(item.personIndex) || 0 });
+      if (activeItems.has(activeKey) && sourcePath && exists(sourcePath)) {
+        files.push({ sourcePath, destination, photoName: String(item.photoName || ''), personIndex: Number(item.personIndex) || 0 });
+      }
     }
     if (manifestItems.length) {
       manifestGroups.push({

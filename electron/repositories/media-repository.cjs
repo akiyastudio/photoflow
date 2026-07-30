@@ -16,8 +16,13 @@ const createMediaRepository = client => ({
   updateProgressTree: (root, payload) => client.call(root, 'progress_update_tree', payload),
   registerBatchBaseline: (root, payload) => client.call(root, 'batch_register_baseline', payload),
   commitBatchCompare: (root, payload) => client.call(root, 'batch_commit_compare', payload),
+  listBatchOperations: (root, batchId) => client.call(root, 'batch_operation_list', { batchId }),
+  retryBatchOperations: (root, batchId) => client.call(root, 'batch_retry_operations', { batchId }),
   listTeamPatches: (root, photoId) => client.call(root, 'team_patch_list', { photoId }),
-  getTeamProjectWorkspace: (root, projectName) => client.call(root, 'team_project_workspace', { projectName }),
+  // This is an interactive screen load. Fail promptly and let the database
+  // client restart its worker instead of leaving the renderer waiting behind
+  // a wedged process for the media worker's long-operation timeout.
+  getTeamProjectWorkspace: (root, projectName) => client.call(root, 'team_project_workspace', { projectName }, 60 * 1000),
   registerTeamProjectPhoto: (root, payload) => client.call(root, 'team_project_register_photo', payload),
   unregisterTeamProjectPhoto: (root, payload) => client.call(root, 'team_project_unregister_photo', payload),
   saveTeamIdentity: (root, payload) => client.call(root, 'team_identity_save', payload),

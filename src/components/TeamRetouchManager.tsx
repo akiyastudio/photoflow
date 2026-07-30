@@ -600,6 +600,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
   const backendMode = defaultBackendMode || 'auto';
   const [refreshToken, setRefreshToken] = useState(0);
   const [identityLoading, setIdentityLoading] = useState(true);
+  const [identityLoadError, setIdentityLoadError] = useState('');
   const [identityState, setIdentityState] = useState<IdentityState>({ success: true, photos: [], identities: [], assignments: [] });
   const [identityPickerKey, setIdentityPickerKey] = useState('');
   const [includedIdentityKeys, setIncludedIdentityKeys] = useState<Set<string>>(new Set());
@@ -609,6 +610,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
   const [photoProcessingMessages, setPhotoProcessingMessages] = useState<Record<string, string>>({});
   const identifyingRef = useRef(false);
   const lastUnmarkedSubjectKeyRef = useRef('');
+  const identityLoadSequenceRef = useRef(0);
   useEffect(() => {
     onBusyChange?.(running || Boolean(identityState.identifying) || identityPickerBusy);
   }, [identityPickerBusy, identityState.identifying, onBusyChange, running]);
@@ -628,16 +630,27 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
   }, [selectedIdentitySubject, identitySubjects]);
 
   const loadIdentities = async (syncLabels = false) => {
-    const result = await window.electronAPI.getTeamProjectWorkspace(workspacePath, project.name);
-    if (result.success) {
+    const sequence = ++identityLoadSequenceRef.current;
+    setIdentityLoadError('');
+    try {
+      const result = await window.electronAPI.getTeamProjectWorkspace(workspacePath, project.name, project.status);
+      if (!result.success) throw new Error(result.error || '未知错误');
       if (syncLabels) await syncTaskLabels(workspacePath, result);
-      setIdentityState(result);
-    } else onNotice(`读取人物数据失败：${result.error || '未知错误'}`);
-    setIdentityLoading(false);
+      if (sequence === identityLoadSequenceRef.current) setIdentityState(result);
+    } catch (error) {
+      if (sequence === identityLoadSequenceRef.current) {
+        const message = error instanceof Error ? error.message : String(error);
+        setIdentityLoadError(message);
+        onNotice(`读取人物数据失败：${message}`);
+      }
+    } finally {
+      if (sequence === identityLoadSequenceRef.current) setIdentityLoading(false);
+    }
   };
   useEffect(() => {
     setIdentityLoading(true);
     void loadIdentities();
+    return () => { identityLoadSequenceRef.current += 1; };
   }, [workspacePath, project.name]);
   useEffect(() => window.electronAPI.onTeamPatchBatchProgress(value => setProgress({ itemIndex: value.itemIndex, itemCount: value.itemCount, progress: value.progress, itemName: value.itemName, message: value.message })), []);
 
@@ -830,12 +843,14 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
     {running && <div className="border-b border-blue-100 bg-blue-50 px-5 py-3"><div className="flex justify-between text-xs font-bold text-blue-700"><span>{progress.itemIndex ? `${progress.itemIndex}/${progress.itemCount} · ${progress.itemName} · ` : ''}{progress.message}</span><span>{Math.round(overallProgress)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full bg-blue-600" style={{ width: `${overallProgress}%` }}/></div></div>}
     <main className="min-h-0 flex-1 overflow-y-auto p-6"><div className="mx-auto max-w-[1600px] space-y-6">{identityLoading
       ? <div className="flex min-h-52 items-center justify-center rounded-xl border border-slate-200 bg-white text-sm font-bold text-slate-600"><Loader2 size={18} className="mr-2 animate-spin text-blue-600"/>正在读取整个项目的人物与工作图数据…</div>
-      : entries.map(entry => {
+      : identityLoadError
+        ? <div className="flex min-h-52 flex-col items-center justify-center gap-3 rounded-xl border border-red-200 bg-white px-6 text-center text-sm text-red-700"><p className="font-bold">团片协作数据读取失败</p><p className="max-w-2xl text-xs text-slate-500">{identityLoadError}</p><button type="button" className="dialog-primary" onClick={() => { setIdentityLoading(true); void loadIdentities(); }}>重新读取</button></div>
+        : entries.map(entry => {
         const result = resultByPath.get(entry.relativePath);
         const initialPhoto = workspacePhotoForEntry(identityState.photos, entry);
         const photoId = initialPhoto?.photoId || '';
         return <section key={entry.relativePath} className="space-y-2">{result && !result.success && <div className="rounded-lg bg-red-50 px-3 py-2 text-xs font-bold text-red-600">{result.error || `${entry.name} 识别失败`}</div>}<TeamRetouchPhotoCard entry={entry} workspacePath={workspacePath} project={project} cacheConfig={cacheConfig} defaultBackendMode={defaultBackendMode} componentStatus={componentStatus} onClose={onClose} onNotice={onNotice} onProjectChanged={onProjectChanged} onEntriesChange={() => { const next = entries.filter(candidate => candidate.relativePath !== entry.relativePath); onEntriesChange?.(next); if (!next.length) onClose(); }} identityState={identityState} initialPhoto={initialPhoto} refreshToken={refreshToken + (photoRefreshTokens[photoId] || 0)} processingMessage={photoProcessingMessages[photoId]} onIdentityChanged={() => loadIdentities(true)} onDetectionComplete={identifyAndSync} onPickIdentity={openIdentityPicker}/></section>;
-      })}</div></main>
+        })}</div></main>
     {selectedIdentitySubject && <IdentityPicker
       subject={selectedIdentitySubject}
       candidates={selectedCandidateSubjects}

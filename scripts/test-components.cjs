@@ -139,6 +139,7 @@ assert(teamRetouchManager.includes('Math.round(task.crop.width)') && teamRetouch
 assert(teamRetouchManager.includes('openNextUnmarkedIdentity') && teamRetouchManager.includes('未标记 {unmarkedIdentityCount}'), 'the unmarked counter must open the next unmarked person');
 assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity candidate selection must prevent duplicate assignments from the same photo');
   const personIdentityManager = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'PersonIdentityManager.tsx'), 'utf8');
+  const teamOutputProgress = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'TeamRetouchOutputProgress.tsx'), 'utf8');
   const teamRetouchSteps = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'TeamRetouchSteps.tsx'), 'utf8');
   const projectWorkspace = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
   const appSource = fs.readFileSync(path.join(repositoryRoot, 'src', 'App.tsx'), 'utf8');
@@ -155,6 +156,8 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(projectWorkspace.includes('teamRetouchInstalled || componentsLoading'), 'the team-retouch toolbar entry must render immediately while component status is refreshing');
   assert(personIdentityManager.includes('批量导入返图并识别'), 'workflow must expose batch returned-image recognition');
   assert(personIdentityManager.includes('<TeamOutputProgressPicker'), 'only the workflow step must choose the final merge destination');
+  assert(teamOutputProgress.includes('controller.progressOptions') && teamOutputProgress.includes('disabled={option.disabled}'), 'the merge destination picker must display every progress version and disable invalid targets');
+  assert(personIdentityManager.includes('workspace.photos.map(photo => photo.sourcePath)'), 'the merge destination boundary must include every source version in a mixed team workspace');
   assert(personIdentityManager.includes('合成已完成图片'), 'workflow must perform final image merging');
   assert(personIdentityManager.includes('generateTeamWorkflow'), 'workflow must generate its project-local week and identity folders');
   assert(personIdentityManager.includes('打开任务文件夹'), 'generated workflow groups must open their persistent project folders');
@@ -164,7 +167,13 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(!personIdentityManager.includes('subjects.filter(subject => !subject.task.needsReview)'), 'suggested-review work images must remain available in the downstream workflow planner');
   assert(personIdentityManager.includes('sameWeekIdentityIds') && personIdentityManager.includes("? '＋' : '→'") && personIdentityManager.includes('toggleSameWeekIdentity'), 'priority labels must switch between same-week and next-week scheduling');
   assert(!personIdentityManager.includes('无需修图') && !personIdentityManager.includes('setTeamWorkflowNoRetouch'), 'workflow tasks must always be generated before the user decides whether to upload a return');
-  assert(personIdentityManager.includes('}上传</button>') && personIdentityManager.includes('删除返图') && personIdentityManager.includes('取消标记'), 'workflow task actions must expose the compact upload and reversible completion states');
+  assert(personIdentityManager.includes('}上传</button>') && personIdentityManager.includes('删除返图') && personIdentityManager.includes('撤销不用修'), 'workflow task actions must expose compact upload and reversible no-retouch states');
+  assert(personIdentityManager.includes('标记本周不用修') && personIdentityManager.includes('markWeekNoRetouch'), 'each workflow person lane must scope bulk no-retouch completion to the displayed week');
+  assert(personIdentityManager.includes('WorkflowReturnReviewDialog') && personIdentityManager.includes("['side-by-side', '并排']") && personIdentityManager.includes('确认匹配并完成'), 'workflow batch returns must provide visual photo comparison and in-place confirmation');
+  const returnImageLoader = personIdentityManager.slice(personIdentityManager.indexOf('const ReturnImage'), personIdentityManager.indexOf('const returnCandidates'));
+  assert(returnImageLoader.includes("if (eager)") && returnImageLoader.indexOf('getMediaOriginal') < returnImageLoader.indexOf('getMediaThumbnail') && !returnImageLoader.includes("eager ? 1600"), 'full return comparison must load the original directly instead of depending on an oversized Shell thumbnail');
+  const visualIdentityPicker = personIdentityManager.slice(personIdentityManager.indexOf('const handlePick'), personIdentityManager.indexOf("window.addEventListener('photoflow-team-person-pick'"));
+  assert(!visualIdentityPicker.includes("tab !== 'people'") && visualIdentityPicker.includes("tab === 'workflow'") && visualIdentityPicker.indexOf('setAssigningSubject(subject)') < visualIdentityPicker.indexOf('getTeamIdentitySimilarities'), 'workflow thumbnails must open the visual identity picker immediately while protecting completed tasks');
   const versionsIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
   const pluginService = fs.readFileSync(path.join(repositoryRoot, 'electron', 'services', 'plugin-service.cjs'), 'utf8');
   assert(!versionsIpc.includes('runWarmJson') && (versionsIpc.match(/pluginService\.runJson\(\s*'team-retouch'/g) || []).length >= 4, 'every team-retouch operation must start an isolated component process');
@@ -179,12 +188,14 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(excludeHandler.includes("'rebuild', '--input'") && !excludeHandler.includes("'detect', '--input'"), 'removing a false positive must rebuild the stored person set without rerunning detection');
   assert(excludeHandler.includes('expectedPersonCount') && excludeHandler.includes('removedPersonCount'), 'false-positive removal must enforce an exact one-person count change');
   assert(versionsIpc.includes('resolveTeamOutputProgress'), 'team-retouch merges must resolve a registered target progress');
+  assert(versionsIpc.includes('compareProgressKeys(progress.versionKey, sourceProgress.versionKey) <= 0'), 'team-retouch merges must reject the current source progress and every earlier progress');
   assert(versionsIpc.includes('合成结果不能写回当前来源进度'), 'team-retouch merges must reject the source folder as their output');
   assert(versionsIpc.includes("ipcMain.handle('workspace-team-patch-open-folder'"), 'delivery and merged-result folders must have a scoped open action');
   assert(versionsIpc.includes("ipcMain.handle('workspace-team-workflow-return-batch'"), 'workflow batch returns must have a dedicated IPC handler');
+  assert(versionsIpc.includes("ipcMain.handle('workspace-team-workflow-return-confirm'") && versionsIpc.includes('readyTeamWorkflowSubjects(workspace'), 'manual visual return confirmation must revalidate the selected workflow task in the main process');
   assert(versionsIpc.includes("ipcMain.handle('workspace-team-workflow-generate'"), 'workflow generation must have a dedicated IPC handler');
   assert(!versionsIpc.includes("ipcMain.handle('workspace-team-workflow-no-retouch'") && !versionsIpc.includes('syncWorkflowNoRetouchFile'), 'the removed no-retouch workflow must not leave a second completion path');
-  assert(versionsIpc.includes('assignmentCompletion: { personIndex, completed: true }') && versionsIpc.includes('assignmentCompletion: { personIndex, completed: false }'), 'single uploads and removals must update the return and completion state together');
+  assert(versionsIpc.includes('assignmentCompletion: { personIndex, completed: true }') && versionsIpc.includes('assignmentCompletion: { personIndex, completed: false'), 'single uploads and removals must update the return and completion state together');
   assert(versionsIpc.includes("path.resolve(projectPath, '团片协作')"), 'workflow output must remain inside the project-local team-retouch folder');
   assert(versionsIpc.includes("'team-retouch', 'workflows'"), 'workflow metadata must live in workspace user data');
   assert(versionsIpc.includes('legacyManifestPath'), 'legacy project-local workflow metadata must migrate automatically');
@@ -262,7 +273,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   fs.writeFileSync(path.join(invalidDirectory, 'component.json'), JSON.stringify({
     apiVersion: 1,
     id: 'team-retouch',
-    version: '26.7.29.1',
+    version: '26.7.30.1',
     entrypoints: { 'win32-x64': '..\\outside.exe' },
   }));
   const invalid = registry.inspect('team-retouch');
@@ -271,7 +282,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert.match(invalid.error, /超出组件目录/);
 
   fs.rmSync(invalidDirectory, { recursive: true, force: true });
-  writeComponent(path.join(installRoot, 'team-retouch'), 'runtime', '26.7.29.1', 'team-retouch.exe', 'team-retouch');
+  writeComponent(path.join(installRoot, 'team-retouch'), 'runtime', '26.7.30.1', 'team-retouch.exe', 'team-retouch');
   const installed = registry.inspect('team-retouch');
   assert.strictEqual(installed.installed, true);
   assert.strictEqual(installed.source, 'user');

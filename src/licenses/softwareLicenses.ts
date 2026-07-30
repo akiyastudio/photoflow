@@ -11,7 +11,7 @@ export interface ThirdPartySoftwareLicense {
 }
 
 export const THIRD_PARTY_SOFTWARE_LICENSES: ThirdPartySoftwareLicense[] = [
-  { group: '主程序', name: '照片流应用代码', version: '26.7.29', purpose: '本软件界面、工作流与本地服务代码', license: '专有软件 · 保留所有权利', sourceUrl: 'https://github.com/akiyastudio/photoflow', licenseUrl: 'https://github.com/akiyastudio/photoflow/blob/main/LICENSE', note: '照片流自主代码不属于开源软件，未经版权所有者书面授权不得复制、修改、分发或再许可；第三方组件仍适用各自许可证。' },
+  { group: '主程序', name: '照片流应用代码', version: '26.7.30', purpose: '本软件界面、工作流与本地服务代码', license: '专有软件 · 保留所有权利', sourceUrl: 'https://github.com/akiyastudio/photoflow', licenseUrl: 'https://github.com/akiyastudio/photoflow/blob/main/LICENSE', note: '照片流自主代码不属于开源软件，未经版权所有者书面授权不得复制、修改、分发或再许可；第三方组件仍适用各自许可证。' },
   { group: '主程序', name: 'Electron', version: '30.5.1', purpose: '桌面应用运行框架', license: 'MIT', sourceUrl: 'https://github.com/electron/electron', licenseUrl: 'https://github.com/electron/electron/blob/main/LICENSE' },
   { group: '主程序', name: 'Chromium', version: '随 Electron 30.5.1', purpose: '网页渲染与多媒体运行环境', license: 'BSD-3-Clause + 第三方许可', sourceUrl: 'https://chromium.googlesource.com/chromium/src/', licenseUrl: 'https://chromium.googlesource.com/chromium/src/+/main/LICENSE', note: '发布包还必须保留 Electron 随附的 LICENSES.chromium.html。' },
   { group: '主程序', name: 'Node.js', version: '随 Electron 30.5.1', purpose: '主进程与本地文件功能', license: 'MIT + 第三方许可', sourceUrl: 'https://github.com/nodejs/node', licenseUrl: 'https://github.com/nodejs/node/blob/main/LICENSE' },

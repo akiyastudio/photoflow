@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { FolderInput, ScanSearch, HardDrive, Play, Trash2, AlertCircle, Edit, X, Plus, User, Loader2, RotateCcw, Download, Scissors, Video, ChevronDown, ChevronUp, Crop } from 'lucide-react';
 import { TaskProgress } from '../../components/TaskStatus';
 import { RequirePlugin } from '../../features/plugins/RequirePlugin';
-import type { AppConfig, LogEntry, ProjectStatus, WorkspaceProject } from '../../types';
+import type { AppConfig, LogEntry, ProjectFileOperationProgress, ProjectStatus, WorkspaceProject } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
@@ -145,9 +145,18 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   const [decisionData, setDecisionData] = useState<any>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [transferStats, setTransferStats] = useState<ImportTransferStats | null>(null);
+  const [isCancellingImport, setIsCancellingImport] = useState(false);
   const [shouldDeleteSourceAfterImport, setShouldDeleteSourceAfterImport] = useState(deleteSourceAfterImport);
   const selectedDrives = config?.sdPaths?.length ? config.sdPaths : config?.sdPath ? [config.sdPath] : [];
   const driveTypes = config?.sdDriveTypes || {};
+  const publishImportTask = (payload: Omit<ProjectFileOperationProgress, 'operationId' | 'operation'>) => {
+    if (!importRequestIdRef.current) return;
+    window.dispatchEvent(new CustomEvent<ProjectFileOperationProgress>('photoflow-import-task-progress', { detail: {
+      operationId: importRequestIdRef.current,
+      operation: directSource ? 'import-negative' : 'import-sd',
+      ...payload,
+    } }));
+  };
 
   // 【关键修改】使用 Ref 来做“防抖”锁，防止 SD 卡接触不良导致多次触发 startImport
   const isBusyRef = React.useRef(false);
@@ -155,6 +164,8 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   const currentDriveRef = React.useRef('');
   const currentDriveTypeRef = React.useRef<'work' | 'broll'>('work');
   const importRequestIdRef = React.useRef('');
+  const currentStageRef = React.useRef('');
+  const cancelRequestedRef = React.useRef(false);
   const importedProjectNamesRef = React.useRef<string[]>([]);
   const continueRoutedImportRef = React.useRef<(routes: Record<string, string>) => void>(() => undefined);
   const startImportRef = React.useRef<(sdPath?: string, type?: 'work' | 'broll') => void>(() => undefined);
@@ -177,7 +188,29 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   };
 
   const runCmd = (stage: string, args: string[] = []) => {
+    currentStageRef.current = stage;
     if(window.electronAPI) window.electronAPI.runScript('classify.py', ['--stage', stage, ...args, ...(directSource ? ['--direct_source', '--source_paths', JSON.stringify(selectedDrives)] : []), ...(shouldDeleteSourceAfterImport ? ['--delete_source'] : []), ...(generateJpgFromRaw ? ['--generate_jpg_from_raw'] : [])], importRequestIdRef.current);
+  };
+
+  const cancelImport = async () => {
+    if (isCancellingImport || !isBusyRef.current) return;
+    setIsCancellingImport(true);
+    importQueueRef.current = [];
+    if (status === 'decision' || currentStageRef.current === 'plan') {
+      cancelRequestedRef.current = true;
+      currentDriveRef.current = '';
+      isBusyRef.current = false;
+      setStatus('idle');
+      setStatusMsg('导入已取消');
+      setIsCancellingImport(false);
+      publishImportTask({ phase: 'cancelled', progress: 0, currentName: '导入已取消' });
+      return;
+    }
+    const result = await window.electronAPI.cancelPythonTask(importRequestIdRef.current);
+    if (!result.success) {
+      setIsCancellingImport(false);
+      setStatusMsg(result.error || '无法取消当前导入任务');
+    }
   };
 
   useEffect(() => {
@@ -187,6 +220,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
       if (!active && !isBusyRef.current) return;
       if (event.scriptName !== 'classify.py') return;
       if (!event.requestId || event.requestId !== importRequestIdRef.current) return;
+      if (cancelRequestedRef.current && event.type !== 'cancelled') return;
       // 1. 记录日志
       if (event.message) {
         setLogs(prev => {
@@ -241,6 +275,15 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
               totalFiles: Number.isFinite(Number(event.data.totalFiles)) ? Number(event.data.totalFiles) : undefined,
             });
           }
+          publishImportTask({
+            phase: 'copying',
+            progress: Number(event.progress) || 0,
+            currentName: event.message,
+            bytesCopied: Number(event.data?.bytesCopied) || 0,
+            totalBytes: Number(event.data?.totalBytes) || 0,
+            filesCopied: Number.isFinite(Number(event.data?.filesCopied)) ? Number(event.data.filesCopied) : undefined,
+            totalFiles: Number.isFinite(Number(event.data?.totalFiles)) ? Number(event.data.totalFiles) : undefined,
+          });
           break;
 
         case 'ask_user':
@@ -280,6 +323,8 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
               setStatus('finished');
               setStatusMsg(directSource ? "所选底片已全部导入完成" : "所选 SD 卡已全部导入完成");
               isBusyRef.current = false; // 【解锁】
+              setIsCancellingImport(false);
+              publishImportTask({ phase: 'complete', progress: 100, currentName: directSource ? '底片导入完成' : 'SD 卡导入完成' });
               onImportCompleteRef.current?.(importedProjectNamesRef.current);
             }
           }
@@ -295,6 +340,19 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
           importQueueRef.current = [];
           currentDriveRef.current = '';
           isBusyRef.current = false; // 【解锁】
+          setIsCancellingImport(false);
+          publishImportTask({ phase: 'failed', progress: 0, error: event.message });
+          break;
+
+        case 'cancelled':
+          setStatusMsg('导入已取消');
+          setStatus('idle');
+          importQueueRef.current = [];
+          currentDriveRef.current = '';
+          isBusyRef.current = false;
+          setIsCancellingImport(false);
+          cancelRequestedRef.current = false;
+          publishImportTask({ phase: 'cancelled', progress: 0, currentName: '导入已取消' });
           break;
       }
     });
@@ -348,6 +406,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
     setStatus('processing');
     setProgress(0);
     setDecisionData(null);
+    publishImportTask({ phase: 'scanning', progress: 0, currentName: '正在统计文件大小和数量' });
     const args = ['--sd_path', currentDriveRef.current || selectedDrives[0] || config?.sdPath || '', '--dest_path', resolvedDestinationPath];
     if (Object.keys(routes).length) args.push('--project_routes', JSON.stringify(routes));
     if (!usesProjectRouting) args.push('--direct_project');
@@ -381,6 +440,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
     setTransferStats(null);
     setLogs([]); // 清空日志准备开始
     setStatusMsg(type === 'broll' ? `正在把 ${sdPath} 导入“花絮”` : `正在整理 ${sdPath} 的工作文件`);
+    publishImportTask({ phase: 'scanning', progress: 0, currentName: usesProjectRouting ? '正在读取拍摄日期并匹配项目' : '正在统计文件大小和数量' });
 
     if (usesProjectRouting) {
       setStatusMsg('正在读取拍摄日期并匹配项目…');
@@ -403,6 +463,8 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
       : connected.map(path => ({ path, type: driveTypes[path] || 'work' as const }));
     importQueueRef.current = queue.slice(1);
     importedProjectNamesRef.current = [];
+    cancelRequestedRef.current = false;
+    setIsCancellingImport(false);
     currentDriveRef.current = '';
     importRequestIdRef.current = crypto.randomUUID();
     startImport(queue[0].path, queue[0].type);
@@ -568,6 +630,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
                 {' · '}{formatTransferBytes(transferStats.bytesPerSecond)}/s
                 {transferStats.totalFiles ? ` · ${transferStats.filesCopied || 0}/${transferStats.totalFiles} 个文件` : ''}
               </p>}
+              <button type="button" onClick={() => void cancelImport()} disabled={isCancellingImport} className="dialog-secondary mt-4 inline-flex items-center gap-2 disabled:opacity-50">{isCancellingImport && <Loader2 size={15} className="animate-spin"/>}{isCancellingImport ? '正在取消…' : '取消导入'}</button>
             </div>
           )}
 
@@ -602,6 +665,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
                     否，合并在一起
                 </button>
               </div></>}
+              <button type="button" onClick={() => void cancelImport()} className="mt-3 w-full rounded-lg border border-slate-200 bg-white py-2 text-sm font-bold text-slate-600 hover:bg-slate-100">取消本次导入</button>
             </div>
           )}
 

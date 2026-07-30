@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
+import classify  # noqa: E402
 from classify import build_capture_groups, build_video_preview_command, generate_missing_raw_jpgs, stage_import_and_organize, stage_import_broll, stage_plan_import  # noqa: E402
 from PIL import Image  # noqa: E402
 
@@ -205,3 +206,26 @@ with tempfile.TemporaryDirectory(prefix="photoflow-work-routing-test-") as tempo
     assert (afternoon_project / "jpg" / "afternoon.jpg").is_file()
 
 print("classify routed work import tests passed")
+
+
+with tempfile.TemporaryDirectory(prefix="photoflow-import-cancel-test-") as temporary:
+    root = Path(temporary)
+    source = root / "cancel-source.mp4"
+    project = root / "project"
+    cancel_file = root / "cancel.flag"
+    source.write_bytes(b"source-must-remain")
+    project.mkdir()
+    cancel_file.write_text("cancel", encoding="utf-8")
+    classify.CANCEL_FILE = str(cancel_file)
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output):
+            stage_import_broll(str(source), str(project), direct_source=True, source_paths=[str(source)], delete_source=True)
+    finally:
+        classify.CANCEL_FILE = ""
+    events = [json.loads(line) for line in output.getvalue().splitlines() if line.strip().startswith("{")]
+    assert any(event.get("type") == "cancelled" for event in events)
+    assert source.is_file(), "cancelled import must not delete the source"
+    assert not any((project / "花絮").rglob("*.mp4")) if (project / "花絮").exists() else True
+
+print("classify cooperative cancellation tests passed")

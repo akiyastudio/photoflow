@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import time
 import uuid
+from pathlib import Path
 
 STATUSES = ("未分类", "策划中", "待拍摄", "后期中", "已归档")
 IMAGE_EXTENSIONS = {
@@ -20,7 +21,7 @@ IMAGE_EXTENSIONS = {
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".crm"}
 SQLITE_BUSY_TIMEOUT_MS = 15_000
 LEGACY_PROGRESS_MIGRATION_KEY = "legacy_progress_folders_migrated"
-TARGET_SCHEMA_VERSION = 13
+TARGET_SCHEMA_VERSION = 15
 INTEGRITY_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 MIGRATION_BACKUP_LIMIT = 5
 AUTOMATIC_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000
@@ -331,10 +332,83 @@ def _migration_13(db):
         )
 
 
+def _migration_14(db):
+    progress_columns = _table_columns(db, "progress_folders")
+    if "tracking_state" not in progress_columns:
+        db.execute(
+            "ALTER TABLE progress_folders ADD COLUMN tracking_state TEXT NOT NULL DEFAULT 'disabled'"
+        )
+    db.execute(
+        """UPDATE progress_folders SET tracking_state=CASE
+             WHEN tracking_enabled=1 THEN 'ready' ELSE 'disabled' END
+           WHERE tracking_state IS NULL OR tracking_state='' OR tracking_state='disabled'"""
+    )
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS batch_file_operations (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL REFERENCES version_batches(id) ON DELETE CASCADE,
+            operation_type TEXT NOT NULL CHECK(operation_type IN ('rename','copy')),
+            source_path TEXT NOT NULL,
+            target_path TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','running','succeeded','failed','skipped')),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
+            error TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(batch_id, operation_type, source_path, target_path)
+        );
+        CREATE INDEX IF NOT EXISTS batch_file_operations_batch
+          ON batch_file_operations(batch_id, status, created_at);
+        """
+    )
+
+
+def _migration_15(db):
+    """Store return artifacts on the exact person hand-off node."""
+    columns = _table_columns(db, "team_person_assignments")
+    if "completion_kind" not in columns:
+        db.execute("ALTER TABLE team_person_assignments ADD COLUMN completion_kind TEXT NOT NULL DEFAULT ''")
+    if "edited_patch_path" not in columns:
+        db.execute("ALTER TABLE team_person_assignments ADD COLUMN edited_patch_path TEXT")
+    if "completed_at" not in columns:
+        db.execute("ALTER TABLE team_person_assignments ADD COLUMN completed_at INTEGER")
+
+    # Older builds stored just one latest return on the shared crop task. Keep
+    # that artifact on the most recently completed member and treat any older
+    # completed members as no-retouch hand-offs instead of claiming that every
+    # person returned the same file.
+    db.execute(
+        """UPDATE team_person_assignments
+           SET completion_kind=CASE WHEN completed=1 THEN 'no-retouch' ELSE '' END,
+               completed_at=CASE WHEN completed=1 THEN updated_at ELSE NULL END
+           WHERE completion_kind=''"""
+    )
+    tasks = db.execute(
+        """SELECT photo_id,base_version_id,edited_patch_path
+           FROM team_patch_tasks
+           WHERE is_deleted=0 AND edited_patch_path IS NOT NULL"""
+    ).fetchall()
+    for task in tasks:
+        latest = db.execute(
+            """SELECT person_index FROM team_person_assignments
+               WHERE photo_id=? AND base_version_id=? AND completed=1
+               ORDER BY updated_at DESC,person_index DESC LIMIT 1""",
+            (task["photo_id"], task["base_version_id"]),
+        ).fetchone()
+        if latest is not None:
+            db.execute(
+                """UPDATE team_person_assignments
+                   SET completion_kind='returned',edited_patch_path=?
+                   WHERE photo_id=? AND base_version_id=? AND person_index=?""",
+                (task["edited_patch_path"], task["photo_id"], task["base_version_id"], latest["person_index"]),
+            )
 MIGRATIONS = {
     11: _migration_11,
     12: _migration_12,
     13: _migration_13,
+    14: _migration_14,
+    15: _migration_15,
 }
 
 
@@ -505,6 +579,7 @@ def connect(root: str, database: str):
             folder_path_key TEXT NOT NULL,
             folder_id TEXT,
             tracking_enabled INTEGER NOT NULL DEFAULT 0,
+            tracking_state TEXT NOT NULL DEFAULT 'disabled',
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             UNIQUE(project_id, media_kind, version_key)
@@ -512,6 +587,21 @@ def connect(root: str, database: str):
         CREATE INDEX IF NOT EXISTS progress_folders_project ON progress_folders(project_id, media_kind, version_key);
         CREATE INDEX IF NOT EXISTS progress_folders_parent ON progress_folders(parent_progress_id);
         CREATE INDEX IF NOT EXISTS progress_folders_identity ON progress_folders(project_id, folder_id);
+        CREATE TABLE IF NOT EXISTS batch_file_operations (
+            id TEXT PRIMARY KEY,
+            batch_id TEXT NOT NULL REFERENCES version_batches(id) ON DELETE CASCADE,
+            operation_type TEXT NOT NULL CHECK(operation_type IN ('rename','copy')),
+            source_path TEXT NOT NULL,
+            target_path TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','running','succeeded','failed','skipped')),
+            attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
+            error TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(batch_id, operation_type, source_path, target_path)
+        );
+        CREATE INDEX IF NOT EXISTS batch_file_operations_batch
+          ON batch_file_operations(batch_id, status, created_at);
         CREATE TABLE IF NOT EXISTS batch_items (
             id TEXT PRIMARY KEY,
             batch_id TEXT NOT NULL REFERENCES version_batches(id) ON DELETE CASCADE,
@@ -617,6 +707,9 @@ def connect(root: str, database: str):
             confidence REAL NOT NULL DEFAULT 0,
             source TEXT NOT NULL DEFAULT 'manual',
             completed INTEGER NOT NULL DEFAULT 0,
+            completion_kind TEXT NOT NULL DEFAULT '',
+            edited_patch_path TEXT,
+            completed_at INTEGER,
             updated_at INTEGER NOT NULL,
             PRIMARY KEY (photo_id, base_version_id, person_index)
         );
@@ -667,6 +760,31 @@ def connect(root: str, database: str):
     return db
 
 
+def connect_read_only(database: str):
+    """Open the catalog without schema writes so WAL readers never need the writer slot."""
+    database = os.path.abspath(database)
+    uri = f"{Path(database).resolve().as_uri()}?mode=ro"
+    db = sqlite3.connect(uri, uri=True, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+    db.row_factory = sqlite3.Row
+    db.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+    db.execute("PRAGMA query_only=ON")
+    return db
+
+
+def database_needs_initialization(database: str) -> bool:
+    if not os.path.isfile(database):
+        return True
+    try:
+        db = connect_read_only(database)
+        try:
+            row = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            return row is None or int(row["value"] or 0) != TARGET_SCHEMA_VERSION
+        finally:
+            db.close()
+    except (sqlite3.Error, ValueError):
+        return True
+
+
 def directory_identity(path: str):
     try:
         stat = os.stat(path)
@@ -714,6 +832,80 @@ def quick_fingerprint(path: str, stat: os.stat_result | None = None) -> str:
     return digest.hexdigest()
 
 
+def full_fingerprint(path: str) -> str:
+    """Authoritative content identity used after the quick candidate filter."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def queue_full_fingerprint(pending_hashes, version_id: str, file_path: str, stat: os.stat_result):
+    """Queue one authoritative hash without reading the file while a DB write is open."""
+    if pending_hashes is None:
+        return
+    path = canonical_path(file_path)
+    request = {
+        "versionId": version_id,
+        "filePath": path,
+        "fileSize": stat.st_size,
+        "modifiedAt": int(stat.st_mtime_ns / 1_000_000),
+    }
+    for index, existing in enumerate(pending_hashes):
+        if existing["versionId"] == version_id:
+            pending_hashes[index] = request
+            return
+    pending_hashes.append(request)
+
+
+def backfill_full_fingerprints(db, requests: list[dict]):
+    """Hash files with no write transaction held, then persist each result briefly."""
+    completed = 0
+    for request in requests:
+        try:
+            db.commit()
+            version_id = str(request["versionId"])
+            file_path = canonical_path(request["filePath"])
+            expected_size = int(request["fileSize"])
+            expected_mtime = int(request["modifiedAt"])
+            record = db.execute(
+                """SELECT current_path,file_size,modified_at,full_hash FROM file_records
+                   WHERE owner_type='version' AND owner_id=?""",
+                (version_id,),
+            ).fetchone()
+            if (record is None or record["full_hash"]
+                    or canonical_path(record["current_path"]).casefold() != file_path.casefold()
+                    or record["file_size"] != expected_size or record["modified_at"] != expected_mtime):
+                continue
+            before = os.stat(file_path)
+            if before.st_size != expected_size or int(before.st_mtime_ns / 1_000_000) != expected_mtime:
+                continue
+            authoritative_hash = full_fingerprint(file_path)
+            after = os.stat(file_path)
+            if after.st_size != expected_size or int(after.st_mtime_ns / 1_000_000) != expected_mtime:
+                continue
+            current = db.execute(
+                """SELECT current_path,file_size,modified_at,full_hash FROM file_records
+                   WHERE owner_type='version' AND owner_id=?""",
+                (version_id,),
+            ).fetchone()
+            if (current is None or current["full_hash"]
+                    or canonical_path(current["current_path"]).casefold() != file_path.casefold()
+                    or current["file_size"] != expected_size or current["modified_at"] != expected_mtime):
+                continue
+            db.execute(
+                """UPDATE file_records SET full_hash=?,updated_at=?
+                   WHERE owner_type='version' AND owner_id=?""",
+                (authoritative_hash, int(time.time() * 1000), version_id),
+            )
+            db.commit()
+            completed += 1
+        except (FileNotFoundError, PermissionError, OSError, sqlite3.Error):
+            db.rollback()
+    return completed
+
+
 def project_row(db, project_name: str):
     row = db.execute("SELECT * FROM projects WHERE name=? COLLATE NOCASE AND status != ''", (project_name,)).fetchone()
     if row is None:
@@ -759,29 +951,30 @@ def media_bundle(db, photo_id: str):
     }
 
 
-def upsert_file_record(db, owner_id: str, file_path: str, stat: os.stat_result, identity: str | None, fingerprint: str):
+def upsert_file_record(db, owner_id: str, file_path: str, stat: os.stat_result, identity: str | None,
+                       fingerprint: str, full_hash: str | None = None):
     timestamp = int(time.time() * 1000)
     record = db.execute("SELECT id, created_at FROM file_records WHERE owner_type='version' AND owner_id=?", (owner_id,)).fetchone()
     values = (
         canonical_path(file_path), os.path.basename(file_path), os.path.splitext(file_path)[1].lower(), identity,
-        str(stat.st_dev), stat.st_size, int(stat.st_mtime_ns / 1_000_000), fingerprint, timestamp,
+        str(stat.st_dev), stat.st_size, int(stat.st_mtime_ns / 1_000_000), fingerprint, full_hash, timestamp,
     )
     if record:
         db.execute(
             """UPDATE file_records SET current_path=?, file_name=?, extension=?, windows_file_id=?, volume_id=?,
-               file_size=?, modified_at=?, quick_hash=?, missing=0, updated_at=? WHERE id=?""",
+               file_size=?, modified_at=?, quick_hash=?, full_hash=?, missing=0, updated_at=? WHERE id=?""",
             values + (record["id"],),
         )
     else:
         db.execute(
             """INSERT INTO file_records(id,owner_type,owner_id,current_path,file_name,extension,windows_file_id,
-               volume_id,file_size,modified_at,quick_hash,missing,created_at,updated_at)
-               VALUES(?,'version',?,?,?,?,?,?,?,?,?,0,?,?)""",
+               volume_id,file_size,modified_at,quick_hash,full_hash,missing,created_at,updated_at)
+               VALUES(?,'version',?,?,?,?,?,?,?,?,?,?,0,?,?)""",
             (str(uuid.uuid4()), owner_id, *values[:-1], timestamp, timestamp),
         )
 
 
-def sync_media_file(db, project, file_path: str):
+def sync_media_file(db, project, file_path: str, pending_hashes=None):
     file_path = canonical_path(file_path)
     kind = media_type(file_path)
     if not kind or not os.path.isfile(file_path):
@@ -792,23 +985,25 @@ def sync_media_file(db, project, file_path: str):
     mtime_ms = int(stat.st_mtime_ns / 1_000_000)
     linked_source = db.execute(
         """SELECT batch_items.id AS item_id,batch_items.photo_id,versions.id AS version_id,
-                  versions.file_path_key,versions.file_fingerprint,versions.content_changed
+                  versions.file_path_key,versions.file_fingerprint,versions.content_changed,
+                  file_records.full_hash AS stored_full_hash
            FROM batch_items
            JOIN version_batches ON version_batches.id=batch_items.batch_id
            JOIN versions ON versions.id=batch_items.version_id
-           WHERE versions.is_deleted=0 AND version_batches.status IN ('importing','ready')
+           LEFT JOIN file_records ON file_records.owner_type='version' AND file_records.owner_id=versions.id
+           WHERE versions.is_deleted=0 AND version_batches.status IN ('importing','applying','needs_repair','ready')
              AND (batch_items.source_path_key=? OR (? IS NOT NULL AND batch_items.source_file_id=?))
            ORDER BY version_batches.sequence DESC LIMIT 1""",
         (path_key, identity, identity),
     ).fetchone()
-    # Batch versions now point directly at the user's real progress files.
-    # Follow a same-volume rename in both the batch item and version record.
+    # A rename keeps the cached full hash. A quick-hash change invalidates it
+    # and queues one replacement after the short metadata transaction commits.
     if linked_source is not None and linked_source["file_path_key"] != path_key:
         fingerprint = quick_fingerprint(file_path, stat)
-        content_changed = bool(
-            linked_source["content_changed"]
-            or linked_source["file_fingerprint"] and linked_source["file_fingerprint"] != fingerprint
+        fingerprint_changed = bool(
+            linked_source["file_fingerprint"] and linked_source["file_fingerprint"] != fingerprint
         )
+        content_changed = bool(linked_source["content_changed"] or fingerprint_changed)
         timestamp = int(time.time() * 1000)
         db.execute(
             """UPDATE batch_items SET source_name=?, source_path=?, source_path_key=?,
@@ -820,21 +1015,28 @@ def sync_media_file(db, project, file_path: str):
                file_modified_at=?,file_missing=0,content_changed=?,
                thumbnail_path=CASE WHEN ?=1 THEN NULL ELSE thumbnail_path END,updated_at=? WHERE id=?""",
             (file_path, path_key, identity, fingerprint, stat.st_size, mtime_ms, int(content_changed),
-             int(bool(linked_source["file_fingerprint"] and linked_source["file_fingerprint"] != fingerprint)),
-             timestamp, linked_source["version_id"]),
+             int(fingerprint_changed), timestamp, linked_source["version_id"]),
         )
-        upsert_file_record(db, linked_source["version_id"], file_path, stat, identity, fingerprint)
+        cached_hash = None if fingerprint_changed else linked_source["stored_full_hash"]
+        upsert_file_record(db, linked_source["version_id"], file_path, stat, identity, fingerprint, cached_hash)
+        if not cached_hash:
+            queue_full_fingerprint(pending_hashes, linked_source["version_id"], file_path, stat)
         return linked_source["photo_id"]
+
     existing = None
     if identity:
         existing = db.execute(
-            """SELECT versions.* FROM versions JOIN photos ON photos.id=versions.photo_id
+            """SELECT versions.*,file_records.full_hash AS stored_full_hash
+               FROM versions JOIN photos ON photos.id=versions.photo_id
+               LEFT JOIN file_records ON file_records.owner_type='version' AND file_records.owner_id=versions.id
                WHERE versions.file_id=? AND versions.is_deleted=0 AND photos.project_id=? LIMIT 1""",
             (identity, project["id"]),
         ).fetchone()
     if existing is None:
         existing = db.execute(
-            """SELECT versions.* FROM versions JOIN photos ON photos.id=versions.photo_id
+            """SELECT versions.*,file_records.full_hash AS stored_full_hash
+               FROM versions JOIN photos ON photos.id=versions.photo_id
+               LEFT JOIN file_records ON file_records.owner_type='version' AND file_records.owner_id=versions.id
                WHERE versions.file_path_key=? AND versions.is_deleted=0 AND photos.project_id=? LIMIT 1""",
             (path_key, project["id"]),
         ).fetchone()
@@ -843,36 +1045,47 @@ def sync_media_file(db, project, file_path: str):
     changed = False
     if existing is not None:
         changed = existing["file_size"] != stat.st_size or existing["file_modified_at"] != mtime_ms
-        if changed or not existing["file_fingerprint"] or existing["file_id"] != identity:
-            fingerprint = quick_fingerprint(file_path, stat)
-        else:
-            fingerprint = existing["file_fingerprint"]
+        fingerprint = quick_fingerprint(file_path, stat) if (
+            changed or not existing["file_fingerprint"] or existing["file_id"] != identity
+        ) else existing["file_fingerprint"]
     else:
         fingerprint = quick_fingerprint(file_path, stat)
         tombstone = db.execute(
-            """SELECT versions.photo_id, versions.file_fingerprint FROM versions
+            """SELECT versions.photo_id,file_records.full_hash FROM versions
                JOIN photos ON photos.id=versions.photo_id
-               WHERE versions.file_path_key=? AND versions.is_deleted=1 AND photos.project_id=?
+               LEFT JOIN file_records ON file_records.owner_type='version' AND file_records.owner_id=versions.id
+               WHERE versions.file_path_key=? AND versions.file_fingerprint=?
+                 AND versions.is_deleted=1 AND photos.project_id=?
                ORDER BY versions.updated_at DESC LIMIT 1""",
-            (path_key, project["id"]),
+            (path_key, fingerprint, project["id"]),
         ).fetchone()
-        if tombstone is not None and tombstone["file_fingerprint"] == fingerprint:
-            return tombstone["photo_id"]
-        # Cross-volume moves change the OS identity. Only claim a fingerprint
-        # whose previous file is missing, otherwise identical exports remain
-        # independent Photos instead of being merged accidentally.
-        existing = db.execute(
-            """SELECT versions.* FROM versions JOIN photos ON photos.id=versions.photo_id
+        candidates = db.execute(
+            """SELECT versions.*,file_records.full_hash AS stored_full_hash FROM versions
+               JOIN photos ON photos.id=versions.photo_id
+               LEFT JOIN file_records ON file_records.owner_type='version' AND file_records.owner_id=versions.id
                WHERE versions.file_fingerprint=? AND versions.is_deleted=0 AND photos.project_id=?
                  AND (versions.file_missing=1 OR NOT EXISTS (SELECT 1 FROM file_records
-                   WHERE owner_type='version' AND owner_id=versions.id AND missing=0)) LIMIT 1""",
+                   WHERE owner_type='version' AND owner_id=versions.id AND missing=0))""",
             (fingerprint, project["id"]),
-        ).fetchone()
+        ).fetchall()
+        candidate_hashes = [tombstone["full_hash"] if tombstone is not None else None]
+        candidate_hashes.extend(candidate["stored_full_hash"] for candidate in candidates)
+        # The expensive pass is only useful when the cheap stages produced an
+        # authoritative candidate. Brand-new files are registered immediately.
+        authoritative_hash = full_fingerprint(file_path) if any(candidate_hashes) else None
+        if tombstone is not None and tombstone["full_hash"] == authoritative_hash:
+            return tombstone["photo_id"]
+        exact_candidates = [
+            candidate for candidate in candidates
+            if candidate["stored_full_hash"] and candidate["stored_full_hash"] == authoritative_hash
+        ]
+        existing = exact_candidates[0] if len(exact_candidates) == 1 else None
 
     timestamp = int(time.time() * 1000)
     if existing is not None:
         content_changed_now = bool(
-            changed and existing["file_id"] == identity and existing["file_fingerprint"] and existing["file_fingerprint"] != fingerprint
+            changed and existing["file_id"] == identity and existing["file_fingerprint"]
+            and existing["file_fingerprint"] != fingerprint
         )
         content_changed = bool(existing["content_changed"] or content_changed_now)
         db.execute(
@@ -891,7 +1104,10 @@ def sync_media_file(db, project, file_path: str):
             (existing["version_number"], file_path, existing["version_number"], identity,
              existing["version_number"], fingerprint, timestamp, existing["photo_id"]),
         )
-        upsert_file_record(db, existing["id"], file_path, stat, identity, fingerprint)
+        cached_hash = None if changed else existing["stored_full_hash"]
+        upsert_file_record(db, existing["id"], file_path, stat, identity, fingerprint, cached_hash)
+        if not cached_hash:
+            queue_full_fingerprint(pending_hashes, existing["id"], file_path, stat)
         return existing["photo_id"]
 
     photo_id = str(uuid.uuid4())
@@ -909,7 +1125,8 @@ def sync_media_file(db, project, file_path: str):
            VALUES(?,?,NULL,0,'原片','original',?,?,?,?,?,?,'original',1,?,?)""",
         (version_id, photo_id, file_path, path_key, identity, fingerprint, stat.st_size, mtime_ms, timestamp, timestamp),
     )
-    upsert_file_record(db, version_id, file_path, stat, identity, fingerprint)
+    upsert_file_record(db, version_id, file_path, stat, identity, fingerprint, None)
+    queue_full_fingerprint(pending_hashes, version_id, file_path, stat)
     return photo_id
 
 
@@ -946,8 +1163,9 @@ def media_sync_project(root: str, db, payload: dict):
             file_path = os.path.join(directory, name)
             if not media_type(file_path):
                 continue
+            pending_hashes = []
             try:
-                if sync_media_file(db, project, file_path):
+                if sync_media_file(db, project, file_path, pending_hashes):
                     seen_paths.add(canonical_path(file_path).casefold())
                     created_or_updated += 1
             except (FileNotFoundError, PermissionError, OSError):
@@ -956,6 +1174,7 @@ def media_sync_project(root: str, db, payload: dict):
             # single WAL writer slot before doing that work so project status
             # changes and other interactive writes stay responsive.
             db.commit()
+            backfill_full_fingerprints(db, pending_hashes)
     timestamp = int(time.time() * 1000)
     version_rows = db.execute(
         """SELECT versions.id, versions.file_path, versions.file_path_key FROM versions
@@ -985,8 +1204,11 @@ def media_get(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     file_path = canonical_path(payload["filePath"])
     mark_missing_project_versions(db, project["id"])
-    photo_id = sync_media_file(db, project, file_path)
     db.commit()
+    pending_hashes = []
+    photo_id = sync_media_file(db, project, file_path, pending_hashes)
+    db.commit()
+    backfill_full_fingerprints(db, pending_hashes)
     if not photo_id:
         raise ValueError("该文件不是可追踪的图片或视频")
     return {"success": True, **media_bundle(db, photo_id)}
@@ -1011,19 +1233,34 @@ def serialize_batch(row):
 
 
 def serialize_progress(row):
+    tracking_state = row["tracking_state"] if "tracking_state" in row.keys() else ("ready" if row["tracking_enabled"] else "disabled")
     return {
         "id": row["id"], "projectId": row["project_id"], "mediaKind": row["media_kind"],
         "versionKey": row["version_key"], "parentProgressId": row["parent_progress_id"],
         "parentVersionKey": row["parent_version_key"], "displayName": row["display_name"],
         "folderPath": row["folder_path"], "folderMissing": not os.path.isdir(row["folder_path"]),
-        "trackingEnabled": bool(row["tracking_enabled"]),
+        "trackingEnabled": tracking_state == "ready",
+        "trackingState": tracking_state,
+        "repairBatchId": row["repair_batch_id"] if "repair_batch_id" in row.keys() else None,
+        "pendingOperationCount": int(row["pending_operation_count"] or 0) if "pending_operation_count" in row.keys() else 0,
         "createdAt": row["created_at"], "updatedAt": row["updated_at"],
     }
 
 
 def progress_rows(db, project_id: str):
     return db.execute(
-        """SELECT progress.*, parent.version_key AS parent_version_key
+        """SELECT progress.*, parent.version_key AS parent_version_key,
+           (SELECT batches.id FROM version_batches batches
+              WHERE batches.project_id=progress.project_id
+                AND batches.source_folder_path_key=progress.folder_path_key
+                AND batches.status='needs_repair'
+              ORDER BY batches.sequence DESC LIMIT 1) AS repair_batch_id,
+           (SELECT COUNT(*) FROM batch_file_operations operations
+              JOIN version_batches batches ON batches.id=operations.batch_id
+              WHERE batches.project_id=progress.project_id
+                AND batches.source_folder_path_key=progress.folder_path_key
+                AND batches.status='needs_repair'
+                AND operations.status IN ('pending','failed')) AS pending_operation_count
            FROM progress_folders AS progress
            LEFT JOIN progress_folders AS parent ON parent.id=progress.parent_progress_id
            WHERE progress.project_id=?
@@ -1126,9 +1363,48 @@ def migrate_legacy_progress_folders_once(root: str, db, project):
 
 def progress_list(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
+    recover_stale_version_batches(db, project["id"])
     migrate_legacy_progress_folders_once(root, db, project)
     sync_progress_folder_locations(root, db, project)
     return {"success": True, "progressFolders": [serialize_progress(row) for row in progress_rows(db, project["id"])]}
+
+
+def recover_stale_version_batches(db, project_id: str):
+    """Expose interrupted worker state as a recoverable tracking state."""
+    cutoff = int(time.time() * 1000) - 10 * 60 * 1000
+    stale = db.execute(
+        """SELECT * FROM version_batches WHERE project_id=? AND status IN ('importing','applying')
+           AND updated_at<?""",
+        (project_id, cutoff),
+    ).fetchall()
+    if not stale:
+        return
+    timestamp = int(time.time() * 1000)
+    for batch in stale:
+        pending_operations = db.execute(
+            "SELECT COUNT(*) FROM batch_file_operations WHERE batch_id=? AND status!='succeeded'",
+            (batch["id"],),
+        ).fetchone()[0]
+        if pending_operations:
+            db.execute(
+                """UPDATE batch_file_operations SET status='failed',error=CASE WHEN error='' THEN '上次文件操作意外中断' ELSE error END,
+                   updated_at=? WHERE batch_id=? AND status IN ('pending','running')""",
+                (timestamp, batch["id"]),
+            )
+            db.execute("UPDATE version_batches SET status='needs_repair',updated_at=? WHERE id=?", (timestamp, batch["id"]))
+            db.execute(
+                """UPDATE progress_folders SET tracking_state='needs_repair',tracking_enabled=0,updated_at=?
+                   WHERE project_id=? AND folder_path_key=?""",
+                (timestamp, project_id, batch["source_folder_path_key"]),
+            )
+        else:
+            db.execute("UPDATE version_batches SET status='failed',updated_at=? WHERE id=?", (timestamp, batch["id"]))
+            db.execute(
+                """UPDATE progress_folders SET tracking_state='pending_compare',tracking_enabled=0,updated_at=?
+                   WHERE project_id=? AND folder_path_key=?""",
+                (timestamp, project_id, batch["source_folder_path_key"]),
+            )
+    db.commit()
 
 
 def progress_register(root: str, db, payload: dict):
@@ -1184,14 +1460,21 @@ def progress_register(root: str, db, payload: dict):
         ).fetchone()
         if conflict is not None:
             raise ValueError(f"版本 _{version_key} 已存在")
+    allowed_tracking_states = {"disabled", "pending_compare", "pending_confirm", "committing", "ready", "needs_repair"}
+    requested_tracking_state = payload.get("trackingState")
+    if requested_tracking_state is None:
+        requested_tracking_state = "ready" if bool(payload.get("trackingEnabled")) else "disabled"
+    tracking_state = str(requested_tracking_state)
+    if tracking_state not in allowed_tracking_states:
+        raise ValueError("无效的版本跟踪状态")
     values = (
         parent_id, display_name, folder_path,
-        folder_path.casefold(), directory_identity(folder_path), int(bool(payload.get("trackingEnabled"))), timestamp,
+        folder_path.casefold(), directory_identity(folder_path), int(tracking_state == "ready"), tracking_state, timestamp,
     )
     if existing:
         db.execute(
             """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,display_name=?,folder_path=?,folder_path_key=?,
-               folder_id=?,tracking_enabled=?,updated_at=? WHERE id=?""",
+               folder_id=?,tracking_enabled=?,tracking_state=?,updated_at=? WHERE id=?""",
             (media_kind, version_key, *values, existing["id"]),
         )
         progress_id = existing["id"]
@@ -1199,8 +1482,8 @@ def progress_register(root: str, db, payload: dict):
         progress_id = str(uuid.uuid4())
         db.execute(
             """INSERT INTO progress_folders(id,project_id,media_kind,version_key,parent_progress_id,
-               display_name,folder_path,folder_path_key,folder_id,tracking_enabled,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+               display_name,folder_path,folder_path_key,folder_id,tracking_enabled,tracking_state,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (progress_id, project["id"], media_kind, version_key, *values[:-1], timestamp, timestamp),
         )
     db.commit()
@@ -1297,8 +1580,16 @@ def progress_update_tree(root: str, db, payload: dict):
         target_versions.add(version_identity)
         target_names.add(name_identity)
         target_paths.add(path_identity)
-        tracking_enabled = int(bool(update.get("trackingEnabled", row["tracking_enabled"])))
-        normalized.append((progress_id, media_kind, version_key, parent_id, display_name, folder_path, tracking_enabled))
+        if update.get("trackingState"):
+            tracking_state = str(update["trackingState"])
+        elif "trackingEnabled" in update:
+            tracking_state = "ready" if bool(update["trackingEnabled"]) else "disabled"
+        else:
+            tracking_state = str(row["tracking_state"] or ("ready" if row["tracking_enabled"] else "disabled"))
+        if tracking_state not in {"disabled", "pending_compare", "pending_confirm", "committing", "ready", "needs_repair"}:
+            raise ValueError("无效的版本跟踪状态")
+        tracking_enabled = int(tracking_state == "ready")
+        normalized.append((progress_id, media_kind, version_key, parent_id, display_name, folder_path, tracking_enabled, tracking_state))
 
     for row in rows.values():
         if row["id"] in update_ids:
@@ -1314,17 +1605,17 @@ def progress_update_tree(root: str, db, payload: dict):
     try:
         # Unique(project, kind, version) requires temporary values so swaps and
         # prefix remaps can be committed as one transaction.
-        for index, (progress_id, _media_kind, _version_key, _parent_id, _display_name, _folder_path, _tracking_enabled) in enumerate(normalized):
+        for index, (progress_id, _media_kind, _version_key, _parent_id, _display_name, _folder_path, _tracking_enabled, _tracking_state) in enumerate(normalized):
             db.execute(
                 "UPDATE progress_folders SET version_key=?,updated_at=? WHERE id=?",
                 (f"__progress_update_{index}_{uuid.uuid4().hex}", timestamp, progress_id),
             )
-        for progress_id, media_kind, version_key, parent_id, display_name, folder_path, tracking_enabled in normalized:
+        for progress_id, media_kind, version_key, parent_id, display_name, folder_path, tracking_enabled, tracking_state in normalized:
             db.execute(
                 """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,display_name=?,
-                   folder_path=?,folder_path_key=?,folder_id=?,tracking_enabled=?,updated_at=? WHERE id=?""",
+                   folder_path=?,folder_path_key=?,folder_id=?,tracking_enabled=?,tracking_state=?,updated_at=? WHERE id=?""",
                 (media_kind, version_key, parent_id, display_name, folder_path, folder_path.casefold(),
-                 directory_identity(folder_path), tracking_enabled, timestamp, progress_id),
+                 directory_identity(folder_path), tracking_enabled, tracking_state, timestamp, progress_id),
             )
         if replacement_id:
             # The physical directory identity moved to the recovered progress.
@@ -1422,11 +1713,17 @@ def source_version_row(db, project_id: str, file_path: str):
     ).fetchone()
 
 
-def ensure_source_version(db, project, file_path: str):
+def ensure_source_version(db, project, file_path: str, pending_hashes=None):
     row = source_version_row(db, project["id"], file_path)
     if row is not None:
+        record = db.execute(
+            "SELECT full_hash FROM file_records WHERE owner_type='version' AND owner_id=?",
+            (row["id"],),
+        ).fetchone()
+        if record is None or not record["full_hash"]:
+            queue_full_fingerprint(pending_hashes, row["id"], file_path, os.stat(file_path))
         return row
-    photo_id = sync_media_file(db, project, file_path)
+    photo_id = sync_media_file(db, project, file_path, pending_hashes)
     if not photo_id:
         raise ValueError(f"无法登记批次图片：{os.path.basename(file_path)}")
     row = source_version_row(db, project["id"], file_path)
@@ -1521,9 +1818,11 @@ def ensure_reference_batch(root: str, db, project, folder_path: str):
         current_source_keys = set()
         for file_path in folder_media_files(folder_path):
             current_source_keys.add(canonical_path(file_path).casefold())
-            version = ensure_source_version(db, project, file_path)
+            pending_hashes = []
+            version = ensure_source_version(db, project, file_path, pending_hashes)
             register_batch_item(db, batch["id"], version, file_path, "baseline")
             db.commit()
+            backfill_full_fingerprints(db, pending_hashes)
         stale_items = db.execute(
             "SELECT id,source_path_key FROM batch_items WHERE batch_id=?",
             (batch["id"],),
@@ -1549,7 +1848,13 @@ def ensure_reference_batch(root: str, db, project, folder_path: str):
 
 def batch_register_baseline(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
-    batch = ensure_reference_batch(root, db, project, canonical_path(payload["folderPath"]))
+    folder_path = canonical_path(payload["folderPath"])
+    try:
+        batch = ensure_reference_batch(root, db, project, folder_path)
+    except Exception:
+        set_progress_tracking_state_for_folder(db, project["id"], folder_path, "pending_compare")
+        db.commit()
+        raise
     version_name = str(payload.get("versionName") or "").strip()
     if version_name:
         db.execute(
@@ -1560,6 +1865,8 @@ def batch_register_baseline(root: str, db, payload: dict):
             (version_name, int(time.time() * 1000), batch["id"]),
         )
         db.commit()
+    set_progress_tracking_state_for_folder(db, project["id"], folder_path, "ready")
+    db.commit()
     return {"success": True, "batch": batch_summary(db, batch["id"])}
 
 
@@ -1670,7 +1977,7 @@ def merge_source_photo_history(db, project, source_path: str, target_photo_id: s
     return db.execute("SELECT * FROM versions WHERE id=?", (selected_version_id,)).fetchone()
 
 
-def create_linked_batch_version(db, project, batch, parent, source_path: str):
+def create_linked_batch_version(db, project, batch, parent, source_path: str, pending_hashes=None):
     existing_item = db.execute(
         """SELECT versions.* FROM batch_items JOIN versions ON versions.id=batch_items.version_id
            WHERE batch_items.batch_id=? AND batch_items.source_path_key=? AND versions.is_deleted=0 LIMIT 1""",
@@ -1698,6 +2005,13 @@ def create_linked_batch_version(db, project, batch, parent, source_path: str):
     stat = os.stat(source_path)
     identity = file_identity(source_path)
     fingerprint = quick_fingerprint(source_path, stat)
+    cached_record = db.execute(
+        """SELECT full_hash FROM file_records
+           WHERE current_path=? AND file_size=? AND modified_at=? AND quick_hash=? AND missing=0
+             AND full_hash IS NOT NULL ORDER BY updated_at DESC LIMIT 1""",
+        (source_path, stat.st_size, int(stat.st_mtime_ns / 1_000_000), fingerprint),
+    ).fetchone()
+    cached_hash = cached_record["full_hash"] if cached_record is not None else None
     timestamp = int(time.time() * 1000)
     version_id = str(uuid.uuid4())
     db.execute(
@@ -1710,43 +2024,116 @@ def create_linked_batch_version(db, project, batch, parent, source_path: str):
          os.environ.get("USERNAME") or "本机用户", f"由进度“{batch['display_name']}”自动建立",
          "draft", 0, 0, timestamp, timestamp),
     )
-    upsert_file_record(db, version_id, source_path, stat, identity, fingerprint)
+    upsert_file_record(db, version_id, source_path, stat, identity, fingerprint, cached_hash)
+    if not cached_hash:
+        queue_full_fingerprint(pending_hashes, version_id, source_path, stat)
     return db.execute("SELECT * FROM versions WHERE id=?", (version_id,)).fetchone(), None
 
 
-def rename_confirmed_batch_sources(db, batch_id: str, folder_path: str, matches: list):
-    renamed_count = 0
-    errors = []
+def serialize_batch_operation(row):
+    return {
+        "id": row["id"], "batchId": row["batch_id"], "operationType": row["operation_type"],
+        "sourcePath": row["source_path"], "targetPath": row["target_path"], "status": row["status"],
+        "attemptCount": row["attempt_count"], "error": row["error"],
+        "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+    }
+
+
+def set_progress_tracking_state_for_folder(db, project_id: str, folder_path: str, state: str):
+    timestamp = int(time.time() * 1000)
+    db.execute(
+        """UPDATE progress_folders SET tracking_state=?,tracking_enabled=?,updated_at=?
+           WHERE project_id=? AND folder_path_key=?""",
+        (state, int(state == "ready"), timestamp, project_id, canonical_path(folder_path).casefold()),
+    )
+
+
+def plan_confirmed_batch_renames(db, batch_id: str, folder_path: str, matches: list):
     folder_path = canonical_path(folder_path)
+    timestamp = int(time.time() * 1000)
     for match in matches:
         source_name = str(match.get("source") or "")
         target_name = str(match.get("target") or "")
         if not target_name or target_name == source_name:
             continue
+        source_path = safe_folder_file(folder_path, source_name)
+        if os.path.basename(target_name) != target_name:
+            raise ValueError("目标文件名无效")
+        target_path = canonical_path(os.path.join(folder_path, target_name))
+        if os.path.dirname(target_path).casefold() != folder_path.casefold():
+            raise ValueError("目标文件超出所选文件夹")
+        planning_error = ""
+        if os.path.exists(target_path):
+            planning_error = f"目标文件已存在：{target_name}"
+        if db.execute(
+            "SELECT id FROM batch_items WHERE batch_id=? AND source_path_key=? LIMIT 1",
+            (batch_id, source_path.casefold()),
+        ).fetchone() is None:
+            planning_error = f"没有找到对应的批次记录：{source_name}"
+        db.execute(
+            """INSERT INTO batch_file_operations(id,batch_id,operation_type,source_path,target_path,
+               status,attempt_count,error,created_at,updated_at)
+               VALUES(?,?,'rename',?,?,?,0,?,?,?)
+               ON CONFLICT(batch_id,operation_type,source_path,target_path) DO NOTHING""",
+            (str(uuid.uuid4()), batch_id, source_path, target_path,
+             "failed" if planning_error else "pending", planning_error, timestamp, timestamp),
+        )
+
+
+def apply_pending_batch_operations(db, batch_id: str):
+    batch = db.execute("SELECT * FROM version_batches WHERE id=?", (batch_id,)).fetchone()
+    if batch is None:
+        raise ValueError("版本批次不存在")
+    operations = db.execute(
+        """SELECT * FROM batch_file_operations WHERE batch_id=? AND status IN ('pending','failed','running')
+           ORDER BY created_at,id""", (batch_id,),
+    ).fetchall()
+    succeeded = 0
+    errors = []
+    for operation in operations:
+        timestamp = int(time.time() * 1000)
+        db.execute(
+            "UPDATE batch_file_operations SET status='running',attempt_count=attempt_count+1,error='',updated_at=? WHERE id=?",
+            (timestamp, operation["id"]),
+        )
+        db.commit()
         try:
-            source_path = safe_folder_file(folder_path, source_name)
-            if os.path.basename(target_name) != target_name:
-                raise ValueError("目标文件名无效")
-            target_path = canonical_path(os.path.join(folder_path, target_name))
-            if os.path.dirname(target_path).casefold() != folder_path.casefold():
-                raise ValueError("目标文件超出所选文件夹")
-            if os.path.exists(target_path):
-                raise FileExistsError(f"目标文件已存在：{target_name}")
+            source_path = canonical_path(operation["source_path"])
+            target_path = canonical_path(operation["target_path"])
             item = db.execute(
                 "SELECT * FROM batch_items WHERE batch_id=? AND source_path_key=? LIMIT 1",
                 (batch_id, source_path.casefold()),
             ).fetchone()
             if item is None:
+                item = db.execute(
+                    "SELECT * FROM batch_items WHERE batch_id=? AND source_path_key=? LIMIT 1",
+                    (batch_id, target_path.casefold()),
+                ).fetchone()
+            if item is None:
                 raise ValueError("没有找到对应的批次记录")
-            os.rename(source_path, target_path)
+            if os.path.exists(source_path):
+                if os.path.exists(target_path):
+                    raise FileExistsError(f"目标文件已存在：{os.path.basename(target_path)}")
+                os.rename(source_path, target_path)
+            elif not os.path.isfile(target_path):
+                raise FileNotFoundError(f"源文件和目标文件都不存在：{os.path.basename(source_path)}")
             stat = os.stat(target_path)
             identity = file_identity(target_path)
             fingerprint = quick_fingerprint(target_path, stat)
+            if item["source_fingerprint"] and item["source_fingerprint"] != fingerprint:
+                raise ValueError("目标文件内容与待重命名素材不一致")
+            existing_record = db.execute(
+                "SELECT full_hash FROM file_records WHERE owner_type='version' AND owner_id=?",
+                (item["version_id"],),
+            ).fetchone()
+            authoritative_hash = existing_record["full_hash"] if existing_record is not None else None
+            if not authoritative_hash:
+                authoritative_hash = full_fingerprint(target_path)
             timestamp = int(time.time() * 1000)
             db.execute(
                 """UPDATE batch_items SET source_name=?,source_path=?,source_path_key=?,source_file_id=?,updated_at=?
                    WHERE id=?""",
-                (target_name, target_path, target_path.casefold(), identity, timestamp, item["id"]),
+                (os.path.basename(target_path), target_path, target_path.casefold(), identity, timestamp, item["id"]),
             )
             db.execute(
                 """UPDATE versions SET file_path=?,file_path_key=?,file_id=?,file_fingerprint=?,file_size=?,
@@ -1754,12 +2141,64 @@ def rename_confirmed_batch_sources(db, batch_id: str, folder_path: str, matches:
                 (target_path, target_path.casefold(), identity, fingerprint, stat.st_size,
                  int(stat.st_mtime_ns / 1_000_000), timestamp, item["version_id"]),
             )
-            upsert_file_record(db, item["version_id"], target_path, stat, identity, fingerprint)
+            upsert_file_record(db, item["version_id"], target_path, stat, identity, fingerprint, authoritative_hash)
+            db.execute(
+                "UPDATE batch_file_operations SET status='succeeded',error='',updated_at=? WHERE id=?",
+                (timestamp, operation["id"]),
+            )
             db.commit()
-            renamed_count += 1
+            succeeded += 1
         except Exception as error:
-            errors.append({"source": source_name, "target": target_name, "error": str(error)})
-    return {"renamedCount": renamed_count, "renameErrors": errors}
+            db.rollback()
+            timestamp = int(time.time() * 1000)
+            db.execute(
+                "UPDATE batch_file_operations SET status='failed',error=?,updated_at=? WHERE id=?",
+                (str(error), timestamp, operation["id"]),
+            )
+            db.commit()
+            errors.append({
+                "operationId": operation["id"], "source": os.path.basename(operation["source_path"]),
+                "target": os.path.basename(operation["target_path"]), "error": str(error),
+            })
+    remaining = db.execute(
+        "SELECT COUNT(*) FROM batch_file_operations WHERE batch_id=? AND status!='succeeded'",
+        (batch_id,),
+    ).fetchone()[0]
+    final_status = "needs_repair" if remaining else "ready"
+    timestamp = int(time.time() * 1000)
+    db.execute("UPDATE version_batches SET status=?,updated_at=? WHERE id=?", (final_status, timestamp, batch_id))
+    set_progress_tracking_state_for_folder(db, batch["project_id"], batch["source_folder_path"], final_status)
+    db.commit()
+    return {
+        "renamedCount": succeeded,
+        "renameErrors": errors,
+        "repairRequired": bool(remaining),
+        "operationCount": len(operations),
+    }
+
+
+def rename_confirmed_batch_sources(db, batch_id: str, folder_path: str, matches: list):
+    plan_confirmed_batch_renames(db, batch_id, folder_path, matches)
+    db.execute("UPDATE version_batches SET status='applying',updated_at=? WHERE id=?", (int(time.time() * 1000), batch_id))
+    db.commit()
+    return apply_pending_batch_operations(db, batch_id)
+
+
+def batch_operation_list(db, payload: dict):
+    batch_id = str(payload.get("batchId") or "")
+    rows = db.execute(
+        "SELECT * FROM batch_file_operations WHERE batch_id=? ORDER BY created_at,id", (batch_id,),
+    ).fetchall()
+    batch = db.execute("SELECT * FROM version_batches WHERE id=?", (batch_id,)).fetchone()
+    if batch is None:
+        raise ValueError("版本批次不存在")
+    return {"success": True, "batch": batch_summary(db, batch_id), "operations": [serialize_batch_operation(row) for row in rows]}
+
+
+def batch_retry_operations(db, payload: dict):
+    batch_id = str(payload.get("batchId") or "")
+    result = apply_pending_batch_operations(db, batch_id)
+    return {"success": not result["repairRequired"], "batch": batch_summary(db, batch_id), **result}
 
 
 def batch_commit_compare(root: str, db, payload: dict):
@@ -1770,8 +2209,19 @@ def batch_commit_compare(root: str, db, payload: dict):
         raise ValueError("批次文件夹不存在")
     if folder_a.casefold() == folder_b.casefold():
         raise ValueError("对照批次和新返图不能是同一个文件夹")
+    set_progress_tracking_state_for_folder(db, project["id"], folder_b, "committing")
+    db.commit()
 
     reference_batch = ensure_reference_batch(root, db, project, folder_a)
+    pending_hashes = []
+    # Register and hash returned files one by one before the relationship
+    # transaction starts. Later batch writes can then reuse cached hashes and
+    # never hold SQLite's writer slot while reading a large RAW/video file.
+    for source_path in folder_media_files(folder_b):
+        preflight_hashes = []
+        ensure_source_version(db, project, source_path, preflight_hashes)
+        db.commit()
+        backfill_full_fingerprints(db, preflight_hashes)
     import_key = str(payload.get("importKey") or uuid.uuid4())
     batch = db.execute("SELECT * FROM version_batches WHERE import_key=?", (import_key,)).fetchone()
     if batch is None and payload.get("reconcileExisting"):
@@ -1785,6 +2235,8 @@ def batch_commit_compare(root: str, db, payload: dict):
     if batch is not None and batch["project_id"] != project["id"]:
         raise ValueError("批次提交标识已被其他项目使用")
     if batch is not None and batch["status"] == "ready" and not payload.get("reconcileExisting"):
+        set_progress_tracking_state_for_folder(db, project["id"], folder_b, "ready")
+        db.commit()
         return {
             "success": True, "alreadyCommitted": True,
             "referenceBatch": batch_summary(db, reference_batch["id"]),
@@ -1810,9 +2262,9 @@ def batch_commit_compare(root: str, db, payload: dict):
                 if source_key in matched_source_keys:
                     continue
                 matched_source_keys.add(source_key)
-                parent = ensure_source_version(db, project, reference_path)
+                parent = ensure_source_version(db, project, reference_path, pending_hashes)
                 register_batch_item(db, reference_batch["id"], parent, reference_path, "baseline")
-                version, created_path = create_linked_batch_version(db, project, batch, parent, source_path)
+                version, created_path = create_linked_batch_version(db, project, batch, parent, source_path, pending_hashes)
                 register_batch_item(
                     db, batch["id"], version, source_path, "visual-hash",
                     float(match.get("distance") or 0), str(match.get("confidence") or ""), "confirmed",
@@ -1827,7 +2279,7 @@ def batch_commit_compare(root: str, db, payload: dict):
                 current_source_keys.add(source_key)
                 if source_key in matched_source_keys:
                     continue
-                version = ensure_source_version(db, project, source_path)
+                version = ensure_source_version(db, project, source_path, pending_hashes)
                 register_batch_item(db, batch["id"], version, source_path, "new", review_status="new")
             if not incremental_sources:
                 stale_items = db.execute(
@@ -1843,9 +2295,17 @@ def batch_commit_compare(root: str, db, payload: dict):
                 db.execute("UPDATE versions SET is_current=0,updated_at=? WHERE photo_id=?", (timestamp, photo_id))
                 db.execute("UPDATE versions SET is_current=1,updated_at=? WHERE id=?", (timestamp, version_id))
                 db.execute("UPDATE photos SET current_version_id=?,updated_at=? WHERE id=?", (version_id, timestamp, photo_id))
-            db.execute("UPDATE version_batches SET updated_at=? WHERE id=?", (timestamp, batch["id"]))
+            if payload.get("renameSources"):
+                plan_confirmed_batch_renames(db, batch["id"], folder_b, matches)
+            db.execute(
+                "UPDATE version_batches SET status=?,updated_at=? WHERE id=?",
+                ("applying" if payload.get("renameSources") else "ready", timestamp, batch["id"]),
+            )
+            if not payload.get("renameSources"):
+                set_progress_tracking_state_for_folder(db, project["id"], folder_b, "ready")
             db.commit()
-            rename_result = rename_confirmed_batch_sources(db, batch["id"], folder_b, matches) if payload.get("renameSources") else {"renamedCount": 0, "renameErrors": []}
+            backfill_full_fingerprints(db, pending_hashes)
+            rename_result = apply_pending_batch_operations(db, batch["id"]) if payload.get("renameSources") else {"renamedCount": 0, "renameErrors": [], "repairRequired": False, "operationCount": 0}
             return {
                 "success": True,
                 "reconciled": True,
@@ -1855,6 +2315,12 @@ def batch_commit_compare(root: str, db, payload: dict):
             }
         except Exception:
             db.rollback()
+            db.execute(
+                "UPDATE version_batches SET status='failed',updated_at=? WHERE id=?",
+                (int(time.time() * 1000), batch["id"]),
+            )
+            set_progress_tracking_state_for_folder(db, project["id"], folder_b, "pending_compare")
+            db.commit()
             for created_path in created_paths:
                 try:
                     os.unlink(created_path)
@@ -1888,9 +2354,9 @@ def batch_commit_compare(root: str, db, payload: dict):
             if source_key in matched_source_keys:
                 continue
             matched_source_keys.add(source_key)
-            parent = ensure_source_version(db, project, reference_path)
+            parent = ensure_source_version(db, project, reference_path, pending_hashes)
             register_batch_item(db, reference_batch["id"], parent, reference_path, "baseline")
-            version, created_path = create_linked_batch_version(db, project, batch, parent, source_path)
+            version, created_path = create_linked_batch_version(db, project, batch, parent, source_path, pending_hashes)
             register_batch_item(
                 db, batch["id"], version, source_path, "visual-hash",
                 float(match.get("distance") or 0), str(match.get("confidence") or ""), "confirmed",
@@ -1901,7 +2367,7 @@ def batch_commit_compare(root: str, db, payload: dict):
         for source_path in folder_media_files(folder_b):
             if source_path.casefold() in matched_source_keys:
                 continue
-            version = ensure_source_version(db, project, source_path)
+            version = ensure_source_version(db, project, source_path, pending_hashes)
             register_batch_item(db, batch["id"], version, source_path, "new", review_status="new")
 
         best_versions = {}
@@ -1918,12 +2384,17 @@ def batch_commit_compare(root: str, db, payload: dict):
             db.execute("UPDATE versions SET is_current=0,updated_at=? WHERE photo_id=?", (timestamp, photo_id))
             db.execute("UPDATE versions SET is_current=1,updated_at=? WHERE id=?", (timestamp, version_id))
             db.execute("UPDATE photos SET current_version_id=?,updated_at=? WHERE id=?", (version_id, timestamp, photo_id))
+        if payload.get("renameSources"):
+            plan_confirmed_batch_renames(db, batch["id"], folder_b, matches)
         db.execute(
-            "UPDATE version_batches SET status='ready',updated_at=? WHERE id=?",
-            (timestamp, batch["id"]),
+            "UPDATE version_batches SET status=?,updated_at=? WHERE id=?",
+            ("applying" if payload.get("renameSources") else "ready", timestamp, batch["id"]),
         )
+        if not payload.get("renameSources"):
+            set_progress_tracking_state_for_folder(db, project["id"], folder_b, "ready")
         db.commit()
-        rename_result = rename_confirmed_batch_sources(db, batch["id"], folder_b, matches) if payload.get("renameSources") else {"renamedCount": 0, "renameErrors": []}
+        backfill_full_fingerprints(db, pending_hashes)
+        rename_result = apply_pending_batch_operations(db, batch["id"]) if payload.get("renameSources") else {"renamedCount": 0, "renameErrors": [], "repairRequired": False, "operationCount": 0}
         return {
             "success": True,
             "referenceBatch": batch_summary(db, reference_batch["id"]),
@@ -1936,6 +2407,7 @@ def batch_commit_compare(root: str, db, payload: dict):
             "UPDATE version_batches SET status='failed',updated_at=? WHERE id=?",
             (int(time.time() * 1000), batch["id"]),
         )
+        set_progress_tracking_state_for_folder(db, project["id"], folder_b, "pending_compare")
         db.commit()
         raise
 
@@ -1951,6 +2423,7 @@ def media_create_version(db, payload: dict):
     stat = os.stat(file_path)
     identity = file_identity(file_path)
     fingerprint = quick_fingerprint(file_path, stat)
+    authoritative_hash = full_fingerprint(file_path)
     timestamp = int(time.time() * 1000)
     next_number = db.execute("SELECT COALESCE(MAX(version_number), -1)+1 FROM versions WHERE photo_id=?", (photo_id,)).fetchone()[0]
     version_id = payload.get("versionId") or str(uuid.uuid4())
@@ -1967,7 +2440,7 @@ def media_create_version(db, payload: dict):
          payload.get("note") or "", payload.get("status") or "draft", 1, int(bool(payload.get("isFinal"))), timestamp, timestamp),
     )
     db.execute("UPDATE photos SET current_version_id=?, updated_at=? WHERE id=?", (version_id, timestamp, photo_id))
-    upsert_file_record(db, version_id, file_path, stat, identity, fingerprint)
+    upsert_file_record(db, version_id, file_path, stat, identity, fingerprint, authoritative_hash)
     db.commit()
     return {"success": True, **media_bundle(db, photo_id)}
 
@@ -2062,7 +2535,16 @@ def media_relocate_version(db, payload: dict):
     stat = os.stat(file_path)
     identity = file_identity(file_path)
     fingerprint = quick_fingerprint(file_path, stat)
-    fingerprint_matches = not row["file_fingerprint"] or row["file_fingerprint"] == fingerprint
+    source_full_hash = full_fingerprint(file_path)
+    stored_record = db.execute(
+        "SELECT full_hash FROM file_records WHERE owner_type='version' AND owner_id=?",
+        (row["id"],),
+    ).fetchone()
+    stored_full_hash = stored_record["full_hash"] if stored_record is not None else None
+    fingerprint_matches = bool(
+        row["file_fingerprint"] and row["file_fingerprint"] == fingerprint
+        and stored_full_hash and stored_full_hash == source_full_hash
+    )
     if not fingerprint_matches and not payload.get("force"):
         return {"success": False, "fingerprintMismatch": True, "error": "所选文件与原版本的内容指纹不一致"}
     duplicate = db.execute(
@@ -2087,7 +2569,7 @@ def media_relocate_version(db, payload: dict):
                updated_at=? WHERE id=?""",
             (file_path, identity, fingerprint, timestamp, row["photo_id"]),
         )
-    upsert_file_record(db, row["id"], file_path, stat, identity, fingerprint)
+    upsert_file_record(db, row["id"], file_path, stat, identity, fingerprint, source_full_hash)
     db.commit()
     return {"success": True, **media_bundle(db, row["photo_id"])}
 
@@ -2104,6 +2586,21 @@ def team_artifact_paths(rows) -> list[str]:
     return list(dict.fromkeys(values))
 
 
+def team_assignment_artifact_paths(db, photo_id: str, base_version_id: str, person_indices=None) -> list[str]:
+    values = [photo_id, base_version_id]
+    member_filter = ""
+    if person_indices:
+        indexes = sorted({int(value) for value in person_indices})
+        member_filter = f" AND person_index IN ({','.join('?' for _ in indexes)})"
+        values.extend(indexes)
+    rows = db.execute(
+        f"""SELECT edited_patch_path FROM team_person_assignments
+            WHERE photo_id=? AND base_version_id=? AND edited_patch_path IS NOT NULL{member_filter}""",
+        values,
+    ).fetchall()
+    return list(dict.fromkeys(row["edited_patch_path"] for row in rows if row["edited_patch_path"]))
+
+
 def unreferenced_team_artifact_paths(db, candidates: list[str]) -> list[str]:
     if not candidates:
         return []
@@ -2117,6 +2614,10 @@ def unreferenced_team_artifact_paths(db, candidates: list[str]) -> list[str]:
         except json.JSONDecodeError:
             members = []
         referenced.update(canonical_path(member["maskPath"]) for member in members if member.get("maskPath"))
+    for row in db.execute(
+        "SELECT edited_patch_path FROM team_person_assignments WHERE edited_patch_path IS NOT NULL"
+    ).fetchall():
+        referenced.add(canonical_path(row["edited_patch_path"]))
     return [value for value in dict.fromkeys(candidates) if canonical_path(value) not in referenced]
 
 
@@ -2380,7 +2881,9 @@ def team_project_workspace(root: str, db, payload: dict):
     ).fetchall()]
     assignments = [dict(row) for row in db.execute(
         """SELECT photo_id AS photoId,base_version_id AS baseVersionId,person_index AS personIndex,
-                  identity_id AS identityId,confidence,source,completed,updated_at AS updatedAt
+                  identity_id AS identityId,confidence,source,completed,
+                  completion_kind AS completionKind,edited_patch_path AS editedPatchPath,
+                  completed_at AS completedAt,updated_at AS updatedAt
            FROM team_person_assignments WHERE project_id=?""",
         (project["id"],),
     ).fetchall()]
@@ -2431,7 +2934,12 @@ def team_identity_save(db, payload: dict):
             """INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,identity_id,confidence,source,completed,updated_at)
                VALUES(?,?,?,?,?,?,?,?,?)
                ON CONFLICT(photo_id,base_version_id,person_index) DO UPDATE SET
-                 identity_id=excluded.identity_id,confidence=excluded.confidence,source=excluded.source,updated_at=excluded.updated_at""",
+                 identity_id=excluded.identity_id,confidence=excluded.confidence,source=excluded.source,
+                 completed=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.completed ELSE 0 END,
+                 completion_kind=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.completion_kind ELSE '' END,
+                 edited_patch_path=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.edited_patch_path ELSE NULL END,
+                 completed_at=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.completed_at ELSE NULL END,
+                 updated_at=excluded.updated_at""",
             (project["id"], assignment["photoId"], assignment["baseVersionId"], int(assignment["personIndex"]),
              identity_id, float(assignment.get("confidence", 1)), str(assignment.get("source") or "manual"),
              int(bool(assignment.get("completed", False))), timestamp),
@@ -2458,7 +2966,11 @@ def team_identity_assign(db, payload: dict):
            VALUES(?,?,?,?,?,?,?,?,?)
            ON CONFLICT(photo_id,base_version_id,person_index) DO UPDATE SET
              identity_id=excluded.identity_id,confidence=excluded.confidence,source=excluded.source,
-             completed=excluded.completed,updated_at=excluded.updated_at""",
+             completed=excluded.completed,
+             completion_kind=CASE WHEN excluded.completed=1 THEN team_person_assignments.completion_kind ELSE '' END,
+             edited_patch_path=CASE WHEN excluded.completed=1 THEN team_person_assignments.edited_patch_path ELSE NULL END,
+             completed_at=CASE WHEN excluded.completed=1 THEN team_person_assignments.completed_at ELSE NULL END,
+             updated_at=excluded.updated_at""",
         (project["id"], payload["photoId"], payload["baseVersionId"], int(payload["personIndex"]), identity_id,
          float(payload.get("confidence", 1)), str(payload.get("source") or "manual"), int(completed), timestamp),
     )
@@ -2565,7 +3077,11 @@ def team_identity_confirm_group(db, payload: dict):
                VALUES(?,?,?,?,?,?,?,?,?)
                ON CONFLICT(photo_id,base_version_id,person_index) DO UPDATE SET
                  identity_id=excluded.identity_id,confidence=excluded.confidence,source=excluded.source,
-                 completed=excluded.completed,updated_at=excluded.updated_at""",
+                 completed=excluded.completed,
+                 completion_kind=CASE WHEN excluded.completed=1 THEN team_person_assignments.completion_kind ELSE '' END,
+                 edited_patch_path=CASE WHEN excluded.completed=1 THEN team_person_assignments.edited_patch_path ELSE NULL END,
+                 completed_at=CASE WHEN excluded.completed=1 THEN team_person_assignments.completed_at ELSE NULL END,
+                 updated_at=excluded.updated_at""",
             (project["id"], photo_id, base_version_id, person_index, identity_id,
              float(assignment.get("confidence", 1)), source, int(completed), timestamp),
         )
@@ -2579,10 +3095,17 @@ def team_identity_confirm_group(db, payload: dict):
 
 def team_identity_complete(db, payload: dict):
     timestamp = int(time.time() * 1000)
+    completed = bool(payload.get("completed"))
+    completion_kind = str(payload.get("completionKind") or ("no-retouch" if completed else ""))
+    if completion_kind not in ("", "returned", "no-retouch", "skip-requested"):
+        raise ValueError("人物完成方式无效")
+    edited_patch_path = canonical_path(payload["editedPatchPath"]) if payload.get("editedPatchPath") else None
     result = db.execute(
-        """UPDATE team_person_assignments SET completed=?,updated_at=?
+        """UPDATE team_person_assignments
+           SET completed=?,completion_kind=?,edited_patch_path=?,completed_at=?,updated_at=?
            WHERE photo_id=? AND base_version_id=? AND person_index=?""",
-        (int(bool(payload.get("completed"))), timestamp, payload["photoId"], payload["baseVersionId"], int(payload["personIndex"])),
+        (int(completed), completion_kind, edited_patch_path, timestamp if completed else None, timestamp,
+         payload["photoId"], payload["baseVersionId"], int(payload["personIndex"])),
     )
     if result.rowcount != 1:
         raise ValueError("请先给这个人物标记身份")
@@ -2592,7 +3115,12 @@ def team_identity_complete(db, payload: dict):
 
 def team_identity_delete(db, payload: dict):
     project = project_row(db, payload["projectName"])
-    db.execute("UPDATE team_person_assignments SET completed=0 WHERE identity_id=? AND project_id=?", (payload["identityId"], project["id"]))
+    db.execute(
+        """UPDATE team_person_assignments
+           SET completed=0,completion_kind='',edited_patch_path=NULL,completed_at=NULL
+           WHERE identity_id=? AND project_id=?""",
+        (payload["identityId"], project["id"]),
+    )
     db.execute("DELETE FROM team_person_identities WHERE id=? AND project_id=?", (payload["identityId"], project["id"]))
     db.commit()
     return {"success": True}
@@ -2676,6 +3204,7 @@ def team_patch_replace(db, payload: dict):
         "SELECT patch_path,mask_path,edited_patch_path,members_json FROM team_patch_tasks WHERE photo_id=? AND base_version_id=?",
         (payload["photoId"], payload["baseVersionId"]),
     ).fetchall()
+    assignment_artifacts = team_assignment_artifact_paths(db, payload["photoId"], payload["baseVersionId"])
     db.execute(
         "DELETE FROM team_patch_tasks WHERE photo_id=? AND base_version_id=?",
         (payload["photoId"], payload["baseVersionId"]),
@@ -2705,7 +3234,7 @@ def team_patch_replace(db, payload: dict):
         )
     db.commit()
     result = team_patch_list(db, {"photoId": payload["photoId"]})
-    result["artifactPaths"] = unreferenced_team_artifact_paths(db, team_artifact_paths(previous_rows))
+    result["artifactPaths"] = unreferenced_team_artifact_paths(db, team_artifact_paths(previous_rows) + assignment_artifacts)
     return result
 
 
@@ -2719,7 +3248,7 @@ def team_patch_cleanup(db, payload: dict):
         return {**team_patch_list(db, {"photoId": payload["photoId"]}), "artifactPaths": [], "cleanedCount": 0}
     if not payload.get("force") and any(row["status"] != "merged" for row in rows):
         raise ValueError("仍有未完成的团片协作任务，不能清理工作数据")
-    candidates = team_artifact_paths(rows)
+    candidates = team_artifact_paths(rows) + team_assignment_artifact_paths(db, payload["photoId"], payload["baseVersionId"])
     db.execute(
         "DELETE FROM team_patch_tasks WHERE photo_id=? AND base_version_id=?",
         (payload["photoId"], payload["baseVersionId"]),
@@ -2790,10 +3319,21 @@ def team_patch_update(db, payload: dict):
     try:
         db.execute(f"UPDATE team_patch_tasks SET {', '.join(fields)} WHERE id=?", values)
         if assignment_person_index is not None:
+            assignment_completed = bool(assignment_completion.get("completed"))
+            assignment_completion_kind = str(assignment_completion.get("completionKind") or ("returned" if assignment_completed and payload.get("editedPatchPath") else "no-retouch" if assignment_completed else ""))
+            if assignment_completion_kind not in ("", "returned", "no-retouch", "skip-requested"):
+                raise ValueError("人物完成方式无效")
+            assignment_edited_path = assignment_completion.get("editedPatchPath")
+            if assignment_edited_path is None and assignment_completion_kind == "returned":
+                assignment_edited_path = payload.get("editedPatchPath")
             db.execute(
-                """UPDATE team_person_assignments SET completed=?,updated_at=?
+                """UPDATE team_person_assignments
+                   SET completed=?,completion_kind=?,edited_patch_path=?,completed_at=?,updated_at=?
                    WHERE photo_id=? AND base_version_id=? AND person_index=?""",
-                (int(bool(assignment_completion.get("completed"))), timestamp, row["photo_id"], row["base_version_id"], assignment_person_index),
+                (int(assignment_completed), assignment_completion_kind,
+                 canonical_path(assignment_edited_path) if assignment_edited_path else None,
+                 timestamp if assignment_completed else None, timestamp,
+                 row["photo_id"], row["base_version_id"], assignment_person_index),
             )
         db.commit()
     except Exception:
@@ -2812,7 +3352,7 @@ def team_patch_delete(db, payload: dict):
         raise ValueError("人物工作图不存在")
     members = json.loads(row["members_json"] or "[]") or [{"personIndex": row["person_index"]}]
     person_indices = sorted({int(member.get("personIndex") or 0) for member in members if int(member.get("personIndex") or 0) > 0})
-    candidates = team_artifact_paths([row])
+    candidates = team_artifact_paths([row]) + team_assignment_artifact_paths(db, row["photo_id"], row["base_version_id"], person_indices)
     db.execute("DELETE FROM team_patch_tasks WHERE id=?", (row["id"],))
     if person_indices:
         placeholders = ",".join("?" for _ in person_indices)
@@ -2883,12 +3423,23 @@ def sync_directories(root: str, db):
     db.commit()
 
 
-def load(root: str, database: str):
-    db = connect(root, database)
-    sync_directories(os.path.abspath(root), db)
+def catalog_snapshot(db, database: str):
     rows = [dict(row) for row in db.execute("SELECT * FROM projects WHERE is_deleted=0 ORDER BY name COLLATE NOCASE").fetchall()]
-    db.close()
     return {"success": True, "projects": rows, "database": os.path.abspath(database)}
+
+
+def load(root: str, database: str):
+    # Schema creation/migration happens only when required. Normal project-list
+    # refreshes use a query-only connection and never compete for SQLite's
+    # single WAL writer slot.
+    if database_needs_initialization(database):
+        initialized = connect(root, database)
+        initialized.close()
+    db = connect_read_only(database)
+    try:
+        return catalog_snapshot(db, database)
+    finally:
+        db.close()
 
 
 def deleted_projects_list(db):
@@ -3005,6 +3556,12 @@ def purge_deleted_project(db, payload: dict):
 def mutate(root: str, database: str, action: str, payload: dict):
     db = connect(root, database)
     now = int(time.time() * 1000)
+    if action == "catalog_sync":
+        try:
+            sync_directories(os.path.abspath(root), db)
+            return catalog_snapshot(db, database)
+        finally:
+            db.close()
     if action == "maintenance_run":
         try:
             _check_integrity(db)
@@ -3103,6 +3660,14 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "batch_commit_compare":
         result = batch_commit_compare(root, db, payload)
+        db.close()
+        return result
+    elif action == "batch_operation_list":
+        result = batch_operation_list(db, payload)
+        db.close()
+        return result
+    elif action == "batch_retry_operations":
+        result = batch_retry_operations(db, payload)
         db.close()
         return result
     elif action == "media_update_version":
@@ -3233,7 +3798,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "maintenance_run", "add", "status", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_update_tree", "batch_register_baseline", "batch_commit_compare", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
+    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_update_tree", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")

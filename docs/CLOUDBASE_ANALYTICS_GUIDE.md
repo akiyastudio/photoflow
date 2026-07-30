@@ -188,9 +188,9 @@ module.exports = {
   "_id": "win32-stable-26-7-29",
   "platform": "win32",
   "channel": "stable",
-  "version": "26.7.29",
+  "version": "26.7.30",
   "versionCode": 260729,
-  "downloadUrl": "https://你的腾讯云域名/releases/26.7.29/照片流-Setup.exe",
+  "downloadUrl": "https://你的腾讯云域名/releases/26.7.30/照片流-Setup.exe",
   "sha256": "安装包的 SHA-256",
   "notes": "修复已知问题并提升稳定性。",
   "mandatory": false,
@@ -217,7 +217,7 @@ Get-FileHash "C:\path\to\PhotoFlow-Setup.exe" -Algorithm SHA256
 验证更新接口：
 
 ```powershell
-Invoke-RestMethod "https://example.ap-shanghai.app.tcloudbase.com/v1/updates?platform=win32&channel=stable&currentVersion=26.7.29"
+Invoke-RestMethod "https://example.ap-shanghai.app.tcloudbase.com/v1/updates?platform=win32&channel=stable&currentVersion=26.7.30"
 ```
 
 客户端仅通过配置的 CloudBase URL 读取这个接口。未配置腾讯云更新服务或接口不可用时，

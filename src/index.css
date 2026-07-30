@@ -129,19 +129,25 @@ main:has(> div > .workflow-board-view) > div {
 .workflow-person-lane {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(220px, 270px) minmax(0, 1fr);
+  grid-template-columns: minmax(175px, 205px) minmax(0, 1fr);
 }
 .workflow-person-summary {
   min-width: 0;
   min-height: 9.5rem;
-  align-content: center;
+  align-content: flex-start;
+  align-items: flex-start;
+  justify-content: flex-start;
+  flex-wrap: wrap;
   border-right: 1px solid #e2e8f0;
   border-bottom-width: 0;
   padding: .8rem .9rem;
 }
-.workflow-person-summary .dialog-primary {
-  padding: .45rem .65rem;
-  font-size: .72rem;
+.workflow-person-summary .dialog-primary,
+.workflow-person-summary .dialog-secondary {
+  flex-basis: auto;
+  margin-left: 0;
+  padding: .4rem .55rem;
+  font-size: .68rem;
 }
 .workflow-task-strip {
   display: flex;
@@ -193,7 +199,7 @@ main:has(> div > .workflow-board-view) > div {
   aspect-ratio: auto;
   overflow: hidden;
 }
-.workflow-board-view [role="button"] { cursor: default; }
+.workflow-board-view [role="button"] { cursor: pointer; }
 @media (max-width: 900px) {
   .workflow-person-lane { grid-template-columns: minmax(0, 1fr); }
   .workflow-person-summary {
@@ -310,6 +316,8 @@ html.dark .workflow-task-card { border-color: #273244; background: #090c12; }
 .dialog-primary:disabled { cursor: not-allowed; opacity: .45; }
 .dialog-secondary { border: 1px solid #cbd5e1; color: #475569; background: #fff; }
 .dialog-secondary:hover { background: #f8fafc; }
+.dialog-secondary:disabled,
+.dialog-secondary:disabled:hover { cursor: not-allowed; border-color: #cbd5e1; background: #f1f5f9; color: #94a3b8; opacity: .8; }
 
 /* The application uses Tailwind utility classes, while theme is applied to <html>. */
 html.dark { color-scheme: dark; }
@@ -332,6 +340,8 @@ html.dark .hover\:bg-blue-50:hover { background-color: #1e3a8a; }
 html.dark input, html.dark select, html.dark textarea { background-color: #030407 !important; color: #e5e7eb !important; border-color: #374151 !important; }
 html.dark .project-action-button, html.dark .dialog-secondary, html.dark .form-input { background: #090c12; border-color: #374151; color: #bfdbfe; }
 html.dark .project-action-button:hover, html.dark .dialog-secondary:hover, html.dark .project-menu-item:hover { background: #111827; }
+html.dark .dialog-secondary:disabled,
+html.dark .dialog-secondary:disabled:hover { cursor: not-allowed; background: #111827; border-color: #334155; color: #64748b; opacity: 1; }
 html.dark .project-action-danger { color: #fca5a5; border-color: #7f1d1d; }
 html.dark .project-toolbar .project-action-button { background:transparent; }
 html.dark .project-toolbar .project-action-button:hover { background:#111827; }

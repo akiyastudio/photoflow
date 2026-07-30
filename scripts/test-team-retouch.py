@@ -148,6 +148,7 @@ def main():
             matched = match_returned_batch(match_manifest)
         assert [item["taskId"] for item in matched["matches"]] == [f"task-{index}" for index in return_order]
         assert all(item["confidence"] == "high" for item in matched["matches"])
+        assert all(item["alternatives"] and item["alternatives"][0]["patchPath"] for item in matched["matches"])
         assert maximize_assignment([[0.9, 0.2], [0.8, 0.7]]) == [0, 1]
         manifest_path.write_text(json.dumps({"tasks": [{
             "id": "test-task",
@@ -414,20 +415,28 @@ def main():
         })
         assert atomic_uploaded["tasks"][0]["editedPatchPath"] == str(uploaded_path.resolve())
         workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
-        assert next(item for item in workspace["assignments"] if item["personIndex"] == 1)["completed"] is True
+        returned_assignment = next(item for item in workspace["assignments"] if item["personIndex"] == 1)
+        assert returned_assignment["completed"] is True
+        assert returned_assignment["completionKind"] == "returned"
+        assert returned_assignment["editedPatchPath"] == str(uploaded_path.resolve())
         atomic_removed = team_patch_update(db, {
             "taskId": "group-task", "editedPatchPath": None, "status": "exported",
             "assignmentCompletion": {"personIndex": 1, "completed": False},
         })
         assert atomic_removed["tasks"][0]["editedPatchPath"] is None
         workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
-        assert next(item for item in workspace["assignments"] if item["personIndex"] == 1)["completed"] is False
+        removed_assignment = next(item for item in workspace["assignments"] if item["personIndex"] == 1)
+        assert removed_assignment["completed"] is False
+        assert removed_assignment["completionKind"] == ""
+        assert removed_assignment["editedPatchPath"] is None
         assert team_identity_complete(db, {
             "photoId": "photo", "baseVersionId": "version", "personIndex": 1, "completed": True,
         })["success"]
         workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
         assert workspace["identities"][0]["name"] == "Alice"
         assert workspace["assignments"][0]["completed"] is True
+        assert workspace["assignments"][0]["completionKind"] == "no-retouch"
+        assert workspace["assignments"][0]["editedPatchPath"] is None
 
         candidate = team_identity_save(db, {
             "projectName": "Test", "name": "\u5f85\u786e\u8ba4\u4eba\u7269 8", "assignments": [{

@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "research-tools",
-  "version": "26.7.29.1",
+  "version": "26.7.30.1",
   "platforms": ["win32", "darwin"],
   "architectures": ["x64", "arm64"],
   "entrypoints": {

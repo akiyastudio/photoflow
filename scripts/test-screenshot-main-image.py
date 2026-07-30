@@ -26,6 +26,30 @@ def make_artwork(height: int, width: int) -> np.ndarray:
     return artwork
 
 
+def make_concentrated_phone_artwork() -> np.ndarray:
+    """A dark full-width post whose visual detail is concentrated on the right."""
+    height, width = 387, 179
+    screenshot = np.full((height, width, 3), 250, dtype=np.uint8)
+    rng = np.random.default_rng(33)
+    artwork = np.full((334, width, 3), (14, 15, 17), dtype=np.uint8)
+    texture = rng.normal(0, 5, artwork.shape).astype(np.float32)
+    texture = cv2.GaussianBlur(texture, (0, 0), 2)
+    artwork = np.clip(artwork.astype(np.float32) + texture, 0, 255).astype(np.uint8)
+    artwork[:, 129:, 0] = np.clip(artwork[:, 129:, 0].astype(np.int16) + 3, 0, 255).astype(np.uint8)
+    cv2.ellipse(artwork, (55, 92), (39, 58), 0, 190, 530, (145, 125, 130), 7)
+    cv2.ellipse(artwork, (55, 92), (31, 49), 0, 185, 535, (7, 8, 10), 10)
+    cv2.circle(artwork, (111, 143), 14, (190, 180, 175), -1)
+    cv2.rectangle(artwork, (91, 157), (137, 275), (60, 55, 80), -1)
+    for y in range(155, 290, 11):
+        x = 84 + (y * 3) % 45
+        cv2.line(artwork, (x, y), (min(174, x + 35), y + 7), ((y * 5) % 220, 35 + y % 80, 95 + y % 130), 3)
+    cv2.line(artwork, (105, 255), (88, 320), (195, 195, 200), 10)
+    cv2.line(artwork, (123, 255), (136, 320), (195, 195, 200), 10)
+    screenshot[27:361] = artwork
+    cv2.putText(screenshot, "prts.wiki", (62, 379), cv2.FONT_HERSHEY_SIMPLEX, 0.25, (110, 110, 110), 1)
+    return screenshot
+
+
 with tempfile.TemporaryDirectory(prefix="photoflow-screenshot-main-") as temporary:
     directory = Path(temporary)
 
@@ -48,6 +72,25 @@ with tempfile.TemporaryDirectory(prefix="photoflow-screenshot-main-") as tempora
     assert abs(crop["height"] - (expected[3] - expected[1])) <= 180, crop
     assert Path(result["output"]).exists(), result
     assert screenshot_path.exists(), "original input must never be overwritten"
+
+    # Subject texture must not be mistaken for the media boundary.  The two
+    # strong horizontal transitions identify the complete full-width artwork.
+    phone_screenshot = make_concentrated_phone_artwork()
+    phone_rectangle, phone_confidence, phone_reason = MODULE.detect_main_rectangle(phone_screenshot)
+    assert phone_rectangle == (0, 27, 179, 361), (phone_rectangle, phone_confidence, phone_reason)
+
+    # A weak boundary on only one side is not enough evidence to delete the
+    # opposite, low-texture portion of an image.
+    weak_rows = np.full(99, 8.0, dtype=np.float32)
+    weak_columns = np.full(99, 8.0, dtype=np.float32)
+    weak_columns[39] = 1.0
+    expanded = MODULE._expand_weak_single_sided_crops(
+        (40, 10, 100, 90),
+        (weak_rows, weak_columns),
+        100,
+        100,
+    )
+    assert expanded == (0, 10, 100, 90), expanded
 
     note = np.full((1600, 900, 3), 250, dtype=np.uint8)
     for y in range(160, 1400, 50):

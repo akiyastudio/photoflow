@@ -24,12 +24,24 @@ VIDEO_PREVIEW_QUALITY_PROFILES = {
     },
 }
 
+CANCEL_FILE = ''
+
+
+class ImportCancelled(Exception):
+    pass
+
+
+def ensure_not_cancelled():
+    if CANCEL_FILE and os.path.exists(CANCEL_FILE):
+        raise ImportCancelled('导入已取消')
+
 # --- 2. 辅助工具函数 ---
 def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024, on_progress=None):
     bytes_copied = 0
     try:
         with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
             while True:
+                ensure_not_cancelled()
                 buf = fsrc.read(chunk_size)
                 if not buf:
                     break
@@ -44,6 +56,11 @@ def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024, on_progress=None):
     except Exception as e:
         # 如果中途出错（比如读卡器突然拔出），with open 会确保文件句柄被立即强制关闭
         # 避免 Windows 内核锁死
+        if isinstance(e, ImportCancelled):
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
         raise e
 
 def get_file_time(file_path):
@@ -62,6 +79,7 @@ def scan_sd_media(sd_path):
         if not os.path.exists(target_dir):
             continue
         for root, dirs, names in os.walk(target_dir):
+            ensure_not_cancelled()
             dirs[:] = [directory for directory in dirs if not directory.startswith('.')]
             files.extend(
                 os.path.join(root, name)
@@ -79,6 +97,7 @@ def scan_direct_media(source_path):
     files = []
     if os.path.isdir(normalized_source):
         for root, dirs, names in os.walk(normalized_source):
+            ensure_not_cancelled()
             dirs[:] = [directory for directory in dirs if not directory.startswith('.')]
             files.extend(
                 os.path.join(root, name)
@@ -94,8 +113,10 @@ def scan_import_media(source_path, direct_source=False, source_paths=None):
     files = []
     seen = set()
     for selected_source in selected_sources:
+        ensure_not_cancelled()
         _root, selected_files = scan_direct_media(selected_source)
         for file_path in selected_files:
+            ensure_not_cancelled()
             normalized = os.path.normcase(os.path.abspath(file_path))
             if normalized in seen:
                 continue
@@ -108,6 +129,7 @@ def build_capture_groups(files, split_threshold_hours=2.0):
     """Group each capture day, additionally splitting at a clear time gap."""
     days = {}
     for file_path in files:
+        ensure_not_cancelled()
         timestamp = get_file_time(file_path)
         date_key = datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
         days.setdefault(date_key, []).append((file_path, timestamp))
@@ -146,6 +168,7 @@ def stage_plan_import(sd_path, projects_json, import_type='work', split_threshol
     automatic_routes = {}
     requires_choice = False
     for group in groups:
+        ensure_not_cancelled()
         year, month, day = (int(part) for part in group['date'].split('-'))
         exact = [project for project in projects if project.get('projectDate', {}).get('year') == year and project.get('projectDate', {}).get('month') == month and project.get('projectDate', {}).get('day') == day]
         month_only = [project for project in projects if project.get('projectDate', {}).get('year') == year and project.get('projectDate', {}).get('month') == month and not project.get('projectDate', {}).get('day')]
@@ -257,6 +280,7 @@ def generate_missing_raw_jpgs(target_folder, imported_paths, converter=generate_
     os.makedirs(jpg_dir, exist_ok=True)
     succeeded = 0
     for index, source_path in enumerate(candidates, start=1):
+        ensure_not_cancelled()
         stem = os.path.splitext(os.path.basename(source_path))[0]
         target_path = os.path.join(jpg_dir, f'{stem}.jpg')
         try:
@@ -422,6 +446,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             )
 
         for idx, src in enumerate(original_sd_files):
+            ensure_not_cancelled()
             filename = os.path.basename(src)
             dst = os.path.join(temp_dir, filename)
             source_size = os.path.getsize(src)
@@ -443,7 +468,8 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             try:
                 safe_chunk_copy(src, dst, on_progress=lambda current_bytes: publish_transfer_progress(filename, current_bytes, idx))
             except Exception as e:
-                log_error(f"复制文件 {filename} 时读卡器断开或报错: {e}")
+                if not isinstance(e, ImportCancelled):
+                    log_error(f"复制文件 {filename} 时读卡器断开或报错: {e}")
                 # 如果复制单个文件就报错了，极大概率是读卡器已经掉线，抛出异常让外层统一处理
                 raise e 
             
@@ -454,6 +480,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
 
         # Step 3: 分组逻辑处理
         files_with_time = [(f, get_file_time(f)) for f in temp_files_list]
+        ensure_not_cancelled()
         files_with_time.sort(key=lambda x: x[1])
 
         route_map = project_routes or {}
@@ -492,6 +519,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
         processed_targets = set()
         imported_paths_by_target = {}
         for idx, group_record in enumerate(groups):
+            ensure_not_cancelled()
             group = group_record['files'] if isinstance(group_record, dict) else group_record
             # 命名文件夹
             first_time = group[0][1]
@@ -514,6 +542,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             
             imported_root_paths = []
             for f_path, _ in group:
+                ensure_not_cancelled()
                 destination = unique_destination(target_folder, os.path.basename(f_path))
                 shutil.move(f_path, destination)
                 imported_root_paths.append(destination)
@@ -548,6 +577,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             ]
             completed_candidates = 0
             for target_folder in processed_target_list:
+                ensure_not_cancelled()
                 def publish_raw_jpg_progress(_index, _total, file_name):
                     nonlocal completed_candidates
                     completed_candidates += 1
@@ -567,6 +597,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             if raw_without_jpg_count:
                 log_info(f"RAW 转 JPG 完成：{generated_jpg_count}/{raw_without_jpg_count} 个文件已保存到 jpg 文件夹")
         for target_index, target_folder in enumerate(processed_target_list):
+            ensure_not_cancelled()
             if split_large_files:
                 split_count = split_large_videos(target_folder)
                 if split_count:
@@ -608,6 +639,9 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
         else:
             log_error(f"警告：导入数量不匹配（应有{len(original_sd_files)}，实际{success_imported_count}）。SD 卡未清理，请检查桌面临时文件夹。")
 
+    except ImportCancelled:
+        emit('cancelled', '导入已取消；源文件未删除，已完成的目标文件已保留。')
+        gc.collect()
     except Exception as e:
         log_error(f"流程异常: {str(e)}")
         # 异常情况下保留临时文件夹和 SD 卡文件，确保数据不丢
@@ -615,12 +649,12 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
 
 def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=False, source_paths=None, delete_source=False):
     """Copy card media into an explicitly selected project, grouped by media date."""
-    base_sd, original_files = scan_import_media(sd_path, direct_source, source_paths)
     created_files = []
     created_date_folders = []
     source_cleanup_started = False
 
     try:
+        base_sd, original_files = scan_import_media(sd_path, direct_source, source_paths)
         log_progress("正在扫描花絮导入来源...", 0, {"bytesCopied": 0, "totalBytes": 0, "filesCopied": 0, "totalFiles": 0})
         if not original_files:
             log_error(f"在 {base_sd} 中没有找到媒体文件" if direct_source else f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
@@ -645,6 +679,7 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
         last_progress_at = 0.0
         log_info(f"正在把 {len(original_files)} 个文件导入花絮...")
         for index, source in enumerate(original_files):
+            ensure_not_cancelled()
             media_time = datetime.datetime.fromtimestamp(get_file_time(source))
             date_name = media_time.strftime('%m-%d').lstrip('0').replace('-0', '-')
             project_path = file_routes.get(source, dest_path)
@@ -731,7 +766,10 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                     os.rmdir(directory)
                 except OSError:
                     pass
-            log_error(f"花絮导入失败，SD 卡原文件已保留：{error}")
+            if isinstance(error, ImportCancelled):
+                emit('cancelled', '花絮导入已取消；本次新增目标已回滚，源文件未删除。')
+            else:
+                log_error(f"花絮导入失败，SD 卡原文件已保留：{error}")
         else:
             log_error(f"花絮文件已完整复制，但清理 SD 卡时失败；目标文件已保留，请手动检查卡内剩余文件：{error}")
         gc.collect()
@@ -759,8 +797,11 @@ def run(args_list):
     parser.add_argument("--source_paths", default="[]")
     parser.add_argument("--delete_source", action="store_true")
     parser.add_argument("--generate_jpg_from_raw", action="store_true")
+    parser.add_argument("--cancel_file", default="")
 
     args, _ = parser.parse_known_args(args_list)
+    global CANCEL_FILE
+    CANCEL_FILE = os.path.abspath(args.cancel_file) if args.cancel_file else ''
     try:
         source_paths = [str(value) for value in json.loads(args.source_paths or '[]') if str(value).strip()]
     except (TypeError, ValueError, json.JSONDecodeError):
