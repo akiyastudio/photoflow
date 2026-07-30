@@ -1255,7 +1255,8 @@ const registerWorkspaceIpc = context => {
     const moves = [];
     const createdTargets = [];
     try {
-      const { preserveOriginal = false } = options || {};
+      const deleteSourceAfterImport = options?.deleteSourceAfterImport === true;
+      const preserveOriginal = !deleteSourceAfterImport;
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
       const destinationDir = assertInside(projectPath, path.resolve(projectPath, relativePath || '.'), '导入位置', true);
       if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('当前文件夹不存在');
@@ -1302,13 +1303,26 @@ const registerWorkspaceIpc = context => {
     const moves = [];
     try {
       const mediaKind = options.mediaKind === 'video' ? 'video' : 'image';
-      const preserveOriginal = Boolean(options.preserveOriginal);
-      const cleanedName = cleanProjectName(String(folderName || ''));
+      const deleteSourceAfterImport = options?.deleteSourceAfterImport === true;
+      const preserveOriginal = !deleteSourceAfterImport;
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      const appendProgressId = String(options.appendProgressId || '');
+      const appendProgress = appendProgressId
+        ? (await versionService.listProgress(workspaceRoot, projectName)).progressFolders?.find(progress => progress.id === appendProgressId)
+        : null;
+      if (appendProgressId && (!appendProgress || appendProgress.folderMissing)) throw new Error('要追加的进度文件夹不存在');
+      if (appendProgress && (appendProgress.mediaKind !== mediaKind || appendProgress.versionKey !== String(options.versionKey || ''))) {
+        throw new Error('追加目标与所选进度类型或版本号不一致');
+      }
+      const cleanedName = cleanProjectName(String(appendProgress?.displayName || folderName || ''));
       if (!cleanedName) throw new Error('进度文件夹名称不能为空');
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const destinationDir = path.resolve(projectPath, cleanedName);
+      const destinationDir = path.resolve(appendProgress ? appendProgress.folderPath : path.join(projectPath, cleanedName));
       if (!destinationDir.startsWith(projectPath + path.sep)) throw new Error('无效的进度文件夹名称');
-      if (fs.existsSync(destinationDir)) throw new Error('同名进度文件夹已存在');
+      if (appendProgress ? !fs.existsSync(destinationDir) : fs.existsSync(destinationDir)) {
+        throw new Error(appendProgress ? '要追加的进度文件夹不存在' : '同名进度文件夹已存在');
+      }
       const extensions = mediaKind === 'video'
         ? [...VIDEO_EXTENSIONS].map(value => value.slice(1))
         : [...new Set([...IMAGE_EXTENSIONS, ...RAW_EXTENSIONS])].map(value => value.slice(1));
@@ -1318,7 +1332,7 @@ const registerWorkspaceIpc = context => {
         filters: [{ name: mediaKind === 'video' ? '视频文件' : '图片与 RAW', extensions }],
       });
       if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, count: 0 };
-      const sourceInfos = [];
+      let sourceInfos = [];
       for (const source of choice.filePaths) {
         const sourceInfo = await assertRegularFile(source);
         const extension = path.extname(sourceInfo.path).toLowerCase();
@@ -1326,8 +1340,51 @@ const registerWorkspaceIpc = context => {
         if (!supported) throw new Error(`所选文件不属于${mediaKind === 'video' ? '视频' : '图片'}进度：${path.basename(sourceInfo.path)}`);
         sourceInfos.push(sourceInfo);
       }
-      await fs.promises.mkdir(destinationDir);
-      createdFolder = destinationDir;
+      let skippedCount = 0;
+      const skippedNames = [];
+      if (appendProgress) {
+        const digestFile = filePath => new Promise((resolve, reject) => {
+          const hash = crypto.createHash('sha256');
+          const stream = fs.createReadStream(filePath);
+          stream.on('data', chunk => hash.update(chunk));
+          stream.on('error', reject);
+          stream.on('end', () => resolve(hash.digest('hex')));
+        });
+        const exactDuplicates = new Set();
+        const conflicts = [];
+        for (const sourceInfo of sourceInfos) {
+          const existingPath = path.join(destinationDir, path.basename(sourceInfo.path));
+          if (!fs.existsSync(existingPath) || !fs.statSync(existingPath).isFile()) continue;
+          const [sourceStat, existingStat] = await Promise.all([fs.promises.stat(sourceInfo.path), fs.promises.stat(existingPath)]);
+          const identical = sourceStat.size === existingStat.size
+            && await digestFile(sourceInfo.path) === await digestFile(existingPath);
+          if (identical) exactDuplicates.add(sourceInfo.path);
+          else conflicts.push(sourceInfo.path);
+        }
+        let keepConflicts = true;
+        if (conflicts.length) {
+          const decision = await dialog.showMessageBox(mainWindow, {
+            type: 'question',
+            title: '追加进度时发现同名文件',
+            message: `有 ${conflicts.length} 个同名文件的内容与现有文件不同。`,
+            detail: '可以跳过这些文件，或者保留两份并为新文件自动添加编号。现有进度文件不会被覆盖。',
+            buttons: ['跳过同名文件', '保留两份', '取消追加'],
+            defaultId: 0,
+            cancelId: 2,
+            noLink: true,
+          });
+          if (decision.response === 2) return { success: true, cancelled: true, count: 0 };
+          keepConflicts = decision.response === 1;
+        }
+        const skippedPaths = new Set([...exactDuplicates, ...(keepConflicts ? [] : conflicts)]);
+        skippedCount = skippedPaths.size;
+        skippedNames.push(...[...skippedPaths].map(filePath => path.basename(filePath)));
+        sourceInfos = sourceInfos.filter(sourceInfo => !skippedPaths.has(sourceInfo.path));
+      }
+      if (!appendProgress) {
+        await fs.promises.mkdir(destinationDir);
+        createdFolder = destinationDir;
+      }
       const reserved = new Set();
       for (const sourceInfo of sourceInfos) {
         const destination = uniqueDestination(destinationDir, path.basename(sourceInfo.path), reserved);
@@ -1339,9 +1396,7 @@ const registerWorkspaceIpc = context => {
           moves.push({ source: sourceInfo.path, destination });
         }
       }
-      const workspaceRoot = ensureWorkspace(workspacePath);
-      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
-      const registered = await versionService.registerProgress(workspaceRoot, {
+      const registered = appendProgress ? { progressFolder: appendProgress } : await versionService.registerProgress(workspaceRoot, {
         projectName,
         mediaKind,
         versionKey: options.versionKey,
@@ -1350,18 +1405,21 @@ const registerWorkspaceIpc = context => {
         folderPath: destinationDir,
         trackingEnabled: Boolean(options.trackingEnabled),
       });
-      if (preserveOriginal) await pushUndoOperation({ kind: 'remove-created', paths: [destinationDir], label: '导入版本进度' });
+      if (preserveOriginal && (appendProgress ? createdTargets.length : true)) await pushUndoOperation({ kind: 'remove-created', paths: appendProgress ? createdTargets : [destinationDir], label: appendProgress ? '追加版本进度' : '导入版本进度' });
       else if (moves.length) await pushUndoOperation({ kind: 'external-move', moves });
-      writeLog('info', 'Progress version files imported', { projectName, folderName: cleanedName, mediaKind, count: choice.filePaths.length, preserveOriginal });
+      writeLog('info', appendProgress ? 'Files appended to progress version' : 'Progress version files imported', { projectName, folderName: cleanedName, mediaKind, count: sourceInfos.length, skippedCount, preserveOriginal });
       telemetryService?.track('photos_imported', {
-        count_bucket: telemetryService.countBucket(choice.filePaths.length),
-        source: 'progress_version',
+        count_bucket: telemetryService.countBucket(sourceInfos.length),
+        source: appendProgress ? 'progress_version_append' : 'progress_version',
         media_kind: mediaKind,
         preserve_original: preserveOriginal,
       });
       return {
         success: true,
-        count: choice.filePaths.length,
+        count: sourceInfos.length,
+        skippedCount,
+        skippedNames,
+        appended: Boolean(appendProgress),
         importedPaths: [...createdTargets, ...moves.map(move => move.destination)],
         progressFolder: registered.progressFolder,
         folder: { name: cleanedName, path: destinationDir, relativePath: path.relative(projectPath, destinationDir), updatedAt: Date.now() },

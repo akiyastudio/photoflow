@@ -115,7 +115,8 @@ const registerBrollImportIpc = ({
     const moves = [];
     try {
       if (activeOperations.size) throw new Error('已有文件任务正在进行');
-      const preserveOriginal = Boolean(options?.preserveOriginal ?? options?.clearSource === false);
+      const deleteSourceAfterImport = options?.deleteSourceAfterImport === true;
+      const preserveOriginal = !deleteSourceAfterImport;
       const splitLargeFiles = Boolean(options?.splitLargeFiles);
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
       const choice = await dialog.showOpenDialog(getMainWindow(), {

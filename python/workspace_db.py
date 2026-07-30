@@ -1133,6 +1133,7 @@ def progress_list(root: str, db, payload: dict):
 
 def progress_register(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
+    sync_progress_folder_locations(root, db, project)
     media_kind = str(payload.get("mediaKind") or "")
     if media_kind not in ("image", "video"):
         raise ValueError("无效的进度类型")
@@ -1167,6 +1168,8 @@ def progress_register(root: str, db, payload: dict):
             "SELECT * FROM progress_folders WHERE project_id=? AND media_kind=? AND version_key=?",
             (project["id"], media_kind, version_key),
         ).fetchone()
+        if existing is not None and os.path.isdir(existing["folder_path"]) and existing["folder_path_key"] != folder_path.casefold():
+            raise ValueError(f"版本 _{version_key} 已存在")
     existing_id = existing["id"] if existing is not None else progress_id
     duplicate_name = db.execute(
         "SELECT id FROM progress_folders WHERE project_id=? AND display_name=? COLLATE NOCASE AND id<>?",
@@ -1209,6 +1212,7 @@ def progress_update_tree(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     updates = payload.get("updates")
     primary_id = str(payload.get("primaryProgressId") or "")
+    replacement_id = str(payload.get("replacementProgressId") or "")
     if not primary_id or not isinstance(updates, list) or not updates:
         raise ValueError("没有可更新的进度关系")
 
@@ -1231,7 +1235,18 @@ def progress_update_tree(root: str, db, payload: dict):
         for child_id in children_by_parent.get(progress_id, []):
             collect_subtree(child_id)
 
-    collect_subtree(primary_id)
+    collect_subtree(replacement_id or primary_id)
+    if replacement_id:
+        replacement = rows.get(replacement_id)
+        replacement_target = rows.get(primary_id)
+        if replacement is None or replacement_target is None or replacement_id == primary_id:
+            raise ValueError("失效进度替换目标无效")
+        if replacement["media_kind"] != replacement_target["media_kind"]:
+            raise ValueError("失效进度替换时不能改变图片或视频类型")
+        if os.path.isdir(replacement["folder_path"]):
+            raise ValueError("被替换进度的原文件夹仍然存在")
+        expected_ids.discard(replacement_id)
+        expected_ids.add(primary_id)
     if update_ids != expected_ids:
         raise ValueError("必须一次性更新当前进度及其全部后代")
 
@@ -1310,6 +1325,14 @@ def progress_update_tree(root: str, db, payload: dict):
                    folder_path=?,folder_path_key=?,folder_id=?,tracking_enabled=?,updated_at=? WHERE id=?""",
                 (media_kind, version_key, parent_id, display_name, folder_path, folder_path.casefold(),
                  directory_identity(folder_path), tracking_enabled, timestamp, progress_id),
+            )
+        if replacement_id:
+            # The physical directory identity moved to the recovered progress.
+            # Clear it from the now-missing former progress so a later location
+            # sync cannot bind both database rows to the same folder.
+            db.execute(
+                "UPDATE progress_folders SET folder_id=NULL,updated_at=? WHERE id=?",
+                (timestamp, replacement_id),
             )
         db.commit()
     except Exception:
@@ -1770,6 +1793,10 @@ def batch_commit_compare(root: str, db, payload: dict):
     if batch is not None and batch["status"] == "ready":
         created_paths = []
         try:
+            incremental_sources = [
+                safe_folder_file(folder_b, source_name)
+                for source_name in (payload.get("incrementalSources") or [])
+            ]
             matches = sorted(
                 payload.get("matches") or [],
                 key=lambda match: float(match.get("distance") if match.get("distance") is not None else 1_000_000),
@@ -1795,20 +1822,21 @@ def batch_commit_compare(root: str, db, payload: dict):
                 best_versions.setdefault(version["photo_id"], version["id"])
 
             current_source_keys = set()
-            for source_path in folder_media_files(folder_b):
+            for source_path in incremental_sources or folder_media_files(folder_b):
                 source_key = source_path.casefold()
                 current_source_keys.add(source_key)
                 if source_key in matched_source_keys:
                     continue
                 version = ensure_source_version(db, project, source_path)
                 register_batch_item(db, batch["id"], version, source_path, "new", review_status="new")
-            stale_items = db.execute(
-                "SELECT id,source_path_key FROM batch_items WHERE batch_id=?",
-                (batch["id"],),
-            ).fetchall()
-            for item in stale_items:
-                if item["source_path_key"] not in current_source_keys:
-                    db.execute("DELETE FROM batch_items WHERE id=?", (item["id"],))
+            if not incremental_sources:
+                stale_items = db.execute(
+                    "SELECT id,source_path_key FROM batch_items WHERE batch_id=?",
+                    (batch["id"],),
+                ).fetchall()
+                for item in stale_items:
+                    if item["source_path_key"] not in current_source_keys:
+                        db.execute("DELETE FROM batch_items WHERE id=?", (item["id"],))
 
             timestamp = int(time.time() * 1000)
             for photo_id, version_id in best_versions.items():
