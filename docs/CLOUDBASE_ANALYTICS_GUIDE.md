@@ -188,7 +188,7 @@ module.exports = {
   "channel": "stable",
   "version": "26.7.29",
   "versionCode": 260729,
-  "downloadUrl": "https://你的网盘分享链接",
+  "downloadUrl": "https://你的腾讯云域名/releases/26.7.29/照片流-Setup.exe",
   "sha256": "安装包的 SHA-256",
   "notes": "修复已知问题并提升稳定性。",
   "mandatory": false,
@@ -202,8 +202,10 @@ module.exports = {
 - Windows 的 `platform` 用 `win32`，macOS 用 `darwin`。
 - `version` 与 `package.json` 的版本格式保持一致。
 - `versionCode` 必须随版本递增，它只用于数据库排序。
-- 安装包还没上传到网盘、分享链接还没验证时，先设 `published: false`。
+- 安装包还没上传、下载链接还没验证时，必须设 `published: false`。
 - `downloadUrl` 必须是 HTTPS。
+- `sha256` 必须是安装包完整的 64 位 SHA-256。缺少任一字段时，即使 `published: true`，更新接口也不会发布这条记录。
+- 开源源码归档和许可证资料继续按发行版本单独留存，但不写入 `app_releases` 数据库记录。
 - PowerShell 计算安装包 SHA-256：
 
 ```powershell
@@ -213,11 +215,11 @@ Get-FileHash "C:\path\to\PhotoFlow-Setup.exe" -Algorithm SHA256
 验证更新接口：
 
 ```powershell
-Invoke-RestMethod "https://example.ap-shanghai.app.tcloudbase.com/v1/updates?platform=win32&channel=stable&currentVersion=26.7.28"
+Invoke-RestMethod "https://example.ap-shanghai.app.tcloudbase.com/v1/updates?platform=win32&channel=stable&currentVersion=26.7.29"
 ```
 
-客户端已实现：配置 CloudBase URL 后读取这个接口；未配置时继续使用原 GitHub
-更新检查，方便部署期间逐步切换。
+客户端仅通过配置的 CloudBase URL 读取这个接口。未配置腾讯云更新服务或接口不可用时，
+更新检查会直接失败，不会请求其他更新服务。
 
 ## 7. 在软件里验证统计
 

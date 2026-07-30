@@ -1,8 +1,4 @@
-"""Export an official AdaFace checkpoint to an experimental ONNX model.
-
-The output is intentionally written outside the packaged component while its
-pretrained-weight distribution terms are being evaluated.
-"""
+"""Export the official AdaFace IR-18 checkpoint used by team-retouch."""
 
 from __future__ import annotations
 

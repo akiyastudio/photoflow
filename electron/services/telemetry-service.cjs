@@ -231,6 +231,14 @@ const createTelemetryService = ({
     if (analytics || crashes) void flush();
   };
 
+  const clearLocalData = () => {
+    state.installId = crypto.randomUUID();
+    state.createdAt = new Date().toISOString();
+    writeJson(statePath, state);
+    saveQueue([]);
+    return true;
+  };
+
   const start = () => {
     previousAnalyticsEnabled = false;
     syncConsent(getConfig()?.telemetry);
@@ -242,7 +250,7 @@ const createTelemetryService = ({
     void flush();
   };
 
-  return { start, stop, flush, track, reportCrash, syncConsent, countBucket };
+  return { start, stop, flush, track, reportCrash, syncConsent, clearLocalData, countBucket };
 };
 
 module.exports = { createTelemetryService, countBucket };

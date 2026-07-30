@@ -31,16 +31,11 @@ const directorySize = async root => {
   return size;
 };
 
-const createComponentRegistry = ({ resourcesPath, executablePath, projectRoot, userComponentRoot, isPackaged, platform = process.platform, arch = process.arch }) => {
-  const installRoot = isPackaged
-    ? path.resolve(userComponentRoot || path.join(path.dirname(executablePath), 'components'))
-    : path.join(projectRoot, 'components');
+const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, platform = process.platform, arch = process.arch }) => {
+  if (isPackaged && !userComponentRoot) throw new Error('打包版本必须提供用户组件目录');
+  const installRoot = isPackaged ? path.resolve(userComponentRoot) : path.join(projectRoot, 'components');
   const roots = isPackaged
-    ? [
-      { source: 'application', path: installRoot },
-      { source: 'legacy-application', path: path.join(path.dirname(executablePath), 'components') },
-      { source: 'bundled', path: path.join(resourcesPath, 'components') },
-    ]
+    ? [{ source: 'user', path: installRoot }]
     : [{ source: 'development', path: installRoot }];
 
   const inspectAt = (definition, root) => {
@@ -53,6 +48,7 @@ const createComponentRegistry = ({ resourcesPath, executablePath, projectRoot, u
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
       if (manifest.id !== definition.id) throw new Error(`组件 ID 不匹配：${manifest.id || '未填写'}`);
       if (Number(manifest.apiVersion) !== COMPONENT_API_VERSION) throw new Error(`组件接口版本不兼容：${manifest.apiVersion || '未填写'}`);
+      if (String(manifest.version || '') !== String(definition.version)) throw new Error(`组件版本不兼容：需要 ${definition.version}，当前为 ${manifest.version || '未知'}`);
       if (Array.isArray(manifest.platforms) && !manifest.platforms.includes(platform)) throw new Error(`组件不支持 ${platform}`);
       if (Array.isArray(manifest.architectures) && !manifest.architectures.includes(arch)) throw new Error(`组件不支持 ${arch}`);
       const entrypoints = manifest.entrypoints || {};
@@ -61,6 +57,12 @@ const createComponentRegistry = ({ resourcesPath, executablePath, projectRoot, u
       const command = path.resolve(componentRoot, relativeEntry);
       if (!isInside(componentRoot, command)) throw new Error('组件入口超出组件目录');
       if (!fs.existsSync(command) || !fs.statSync(command).isFile()) throw new Error(`组件入口不存在：${relativeEntry}`);
+      for (const relativeFile of Array.isArray(manifest.requiredFiles) ? manifest.requiredFiles : []) {
+        if (typeof relativeFile !== 'string' || !relativeFile.trim()) throw new Error('组件必需文件路径无效');
+        const requiredFile = path.resolve(componentRoot, relativeFile);
+        if (!isInside(componentRoot, requiredFile)) throw new Error(`组件必需文件超出组件目录：${relativeFile}`);
+        if (!fs.existsSync(requiredFile) || !fs.statSync(requiredFile).isFile()) throw new Error(`组件必需文件不存在：${relativeFile}`);
+      }
       return {
         ...definition,
         installed: true,

@@ -19,7 +19,7 @@ ENGINE = ROOT / "components" / "team-retouch" / "team_retouch.py"
 sys.path.insert(0, str(ENGINE.parent))
 sys.path.insert(0, str(ROOT / "python"))
 
-from team_retouch import bounded_planning_box, box_coverage_by_crop, centered_work_crop, emit_progress, excluded_detection_indices, identify_people, load_mask, mask_bounds, match_returned_batch, matches_exclusion, maximize_assignment, plan_work_tiles, rebuild_without_person, reposition_crop_to_avoid_bystanders, restore_patches, save_mask, spatially_order_people  # noqa: E402
+from team_retouch import bounded_planning_box, box_coverage_by_crop, centered_work_crop, emit_progress, excluded_detection_indices, face_shoulder_planning_box, identify_people, load_mask, mask_bounds, match_returned_batch, matches_exclusion, maximize_assignment, plan_work_tiles, rebuild_without_person, reposition_crop_to_avoid_bystanders, restore_patches, save_mask, spatially_order_people  # noqa: E402
 from identity_engine import constrained_clusters, ranked_similarity_pairs  # noqa: E402
 from patch_merge import safe_exif_bytes, save_tiff  # noqa: E402
 from workspace_db import connect, team_identity_assign, team_identity_complete, team_identity_confirm_group, team_identity_save, team_patch_delete, team_patch_replace, team_patch_update, team_person_exclusion_add, team_person_exclusion_clear, team_person_exclusion_list, team_project_register_photo, team_project_unregister_photo, team_project_workspace  # noqa: E402
@@ -314,17 +314,51 @@ def main():
             "box": oversized_box,
             "faceBox": [1320, 260, 1680, 700],
         }], 6000, 7000, oversize_crop_mode="face-centered")[0]["crop"]
-        assert max(face_centered[2:]) <= 4000
+        assert max(face_centered[2:]) == 4000
         assert face_centered[0] <= 1320 and face_centered[1] <= 260
         assert face_centered[0] + face_centered[2] >= 1680
         assert face_centered[1] + face_centered[3] >= 700
+        protected = face_shoulder_planning_box({
+            "box": oversized_box, "faceBox": [1320, 260, 1680, 700],
+        }, 6000, 7000)
+        assert box_coverage_by_crop(protected, face_centered) == 1
 
         oversized_pair = plan_work_tiles([
             {"box": [800, 100, 2100, 5200], "faceBox": [1200, 180, 1600, 650]},
             {"box": [2200, 120, 3500, 5250], "faceBox": [2600, 200, 3000, 670]},
         ], 6000, 7000, oversize_crop_mode="face-centered")
-        assert len(oversized_pair) == 2
-        assert all(max(tile["crop"][2:]) <= 4000 for tile in oversized_pair)
+        assert len(oversized_pair) == 1
+        assert oversized_pair[0]["indices"] == [0, 1]
+        assert all(max(tile["crop"][2:]) == 4000 for tile in oversized_pair)
+
+
+        # Keeping the 4000px limit protects each person's head and shoulders.
+        # If those protected regions do not fit together, split the lineup
+        # instead of trimming people at a work-image edge.
+        wide_oversized = [
+            {"box": [100, 100, 1700, 5200], "faceBox": [650, 180, 1050, 650]},
+            {"box": [1750, 120, 3350, 5220], "faceBox": [2300, 200, 2700, 670]},
+            {"box": [3400, 140, 5000, 5240], "faceBox": [3950, 220, 4350, 690]},
+        ]
+        wide_tiles = plan_work_tiles(
+            wide_oversized, 6000, 7000, oversize_crop_mode="face-centered",
+        )
+        assert len(wide_tiles) == 2
+        assert all(max(tile["crop"][2:]) == 4000 for tile in wide_tiles)
+        for tile in wide_tiles:
+            for index in tile["indices"]:
+                shoulder_box = face_shoulder_planning_box(wide_oversized[index], 6000, 7000)
+                assert box_coverage_by_crop(shoulder_box, tile["crop"]) == 1
+        expanded_oversized_pair = plan_work_tiles([
+            {"box": [800, 100, 2100, 5200], "faceBox": [1200, 180, 1600, 650]},
+            {"box": [2200, 120, 3500, 5250], "faceBox": [2600, 200, 3000, 670]},
+        ], 6000, 7000, oversize_crop_mode="expand")
+        assert len(expanded_oversized_pair) == 1
+        assert expanded_oversized_pair[0]["indices"] == [0, 1]
+        assert max(expanded_oversized_pair[0]["crop"][2:]) > 4000
+        assert all(box_coverage_by_crop(item["box"], expanded_oversized_pair[0]["crop"]) == 1 for item in [
+            {"box": [800, 100, 2100, 5200]}, {"box": [2200, 120, 3500, 5250]},
+        ])
 
         # Group membership survives the workspace database round-trip while
         # old databases gain the new column through connect() migration.

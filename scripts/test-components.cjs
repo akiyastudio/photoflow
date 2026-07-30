@@ -12,13 +12,13 @@ const projectRoot = path.join(sandbox, 'project');
 const userComponentRoot = path.join(sandbox, 'local-app-data', 'PhotoFlow', 'components');
 const repositoryRoot = path.resolve(__dirname, '..');
 
-const writeComponent = (root, id, version, entrypoint = `${id}.exe`) => {
+const writeComponent = (root, id, version, entrypoint = `${id}.exe`, manifestId = id) => {
   const directory = path.join(root, id);
   fs.mkdirSync(directory, { recursive: true });
   fs.writeFileSync(path.join(directory, entrypoint), 'test executable');
   fs.writeFileSync(path.join(directory, 'component.json'), JSON.stringify({
     apiVersion: 1,
-    id,
+    id: manifestId,
     version,
     platforms: ['win32'],
     architectures: ['x64'],
@@ -30,9 +30,9 @@ const writeComponent = (root, id, version, entrypoint = `${id}.exe`) => {
 try {
   const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
   const releaseCommand = packageJson.scripts['electron:build'];
-  assert(releaseCommand.includes('npm run build:components'), 'default installer build must build both optional components');
-  assert(releaseCommand.includes('npm run build:model-packs'), 'default release build must create the prepared identity model pack');
-  assert(releaseCommand.indexOf('npm run build:components') < releaseCommand.indexOf('electron-builder'), 'components must be built before electron-builder');
+  assert(!releaseCommand.includes('npm run build:components'), 'default application build must not build or bundle optional components');
+  assert(!releaseCommand.includes('npm run build:model-packs'), 'default application build must not build team-retouch model packs');
+  assert(packageJson.scripts['build:components'] && !packageJson.scripts['build:model-packs'], 'identity models must ship in the standalone team-retouch component instead of a second model pack');
   assert.deepStrictEqual(packageJson.build.win.target, ['nsis'], 'Windows release must only build the NSIS installer');
   assert(releaseCommand.endsWith('npm run cleanup:electron-artifacts'), 'release build must remove the unpacked staging directory');
   const artifactCleanup = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'cleanup-electron-artifacts.cjs'), 'utf8');
@@ -40,19 +40,29 @@ try {
   assert(artifactCleanup.includes("entry.name.endsWith('-win.zip')"), 'artifact cleanup must remove legacy application ZIPs');
 
   const installer = fs.readFileSync(path.join(repositoryRoot, 'build', 'installer.nsh'), 'utf8');
+  assert.strictEqual(packageJson.build.nsis.license, 'docs/legal/INSTALLER_NOTICE.txt', 'NSIS must require acceptance of the installer legal notice');
+  assert(fs.readFileSync(path.join(repositoryRoot, packageJson.build.nsis.license), 'utf8').includes('用户协议') && fs.readFileSync(path.join(repositoryRoot, packageJson.build.nsis.license), 'utf8').includes('隐私政策'), 'installer notice must reference both legal documents');
   assert(!installer.includes('release\\components'), 'base installer must not embed optional components');
-  assert(installer.includes('$EXEDIR\\PhotoFlow-team-retouch-*-win32-*.zip'), 'installer must discover team-retouch archives beside itself');
-  assert(!installer.includes('PhotoFlow-research-tools-') && !installer.includes('PhotoFlow-office-media-extractor-'), 'built-in inspiration and Office tools must not be offered as optional component archives');
-  assert.strictEqual((installer.match(/\$\{NSD_Check\}/g) || []).length, 1, 'installer must only preselect the optional team-retouch archive');
-  assert(installer.includes('nsisunz::Unzip'), 'installer must extract component archives');
-  assert(!installer.includes('$EXEDIR\\components'), 'legacy component folders beside the installer must not be supported');
-  assert(!installer.includes('仍兼容旧方式'), 'installer must not advertise the removed legacy component flow');
-  assert(!installer.includes('CopyFiles /SILENT'), 'installer must only install component ZIP archives');
+  assert(!installer.includes('PhotoFlow-team-retouch-') && !installer.includes('PhotoFlowComponentPage'), 'application installer must not discover or offer team-retouch packages');
+  assert(!installer.includes('nsisunz::Unzip') && !installer.includes('$INSTDIR\\components'), 'application installer must never write components into the program directory');
+  assert(!installer.includes('$EXEDIR\\components') && !installer.includes('CopyFiles /SILENT'), 'installer-adjacent component folders and packages must not be supported');
   assert(!installer.includes('File /r "${PROJECT_DIR}\\release\\components'), 'component binaries must not be compiled into the base installer');
+  assert(installer.includes('customUnWelcomePage') && installer.includes('同时清空照片流的用户数据和注册表'), 'assisted uninstall must offer an explicit user-data cleanup option');
+  assert(installer.includes('${NSD_Uncheck} $PhotoFlowDeleteUserDataCheckbox'), 'destructive uninstall cleanup must be opt-in');
+  assert(installer.includes('RMDir /r "$APPDATA\\Photoflow"') && installer.includes('RMDir /r "$LOCALAPPDATA\\PhotoFlow"'), 'opt-in cleanup must remove the application user-data and component roots');
+  assert(installer.includes('--unregister PhotoFlowNative') && installer.includes('--unregister PhotoflowLab'), 'opt-in cleanup must unregister current and legacy app-owned WSL environments before deleting their disks');
+  assert(installer.includes('DeleteRegKey HKCU "Software\\PhotoFlow"') && installer.includes('com.photoflow.toolkit'), 'opt-in cleanup must remove only PhotoFlow-specific registry state');
+  assert(installer.includes('不会删除工作区、项目中的照片和视频'), 'uninstall cleanup must disclose that user project media remains untouched');
+
+  const componentSystemIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
+  assert(componentSystemIpc.includes("properties: ['openFile']") && componentSystemIpc.includes("extensions: ['zip']"), 'component installation must let the user select a ZIP file');
+  assert(componentSystemIpc.includes('普通组件的原始安装文件由用户管理，照片流不会删除'), 'ordinary component source ZIP deletion must be rejected by the main process');
+  const settingsSource = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
+  assert(!settingsSource.includes("kind: 'component'") && settingsSource.includes('不会移动或删除你选择的原 ZIP'), 'component UI must retain the selected source ZIP');
 
   const componentBuilder = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'build-components.cjs'), 'utf8');
   assert(componentBuilder.includes('PhotoFlow-${id}-${manifest.version}-${process.platform}-${process.arch}.zip'));
-  assert(componentBuilder.includes('existingName.startsWith(artifactPrefix)'), 'component packaging must remove stale archives so the installer finds one version');
+  assert(componentBuilder.includes('existingName.startsWith(artifactPrefix)'), 'component packaging must remove stale standalone package versions');
   assert(componentBuilder.includes('zipfile.ZIP_DEFLATED'));
   assert(componentBuilder.includes("'--collect-binaries', 'onnxruntime'"));
   assert(!componentBuilder.includes("'--collect-all', 'onnxruntime'"));
@@ -91,12 +101,12 @@ try {
   const settingsFeature = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
   assert(settingsFeature.includes('基础版 · RTMDet'), 'settings must describe the basic person-detection engine');
   assert(settingsFeature.includes('增强版 · PairDETR + SAM 2.1'), 'settings must describe the enhanced person-detection engine');
-  assert(settingsFeature.includes('两个增强 ZIP 都原样放在这里，无需解压'), 'settings must explain the shared prepared-package installation flow');
+  assert(settingsFeature.includes('人物检测增强 ZIP 原样放在这里，无需解压') && settingsFeature.includes('身份识别模型已经包含在组件 ZIP 中'), 'settings must explain which models and add-ons are included in the component');
   assert(settingsFeature.includes('支持 WSL CUDA 的 NVIDIA 显卡与驱动') && settingsFeature.includes('目标磁盘至少 35 GB'), 'settings must disclose hard requirements for enhanced person detection');
   assert(settingsFeature.includes('至少 8 GB 显存、16 GB 系统内存') && settingsFeature.includes('不作为安装硬门槛'), 'settings must distinguish performance recommendations from enforced requirements');
   assert(!settingsFeature.includes('AdaFace 来源') && !settingsFeature.includes('OSNet 来源'), 'model sources must live in open-source licenses instead of the install panel');
   assert(settingsFeature.includes('团片协作组件目录'), 'settings must expose one directory for all team-retouch packages');
-  assert(settingsFeature.includes('安装身份识别增强包') && settingsFeature.includes('安装检测增强包'), 'settings must install every team-retouch add-on from the shared component directory');
+  assert(!settingsFeature.includes('安装身份识别增强包') && settingsFeature.includes('安装检测增强包'), 'settings must only expose the optional detection add-on installer');
   assert(!settingsFeature.includes('统一组件安装包目录') && !settingsFeature.includes('高级安装包目录'), 'settings must not expose separate team-retouch package locations');
   assert.strictEqual((settingsFeature.match(/优先使用 GPU 进行全身人物检测/g) || []).length, 1, 'GPU preference must appear once');
   assert(settingsFeature.indexOf('优先使用 GPU 进行全身人物检测') < settingsFeature.indexOf('<TeamRetouchEngineSettings'), 'GPU preference must be the first team-retouch setting');
@@ -136,6 +146,10 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(teamRetouchManager.includes('<TeamRetouchSteps') && personIdentityManager.includes('<TeamRetouchSteps'), 'all team-retouch panels must reuse the same step navigation');
   assert(!projectWorkspace.includes('团片协作菜单'), 'project toolbar must not expose a separate team-retouch dropdown menu');
   assert(projectWorkspace.includes("setTeamRetouchStep(current => current || 'detect')"), 'the single team-retouch entry must start at person detection without resetting an existing tab');
+  assert(projectWorkspace.includes('const [directoryLoading, setDirectoryLoading]') && projectWorkspace.includes('role="status" aria-live="polite"') && projectWorkspace.includes('加载中…'), 'project browsing must distinguish directory loading from an empty directory');
+  const markProgressSource = projectWorkspace.slice(projectWorkspace.indexOf('const openMarkProgress'), projectWorkspace.indexOf('useEffect(() => {', projectWorkspace.indexOf('const openMarkProgress')));
+  assert(markProgressSource.indexOf('setProgressSetup(initialDraft)') < markProgressSource.indexOf('void loadProgressFolders().then'), 'mark-progress must open from cached data before refreshing progress folders');
+  assert(markProgressSource.includes('current === initialDraft ? latestDraft : current'), 'background progress refresh must not overwrite a mark-progress draft after the user edits it');
   assert(appSource.includes("'project-version'") && appSource.includes("'project-team'") && projectWorkspace.includes("onOpenToolTab('version'") && projectWorkspace.includes("onOpenToolTab('team'"), 'version management and team retouch must open in reusable project tool tabs');
   assert(appSource.includes('photoflow:components-cache') && appSource.includes('componentsLoading={componentsLoading}'), 'installed component state must be restored before opening a project');
   assert(projectWorkspace.includes('teamRetouchInstalled || componentsLoading'), 'the team-retouch toolbar entry must render immediately while component status is refreshing');
@@ -189,34 +203,40 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   }
 
   const systemIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
-  assert(systemIpc.includes("component.source !== 'application'"), 'only application-directory components may be removed');
+  assert(systemIpc.includes("component.source !== 'user'"), 'only user-data components may be removed');
   assert(systemIpc.includes('await shell.trashItem(containerPath)'), 'component uninstall must recycle the complete component container');
   assert(systemIpc.includes("ipcMain.handle('team-retouch-advanced-install'"), 'settings must be able to install or repair the advanced environment');
   assert(systemIpc.includes("ipcMain.handle('team-retouch-advanced-preflight'"), 'settings must check offline prerequisites before installation');
   assert(systemIpc.includes("ipcMain.handle('team-retouch-advanced-uninstall'"), 'settings must be able to remove the advanced environment');
-  assert(systemIpc.includes("ipcMain.handle('team-retouch-identity-models-open-folder'"), 'settings must open the user-managed identity model directory');
+  assert(!systemIpc.includes("ipcMain.handle('team-retouch-identity-models"), 'identity models must not retain a separate package installer');
   assert(systemIpc.includes("ipcMain.handle('components-delete-package'") && systemIpc.includes("path.extname(resolvedArchive).toLowerCase() !== '.zip'") && systemIpc.includes('await fs.promises.unlink(archivePath)'), 'confirmed package cleanup must only delete a validated ZIP from its component directory');
   assert(systemIpc.includes('packageSizeBytes'), 'successful installers must report the actual package size for cleanup confirmation');
   assert(systemIpc.includes("const teamRetouchRoot"), 'all team-retouch packages must share one component directory');
-  assert(systemIpc.includes("path.join(teamRetouchRoot(), 'advanced')") && systemIpc.includes("path.join(teamRetouchRoot(), 'identity-models')"), 'team-retouch runtime data must stay under the single component directory');
-  assert(settingsFeature.includes('基础版 · YuNet + SFace + OSNet x0.25') && settingsFeature.includes('增强版 · AdaFace IR-18 + OSNet x1.0'), 'settings must explain the basic and enhanced cross-photo identity models');
+  assert(systemIpc.includes("path.join(teamRetouchRoot(), 'advanced')") && !systemIpc.includes("path.join(teamRetouchRoot(), 'identity-models')"), 'only the optional detection engine may retain a team-retouch add-on directory');
+  assert(settingsFeature.includes('YuNet + AdaFace IR-18 + OSNet x1.0') && !settingsFeature.includes('SFace') && !settingsFeature.includes('OSNet x0.25'), 'settings must expose the single enhanced cross-photo identity engine');
   assert(!settingsFeature.includes('实验人物识别模型 · 用户自备'), 'settings must not require end users to compile identity models');
 
-  const identityPackBuilder = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'build-team-retouch-identity-model-pack.cjs'), 'utf8');
-  assert(identityPackBuilder.includes('adaface_ir18_webface4m.onnx') && identityPackBuilder.includes('osnet_x1_0_msmt17.onnx'), 'identity model pack must contain both prepared ONNX models');
-  assert(identityPackBuilder.includes('model-pack.json') && identityPackBuilder.includes('sha256'), 'identity model pack must contain a versioned checksum manifest');
+  assert(componentBuilder.includes("'.model-lab', 'adaface', 'adaface_ir18_webface4m.onnx") && componentBuilder.includes("'.model-lab', 'osnet', 'osnet_x1_0_msmt17.onnx"), 'team-retouch component must contain both enhanced identity ONNX models');
+  assert(!componentBuilder.includes('face_recognition_sface_2021dec.onnx') && !componentBuilder.includes('osnet_x0_25_msmt17.onnx'), 'team-retouch component must not contain the retired identity models');
+  const teamRetouchTemplate = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'components', 'team-retouch', 'component.template.json'), 'utf8'));
+  assert(teamRetouchTemplate.requiredFiles.includes('_internal/models/adaface_ir18_webface4m.onnx') && teamRetouchTemplate.requiredFiles.includes('_internal/models/osnet_x1_0_msmt17.onnx'), 'component installation must reject a package missing either enhanced identity model');
+  const identityEngine = fs.readFileSync(path.join(repositoryRoot, 'components', 'team-retouch', 'identity_engine.py'), 'utf8');
+  assert(identityEngine.includes('self.face_backend = "adaface-ir18"') && identityEngine.includes('self.body_backend = "osnet-x1"'), 'identity runtime must report only the enhanced backends');
+  assert(!identityEngine.includes('FaceRecognizerSF_create') && !identityEngine.includes('osnet-x0.25') && !identityEngine.includes('face_recognition_sface'), 'identity runtime must not retain the basic-model fallback');
   const modelLicenses = fs.readFileSync(path.join(repositoryRoot, 'src', 'licenses', 'modelLicenses.ts'), 'utf8');
   for (const modelName of ['AdaFace IR-18', 'OSNet x1.0', 'PairDETR', 'SAM 2.1 Hiera Large']) {
     assert(modelLicenses.includes(`name: '${modelName}'`), `open-source licenses must include ${modelName}`);
   }
   const softwareLicenses = fs.readFileSync(path.join(repositoryRoot, 'src', 'licenses', 'softwareLicenses.ts'), 'utf8');
-  for (const dependency of ['PhotoFlow 应用代码', 'Electron', 'Chromium', 'Node.js', 'React / React DOM', 'ExifTool', 'Python', 'PyInstaller', 'OpenCV / opencv-python-headless', 'ONNX Runtime DirectML', 'FFmpeg', 'PyTorch / TorchVision', 'NVIDIA CUDA 运行库']) {
+  for (const dependency of ['照片流应用代码', 'Electron', 'Chromium', 'Node.js', 'React / React DOM', 'ExifTool', 'Python', 'PyInstaller', 'OpenCV / opencv-python-headless', 'ONNX Runtime DirectML', 'FFmpeg + x264 + zlib', 'PyTorch / TorchVision', 'NVIDIA CUDA 运行库']) {
     assert(softwareLicenses.includes(`name: '${dependency}'`), `third-party software notices must include ${dependency}`);
   }
-  assert(softwareLicenses.includes("license: 'GPL-3.0-or-later'") && softwareLicenses.includes('--enable-gpl'), 'FFmpeg notice must disclose the actual GPL build');
+  assert(softwareLicenses.includes("license: 'GPL-2.0-or-later'") && softwareLicenses.includes('libx264') && softwareLicenses.includes('禁用 x265'), 'FFmpeg notice must disclose the fixed minimal GPL+x264 build');
   assert(softwareLicenses.includes('上游代码授权未明确'), 'PairDETR redistribution uncertainty must remain visible');
   assert(settingsFeature.lastIndexOf('使用提示') < settingsFeature.lastIndexOf('开源许可'), 'usage guidance must appear before open-source licenses');
 
+  writeComponent(path.join(path.dirname(executablePath), 'components'), 'team-retouch', '99.0.0');
+  writeComponent(path.join(resourcesPath, 'components'), 'team-retouch', '99.0.1');
   const registry = createComponentRegistry({
     resourcesPath,
     executablePath,
@@ -227,11 +247,12 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
     arch: 'x64',
   });
 
-  assert.strictEqual(registry.list().length, 1);
+  assert.strictEqual(registry.list().length, Object.keys(PLUGIN_DEFINITIONS).length);
   assert.strictEqual(registry.resolve('team-retouch'), null);
   assert.strictEqual(registry.resolve('office-media-extractor'), null);
   const installRoot = userComponentRoot;
   assert.strictEqual(registry.ensureInstallRoot(), installRoot);
+  assert.deepStrictEqual(registry.roots, [{ source: 'user', path: installRoot }], 'packaged registry must only scan the user component root');
 
   assert.strictEqual(registry.resolve('research-tools'), null);
 
@@ -241,13 +262,20 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   fs.writeFileSync(path.join(invalidDirectory, 'component.json'), JSON.stringify({
     apiVersion: 1,
     id: 'team-retouch',
-    version: '1.0.0',
+    version: '26.7.29.1',
     entrypoints: { 'win32-x64': '..\\outside.exe' },
   }));
   const invalid = registry.inspect('team-retouch');
   assert.strictEqual(invalid.installed, false);
   assert.strictEqual(invalid.compatible, false);
   assert.match(invalid.error, /超出组件目录/);
+
+  fs.rmSync(invalidDirectory, { recursive: true, force: true });
+  writeComponent(path.join(installRoot, 'team-retouch'), 'runtime', '26.7.29.1', 'team-retouch.exe', 'team-retouch');
+  const installed = registry.inspect('team-retouch');
+  assert.strictEqual(installed.installed, true);
+  assert.strictEqual(installed.source, 'user');
+  assert.strictEqual(registry.resolve('team-retouch').command, path.join(installRoot, 'team-retouch', 'runtime', 'team-retouch.exe'));
 
   console.log('Component registry tests passed');
 } finally {

@@ -20,40 +20,29 @@ Identity suggestions run locally and use three fixed model assets:
 - `face_detection_yunet_2023mar.onnx` from OpenCV Zoo's YuNet face detector.
   The model directory is MIT licensed. Local SHA-256:
   `8F2383E4DD3CFBB4553EA8718107FC0423210DC964F9F4280604804ED2552FA4`.
-- `face_recognition_sface_2021dec.onnx` from OpenCV Zoo's SFace recognizer.
-  Consult the license shipped in that upstream model directory. Local SHA-256:
-  `0BA9FBFA01B5270C96627C4EF784DA859931E02F04419C829E83484087C34E79`.
-- `osnet_x0_25_msmt17.onnx`, exported from Kaiyang Zhou's MIT-licensed
-  Torchreid `osnet_x0_25_msmt17_combineall` checkpoint hosted in the official
-  `kaiyangzhou/osnet` Hugging Face repository. The reproducible conversion
-  helper is `scripts/export-team-retouch-osnet.py`. Local SHA-256:
-  `9213AE24C79D7CA1620E7FDEF0BCB03DC6FD8921EBAB336D61DC0BC2BED92E76`.
+- `adaface_ir18_webface4m.onnx`, exported from the MIT-licensed AdaFace IR-18
+  WebFace4M checkpoint. Local SHA-256:
+  `F67C21148795C4B10F3063DEE16A0E9BFBB008BD94FCF0C0DAD7B16C2CFA1A54`.
+- `osnet_x1_0_msmt17.onnx`, exported from Kaiyang Zhou's MIT-licensed Torchreid
+  `osnet_x1_0_msmt17_combineall` checkpoint. Local SHA-256:
+  `725DFAF07872CB5348E041F0B7C4CB5EF77259BAF385833A4CB1AB4BD04AF287`.
 
-YuNet supplies five facial landmarks, SFace supplies aligned face embeddings,
-and OSNet supplies 512-dimensional full-body appearance embeddings. OSNet is a
-supporting signal only; body-only matches remain review candidates.
-
-## Optional identity model pack
-
-The identity engine can use an AdaFace IR-18 face model and an OSNet x1.0 body
-model. They remain outside the base application and component, but release
-builds publish them as a prepared optional model pack. End users do not need
-Python, PyTorch, the upstream repositories, or a local ONNX conversion step.
-The stable packaged fallback remains SFace plus OSNet x0.25.
+YuNet supplies five facial landmarks, AdaFace supplies aligned face embeddings,
+and OSNet x1.0 supplies 512-dimensional full-body appearance embeddings. OSNet
+is a supporting signal only; body-only matches remain review candidates. All
+three assets are bundled into the team-retouch component ZIP and run on CPU,
+with DirectML used only as an optional accelerator. There is no smaller-model
+fallback or separate identity model package.
 
 - AdaFace upstream: `mk-minchul/AdaFace`. The reproducible conversion helper is
   `scripts/export-team-retouch-adaface.py`.
 - OSNet x1.0 upstream: the official `kaiyangzhou/osnet` Hugging Face repository.
   It uses the same `scripts/export-team-retouch-osnet.py` conversion helper.
 
-The prepared ZIP is built with `npm run build:model-packs`. It is placed,
-without extraction, in `%LOCALAPPDATA%/PhotoFlow/components/team-retouch` and
-installed from Settings. The ZIP includes a manifest, SHA-256 values, upstream
-links, and license texts.
-
-The engine also accepts explicit local paths through
+Release builds read the prepared AdaFace and OSNet assets from `.model-lab`
+and include them in `npm run build:components`. The engine also accepts explicit local paths through
 `PHOTOFLOW_ADAFACE_MODEL` and `PHOTOFLOW_OSNET_MODEL`. This allows development
-and accuracy testing without changing what is redistributed to end users.
+and accuracy testing before the component ZIP is built.
 
 ## Optional advanced backend
 

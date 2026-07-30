@@ -7,11 +7,10 @@ installer does not contain optional components.
 
 ## Offline installation
 
-The preferred layout is to place the generated component ZIP archives directly
-beside the PhotoFlow installer. The installer's optional-component page detects
-files named `PhotoFlow-<component-id>-<version>-win32-<arch>.zip` and extracts
-the selected archives automatically. No pre-created `components` directory is
-required.
+Open PhotoFlow's component manager, click Install, and select the generated ZIP
+directly. PhotoFlow extracts and validates it in a temporary directory before
+copying the runtime into the component-specific user-data directory. The source
+ZIP selected by the user is never moved or deleted.
 
 Each component has one application-data directory:
 
@@ -31,8 +30,6 @@ directory. For multi-person retouch this is:
 `%LOCALAPPDATA%\PhotoFlow\components\team-retouch`
 
 - `PhotoFlow-<component-id>-*.zip`: installed by the matching component button.
-- `PhotoFlow-team-retouch-identity-models-*.zip`: installs prepared AdaFace
-  IR-18 and OSNet x1.0 ONNX files.
 - `PhotoFlow-team-retouch-advanced-*.zip`: verifies and registers the prepared
   PairDETR + SAM 2.1 WSL virtual disk.
 
@@ -41,15 +38,15 @@ completed by copying files alone. PhotoFlow performs it after explicit user
 confirmation because it creates a registered WSL distribution and uses tens
 of gigabytes of disk space.
 
-`npm run electron:build` also creates one ZIP package per component in
-`release`. Copy each generated ZIP into its component directory and install it
-from Settings.
+Build component ZIPs separately from the application installer. For example,
+`npm run build:components` creates the team-retouch ZIP in `release`; select it
+from Settings to install it.
 
-Packaged builds scan these locations in order:
+Packaged builds scan only this location:
 
 1. `%LOCALAPPDATA%\PhotoFlow\components` (component containers and runtimes)
-2. `components` beside `Photoflow.exe` (legacy installer and upgrade compatibility)
-3. `resources\components` inside the application (legacy/bundled fallback)
+
+Components beside `Photoflow.exe` or inside `resources\components` are ignored.
 
 ## Manifest contract
 
@@ -63,6 +60,9 @@ The current component IDs are:
   GPU/CPU person detection, lossless crop export, high-resolution alignment,
   color matching, overlap blending, and recomposition. When it is missing the
   whole team-retouch workflow is unavailable.
+- `video-playback-mpv`: “高级视频解码”. It runs libmpv in an isolated process,
+  embeds the native video surface in PhotoFlow, and falls back to Chromium
+  playback if startup or decoding fails.
 The inspiration library, scene organizer, and Office image extractor are part
 of the main application and are not component IDs.
 
@@ -70,7 +70,12 @@ Run `npm run setup:team-retouch` once to create/prepare the development virtual
 environment and verify that the DirectML provider is available. Run
 `npm run build:team-retouch` to create a self-contained distributable component
 under `release/components/team-retouch`; the packaged component includes ONNX
-Runtime and does not require Python on the user's machine.
+Runtime, YuNet, AdaFace IR-18, and OSNet x1.0, and does not require Python on
+the user's machine.
 
 `npm run build:components` builds the optional team-retouch component. Components remain
 separate from the base PhotoFlow installer so the core application stays small.
+
+`npm run build:advanced-video-decoder -- --mpv-root <directory>` builds only the
+optional advanced video ZIP. It is intentionally not part of `electron:build`,
+so the main installer does not depend on or include libmpv.

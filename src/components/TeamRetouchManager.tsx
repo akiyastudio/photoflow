@@ -6,6 +6,7 @@ import type { AppConfig, ComponentStatus, MediaVersion, ProjectFileEntry, TeamId
 import { useAppDialog } from './AppDialogProvider';
 import { useEscapeLayer } from './LayerProvider';
 import { TeamRetouchSteps, type TeamRetouchStep } from './TeamRetouchSteps';
+import { ensureFaceRecognitionConsent } from '../utils/privacyConsent';
 
 type Props = {
   entries: ProjectFileEntry[];
@@ -129,22 +130,66 @@ const bundleFromWorkspacePhoto = (photo: TeamProjectPhoto): TeamPatchBundle => (
   excludedPersonCounts: { [photo.baseVersionId]: photo.excludedPersonCount || 0 },
 });
 
+type LazyPreviewState = { url: string; status: 'idle' | 'loading' | 'ready' | 'failed'; error: string };
+const thumbnailSizeLabel = (requestedSize: number) => requestedSize <= 320 ? 'small' : requestedSize <= 640 ? 'medium' : 'large';
+const pickThumbnailUrl = (previewUrls: Partial<Record<'small' | 'medium' | 'large', string>> | undefined, requestedSize: number) => {
+  const preferred = thumbnailSizeLabel(requestedSize);
+  return previewUrls?.[preferred] || previewUrls?.large || previewUrls?.medium || previewUrls?.small || '';
+};
+
 const useLazyPreview = (filePath: string | undefined, cacheConfig: AppConfig['mediaCache'], size: number, refreshKey = '', enabled = true) => {
+  const [state, setState] = useState<LazyPreviewState>({ url: '', status: 'idle', error: '' });
+  const [retryToken, setRetryToken] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setState({ url: '', status: filePath && enabled ? 'loading' : 'idle', error: '' });
+    if (!filePath || !enabled) return () => { active = false; };
+    const stop = window.electronAPI.onThumbnailStateChanged(update => {
+      if (!active || update.filePath.toLocaleLowerCase() !== filePath.toLocaleLowerCase()) return;
+      if (update.state === 'READY') {
+        const url = pickThumbnailUrl(update.previewUrls, size);
+        if (url) setState({ url, status: 'ready', error: '' });
+      } else if (update.state === 'FAILED' || update.state === 'MISSING') {
+        setState({ url: '', status: 'failed', error: update.error || (update.state === 'MISSING' ? '原始文件不存在或磁盘离线' : '预览生成失败') });
+      }
+    });
+    void window.electronAPI.getMediaThumbnail(filePath, originalPreviewKind(filePath), cacheConfig, size, 1, 0).then(result => {
+      if (!active) return;
+      if (result.previewUrl) setState({ url: result.previewUrl, status: 'ready', error: '' });
+      else if (!result.success || result.state === 'FAILED' || result.state === 'MISSING') setState({ url: '', status: 'failed', error: result.error || '预览生成失败' });
+    }).catch(error => {
+      if (active) setState({ url: '', status: 'failed', error: error instanceof Error ? error.message : String(error) });
+    });
+    return () => { active = false; stop(); };
+  }, [filePath, size, refreshKey, enabled, cacheConfig.directory, cacheConfig.maxSizeGB, retryToken]);
+  return { ...state, retry: () => setRetryToken(current => current + 1) };
+};
+
+const originalPreviewKind = (filePath: string): 'image' | 'raw' => {
+  const extension = filePath.split('.').pop()?.toLocaleLowerCase() || '';
+  return ['cr2', 'cr3', 'nef', 'arw', 'raf', 'orf', 'rw2', 'dng', 'rwl', '3fr', 'fff', 'iiq', 'pef', 'srw'].includes(extension) ? 'raw' : 'image';
+};
+
+const useOriginalPreview = (filePath: string | undefined, cacheConfig: AppConfig['mediaCache'], enabled = true) => {
   const [url, setUrl] = useState('');
   useEffect(() => {
     let active = true;
     setUrl('');
     if (!filePath || !enabled) return () => { active = false; };
-    const stop = window.electronAPI.onThumbnailStateChanged(update => {
-      if (active && update.filePath.toLocaleLowerCase() === filePath.toLocaleLowerCase() && update.state === 'READY' && update.previewUrls?.medium) setUrl(update.previewUrls.medium);
-    });
-    void window.electronAPI.getMediaThumbnail(filePath, 'image', cacheConfig, size, 1, 0).then(result => {
-      if (active && result.previewUrl) setUrl(result.previewUrl);
-    });
-    return () => { active = false; stop(); };
-  }, [filePath, size, refreshKey, enabled, cacheConfig.directory, cacheConfig.maxSizeGB]);
+    void window.electronAPI.getMediaOriginal(filePath, originalPreviewKind(filePath), cacheConfig).then(result => {
+      const matrix = result.orientation?.matrix;
+      const orientationMatches = !matrix
+        || matrix.length === 4 && matrix.every((value, index) => value === [1, 0, 0, 1][index]);
+      if (active && result.success && result.mediaUrl && orientationMatches) setUrl(result.mediaUrl);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [filePath, enabled, cacheConfig.directory, cacheConfig.maxSizeGB]);
   return url;
 };
+
+const LazyPreviewPlaceholder = ({ failed, error, onRetry }: { failed: boolean; error: string; onRetry: () => void }) => failed
+  ? <div className="flex flex-col items-center justify-center gap-2 px-4 text-center text-xs text-amber-400"><AlertTriangle size={22}/><span title={error}>预览加载失败</span><button type="button" onClick={onRetry} className="rounded-md border border-amber-400/40 px-2.5 py-1 font-bold text-amber-300 hover:bg-amber-400/10">重试</button></div>
+  : <Loader2 className="animate-spin text-slate-500"/>;
 
 const FullscreenImageViewer = ({ url, filePath, cacheConfig, title, details, onClose }: { url: string; filePath?: string; cacheConfig?: AppConfig['mediaCache']; title: string; details?: string; onClose: () => void }) => {
   const [displayUrl, setDisplayUrl] = useState(url);
@@ -157,16 +202,16 @@ const FullscreenImageViewer = ({ url, filePath, cacheConfig, title, details, onC
     return () => { active = false; };
   }, [url, filePath, cacheConfig]);
   useEscapeLayer(true, onClose);
-  return createPortal(<div role="dialog" aria-modal="true" aria-label={`全窗口浏览：${title}`} className="fixed inset-0 z-[700] flex flex-col bg-slate-950/95" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><header className="flex h-14 shrink-0 items-center gap-3 border-b border-white/10 px-5 text-white"><div className="min-w-0"><h3 className="truncate text-sm font-bold">{title}</h3>{details && <p className="mt-0.5 text-xs text-slate-400">{details}</p>}</div><button type="button" onClick={onClose} title="关闭全窗口浏览" className="ml-auto rounded-md p-2 text-slate-300 hover:bg-white/10 hover:text-white"><X size={20}/></button></header><div className="flex min-h-0 flex-1 items-center justify-center p-4"><img src={displayUrl} alt={title} className="max-h-full max-w-full object-contain"/></div></div>, document.body);
+  return createPortal(<div role="dialog" aria-modal="true" aria-label={`全窗口浏览：${title}`} className="fixed inset-0 z-[700] flex flex-col bg-slate-950/95" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><header className="flex h-14 shrink-0 items-center gap-3 border-b border-white/10 px-5 text-white"><div className="min-w-0"><h3 className="truncate text-sm font-bold">{title}</h3>{details && <p className="mt-0.5 text-xs text-slate-400">{details}</p>}</div><button type="button" onClick={onClose} title="关闭全窗口浏览" className="ml-auto rounded-md p-2 text-slate-300 hover:bg-white/10 hover:text-white"><X size={20}/></button></header><div className="flex min-h-0 flex-1 items-center justify-center p-4" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><img src={displayUrl} alt={title} className="max-h-full max-w-full object-contain"/></div></div>, document.body);
 };
 
 const ImageZoomButton = ({ disabled, onClick }: { disabled?: boolean; onClick: () => void }) => <button type="button" disabled={disabled} onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.preventDefault(); event.stopPropagation(); onClick(); }} title="全窗口浏览图片" aria-label="全窗口浏览图片" className="absolute bottom-2 right-2 z-20 rounded-md border border-white/20 bg-black/75 p-1.5 text-white shadow-lg transition hover:bg-blue-600 disabled:hidden"><Maximize2 size={15}/></button>;
 
 const PatchPreview = ({ task, cacheConfig, enabled = true, onPickPerson }: { task: TeamPatchTask; cacheConfig: AppConfig['mediaCache']; enabled?: boolean; onPickPerson?: (personIndex: number) => void }) => {
-  const url = useLazyPreview(task.patchPath, cacheConfig, 480, `${task.updatedAt}:${task.crop.x}:${task.crop.y}:${task.crop.width}:${task.crop.height}`, enabled);
+  const preview = useLazyPreview(task.patchPath, cacheConfig, 480, `${task.updatedAt}:${task.crop.x}:${task.crop.y}:${task.crop.width}:${task.crop.height}`, enabled);
   const [fullscreen, setFullscreen] = useState(false);
   return <><div className="relative flex h-44 items-center justify-center overflow-hidden rounded-lg bg-slate-950">
-    {url ? <svg className="h-full w-full" viewBox={`0 0 ${task.crop.width} ${task.crop.height}`} preserveAspectRatio="xMidYMid meet"><image href={url} width={task.crop.width} height={task.crop.height}/>{membersOf(task).map(member => {
+    {preview.url ? <svg className="h-full w-full" viewBox={`0 0 ${task.crop.width} ${task.crop.height}`} preserveAspectRatio="xMidYMid meet"><image href={preview.url} width={task.crop.width} height={task.crop.height}/>{membersOf(task).map(member => {
       const x = Math.max(0, member.bbox.x - task.crop.x);
       const y = Math.max(0, member.bbox.y - task.crop.y);
       const width = Math.min(member.bbox.width, task.crop.width - x);
@@ -177,14 +222,14 @@ const PatchPreview = ({ task, cacheConfig, enabled = true, onPickPerson }: { tas
       const labelHeight = fontSize * 1.45;
       const labelY = Math.max(0, y - labelHeight);
       return <g key={member.personIndex} onClick={() => onPickPerson?.(member.personIndex)} className={onPickPerson ? 'cursor-pointer' : undefined}><rect x={x} y={y} width={width} height={height} fill={`${color}12`} stroke={color} strokeWidth={Math.max(2, task.crop.width / 420)}/><rect x={x} y={labelY} width={labelWidth} height={labelHeight} rx={fontSize * .2} fill={color}/><text x={x + fontSize * .35} y={labelY + fontSize * 1.05} fill="#020617" fontSize={fontSize} fontWeight="800">人物 {member.personIndex}</text></g>;
-    })}</svg> : <Loader2 className="animate-spin text-slate-500"/>}
+    })}</svg> : <LazyPreviewPlaceholder failed={preview.status === 'failed'} error={preview.error} onRetry={preview.retry}/>}
     <span className="absolute left-2 top-2 rounded bg-black/70 px-2 py-1 text-[10px] font-bold text-white">识别工作图</span>
-    <ImageZoomButton disabled={!url} onClick={() => setFullscreen(true)}/>
-  </div><p className="mt-1.5 text-center text-[11px] font-medium tabular-nums text-slate-500">{Math.round(task.crop.width)} × {Math.round(task.crop.height)} px</p>{fullscreen && url && <FullscreenImageViewer url={url} filePath={task.patchPath} cacheConfig={cacheConfig} title="识别工作图" details={`${Math.round(task.crop.width)} × ${Math.round(task.crop.height)} px`} onClose={() => setFullscreen(false)}/>}</>;
+    <ImageZoomButton disabled={!preview.url} onClick={() => setFullscreen(true)}/>
+  </div><p className="mt-1.5 text-center text-[11px] font-medium tabular-nums text-slate-500">{Math.round(task.crop.width)} × {Math.round(task.crop.height)} px</p>{fullscreen && preview.url && <FullscreenImageViewer url={preview.url} filePath={task.patchPath} cacheConfig={cacheConfig} title="识别工作图" details={`${Math.round(task.crop.width)} × ${Math.round(task.crop.height)} px`} onClose={() => setFullscreen(false)}/>}</>;
 };
 
 const IdentitySubjectThumb = ({ subject, cacheConfig, compact = false }: { subject: IdentitySubject; cacheConfig: AppConfig['mediaCache']; compact?: boolean }) => {
-  const url = useLazyPreview(subject.task.patchPath, cacheConfig, compact ? 320 : 480, `${subject.task.updatedAt}:${subject.personIndex}`);
+  const preview = useLazyPreview(subject.task.patchPath, cacheConfig, compact ? 320 : 480, `${subject.task.updatedAt}:${subject.personIndex}`);
   const [fullscreen, setFullscreen] = useState(false);
   const x = Math.max(0, subject.bbox.x - subject.task.crop.x);
   const y = Math.max(0, subject.bbox.y - subject.task.crop.y);
@@ -200,10 +245,47 @@ const IdentitySubjectThumb = ({ subject, cacheConfig, compact = false }: { subje
   const viewX = Math.max(0, Math.min(subject.task.crop.width - viewWidth, centerX - viewWidth / 2));
   const viewY = Math.max(0, Math.min(subject.task.crop.height - viewHeight, centerY - viewHeight / 2));
   return <><div className="relative aspect-[4/3] overflow-hidden rounded-lg bg-slate-950">
-    {url ? <svg className="block h-full w-full" viewBox={`${viewX} ${viewY} ${viewWidth} ${viewHeight}`} preserveAspectRatio="xMidYMid meet"><image href={url} width={subject.task.crop.width} height={subject.task.crop.height}/><rect x={x} y={y} width={boxWidth} height={boxHeight} fill="none" stroke="#facc15" strokeWidth={Math.max(3, viewWidth / 180)}/></svg> : <div className="absolute inset-0 flex items-center justify-center"><Loader2 className="animate-spin text-slate-500"/></div>}
-    <span className="absolute inset-x-0 bottom-0 truncate bg-black/70 py-1 pl-2 pr-11 text-[10px] font-bold text-white">{subject.photo.name} · 人物 {subject.personIndex}</span><ImageZoomButton disabled={!url} onClick={() => setFullscreen(true)}/>
-  </div>{fullscreen && url && <FullscreenImageViewer url={url} filePath={subject.task.patchPath} cacheConfig={cacheConfig} title={`${subject.photo.name} · 人物 ${subject.personIndex}`} details={`${Math.round(subject.task.crop.width)} × ${Math.round(subject.task.crop.height)} px`} onClose={() => setFullscreen(false)}/>}</>;
+    {preview.url ? <svg className="block h-full w-full" viewBox={`${viewX} ${viewY} ${viewWidth} ${viewHeight}`} preserveAspectRatio="xMidYMid meet"><image href={preview.url} width={subject.task.crop.width} height={subject.task.crop.height}/><rect x={x} y={y} width={boxWidth} height={boxHeight} fill="none" stroke="#facc15" strokeWidth={Math.max(3, viewWidth / 180)}/></svg> : <div className="absolute inset-0 flex items-center justify-center"><LazyPreviewPlaceholder failed={preview.status === 'failed'} error={preview.error} onRetry={preview.retry}/></div>}
+    <span className="absolute inset-x-0 bottom-0 truncate bg-black/70 py-1 pl-2 pr-11 text-[10px] font-bold text-white">{subject.photo.name} · 人物 {subject.personIndex}</span><ImageZoomButton disabled={!preview.url} onClick={() => setFullscreen(true)}/>
+  </div>{fullscreen && preview.url && <FullscreenImageViewer url={preview.url} filePath={subject.task.patchPath} cacheConfig={cacheConfig} title={`${subject.photo.name} · 人物 ${subject.personIndex}`} details={`${Math.round(subject.task.crop.width)} × ${Math.round(subject.task.crop.height)} px`} onClose={() => setFullscreen(false)}/>}</>;
 };
+
+const IdentityChoiceCard = ({ identity, representative, count, cacheConfig, disabled, onSelect }: {
+  identity: TeamIdentity;
+  representative?: IdentitySubject;
+  count: number;
+  cacheConfig: AppConfig['mediaCache'];
+  disabled: boolean;
+  onSelect: () => void;
+}) => (
+  <div
+    role="button"
+    tabIndex={disabled ? -1 : 0}
+    aria-disabled={disabled}
+    aria-label={"选择人物身份“" + identity.name + "”"}
+    onClick={event => {
+      if (disabled || (event.target instanceof Element && event.target.closest('button, a, input, select, textarea'))) return;
+      onSelect();
+    }}
+    onKeyDown={event => {
+      if (disabled || event.target !== event.currentTarget) return;
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        onSelect();
+      }
+    }}
+    className={"group overflow-hidden rounded-xl border border-slate-200 bg-white transition hover:border-blue-400 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 " + (disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer')}
+  >
+    {representative
+      ? <IdentitySubjectThumb subject={representative} cacheConfig={cacheConfig} compact/>
+      : <div className="flex aspect-[4/3] items-center justify-center bg-slate-100 text-slate-400"><UserRound/></div>}
+    <div className="flex w-full items-center gap-2 border-t border-slate-100 p-3 text-left transition group-hover:bg-blue-50">
+      <span className="h-2.5 w-2.5 rounded-full" style={{ background: identity.color }}/>
+      <span className="min-w-0 flex-1 truncate text-sm font-bold text-slate-800">{identity.name}</span>
+      <span className="text-[10px] text-slate-400">{count} 张</span>
+    </div>
+  </div>
+);
 
 const IdentityPicker = ({ subject, candidates, allSubjects, identities, includedKeys, cacheConfig, busy, busyLabel, onToggleCandidate, onOnlyCurrent, onConfirm, onCreate, onClear, onExclude, onRename, onDelete, onClose }: {
   subject: IdentitySubject;
@@ -235,7 +317,19 @@ const IdentityPicker = ({ subject, candidates, allSubjects, identities, included
         <section className="min-h-0 overflow-y-auto p-5">
           <div className="flex items-center gap-3"><div><h4 className="text-sm font-bold text-slate-800">系统认为是同一个人的候选图</h4><p className="mt-1 text-xs text-slate-500">默认勾选整组；有误的图片可以取消勾选，当前人物不能取消。</p></div><button disabled={busy} onClick={onOnlyCurrent} className="dialog-secondary ml-auto">仅标记当前人物</button></div>
           <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">{candidates.map(candidate => { const included = includedKeys.has(candidate.key); const isAnchor = candidate.key === subject.key; return <label key={candidate.key} className={`relative cursor-pointer overflow-hidden rounded-xl border bg-white p-2 transition ${included ? 'border-blue-500 ring-2 ring-blue-100' : 'border-slate-200 opacity-65'}`}><input type="checkbox" checked={included} disabled={busy || isAnchor} onChange={() => onToggleCandidate(candidate.key)} className="absolute left-3 top-3 z-10 h-4 w-4 accent-blue-600"/><IdentitySubjectThumb subject={candidate} cacheConfig={cacheConfig} compact/><div className="mt-2 flex items-center justify-between gap-2 text-[10px]"><span className="font-bold text-slate-600">{isAnchor ? '当前人物' : candidate.assignment?.source === 'suggested' ? '自动候选' : '同组人物'}</span><span className="text-slate-400">{Math.round((candidate.assignment?.confidence || 0) * 100)}%</span></div></label>; })}</div>
-          <div className="mt-6 border-t border-slate-200 pt-5"><div className="flex items-center gap-3"><div><h4 className="text-sm font-bold text-slate-800">选择已有身份</h4><p className="mt-1 text-xs text-slate-500">点击后会应用到上方已勾选的 {includedKeys.size} 个人物实例。</p></div><button disabled={busy} onClick={onCreate} className="dialog-secondary ml-auto">新建人物</button></div>{availableIdentities.length ? <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{availableIdentities.map(identity => { const representative = allSubjects.find(candidate => candidate.identity?.id === identity.id); const count = allSubjects.filter(candidate => candidate.identity?.id === identity.id).length; return <button key={identity.id} disabled={busy || !includedKeys.size} onClick={() => onConfirm(identity.id)} className="overflow-hidden rounded-xl border border-slate-200 bg-white text-left transition hover:border-blue-400 hover:shadow-md disabled:opacity-50">{representative ? <IdentitySubjectThumb subject={representative} cacheConfig={cacheConfig} compact/> : <div className="flex aspect-[4/3] items-center justify-center bg-slate-100 text-slate-400"><UserRound/></div>}<div className="flex items-center gap-2 p-3"><span className="h-2.5 w-2.5 rounded-full" style={{ background: identity.color }}/><span className="min-w-0 flex-1 truncate text-sm font-bold text-slate-800">{identity.name}</span><span className="text-[10px] text-slate-400">{count} 张</span></div></button>; })}</div> : <div className="mt-3 rounded-xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">还没有已确认人物，请新建第一个人物。</div>}</div>
+          <div className="mt-6 border-t border-slate-200 pt-5"><div className="flex items-center gap-3"><div><h4 className="text-sm font-bold text-slate-800">选择已有身份</h4><p className="mt-1 text-xs text-slate-500">点击后会应用到上方已勾选的 {includedKeys.size} 个人物实例。</p></div><button disabled={busy} onClick={onCreate} className="dialog-secondary ml-auto">新建人物</button></div>{availableIdentities.length ? <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{availableIdentities.map(identity => {
+            const representative = allSubjects.find(candidate => candidate.identity?.id === identity.id);
+            const count = allSubjects.filter(candidate => candidate.identity?.id === identity.id).length;
+            return <IdentityChoiceCard
+              key={identity.id}
+              identity={identity}
+              representative={representative}
+              count={count}
+              cacheConfig={cacheConfig}
+              disabled={busy || !includedKeys.size}
+              onSelect={() => onConfirm(identity.id)}
+            />;
+          })}</div> : <div className="mt-3 rounded-xl border border-dashed border-slate-300 p-8 text-center text-sm text-slate-500">还没有已确认人物，请新建第一个人物。</div>}</div>
         </section>
       </div>
       {busy && <footer className="flex items-center justify-center border-t border-blue-100 bg-blue-50 px-5 py-3 text-xs font-bold text-blue-700"><Loader2 size={14} className="mr-2 animate-spin"/>{busyLabel}</footer>}
@@ -378,7 +472,9 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defa
 
   const baseVersion = useMemo<MediaVersion | undefined>(() => bundle.versions.find(version => version.id === bundle.photo?.currentVersionId) || bundle.versions.find(version => version.isCurrent) || bundle.versions.at(-1), [bundle.versions, bundle.photo?.currentVersionId]);
   const tasks = useMemo(() => bundle.tasks.filter(task => task.baseVersionId === baseVersion?.id), [bundle.tasks, baseVersion?.id]);
-  const previewUrl = useLazyPreview(baseVersion?.filePath, cacheConfig, 1280, '', previewEnabled);
+  const sourceThumbnail = useLazyPreview(baseVersion?.filePath, cacheConfig, 1280, '', previewEnabled);
+  const sourceOriginalUrl = useOriginalPreview(baseVersion?.filePath, cacheConfig, previewEnabled);
+  const sourcePreview = { ...sourceThumbnail, url: sourceOriginalUrl || sourceThumbnail.url };
   const [imageSize, setImageSize] = useState({ width: 1, height: 1 });
   const assignments = useMemo(() => new Map(identityState.assignments.map(item => [assignmentKey(item.photoId, item.baseVersionId, item.personIndex), item])), [identityState.assignments]);
   const identities = useMemo(() => new Map(identityState.identities.map(item => [item.id, item])), [identityState.identities]);
@@ -462,7 +558,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defa
     <header className="flex min-h-16 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-3"><div className="min-w-0"><h3 className="truncate font-bold text-slate-900">{bundle.photo?.displayName || entry.name}</h3><p className="mt-0.5 text-xs text-slate-500">{tasks.length} 张工作图 · {identifiedCount}/{personCount} 个人物已标记{tasks.some(task => task.needsReview) ? ` · ${tasks.filter(task => task.needsReview).length} 张建议检查` : ''}{excludedPersonCount ? ` · 已排除 ${excludedPersonCount} 个误识别` : ''}</p></div><div className="ml-auto flex flex-wrap items-center gap-2"><button disabled={!baseVersion || Boolean(busy)} onClick={() => void detect()} className="dialog-secondary inline-flex items-center gap-2">{busy === 'detect' ? <Loader2 size={15} className="animate-spin"/> : tasks.length ? <RefreshCw size={15}/> : <ScanFace size={15}/>} {tasks.length ? '重新识别本图' : '识别本图'}</button>{excludedPersonCount > 0 && <button disabled={!baseVersion || Boolean(busy)} onClick={() => void detect(true)} className="dialog-secondary inline-flex items-center gap-2"><RefreshCw size={15}/>恢复已排除（{excludedPersonCount}）</button>}{baseVersion && <button disabled={Boolean(busy)} onClick={() => void removeFromProject()} title="从项目团片协作中删除这张图片" className="rounded-md border border-red-200 p-2 text-red-600 hover:bg-red-50"><Trash2 size={15}/></button>}</div></header>
     {busy === 'detect' && <div className="border-b border-blue-100 bg-blue-50 px-5 py-3"><div className="flex justify-between text-xs font-bold text-blue-700"><span>{detectionProgress.message}</span><span>{Math.round(detectionProgress.progress)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full bg-blue-600" style={{ width: `${detectionProgress.progress}%` }}/></div></div>}
     {loading ? <div className="flex min-h-64 items-center justify-center gap-2 text-slate-500"><Loader2 className="animate-spin"/>正在读取人物数据…</div> : <div className="grid grid-cols-[minmax(320px,.9fr)_minmax(440px,1.1fr)]">
-      <section className="border-r border-slate-200 bg-slate-950 p-4"><div className="relative mx-auto flex min-h-[500px] items-center justify-center overflow-hidden rounded-xl bg-black">{previewUrl ? <svg className="max-h-[calc(100vh-190px)] w-full" viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} preserveAspectRatio="xMidYMid meet"><image href={previewUrl} width={imageSize.width} height={imageSize.height} onLoad={() => { if (tasks.length) return; const image = new Image(); image.onload = () => setImageSize({ width: image.naturalWidth || 1, height: image.naturalHeight || 1 }); image.src = previewUrl; }}/>{tasks.map((task, index) => <g key={task.id}><rect x={task.crop.x} y={task.crop.y} width={task.crop.width} height={task.crop.height} fill="rgba(59,130,246,.06)" stroke={task.needsReview ? '#fb923c' : '#60a5fa'} strokeWidth={Math.max(3, imageSize.width / 900)}/>{membersOf(task).map(member => { const color = personColor(member.personIndex); const fontSize = Math.max(20, imageSize.width / 100); return <g key={member.personIndex}><rect x={member.bbox.x} y={member.bbox.y} width={member.bbox.width} height={member.bbox.height} fill={`${color}0d`} stroke={color} strokeWidth={Math.max(2, imageSize.width / 1300)}/><text x={member.bbox.x + fontSize * .25} y={Math.max(fontSize, member.bbox.y - fontSize * .25)} fill={color} fontSize={fontSize} fontWeight="800" paintOrder="stroke" stroke="rgba(0,0,0,.85)" strokeWidth="5">人物 {member.personIndex}</text></g>; })}<text x={task.crop.x + 10} y={task.crop.y + 28} fill="white" fontSize={Math.max(20, imageSize.width / 85)} fontWeight="700" paintOrder="stroke" stroke="rgba(0,0,0,.75)" strokeWidth="5">工作图 {index + 1}</text></g>)}</svg> : <Loader2 className="animate-spin text-slate-500"/>}<ImageZoomButton disabled={!previewUrl} onClick={() => setSourceFullscreen(true)}/></div><p className="mt-3 text-xs leading-5 text-slate-400">蓝框是工作图范围；每个人物使用独立颜色和编号，并与右侧人物标记行对应。橙色框表示建议检查，有误可直接删除工作图。</p>{sourceFullscreen && previewUrl && <FullscreenImageViewer url={previewUrl} filePath={baseVersion?.filePath} cacheConfig={cacheConfig} title={bundle.photo?.displayName || entry.name} details={`${imageSize.width} × ${imageSize.height} px`} onClose={() => setSourceFullscreen(false)}/>}</section>
+      <section className="border-r border-slate-200 bg-slate-950 p-4"><div className="relative mx-auto flex min-h-[500px] items-center justify-center overflow-hidden rounded-xl bg-black">{sourcePreview.url ? <svg className="max-h-[calc(100vh-190px)] w-full" viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} preserveAspectRatio="xMidYMid meet"><image href={sourcePreview.url} width={imageSize.width} height={imageSize.height} onLoad={() => { if (tasks.length) return; const image = new Image(); image.onload = () => setImageSize({ width: image.naturalWidth || 1, height: image.naturalHeight || 1 }); image.src = sourcePreview.url; }}/>{tasks.map((task, index) => <g key={task.id}><rect x={task.crop.x} y={task.crop.y} width={task.crop.width} height={task.crop.height} fill="rgba(59,130,246,.06)" stroke={task.needsReview ? '#fb923c' : '#60a5fa'} strokeWidth={Math.max(3, imageSize.width / 900)}/>{membersOf(task).map(member => { const color = personColor(member.personIndex); const fontSize = Math.max(20, imageSize.width / 100); return <g key={member.personIndex}><rect x={member.bbox.x} y={member.bbox.y} width={member.bbox.width} height={member.bbox.height} fill={`${color}0d`} stroke={color} strokeWidth={Math.max(2, imageSize.width / 1300)}/><text x={member.bbox.x + fontSize * .25} y={Math.max(fontSize, member.bbox.y - fontSize * .25)} fill={color} fontSize={fontSize} fontWeight="800" paintOrder="stroke" stroke="rgba(0,0,0,.85)" strokeWidth="5">人物 {member.personIndex}</text></g>; })}<text x={task.crop.x + 10} y={task.crop.y + 28} fill="white" fontSize={Math.max(20, imageSize.width / 85)} fontWeight="700" paintOrder="stroke" stroke="rgba(0,0,0,.75)" strokeWidth="5">工作图 {index + 1}</text></g>)}</svg> : <LazyPreviewPlaceholder failed={sourcePreview.status === 'failed'} error={sourcePreview.error} onRetry={sourcePreview.retry}/>}<ImageZoomButton disabled={!sourcePreview.url} onClick={() => setSourceFullscreen(true)}/></div><p className="mt-3 text-xs leading-5 text-slate-400">蓝框是工作图范围；每个人物使用独立颜色和编号，并与右侧人物标记行对应。橙色框表示建议检查，有误可直接删除工作图。</p>{sourceFullscreen && sourcePreview.url && <FullscreenImageViewer url={sourcePreview.url} filePath={baseVersion?.filePath} cacheConfig={cacheConfig} title={bundle.photo?.displayName || entry.name} details={`${imageSize.width} × ${imageSize.height} px`} onClose={() => setSourceFullscreen(false)}/>}</section>
       <section className="p-5">{!tasks.length ? <div className="flex min-h-96 flex-col items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center"><ScanFace size={34} className="text-violet-500"/><h4 className="mt-3 font-bold text-slate-800">识别人物并生成工作图</h4><p className="mt-2 text-sm text-slate-500">这一步只识别、裁图和标记人物，不上传返图，也不进行合成。</p><button onClick={() => void detect()} className="dialog-primary mt-4">开始识别</button></div> : <div className="grid gap-4 xl:grid-cols-2">{tasks.map((task, taskIndex) => {
         const names = taskIdentityNames(task, task.photoId, task.baseVersionId, assignments, identities);
         const taskMembers = membersOf(task);
@@ -480,7 +576,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defa
         </article>;
       })}</div>}</section>
     </div>}
-    {cropEditor && <div role="dialog" aria-modal="true" className="fixed inset-0 z-[460] flex items-center justify-center bg-slate-950/70 p-5"><div className="w-full max-w-2xl rounded-2xl bg-white p-5 shadow-2xl"><div className="flex items-center"><div><h3 className="font-bold text-slate-900">调整工作图范围</h3><p className="mt-1 text-xs text-slate-500">拖动蓝框可移动范围，拖动四角可放大或缩小；也可以精确输入像素。</p></div><button onClick={() => setCropEditor(null)} className="ml-auto p-2 text-slate-500"><X size={18}/></button></div>{previewUrl && <InteractiveCropEditor previewUrl={previewUrl} imageSize={imageSize} crop={cropEditor.crop} onChange={crop => setCropEditor(current => current ? { ...current, crop } : current)}/>}<div className="mt-4 flex flex-wrap gap-2"><button type="button" onClick={() => setCropEditor(current => { if (!current) return current; const marginX = Math.max(20, Math.round(current.crop.width * .1)); const marginY = Math.max(20, Math.round(current.crop.height * .1)); const x = Math.max(0, current.crop.x - marginX); const y = Math.max(0, current.crop.y - marginY); return { ...current, crop: { x, y, width: Math.min(imageSize.width - x, current.crop.width + marginX * 2), height: Math.min(imageSize.height - y, current.crop.height + marginY * 2) } }; })} className="dialog-secondary">四周扩大 10%</button><button type="button" onClick={() => setCropEditor(current => { if (!current) return current; const boxes = membersOf(current.task).map(member => member.bbox); const left = Math.min(...boxes.map(box => box.x)); const top = Math.min(...boxes.map(box => box.y)); const right = Math.max(...boxes.map(box => box.x + box.width)); const bottom = Math.max(...boxes.map(box => box.y + box.height)); const marginX = Math.max(20, Math.round((right - left) * .12)); const marginY = Math.max(20, Math.round((bottom - top) * .12)); const x = Math.max(0, left - marginX); const y = Math.max(0, top - marginY); return { ...current, crop: { x, y, width: Math.min(imageSize.width - x, right - left + marginX * 2), height: Math.min(imageSize.height - y, bottom - top + marginY * 2) } }; })} className="dialog-secondary">完整包住已识别人物</button></div><div className="mt-4 grid grid-cols-2 gap-3">{(['x', 'y', 'width', 'height'] as const).map(key => <label key={key} className="text-xs font-bold text-slate-600">{{ x: '左边 X', y: '顶部 Y', width: '宽度', height: '高度' }[key]}<input type="number" min={key === 'x' || key === 'y' ? 0 : 1} value={cropEditor.crop[key]} onChange={event => setCropEditor(current => current ? { ...current, crop: { ...current.crop, [key]: Math.max(key === 'x' || key === 'y' ? 0 : 1, Math.round(Number(event.target.value) || 0)) } } : current)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2"/></label>)}</div><div className="mt-5 flex justify-end gap-2"><button onClick={() => setCropEditor(null)} className="dialog-secondary">取消</button><button disabled={Boolean(busy)} onClick={() => void saveCrop()} className="dialog-primary">{busy.startsWith('crop:') ? '正在重新裁图…' : '保存并重新裁图'}</button></div></div></div>}
+    {cropEditor && <div role="dialog" aria-modal="true" className="fixed inset-0 z-[460] flex items-center justify-center bg-slate-950/70 p-5"><div className="w-full max-w-2xl rounded-2xl bg-white p-5 shadow-2xl"><div className="flex items-center"><div><h3 className="font-bold text-slate-900">调整工作图范围</h3><p className="mt-1 text-xs text-slate-500">拖动蓝框可移动范围，拖动四角可放大或缩小；也可以精确输入像素。</p></div><button onClick={() => setCropEditor(null)} className="ml-auto p-2 text-slate-500"><X size={18}/></button></div>{sourcePreview.url && <InteractiveCropEditor previewUrl={sourcePreview.url} imageSize={imageSize} crop={cropEditor.crop} onChange={crop => setCropEditor(current => current ? { ...current, crop } : current)}/>}<div className="mt-4 flex flex-wrap gap-2"><button type="button" onClick={() => setCropEditor(current => { if (!current) return current; const marginX = Math.max(20, Math.round(current.crop.width * .1)); const marginY = Math.max(20, Math.round(current.crop.height * .1)); const x = Math.max(0, current.crop.x - marginX); const y = Math.max(0, current.crop.y - marginY); return { ...current, crop: { x, y, width: Math.min(imageSize.width - x, current.crop.width + marginX * 2), height: Math.min(imageSize.height - y, current.crop.height + marginY * 2) } }; })} className="dialog-secondary">四周扩大 10%</button><button type="button" onClick={() => setCropEditor(current => { if (!current) return current; const boxes = membersOf(current.task).map(member => member.bbox); const left = Math.min(...boxes.map(box => box.x)); const top = Math.min(...boxes.map(box => box.y)); const right = Math.max(...boxes.map(box => box.x + box.width)); const bottom = Math.max(...boxes.map(box => box.y + box.height)); const marginX = Math.max(20, Math.round((right - left) * .12)); const marginY = Math.max(20, Math.round((bottom - top) * .12)); const x = Math.max(0, left - marginX); const y = Math.max(0, top - marginY); return { ...current, crop: { x, y, width: Math.min(imageSize.width - x, right - left + marginX * 2), height: Math.min(imageSize.height - y, bottom - top + marginY * 2) } }; })} className="dialog-secondary">完整包住已识别人物</button></div><div className="mt-4 grid grid-cols-2 gap-3">{(['x', 'y', 'width', 'height'] as const).map(key => <label key={key} className="text-xs font-bold text-slate-600">{{ x: '左边 X', y: '顶部 Y', width: '宽度', height: '高度' }[key]}<input type="number" min={key === 'x' || key === 'y' ? 0 : 1} value={cropEditor.crop[key]} onChange={event => setCropEditor(current => current ? { ...current, crop: { ...current.crop, [key]: Math.max(key === 'x' || key === 'y' ? 0 : 1, Math.round(Number(event.target.value) || 0)) } } : current)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2"/></label>)}</div><div className="mt-5 flex justify-end gap-2"><button onClick={() => setCropEditor(null)} className="dialog-secondary">取消</button><button disabled={Boolean(busy)} onClick={() => void saveCrop()} className="dialog-primary">{busy.startsWith('crop:') ? '正在重新裁图…' : '保存并重新裁图'}</button></div></div></div>}
   </div>;
 };
 
@@ -696,6 +792,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
 
   const identifyAndSync = async () => {
     if (identifyingRef.current) return;
+    if (!await ensureFaceRecognitionConsent(appDialog)) return;
     identifyingRef.current = true;
     setIdentityState(current => ({ ...current, identifying: true }));
     const result = await window.electronAPI.suggestTeamIdentities(workspacePath, project.name);

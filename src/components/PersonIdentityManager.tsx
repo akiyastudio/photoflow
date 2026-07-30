@@ -8,6 +8,7 @@ import { useEscapeLayer } from './LayerProvider';
 import { TeamRetouchSteps, type TeamRetouchStep } from './TeamRetouchSteps';
 import { TeamOutputProgressPicker } from './TeamRetouchOutputProgress';
 import { useTeamOutputProgress } from './useTeamOutputProgress';
+import { ensureFaceRecognitionConsent } from '../utils/privacyConsent';
 
 type Props = {
   workspacePath: string;
@@ -191,6 +192,8 @@ const buildWorkflow = (subjects: Subject[], identities: TeamIdentity[], preferre
   })), { preferredIdentityOrder, sameWeekIdentityIds });
   const items: WorkflowItem[] = [];
   for (const members of byTask.values()) {
+    // Readiness is isolated per photo/task. A completed predecessor immediately
+    // unlocks the next person even when that person is scheduled in a later week.
     const ordered = [...members].sort((left, right) => (scheduledWeeks.get(left.key) || 1) - (scheduledWeeks.get(right.key) || 1) || orderOf(left) - orderOf(right) || left.personIndex - right.personIndex);
     ordered.forEach((subject, index) => {
       const predecessors = ordered.slice(0, index);
@@ -336,6 +339,7 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
   }, [workspace.assignments, tab]);
 
   const suggest = async () => {
+    if (!await ensureFaceRecognitionConsent(appDialog)) return;
     setBusy('suggest');
     const result = await window.electronAPI.suggestTeamIdentities(workspacePath, project.name);
     setBusy('');
@@ -343,7 +347,7 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
     setSimilarities([]);
     setWorkspace({ ...result, similarities: undefined, workflowSettings: workspace.workflowSettings });
     onProjectChanged();
-    const engine = result.faceBackend?.startsWith('adaface') ? 'AdaFace 实验模型' : 'SFace';
+    const engine = result.faceBackend?.startsWith('adaface') ? 'AdaFace IR-18' : '身份识别模型';
     onNotice(`已生成 ${result.candidateGroupCount || 0} 个跨图候选组；${result.unmatchedCount || 0} 个人物因证据不足保持未标注 · ${engine}`);
   };
   const createIdentity = async () => {

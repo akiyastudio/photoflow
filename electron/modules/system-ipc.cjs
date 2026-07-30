@@ -1,12 +1,11 @@
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, process, readSavedConfig, screen, shell, spawn, telemetryService, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, privacyService, process, readSavedConfig, screen, shell, spawn, telemetryService, undefined, writeLog } = context;
   const activePythonTasks = new Map();
   let advancedOperation = null;
 
   const componentRoot = componentId => path.join(pluginService.installRoot, String(componentId));
   const teamRetouchRoot = () => componentRoot('team-retouch');
   const advancedStateRoot = () => path.join(teamRetouchRoot(), 'advanced');
-  const identityModelRoot = () => path.join(teamRetouchRoot(), 'identity-models');
   const defaultAdvancedInstallRoot = () => path.join(advancedStateRoot(), 'wsl', 'PhotoFlowNative');
   const legacyAdvancedInstallRoot = () => path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'PhotoFlow', 'wsl', 'PhotoFlowNative');
   const readAdvancedStorage = async () => {
@@ -177,16 +176,12 @@ const registerSystemIpc = context => {
     if (archives.length === 1) return archives[0];
     throw new Error(`未在组件安装包目录中找到${description}：${packageRoot}`);
   };
-  const resolveAdvancedPackage = () => resolvePreparedPackage(teamRetouchRoot(), /^PhotoFlow-team-retouch-advanced-.*\.zip$/i, '高级引擎包 PhotoFlow-team-retouch-advanced-*.zip');
-  const resolveIdentityPackage = () => resolvePreparedPackage(teamRetouchRoot(), /^PhotoFlow-team-retouch-identity-models-.*\.zip$/i, '人物识别模型包 PhotoFlow-team-retouch-identity-models-*.zip');
+  const resolveAdvancedPackage = () => resolvePreparedPackage(teamRetouchRoot(), /^PhotoFlow-team-retouch-advanced-.*\.zip$/i, '照片流高级引擎包');
   const resolveComponentPackage = componentId => resolvePreparedPackage(componentRoot(componentId), new RegExp(`^PhotoFlow-${String(componentId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-(?!identity-models-|advanced-).*-${process.platform}-${process.arch}\\.zip$`, 'i'), `“${componentId}”组件包`);
   const resolvePackageForDeletion = async (kind, componentId = '') => {
     let archivePath;
     let allowedRoot;
-    if (kind === 'identity-models') {
-      archivePath = await resolveIdentityPackage();
-      allowedRoot = teamRetouchRoot();
-    } else if (kind === 'advanced') {
+    if (kind === 'advanced') {
       archivePath = await resolveAdvancedPackage();
       allowedRoot = teamRetouchRoot();
     } else if (kind === 'component') {
@@ -225,12 +220,6 @@ const registerSystemIpc = context => {
     await fs.promises.mkdir(target, { recursive: true });
     await runPackageCommand('tar.exe', ['-xf', archivePath, '-C', target]);
   };
-  const fileSha256 = async filePath => {
-    const hash = crypto.createHash('sha256');
-    const data = await fs.promises.readFile(filePath);
-    hash.update(data);
-    return hash.digest('hex');
-  };
 
   const installerProgress = message => {
     const text = String(message || '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '').trim();
@@ -240,7 +229,7 @@ const registerSystemIpc = context => {
       ['Extracting verified package', 8, '正在解压高级引擎离线包'],
       ['Verifying package SHA256', 48, '正在校验离线包完整性与版本'],
       ['Replacing the registered', 65, '正在替换需要修复的高级环境'],
-      ['Installing PhotoFlowNative', 72, '正在安装 PhotoFlowNative 虚拟磁盘'],
+      ['Installing PhotoFlowNative', 72, '正在安装照片流本地增强环境虚拟磁盘'],
       ['offline environment is ready', 97, '高级引擎离线环境准备完成'],
     ];
     const marker = markers.find(([needle]) => text.includes(needle));
@@ -277,6 +266,25 @@ const registerSystemIpc = context => {
   
   ipcMain.on('open-external', (event, url) => {
     shell.openExternal(url);
+  });
+
+  ipcMain.handle('privacy-consent-state', async () => privacyService.getState());
+  ipcMain.handle('privacy-consent-save', async (_event, request) => {
+    try {
+      const state = await privacyService.saveConsent(request);
+      return { success: true, state };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+  ipcMain.handle('privacy-open-legal-document', async (_event, documentId) => privacyService.openLegalDocument(documentId));
+  ipcMain.handle('privacy-clear-telemetry-local-data', async () => {
+    try {
+      telemetryService?.clearLocalData();
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
   });
   
   ipcMain.handle('check-for-updates', async () => checkForUpdates());
@@ -376,7 +384,14 @@ const registerSystemIpc = context => {
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，请在打包版本中测试安装');
       const knownComponent = pluginService.list().find(component => component.id === componentId);
       if (!knownComponent) throw new Error(`未知组件：${componentId}`);
-      const archivePath = await resolveComponentPackage(componentId);
+      const selection = await dialog.showOpenDialog(mainWindow, {
+        title: `选择“${knownComponent.name || componentId}”组件安装包`,
+        properties: ['openFile'],
+        filters: [{ name: '照片流组件安装包', extensions: ['zip'] }],
+      });
+      if (selection.canceled || !selection.filePaths[0]) return { success: false, cancelled: true };
+      const archivePath = path.resolve(selection.filePaths[0]);
+      if (path.extname(archivePath).toLowerCase() !== '.zip') throw new Error('请选择 ZIP 格式的组件安装包');
       const packageSizeBytes = (await fs.promises.stat(archivePath)).size;
       packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${process.pid}-${Date.now()}`);
       await extractPreparedPackage(archivePath, packageStagePath);
@@ -397,6 +412,13 @@ const registerSystemIpc = context => {
       const sourceRelative = path.relative(componentRoot, sourceEntry);
       if (!sourceRelative || sourceRelative.startsWith('..') || path.isAbsolute(sourceRelative)) throw new Error('组件入口路径无效');
       if (!(await fs.promises.stat(sourceEntry).catch(() => null))?.isFile()) throw new Error(`组件入口不存在：${relativeEntry}`);
+      for (const relativeFile of Array.isArray(manifest.requiredFiles) ? manifest.requiredFiles : []) {
+        if (typeof relativeFile !== 'string' || !relativeFile.trim()) throw new Error('组件必需文件路径无效');
+        const sourceFile = path.resolve(componentRoot, relativeFile);
+        const requiredRelative = path.relative(componentRoot, sourceFile);
+        if (!requiredRelative || requiredRelative.startsWith('..') || path.isAbsolute(requiredRelative)) throw new Error(`组件必需文件路径无效：${relativeFile}`);
+        if (!(await fs.promises.stat(sourceFile).catch(() => null))?.isFile()) throw new Error(`组件必需文件不存在：${relativeFile}`);
+      }
 
       const installRoot = pluginService.ensureInstallRoot();
       const container = path.join(installRoot, String(componentId));
@@ -422,7 +444,7 @@ const registerSystemIpc = context => {
       queueSystemFilesystemCleanup(cleanupPaths, `清理“${componentId}”组件旧文件`);
       invalidateComponentStatus();
       writeLog('info', 'Component installed', { componentId, destination });
-      return { success: true, packageSizeBytes };
+      return { success: true, packageSizeBytes, sourcePackagePath: archivePath };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     } finally {
@@ -434,6 +456,7 @@ const registerSystemIpc = context => {
 
   ipcMain.handle('components-delete-package', async (_event, kind, componentId = '') => {
     try {
+      if (kind !== 'advanced') throw new Error('普通组件的原始安装文件由用户管理，照片流不会删除');
       const archivePath = await resolvePackageForDeletion(String(kind || ''), String(componentId || ''));
       const stat = await fs.promises.stat(archivePath);
       if (!stat.isFile()) throw new Error('安装包不是普通文件');
@@ -450,7 +473,7 @@ const registerSystemIpc = context => {
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，不能在应用内卸载');
       const component = pluginService.list().find(item => item.id === componentId);
       if (!component?.installed) throw new Error('组件尚未安装');
-      if (component.source !== 'application') throw new Error('此组件随应用提供，不能单独卸载');
+      if (component.source !== 'user') throw new Error('此组件不在用户组件目录中，不能通过组件管理卸载');
       const installRoot = path.resolve(pluginService.installRoot);
       const componentPath = path.resolve(component.path);
       const containerPath = path.basename(componentPath) === 'runtime' ? path.dirname(componentPath) : componentPath;
@@ -532,88 +555,6 @@ const registerSystemIpc = context => {
     }
   });
 
-  ipcMain.handle('team-retouch-identity-models-open-folder', async () => {
-    try {
-      const target = teamRetouchRoot();
-      await fs.promises.mkdir(target, { recursive: true });
-      const error = await shell.openPath(target);
-      if (error) throw new Error(error);
-      return { success: true, path: target };
-    } catch (error) {
-      return { success: false, error: error.message || String(error) };
-    }
-  });
-
-  ipcMain.handle('team-retouch-identity-models-install', async () => {
-    let stagePath = '';
-    const prepared = [];
-    const backups = [];
-    const installedTargets = [];
-    try {
-      const component = pluginService.list().find(item => item.id === 'team-retouch');
-      if (!component?.installed) throw new Error('请先安装“团片协作”组件');
-      const archivePath = await resolveIdentityPackage();
-      const packageSizeBytes = (await fs.promises.stat(archivePath)).size;
-      stagePath = path.join(app.getPath('temp'), `photoflow-identity-package-${process.pid}-${Date.now()}`);
-      await extractPreparedPackage(archivePath, stagePath);
-      const manifestPath = path.join(stagePath, 'model-pack.json');
-      const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
-      if (Number(manifest.formatVersion) !== 1 || manifest.id !== 'team-retouch-identity-models') throw new Error('这不是受支持的人物识别模型包');
-      if (String(manifest.version) !== String(component.version)) throw new Error(`模型包版本 ${manifest.version || '未知'} 与团片协作组件版本 ${component.version} 不一致`);
-      if (Array.isArray(manifest.platforms) && !manifest.platforms.includes(process.platform)) throw new Error(`模型包不支持 ${process.platform}`);
-      if (Array.isArray(manifest.architectures) && !manifest.architectures.includes(process.arch)) throw new Error(`模型包不支持 ${process.arch}`);
-      const expectedFiles = new Set(['adaface_ir18_webface4m.onnx', 'osnet_x1_0_msmt17.onnx']);
-      const models = Array.isArray(manifest.models) ? manifest.models : [];
-      if (models.length !== expectedFiles.size) throw new Error('人物识别模型包文件数量不正确');
-      const targetRoot = identityModelRoot();
-      await fs.promises.mkdir(targetRoot, { recursive: true });
-      for (const model of models) {
-        const fileName = String(model.file || '');
-        if (!expectedFiles.delete(fileName) || path.basename(fileName) !== fileName) throw new Error(`模型包包含未知文件：${fileName || '未命名'}`);
-        const source = path.join(stagePath, fileName);
-        const stat = await fs.promises.stat(source).catch(() => null);
-        if (!stat?.isFile() || stat.size !== Number(model.sizeBytes)) throw new Error(`模型文件大小不正确：${fileName}`);
-        const actualHash = await fileSha256(source);
-        if (!model.sha256 || actualHash !== String(model.sha256).toLowerCase()) throw new Error(`模型文件 SHA-256 不匹配：${fileName}`);
-        const target = path.join(targetRoot, fileName);
-        const temporary = path.join(targetRoot, `.${fileName}.install-${process.pid}-${Date.now()}`);
-        await fs.promises.copyFile(source, temporary);
-        prepared.push({ fileName, target, temporary });
-      }
-      if (expectedFiles.size) throw new Error('人物识别模型包缺少必需模型');
-      for (const item of prepared) {
-        if (fs.existsSync(item.target)) {
-          const backup = `${item.target}.backup-${process.pid}-${Date.now()}`;
-          await fs.promises.rename(item.target, backup);
-          backups.push({ target: item.target, backup });
-        }
-        await fs.promises.rename(item.temporary, item.target);
-        installedTargets.push(item.target);
-      }
-      for (const fileName of ['model-pack.json', 'LICENSE-AdaFace.txt', 'LICENSE-OSNet.txt', 'README-install.txt']) {
-        const source = path.join(stagePath, fileName);
-        if ((await fs.promises.stat(source).catch(() => null))?.isFile()) await fs.promises.copyFile(source, path.join(targetRoot, fileName));
-      }
-      const cleanupPaths = [stagePath, ...backups.map(item => item.backup), ...prepared.map(item => item.temporary)].filter(Boolean);
-      stagePath = '';
-      backups.splice(0);
-      prepared.splice(0);
-      queueSystemFilesystemCleanup(cleanupPaths, '清理人物识别模型安装临时文件');
-      invalidateComponentStatus();
-      writeLog('info', 'Prepared identity model package installed', { archivePath, targetRoot, version: component.version });
-      return { success: true, packageSizeBytes };
-    } catch (error) {
-      for (const target of installedTargets.reverse()) await fs.promises.rm(target, { force: true }).catch(() => undefined);
-      for (const item of backups.reverse()) {
-        if (fs.existsSync(item.backup)) await fs.promises.rename(item.backup, item.target).catch(() => undefined);
-      }
-      return { success: false, error: error.message || String(error) };
-    } finally {
-      for (const item of prepared) await fs.promises.rm(item.temporary, { force: true }).catch(() => undefined);
-      if (stagePath) await fs.promises.rm(stagePath, { recursive: true, force: true }).catch(() => undefined);
-    }
-  });
-  
   ipcMain.handle('cancel-python', async (_event, requestId) => {
     const task = activePythonTasks.get(String(requestId || ''));
     if (!task) return { success: false, error: '任务已经结束或不存在。' };
@@ -755,7 +696,10 @@ const registerSystemIpc = context => {
     try {
       const normalizedConfig = {
         ...config,
-        telemetry: { enabled: true, crashReports: true },
+        telemetry: {
+          enabled: privacyService.hasCoreConsent(),
+          crashReports: privacyService.hasCoreConsent(),
+        },
       };
       const requestedCacheDirectory = String(config?.mediaCache?.directory || '').trim();
       const savedCacheDirectory = String(readSavedConfig()?.mediaCache?.directory || '').trim();
@@ -819,9 +763,23 @@ const registerSystemIpc = context => {
   
   ipcMain.handle('save-birthdays', async (event, newContent) => {
     try {
+      if (!newContent || typeof newContent !== 'object' || Array.isArray(newContent)) throw new Error('生日数据格式无效');
+      const normalized = {};
+      for (const [rawName, rawDate] of Object.entries(newContent)) {
+        const name = String(rawName).trim();
+        const match = String(rawDate).trim().match(/^(\d{1,2})(?:\.|月\.?)(\d{1,2})日?$/);
+        if (!name || !match) throw new Error(`生日记录格式无效：${rawName || '未命名'}`);
+        const month = Number(match[1]);
+        const day = Number(match[2]);
+        const probe = new Date(2000, month - 1, day);
+        if (month < 1 || month > 12 || day < 1 || day > 31 || probe.getMonth() !== month - 1 || probe.getDate() !== day) {
+          throw new Error(`生日日期无效：${name}`);
+        }
+        normalized[name] = `${month}.${day}`;
+      }
       // 始终写入用户目录，确保有权限
       const userPath = getUserBirthdaysPath();
-      fs.writeFileSync(userPath, JSON.stringify(newContent, null, 4), 'utf-8');
+      fs.writeFileSync(userPath, JSON.stringify(normalized, null, 4), 'utf-8');
       return { success: true };
     } catch (error) {
       console.error('Error writing birthdays.json:', error);

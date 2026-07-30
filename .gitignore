@@ -48,6 +48,10 @@ build/
 release/
 out/
 electron/bin/
+media-runtime/vendor/
+.media-runtime-build/
+/components/video-playback-mpv/runtime/
+/components/video-playback-mpv/vendor/
 
 # 系统文件
 .DS_Store

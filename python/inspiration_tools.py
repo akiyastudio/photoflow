@@ -7,6 +7,7 @@ import sys
 TOOLS = {
     "research": "research",
     "office_media_extract": "office_media_extract",
+    "screenshot_main_image": "screenshot_main_image",
 }
 
 

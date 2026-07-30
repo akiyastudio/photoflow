@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cloudbase from '@cloudbase/js-sdk';
 
@@ -7,6 +8,7 @@ const PORT = Number(process.env.PORT || 9000);
 const ENV_ID = process.env.CLOUDBASE_ENV_ID || process.env.TCB_ENV_ID || '';
 const INGEST_KEY = process.env.PHOTOFLOW_INGEST_KEY || 'photoflow-desktop-v1';
 const ADMIN_TOKEN = process.env.PHOTOFLOW_ADMIN_TOKEN || '';
+const ADMIN_ASSETS_DIR = fileURLToPath(new URL('./admin', import.meta.url));
 const EVENT_NAMES = new Set([
   'session_start',
   'feature_opened',
@@ -42,6 +44,23 @@ app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '128kb', strict: true }));
 
+app.use('/admin', (_request, response, next) => {
+  response.set({
+    'Cache-Control': 'no-store',
+    'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+  });
+  next();
+});
+app.use('/admin', express.static(ADMIN_ASSETS_DIR, {
+  etag: false,
+  index: 'index.html',
+  maxAge: 0,
+}));
+
 const sha256 = value => crypto.createHash('sha256').update(String(value)).digest('hex');
 const isUuid = value => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ''));
 const validIsoTime = value => {
@@ -53,6 +72,13 @@ const validIsoTime = value => {
 };
 const validLocalDate = value => /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''));
 const safeText = (value, max) => String(value ?? '').slice(0, max);
+const validSha256 = value => /^[a-f0-9]{64}$/i.test(String(value || ''));
+const validHttpsUrl = value => {
+  try { return new URL(String(value || '')).protocol === 'https:'; }
+  catch { return false; }
+};
+const validReleaseArtifact = release => validHttpsUrl(release.downloadUrl)
+  && validSha256(release.sha256);
 const redactText = (value, max) => safeText(value, max)
   .replace(/\b[A-Z]:\\(?:[^\\\r\n]+\\)*[^\\\r\n]*/gi, '<local-path>')
   .replace(/\/(?:Users|home)\/[^/\s]+\/[^\s]*/gi, '<local-path>')
@@ -217,8 +243,9 @@ app.get('/v1/updates', rateLimit(120, 60_000), async (request, response, next) =
     // Release records are few. Filtering here avoids requiring a compound index
     // for platform + channel + published + versionCode on a fresh environment.
     const result = await db.collection('app_releases').limit(100).get();
-    const release = databaseRows(result, 'app_releases.get')
-      .filter(item => item.platform === platform && item.channel === channel && item.published === true)
+    const releases = databaseRows(result, 'app_releases.get')
+      .filter(item => item.platform === platform && item.channel === channel && item.published === true && validReleaseArtifact(item));
+    const release = releases
       .sort((left, right) => Number(right.versionCode || 0) - Number(left.versionCode || 0))[0];
     if (!release) return response.status(404).json({ error: 'release_not_found' });
     response.json({
@@ -274,7 +301,10 @@ const countBy = (records, valueFor) => Object.entries(records.reduce((counts, re
   return counts;
 }, {})).sort((left, right) => right[1] - left[1]).map(([value, count]) => ({ value, count }));
 
-app.get('/v1/admin/metrics', requireAdmin, rateLimit(30, 60_000), async (request, response, next) => {
+app.get('/v1/admin/metrics', (_request, response, next) => {
+  response.set('Cache-Control', 'no-store');
+  next();
+}, rateLimit(30, 60_000), requireAdmin, async (request, response, next) => {
   try {
     const days = Math.min(90, Math.max(7, Number(request.query.days) || 30));
     const [allEvents, allCrashes] = await Promise.all([loadEvents(50_000), loadCrashes(10_000)]);

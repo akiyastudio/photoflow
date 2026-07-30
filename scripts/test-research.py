@@ -18,7 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 from event_protocol import emit  # noqa: E402
-from rename import build_jpg_proxy_index, find_selection_jpg_proxy_folder, visual_reference_path  # noqa: E402
+import rename as rename_module  # noqa: E402
+from rename import build_jpg_proxy_index, find_selection_jpg_proxy_folder, unique_stem_index, visual_reference_path  # noqa: E402
 import research as research_module  # noqa: E402
 from research import frame_quality_metrics, perceptual_hash  # noqa: E402
 
@@ -138,6 +139,61 @@ def main():
         "data": {"item": 2},
         "progress": 37,
     }
+
+    assert unique_stem_index(["IMG_0001.CR3", "img_0001.jpg", "IMG_0002.CR3"]) == {
+        "img_0002": "IMG_0002.CR3",
+    }, "duplicate stems must remain ambiguous even when extensions or case differ"
+
+    with TemporaryDirectory() as temporary_directory:
+        reference_directory = Path(temporary_directory) / "reference"
+        source_directory = Path(temporary_directory) / "source"
+        reference_directory.mkdir()
+        source_directory.mkdir()
+        # The RAW is deliberately undecodable: a unique same-stem pair must be
+        # resolved before the visual decoder is called.
+        (reference_directory / "IMG_1234.CR3").write_bytes(b"raw-placeholder")
+        Image.new("RGB", (64, 48), (220, 20, 60)).save(source_directory / "img_1234.jpg")
+        original_calculate_hashes = rename_module.calculate_hashes
+        rename_module.calculate_hashes = lambda _path: (_ for _ in ()).throw(AssertionError("filename matches must skip visual decoding"))
+        output = StringIO()
+        try:
+            with redirect_stdout(output):
+                assert rename_module.process_folders(
+                    str(reference_directory), str(source_directory), 5, False, preview_only=True
+                )
+        finally:
+            rename_module.calculate_hashes = original_calculate_hashes
+        events = [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
+        preview = next(event for event in events if event["type"] == "preview")
+        assert preview["data"]["matches"] == [{
+            "source": "img_1234.jpg",
+            "reference": "IMG_1234.CR3",
+            "target": "IMG_1234.jpg",
+            "confidence": "高",
+            "distance": 0,
+        }]
+        assert any(event["type"] == "log" and "唯一同名主文件名" in event["message"] for event in events)
+
+    with TemporaryDirectory() as temporary_directory:
+        reference_directory = Path(temporary_directory) / "reference"
+        source_directory = Path(temporary_directory) / "source"
+        reference_directory.mkdir()
+        source_directory.mkdir()
+        Image.new("RGB", (100, 100), (255, 0, 0)).save(reference_directory / "same-name.jpg")
+        Image.new("RGB", (200, 100), (0, 0, 255)).save(source_directory / "SAME-NAME.png")
+        result = subprocess.run([
+            sys.executable,
+            str(ROOT / "python" / "rename.py"),
+            "--folder_a", str(reference_directory),
+            "--folder_b", str(source_directory),
+            "--threshold", "-1",
+            "--preview",
+        ], capture_output=True, text=True, encoding="utf-8", timeout=30, check=False)
+        assert result.returncode == 0, result.stderr
+        events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        preview = next(event for event in events if event["type"] == "preview")
+        assert preview["data"]["matches"] == [], "obvious same-name aspect conflicts must not auto-match"
+        assert any(event["type"] == "log" and "宽高比或拍摄时间不一致" in event["message"] for event in events)
 
     with TemporaryDirectory() as temporary_directory:
         reference_directory = Path(temporary_directory) / "reference"

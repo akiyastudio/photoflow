@@ -1205,6 +1205,126 @@ def progress_register(root: str, db, payload: dict):
     return {"success": True, "progressFolder": serialize_progress(row)}
 
 
+def progress_update_tree(root: str, db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    updates = payload.get("updates")
+    primary_id = str(payload.get("primaryProgressId") or "")
+    if not primary_id or not isinstance(updates, list) or not updates:
+        raise ValueError("没有可更新的进度关系")
+
+    rows = {row["id"]: row for row in progress_rows(db, project["id"])}
+    update_ids = {str(update.get("id") or "") for update in updates}
+    if "" in update_ids or len(update_ids) != len(updates) or primary_id not in update_ids:
+        raise ValueError("进度更新列表无效")
+    if any(progress_id not in rows for progress_id in update_ids):
+        raise ValueError("要修改的进度不存在")
+    children_by_parent = {}
+    for row in rows.values():
+        parent_id = row["parent_progress_id"]
+        parent = rows.get(parent_id) if parent_id else None
+        if parent and row["version_key"].startswith(f"{parent['version_key']}_") and len(row["version_key"].split("_")) == len(parent["version_key"].split("_")) + 1:
+            children_by_parent.setdefault(parent_id, []).append(row["id"])
+    expected_ids = set()
+
+    def collect_subtree(progress_id):
+        expected_ids.add(progress_id)
+        for child_id in children_by_parent.get(progress_id, []):
+            collect_subtree(child_id)
+
+    collect_subtree(primary_id)
+    if update_ids != expected_ids:
+        raise ValueError("必须一次性更新当前进度及其全部后代")
+
+    normalized = []
+    target_versions = set()
+    target_names = set()
+    target_paths = set()
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    for update in updates:
+        progress_id = str(update["id"])
+        row = rows[progress_id]
+        media_kind = str(update.get("mediaKind") or row["media_kind"])
+        if media_kind != row["media_kind"]:
+            raise ValueError("修改进度时不能改变图片或视频类型")
+        version_key = str(update.get("versionKey") or "")
+        if not version_key or any(not part.isdigit() for part in version_key.split("_")):
+            raise ValueError("无效的版本编号")
+        display_name = str(update.get("displayName") or "").strip()
+        if not display_name:
+            raise ValueError("进度名称不能为空")
+        folder_path = canonical_path(update.get("folderPath") or "")
+        if os.path.dirname(folder_path).casefold() != project_path.casefold() or not os.path.isdir(folder_path):
+            raise ValueError("版本进度必须是项目根目录下的文件夹")
+        parent_id = update.get("parentProgressId") or None
+        if parent_id:
+            parent = rows.get(parent_id)
+            if parent is None or parent["media_kind"] != media_kind:
+                raise ValueError("父版本进度不存在")
+            if parent_id in update_ids:
+                parent_update = next(item for item in updates if str(item.get("id") or "") == parent_id)
+                parent_version_key = str(parent_update.get("versionKey") or "")
+            else:
+                parent_version_key = parent["version_key"]
+            if not version_key.startswith(f"{parent_version_key}_") or len(version_key.split("_")) != len(parent_version_key.split("_")) + 1:
+                raise ValueError(f"版本 _{version_key} 与父版本 _{parent_version_key} 不匹配")
+        elif "_" in version_key:
+            raise ValueError(f"分支版本 _{version_key} 必须指定父版本")
+
+        version_identity = (media_kind, version_key.casefold())
+        name_identity = display_name.casefold()
+        path_identity = folder_path.casefold()
+        if version_identity in target_versions:
+            raise ValueError(f"版本 _{version_key} 重复")
+        if name_identity in target_names:
+            raise ValueError(f"进度名称重复：{display_name}")
+        if path_identity in target_paths:
+            raise ValueError(f"进度文件夹重复：{display_name}")
+        target_versions.add(version_identity)
+        target_names.add(name_identity)
+        target_paths.add(path_identity)
+        tracking_enabled = int(bool(update.get("trackingEnabled", row["tracking_enabled"])))
+        normalized.append((progress_id, media_kind, version_key, parent_id, display_name, folder_path, tracking_enabled))
+
+    for row in rows.values():
+        if row["id"] in update_ids:
+            continue
+        if (row["media_kind"], row["version_key"].casefold()) in target_versions:
+            raise ValueError(f"版本 _{row['version_key']} 已存在")
+        if row["display_name"].casefold() in target_names:
+            raise ValueError(f"进度名称已存在：{row['display_name']}")
+        if row["folder_path_key"] in target_paths:
+            raise ValueError(f"进度文件夹已登记：{row['display_name']}")
+
+    timestamp = int(time.time() * 1000)
+    try:
+        # Unique(project, kind, version) requires temporary values so swaps and
+        # prefix remaps can be committed as one transaction.
+        for index, (progress_id, _media_kind, _version_key, _parent_id, _display_name, _folder_path, _tracking_enabled) in enumerate(normalized):
+            db.execute(
+                "UPDATE progress_folders SET version_key=?,updated_at=? WHERE id=?",
+                (f"__progress_update_{index}_{uuid.uuid4().hex}", timestamp, progress_id),
+            )
+        for progress_id, media_kind, version_key, parent_id, display_name, folder_path, tracking_enabled in normalized:
+            db.execute(
+                """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,display_name=?,
+                   folder_path=?,folder_path_key=?,folder_id=?,tracking_enabled=?,updated_at=? WHERE id=?""",
+                (media_kind, version_key, parent_id, display_name, folder_path, folder_path.casefold(),
+                 directory_identity(folder_path), tracking_enabled, timestamp, progress_id),
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    refreshed = progress_rows(db, project["id"])
+    primary = next(row for row in refreshed if row["id"] == primary_id)
+    return {
+        "success": True,
+        "progressFolder": serialize_progress(primary),
+        "progressFolders": [serialize_progress(row) for row in refreshed],
+    }
+
+
 def batch_summary(db, batch_id: str):
     row = db.execute(
         """SELECT batches.*, parent.sequence AS parent_sequence,
@@ -1375,10 +1495,19 @@ def ensure_reference_batch(root: str, db, project, folder_path: str):
         )
     db.commit()
     try:
+        current_source_keys = set()
         for file_path in folder_media_files(folder_path):
+            current_source_keys.add(canonical_path(file_path).casefold())
             version = ensure_source_version(db, project, file_path)
             register_batch_item(db, batch["id"], version, file_path, "baseline")
             db.commit()
+        stale_items = db.execute(
+            "SELECT id,source_path_key FROM batch_items WHERE batch_id=?",
+            (batch["id"],),
+        ).fetchall()
+        for item in stale_items:
+            if item["source_path_key"] not in current_source_keys:
+                db.execute("DELETE FROM batch_items WHERE id=?", (item["id"],))
         db.execute(
             "UPDATE version_batches SET status='ready',updated_at=? WHERE id=?",
             (int(time.time() * 1000), batch["id"]),
@@ -1411,7 +1540,13 @@ def batch_register_baseline(root: str, db, payload: dict):
     return {"success": True, "batch": batch_summary(db, batch["id"])}
 
 
-def discard_unclaimed_source_photo(db, project_id: str, source_path: str, target_photo_id: str):
+def merge_source_photo_history(db, project, source_path: str, target_photo_id: str, parent_version_id: str, version_name: str):
+    """Attach an already-registered returned image to an earlier photo history.
+
+    A returned image can be used by team retouch before its V0 relationship is
+    registered. Preserve that V1 version ID and move every dependent row to the
+    V0 photo instead of deleting and recreating the version.
+    """
     source_path = canonical_path(source_path)
     identity = file_identity(source_path)
     row = db.execute(
@@ -1419,18 +1554,97 @@ def discard_unclaimed_source_photo(db, project_id: str, source_path: str, target
            WHERE photos.project_id=? AND versions.is_deleted=0
              AND (versions.file_path_key=? OR (? IS NOT NULL AND versions.file_id=?))
            ORDER BY versions.updated_at DESC LIMIT 1""",
-        (project_id, source_path.casefold(), identity, identity),
+        (project["id"], source_path.casefold(), identity, identity),
     ).fetchone()
-    if row is None or row["photo_id"] == target_photo_id:
-        return
-    version_count = db.execute("SELECT COUNT(*) FROM versions WHERE photo_id=?", (row["photo_id"],)).fetchone()[0]
-    batch_count = db.execute("SELECT COUNT(*) FROM batch_items WHERE photo_id=?", (row["photo_id"],)).fetchone()[0]
-    compare_count = db.execute("SELECT COUNT(*) FROM version_compare_history WHERE photo_id=?", (row["photo_id"],)).fetchone()[0]
-    patch_count = db.execute("SELECT COUNT(*) FROM team_patch_tasks WHERE photo_id=?", (row["photo_id"],)).fetchone()[0]
-    if version_count != 1 or batch_count or compare_count or patch_count:
-        raise ValueError(f"{os.path.basename(source_path)} 已属于另一条版本历史，请先人工确认")
-    db.execute("DELETE FROM file_records WHERE owner_type='version' AND owner_id=?", (row["id"],))
-    db.execute("DELETE FROM photos WHERE id=?", (row["photo_id"],))
+    if row is None:
+        return None
+    if row["photo_id"] == target_photo_id:
+        return row
+
+    source_photo_id = row["photo_id"]
+    versions = db.execute(
+        "SELECT * FROM versions WHERE photo_id=? ORDER BY version_number,created_at,id",
+        (source_photo_id,),
+    ).fetchall()
+    if not versions:
+        raise ValueError(f"{os.path.basename(source_path)} 的已有版本历史为空")
+    source_version_ids = {version["id"] for version in versions}
+    if parent_version_id in source_version_ids:
+        raise ValueError(f"{os.path.basename(source_path)} 的版本关系形成循环")
+    if db.execute(
+        "SELECT id FROM versions WHERE id=? AND photo_id=? AND is_deleted=0",
+        (parent_version_id, target_photo_id),
+    ).fetchone() is None:
+        raise ValueError("要补入的 V0 不属于目标版本历史")
+
+    timestamp = int(time.time() * 1000)
+    source_final_ids = [version["id"] for version in versions if version["is_final"] and not version["is_deleted"]]
+    db.execute("UPDATE photos SET current_version_id=NULL,updated_at=? WHERE id=?", (timestamp, source_photo_id))
+    db.execute("UPDATE versions SET is_current=0,is_final=0,updated_at=? WHERE photo_id=?", (timestamp, source_photo_id))
+    if source_final_ids:
+        db.execute("UPDATE versions SET is_final=0,updated_at=? WHERE photo_id=?", (timestamp, target_photo_id))
+
+    next_number = db.execute(
+        "SELECT COALESCE(MAX(version_number),-1)+1 FROM versions WHERE photo_id=?",
+        (target_photo_id,),
+    ).fetchone()[0]
+    pending = {version["id"]: version for version in versions}
+    moved = set()
+    while pending:
+        ready = [
+            version for version in pending.values()
+            if version["parent_version_id"] is None or version["parent_version_id"] not in source_version_ids or version["parent_version_id"] in moved
+        ]
+        if not ready:
+            raise ValueError(f"{os.path.basename(source_path)} 的已有版本历史包含循环")
+        for version in ready:
+            previous_parent_id = version["parent_version_id"]
+            next_parent_id = previous_parent_id if previous_parent_id in source_version_ids else parent_version_id
+            db.execute(
+                """UPDATE versions SET photo_id=?,parent_version_id=?,version_number=?,updated_at=?
+                   WHERE id=?""",
+                (target_photo_id, next_parent_id, next_number, timestamp, version["id"]),
+            )
+            next_number += 1
+            moved.add(version["id"])
+            pending.pop(version["id"])
+
+    # Move every owner reference before deleting the now-empty source photo.
+    db.execute("UPDATE batch_items SET photo_id=?,updated_at=? WHERE photo_id=?", (target_photo_id, timestamp, source_photo_id))
+    db.execute("UPDATE version_compare_history SET photo_id=? WHERE photo_id=?", (target_photo_id, source_photo_id))
+    db.execute("UPDATE team_patch_tasks SET photo_id=?,updated_at=? WHERE photo_id=?", (target_photo_id, timestamp, source_photo_id))
+    db.execute("UPDATE team_person_assignments SET photo_id=?,updated_at=? WHERE photo_id=?", (target_photo_id, timestamp, source_photo_id))
+    db.execute("UPDATE team_person_exclusions SET photo_id=? WHERE photo_id=?", (target_photo_id, source_photo_id))
+
+    registration = db.execute(
+        "SELECT * FROM team_retouch_photos WHERE photo_id=?",
+        (source_photo_id,),
+    ).fetchone()
+    if registration is not None:
+        # The returned V1 is the later workflow base. Its registration replaces
+        # an older V0 registration while all actual tasks remain intact.
+        db.execute("DELETE FROM team_retouch_photos WHERE photo_id=?", (target_photo_id,))
+        db.execute(
+            "UPDATE team_retouch_photos SET photo_id=?,project_id=?,updated_at=? WHERE photo_id=?",
+            (target_photo_id, project["id"], timestamp, source_photo_id),
+        )
+
+    selected_version_id = row["id"]
+    db.execute("UPDATE versions SET is_current=0,updated_at=? WHERE photo_id=?", (timestamp, target_photo_id))
+    db.execute(
+        """UPDATE versions SET version_name=?,version_type='batch',status='draft',is_current=1,
+           author=?,note=?,updated_at=? WHERE id=?""",
+        (version_name, os.environ.get("USERNAME") or "本机用户",
+         f"补入早期版本后由进度“{version_name}”接入", timestamp, selected_version_id),
+    )
+    if source_final_ids:
+        db.execute("UPDATE versions SET is_final=1,updated_at=? WHERE id=?", (timestamp, source_final_ids[-1]))
+    db.execute(
+        "UPDATE photos SET current_version_id=?,updated_at=? WHERE id=?",
+        (selected_version_id, timestamp, target_photo_id),
+    )
+    db.execute("DELETE FROM photos WHERE id=?", (source_photo_id,))
+    return db.execute("SELECT * FROM versions WHERE id=?", (selected_version_id,)).fetchone()
 
 
 def create_linked_batch_version(db, project, batch, parent, source_path: str):
@@ -1440,9 +1654,20 @@ def create_linked_batch_version(db, project, batch, parent, source_path: str):
         (batch["id"], canonical_path(source_path).casefold()),
     ).fetchone()
     if existing_item is not None:
+        if existing_item["photo_id"] != parent["photo_id"]:
+            merged = merge_source_photo_history(
+                db, project, source_path, parent["photo_id"], parent["id"], batch["display_name"],
+            )
+            if merged is None:
+                raise ValueError(f"无法合并已有版本：{os.path.basename(source_path)}")
+            return merged, None
         return existing_item, None
 
-    discard_unclaimed_source_photo(db, project["id"], source_path, parent["photo_id"])
+    merged = merge_source_photo_history(
+        db, project, source_path, parent["photo_id"], parent["id"], batch["display_name"],
+    )
+    if merged is not None:
+        return merged, None
     next_number = db.execute(
         "SELECT COALESCE(MAX(version_number), -1)+1 FROM versions WHERE photo_id=?", (parent["photo_id"],)
     ).fetchone()[0]
@@ -1526,14 +1751,88 @@ def batch_commit_compare(root: str, db, payload: dict):
     reference_batch = ensure_reference_batch(root, db, project, folder_a)
     import_key = str(payload.get("importKey") or uuid.uuid4())
     batch = db.execute("SELECT * FROM version_batches WHERE import_key=?", (import_key,)).fetchone()
+    if batch is None and payload.get("reconcileExisting"):
+        folder_identity = directory_identity(folder_b)
+        batch = db.execute(
+            """SELECT * FROM version_batches WHERE project_id=? AND parent_batch_id=? AND status='ready'
+               AND (source_folder_path_key=? OR (? IS NOT NULL AND source_folder_id=?))
+               ORDER BY sequence DESC LIMIT 1""",
+            (project["id"], reference_batch["id"], folder_b.casefold(), folder_identity, folder_identity),
+        ).fetchone()
     if batch is not None and batch["project_id"] != project["id"]:
         raise ValueError("批次提交标识已被其他项目使用")
-    if batch is not None and batch["status"] == "ready":
+    if batch is not None and batch["status"] == "ready" and not payload.get("reconcileExisting"):
         return {
             "success": True, "alreadyCommitted": True,
             "referenceBatch": batch_summary(db, reference_batch["id"]),
             "batch": batch_summary(db, batch["id"]),
         }
+    if batch is not None and batch["status"] == "ready":
+        created_paths = []
+        try:
+            matches = sorted(
+                payload.get("matches") or [],
+                key=lambda match: float(match.get("distance") if match.get("distance") is not None else 1_000_000),
+            )
+            best_versions = {}
+            matched_source_keys = set()
+            for match in matches:
+                reference_path = safe_folder_file(folder_a, match.get("reference"))
+                source_path = safe_folder_file(folder_b, match.get("source"))
+                source_key = source_path.casefold()
+                if source_key in matched_source_keys:
+                    continue
+                matched_source_keys.add(source_key)
+                parent = ensure_source_version(db, project, reference_path)
+                register_batch_item(db, reference_batch["id"], parent, reference_path, "baseline")
+                version, created_path = create_linked_batch_version(db, project, batch, parent, source_path)
+                register_batch_item(
+                    db, batch["id"], version, source_path, "visual-hash",
+                    float(match.get("distance") or 0), str(match.get("confidence") or ""), "confirmed",
+                )
+                if created_path:
+                    created_paths.append(created_path)
+                best_versions.setdefault(version["photo_id"], version["id"])
+
+            current_source_keys = set()
+            for source_path in folder_media_files(folder_b):
+                source_key = source_path.casefold()
+                current_source_keys.add(source_key)
+                if source_key in matched_source_keys:
+                    continue
+                version = ensure_source_version(db, project, source_path)
+                register_batch_item(db, batch["id"], version, source_path, "new", review_status="new")
+            stale_items = db.execute(
+                "SELECT id,source_path_key FROM batch_items WHERE batch_id=?",
+                (batch["id"],),
+            ).fetchall()
+            for item in stale_items:
+                if item["source_path_key"] not in current_source_keys:
+                    db.execute("DELETE FROM batch_items WHERE id=?", (item["id"],))
+
+            timestamp = int(time.time() * 1000)
+            for photo_id, version_id in best_versions.items():
+                db.execute("UPDATE versions SET is_current=0,updated_at=? WHERE photo_id=?", (timestamp, photo_id))
+                db.execute("UPDATE versions SET is_current=1,updated_at=? WHERE id=?", (timestamp, version_id))
+                db.execute("UPDATE photos SET current_version_id=?,updated_at=? WHERE id=?", (version_id, timestamp, photo_id))
+            db.execute("UPDATE version_batches SET updated_at=? WHERE id=?", (timestamp, batch["id"]))
+            db.commit()
+            rename_result = rename_confirmed_batch_sources(db, batch["id"], folder_b, matches) if payload.get("renameSources") else {"renamedCount": 0, "renameErrors": []}
+            return {
+                "success": True,
+                "reconciled": True,
+                "referenceBatch": batch_summary(db, reference_batch["id"]),
+                "batch": batch_summary(db, batch["id"]),
+                **rename_result,
+            }
+        except Exception:
+            db.rollback()
+            for created_path in created_paths:
+                try:
+                    os.unlink(created_path)
+                except OSError:
+                    pass
+            raise
     if batch is None:
         batch = create_batch_row(
             db, project["id"], folder_b, payload.get("displayName") or os.path.basename(folder_b),
@@ -1568,7 +1867,6 @@ def batch_commit_compare(root: str, db, payload: dict):
                 db, batch["id"], version, source_path, "visual-hash",
                 float(match.get("distance") or 0), str(match.get("confidence") or ""), "confirmed",
             )
-            db.commit()
             if created_path:
                 created_paths.append(created_path)
 
@@ -1577,7 +1875,6 @@ def batch_commit_compare(root: str, db, payload: dict):
                 continue
             version = ensure_source_version(db, project, source_path)
             register_batch_item(db, batch["id"], version, source_path, "new", review_status="new")
-            db.commit()
 
         best_versions = {}
         rows = db.execute(
@@ -2768,6 +3065,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = progress_register(root, db, payload)
         db.close()
         return result
+    elif action == "progress_update_tree":
+        result = progress_update_tree(root, db, payload)
+        db.close()
+        return result
     elif action == "batch_register_baseline":
         result = batch_register_baseline(root, db, payload)
         db.close()
@@ -2904,7 +3205,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "maintenance_run", "add", "status", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "batch_register_baseline", "batch_commit_compare", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
+    parser.add_argument("action", nargs="?", choices=("init", "maintenance_run", "add", "status", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_update_tree", "batch_register_baseline", "batch_commit_compare", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")

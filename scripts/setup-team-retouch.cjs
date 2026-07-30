@@ -10,10 +10,10 @@ const venvPython = process.platform === 'win32'
 const systemPython = process.platform === 'win32' ? 'python' : 'python3';
 const modelRoot = path.join(root, 'components', 'team-retouch', 'models');
 const requiredModels = [
-  ['rtmdet-ins_m_640x640.onnx', 100 * 1024 * 1024],
-  ['face_detection_yunet_2023mar.onnx', 200 * 1024],
-  ['face_recognition_sface_2021dec.onnx', 30 * 1024 * 1024],
-  ['osnet_x0_25_msmt17.onnx', 700 * 1024],
+  [path.join(modelRoot, 'rtmdet-ins_m_640x640.onnx'), 100 * 1024 * 1024],
+  [path.join(modelRoot, 'face_detection_yunet_2023mar.onnx'), 200 * 1024],
+  [path.join(root, '.model-lab', 'adaface', 'adaface_ir18_webface4m.onnx'), 80 * 1024 * 1024],
+  [path.join(root, '.model-lab', 'osnet', 'osnet_x1_0_msmt17.onnx'), 7 * 1024 * 1024],
 ];
 
 const run = (command, args) => {
@@ -24,9 +24,8 @@ const run = (command, args) => {
 
 try {
   if (process.platform !== 'win32') throw new Error('团片协作的 DirectML 运行库目前只支持 Windows');
-  for (const [name, minBytes] of requiredModels) {
-    const modelPath = path.join(modelRoot, name);
-    if (!fs.existsSync(modelPath) || fs.statSync(modelPath).size < minBytes) throw new Error(`Team-retouch model is missing or incomplete: ${name}`);
+  for (const [modelPath, minBytes] of requiredModels) {
+    if (!fs.existsSync(modelPath) || fs.statSync(modelPath).size < minBytes) throw new Error(`Team-retouch model is missing or incomplete: ${modelPath}`);
   }
   if (!fs.existsSync(venvPython)) run(systemPython, ['-m', 'venv', venvRoot]);
   // OpenCV packages share the same cv2 directory. Uninstall every variant

@@ -1,10 +1,16 @@
 {
   "apiVersion": 1,
   "id": "team-retouch",
-  "version": "26.7.28.2",
+  "version": "26.7.29.1",
   "platforms": ["win32"],
   "architectures": ["x64"],
   "entrypoints": {
     "win32-x64": "team-retouch.exe"
-  }
+  },
+  "requiredFiles": [
+    "_internal/models/rtmdet-ins_m_640x640.onnx",
+    "_internal/models/face_detection_yunet_2023mar.onnx",
+    "_internal/models/adaface_ir18_webface4m.onnx",
+    "_internal/models/osnet_x1_0_msmt17.onnx"
+  ]
 }
