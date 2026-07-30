@@ -25,7 +25,7 @@ npm run build:advanced-video-decoder -- --mpv-root C:\path\to\libmpv
 输出是独立 ZIP：
 
 ```text
-release\PhotoFlow-video-playback-mpv-26.7.30.1-win32-x64.zip
+release\PhotoFlow-video-playback-mpv-26.7.29.1-win32-x64.zip
 ```
 
 此命令不会修改或打包照片流主程序。组件构建会强制复核 LGPL 声明、mpv/FFmpeg
