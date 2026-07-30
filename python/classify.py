@@ -9,8 +9,9 @@ import re
 import json
 from pathlib import Path
 import gc
-from event_protocol import ask_user, log_error, log_info, log_progress, log_status, log_success
+from event_protocol import ask_user, emit, log_error, log_info, log_progress, log_status, log_success
 from ffmpeg_utils import get_ffmpeg_exe
+from thumbnail_image import _embedded_jpeg
 
 VIDEO_PREVIEW_QUALITY_PROFILES = {
     'medium': {
@@ -50,6 +51,8 @@ def get_file_time(file_path):
     except: return 0
 
 VALID_MEDIA_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.heic', '.mp4', '.mov', '.avi', '.crm', '.rwl', '.raf', '.3fr', '.fff')
+RAW_EXTENSIONS = ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.rwl', '.raf', '.3fr', '.fff')
+JPG_EXTENSIONS = ('.jpg', '.jpeg')
 
 def scan_sd_media(sd_path):
     normalized_sd = os.path.normpath(sd_path)
@@ -187,6 +190,7 @@ def classify_files_by_type(folder_path):
         'raw': ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.rwl', '.raf', '.3fr', '.fff'),
         'mov': ('.mp4', '.mov', '.avi', '.crm')
     }
+    moved_paths = {}
     for f in os.listdir(folder_path):
         src_path = os.path.join(folder_path, f)
         if not os.path.isfile(src_path) or f.startswith('.'): continue
@@ -198,7 +202,71 @@ def classify_files_by_type(folder_path):
                 # 如果子目录已有同名文件，加时间戳
                 dst_path = unique_destination(sub_dir, f)
                 shutil.move(src_path, dst_path)
+                moved_paths[src_path] = dst_path
                 break
+    return moved_paths
+
+
+def find_missing_raw_jpg_candidates(target_folder, imported_paths):
+    """Return RAW files from this import that do not have a same-stem JPG."""
+    jpg_dir = os.path.join(target_folder, 'jpg')
+    jpg_stems = set()
+    if os.path.isdir(jpg_dir):
+        jpg_stems = {
+            os.path.splitext(name)[0].casefold()
+            for name in os.listdir(jpg_dir)
+            if os.path.isfile(os.path.join(jpg_dir, name)) and name.lower().endswith(JPG_EXTENSIONS)
+        }
+    candidates = []
+    seen = set()
+    for file_path in imported_paths:
+        normalized = os.path.normcase(os.path.abspath(file_path))
+        stem, extension = os.path.splitext(os.path.basename(file_path))
+        if extension.lower() not in RAW_EXTENSIONS or stem.casefold() in jpg_stems or normalized in seen:
+            continue
+        seen.add(normalized)
+        jpg_stems.add(stem.casefold())
+        candidates.append(file_path)
+    return candidates
+
+
+def generate_raw_jpg(source_path, target_path):
+    """Create a full-size JPG from the best embedded preview in a RAW file."""
+    image = _embedded_jpeg(source_path)
+    temporary = f"{target_path}.tmp-{os.getpid()}"
+    try:
+        rgb_image = image if image.mode == 'RGB' else image.convert('RGB')
+        try:
+            rgb_image.save(temporary, format='JPEG', quality=95, optimize=True, progressive=True)
+        finally:
+            if rgb_image is not image:
+                rgb_image.close()
+        os.replace(temporary, target_path)
+        shutil.copystat(source_path, target_path)
+    finally:
+        image.close()
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
+def generate_missing_raw_jpgs(target_folder, imported_paths, converter=generate_raw_jpg, on_progress=None):
+    candidates = find_missing_raw_jpg_candidates(target_folder, imported_paths)
+    if not candidates:
+        return 0, 0
+    jpg_dir = os.path.join(target_folder, 'jpg')
+    os.makedirs(jpg_dir, exist_ok=True)
+    succeeded = 0
+    for index, source_path in enumerate(candidates, start=1):
+        stem = os.path.splitext(os.path.basename(source_path))[0]
+        target_path = os.path.join(jpg_dir, f'{stem}.jpg')
+        try:
+            converter(source_path, target_path)
+            succeeded += 1
+        except Exception as error:
+            emit('warning', f'无法从 RAW 生成 JPG，已保留 RAW 文件 {os.path.basename(source_path)}：{error}')
+        if on_progress:
+            on_progress(index, len(candidates), os.path.basename(source_path))
+    return succeeded, len(candidates)
 
 def normalize_video_preview_quality(quality):
     return quality if quality in VIDEO_PREVIEW_QUALITY_PROFILES else 'medium'
@@ -301,7 +369,7 @@ def split_large_videos(target_folder):
             emit('warning', f'视频分割失败，已保留原文件 {file_name}：{detail}')
     return split_count
 # --- 3. 核心导入流程 ---
-def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_threshold_hours=2.0, should_split=None, generate_video_preview=False, split_large_files=False, project_routes=None, direct_project=False, video_preview_quality='medium', direct_source=False, source_paths=None):
+def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_threshold_hours=2.0, should_split=None, generate_video_preview=False, split_large_files=False, project_routes=None, direct_project=False, video_preview_quality='medium', direct_source=False, source_paths=None, delete_source=False, generate_jpg_from_raw=False):
     # 临时存放区（即使出错也保留，直到确认安全）
     temp_dir = os.path.join(dest_path, "_PhotoFlow_Safety_Temp")
     
@@ -320,6 +388,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             return
 
         total_bytes = sum(os.path.getsize(file_path) for file_path in original_sd_files)
+        log_progress("扫描完成，准备复制文件...", 5, {"bytesCopied": 0, "totalBytes": total_bytes, "filesCopied": 0, "totalFiles": len(original_sd_files)})
 
 
 # Step 2: 复制到临时区 (仅复制不存在或不完整的文件)
@@ -342,7 +411,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             elapsed = max(0.001, now - transfer_started_at)
             log_progress(
                 f"导入中: {filename}",
-                int((bytes_copied / max(1, total_bytes)) * 100),
+                5 + int((bytes_copied / max(1, total_bytes)) * 70),
                 {
                     "bytesCopied": bytes_copied,
                     "totalBytes": total_bytes,
@@ -419,7 +488,9 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             groups = [files_with_time]
 
         log_info(f"正在整理到目标文件夹...")
+        log_progress("正在整理并分类文件...", 75, {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": len(original_sd_files), "totalFiles": len(original_sd_files)})
         processed_targets = set()
+        imported_paths_by_target = {}
         for idx, group_record in enumerate(groups):
             group = group_record['files'] if isinstance(group_record, dict) else group_record
             # 命名文件夹
@@ -441,11 +512,17 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
             if date_str not in created_projects:
                 created_projects.append(date_str)
             
+            imported_root_paths = []
             for f_path, _ in group:
-                shutil.move(f_path, unique_destination(target_folder, os.path.basename(f_path)))
+                destination = unique_destination(target_folder, os.path.basename(f_path))
+                shutil.move(f_path, destination)
+                imported_root_paths.append(destination)
                 success_imported_count += 1
             
-            classify_files_by_type(target_folder)
+            classified_paths = classify_files_by_type(target_folder)
+            imported_paths_by_target.setdefault(target_folder, []).extend(
+                classified_paths.get(file_path, file_path) for file_path in imported_root_paths
+            )
             processed_targets.add(target_folder)
 
             # 备份
@@ -454,7 +531,42 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
                 if os.path.exists(backup_dst): shutil.rmtree(backup_dst)
                 shutil.copytree(target_folder, backup_dst)
 
-        for target_folder in processed_targets:
+            log_progress(
+                f"正在整理并分类文件：{idx + 1}/{len(groups)}",
+                75 + int(((idx + 1) / max(1, len(groups))) * 15),
+                {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": success_imported_count, "totalFiles": len(original_sd_files)},
+            )
+
+        processed_target_list = list(processed_targets)
+        generated_jpg_count = 0
+        raw_without_jpg_count = 0
+        if generate_jpg_from_raw:
+            all_candidates = [
+                (target_folder, source_path)
+                for target_folder in processed_target_list
+                for source_path in find_missing_raw_jpg_candidates(target_folder, imported_paths_by_target.get(target_folder, []))
+            ]
+            completed_candidates = 0
+            for target_folder in processed_target_list:
+                def publish_raw_jpg_progress(_index, _total, file_name):
+                    nonlocal completed_candidates
+                    completed_candidates += 1
+                    log_progress(
+                        f"正在从 RAW 生成 JPG：{file_name}",
+                        90 + int((completed_candidates / max(1, len(all_candidates))) * 4),
+                        {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": success_imported_count, "totalFiles": len(original_sd_files)},
+                    )
+
+                generated, candidate_count = generate_missing_raw_jpgs(
+                    target_folder,
+                    imported_paths_by_target.get(target_folder, []),
+                    on_progress=publish_raw_jpg_progress,
+                )
+                generated_jpg_count += generated
+                raw_without_jpg_count += candidate_count
+            if raw_without_jpg_count:
+                log_info(f"RAW 转 JPG 完成：{generated_jpg_count}/{raw_without_jpg_count} 个文件已保存到 jpg 文件夹")
+        for target_index, target_folder in enumerate(processed_target_list):
             if split_large_files:
                 split_count = split_large_videos(target_folder)
                 if split_count:
@@ -463,22 +575,36 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
                 preview_count, video_count = generate_video_previews(target_folder, video_preview_quality)
                 if video_count:
                     log_info(f"视频预览完成：{preview_count}/{video_count} 个文件已保存到 mov_预览")
+            log_progress(
+                f"正在完成导入后处理：{target_index + 1}/{len(processed_target_list)}",
+                94 + int(((target_index + 1) / max(1, len(processed_target_list))) * 2),
+                {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": success_imported_count, "totalFiles": len(original_sd_files)},
+            )
         # Step 5: 最终校验与清理 SD 卡
         if success_imported_count == len(original_sd_files):
             log_info(f"整理完成，共处理 {success_imported_count} 个文件")
             
-            # 只有在此刻，才开始清理 SD 卡
-            log_info("正在安全清理 SD 卡原始文件...")
-            for f in original_sd_files:
-                try:
-                    os.remove(f)
-                except:
-                    pass
-            log_success("SD 卡清理完成", {"projectNames": created_projects, "importedCount": success_imported_count})
+            should_delete_sources = delete_source
+            if should_delete_sources:
+                log_info("正在安全清理导入源文件...")
+                for cleanup_index, f in enumerate(original_sd_files):
+                    try:
+                        os.remove(f)
+                    except:
+                        pass
+                    log_progress(
+                        f"正在完成源文件清理：{cleanup_index + 1}/{len(original_sd_files)}",
+                        96 + int(((cleanup_index + 1) / max(1, len(original_sd_files))) * 3),
+                        {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": success_imported_count, "totalFiles": len(original_sd_files)},
+                    )
+            else:
+                log_progress("正在保留源文件...", 99, {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": success_imported_count, "totalFiles": len(original_sd_files)})
             
             # 只有全部成功，才清理临时目录
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir)
+            log_progress("导入流程全部完成", 100, {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": success_imported_count, "totalFiles": len(original_sd_files)})
+            log_success("导入完成，源文件已按设置处理", {"projectNames": created_projects, "importedCount": success_imported_count, "sourceFilesDeleted": should_delete_sources, "generatedJpgCount": generated_jpg_count})
         else:
             log_error(f"警告：导入数量不匹配（应有{len(original_sd_files)}，实际{success_imported_count}）。SD 卡未清理，请检查桌面临时文件夹。")
 
@@ -487,7 +613,7 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
         # 异常情况下保留临时文件夹和 SD 卡文件，确保数据不丢
         gc.collect()
 
-def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=False, source_paths=None):
+def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=False, source_paths=None, delete_source=False):
     """Copy card media into an explicitly selected project, grouped by media date."""
     base_sd, original_files = scan_import_media(sd_path, direct_source, source_paths)
     created_files = []
@@ -495,6 +621,7 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
     source_cleanup_started = False
 
     try:
+        log_progress("正在扫描花絮导入来源...", 0, {"bytesCopied": 0, "totalBytes": 0, "filesCopied": 0, "totalFiles": 0})
         if not original_files:
             log_error(f"在 {base_sd} 中没有找到媒体文件" if direct_source else f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
             return
@@ -512,6 +639,7 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                 for file_path, _timestamp in group['files']:
                     file_routes[file_path] = project_path
         total_bytes = sum(os.path.getsize(file_path) for file_path in original_files)
+        log_progress("扫描完成，准备导入花絮...", 5, {"bytesCopied": 0, "totalBytes": total_bytes, "filesCopied": 0, "totalFiles": len(original_files)})
         completed_bytes = 0
         transfer_started_at = time.monotonic()
         last_progress_at = 0.0
@@ -539,7 +667,7 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                 elapsed = max(0.001, now - transfer_started_at)
                 log_progress(
                     f"导入花絮：{os.path.basename(source)}",
-                    int((bytes_copied / max(1, total_bytes)) * 100),
+                    5 + int((bytes_copied / max(1, total_bytes)) * 85),
                     {
                         "bytesCopied": bytes_copied,
                         "totalBytes": total_bytes,
@@ -568,14 +696,25 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
             publish_broll_progress(0, True)
 
         # The source card is only cleaned after every destination file has passed validation.
-        source_cleanup_started = True
-        for source in original_files:
-            os.remove(source)
-        log_success("花絮导入完成，SD 卡已安全清理", {
+        should_delete_sources = delete_source
+        if should_delete_sources:
+            source_cleanup_started = True
+            for cleanup_index, source in enumerate(original_files):
+                os.remove(source)
+                log_progress(
+                    f"正在完成花絮源文件清理：{cleanup_index + 1}/{len(original_files)}",
+                    90 + int(((cleanup_index + 1) / max(1, len(original_files))) * 9),
+                    {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": len(created_files), "totalFiles": len(original_files)},
+                )
+        else:
+            log_progress("正在保留源文件...", 99, {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": len(created_files), "totalFiles": len(original_files)})
+        log_progress("花絮导入流程全部完成", 100, {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": len(created_files), "totalFiles": len(original_files)})
+        log_success("花絮导入完成，源文件已按设置处理", {
             "projectNames": sorted({os.path.basename(os.path.normpath(project_path)) for project_path in (file_routes.values() or [dest_path])}),
             "importedCount": len(created_files),
             "destination": dest_path,
             "dateFolders": sorted({os.path.basename(os.path.dirname(file_path)) for file_path in created_files}),
+            "sourceFilesDeleted": should_delete_sources,
         })
     except Exception as error:
         # Before source cleanup starts, remove a partial destination so retrying
@@ -618,6 +757,8 @@ def run(args_list):
     parser.add_argument("--direct_project", action="store_true")
     parser.add_argument("--direct_source", action="store_true")
     parser.add_argument("--source_paths", default="[]")
+    parser.add_argument("--delete_source", action="store_true")
+    parser.add_argument("--generate_jpg_from_raw", action="store_true")
 
     args, _ = parser.parse_known_args(args_list)
     try:
@@ -634,9 +775,9 @@ def run(args_list):
     elif args.stage == 'plan':
         stage_plan_import(args.sd_path, args.projects_json, args.import_type, args.time_gap, args.direct_source, source_paths)
     elif args.stage == 'import':
-        stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files, json.loads(args.project_routes or '{}'), args.direct_project, args.video_preview_quality, args.direct_source, source_paths)
+        stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files, json.loads(args.project_routes or '{}'), args.direct_project, args.video_preview_quality, args.direct_source, source_paths, args.delete_source, args.generate_jpg_from_raw)
     elif args.stage == 'broll':
-        stage_import_broll(args.sd_path, args.dest_path, json.loads(args.project_routes or '{}'), args.direct_source, source_paths)
+        stage_import_broll(args.sd_path, args.dest_path, json.loads(args.project_routes or '{}'), args.direct_source, source_paths, args.delete_source)
 
 if __name__ == "__main__":
     run(sys.argv[1:])

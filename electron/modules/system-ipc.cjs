@@ -1,7 +1,8 @@
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, path, pluginService, privacyService, process, readSavedConfig, screen, shell, spawn, telemetryService, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, path, pluginService, privacyService, process, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
   const activePythonTasks = new Map();
   let advancedOperation = null;
+  let activeClassifyWrite = null;
 
   const componentRoot = componentId => path.join(pluginService.installRoot, String(componentId));
   const teamRetouchRoot = () => componentRoot('team-retouch');
@@ -568,12 +569,48 @@ const registerSystemIpc = context => {
     let command;
     let spawnArgs;
     const normalizedRequestId = String(requestId || '');
+    const stageArgumentIndex = scriptName === 'classify.py' ? args.indexOf('--stage') : -1;
+    const classifyStage = stageArgumentIndex >= 0 ? String(args[stageArgumentIndex + 1] || '') : '';
+    const writesImportFiles = scriptName === 'classify.py' && (classifyStage === 'import' || classifyStage === 'broll');
+    if (writesImportFiles && activeClassifyWrite?.process && !activeClassifyWrite.process.killed && activeClassifyWrite.requestId !== normalizedRequestId) {
+      event.sender.send('python-event', {
+        type: 'error',
+        message: '已有导入任务正在运行，请等待完成后再启动另一个导入任务。',
+        scriptName,
+        requestId,
+      });
+      return;
+    }
     const cancellable = scriptName === 'catch.py' && /^[a-z0-9-]{8,80}$/i.test(normalizedRequestId);
     const cancelFile = cancellable ? path.join(app.getPath('temp'), `photoflow-cancel-${normalizedRequestId}.flag`) : '';
     const runtimeArgs = cancellable ? [...args, '--cancel_file', cancelFile] : args;
+    const destinationArgumentIndex = scriptName === 'classify.py' ? args.indexOf('--dest_path') : -1;
+    const importDestination = destinationArgumentIndex >= 0 ? path.resolve(String(args[destinationArgumentIndex + 1] || '')) : '';
+    let importWatchSuppressed = false;
+    let importWatchFinalized = false;
+    const finalizeImportWatch = succeeded => {
+      if (!importWatchSuppressed || importWatchFinalized) return;
+      importWatchFinalized = true;
+      releaseWorkspaceWatchPath(importDestination, 250);
+      if (!succeeded) return;
+      setTimeout(() => {
+        void thumbnailService?.scanProject(importDestination, mediaRuntimeState.activeMediaCacheConfig).catch(error => {
+          writeLog('warn', 'Post-import thumbnail scan deferred', { importDestination, error: error.message || String(error) });
+        });
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('workspace-files-changed', {
+          root: path.dirname(importDestination),
+          fileName: path.basename(importDestination),
+          eventType: 'rename',
+        });
+      }, 600);
+    };
     try {
       if (cancelFile) fs.rmSync(cancelFile, { force: true });
       ({ command, args: spawnArgs } = getRunConfig(scriptName, runtimeArgs));
+      if (importDestination && fs.existsSync(importDestination) && fs.statSync(importDestination).isDirectory()) {
+        suppressWorkspaceWatchPath(importDestination);
+        importWatchSuppressed = true;
+      }
     } catch (error) {
       event.sender.send('python-event', { type: 'error', message: error.message || String(error), scriptName, requestId });
       return;
@@ -597,6 +634,7 @@ const registerSystemIpc = context => {
     try {
       // 注意：windowsHide: true 可以隐藏弹出的黑框
       const pyProcess = spawn(command, spawnArgs, { windowsHide: true });
+      if (writesImportFiles) activeClassifyWrite = { process: pyProcess, requestId: normalizedRequestId, stage: classifyStage };
       if (cancellable) activePythonTasks.set(normalizedRequestId, { process: pyProcess, cancelFile });
       let stdoutBuffer = '';
       const handlePythonOutputLine = line => {
@@ -643,6 +681,7 @@ const registerSystemIpc = context => {
       });
   
       pyProcess.on('close', (code) => {
+        if (activeClassifyWrite?.process === pyProcess) activeClassifyWrite = null;
         if (stdoutBuffer.trim()) handlePythonOutputLine(stdoutBuffer);
         stdoutBuffer = '';
         // 可以在这里针对特定脚本做处理，比如 classify 退出不一定代表错误
@@ -656,10 +695,13 @@ const registerSystemIpc = context => {
           activePythonTasks.delete(normalizedRequestId);
           fs.promises.rm(cancelFile, { force: true }).catch(() => undefined);
         }
+        finalizeImportWatch(code === 0);
       });
       
       // 监听启动错误（比如 exe 不存在）
       pyProcess.on('error', (err) => {
+         if (activeClassifyWrite?.process === pyProcess) activeClassifyWrite = null;
+         finalizeImportWatch(false);
          if (cancellable) {
            activePythonTasks.delete(normalizedRequestId);
            fs.promises.rm(cancelFile, { force: true }).catch(() => undefined);
@@ -674,6 +716,7 @@ const registerSystemIpc = context => {
       });
   
     } catch (e) {
+      finalizeImportWatch(false);
       console.error("Spawn Error:", e);
     }
   });

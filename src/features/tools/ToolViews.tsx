@@ -138,13 +138,14 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
   return { logs, isRunning, isCancelling, progress, statusMsg, preview, clearPreview: () => setPreview(null), start, cancel };
 };
 
-const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspaceProjects, active = true, directSource = false, onImportConfigChange, onImportComplete }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (projectNames: string[]) => void }) => {
+const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspaceProjects, active = true, directSource = false, deleteSourceAfterImport = true, generateJpgFromRaw = false, onBusyChange, onImportConfigChange, onImportComplete }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (projectNames: string[]) => void }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'finished'>('idle');
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("等待连接...");
   const [decisionData, setDecisionData] = useState<any>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [transferStats, setTransferStats] = useState<ImportTransferStats | null>(null);
+  const [shouldDeleteSourceAfterImport, setShouldDeleteSourceAfterImport] = useState(deleteSourceAfterImport);
   const selectedDrives = config?.sdPaths?.length ? config.sdPaths : config?.sdPath ? [config.sdPath] : [];
   const driveTypes = config?.sdDriveTypes || {};
 
@@ -160,6 +161,11 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   const startBatchRef = React.useRef<() => void>(() => undefined);
   const onImportCompleteRef = React.useRef(onImportComplete);
   useEffect(() => { onImportCompleteRef.current = onImportComplete; }, [onImportComplete]);
+  useEffect(() => {
+    const busy = status === 'ready_to_import' || status === 'importing' || status === 'decision' || status === 'processing';
+    onBusyChange?.(busy);
+    return () => onBusyChange?.(false);
+  }, [status, onBusyChange]);
   const toggleDrive = (sdPath: string) => {
     if (!config || !onImportConfigChange) return;
     const sdPaths = selectedDrives.includes(sdPath) ? selectedDrives.filter(path => path !== sdPath) : [...selectedDrives, sdPath];
@@ -171,7 +177,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   };
 
   const runCmd = (stage: string, args: string[] = []) => {
-    if(window.electronAPI) window.electronAPI.runScript('classify.py', ['--stage', stage, ...args, ...(directSource ? ['--direct_source', '--source_paths', JSON.stringify(selectedDrives)] : [])], importRequestIdRef.current);
+    if(window.electronAPI) window.electronAPI.runScript('classify.py', ['--stage', stage, ...args, ...(directSource ? ['--direct_source', '--source_paths', JSON.stringify(selectedDrives)] : []), ...(shouldDeleteSourceAfterImport ? ['--delete_source'] : []), ...(generateJpgFromRaw ? ['--generate_jpg_from_raw'] : [])], importRequestIdRef.current);
   };
 
   useEffect(() => {
@@ -272,7 +278,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
               setTimeout(() => startImportRef.current(nextDrive.path, nextDrive.type), 500);
             } else {
               setStatus('finished');
-              setStatusMsg("所选 SD 卡已全部导入完成");
+              setStatusMsg(directSource ? "所选底片已全部导入完成" : "所选 SD 卡已全部导入完成");
               isBusyRef.current = false; // 【解锁】
               onImportCompleteRef.current?.(importedProjectNamesRef.current);
             }
@@ -398,6 +404,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
     importQueueRef.current = queue.slice(1);
     importedProjectNamesRef.current = [];
     currentDriveRef.current = '';
+    importRequestIdRef.current = crypto.randomUUID();
     startImport(queue[0].path, queue[0].type);
   };
   startBatchRef.current = startBatchImport;
@@ -483,6 +490,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
             : 'bg-slate-100 text-slate-500';
 
     return (
+      <div className="w-full space-y-3">
       <div className="w-full bg-white/50 border border-slate-200 rounded-xl p-4 flex items-center justify-between animate-in fade-in transition-all">
         <div className="flex items-center gap-3">
           <div className={`p-2 rounded-lg transition-colors ${iconColorClass}`}>
@@ -508,6 +516,13 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
             <button disabled className={`p-2 rounded-lg transition ${status === 'checking' ? 'text-blue-500' : 'text-slate-300 bg-slate-50 cursor-not-allowed'}`}><RotateCcw size={18} className={status === 'checking' ? 'animate-spin' : ''} /></button>
           )}
         </div>
+      </div>
+      {status === 'idle' && <>
+        <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+          <input type="checkbox" checked={shouldDeleteSourceAfterImport} onChange={event => setShouldDeleteSourceAfterImport(event.target.checked)} className="mt-0.5"/>
+          <span><span className="block text-sm font-bold text-slate-700">导入后删除源文件</span><span className="mt-1 block text-xs leading-5 text-slate-500">初始值来自设置。只有全部文件复制并校验成功后才会删除{directSource ? '所选底片' : '所选 SD 卡中的媒体'}；取消勾选则保留源文件。</span></span>
+        </label>
+      </>}
       </div>
     );
   }
@@ -715,6 +730,7 @@ const DashboardView = ({
   workspacePath,
   section = 'all',
   config,
+  importDefaults,
   projectDestination,
   projectName,
   onImportConfigChange,
@@ -724,6 +740,7 @@ const DashboardView = ({
   workspacePath: string;
   section?: 'all' | 'import' | 'birthday';
   config: AppConfig['smartImport'];
+  importDefaults: AppConfig['importDefaults'];
   projectDestination?: string | null;
   projectName?: string;
   onImportConfigChange: (config: AppConfig['smartImport']) => void;
@@ -837,7 +854,7 @@ const DashboardView = ({
       {section !== 'birthday' && <HomePanel title="从 SD 卡导入" initiallyOpen {...dragProps}>
         <div className="flex flex-col gap-6">
           <RequirePlugin embedded scriptName="classify.py" title="从 SD 卡导入" desc="需要该引擎来识别和导入 SD 卡中的媒体文件。">
-            <ImportCard config={config} drives={drives} destinationPath={projectDestination ?? workspacePath} brollDestinationPath={projectDestination} workspaceProjects={projectDestination ? undefined : workspaceProjects} onImportConfigChange={onImportConfigChange} onImportComplete={projectDestination ? undefined : projectNames => { void onImportComplete?.(projectNames); }} />
+            <ImportCard config={config} drives={drives} destinationPath={projectDestination ?? workspacePath} brollDestinationPath={projectDestination} workspaceProjects={projectDestination ? undefined : workspaceProjects} deleteSourceAfterImport={importDefaults.deleteSourceAfterImport} generateJpgFromRaw={importDefaults.generateJpgFromRaw} onImportConfigChange={onImportConfigChange} onImportComplete={projectDestination ? undefined : projectNames => { void onImportComplete?.(projectNames); }} />
           </RequirePlugin>
         </div>
       </HomePanel>}

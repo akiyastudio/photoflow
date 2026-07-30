@@ -97,7 +97,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   registerProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-progress-register', workspacePath, status, projectName, request),
   updateProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-progress-update', workspacePath, status, projectName, request),
   registerVersionBaseline: (workspacePath, status, projectName, relativePath) => ipcRenderer.invoke('workspace-version-register-baseline', workspacePath, status, projectName, relativePath),
-  compareVersionFolders: (workspacePath, status, projectName, referenceRelativePath, sourceRelativePath) => invokeFeature('version_folder_compare', 'workspace-version-compare-preview', workspacePath, status, projectName, referenceRelativePath, sourceRelativePath),
+  compareVersionFolders: (workspacePath, status, projectName, referenceRelativePath, sourceRelativePath, sourceNames) => invokeFeature('version_folder_compare', 'workspace-version-compare-preview', workspacePath, status, projectName, referenceRelativePath, sourceRelativePath, sourceNames),
   commitVersionBatch: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-version-batch-commit', workspacePath, status, projectName, request),
   getTeamPatches: (workspacePath, status, projectName, relativePath) => ipcRenderer.invoke('workspace-team-patches', workspacePath, status, projectName, relativePath),
   getTeamProjectWorkspace: (workspacePath, projectName) => ipcRenderer.invoke('workspace-team-project', workspacePath, projectName),

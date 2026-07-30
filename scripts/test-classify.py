@@ -11,7 +11,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
-from classify import build_capture_groups, build_video_preview_command, stage_import_and_organize, stage_import_broll, stage_plan_import  # noqa: E402
+from classify import build_capture_groups, build_video_preview_command, generate_missing_raw_jpgs, stage_import_and_organize, stage_import_broll, stage_plan_import  # noqa: E402
+from PIL import Image  # noqa: E402
 
 
 for quality, expected in {
@@ -44,13 +45,97 @@ with tempfile.TemporaryDirectory(prefix="photoflow-classify-test-") as temporary
         timestamp = captured_at.timestamp()
         os.utime(source, (timestamp, timestamp))
 
-    stage_import_broll(str(card), str(project))
+    stage_import_broll(str(card), str(project), delete_source=True)
 
     assert not any(dcim.iterdir()), "successful b-roll import should clean the source card"
     assert (project / "花絮" / "7-21" / "clip-one.mp4").is_file()
     assert (project / "花絮" / "7-22" / "clip-two.mp4").is_file()
 
 print("classify b-roll date routing tests passed")
+
+
+with tempfile.TemporaryDirectory(prefix="photoflow-broll-source-policy-test-") as temporary:
+    root = Path(temporary)
+    card = root / "card"
+    dcim = card / "DCIM"
+    project = root / "project"
+    dcim.mkdir(parents=True)
+    project.mkdir()
+    source = dcim / "keep-source.mp4"
+    source.write_bytes(b"source-policy")
+
+    stage_import_broll(str(card), str(project))
+
+    assert source.is_file(), "backend must retain sources unless deletion was explicitly requested"
+    assert (project / "花絮" / datetime.datetime.fromtimestamp(source.stat().st_mtime).strftime('%m-%d').lstrip('0').replace('-0', '-') / source.name).is_file()
+
+print("classify explicit source deletion policy tests passed")
+
+
+with tempfile.TemporaryDirectory(prefix="photoflow-work-source-policy-test-") as temporary:
+    root = Path(temporary)
+    card = root / "card"
+    dcim = card / "DCIM"
+    project = root / "project"
+    dcim.mkdir(parents=True)
+    project.mkdir()
+    source = dcim / "keep-source.jpg"
+    source.write_bytes(b"source-policy")
+
+    stage_import_and_organize(str(card), str(project), direct_project=True)
+
+    assert source.is_file(), "work import must retain sources unless deletion was explicitly requested"
+    assert (project / "jpg" / source.name).is_file()
+
+print("classify work import source retention tests passed")
+
+
+with tempfile.TemporaryDirectory(prefix="photoflow-raw-jpg-test-") as temporary:
+    root = Path(temporary)
+    raw_folder = root / "raw"
+    jpg_folder = root / "jpg"
+    raw_folder.mkdir()
+    jpg_folder.mkdir()
+
+    embedded = io.BytesIO()
+    Image.effect_noise((640, 480), 100).convert("RGB").save(embedded, format="JPEG", quality=95)
+    assert len(embedded.getvalue()) > 8 * 1024
+    missing_pair = raw_folder / "missing.CR3"
+    missing_pair.write_bytes(b"raw-prefix" + embedded.getvalue() + b"raw-suffix")
+    existing_pair = raw_folder / "paired.CR3"
+    existing_pair.write_bytes(b"raw-prefix" + embedded.getvalue() + b"raw-suffix")
+    (jpg_folder / "PAIRED.jpeg").write_bytes(embedded.getvalue())
+
+    succeeded, candidates = generate_missing_raw_jpgs(root, [missing_pair, existing_pair])
+
+    assert (succeeded, candidates) == (1, 1), "only an imported RAW without a same-stem JPG should be converted"
+    generated = jpg_folder / "missing.jpg"
+    assert generated.is_file()
+    with Image.open(generated) as image:
+        assert image.size == (640, 480)
+
+print("classify RAW-to-JPG generation tests passed")
+
+
+with tempfile.TemporaryDirectory(prefix="photoflow-raw-jpg-import-test-") as temporary:
+    root = Path(temporary)
+    card = root / "card"
+    dcim = card / "DCIM"
+    project = root / "project"
+    dcim.mkdir(parents=True)
+    project.mkdir()
+    embedded = io.BytesIO()
+    Image.effect_noise((640, 480), 100).convert("RGB").save(embedded, format="JPEG", quality=95)
+    source = dcim / "camera.CR3"
+    source.write_bytes(b"raw-prefix" + embedded.getvalue() + b"raw-suffix")
+
+    stage_import_and_organize(str(card), str(project), direct_project=True, generate_jpg_from_raw=True)
+
+    assert (project / "raw" / "camera.CR3").is_file()
+    assert (project / "jpg" / "camera.jpg").is_file(), "generated JPG must be saved in the project-root jpg folder"
+    assert source.is_file(), "RAW-to-JPG generation must not change the selected source retention policy"
+
+print("classify RAW-to-JPG import integration tests passed")
 
 
 with tempfile.TemporaryDirectory(prefix="photoflow-routing-plan-test-") as temporary:
@@ -113,6 +198,7 @@ with tempfile.TemporaryDirectory(prefix="photoflow-work-routing-test-") as tempo
             "2026-07-17:1": str(morning_project),
             "2026-07-17:2": str(afternoon_project),
         },
+        delete_source=True,
     )
     assert not any(dcim.iterdir())
     assert (morning_project / "raw" / "morning.cr3").is_file()

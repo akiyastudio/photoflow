@@ -506,6 +506,10 @@ const registerVersionIpc = context => {
       } else if (versionKey.includes('_')) {
         throw new Error('分支版本必须选择父版本');
       }
+      const replacementTarget = progressFolders.find(progress => !subtreeIds.has(progress.id)
+        && progress.folderMissing
+        && progress.mediaKind === current.mediaKind
+        && progress.versionKey === versionKey);
 
       const updates = subtree.map(progress => {
         let nextVersionKey = versionKey;
@@ -543,7 +547,7 @@ const registerVersionIpc = context => {
         destinationPaths.add(pathIdentity);
       }
       for (const progress of progressFolders) {
-        if (subtreeIds.has(progress.id)) continue;
+        if (subtreeIds.has(progress.id) || progress.id === replacementTarget?.id) continue;
         if (versionKeys.has(`${progress.mediaKind}|${progress.versionKey.toLocaleLowerCase()}`)) throw new Error(`版本 _${progress.versionKey} 已存在`);
         if (displayNames.has(progress.displayName.toLocaleLowerCase('zh-CN'))) throw new Error(`进度名称已存在：${progress.displayName}`);
       }
@@ -570,18 +574,20 @@ const registerVersionIpc = context => {
         completedMoves.push(move);
       }
 
+      const databaseUpdates = updates.map(update => ({
+        id: replacementTarget && update.id === current.id ? replacementTarget.id : update.id,
+        mediaKind: update.mediaKind,
+        versionKey: update.versionKey,
+        parentProgressId: replacementTarget && update.parentProgressId === current.id ? replacementTarget.id : update.parentProgressId,
+        displayName: update.displayName,
+        folderPath: update.folderPath,
+        trackingEnabled: update.trackingEnabled,
+      }));
       const updated = await versionService.updateProgressTree(workspaceRoot, {
         projectName,
-        primaryProgressId: current.id,
-        updates: updates.map(update => ({
-          id: update.id,
-          mediaKind: update.mediaKind,
-          versionKey: update.versionKey,
-          parentProgressId: update.parentProgressId,
-          displayName: update.displayName,
-          folderPath: update.folderPath,
-          trackingEnabled: update.trackingEnabled,
-        })),
+        primaryProgressId: replacementTarget?.id || current.id,
+        replacementProgressId: replacementTarget ? current.id : undefined,
+        updates: databaseUpdates,
       });
       await versionService.syncProject(workspaceRoot, projectName).catch(error => {
         writeLog('warn', 'Progress tree updated but media rescan failed', { projectName, error: error.message || String(error) });
@@ -626,13 +632,14 @@ const registerVersionIpc = context => {
     }
   });
   
-  ipcMain.handle('workspace-version-compare-preview', async (_event, workspacePath, status, projectName, referenceRelativePath, sourceRelativePath) => {
+  ipcMain.handle('workspace-version-compare-preview', async (_event, workspacePath, status, projectName, referenceRelativePath, sourceRelativePath, sourceNames) => {
     try {
       const folderA = resolveProjectEntry(workspacePath, status, projectName, referenceRelativePath);
       const folderB = resolveProjectEntry(workspacePath, status, projectName, sourceRelativePath);
       if (!fs.statSync(folderA).isDirectory() || !fs.statSync(folderB).isDirectory()) throw new Error('版本对比必须选择两个文件夹');
       if (folderA.toLocaleLowerCase() === folderB.toLocaleLowerCase()) throw new Error('上一版本和新版本不能是同一个文件夹');
-      const events = await runPythonEventAction('rename.py', ['--folder_a', folderA, '--folder_b', folderB, '--preview'], 60 * 60 * 1000);
+      const selectedSourceNames = Array.isArray(sourceNames) ? [...new Set(sourceNames.map(value => String(value || '')).filter(value => value && path.basename(value) === value))] : [];
+      const events = await runPythonEventAction('rename.py', ['--folder_a', folderA, '--folder_b', folderB, '--preview', ...(selectedSourceNames.length ? ['--source_files', JSON.stringify(selectedSourceNames)] : [])], 60 * 60 * 1000);
       const preview = events.find(event => event.type === 'preview');
       if (!preview) throw new Error('版本对比没有返回匹配结果');
       return {
@@ -703,6 +710,7 @@ const registerVersionIpc = context => {
         displayName: cleanVersionName(request.displayName || path.basename(folderB)) || path.basename(folderB),
         renameSources: Boolean(request.renameSources),
         reconcileExisting: Boolean(request.reconcileExisting),
+        incrementalSources: Array.isArray(request.incrementalSources) ? request.incrementalSources : [],
         matches,
       });
       writeLog('info', 'Version batch committed', { projectName, folderA, folderB, matchCount: matches.length, copiedMissingCount: copiedMissingPaths.length, copyMissingErrorCount: copyMissingErrors.length, batch: result.batch?.sequence });

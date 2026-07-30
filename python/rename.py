@@ -4,6 +4,7 @@ import sys
 import argparse
 import io
 import subprocess
+import json
 from event_protocol import emit, log_error, log_info, log_progress, log_success
 from PIL import Image
 from ffmpeg_utils import get_ffmpeg_exe
@@ -178,13 +179,16 @@ def copy_unmatched_a_files(unmatched_files_a, folder_a):
         except Exception:
             pass
 
-def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_only=False, move_unmatched=False):
+def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_only=False, move_unmatched=False, source_files=None):
     media_extensions = IMAGE_EXTENSIONS + FFMPEG_IMAGE_EXTENSIONS + VIDEO_EXTENSIONS
     jpg_proxy_folder = find_selection_jpg_proxy_folder(folder_a)
     jpg_proxy_index = build_jpg_proxy_index(jpg_proxy_folder)
     proxy_count = 0
     list_a = [f for f in os.listdir(folder_a) if f.lower().endswith(media_extensions)]
     list_b = [f for f in os.listdir(folder_b) if f.lower().endswith(media_extensions)]
+    if source_files is not None:
+        selected_names = {str(file_name).casefold() for file_name in source_files}
+        list_b = [file_name for file_name in list_b if file_name.casefold() in selected_names]
     all_a = {f: (os.path.join(folder_a, f), media_kind(f)) for f in list_a}
     all_b = {f: (os.path.join(folder_b, f), media_kind(f)) for f in list_b}
 
@@ -403,6 +407,7 @@ def run(args_list):
     parser.add_argument("--threshold", type=int, default=5)
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--move_unmatched", action="store_true")
+    parser.add_argument("--source_files", default="")
     args = parser.parse_args(args_list)
 
     # 清理路径
@@ -414,7 +419,8 @@ def run(args_list):
         return
 
     try:
-        if process_folders(fa, fb, args.threshold, args.copy_unmatched, args.preview, args.move_unmatched):
+        source_files = json.loads(args.source_files) if args.source_files else None
+        if process_folders(fa, fb, args.threshold, args.copy_unmatched, args.preview, args.move_unmatched, source_files):
             emit('success', "所有任务结束")
     except Exception as e:
         log_error(f"错误: {e}")
