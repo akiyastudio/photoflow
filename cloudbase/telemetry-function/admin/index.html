@@ -42,6 +42,7 @@
         <a class="nav-item" href="#activity">活跃趋势</a>
         <a class="nav-item" href="#features">功能分析</a>
         <a class="nav-item" href="#stability">稳定性</a>
+        <a class="nav-item" href="#feedback">问题反馈</a>
       </nav>
       <div class="sidebar-footer">
         <span class="status-dot"></span>
@@ -106,6 +107,11 @@
             <span class="kpi-label">崩溃报告</span>
             <strong class="kpi-value" id="crash-count">—</strong>
             <span class="kpi-caption" id="crash-caption">影响 — 个匿名安装</span>
+          </article>
+          <article class="kpi-card accent-green">
+            <span class="kpi-label">问题反馈</span>
+            <strong class="kpi-value" id="feedback-count">—</strong>
+            <span class="kpi-caption" id="feedback-caption">待处理 — 条</span>
           </article>
         </div>
       </section>
@@ -199,6 +205,17 @@
             <div class="rank-list" id="crashes-by-process"></div>
           </div>
         </div>
+      </section>
+
+      <section class="panel feedback-panel" id="feedback" aria-labelledby="feedback-title">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-kicker">FEEDBACK</p>
+            <h2 id="feedback-title">最近问题与建议</h2>
+          </div>
+          <span class="panel-hint">按接收时间倒序，最多显示 30 条</span>
+        </div>
+        <div class="feedback-list" id="feedback-list"></div>
       </section>
 
       <footer class="page-footer">

@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const { Readable } = require('stream');
 
 const CONTENT_TYPES = new Map([
   ['.avi', 'video/x-msvideo'],
@@ -37,6 +36,36 @@ const parseByteRange = (rangeHeader, fileSize) => {
   return { start, end: Math.min(requestedEnd, fileSize - 1) };
 };
 
+// Node's Readable.toWeb adapter can enqueue once more after Electron cancels a
+// protocol response, raising ERR_INVALID_STATE as an uncaught exception. Own
+// the cancellation boundary so late file events are ignored safely.
+const createFileWebStream = (filePath, options) => {
+  let source;
+  let closed = false;
+  return new ReadableStream({
+    start(controller) {
+      source = fs.createReadStream(filePath, options);
+      source.on('data', chunk => {
+        if (!closed) controller.enqueue(new Uint8Array(chunk));
+      });
+      source.once('end', () => {
+        if (closed) return;
+        closed = true;
+        controller.close();
+      });
+      source.once('error', error => {
+        if (closed) return;
+        closed = true;
+        controller.error(error);
+      });
+    },
+    cancel() {
+      closed = true;
+      source?.destroy();
+    },
+  });
+};
+
 const createMediaFileResponse = async (filePath, request) => {
   const stat = await fs.promises.stat(filePath).catch(() => null);
   if (!stat?.isFile()) return new Response('Not found', { status: 404 });
@@ -58,7 +87,7 @@ const createMediaFileResponse = async (filePath, request) => {
 
   if (range) {
     const contentLength = range.end - range.start + 1;
-    const body = method === 'HEAD' ? null : Readable.toWeb(fs.createReadStream(filePath, range));
+    const body = method === 'HEAD' ? null : createFileWebStream(filePath, range);
     return new Response(body, {
       status: 206,
       headers: {
@@ -69,7 +98,7 @@ const createMediaFileResponse = async (filePath, request) => {
     });
   }
 
-  const body = method === 'HEAD' || stat.size === 0 ? null : Readable.toWeb(fs.createReadStream(filePath));
+  const body = method === 'HEAD' || stat.size === 0 ? null : createFileWebStream(filePath);
   return new Response(body, { status: 200, headers: { ...commonHeaders, 'Content-Length': String(stat.size) } });
 };
 

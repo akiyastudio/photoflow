@@ -308,6 +308,37 @@ function renderRankList(id, records, emptyMessage) {
   });
 }
 
+function renderFeedback(records) {
+  const container = byId('feedback-list');
+  clearElement(container);
+  const items = Array.isArray(records) ? records : [];
+  if (!items.length) {
+    container.appendChild(createEmptyState('所选周期内还没有问题反馈'));
+    return;
+  }
+  const statusLabels = { new: '待处理', investigating: '处理中', resolved: '已处理', ignored: '已忽略' };
+  items.forEach(item => {
+    const article = document.createElement('article');
+    article.className = 'feedback-item';
+    const meta = document.createElement('div');
+    meta.className = 'feedback-meta';
+    const version = document.createElement('span');
+    version.textContent = `v${String(item.appVersion || 'unknown')} · ${String(item.platform || 'unknown')}`;
+    const time = document.createElement('time');
+    const receivedAt = new Date(item.receivedAt || item.clientTime);
+    time.textContent = Number.isNaN(receivedAt.getTime()) ? '时间未知' : receivedAt.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+    const status = document.createElement('span');
+    status.className = `feedback-status status-${String(item.status || 'new')}`;
+    status.textContent = statusLabels[item.status] || String(item.status || '待处理');
+    meta.append(version, time, status);
+    const message = document.createElement('p');
+    message.className = 'feedback-message';
+    message.textContent = String(item.message || '');
+    article.append(meta, message);
+    container.appendChild(article);
+  });
+}
+
 function renderMetrics(metrics) {
   setText('activation-count', formatNumber(metrics.activationCount));
   setText('active-installations', formatNumber(metrics.activeInstallations));
@@ -316,6 +347,8 @@ function renderMetrics(metrics) {
   setText('update-check-caption', `发现可用更新 ${formatNumber(metrics.updateChecks?.updateAvailable)} 次`);
   setText('crash-count', formatNumber(metrics.crashes?.total));
   setText('crash-caption', `影响 ${formatNumber(metrics.crashes?.affectedInstallations)} 个匿名安装`);
+  setText('feedback-count', formatNumber(metrics.feedback?.total));
+  setText('feedback-caption', `待处理 ${formatNumber(metrics.feedback?.newCount)} 条`);
   renderDailyActive(metrics.dailyActive, metrics.windowDays, metrics.generatedAt);
   renderRetention(metrics.retention);
   renderFeatureChart(metrics.highFrequencyFeatures);
@@ -323,6 +356,7 @@ function renderMetrics(metrics) {
   renderRankList('crashes-by-version', metrics.crashes?.byAppVersion, '没有版本相关崩溃');
   renderRankList('crashes-by-error', metrics.crashes?.byErrorName, '没有错误类型数据');
   renderRankList('crashes-by-process', metrics.crashes?.byProcessType, '没有进程崩溃数据');
+  renderFeedback(metrics.feedback?.recent);
   elements.truncatedWarning.hidden = metrics.truncated !== true;
 
   const generated = new Date(metrics.generatedAt);

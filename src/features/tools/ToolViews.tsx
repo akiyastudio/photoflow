@@ -138,7 +138,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
   return { logs, isRunning, isCancelling, progress, statusMsg, preview, clearPreview: () => setPreview(null), start, cancel };
 };
 
-const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspaceProjects, active = true, onImportConfigChange, onImportComplete }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (projectNames: string[]) => void }) => {
+const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspaceProjects, active = true, directSource = false, onImportConfigChange, onImportComplete }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (projectNames: string[]) => void }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'finished'>('idle');
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("等待连接...");
@@ -171,7 +171,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   };
 
   const runCmd = (stage: string, args: string[] = []) => {
-    if(window.electronAPI) window.electronAPI.runScript('classify.py', ['--stage', stage, ...args], importRequestIdRef.current);
+    if(window.electronAPI) window.electronAPI.runScript('classify.py', ['--stage', stage, ...args, ...(directSource ? ['--direct_source', '--source_paths', JSON.stringify(selectedDrives)] : [])], importRequestIdRef.current);
   };
 
   useEffect(() => {
@@ -298,7 +298,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
 
   // 自动检查逻辑
   useEffect(() => {
-    if (active && config?.autoStart && !isBusyRef.current) {
+    if (active && !directSource && config?.autoStart && !isBusyRef.current) {
       checkSD();
     }
   }, [active, config?.autoStart]);
@@ -392,7 +392,9 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
       setStatusMsg('所选 SD 卡均未连接');
       return;
     }
-    const queue = connected.map(path => ({ path, type: driveTypes[path] || 'work' as const }));
+    const queue = directSource
+      ? [{ path: connected[0], type: 'work' as const }]
+      : connected.map(path => ({ path, type: driveTypes[path] || 'work' as const }));
     importQueueRef.current = queue.slice(1);
     importedProjectNamesRef.current = [];
     currentDriveRef.current = '';
@@ -487,21 +489,21 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
             {status === 'checking' ? <Loader2 className="animate-spin" size={18} /> : <HardDrive size={18} />}
           </div>
           <div className="flex flex-col">
-            <span className="text-sm font-bold text-slate-800">从SD卡导入媒体</span>
+            <span className="text-sm font-bold text-slate-800">{directSource ? '导入底片' : '从 SD 卡导入媒体'}</span>
             <span className="text-xs text-slate-500">{displayMsg}</span>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
-          <details className="relative" onClick={event => event.stopPropagation()}>
+          {!directSource && <details className="relative" onClick={event => event.stopPropagation()}>
             <summary className="flex h-9 min-w-36 cursor-pointer list-none items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:border-blue-400"><span className="max-w-40 truncate">{selectedDrives.length ? `已选 ${selectedDrives.length} 个盘符` : '选择盘符'}</span><ChevronDown size={15}/></summary>
             <div className="mt-1 min-w-56 rounded-lg border border-slate-200 bg-white p-2 shadow-xl">
               {[...new Set([...selectedDrives, ...drives])].map(drive => <div key={drive} className="flex items-center gap-2 rounded-md px-2 py-2 text-sm hover:bg-slate-50"><label className="flex min-w-0 cursor-pointer items-center gap-2"><input type="checkbox" checked={selectedDrives.includes(drive)} onChange={() => toggleDrive(drive)}/><span className="font-mono">{drive}</span></label><select aria-label={`${drive} 导入类型`} value={driveTypes[drive] || 'work'} onChange={event => setDriveType(drive, event.target.value as 'work' | 'broll')} className="ml-auto rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600" disabled={!selectedDrives.includes(drive)}><option value="work">工作文件</option><option value="broll">花絮</option></select><span className={`text-xs ${drives.includes(drive) ? 'text-emerald-600' : 'text-slate-400'}`}>{drives.includes(drive) ? '已连接' : '未连接'}</span></div>)}
               {!drives.length && !selectedDrives.length && <p className="px-2 py-1 text-xs text-slate-500">未检测到可用盘符</p>}
             </div>
-          </details>
+          </details>}
           {isConnected && status === 'idle' ? (
-            <button onClick={startBatchImport} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-bold flex items-center gap-2 shadow-md shadow-blue-500/20 transition-all animate-in zoom-in-95"><Download size={16} />{connectedDrives.length > 1 ? '批量导入' : '开始导入'}</button>
+            <button onClick={startBatchImport} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-bold flex items-center gap-2 shadow-md shadow-blue-500/20 transition-all animate-in zoom-in-95"><Download size={16} />{directSource ? '开始导入' : connectedDrives.length > 1 ? '批量导入' : '开始导入'}</button>
           ) : (
             <button disabled className={`p-2 rounded-lg transition ${status === 'checking' ? 'text-blue-500' : 'text-slate-300 bg-slate-50 cursor-not-allowed'}`}><RotateCcw size={18} className={status === 'checking' ? 'animate-spin' : ''} /></button>
           )}
@@ -518,7 +520,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
         <div className="flex justify-between items-center mb-6 z-10">
           <h3 className="text-lg font-semibold text-blue-200 flex items-center gap-2">
             <FolderInput size={20} />
-            从 SD 卡导入媒体
+            {directSource ? '导入底片' : '从 SD 卡导入媒体'}
           </h3>
           <span className="text-xs px-2 py-1 rounded border font-mono bg-blue-500/20 text-blue-300 border-blue-500/30">
             {status.toUpperCase().replace('_', ' ')}

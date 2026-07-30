@@ -180,7 +180,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .warning-banner { color: #805d16; border: 1px solid #f0dca7; background: #fffae9; }
 .banner button { border: 0; color: inherit; background: transparent; font-weight: 700; }
 
-.kpi-grid { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 14px; }
+.kpi-grid { display: grid; grid-template-columns: repeat(6, minmax(140px, 1fr)); gap: 14px; }
 .kpi-card {
   position: relative;
   min-height: 140px;
@@ -198,6 +198,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .accent-violet { --accent: #7658d7; }
 .accent-amber { --accent: #d99319; }
 .accent-red { --accent: #d94e5b; }
+.accent-green { --accent: #27966c; }
 .kpi-label { display: block; color: #687387; font-size: 12px; font-weight: 650; }
 .kpi-value { display: block; margin: 12px 0 10px; color: #182237; font-size: 32px; line-height: 1; letter-spacing: -0.04em; }
 .kpi-caption { color: #929aab; font-size: 11px; }
@@ -254,6 +255,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .bucket-label { color: #818b9c; font-size: 10px; text-align: center; }
 
 .stability-panel { margin-top: 14px; }
+.feedback-panel { margin-top: 14px; }
+.feedback-list { display: grid; gap: 10px; }
+.feedback-item { padding: 14px 15px; border: 1px solid #e6eaf0; border-radius: 10px; background: #fafbfd; }
+.feedback-meta { display: flex; align-items: center; gap: 10px; color: #7b8596; font-size: 10px; }
+.feedback-meta time { margin-left: auto; }
+.feedback-status { padding: 3px 7px; border-radius: 99px; color: #7b5a13; background: #fff2c9; font-weight: 650; }
+.feedback-status.status-resolved { color: #237052; background: #dff5ea; }
+.feedback-status.status-investigating { color: #315f9e; background: #e3eefc; }
+.feedback-status.status-ignored { color: #687286; background: #eceff3; }
+.feedback-message { margin: 10px 0 0; color: #374255; font-size: 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .crash-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; }
 .crash-column { min-width: 0; padding: 0 4px; }
 .crash-column + .crash-column { border-left: 1px solid #e8ecf2; padding-left: 22px; }

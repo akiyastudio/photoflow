@@ -67,6 +67,40 @@ def scan_sd_media(sd_path):
             )
     return base_sd, files
 
+def scan_direct_media(source_path):
+    """Read an explicitly selected file or directory without SD-card layout rules."""
+    normalized_source = os.path.normpath(source_path)
+    if os.path.isfile(normalized_source):
+        files = [normalized_source] if normalized_source.lower().endswith(VALID_MEDIA_EXTENSIONS) else []
+        return os.path.dirname(normalized_source), files
+    files = []
+    if os.path.isdir(normalized_source):
+        for root, dirs, names in os.walk(normalized_source):
+            dirs[:] = [directory for directory in dirs if not directory.startswith('.')]
+            files.extend(
+                os.path.join(root, name)
+                for name in names
+                if not name.startswith('.') and name.lower().endswith(VALID_MEDIA_EXTENSIONS)
+            )
+    return normalized_source, files
+
+def scan_import_media(source_path, direct_source=False, source_paths=None):
+    if not direct_source:
+        return scan_sd_media(source_path)
+    selected_sources = source_paths or [source_path]
+    files = []
+    seen = set()
+    for selected_source in selected_sources:
+        _root, selected_files = scan_direct_media(selected_source)
+        for file_path in selected_files:
+            normalized = os.path.normcase(os.path.abspath(file_path))
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            files.append(file_path)
+    root_label = os.path.dirname(selected_sources[0]) if len(selected_sources) > 1 and os.path.isfile(selected_sources[0]) else selected_sources[0]
+    return os.path.normpath(root_label), files
+
 def build_capture_groups(files, split_threshold_hours=2.0):
     """Group each capture day, additionally splitting at a clear time gap."""
     days = {}
@@ -95,10 +129,10 @@ def build_capture_groups(files, split_threshold_hours=2.0):
             })
     return groups
 
-def stage_plan_import(sd_path, projects_json, import_type='work', split_threshold_hours=2.0):
-    base_sd, files = scan_sd_media(sd_path)
+def stage_plan_import(sd_path, projects_json, import_type='work', split_threshold_hours=2.0, direct_source=False, source_paths=None):
+    base_sd, files = scan_import_media(sd_path, direct_source, source_paths)
     if not files:
-        log_error(f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
+        log_error(f"在 {base_sd} 中没有找到媒体文件" if direct_source else f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
         return
     try:
         projects = json.loads(projects_json or '[]')
@@ -267,7 +301,7 @@ def split_large_videos(target_folder):
             emit('warning', f'视频分割失败，已保留原文件 {file_name}：{detail}')
     return split_count
 # --- 3. 核心导入流程 ---
-def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_threshold_hours=2.0, should_split=None, generate_video_preview=False, split_large_files=False, project_routes=None, direct_project=False, video_preview_quality='medium'):
+def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_threshold_hours=2.0, should_split=None, generate_video_preview=False, split_large_files=False, project_routes=None, direct_project=False, video_preview_quality='medium', direct_source=False, source_paths=None):
     # 临时存放区（即使出错也保留，直到确认安全）
     temp_dir = os.path.join(dest_path, "_PhotoFlow_Safety_Temp")
     
@@ -277,12 +311,12 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
     created_projects = []
 
     try:
-        time.sleep(2.5)
         # Step 1: 扫描 SD 卡 (仅扫描 DCIM 和 PRIVATE 目录)
-        base_sd, original_sd_files = scan_sd_media(sd_path)
+        log_progress("正在扫描导入来源...", 0, {"bytesCopied": 0, "totalBytes": 0, "filesCopied": 0, "totalFiles": 0})
+        base_sd, original_sd_files = scan_import_media(sd_path, direct_source, source_paths)
         
         if not original_sd_files:
-            log_error(f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
+            log_error(f"在 {base_sd} 中没有找到媒体文件" if direct_source else f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
             return
 
         total_bytes = sum(os.path.getsize(file_path) for file_path in original_sd_files)
@@ -453,16 +487,16 @@ def stage_import_and_organize(sd_path, dest_path, backup_path=None, split_thresh
         # 异常情况下保留临时文件夹和 SD 卡文件，确保数据不丢
         gc.collect()
 
-def stage_import_broll(sd_path, dest_path, project_routes=None):
+def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=False, source_paths=None):
     """Copy card media into an explicitly selected project, grouped by media date."""
-    base_sd, original_files = scan_sd_media(sd_path)
+    base_sd, original_files = scan_import_media(sd_path, direct_source, source_paths)
     created_files = []
     created_date_folders = []
     source_cleanup_started = False
 
     try:
         if not original_files:
-            log_error(f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
+            log_error(f"在 {base_sd} 中没有找到媒体文件" if direct_source else f"在 {base_sd} 的 DCIM/PRIVATE 目录下没有找到媒体文件")
             return
 
         if not dest_path or not os.path.isdir(dest_path):
@@ -582,8 +616,14 @@ def run(args_list):
     parser.add_argument("--project_routes", default="{}")
     parser.add_argument("--import_type", choices=("work", "broll"), default="work")
     parser.add_argument("--direct_project", action="store_true")
+    parser.add_argument("--direct_source", action="store_true")
+    parser.add_argument("--source_paths", default="[]")
 
     args, _ = parser.parse_known_args(args_list)
+    try:
+        source_paths = [str(value) for value in json.loads(args.source_paths or '[]') if str(value).strip()]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        source_paths = []
     
     split_val = None
     if args.should_split.lower() == 'true': split_val = True
@@ -592,11 +632,11 @@ def run(args_list):
     if args.stage == 'check':
         log_status("SD Card Detected" if os.path.exists(args.sd_path) else "No Device", {"connected": os.path.exists(args.sd_path), "path": args.sd_path})
     elif args.stage == 'plan':
-        stage_plan_import(args.sd_path, args.projects_json, args.import_type, args.time_gap)
+        stage_plan_import(args.sd_path, args.projects_json, args.import_type, args.time_gap, args.direct_source, source_paths)
     elif args.stage == 'import':
-        stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files, json.loads(args.project_routes or '{}'), args.direct_project, args.video_preview_quality)
+        stage_import_and_organize(args.sd_path, args.dest_path, args.backup_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files, json.loads(args.project_routes or '{}'), args.direct_project, args.video_preview_quality, args.direct_source, source_paths)
     elif args.stage == 'broll':
-        stage_import_broll(args.sd_path, args.dest_path, json.loads(args.project_routes or '{}'))
+        stage_import_broll(args.sd_path, args.dest_path, json.loads(args.project_routes or '{}'), args.direct_source, source_paths)
 
 if __name__ == "__main__":
     run(sys.argv[1:])

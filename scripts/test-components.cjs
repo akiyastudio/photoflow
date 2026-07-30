@@ -55,10 +55,10 @@ try {
   assert(installer.includes('不会删除工作区、项目中的照片和视频'), 'uninstall cleanup must disclose that user project media remains untouched');
 
   const componentSystemIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
-  assert(componentSystemIpc.includes("properties: ['openFile']") && componentSystemIpc.includes("extensions: ['zip']"), 'component installation must let the user select a ZIP file');
-  assert(componentSystemIpc.includes('普通组件的原始安装文件由用户管理，照片流不会删除'), 'ordinary component source ZIP deletion must be rejected by the main process');
+  assert(componentSystemIpc.includes('resolvePreparedPackage(pluginService.installRoot'), 'component installation must scan the shared components root');
+  assert(componentSystemIpc.includes('allowedRoot = pluginService.installRoot'), 'component package cleanup must remain confined to the shared components root');
   const settingsSource = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
-  assert(!settingsSource.includes("kind: 'component'") && settingsSource.includes('不会移动或删除你选择的原 ZIP'), 'component UI must retain the selected source ZIP');
+  assert(settingsSource.includes("kind: 'component'") && settingsSource.includes('删除已使用的安装包吗？'), 'component UI must offer optional package cleanup after installation');
 
   const componentBuilder = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'build-components.cjs'), 'utf8');
   assert(componentBuilder.includes('PhotoFlow-${id}-${manifest.version}-${process.platform}-${process.arch}.zip'));

@@ -10,11 +10,12 @@ Collections required in the same CloudBase environment:
 - `analytics_events`
 - `crash_reports`
 - `app_releases`
+- `user_feedback`
 
 不要给这些集合开放客户端读写权限。桌面软件只访问 HTTP 云函数；
 CloudBase 凭据和 `PHOTOFLOW_ADMIN_TOKEN` 只保存在云函数环境变量中。
 
 发布记录的必填产物字段只有 `downloadUrl` 和 `sha256`。
 
-上传包使用仓库根目录下的 `output/photoflow-cloud-function.zip`。详细操作见
+上传包使用仓库根目录下的 `output/photoflow-cloud-function-dashboard-cloudbase.zip`。详细操作见
 `../../docs/CLOUDBASE_ANALYTICS_GUIDE.md`。

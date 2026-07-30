@@ -11,7 +11,10 @@ type ConsentDialog = {
 };
 
 export const ensureFaceRecognitionConsent = async (dialog: ConsentDialog) => {
-  const state = await window.electronAPI.getPrivacyConsentState();
+  const api = window.electronAPI;
+  if (api?.apiContractVersion !== 1 || typeof api.getPrivacyConsentState !== 'function'
+    || typeof api.savePrivacyConsent !== 'function' || typeof api.openLegalDocument !== 'function') return false;
+  const state = await api.getPrivacyConsentState();
   if (state.faceRecognitionGranted) return true;
 
   let choice: string | null = 'rules';
@@ -28,10 +31,10 @@ export const ensureFaceRecognitionConsent = async (dialog: ConsentDialog) => {
       defaultValue: 'agree',
     });
     if (choice === 'rules') {
-      await window.electronAPI.openLegalDocument('face');
+      await api.openLegalDocument('face');
     }
   }
   if (choice !== 'agree') return false;
-  const result = await window.electronAPI.savePrivacyConsent({ faceRecognitionGranted: true });
+  const result = await api.savePrivacyConsent({ faceRecognitionGranted: true });
   return result.success && result.state?.faceRecognitionGranted === true;
 };
