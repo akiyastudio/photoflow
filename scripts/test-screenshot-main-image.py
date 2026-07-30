@@ -50,6 +50,19 @@ def make_concentrated_phone_artwork() -> np.ndarray:
     return screenshot
 
 
+def make_sparse_line_art_screenshot() -> np.ndarray:
+    """A white, low-texture sketch panel between solid black app chrome."""
+    height, width = 1000, 600
+    screenshot = np.full((height, width, 3), 8, dtype=np.uint8)
+    screenshot[100:850] = 250
+    ink = (205, 175, 190)
+    cv2.circle(screenshot, (315, 245), 55, ink, 3)
+    cv2.ellipse(screenshot, (305, 460), (75, 190), 10, 0, 360, ink, 4)
+    cv2.line(screenshot, (285, 625), (250, 790), ink, 4)
+    cv2.line(screenshot, (335, 625), (370, 790), ink, 4)
+    return screenshot
+
+
 with tempfile.TemporaryDirectory(prefix="photoflow-screenshot-main-") as temporary:
     directory = Path(temporary)
 
@@ -78,6 +91,16 @@ with tempfile.TemporaryDirectory(prefix="photoflow-screenshot-main-") as tempora
     phone_screenshot = make_concentrated_phone_artwork()
     phone_rectangle, phone_confidence, phone_reason = MODULE.detect_main_rectangle(phone_screenshot)
     assert phone_rectangle == (0, 27, 179, 361), (phone_rectangle, phone_confidence, phone_reason)
+
+    # Strong opposing frame edges must outweigh the sparse sketch's low
+    # texture, and its intentional white canvas must not be trimmed away.
+    line_art = make_sparse_line_art_screenshot()
+    line_art_rectangle, line_art_confidence, line_art_reason = MODULE.detect_main_rectangle(line_art)
+    assert line_art_rectangle == (0, 100, 600, 850), (
+        line_art_rectangle,
+        line_art_confidence,
+        line_art_reason,
+    )
 
     # A weak boundary on only one side is not enough evidence to delete the
     # opposite, low-texture portion of an image.

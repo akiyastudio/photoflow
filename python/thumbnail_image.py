@@ -11,6 +11,13 @@ import sys
 from pathlib import Path
 
 from PIL import Image, ImageOps
+from pi_heif import register_heif_opener
+
+
+# Pillow does not decode HEIC/HEIF by itself. Register pi-heif once in this
+# long-lived worker so thumbnails and browser-compatible full-size previews use
+# the same decoder without relying on an optional Windows codec extension.
+register_heif_opener(thumbnails=False)
 
 
 def _embedded_jpeg(source_path: str) -> Image.Image:

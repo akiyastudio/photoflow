@@ -1,5 +1,5 @@
 const registerMediaIpc = context => {
-  const { Buffer, Date, Error, IMAGE_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog } = context;
+  const { Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog } = context;
 
   ipcMain.handle('media-thumbnail', async (_event, filePath, kind, cacheConfig = {}, requestedSize = 640, priority = PRIORITY.visible, queueOrder = Number.MAX_SAFE_INTEGER) => {
     try {
@@ -33,7 +33,16 @@ const registerMediaIpc = context => {
       const extension = path.extname(sourcePath).toLowerCase();
       const supported = kind === 'raw' ? RAW_EXTENSIONS.has(extension) : kind === 'image' ? IMAGE_EXTENSIONS.has(extension) : false;
       if (!supported || !fs.existsSync(sourcePath)) throw new Error('图片不存在或格式不受支持');
-      if (kind === 'image') return { success: true, mediaUrl: mediaService.toUrl(sourcePath, true), original: true };
+      if (kind === 'image' && !IMAGE_PREVIEW_CONVERSION_EXTENSIONS.has(extension)) {
+        return { success: true, mediaUrl: mediaService.toUrl(sourcePath, true), original: true };
+      }
+
+      if (kind === 'image') {
+        const stat = await fs.promises.stat(sourcePath);
+        const previewPath = await convertedImagePreviewPath(sourcePath, stat, cacheConfig);
+        if (!previewPath) throw new Error('图片无法转换为可显示的预览');
+        return { success: true, mediaUrl: mediaService.toUrl(previewPath, true), original: false };
+      }
   
       // Chromium cannot decode camera RAW containers directly. Use the largest
       // camera-embedded JPEG, which is the closest displayable source preview.

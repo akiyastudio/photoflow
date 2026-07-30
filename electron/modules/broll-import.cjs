@@ -12,7 +12,7 @@ const {
   uniqueDestination,
 } = require('../services/file-transfer-service.cjs');
 
-const BROLL_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.heic', '.mp4', '.mov', '.avi', '.m4v', '.mkv']);
+const BROLL_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.avif', '.heic', '.heif', '.hif', '.mp4', '.mov', '.avi', '.m4v', '.mkv']);
 const BROLL_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.m4v', '.mkv']);
 const FOUR_GB = 4 * 1024 * 1024 * 1024;
 

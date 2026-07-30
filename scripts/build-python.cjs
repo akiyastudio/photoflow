@@ -21,7 +21,7 @@ const result = spawnSync(python, [
   '--exclude-module', 'torch', '--exclude-module', 'torchvision',
   '--exclude-module', 'torchaudio', '--exclude-module', 'triton',
   '--exclude-module', 'PIL._imagingmath',
-  '--exclude-module', 'PIL._imagingtk', '--exclude-module', 'PIL._webp',
+  '--exclude-module', 'PIL._imagingtk',
   '--hidden-import', 'catch', '--hidden-import', 'classify',
   '--hidden-import', 'cut_video', '--hidden-import', 'png_to_jpg',
   '--hidden-import', 'rename',
