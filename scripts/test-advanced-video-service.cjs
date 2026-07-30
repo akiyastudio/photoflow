@@ -83,6 +83,7 @@ const run = async () => {
 
   assert.strictEqual(service.stop(result.sessionId, sender.id), true);
   assert.strictEqual(service.sessions.size, 0);
+  assert.strictEqual(sender.listenerCount('destroyed'), 0, 'stopped sessions must remove their WebContents destroyed listener');
   assert.strictEqual(stdinLines.at(-1).command, 'close');
   console.log('Advanced video service tests passed');
 };

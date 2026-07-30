@@ -7,6 +7,7 @@ const invokeFeature = (feature, channel, ...args) => {
 };
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  apiContractVersion: 1,
   runScript: (scriptName, args, requestId) => {
     const feature = String(scriptName || '').replace(/\.py$/i, '').replace(/[^a-z0-9_]/gi, '_').slice(0, 48);
     if (feature) trackFeature(feature);
@@ -34,6 +35,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   openExternal: (url) => ipcRenderer.send('open-external', url),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
+  submitFeedback: (message) => ipcRenderer.invoke('submit-feedback', message),
   checkScript: (scriptName) => ipcRenderer.invoke('check-script', scriptName),
   getComponents: () => ipcRenderer.invoke('components-list'),
   onComponentsStatusChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('components-status-changed', subscription); return () => ipcRenderer.removeListener('components-status-changed', subscription); },
@@ -154,6 +156,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   cancelProjectFileOperation: (operationId) => ipcRenderer.invoke('workspace-cancel-file-operation', operationId),
   chooseCacheDirectory: () => ipcRenderer.invoke('choose-cache-directory'),
   chooseWorkspaceDirectory: (currentPath) => ipcRenderer.invoke('choose-workspace-directory', currentPath),
+  chooseImportSourceFiles: () => ipcRenderer.invoke('choose-import-source-files'),
   getMediaCacheInfo: (cacheConfig) => ipcRenderer.invoke('media-cache-info', cacheConfig),
   clearMediaCache: (cacheConfig, olderThanDays) => ipcRenderer.invoke('media-cache-clear', cacheConfig, olderThanDays),
   getBackgroundTasks: () => ipcRenderer.invoke('background-tasks-list'),

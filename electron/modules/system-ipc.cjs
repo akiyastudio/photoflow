@@ -177,7 +177,7 @@ const registerSystemIpc = context => {
     throw new Error(`未在组件安装包目录中找到${description}：${packageRoot}`);
   };
   const resolveAdvancedPackage = () => resolvePreparedPackage(teamRetouchRoot(), /^PhotoFlow-team-retouch-advanced-.*\.zip$/i, '照片流高级引擎包');
-  const resolveComponentPackage = componentId => resolvePreparedPackage(componentRoot(componentId), new RegExp(`^PhotoFlow-${String(componentId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-(?!identity-models-|advanced-).*-${process.platform}-${process.arch}\\.zip$`, 'i'), `“${componentId}”组件包`);
+  const resolveComponentPackage = componentId => resolvePreparedPackage(pluginService.installRoot, new RegExp(`^PhotoFlow-${String(componentId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-(?!identity-models-|advanced-).*-${process.platform}-${process.arch}\\.zip$`, 'i'), `“${componentId}”组件包`);
   const resolvePackageForDeletion = async (kind, componentId = '') => {
     let archivePath;
     let allowedRoot;
@@ -188,7 +188,7 @@ const registerSystemIpc = context => {
       const known = pluginService.list().find(component => component.id === componentId);
       if (!known) throw new Error(`未知组件：${componentId}`);
       archivePath = await resolveComponentPackage(componentId);
-      allowedRoot = componentRoot(componentId);
+      allowedRoot = pluginService.installRoot;
     } else {
       throw new Error('不支持的安装包类型');
     }
@@ -254,7 +254,12 @@ const registerSystemIpc = context => {
   });
 
   ipcMain.on('renderer-error-log', (_event, message, details) => {
-    writeLog('error', `Renderer: ${String(message || '未知错误').slice(0, 500)}`, String(details || '').slice(0, 4000));
+    const text = String(message || '未知错误').slice(0, 500);
+    const detailText = String(details || '').slice(0, 4000);
+    const isCrash = /(?:Uncaught|界面渲染失败|React 界面渲染失败)/i.test(text)
+      && !/(?:\[hmr\]|validateDOMNesting)/i.test(`${text}\n${detailText}`);
+    writeLog(isCrash ? 'error' : 'warn', `Renderer: ${text}`, detailText);
+    if (!isCrash) return;
     const error = new Error(String(message || 'Renderer error'));
     error.stack = String(details || error.stack || '');
     telemetryService?.reportCrash('renderer_error', error);
@@ -288,6 +293,7 @@ const registerSystemIpc = context => {
   });
   
   ipcMain.handle('check-for-updates', async () => checkForUpdates());
+  ipcMain.handle('submit-feedback', async (_event, message) => telemetryService.submitFeedback(message));
   
   ipcMain.handle('set-theme', async (_event, theme) => {
     if (!mainWindow) return;
@@ -384,14 +390,7 @@ const registerSystemIpc = context => {
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，请在打包版本中测试安装');
       const knownComponent = pluginService.list().find(component => component.id === componentId);
       if (!knownComponent) throw new Error(`未知组件：${componentId}`);
-      const selection = await dialog.showOpenDialog(mainWindow, {
-        title: `选择“${knownComponent.name || componentId}”组件安装包`,
-        properties: ['openFile'],
-        filters: [{ name: '照片流组件安装包', extensions: ['zip'] }],
-      });
-      if (selection.canceled || !selection.filePaths[0]) return { success: false, cancelled: true };
-      const archivePath = path.resolve(selection.filePaths[0]);
-      if (path.extname(archivePath).toLowerCase() !== '.zip') throw new Error('请选择 ZIP 格式的组件安装包');
+      const archivePath = await resolveComponentPackage(componentId);
       const packageSizeBytes = (await fs.promises.stat(archivePath)).size;
       packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${process.pid}-${Date.now()}`);
       await extractPreparedPackage(archivePath, packageStagePath);
@@ -444,7 +443,7 @@ const registerSystemIpc = context => {
       queueSystemFilesystemCleanup(cleanupPaths, `清理“${componentId}”组件旧文件`);
       invalidateComponentStatus();
       writeLog('info', 'Component installed', { componentId, destination });
-      return { success: true, packageSizeBytes, sourcePackagePath: archivePath };
+      return { success: true, packageSizeBytes };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     } finally {
@@ -456,7 +455,6 @@ const registerSystemIpc = context => {
 
   ipcMain.handle('components-delete-package', async (_event, kind, componentId = '') => {
     try {
-      if (kind !== 'advanced') throw new Error('普通组件的原始安装文件由用户管理，照片流不会删除');
       const archivePath = await resolvePackageForDeletion(String(kind || ''), String(componentId || ''));
       const stat = await fs.promises.stat(archivePath);
       if (!stat.isFile()) throw new Error('安装包不是普通文件');
@@ -837,6 +835,15 @@ const registerSystemIpc = context => {
       properties: ['openDirectory', 'createDirectory']
     });
     return choice.canceled ? { cancelled: true } : { path: choice.filePaths[0] };
+  });
+
+  ipcMain.handle('choose-import-source-files', async () => {
+    const choice = await dialog.showOpenDialog(mainWindow, {
+      title: '选择要导入的底片文件',
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: '照片、RAW 与视频', extensions: ['jpg', 'jpeg', 'png', 'arw', 'cr2', 'cr3', 'dng', 'nef', 'orf', 'heic', 'mp4', 'mov', 'avi', 'crm', 'rwl', 'raf', '3fr', 'fff'] }],
+    });
+    return choice.canceled ? { cancelled: true, paths: [] } : { paths: choice.filePaths };
   });
   
   ipcMain.handle('photoshop-status', async () => {

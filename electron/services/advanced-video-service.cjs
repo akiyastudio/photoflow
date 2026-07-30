@@ -33,6 +33,10 @@ const createAdvancedVideoService = ({ BrowserWindow, crypto, mediaService, path,
     if (!session || senderId !== undefined && session.sender.id !== senderId) return false;
     sessions.delete(session.id);
     session.stopped = true;
+    if (session.onSenderDestroyed) {
+      session.sender.removeListener('destroyed', session.onSenderDestroyed);
+      session.onSenderDestroyed = null;
+    }
     for (const pending of session.pendingScreenshots.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error('视频播放已经停止'));
@@ -63,9 +67,10 @@ const createAdvancedVideoService = ({ BrowserWindow, crypto, mediaService, path,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    const session = { id, sender, child, filePath: authorizedPath, stopped: false, ready: false, lastError: '', pendingScreenshots: new Map() };
+    const session = { id, sender, child, filePath: authorizedPath, stopped: false, ready: false, lastError: '', pendingScreenshots: new Map(), onSenderDestroyed: null };
     sessions.set(id, session);
-    sender.once('destroyed', () => stop(id, sender.id));
+    session.onSenderDestroyed = () => stop(id, sender.id);
+    sender.once('destroyed', session.onSenderDestroyed);
 
     const decoder = new StringDecoder('utf8');
     let buffered = '';

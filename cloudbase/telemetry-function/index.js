@@ -16,6 +16,7 @@ const EVENT_NAMES = new Set([
   'project_created',
   'photos_imported',
   'update_checked',
+  'media_preview_failed',
 ]);
 const COUNT_BUCKETS = new Set(['1-20', '21-100', '101-500', '501-2000', '2001+']);
 const PLATFORMS = new Set(['win32', 'darwin', 'linux']);
@@ -154,7 +155,7 @@ const validateClient = body => {
 app.get('/health', (_request, response) => response.json({
   ok: true,
   service: 'photoflow-telemetry-api',
-  build: '2026-07-28.5',
+  build: '2026-07-30.1',
   databaseInstance: 'default',
 }));
 
@@ -226,10 +227,39 @@ app.post('/v1/crashes', requireApp, rateLimit(20, 60_000), async (request, respo
       stack: redactText(body.stack, 16000),
       logTail: redactText(body.logTail, 48 * 1024),
       extra: safeProperties(body.extra),
+      fingerprint: validSha256(body.fingerprint) ? body.fingerprint.toLowerCase() : '',
       status: 'new',
     });
     assertDatabaseWrite(result, 'crash_reports.set');
     response.status(202).json({ accepted: true, crashId: body.id });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/v1/feedback', requireApp, rateLimit(10, 60_000), async (request, response, next) => {
+  try {
+    const body = request.body || {};
+    const clientError = validateClient(body);
+    const message = safeText(body.message, 4001).trim();
+    if (clientError || !isUuid(body.id) || !validIsoTime(body.clientTime)) {
+      return response.status(400).json({ error: clientError || 'invalid_feedback' });
+    }
+    if (message.length < 2 || message.length > 4000) {
+      return response.status(400).json({ error: 'invalid_message' });
+    }
+    const result = await db.collection('user_feedback').doc(body.id).set({
+      installHash: sha256(body.installId),
+      appVersion: body.appVersion,
+      platform: body.platform,
+      arch: safeText(body.arch, 24),
+      clientTime: body.clientTime,
+      receivedAt: new Date().toISOString(),
+      message,
+      status: 'new',
+    });
+    assertDatabaseWrite(result, 'user_feedback.set');
+    response.status(202).json({ accepted: true });
   } catch (error) {
     next(error);
   }
@@ -295,6 +325,40 @@ const loadCrashes = async maximum => {
   return records;
 };
 
+const loadFeedback = async maximum => {
+  const pageSize = 100;
+  const records = [];
+  for (let offset = 0; offset < maximum; offset += pageSize) {
+    const page = await db.collection('user_feedback')
+      .orderBy('receivedAt', 'desc')
+      .skip(offset)
+      .limit(pageSize)
+      .get();
+    const batch = databaseRows(page, 'user_feedback.get');
+    records.push(...batch);
+    if (batch.length < pageSize) break;
+  }
+  return records;
+};
+
+// Prefer this endpoint over the CloudBase console's line-oriented database
+// export. Express serializes the array as strict UTF-8 JSON, including Windows
+// paths and non-ASCII log content.
+app.get('/v1/admin/crashes-export', rateLimit(10, 60_000), requireAdmin, async (request, response, next) => {
+  try {
+    const maximum = Math.min(10_000, Math.max(1, Number(request.query.limit) || 10_000));
+    const crashes = await loadCrashes(maximum);
+    response.set({
+      'Cache-Control': 'no-store',
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="photoflow-crashes-${new Date().toISOString().slice(0, 10)}.json"`,
+    });
+    response.send(JSON.stringify(crashes));
+  } catch (error) {
+    next(error);
+  }
+});
+
 const countBy = (records, valueFor) => Object.entries(records.reduce((counts, record) => {
   const value = safeText(valueFor(record) || 'unknown', 160) || 'unknown';
   counts[value] = (counts[value] || 0) + 1;
@@ -307,10 +371,11 @@ app.get('/v1/admin/metrics', (_request, response, next) => {
 }, rateLimit(30, 60_000), requireAdmin, async (request, response, next) => {
   try {
     const days = Math.min(90, Math.max(7, Number(request.query.days) || 30));
-    const [allEvents, allCrashes] = await Promise.all([loadEvents(50_000), loadCrashes(10_000)]);
+    const [allEvents, allCrashes, allFeedback] = await Promise.all([loadEvents(50_000), loadCrashes(10_000), loadFeedback(10_000)]);
     const cutoff = Date.now() - days * 86_400_000;
     const events = allEvents.filter(event => new Date(event.clientTime).getTime() >= cutoff);
     const crashes = allCrashes.filter(crash => new Date(crash.clientTime).getTime() >= cutoff);
+    const feedback = allFeedback.filter(item => new Date(item.clientTime).getTime() >= cutoff);
     const sessions = events.filter(event => event.eventName === 'session_start');
     const activeByDate = new Map();
     const firstSeen = new Map();
@@ -356,7 +421,7 @@ app.get('/v1/admin/metrics', (_request, response, next) => {
     response.json({
       windowDays: days,
       generatedAt: new Date().toISOString(),
-      truncated: allEvents.length >= 50_000 || allCrashes.length >= 10_000,
+      truncated: allEvents.length >= 50_000 || allCrashes.length >= 10_000 || allFeedback.length >= 10_000,
       activationCount: [...firstSeen.values()].filter(date => new Date(`${date}T00:00:00Z`).getTime() >= cutoff).length,
       activeInstallations: new Set(sessions.map(event => event.installHash)).size,
       projectCreationCount: events.filter(event => event.eventName === 'project_created').length,
@@ -374,6 +439,20 @@ app.get('/v1/admin/metrics', (_request, response, next) => {
         byProcessType: countBy(crashes, crash => crash.processType),
         byErrorName: countBy(crashes, crash => crash.errorName),
         byAppVersion: countBy(crashes, crash => crash.appVersion),
+      },
+      feedback: {
+        total: feedback.length,
+        newCount: feedback.filter(item => String(item.status || 'new') === 'new').length,
+        byAppVersion: countBy(feedback, item => item.appVersion),
+        recent: feedback.slice(0, 30).map(item => ({
+          id: safeText(item._id, 80),
+          message: safeText(item.message, 4000),
+          appVersion: safeText(item.appVersion, 32),
+          platform: safeText(item.platform, 24),
+          clientTime: safeText(item.clientTime, 40),
+          receivedAt: safeText(item.receivedAt, 40),
+          status: safeText(item.status || 'new', 24),
+        })),
       },
     });
   } catch (error) {

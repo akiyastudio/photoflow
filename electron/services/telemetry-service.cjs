@@ -2,6 +2,8 @@ const ALLOWED_EVENT_NAME = /^[a-z][a-z0-9_]{1,63}$/;
 const MAX_QUEUE_ITEMS = 1000;
 const MAX_PROPERTY_COUNT = 24;
 const MAX_STRING_LENGTH = 160;
+const CRASH_DEDUPE_WINDOW_MS = 10 * 60 * 1000;
+const NON_CRASH_MESSAGE = /(?:\[hmr\]|validateDOMNesting|Original image (?:preview|decode)|decoder failed; falling back|Failed to reload)/i;
 const ALLOWED_PROPERTY_NAMES = new Set([
   'first_launch',
   'feature',
@@ -63,6 +65,7 @@ const createTelemetryService = ({
   let timer = null;
   let flushing = false;
   let previousAnalyticsEnabled = false;
+  const recentCrashFingerprints = new Map();
 
   const readJson = (filePath, fallback) => {
     try {
@@ -146,7 +149,21 @@ const createTelemetryService = ({
 
   const reportCrash = (processType, error, extra = {}) => {
     if (!getConsent().crashes) return false;
+    // Development errors (notably Vite HMR and React warnings) are useful in
+    // the local log, but they are not release crashes and distort incidence.
+    if (!app.isPackaged) return false;
     const normalized = error instanceof Error ? error : new Error(String(error || 'Unknown error'));
+    if (NON_CRASH_MESSAGE.test(`${normalized.message}\n${normalized.stack || ''}`)) return false;
+    const stackHead = String(normalized.stack || '').split(/\r?\n/).slice(0, 4).join('\n');
+    const fingerprint = crypto.createHash('sha256')
+      .update(`${processType}\0${normalized.name}\0${normalized.message}\0${stackHead}`)
+      .digest('hex');
+    const now = Date.now();
+    for (const [key, seenAt] of recentCrashFingerprints) {
+      if (now - seenAt >= CRASH_DEDUPE_WINDOW_MS) recentCrashFingerprints.delete(key);
+    }
+    if (recentCrashFingerprints.has(fingerprint)) return false;
+    recentCrashFingerprints.set(fingerprint, now);
     enqueue({
       kind: 'crash',
       payload: {
@@ -158,10 +175,30 @@ const createTelemetryService = ({
         stack: redactSensitiveText(normalized.stack || '').slice(0, 16000),
         logTail: readErrorLogTail(),
         extra: sanitizeProperties(extra),
+        fingerprint,
       },
     });
     void flush();
     return true;
+  };
+
+  const submitFeedback = async message => {
+    const text = String(message || '').trim();
+    if (text.length < 2 || text.length > 4000) {
+      return { success: false, error: '问题和建议需填写 2—4000 个字符' };
+    }
+    try {
+      await postJson('/v1/feedback', {
+        ...commonPayload(),
+        id: crypto.randomUUID(),
+        clientTime: new Date().toISOString(),
+        message: text,
+      });
+      return { success: true };
+    } catch (error) {
+      writeLog('warn', 'Feedback submission failed', { error: error.message || String(error) });
+      return { success: false, error: '发送失败，请检查网络后重试' };
+    }
   };
 
   const postJson = async (route, body) => {
@@ -250,7 +287,7 @@ const createTelemetryService = ({
     void flush();
   };
 
-  return { start, stop, flush, track, reportCrash, syncConsent, clearLocalData, countBucket };
+  return { start, stop, flush, track, reportCrash, submitFeedback, syncConsent, clearLocalData, countBucket };
 };
 
 module.exports = { createTelemetryService, countBucket };

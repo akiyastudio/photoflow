@@ -8,7 +8,7 @@ export type ToolType = 'home' | 'inspiration' | 'project' | 'project-version' | 
 
 export type Theme = 'light' | 'dark' | 'system';
 export type HomeCardId = 'birthday' | 'import' | 'inspiration';
-export const PROJECT_TOOLBAR_ACTION_IDS = ['smart-import', 'filename-selection', 'select-media', 'storyboard', 'screenshot-main-image', 'photoshop', 'png-converter', 'version-management', 'team-retouch', 'final-versions'] as const;
+export const PROJECT_TOOLBAR_ACTION_IDS = ['filename-selection', 'select-media', 'storyboard', 'screenshot-main-image', 'photoshop', 'png-converter', 'version-management', 'team-retouch', 'final-versions'] as const;
 export type ProjectToolbarActionId = typeof PROJECT_TOOLBAR_ACTION_IDS[number];
 export interface ProjectToolbarSettings {
   order: ProjectToolbarActionId[];
@@ -452,6 +452,7 @@ export interface BackgroundTask {
 }
 
 export interface IElectronAPI {
+  readonly apiContractVersion: number;
   onPythonEvent: any;
   runScript: (scriptName: string, args?: string[], requestId?: string) => void;
   cancelPythonTask: (requestId: string) => Promise<{ success: boolean; error?: string }>;
@@ -467,6 +468,7 @@ export interface IElectronAPI {
   onUpdateAvailable: (callback: (info: { version: string; url: string; notes: string }) => void) => () => void;
   openExternal: (url: string) => void;
   checkForUpdates: () => Promise<{ success: boolean; updateAvailable?: boolean; currentVersion?: string; latestVersion?: string; url?: string; notes?: string; sha256?: string; error?: string }>;
+  submitFeedback: (message: string) => Promise<{ success: boolean; error?: string }>;
   checkScript: (scriptName: string) => Promise<boolean>;
   getComponents: () => Promise<{ success: boolean; components: ComponentStatus[]; installPath: string; error?: string }>;
   onComponentsStatusChanged: (callback: (result: { success: boolean; components: ComponentStatus[]; installPath: string; error?: string }) => void) => () => void;
@@ -475,8 +477,8 @@ export interface IElectronAPI {
   clearLogs: () => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
   clearInterfaceCache: () => Promise<{ success: boolean; clearedBytes?: number; error?: string }>;
   getCursorScreenPoint: () => Promise<{ x: number; y: number }>;
-  installComponent: (componentId: string) => Promise<{ success: boolean; cancelled?: boolean; packageSizeBytes?: number; sourcePackagePath?: string; error?: string }>;
-  deleteComponentPackage: (kind: 'advanced') => Promise<{ success: boolean; deletedBytes?: number; error?: string }>;
+  installComponent: (componentId: string) => Promise<{ success: boolean; cancelled?: boolean; packageSizeBytes?: number; error?: string }>;
+  deleteComponentPackage: (kind: 'component' | 'advanced', componentId?: string) => Promise<{ success: boolean; deletedBytes?: number; error?: string }>;
   uninstallComponent: (componentId: string) => Promise<{ success: boolean; error?: string }>;
   checkTeamRetouchAdvancedRequirements: () => Promise<{ success: boolean; message?: string; error?: string }>;
   installTeamRetouchAdvanced: (options?: { repair?: boolean }) => Promise<{ success: boolean; cancelled?: boolean; restartRequired?: boolean; packageSizeBytes?: number; error?: string }>;
@@ -615,7 +617,8 @@ export interface IElectronAPI {
   onProjectFileOperationProgress: (callback: (progress: ProjectFileOperationProgress) => void) => () => void;
   cancelProjectFileOperation: (operationId: string) => Promise<{ success: boolean; error?: string }>;
   chooseCacheDirectory: () => Promise<{ cancelled?: boolean; path?: string }>;
-  chooseWorkspaceDirectory: (currentPath?: string) => Promise<{ cancelled?: boolean; path?: string }>;
+  chooseWorkspaceDirectory: (currentPath?: string) => Promise<{ success?: boolean; cancelled?: boolean; path?: string }>;
+  chooseImportSourceFiles: () => Promise<{ cancelled?: boolean; paths: string[] }>;
   getMediaCacheInfo: (cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path: string; sizeBytes: number; fileCount: number; error?: string }>;
   clearMediaCache: (cacheConfig?: AppConfig['mediaCache'], olderThanDays?: number) => Promise<{ success: boolean; deletedCount?: number; prunedSourceCount?: number; taskId?: string; error?: string }>;
   getBackgroundTasks: () => Promise<{ success: boolean; tasks: BackgroundTask[] }>;

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { FolderOpen, HardDrive, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, ScanSearch, Loader2, Cpu, Wrench, ExternalLink, AtSign, Scale, GripVertical, MemoryStick, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, Crop, Heart, ShieldCheck } from 'lucide-react';
+import { FolderOpen, HardDrive, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, ScanSearch, Loader2, Cpu, Wrench, ExternalLink, AtSign, Scale, GripVertical, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, Crop, Heart, ShieldCheck, MessageSquareText, Send } from 'lucide-react';
 import { PROJECT_TOOLBAR_ACTION_IDS } from '../../types';
 import type { AppConfig, ComponentStatus, LegalDocumentId, PrivacyConsentState, ProjectToolbarActionId } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
@@ -10,7 +10,7 @@ const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
 };
-export type SettingsSection = 'general' | 'privacy' | 'storage' | 'components' | 'import' | 'team-retouch' | 'inspiration-library' | 'about';
+export type SettingsSection = 'general' | 'privacy' | 'storage' | 'components' | 'import' | 'team-retouch' | 'inspiration-library' | 'about' | 'feedback';
 
 export const PrivacyConsentPage = ({ onAccept }: { onAccept: () => void | Promise<void> }) => {
   const [acceptedLegal, setAcceptedLegal] = useState(false);
@@ -58,9 +58,10 @@ const formatStorageSize = (sizeBytes = 0) => sizeBytes >= 1024 ** 3
   ? `${(sizeBytes / 1024 ** 3).toFixed(sizeBytes >= 10 * 1024 ** 3 ? 1 : 2)} GB`
   : sizeBytes > 0 ? `${(sizeBytes / 1024 ** 2).toFixed(0)} MB` : '0 MB';
 
-const offerPackageCleanup = async ({ appDialog, kind, label, packageSizeBytes, repairHint, onNotice }: {
+const offerPackageCleanup = async ({ appDialog, kind, componentId, label, packageSizeBytes, repairHint, onNotice }: {
   appDialog: ReturnType<typeof useAppDialog>;
-  kind: 'advanced';
+  kind: 'component' | 'advanced';
+  componentId?: string;
   label: string;
   packageSizeBytes?: number;
   repairHint?: string;
@@ -76,7 +77,7 @@ const offerPackageCleanup = async ({ appDialog, kind, label, packageSizeBytes, r
     cancelLabel: '保留安装包',
     tone: 'danger',
   })) return;
-  const deleted = await window.electronAPI.deleteComponentPackage(kind);
+  const deleted = await window.electronAPI.deleteComponentPackage(kind, componentId);
   if (!deleted.success) {
     onNotice(`删除安装包失败：${deleted.error || '未知错误'}`, 6000);
     return;
@@ -254,6 +255,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
       if (result.cancelled) return;
       if (!result.success) { onNotice(`安装“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
       onNotice(`已安装“${component.name}”`);
+      await offerPackageCleanup({ appDialog, kind: 'component', componentId: component.id, label: `“${component.name}”组件`, packageSizeBytes: result.packageSizeBytes, onNotice });
       await onComponentsChanged();
     } finally { setBusyId(''); }
   };
@@ -273,7 +275,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     } finally { setBusyId(''); }
   };
   return <section>
-    <div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="text-sm font-bold text-slate-800">组件安装与卸载</h4><p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">点击安装后直接选择预编译 ZIP。照片流会在临时目录中解压、校验并复制到用户组件目录，不会移动或删除你选择的原 ZIP；不需要安装 Python 或自行编译。</p></div><div className="flex gap-2"><button type="button" onClick={() => void onRefresh()} disabled={loading} className="dialog-secondary inline-flex items-center gap-2"><RotateCcw size={15} className={loading ? 'animate-spin' : ''}/>刷新状态</button><button type="button" onClick={() => void openFolder()} className="dialog-secondary inline-flex items-center gap-2"><FolderOpen size={15}/>打开组件根目录</button></div></div>
+    <div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="text-sm font-bold text-slate-800">组件安装与卸载</h4><p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">把预编译 ZIP 直接放入下方组件根目录（components），无需再放进组件名称子文件夹，然后点击对应组件的安装按钮。安装并校验成功后可选择删除安装包。</p></div><div className="flex gap-2"><button type="button" onClick={() => void onRefresh()} disabled={loading} className="dialog-secondary inline-flex items-center gap-2"><RotateCcw size={15} className={loading ? 'animate-spin' : ''}/>刷新状态</button><button type="button" onClick={() => void openFolder()} className="dialog-secondary inline-flex items-center gap-2"><FolderOpen size={15}/>打开组件根目录</button></div></div>
     {installPath && <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"><p className="text-xs font-bold text-slate-500">组件根目录</p><p className="mt-1 break-all font-mono text-xs text-slate-600">{installPath}</p></div>}
     <div className="mt-4 grid gap-3 sm:grid-cols-2">{components.map(component => {
       const stateText = !component.installed ? (component.compatible ? '未安装' : '不兼容') : component.source === 'development' ? '开发组件' : '已安装';
@@ -305,13 +307,13 @@ const SettingsNavigator = ({ activeSection, components, onSelect }: { activeSect
     <div className="mt-3 border-t border-slate-200 pt-3"><p className="px-3 pb-1.5 text-[11px] font-bold tracking-wide text-slate-400">组件</p><div className="space-y-1">{componentItems.map(renderItem)}</div></div>
     <div className="mt-3 space-y-1 border-t border-slate-200 pt-3">
       {renderItem({ id: 'about', label: '关于', description: '版本、项目与开源许可', icon: <AtSign size={18}/> })}
+      {renderItem({ id: 'feedback', label: '问题和建议', description: '向开发者发送反馈', icon: <MessageSquareText size={18}/> })}
       {renderItem({ id: 'privacy', label: '隐私与数据', description: '内测统计、人脸信息与法律文件', icon: <ShieldCheck size={18}/> })}
     </div>
   </nav>;
 };
 
 const PROJECT_TOOLBAR_ITEMS: Record<ProjectToolbarActionId, { label: string; description: string; icon: React.ReactNode }> = {
-  'smart-import': { label: '从 SD 卡导入', description: '打开项目的 SD 卡整理导入面板', icon: <MemoryStick size={17}/> },
   'filename-selection': { label: '从文件名选片', description: '按文件名把选中的素材整理到选片文件夹', icon: <FileText size={17}/> },
   'select-media': { label: '选片', description: '把当前选择的图片或视频加入选片结果', icon: <CheckCircle2 size={17}/> },
   storyboard: { label: '提取分镜帧', description: '从所选视频或文件夹提取分镜帧', icon: <Video size={17}/> },
@@ -408,7 +410,7 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
     <section><h4 className="text-sm font-bold text-slate-800">界面配色</h4><div className="mt-3 inline-flex rounded-lg border border-slate-200 bg-slate-50 p-1">{([['system', '适应系统'], ['light', '浅色'], ['dark', '深色']] as const).map(([theme, label]) => <button key={theme} onClick={() => update('theme', theme)} className={`rounded-md px-4 py-2 text-sm font-bold transition ${draft.theme === theme ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{label}</button>)}</div></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">工作目录</h4><p className="mt-1 text-sm leading-6 text-slate-500">项目会直接放在选中的客户文件夹中；只有选择磁盘根目录时，才会使用根目录下的“照片流”文件夹。</p><div className="mt-4"><WorkspaceFolderPicker value={draft.workspacePath} onChange={workspacePath => update('workspacePath', workspacePath)}/></div></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">项目与文件夹</h4><div className="mt-5"><label className="form-label">文件夹默认排序方式</label><select value={draft.defaultFolderSort} onChange={event => update('defaultFolderSort', event.target.value as AppConfig['defaultFolderSort'])} className="form-input"><option value="date">修改日期（最新优先）</option><option value="name">文件名（A–Z）</option><option value="size">大小（从大到小）</option></select><p className="mt-2 text-xs leading-5 text-slate-500">打开项目文件夹时采用此顺序；仍可在文件浏览器的“排序”菜单中临时调整。</p></div></section>
-    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">项目工具栏</h4><p className="mt-1 text-sm leading-6 text-slate-500">调整项目文件浏览器中工作流按钮的显示状态和排列顺序。Photoshop、团片协作等按钮仍会根据组件是否可用自动隐藏。</p><ProjectToolbarSettingsEditor value={draft.projectToolbar} onChange={projectToolbar => update('projectToolbar', projectToolbar)}/></section>
+    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">项目工具栏</h4><p className="mt-1 text-sm leading-6 text-slate-500">调整项目文件浏览器中工作流按钮的显示状态和排列顺序。功能按钮仍会根据组件是否可用自动隐藏。</p><ProjectToolbarSettingsEditor value={draft.projectToolbar} onChange={projectToolbar => update('projectToolbar', projectToolbar)}/></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">角色生日</h4><label className="settings-check"><input type="checkbox" checked={draft.birthdayEnabled} onChange={event => update('birthdayEnabled', event.target.checked)}/>在首页显示角色生日</label></section>
     <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">恢复默认设置</h4><p className="mt-1 text-sm leading-6 text-slate-500">保留当前工作目录，将其他应用设置恢复为初始值。</p><button type="button" onClick={() => void restoreDefaults()} className="dialog-secondary mt-4 inline-flex items-center gap-2"><RotateCcw size={15}/>恢复默认设置</button></section>
     </>}
@@ -438,13 +440,47 @@ const SettingsPage = ({ activeSection, config, components, componentInstallPath,
     </>}
     {activeSection === 'import' && <>
     <section><h4 className="text-sm font-bold text-slate-800">从 SD 卡导入</h4><label className="settings-check"><input type="checkbox" checked={draft.smartImport.autoStart} onChange={event => update('smartImport', { ...draft.smartImport, autoStart: event.target.checked })}/>应用启动时自动读取 SD 卡</label><label className="settings-check"><input type="checkbox" checked={draft.smartImport.splitLargeFiles} onChange={event => update('smartImport', { ...draft.smartImport, splitLargeFiles: event.target.checked })}/><span><span className="block">超过 4GB 的视频自动分割</span><span className="mt-1 block text-xs leading-5 text-slate-500">用于兼容部分老旧 U 盘的 FAT32 单文件大小限制，以及某些云盘的单文件上传限制。</span></span></label><label className="settings-check"><input type="checkbox" checked={draft.smartImport.generateVideoPreview} onChange={event => update('smartImport', { ...draft.smartImport, generateVideoPreview: event.target.checked })}/><span><span className="block">生成视频预览</span><span className="mt-1 block text-xs leading-5 text-slate-500">为导入到“mov”的大型视频生成 H.264 文件，储存在“mov_预览”并作为软件内快速播放源。关闭后不会在浏览时临时转码这些导入视频；其他普通视频仍可照常预览。</span></span></label><fieldset disabled={!draft.smartImport.generateVideoPreview} className={`ml-7 mt-3 max-w-xl ${draft.smartImport.generateVideoPreview ? '' : 'opacity-50'}`}><legend className="text-xs font-bold text-slate-700">预览质量</legend><div className="mt-3 grid gap-3 md:grid-cols-2">{([
-      ['medium', '中（默认 · 约 4 Mbps）', '保持当前预览质量，生成速度和文件大小较均衡。'],
-      ['high', '高（约 10 Mbps）', '接近 Adobe 匹配源高比特率，画面细节更好，文件也会明显增大。'],
+      ['medium', '中（默认 · 约 4 Mbps）', '预览质量，生成速度和文件大小较均衡。'],
+      ['high', '高（约 10 Mbps）', '画面细节更好，文件也会明显增大。'],
     ] as const).map(([quality, label, description]) => <label key={quality} className={`rounded-xl border p-4 transition ${draft.smartImport.generateVideoPreview ? 'cursor-pointer' : 'cursor-not-allowed'} ${draft.smartImport.videoPreviewQuality === quality ? 'border-blue-400 bg-blue-50' : 'border-slate-200 hover:border-slate-300'}`}><input type="radio" name="video-preview-quality" value={quality} checked={draft.smartImport.videoPreviewQuality === quality} onChange={() => update('smartImport', { ...draft.smartImport, videoPreviewQuality: quality })} className="mr-2"/><span className="font-bold text-slate-800">{label}</span><span className="mt-2 block text-xs leading-5 text-slate-500">{description}</span></label>)}</div></fieldset></section>
-    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">导入设置</h4><label className="settings-check"><input type="checkbox" checked={draft.fileImport.preserveOriginal} onChange={event => update('fileImport', { preserveOriginal: event.target.checked })}/><span><span className="block">导入后保留原始文件</span><span className="mt-1 block text-xs leading-5 text-slate-500">开启此项后导入的文件会保留源文件。这可能会导致大量的文件重复。</span></span></label><label className="settings-check"><input type="checkbox" checked={draft.brollImport.splitLargeFiles} onChange={event => update('brollImport', { ...draft.brollImport, splitLargeFiles: event.target.checked })}/><span><span className="block">花絮视频超过 4GB 时自动分割</span><span className="mt-1 block text-xs leading-5 text-slate-500">用于兼容 FAT32 和部分云盘的单文件大小限制。</span></span></label></section>
+    <section className="border-t border-slate-100 pt-6"><h4 className="text-sm font-bold text-slate-800">导入设置</h4><label className="settings-check"><input type="checkbox" checked={draft.fileImport.preserveOriginal} onChange={event => update('fileImport', { preserveOriginal: event.target.checked })}/><span><span className="block">导入后保留原始文件</span><span className="mt-1 block text-xs leading-5 text-slate-500">开启此项后导入的文件会保留源文件。这可能会导致大量的文件重复。</span></span></label><label className="settings-check"><input type="checkbox" checked={draft.brollImport.splitLargeFiles} onChange={event => update('brollImport', { ...draft.brollImport, splitLargeFiles: event.target.checked })}/><span><span className="block">花絮视频超过 4GB 时自动分割</span><span className="mt-1 block text-xs leading-5 text-slate-500">用于兼容部分老旧 U 盘的 FAT32 单文件大小限制，以及某些云盘的单文件上传限制。</span></span></label></section>
     </>}
     {activeSection === 'about' && <AboutSettings/>}
+    {activeSection === 'feedback' && <FeedbackSettings onNotice={onNotice}/>}
   </div></section>;
+};
+
+const FeedbackSettings = ({ onNotice }: { onNotice: (message: string, duration?: number) => void }) => {
+  const [message, setMessage] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const trimmed = message.trim();
+  const submit = async () => {
+    if (trimmed.length < 2 || trimmed.length > 4000 || submitting) return;
+    setSubmitting(true);
+    const result = await window.electronAPI.submitFeedback(trimmed);
+    setSubmitting(false);
+    if (!result.success) {
+      onNotice(result.error || '发送失败，请稍后重试', 5000);
+      return;
+    }
+    setMessage('');
+    onNotice('感谢反馈，已成功发送');
+  };
+  return <div className="space-y-5 text-sm leading-6 text-slate-600">
+    <section>
+      <div className="flex items-center gap-2"><MessageSquareText size={19} className="text-blue-600"/><h4 className="text-base font-bold text-slate-800">问题和建议</h4></div>
+      <p className="mt-2">请描述遇到的问题、复现步骤或希望增加的功能。请不要填写密码、密钥、私人文件路径等敏感信息。</p>
+      <label className="mt-4 block">
+        <span className="sr-only">问题和建议内容</span>
+        <textarea value={message} maxLength={4000} rows={9} onChange={event => setMessage(event.target.value)} placeholder="例如：我在……操作后遇到了……；希望能够……" className="w-full resize-y rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"/>
+      </label>
+      <div className="mt-3 flex items-center justify-between gap-4">
+        <span className={`text-xs ${message.length >= 3900 ? 'text-amber-600' : 'text-slate-400'}`}>{message.length}/4000</span>
+        <button type="button" onClick={() => void submit()} disabled={trimmed.length < 2 || submitting} className="dialog-primary inline-flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-45">{submitting ? <Loader2 size={14} className="animate-spin"/> : <Send size={14}/>} {submitting ? '正在发送…' : '发送'}</button>
+      </div>
+    </section>
+    <p className="border-t border-slate-100 pt-5 text-xs text-slate-500">发送时会同时附带软件版本、操作系统类型和匿名安装标识，便于定位问题；不会自动上传照片、项目文件或日志。</p>
+  </div>;
 };
 
 const PrivacySettings = ({ onNotice }: { onNotice: (message: string, duration?: number) => void }) => {

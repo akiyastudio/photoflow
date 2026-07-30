@@ -64,6 +64,7 @@ PostgreSQL，请先在 CloudBase 环境中启用文档型数据库，或把服�
 analytics_events
 crash_reports
 app_releases
+user_feedback
 ```
 
 权限全部设为「仅管理端可读写」或等价的私有权限。不要开启「所有用户可读写」。
@@ -78,6 +79,7 @@ app_releases
 | `crash_reports` | `receivedAt` | 降序 |
 | `crash_reports` | `status`, `receivedAt` | 升序、降序 |
 | `app_releases` | `platform`, `channel`, `published`, `versionCode` | 升序、升序、升序、降序 |
+| `user_feedback` | `receivedAt` | 降序 |
 
 CloudBase 的索引入口和组合索引说明见
 [索引管理](https://docs.cloudbase.net/database/data-index)。
@@ -110,7 +112,7 @@ $bytes = New-Object byte[] 32
 可以直接上传的 ZIP 已生成在：
 
 ```text
-output/photoflow-cloud-function.zip
+output/photoflow-cloud-function-dashboard-cloudbase.zip
 ```
 
 控制台操作：
@@ -121,7 +123,7 @@ output/photoflow-cloud-function.zip
 4. 函数名称填写 `photoflow-api`。
 5. 运行时选择 `Node.js 20`；如果没有则选择 `Node.js 18`。
 6. 部署方式选择「本地上传」或「上传 ZIP」。
-7. 上传 `output/photoflow-cloud-function.zip`。
+7. 上传 `output/photoflow-cloud-function-dashboard-cloudbase.zip`。
 8. 端口使用 HTTP 云函数固定端口 `9000`。
 9. 内存选择 `256 MB` 或 `512 MB`，超时设为 `10 秒`。
 10. 添加上一节的三个环境变量。
@@ -290,14 +292,17 @@ Invoke-RestMethod `
 | `importCountBuckets` | 导入数量区间分布 |
 | `truncated` | 是否达到 50,000 条扫描上限 |
 
+数据中心还会读取 `user_feedback`，展示周期内反馈总数、待处理数量及最近 30 条
+问题与建议。反馈正文只在输入管理 Token 后返回，并以纯文本方式渲染。
+
 这个汇总端点适合内测和早期产品。数据量接近 50,000 条时，应改成每日定时聚合，
 把结果写入 `analytics_daily`，避免每次扫描原始事件。
 
 ## 9. 验证崩溃报告
 
-不要为了测试而破坏生产代码。开发环境可临时在 DevTools 控制台执行一个会被
-React 错误边界捕获的测试，或在测试分支里加一个测试按钮。确认后立即撤回测试
-代码。
+不要为了测试而破坏生产代码。开发环境会主动跳过崩溃上报，避免 HMR 和 React
+开发警告污染数据。需要端到端验证时，请使用独立的打包测试版本，并在测试完成后
+将测试报告标为 `ignored`。
 
 CloudBase 的 `crash_reports` 文档包含：
 
@@ -309,12 +314,25 @@ stack
 logTail
 appVersion
 platform
+fingerprint
 status
 ```
 
 `logTail` 只取最近的错误/警告行，并在客户端先替换本机路径、邮箱及常见
 项目/文件字段。仍建议上线前人工检查你的应用日志格式，确保没有业务侧自定义的
 敏感字段。
+
+请使用管理端导出接口获取严格 UTF-8 JSON，不要使用可能产生非标准反斜杠转义的
+数据库控制台逐行导出：
+
+```powershell
+$adminToken = "PHOTOFLOW_ADMIN_TOKEN 的值"
+$headers = @{ Authorization = "Bearer $adminToken" }
+Invoke-WebRequest `
+  "https://example.ap-shanghai.app.tcloudbase.com/v1/admin/crashes-export?limit=10000" `
+  -Headers $headers `
+  -OutFile "photoflow-crashes.json"
+```
 
 处理崩溃时把 `status` 从 `new` 改为：
 

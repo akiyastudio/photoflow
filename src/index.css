@@ -292,7 +292,7 @@ html.dark .workflow-task-card { border-color: #273244; background: #090c12; }
 .group:hover .file-grid-select, .file-grid-select.is-selected { opacity:1; }
 .file-list-row { display:grid; grid-template-columns:minmax(260px, 1.7fr) minmax(150px, .9fr) minmax(130px, .7fr) minmax(90px, .45fr); align-items:center; min-height:3rem; column-gap:1rem; padding:0 .65rem; }
 .file-list-heading { min-height:2rem; background:#f8fafc; }
-.project-menu-item { display: block; width: 100%; border-radius: .4rem; padding: .5rem; text-align: left; font-size: .875rem; color: #475569; }
+.project-menu-item { display: flex; width: 100%; align-items: center; gap: .5rem; border-radius: .4rem; padding: .5rem; text-align: left; font-size: .875rem; color: #475569; }
 .project-menu-item:hover { background: #f1f5f9; color: #0f172a; }
 .project-context-menu .project-menu-item { display: flex; align-items: center; gap: .5rem; }
 .project-create-menu .project-menu-item { display:flex; align-items:center; gap:.5rem; }

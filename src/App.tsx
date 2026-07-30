@@ -503,10 +503,17 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!configLoaded) return;
-    void window.electronAPI.getPrivacyConsentState().then(state => {
+    const getConsentState = window.electronAPI?.getPrivacyConsentState;
+    if (window.electronAPI?.apiContractVersion !== 1 || typeof getConsentState !== 'function') {
+      setPrivacyConsentRequired(true);
+      setPrivacyStateLoaded(true);
+      showNotice('应用组件版本不一致，请完全退出后重新启动；若仍然出现，请重新安装当前版本。', 10000);
+      return;
+    }
+    void getConsentState().then(state => {
       setPrivacyConsentRequired(state.privacyNoticeVersion !== state.currentPrivacyNoticeVersion || state.termsVersion !== state.currentTermsVersion);
     }).catch(() => setPrivacyConsentRequired(true)).finally(() => setPrivacyStateLoaded(true));
-  }, [configLoaded]);
+  }, [configLoaded, showNotice]);
 
   useEffect(() => {
     if (!configLoaded) return;

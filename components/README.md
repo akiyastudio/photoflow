@@ -7,10 +7,11 @@ installer does not contain optional components.
 
 ## Offline installation
 
-Open PhotoFlow's component manager, click Install, and select the generated ZIP
-directly. PhotoFlow extracts and validates it in a temporary directory before
-copying the runtime into the component-specific user-data directory. The source
-ZIP selected by the user is never moved or deleted.
+Place generated component ZIPs directly in the shared `components` user-data
+directory, then click Install for the matching component. PhotoFlow extracts and
+validates the package in a temporary directory before copying the runtime into
+its component-specific subdirectory. After installation, the user may choose
+whether to delete or retain the source ZIP.
 
 Each component has one application-data directory:
 
@@ -39,8 +40,8 @@ confirmation because it creates a registered WSL distribution and uses tens
 of gigabytes of disk space.
 
 Build component ZIPs separately from the application installer. For example,
-`npm run build:components` creates the team-retouch ZIP in `release`; select it
-from Settings to install it.
+`npm run build:components` creates the team-retouch ZIP in `release`; copy it to
+the shared `components` directory and install it from Settings.
 
 Packaged builds scan only this location:
 

@@ -10,6 +10,7 @@ const read = relativePath => fs.readFileSync(path.join(root, relativePath), 'utf
 const lines = value => value.split(/\r?\n/).length;
 
 const main = read('electron/main.cjs');
+const preload = read('electron/preload.cjs');
 const app = read('src/App.tsx');
 const toolViews = read('src/features/tools/ToolViews.tsx');
 assert(toolViews.includes('const dateStr = `${month}.${day}`') && toolViews.includes('该月份中不存在这个日期') && toolViews.includes('min="1" max="12"'), 'birthday editor must save canonical dates and reject invalid or negative values');
@@ -27,13 +28,28 @@ const workspaceIpc = read('electron/modules/workspace-ipc.cjs');
 const versionsIpc = read('electron/modules/versions-ipc.cjs');
 const systemIpc = read('electron/modules/system-ipc.cjs');
 assert(systemIpc.includes('生日日期无效') && systemIpc.includes('normalized[name] = `${month}.${day}`'), 'birthday IPC must independently validate and normalize saved dates');
+assert(projectWorkspace.includes("if (event.key === 'Enter') { event.preventDefault(); void commitInlineRename(); }") && projectNavigator.includes('<form autoComplete="off" onSubmit='), 'rename editors must submit with Enter without leaking the key to the file row');
+assert(projectWorkspace.includes('const breadcrumbs = pathSegments.map') && projectWorkspace.includes('title: props.project.name'), 'project and inspiration breadcrumbs must not repeat their root labels');
+assert(projectWorkspace.includes("onClick={() => navigateToDirectory('')}") && projectWorkspace.includes('allowSubmenus ? \'overflow-visible\''), 'breadcrumb roots must navigate home and nested surface menus must not be clipped into scrollbars');
+assert(projectWorkspace.includes('const ToolModal') && projectWorkspace.includes("panel === 'negative-import'") && projectWorkspace.includes('从 SD 卡导入</button>') && projectWorkspace.includes('导入底片</button>'), 'project tools and classified negative import must use the modal import workflow');
+assert(projectWorkspace.includes('chooseImportSourceFiles') && projectWorkspace.includes('chooseWorkspaceDirectory') && projectWorkspace.includes('directSource'), 'negative import must accept explicit files and folders');
+assert(systemIpc.includes("ipcMain.handle('choose-import-source-files'") && preload.includes("ipcRenderer.invoke('choose-import-source-files')"), 'negative file selection must be exposed through a registered IPC channel');
+assert(read('python/classify.py').includes('def scan_direct_media') && read('python/classify.py').includes('args.direct_source') && read('python/classify.py').includes('source_paths =') && toolViews.includes("'--source_paths', JSON.stringify(selectedDrives)"), 'negative import must scan all selected sources as one batch instead of requiring DCIM/PRIVATE');
+assert(!projectNavigator.includes('从 SD 卡导入</button>') && !projectNavigator.includes('从文件名选片</button>'), 'project-list context menus must not duplicate project import tools');
 const workspaceDb = read('python/workspace_db.py');
 const inspirationTools = read('python/inspiration_tools.py');
 const pythonBuild = read('scripts/build-python.cjs');
 const appDialogProvider = read('src/components/AppDialogProvider.tsx');
+const indexCss = read('src/index.css');
+assert(indexCss.includes('.project-menu-item { display: flex;') && indexCss.includes('align-items: center; gap: .5rem;'), 'all dropdown and context menu items must place labels to the right of their icons');
 const shellNewService = read('electron/services/shell-new-service.cjs');
 const protectedProjectFolderService = read('electron/services/protected-project-folder.cjs');
 const mediaAccessService = read('electron/services/media-access-service.cjs');
+const mediaResponseService = read('electron/services/media-response-service.cjs');
+const telemetryService = read('electron/services/telemetry-service.cjs');
+assert(!mediaResponseService.includes('Readable.toWeb(fs.createReadStream') && mediaResponseService.includes('source?.destroy()'), 'media protocol streams must own cancellation and ignore late file events');
+assert(telemetryService.includes('if (!app.isPackaged) return false') && telemetryService.includes('recentCrashFingerprints'), 'crash telemetry must exclude development runs and deduplicate repeated failures');
+assert(main.includes('createWindow(false);') && main.indexOf('registerAdvancedVideoIpc({') < main.indexOf('loadMainWindowRenderer();', main.indexOf('registerAdvancedVideoIpc({')), 'all IPC handlers must be registered before the renderer is loaded');
 const fileRootWatcherService = read('electron/services/file-root-watcher-service.cjs');
 const nativeRecycleBinService = read('electron/native/RecycleBinService.cs');
 const packageJson = JSON.parse(read('package.json'));
@@ -58,7 +74,7 @@ assert(!/run(?:Workspace|Media)Database/.test(`${main}\n${read('electron/modules
 assert.strictEqual((app.match(/electronAPI\.getComponents\(/g) || []).length, 1, 'App must be the single renderer owner of component status');
 assert(!app.includes('shrink-0 font-mono text-[10px] text-slate-400">v'), 'the title-bar brand must not display the application version');
 assert(!settingsFeature.includes('electronAPI.getComponents('), 'settings must consume App component state instead of fetching it');
-assert(settingsFeature.includes("title: '删除已使用的安装包吗？'") && settingsFeature.includes('删除并释放 ${size}') && !settingsFeature.includes("kind: 'component'") && settingsFeature.includes("kind: 'advanced'"), 'only the explicitly managed advanced package may offer cleanup; ordinary selected component ZIPs must be retained');
+assert(settingsFeature.includes("title: '删除已使用的安装包吗？'") && settingsFeature.includes('删除并释放 ${size}') && settingsFeature.includes("kind: 'component'") && settingsFeature.includes("kind: 'advanced'"), 'component and advanced package installers must offer optional cleanup with the actual size');
 assert(!projectWorkspace.includes('electronAPI.getComponents('), 'project workspace must consume App component state instead of fetching it');
 assert(!requirePlugin.includes('electronAPI.getComponents('), 'component contributions must not independently fetch component state');
 assert(app.includes("DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'inspiration']") && app.includes('openInspirationTab') && !app.includes('openResearchTab') && !app.includes('openConverterTab'), 'the home page must expose inspiration without standalone storyboard or PNG tools');
@@ -187,7 +203,6 @@ const electronSources = fs.readdirSync(path.join(root, 'electron'), { recursive:
   .map(name => read(path.join('electron', name)))
   .join('\n');
 const registeredChannels = new Set([...electronSources.matchAll(/ipcMain\.(?:handle|on)\(\s*['"]([^'"]+)['"]/g)].map(match => match[1]));
-const preload = read('electron/preload.cjs');
 const requestedChannels = [...preload.matchAll(/ipcRenderer\.(?:invoke|send)\(\s*['"]([^'"]+)['"]/g)].map(match => match[1]);
 for (const channel of requestedChannels) assert(registeredChannels.has(channel), `preload channel is not registered: ${channel}`);
 
