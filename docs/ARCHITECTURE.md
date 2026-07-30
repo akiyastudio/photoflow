@@ -41,6 +41,11 @@ file workflows.
   behind domain-specific repository functions rather than IPC handlers.
   It also owns the lightweight persistent undo journal; no deleted media bytes
   are stored in SQLite.
+- `python/tools.py`: shared packaged runtime for lightweight Python commands,
+  the thumbnail image server, and workspace database processes. They still run
+  as isolated child processes while sharing one on-disk Python/Pillow/SQLite
+  runtime. OpenCV-based analysis remains in `python/inspiration_tools.py` so
+  the large vision dependencies are not duplicated into the core runtime.
 - `src/features/workspace`: the project browser, preview, metadata, version and
   team-retouch workspace UI.
 - `src/features/tools`: import, birthday, conversion, inspiration, matching and
@@ -49,8 +54,8 @@ file workflows.
   hierarchical navigation. It reuses the workspace file browser.
 - `src/features/settings`, `src/features/plugins`, and
   `src/features/background-tasks`: settings, plugin availability and observable
-  background-task UI. `src/App.tsx` is now the 684-line application shell
-  rather than the previous 4,000-line feature container.
+  background-task UI. `src/App.tsx` is the application shell rather than the
+  previous 4,000-line feature container.
 
 ## Stable contracts
 

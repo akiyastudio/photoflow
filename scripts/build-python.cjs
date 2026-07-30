@@ -1,4 +1,4 @@
-const { existsSync } = require('fs');
+const { existsSync, rmSync } = require('fs');
 const { spawnSync } = require('child_process');
 const { join } = require('path');
 
@@ -7,18 +7,26 @@ const venvPython = process.platform === 'win32'
   ? join(root, '.venv', 'Scripts', 'python.exe')
   : join(root, '.venv', 'bin', 'python');
 const python = existsSync(venvPython) ? venvPython : 'python';
+
+// These workers now share the tools runtime. Remove stale standalone outputs
+// so local release inspection cannot mistake them for packaged resources.
+for (const retiredOutput of ['thumbnail-image-worker', 'workspace-db-worker', 'tools.exe', 'thumbnail-image-worker.exe', 'workspace-db-worker.exe']) {
+  rmSync(join(root, 'python', 'dist', retiredOutput), { recursive: true, force: true });
+}
+
 const result = spawnSync(python, [
   '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm', '--specpath', 'build/specs',
   '--name', 'tools', '--exclude-module', 'imageio_ffmpeg',
   '--exclude-module', 'numpy', '--exclude-module', 'scipy', '--exclude-module', 'cv2',
   '--exclude-module', 'torch', '--exclude-module', 'torchvision',
   '--exclude-module', 'torchaudio', '--exclude-module', 'triton',
-  '--exclude-module', 'PIL._avif', '--exclude-module', 'PIL._imagingmath',
+  '--exclude-module', 'PIL._imagingmath',
   '--exclude-module', 'PIL._imagingtk', '--exclude-module', 'PIL._webp',
   '--hidden-import', 'catch', '--hidden-import', 'classify',
   '--hidden-import', 'cut_video', '--hidden-import', 'png_to_jpg',
   '--hidden-import', 'rename',
-  '--hidden-import', 'thumbnail_db', '--hidden-import', 'video_preview',
+  '--hidden-import', 'thumbnail_db', '--hidden-import', 'thumbnail_image',
+  '--hidden-import', 'video_preview', '--hidden-import', 'workspace_db',
   'tools.py',
 ], { cwd: join(root, 'python'), stdio: 'inherit' });
 
@@ -31,35 +39,14 @@ const inspirationTools = spawnSync(python, [
   '--exclude-module', 'scipy', '--exclude-module', 'matplotlib',
   '--exclude-module', 'torch', '--exclude-module', 'torchvision',
   '--exclude-module', 'torchaudio', '--exclude-module', 'triton',
+  '--exclude-module', 'tkinter', '--exclude-module', 'PIL.ImageTk',
+  '--exclude-module', 'PIL.ImageQt', '--exclude-module', 'PIL._avif',
+  '--exclude-module', 'PIL._imagingmath', '--exclude-module', 'PIL._imagingtk',
+  '--exclude-module', 'PIL._webp',
   '--hidden-import', 'research', '--hidden-import', 'office_media_extract',
   '--hidden-import', 'screenshot_main_image',
   'inspiration_tools.py',
 ], { cwd: join(root, 'python'), stdio: 'inherit' });
 
 if (inspirationTools.error) throw inspirationTools.error;
-if ((inspirationTools.status ?? 1) !== 0) process.exit(inspirationTools.status ?? 1);
-
-const thumbnailWorker = spawnSync(python, [
-  '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm', '--specpath', 'build/specs',
-  '--name', 'thumbnail-image-worker',
-  '--exclude-module', 'numpy', '--exclude-module', 'scipy',
-  '--exclude-module', 'matplotlib', '--exclude-module', 'cv2',
-  '--exclude-module', 'torch', '--exclude-module', 'tkinter',
-  '--exclude-module', 'PIL.ImageTk', '--exclude-module', 'PIL.ImageQt',
-  'thumbnail_image.py',
-], { cwd: join(root, 'python'), stdio: 'inherit' });
-
-if (thumbnailWorker.error) throw thumbnailWorker.error;
-if ((thumbnailWorker.status ?? 1) !== 0) process.exit(thumbnailWorker.status ?? 1);
-
-const workspaceWorker = spawnSync(python, [
-  '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm', '--specpath', 'build/specs',
-  '--name', 'workspace-db-worker',
-  '--exclude-module', 'numpy', '--exclude-module', 'scipy',
-  '--exclude-module', 'matplotlib', '--exclude-module', 'cv2',
-  '--exclude-module', 'torch', '--exclude-module', 'PIL',
-  'workspace_db.py',
-], { cwd: join(root, 'python'), stdio: 'inherit' });
-
-if (workspaceWorker.error) throw workspaceWorker.error;
-process.exit(workspaceWorker.status ?? 1);
+process.exit(inspirationTools.status ?? 1);

@@ -840,7 +840,7 @@ const registerSystemIpc = context => {
       const isWin = process.platform === 'win32';
       const exeSuffix = isWin ? '.exe' : '';
       // 打包后去 resources/python 目录下寻找 Python 引擎文件
-      const executableName = baseName === 'thumbnail_image' ? 'thumbnail-image-worker' : baseName === 'workspace_db' ? 'workspace-db-worker' : MERGED_PYTHON_TOOLS.has(baseName) ? 'tools' : INSPIRATION_PYTHON_TOOLS.has(baseName) ? 'inspiration-tools' : baseName;
+      const executableName = MERGED_PYTHON_TOOLS.has(baseName) ? 'tools' : INSPIRATION_PYTHON_TOOLS.has(baseName) ? 'inspiration-tools' : baseName;
       const scriptPath = path.join(process.resourcesPath, 'python', executableName, `${executableName}${exeSuffix}`);
       return fs.existsSync(scriptPath);
       

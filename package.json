@@ -78,14 +78,6 @@
           "to": "python/inspiration-tools"
         },
         {
-          "from": "python/dist/thumbnail-image-worker",
-          "to": "python/thumbnail-image-worker"
-        },
-        {
-          "from": "python/dist/workspace-db-worker",
-          "to": "python/workspace-db-worker"
-        },
-        {
           "from": "python/dist/ffmpeg.zip",
           "to": "python/ffmpeg.zip"
         },
@@ -129,14 +121,6 @@
           "to": "python/inspiration-tools"
         },
         {
-          "from": "python/dist/thumbnail-image-worker",
-          "to": "python/thumbnail-image-worker"
-        },
-        {
-          "from": "python/dist/workspace-db-worker",
-          "to": "python/workspace-db-worker"
-        },
-        {
           "from": "python/dist/ffmpeg.zip",
           "to": "python/ffmpeg.zip"
         }
@@ -157,10 +141,7 @@
     ]
   },
   "dependencies": {
-    "exiftool-vendored": "^30.5.0",
-    "lucide-react": "^0.344.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "exiftool-vendored": "^30.5.0"
   },
   "devDependencies": {
     "@eslint/js": "^8.57.1",
@@ -178,7 +159,10 @@
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-react-refresh": "^0.4.6",
     "globals": "^15.14.0",
+    "lucide-react": "^0.344.0",
     "postcss": "^8.5.6",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
     "tailwindcss": "^3.4.18",
     "typescript": "^5.2.2",
     "typescript-eslint": "^8.46.4",

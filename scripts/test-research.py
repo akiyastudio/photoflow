@@ -1,4 +1,4 @@
-"""Regression checks for research-tools algorithms and event compatibility."""
+"""Regression checks for the built-in research worker and event compatibility."""
 
 from __future__ import annotations
 
@@ -296,7 +296,7 @@ def main():
         assert find_selection_jpg_proxy_folder(str(reference_directory)) == str(jpg_directory)
         assert find_selection_jpg_proxy_folder(str(source_directory)) is None
         assert visual_reference_path(str(reference_directory / "IMG_1234.CR3"), proxy_index).endswith("IMG_1234.CR3")
-    print("research-tools regression tests passed")
+    print("Research worker regression tests passed")
 
 
 if __name__ == "__main__":

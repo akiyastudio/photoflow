@@ -67,29 +67,26 @@
 目前主要发布和验证的平台是 **Windows x64**。
 
 1. 前往 [Releases](https://github.com/akiyastudio/photoflow/releases/latest) 下载最新版 `照片流 Setup <版本>.exe`。
-2. 如需可选功能，同时下载对应的 `PhotoFlow-<组件>-<版本>-win32-x64.zip`，并把 ZIP 放在安装程序旁边。
-3. 运行安装程序。安装页会自动识别旁边的组件包，可按需选择。
-4. 第一次启动时选择工作文件夹。若选择磁盘根目录，照片流会在该磁盘下创建 `照片流` 文件夹。
+2. 运行安装程序并启动照片流。
+3. 第一次启动时选择工作文件夹。若选择磁盘根目录，照片流会在该磁盘下创建 `照片流` 文件夹。
+4. 如需可选功能，再下载对应的 `PhotoFlow-<组件>-<版本>-win32-x64.zip`，通过 **设置 → 组件管理** 安装。
 
 ### 安装或更新可选组件
 
-当前提供三个独立组件：
+当前提供两个独立组件：
 
 | 组件 | 功能 | 支持平台 |
 | --- | --- | --- |
 | `team-retouch` | 人物检测、裁切、对齐与合回 | Windows x64 |
-| `research-tools` | 视频分镜帧提取与图片去重 | Windows / macOS |
-| `office-media-extractor` | 提取 Word、PowerPoint、Excel 内嵌图片 | Windows / macOS |
+| `video-playback-mpv` | 使用独立 libmpv 进程播放相机原始视频 | Windows x64 |
 
-推荐在安装主程序时，把组件 ZIP 放在安装程序旁边一并安装。如果需要在软件安装后安装组件，目前需要解压组件zip后把完整组件目录放到：
+视频分镜整理和 Office 图片提取已内置于主程序，不需要单独安装组件。可选组件 ZIP 通过 **设置 → 组件管理** 安装；组件运行时统一保存在：
 
 ```text
-<照片流安装目录>\components\team-retouch
-<照片流安装目录>\components\research-tools
-...
+%LOCALAPPDATA%\PhotoFlow\components
 ```
 
-然后进入 **设置 → 组件管理 → 刷新状态**。更详细的组件打包和目录约定见 [components/README.md](components/README.md)。
+不要把组件解压到照片流安装目录；打包和目录约定见 [components/README.md](components/README.md)。
 
 ## 快速上手
 
