@@ -885,7 +885,7 @@ const registerSystemIpc = context => {
     const choice = await dialog.showOpenDialog(mainWindow, {
       title: '选择要导入的底片文件',
       properties: ['openFile', 'multiSelections'],
-      filters: [{ name: '照片、RAW 与视频', extensions: ['jpg', 'jpeg', 'png', 'arw', 'cr2', 'cr3', 'dng', 'nef', 'orf', 'heic', 'mp4', 'mov', 'avi', 'crm', 'rwl', 'raf', '3fr', 'fff'] }],
+      filters: [{ name: '照片、RAW 与视频', extensions: ['jpg', 'jpeg', 'png', 'webp', 'tif', 'tiff', 'avif', 'heic', 'heif', 'hif', 'arw', 'cr2', 'cr3', 'dng', 'nef', 'orf', 'mp4', 'mov', 'avi', 'crm', 'rwl', 'raf', '3fr', 'fff'] }],
     });
     return choice.canceled ? { cancelled: true, paths: [] } : { paths: choice.filePaths };
   });

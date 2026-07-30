@@ -67,7 +67,7 @@ def get_file_time(file_path):
     try: return os.path.getmtime(file_path)
     except: return 0
 
-VALID_MEDIA_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.heic', '.mp4', '.mov', '.avi', '.crm', '.rwl', '.raf', '.3fr', '.fff')
+VALID_MEDIA_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.avif', '.heic', '.heif', '.hif', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.mp4', '.mov', '.avi', '.crm', '.rwl', '.raf', '.3fr', '.fff')
 RAW_EXTENSIONS = ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.rwl', '.raf', '.3fr', '.fff')
 JPG_EXTENSIONS = ('.jpg', '.jpeg')
 
@@ -209,7 +209,7 @@ def unique_destination(directory, file_name):
 def classify_files_by_type(folder_path):
     """整理子文件夹"""
     ext_map = {
-        'jpg': ('.jpg', '.jpeg', '.hif', '.heic'),
+        'jpg': ('.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.avif', '.heic', '.heif', '.hif'),
         'raw': ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.rwl', '.raf', '.3fr', '.fff'),
         'mov': ('.mp4', '.mov', '.avi', '.crm')
     }

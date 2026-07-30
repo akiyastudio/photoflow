@@ -1,0 +1,13 @@
+{
+  "_id": "win32-stable-26-7-30",
+  "channel": "stable",
+  "downloadUrl": "https://pan.quark.cn/s/ee4bc55a8bd2",
+  "mandatory": false,
+  "notes": "修复崩溃上报与去重、IPC 启动时序、媒体预览流异常和视频监听泄漏；新增问题反馈及云端数据中心展示。",
+  "platform": "win32",
+  "published": true,
+  "publishedAt": "2026-07-30T15:40:16.895Z",
+  "sha256": "11d61e962b386d70e13afb306e42251491d0476cd2bf77a23677843b063f996b",
+  "version": "26.7.30",
+  "versionCode": 260730
+}

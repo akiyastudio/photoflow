@@ -7,12 +7,15 @@ import subprocess
 import json
 from event_protocol import emit, log_error, log_info, log_progress, log_success
 from PIL import Image
+from pi_heif import register_heif_opener
 from ffmpeg_utils import get_ffmpeg_exe
 
-IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tif', '.tiff')
+register_heif_opener(thumbnails=False)
+
+IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tif', '.tiff', '.heic', '.heif', '.hif', '.avif')
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.m4v', '.mkv', '.webm', '.crm')
 RAW_EXTENSIONS = ('.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw')
-FFMPEG_IMAGE_EXTENSIONS = ('.heic', '.avif') + RAW_EXTENSIONS
+FFMPEG_IMAGE_EXTENSIONS = RAW_EXTENSIONS
 JPG_PROXY_EXTENSIONS = ('.jpg', '.jpeg')
 IMAGE_SELECTION_FOLDER_NAME = '图片选片'
 

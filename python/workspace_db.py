@@ -15,7 +15,7 @@ from pathlib import Path
 STATUSES = ("未分类", "策划中", "待拍摄", "后期中", "已归档")
 IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff",
-    ".heic", ".avif", ".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf",
+    ".heic", ".heif", ".hif", ".avif", ".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf",
     ".rw2", ".dng", ".rwl", ".3fr", ".fff", ".iiq", ".pef", ".srw",
 }
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".crm"}

@@ -14,7 +14,7 @@ WORD_EXTENSIONS = {".docx", ".docm", ".dotx", ".dotm"}
 POWERPOINT_EXTENSIONS = {".pptx", ".pptm", ".potx", ".potm", ".ppsx", ".ppsm", ".ppam"}
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm", ".xltx", ".xltm", ".xlam", ".xlsb"}
 IMAGE_EXTENSIONS = {
-    ".avif", ".bmp", ".emf", ".gif", ".heic", ".heif", ".ico",
+    ".avif", ".bmp", ".emf", ".gif", ".heic", ".heif", ".hif", ".ico",
     ".jfif", ".jpe", ".jpeg", ".jpg", ".png", ".svg", ".tif",
     ".tiff", ".webp", ".wmf",
 }

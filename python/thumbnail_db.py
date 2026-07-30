@@ -19,7 +19,7 @@ THUMBNAIL_STATES = {"NOT_READY", "QUEUED", "GENERATING", "READY", "STALE", "FAIL
 MEDIA_EXTENSIONS = {
     ".jpg": "image", ".jpeg": "image", ".png": "image", ".gif": "image",
     ".webp": "image", ".bmp": "image", ".tif": "image", ".tiff": "image",
-    ".heic": "image", ".avif": "image",
+    ".heic": "image", ".heif": "image", ".hif": "image", ".avif": "image",
     ".mp4": "video", ".mov": "video", ".m4v": "video", ".webm": "video",
     ".avi": "video", ".mkv": "video",
     ".cr2": "raw", ".cr3": "raw", ".nef": "raw", ".arw": "raw",

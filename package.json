@@ -8,6 +8,8 @@
   "main": "electron/main.cjs",
   "scripts": {
     "generate:icon": "node scripts/generate-app-icon.cjs",
+    "version:set": "node scripts/set-app-version.cjs",
+    "release:json": "node scripts/generate-release-json.cjs",
     "build:shell-thumbnail": "node scripts/build-shell-thumbnail.cjs",
     "build:recycle-bin-service": "node scripts/build-recycle-bin-service.cjs",
     "dev": "vite",
@@ -27,6 +29,7 @@
     "test:file-transfer": "node scripts/test-file-transfer.cjs",
     "test:filesystem-safety": "node scripts/test-filesystem-safety.cjs",
     "test:catch": ".venv\\Scripts\\python.exe scripts\\test-catch.py",
+    "test:media-formats": ".venv\\Scripts\\python.exe scripts\\test-media-formats.py",
     "test:deleted-project-cleanup": "node scripts/test-deleted-project-cleanup.cjs",
     "test:data-maintenance": ".venv\\Scripts\\python.exe scripts\\test-data-maintenance.py",
     "test:database-migrations": ".venv\\Scripts\\python.exe scripts\\test-workspace-db-migrations.py",

@@ -122,11 +122,36 @@ def _candidate_rectangles(
         )[:28]
     boundaries = [0, height, *peak_centers]
     boundaries = sorted(set(boundaries))
+    row_scale = max(3.0, float(np.percentile(row_difference, 85)))
     for first_index, top in enumerate(boundaries):
         for bottom in boundaries[first_index + 1:]:
             candidate_height = bottom - top
             if candidate_height < min_height or candidate_height > height * 0.88:
                 continue
+            top_boundary = row_difference[max(0, top - 1)] if top else 0.0
+            bottom_boundary = row_difference[min(len(row_difference) - 1, bottom - 1)] if bottom < height else 0.0
+            pixel_boundary_threshold = max(18.0, row_scale * 1.5)
+            top_boundary_coverage = 0.0 if not top else float(np.mean(
+                np.mean(np.abs(image[top].astype(np.float32) - image[top - 1].astype(np.float32)), axis=1)
+                >= pixel_boundary_threshold
+            ))
+            bottom_boundary_coverage = 0.0 if bottom >= height else float(np.mean(
+                np.mean(np.abs(image[bottom].astype(np.float32) - image[bottom - 1].astype(np.float32)), axis=1)
+                >= pixel_boundary_threshold
+            ))
+            strong_horizontal_frame = (
+                top > 0
+                and bottom < height
+                and top_boundary >= row_scale * 4.0
+                and bottom_boundary >= row_scale * 4.0
+                and top_boundary_coverage >= 0.94
+                and bottom_boundary_coverage >= 0.94
+            )
+            if strong_horizontal_frame:
+                # Sparse sketches and line art can have almost no texture away
+                # from their strokes.  Their two full-width frame transitions
+                # are still reliable evidence for the complete artwork panel.
+                candidates.append((0, top, width, bottom))
             band_active = active[top:bottom]
             if float(band_active.mean()) < 0.19:
                 continue
@@ -312,14 +337,18 @@ def _score_candidate(
     )
     frame = 1.0 if horizontal_frame or vertical_frame else 0.0
 
-    # A text-only note normally has many edges but low continuous texture and low color activity.
+    # A text-only note normally has many edges but low continuous texture and
+    # low color activity.  Do not apply that penalty when two strong opposing
+    # frame edges already identify the complete media panel: sparse line art is
+    # intentionally low-texture and would otherwise look text-like here.
     text_like_penalty = 0.0
-    if continuity < 0.58:
-        text_like_penalty += (0.58 - continuity) * 0.45
-    if texture < 0.32 and edge > 0.20:
-        text_like_penalty += 0.16
-    if height_ratio < 0.18 or width_ratio < 0.40:
-        text_like_penalty += 0.18
+    if not frame:
+        if continuity < 0.58:
+            text_like_penalty += (0.58 - continuity) * 0.45
+        if texture < 0.32 and edge > 0.20:
+            text_like_penalty += 0.16
+        if height_ratio < 0.18 or width_ratio < 0.40:
+            text_like_penalty += 0.18
 
     score = (
         0.17 * size_score
@@ -332,7 +361,7 @@ def _score_candidate(
         + 0.06 * width_score
         + 0.04 * center_score
         + 0.04 * margin_score
-        + 0.25 * frame
+        + 0.35 * frame
         - text_like_penalty
     )
     features = {
@@ -373,11 +402,11 @@ def detect_main_rectangle(image: np.ndarray) -> tuple[tuple[int, int, int, int] 
     removed_ratio = 1.0 - ((right - left) * (bottom - top) / float(width * height))
     if removed_ratio < 0.06:
         return None, score, "图片本身已接近完整画面，无需裁剪"
-    if features["continuity"] < 0.44 or (
+    if not features["frame"] and (features["continuity"] < 0.44 or (
         features["texture"] < 0.16
         and features["activity"] < 0.28
         and features["boundary"] < 0.70
-    ):
+    )):
         return None, score, "画面更像文字或界面，已为避免误裁而跳过"
     if score < MIN_CONFIDENCE:
         return None, score, "主图区域置信度不足，已保留原图"
@@ -390,6 +419,10 @@ def detect_main_rectangle(image: np.ndarray) -> tuple[tuple[int, int, int, int] 
     )
     if resolved[2] - resolved[0] < 80 or resolved[3] - resolved[1] < 80:
         return None, score, "检测到的区域过小，已保留原图"
+    # The frame itself is the main-image boundary.  Trimming uniform white or
+    # black lines inside it would remove intentional canvas around sparse art.
+    if features["frame"]:
+        return resolved, score, ""
     return _trim_uniform_borders(image, resolved), score, ""
 
 
