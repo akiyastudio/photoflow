@@ -41,7 +41,10 @@ try {
 
   const installer = fs.readFileSync(path.join(repositoryRoot, 'build', 'installer.nsh'), 'utf8');
   assert.strictEqual(packageJson.build.nsis.license, 'docs/legal/INSTALLER_NOTICE.txt', 'NSIS must require acceptance of the installer legal notice');
-  assert(fs.readFileSync(path.join(repositoryRoot, packageJson.build.nsis.license), 'utf8').includes('用户协议') && fs.readFileSync(path.join(repositoryRoot, packageJson.build.nsis.license), 'utf8').includes('隐私政策'), 'installer notice must reference both legal documents');
+  const installerLicense = fs.readFileSync(path.join(repositoryRoot, packageJson.build.nsis.license));
+  assert.deepStrictEqual([...installerLicense.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'NSIS installer notice must use a UTF-8 BOM so Chinese text is decoded correctly');
+  const installerLicenseText = installerLicense.toString('utf8');
+  assert(installerLicenseText.includes('用户协议') && installerLicenseText.includes('隐私政策'), 'installer notice must reference both legal documents');
   assert(!installer.includes('release\\components'), 'base installer must not embed optional components');
   assert(!installer.includes('PhotoFlow-team-retouch-') && !installer.includes('PhotoFlowComponentPage'), 'application installer must not discover or offer team-retouch packages');
   assert(!installer.includes('nsisunz::Unzip') && !installer.includes('$INSTDIR\\components'), 'application installer must never write components into the program directory');
@@ -259,6 +262,9 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   });
 
   assert.strictEqual(registry.list().length, Object.keys(PLUGIN_DEFINITIONS).length);
+  const advancedVideoManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'components', 'video-playback-mpv', 'component.template.json'), 'utf8'));
+  assert.strictEqual(PLUGIN_DEFINITIONS['video-playback-mpv'].version, '26.7.29.1', 'the app must accept the latest published advanced-video component');
+  assert.strictEqual(advancedVideoManifest.version, PLUGIN_DEFINITIONS['video-playback-mpv'].version, 'the advanced-video manifest and app compatibility pin must stay aligned');
   assert.strictEqual(registry.resolve('team-retouch'), null);
   assert.strictEqual(registry.resolve('office-media-extractor'), null);
   const installRoot = userComponentRoot;
