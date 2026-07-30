@@ -12,24 +12,6 @@ const requested = process.argv.includes('--only') ? process.argv[process.argv.in
 const componentIds = requested ? [requested] : (process.platform === 'win32' ? ['team-retouch'] : []);
 
 const definitions = {
-  'research-tools': {
-    source: path.join(root, 'python', 'research.py'),
-    template: path.join(root, 'components', 'research-tools', 'component.template.json'),
-    pyInstallerArgs: [
-      '--exclude-module', 'torch', '--exclude-module', 'torchvision', '--exclude-module', 'torchaudio',
-      '--exclude-module', 'triton', '--exclude-module', 'matplotlib',
-    ],
-    requiresOpenCv: true,
-  },
-  'office-media-extractor': {
-    source: path.join(root, 'components', 'office-media-extractor', 'office_media_extractor.py'),
-    template: path.join(root, 'components', 'office-media-extractor', 'component.template.json'),
-    pyInstallerArgs: [
-      '--exclude-module', 'cv2', '--exclude-module', 'numpy',
-      '--exclude-module', 'torch', '--exclude-module', 'torchvision', '--exclude-module', 'torchaudio',
-      '--exclude-module', 'matplotlib', '--exclude-module', 'onnxruntime',
-    ],
-  },
   'team-retouch': {
     source: path.join(root, 'components', 'team-retouch', 'team_retouch.py'),
     template: path.join(root, 'components', 'team-retouch', 'component.template.json'),

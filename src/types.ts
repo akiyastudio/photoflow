@@ -21,7 +21,7 @@ export interface TeamRetouchComponentSettings {
   oversizeCropMode: 'face-centered' | 'expand';
   backendMode: 'auto' | 'basic' | 'advanced';
 }
-export interface ResearchToolsComponentSettings {
+export interface ResearchSettings {
   sensitivity: 'low' | 'standard' | 'high';
   minDuration: number;
   /** legacy config field */
@@ -32,8 +32,6 @@ export interface InspirationLibrarySettings {
 }
 export interface ComponentSettingsMap {
   'team-retouch'?: TeamRetouchComponentSettings;
-  'research-tools'?: ResearchToolsComponentSettings;
-  'office-media-extractor'?: Record<string, never>;
   [componentId: string]: unknown;
 }
 export const PROJECT_STATUS_LABELS: Record<ProjectStatus, string> = {
@@ -110,8 +108,8 @@ export interface AppConfig {
     /** legacy config field */
     destFolderName?: string;
   };
-  /** Compatibility mirror for versions before componentSettings. */
-  research: ResearchToolsComponentSettings;
+  /** Built-in storyboard analysis settings. */
+  research: ResearchSettings;
 }
 
 export interface PrivacyConsentState {
@@ -391,7 +389,7 @@ export interface TeamPatchReturnBatchResult {
 }
 
 export interface ComponentStatus {
-  id: 'team-retouch' | 'research-tools' | string;
+  id: string;
   name: string;
   description: string;
   capability: string;

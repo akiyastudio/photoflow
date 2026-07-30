@@ -460,7 +460,7 @@ const App: React.FC = () => {
             const configuredImageSource = fileConfig.smartMatch?.imageSourceFolderName;
             const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;
             const savedSdPaths = (Array.isArray(fileConfig.smartImport?.sdPaths) && fileConfig.smartImport.sdPaths.length ? fileConfig.smartImport.sdPaths : fileConfig.smartImport?.sdPath ? [fileConfig.smartImport.sdPath] : []).map((drive: string) => isMac ? drive : drive.replace(/\\/g, '/').replace(/\/DCIM\/?$/i, '/'));
-            const componentSettings = { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings };
+            const componentSettings: AppConfig['componentSettings'] = { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings };
             delete componentSettings['research-tools'];
             delete componentSettings['office-media-extractor'];
             const legacyConfig = { ...fileConfig } as AppConfig & { fileImport?: { preserveOriginal?: boolean }; brollImport: AppConfig['brollImport'] & { clearSource?: boolean } };

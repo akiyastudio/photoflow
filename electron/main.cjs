@@ -471,7 +471,7 @@ const loadMainWindowRenderer = () => {
 };
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'thumbnail_db', 'video_preview']);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db']);
 const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract', 'screenshot_main_image']);
 
 const getDevelopmentPython = () => {
@@ -492,18 +492,6 @@ const getRunConfig = (scriptName, args) => {
   if (app.isPackaged) {
     // 生产环境：根据平台决定是否有 .exe 后缀
     const exeSuffix = isWin ? '.exe' : '';
-    if (baseName === 'thumbnail_image') {
-      return {
-        command: path.join(process.resourcesPath, 'python', 'thumbnail-image-worker', `thumbnail-image-worker${exeSuffix}`),
-        args
-      };
-    }
-    if (baseName === 'workspace_db') {
-      return {
-        command: path.join(process.resourcesPath, 'python', 'workspace-db-worker', `workspace-db-worker${exeSuffix}`),
-        args
-      };
-    }
     if (MERGED_PYTHON_TOOLS.has(baseName)) {
       return {
         command: path.join(process.resourcesPath, 'python', 'tools', `tools${exeSuffix}`),

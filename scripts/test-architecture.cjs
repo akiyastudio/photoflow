@@ -13,6 +13,8 @@ const main = read('electron/main.cjs');
 const preload = read('electron/preload.cjs');
 const app = read('src/App.tsx');
 const toolViews = read('src/features/tools/ToolViews.tsx');
+const componentBuilder = read('scripts/build-components.cjs');
+assert(!componentBuilder.includes("'research-tools':") && !componentBuilder.includes("'office-media-extractor':") && !fs.existsSync(path.join(root, 'components', 'research-tools')) && !fs.existsSync(path.join(root, 'components', 'office-media-extractor')), 'built-in research and Office workers must not retain retired optional-component packaging');
 assert(toolViews.includes('const dateStr = `${month}.${day}`') && toolViews.includes('该月份中不存在这个日期') && toolViews.includes('min="1" max="12"'), 'birthday editor must save canonical dates and reject invalid or negative values');
 const projectWorkspace = read('src/features/workspace/ProjectWorkspace.tsx');
 const browserContext = read('src/features/file-browser/browser-context.ts');
@@ -57,6 +59,9 @@ assert(main.includes('createWindow(false);') && main.indexOf('registerAdvancedVi
 const fileRootWatcherService = read('electron/services/file-root-watcher-service.cjs');
 const nativeRecycleBinService = read('electron/native/RecycleBinService.cs');
 const packageJson = JSON.parse(read('package.json'));
+assert(main.includes("'thumbnail_image', 'video_preview', 'workspace_db'") && pythonBuild.includes("'--hidden-import', 'thumbnail_image'") && pythonBuild.includes("'--hidden-import', 'video_preview', '--hidden-import', 'workspace_db'") && !pythonBuild.includes("'--name', 'thumbnail-image-worker'") && !pythonBuild.includes("'--name', 'workspace-db-worker'") && !JSON.stringify(packageJson.build.win.extraResources).includes('thumbnail-image-worker') && !JSON.stringify(packageJson.build.win.extraResources).includes('workspace-db-worker'), 'lightweight Python services must share the tools runtime instead of duplicating PyInstaller runtimes');
+assert(['react', 'react-dom', 'lucide-react'].every(dependency => !packageJson.dependencies[dependency] && packageJson.devDependencies[dependency]), 'renderer-only dependencies must remain build-time dependencies instead of being duplicated in app.asar');
+assert(pythonBuild.includes("'--exclude-module', 'PIL.ImageQt', '--exclude-module', 'PIL._avif'") && pythonBuild.includes("'--exclude-module', 'PIL._webp'"), 'the OpenCV visual-tools runtime must exclude unused Pillow format and GUI plugins');
 assert(/\btsc\s+-b\b/.test(packageJson.scripts.build), 'production build must type-check referenced TypeScript projects');
 assert(app.includes("videoPreviewQuality: 'medium'") && app.includes('normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality)'), 'video preview quality must default and migrate to medium');
 assert(settingsFeature.includes("['medium', '中（默认 · 约 4 Mbps）'") && settingsFeature.includes("['high', '高（约 10 Mbps）'") && settingsFeature.includes('name="video-preview-quality"') && !settingsFeature.includes("['maximum', '最高（约 20 Mbps）'"), 'import settings must expose medium and high video preview qualities as radio cards');

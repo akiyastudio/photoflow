@@ -9,7 +9,9 @@ TOOLS = {
     "png_to_jpg": "png_to_jpg",
     "rename": "rename",
     "thumbnail_db": "thumbnail_db",
+    "thumbnail_image": "thumbnail_image",
     "video_preview": "video_preview",
+    "workspace_db": "workspace_db",
 }
 
 
