@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import type { LogEntry } from '../types';
 import { ProgressBar } from './ProgressBar';
+import { usePanelTaskReporter } from '../features/background-tasks/TaskCenter';
 
 interface TaskProgressProps {
   logs: LogEntry[];
@@ -22,6 +23,18 @@ export const TaskProgress: React.FC<TaskProgressProps> = ({
   const message = latest?.message || (progress >= 100 ? '处理完成' : idleMessage);
   const color = latest?.type === 'error' ? 'text-red-500' : latest?.type === 'success' || progress >= 100 ? 'text-emerald-600' : latest?.type === 'warning' ? 'text-amber-600' : 'text-slate-800';
   const percentage = Math.min(100, Math.max(0, progress));
+  const reporter = usePanelTaskReporter();
+  const latestType = latest?.type;
+
+  useEffect(() => {
+    if (!reporter) return;
+    reporter({
+      state: isRunning ? 'running' : latestType === 'error' ? 'failed' : percentage >= 100 ? 'completed' : 'idle',
+      progress: percentage,
+      message,
+      logs,
+    });
+  }, [isRunning, latestType, logs, message, percentage, reporter]);
 
   return (
     <section className="rounded-xl border border-slate-200 bg-slate-50 p-4" aria-live="polite" aria-busy={isRunning}>

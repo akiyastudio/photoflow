@@ -8,7 +8,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from event_protocol import log_error, log_info, log_progress, log_success
+from event_protocol import log_error, log_info, log_progress, log_success, log_warning
 from PIL import Image
 from send2trash import send2trash
 
@@ -19,6 +19,38 @@ PREVIEW_WIDTH = 384
 QUALITY_WIDTH = 640
 MIN_FRAME_SHARPNESS = 24.0
 BLACK_FRAME_LUMA_P99 = 18.0
+
+
+def detected_video_container(file_path):
+    """Identify supported video containers without trusting the file extension."""
+    try:
+        with open(file_path, "rb") as source:
+            header = source.read(4096)
+    except OSError:
+        return None
+    if len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"AVI ":
+        return "avi"
+    if header.startswith(b"\x1aE\xdf\xa3"):
+        return "matroska"
+    if header.startswith(b"\x30\x26\xb2\x75\x8e\x66\xcf\x11\xa6\xd9\x00\xaa\x00\x62\xce\x6c"):
+        return "asf"
+    # ISO BMFF files normally begin with an ftyp box, while older QuickTime MOV
+    # files may begin directly with moov/mdat. Parse bounded top-level boxes so
+    # random HTML/JavaScript containing one of those strings is not accepted.
+    offset = 0
+    while offset + 8 <= len(header):
+        size = int.from_bytes(header[offset:offset + 4], "big")
+        box_type = header[offset + 4:offset + 8]
+        if box_type in {b"ftyp", b"moov", b"mdat", b"styp", b"moof"}:
+            return "iso-bmff"
+        if box_type not in {b"free", b"skip", b"wide", b"sidx"}:
+            break
+        if size == 1 and offset + 16 <= len(header):
+            size = int.from_bytes(header[offset + 8:offset + 16], "big")
+        if size < 8 or offset + size > len(header):
+            break
+        offset += size
+    return None
 
 
 def configure_text_streams():
@@ -313,15 +345,13 @@ def analyze_video(video_path, sensitivity, min_duration):
     log_info(f"正在分析视频：{name}")
     cap = open_video(video_path)
     if not cap.isOpened():
-        log_error(f"无法打开视频：{name}")
-        return []
+        return None
     fps = float(cap.get(cv2.CAP_PROP_FPS)) or 25.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     ok, first = cap.read()
     if not ok:
         cap.release()
-        log_error(f"视频没有可读取的画面：{name}")
-        return []
+        return None
 
     previous = preview_features(first)
     scores = []
@@ -435,8 +465,17 @@ def run(args_list):
         return
     log_progress("扫描视频文件…", 0)
     sensitivity = args.sensitivity or normalize_sensitivity(args.threshold)
+    skipped_videos = []
+    processed_videos = 0
     for index, video in enumerate(videos, 1):
-        analyze_video(str(video), sensitivity, max(0.05, args.min_duration))
+        if detected_video_container(video) is None:
+            skipped_videos.append(video.name)
+        else:
+            result = analyze_video(str(video), sensitivity, max(0.05, args.min_duration))
+            if result is None:
+                skipped_videos.append(video.name)
+            else:
+                processed_videos += 1
         log_progress(f"处理视频：{index}/{len(videos)}", int(index / max(1, len(videos)) * 90))
     if not videos:
         log_info("目录中未找到视频文件，跳过分镜识别")
@@ -446,8 +485,19 @@ def run(args_list):
         process_images_deduplication(working_directory)
         if args.organize_data:
             move_txt_files(working_directory)
+    if skipped_videos:
+        preview_names = "、".join(f"“{name}”" for name in skipped_videos[:5])
+        remaining = len(skipped_videos) - min(5, len(skipped_videos))
+        suffix = f"等 {len(skipped_videos)} 个文件" if remaining else ""
+        log_warning(
+            f"已跳过 {preview_names}{suffix}：文件内容不是受支持的视频容器，或没有可解码的画面。",
+            data={"skippedCount": len(skipped_videos), "processedCount": processed_videos},
+        )
     log_progress("任务全部完成", 100)
-    log_success("所有任务处理完毕")
+    log_success(
+        f"分镜处理完成：成功处理 {processed_videos} 个视频，跳过 {len(skipped_videos)} 个无效或不可读文件。",
+        data={"processedCount": processed_videos, "skippedCount": len(skipped_videos)},
+    )
 
 
 if __name__ == "__main__":

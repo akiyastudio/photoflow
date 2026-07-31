@@ -17,11 +17,11 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
-from event_protocol import emit  # noqa: E402
+from event_protocol import emit, log_warning  # noqa: E402
 import rename as rename_module  # noqa: E402
 from rename import build_jpg_proxy_index, find_selection_jpg_proxy_folder, unique_stem_index, visual_reference_path  # noqa: E402
 import research as research_module  # noqa: E402
-from research import frame_quality_metrics, perceptual_hash  # noqa: E402
+from research import detected_video_container, frame_quality_metrics, perceptual_hash  # noqa: E402
 
 
 def main():
@@ -82,12 +82,12 @@ def main():
 
     with TemporaryDirectory() as temporary_directory:
         selected_video = Path(temporary_directory) / "selected-video.mp4"
-        selected_video.write_bytes(b"video placeholder")
+        selected_video.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2")
         analyzed_paths = []
         original_analyze_video = research_module.analyze_video
         original_deduplication = research_module.process_images_deduplication
         original_move_txt_files = research_module.move_txt_files
-        research_module.analyze_video = lambda video_path, _sensitivity, _min_duration: analyzed_paths.append(video_path)
+        research_module.analyze_video = lambda video_path, _sensitivity, _min_duration: analyzed_paths.append(video_path) or []
         research_module.process_images_deduplication = lambda _directory: (_ for _ in ()).throw(AssertionError("single-video mode must not deduplicate sibling images"))
         research_module.move_txt_files = lambda _directory: (_ for _ in ()).throw(AssertionError("single-video mode must not move sibling text files"))
         try:
@@ -97,6 +97,36 @@ def main():
             research_module.process_images_deduplication = original_deduplication
             research_module.move_txt_files = original_move_txt_files
         assert analyzed_paths == [str(selected_video)]
+
+    with TemporaryDirectory() as temporary_directory:
+        target_directory = Path(temporary_directory)
+        valid_video = target_directory / "valid.mp4"
+        fake_javascript = target_directory / "script.mp4"
+        fake_webp = target_directory / "image.mp4"
+        valid_video.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2")
+        fake_javascript.write_bytes(b"/*! html2canvas */")
+        fake_webp.write_bytes(b"RIFF\x0c\x00\x00\x00WEBPVP8 ")
+        assert detected_video_container(valid_video) == "iso-bmff"
+        assert detected_video_container(fake_javascript) is None
+        assert detected_video_container(fake_webp) is None
+
+        analyzed_paths = []
+        warnings = []
+        original_analyze_video = research_module.analyze_video
+        original_deduplication = research_module.process_images_deduplication
+        original_log_warning = research_module.log_warning
+        research_module.analyze_video = lambda video_path, _sensitivity, _min_duration: analyzed_paths.append(video_path) or []
+        research_module.process_images_deduplication = lambda _directory: None
+        research_module.log_warning = lambda message, data=None: warnings.append((message, data))
+        try:
+            research_module.run(["--path", str(target_directory), "--sensitivity", "standard"])
+        finally:
+            research_module.analyze_video = original_analyze_video
+            research_module.process_images_deduplication = original_deduplication
+            research_module.log_warning = original_log_warning
+        assert analyzed_paths == [str(valid_video)]
+        assert len(warnings) == 1
+        assert warnings[0][1] == {"skippedCount": 2, "processedCount": 1}
 
     with TemporaryDirectory() as temporary_directory:
         target_directory = Path(temporary_directory)
@@ -138,6 +168,15 @@ def main():
         "message": "working",
         "data": {"item": 2},
         "progress": 37,
+    }
+
+    output = StringIO()
+    with redirect_stdout(output):
+        log_warning("skipped invalid media", data={"skippedCount": 2})
+    assert json.loads(output.getvalue()) == {
+        "type": "warning",
+        "message": "skipped invalid media",
+        "data": {"skippedCount": 2},
     }
 
     assert unique_stem_index(["IMG_0001.CR3", "img_0001.jpg", "IMG_0002.CR3"]) == {

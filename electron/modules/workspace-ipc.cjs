@@ -1163,6 +1163,8 @@ const registerWorkspaceIpc = context => {
 
   ipcMain.handle('workspace-extract-screenshot-main-images', async (event, workspacePath, status, projectName, relativePaths = [], options = {}) => {
     const requestId = String(options?.requestId || '');
+    const analyzeOnly = options?.analyzeOnly === true;
+    const confirmedCrops = Array.isArray(options?.crops) ? options.crops : null;
     const publish = payload => {
       if (requestId && !event.sender.isDestroyed()) event.sender.send('workspace-screenshot-main-image-progress', { requestId, ...payload });
     };
@@ -1170,42 +1172,60 @@ const registerWorkspaceIpc = context => {
       const requestedPaths = Array.isArray(relativePaths) ? relativePaths.slice(0, 2000) : [];
       if (!requestedPaths.length) throw new Error('没有选择图片');
       const targets = requestedPaths.map(relativePath => resolveProjectEntry(workspacePath, status, projectName, relativePath));
+      if (confirmedCrops && confirmedCrops.length !== targets.length) throw new Error('确认的裁剪范围与图片数量不一致');
       for (const target of targets) {
         if (!fs.statSync(target).isFile() || !screenshotMainImageExtensions.has(path.extname(target).toLowerCase())) {
           throw new Error(`不支持此图片格式：${path.basename(target)}`);
         }
       }
       const results = [];
-      publish({ phase: 'extracting', progress: 0, processedCount: 0, totalCount: targets.length, message: '正在准备识别截图主图…' });
+      const command = analyzeOnly ? 'analyze' : confirmedCrops ? 'crop' : 'extract';
+      publish({ phase: analyzeOnly ? 'analyzing' : 'extracting', progress: 0, processedCount: 0, totalCount: targets.length, message: analyzeOnly ? '正在准备分析截图主图…' : '正在准备提取截图主图…' });
       for (let offset = 0; offset < targets.length; offset += 60) {
         const chunk = targets.slice(offset, offset + 60);
-        const args = ['extract', ...chunk.flatMap(target => ['--input', target])];
+        const cropChunk = confirmedCrops?.slice(offset, offset + chunk.length) || [];
+        const args = [command, ...chunk.flatMap((target, index) => {
+          if (!confirmedCrops) return ['--input', target];
+          const crop = cropChunk[index] || {};
+          const values = ['x', 'y', 'width', 'height'].map(key => Math.round(Number(crop[key]) || 0));
+          return ['--input', target, '--rectangle', values.join(',')];
+        })];
         const payload = await runPythonJsonAction('screenshot_main_image.py', args, 30 * 60 * 1000, message => {
           if (message?.type !== 'progress') return;
           const processedCount = Math.max(0, Math.min(targets.length, offset + Number(message.processedCount || 0)));
           const currentName = String(message.currentName || '');
           const displayIndex = message.phase === 'item-start' ? Math.min(targets.length, processedCount + 1) : processedCount;
           publish({
-            phase: 'extracting',
+            phase: analyzeOnly ? 'analyzing' : 'extracting',
             progress: Math.round(processedCount / Math.max(1, targets.length) * 100),
             processedCount,
             totalCount: targets.length,
             currentName,
-            message: `${message.phase === 'item-complete' ? '已处理' : '正在识别'} ${displayIndex}/${targets.length}${currentName ? ` · ${currentName}` : ''}`,
+            message: `${message.phase === 'item-complete' ? '已处理' : analyzeOnly ? '正在分析' : '正在裁剪'} ${displayIndex}/${targets.length}${currentName ? ` · ${currentName}` : ''}`,
           });
         });
         if (!payload?.success && !Array.isArray(payload?.results)) throw new Error(payload?.error || '提取截图主图失败');
         results.push(...(Array.isArray(payload.results) ? payload.results : []));
       }
       const croppedCount = results.filter(result => result?.cropped).length;
+      const reviewCount = results.filter(result => result?.needsReview).length;
       const skippedCount = results.filter(result => result?.skipped).length;
       const failedCount = results.filter(result => !result?.success).length;
-      publish({ phase: 'complete', progress: 100, processedCount: targets.length, totalCount: targets.length, message: '主图识别完成' });
-      mainWindow?.webContents.send('workspace-files-changed', { root: getProjectPath(workspacePath, status, projectName), fileName: '' });
+      publish({ phase: 'complete', progress: 100, processedCount: targets.length, totalCount: targets.length, message: analyzeOnly ? '主图范围分析完成' : '主图提取完成' });
+      if (!analyzeOnly) {
+        const projectRoot = path.resolve(getProjectPath(workspacePath, status, projectName));
+        const outputPaths = results.flatMap(result => result?.cropped && result?.output ? [assertInside(projectRoot, path.resolve(result.output), '主图输出路径')] : []);
+        if (outputPaths.length) void thumbnailService.syncChangedPaths(projectRoot, outputPaths, mediaRuntimeState.activeMediaCacheConfig).catch(error => {
+          writeLog('warn', 'Unable to queue screenshot main-image thumbnails', { projectName, error: error.message || String(error) });
+        });
+        const workspaceRoot = path.resolve(resolveWorkspaceRoot(workspacePath));
+        mainWindow?.webContents.send('workspace-files-changed', { root: workspaceRoot, fileName: path.relative(workspaceRoot, projectRoot), eventType: 'rename' });
+      }
       return {
         success: failedCount < results.length,
         inputCount: results.length,
         croppedCount,
+        reviewCount,
         skippedCount,
         failedCount,
         results,
@@ -1369,14 +1389,23 @@ const registerWorkspaceIpc = context => {
       const extensions = mediaKind === 'video'
         ? [...VIDEO_EXTENSIONS].map(value => value.slice(1))
         : [...new Set([...IMAGE_EXTENSIONS, ...RAW_EXTENSIONS])].map(value => value.slice(1));
-      const choice = await dialog.showOpenDialog(mainWindow, {
-        title: mediaKind === 'video' ? '选择要导入的视频版本' : '选择要导入的图片版本',
-        properties: ['openFile', 'multiSelections'],
-        filters: [{ name: mediaKind === 'video' ? '视频文件' : '图片与 RAW', extensions }],
-      });
-      if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, count: 0 };
+      const progressConflictPolicy = ['skip', 'keep-both'].includes(options.progressConflictPolicy) ? options.progressConflictPolicy : '';
+      let selectedSourcePaths;
+      if (progressConflictPolicy) {
+        if (!appendProgress) throw new Error('只能在向已有进度追加文件时处理同名冲突');
+        if (!Array.isArray(options.sourcePaths) || !options.sourcePaths.length) throw new Error('同名文件冲突确认已失效，请重新选择文件');
+        selectedSourcePaths = options.sourcePaths.map(value => String(value));
+      } else {
+        const choice = await dialog.showOpenDialog(mainWindow, {
+          title: mediaKind === 'video' ? '选择要导入的视频版本' : '选择要导入的图片版本',
+          properties: ['openFile', 'multiSelections'],
+          filters: [{ name: mediaKind === 'video' ? '视频文件' : '图片与 RAW', extensions }],
+        });
+        if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, count: 0 };
+        selectedSourcePaths = choice.filePaths;
+      }
       let sourceInfos = [];
-      for (const source of choice.filePaths) {
+      for (const source of selectedSourcePaths) {
         const sourceInfo = await assertRegularFile(source);
         const extension = path.extname(sourceInfo.path).toLowerCase();
         const supported = mediaKind === 'video' ? VIDEO_EXTENSIONS.has(extension) : IMAGE_EXTENSIONS.has(extension) || RAW_EXTENSIONS.has(extension);
@@ -1414,23 +1443,26 @@ const registerWorkspaceIpc = context => {
           if (identical) exactDuplicates.add(sourceInfo.path);
           else conflicts.push(sourceInfo.path);
         }
-        let keepConflicts = true;
+        const keepConflicts = progressConflictPolicy === 'keep-both';
         if (conflicts.length) {
-          const decision = await dialog.showMessageBox(mainWindow, {
-            type: 'question',
-            title: '追加进度时发现同名文件',
-            message: `有 ${conflicts.length} 个同名文件的内容与现有文件不同。`,
-            detail: '可以跳过这些文件，或者保留两份并为新文件自动添加编号。现有进度文件不会被覆盖。',
-            buttons: ['跳过同名文件', '保留两份', '取消追加'],
-            defaultId: 0,
-            cancelId: 2,
-            noLink: true,
-          });
-          if (decision.response === 2) {
-            publish({ phase: 'cancelled', progress: 0, currentName: '已取消追加版本进度' });
-            return { success: true, cancelled: true, operationId, count: 0 };
+          if (!progressConflictPolicy) {
+            const conflictNames = conflicts.slice(0, 6).map(filePath => path.basename(filePath));
+            const more = conflicts.length > conflictNames.length ? `等 ${conflicts.length} 个文件` : conflictNames.map(name => `“${name}”`).join('、');
+            publish({ phase: 'complete', progress: 100, currentName: '等待处理同名文件', count: 0, decisionRequired: true });
+            return {
+              success: true,
+              operationId,
+              count: 0,
+              requiresDecision: {
+                kind: 'progress-import-conflict',
+                names: conflictNames,
+                conflictCount: conflicts.length,
+                sourcePaths: selectedSourcePaths,
+                message: `追加进度时发现 ${more}与现有文件同名，但内容不同。`,
+                detail: '可以跳过这些文件，或者保留两份并为新文件自动添加编号。现有进度文件不会被覆盖。',
+              },
+            };
           }
-          keepConflicts = decision.response === 1;
         }
         const skippedPaths = new Set([...exactDuplicates, ...(keepConflicts ? [] : conflicts)]);
         skippedCount = skippedPaths.size;

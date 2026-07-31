@@ -12,8 +12,8 @@ const outside = path.join(root, 'outside');
 fs.mkdirSync(workspace);
 fs.mkdirSync(outside);
 
-const runJson = (command, args) => {
-  const result = spawnSync(command, args, { encoding: 'utf8', windowsHide: true });
+const runJson = (command, args, input) => {
+  const result = spawnSync(command, args, { encoding: 'utf8', windowsHide: true, input });
   const lines = String(result.stdout || '').replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean);
   const payload = JSON.parse(lines[lines.length - 1]);
   if (!payload.success) throw new Error(payload.error || String(result.stderr));
@@ -167,6 +167,17 @@ const runJson = (command, args) => {
           assert.strictEqual(fs.existsSync(recycleFile), false);
           runJson(helper, ['restore', '--pidl', recycled.recyclePidl, '--target', recycleFile]);
           assert.strictEqual(fs.readFileSync(recycleFile, 'utf8'), 'restore me');
+
+          const batchFiles = ['批量甲.txt', 'batch-b.txt'].map(name => path.join(workspace, name));
+          for (const filePath of batchFiles) fs.writeFileSync(filePath, `restore ${path.basename(filePath)}`);
+          const batch = runJson(helper, ['trash-many'], JSON.stringify(batchFiles));
+          assert.strictEqual(batch.items.length, batchFiles.length);
+          assert(batch.items.every(item => item.success && item.recyclePidl), 'batch recycle must preserve a precise restore identity for every item');
+          for (let index = 0; index < batchFiles.length; index += 1) {
+            assert.strictEqual(fs.existsSync(batchFiles[index]), false);
+            runJson(helper, ['restore', '--pidl', batch.items[index].recyclePidl, '--target', batchFiles[index]]);
+            assert.strictEqual(fs.readFileSync(batchFiles[index], 'utf8'), `restore ${path.basename(batchFiles[index])}`);
+          }
         }
       }
     }

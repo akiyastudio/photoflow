@@ -63,6 +63,60 @@ def make_sparse_line_art_screenshot() -> np.ndarray:
     return screenshot
 
 
+def make_white_feed_screenshot() -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """A fixed-source social feed: white chrome, media, then text/actions."""
+    height, width = 1800, 900
+    screenshot = np.full((height, width, 3), 252, dtype=np.uint8)
+    cv2.putText(screenshot, "13:04  5G", (70, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (25, 25, 25), 2)
+    cv2.circle(screenshot, (105, 180), 34, (205, 220, 230), -1)
+    cv2.putText(screenshot, "creator", (155, 190), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (45, 45, 45), 2)
+    expected = (45, 250, 855, 1160)
+    screenshot[expected[1]:expected[3], expected[0]:expected[2]] = make_artwork(
+        expected[3] - expected[1],
+        expected[2] - expected[0],
+    )
+    for y in range(1235, 1590, 70):
+        cv2.rectangle(screenshot, (55, y), (540 + y % 210, y + 10), (55, 55, 55), -1)
+    cv2.circle(screenshot, (420, 1685), 24, (220, 30, 75), -1)
+    return screenshot, expected
+
+
+def make_black_viewer_screenshot() -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """A fixed-source immersive viewer with a grayscale image on black chrome."""
+    height, width = 1800, 900
+    screenshot = np.full((height, width, 3), 5, dtype=np.uint8)
+    cv2.line(screenshot, (55, 115), (85, 145), (240, 240, 240), 4)
+    cv2.line(screenshot, (85, 115), (55, 145), (240, 240, 240), 4)
+    cv2.putText(screenshot, "9/10", (420, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (240, 240, 240), 2)
+    expected = (70, 260, 830, 1460)
+    artwork = make_artwork(expected[3] - expected[1], expected[2] - expected[0])
+    gray = cv2.cvtColor(artwork, cv2.COLOR_BGR2GRAY)
+    screenshot[expected[1]:expected[3], expected[0]:expected[2]] = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    cv2.line(screenshot, (330, 1725), (570, 1725), (160, 160, 160), 9)
+    return screenshot, expected
+
+
+def make_story_viewer_screenshot() -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """A full-width story viewer with status chrome and an internal hard edge."""
+    height, width = 1200, 600
+    screenshot = np.full((height, width, 3), (120, 105, 92), dtype=np.uint8)
+    expected = (0, 72, width, 1100)
+    artwork = make_artwork(expected[3] - expected[1], width)
+    # A strong horizon inside the photograph must not beat the actual bottom
+    # edge followed by the dark carousel/control strip.
+    artwork[720:726] = (18, 18, 18)
+    screenshot[expected[1]:expected[3]] = artwork
+    screenshot[expected[3]:] = 8
+    cv2.putText(screenshot, "07:31", (45, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (245, 245, 245), 2)
+    for x in range(15, width - 15, 62):
+        cv2.line(screenshot, (x, 1135), (min(width - 15, x + 46), 1135), (125, 125, 125), 5)
+    return screenshot, expected
+
+
+def assert_rectangle_close(actual: tuple[int, int, int, int] | None, expected: tuple[int, int, int, int], tolerance: int = 3) -> None:
+    assert actual is not None and all(abs(actual[index] - expected[index]) <= tolerance for index in range(4)), (actual, expected)
+
+
 with tempfile.TemporaryDirectory(prefix="photoflow-screenshot-main-") as temporary:
     directory = Path(temporary)
 
@@ -102,6 +156,21 @@ with tempfile.TemporaryDirectory(prefix="photoflow-screenshot-main-") as tempora
         line_art_reason,
     )
 
+    white_feed, white_feed_expected = make_white_feed_screenshot()
+    white_feed_rectangle, white_feed_confidence, white_feed_reason = MODULE.detect_main_rectangle(white_feed)
+    assert_rectangle_close(white_feed_rectangle, white_feed_expected)
+    assert not white_feed_reason, (white_feed_rectangle, white_feed_confidence, white_feed_reason)
+
+    black_viewer, black_viewer_expected = make_black_viewer_screenshot()
+    black_viewer_rectangle, black_viewer_confidence, black_viewer_reason = MODULE.detect_main_rectangle(black_viewer)
+    assert_rectangle_close(black_viewer_rectangle, black_viewer_expected)
+    assert not black_viewer_reason, (black_viewer_rectangle, black_viewer_confidence, black_viewer_reason)
+
+    story_viewer, story_viewer_expected = make_story_viewer_screenshot()
+    story_viewer_rectangle, story_viewer_confidence, story_viewer_reason = MODULE.detect_main_rectangle(story_viewer)
+    assert_rectangle_close(story_viewer_rectangle, story_viewer_expected)
+    assert not story_viewer_reason, (story_viewer_rectangle, story_viewer_confidence, story_viewer_reason)
+
     # A weak boundary on only one side is not enough evidence to delete the
     # opposite, low-texture portion of an image.
     weak_rows = np.full(99, 8.0, dtype=np.float32)
@@ -122,6 +191,15 @@ with tempfile.TemporaryDirectory(prefix="photoflow-screenshot-main-") as tempora
     cv2.imwrite(str(note_path), note)
     note_result = MODULE.extract_main_image(str(note_path))
     assert note_result["success"] and note_result["skipped"] and not note_result["cropped"], note_result
+
+    note_analysis = MODULE.analyze_main_image(str(note_path))
+    assert note_analysis["success"] and note_analysis["crop"] and note_analysis["needsReview"], note_analysis
+    assert note_analysis["snapGuides"]["x"] and note_analysis["snapGuides"]["y"], note_analysis
+
+    manual_result = MODULE.crop_main_image(str(note_path), "40,60,720,1080")
+    assert manual_result["success"] and manual_result["cropped"], manual_result
+    assert manual_result["outputSize"] == {"width": 720, "height": 1080}, manual_result
+    assert Path(manual_result["output"]).exists(), manual_result
 
     second_result = MODULE.extract_main_image(str(screenshot_path))
     assert second_result["success"] and second_result["cropped"], second_result

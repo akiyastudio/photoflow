@@ -19,13 +19,19 @@ internal static class RecycleBinService
     [STAThread]
     private static int Main(string[] args)
     {
-        Console.OutputEncoding = System.Text.Encoding.UTF8;
+        // Node writes batch JSON as UTF-8.  On Chinese Windows a redirected
+        // console otherwise defaults to the legacy system code page, which can
+        // consume one byte of a JSON path escape and produce an "unrecognized
+        // escape sequence" error for Chinese file names.
+        Console.InputEncoding = Encoding.UTF8;
+        Console.OutputEncoding = Encoding.UTF8;
         try
         {
             if (args.Length < 1) throw new ArgumentException("缺少操作名称");
             var options = ParseOptions(args);
             object result;
             if (args[0] == "trash") result = Trash(Required(options, "path"));
+            else if (args[0] == "trash-many") result = TrashMany(ReadPaths());
             else if (args[0] == "restore") result = Restore(Required(options, "pidl"), Required(options, "target"));
             else if (args[0] == "probe") result = Probe(Required(options, "pidl"));
             else if (args[0] == "check") result = Check(Required(options, "directory"));
@@ -112,6 +118,100 @@ internal static class RecycleBinService
             Release(source);
             Release(operation);
         }
+    }
+
+    private static string[] ReadPaths()
+    {
+        var input = Console.In.ReadToEnd();
+        var paths = new JavaScriptSerializer().Deserialize<string[]>(input);
+        if (paths == null || paths.Length == 0) throw new ArgumentException("没有要删除的文件或文件夹");
+        if (paths.Length > 500) throw new ArgumentException("单次最多删除 500 个项目");
+        return paths;
+    }
+
+    private static object TrashMany(string[] requestedPaths)
+    {
+        var sourcePaths = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var requestedPath in requestedPaths)
+        {
+            var sourcePath = Path.GetFullPath(requestedPath);
+            if (!File.Exists(sourcePath) && !Directory.Exists(sourcePath)) throw new FileNotFoundException("文件或文件夹不存在", sourcePath);
+            if (seen.Add(sourcePath)) sourcePaths.Add(sourcePath);
+        }
+
+        var operation = (IFileOperation)new FileOperation();
+        var sources = new List<IShellItem>();
+        var sinks = new List<ProgressSink>();
+        try
+        {
+            ThrowIfFailed(operation.SetOperationFlags(FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_WANTNUKEWARNING | FOFX_RECYCLEONDELETE | FOFX_ADDUNDORECORD));
+            foreach (var sourcePath in sourcePaths)
+            {
+                IShellItem source;
+                ThrowIfFailed(SHCreateItemFromParsingName(sourcePath, IntPtr.Zero, typeof(IShellItem).GUID, out source));
+                var sink = new ProgressSink();
+                sources.Add(source);
+                sinks.Add(sink);
+                ThrowIfFailed(operation.DeleteItem(source, sink));
+            }
+
+            var operationResult = operation.PerformOperations();
+            bool aborted = false;
+            if (operationResult >= 0) ThrowIfFailed(operation.GetAnyOperationsAborted(out aborted));
+            var items = new List<Dictionary<string, object>>();
+            for (var index = 0; index < sourcePaths.Count; index++)
+            {
+                var sourcePath = sourcePaths[index];
+                var sink = sinks[index];
+                var itemResult = sink.DeleteCompleted ? sink.DeleteResult : operationResult;
+                if (!sink.DeleteCompleted || itemResult < 0)
+                {
+                    items.Add(new Dictionary<string, object> {
+                        { "success", false },
+                        { "originalPath", sourcePath },
+                        { "error", itemResult < 0 ? ErrorMessage(itemResult) : aborted ? "系统取消了删除操作" : "Windows 未能删除该文件或文件夹" },
+                        { "hresult", itemResult }
+                    });
+                    continue;
+                }
+                var permanent = sink.RecycledPidl == null || sink.RecycledPidl.Length == 0;
+                var stillExists = File.Exists(sourcePath) || Directory.Exists(sourcePath);
+                if (permanent && stillExists)
+                {
+                    items.Add(new Dictionary<string, object> {
+                        { "success", false },
+                        { "originalPath", sourcePath },
+                        { "error", "Windows 未能删除该文件或文件夹" }
+                    });
+                    continue;
+                }
+                items.Add(new Dictionary<string, object> {
+                    { "success", true },
+                    { "originalPath", sourcePath },
+                    { "recyclePidl", permanent ? "" : Convert.ToBase64String(sink.RecycledPidl) },
+                    { "preciseRestore", !permanent },
+                    { "permanent", permanent }
+                });
+            }
+            return new Dictionary<string, object> {
+                { "success", true },
+                { "aborted", aborted },
+                { "items", items }
+            };
+        }
+        finally
+        {
+            foreach (var source in sources) Release(source);
+            Release(operation);
+        }
+    }
+
+    private static string ErrorMessage(int result)
+    {
+        try { Marshal.ThrowExceptionForHR(result); }
+        catch (Exception error) { return error.Message; }
+        return "Windows 回收站操作失败";
     }
 
     private static object Restore(string encodedPidl, string requestedTarget)
@@ -295,6 +395,7 @@ internal static class RecycleBinService
     {
         internal byte[] RecycledPidl;
         internal int DeleteResult;
+        internal bool DeleteCompleted;
         public int StartOperations() { return 0; }
         public int FinishOperations(int result) { return 0; }
         public int PreRenameItem(uint flags, IShellItem item, string newName) { return 0; }
@@ -306,6 +407,7 @@ internal static class RecycleBinService
         public int PreDeleteItem(uint flags, IShellItem item) { return 0; }
         public int PostDeleteItem(uint flags, IShellItem item, int result, IShellItem newItem)
         {
+            DeleteCompleted = true;
             DeleteResult = result;
             if (result >= 0 && newItem != null)
             {

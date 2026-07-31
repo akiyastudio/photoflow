@@ -60,6 +60,66 @@ def _analysis_maps(image: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarra
     return gray, local_std, gradient, active
 
 
+def _neutral_edge_backgrounds(image: np.ndarray) -> list[np.ndarray]:
+    """Return likely black/white app-canvas colors sampled from the corners."""
+    height, width = image.shape[:2]
+    sample_height = max(8, height // 18)
+    sample_width = max(8, width // 18)
+    blocks = (
+        image[:sample_height, :sample_width],
+        image[:sample_height, width - sample_width:],
+        image[height - sample_height:, :sample_width],
+        image[height - sample_height:, width - sample_width:],
+    )
+    colors: list[np.ndarray] = []
+    for block in blocks:
+        color = np.median(block.reshape(-1, 3), axis=0).astype(np.float32)
+        if float(color.max() - color.min()) > 18.0 or 45.0 <= float(color.mean()) <= 210.0:
+            continue
+        if not any(float(np.max(np.abs(color - saved))) < 14.0 for saved in colors):
+            colors.append(color)
+    return colors
+
+
+def _background_panel_candidates(
+    image: np.ndarray,
+    min_width: int,
+    min_height: int,
+) -> list[tuple[int, int, int, int]]:
+    """Find media rectangles set against a neutral social-app background.
+
+    Fixed-source screenshots are commonly either a white feed page or a black
+    immersive viewer.  Text and controls occupy too little of a row to look
+    like a panel, while the main image differs from the app canvas across a
+    large, continuous rectangle.
+    """
+    height, width = image.shape[:2]
+    candidates: list[tuple[int, int, int, int]] = []
+    image_float = image.astype(np.float32)
+    for background in _neutral_edge_backgrounds(image):
+        foreground = np.max(np.abs(image_float - background), axis=2) >= 24.0
+        row_occupancy = _smooth(foreground.mean(axis=1), max(3, height // 220))
+        row_parts = _merge_segments(
+            _segments(row_occupancy > 0.28, max(5, height // 140)),
+            max(5, height // 35),
+        )
+        for top, bottom in row_parts:
+            if bottom - top < min_height:
+                continue
+            column_occupancy = _smooth(foreground[top:bottom].mean(axis=0), max(3, width // 180))
+            column_parts = _merge_segments(
+                _segments(column_occupancy > 0.24, max(5, width // 120)),
+                max(4, width // 45),
+            )
+            for left, right in column_parts:
+                if right - left < min_width:
+                    continue
+                support = float(foreground[top:bottom, left:right].mean())
+                if support >= 0.24:
+                    candidates.append((left, top, right, bottom))
+    return candidates
+
+
 def _candidate_rectangles(
     image: np.ndarray,
     maps: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
@@ -77,6 +137,7 @@ def _candidate_rectangles(
     )
 
     candidates: list[tuple[int, int, int, int]] = []
+    candidates.extend(_background_panel_candidates(image, min_width, min_height))
     for top, bottom in row_parts:
         if bottom - top < min_height:
             continue
@@ -139,6 +200,23 @@ def _candidate_rectangles(
                 np.mean(np.abs(image[bottom].astype(np.float32) - image[bottom - 1].astype(np.float32)), axis=1)
                 >= pixel_boundary_threshold
             ))
+            if top > 0 and bottom < height:
+                top_transition = np.mean(
+                    np.abs(image[top].astype(np.float32) - image[top - 1].astype(np.float32)),
+                    axis=1,
+                ) >= pixel_boundary_threshold
+                bottom_transition = np.mean(
+                    np.abs(image[bottom].astype(np.float32) - image[bottom - 1].astype(np.float32)),
+                    axis=1,
+                ) >= pixel_boundary_threshold
+                shared_transition = top_transition & bottom_transition
+                transition_parts = _merge_segments(
+                    _segments(shared_transition, max(6, width // 80)),
+                    max(4, width // 40),
+                )
+                for left, right in transition_parts:
+                    if right - left >= min_width and float(shared_transition[left:right].mean()) >= 0.62:
+                        candidates.append((left, top, right, bottom))
             strong_horizontal_frame = (
                 top > 0
                 and bottom < height
@@ -267,6 +345,36 @@ def _outside_strip_score(values: np.ndarray, rectangle: tuple[int, int, int, int
     return float(np.mean([strip.mean() for strip in usable])) if usable else 0.0
 
 
+def _panel_background_score(image: np.ndarray, rectangle: tuple[int, int, int, int]) -> float:
+    """Measure whether a rectangle is a coherent panel on black/white app chrome."""
+    left, top, right, bottom = rectangle
+    height, width = image.shape[:2]
+    pad_y = max(4, height // 45)
+    pad_x = max(4, width // 45)
+    strips: list[np.ndarray] = []
+    if top:
+        strips.append(image[max(0, top - pad_y):top, left:right])
+    if bottom < height:
+        strips.append(image[bottom:min(height, bottom + pad_y), left:right])
+    if left:
+        strips.append(image[top:bottom, max(0, left - pad_x):left])
+    if right < width:
+        strips.append(image[top:bottom, right:min(width, right + pad_x)])
+    usable = [strip.reshape(-1, 3) for strip in strips if strip.size]
+    if not usable:
+        return 0.0
+    outside = np.concatenate(usable, axis=0).astype(np.float32)
+    background = np.median(outside, axis=0)
+    if float(background.max() - background.min()) > 22.0 or 50.0 <= float(background.mean()) <= 205.0:
+        return 0.0
+    outside_match = float(np.mean(np.max(np.abs(outside - background), axis=1) < 20.0))
+    inside = image[top:bottom, left:right].reshape(-1, 3).astype(np.float32)
+    inside_difference = float(np.mean(np.max(np.abs(inside - background), axis=1) >= 24.0))
+    outside_score = float(np.clip((outside_match - 0.45) / 0.45, 0.0, 1.0))
+    inside_score = float(np.clip((inside_difference - 0.16) / 0.64, 0.0, 1.0))
+    return outside_score * inside_score
+
+
 def _score_candidate(
     image: np.ndarray,
     rectangle: tuple[int, int, int, int],
@@ -288,10 +396,12 @@ def _score_candidate(
     row_coverage = active[top:bottom, left:right].mean(axis=1)
     continuity = float(np.mean(row_coverage > 0.20))
     contrast = float(np.clip((inside_std - outside_std + 5.0) / 30.0, 0.0, 1.0))
+    panel = _panel_background_score(image, rectangle)
     texture = float(np.clip(inside_std / 34.0, 0.0, 1.0))
     edge = float(np.clip(inside_gradient / 120.0, 0.0, 1.0))
     activity = float(np.clip((active_fraction - 0.12) / 0.55, 0.0, 1.0))
     size_score = float(np.clip((area_ratio - 0.10) / 0.32, 0.0, 1.0))
+    unpenalized_size_score = size_score
     if area_ratio > 0.82:
         size_score *= max(0.0, (0.96 - area_ratio) / 0.14)
     width_score = float(np.clip((width_ratio - 0.33) / 0.42, 0.0, 1.0))
@@ -318,6 +428,24 @@ def _score_candidate(
         np.clip(boundary_values[2] / (column_scale * 2.5), 0.0, 1.0),
         np.clip(boundary_values[3] / (column_scale * 2.5), 0.0, 1.0),
     ]))
+    row_pixel_threshold = max(18.0, row_scale * 1.5)
+    column_pixel_threshold = max(18.0, column_scale * 1.5)
+    top_coverage = 0.0 if not top else float(np.mean(
+        np.mean(np.abs(image[top].astype(np.float32) - image[top - 1].astype(np.float32)), axis=1)
+        >= row_pixel_threshold
+    ))
+    bottom_coverage = 0.0 if bottom >= height else float(np.mean(
+        np.mean(np.abs(image[bottom].astype(np.float32) - image[bottom - 1].astype(np.float32)), axis=1)
+        >= row_pixel_threshold
+    ))
+    left_coverage = 0.0 if not left else float(np.mean(
+        np.mean(np.abs(image[:, left].astype(np.float32) - image[:, left - 1].astype(np.float32)), axis=1)
+        >= column_pixel_threshold
+    ))
+    right_coverage = 0.0 if right >= width else float(np.mean(
+        np.mean(np.abs(image[:, right].astype(np.float32) - image[:, right - 1].astype(np.float32)), axis=1)
+        >= column_pixel_threshold
+    ))
     # A screenshot often contains a full-width image between a status/header
     # strip and a footer strip.  Two exceptionally strong opposing transitions
     # are much better frame evidence than a dense subject-shaped texture blob.
@@ -327,6 +455,8 @@ def _score_candidate(
         and bottom < height
         and boundary_values[0] >= row_scale * 4.0
         and boundary_values[1] >= row_scale * 4.0
+        and min(top_coverage, bottom_coverage) >= 0.25
+        and max(top_coverage, bottom_coverage) >= 0.82
     )
     vertical_frame = (
         height_ratio >= 0.90
@@ -334,15 +464,35 @@ def _score_candidate(
         and right < width
         and boundary_values[2] >= column_scale * 4.0
         and boundary_values[3] >= column_scale * 4.0
+        and min(left_coverage, right_coverage) >= 0.25
+        and max(left_coverage, right_coverage) >= 0.82
     )
     frame = 1.0 if horizontal_frame or vertical_frame else 0.0
+    viewer_layout = 1.0 if (
+        width_ratio >= 0.90
+        and 0.025 <= top / height <= 0.13
+        and 0.70 <= bottom / height <= 0.97
+    ) else 0.0
+    frame_strength = 0.0
+    if horizontal_frame:
+        frame_strength = float(np.mean([
+            np.clip(boundary_values[0] / (row_scale * 40.0), 0.0, 1.0),
+            np.clip(boundary_values[1] / (row_scale * 40.0), 0.0, 1.0),
+        ]))
+    elif vertical_frame:
+        frame_strength = float(np.mean([
+            np.clip(boundary_values[2] / (column_scale * 40.0), 0.0, 1.0),
+            np.clip(boundary_values[3] / (column_scale * 40.0), 0.0, 1.0),
+        ]))
+    if frame or panel >= 0.55:
+        size_score = unpenalized_size_score
 
     # A text-only note normally has many edges but low continuous texture and
     # low color activity.  Do not apply that penalty when two strong opposing
     # frame edges already identify the complete media panel: sparse line art is
     # intentionally low-texture and would otherwise look text-like here.
     text_like_penalty = 0.0
-    if not frame:
+    if not frame and panel < 0.55:
         if continuity < 0.58:
             text_like_penalty += (0.58 - continuity) * 0.45
         if texture < 0.32 and edge > 0.20:
@@ -357,11 +507,14 @@ def _score_candidate(
         + 0.12 * activity
         + 0.12 * continuity
         + 0.09 * contrast
+        + 0.20 * panel
         + 0.14 * boundary
         + 0.06 * width_score
         + 0.04 * center_score
         + 0.04 * margin_score
-        + 0.35 * frame
+        + 0.28 * frame
+        + 0.12 * frame_strength
+        + 0.12 * viewer_layout
         - text_like_penalty
     )
     features = {
@@ -370,17 +523,20 @@ def _score_candidate(
         "activity": activity,
         "continuity": continuity,
         "contrast": contrast,
+        "panel": panel,
         "margin": margin_ratio,
         "boundary": boundary,
         "frame": frame,
+        "frameStrength": frame_strength,
+        "viewerLayout": viewer_layout,
     }
     return float(np.clip(score, 0.0, 1.0)), features
 
 
-def detect_main_rectangle(image: np.ndarray) -> tuple[tuple[int, int, int, int] | None, float, str]:
+def _analyze_main_rectangle(image: np.ndarray) -> tuple[tuple[int, int, int, int], float, str, bool]:
     original_height, original_width = image.shape[:2]
     if original_height < 160 or original_width < 120:
-        return None, 0.0, "图片尺寸过小"
+        return (0, 0, original_width, original_height), 0.0, "图片尺寸过小，请手动确认范围", False
     scale = min(1.0, MAX_ANALYSIS_EDGE / max(original_height, original_width))
     analysis = image if scale == 1.0 else cv2.resize(
         image,
@@ -394,22 +550,17 @@ def detect_main_rectangle(image: np.ndarray) -> tuple[tuple[int, int, int, int] 
     )
     candidates = _candidate_rectangles(analysis, maps, differences)
     if not candidates:
-        return None, 0.0, "没有找到可信的主图区域"
+        return (0, 0, original_width, original_height), 0.0, "没有找到可信的主图区域，请手动调整", False
     scored = [(*_score_candidate(analysis, rectangle, maps, differences), rectangle) for rectangle in candidates]
-    score, features, rectangle = max(scored, key=lambda item: item[0])
+    score, features, rectangle = max(scored, key=lambda item: (
+        item[0],
+        item[1]["panel"],
+        item[1]["frameStrength"],
+        item[1]["area"],
+    ))
     height, width = analysis.shape[:2]
     left, top, right, bottom = rectangle
     removed_ratio = 1.0 - ((right - left) * (bottom - top) / float(width * height))
-    if removed_ratio < 0.06:
-        return None, score, "图片本身已接近完整画面，无需裁剪"
-    if not features["frame"] and (features["continuity"] < 0.44 or (
-        features["texture"] < 0.16
-        and features["activity"] < 0.28
-        and features["boundary"] < 0.70
-    )):
-        return None, score, "画面更像文字或界面，已为避免误裁而跳过"
-    if score < MIN_CONFIDENCE:
-        return None, score, "主图区域置信度不足，已保留原图"
     inverse_scale = 1.0 / scale
     resolved = (
         max(0, round(left * inverse_scale)),
@@ -417,13 +568,55 @@ def detect_main_rectangle(image: np.ndarray) -> tuple[tuple[int, int, int, int] 
         min(original_width, round(right * inverse_scale)),
         min(original_height, round(bottom * inverse_scale)),
     )
+    if removed_ratio < 0.06:
+        return (0, 0, original_width, original_height), score, "候选范围接近整张截图，请手动确认", False
+    if not features["frame"] and features["panel"] < 0.55 and (features["continuity"] < 0.44 or (
+        features["texture"] < 0.16
+        and features["activity"] < 0.28
+        and features["boundary"] < 0.70
+    )):
+        return resolved, score, "画面更像文字或界面，请手动确认范围", False
+    if score < MIN_CONFIDENCE:
+        return resolved, score, "主图区域置信度不足，请手动确认范围", False
     if resolved[2] - resolved[0] < 80 or resolved[3] - resolved[1] < 80:
-        return None, score, "检测到的区域过小，已保留原图"
+        return (0, 0, original_width, original_height), score, "检测到的区域过小，请手动调整", False
     # The frame itself is the main-image boundary.  Trimming uniform white or
     # black lines inside it would remove intentional canvas around sparse art.
-    if features["frame"]:
-        return resolved, score, ""
-    return _trim_uniform_borders(image, resolved), score, ""
+    if features["frame"] or features["panel"] >= 0.55:
+        return resolved, score, "", True
+    return _trim_uniform_borders(image, resolved), score, "", True
+
+
+def detect_main_rectangle(image: np.ndarray) -> tuple[tuple[int, int, int, int] | None, float, str]:
+    rectangle, score, reason, accepted = _analyze_main_rectangle(image)
+    return (rectangle if accepted else None), score, reason
+
+
+def _strong_axis_guides(image: np.ndarray, axis: int, maximum: int) -> list[int]:
+    image_float = image.astype(np.float32)
+    if axis == 0:
+        differences = np.mean(np.abs(np.diff(image_float, axis=0)), axis=(1, 2))
+    else:
+        differences = np.mean(np.abs(np.diff(image_float, axis=1)), axis=(0, 2))
+    smoothed = _smooth(differences, max(3, maximum // 320))
+    threshold = max(4.0, float(np.percentile(smoothed, 82)), float(smoothed.mean() + smoothed.std() * 0.55))
+    indexes = np.flatnonzero(smoothed >= threshold) + 1
+    grouped = _merge_segments([(int(index), int(index) + 1) for index in indexes], max(2, maximum // 180))
+    ranked = sorted(
+        (int((start + end) / 2) for start, end in grouped),
+        key=lambda position: float(smoothed[min(len(smoothed) - 1, max(0, position - 1))]),
+        reverse=True,
+    )[:16]
+    return sorted(set([0, maximum, *ranked]))
+
+
+def _snap_guides(image: np.ndarray, rectangle: tuple[int, int, int, int]) -> dict[str, list[int]]:
+    height, width = image.shape[:2]
+    left, top, right, bottom = rectangle
+    return {
+        "x": sorted(set([left, right, *_strong_axis_guides(image, 1, width)])),
+        "y": sorted(set([top, bottom, *_strong_axis_guides(image, 0, height)])),
+    }
 
 
 def _trim_uniform_borders(image: np.ndarray, rectangle: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
@@ -485,6 +678,70 @@ def _write_image_atomic(destination: Path, image: np.ndarray) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _load_source(input_path: str) -> tuple[Path, np.ndarray]:
+    source = Path(input_path).resolve()
+    if not source.is_file():
+        raise ValueError("图片不存在")
+    if source.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        raise ValueError("当前仅支持 JPG、PNG、BMP、WebP 和 TIFF")
+    return source, _read_image(source)
+
+
+def analyze_main_image(input_path: str) -> dict[str, object]:
+    source = Path(input_path).resolve()
+    result: dict[str, object] = {"input": str(source), "inputName": source.name, "success": False, "cropped": False}
+    try:
+        source, image = _load_source(input_path)
+        original_height, original_width = image.shape[:2]
+        rectangle, confidence, reason, accepted = _analyze_main_rectangle(image)
+        left, top, right, bottom = rectangle
+        result.update(
+            success=True,
+            analyzed=True,
+            detected=accepted,
+            needsReview=not accepted or confidence < 0.78,
+            confidence=round(confidence, 4),
+            reason=reason,
+            originalSize={"width": original_width, "height": original_height},
+            crop={"x": left, "y": top, "width": right - left, "height": bottom - top},
+            snapGuides=_snap_guides(image, rectangle),
+        )
+        return result
+    except Exception as error:
+        result["error"] = str(error)
+        return result
+
+
+def crop_main_image(input_path: str, rectangle: str) -> dict[str, object]:
+    source = Path(input_path).resolve()
+    result: dict[str, object] = {"input": str(source), "inputName": source.name, "success": False, "cropped": False}
+    try:
+        source, image = _load_source(input_path)
+        original_height, original_width = image.shape[:2]
+        values = [int(value) for value in rectangle.split(",")]
+        if len(values) != 4:
+            raise ValueError("裁剪范围格式无效")
+        left, top, crop_width, crop_height = values
+        right, bottom = left + crop_width, top + crop_height
+        if left < 0 or top < 0 or crop_width < 20 or crop_height < 20 or right > original_width or bottom > original_height:
+            raise ValueError("裁剪范围超出图片边界")
+        destination = _unique_output_path(source)
+        _write_image_atomic(destination, image[top:bottom, left:right])
+        result.update(
+            success=True,
+            cropped=True,
+            output=str(destination),
+            outputName=destination.name,
+            crop={"x": left, "y": top, "width": crop_width, "height": crop_height},
+            originalSize={"width": original_width, "height": original_height},
+            outputSize={"width": crop_width, "height": crop_height},
+        )
+        return result
+    except Exception as error:
+        result["error"] = str(error)
+        return result
+
+
 def extract_main_image(input_path: str) -> dict[str, object]:
     source = Path(input_path).resolve()
     result: dict[str, object] = {
@@ -494,11 +751,7 @@ def extract_main_image(input_path: str) -> dict[str, object]:
         "cropped": False,
     }
     try:
-        if not source.is_file():
-            raise ValueError("图片不存在")
-        if source.suffix.lower() not in SUPPORTED_EXTENSIONS:
-            raise ValueError("当前仅支持 JPG、PNG、BMP、WebP 和 TIFF")
-        image = _read_image(source)
+        source, image = _load_source(input_path)
         original_height, original_width = image.shape[:2]
         rectangle, confidence, reason = detect_main_rectangle(image)
         result["confidence"] = round(confidence, 4)
@@ -529,7 +782,15 @@ def run(args_list: list[str]) -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
     extract_parser = subparsers.add_parser("extract")
     extract_parser.add_argument("--input", action="append", required=True, dest="inputs")
+    analyze_parser = subparsers.add_parser("analyze")
+    analyze_parser.add_argument("--input", action="append", required=True, dest="inputs")
+    crop_parser = subparsers.add_parser("crop")
+    crop_parser.add_argument("--input", action="append", required=True, dest="inputs")
+    crop_parser.add_argument("--rectangle", action="append", required=True, dest="rectangles")
     args = parser.parse_args(args_list)
+
+    if args.command == "crop" and len(args.inputs) != len(args.rectangles):
+        parser.error("每张图片都需要一个裁剪范围")
 
     results = []
     total = len(args.inputs)
@@ -544,7 +805,12 @@ def run(args_list: list[str]) -> None:
             "currentName": input_name,
             "message": f"正在识别 {index}/{total} · {input_name}",
         }, ensure_ascii=True), flush=True)
-        results.append(extract_main_image(input_path))
+        if args.command == "analyze":
+            results.append(analyze_main_image(input_path))
+        elif args.command == "crop":
+            results.append(crop_main_image(input_path, args.rectangles[index - 1]))
+        else:
+            results.append(extract_main_image(input_path))
         print(json.dumps({
             "type": "progress",
             "phase": "item-complete",
