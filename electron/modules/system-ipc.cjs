@@ -579,6 +579,13 @@ const registerSystemIpc = context => {
         scriptName,
         requestId,
       });
+      event.sender.send('python-event', {
+        type: 'complete',
+        message: '任务未启动',
+        data: { exitCode: 1 },
+        scriptName,
+        requestId,
+      });
       return;
     }
     const cancellableClassify = scriptName === 'classify.py' && ['import', 'broll'].includes(classifyStage);
@@ -614,6 +621,13 @@ const registerSystemIpc = context => {
       }
     } catch (error) {
       event.sender.send('python-event', { type: 'error', message: error.message || String(error), scriptName, requestId });
+      event.sender.send('python-event', {
+        type: 'complete',
+        message: '任务未启动',
+        data: { exitCode: 1 },
+        scriptName,
+        requestId,
+      });
       return;
     }
   
@@ -692,6 +706,13 @@ const registerSystemIpc = context => {
             message: `${scriptName} Process finished`,
             type: code === 0 ? 'success' : 'warning'
         });
+        mainWindow.webContents.send('python-event', {
+          type: 'complete',
+          message: code === 0 ? '任务进程已结束' : `任务进程异常退出（代码 ${code}）`,
+          data: { exitCode: code },
+          scriptName,
+          requestId,
+        });
         if (cancellable) {
           activePythonTasks.delete(normalizedRequestId);
           fs.promises.rm(cancelFile, { force: true }).catch(() => undefined);
@@ -719,6 +740,19 @@ const registerSystemIpc = context => {
     } catch (e) {
       finalizeImportWatch(false);
       console.error("Spawn Error:", e);
+      event.sender.send('python-event', {
+        type: 'error',
+        message: `Failed to launch ${scriptName}: ${(e && e.message) || String(e)}`,
+        scriptName,
+        requestId,
+      });
+      event.sender.send('python-event', {
+        type: 'complete',
+        message: '任务未启动',
+        data: { exitCode: 1 },
+        scriptName,
+        requestId,
+      });
     }
   });
   

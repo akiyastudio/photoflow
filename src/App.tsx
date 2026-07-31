@@ -22,6 +22,7 @@ import { ProjectWorkspace } from './features/workspace/ProjectWorkspace';
 import { AppErrorBoundary } from './features/app/AppErrorBoundary';
 import { RequirePlugin } from './features/plugins/RequirePlugin';
 import { BackgroundTaskIndicator } from './features/background-tasks/BackgroundTaskIndicator';
+import { useTaskCenter } from './features/background-tasks/TaskCenter';
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
 import type { SettingsSection } from './features/settings/SettingsFeature';
 import { DashboardView, MatchView, VideoSplitView } from './features/tools/ToolViews';
@@ -184,6 +185,7 @@ interface PythonEvent {
 
 const App: React.FC = () => {
   const appDialog = useAppDialog();
+  const { panelTasks } = useTaskCenter();
   const [activeTab, setActiveTab] = useState<ToolType>('home');
   const [settingsTabOpen, setSettingsTabOpen] = useState(false);
   const [inspirationTabOpen, setInspirationTabOpen] = useState(false);
@@ -216,6 +218,18 @@ const App: React.FC = () => {
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const titlebarTabsRef = useRef<HTMLDivElement>(null);
   const [titlebarTabScroll, setTitlebarTabScroll] = useState({ overflow: false, canScrollLeft: false, canScrollRight: false });
+  useEffect(() => {
+    const restorePanelTask = (event: Event) => {
+      const scopeKey = (event as CustomEvent<{ scopeKey?: string }>).detail?.scopeKey;
+      const project = openProjects.find(item => item.path === scopeKey);
+      if (!project) return;
+      setSelectedProject(project);
+      setProjectDestination(project.path);
+      setActiveTab('project');
+    };
+    window.addEventListener('photoflow:restore-panel-task', restorePanelTask);
+    return () => window.removeEventListener('photoflow:restore-panel-task', restorePanelTask);
+  }, [openProjects]);
   const [components, setComponents] = useState<ComponentStatus[]>(() => {
     try {
       const cached = JSON.parse(window.localStorage.getItem('photoflow:components-cache') || '[]');
@@ -724,6 +738,15 @@ const App: React.FC = () => {
     if (activeTab === 'settings') showHomeTab();
   };
   const closeProjectTab = async (projectPath: string, force = false) => {
+    const runningPanelTask = Object.values(panelTasks).find(task => task.scopeKey === projectPath && task.state === 'running');
+    if (!force && runningPanelTask) {
+      await appDialog.alert({
+        title: '组件任务仍在运行',
+        message: `“${runningPanelTask.title}”仍在运行，请等待完成或在组件面板中明确取消任务后再关闭项目标签。`,
+        detail: '你可以切换到其他项目或页面；任务面板和进度不会丢失。',
+      });
+      return;
+    }
     const runningTeamTab = workspaceToolTabs.find(tab => tab.projectPath === projectPath && tab.kind === 'team' && tab.busy);
     if (!force && runningTeamTab && !await appDialog.confirm({
       title: '团片任务仍在运行',

@@ -264,6 +264,41 @@ const run = async () => {
     assert.strictEqual(replacementUndo.kind, 'paste-replace');
     assert.strictEqual(fs.existsSync(replacementUndo.items[0].backup), true);
 
+    const trashProject = path.join(root, 'batch-trash-project');
+    fs.mkdirSync(trashProject);
+    const trashNames = ['first.txt', 'second.txt'];
+    for (const name of trashNames) fs.writeFileSync(path.join(trashProject, name), name);
+    const trashHandlers = new Map();
+    const trashProgress = [];
+    let trashBatchCalls = 0;
+    let trashUndo;
+    registerFileOperationsIpc({
+      Array, Boolean, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => trashHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: () => trashProject, activeProjectFileOperations: new Map(),
+      fileOperationState: { projectFileClipboard: null }, ensureWorkspace: () => root,
+      capturePathIdentity, writeLog: () => {},
+      recycleBinService: {
+        trashMany: async sources => {
+          trashBatchCalls += 1;
+          for (const source of sources) fs.unlinkSync(source);
+          return { success: true, items: sources.map((source, index) => ({ success: true, originalPath: source, recyclePidl: `pidl-${index}`, preciseRestore: true, permanent: false })) };
+        },
+      },
+      workspaceRepository: { addUndoRecord: async () => ({ id: 'batch-trash-undo' }) },
+      pushUndoOperation: async operation => { trashUndo = operation; },
+    });
+    const trashResult = await trashHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: (_channel, progress) => trashProgress.push(progress) } },
+      'workspace', '策划中', 'project', 'trash', trashNames,
+    );
+    assert.strictEqual(trashResult.success, true);
+    assert.strictEqual(trashResult.count, 2);
+    assert.strictEqual(trashBatchCalls, 1, 'multi-selection trash must use one native batch request');
+    assert.deepStrictEqual(trashUndo.items.map(item => item.recyclePidl), ['pidl-0', 'pidl-1']);
+    assert(trashUndo.items.every(item => item.originalIdentity), 'batch trash must preserve every source identity for safe undo');
+    assert.strictEqual(trashProgress.at(-1).phase, 'complete');
+
     const undoHandlers = new Map();
     const renameHistory = [replacementUndo];
     registerWorkspaceIpc({

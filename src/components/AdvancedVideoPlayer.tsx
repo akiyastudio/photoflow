@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Camera, Loader2, Pause, Play, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
+import { Camera, ChevronUp, Loader2, Pause, Play, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
 import type { AdvancedVideoState } from '../types';
 
 const formatTime = (seconds: number) => {
@@ -203,10 +203,6 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
     window.addEventListener('keydown', handleSeekKey);
     return () => window.removeEventListener('keydown', handleSeekKey);
   }, [seekRelative]);
-  const cycleSpeed = () => {
-    const currentIndex = PLAYBACK_SPEEDS.findIndex(value => Math.abs(value - speed) < 0.01);
-    control('speed', PLAYBACK_SPEEDS[(currentIndex + 1 + PLAYBACK_SPEEDS.length) % PLAYBACK_SPEEDS.length]);
-  };
   const captureFrame = async () => {
     const currentSession = sessionRef.current;
     if (!currentSession || capturing) return;
@@ -241,19 +237,31 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
       className="relative min-h-0 flex-1 cursor-pointer bg-black bg-contain bg-center bg-no-repeat outline-none"
       style={poster ? { backgroundImage: `url(${JSON.stringify(poster).slice(1, -1)})` } : undefined}
     />
-    <div className="flex h-12 shrink-0 items-center gap-1 border-t border-white/10 bg-slate-950 px-2 text-white">
-      {showNavigation && <button type="button" onClick={() => onNavigateRef.current(-1)} title="上一个视频" aria-label="上一个视频" className="rounded p-1.5 text-slate-100 hover:bg-white/10"><SkipBack size={16}/></button>}
-      <button type="button" disabled={!sessionId} onClick={togglePlayback} title={paused ? '播放' : '暂停'} aria-label={paused ? '播放' : '暂停'} className="rounded p-1.5 text-slate-100 hover:bg-white/10 disabled:opacity-40">{paused ? <Play size={17} fill="currentColor"/> : <Pause size={17} fill="currentColor"/>}</button>
-      {showNavigation && <button type="button" onClick={() => onNavigateRef.current(1)} title="下一个视频" aria-label="下一个视频" className="rounded p-1.5 text-slate-100 hover:bg-white/10"><SkipForward size={16}/></button>}
-      <span className="w-10 text-right text-[11px] tabular-nums text-slate-300">{formatTime(time)}</span>
-      <input type="range" min={0} max={Math.max(0.01, duration)} step={0.01} value={Math.min(time, Math.max(0.01, duration))} disabled={!duration} onChange={event => control('seek', Number(event.currentTarget.value))} aria-label="播放进度" className="min-w-12 flex-1 accent-blue-500 disabled:opacity-40"/>
-      <span className="w-10 text-[11px] tabular-nums text-slate-300">{formatTime(duration)}</span>
-      <button type="button" disabled={!sessionId} onClick={cycleSpeed} title="切换播放速度" aria-label={`当前播放速度 ${speed} 倍，点击切换`} className="min-w-10 rounded px-1.5 py-1 text-[11px] font-semibold tabular-nums text-slate-200 hover:bg-white/10 disabled:opacity-40">{speed}×</button>
-      <button type="button" disabled={!sessionId || starting || capturing} onClick={() => void captureFrame()} title="截取当前视频帧并保存到原视频目录" aria-label="截取当前视频帧" className="rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40">{capturing ? <Loader2 size={16} className="animate-spin"/> : <Camera size={16}/>}</button>
-      <button type="button" onClick={() => control('mute', !muted)} title={muted ? '取消静音' : '静音'} aria-label={muted ? '取消静音' : '静音'} className="rounded p-1.5 text-slate-200 hover:bg-white/10">{muted || volume === 0 ? <VolumeX size={16}/> : <Volume2 size={16}/>}</button>
-      <input type="range" min={0} max={100} step={1} value={muted ? 0 : volume} onChange={event => control('volume', Number(event.currentTarget.value))} aria-label="音量" className="w-14 accent-blue-500"/>
-      {(starting || state.buffering) && <span role="status" className="inline-flex items-center gap-1 whitespace-nowrap text-[11px] text-blue-200"><Loader2 size={13} className="animate-spin"/>加载中</span>}
-      {captureNotice && <span role="status" aria-live="polite" title={captureNotice.text} className={`max-w-24 truncate whitespace-nowrap text-[11px] ${captureNotice.error ? 'text-red-300' : 'text-emerald-300'}`}>{captureNotice.text}</span>}
+    <div className="flex h-12 shrink-0 items-center gap-1 border-t border-white/10 bg-[#070b15] px-2 text-white">
+        {showNavigation && <button type="button" onClick={() => onNavigateRef.current(-1)} title="上一个视频" aria-label="上一个视频" className="rounded p-1.5 text-slate-100 hover:bg-white/10"><SkipBack size={16}/></button>}
+        <button type="button" disabled={!sessionId} onClick={togglePlayback} title={paused ? '播放' : '暂停'} aria-label={paused ? '播放' : '暂停'} className="rounded p-1.5 text-slate-100 hover:bg-white/10 disabled:opacity-40">{paused ? <Play size={17} fill="currentColor"/> : <Pause size={17} fill="currentColor"/>}</button>
+        {showNavigation && <button type="button" onClick={() => onNavigateRef.current(1)} title="下一个视频" aria-label="下一个视频" className="rounded p-1.5 text-slate-100 hover:bg-white/10"><SkipForward size={16}/></button>}
+        <span className="w-10 text-right text-[11px] tabular-nums text-slate-300">{formatTime(time)}</span>
+        <input type="range" min={0} max={Math.max(0.01, duration)} step={0.01} value={Math.min(time, Math.max(0.01, duration))} disabled={!duration} onChange={event => control('seek', Number(event.currentTarget.value))} aria-label="播放进度" className="min-w-12 flex-1 accent-blue-500 disabled:opacity-40"/>
+        <span className="w-10 text-[11px] tabular-nums text-slate-300">{formatTime(duration)}</span>
+        <div className="relative shrink-0">
+          <select
+            disabled={!sessionId}
+            value={speed}
+            onChange={event => control('speed', Number(event.currentTarget.value))}
+            title="选择播放速度"
+            aria-label={`当前播放速度 ${speed} 倍`}
+            className="h-7 min-w-12 cursor-pointer appearance-none rounded border-0 bg-white/10 py-0 pl-2 pr-5 text-[11px] font-semibold tabular-nums text-slate-200 outline-none hover:bg-white/15 focus:ring-1 focus:ring-blue-400 disabled:cursor-default disabled:opacity-40"
+          >
+            {PLAYBACK_SPEEDS.map(value => <option key={value} value={value} className="bg-[#10192c] text-white">{value}×</option>)}
+          </select>
+          <ChevronUp aria-hidden="true" size={12} className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-400"/>
+        </div>
+        <button type="button" disabled={!sessionId || starting || capturing} onClick={() => void captureFrame()} title="截取当前视频帧并保存到原视频目录" aria-label="截取当前视频帧" className="rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40">{capturing ? <Loader2 size={16} className="animate-spin"/> : <Camera size={16}/>}</button>
+        <button type="button" onClick={() => control('mute', !muted)} title={muted ? '取消静音' : '静音'} aria-label={muted ? '取消静音' : '静音'} className="rounded p-1.5 text-slate-200 hover:bg-white/10">{muted || volume === 0 ? <VolumeX size={16}/> : <Volume2 size={16}/>}</button>
+        <input type="range" min={0} max={100} step={1} value={muted ? 0 : volume} onChange={event => control('volume', Number(event.currentTarget.value))} aria-label="音量" className="w-14 accent-blue-500"/>
+        {(starting || state.buffering) && <span role="status" className="inline-flex items-center gap-1 whitespace-nowrap text-[11px] text-blue-200"><Loader2 size={13} className="animate-spin"/>加载中</span>}
+        {captureNotice && <span role="status" aria-live="polite" title={captureNotice.text} className={`max-w-24 truncate whitespace-nowrap text-[11px] ${captureNotice.error ? 'text-red-300' : 'text-emerald-300'}`}>{captureNotice.text}</span>}
     </div>
   </div>;
 };

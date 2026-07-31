@@ -76,7 +76,7 @@ const run = async () => {
   assert(playerSource.includes('onClick={togglePlayback}') && decoderSource.includes('OnMouseClick'), 'clicking the video surface must toggle playback in both renderer and native surfaces');
   assert(playerSource.includes("event.key === 'ArrowRight' ? SKIP_SECONDS : -SKIP_SECONDS") && decoderSource.includes('player.SeekRelative(key == Keys.Right ? 5 : -5)'), 'left and right arrow keys must seek backward and forward by five seconds');
   assert(playerSource.includes('title="上一个视频"') && playerSource.includes('title="下一个视频"'), 'video controls must expose previous-video and next-video buttons');
-  assert(playerSource.includes('cycleSpeed') && playerSource.includes('captureAdvancedVideoFrame'), 'video controls must expose playback speed and current-frame capture');
+  assert(playerSource.includes('<select') && playerSource.includes('PLAYBACK_SPEEDS.map') && playerSource.includes('captureAdvancedVideoFrame'), 'video controls must expose a floating playback-speed menu and current-frame capture');
   assert(!playerSource.includes('高级解码</span>'), 'the advanced-decoder label must not remain in the control bar');
   assert(workspaceSource.includes("previewMediaEntries.filter(entry => entry.kind === 'video')"), 'previous and next controls must navigate between videos only');
   assert(workspaceSource.includes("!['image', 'raw'].includes(previewEntry.kind)"), 'image and raw previews must retain left and right navigation');

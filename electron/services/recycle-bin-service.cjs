@@ -2,8 +2,8 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const runJson = (command, args, timeoutMs = 120000) => new Promise((resolve, reject) => {
-  const child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+const runJson = (command, args, timeoutMs = 120000, stdin = '') => new Promise((resolve, reject) => {
+  const child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   let settled = false;
@@ -16,6 +16,8 @@ const runJson = (command, args, timeoutMs = 120000) => new Promise((resolve, rej
   };
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
+  child.stdin.on('error', () => undefined);
+  child.stdin.end(stdin);
   child.stdout.on('data', data => { stdout = (stdout + data).slice(-2 * 1024 * 1024); });
   child.stderr.on('data', data => { stderr = (stderr + data).slice(-16000); });
   child.on('error', error => finish(error));
@@ -60,6 +62,26 @@ const createRecycleBinService = ({ app, shell, projectRoot }) => {
     return { success: true, originalPath: resolved, recyclePidl: '', preciseRestore: false };
   };
 
+  const trashMany = async filePaths => {
+    const resolvedPaths = Array.from(new Set((Array.isArray(filePaths) ? filePaths : []).map(filePath => path.resolve(filePath))));
+    if (!resolvedPaths.length) return { success: true, items: [] };
+    if (nativeAvailable()) {
+      const timeoutMs = Math.min(15 * 60 * 1000, 120000 + resolvedPaths.length * 2000);
+      return runJson(executable(), ['trash-many'], timeoutMs, JSON.stringify(resolvedPaths));
+    }
+    if (process.platform === 'win32') {
+      const error = new Error('Windows 回收站服务未安装，已取消删除以避免无法撤销');
+      error.code = 'RECYCLE_SERVICE_MISSING';
+      throw error;
+    }
+    const items = [];
+    for (const resolved of resolvedPaths) {
+      await shell.trashItem(resolved);
+      items.push({ success: true, originalPath: resolved, recyclePidl: '', preciseRestore: false, permanent: false });
+    }
+    return { success: true, items };
+  };
+
   const restore = async ({ recyclePidl, originalPath }) => {
     if (!recyclePidl || !nativeAvailable()) {
       const error = new Error('当前系统无法从软件内精确恢复，请打开系统回收站手动还原');
@@ -74,7 +96,7 @@ const createRecycleBinService = ({ app, shell, projectRoot }) => {
     return runJson(executable(), ['probe', '--pidl', recyclePidl], 15000);
   };
 
-  return { trash, restore, probe, nativeAvailable };
+  return { trash, trashMany, restore, probe, nativeAvailable };
 };
 
 module.exports = { createRecycleBinService };

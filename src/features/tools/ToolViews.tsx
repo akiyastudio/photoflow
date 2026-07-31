@@ -6,11 +6,12 @@ import type { AppConfig, LogEntry, ProjectFileOperationProgress, ProjectStatus, 
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
+import { InteractiveCropEditor, type CropRectangle } from '../../components/InteractiveCropEditor';
 
 const IMAGE_SELECTION_FOLDER_NAME = '图片选片';
 const VIDEO_SELECTION_FOLDER_NAME = '视频选片';
 interface PythonEvent {
-  type: 'log' | 'error' | 'progress' | 'status' | 'ask_user' | 'success' | 'warning' | 'preview' | 'cancelled';
+  type: 'log' | 'error' | 'progress' | 'status' | 'ask_user' | 'success' | 'warning' | 'preview' | 'cancelled' | 'complete';
   message: string;
   data?: any;
   progress?: number;
@@ -51,6 +52,10 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
   const [statusMsg, setStatusMsg] = useState(initialStatus);
   const [preview, setPreview] = useState<Record<string, any> | null>(null);
   const requestIdRef = React.useRef('');
+  const taskHadErrorRef = React.useRef(false);
+  const taskHadSuccessRef = React.useRef(false);
+  const taskCancelledRef = React.useRef(false);
+  const taskAwaitingPreviewRef = React.useRef(false);
   const pendingLogsRef = React.useRef<LogEntry[]>([]);
   const logFlushTimerRef = React.useRef<number | null>(null);
   const appendLog = React.useCallback((message: string, type: LogEntry['type']) => {
@@ -76,15 +81,13 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
       if (event.type === 'log' || event.type === 'error' || event.type === 'warning' || event.type === 'success') {
         const type: LogEntry['type'] = event.type === 'log' ? 'info' : event.type;
         appendLog(event.message, type);
-        if (event.type === 'success' || event.type === 'error') {
-          setIsRunning(false);
-          setIsCancelling(false);
-          if (event.type === 'success') {
-            setProgress(100);
-            setStatusMsg('处理完成');
-          } else {
-            setStatusMsg('发生错误');
-          }
+        if (event.type === 'success') {
+          taskHadSuccessRef.current = true;
+          setProgress(100);
+          setStatusMsg('正在结束任务…');
+        } else if (event.type === 'error') {
+          taskHadErrorRef.current = true;
+          setStatusMsg('出现错误，正在结束任务…');
         }
       } else if (event.type === 'progress') {
         if (event.progress !== undefined) setProgress(event.progress);
@@ -93,15 +96,29 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
       } else if (event.type === 'status') {
         if (event.message) setStatusMsg(event.message);
       } else if (event.type === 'preview') {
+        taskAwaitingPreviewRef.current = true;
         setPreview(event.data || {});
         setIsRunning(false);
         setStatusMsg('等待确认');
       } else if (event.type === 'cancelled') {
+        taskCancelledRef.current = true;
         appendLog(event.message || '任务已取消。', 'warning');
         setIsRunning(false);
         setIsCancelling(false);
         setProgress(0);
         setStatusMsg('已取消并回滚');
+      } else if (event.type === 'complete') {
+        if (taskCancelledRef.current || taskAwaitingPreviewRef.current) return;
+        const exitCode = event.data?.exitCode;
+        const failed = exitCode !== 0 || (taskHadErrorRef.current && !taskHadSuccessRef.current);
+        setIsRunning(false);
+        setIsCancelling(false);
+        if (failed) {
+          setStatusMsg('发生错误');
+        } else {
+          setProgress(100);
+          setStatusMsg('处理完成');
+        }
       }
     });
   }, [appendLog, scriptName]);
@@ -112,6 +129,10 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
     logFlushTimerRef.current = null;
     pendingLogsRef.current = [];
     setLogs([]);
+    taskHadErrorRef.current = false;
+    taskHadSuccessRef.current = false;
+    taskCancelledRef.current = false;
+    taskAwaitingPreviewRef.current = false;
     setPreview(null);
     setProgress(0);
     setIsRunning(true);
@@ -1062,18 +1083,71 @@ type ScreenshotMainImageSummary = Awaited<ReturnType<typeof window.electronAPI.e
   recycleError?: string;
 };
 
+type ScreenshotCropReviewItem = {
+  relativePath: string;
+  input: string;
+  inputName: string;
+  crop: CropRectangle;
+  snapGuides: { x: number[]; y: number[] };
+  originalSize: { width: number; height: number };
+  confidence: number;
+  reason?: string;
+  needsReview: boolean;
+  confirmed: boolean;
+  included: boolean;
+};
+
+const ScreenshotCropPreview = ({ item, cacheConfig, queueOrder, onEdit }: { item: ScreenshotCropReviewItem; cacheConfig: AppConfig['mediaCache']; queueOrder: number; onEdit: (previewUrl: string) => void }) => {
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [previewError, setPreviewError] = useState('');
+  useEffect(() => {
+    let active = true;
+    let fallbackTimer: number | undefined;
+    setPreviewUrl(''); setPreviewError('');
+    const loadOriginal = () => window.electronAPI.getMediaOriginal(item.input, 'image', cacheConfig).then(result => {
+      if (!active) return;
+      if (result.mediaUrl) { setPreviewUrl(result.mediaUrl); setPreviewError(''); }
+      else setPreviewError(result.error || '预览加载失败');
+    }).catch(error => { if (active) setPreviewError(error instanceof Error ? error.message : String(error)); });
+    const stopUpdates = window.electronAPI.onThumbnailStateChanged(update => {
+      if (update.filePath.toLocaleLowerCase() !== item.input.toLocaleLowerCase()) return;
+      if (update.state === 'READY') {
+        const url = update.previewUrls?.large || update.previewUrls?.medium || update.previewUrls?.small;
+        if (url && active) { setPreviewUrl(url); setPreviewError(''); }
+      } else if (update.state === 'FAILED' || update.state === 'MISSING') {
+        void loadOriginal();
+      }
+    });
+    window.electronAPI.getMediaThumbnail(item.input, 'image', cacheConfig, 900, item.needsReview ? 0 : 1, queueOrder).then(result => {
+      if (!active) return;
+      if (result.previewUrl) { setPreviewUrl(result.previewUrl); return; }
+      if (result.state === 'QUEUED' || result.state === 'GENERATING') fallbackTimer = window.setTimeout(() => { void loadOriginal(); }, 8000);
+      else void loadOriginal();
+    }).catch(() => { void loadOriginal(); });
+    return () => { active = false; stopUpdates(); if (fallbackTimer !== undefined) window.clearTimeout(fallbackTimer); };
+  }, [cacheConfig, item.input, item.needsReview, queueOrder]);
+  return <div className="relative flex h-44 items-center justify-center overflow-hidden rounded-lg bg-slate-950">
+    {previewUrl ? <svg className="h-full w-full" viewBox={`0 0 ${item.originalSize.width} ${item.originalSize.height}`} preserveAspectRatio="xMidYMid meet"><image href={previewUrl} width={item.originalSize.width} height={item.originalSize.height}/><path d={`M0 0H${item.originalSize.width}V${item.originalSize.height}H0Z M${item.crop.x} ${item.crop.y}V${item.crop.y + item.crop.height}H${item.crop.x + item.crop.width}V${item.crop.y}Z`} fill="rgba(2,6,23,.58)" fillRule="evenodd"/><rect x={item.crop.x} y={item.crop.y} width={item.crop.width} height={item.crop.height} fill="none" stroke={item.confirmed ? '#34d399' : '#f59e0b'} strokeWidth={Math.max(4, item.originalSize.width / 260)}/></svg> : <p className="px-4 text-center text-xs text-slate-400">{previewError || '正在加载预览…'}</p>}
+    <button type="button" disabled={!previewUrl || !item.included} onClick={() => onEdit(previewUrl)} className="absolute bottom-2 right-2 rounded-md bg-slate-950/80 px-2.5 py-1.5 text-xs font-bold text-white shadow disabled:opacity-40">调整范围</button>
+  </div>;
+};
+
 const ScreenshotMainImageView = ({
   embedded = false,
   workspacePath,
   projectStatus,
   projectName,
   initialRelativePaths,
+  cacheConfig,
+  onFilesChanged,
 }: {
   embedded?: boolean;
   workspacePath: string;
   projectStatus: ProjectStatus;
   projectName: string;
   initialRelativePaths: string[];
+  cacheConfig: AppConfig['mediaCache'];
+  onFilesChanged?: () => void | Promise<void>;
 }) => {
   const appDialog = useAppDialog();
   const [targetPaths, setTargetPaths] = useState(() => initialRelativePaths.filter(Boolean));
@@ -1082,22 +1156,31 @@ const ScreenshotMainImageView = ({
   const [progress, setProgress] = useState(0);
   const [statusMessage, setStatusMessage] = useState('进度');
   const [summary, setSummary] = useState<ScreenshotMainImageSummary | null>(null);
+  const [reviewItems, setReviewItems] = useState<ScreenshotCropReviewItem[]>([]);
+  const [analysisErrors, setAnalysisErrors] = useState<Array<{ inputName: string; error?: string }>>([]);
+  const [cropEditor, setCropEditor] = useState<{ index: number; previewUrl: string; crop: CropRectangle; snapEnabled: boolean } | null>(null);
   const requestIdRef = React.useRef('');
   const preserveOriginalRef = React.useRef(false);
-  const outputFolders = useMemo(() => Array.from(new Set((summary?.results || []).flatMap(result => result.output ? [result.output.replace(/[\\/][^\\/]+$/, '')] : []))), [summary]);
+  const issueResults = useMemo(() => (summary?.results || []).filter(result => !result.cropped), [summary]);
+  const firstTargetName = targetPaths[0]?.split(/[\\/]/).pop() || '';
+  const pendingReviewCount = reviewItems.filter(item => item.included && !item.confirmed).length;
+  const includedReviewItems = reviewItems.filter(item => item.included);
   const progressLogs = useMemo<LogEntry[]>(() => summary ? [{
     timestamp: new Date().toLocaleTimeString(),
     message: summary.recycleError
       ? `主图已生成，但原图未能移入回收站：${summary.recycleError}`
       : summary.success
-        ? `处理完成：已生成 ${summary.croppedCount || 0} 张主图`
+        ? `处理完成：已生成 ${summary.croppedCount || 0} 张主图${summary.skippedCount ? `，跳过 ${summary.skippedCount} 张` : ''}${summary.failedCount ? `，失败 ${summary.failedCount} 张` : ''}${summary.recycledOriginalCount !== undefined ? `；${summary.recycledOriginalCount} 张原图已移入回收站` : ''}`
         : summary.error || '提取失败',
     type: summary.recycleError || !summary.success ? 'error' : 'success',
-  }] : [], [summary]);
+  }] : reviewItems.length ? [{ timestamp: new Date().toLocaleTimeString(), message: statusMessage, type: pendingReviewCount ? 'warning' : 'success' }] : [], [pendingReviewCount, reviewItems.length, statusMessage, summary]);
 
   useEffect(() => {
     setTargetPaths(initialRelativePaths.filter(Boolean));
     setSummary(null);
+    setReviewItems([]);
+    setAnalysisErrors([]);
+    setCropEditor(null);
     setProgress(0);
     setStatusMessage('进度');
   }, [initialRelativePaths]);
@@ -1109,19 +1192,52 @@ const ScreenshotMainImageView = ({
     if (value.message) setStatusMessage(value.message);
   }), []);
 
-  const startExtraction = async () => {
+  const startAnalysis = async () => {
     if (!targetPaths.length || isRunning) return;
+    const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    requestIdRef.current = requestId;
+    preserveOriginalRef.current = true;
+    setIsRunning(true);
+    setSummary(null);
+    setProgress(0);
+    setReviewItems([]);
+    setAnalysisErrors([]);
+    setStatusMessage('正在分析截图主图…');
+    try {
+      const analysis = await window.electronAPI.extractScreenshotMainImages(workspacePath, projectStatus, projectName, targetPaths, { requestId, analyzeOnly: true });
+      const nextItems = analysis.results.flatMap((result, index) => result.success && result.crop && result.originalSize ? [{
+        relativePath: targetPaths[index], input: result.input, inputName: result.inputName, crop: result.crop, snapGuides: result.snapGuides || { x: [0, result.originalSize.width], y: [0, result.originalSize.height] },
+        originalSize: result.originalSize, confidence: Number(result.confidence || 0), reason: result.reason,
+        needsReview: Boolean(result.needsReview), confirmed: !result.needsReview, included: true,
+      }] : []);
+      setReviewItems(nextItems);
+      setAnalysisErrors(analysis.results.filter(result => !result.success).map(result => ({ inputName: result.inputName, error: result.error })));
+      setProgress(100);
+      setStatusMessage(nextItems.some(item => !item.confirmed) ? '请确认需要检查的裁剪范围' : '范围分析完成，可以生成主图');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSummary({ success: false, results: [], error: message });
+      setStatusMessage(message);
+    } finally {
+      requestIdRef.current = '';
+      setIsRunning(false);
+    }
+  };
+
+  const confirmExtraction = async () => {
+    if (!includedReviewItems.length || pendingReviewCount || isRunning) return;
     const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     requestIdRef.current = requestId;
     preserveOriginalRef.current = preserveOriginal;
     setIsRunning(true);
     setSummary(null);
     setProgress(0);
-    setStatusMessage('正在准备识别截图主图…');
+    setStatusMessage('正在按确认范围生成主图…');
+    const confirmedPaths = includedReviewItems.map(item => item.relativePath);
     try {
-      const extraction = await window.electronAPI.extractScreenshotMainImages(workspacePath, projectStatus, projectName, targetPaths, { requestId });
+      const extraction = await window.electronAPI.extractScreenshotMainImages(workspacePath, projectStatus, projectName, confirmedPaths, { requestId, crops: includedReviewItems.map(item => item.crop) });
       let nextSummary: ScreenshotMainImageSummary = extraction;
-      const croppedRelativePaths = targetPaths.filter((_relativePath, index) => extraction.results[index]?.success && extraction.results[index]?.cropped);
+      const croppedRelativePaths = confirmedPaths.filter((_relativePath, index) => extraction.results[index]?.success && extraction.results[index]?.cropped);
       if (!preserveOriginal && croppedRelativePaths.length) {
         setProgress(90);
         setStatusMessage(`正在将 ${croppedRelativePaths.length} 张原图移入回收站…`);
@@ -1134,7 +1250,9 @@ const ScreenshotMainImageView = ({
           if (isRecycleBinFailure(recycled.error, recycled.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
         }
       }
+      if (croppedRelativePaths.length) await onFilesChanged?.();
       setSummary(nextSummary);
+      setReviewItems([]);
       setProgress(nextSummary.recycleError ? 90 : 100);
       setStatusMessage(nextSummary.recycleError ? '主图已生成，但回收原图失败' : nextSummary.success ? '处理完成' : nextSummary.error || '提取失败');
     } catch (error) {
@@ -1147,45 +1265,55 @@ const ScreenshotMainImageView = ({
     }
   };
 
+  const updateReviewItem = (index: number, changes: Partial<ScreenshotCropReviewItem>) => setReviewItems(items => items.map((item, itemIndex) => itemIndex === index ? { ...item, ...changes } : item));
+  const saveEditedCrop = () => {
+    if (!cropEditor) return;
+    const item = reviewItems[cropEditor.index];
+    if (!item) return;
+    const x = Math.max(0, Math.min(item.originalSize.width - 20, Math.round(cropEditor.crop.x)));
+    const y = Math.max(0, Math.min(item.originalSize.height - 20, Math.round(cropEditor.crop.y)));
+    const width = Math.max(20, Math.min(item.originalSize.width - x, Math.round(cropEditor.crop.width)));
+    const height = Math.max(20, Math.min(item.originalSize.height - y, Math.round(cropEditor.crop.height)));
+    updateReviewItem(cropEditor.index, { crop: { x, y, width, height }, confirmed: true });
+    setCropEditor(null);
+  };
+
   return <div className="w-full space-y-6">
     {!embedded && <h2 className="text-2xl font-bold text-slate-800">提取截图主图</h2>}
     <div className={embedded ? 'space-y-5' : 'space-y-5 rounded-xl border border-slate-200 bg-white p-6'}>
       <div className="space-y-2">
-        <p className="text-sm leading-6 text-slate-600">自动识别截图中的主图矩形，排除导航栏、正文和操作区。置信度不足时会跳过；成功生成主图后，原图默认移入回收站。</p>
-        <label className="text-xs font-semibold uppercase text-slate-500">待处理图片（{targetPaths.length} 张）</label>
-        <div className="relative">
-          <Crop size={18} className="absolute left-3 top-3 text-slate-500"/>
-          <textarea value={targetPaths.join('\n')} readOnly rows={Math.min(6, Math.max(2, targetPaths.length))} aria-label="待提取主图的图片" className="w-full resize-none rounded-lg border border-slate-200 bg-slate-50 py-3 pl-10 pr-4 font-mono text-sm text-slate-700"/>
+        <p className="text-sm leading-6 text-slate-600">先生成主图候选框，再处理确认后的范围。低置信结果会重点提示并允许拖动调整，确认前不会生成文件或处理原图。</p>
+        <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white text-blue-600 shadow-sm"><Crop size={18}/></span>
+          <div className="min-w-0">
+            <p className="text-sm font-bold text-slate-800">已选择 {targetPaths.length} 张截图</p>
+            <p className="mt-0.5 truncate text-xs text-slate-500" title={targetPaths.length === 1 ? firstTargetName : undefined}>{targetPaths.length === 1 ? firstTargetName : '将按同一版式批量识别主图区域'}</p>
+          </div>
         </div>
-        <p className="flex items-center gap-1 text-xs text-slate-500"><AlertCircle size={12}/>结果保存在原图旁，文件名增加“_主图”；重复执行会自动使用新名称。</p>
+        <p className="flex items-center gap-1 text-xs text-slate-500"><AlertCircle size={12}/>主图保存在原图旁；黄色项目需要确认，绿色项目可直接批量生成。</p>
         <label className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
           <input type="checkbox" checked={preserveOriginal} disabled={isRunning} onChange={event => setPreserveOriginal(event.currentTarget.checked)} className="mt-0.5 h-4 w-4 accent-blue-600"/>
           <span><span className="font-bold">保留原图</span><span className="mt-1 block text-xs leading-5 text-slate-500">默认关闭；关闭时仅把成功裁剪的原图移入系统回收站，跳过或失败的图片保持不变。</span></span>
         </label>
       </div>
 
-      {summary && <div role="status" className={`rounded-lg border p-4 text-sm ${summary.success ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-red-200 bg-red-50 text-red-700'}`}>
-        <p className="font-bold">{summary.success ? `已生成 ${summary.croppedCount || 0} 张主图，跳过 ${summary.skippedCount || 0} 张，失败 ${summary.failedCount || 0} 张` : summary.error || '提取失败'}</p>
-        {summary.recycledOriginalCount !== undefined && <p className="mt-2 text-xs">已处理 {summary.recycledOriginalCount} 张原图{summary.permanentOriginalCount ? `；其中 ${summary.permanentOriginalCount} 张经 Windows 警告确认后永久删除` : '，均已移入回收站'}。</p>}
-        {!!outputFolders.length && <div className="mt-2 space-y-1 text-xs"><span className="font-semibold">保存位置：</span>{outputFolders.map(folder => <p key={folder} className="break-all font-mono" title={folder}>{folder}</p>)}</div>}
-        {!!summary.results.length && <div className="mt-3 max-h-40 space-y-1 overflow-y-auto text-xs">
-          {summary.results.map((result, index) => <p key={`${result.input}-${index}`} className="truncate" title={result.output || result.reason || result.error}>
-            {result.cropped ? `已生成：${result.output}` : result.skipped ? `已跳过：${result.inputName}（${result.reason}）` : `失败：${result.inputName}（${result.error || '未知错误'}）`}
-          </p>)}
-        </div>}
-      </div>}
+      {!!reviewItems.length && <section className="space-y-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-sm font-bold text-slate-800">检查裁剪范围</h3><p className="mt-0.5 text-xs text-slate-500">{pendingReviewCount ? `还有 ${pendingReviewCount} 张需要确认` : `已确认 ${includedReviewItems.length} 张，可以生成主图`}</p></div><span className={`rounded-full px-2.5 py-1 text-xs font-bold ${pendingReviewCount ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{pendingReviewCount ? '待检查' : '已就绪'}</span></div><div className="grid gap-3 md:grid-cols-2">{reviewItems.map((item, index) => <article key={item.relativePath} className={`rounded-xl border p-3 ${!item.included ? 'border-slate-200 bg-slate-50 opacity-65' : item.confirmed ? 'border-emerald-200 bg-emerald-50/40' : 'border-amber-300 bg-amber-50/60'}`}><div className="mb-2 flex items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-xs font-bold text-slate-800" title={item.inputName}>{item.inputName}</p><p className="mt-0.5 text-[11px] text-slate-500">置信度 {Math.round(item.confidence * 100)}% · {item.crop.width} × {item.crop.height}</p></div><span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${item.confirmed ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{item.confirmed ? '已确认' : '需检查'}</span></div><ScreenshotCropPreview item={item} cacheConfig={cacheConfig} queueOrder={index} onEdit={previewUrl => setCropEditor({ index, previewUrl, crop: { ...item.crop }, snapEnabled: true })}/>{item.reason && <p className="mt-2 text-[11px] leading-4 text-amber-700">{item.reason}</p>}<div className="mt-3 flex justify-between gap-2"><button type="button" onClick={() => updateReviewItem(index, { included: !item.included, confirmed: item.included ? item.confirmed : true })} className="dialog-secondary px-3 py-1.5 text-xs">{item.included ? '不处理这张' : '恢复处理'}</button>{item.included && !item.confirmed && <button type="button" onClick={() => updateReviewItem(index, { confirmed: true })} className="rounded-md bg-amber-500 px-3 py-1.5 text-xs font-bold text-white hover:bg-amber-400">范围正确</button>}</div></article>)}</div></section>}
+
+      {!!analysisErrors.length && <details className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"><summary className="cursor-pointer font-semibold">{analysisErrors.length} 张图片无法读取</summary><div className="mt-2 space-y-1">{analysisErrors.map((item, index) => <p key={`${item.inputName}-${index}`}>{item.inputName}：{item.error || '分析失败'}</p>)}</div></details>}
 
       <TaskProgress
         logs={progressLogs}
         progress={progress}
         isRunning={isRunning}
         idleMessage={statusMessage}
-        action={<button type="button" onClick={() => void startExtraction()} disabled={!targetPaths.length || isRunning} className={`flex items-center gap-2 rounded-lg px-8 py-2.5 font-bold transition ${!targetPaths.length || isRunning ? 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400 shadow-none' : 'bg-blue-600 text-white shadow-lg shadow-blue-500/20 hover:bg-blue-500'}`}>
+        action={<button type="button" onClick={() => void (reviewItems.length ? confirmExtraction() : startAnalysis())} disabled={!targetPaths.length || isRunning || Boolean(reviewItems.length && (!includedReviewItems.length || pendingReviewCount))} className={`flex items-center gap-2 rounded-lg px-8 py-2.5 font-bold transition ${!targetPaths.length || isRunning || Boolean(reviewItems.length && (!includedReviewItems.length || pendingReviewCount)) ? 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400 shadow-none' : 'bg-blue-600 text-white shadow-lg shadow-blue-500/20 hover:bg-blue-500'}`}>
           {isRunning ? <Loader2 size={18} className="animate-spin"/> : <Crop size={18}/>}
-          {isRunning ? '正在提取…' : `提取主图${targetPaths.length > 1 ? `（${targetPaths.length} 张）` : ''}`}
+          {isRunning ? '正在处理…' : reviewItems.length ? pendingReviewCount ? `先确认 ${pendingReviewCount} 张` : `生成 ${includedReviewItems.length} 张主图` : summary ? '重新分析' : `分析范围${targetPaths.length > 1 ? `（${targetPaths.length} 张）` : ''}`}
         </button>}
       />
+      {!!issueResults.length && <details className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"><summary className="cursor-pointer font-semibold">查看 {issueResults.length} 个异常项目</summary><div className="mt-2 max-h-36 space-y-1.5 overflow-y-auto">{issueResults.map((result, index) => <p key={`${result.input}-${index}`} className="break-words"><span className="font-semibold">{result.inputName}</span>：{result.skipped ? result.reason || '已跳过' : result.error || '处理失败'}</p>)}</div></details>}
     </div>
+    {cropEditor && (() => { const item = reviewItems[cropEditor.index]; if (!item) return null; return <div role="dialog" aria-modal="true" className="fixed inset-0 z-[470] flex items-center justify-center bg-slate-950/75 p-3"><div className="flex max-h-[96vh] w-full max-w-6xl flex-col overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl"><div className="flex items-start gap-3"><div><h3 className="font-bold text-slate-900">调整主图范围</h3><p className="mt-1 text-xs text-slate-500">拖动框体移动，拖动四角调整大小；靠近检测边缘时会自动吸附。</p></div><label className="ml-auto inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700"><input type="checkbox" checked={cropEditor.snapEnabled} onChange={event => setCropEditor(current => current ? { ...current, snapEnabled: event.currentTarget.checked } : current)} className="accent-blue-600"/>磁吸边缘</label><button type="button" onClick={() => setCropEditor(null)} className="rounded-md p-2 text-slate-500 hover:bg-slate-100"><X size={18}/></button></div><InteractiveCropEditor large snapEnabled={cropEditor.snapEnabled} snapGuides={item.snapGuides} previewUrl={cropEditor.previewUrl} imageSize={item.originalSize} crop={cropEditor.crop} onChange={crop => setCropEditor(current => current ? { ...current, crop } : current)}/><div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">{(['x', 'y', 'width', 'height'] as const).map(key => <label key={key} className="text-xs font-bold text-slate-600">{{ x: '左边 X', y: '顶部 Y', width: '宽度', height: '高度' }[key]}<input type="number" min={key === 'x' || key === 'y' ? 0 : 20} value={cropEditor.crop[key]} onChange={event => setCropEditor(current => current ? { ...current, crop: { ...current.crop, [key]: Math.max(key === 'x' || key === 'y' ? 0 : 20, Math.round(Number(event.target.value) || 0)) } } : current)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2"/></label>)}</div><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setCropEditor(null)} className="dialog-secondary">取消</button><button type="button" onClick={saveEditedCrop} className="dialog-primary">确认范围</button></div></div></div>; })()}
   </div>;
 };
 

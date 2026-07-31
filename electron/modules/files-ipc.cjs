@@ -507,7 +507,9 @@ const registerFileOperationsIpc = context => {
       if (operation === 'trash') {
         const existingSources = sources.filter(source => fs.existsSync(source));
         const operationId = crypto.randomUUID();
+        const startedAt = Date.now();
         const totalCount = existingSources.length;
+        const useBatchTrash = typeof recycleBinService.trashMany === 'function' && existingSources.length > 1;
         const publish = payload => {
           if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', { operationId, operation: 'trash', ...payload });
         };
@@ -523,17 +525,43 @@ const registerFileOperationsIpc = context => {
         };
         publish({ phase: 'trashing', progress: 0, currentName: '', processedCount, totalCount });
         try {
-          for (const source of existingSources) {
-            publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
-            const originalIdentity = await capturePathIdentity(source);
-            const recycled = await recycleBinService.trash(source);
-            if (recycled.recyclePidl) undoItems.push({ original: source, originalIdentity, recyclePidl: recycled.recyclePidl, preciseRestore: recycled.preciseRestore !== false });
-            if (recycled.permanent) permanentCount += 1;
-            processedCount += 1;
-            publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
+          if (useBatchTrash) {
+            const originalIdentities = [];
+            for (const source of existingSources) originalIdentities.push(await capturePathIdentity(source));
+            publish({ phase: 'trashing', progress: 0, currentName: `正在移入回收站（${totalCount} 个项目）`, processedCount, totalCount });
+            const batch = await recycleBinService.trashMany(existingSources);
+            if (!Array.isArray(batch?.items) || batch.items.length !== existingSources.length) throw new Error('回收站批量操作未返回完整结果');
+            const failures = [];
+            for (let index = 0; index < existingSources.length; index += 1) {
+              const source = existingSources[index];
+              const recycled = batch.items[index];
+              if (recycled.success) {
+                if (recycled.recyclePidl) undoItems.push({ original: source, originalIdentity: originalIdentities[index], recyclePidl: recycled.recyclePidl, preciseRestore: recycled.preciseRestore !== false });
+                if (recycled.permanent) permanentCount += 1;
+                processedCount += 1;
+              } else {
+                failures.push({ source, error: recycled.error || 'Windows 回收站操作失败' });
+              }
+              publish({ phase: 'trashing', progress: Math.round((index + 1) / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
+            }
+            if (failures.length) {
+              const error = new Error(`${failures.length} 个项目未能移入回收站：${path.basename(failures[0].source)}（${failures[0].error}）`);
+              error.code = 'RECYCLE_BIN_FAILED';
+              throw error;
+            }
+          } else {
+            for (const source of existingSources) {
+              publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
+              const originalIdentity = await capturePathIdentity(source);
+              const recycled = await recycleBinService.trash(source);
+              if (recycled.recyclePidl) undoItems.push({ original: source, originalIdentity, recyclePidl: recycled.recyclePidl, preciseRestore: recycled.preciseRestore !== false });
+              if (recycled.permanent) permanentCount += 1;
+              processedCount += 1;
+              publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
+            }
           }
           publish({ phase: 'complete', progress: 100, currentName: '', processedCount, totalCount });
-          writeLog('info', 'Project files moved to trash', { projectName, count: processedCount, operationId });
+          writeLog('info', 'Project files moved to trash', { projectName, count: processedCount, operationId, batch: useBatchTrash, durationMs: Date.now() - startedAt });
           await persistTrashUndo();
           return { success: true, count: processedCount, permanentCount, operationId };
         } catch (error) {
