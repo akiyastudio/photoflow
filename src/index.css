@@ -25,6 +25,10 @@
 .window-glyph-close::before { transform:rotate(45deg); }
 .window-glyph-close::after { transform:rotate(-45deg); }
 .workspace-tab.is-active { border-bottom-color: transparent; box-shadow: 0 -1px 0 rgb(15 23 42 / .02); }
+.workspace-tab[data-tab-draggable="true"] { cursor:grab; touch-action:pan-y; }
+.workspace-tab[data-dragging="true"] { cursor:grabbing; opacity:.48; }
+.workspace-tab[data-drop-target="true"][data-drop-side="before"] { box-shadow:inset 3px 0 0 #3b82f6; }
+.workspace-tab[data-drop-target="true"][data-drop-side="after"] { box-shadow:inset -3px 0 0 #3b82f6; }
 .titlebar-tabs-scroll { overscroll-behavior-x: contain; scroll-behavior: smooth; }
 .titlebar-tab-scroll-button { display:flex; width:24px; flex:none; align-items:center; justify-content:center; color:#64748b; }
 .titlebar-tab-scroll-button:hover:not(:disabled) { background:#f1f5f9; color:#0f172a; }
@@ -32,48 +36,12 @@
 .win11-spinner { width: 24px; height: 24px; border: 3px solid rgb(148 163 184 / .28); border-top-color: #fff; border-radius: 9999px; animation: win11-spin .8s linear infinite; }
 @keyframes win11-spin { to { transform: rotate(360deg); } }
 
-/* Custom scrollbar for terminal outputs */
 .scrollbar-hide::-webkit-scrollbar {
     display: none;
 }
 .scrollbar-hide {
     -ms-overflow-style: none;
     scrollbar-width: none;
-}
-
-.terminal-scroll::-webkit-scrollbar {
-  width: 8px;
-}
-.terminal-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-.terminal-scroll::-webkit-scrollbar-thumb {
-  background: #475569;
-  border-radius: 4px;
-  transition: background 0.2s;
-}
-.terminal-scroll::-webkit-scrollbar-thumb:hover {
-  background: #64748b;
-}
-
-.terminal-scroll {
-  scrollbar-width: thin;
-  scrollbar-color: #475569 transparent;
-}
-
-.scrollbar-thin::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-.scrollbar-thin::-webkit-scrollbar-track {
-  background: transparent;
-}
-.scrollbar-thin::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 3px;
-}
-.scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background: #475569;
 }
 
 /* Weeks stack vertically. Each person gets one compact horizontal task lane. */
@@ -157,8 +125,6 @@ main:has(> div > .workflow-board-view) > div {
   overflow-y: hidden;
   overscroll-behavior-x: contain;
   padding: .8rem;
-  scrollbar-width: thin;
-  scrollbar-color: #64748b transparent;
 }
 .workflow-task-card {
   display: grid;
@@ -219,8 +185,6 @@ html.dark .workflow-board-view > .space-y-7 > section > h3 {
 html.dark .workflow-person-summary { border-color: #273244; }
 html.dark .workflow-task-card { border-color: #273244; background: #090c12; }
 .project-navigator-scroll { padding-left:.5rem; padding-right:.5rem; }
-.project-navigator-scroll::-webkit-scrollbar, .inspiration-navigator-scroll::-webkit-scrollbar { width:6px; }
-.project-navigator-scroll::-webkit-scrollbar-track, .inspiration-navigator-scroll::-webkit-scrollbar-track { background:#fff; }
 /* Recovered workspace UI primitives */
 .project-action-button {
   display: inline-flex;
@@ -348,19 +312,18 @@ html.dark .project-toolbar .project-action-button:hover { background:#111827; }
 html.dark .toolbar-divider { background:#1f2937; }
 html.dark .column-resize-handle { border-color:#1f2937; background:transparent; }
 html.dark .column-resize-handle:hover, html.dark .column-resize-handle:focus-visible { border-color:#3b82f6; }
-html.dark .project-navigator-scroll::-webkit-scrollbar-track, html.dark .inspiration-navigator-scroll::-webkit-scrollbar-track { background:#090c12; }
 html.dark .file-list-heading { background:#090c12; }
 html.dark .project-menu-item { color: #d1d5db; }
-html.dark .terminal-scroll::-webkit-scrollbar-thumb { background: #64748b; }
 html.dark .app-titlebar { background:#090c12; border-color:#1f2937; }
 html.dark .window-control-button { --window-glyph-bg:#090c12; }
-html.dark .window-control-button:hover { --window-glyph-bg:#111827; }
+html.dark .window-control-button:hover { --window-glyph-bg:#111827; background:#111827; color:#f8fafc; }
+html.dark .window-control-close:hover { background:#e81123; color:#fff; }
 html.dark .workspace-tab.is-active { border-color:#1f2937; border-bottom-color:transparent; background:#030407; }
 html.dark .titlebar-tab-scroll-button { color:#94a3b8; }
 html.dark .titlebar-tab-scroll-button:hover:not(:disabled) { background:#111827; color:#f8fafc; }
 html.dark .titlebar-tab-scroll-button:disabled { color:#374151; }
 
-.settings-check { display:flex; align-items:flex-start; gap:.65rem; margin-top:1rem; border:1px solid #e2e8f0; border-radius:.6rem; padding:.75rem; background:#f8fafc; color:#334155; font-size:.875rem; line-height:1.4; cursor:pointer; }
+.settings-check { display:flex; align-items:flex-start; gap:.65rem; margin-top:1rem; border:1px solid #e2e8f0; border-radius:.6rem; padding:.75rem; background:#fff; color:#334155; font-size:.875rem; line-height:1.4; cursor:pointer; }
 .settings-check input { margin-top:.12rem; flex:none; accent-color:#2563eb; }
 .project-row { position:relative; }
 .project-row > button:first-child { padding-right:.5rem; transition:padding-right .15s; }
@@ -384,7 +347,9 @@ html.dark .text-gray-600 { color:#94a3b8; }
 html.dark .hover\:bg-slate-200:hover, html.dark .hover\:bg-slate-700:hover, html.dark .hover\:bg-slate-800:hover { background-color:#1f2937; }
 html.dark .hover\:bg-red-50:hover { background-color:#450a0a; }
 html.dark .project-open-button:hover { background:#1f2937; color:#f8fafc; }
-html.dark .settings-check { border-color:#1f2937; background:#030407; color:#d1d5db; }
+html.dark .settings-check { border-color:#1f2937; background:#090c12; color:#d1d5db; }
+html.dark .settings-group-card { border-color:#1f2937; }
+html.dark .settings-group-card > :not([hidden]) ~ :not([hidden]) { border-color:#1f2937 !important; }
 html.dark input[type="checkbox"], html.dark input[type="range"] { accent-color:#3b82f6; }
 
 .video-hover-seek {
@@ -430,5 +395,24 @@ html.dark .birthday-panel .bg-white\/80 { background-color:#090f1b; }
 html.dark .birthday-panel .border-blue-100 { border-color:#1e40af; }
 html.dark .birthday-panel .bg-blue-50 { background-color:#071a3d; }
 html.dark .birthday-panel .bg-blue-100 { background-color:#0b2a64; }
-html.dark ::-webkit-scrollbar-track { background:#030407; }
-html.dark ::-webkit-scrollbar-thumb { background:#374151; border-radius:999px; }
+/* One scrollbar style for every page. A transparent track reveals its exact surface. */
+:root {
+  --app-scrollbar-thumb:#cbd5e1;
+  --app-scrollbar-thumb-hover:#94a3b8;
+}
+html.dark {
+  --app-scrollbar-thumb:#374151;
+  --app-scrollbar-thumb-hover:#4b5563;
+}
+::-webkit-scrollbar { width:12px; height:12px; background:transparent; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background:transparent; }
+::-webkit-scrollbar-thumb {
+  border:2px solid transparent;
+  border-radius:9999px;
+  background-color:var(--app-scrollbar-thumb);
+  background-clip:padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color:var(--app-scrollbar-thumb-hover); }
+
+.scrollbar-hide { scrollbar-width:none; }
+.scrollbar-hide::-webkit-scrollbar { display:none; }

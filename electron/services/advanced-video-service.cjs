@@ -54,7 +54,7 @@ const createAdvancedVideoService = ({ BrowserWindow, crypto, mediaService, path,
     for (const session of [...sessions.values()]) if (session.sender.id === senderId) stop(session.id, senderId);
   };
 
-  const start = async (event, filePath) => {
+  const start = async (event, filePath, arrowKeyAction = 'seek') => {
     const sender = event.sender;
     stopForSender(sender.id);
     const authorizedPath = await mediaService.authorizeInput(filePath);
@@ -136,6 +136,7 @@ const createAdvancedVideoService = ({ BrowserWindow, crypto, mediaService, path,
 
     try {
       await readyPromise;
+      sendCommand(session, { command: 'set-keyboard-mode', value: arrowKeyAction === 'navigate' ? 'navigate' : 'seek' });
       if (!sendCommand(session, { command: 'open', path: authorizedPath })) throw new Error('无法向高级视频解码组件发送文件');
       writeLog('info', 'Advanced video decoder started', { sessionId: id, filePath: authorizedPath });
       return { sessionId: id };

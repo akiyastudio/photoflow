@@ -23,6 +23,7 @@ interface TaskCenterValue {
   panelTasks: Record<string, PanelTaskSnapshot>;
   reportPanelTask: (identity: Pick<PanelTaskSnapshot, 'key' | 'scopeKey' | 'panelKind' | 'title'>, report: PanelTaskReport) => void;
   dismissPanelTask: (key: string) => void;
+  dismissBackgroundTask: (id: string) => Promise<void>;
 }
 
 const TaskCenterContext = createContext<TaskCenterValue | null>(null);
@@ -74,7 +75,12 @@ export const TaskCenterProvider = ({ children }: { children: React.ReactNode }) 
     });
   }, []);
 
-  const value = useMemo<TaskCenterValue>(() => ({ backgroundTasks, panelTasks, reportPanelTask, dismissPanelTask }), [backgroundTasks, dismissPanelTask, panelTasks, reportPanelTask]);
+  const dismissBackgroundTask = useCallback(async (id: string) => {
+    const result = await window.electronAPI.dismissBackgroundTask(id);
+    if (result.success) setBackgroundTasks(current => current.filter(task => task.id !== id));
+  }, []);
+
+  const value = useMemo<TaskCenterValue>(() => ({ backgroundTasks, panelTasks, reportPanelTask, dismissPanelTask, dismissBackgroundTask }), [backgroundTasks, dismissBackgroundTask, dismissPanelTask, panelTasks, reportPanelTask]);
   return <TaskCenterContext.Provider value={value}>{children}</TaskCenterContext.Provider>;
 };
 

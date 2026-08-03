@@ -1,7 +1,8 @@
 const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = require('../services/protected-project-folder.cjs');
+const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
 
 const registerFileOperationsIpc = context => {
-  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
 
   ipcMain.handle('workspace-file-details', async (_event, workspacePath, status, projectName, relativePaths = []) => {
     try {
@@ -23,13 +24,14 @@ const registerFileOperationsIpc = context => {
     const job = activeProjectFileOperations.get(operationId);
     if (!job || job.finishing) return { success: false, error: job?.finishing ? '文件已复制完成，正在整理源文件' : '操作已结束' };
     job.cancelled = true;
+    job.cancel?.();
     return { success: true };
   });
   
   ipcMain.on('workspace-start-file-drag', async (event, workspacePath, status, projectName, relativePaths = []) => {
     let validatedRelativePaths = [];
     try {
-      if (!Array.isArray(relativePaths) || !relativePaths.length || relativePaths.length > 500) throw new Error('没有可拖动的文件');
+      if (!Array.isArray(relativePaths) || !relativePaths.length) throw new Error('没有可拖动的文件');
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
       const sources = Array.from(new Set(relativePaths.map(relativePath => {
         if (typeof relativePath !== 'string' || !relativePath) throw new Error('无效的文件路径');
@@ -205,19 +207,16 @@ const registerFileOperationsIpc = context => {
         return { success: true, count: sources.length };
       }
       if (operation === 'paste') {
-        if (activeProjectFileOperations.size) throw new Error('已有文件粘贴任务正在进行');
         const operationId = crypto.randomUUID();
-        const job = { cancelled: false, finishing: false };
+        let job = { cancelled: false, finishing: false };
+        let task = null;
         const createdTargets = [];
         const stagedReplacements = [];
         const committedTargets = [];
         let topLevelTargets = [];
         let incomingRoot = '';
         let replacementRoot = '';
-        activeProjectFileOperations.set(operationId, job);
-        const publish = payload => {
-          if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', { operationId, operation: 'paste', ...payload });
-        };
+        const publish = payload => task?.publish(payload);
         publish({ phase: 'scanning', progress: 0, currentName: '', bytesCopied: 0, totalBytes: 0 });
         try {
           const requestedDestination = resolveInsideProject(targetRelativePath);
@@ -249,6 +248,15 @@ const registerFileOperationsIpc = context => {
             seenSources.add(key);
             uniqueSources.push(source);
           }
+          task = createProjectFileTask({
+            backgroundTasks, event, operationId, operation: 'paste', title: `粘贴文件 · ${projectName}`,
+            projectName, resources: [destinationDir, ...uniqueSources], cancelledCode: CANCELLED_CODE,
+          });
+          job = task.job;
+          job.cancel = task.cancel;
+          activeProjectFileOperations.set(operationId, job);
+          await task.start();
+          publish({ phase: 'scanning', progress: 0, currentName: '正在检查文件', bytesCopied: 0, totalBytes: 0 });
           const requestedItems = [];
           for (const source of uniqueSources) {
             if (clipboardSnapshot.operation === 'cut' && pathKey(path.dirname(source)) === pathKey(destinationDir)) continue;
@@ -272,6 +280,7 @@ const registerFileOperationsIpc = context => {
             const conflictPolicy = ['replace', 'keep-both'].includes(options?.pasteConflictPolicy) ? options.pasteConflictPolicy : '';
             if (!conflictPolicy) {
               publish({ phase: 'complete', progress: 100, currentName: '', count: 0, decisionRequired: true });
+              task.complete('等待用户处理同名文件');
               return {
                 success: true,
                 count: 0,
@@ -390,6 +399,7 @@ const registerFileOperationsIpc = context => {
               writeLog('warn', 'Unable to record paste undo history', error);
             });
             publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied: 0, totalBytes: 0, filesCopied: count, totalFiles: count, count });
+            task.complete('文件移动完成');
             writeLog('info', 'Project files moved by same-volume rename', { projectName, targetRelativePath, count, operationId });
             return { success: true, count, operationId, replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
           }
@@ -462,6 +472,7 @@ const registerFileOperationsIpc = context => {
                 writeLog('warn', 'Unable to record paste undo history', error);
               });
           publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied, totalBytes, filesCopied, totalFiles, count });
+          task.complete('文件粘贴完成');
           writeLog('info', 'Project files pasted', { projectName, targetRelativePath, count, operationId, ...transferStats });
           return { success: true, count, operationId, replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
         } catch (error) {
@@ -495,10 +506,12 @@ const registerFileOperationsIpc = context => {
           }
           if (error?.code === CANCELLED_CODE) {
             publish({ phase: 'cancelled', progress: 0, currentName: '' });
+            task?.cancelled();
             writeLog('info', 'Project file paste cancelled', { projectName, operationId });
             return { success: false, cancelled: true, operationId, error: '粘贴已取消' };
           }
           publish({ phase: 'failed', progress: 0, currentName: '', error: error.message || String(error) });
+          task?.fail(error);
           throw error;
         } finally {
           activeProjectFileOperations.delete(operationId);
@@ -510,8 +523,15 @@ const registerFileOperationsIpc = context => {
         const startedAt = Date.now();
         const totalCount = existingSources.length;
         const useBatchTrash = typeof recycleBinService.trashMany === 'function' && existingSources.length > 1;
+        const task = createProjectFileTask({
+          backgroundTasks, event, operationId, operation: 'trash', title: `删除文件 · ${projectName}`,
+          projectName, resources: existingSources, cancellable: !useBatchTrash, cancelledCode: CANCELLED_CODE,
+        });
+        const job = task.job;
+        job.cancel = task.cancel;
+        activeProjectFileOperations.set(operationId, job);
         const publish = payload => {
-          if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', { operationId, operation: 'trash', ...payload });
+          task.publish(payload);
         };
         let processedCount = 0;
         let permanentCount = 0;
@@ -523,13 +543,18 @@ const registerFileOperationsIpc = context => {
           persistedTrashRecord = await workspaceRepository.addUndoRecord(workspaceRoot, { kind: 'trash', payload: { items: undoItems } });
           await pushUndoOperation({ kind: 'trash', workspaceRoot, persistentId: persistedTrashRecord.id, items: [...undoItems] });
         };
-        publish({ phase: 'trashing', progress: 0, currentName: '', processedCount, totalCount });
         try {
+          await task.start();
+          publish({ phase: 'trashing', progress: 0, currentName: '', processedCount, totalCount });
           if (useBatchTrash) {
             const originalIdentities = [];
-            for (const source of existingSources) originalIdentities.push(await capturePathIdentity(source));
+            for (const source of existingSources) {
+              if (job.cancelled) throw Object.assign(new Error('文件操作已取消'), { code: CANCELLED_CODE });
+              originalIdentities.push(await capturePathIdentity(source));
+            }
             publish({ phase: 'trashing', progress: 0, currentName: `正在移入回收站（${totalCount} 个项目）`, processedCount, totalCount });
             const batch = await recycleBinService.trashMany(existingSources);
+            if (job.cancelled) throw Object.assign(new Error('文件操作已取消'), { code: CANCELLED_CODE });
             if (!Array.isArray(batch?.items) || batch.items.length !== existingSources.length) throw new Error('回收站批量操作未返回完整结果');
             const failures = [];
             for (let index = 0; index < existingSources.length; index += 1) {
@@ -551,6 +576,7 @@ const registerFileOperationsIpc = context => {
             }
           } else {
             for (const source of existingSources) {
+              if (job.cancelled) throw Object.assign(new Error('文件操作已取消'), { code: CANCELLED_CODE });
               publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
               const originalIdentity = await capturePathIdentity(source);
               const recycled = await recycleBinService.trash(source);
@@ -560,14 +586,21 @@ const registerFileOperationsIpc = context => {
               publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
             }
           }
-          publish({ phase: 'complete', progress: 100, currentName: '', processedCount, totalCount });
-          writeLog('info', 'Project files moved to trash', { projectName, count: processedCount, operationId, batch: useBatchTrash, durationMs: Date.now() - startedAt });
           await persistTrashUndo();
+          publish({ phase: 'complete', progress: 100, currentName: '', processedCount, totalCount });
+          task.complete('文件已移入回收站');
+          writeLog('info', 'Project files moved to trash', { projectName, count: processedCount, operationId, batch: useBatchTrash, durationMs: Date.now() - startedAt });
           return { success: true, count: processedCount, permanentCount, operationId };
         } catch (error) {
           await persistTrashUndo().catch(persistError => writeLog('error', 'Unable to persist partial trash undo record', persistError));
-          publish({ phase: 'failed', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: '', processedCount, totalCount, error: error.message || String(error) });
+          const cancelled = error?.code === CANCELLED_CODE;
+          publish({ phase: cancelled ? 'cancelled' : 'failed', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: '', processedCount, totalCount, error: error.message || String(error) });
+          if (cancelled) task.cancelled();
+          else task.fail(error);
+          if (cancelled) return { success: false, cancelled: true, operationId, count: processedCount };
           throw error;
+        } finally {
+          activeProjectFileOperations.delete(operationId);
         }
       }
       if (operation === 'select') {

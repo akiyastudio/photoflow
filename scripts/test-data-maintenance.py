@@ -21,11 +21,15 @@ from workspace_db import (  # noqa: E402
     media_set_thumbnail,
     media_version_delete_scope,
     progress_list,
+    progress_delete_missing,
     progress_register,
     progress_update_tree,
+    team_identity_complete,
+    team_identity_save,
     team_patch_cleanup,
     team_patch_replace,
     team_patch_update,
+    team_project_workspace,
 )
 
 
@@ -55,6 +59,65 @@ def test_thumbnail_missing_prune(root: Path) -> None:
     database.close()
 
 
+def test_team_return_missing_reconciliation(root: Path) -> None:
+    workspace = root / "team-return-workspace"
+    project = workspace / "Project"
+    original = project / "original.jpg"
+    patch = root / "workspace-data" / "team-retouch" / "patch.png"
+    returned = root / "workspace-data" / "team-retouch" / "uploads" / "returned.jpg"
+    for file_path, content in ((original, b"original"), (patch, b"patch"), (returned, b"returned")):
+        write_media(file_path, content)
+    db = connect(str(workspace), str(root / "team-return.sqlite3"))
+    now = 1
+    db.execute(
+        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+        ("team-project", "Project", "未分类", "Project", now, now),
+    )
+    db.commit()
+    bundle = media_get(str(workspace), db, {"projectName": "Project", "filePath": str(original)})
+    photo = bundle["photo"]
+    base = bundle["versions"][0]
+    team_patch_replace(db, {"photoId": photo["id"], "baseVersionId": base["id"], "tasks": [{
+        "id": "team-task", "personIndex": 1, "personName": "人物 1", "assignee": "",
+        "detector": "test", "bbox": {"x": 0, "y": 0, "width": 10, "height": 10},
+        "crop": {"x": 0, "y": 0, "width": 10, "height": 10},
+        "patchPath": str(patch), "status": "exported",
+    }]})
+    saved = team_identity_save(db, {"projectName": "Project", "name": "测试人物", "assignments": [{
+        "photoId": photo["id"], "baseVersionId": base["id"], "personIndex": 1,
+    }]})
+    assert saved["success"]
+    team_identity_complete(db, {
+        "photoId": photo["id"], "baseVersionId": base["id"], "personIndex": 1,
+        "completed": True, "completionKind": "returned", "editedPatchPath": str(returned),
+    })
+    team_patch_update(db, {"taskId": "team-task", "editedPatchPath": str(returned), "status": "uploaded"})
+
+    active = team_project_workspace(str(workspace), db, {"projectName": "Project"})
+    assert active["missingReturnCount"] == 0 and active["assignments"][0]["completed"]
+    assert not active["assignments"][0]["returnMissing"]
+
+    returned.unlink()
+    missing = team_project_workspace(str(workspace), db, {"projectName": "Project"})
+    assert missing["missingReturnCount"] == 1
+    assert missing["assignments"][0]["returnMissing"] and not missing["assignments"][0]["completed"]
+    stored = db.execute(
+        "SELECT completed,return_missing,return_missing_since FROM team_person_assignments WHERE photo_id=?",
+        (photo["id"],),
+    ).fetchone()
+    assert stored[0] == 1 and stored[1] == 1 and stored[2]
+    task = db.execute("SELECT edited_patch_path,status FROM team_patch_tasks WHERE id='team-task'").fetchone()
+    assert task[0] is None and task[1] == "exported"
+
+    write_media(returned, b"restored")
+    restored = team_project_workspace(str(workspace), db, {"projectName": "Project"})
+    assert restored["missingReturnCount"] == 0
+    assert restored["assignments"][0]["completed"] and not restored["assignments"][0]["returnMissing"]
+    task = db.execute("SELECT edited_patch_path,status FROM team_patch_tasks WHERE id='team-task'").fetchone()
+    assert Path(task[0]).resolve() == returned.resolve() and task[1] == "uploaded"
+    db.close()
+
+
 def test_missing_progress_replacement(root: Path) -> None:
     workspace = root / "progress-workspace"
     project = workspace / "Project"
@@ -73,7 +136,20 @@ def test_missing_progress_replacement(root: Path) -> None:
         })["progressFolder"]
         original.rmdir()
         missing = progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"][0]
-        assert missing["id"] == registered["id"] and missing["folderMissing"]
+        assert missing["id"] == registered["id"] and missing["folderMissing"] and missing["missingSince"]
+
+        # Recreating the original path produces a new filesystem identity. It
+        # must revive the tombstone and keep following subsequent renames.
+        original.mkdir()
+        revived = progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"][0]
+        assert revived["id"] == registered["id"] and not revived["folderMissing"] and revived["missingSince"] is None
+        relocated = project / "图片后期_1_已恢复"
+        original.rename(relocated)
+        followed = progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"][0]
+        assert Path(followed["folderPath"]).resolve() == relocated.resolve()
+        relocated.rmdir()
+        missing_again = progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"][0]
+        assert missing_again["folderMissing"] and missing_again["missingSince"]
 
         replacement = project / "图片后期_1_替换"
         replacement.mkdir()
@@ -82,7 +158,8 @@ def test_missing_progress_replacement(root: Path) -> None:
             "displayName": "图片后期_1_替换", "folderPath": str(replacement), "trackingEnabled": True,
         })["progressFolder"]
         assert replaced["id"] == registered["id"]
-        assert not replaced["folderMissing"] and Path(replaced["folderPath"]).resolve() == replacement.resolve()
+        assert not replaced["folderMissing"] and replaced["missingSince"] is None
+        assert Path(replaced["folderPath"]).resolve() == replacement.resolve()
     finally:
         db.close()
 
@@ -174,6 +251,93 @@ def test_modify_progress_replaces_missing_version(root: Path) -> None:
         assert not rows[missing["id"]]["folderMissing"] and rows[missing["id"]]["versionKey"] == "1"
         assert rows[active["id"]]["folderMissing"] and rows[active["id"]]["versionKey"] == "2"
         assert rows[child["id"]]["parentProgressId"] == missing["id"] and rows[child["id"]]["versionKey"] == "1_1"
+    finally:
+        db.close()
+
+
+def test_missing_progress_removal_is_safe(root: Path) -> None:
+    workspace = root / "remove-progress-workspace"
+    project = workspace / "Project"
+    baseline_folder = project / "selection"
+    missing_folder = project / "progress-v1"
+    child_folder = project / "progress-v1-child"
+    write_media(baseline_folder / "one.jpg", b"baseline")
+    write_media(missing_folder / "one.jpg", b"version-one")
+    child_folder.mkdir(parents=True)
+    db = connect(str(workspace), str(root / "remove-progress.sqlite3"))
+    db.execute(
+        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+        ("remove-progress-project", "Project", "后期中", "Project", 1, 1),
+    )
+    db.commit()
+    try:
+        baseline_progress = progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "0",
+            "displayName": "selection", "folderPath": str(baseline_folder), "trackingEnabled": True,
+        })["progressFolder"]
+        parent_progress = progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "1",
+            "parentProgressId": baseline_progress["id"], "displayName": "progress-v1",
+            "folderPath": str(missing_folder), "trackingEnabled": True,
+        })["progressFolder"]
+        child_progress = progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "1_1",
+            "parentProgressId": parent_progress["id"], "displayName": "progress-v1-child",
+            "folderPath": str(child_folder), "trackingEnabled": True,
+        })["progressFolder"]
+        batch_register_baseline(str(workspace), db, {
+            "projectName": "Project", "folderPath": str(baseline_folder),
+        })
+        committed = batch_commit_compare(str(workspace), db, {
+            "projectName": "Project", "folderA": str(baseline_folder), "folderB": str(missing_folder),
+            "importKey": "remove-v1", "displayName": "progress-v1", "matches": [{
+                "reference": "one.jpg", "source": "one.jpg", "distance": 0, "confidence": "high",
+            }],
+        })
+
+        # V0 is protected even if its directory is externally removed.
+        (baseline_folder / "one.jpg").unlink()
+        baseline_folder.rmdir()
+        try:
+            progress_delete_missing(str(workspace), db, {
+                "projectName": "Project", "progressId": baseline_progress["id"],
+            })
+            raise AssertionError("missing V0 progress must not be removable")
+        except ValueError as error:
+            assert "V0" in str(error)
+
+        # A stale database flag must not permit detaching a media file that is
+        # still physically available at a relocated path.
+        recovered_file = project / "recovered-one.jpg"
+        (missing_folder / "one.jpg").rename(recovered_file)
+        missing_folder.rmdir()
+        version_id = db.execute(
+            "SELECT version_id FROM batch_items WHERE batch_id=?",
+            (committed["batch"]["id"],),
+        ).fetchone()[0]
+        db.execute(
+            "UPDATE versions SET file_path=?,file_path_key=?,file_missing=1 WHERE id=?",
+            (str(recovered_file.resolve()), str(recovered_file.resolve()).casefold(), version_id),
+        )
+        db.commit()
+        try:
+            progress_delete_missing(str(workspace), db, {
+                "projectName": "Project", "progressId": parent_progress["id"],
+            })
+            raise AssertionError("progress with an available media file must not be removable")
+        except ValueError as error:
+            assert "可用文件" in str(error)
+
+        recovered_file.unlink()
+        removed = progress_delete_missing(str(workspace), db, {
+            "projectName": "Project", "progressId": parent_progress["id"],
+        })
+        assert removed["success"] and removed["deletedVersionCount"] == 1
+        assert removed["deletedBatchCount"] == 1 and removed["reparentedProgressCount"] == 1
+        remaining = {item["id"]: item for item in progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"]}
+        assert parent_progress["id"] not in remaining
+        assert remaining[child_progress["id"]]["parentProgressId"] == baseline_progress["id"]
+        assert db.execute("SELECT is_deleted FROM versions WHERE id=?", (version_id,)).fetchone()[0] == 1
     finally:
         db.close()
 
@@ -281,9 +445,11 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="photoflow-maintenance-") as directory:
         root = Path(directory)
         test_thumbnail_missing_prune(root)
+        test_team_return_missing_reconciliation(root)
         test_missing_progress_replacement(root)
         test_incremental_progress_append_preserves_existing_items(root)
         test_modify_progress_replaces_missing_version(root)
+        test_missing_progress_removal_is_safe(root)
         test_version_and_team_cleanup(root)
     print("Data maintenance tests passed.")
 

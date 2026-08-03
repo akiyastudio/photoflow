@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const createWorkspaceService = ({ repository, catalogs, statuses, assertInside, assertExistingInside }) => {
+const createWorkspaceService = ({ repository, catalogs, assertInside, assertExistingInside }) => {
   const resolveRoot = workspacePath => {
     if (typeof workspacePath !== 'string' || !workspacePath.trim()) throw new Error('尚未选择工作目录');
     const requestedPath = path.resolve(workspacePath.trim());
@@ -39,7 +39,8 @@ const createWorkspaceService = ({ repository, catalogs, statuses, assertInside, 
   };
 
   const getProjectPath = (workspacePath, status, projectName) => {
-    if (!statuses.includes(status)) throw new Error('无效的项目状态');
+    const validStatus = typeof status === 'string' && status === status.trim() && status.length > 0 && status.length <= 24 && ![...status].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
+    if (!validStatus) throw new Error('无效的项目状态');
     if (projectName === '.__photoflow_inspiration__') {
       const inspirationRoot = path.resolve(String(workspacePath || '').trim());
       if (!fs.existsSync(inspirationRoot)) throw new Error('灵感库文件夹不存在');
@@ -52,7 +53,9 @@ const createWorkspaceService = ({ repository, catalogs, statuses, assertInside, 
     const relativePath = row?.relative_path || projectName;
     const projectPath = path.resolve(root, relativePath);
     assertInside(root, projectPath, '项目路径');
-    if (fs.existsSync(projectPath)) assertExistingInside(root, projectPath, '项目路径');
+    let archivePath = '';
+    try { archivePath = JSON.parse(row?.extra_json || '{}')?.archive?.path || ''; } catch { /* malformed optional metadata is ignored */ }
+    if (fs.existsSync(projectPath) && !archivePath) assertExistingInside(root, projectPath, '项目路径');
     return projectPath;
   };
 

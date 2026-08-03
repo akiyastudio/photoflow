@@ -230,12 +230,46 @@ namespace PhotoFlow.AdvancedVideoDecoder
 
         internal void TogglePause()
         {
+            if (IsAtEnd())
+            {
+                Play();
+                return;
+            }
             SetProperty("pause", IsYesValue(GetProperty("pause")) ? "no" : "yes");
+        }
+
+        internal void Play()
+        {
+            if (IsAtEnd()) Check(Run("seek", "0", "absolute+exact"), "重新播放视频");
+            SetProperty("pause", "no");
+        }
+
+        internal void Pause()
+        {
+            SetProperty("pause", "yes");
+        }
+
+        internal void SeekAbsolute(double seconds)
+        {
+            if (IsAtEnd()) SetProperty("pause", "yes");
+            Check(Run("seek", Math.Max(0, seconds).ToString(CultureInfo.InvariantCulture), "absolute+exact"), "跳转视频");
         }
 
         internal void SeekRelative(double seconds)
         {
+            if (IsAtEnd())
+            {
+                double duration;
+                if (!double.TryParse(GetProperty("duration"), NumberStyles.Float, CultureInfo.InvariantCulture, out duration)) duration = 0;
+                SeekAbsolute(duration + seconds);
+                return;
+            }
             Check(Run("seek", seconds.ToString(CultureInfo.InvariantCulture), "relative+exact"), "跳转视频");
+        }
+
+        internal bool IsAtEnd()
+        {
+            return IsYesValue(GetProperty("eof-reached"));
         }
 
         internal void Screenshot(string filePath)
@@ -313,6 +347,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private Thread pollThread;
         private string lastState = string.Empty;
         private bool loading;
+        private bool arrowKeysNavigate;
 
         internal DecoderHost(IntPtr parentWindow)
         {
@@ -401,6 +436,11 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 BeginInvoke(new Action(Close));
                 return;
             }
+            if (name == "set-keyboard-mode")
+            {
+                arrowKeysNavigate = ReadString(value, "value") == "navigate";
+                return;
+            }
             lock (playerLock)
             {
                 if (player == null) return;
@@ -411,9 +451,9 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     loading = true;
                     player.Open(path);
                 }
-                else if (name == "play") player.SetProperty("pause", "no");
-                else if (name == "pause") player.SetProperty("pause", "yes");
-                else if (name == "seek") player.Run("seek", ReadDouble(value, "value").ToString(CultureInfo.InvariantCulture), "absolute+exact");
+                else if (name == "play") player.Play();
+                else if (name == "pause") player.Pause();
+                else if (name == "seek") player.SeekAbsolute(ReadDouble(value, "value"));
                 else if (name == "volume") player.SetProperty("volume", Math.Max(0, Math.Min(100, ReadDouble(value, "value"))).ToString(CultureInfo.InvariantCulture));
                 else if (name == "mute") player.SetProperty("mute", ReadBool(value, "value") ? "yes" : "no");
                 else if (name == "speed") player.SetProperty("speed", Math.Max(0.25, Math.Min(4, ReadDouble(value, "value"))).ToString(CultureInfo.InvariantCulture));
@@ -446,11 +486,16 @@ namespace PhotoFlow.AdvancedVideoDecoder
         protected override void OnMouseClick(MouseEventArgs eventArgs)
         {
             base.OnMouseClick(eventArgs);
-            if (eventArgs.Button != MouseButtons.Left || shuttingDown) return;
-            lock (playerLock)
+            if (shuttingDown) return;
+            if (eventArgs.Button == MouseButtons.Left)
             {
-                if (player != null) player.TogglePause();
+                lock (playerLock)
+                {
+                    if (player != null) player.TogglePause();
+                }
             }
+            else if (eventArgs.Button == MouseButtons.XButton1 || eventArgs.Button == MouseButtons.XButton2)
+                HandleDirectionalInput(eventArgs.Button == MouseButtons.XButton2 ? 1 : -1, false);
         }
 
         protected override bool ProcessCmdKey(ref Message message, Keys keyData)
@@ -458,13 +503,29 @@ namespace PhotoFlow.AdvancedVideoDecoder
             Keys key = keyData & Keys.KeyCode;
             if (key == Keys.Left || key == Keys.Right)
             {
-                lock (playerLock)
-                {
-                    if (player != null) player.SeekRelative(key == Keys.Right ? 5 : -5);
-                }
+                HandleDirectionalInput(key == Keys.Right ? 1 : -1, true);
+                return true;
+            }
+            if (key == Keys.BrowserBack || key == Keys.BrowserForward)
+            {
+                HandleDirectionalInput(key == Keys.BrowserForward ? 1 : -1, false);
                 return true;
             }
             return base.ProcessCmdKey(ref message, keyData);
+        }
+
+        private void HandleDirectionalInput(int direction, bool arrowKeys)
+        {
+            bool navigate = arrowKeys ? arrowKeysNavigate : !arrowKeysNavigate;
+            if (navigate)
+            {
+                Emit(new Dictionary<string, object> { { "type", "navigate" }, { "direction", direction } });
+                return;
+            }
+            lock (playerLock)
+            {
+                if (player != null) player.SeekRelative(direction * 5);
+            }
         }
 
         private void PollState()
@@ -487,7 +548,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                                 { "type", "state" },
                                 { "time", ReadNumber(player.GetProperty("time-pos")) },
                                 { "duration", ReadNumber(player.GetProperty("duration")) },
-                                { "paused", IsYes(player.GetProperty("pause")) },
+                                { "paused", player.IsAtEnd() || IsYes(player.GetProperty("pause")) },
                                 { "buffering", loading || IsYes(player.GetProperty("paused-for-cache")) },
                                 { "muted", IsYes(player.GetProperty("mute")) },
                                 { "volume", ReadNumber(player.GetProperty("volume"), 100) },

@@ -12,6 +12,7 @@ TOOLS = {
     "thumbnail_image": "thumbnail_image",
     "video_preview": "video_preview",
     "workspace_db": "workspace_db",
+    "backup_db": "backup_db",
 }
 
 

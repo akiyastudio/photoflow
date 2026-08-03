@@ -44,18 +44,19 @@ const run = async () => {
     writeLog: () => undefined,
   });
 
-  const result = await service.start({ sender }, 'C:\\workspace\\camera.mov');
+  const result = await service.start({ sender }, 'C:\\workspace\\camera.mov', 'navigate');
   assert.strictEqual(result.sessionId, 'session-1');
   assert.strictEqual(spawned.options.windowsHide, true);
   assert.deepStrictEqual(spawned.args, ['--parent-hwnd', '123456']);
-  assert.deepStrictEqual(stdinLines[0], { command: 'open', path: path.resolve('C:\\workspace\\camera.mov') });
+  assert.deepStrictEqual(stdinLines[0], { command: 'set-keyboard-mode', value: 'navigate' });
+  assert.deepStrictEqual(stdinLines[1], { command: 'open', path: path.resolve('C:\\workspace\\camera.mov') });
 
   service.setBounds({ sender }, result.sessionId, { x: 10.4, y: 20.6, width: 300.2, height: 200.8, visible: true });
   service.control({ sender }, result.sessionId, { action: 'play' });
   service.control({ sender }, result.sessionId, { action: 'arbitrary-command' });
-  assert.deepStrictEqual(stdinLines[1], { command: 'set-bounds', x: 10, y: 21, width: 300, height: 201, visible: true });
-  assert.deepStrictEqual(stdinLines[2], { command: 'play' });
-  assert.strictEqual(stdinLines.length, 3);
+  assert.deepStrictEqual(stdinLines[2], { command: 'set-bounds', x: 10, y: 21, width: 300, height: 201, visible: true });
+  assert.deepStrictEqual(stdinLines[3], { command: 'play' });
+  assert.strictEqual(stdinLines.length, 4);
 
   child.stdout.write('{"type":"state","time":2,"duration":10,"paused":false}\n');
   await new Promise(resolve => setImmediate(resolve));
@@ -73,8 +74,12 @@ const run = async () => {
   const playerSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'components', 'AdvancedVideoPlayer.tsx'), 'utf8');
   const workspaceSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
   const decoderSource = require('fs').readFileSync(path.join(__dirname, '..', 'components', 'video-playback-mpv', 'AdvancedVideoDecoder.cs'), 'utf8');
+  assert(decoderSource.includes('SetOption("gpu-api", "d3d11")') && decoderSource.includes('SetOption("hwdec", "auto-safe")'), 'advanced video playback must prefer safe D3D11 hardware decoding with automatic CPU fallback');
   assert(playerSource.includes('onClick={togglePlayback}') && decoderSource.includes('OnMouseClick'), 'clicking the video surface must toggle playback in both renderer and native surfaces');
-  assert(playerSource.includes("event.key === 'ArrowRight' ? SKIP_SECONDS : -SKIP_SECONDS") && decoderSource.includes('player.SeekRelative(key == Keys.Right ? 5 : -5)'), 'left and right arrow keys must seek backward and forward by five seconds');
+  assert(playerSource.includes("event.key === 'BrowserBack'") && decoderSource.includes('key == Keys.BrowserBack') && decoderSource.includes('arrowKeysNavigate'), 'arrow and browser navigation keys must use the configurable inverse mapping');
+  assert(playerSource.includes('event.button !== 3 && event.button !== 4') && decoderSource.includes('MouseButtons.XButton1'), 'mouse back and forward buttons must follow the browser-key mapping');
+  assert(decoderSource.includes('if (IsAtEnd()) Check(Run("seek", "0", "absolute+exact")') && decoderSource.includes('{ "paused", player.IsAtEnd() || IsYes(player.GetProperty("pause")) }'), 'playback controls must recover from EOF and report the ended state as paused');
+  assert(decoderSource.includes('if (IsAtEnd())') && decoderSource.includes('SeekAbsolute(duration + seconds)'), 'relative seeking must remain available after playback reaches EOF');
   assert(playerSource.includes('title="上一个视频"') && playerSource.includes('title="下一个视频"'), 'video controls must expose previous-video and next-video buttons');
   assert(playerSource.includes('<select') && playerSource.includes('PLAYBACK_SPEEDS.map') && playerSource.includes('captureAdvancedVideoFrame'), 'video controls must expose a floating playback-speed menu and current-frame capture');
   assert(!playerSource.includes('高级解码</span>'), 'the advanced-decoder label must not remain in the control bar');

@@ -5,9 +5,21 @@ import type { BackgroundTask } from '../../types';
 import { useTaskCenter } from './TaskCenter';
 
 const isVisible = (task: BackgroundTask) => task.state === 'queued' || task.state === 'running' || task.state === 'failed';
+const formatBytes = (value: number) => value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(1)} GB` : value >= 1024 ** 2 ? `${(value / 1024 ** 2).toFixed(1)} MB` : `${Math.round(value / 1024)} KB`;
+const taskSummary = (task: BackgroundTask) => {
+  const metadata = task.metadata || {};
+  const completed = Number(metadata.filesCopied ?? metadata.processedCount ?? 0);
+  const total = Number(metadata.totalFiles ?? metadata.totalCount ?? 0);
+  const copiedBytes = Number(metadata.bytesCopied ?? 0);
+  const totalBytes = Number(metadata.totalBytes ?? 0);
+  const parts: string[] = [];
+  if (total > 0) parts.push(`${completed}/${total} 项`);
+  if (totalBytes > 0) parts.push(`${formatBytes(copiedBytes)}/${formatBytes(totalBytes)}`);
+  return parts.join(' · ');
+};
 
 export const BackgroundTaskIndicator = () => {
-  const { backgroundTasks: tasks, panelTasks, dismissPanelTask } = useTaskCenter();
+  const { backgroundTasks: tasks, panelTasks, dismissPanelTask, dismissBackgroundTask } = useTaskCenter();
   const [open, setOpen] = useState(false);
 
   const visibleTasks = useMemo(() => tasks.filter(isVisible), [tasks]);
@@ -19,6 +31,7 @@ export const BackgroundTaskIndicator = () => {
     window.dispatchEvent(new CustomEvent('photoflow:restore-panel-task', { detail: { scopeKey: task.scopeKey, panelKind: task.panelKind } }));
     setOpen(false);
   };
+  const cancelTask = (task: BackgroundTask) => window.electronAPI.cancelBackgroundTask(task.id);
   if (!visibleCount && !open) return null;
 
   return <div className="app-titlebar-control relative flex shrink-0 items-center px-1">
@@ -42,9 +55,11 @@ export const BackgroundTaskIndicator = () => {
           <div className="flex items-start justify-between gap-2"><span className="min-w-0 truncate text-xs font-bold text-slate-700">{task.title}</span><span className={`shrink-0 text-[10px] ${task.state === 'failed' ? 'text-red-500' : 'text-slate-400'}`}>{task.state === 'failed' ? '失败' : task.state === 'queued' ? '等待中' : `${Math.round(task.progress)}%`}</span></div>
           <ProgressBar value={task.progress} minimumVisible={2} trackClassName="mt-2 h-1 overflow-hidden rounded-full bg-slate-100" barClassName={`h-full rounded-full ${task.state === 'failed' ? 'bg-red-500' : 'bg-blue-500'}`}/>
           {task.message && <p className="mt-1.5 line-clamp-2 text-[11px] text-slate-500">{task.message}</p>}
+          {taskSummary(task) && <p className="mt-1 text-[10px] tabular-nums text-slate-400">{taskSummary(task)}</p>}
           <div className="mt-2 flex justify-end gap-1">
             {task.state === 'failed' && task.retryable && <button type="button" onClick={() => void window.electronAPI.retryBackgroundTask(task.id)} className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-blue-600 hover:bg-blue-50"><RotateCcw size={11}/>重试</button>}
-            {(task.state === 'queued' || task.state === 'running') && task.cancellable && <button type="button" onClick={() => void window.electronAPI.cancelBackgroundTask(task.id)} className="rounded px-2 py-1 text-[11px] text-red-600 hover:bg-red-50">取消</button>}
+            {task.state === 'failed' && <button type="button" onClick={() => void dismissBackgroundTask(task.id)} className="rounded px-2 py-1 text-[11px] text-slate-500 hover:bg-slate-100">清除</button>}
+            {(task.state === 'queued' || task.state === 'running') && task.cancellable && <button type="button" onClick={() => void cancelTask(task)} className="rounded px-2 py-1 text-[11px] text-red-600 hover:bg-red-50">取消</button>}
           </div>
         </div>)}
       </div>

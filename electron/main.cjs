@@ -1,10 +1,10 @@
-const { app, BrowserWindow, ipcMain, Menu, shell, dialog, protocol, nativeImage, clipboard, screen } = require('electron');
+const { app, BrowserWindow, ipcMain: electronIpcMain, Menu, shell, dialog, protocol, nativeImage, clipboard, screen } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const crypto = require('crypto');
 const os = require('os');
-const { exiftool } = require('exiftool-vendored');
+const { exiftool, exiftoolPath } = require('exiftool-vendored');
 const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY, isThumbnailSizeSufficient } = require('./thumbnail-pipeline.cjs');
 const { createComponentRegistry } = require('./component-registry.cjs');
 const { registerBrollImportIpc } = require('./modules/broll-import.cjs');
@@ -14,6 +14,9 @@ const { registerFileOperationsIpc } = require('./modules/files-ipc.cjs');
 const { registerMediaIpc } = require('./modules/media-ipc.cjs');
 const { registerVersionIpc } = require('./modules/versions-ipc.cjs');
 const { registerAdvancedVideoIpc } = require('./modules/advanced-video-ipc.cjs');
+const { registerBackupIpc } = require('./modules/backup-ipc.cjs');
+const { registerArchiveIpc } = require('./modules/archive-ipc.cjs');
+const { registerStorageUsageIpc } = require('./modules/storage-usage-ipc.cjs');
 const { createRecycleBinService } = require('./services/recycle-bin-service.cjs');
 const { createShellNewService } = require('./services/shell-new-service.cjs');
 const { createMediaAccessService } = require('./services/media-access-service.cjs');
@@ -23,6 +26,11 @@ const { createWorkspaceRepository } = require('./repositories/workspace-reposito
 const { createMediaRepository } = require('./repositories/media-repository.cjs');
 const { createEventBus } = require('./services/event-bus.cjs');
 const { createBackgroundTaskService } = require('./services/background-task-service.cjs');
+const { createBackupService } = require('./services/backup-service.cjs');
+const { createArchiveService } = require('./services/archive-service.cjs');
+const { createCredentialService } = require('./services/credential-service.cjs');
+const { createStorageUsageService } = require('./services/storage-usage-service.cjs');
+const { cleanupRetiredCaptureTimeCache } = require('./services/retired-cache-service.cjs');
 const { createPluginService } = require('./services/plugin-service.cjs');
 const { createWorkspaceService } = require('./services/workspace-service.cjs');
 const { createFileSystemService } = require('./services/file-system-service.cjs');
@@ -34,12 +42,10 @@ const { createPrivacyService } = require('./privacy-service.cjs');
 const { createFileRootWatcherService } = require('./services/file-root-watcher-service.cjs');
 const cloudConfig = require('./cloud-config.cjs');
 const { registerBackgroundTasksIpc } = require('./modules/background-tasks-ipc.cjs');
-
-// Keep user-facing OS labels localized while runtime data stays in a stable,
-// Latin-only application directory name.
+const { createElectronSecurity, normalizeBundledPythonTool, normalizeExternalUrl } = require('./security-policy.cjs');
+// Keep user-facing OS labels localized while runtime data stays in a stable, Latin-only directory name.
 app.setPath('userData', path.join(app.getPath('appData'), 'Photoflow'));
 app.setName('照片流');
-
 const projectRoot = path.join(__dirname, '..');
 const privacyService = createPrivacyService({ app, fs, path, shell, projectRoot });
 const userComponentRoot = process.env.LOCALAPPDATA
@@ -52,7 +58,6 @@ const componentRegistry = createComponentRegistry({
 });
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
-
 let mediaAccessService;
 const toMediaUrl = (filePath, fresh = false) => `photoflow-media://file/${mediaAccessService.grantPath(filePath)}${fresh ? `?request=${crypto.randomUUID()}` : ''}`;
 
@@ -294,6 +299,12 @@ const writeLog = (level, message, details) => {
   }
 };
 
+const rendererEntryFile = path.join(__dirname, '../dist/index.html');
+const isDevelopmentRenderer = () => process.env.NODE_ENV === 'development';
+const { configureWindowSecurity, ipcMain, openAllowedExternalUrl } = createElectronSecurity({
+  electronIpcMain, getMainWindow: () => mainWindow, isDevelopment: isDevelopmentRenderer,
+  rendererFile: rendererEntryFile, shell, writeLog,
+});
 const getShellThumbnailExecutable = () => app.isPackaged
   ? path.join(process.resourcesPath, 'shell-thumbnail.exe')
   : path.join(__dirname, 'bin', 'shell-thumbnail.exe');
@@ -429,8 +440,11 @@ function createWindow(loadRenderer = true) {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
+      webviewTag: false,
     },
   });
+  configureWindowSecurity(mainWindow);
   const sendMaximizedState = () => {
     if (!mainWindow?.isDestroyed()) mainWindow.webContents.send('window-maximized-change', mainWindow.isMaximized());
   };
@@ -466,12 +480,12 @@ const loadMainWindowRenderer = () => {
     void mainWindow.loadURL('http://localhost:5173');
     //mainWindow.webContents.openDevTools();
   } else {
-    void mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    void mainWindow.loadFile(rendererEntryFile);
   }
 };
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db']);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'backup_db']);
 const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract', 'screenshot_main_image']);
 
 const getDevelopmentPython = () => {
@@ -485,7 +499,14 @@ let pluginService;
 
 const getRunConfig = (scriptName, args) => {
   // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
-  const baseName = scriptName.replace('.py', '');
+  const normalizedScriptName = normalizeBundledPythonTool(scriptName);
+  const baseName = normalizedScriptName.slice(0, -3);
+  if (!MERGED_PYTHON_TOOLS.has(baseName) && !INSPIRATION_PYTHON_TOOLS.has(baseName)) {
+    throw new Error(`Unknown bundled Python tool: ${normalizedScriptName}`);
+  }
+  if (!Array.isArray(args) || args.some(value => typeof value !== 'string' || /\0/.test(value))) {
+    throw new TypeError('Invalid bundled Python tool arguments');
+  }
 
   const isWin = process.platform === 'win32';
 
@@ -504,10 +525,7 @@ const getRunConfig = (scriptName, args) => {
         args: [baseName, ...args]
       };
     }
-    return {
-      command: path.join(process.resourcesPath, 'python', `${baseName}${exeSuffix}`),
-      args: args
-    };
+    throw new Error(`Bundled Python tool is missing a packaged runtime group: ${normalizedScriptName}`);
   } else {
     // 【开发环境】使用 python 解释器运行对应的 .py 脚本
     // 脚本路径: python/classify.py
@@ -616,12 +634,15 @@ const checkForUpdates = async () => {
     const response = await fetch(`${cloudConfig.apiBaseUrl.replace(/\/+$/, '')}/v1/updates?${query}`);
     if (!response.ok) throw new Error(`更新服务返回 ${response.status}`);
     const data = await response.json();
+    const updateAvailable = data.updateAvailable === true;
+    const downloadUrl = updateAvailable ? normalizeExternalUrl(data.downloadUrl) : '';
+    if (updateAvailable && !downloadUrl) throw new Error('更新服务返回了不受信任的下载地址');
     const result = {
       success: true,
-      updateAvailable: data.updateAvailable === true,
+      updateAvailable,
       currentVersion,
       latestVersion: data.latestVersion,
-      url: data.downloadUrl,
+      url: downloadUrl,
       notes: data.notes || '',
       sha256: data.sha256 || '',
       mandatory: data.mandatory === true,
@@ -1885,6 +1906,7 @@ registerBrollImportIpc({
   writeLog,
   pushUndoOperation,
   activeOperations: activeProjectFileOperations,
+  backgroundTasks,
   getTelemetry: () => telemetryService,
 });
 registerBackgroundTasksIpc({ ipcMain, eventBus, backgroundTasks, getMainWindow: () => mainWindow });
@@ -1901,7 +1923,8 @@ app.whenReady().then(async () => {
     }
   });
   const deletedLogFiles = await cleanupExpiredLogs();
-  writeLog('info', 'Application started', { version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, deletedExpiredLogFiles: deletedLogFiles });
+  const deletedCaptureTimeCacheFiles = await cleanupRetiredCaptureTimeCache({ app, fs, path, onError: nativeConsoleError });
+  writeLog('info', 'Application started', { version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, deletedExpiredLogFiles: deletedLogFiles, deletedCaptureTimeCacheFiles });
   telemetryService = createTelemetryService({
     app,
     fs,
@@ -1918,13 +1941,19 @@ app.whenReady().then(async () => {
   // not load renderer code until every channel has been registered.
   createWindow(false);
 
-  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, path, pluginService, privacyService, process, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
+  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
   registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
-  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard });
+  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
   registerAdvancedVideoIpc({ BrowserWindow, app, crypto, ipcMain, mediaService, path, pluginService, spawn, writeLog });
-
+  const credentialService = createCredentialService({ writeLog });
+  const backupService = createBackupService({ app, backgroundTasks, credentialService, getConfigPath, getUserBirthdaysPath, getWorkspaceDatabasePath, getWorkspaceDataRoot, readSavedConfig, runPythonJsonAction, writeLog });
+  registerBackupIpc({ backupService, credentialService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
+  const archiveService = createArchiveService({ backgroundTasks, movePathAtomic, readSavedConfig, workspaceRepository, writeLog });
+  registerArchiveIpc({ archiveService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
+  const storageUsageService = createStorageUsageService({ app, backgroundTasks, eventBus, getWorkspaceDatabasePath, getWorkspaceDataRoot, readSavedConfig, writeLog });
+  registerStorageUsageIpc({ ipcMain, storageUsageService });
   // A fast renderer can invoke preload APIs immediately on warm starts.
   loadMainWindowRenderer();
 

@@ -11,6 +11,7 @@ type ProjectVersionTreeProps = {
   projectRelativePath: (absolutePath: string) => string;
   renderEntry: (entry: ProjectFileEntry, progressFolder?: ProgressFolder, sourceKind?: 'image' | 'video') => ReactNode;
   teamRetouchParentProgressIds?: string[];
+  onOpenMissingProgressMenu?: (folder: ProgressFolder, x: number, y: number) => void;
 };
 
 type VersionTreeItem = {
@@ -53,7 +54,7 @@ const compareProgressFolders = (left: ProgressFolder, right: ProgressFolder) => 
   return left.createdAt - right.createdAt;
 };
 
-export const ProjectVersionTree = ({ progressFolders, entries, activeRelativePath, gridIconSize, projectRelativePath, renderEntry, teamRetouchParentProgressIds = [] }: ProjectVersionTreeProps) => {
+export const ProjectVersionTree = ({ progressFolders, entries, activeRelativePath, gridIconSize, projectRelativePath, renderEntry, teamRetouchParentProgressIds = [], onOpenMissingProgressMenu }: ProjectVersionTreeProps) => {
   const scopePath = normalizePath(activeRelativePath);
   const scopedFolders = useMemo(() => progressFolders
     .filter(folder => parentPath(projectRelativePath(folder.folderPath)) === scopePath)
@@ -220,15 +221,16 @@ export const ProjectVersionTree = ({ progressFolders, entries, activeRelativePat
             const endX = child.x + nodeWidth * 0.18;
             const endY = child.y + nodeWidth * 0.48;
             const bend = Math.max(28, (endX - startX) * 0.5);
-            return <path key={`${parent.key}-${child.key}`} d={`M ${startX} ${startY} C ${startX + bend} ${startY}, ${endX - bend} ${endY}, ${endX} ${endY}`} fill="none" stroke={kind === 'team-workspace' ? '#8b5cf6' : child.folder?.folderMissing ? '#fca5a5' : '#94a3b8'} strokeWidth="2" strokeDasharray={kind === 'team-workspace' ? '7 5' : child.folder?.folderMissing ? '6 5' : undefined}/>;
+            const childFolderMissing = Boolean(child.folder && (!child.entry || child.folder.folderMissing));
+            return <path key={`${parent.key}-${child.key}`} d={`M ${startX} ${startY} C ${startX + bend} ${startY}, ${endX - bend} ${endY}, ${endX} ${endY}`} fill="none" stroke={kind === 'team-workspace' ? '#8b5cf6' : childFolderMissing ? '#fca5a5' : '#94a3b8'} strokeWidth="2" strokeDasharray={kind === 'team-workspace' ? '7 5' : childFolderMissing ? '6 5' : undefined}/>;
           })}
         </svg>
         {layout.positioned.map(item => <div key={item.key} className="absolute" style={{ left: item.x, top: item.y, width: nodeWidth, minHeight: nodeHeight }}>
-          {item.entry ? renderEntry(item.entry, item.folder, item.sourceKind) : item.folder ? <div title={`${item.folder.displayName} 对应的文件夹已失效`} className="relative flex min-h-full flex-col items-center rounded-lg p-2 text-center text-red-500">
+          {item.entry ? renderEntry(item.entry, item.folder, item.sourceKind) : item.folder ? <div tabIndex={0} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onOpenMissingProgressMenu?.(item.folder!, event.clientX, event.clientY); }} onKeyDown={event => { if (!onOpenMissingProgressMenu || event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return; event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); onOpenMissingProgressMenu(item.folder!, rect.left + Math.min(rect.width, 24), rect.top + Math.min(rect.height, 24)); }} title={`${item.folder.displayName} 对应的文件夹已失效；右键可管理失效记录。`} className="relative flex min-h-full flex-col items-center rounded-lg p-2 text-center text-red-500 outline-none focus-visible:ring-2 focus-visible:ring-red-300">
             <span className="absolute right-2 top-2 z-10 rounded-full bg-red-50 px-2 py-1 font-mono text-[10px] font-bold">V{item.folder.versionKey}</span>
             <span className="relative flex aspect-square w-full items-center justify-center"><Folder size={Math.max(46, nodeWidth * 0.48)} strokeWidth={1.4} fill="currentColor" className="text-red-300"/><AlertTriangle size={18} className="absolute text-red-600"/></span>
             <span className="mt-2 w-full truncate text-xs font-medium">{item.folder.displayName}</span>
-            <span className="mt-0.5 text-[10px] font-bold">文件夹失效</span>
+            <span className="mt-0.5 text-[10px] font-bold">文件夹失效 · 记录已保留</span>
           </div> : null}
         </div>)}
       </div>

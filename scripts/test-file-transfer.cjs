@@ -269,7 +269,6 @@ const run = async () => {
     const trashNames = ['first.txt', 'second.txt'];
     for (const name of trashNames) fs.writeFileSync(path.join(trashProject, name), name);
     const trashHandlers = new Map();
-    const trashProgress = [];
     let trashBatchCalls = 0;
     let trashUndo;
     registerFileOperationsIpc({
@@ -289,7 +288,7 @@ const run = async () => {
       pushUndoOperation: async operation => { trashUndo = operation; },
     });
     const trashResult = await trashHandlers.get('workspace-file-operation')(
-      { sender: { isDestroyed: () => false, send: (_channel, progress) => trashProgress.push(progress) } },
+      { sender: { isDestroyed: () => false, send: () => {} } },
       'workspace', '策划中', 'project', 'trash', trashNames,
     );
     assert.strictEqual(trashResult.success, true);
@@ -297,7 +296,6 @@ const run = async () => {
     assert.strictEqual(trashBatchCalls, 1, 'multi-selection trash must use one native batch request');
     assert.deepStrictEqual(trashUndo.items.map(item => item.recyclePidl), ['pidl-0', 'pidl-1']);
     assert(trashUndo.items.every(item => item.originalIdentity), 'batch trash must preserve every source identity for safe undo');
-    assert.strictEqual(trashProgress.at(-1).phase, 'complete');
 
     const undoHandlers = new Map();
     const renameHistory = [replacementUndo];

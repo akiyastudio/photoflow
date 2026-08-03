@@ -7,15 +7,16 @@
 
 ## 对外文件
 
-- `PRIVACY_POLICY.md`：隐私政策
-- `USER_AGREEMENT.md`：用户协议及内测条款
-- `FACE_RECOGNITION_RULES.md`：人脸信息处理规则
-- `PERSONAL_INFORMATION_LIST.md`：个人信息处理清单
-- `THIRD_PARTY_SERVICES.md`：第三方服务清单
-- `PERMISSIONS.md`：权限与本地文件访问说明
-- `CHILDREN_PRIVACY.md`：儿童个人信息保护规则
-- `CUSTOMER_DATA_PROCESSING_TERMS.md`：影楼、工作室客户数据条款
-- `OPEN_SOURCE_NOTICES.md`：开源软件与模型许可说明
+- `INSTALLER_TERMS.html`：安装时展示的用户协议与隐私政策合并页面
+- `PRIVACY_POLICY.html`：隐私政策
+- `USER_AGREEMENT.html`：用户协议及内测条款
+- `FACE_RECOGNITION_RULES.html`：人脸信息处理规则
+- `PERSONAL_INFORMATION_LIST.html`：个人信息处理清单
+- `THIRD_PARTY_SERVICES.html`：第三方服务清单
+- `PERMISSIONS.html`：权限与本地文件访问说明
+- `CHILDREN_PRIVACY.html`：儿童个人信息保护规则
+- `CUSTOMER_DATA_PROCESSING_TERMS.html`：影楼、工作室客户数据条款
+- `OPEN_SOURCE_NOTICES.html`：开源软件与模型许可说明
 
 ## 发布阻断项
 

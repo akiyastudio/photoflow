@@ -2,8 +2,8 @@ const { createAdvancedVideoService } = require('../services/advanced-video-servi
 
 const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, ipcMain, mediaService, path, pluginService, spawn, writeLog }) => {
   const service = createAdvancedVideoService({ BrowserWindow, crypto, mediaService, path, pluginService, spawn, writeLog });
-  ipcMain.handle('advanced-video-start', async (event, filePath) => {
-    try { return { success: true, ...(await service.start(event, filePath)) }; }
+  ipcMain.handle('advanced-video-start', async (event, filePath, arrowKeyAction) => {
+    try { return { success: true, ...(await service.start(event, filePath, arrowKeyAction)) }; }
     catch (error) {
       writeLog('warn', 'Advanced video decoder start failed', { error: error.message || String(error) });
       return { success: false, error: error.message || String(error) };

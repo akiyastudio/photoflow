@@ -1,20 +1,42 @@
 const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = require('../services/protected-project-folder.cjs');
+const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
 
 const registerWorkspaceIpc = context => {
   const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
-  const isInternalFileOperationEntry = name => name.toLowerCase().endsWith('.photoflow-part') || /^\.photoflow-(?:paste|replace|undo|team-workflow-)/i.test(name);
+  const isValidProjectStatus = value => typeof value === 'string' && value === value.trim() && value.length > 0 && value.length <= 24 && ![...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
+  const availableProjectStatuses = catalog => {
+    const values = [...WORKSPACE_STATUSES, ...((catalog?.projects || []).map(project => project.status))];
+    const seen = new Set();
+    return values.filter(status => {
+      if (!isValidProjectStatus(status)) return false;
+      const key = status.toLocaleLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  const isInternalFileOperationEntry = name => name.toLowerCase().endsWith('.photoflow-part') || name.toLowerCase() === '_photoflow_safety_temp' || /^\.photoflow-(?:import-|paste|replace|undo|team-workflow-)/i.test(name);
   const officeOpenXmlExtensions = new Set([
     '.docx', '.docm', '.dotx', '.dotm',
     '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam',
     '.xlsx', '.xlsm', '.xltx', '.xltm', '.xlam', '.xlsb',
   ]);
   const screenshotMainImageExtensions = new Set(['.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp']);
+  const missingProjectRetentionMs = 30 * 24 * 60 * 60 * 1000;
   const recentFileSessions = new Map();
+  const progressImportConflictCache = new Map();
   const pruneRecentFileSessions = () => {
     const expiry = Date.now() - 10 * 60 * 1000;
     for (const [cursor, session] of recentFileSessions) {
       if (session.touchedAt < expiry) recentFileSessions.delete(cursor);
     }
+  };
+  const pruneProgressImportConflictCache = () => {
+    const now = Date.now();
+    for (const [key, entry] of progressImportConflictCache) {
+      if (entry.expiresAt <= now) progressImportConflictCache.delete(key);
+    }
+    while (progressImportConflictCache.size > 32) progressImportConflictCache.delete(progressImportConflictCache.keys().next().value);
   };
 
   const readProjectDate = project => {
@@ -140,6 +162,16 @@ const registerWorkspaceIpc = context => {
     return { cleaned: true, status: 'missing', removedArtifactCount };
   };
 
+  const purgeStaleMissingProject = async (root, project) => {
+    const purgeResult = await workspaceRepository.purgeMissingProject(root, project.name);
+    const removedArtifactCount = await removeInternalProjectArtifacts(root, purgeResult);
+    await thumbnailService.invalidateSources(purgeResult.sourcePaths || []).catch(error => {
+      writeLog('warn', 'Unable to clear stale offline project thumbnails', { projectName: project.name, error: error.message || String(error) });
+    });
+    writeLog('info', 'Purged stale offline project data', { root, projectName: project.name, removedArtifactCount });
+    return { cleaned: true, status: 'missing', removedArtifactCount };
+  };
+
   const queuePermanentProjectCleanup = (root, projectName) => {
     const run = () => backgroundTasks.run({
       type: 'deleted-project-cleanup',
@@ -189,9 +221,12 @@ const registerWorkspaceIpc = context => {
   ipcMain.handle('workspace-cleanup-deleted-projects', async (_event, workspacePath) => {
     try {
       const root = ensureWorkspace(workspacePath);
+      await reconcileWorkspaceCatalog(root);
       const result = await workspaceRepository.listDeletedProjects(root);
       const outcomes = [];
       for (const project of result.projects || []) outcomes.push({ projectId: project.id, name: project.name, ...await purgeConfirmedDeletedProject(root, project) });
+      const staleMissing = await workspaceRepository.listMissingProjects(root, Date.now() - missingProjectRetentionMs);
+      for (const project of staleMissing.projects || []) outcomes.push({ projectId: project.id, name: project.name, ...await purgeStaleMissingProject(root, project) });
       const cleanedCount = outcomes.filter(outcome => outcome.cleaned).length;
       if (cleanedCount) await refreshWorkspaceCatalog(root);
       return { success: true, checkedCount: outcomes.length, cleanedCount, outcomes };
@@ -210,11 +245,18 @@ const registerWorkspaceIpc = context => {
         writeLog('warn', 'Unable to reconcile workspace catalog after project-list read', { root, error: error.message || String(error) });
       });
       queueWorkspaceMaintenance(root);
-      const statuses = WORKSPACE_STATUSES.map(status => {
-        const projects = catalog.projects
-          .filter(project => project.status === status)
+      const statuses = availableProjectStatuses(catalog).map(status => {
+        const onlineProjects = catalog.projects.filter(project => project.status === status && project.availability !== 'missing');
+        const offlineArchivedProjects = catalog.projects.filter(project => {
+          if (project.status !== status || project.availability !== 'missing') return false;
+          try { return Boolean(JSON.parse(project.extra_json || '{}')?.archive?.path); }
+          catch { return false; }
+        });
+        const projects = [...onlineProjects, ...offlineArchivedProjects]
           .map(project => {
             const projectPath = path.resolve(root, project.relative_path);
+            let archive = null;
+            try { archive = JSON.parse(project.extra_json || '{}')?.archive || null; } catch { /* malformed optional metadata is ignored */ }
             return {
               name: project.name,
               path: projectPath,
@@ -224,6 +266,10 @@ const registerWorkspaceIpc = context => {
               availability: project.availability || 'available',
               missingSince: project.missing_since || undefined,
               missingChecks: project.missing_checks || 0,
+              archived: Boolean(archive?.path),
+              archivePath: archive?.path || undefined,
+              archiveVerifiedAt: archive?.verifiedAt || undefined,
+              archiveBytes: archive?.bytes || undefined,
             };
           })
           .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
@@ -622,10 +668,10 @@ const registerWorkspaceIpc = context => {
   
   ipcMain.handle('workspace-move-project', async (_event, workspacePath, currentStatus, projectName, nextStatus) => {
     try {
-      if (!WORKSPACE_STATUSES.includes(nextStatus)) throw new Error('无效的项目状态');
-      if (nextStatus === '未分类') throw new Error('未分类仅用于自动发现的新文件夹');
       const root = ensureWorkspace(workspacePath);
-      if (!workspaceCatalogs.has(root)) await refreshWorkspaceCatalog(root);
+      const catalog = workspaceCatalogs.get(root) || await refreshWorkspaceCatalog(root);
+      if (!isValidProjectStatus(nextStatus)) throw new Error('无效的项目状态');
+      if (nextStatus === '未分类') throw new Error('未分类仅用于自动发现的新文件夹');
       const source = getProjectPath(workspacePath, currentStatus, projectName);
       if (!fs.existsSync(source)) throw new Error('项目不存在');
       await mutateWorkspaceCatalog(root, 'setProjectStatus', { name: projectName, status: nextStatus });
@@ -667,12 +713,16 @@ const registerWorkspaceIpc = context => {
   ipcMain.handle('workspace-trash-project', async (event, workspacePath, status, projectName) => {
     const operationId = crypto.randomUUID();
     let suppressedProjectPath = '';
-    const publish = payload => {
-      if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', { operationId, operation: 'trash', ...payload });
-    };
+    let task = null;
+    const publish = payload => task?.publish(payload);
     try {
       const projectPath = getProjectPath(workspacePath, status, projectName);
       if (!fs.existsSync(projectPath)) throw new Error('项目不存在');
+      task = createProjectFileTask({
+        backgroundTasks, event, operationId, operation: 'trash', title: `删除项目 · ${projectName}`,
+        projectName, resources: [projectPath], cancellable: false, cancelledCode: CANCELLED_CODE,
+      });
+      await task.start();
       publish({ phase: 'trashing', progress: 0, currentName: projectName, processedCount: 0, totalCount: 1 });
       const root = ensureWorkspace(workspacePath);
       const originalIdentity = await capturePathIdentity(projectPath);
@@ -693,10 +743,12 @@ const registerWorkspaceIpc = context => {
       }
       await mutateWorkspaceCatalog(root, 'softDeleteProject', { name: projectName });
       publish({ phase: 'complete', progress: 100, currentName: projectName, processedCount: 1, totalCount: 1 });
+      task.complete('项目已移入回收站');
       if (recycled.permanent) queuePermanentProjectCleanup(root, projectName);
       return { success: true, operationId, permanent: Boolean(recycled.permanent) };
     } catch (error) {
       publish({ phase: 'failed', progress: 0, currentName: projectName, error: error.message || String(error) });
+      task?.fail(error);
       return { success: false, error: error.message || String(error), errorCode: error?.code || undefined };
     } finally {
       if (suppressedProjectPath) releaseWorkspaceWatchPath(suppressedProjectPath);
@@ -1276,16 +1328,12 @@ const registerWorkspaceIpc = context => {
   
   ipcMain.handle('workspace-import-files', async (event, workspacePath, status, projectName, relativePath = '', options = {}) => {
     const operationId = crypto.randomUUID();
-    const job = { cancelled: false, finishing: false };
-    const publish = payload => {
-      if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', {
-        operationId, operation: 'import-files', ...payload,
-      });
-    };
+    let job = { cancelled: false, finishing: false };
+    let task = null;
+    const publish = payload => task?.publish(payload);
     const moves = [];
     const createdTargets = [];
     try {
-      if (activeProjectFileOperations.size) throw new Error('已有文件任务正在进行');
       const deleteSourceAfterImport = options?.deleteSourceAfterImport === true;
       const preserveOriginal = !deleteSourceAfterImport;
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
@@ -1293,8 +1341,15 @@ const registerWorkspaceIpc = context => {
       if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('当前文件夹不存在');
       const choice = await dialog.showOpenDialog(mainWindow, { title: '选择要导入的文件', properties: ['openFile', 'multiSelections'] });
       if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, count: 0 };
-      activeProjectFileOperations.set(operationId, job);
       const sourceInfos = await Promise.all(choice.filePaths.map(source => assertRegularFile(source)));
+      task = createProjectFileTask({
+        backgroundTasks, event, operationId, operation: 'import-files', title: `导入文件 · ${projectName}`,
+        projectName, resources: [destinationDir, ...sourceInfos.map(source => source.path)], cancelledCode: CANCELLED_CODE,
+      });
+      job = task.job;
+      job.cancel = task.cancel;
+      activeProjectFileOperations.set(operationId, job);
+      await task.start();
       const totalBytes = sourceInfos.reduce((sum, source) => sum + source.stat.size, 0);
       let completedBytes = 0;
       let completedFiles = 0;
@@ -1333,6 +1388,7 @@ const registerWorkspaceIpc = context => {
         preserve_original: preserveOriginal,
       });
       publish({ phase: 'complete', progress: 100, currentName: '文件导入完成', bytesCopied: totalBytes, totalBytes, filesCopied: sourceInfos.length, totalFiles: sourceInfos.length });
+      task.complete('文件导入完成');
       return { success: true, operationId, count: choice.filePaths.length };
     } catch (error) {
       for (const move of [...moves].reverse()) {
@@ -1345,6 +1401,8 @@ const registerWorkspaceIpc = context => {
       for (const target of createdTargets) await fs.promises.rm(target, { force: true }).catch(() => undefined);
       const cancelled = error?.code === CANCELLED_CODE;
       publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, error: error.message || String(error) });
+      if (cancelled) task?.cancelled();
+      else task?.fail(error);
       if (!cancelled) writeLog('error', 'Project file import failed', error);
       return cancelled ? { success: true, cancelled: true, operationId, count: 0 } : { success: false, operationId, error: error.message || String(error) };
     } finally {
@@ -1354,17 +1412,13 @@ const registerWorkspaceIpc = context => {
   
   ipcMain.handle('workspace-import-progress-files', async (event, workspacePath, status, projectName, folderName, options = {}) => {
     const operationId = crypto.randomUUID();
-    const job = { cancelled: false, finishing: false };
-    const publish = payload => {
-      if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', {
-        operationId, operation: 'import-progress', ...payload,
-      });
-    };
+    let job = { cancelled: false, finishing: false };
+    let task = null;
+    const publish = payload => task?.publish(payload);
     let createdFolder = '';
     const createdTargets = [];
     const moves = [];
     try {
-      if (activeProjectFileOperations.size) throw new Error('已有文件任务正在进行');
       const mediaKind = options.mediaKind === 'video' ? 'video' : 'image';
       const deleteSourceAfterImport = options?.deleteSourceAfterImport === true;
       const preserveOriginal = !deleteSourceAfterImport;
@@ -1412,7 +1466,14 @@ const registerWorkspaceIpc = context => {
         if (!supported) throw new Error(`所选文件不属于${mediaKind === 'video' ? '视频' : '图片'}进度：${path.basename(sourceInfo.path)}`);
         sourceInfos.push(sourceInfo);
       }
+      task = createProjectFileTask({
+        backgroundTasks, event, operationId, operation: 'import-progress', title: `导入版本进度 · ${projectName}`,
+        projectName, resources: [destinationDir, ...sourceInfos.map(source => source.path)], cancelledCode: CANCELLED_CODE, emitLegacyProgress: true,
+      });
+      job = task.job;
+      job.cancel = task.cancel;
       activeProjectFileOperations.set(operationId, job);
+      await task.start();
       let totalBytes = sourceInfos.reduce((sum, source) => sum + source.stat.size, 0);
       publish({ phase: 'scanning', progress: 0, currentName: '正在检查重复文件', bytesCopied: 0, totalBytes, filesCopied: 0, totalFiles: sourceInfos.length });
       let skippedCount = 0;
@@ -1431,17 +1492,42 @@ const registerWorkspaceIpc = context => {
           stream.on('error', reject);
           stream.on('end', () => resolve(hash.digest('hex')));
         });
-        const exactDuplicates = new Set();
-        const conflicts = [];
+        const collisionRecords = [];
         for (const sourceInfo of sourceInfos) {
           if (job.cancelled) throw Object.assign(new Error('文件操作已取消'), { code: CANCELLED_CODE });
           const existingPath = path.join(destinationDir, path.basename(sourceInfo.path));
           if (!fs.existsSync(existingPath) || !fs.statSync(existingPath).isFile()) continue;
           const [sourceStat, existingStat] = await Promise.all([fs.promises.stat(sourceInfo.path), fs.promises.stat(existingPath)]);
-          const identical = sourceStat.size === existingStat.size
-            && await digestFile(sourceInfo.path) === await digestFile(existingPath);
-          if (identical) exactDuplicates.add(sourceInfo.path);
-          else conflicts.push(sourceInfo.path);
+          collisionRecords.push({ sourcePath: sourceInfo.path, existingPath, sourceStat, existingStat });
+        }
+        const conflictCacheKey = crypto.createHash('sha256').update(JSON.stringify({
+          destinationDir,
+          files: collisionRecords.map(record => ({
+            sourcePath: record.sourcePath,
+            sourceSize: record.sourceStat.size,
+            sourceMtimeMs: record.sourceStat.mtimeMs,
+            existingPath: record.existingPath,
+            existingSize: record.existingStat.size,
+            existingMtimeMs: record.existingStat.mtimeMs,
+          })),
+        })).digest('hex');
+        pruneProgressImportConflictCache();
+        const cachedConflicts = progressImportConflictCache.get(conflictCacheKey);
+        const exactDuplicates = new Set(cachedConflicts?.exactDuplicates || []);
+        const conflicts = [...(cachedConflicts?.conflicts || [])];
+        if (!cachedConflicts) {
+          for (const record of collisionRecords) {
+            if (job.cancelled) throw Object.assign(new Error('文件操作已取消'), { code: CANCELLED_CODE });
+            const identical = record.sourceStat.size === record.existingStat.size
+              && await digestFile(record.sourcePath) === await digestFile(record.existingPath);
+            if (identical) exactDuplicates.add(record.sourcePath);
+            else conflicts.push(record.sourcePath);
+          }
+          progressImportConflictCache.set(conflictCacheKey, {
+            exactDuplicates: [...exactDuplicates],
+            conflicts: [...conflicts],
+            expiresAt: Date.now() + 10 * 60 * 1000,
+          });
         }
         const keepConflicts = progressConflictPolicy === 'keep-both';
         if (conflicts.length) {
@@ -1449,6 +1535,7 @@ const registerWorkspaceIpc = context => {
             const conflictNames = conflicts.slice(0, 6).map(filePath => path.basename(filePath));
             const more = conflicts.length > conflictNames.length ? `等 ${conflicts.length} 个文件` : conflictNames.map(name => `“${name}”`).join('、');
             publish({ phase: 'complete', progress: 100, currentName: '等待处理同名文件', count: 0, decisionRequired: true });
+            task.complete('等待用户处理同名文件');
             return {
               success: true,
               operationId,
@@ -1532,6 +1619,7 @@ const registerWorkspaceIpc = context => {
         preserve_original: preserveOriginal,
       });
       publish({ phase: 'complete', progress: 100, currentName: '版本进度导入完成', bytesCopied: totalBytes, totalBytes, filesCopied: sourceInfos.length, totalFiles: sourceInfos.length });
+      task.complete('版本进度导入完成');
       return {
         success: true,
         operationId,
@@ -1555,6 +1643,8 @@ const registerWorkspaceIpc = context => {
       if (createdFolder) await fs.promises.rm(createdFolder, { recursive: true, force: true }).catch(() => undefined);
       const cancelled = error?.code === CANCELLED_CODE;
       publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, error: error.message || String(error) });
+      if (cancelled) task?.cancelled();
+      else task?.fail(error);
       if (!cancelled) writeLog('error', 'Progress version import failed', { projectName, folderName, error: error.message || String(error) });
       return cancelled ? { success: true, cancelled: true, operationId, count: 0 } : { success: false, operationId, error: error.message || String(error) };
     } finally {

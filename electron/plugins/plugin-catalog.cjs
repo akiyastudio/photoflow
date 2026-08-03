@@ -14,7 +14,7 @@ const PLUGIN_DEFINITIONS = Object.freeze({
     id: 'video-playback-mpv',
     version: '26.7.29.1',
     name: '高级视频解码',
-    description: '使用独立 libmpv 进程、硬件解码和预读缓存播放相机原始视频，失败时自动回退到内置预览。',
+    description: '使用独立 libmpv 进程、硬件解码和预读缓存播放相机原始视频。',
     capabilities: ['video-playback.advanced'],
   },
 });

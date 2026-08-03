@@ -8,6 +8,7 @@
   "main": "electron/main.cjs",
   "scripts": {
     "generate:icon": "node scripts/generate-app-icon.cjs",
+    "generate:installer-terms": "node scripts/generate-installer-terms.cjs",
     "version:set": "node scripts/set-app-version.cjs",
     "release:json": "node scripts/generate-release-json.cjs",
     "build:shell-thumbnail": "node scripts/build-shell-thumbnail.cjs",
@@ -34,6 +35,14 @@
     "test:data-maintenance": ".venv\\Scripts\\python.exe scripts\\test-data-maintenance.py",
     "test:database-migrations": ".venv\\Scripts\\python.exe scripts\\test-workspace-db-migrations.py",
     "test:architecture": "node scripts/test-architecture.cjs",
+    "test:electron-security": "node scripts/test-electron-security.cjs",
+    "test:privacy": "node scripts/test-privacy-service.cjs",
+    "test:background-tasks": "node scripts/test-background-task-service.cjs",
+    "test:classify-import": ".venv\\Scripts\\python.exe scripts\\test-classify-import.py",
+    "test:backup": ".venv\\Scripts\\python.exe scripts\\test-backup.py",
+    "test:backup-service": "node scripts/test-backup-service.cjs",
+    "test:storage-usage": "node scripts/test-storage-usage-service.cjs",
+    "test:archive-service": "node scripts/test-archive-service.cjs",
     "test:components": "node scripts/test-components.cjs",
     "test:advanced-video": "node scripts/test-advanced-video-service.cjs",
     "test:office-media": ".venv\\Scripts\\python.exe scripts\\test-office-media-extractor.py",
@@ -46,7 +55,7 @@
     "electron": "npm run build:shell-thumbnail && npm run build:recycle-bin-service && wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
     "electron:dev": "concurrently -k \"cross-env BROWSER=none npm run dev\" \"npm run electron\"",
     "cleanup:electron-artifacts": "node scripts/cleanup-electron-artifacts.cjs",
-    "electron:build": "npm run generate:icon && npm run build && npm run build:python && npm run build:shell-thumbnail && npm run build:recycle-bin-service && electron-builder && npm run cleanup:electron-artifacts"
+    "electron:build": "npm run generate:icon && npm run generate:installer-terms && npm run build && npm run build:python && npm run build:shell-thumbnail && npm run build:recycle-bin-service && electron-builder && npm run cleanup:electron-artifacts"
   },
   "build": {
     "appId": "com.photoflow.toolkit",
@@ -100,8 +109,9 @@
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": false,
       "allowToChangeInstallationDirectory": true,
-      "license": "docs/legal/INSTALLER_NOTICE.txt",
+      "license": "docs/legal/INSTALLER_TERMS.html",
       "createDesktopShortcut": false,
       "include": "build/installer.nsh",
       "shortcutName": "照片流",
@@ -138,7 +148,7 @@
         "from": "docs/legal",
         "to": "legal",
         "filter": [
-          "*.md"
+          "*.html"
         ]
       }
     ]
@@ -156,7 +166,7 @@
     "autoprefixer": "^10.4.22",
     "concurrently": "^8.2.2",
     "cross-env": "^7.0.3",
-    "electron": "^30.0.1",
+    "electron": "^43.2.0",
     "electron-builder": "^26.0.12",
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.0",

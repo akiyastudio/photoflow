@@ -1,0 +1,79 @@
+const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { createStorageUsageService } = require('../electron/services/storage-usage-service.cjs');
+
+const run = async () => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'photoflow-storage-usage-'));
+  try {
+    const workspace = path.join(root, 'workspace');
+    const archive = path.join(root, 'archive');
+    const backup = path.join(root, 'backup');
+    const cache = path.join(root, 'cache');
+    const inspiration = path.join(root, 'inspiration');
+    const userData = path.join(root, 'user-data');
+    const workspaceData = path.join(userData, 'workspace-data', 'ws01');
+    const database = path.join(userData, 'workspace-data', 'ws01.sqlite3');
+    await Promise.all([workspace, path.join(archive, 'ws01'), path.join(backup, '.photoflow-backup'), cache, inspiration, workspaceData].map(directory => fs.promises.mkdir(directory, { recursive: true })));
+    const files = [
+      [path.join(workspace, '.photoflow-workspace-id'), 'ws01\n'],
+      [path.join(workspace, 'photo.raw'), 'w'.repeat(11)],
+      [path.join(archive, 'ws01', 'archived.raw'), 'a'.repeat(13)],
+      [path.join(backup, '.photoflow-backup', 'object'), 'b'.repeat(17)],
+      [path.join(cache, 'thumb.jpg'), 'c'.repeat(19)],
+      [path.join(inspiration, 'reference.jpg'), 'r'.repeat(31)],
+      [path.join(workspaceData, 'internal.json'), 'i'.repeat(23)],
+      [database, 'd'.repeat(29)],
+    ];
+    await Promise.all(files.map(([filePath, content]) => fs.promises.writeFile(filePath, content)));
+    const tasks = [];
+    let pending;
+    const backgroundTasks = {
+      list: () => tasks,
+      run: (definition, worker) => {
+        const task = { id: 'scan', type: definition.type, state: 'running', createdAt: Date.now() };
+        tasks.push(task);
+        pending = (async () => {
+          const result = await worker({ throwIfCancelled() {}, report() {} });
+          task.state = 'completed';
+          return { task, result };
+        })();
+        return pending;
+      },
+    };
+    const config = {
+      workspacePath: workspace,
+      archive: { targetPath: archive },
+      backup: { targetPath: backup },
+      mediaCache: { directory: cache },
+      inspirationLibrary: { rootPath: inspiration },
+    };
+    const service = createStorageUsageService({
+      app: { getPath: name => name === 'userData' ? userData : root },
+      backgroundTasks,
+      getWorkspaceDatabasePath: () => database,
+      getWorkspaceDataRoot: () => workspaceData,
+      readSavedConfig: () => config,
+      writeLog() {},
+    });
+    const initial = await service.overview(false);
+    assert.equal(initial.success, true);
+    assert.equal(initial.scanning, true);
+    await pending;
+    const measured = await service.overview(false);
+    const items = measured.volumes.flatMap(volume => volume.items);
+    assert.equal(measured.scanning, false);
+    assert.equal(items.length, 7);
+    assert.equal(items.find(item => item.kind === 'inspiration')?.path, inspiration);
+    assert.equal(items.every(item => item.measured), true);
+    const rolePriority = { workspace: 1, inspiration: 2, cache: 3, internal: 3, archive: 4, backup: 5 };
+    assert.equal(items.every((item, index) => index === 0 || rolePriority[items[index - 1].kind] <= rolePriority[item.kind]), true);
+    assert.equal(items.reduce((sum, item) => sum + item.bytes, 0), files.reduce((sum, [, content]) => sum + Buffer.byteLength(content), 0));
+    console.log('Storage usage service integration tests passed.');
+  } finally {
+    await fs.promises.rm(root, { recursive: true, force: true });
+  }
+};
+
+run().catch(error => { console.error(error); process.exitCode = 1; });
