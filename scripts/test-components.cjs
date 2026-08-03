@@ -40,11 +40,45 @@ try {
   assert(artifactCleanup.includes("entry.name.endsWith('-win.zip')"), 'artifact cleanup must remove legacy application ZIPs');
 
   const installer = fs.readFileSync(path.join(repositoryRoot, 'build', 'installer.nsh'), 'utf8');
-  assert.strictEqual(packageJson.build.nsis.license, 'docs/legal/INSTALLER_NOTICE.txt', 'NSIS must require acceptance of the installer legal notice');
-  const installerLicense = fs.readFileSync(path.join(repositoryRoot, packageJson.build.nsis.license));
-  assert.deepStrictEqual([...installerLicense.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'NSIS installer notice must use a UTF-8 BOM so Chinese text is decoded correctly');
-  const installerLicenseText = installerLicense.toString('utf8');
-  assert(installerLicenseText.includes('用户协议') && installerLicenseText.includes('隐私政策'), 'installer notice must reference both legal documents');
+  assert.strictEqual(packageJson.build.nsis.license, 'docs/legal/INSTALLER_TERMS.html', 'NSIS must require acceptance of the combined HTML installation terms');
+  assert.strictEqual(packageJson.build.nsis.perMachine, false, 'installer consent must remain scoped to the current Windows user');
+  const installerLicenseText = fs.readFileSync(path.join(repositoryRoot, packageJson.build.nsis.license), 'utf8');
+  assert(installerLicenseText.startsWith('<!doctype html>') && installerLicenseText.includes('<meta charset="utf-8">'), 'NSIS installation terms must be a complete UTF-8 HTML document');
+  assert(installerLicenseText.includes('照片流用户协议及内测条款') && installerLicenseText.includes('照片流隐私政策（内测版）'), 'installation terms must contain the complete agreement and privacy policy');
+  assert(installerLicenseText.includes('只有明确接受后，安装程序才会继续') && installerLicenseText.includes('实际使用前仍会另行展示规则并取得单独同意'), 'installation terms must explain the installation gate and preserve separate face-recognition consent');
+  assert(releaseCommand.includes('npm run generate:installer-terms'), 'release builds must regenerate the combined installation terms from the current HTML policies');
+  const legalResource = packageJson.build.extraResources.find(resource => resource.to === 'legal');
+  assert.deepStrictEqual(legalResource?.filter, ['*.html'], 'release packages must include only the user-facing HTML legal documents');
+  const legalDocumentNames = [
+    'PRIVACY_POLICY',
+    'USER_AGREEMENT',
+    'FACE_RECOGNITION_RULES',
+    'PERSONAL_INFORMATION_LIST',
+    'THIRD_PARTY_SERVICES',
+    'PERMISSIONS',
+    'CHILDREN_PRIVACY',
+    'CUSTOMER_DATA_PROCESSING_TERMS',
+    'OPEN_SOURCE_NOTICES',
+  ];
+  const privacyService = fs.readFileSync(path.join(repositoryRoot, 'electron', 'privacy-service.cjs'), 'utf8');
+  for (const documentName of legalDocumentNames) {
+    const htmlPath = path.join(repositoryRoot, 'docs', 'legal', `${documentName}.html`);
+    assert(fs.existsSync(htmlPath), `${documentName} must be distributed as HTML`);
+    assert(!fs.existsSync(path.join(repositoryRoot, 'docs', 'legal', `${documentName}.md`)), `${documentName} must not retain a Markdown user-facing copy`);
+    const html = fs.readFileSync(htmlPath, 'utf8');
+    assert(html.startsWith('<!doctype html>') && html.includes('<html lang="zh-CN">'), `${documentName} must be a complete Chinese HTML document`);
+    assert(html.includes('Content-Security-Policy') && html.includes('<meta name="viewport"'), `${documentName} must be safe and responsive when opened in a browser`);
+    assert(html.includes('<main>') && html.includes('<h1>') && !html.includes('<script'), `${documentName} must use semantic, script-free document markup`);
+    assert(privacyService.includes(`'${documentName}.html'`), `${documentName} must be reachable from the application`);
+  }
+  const informationListHtml = fs.readFileSync(path.join(repositoryRoot, 'docs', 'legal', 'PERSONAL_INFORMATION_LIST.html'), 'utf8');
+  assert(informationListHtml.includes('<table>') && informationListHtml.includes('<thead>') && informationListHtml.includes('<tbody>'), 'the personal-information list must remain a semantic HTML table');
+  assert(installer.includes('IfSilent PhotoFlowSkipConsentReceipt'), 'silent installs must not create an interactive consent receipt');
+  assert(installer.includes('WriteINIStr "$APPDATA\\Photoflow\\install-consent.ini"') && installer.includes('"Interactive" "1"'), 'interactive installs must write a per-user consent receipt');
+  const currentTermsVersion = privacyService.match(/CURRENT_TERMS_VERSION = '([^']+)'/)?.[1];
+  const currentPrivacyVersion = privacyService.match(/CURRENT_PRIVACY_NOTICE_VERSION = '([^']+)'/)?.[1];
+  assert(installer.includes(`!define PhotoFlowTermsVersion "${currentTermsVersion}"`) && installer.includes(`!define PhotoFlowPrivacyVersion "${currentPrivacyVersion}"`), 'installer receipt versions must match the application consent versions');
+  assert(privacyService.includes('coreConsentRevokedAt') && privacyService.includes("coreConsentSource: 'interactive-installer'"), 'the application must import installer consent without allowing an old receipt to undo withdrawal');
   assert(!installer.includes('release\\components'), 'base installer must not embed optional components');
   assert(!installer.includes('PhotoFlow-team-retouch-') && !installer.includes('PhotoFlowComponentPage'), 'application installer must not discover or offer team-retouch packages');
   assert(!installer.includes('nsisunz::Unzip') && !installer.includes('$INSTDIR\\components'), 'application installer must never write components into the program directory');
@@ -119,8 +153,8 @@ assert.match(teamRetouchManager, /dimension \/ scale/, '团片协作原图标记
 assert(teamRetouchManager.includes('人物 {member.personIndex}'), '工作图预览应直接标出人物编号');
 assert(teamRetouchManager.includes('InteractiveCropEditor'), '工作图范围应支持可视化拖动和缩放');
 assert(teamRetouchManager.includes("cropEditor ? 'overflow-visible' : 'overflow-hidden'"), '范围编辑弹窗打开时不应被图片卡片裁切');
-  assert(teamRetouchManager.includes('基础可用 · 高级未安装'), 'team-retouch workspace must disclose when only the basic engine is available');
-  assert(!teamRetouchManager.includes('aria-label="识别模式"') && settingsFeature.includes('team-retouch-backend-mode'), 'detection mode must stay in settings instead of the team-retouch workspace');
+  assert(teamRetouchManager.includes('默认使用高级模型 · PairDETR + SAM 2.1') && teamRetouchManager.includes('当前使用基础模型 · RTMDet'), 'team-retouch workspace must disclose the automatically selected recognition model');
+  assert(!teamRetouchManager.includes('aria-label="识别模式"') && !settingsFeature.includes('team-retouch-backend-mode') && !settingsFeature.includes('默认识别模式'), 'automatic recognition must not expose a redundant mode setting');
   assert(!teamRetouchManager.includes('aria-label="基础版本"') && teamRetouchManager.includes('bundle.photo?.currentVersionId'), 'team-retouch must use the current version without exposing a redundant base-version selector');
   assert(!teamRetouchManager.includes('合成保存到'), 'recognition must not expose final merge output settings');
   assert(!teamRetouchManager.includes('上传修图结果'), 'recognition must not accept returned edits');
@@ -191,6 +225,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(excludeHandler.includes("'rebuild', '--input'") && !excludeHandler.includes("'detect', '--input'"), 'removing a false positive must rebuild the stored person set without rerunning detection');
   assert(excludeHandler.includes('expectedPersonCount') && excludeHandler.includes('removedPersonCount'), 'false-positive removal must enforce an exact one-person count change');
   assert(versionsIpc.includes('resolveTeamOutputProgress'), 'team-retouch merges must resolve a registered target progress');
+  assert((versionsIpc.match(/const requestedMode = 'auto';/g) || []).length === 2 && !versionsIpc.includes('request.backendMode') && !versionsIpc.includes('personDetection.backendMode'), 'all team-retouch detection paths must automatically prefer advanced and fall back to basic');
   assert(versionsIpc.includes('compareProgressKeys(progress.versionKey, sourceProgress.versionKey) <= 0'), 'team-retouch merges must reject the current source progress and every earlier progress');
   assert(versionsIpc.includes('合成结果不能写回当前来源进度'), 'team-retouch merges must reject the source folder as their output');
   assert(versionsIpc.includes("ipcMain.handle('workspace-team-patch-open-folder'"), 'delivery and merged-result folders must have a scoped open action');

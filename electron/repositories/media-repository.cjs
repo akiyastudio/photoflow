@@ -14,6 +14,7 @@ const createMediaRepository = client => ({
   listProgress: (root, projectName) => client.call(root, 'progress_list', { projectName }),
   registerProgress: (root, payload) => client.call(root, 'progress_register', payload),
   updateProgressTree: (root, payload) => client.call(root, 'progress_update_tree', payload),
+  deleteMissingProgress: (root, payload) => client.call(root, 'progress_delete_missing', payload),
   registerBatchBaseline: (root, payload) => client.call(root, 'batch_register_baseline', payload),
   commitBatchCompare: (root, payload) => client.call(root, 'batch_commit_compare', payload),
   listBatchOperations: (root, batchId) => client.call(root, 'batch_operation_list', { batchId }),

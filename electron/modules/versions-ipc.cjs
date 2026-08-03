@@ -349,6 +349,19 @@ const registerVersionIpc = context => {
     }
   });
 
+  ipcMain.handle('workspace-progress-delete-missing', async (_event, workspacePath, projectName, progressId) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      await versionService.syncProject(workspaceRoot, projectName);
+      const result = await versionService.deleteMissingProgress(workspaceRoot, { projectName, progressId });
+      queueCleanupArtifacts(workspaceRoot, result, '清理已移除失效进度的内部文件');
+      return { ...result, cleanupQueued: true };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
   ipcMain.handle('workspace-selection-baseline-ensure', async (_event, workspacePath, status, projectName) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
@@ -1370,7 +1383,7 @@ const registerVersionIpc = context => {
       const projectName = String(request.projectName || '').trim();
       if (!projectName) throw new Error('项目名称不能为空');
       const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
-      const workflowStarted = (workspace.assignments || []).some(assignment => assignment.completed)
+      const workflowStarted = (workspace.assignments || []).some(assignment => assignment.completed || assignment.returnMissing)
         || (workspace.photos || []).some(photo => (photo.tasks || []).some(task => Boolean(task.editedPatchPath) || !['', 'exported'].includes(String(task.status || 'exported'))));
       if (workflowStarted) throw new Error('已有任务返图或完成，不能再修改优先开工人物');
       const requestedOrder = Array.isArray(request.preferredIdentityOrder)
@@ -2094,9 +2107,7 @@ const registerVersionIpc = context => {
       const personDetection = savedConfig.componentSettings?.['team-retouch'] || savedConfig.personDetection || {};
       const useGpu = personDetection.useGpu !== false;
       const oversizeCropMode = personDetection.oversizeCropMode === 'expand' ? 'expand' : 'face-centered';
-      const requestedMode = ['auto', 'basic', 'advanced'].includes(request.backendMode)
-        ? request.backendMode
-        : ['auto', 'basic', 'advanced'].includes(personDetection.backendMode) ? personDetection.backendMode : 'auto';
+      const requestedMode = 'auto';
       pluginService.requireCapability('team-retouch.detect');
       const detected = await pluginService.runJson(
         'team-retouch',
@@ -2170,9 +2181,7 @@ const registerVersionIpc = context => {
       const personDetection = savedConfig.componentSettings?.['team-retouch'] || savedConfig.personDetection || {};
       const useGpu = personDetection.useGpu !== false;
       const oversizeCropMode = personDetection.oversizeCropMode === 'expand' ? 'expand' : 'face-centered';
-      const requestedMode = ['auto', 'basic', 'advanced'].includes(request.backendMode)
-        ? request.backendMode
-        : ['auto', 'basic', 'advanced'].includes(personDetection.backendMode) ? personDetection.backendMode : 'auto';
+      const requestedMode = 'auto';
       const detected = await pluginService.runJson(
         'team-retouch',
         ['detect-batch', '--manifest', manifestPath, '--provider', useGpu ? 'auto' : 'cpu', '--oversize-crop-mode', oversizeCropMode, '--advanced-mode', requestedMode],

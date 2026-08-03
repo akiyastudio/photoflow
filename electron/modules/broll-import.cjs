@@ -11,6 +11,7 @@ const {
   moveFileAtomic,
   uniqueDestination,
 } = require('../services/file-transfer-service.cjs');
+const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
 
 const BROLL_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.avif', '.heic', '.heif', '.hif', '.mp4', '.mov', '.avi', '.m4v', '.mkv']);
 const BROLL_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.m4v', '.mkv']);
@@ -99,22 +100,17 @@ const registerBrollImportIpc = ({
   writeLog,
   pushUndoOperation,
   activeOperations,
+  backgroundTasks,
   getTelemetry,
 }) => {
   ipcMain.handle('workspace-import-broll', async (event, workspacePath, status, projectName, options = {}) => {
     const operationId = crypto.randomUUID();
-    const job = { cancelled: false, finishing: false };
-    const publish = payload => {
-      if (!event.sender.isDestroyed()) event.sender.send('workspace-file-operation-progress', {
-        operationId,
-        operation: 'import-broll',
-        ...payload,
-      });
-    };
+    let job = { cancelled: false, finishing: false };
+    let task = null;
+    const publish = payload => task?.publish(payload);
     const createdPaths = [];
     const moves = [];
     try {
-      if (activeOperations.size) throw new Error('已有文件任务正在进行');
       const deleteSourceAfterImport = options?.deleteSourceAfterImport === true;
       const preserveOriginal = !deleteSourceAfterImport;
       const splitLargeFiles = Boolean(options?.splitLargeFiles);
@@ -138,7 +134,18 @@ const registerBrollImportIpc = ({
       const totalBytes = sources.reduce((sum, item) => sum + item.stat.size, 0);
       const splitBytes = sources.reduce((sum, item) => sum + (splitLargeFiles && BROLL_VIDEO_EXTENSIONS.has(item.extension) && item.stat.size > FOUR_GB ? item.stat.size : 0), 0);
       await assertDiskSpace(destinationDir, preserveOriginal ? totalBytes + splitBytes : splitBytes);
+      task = createProjectFileTask({
+        backgroundTasks, event, operationId, operation: 'import-broll', title: `导入花絮 · ${projectName}`,
+        projectName,
+        resources: [destinationDir, ...sources.map(source => source.path)],
+        concurrencyGroup: splitLargeFiles ? 'heavy-media' : 'disk-io',
+        concurrencyLimit: splitLargeFiles ? 1 : 2,
+        cancelledCode: CANCELLED_CODE,
+      });
+      job = task.job;
+      job.cancel = task.cancel;
       activeOperations.set(operationId, job);
+      await task.start();
       publish({ phase: 'scanning', progress: 0, totalBytes, bytesCopied: 0, totalFiles: sources.length, filesCopied: 0 });
 
       const reserved = new Set();
@@ -224,6 +231,7 @@ const registerBrollImportIpc = ({
       if (cleanupWarnings.length) warningParts.push(`部分源文件未能移入回收站：${cleanupWarnings.join('；')}`);
       const warning = warningParts.join('；');
       publish({ phase: 'complete', progress: 100, currentName: '花絮导入完成', bytesCopied: totalBytes, totalBytes, filesCopied: sources.length, totalFiles: sources.length });
+      task.complete('花絮导入完成');
       writeLog('info', 'B-roll imported', { projectPath, count: sources.length, splitCount, clearedCount, totalBytes, warning });
       const telemetry = getTelemetry?.();
       telemetry?.track('photos_imported', {
@@ -243,6 +251,8 @@ const registerBrollImportIpc = ({
       for (const created of [...createdPaths].reverse()) await fs.promises.rm(created, { force: true }).catch(() => undefined);
       const cancelled = error?.code === CANCELLED_CODE;
       publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, error: error.message || String(error) });
+      if (cancelled) task?.cancelled();
+      else task?.fail(error);
       if (!cancelled) writeLog('error', 'B-roll import failed', { projectName, error: error.message || String(error) });
       return cancelled ? { success: true, cancelled: true, count: 0, splitCount: 0, clearedCount: 0 } : { success: false, error: error.message || String(error) };
     } finally {

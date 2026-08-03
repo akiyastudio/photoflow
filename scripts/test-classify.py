@@ -49,8 +49,8 @@ with tempfile.TemporaryDirectory(prefix="photoflow-classify-test-") as temporary
     stage_import_broll(str(card), str(project), delete_source=True)
 
     assert not any(dcim.iterdir()), "successful b-roll import should clean the source card"
-    assert (project / "花絮" / "7-21" / "clip-one.mp4").is_file()
-    assert (project / "花絮" / "7-22" / "clip-two.mp4").is_file()
+    assert (project / "花絮" / "clip-one.mp4").is_file()
+    assert (project / "花絮" / "clip-two.mp4").is_file()
 
 print("classify b-roll date routing tests passed")
 
@@ -68,7 +68,7 @@ with tempfile.TemporaryDirectory(prefix="photoflow-broll-source-policy-test-") a
     stage_import_broll(str(card), str(project))
 
     assert source.is_file(), "backend must retain sources unless deletion was explicitly requested"
-    assert (project / "花絮" / datetime.datetime.fromtimestamp(source.stat().st_mtime).strftime('%m-%d').lstrip('0').replace('-0', '-') / source.name).is_file()
+    assert (project / "花絮" / source.name).is_file()
 
 print("classify explicit source deletion policy tests passed")
 
@@ -165,8 +165,10 @@ with tempfile.TemporaryDirectory(prefix="photoflow-routing-plan-test-") as tempo
     ]
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
-        stage_plan_import(str(card), json.dumps(projects, ensure_ascii=False))
-    event = json.loads(output.getvalue().strip())
+        stage_plan_import(str(card), str(root), json.dumps(projects, ensure_ascii=False), import_session='routing-plan')
+    events = [json.loads(line) for line in output.getvalue().splitlines() if line.strip()]
+    event = next(event for event in events if event["type"] == "ask_user")
+    assert any(event["type"] == "progress" for event in events)
     assert event["type"] == "ask_user"
     assert event["data"]["requiresChoice"] is True
     assert len(event["data"]["groups"]) == 2

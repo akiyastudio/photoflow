@@ -1,5 +1,9 @@
 !include "nsDialogs.nsh"
 !include "LogicLib.nsh"
+!include "FileFunc.nsh"
+
+!define PhotoFlowTermsVersion "2026-07-29"
+!define PhotoFlowPrivacyVersion "2026-07-29"
 
 !ifdef BUILD_UNINSTALLER
 Var PhotoFlowDeleteUserDataCheckbox
@@ -73,6 +77,16 @@ Function PhotoFlowShortcutPageLeave
 FunctionEnd
 
 !macro customInstall
+  IfSilent PhotoFlowSkipConsentReceipt
+  ${GetTime} "" "L" $0 $1 $2 $3 $4 $5 $6
+  CreateDirectory "$APPDATA\Photoflow"
+  WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "SchemaVersion" "1"
+  WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "Interactive" "1"
+  WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "TermsVersion" "${PhotoFlowTermsVersion}"
+  WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "PrivacyVersion" "${PhotoFlowPrivacyVersion}"
+  WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "InstallerVersion" "${VERSION}"
+  WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "AcceptedAtLocal" "$2-$1-$0T$4:$5:$6"
+  PhotoFlowSkipConsentReceipt:
   ${If} $PhotoFlowCreateDesktopShortcut == ${BST_CHECKED}
     CreateShortCut "$newDesktopLink" "$appExe" "" "$appExe" 0 "" "" "${APP_DESCRIPTION}"
     ClearErrors

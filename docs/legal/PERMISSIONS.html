@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+  <title>照片流权限与本地文件访问说明</title>
+  <style>
+    :root { color-scheme: light; font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; color: #1e293b; background: #f1f5f9; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px 20px 64px; line-height: 1.8; }
+    main { width: min(920px, 100%); margin: 0 auto; padding: 48px 56px; background: #fff; border: 1px solid #e2e8f0; border-radius: 18px; box-shadow: 0 12px 32px rgb(15 23 42 / 8%); }
+    h1 { margin: 0 0 8px; color: #0f172a; font-size: clamp(1.75rem, 4vw, 2.35rem); line-height: 1.3; }
+    h2 { margin: 2.2em 0 .55em; padding-bottom: .35em; border-bottom: 1px solid #e2e8f0; color: #0f172a; font-size: 1.35rem; line-height: 1.45; }
+    h3 { margin: 1.7em 0 .45em; color: #1e40af; font-size: 1.08rem; }
+    p { margin: .75em 0; }
+    h1 + p { margin-top: 0; color: #64748b; }
+    ul, ol { margin: .75em 0; padding-left: 1.65em; }
+    li + li { margin-top: .45em; }
+    aside { margin: 1.25em 0; padding: 14px 18px; border-left: 4px solid #f59e0b; border-radius: 0 10px 10px 0; background: #fffbeb; color: #78350f; }
+    a { color: #1d4ed8; text-decoration-thickness: 1px; text-underline-offset: 3px; overflow-wrap: anywhere; }
+    code { padding: .12em .38em; border-radius: 5px; background: #f1f5f9; color: #334155; font-family: Consolas, monospace; font-size: .92em; }
+    .table-wrap { margin: 1.25em 0; overflow-x: auto; border: 1px solid #cbd5e1; border-radius: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: .94rem; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; }
+    th { background: #f8fafc; color: #0f172a; white-space: nowrap; }
+    tbody tr:last-child td { border-bottom: 0; }
+    @media (max-width: 640px) { body { padding: 0; } main { padding: 28px 20px 48px; border: 0; border-radius: 0; box-shadow: none; } }
+    @media print { body { padding: 0; background: #fff; } main { width: auto; padding: 0; border: 0; box-shadow: none; } a { color: inherit; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>照片流权限与本地文件访问说明</h1>
+    <p>版本：2026-07-29</p>
+    <ul>
+    <li>工作目录读写：浏览、创建、复制、移动、重命名、删除项目与素材；仅访问用户选择或操作所涉及的目录。</li>
+    <li>SD卡及外接磁盘：用户启动导入时读取素材并写入目标工作目录。</li>
+    <li>AppData目录：保存配置、数据库、缩略图、媒体缓存、日志、统计状态和组件状态。</li>
+    <li>网络访问：发送内测统计和崩溃报告、检查更新、打开用户主动点击的外部链接。</li>
+    <li>系统回收站：执行可恢复删除及撤销。</li>
+    <li>剪贴板：用户执行复制路径、复制/粘贴文件等操作时读写相关内容。</li>
+    <li>Photoshop及外部程序：用户主动选择“在PS中打开”或打开文件、文件夹时调用。</li>
+    <li>GPU/WSL：用户安装并启用人物检测增强组件时用于本地模型推理。</li>
+    </ul>
+    <p>照片流不主动申请摄像头、麦克风、通讯录、短信、通话记录或精确位置权限。macOS构建配置中如保留无实际用途的麦克风声明，应在发布前移除。</p>
+  </main>
+</body>
+</html>

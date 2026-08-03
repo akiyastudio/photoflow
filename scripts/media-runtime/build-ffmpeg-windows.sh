@@ -85,6 +85,8 @@ ffmpeg_flags=(
   --enable-gpl
   --enable-libx264
   --enable-zlib
+  --enable-mediafoundation
+  --enable-d3d11va
   --enable-static
   --disable-shared
   --disable-autodetect
@@ -123,9 +125,10 @@ if "$objdump_command" -p "$ffmpeg_exe" | grep -Eiq 'DLL Name:.*(libwinpthread|li
   "$objdump_command" -p "$ffmpeg_exe" | grep -Ei 'DLL Name:' >&2
   exit 1
 fi
-for required in --enable-gpl --enable-libx264 --enable-zlib --disable-autodetect --disable-network; do
+for required in --enable-gpl --enable-libx264 --enable-zlib --enable-mediafoundation --enable-d3d11va --disable-autodetect --disable-network; do
   grep -Fq -- "$required" <<<"$configuration" || { echo "Missing FFmpeg option: $required" >&2; exit 1; }
 done
+"$ffmpeg_exe" -hide_banner -encoders 2>&1 | grep -Eq '^ V.* h264_mf ' || { echo 'Missing Media Foundation H.264 encoder' >&2; exit 1; }
 
 # Exercise every command family used by the desktop app: H.264/AAC preview,
 # PNG frame extraction, and stream-copy segmentation.
@@ -148,12 +151,12 @@ cp "$work_root/src/ffmpeg/COPYING.GPLv2" "$work_root/package/runtime/COPYING.GPL
 cp "$work_root/src/x264/COPYING" "$work_root/package/runtime/COPYING.x264"
 cp "$work_root/src/zlib/LICENSE" "$work_root/package/runtime/LICENSE.zlib"
 cp "$work_root/configure-flags.txt" "$work_root/package/runtime/configure-flags.txt"
-cp "$repo_root/docs/legal/OPEN_SOURCE_NOTICES.md" "$work_root/package/runtime/OPEN_SOURCE_NOTICES.md"
+cp "$repo_root/docs/legal/OPEN_SOURCE_NOTICES.html" "$work_root/package/runtime/OPEN_SOURCE_NOTICES.html"
 
 cp "$work_root/src/ffmpeg/COPYING.GPLv2" "$work_root/package/licenses/FFmpeg-COPYING.GPLv2"
 cp "$work_root/src/x264/COPYING" "$work_root/package/licenses/x264-COPYING"
 cp "$work_root/src/zlib/LICENSE" "$work_root/package/licenses/zlib-LICENSE"
-cp "$repo_root/docs/legal/OPEN_SOURCE_NOTICES.md" "$work_root/package/licenses/OPEN_SOURCE_NOTICES.md"
+cp "$repo_root/docs/legal/OPEN_SOURCE_NOTICES.html" "$work_root/package/licenses/OPEN_SOURCE_NOTICES.html"
 
 git -C "$work_root/src/ffmpeg" archive --format=zip --output="$work_root/package/source/ffmpeg-$ffmpeg_commit.zip" HEAD
 git -C "$work_root/src/x264" archive --format=zip --output="$work_root/package/source/x264-$x264_commit.zip" HEAD

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Camera, ChevronUp, Loader2, Pause, Play, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
-import type { AdvancedVideoState } from '../types';
+import type { AdvancedVideoComponentSettings, AdvancedVideoState } from '../types';
 
 const formatTime = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
@@ -22,6 +22,7 @@ type AdvancedVideoPlayerProps = {
   onError: (message: string) => void;
   onMetadata: (metadata: { width?: number; height?: number; duration?: number }) => void;
   onNavigate?: (direction: -1 | 1) => void;
+  keyboardSettings?: AdvancedVideoComponentSettings;
 };
 
 const initialState = (): AdvancedVideoState => ({
@@ -36,7 +37,7 @@ const initialState = (): AdvancedVideoState => ({
   duration: 0,
 });
 
-const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate }: AdvancedVideoPlayerProps) => {
+const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, keyboardSettings = { arrowKeyAction: 'seek' } }: AdvancedVideoPlayerProps) => {
   const navigate = onNavigate || (() => undefined);
   const showNavigation = Boolean(onNavigate);
   const surfaceRef = useRef<HTMLDivElement>(null);
@@ -88,7 +89,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
         setState(current => ({ ...current, ...update }));
       }
     });
-    void window.electronAPI.startAdvancedVideo(filePath).then(result => {
+    void window.electronAPI.startAdvancedVideo(filePath, keyboardSettings.arrowKeyAction).then(result => {
       if (!result.success || !result.sessionId) {
         if (active && !errorReportedRef.current) {
           errorReportedRef.current = true;
@@ -113,7 +114,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
         void window.electronAPI.stopAdvancedVideo(currentSession);
       }
     };
-  }, [filePath]);
+  }, [filePath, keyboardSettings.arrowKeyAction]);
 
   useEffect(() => {
     if (!captureNotice) return;
@@ -191,18 +192,37 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
     });
   }, []);
   useEffect(() => {
-    const handleSeekKey = (event: KeyboardEvent) => {
-      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    const runDirectionalAction = (direction: -1 | 1, arrowKeys: boolean) => {
+      const shouldNavigate = arrowKeys
+        ? keyboardSettings.arrowKeyAction === 'navigate'
+        : keyboardSettings.arrowKeyAction !== 'navigate';
+      if (shouldNavigate) onNavigateRef.current(direction);
+      else seekRelative(direction * SKIP_SECONDS);
+    };
+    const handleDirectionalKey = (event: KeyboardEvent) => {
+      const arrowKeys = event.key === 'ArrowLeft' || event.key === 'ArrowRight';
+      const browserKeys = event.key === 'BrowserBack' || event.key === 'BrowserForward';
+      if (!arrowKeys && !browserKeys) return;
       if (event.ctrlKey || event.metaKey || event.altKey) return;
       const target = event.target as HTMLElement | null;
       if (target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
       event.preventDefault();
       event.stopPropagation();
-      seekRelative(event.key === 'ArrowRight' ? SKIP_SECONDS : -SKIP_SECONDS);
+      runDirectionalAction(event.key === 'ArrowRight' || event.key === 'BrowserForward' ? 1 : -1, arrowKeys);
     };
-    window.addEventListener('keydown', handleSeekKey);
-    return () => window.removeEventListener('keydown', handleSeekKey);
-  }, [seekRelative]);
+    const handleMouseNavigationButton = (event: MouseEvent) => {
+      if (event.button !== 3 && event.button !== 4) return;
+      event.preventDefault();
+      event.stopPropagation();
+      runDirectionalAction(event.button === 4 ? 1 : -1, false);
+    };
+    window.addEventListener('keydown', handleDirectionalKey);
+    window.addEventListener('mousedown', handleMouseNavigationButton);
+    return () => {
+      window.removeEventListener('keydown', handleDirectionalKey);
+      window.removeEventListener('mousedown', handleMouseNavigationButton);
+    };
+  }, [keyboardSettings.arrowKeyAction, seekRelative]);
   const captureFrame = async () => {
     const currentSession = sessionRef.current;
     if (!currentSession || capturing) return;

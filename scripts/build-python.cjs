@@ -26,7 +26,7 @@ const result = spawnSync(python, [
   '--hidden-import', 'cut_video', '--hidden-import', 'png_to_jpg',
   '--hidden-import', 'rename',
   '--hidden-import', 'thumbnail_db', '--hidden-import', 'thumbnail_image',
-  '--hidden-import', 'video_preview', '--hidden-import', 'workspace_db',
+  '--hidden-import', 'video_preview', '--hidden-import', 'workspace_db', '--hidden-import', 'backup_db',
   'tools.py',
 ], { cwd: join(root, 'python'), stdio: 'inherit' });
 

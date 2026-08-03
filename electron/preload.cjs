@@ -1,5 +1,16 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+const RENDERER_PYTHON_TOOLS = new Set(['catch.py', 'classify.py', 'cut_video.py', 'png_to_jpg.py', 'research.py']);
+const validatePythonInvocation = (scriptName, args, requestId) => {
+  if (typeof scriptName !== 'string' || !RENDERER_PYTHON_TOOLS.has(scriptName)) throw new Error('Python tool is not available');
+  if (!Array.isArray(args) || args.length > 256 || args.some(value => typeof value !== 'string' || value.length > 32768 || /[\0\r\n]/.test(value))) {
+    throw new TypeError('Invalid Python tool arguments');
+  }
+  const normalizedRequestId = String(requestId || '');
+  if (normalizedRequestId && !/^[a-z0-9-]{8,80}$/i.test(normalizedRequestId)) throw new Error('Invalid Python request identifier');
+  return { scriptName, args, requestId: normalizedRequestId };
+};
+
 const trackFeature = feature => ipcRenderer.send('telemetry-track', 'feature_used', { feature });
 const invokeFeature = (feature, channel, ...args) => {
   trackFeature(feature);
@@ -9,9 +20,10 @@ const invokeFeature = (feature, channel, ...args) => {
 contextBridge.exposeInMainWorld('electronAPI', {
   apiContractVersion: 1,
   runScript: (scriptName, args, requestId) => {
-    const feature = String(scriptName || '').replace(/\.py$/i, '').replace(/[^a-z0-9_]/gi, '_').slice(0, 48);
+    const invocation = validatePythonInvocation(scriptName, args, requestId);
+    const feature = invocation.scriptName.replace(/\.py$/i, '').slice(0, 48);
     if (feature) trackFeature(feature);
-    ipcRenderer.send('run-python', scriptName, args, requestId);
+    ipcRenderer.send('run-python', invocation.scriptName, invocation.args, invocation.requestId);
   },
   cancelPythonTask: (requestId) => ipcRenderer.invoke('cancel-python', requestId),
   getBirthdays: () => ipcRenderer.invoke('get-birthdays'),
@@ -36,7 +48,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openExternal: (url) => ipcRenderer.send('open-external', url),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   submitFeedback: (message) => ipcRenderer.invoke('submit-feedback', message),
-  checkScript: (scriptName) => ipcRenderer.invoke('check-script', scriptName),
   getComponents: () => ipcRenderer.invoke('components-list'),
   onComponentsStatusChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('components-status-changed', subscription); return () => ipcRenderer.removeListener('components-status-changed', subscription); },
   openComponentsFolder: (componentId) => ipcRenderer.invoke('components-open-folder', componentId),
@@ -96,6 +107,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   createProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-create-progress-folder', workspacePath, status, projectName, request),
   registerProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-progress-register', workspacePath, status, projectName, request),
   updateProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-progress-update', workspacePath, status, projectName, request),
+  deleteMissingProgressFolder: (workspacePath, projectName, progressId) => ipcRenderer.invoke('workspace-progress-delete-missing', workspacePath, projectName, progressId),
   registerVersionBaseline: (workspacePath, status, projectName, relativePath) => ipcRenderer.invoke('workspace-version-register-baseline', workspacePath, status, projectName, relativePath),
   compareVersionFolders: (workspacePath, status, projectName, referenceRelativePath, sourceRelativePath, sourceNames) => invokeFeature('version_folder_compare', 'workspace-version-compare-preview', workspacePath, status, projectName, referenceRelativePath, sourceRelativePath, sourceNames),
   commitVersionBatch: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-version-batch-commit', workspacePath, status, projectName, request),
@@ -139,7 +151,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getMediaThumbnail: (filePath, kind, cacheConfig, requestedSize, priority, queueOrder) => ipcRenderer.invoke('media-thumbnail', filePath, kind, cacheConfig, requestedSize, priority, queueOrder),
   cancelMediaThumbnail: (filePath, requestedSize) => ipcRenderer.invoke('media-thumbnail-cancel', filePath, requestedSize),
   onThumbnailStateChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('thumbnail-state-changed', subscription); return () => ipcRenderer.removeListener('thumbnail-state-changed', subscription); },
-  startAdvancedVideo: (filePath) => ipcRenderer.invoke('advanced-video-start', filePath),
+  startAdvancedVideo: (filePath, arrowKeyAction) => ipcRenderer.invoke('advanced-video-start', filePath, arrowKeyAction),
   setAdvancedVideoBounds: (sessionId, bounds) => ipcRenderer.send('advanced-video-bounds', sessionId, bounds),
   controlAdvancedVideo: (sessionId, request) => ipcRenderer.send('advanced-video-control', sessionId, request),
   captureAdvancedVideoFrame: (sessionId) => ipcRenderer.invoke('advanced-video-screenshot', sessionId),
@@ -163,10 +175,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
   chooseImportSourceFiles: () => ipcRenderer.invoke('choose-import-source-files'),
   getMediaCacheInfo: (cacheConfig) => ipcRenderer.invoke('media-cache-info', cacheConfig),
   clearMediaCache: (cacheConfig, olderThanDays) => ipcRenderer.invoke('media-cache-clear', cacheConfig, olderThanDays),
+  getStorageUsageOverview: (force) => ipcRenderer.invoke('storage-usage-overview', force),
   getBackgroundTasks: () => ipcRenderer.invoke('background-tasks-list'),
   cancelBackgroundTask: (id) => ipcRenderer.invoke('background-task-cancel', id),
+  dismissBackgroundTask: (id) => ipcRenderer.invoke('background-task-dismiss', id),
   retryBackgroundTask: (id) => ipcRenderer.invoke('background-task-retry', id),
   onBackgroundTaskChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('background-task-changed', subscription); return () => ipcRenderer.removeListener('background-task-changed', subscription); },
+  chooseBackupTarget: (currentPath) => ipcRenderer.invoke('backup-choose-target', currentPath),
+  getBackupStatus: (workspacePath) => ipcRenderer.invoke('backup-status', workspacePath),
+  setNasBackupTarget: (targetPath) => ipcRenderer.invoke('backup-set-nas-target', targetPath),
+  saveNasCredential: (request) => ipcRenderer.invoke('backup-save-nas-credential', request),
+  readNasCredential: (credentialRef) => ipcRenderer.invoke('backup-read-nas-credential', credentialRef),
+  deleteNasCredential: (credentialRef) => ipcRenderer.invoke('backup-delete-nas-credential', credentialRef),
+  testBackupConnection: () => ipcRenderer.invoke('backup-test-connection'),
+  getBackupSpaceStatus: (workspacePath) => ipcRenderer.invoke('backup-space-status', workspacePath),
+  cleanupBackup: (workspacePath) => ipcRenderer.invoke('backup-cleanup', workspacePath),
+  runBackup: (workspacePath, reason) => ipcRenderer.invoke('backup-run', workspacePath, reason),
+  runBackupIfDue: (workspacePath) => ipcRenderer.invoke('backup-run-if-due', workspacePath),
+  verifyBackup: (workspacePath, snapshotId) => ipcRenderer.invoke('backup-verify', workspacePath, snapshotId),
+  restoreBackupWorkspace: (workspacePath, snapshotId) => ipcRenderer.invoke('backup-restore-workspace', workspacePath, snapshotId),
+  restoreBackupProject: (workspacePath, snapshotId, projectId) => ipcRenderer.invoke('backup-restore-project', workspacePath, snapshotId, projectId),
+  openBackupTarget: () => ipcRenderer.invoke('backup-open-target'),
+  chooseArchiveTarget: (currentPath) => ipcRenderer.invoke('archive-choose-target', currentPath),
+  getArchiveStatus: () => ipcRenderer.invoke('archive-status'),
+  archiveWorkspaceProject: (workspacePath, projectName) => ipcRenderer.invoke('archive-project', workspacePath, projectName),
+  moveArchivedProjectBack: (workspacePath, projectName, statusAfter) => ipcRenderer.invoke('archive-move-back', workspacePath, projectName, statusAfter),
+  openArchiveTarget: () => ipcRenderer.invoke('archive-open-target'),
   openWorkspaceProject: (workspacePath, status, name, folderName) => ipcRenderer.invoke('workspace-open-project', workspacePath, status, name, folderName),
   openProjectEntry: (workspacePath, status, name, relativePath) => ipcRenderer.invoke('workspace-open-entry', workspacePath, status, name, relativePath),
   getPhotoshopStatus: () => ipcRenderer.invoke('photoshop-status'),

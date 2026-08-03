@@ -1,0 +1,13 @@
+{
+  "_id": "win32-stable-26-7-31",
+  "channel": "stable",
+  "downloadUrl": "https://pan.quark.cn/s/2d8d313f7523",
+  "mandatory": false,
+  "notes": "新增版本树功能。若干Bug修复。",
+  "platform": "win32",
+  "published": true,
+  "publishedAt": "2026-07-31T04:07:19.600Z",
+  "sha256": "c88acb5bb87efd9881f968374800e2d9110cb22735ddd1bef0b74a45420a32a2",
+  "version": "26.7.31",
+  "versionCode": 260731
+}

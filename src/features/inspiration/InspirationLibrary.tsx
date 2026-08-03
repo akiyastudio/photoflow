@@ -319,7 +319,6 @@ export const InspirationLibraryPage = ({
   };
   const installedComponentIds = new Set(components.filter(component => component.installed).map(component => component.id));
   const teamRetouchStatus = components.find(component => component.id === 'team-retouch');
-  const teamRetouchSettings = (config.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || config.personDetection;
   return <FileBrowserWorkspace
     active={active}
     activeView="project"
@@ -332,7 +331,7 @@ export const InspirationLibraryPage = ({
     installedComponentIds={installedComponentIds}
     componentsLoading={componentsLoading}
     teamRetouchStatus={teamRetouchStatus}
-    teamRetouchSettings={teamRetouchSettings}
+    advancedVideoSettings={config.componentSettings['video-playback-mpv'] || { arrowKeyAction: 'seek' }}
     initialPanel={null}
     importConfig={config.smartImport}
     importDefaults={config.importDefaults}

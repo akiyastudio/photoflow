@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: photoflow-media:; media-src 'self' blob: photoflow-media:; font-src 'self' data:; connect-src 'self' http://localhost:5173 ws://localhost:5173 photoflow-media:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'" />
     <title>照片流</title>
     <style>
       body {
@@ -15,34 +16,6 @@
       .boot-logo { width: 80px; height: 80px; object-fit: contain; }
       .boot-spinner { width: 24px; height: 24px; box-sizing: border-box; border: 3px solid rgba(148, 163, 184, .28); border-top-color: #fff; border-radius: 50%; animation: win11-spin .8s linear infinite; }
 
-      /* === 全局滚动条样式 === */
-      ::-webkit-scrollbar {
-        width: 8px;  /* 垂直滚动条宽度 */
-        height: 8px; /* 水平滚动条高度 */
-      }
-      
-      /* 滚动条轨道（透明，融入背景） */
-      ::-webkit-scrollbar-track {
-        background: transparent;
-      }
-      
-      /* 滚动条滑块（浅灰色） */
-      ::-webkit-scrollbar-thumb {
-        background-color: #cbd5e1; /* Tailwind 的 slate-300 */
-        border-radius: 9999px;
-        /* 使用边框模拟内边距，让滚动条看起来更细 */
-        border: 2px solid #f8fafc; 
-      }
-      
-      /* 鼠标悬停在滑块上时加深一点点 */
-      ::-webkit-scrollbar-thumb:hover {
-        background-color: #94a3b8; /* Tailwind 的 slate-400 */
-      }
-      
-      /* 如果滚动条在纯白背景的容器里（如侧边栏），边框颜色自动适应为白色 */
-      .bg-white ::-webkit-scrollbar-thumb {
-        border-color: #ffffff;
-      }
     </style>
   </head>
   <body class="bg-slate-50 text-slate-900 antialiased overflow-hidden">

@@ -13,7 +13,6 @@ type Props = {
   workspacePath: string;
   project: WorkspaceProject;
   cacheConfig: AppConfig['mediaCache'];
-  defaultBackendMode: AppConfig['personDetection']['backendMode'];
   componentStatus?: ComponentStatus;
   activeStep: TeamRetouchStep;
   onStepChange: (step: TeamRetouchStep) => void;
@@ -432,12 +431,11 @@ type PhotoCardProps = Omit<Props, 'entries' | 'activeStep' | 'onStepChange'> & {
   initialPhoto?: TeamProjectPhoto;
 };
 
-const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defaultBackendMode, identityState, refreshToken, onIdentityChanged, onDetectionComplete, onPickIdentity, processingMessage, initialPhoto, onNotice, onEntriesChange, onProjectChanged }: PhotoCardProps) => {
+const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, identityState, refreshToken, onIdentityChanged, onDetectionComplete, onPickIdentity, processingMessage, initialPhoto, onNotice, onEntriesChange, onProjectChanged }: PhotoCardProps) => {
   const appDialog = useAppDialog();
   const [bundle, setBundle] = useState<TeamPatchBundle>(() => initialPhoto ? bundleFromWorkspacePhoto(initialPhoto) : { success: true, versions: [], tasks: [] });
   const [loading, setLoading] = useState(!initialPhoto);
   const [busy, setBusy] = useState('');
-  const backendMode = defaultBackendMode || 'auto';
   const [cropEditor, setCropEditor] = useState<{ task: TeamPatchTask; crop: Crop } | null>(null);
   useEscapeLayer(Boolean(cropEditor), () => setCropEditor(null), !busy.startsWith('crop:'));
   const [detectionProgress, setDetectionProgress] = useState({ progress: 0, message: '等待识别操作' });
@@ -499,7 +497,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, defa
     })) return;
     setBusy('detect');
     setDetectionProgress({ progress: 1, message: '正在启动 AI 识别进程…' });
-    const result = await window.electronAPI.detectTeamPatchPeople(workspacePath, project.status, project.name, { photoId: bundle.photo.id, baseVersionId: baseVersion.id, backendMode, restoreExcluded });
+    const result = await window.electronAPI.detectTeamPatchPeople(workspacePath, project.status, project.name, { photoId: bundle.photo.id, baseVersionId: baseVersion.id, restoreExcluded });
     setBusy('');
     if (!result.success) { onNotice(`AI 识别失败：${result.error || '未知错误'}`); return; }
     setBundle(normalizeBundle(result));
@@ -592,12 +590,11 @@ const syncTaskLabels = async (workspacePath: string, workspace: TeamIdentityWork
   })));
 };
 
-const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, defaultBackendMode, componentStatus, activeStep, onStepChange, onClose, onNotice, onEntriesChange, onProjectChanged, onBusyChange }: Props) => {
+const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, componentStatus, activeStep, onStepChange, onClose, onNotice, onEntriesChange, onProjectChanged, onBusyChange }: Props) => {
   const appDialog = useAppDialog();
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<BatchResult[]>([]);
   const [progress, setProgress] = useState({ itemIndex: 0, itemCount: entries.length, progress: 0, itemName: '', message: '准备批量识别' });
-  const backendMode = defaultBackendMode || 'auto';
   const [refreshToken, setRefreshToken] = useState(0);
   const [identityLoading, setIdentityLoading] = useState(true);
   const [identityLoadError, setIdentityLoadError] = useState('');
@@ -792,7 +789,6 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
       photoId,
       baseVersionId: subject.photo.baseVersionId,
       personIndex: subject.personIndex,
-      backendMode,
     });
     setPhotoProcessingMessages(current => { const next = { ...current }; delete next[photoId]; return next; });
     if (!result.success) { onNotice(`移除误识别人物失败：${result.error || '未知错误'}`); return; }
@@ -821,7 +817,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
     const targetEntries = unrecognizedPaths.length ? entries.filter(entry => unrecognizedPaths.includes(entry.relativePath)) : entries;
     setRunning(true);
     setResults([]);
-    const result = await window.electronAPI.detectTeamPatchBatch(workspacePath, project.status, project.name, { relativePaths: targetEntries.map(entry => entry.relativePath), backendMode });
+    const result = await window.electronAPI.detectTeamPatchBatch(workspacePath, project.status, project.name, { relativePaths: targetEntries.map(entry => entry.relativePath) });
     setRunning(false);
     setResults(result.results || []);
     setRefreshToken(current => current + 1);
@@ -838,7 +834,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
   const unmarkedIdentityCount = identitySubjects.filter(isUnmarkedIdentitySubject).length;
 
   return <div className="fixed inset-x-0 bottom-0 top-10 z-[310] flex flex-col bg-slate-50"><header className="flex min-h-16 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-3"><span className="rounded-xl bg-violet-50 p-2 text-violet-600"><UsersRound size={20}/></span><div><h2 className="font-bold text-slate-900">团片协作 · {entries.length} 张图片</h2><p className="mt-0.5 text-xs text-slate-500">识别并裁图时同步标记人物；确认后再生成工作流程。</p></div><TeamRetouchSteps value={activeStep} onChange={onStepChange} disabled={running}/><div className="ml-auto flex items-center gap-2"><button disabled={running || identityLoading} onClick={() => void runBatch()} className="dialog-secondary inline-flex items-center gap-2">{running || identityLoading ? <Loader2 size={15} className="animate-spin"/> : <ScanFace size={15}/>} {identityLoading ? '读取项目数据…' : unrecognizedPaths.length ? `识别新增图片（${unrecognizedPaths.length} 张）` : entries.length > 1 ? '重新识别全部图片' : '重新识别图片'}</button><button disabled={running || identityLoading || identityState.identifying} onClick={() => void identifyAndSync()} className="dialog-primary inline-flex items-center gap-2">{identityState.identifying ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}重新自动标记人物</button><button onClick={onClose} className="rounded-md p-2 text-slate-500 hover:bg-slate-100"><X size={20}/></button></div></header>
-    <div className={`border-b px-5 py-2 text-xs ${componentStatus?.advancedAvailable ? 'border-violet-100 bg-violet-50 text-violet-700' : advancedNeedsRepair ? 'border-amber-100 bg-amber-50 text-amber-700' : 'border-blue-100 bg-blue-50 text-blue-700'}`}><span className="font-bold">{componentStatus?.advancedAvailable ? '高级引擎可用' : advancedNeedsRepair ? '高级引擎需要修复' : '基础可用 · 高级未安装'}</span></div>
+    <div className={`border-b px-5 py-2 text-xs ${componentStatus?.advancedAvailable ? 'border-violet-100 bg-violet-50 text-violet-700' : advancedNeedsRepair ? 'border-amber-100 bg-amber-50 text-amber-700' : 'border-blue-100 bg-blue-50 text-blue-700'}`}><span className="font-bold">{componentStatus?.advancedAvailable ? '默认使用高级模型 · PairDETR + SAM 2.1' : advancedNeedsRepair ? '当前使用基础模型 · RTMDet（高级模型需要修复）' : '当前使用基础模型 · RTMDet（高级模型未安装）'}</span></div>
     {!!identitySubjects.length && <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-5 py-2 text-xs"><span className="font-bold text-slate-700">人物标记</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 font-bold text-emerald-700">已确认 {confirmedIdentityCount}</span>{candidateIdentityCount > 0 && <span className="rounded-full bg-amber-50 px-2.5 py-1 font-bold text-amber-700">自动候选 {candidateIdentityCount}</span>}<button type="button" disabled={!unmarkedIdentityCount || identityLoading || identityState.identifying} onClick={openNextUnmarkedIdentity} title="打开下一个未标记人物" className="rounded-full bg-slate-100 px-2.5 py-1 font-bold text-slate-600 transition hover:bg-blue-50 hover:text-blue-700 disabled:cursor-default disabled:opacity-50">未标记 {unmarkedIdentityCount}{unmarkedIdentityCount ? ' · 下一个' : ''}</button><span className="ml-auto text-slate-500">点击“未标记”可连续找到下一处，也可直接点击人物框或人物行</span></div>}
     {running && <div className="border-b border-blue-100 bg-blue-50 px-5 py-3"><div className="flex justify-between text-xs font-bold text-blue-700"><span>{progress.itemIndex ? `${progress.itemIndex}/${progress.itemCount} · ${progress.itemName} · ` : ''}{progress.message}</span><span>{Math.round(overallProgress)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full bg-blue-600" style={{ width: `${overallProgress}%` }}/></div></div>}
     <main className="min-h-0 flex-1 overflow-y-auto p-6"><div className="mx-auto max-w-[1600px] space-y-6">{identityLoading
@@ -849,7 +845,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, de
         const result = resultByPath.get(entry.relativePath);
         const initialPhoto = workspacePhotoForEntry(identityState.photos, entry);
         const photoId = initialPhoto?.photoId || '';
-        return <section key={entry.relativePath} className="space-y-2">{result && !result.success && <div className="rounded-lg bg-red-50 px-3 py-2 text-xs font-bold text-red-600">{result.error || `${entry.name} 识别失败`}</div>}<TeamRetouchPhotoCard entry={entry} workspacePath={workspacePath} project={project} cacheConfig={cacheConfig} defaultBackendMode={defaultBackendMode} componentStatus={componentStatus} onClose={onClose} onNotice={onNotice} onProjectChanged={onProjectChanged} onEntriesChange={() => { const next = entries.filter(candidate => candidate.relativePath !== entry.relativePath); onEntriesChange?.(next); if (!next.length) onClose(); }} identityState={identityState} initialPhoto={initialPhoto} refreshToken={refreshToken + (photoRefreshTokens[photoId] || 0)} processingMessage={photoProcessingMessages[photoId]} onIdentityChanged={() => loadIdentities(true)} onDetectionComplete={identifyAndSync} onPickIdentity={openIdentityPicker}/></section>;
+        return <section key={entry.relativePath} className="space-y-2">{result && !result.success && <div className="rounded-lg bg-red-50 px-3 py-2 text-xs font-bold text-red-600">{result.error || `${entry.name} 识别失败`}</div>}<TeamRetouchPhotoCard entry={entry} workspacePath={workspacePath} project={project} cacheConfig={cacheConfig} componentStatus={componentStatus} onClose={onClose} onNotice={onNotice} onProjectChanged={onProjectChanged} onEntriesChange={() => { const next = entries.filter(candidate => candidate.relativePath !== entry.relativePath); onEntriesChange?.(next); if (!next.length) onClose(); }} identityState={identityState} initialPhoto={initialPhoto} refreshToken={refreshToken + (photoRefreshTokens[photoId] || 0)} processingMessage={photoProcessingMessages[photoId]} onIdentityChanged={() => loadIdentities(true)} onDetectionComplete={identifyAndSync} onPickIdentity={openIdentityPicker}/></section>;
         })}</div></main>
     {selectedIdentitySubject && <IdentityPicker
       subject={selectedIdentitySubject}

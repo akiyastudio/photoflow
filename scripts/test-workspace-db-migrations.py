@@ -379,6 +379,57 @@ def test_project_list_is_read_only_until_catalog_sync(temp_root):
         writer.close()
 
 
+def test_import_staging_directory_never_becomes_a_project(temp_root):
+    workspace_root = os.path.join(temp_root, "import-staging-workspace")
+    staging_path = os.path.join(workspace_root, "_PhotoFlow_Safety_Temp")
+    project_path = os.path.join(workspace_root, "real-project")
+    os.makedirs(staging_path)
+    os.makedirs(project_path)
+    database = os.path.join(temp_root, "import-staging.sqlite3")
+    db = workspace_db.connect(workspace_root, database)
+    now = int(time.time() * 1000)
+    db.execute(
+        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+        ("stale-import-staging", "_PhotoFlow_Safety_Temp", "未分类", "_PhotoFlow_Safety_Temp", now, now),
+    )
+    db.commit()
+    db.close()
+
+    assert workspace_db.load(workspace_root, database)["projects"] == [], "staging records must never be shown as projects"
+    synced = workspace_db.mutate(workspace_root, database, "catalog_sync", {})
+    assert [project["name"] for project in synced["projects"]] == ["real-project"]
+    verification = sqlite3.connect(database)
+    try:
+        assert verification.execute("SELECT COUNT(*) FROM projects WHERE id='stale-import-staging'").fetchone()[0] == 0
+    finally:
+        verification.close()
+
+
+def test_missing_project_can_reconnect_before_retention_cleanup(temp_root):
+    workspace_root = os.path.join(temp_root, "missing-project-workspace")
+    project_path = os.path.join(workspace_root, "recoverable-project")
+    os.makedirs(project_path)
+    database = os.path.join(temp_root, "missing-project.sqlite3")
+    synced = workspace_db.mutate(workspace_root, database, "catalog_sync", {})
+    project_id = synced["projects"][0]["id"]
+
+    os.rmdir(project_path)
+    missing = workspace_db.mutate(workspace_root, database, "catalog_sync", {})["projects"][0]
+    assert missing["availability"] == "missing"
+    assert workspace_db.mutate(workspace_root, database, "missing_projects_list", {"missingBefore": missing["missing_since"] - 1})["projects"] == []
+
+    os.makedirs(project_path)
+    restored = workspace_db.mutate(workspace_root, database, "catalog_sync", {})["projects"][0]
+    assert restored["id"] == project_id and restored["availability"] == "available"
+
+    os.rmdir(project_path)
+    expired = workspace_db.mutate(workspace_root, database, "catalog_sync", {})["projects"][0]
+    candidates = workspace_db.mutate(workspace_root, database, "missing_projects_list", {"missingBefore": expired["missing_since"]})["projects"]
+    assert [project["id"] for project in candidates] == [project_id]
+    workspace_db.mutate(workspace_root, database, "purge_missing_project", {"name": "recoverable-project"})
+    assert workspace_db.load(workspace_root, database)["projects"] == []
+
+
 def main():
     temp_root = tempfile.mkdtemp(prefix="photoflow-db-migration-")
     try:
@@ -391,10 +442,11 @@ def main():
         create_legacy_database(database, project_id, photo_id, version_id)
 
         db = workspace_db.connect(workspace_root, database)
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "15"
+        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "17"
         assignment_columns = {row[1] for row in db.execute("PRAGMA table_info(team_person_assignments)").fetchall()}
-        assert {"completion_kind", "edited_patch_path", "completed_at"} <= assignment_columns
+        assert {"completion_kind", "edited_patch_path", "return_missing", "return_missing_since", "completed_at"} <= assignment_columns
         assert "tracking_state" in {row[1] for row in db.execute("PRAGMA table_info(progress_folders)").fetchall()}
+        assert "missing_since" in {row[1] for row in db.execute("PRAGMA table_info(progress_folders)").fetchall()}
         assert db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='batch_file_operations'").fetchone()
         assert db.execute("SELECT COUNT(*) FROM file_records").fetchone()[0] == 1
         assert db.execute("SELECT value FROM meta WHERE key='migration_12_orphan_file_records_removed'").fetchone()[0] == "1"
@@ -450,6 +502,8 @@ def main():
         test_tiered_fingerprint_rejects_same_edges(temp_root)
         test_full_hash_is_deferred_and_cached(temp_root)
         test_project_list_is_read_only_until_catalog_sync(temp_root)
+        test_import_staging_directory_never_becomes_a_project(temp_root)
+        test_missing_project_can_reconnect_before_retention_cleanup(temp_root)
         print("workspace database migration tests passed")
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)

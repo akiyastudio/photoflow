@@ -21,11 +21,25 @@ IMAGE_EXTENSIONS = {
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".crm"}
 SQLITE_BUSY_TIMEOUT_MS = 15_000
 LEGACY_PROGRESS_MIGRATION_KEY = "legacy_progress_folders_migrated"
-TARGET_SCHEMA_VERSION = 15
+TARGET_SCHEMA_VERSION = 17
 INTEGRITY_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 MIGRATION_BACKUP_LIMIT = 5
 AUTOMATIC_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000
 AUTOMATIC_BACKUP_LIMIT = 7
+
+
+def valid_project_status(value) -> bool:
+    return (
+        isinstance(value, str)
+        and value == value.strip()
+        and 0 < len(value) <= 24
+        and all(ord(character) >= 32 and ord(character) != 127 for character in value)
+    )
+
+
+def is_internal_workspace_directory(value: str) -> bool:
+    name = str(value or "").replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].casefold()
+    return name == "_photoflow_safety_temp" or name.startswith(".photoflow-")
 
 
 def _table_columns(db, table: str) -> set[str]:
@@ -403,12 +417,32 @@ def _migration_15(db):
                    WHERE photo_id=? AND base_version_id=? AND person_index=?""",
                 (task["edited_patch_path"], task["photo_id"], task["base_version_id"], latest["person_index"]),
             )
+
+
+def _migration_16(db):
+    """Keep progress-folder tombstones recoverable after their directory disappears."""
+    columns = _table_columns(db, "progress_folders")
+    if "missing_since" not in columns:
+        db.execute("ALTER TABLE progress_folders ADD COLUMN missing_since INTEGER")
+
+
+def _migration_17(db):
+    """Track externally removed team-retouch return artifacts without losing history."""
+    columns = _table_columns(db, "team_person_assignments")
+    if "return_missing" not in columns:
+        db.execute("ALTER TABLE team_person_assignments ADD COLUMN return_missing INTEGER NOT NULL DEFAULT 0 CHECK(return_missing IN (0,1))")
+    if "return_missing_since" not in columns:
+        db.execute("ALTER TABLE team_person_assignments ADD COLUMN return_missing_since INTEGER")
+
+
 MIGRATIONS = {
     11: _migration_11,
     12: _migration_12,
     13: _migration_13,
     14: _migration_14,
     15: _migration_15,
+    16: _migration_16,
+    17: _migration_17,
 }
 
 
@@ -580,6 +614,7 @@ def connect(root: str, database: str):
             folder_id TEXT,
             tracking_enabled INTEGER NOT NULL DEFAULT 0,
             tracking_state TEXT NOT NULL DEFAULT 'disabled',
+            missing_since INTEGER,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             UNIQUE(project_id, media_kind, version_key)
@@ -709,6 +744,8 @@ def connect(root: str, database: str):
             completed INTEGER NOT NULL DEFAULT 0,
             completion_kind TEXT NOT NULL DEFAULT '',
             edited_patch_path TEXT,
+            return_missing INTEGER NOT NULL DEFAULT 0 CHECK(return_missing IN (0,1)),
+            return_missing_since INTEGER,
             completed_at INTEGER,
             updated_at INTEGER NOT NULL,
             PRIMARY KEY (photo_id, base_version_id, person_index)
@@ -1234,11 +1271,14 @@ def serialize_batch(row):
 
 def serialize_progress(row):
     tracking_state = row["tracking_state"] if "tracking_state" in row.keys() else ("ready" if row["tracking_enabled"] else "disabled")
+    folder_missing = not os.path.isdir(row["folder_path"])
+    missing_since = row["missing_since"] if "missing_since" in row.keys() else None
     return {
         "id": row["id"], "projectId": row["project_id"], "mediaKind": row["media_kind"],
         "versionKey": row["version_key"], "parentProgressId": row["parent_progress_id"],
         "parentVersionKey": row["parent_version_key"], "displayName": row["display_name"],
-        "folderPath": row["folder_path"], "folderMissing": not os.path.isdir(row["folder_path"]),
+        "folderPath": row["folder_path"], "folderMissing": folder_missing,
+        "missingSince": missing_since if folder_missing else None,
         "trackingEnabled": tracking_state == "ready",
         "trackingState": tracking_state,
         "repairBatchId": row["repair_batch_id"] if "repair_batch_id" in row.keys() else None,
@@ -1273,21 +1313,43 @@ def sync_progress_folder_locations(root: str, db, project):
     project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
     existing = progress_rows(db, project["id"])
     by_identity = {row["folder_id"]: row for row in existing if row["folder_id"]}
+    by_path = {row["folder_path_key"]: row for row in existing}
     timestamp = int(time.time() * 1000)
     if not os.path.isdir(project_path):
         return
     project_entries = [entry for entry in os.scandir(project_path) if entry.is_dir()]
+    entry_locations = [
+        (entry, canonical_path(entry.path), directory_identity(entry.path))
+        for entry in project_entries
+    ]
+    present_identities = {identity for _entry, _folder_path, identity in entry_locations if identity}
     # Folder identity survives a rename, so only follow the physical path.
     # The user-facing progress name is independent and must remain unchanged.
-    for entry in project_entries:
-        folder_path = canonical_path(entry.path)
-        identity = directory_identity(folder_path)
+    for _entry, folder_path, identity in entry_locations:
         tracked = by_identity.get(identity) if identity else None
-        if tracked is not None and tracked["folder_path_key"] != folder_path.casefold():
+        if tracked is None:
+            path_match = by_path.get(folder_path.casefold())
+            # A directory recreated at the original path gets a new filesystem
+            # identity. Rebind it only when the old identity is no longer
+            # present elsewhere, otherwise this is a rename plus path reuse.
+            if path_match is not None and path_match["folder_id"] not in present_identities:
+                tracked = path_match
+        if tracked is not None and (tracked["folder_path_key"] != folder_path.casefold()
+                                    or tracked["folder_id"] != identity
+                                    or tracked["missing_since"] is not None):
             db.execute(
-                """UPDATE progress_folders SET folder_path=?,folder_path_key=?,folder_id=?,updated_at=?
+                """UPDATE progress_folders SET folder_path=?,folder_path_key=?,folder_id=?,missing_since=NULL,updated_at=?
                    WHERE id=?""",
                 (folder_path, folder_path.casefold(), identity, timestamp, tracked["id"]),
+            )
+    for row in progress_rows(db, project["id"]):
+        if os.path.isdir(row["folder_path"]):
+            if row["missing_since"] is not None:
+                db.execute("UPDATE progress_folders SET missing_since=NULL,updated_at=? WHERE id=?", (timestamp, row["id"]))
+        elif row["missing_since"] is None:
+            db.execute(
+                "UPDATE progress_folders SET missing_since=?,updated_at=? WHERE id=?",
+                (timestamp, timestamp, row["id"]),
             )
     db.commit()
 
@@ -1326,7 +1388,7 @@ def sync_legacy_progress_folders(root: str, db, project):
         if row is not None:
             db.execute(
                 """UPDATE progress_folders SET folder_path=?,folder_path_key=?,folder_id=?,
-                   parent_progress_id=COALESCE(parent_progress_id,?),updated_at=? WHERE id=?""",
+                   parent_progress_id=COALESCE(parent_progress_id,?),missing_since=NULL,updated_at=? WHERE id=?""",
                 (folder_path, folder_path.casefold(), identity, parent["id"] if parent else None, timestamp, row["id"]),
             )
         else:
@@ -1474,7 +1536,7 @@ def progress_register(root: str, db, payload: dict):
     if existing:
         db.execute(
             """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,display_name=?,folder_path=?,folder_path_key=?,
-               folder_id=?,tracking_enabled=?,tracking_state=?,updated_at=? WHERE id=?""",
+               folder_id=?,tracking_enabled=?,tracking_state=?,missing_since=NULL,updated_at=? WHERE id=?""",
             (media_kind, version_key, *values, existing["id"]),
         )
         progress_id = existing["id"]
@@ -1613,7 +1675,7 @@ def progress_update_tree(root: str, db, payload: dict):
         for progress_id, media_kind, version_key, parent_id, display_name, folder_path, tracking_enabled, tracking_state in normalized:
             db.execute(
                 """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,display_name=?,
-                   folder_path=?,folder_path_key=?,folder_id=?,tracking_enabled=?,tracking_state=?,updated_at=? WHERE id=?""",
+                   folder_path=?,folder_path_key=?,folder_id=?,tracking_enabled=?,tracking_state=?,missing_since=NULL,updated_at=? WHERE id=?""",
                 (media_kind, version_key, parent_id, display_name, folder_path, folder_path.casefold(),
                  directory_identity(folder_path), tracking_enabled, tracking_state, timestamp, progress_id),
             )
@@ -1622,8 +1684,9 @@ def progress_update_tree(root: str, db, payload: dict):
             # Clear it from the now-missing former progress so a later location
             # sync cannot bind both database rows to the same folder.
             db.execute(
-                "UPDATE progress_folders SET folder_id=NULL,updated_at=? WHERE id=?",
-                (timestamp, replacement_id),
+                """UPDATE progress_folders SET folder_id=NULL,missing_since=COALESCE(missing_since,?),updated_at=?
+                   WHERE id=?""",
+                (timestamp, timestamp, replacement_id),
             )
         db.commit()
     except Exception:
@@ -1636,6 +1699,79 @@ def progress_update_tree(root: str, db, payload: dict):
         "success": True,
         "progressFolder": serialize_progress(primary),
         "progressFolders": [serialize_progress(row) for row in refreshed],
+    }
+
+
+def progress_delete_missing(root: str, db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    sync_progress_folder_locations(root, db, project)
+    progress_id = str(payload.get("progressId") or "")
+    progress = db.execute(
+        "SELECT * FROM progress_folders WHERE id=? AND project_id=?",
+        (progress_id, project["id"]),
+    ).fetchone()
+    if progress is None:
+        raise ValueError("失效版本记录不存在")
+    if progress["version_key"] == "0":
+        raise ValueError("原始版本 V0 受保护，不能移除")
+    if os.path.isdir(progress["folder_path"]):
+        raise ValueError("版本文件夹仍然存在，不能按失效记录移除")
+
+    batches = db.execute(
+        """SELECT * FROM version_batches
+           WHERE project_id=? AND (source_folder_path_key=? OR (source_folder_id IS NOT NULL AND source_folder_id=?))
+           ORDER BY sequence""",
+        (project["id"], progress["folder_path_key"], progress["folder_id"]),
+    ).fetchall()
+    batch_ids = [row["id"] for row in batches]
+    version_rows = []
+    if batch_ids:
+        placeholders = ",".join("?" for _ in batch_ids)
+        version_rows = db.execute(
+            f"""SELECT DISTINCT versions.* FROM versions
+                JOIN batch_items ON batch_items.version_id=versions.id
+                WHERE batch_items.batch_id IN ({placeholders}) AND versions.is_deleted=0""",
+            batch_ids,
+        ).fetchall()
+    # The filesystem is authoritative here. A stale file_missing flag must never
+    # allow a still-existing media file to be detached from version history.
+    available_count = sum(os.path.isfile(row["file_path"]) for row in version_rows)
+    if available_count:
+        raise ValueError(f"该节点仍关联 {available_count} 个可用文件，请在版本管理中逐个处理")
+
+    cleanup = delete_version_rows(db, version_rows)
+    deleted_batch_ids = set(batch_ids)
+    parent_by_batch = {row["id"]: row["parent_batch_id"] for row in batches}
+    for batch in db.execute(
+        "SELECT id,parent_batch_id FROM version_batches WHERE project_id=? AND parent_batch_id IS NOT NULL",
+        (project["id"],),
+    ).fetchall():
+        parent_id = batch["parent_batch_id"]
+        visited = set()
+        while parent_id in deleted_batch_ids and parent_id not in visited:
+            visited.add(parent_id)
+            parent_id = parent_by_batch.get(parent_id)
+        if parent_id != batch["parent_batch_id"]:
+            db.execute("UPDATE version_batches SET parent_batch_id=? WHERE id=?", (parent_id, batch["id"]))
+    if batch_ids:
+        placeholders = ",".join("?" for _ in batch_ids)
+        db.execute(f"DELETE FROM version_batches WHERE id IN ({placeholders})", batch_ids)
+
+    timestamp = int(time.time() * 1000)
+    reparented_progress_count = db.execute(
+        "UPDATE progress_folders SET parent_progress_id=?,updated_at=? WHERE parent_progress_id=?",
+        (progress["parent_progress_id"], timestamp, progress_id),
+    ).rowcount
+    db.execute("DELETE FROM progress_folders WHERE id=?", (progress_id,))
+    db.commit()
+    return {
+        "success": True,
+        "progressId": progress_id,
+        "versionKey": progress["version_key"],
+        "deletedVersionCount": len(version_rows),
+        "deletedBatchCount": len(batch_ids),
+        "reparentedProgressCount": reparented_progress_count,
+        **cleanup,
     }
 
 
@@ -2806,8 +2942,81 @@ def team_patch_list(db, payload: dict):
     return {"success": True, "tasks": [serialize_team_patch(row) for row in rows]}
 
 
+def reconcile_team_return_artifacts(db, project_id: str) -> dict:
+    """Reconcile returned-image history with disk while keeping paths recoverable."""
+    timestamp = int(time.time() * 1000)
+    assignments = db.execute(
+        """SELECT photo_id,base_version_id,person_index,edited_patch_path,
+                  return_missing,return_missing_since,completed_at,updated_at
+           FROM team_person_assignments
+           WHERE project_id=? AND completed=1 AND completion_kind='returned'""",
+        (project_id,),
+    ).fetchall()
+    assignment_states = {}
+    missing_count = 0
+    changed_count = 0
+    for row in assignments:
+        artifact_exists = bool(row["edited_patch_path"] and os.path.isfile(row["edited_patch_path"]))
+        missing = not artifact_exists
+        missing_count += int(missing)
+        missing_since = (row["return_missing_since"] or timestamp) if missing else None
+        if bool(row["return_missing"]) != missing or row["return_missing_since"] != missing_since:
+            db.execute(
+                """UPDATE team_person_assignments
+                   SET return_missing=?,return_missing_since=?
+                   WHERE photo_id=? AND base_version_id=? AND person_index=?""",
+                (int(missing), missing_since, row["photo_id"], row["base_version_id"], row["person_index"]),
+            )
+            changed_count += 1
+        assignment_states[(row["photo_id"], row["base_version_id"], int(row["person_index"]))] = {
+            "path": row["edited_patch_path"],
+            "missing": missing,
+            "completed_at": int(row["completed_at"] or row["updated_at"] or 0),
+        }
+
+    tasks = db.execute(
+        """SELECT task.id,task.photo_id,task.base_version_id,task.person_index,task.members_json,
+                  task.edited_patch_path,task.status
+           FROM team_patch_tasks task
+           JOIN photos ON photos.id=task.photo_id
+           WHERE photos.project_id=? AND task.is_deleted=0""",
+        (project_id,),
+    ).fetchall()
+    for task in tasks:
+        try:
+            members = json.loads(task["members_json"] or "[]")
+        except json.JSONDecodeError:
+            members = []
+        person_indices = {int(member.get("personIndex") or 0) for member in members}
+        if not person_indices:
+            person_indices = {int(task["person_index"])}
+        task_assignments = [
+            assignment_states[(task["photo_id"], task["base_version_id"], person_index)]
+            for person_index in person_indices
+            if (task["photo_id"], task["base_version_id"], person_index) in assignment_states
+        ]
+        # Legacy task-only returns have no person assignment to reconcile.
+        if not task_assignments:
+            continue
+        available = [item for item in task_assignments if not item["missing"] and item["path"]]
+        latest = max(available, key=lambda item: item["completed_at"], default=None)
+        desired_path = latest["path"] if latest else None
+        desired_status = task["status"] if task["status"] == "merged" else "uploaded" if desired_path else "exported"
+        current_path = canonical_path(task["edited_patch_path"]) if task["edited_patch_path"] else None
+        if current_path != desired_path or task["status"] != desired_status:
+            db.execute(
+                "UPDATE team_patch_tasks SET edited_patch_path=?,status=?,updated_at=? WHERE id=?",
+                (desired_path, desired_status, timestamp, task["id"]),
+            )
+            changed_count += 1
+    if changed_count:
+        db.commit()
+    return {"missingCount": missing_count, "changedCount": changed_count}
+
+
 def team_project_workspace(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
+    return_artifacts = reconcile_team_return_artifacts(db, project["id"])
     if cleanup_empty_generated_team_identities(db, project["id"]):
         db.commit()
     project_path = os.path.join(os.path.abspath(root), project["relative_path"])
@@ -2883,13 +3092,16 @@ def team_project_workspace(root: str, db, payload: dict):
         """SELECT photo_id AS photoId,base_version_id AS baseVersionId,person_index AS personIndex,
                   identity_id AS identityId,confidence,source,completed,
                   completion_kind AS completionKind,edited_patch_path AS editedPatchPath,
+                  return_missing AS returnMissing,return_missing_since AS returnMissingSince,
                   completed_at AS completedAt,updated_at AS updatedAt
            FROM team_person_assignments WHERE project_id=?""",
         (project["id"],),
     ).fetchall()]
     for item in assignments:
-        item["completed"] = bool(item["completed"])
-    return {"success": True, "photos": photos, "identities": identities, "assignments": assignments}
+        item["returnMissing"] = bool(item["returnMissing"])
+        item["completed"] = bool(item["completed"]) and not item["returnMissing"]
+    return {"success": True, "photos": photos, "identities": identities, "assignments": assignments,
+            "missingReturnCount": return_artifacts["missingCount"]}
 
 
 def team_project_register_photo(db, payload: dict):
@@ -2938,6 +3150,8 @@ def team_identity_save(db, payload: dict):
                  completed=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.completed ELSE 0 END,
                  completion_kind=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.completion_kind ELSE '' END,
                  edited_patch_path=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.edited_patch_path ELSE NULL END,
+                 return_missing=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.return_missing ELSE 0 END,
+                 return_missing_since=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.return_missing_since ELSE NULL END,
                  completed_at=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.completed_at ELSE NULL END,
                  updated_at=excluded.updated_at""",
             (project["id"], assignment["photoId"], assignment["baseVersionId"], int(assignment["personIndex"]),
@@ -2969,6 +3183,8 @@ def team_identity_assign(db, payload: dict):
              completed=excluded.completed,
              completion_kind=CASE WHEN excluded.completed=1 THEN team_person_assignments.completion_kind ELSE '' END,
              edited_patch_path=CASE WHEN excluded.completed=1 THEN team_person_assignments.edited_patch_path ELSE NULL END,
+             return_missing=CASE WHEN excluded.completed=1 THEN team_person_assignments.return_missing ELSE 0 END,
+             return_missing_since=CASE WHEN excluded.completed=1 THEN team_person_assignments.return_missing_since ELSE NULL END,
              completed_at=CASE WHEN excluded.completed=1 THEN team_person_assignments.completed_at ELSE NULL END,
              updated_at=excluded.updated_at""",
         (project["id"], payload["photoId"], payload["baseVersionId"], int(payload["personIndex"]), identity_id,
@@ -3080,6 +3296,8 @@ def team_identity_confirm_group(db, payload: dict):
                  completed=excluded.completed,
                  completion_kind=CASE WHEN excluded.completed=1 THEN team_person_assignments.completion_kind ELSE '' END,
                  edited_patch_path=CASE WHEN excluded.completed=1 THEN team_person_assignments.edited_patch_path ELSE NULL END,
+                 return_missing=CASE WHEN excluded.completed=1 THEN team_person_assignments.return_missing ELSE 0 END,
+                 return_missing_since=CASE WHEN excluded.completed=1 THEN team_person_assignments.return_missing_since ELSE NULL END,
                  completed_at=CASE WHEN excluded.completed=1 THEN team_person_assignments.completed_at ELSE NULL END,
                  updated_at=excluded.updated_at""",
             (project["id"], photo_id, base_version_id, person_index, identity_id,
@@ -3102,7 +3320,7 @@ def team_identity_complete(db, payload: dict):
     edited_patch_path = canonical_path(payload["editedPatchPath"]) if payload.get("editedPatchPath") else None
     result = db.execute(
         """UPDATE team_person_assignments
-           SET completed=?,completion_kind=?,edited_patch_path=?,completed_at=?,updated_at=?
+           SET completed=?,completion_kind=?,edited_patch_path=?,return_missing=0,return_missing_since=NULL,completed_at=?,updated_at=?
            WHERE photo_id=? AND base_version_id=? AND person_index=?""",
         (int(completed), completion_kind, edited_patch_path, timestamp if completed else None, timestamp,
          payload["photoId"], payload["baseVersionId"], int(payload["personIndex"])),
@@ -3117,7 +3335,7 @@ def team_identity_delete(db, payload: dict):
     project = project_row(db, payload["projectName"])
     db.execute(
         """UPDATE team_person_assignments
-           SET completed=0,completion_kind='',edited_patch_path=NULL,completed_at=NULL
+           SET completed=0,completion_kind='',edited_patch_path=NULL,return_missing=0,return_missing_since=NULL,completed_at=NULL
            WHERE identity_id=? AND project_id=?""",
         (payload["identityId"], project["id"]),
     )
@@ -3328,7 +3546,7 @@ def team_patch_update(db, payload: dict):
                 assignment_edited_path = payload.get("editedPatchPath")
             db.execute(
                 """UPDATE team_person_assignments
-                   SET completed=?,completion_kind=?,edited_patch_path=?,completed_at=?,updated_at=?
+                   SET completed=?,completion_kind=?,edited_patch_path=?,return_missing=0,return_missing_since=NULL,completed_at=?,updated_at=?
                    WHERE photo_id=? AND base_version_id=? AND person_index=?""",
                 (int(assignment_completed), assignment_completion_kind,
                  canonical_path(assignment_edited_path) if assignment_edited_path else None,
@@ -3372,12 +3590,17 @@ def sync_directories(root: str, db):
     """Reconcile direct child folders with the catalog without moving files."""
     now = int(time.time() * 1000)
     rows = db.execute("SELECT * FROM projects").fetchall()
+    internal_rows = [row for row in rows if is_internal_workspace_directory(row["relative_path"])]
+    for row in internal_rows:
+        db.execute("DELETE FROM projects WHERE id=?", (row["id"],))
+    internal_ids = {row["id"] for row in internal_rows}
+    rows = [row for row in rows if row["id"] not in internal_ids]
     by_path = {row["relative_path"].casefold(): row for row in rows}
     by_identity = {row["filesystem_id"]: row for row in rows if row["filesystem_id"]}
     seen_ids = set()
 
     for entry in os.scandir(root):
-        if not entry.is_dir():
+        if not entry.is_dir() or is_internal_workspace_directory(entry.name):
             continue
         relative_path = entry.name
         identity = directory_identity(entry.path)
@@ -3424,7 +3647,7 @@ def sync_directories(root: str, db):
 
 
 def catalog_snapshot(db, database: str):
-    rows = [dict(row) for row in db.execute("SELECT * FROM projects WHERE is_deleted=0 ORDER BY name COLLATE NOCASE").fetchall()]
+    rows = [dict(row) for row in db.execute("SELECT * FROM projects WHERE is_deleted=0 ORDER BY name COLLATE NOCASE").fetchall() if not is_internal_workspace_directory(row["relative_path"])]
     return {"success": True, "projects": rows, "database": os.path.abspath(database)}
 
 
@@ -3488,12 +3711,8 @@ def deleted_projects_list(db):
     return {"success": True, "projects": projects}
 
 
-def deleted_project_cleanup_plan(db, payload: dict):
-    project_id = str(payload.get("projectId") or "")
-    project = db.execute("SELECT * FROM projects WHERE id=? AND is_deleted=1", (project_id,)).fetchone()
-    if project is None:
-        raise ValueError("已删除项目记录不存在")
-
+def project_cleanup_plan(db, project):
+    project_id = project["id"]
     photo_rows = db.execute("SELECT id,original_file_path FROM photos WHERE project_id=?", (project_id,)).fetchall()
     photo_ids = [row["id"] for row in photo_rows]
     version_rows = db.execute(
@@ -3540,6 +3759,14 @@ def deleted_project_cleanup_plan(db, payload: dict):
     }
 
 
+def deleted_project_cleanup_plan(db, payload: dict):
+    project_id = str(payload.get("projectId") or "")
+    project = db.execute("SELECT * FROM projects WHERE id=? AND is_deleted=1", (project_id,)).fetchone()
+    if project is None:
+        raise ValueError("已删除项目记录不存在")
+    return project_cleanup_plan(db, project)
+
+
 def purge_deleted_project(db, payload: dict):
     result = deleted_project_cleanup_plan(db, payload)
     project_id = str(payload.get("projectId") or "")
@@ -3551,6 +3778,47 @@ def purge_deleted_project(db, payload: dict):
     db.execute("DELETE FROM projects WHERE id=? AND is_deleted=1", (project_id,))
     db.commit()
     return result
+
+
+def purge_missing_project(root: str, db, payload: dict):
+    name = str(payload.get("name") or "").strip()
+    project = db.execute(
+        "SELECT * FROM projects WHERE name=? COLLATE NOCASE AND is_deleted=0 AND availability='missing'",
+        (name,),
+    ).fetchone()
+    if project is None:
+        raise ValueError("离线项目记录不存在或项目已经恢复")
+    project_path = os.path.abspath(os.path.join(root, project["relative_path"]))
+    if os.path.exists(project_path):
+        raise ValueError("项目文件夹仍然存在，不能只移除软件记录")
+    result = project_cleanup_plan(db, project)
+    removed_undo_ids = result["removedUndoIds"]
+    if removed_undo_ids:
+        placeholders = ",".join("?" for _ in removed_undo_ids)
+        db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", removed_undo_ids)
+    db.execute("DELETE FROM projects WHERE id=? AND is_deleted=0 AND availability='missing'", (project["id"],))
+    db.commit()
+    return result
+
+
+def missing_projects_list(db, payload: dict):
+    cutoff = int(payload.get("missingBefore") or 0)
+    rows = db.execute(
+        """SELECT id,name,relative_path,missing_since,extra_json FROM projects
+           WHERE is_deleted=0 AND availability='missing' AND missing_since IS NOT NULL AND missing_since<=?
+           ORDER BY missing_since""",
+        (cutoff,),
+    ).fetchall()
+    projects = []
+    for row in rows:
+        try:
+            archive = (json.loads(row["extra_json"] or "{}").get("archive") or {})
+        except (TypeError, ValueError, json.JSONDecodeError):
+            archive = {}
+        if archive.get("path"):
+            continue
+        projects.append({"id": row["id"], "name": row["name"], "relativePath": row["relative_path"], "missingSince": row["missing_since"]})
+    return {"success": True, "projects": projects}
 
 
 def mutate(root: str, database: str, action: str, payload: dict):
@@ -3570,7 +3838,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
         finally:
             db.close()
     if action == "add":
-        if payload["status"] not in STATUSES:
+        if not valid_project_status(payload["status"]):
             raise ValueError("无效的项目状态")
         project_path = os.path.join(os.path.abspath(root), payload["relativePath"])
         db.execute("DELETE FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],))
@@ -3579,9 +3847,43 @@ def mutate(root: str, database: str, action: str, payload: dict):
             (str(uuid.uuid4()), payload["name"], payload["status"], payload["relativePath"], directory_identity(project_path), now, now, json.dumps(payload.get("extra") or {}, ensure_ascii=False)),
         )
     elif action == "status":
-        if payload["status"] not in STATUSES:
+        if not valid_project_status(payload["status"]):
             raise ValueError("无效的项目状态")
         db.execute("UPDATE projects SET status=?, updated_at=? WHERE is_deleted=0 AND name=? COLLATE NOCASE", (payload["status"], now, payload["name"]))
+    elif action == "archive_project":
+        row = db.execute("SELECT extra_json FROM projects WHERE is_deleted=0 AND name=? COLLATE NOCASE", (payload["name"],)).fetchone()
+        if row is None:
+            raise ValueError("项目不存在")
+        try:
+            extra = json.loads(row["extra_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            extra = {}
+        extra["archive"] = {
+            "path": os.path.abspath(payload["archivePath"]),
+            "verifiedAt": int(payload.get("verifiedAt") or now),
+            "fileCount": int(payload.get("fileCount") or 0),
+            "bytes": int(payload.get("bytes") or 0),
+        }
+        db.execute(
+            "UPDATE projects SET status='已归档',availability='available',missing_since=NULL,missing_checks=0,extra_json=?,updated_at=? WHERE is_deleted=0 AND name=? COLLATE NOCASE",
+            (json.dumps(extra, ensure_ascii=False), now, payload["name"]),
+        )
+    elif action == "unarchive_project":
+        status = payload.get("status") or "后期中"
+        if not valid_project_status(status) or status in ("未分类", "已归档"):
+            raise ValueError("无效的移回状态")
+        row = db.execute("SELECT extra_json FROM projects WHERE is_deleted=0 AND name=? COLLATE NOCASE", (payload["name"],)).fetchone()
+        if row is None:
+            raise ValueError("项目不存在")
+        try:
+            extra = json.loads(row["extra_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            extra = {}
+        extra.pop("archive", None)
+        db.execute(
+            "UPDATE projects SET status=?,availability='available',missing_since=NULL,missing_checks=0,extra_json=?,updated_at=? WHERE is_deleted=0 AND name=? COLLATE NOCASE",
+            (status, json.dumps(extra, ensure_ascii=False), now, payload["name"]),
+        )
     elif action == "rename":
         extra_json = None
         if "projectDate" in payload:
@@ -3622,6 +3924,14 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = purge_deleted_project(db, payload)
         db.close()
         return result
+    elif action == "purge_missing_project":
+        result = purge_missing_project(root, db, payload)
+        db.close()
+        return result
+    elif action == "missing_projects_list":
+        result = missing_projects_list(db, payload)
+        db.close()
+        return result
     elif action == "media_sync_project":
         result = media_sync_project(root, db, payload)
         db.close()
@@ -3652,6 +3962,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "progress_update_tree":
         result = progress_update_tree(root, db, payload)
+        db.close()
+        return result
+    elif action == "progress_delete_missing":
+        result = progress_delete_missing(root, db, payload)
         db.close()
         return result
     elif action == "batch_register_baseline":
@@ -3798,7 +4112,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_update_tree", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
+    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "archive_project", "unarchive_project", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "missing_projects_list", "purge_missing_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_update_tree", "progress_delete_missing", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")

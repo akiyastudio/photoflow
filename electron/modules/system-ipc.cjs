@@ -1,8 +1,54 @@
+const { validateRendererPythonInvocation } = require('../security-policy.cjs');
+
+const RESERVED_PROJECT_CATEGORIES = new Set(['未分类', '策划中', '待拍摄', '后期中', '已归档']);
+const normalizeCustomProjectCategories = value => {
+  const result = [];
+  const seen = new Set();
+  for (const item of Array.isArray(value) ? value : []) {
+    const name = String(item || '').trim().replace(/\s+/g, ' ');
+    const key = name.toLocaleLowerCase();
+    const hasControlCharacter = [...name].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
+    if (!name || name.length > 24 || hasControlCharacter || RESERVED_PROJECT_CATEGORIES.has(name) || seen.has(key)) continue;
+    seen.add(key);
+    result.push(name);
+    if (result.length >= 50) break;
+  }
+  return result;
+};
+const normalizeProjectCategoryOrder = (value, customCategories) => {
+  const available = ['策划中', '待拍摄', '后期中', '已归档', ...customCategories];
+  const byKey = new Map(available.map(name => [name.toLocaleLowerCase(), name]));
+  const result = [];
+  const seen = new Set();
+  for (const item of Array.isArray(value) ? value : []) {
+    const key = String(item || '').trim().toLocaleLowerCase();
+    const name = byKey.get(key);
+    if (!name || seen.has(key)) continue;
+    seen.add(key);
+    result.push(name);
+  }
+  for (const name of available) {
+    const key = name.toLocaleLowerCase();
+    if (!seen.has(key)) result.push(name);
+  }
+  return result;
+};
+
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, INSPIRATION_PYTHON_TOOLS, JSON, MERGED_PYTHON_TOOLS, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, path, pluginService, privacyService, process, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
   const activePythonTasks = new Map();
+  const rememberPythonTask = (requestId, invocationId, task) => {
+    const requests = activePythonTasks.get(requestId) || new Map();
+    requests.set(invocationId, task);
+    activePythonTasks.set(requestId, requests);
+  };
+  const forgetPythonTask = (requestId, invocationId) => {
+    const requests = activePythonTasks.get(requestId);
+    if (!requests) return;
+    requests.delete(invocationId);
+    if (!requests.size) activePythonTasks.delete(requestId);
+  };
   let advancedOperation = null;
-  let activeClassifyWrite = null;
 
   const componentRoot = componentId => path.join(pluginService.installRoot, String(componentId));
   const teamRetouchRoot = () => componentRoot('team-retouch');
@@ -270,8 +316,8 @@ const registerSystemIpc = context => {
     telemetryService?.track(eventName, properties);
   });
   
-  ipcMain.on('open-external', (event, url) => {
-    shell.openExternal(url);
+  ipcMain.on('open-external', (_event, url) => {
+    void openAllowedExternalUrl(url).catch(error => writeLog('warn', 'Blocked external URL', { url, error: error.message || String(error) }));
   });
 
   ipcMain.handle('privacy-consent-state', async () => privacyService.getState());
@@ -555,71 +601,142 @@ const registerSystemIpc = context => {
   });
 
   ipcMain.handle('cancel-python', async (_event, requestId) => {
-    const task = activePythonTasks.get(String(requestId || ''));
-    if (!task) return { success: false, error: '任务已经结束或不存在。' };
+    const normalizedRequestId = String(requestId || '');
+    const tasks = [...(activePythonTasks.get(normalizedRequestId)?.values() || [])];
+    const coordinatorResults = tasks.map(task => task.backgroundTaskId && backgroundTasks?.cancel?.(task.backgroundTaskId) === true);
+    const coordinatorCancelled = coordinatorResults.some(Boolean);
+    if (!tasks.length) return coordinatorCancelled ? { success: true } : { success: false, error: '任务已经结束或不存在。' };
     try {
-      await fs.promises.writeFile(task.cancelFile, 'cancel', 'utf8');
+      const cancelFiles = [...new Set(tasks.map(task => task.cancelFile).filter(Boolean))];
+      await Promise.all(cancelFiles.map(filePath => fs.promises.writeFile(filePath, 'cancel', 'utf8')));
       return { success: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
   });
 
-  ipcMain.on('run-python', (event, scriptName, args = [], requestId = '') => {
+  ipcMain.on('run-python', async (event, scriptName, args = [], requestId = '') => {
     let command;
     let spawnArgs;
-    const normalizedRequestId = String(requestId || '');
-    const stageArgumentIndex = scriptName === 'classify.py' ? args.indexOf('--stage') : -1;
-    const classifyStage = stageArgumentIndex >= 0 ? String(args[stageArgumentIndex + 1] || '') : '';
-    const writesImportFiles = scriptName === 'classify.py' && (classifyStage === 'import' || classifyStage === 'broll');
-    if (writesImportFiles && activeClassifyWrite?.process && !activeClassifyWrite.process.killed && activeClassifyWrite.requestId !== normalizedRequestId) {
-      event.sender.send('python-event', {
-        type: 'error',
-        message: '已有导入任务正在运行，请等待完成后再启动另一个导入任务。',
-        scriptName,
-        requestId,
-      });
-      event.sender.send('python-event', {
-        type: 'complete',
-        message: '任务未启动',
-        data: { exitCode: 1 },
-        scriptName,
-        requestId,
-      });
+    try {
+      const invocation = validateRendererPythonInvocation(scriptName, args, requestId);
+      scriptName = invocation.scriptName;
+      args = invocation.args;
+      requestId = invocation.requestId;
+    } catch (error) {
+      writeLog('warn', 'Rejected renderer Python invocation', { scriptName, error: error.message || String(error) });
+      event.sender.send('python-event', { type: 'error', message: '不允许启动该工具', scriptName: String(scriptName || ''), requestId: String(requestId || '') });
+      event.sender.send('python-event', { type: 'complete', message: '任务未启动', data: { exitCode: 1 }, scriptName: String(scriptName || ''), requestId: String(requestId || '') });
       return;
     }
-    const cancellableClassify = scriptName === 'classify.py' && ['import', 'broll'].includes(classifyStage);
+    const normalizedRequestId = String(requestId || '');
+    const invocationId = crypto.randomUUID();
+    const stageArgumentIndex = scriptName === 'classify.py' ? args.indexOf('--stage') : -1;
+    const classifyStage = stageArgumentIndex >= 0 ? String(args[stageArgumentIndex + 1] || '') : '';
+    const writesImportFiles = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage);
+    const tracksImportTask = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage);
+    const cancellableClassify = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage);
     const cancellable = (scriptName === 'catch.py' || cancellableClassify) && /^[a-z0-9-]{8,80}$/i.test(normalizedRequestId);
     const cancelFile = cancellable ? path.join(app.getPath('temp'), `photoflow-cancel-${normalizedRequestId}.flag`) : '';
-    const runtimeArgs = cancellable ? [...args, '--cancel_file', cancelFile] : args;
+    let runtimeArgs = cancellable ? [...args, '--cancel_file', cancelFile] : [...args];
+    if (scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage)) {
+      try {
+        const bundledExifTool = await exiftoolPath();
+        if (bundledExifTool) runtimeArgs.push('--exiftool_path', String(bundledExifTool));
+      } catch (error) {
+        writeLog('warn', 'Unable to resolve bundled ExifTool for import metadata', { error: error.message || String(error) });
+      }
+    }
     const destinationArgumentIndex = scriptName === 'classify.py' ? args.indexOf('--dest_path') : -1;
     const importDestination = destinationArgumentIndex >= 0 ? path.resolve(String(args[destinationArgumentIndex + 1] || '')) : '';
-    let importWatchSuppressed = false;
+    const backgroundTaskId = tracksImportTask ? `${normalizedRequestId}:${classifyStage}:${invocationId}` : '';
+    let importTask = null;
+    let importTargets = importDestination ? [importDestination] : [];
+    if (tracksImportTask && normalizedRequestId) {
+      const sdPathIndex = args.indexOf('--sd_path');
+      const sourcePathsIndex = args.indexOf('--source_paths');
+      const routeIndex = args.indexOf('--project_routes');
+      let sourcePaths = sdPathIndex >= 0 ? [String(args[sdPathIndex + 1] || '')] : [];
+      if (sourcePathsIndex >= 0) {
+        try { sourcePaths = JSON.parse(String(args[sourcePathsIndex + 1] || '[]')).map(String); } catch { sourcePaths = []; }
+      }
+      if (routeIndex >= 0) {
+        try {
+          const routedTargets = Object.values(JSON.parse(String(args[routeIndex + 1] || '{}'))).map(value => String(value || '')).filter(Boolean).map(value => path.resolve(value));
+          if (routedTargets.length) importTargets = [...new Set(routedTargets)];
+        } catch { /* invalid route data is reported by the Python worker */ }
+      }
+      const directSource = args.includes('--direct_source');
+      const destinationName = importDestination ? path.basename(importDestination) : '';
+      const importTitle = classifyStage === 'plan' ? (directSource ? '分析底片素材' : '分析 SD 卡素材') : directSource ? '导入底片' : classifyStage === 'broll' ? '从 SD 卡导入花絮' : '从 SD 卡导入';
+      importTask = backgroundTasks?.create?.({
+        id: backgroundTaskId,
+        type: 'project-file-operation',
+        title: destinationName ? `${importTitle} · ${destinationName}` : importTitle,
+        message: classifyStage === 'plan' ? '等待扫描素材' : '等待可用的文件任务名额',
+        runningMessage: classifyStage === 'plan' ? '正在读取拍摄日期并匹配项目' : '正在准备导入',
+        concurrencyGroup: writesImportFiles ? (args.includes('--split_large_files') ? 'heavy-media' : 'disk-io') : '',
+        concurrencyLimit: args.includes('--split_large_files') ? 1 : 2,
+        resources: [...(writesImportFiles ? importTargets : []), ...sourcePaths].filter(Boolean),
+        metadata: { operation: directSource ? 'import-negative' : 'import-sd', importStage: classifyStage, projectName: destinationName, phase: classifyStage === 'plan' ? 'scanning' : 'queued', destinationPath: importDestination, requestId: normalizedRequestId },
+      }) || null;
+      if (importTask && !importTask.deduplicated) {
+        if (cancelFile) rememberPythonTask(normalizedRequestId, invocationId, { process: null, cancelFile, backgroundTaskId });
+        importTask.context.signal.addEventListener('abort', () => {
+          if (cancelFile) fs.promises.writeFile(cancelFile, 'cancel', 'utf8').catch(() => undefined);
+        }, { once: true });
+        try {
+          await importTask.waitForStart();
+        } catch (error) {
+          importTask.cancelled();
+          forgetPythonTask(normalizedRequestId, invocationId);
+          if (cancelFile) fs.promises.rm(cancelFile, { force: true }).catch(() => undefined);
+          event.sender.send('python-event', { type: 'cancelled', message: '导入已取消', scriptName, requestId });
+          event.sender.send('python-event', { type: 'complete', message: '任务未启动', data: { exitCode: 0 }, scriptName, requestId });
+          return;
+        }
+      }
+    }
+    const importWatchSuppressedPaths = [];
     let importWatchFinalized = false;
+    const importedMediaPaths = new Set();
     const finalizeImportWatch = succeeded => {
-      if (!importWatchSuppressed || importWatchFinalized) return;
+      if (!importWatchSuppressedPaths.length || importWatchFinalized) return;
       importWatchFinalized = true;
-      releaseWorkspaceWatchPath(importDestination, 250);
+      for (const targetPath of importWatchSuppressedPaths) releaseWorkspaceWatchPath(targetPath, 250);
       if (!succeeded) return;
       setTimeout(() => {
-        void thumbnailService?.scanProject(importDestination, mediaRuntimeState.activeMediaCacheConfig).catch(error => {
-          writeLog('warn', 'Post-import thumbnail scan deferred', { importDestination, error: error.message || String(error) });
-        });
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('workspace-files-changed', {
-          root: path.dirname(importDestination),
-          fileName: path.basename(importDestination),
-          eventType: 'rename',
-        });
+        for (const targetPath of importWatchSuppressedPaths) {
+          const changedPaths = [...importedMediaPaths].filter(candidate => {
+            const relative = path.relative(targetPath, candidate);
+            return relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+          });
+          if (changedPaths.length) {
+            void thumbnailService?.syncChangedPaths(targetPath, changedPaths, mediaRuntimeState.activeMediaCacheConfig).catch(error => {
+              writeLog('warn', 'Post-import thumbnail update deferred', { importDestination: targetPath, error: error.message || String(error) });
+            });
+          }
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('workspace-files-changed', {
+            root: path.dirname(targetPath),
+            fileName: path.basename(targetPath),
+            eventType: 'rename',
+          });
+        }
       }, 600);
     };
     try {
       if (cancelFile) fs.rmSync(cancelFile, { force: true });
       ({ command, args: spawnArgs } = getRunConfig(scriptName, runtimeArgs));
-      if (importDestination && fs.existsSync(importDestination) && fs.statSync(importDestination).isDirectory()) {
-        suppressWorkspaceWatchPath(importDestination);
-        importWatchSuppressed = true;
+      if (writesImportFiles) {
+        for (const targetPath of importTargets) {
+          if (!targetPath || !fs.existsSync(targetPath) || !fs.statSync(targetPath).isDirectory()) continue;
+          suppressWorkspaceWatchPath(targetPath);
+          importWatchSuppressedPaths.push(targetPath);
+        }
       }
     } catch (error) {
+      importTask?.fail(error);
+      forgetPythonTask(normalizedRequestId, invocationId);
       event.sender.send('python-event', { type: 'error', message: error.message || String(error), scriptName, requestId });
       event.sender.send('python-event', {
         type: 'complete',
@@ -649,15 +766,40 @@ const registerSystemIpc = context => {
     try {
       // 注意：windowsHide: true 可以隐藏弹出的黑框
       const pyProcess = spawn(command, spawnArgs, { windowsHide: true });
-      if (writesImportFiles) activeClassifyWrite = { process: pyProcess, requestId: normalizedRequestId, stage: classifyStage };
-      if (cancellable) activePythonTasks.set(normalizedRequestId, { process: pyProcess, cancelFile });
+      if (cancellable) rememberPythonTask(normalizedRequestId, invocationId, { process: pyProcess, cancelFile, backgroundTaskId });
       let stdoutBuffer = '';
+      let importFailed = false;
+      let importCancelled = false;
+      let importProgress = 0;
       const handlePythonOutputLine = line => {
         const trimmed = line.trim();
         if (!trimmed) return;
         try {
           const jsonMsg = JSON.parse(trimmed);
           mainWindow.webContents.send('python-event', { ...jsonMsg, scriptName, requestId });
+          if (jsonMsg.type === 'success' && Array.isArray(jsonMsg.data?.importedPaths)) {
+            for (const importedPath of jsonMsg.data.importedPaths) {
+              const resolved = path.resolve(String(importedPath || ''));
+              if (importTargets.some(target => {
+                const relative = path.relative(target, resolved);
+                return relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+              })) importedMediaPaths.add(resolved);
+            }
+          }
+          if (importTask && !importTask.deduplicated) {
+            if (jsonMsg.type === 'error') importFailed = true;
+            if (jsonMsg.type === 'cancelled') importCancelled = true;
+            if (jsonMsg.type === 'progress' || jsonMsg.type === 'status') {
+              if (jsonMsg.type === 'progress' && Number.isFinite(Number(jsonMsg.progress))) importProgress = Number(jsonMsg.progress);
+              importTask.context.report(importProgress, jsonMsg.message || '正在导入', {
+                phase: jsonMsg.type === 'progress' ? 'copying' : 'scanning',
+                bytesCopied: Number(jsonMsg.data?.bytesCopied) || 0,
+                totalBytes: Number(jsonMsg.data?.totalBytes) || 0,
+                filesCopied: Number(jsonMsg.data?.filesCopied) || 0,
+                totalFiles: Number(jsonMsg.data?.totalFiles) || 0,
+              });
+            }
+          }
   
           if (jsonMsg.type === 'log' || jsonMsg.type === 'error') {
             mainWindow.webContents.send('python-log', {
@@ -696,9 +838,16 @@ const registerSystemIpc = context => {
       });
   
       pyProcess.on('close', (code) => {
-        if (activeClassifyWrite?.process === pyProcess) activeClassifyWrite = null;
         if (stdoutBuffer.trim()) handlePythonOutputLine(stdoutBuffer);
         stdoutBuffer = '';
+        const cancelledByCoordinator = Boolean(importTask?.context?.signal.aborted);
+        if (cancelledByCoordinator && !importCancelled) {
+          importCancelled = true;
+          mainWindow.webContents.send('python-event', { type: 'cancelled', message: classifyStage === 'plan' ? '素材分析已取消' : '导入已取消', scriptName, requestId });
+        } else if (code !== 0 && importTask && !importFailed && !importCancelled) {
+          importFailed = true;
+          mainWindow.webContents.send('python-event', { type: 'error', message: classifyStage === 'plan' ? '素材分析失败' : `导入进程异常退出（代码 ${code}）`, scriptName, requestId });
+        }
         // 可以在这里针对特定脚本做处理，比如 classify 退出不一定代表错误
         console.log(`${scriptName} finished with code ${code}`);
         mainWindow.webContents.send('python-log', {
@@ -714,18 +863,23 @@ const registerSystemIpc = context => {
           requestId,
         });
         if (cancellable) {
-          activePythonTasks.delete(normalizedRequestId);
+          forgetPythonTask(normalizedRequestId, invocationId);
           fs.promises.rm(cancelFile, { force: true }).catch(() => undefined);
         }
-        finalizeImportWatch(code === 0);
+        if (importTask && !importTask.deduplicated) {
+          if (importCancelled || importTask.context.signal.aborted) importTask.cancelled();
+          else if (code === 0 && !importFailed) importTask.complete(classifyStage === 'plan' ? '素材分析完成' : '导入完成');
+          else importTask.fail(new Error(code === 0 ? '导入失败' : `导入进程异常退出（代码 ${code}）`));
+        }
+        finalizeImportWatch(classifyStage !== 'plan' && code === 0 && !importFailed && !importCancelled);
       });
       
       // 监听启动错误（比如 exe 不存在）
       pyProcess.on('error', (err) => {
-         if (activeClassifyWrite?.process === pyProcess) activeClassifyWrite = null;
+         importTask?.fail(err);
          finalizeImportWatch(false);
          if (cancellable) {
-           activePythonTasks.delete(normalizedRequestId);
+           forgetPythonTask(normalizedRequestId, invocationId);
            fs.promises.rm(cancelFile, { force: true }).catch(() => undefined);
          }
          console.error('Failed to start process:', err);
@@ -738,6 +892,8 @@ const registerSystemIpc = context => {
       });
   
     } catch (e) {
+      importTask?.fail(e);
+      forgetPythonTask(normalizedRequestId, invocationId);
       finalizeImportWatch(false);
       console.error("Spawn Error:", e);
       event.sender.send('python-event', {
@@ -770,8 +926,11 @@ const registerSystemIpc = context => {
   
   ipcMain.handle('saveConfig', async (event, config) => {
     try {
+      const customProjectCategories = normalizeCustomProjectCategories(config?.customProjectCategories);
       const normalizedConfig = {
         ...config,
+        customProjectCategories,
+        projectCategoryOrder: normalizeProjectCategoryOrder(config?.projectCategoryOrder, customProjectCategories),
         telemetry: {
           enabled: privacyService.hasCoreConsent(),
           crashReports: privacyService.hasCoreConsent(),
@@ -860,27 +1019,6 @@ const registerSystemIpc = context => {
     } catch (error) {
       console.error('Error writing birthdays.json:', error);
       return { success: false, error: error.message };
-    }
-  });
-  
-  ipcMain.handle('check-script', async (event, scriptName) => {
-    try {
-      const baseName = scriptName.replace('.py', '');
-      if (!app.isPackaged) {
-        console.log(`[开发模式] 自动放行组件检查: ${scriptName}`);
-        return true; 
-      }
-  
-      const isWin = process.platform === 'win32';
-      const exeSuffix = isWin ? '.exe' : '';
-      // 打包后去 resources/python 目录下寻找 Python 引擎文件
-      const executableName = MERGED_PYTHON_TOOLS.has(baseName) ? 'tools' : INSPIRATION_PYTHON_TOOLS.has(baseName) ? 'inspiration-tools' : baseName;
-      const scriptPath = path.join(process.resourcesPath, 'python', executableName, `${executableName}${exeSuffix}`);
-      return fs.existsSync(scriptPath);
-      
-    } catch (error) {
-      console.error("检查脚本失败:", error);
-      return false;
     }
   });
   

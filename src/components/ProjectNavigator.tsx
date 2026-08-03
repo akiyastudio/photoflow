@@ -1,13 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus, X } from 'lucide-react';
-import { PROJECT_STATUS_LABELS } from '../types';
-import type { ProjectDate, ProjectStatus, WorkspaceProject, WorkspaceStatusGroup } from '../types';
+import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus, HardDrive, X } from 'lucide-react';
+import { normalizeProjectCategoryOrder, projectStatusLabel } from '../types';
+import type { BackupStatus, ProjectDate, ProjectStatus, WorkspaceProject, WorkspaceStatusGroup } from '../types';
 import { useAppDialog } from './AppDialogProvider';
 import { useEscapeLayer } from './LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../utils/recycleBinFailure';
 
-const STATUSES: ProjectStatus[] = ['未分类', '策划中', '待拍摄', '后期中', '已归档'];
 type Action = 'import' | 'broll' | 'match';
 const cleanupCheckedWorkspaces = new Set<string>();
 const localDateKey = () => {
@@ -67,19 +66,29 @@ const projectEditorValue = (project: WorkspaceProject) => {
   return { year: '', month: '', day: '', quickDate: '', name: project.name };
 };
 
-export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData, createPlanningFolder, selectedProject, onSelectProject, onProjectDeleted, onWorkspaceResolved }: {
+export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, autoCleanupDeletedProjectData, createPlanningFolder, customProjectCategories, projectCategoryOrder, selectedProject, onSelectProject, onProjectDeleted, onWorkspaceResolved, onOpenBackup }: {
   workspacePath: string;
+  backupEnabled: boolean;
+  backupStatus: BackupStatus;
   autoCleanupDeletedProjectData: boolean;
   createPlanningFolder: boolean;
+  customProjectCategories: string[];
+  projectCategoryOrder: string[];
   selectedProject: WorkspaceProject | null;
   onSelectProject: (project: WorkspaceProject, replacePath?: string) => void;
   onProjectAction: (action: Action, project: WorkspaceProject) => void;
   onProjectDeleted: (project: WorkspaceProject) => void;
   onWorkspaceResolved: (workspacePath: string) => void;
+  onOpenBackup: (project?: WorkspaceProject) => void;
 }) => {
   const appDialog = useAppDialog();
   const [groups, setGroups] = useState<WorkspaceStatusGroup[]>([]);
-  const [expanded, setExpanded] = useState<Record<ProjectStatus, boolean>>({ 未分类: true, 策划中: true, 待拍摄: true, 后期中: true, 已归档: true });
+  const statuses = useMemo<ProjectStatus[]>(() => {
+    const ordered = ['未分类', ...normalizeProjectCategoryOrder(projectCategoryOrder, customProjectCategories), ...groups.map(group => group.status)];
+    const seen = new Set<string>();
+    return ordered.filter(status => { const key = status.toLocaleLowerCase(); if (seen.has(key)) return false; seen.add(key); return true; });
+  }, [customProjectCategories, groups, projectCategoryOrder]);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({ 未分类: true, 策划中: true, 待拍摄: true, 后期中: true, 已归档: true });
   useEffect(() => {
     try {
       const saved = window.localStorage.getItem('photoflow:sidebar-expanded');
@@ -184,6 +193,12 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
     window.addEventListener('workspace-projects-changed', changed);
     return () => { window.clearTimeout(refreshTimer); unsubscribe(); window.removeEventListener('click', close); window.removeEventListener('photoflow-menu-open', close); window.removeEventListener('workspace-projects-changed', changed); };
   }, [workspacePath]);
+  useEffect(() => {
+    const hasOfflineArchive = groups.some(group => group.projects.some(project => project.archived && project.availability === 'missing'));
+    if (!hasOfflineArchive) return;
+    const timer = window.setInterval(() => void refresh(), 15000);
+    return () => window.clearInterval(timer);
+  }, [groups, workspacePath]);
 
   const createProject = async () => {
     setNewProjectError('');
@@ -230,11 +245,42 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
   };
   const move = async (project: WorkspaceProject, status: ProjectStatus) => {
     if (status === project.status) return;
+    if (project.archived && status !== '已归档') {
+      await moveBack(project, status);
+      return;
+    }
+    if (status === '已归档' && !project.archived) {
+      const archive = await window.electronAPI.getArchiveStatus();
+      if (archive.enabled) {
+        const choice = await appDialog.choice({
+          title: '如何归档这个项目？',
+          message: archive.state === 'connected' ? '可以只更改项目状态，也可以验证后迁移到归档盘。归档盘不是备份。' : '归档盘当前离线，只能更改项目状态。',
+          choices: [
+            ...(archive.state === 'connected' ? [{ value: 'move', label: '移动到归档盘' }] : []),
+            { value: 'status', label: '只更改项目状态' },
+          ],
+          defaultValue: archive.state === 'connected' ? 'move' : 'status',
+        });
+        if (!choice) return;
+        if (choice === 'move') {
+          const result = await window.electronAPI.archiveWorkspaceProject(workspacePath, project.name);
+          setCreateNotice(result.success ? '归档任务已开始；完成后请再确认独立备份' : result.error || '无法开始归档');
+          window.setTimeout(() => setCreateNotice(''), result.success ? 4500 : 6000);
+          return;
+        }
+      }
+    }
     const result = await window.electronAPI.moveWorkspaceProject(workspacePath, project.status, project.name, status);
     if (!result.success) setError(result.error || '更改状态失败');
     else if (result.project && selectedProject?.path === project.path) onSelectProject(result.project, project.path);
     setExpanded(current => ({ ...current, [status]: true }));
     refresh();
+  };
+  const moveBack = async (project: WorkspaceProject, statusAfter: Exclude<ProjectStatus, '已归档'> = '后期中') => {
+    if (!await appDialog.confirm({ title: `将“${project.name}”移回工作盘？`, message: `项目将从归档盘移回原工作区位置，并更改为“${projectStatusLabel(statusAfter)}”。`, confirmLabel: '移回工作盘' })) return;
+    const result = await window.electronAPI.moveArchivedProjectBack(workspacePath, project.name, statusAfter);
+    setCreateNotice(result.success ? '移回工作盘任务已开始' : result.error || '无法移回项目');
+    window.setTimeout(() => setCreateNotice(''), result.success ? 3500 : 6000);
   };
   const trash = async (project: WorkspaceProject) => {
     if (!await appDialog.confirm({
@@ -262,22 +308,21 @@ export const ProjectNavigator = ({ workspacePath, autoCleanupDeletedProjectData,
     const result = await window.electronAPI.openWorkspaceProject(workspacePath, project.status, project.name);
     if (!result.success) setError(result.error || '无法打开文件夹');
   };
-
   return <>
     {createNotice && <div className="fixed left-1/2 top-10 z-[400] -translate-x-1/2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-xl animate-in fade-in slide-in-from-top-2">{createNotice}</div>}
     <div className="px-4 pt-4"><button onClick={openNewProject} className="w-full rounded-lg bg-blue-600 px-3 py-2.5 text-sm font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-500"><span className="flex items-center justify-center gap-2"><FolderPlus size={17}/>新建项目</span></button></div>
     <nav className="project-navigator-scroll flex-1 overflow-y-auto p-4 pt-2">
-      {STATUSES.filter(status => status !== '未分类' || (groups.find(group => group.status === status)?.projects.length || 0) > 0).map(status => {
+      {statuses.filter(status => status !== '未分类' || (groups.find(group => group.status === status)?.projects.length || 0) > 0).map(status => {
         const projects = (groups.find(group => group.status === status)?.projects || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
         const isOpen = expanded[status];
         return <section key={status} className="border-t border-slate-200 py-2 first:border-t-0">
-          <button type="button" onClick={() => setExpanded(current => ({ ...current, [status]: !current[status] }))} className="flex w-full items-center gap-1.5 rounded-md px-2 py-2 text-left text-xs font-bold tracking-wide text-slate-500 hover:bg-slate-100 hover:text-slate-800">{isOpen ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span>{PROJECT_STATUS_LABELS[status]}</span><span className="ml-auto font-mono text-[10px] text-slate-400">{projects.length}</span></button>
-          {isOpen && <div className="mt-1 space-y-1">{projects.map(project => { const unavailable = project.availability === 'missing'; return <div key={project.path} className={`project-row group flex items-center gap-1 rounded-lg text-sm transition ${unavailable ? 'bg-amber-50 text-amber-700' : selectedProject?.path === project.path ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'}`}><button title={unavailable ? `${project.name}（文件夹不可用，数据已保留）` : project.name} disabled={unavailable} onClick={() => onSelectProject(project)} onContextMenu={event => { event.preventDefault(); if (unavailable) return; window.dispatchEvent(new Event('photoflow-menu-open')); setMenu({ project, x: event.clientX, y: event.clientY }); }} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left disabled:cursor-not-allowed"><Folder size={15} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{project.name}</span>{unavailable && <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">离线</span>}</button><button type="button" aria-label="打开项目文件夹" title={unavailable ? '项目文件夹不可用' : '打开项目文件夹'} disabled={unavailable} onClick={() => openProject(project)} className="project-open-button mr-1 rounded p-1.5 disabled:cursor-not-allowed disabled:opacity-40"><FolderOpen size={15}/></button></div>; })}{!projects.length && <p className="px-7 py-1 text-xs text-slate-400">暂无项目</p>}</div>}
+          <button type="button" onClick={() => setExpanded(current => ({ ...current, [status]: !current[status] }))} className="flex w-full items-center gap-1.5 rounded-md px-2 py-2 text-left text-xs font-bold tracking-wide text-slate-500 hover:bg-slate-100 hover:text-slate-800">{isOpen ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span>{projectStatusLabel(status)}</span><span className="ml-auto font-mono text-[10px] text-slate-400">{projects.length}</span></button>
+          {isOpen && <div className="mt-1 space-y-1">{projects.map(project => { const unavailable = project.availability === 'missing'; return <div key={project.path} onContextMenu={event => { event.preventDefault(); window.dispatchEvent(new Event('photoflow-menu-open')); setMenu({ project, x: event.clientX, y: event.clientY }); }} className={`project-row group flex items-center gap-1 rounded-lg text-sm transition ${unavailable ? 'bg-amber-50 text-amber-700' : selectedProject?.path === project.path ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'}`}><button title={unavailable ? `${project.name}（${project.archived ? '归档盘未连接' : '文件夹不可用，数据已保留'}）` : project.name} disabled={unavailable} onClick={() => onSelectProject(project)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left disabled:cursor-not-allowed"><Folder size={15} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{project.name}</span>{project.archived && !unavailable && <HardDrive size={13} className="shrink-0 opacity-60"/>}{unavailable && <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">{project.archived ? '归档盘离线' : '离线'}</span>}</button><button type="button" aria-label="打开项目文件夹" title={unavailable ? '项目文件夹不可用' : '打开项目文件夹'} disabled={unavailable} onClick={() => openProject(project)} className="project-open-button mr-1 rounded p-1.5 disabled:cursor-not-allowed disabled:opacity-40"><FolderOpen size={15}/></button></div>; })}{!projects.length && <p className="px-7 py-1 text-xs text-slate-400">暂无项目</p>}</div>}
         </section>;
       })}
       {error && <p className="mt-2 px-2 text-xs text-red-500">{error}</p>}
     </nav>
-    {menu && <div className="fixed z-[300] w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" style={{ left: Math.min(menu.x, window.innerWidth - 190), top: Math.min(menu.y, window.innerHeight - 300) }} onClick={event => event.stopPropagation()}><button className="project-menu-item" onClick={() => { openRenameProject(menu.project); setMenu(null); }}>重命名</button><div className="my-1 border-t border-slate-100"/><p className="px-2 py-1 text-[11px] font-bold text-slate-400">更改状态</p>{STATUSES.filter(status => status !== '未分类').map(status => { const isCurrentStatus = status === menu.project.status; return <button key={status} aria-current={isCurrentStatus ? 'true' : undefined} className={`project-menu-item ${isCurrentStatus ? 'bg-blue-50 font-bold text-blue-700' : ''}`} onClick={() => { move(menu.project, status); setMenu(null); }}>{PROJECT_STATUS_LABELS[status]}{isCurrentStatus ? '（当前）' : ''}</button>; })}<div className="my-1 border-t border-slate-100"/><button className="project-menu-item text-red-500 hover:bg-red-50" onClick={() => { trash(menu.project); setMenu(null); }}>删除项目</button></div>}
+    {menu && (backupEnabled || menu.project.availability !== 'missing' || menu.project.archived) && (() => { const hasProjectBackup = backupStatus.snapshots.some(snapshot => snapshot.projectItems?.some(project => project.name === menu.project.name)); return <div className="fixed z-[300] w-52 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" style={{ left: Math.min(menu.x, window.innerWidth - 221), top: Math.min(menu.y, window.innerHeight - 350) }} onClick={event => event.stopPropagation()}>{menu.project.availability !== 'missing' && <><button className="project-menu-item" onClick={() => { openRenameProject(menu.project); setMenu(null); }}>重命名</button>{menu.project.archived && <button className="project-menu-item" onClick={() => { const project = menu.project; setMenu(null); void moveBack(project); }}>移回工作盘</button>}{backupEnabled && <div className="my-1 border-t border-slate-100"/>}</>}{backupEnabled && <><button className="project-menu-item" onClick={() => { const project = menu.project; setMenu(null); onOpenBackup(project); }}>查看项目备份</button>{menu.project.availability === 'missing' && <button disabled={!hasProjectBackup} title={hasProjectBackup ? '选择一个项目快照进行恢复' : '没有可恢复的项目快照'} className="project-menu-item disabled:cursor-not-allowed disabled:text-slate-300" onClick={() => { if (!hasProjectBackup) return; const project = menu.project; setMenu(null); onOpenBackup(project); }}>从备份恢复此项目…</button>}</>}{!backupEnabled && menu.project.archived && menu.project.availability === 'missing' && <button className="project-menu-item" onClick={() => { setMenu(null); onOpenBackup(); }}>查看归档设置</button>}{menu.project.availability !== 'missing' && <><div className="my-1 border-t border-slate-100"/><p className="px-2 py-1 text-[11px] font-bold text-slate-400">更改状态</p>{statuses.filter(status => status !== '未分类').map(status => { const isCurrentStatus = status === menu.project.status; return <button key={status} aria-current={isCurrentStatus ? 'true' : undefined} className={`project-menu-item ${isCurrentStatus ? 'bg-blue-50 font-bold text-blue-700' : ''}`} onClick={() => { move(menu.project, status); setMenu(null); }}>{projectStatusLabel(status)}{isCurrentStatus ? '（当前）' : ''}</button>; })}<div className="my-1 border-t border-slate-100"/>{menu.project.archived ? <p className="px-2 py-1 text-[11px] leading-4 text-amber-600">删除前请先移回工作盘</p> : <button className="project-menu-item text-red-500 hover:bg-red-50" onClick={() => { trash(menu.project); setMenu(null); }}>删除项目</button>}</>}</div>; })()}
     {(showNew || renameProject) && <ProjectDialog title={renameProject ? '重命名项目' : '新建项目'} onClose={closeProjectEditor}>
       <form autoComplete="off" onSubmit={event => { event.preventDefault(); if (!isCreating && nextProjectDisplayName) void (renameProject ? rename() : createProject()); }}>
         <p className="text-xs text-slate-500">日期精确到日时可自动匹配 SD 卡；只填年月时，导入前会询问目标项目。项目名称可以留空，只使用日期。</p>

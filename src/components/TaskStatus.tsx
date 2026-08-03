@@ -9,6 +9,7 @@ interface TaskProgressProps {
   isRunning: boolean;
   idleMessage?: string;
   action?: React.ReactNode;
+  reportToTaskCenter?: boolean;
 }
 
 /** Shared execution area used by every tool. The newest script output is the status title. */
@@ -17,7 +18,8 @@ export const TaskProgress: React.FC<TaskProgressProps> = ({
   progress,
   isRunning,
   idleMessage = '进度',
-  action
+  action,
+  reportToTaskCenter = true,
 }) => {
   const latest = logs[logs.length - 1];
   const message = latest?.message || (progress >= 100 ? '处理完成' : idleMessage);
@@ -27,14 +29,14 @@ export const TaskProgress: React.FC<TaskProgressProps> = ({
   const latestType = latest?.type;
 
   useEffect(() => {
-    if (!reporter) return;
+    if (!reporter || !reportToTaskCenter) return;
     reporter({
       state: isRunning ? 'running' : latestType === 'error' ? 'failed' : percentage >= 100 ? 'completed' : 'idle',
       progress: percentage,
       message,
       logs,
     });
-  }, [isRunning, latestType, logs, message, percentage, reporter]);
+  }, [isRunning, latestType, logs, message, percentage, reporter, reportToTaskCenter]);
 
   return (
     <section className="rounded-xl border border-slate-200 bg-slate-50 p-4" aria-live="polite" aria-busy={isRunning}>

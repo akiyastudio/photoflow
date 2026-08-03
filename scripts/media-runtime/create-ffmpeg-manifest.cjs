@@ -9,7 +9,7 @@ const lock = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', '..', 'med
 const configureFlags = fs.readFileSync(path.resolve(configureFileArg), 'utf8').trim().split(/\s+/).filter(Boolean);
 const artifact = file => ({ file, sha256: sha256File(path.join(root, file)) });
 const manifest = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   kind: 'photoflow-ffmpeg-runtime',
   platform: 'windows-x64',
   license: 'GPL-2.0-or-later',

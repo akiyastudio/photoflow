@@ -14,6 +14,7 @@ const createVersionService = ({ repository }) => ({
   listProgress: (root, projectName) => repository.listProgress(root, projectName),
   registerProgress: (root, payload) => repository.registerProgress(root, payload),
   updateProgressTree: (root, payload) => repository.updateProgressTree(root, payload),
+  deleteMissingProgress: (root, payload) => repository.deleteMissingProgress(root, payload),
   registerBatchBaseline: (root, payload) => repository.registerBatchBaseline(root, payload),
   commitBatchCompare: (root, payload) => repository.commitBatchCompare(root, payload),
   listBatchOperations: (root, batchId) => repository.listBatchOperations(root, batchId),

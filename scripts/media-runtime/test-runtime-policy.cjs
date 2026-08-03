@@ -18,17 +18,26 @@ try {
     licenseArchive: create('licenses.zip'),
   };
   const ffmpeg = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: 'photoflow-ffmpeg-runtime',
     platform: 'windows-x64',
     license: 'GPL-2.0-or-later',
     reproducibleSource: true,
     ffmpeg: { version: '7.1.1', commit: 'a'.repeat(40) },
-    configureFlags: ['--enable-gpl', '--enable-libx264', '--enable-zlib', '--disable-autodetect', '--disable-network'],
+    configureFlags: ['--enable-gpl', '--enable-libx264', '--enable-zlib', '--enable-mediafoundation', '--enable-d3d11va', '--disable-autodetect', '--disable-network'],
     components: [{ name: 'x264', commit: 'b'.repeat(40) }, { name: 'zlib', commit: 'e'.repeat(40) }],
     artifacts,
   };
   assert.doesNotThrow(() => validateFfmpegManifest(ffmpeg, root));
+  assert.doesNotThrow(() => validateFfmpegManifest({
+    ...ffmpeg,
+    schemaVersion: 1,
+    configureFlags: ffmpeg.configureFlags.filter(flag => !['--enable-mediafoundation', '--enable-d3d11va'].includes(flag)),
+  }, root));
+  assert.throws(() => validateFfmpegManifest({
+    ...ffmpeg,
+    configureFlags: ffmpeg.configureFlags.filter(flag => flag !== '--enable-mediafoundation'),
+  }, root), /硬件加速构建参数/);
   assert.throws(() => validateFfmpegManifest({ ...ffmpeg, configureFlags: [...ffmpeg.configureFlags, '--enable-libx265'] }, root), /禁止构建参数/);
 
   const dll = create('libmpv-2.dll');
