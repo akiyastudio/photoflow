@@ -50,13 +50,21 @@ done
 
 test -f "$dependency_sources" || { echo "Missing dependency source archive: $dependency_sources" >&2; exit 1; }
 test -f "$dependency_licenses" || { echo "Missing dependency license archive: $dependency_licenses" >&2; exit 1; }
-rm -rf "$source_root" "$build_root" "$output_root"
-git clone --branch "$mpv_ref" --depth 1 "$mpv_repo" "$source_root"
+if [[ "${PHOTOFLOW_MPV_RESUME:-0}" != 1 ]]; then
+  rm -rf "$source_root" "$build_root" "$output_root"
+fi
+if [[ ! -d "$source_root/.git" ]]; then
+  git clone --branch "$mpv_ref" --depth 1 "$mpv_repo" "$source_root"
+fi
 actual_mpv_commit="$(git -C "$source_root" rev-parse HEAD)"
 [[ "$actual_mpv_commit" == "$mpv_commit"* ]] || { echo "mpv tag resolved to unexpected commit: $actual_mpv_commit" >&2; exit 1; }
 mkdir -p "$build_root" "$output_root"
 
-export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+shaderc_pkg_config_dir="${PHOTOFLOW_SHADERC_PKG_CONFIG_DIR:-/ucrt64/lib/pkgconfig}"
+shaderc_runtime_dll="${PHOTOFLOW_SHADERC_RUNTIME_DLL:-/ucrt64/bin/libshaderc_shared.dll}"
+test -f "$shaderc_pkg_config_dir/shaderc.pc" || { echo "Missing shaderc pkg-config metadata: $shaderc_pkg_config_dir/shaderc.pc" >&2; exit 1; }
+test -f "$shaderc_runtime_dll" || { echo "Missing shaderc runtime: $shaderc_runtime_dll" >&2; exit 1; }
+export PKG_CONFIG_PATH="$prefix/lib/pkgconfig:$shaderc_pkg_config_dir"
 export PKG_CONFIG_LIBDIR="$PKG_CONFIG_PATH"
 export PATH="$prefix/bin:$PATH"
 export LDFLAGS="-static-libgcc -static-libstdc++"
@@ -75,21 +83,26 @@ mpv_options=(
   -Dzlib=enabled
   -Dgl=disabled
   -Dvulkan=disabled
+  -Dshaderc=enabled
+  -Dspirv-cross=enabled
 )
 printf '%s\n' "${mpv_options[@]}" > "$build_root-meson-options.txt"
-meson setup "$build_root" "$source_root" \
-  --buildtype=release \
-  --prefix="$output_root" \
-  "${mpv_options[@]}"
+if [[ ! -f "$build_root/build.ninja" ]]; then
+  meson setup "$build_root" "$source_root" \
+    --buildtype=release \
+    --prefix="$output_root" \
+    "${mpv_options[@]}"
+fi
 meson compile -C "$build_root"
 meson install -C "$build_root"
 meson configure "$build_root" > "$output_root/meson-configure.txt"
 cp "$build_root-meson-options.txt" "$output_root/mpv-meson-options.txt"
-grep -Eq '^gpl[[:space:]]+false' "$output_root/meson-configure.txt" || { echo 'mpv gpl=false was not preserved' >&2; exit 1; }
+grep -Eq '^[[:space:]]*gpl[[:space:]]+false' "$output_root/meson-configure.txt" || { echo 'mpv gpl=false was not preserved' >&2; exit 1; }
 
 find "$build_root" -type f \( -iname 'libmpv-2.dll' -o -iname 'mpv-2.dll' \) -exec cp {} "$output_root/libmpv-2.dll" \;
 test -f "$output_root/libmpv-2.dll" || { echo 'Meson build did not produce libmpv-2.dll' >&2; exit 1; }
-find "$prefix/bin" -maxdepth 1 -type f -iname '*.dll' -exec cp -n {} "$output_root/" \;
+find "$prefix/bin" -maxdepth 1 -type f -iname '*.dll' -exec cp -f {} "$output_root/" \;
+cp "$shaderc_runtime_dll" "$output_root/libshaderc_shared.dll"
 for binary in "$output_root"/*.dll; do
   if objdump -p "$binary" | grep -Eiq 'DLL Name:.*(libwinpthread|libgcc|libstdc\+\+)'; then
     echo "Runtime contains an undeclared MinGW support DLL dependency: $binary" >&2

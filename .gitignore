@@ -50,6 +50,7 @@ out/
 electron/bin/
 media-runtime/vendor/
 .media-runtime-build/
+/.tools/
 /components/video-playback-mpv/runtime/
 /components/video-playback-mpv/vendor/
 

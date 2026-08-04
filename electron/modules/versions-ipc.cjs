@@ -106,6 +106,43 @@ const registerVersionIpc = context => {
       await fs.promises.rm(pendingPath, { force: true }).catch(() => undefined);
     }
   };
+  const teamWorkflowReturnReviewTarget = (workspaceRoot, projectName) => {
+    const reviewRoot = path.join(getWorkspaceDataRoot(workspaceRoot), 'team-retouch', 'workflow-return-reviews');
+    const projectKey = crypto.createHash('sha256').update(String(projectName)).digest('hex');
+    const directory = path.join(reviewRoot, projectKey);
+    return { reviewRoot, directory, sessionPath: path.join(directory, 'session.json') };
+  };
+  const readTeamWorkflowReturnReview = async (workspaceRoot, projectName) => {
+    const target = teamWorkflowReturnReviewTarget(workspaceRoot, projectName);
+    if (!fs.existsSync(target.sessionPath)) return { ...target, session: null };
+    const session = JSON.parse(await fs.promises.readFile(target.sessionPath, 'utf8'));
+    if (String(session.projectName) !== String(projectName) || !session.id || Number(session.version) !== 1) throw new Error('待确认返图批次数据无效');
+    return { ...target, session };
+  };
+  const presentTeamWorkflowReturnReview = session => ({
+    ...session.result,
+    reviewSessionId: session.id,
+    matches: (session.result?.matches || []).map(match => ({
+      ...match,
+      mediaPath: match.path && fs.existsSync(match.path) ? `media-token:${mediaService.grantPath(path.resolve(match.path))}` : undefined,
+    })),
+  });
+  const writeTeamWorkflowReturnReview = async (sessionPath, session) => {
+    const pendingPath = `${sessionPath}.${crypto.randomUUID()}.tmp`;
+    try {
+      await fs.promises.writeFile(pendingPath, JSON.stringify(session, null, 2), 'utf8');
+      await replaceFileAtomic(pendingPath, sessionPath);
+    } finally {
+      await fs.promises.rm(pendingPath, { force: true }).catch(() => undefined);
+    }
+  };
+  const discardTeamWorkflowReturnReview = async (workspaceRoot, projectName, expectedSessionId = '') => {
+    const target = await readTeamWorkflowReturnReview(workspaceRoot, projectName);
+    if (!target.session) return false;
+    if (expectedSessionId && String(target.session.id) !== String(expectedSessionId)) throw new Error('待确认返图批次已经变化，请刷新后重试');
+    await fs.promises.rm(target.directory, { recursive: true, force: true });
+    return true;
+  };
   const resolveWorkflowSource = async (workspaceRoot, item) => {
     const patches = await versionService.listTeamPatches(workspaceRoot, item.photoId);
     const task = patches.tasks.find(candidate => candidate.id === item.taskId && candidate.baseVersionId === item.baseVersionId);
@@ -1099,13 +1136,15 @@ const registerVersionIpc = context => {
       const settings = await readTeamWorkflowSettings(workspaceRoot, projectName);
       const identityIds = new Set((workspace.identities || []).map(identity => identity.id));
       const preferredIdentityOrder = (settings.preferredIdentityOrder || []).filter(identityId => identityIds.has(identityId));
-      const sameWeekIdentityIds = (settings.sameWeekIdentityIds || []).filter(identityId => preferredIdentityOrder.slice(1).includes(identityId));
+      const requestedSameWeekIdentityIds = new Set((settings.sameWeekIdentityIds || []).map(String));
+      const sameWeekIdentityIds = preferredIdentityOrder.slice(1).filter(identityId => requestedSameWeekIdentityIds.has(identityId));
       const workflowTarget = status ? await readTeamWorkflowManifest(workspaceRoot, status, projectName) : null;
       const workflowManifest = workflowTarget?.manifest || null;
       const workflowGenerated = Boolean(workflowManifest && Number(workflowManifest.version) >= 2);
       const generatedSettings = workflowManifest?.workflowSettings;
       const generatedOrder = Array.isArray(generatedSettings?.preferredIdentityOrder) ? generatedSettings.preferredIdentityOrder.map(String) : [];
-      const generatedSameWeekIdentityIds = Array.isArray(generatedSettings?.sameWeekIdentityIds) ? generatedSettings.sameWeekIdentityIds.map(String) : [];
+      const generatedSameWeekSet = new Set(Array.isArray(generatedSettings?.sameWeekIdentityIds) ? generatedSettings.sameWeekIdentityIds.map(String) : []);
+      const generatedSameWeekIdentityIds = generatedOrder.slice(1).filter(identityId => generatedSameWeekSet.has(identityId));
       const workflowNeedsRegeneration = Boolean(workflowGenerated && generatedSettings && (
         JSON.stringify(generatedOrder) !== JSON.stringify(preferredIdentityOrder)
         || JSON.stringify(generatedSameWeekIdentityIds) !== JSON.stringify(sameWeekIdentityIds)
@@ -1877,11 +1916,35 @@ const registerVersionIpc = context => {
     }
   });
 
+  ipcMain.handle('workspace-team-workflow-return-review-get', async (_event, workspacePath, projectName, status) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const { session } = await readTeamWorkflowReturnReview(workspaceRoot, projectName);
+      if (!session || status && String(session.status) !== String(status)) return { success: true, review: null };
+      return { success: true, review: presentTeamWorkflowReturnReview(session) };
+    } catch (error) {
+      return { success: false, review: null, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-team-workflow-return-review-discard', async (_event, workspacePath, projectName, reviewSessionId) => {
+    try {
+      const discarded = await discardTeamWorkflowReturnReview(ensureWorkspace(workspacePath), projectName, reviewSessionId);
+      return { success: true, discarded };
+    } catch (error) {
+      return { success: false, discarded: false, error: error.message || String(error) };
+    }
+  });
+
   ipcMain.handle('workspace-team-workflow-return-batch', async (event, workspacePath, projectName, request = {}) => {
     let manifestPath = '';
     try {
       pluginService.requireCapability('team-retouch.detect');
       const workspaceRoot = ensureWorkspace(workspacePath);
+      const existingReview = await readTeamWorkflowReturnReview(workspaceRoot, projectName);
+      if (existingReview.session) throw new Error('还有一批返图等待确认，请先继续处理或明确放弃该批次');
+      const reviewTarget = teamWorkflowReturnReviewTarget(workspaceRoot, projectName);
+      await fs.promises.mkdir(reviewTarget.reviewRoot, { recursive: true });
       const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
       const candidates = readyTeamWorkflowSubjects(workspace, request.items || []).map(item => {
         const latestPatchPath = item.task.editedPatchPath && fs.existsSync(item.task.editedPatchPath)
@@ -1972,7 +2035,7 @@ const registerVersionIpc = context => {
         projectName, returnedCount: returned.length, candidateCount: candidates.length,
         acceptedCount: accepted.length, reviewCount,
       });
-      return {
+      let result = {
         success: true,
         matches,
         merges: [],
@@ -1984,6 +2047,38 @@ const registerVersionIpc = context => {
         mergedCount: 0,
         warning: handoffFailureCount ? `${handoffFailureCount} 张返图已保存，但下一位任务文件生成失败，请重新生成工作流程后继续` : undefined,
       };
+      if (reviewCount > 0) {
+        if (fs.existsSync(reviewTarget.directory)) throw new Error('待确认返图目录已存在，请重新进入项目后继续处理');
+        const reviewSessionId = crypto.randomUUID();
+        const stagingDirectory = `${reviewTarget.directory}.staging-${reviewSessionId}`;
+        try {
+          await fs.promises.mkdir(stagingDirectory, { recursive: false });
+          const persistedMatches = [];
+          for (const [index, match] of matches.entries()) {
+            const sourcePath = path.resolve(String(match.path || ''));
+            if (!fs.existsSync(sourcePath) || !IMAGE_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) throw new Error(`第 ${index + 1} 张待确认返图文件已失效`);
+            const storedName = `${String(match.returnId || index + 1).replace(/[^a-zA-Z0-9_-]/g, '_')}${path.extname(sourcePath).toLowerCase()}`;
+            await fs.promises.copyFile(sourcePath, path.join(stagingDirectory, storedName), fs.constants.COPYFILE_EXCL);
+            persistedMatches.push({ ...match, path: path.join(reviewTarget.directory, storedName), mediaPath: undefined });
+          }
+          const session = {
+            version: 1,
+            id: reviewSessionId,
+            projectName: String(projectName),
+            status: String(request.status || ''),
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            result: { ...result, reviewSessionId, matches: persistedMatches },
+          };
+          await fs.promises.writeFile(path.join(stagingDirectory, 'session.json'), JSON.stringify(session, null, 2), 'utf8');
+          await fs.promises.rename(stagingDirectory, reviewTarget.directory);
+          result = presentTeamWorkflowReturnReview(session);
+        } catch (error) {
+          await fs.promises.rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
+          throw error;
+        }
+      }
+      return result;
     } catch (error) {
       writeLog('error', 'Unable to match returned workflow images', { projectName, error: error.message || String(error) });
       return { success: false, error: error.message || String(error), matches: [], merges: [] };
@@ -1995,9 +2090,18 @@ const registerVersionIpc = context => {
   ipcMain.handle('workspace-team-workflow-return-confirm', async (_event, workspacePath, projectName, request = {}) => {
     let copiedPath = '';
     let warning = '';
+    let reviewTarget = null;
+    let reviewMatch = null;
     try {
       pluginService.requireCapability('team-retouch.detect');
       const workspaceRoot = ensureWorkspace(workspacePath);
+      if (request.reviewSessionId) {
+        reviewTarget = await readTeamWorkflowReturnReview(workspaceRoot, projectName);
+        if (!reviewTarget.session || String(reviewTarget.session.id) !== String(request.reviewSessionId)) throw new Error('待确认返图批次已经变化，请重新进入项目后继续');
+        if (request.status && String(reviewTarget.session.status) !== String(request.status)) throw new Error('待确认返图批次不属于当前项目状态');
+        reviewMatch = (reviewTarget.session.result?.matches || []).find(match => String(match.returnId) === String(request.returnId));
+        if (!reviewMatch || reviewMatch.accepted) throw new Error('这张返图已经处理或不属于当前审核批次');
+      }
       const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
       const [candidate] = readyTeamWorkflowSubjects(workspace, [{
         photoId: request.photoId,
@@ -2008,7 +2112,9 @@ const registerVersionIpc = context => {
       }]);
       if (!candidate || String(candidate.task.id) !== String(request.taskId)) throw new Error('该候选任务当前不可确认，请刷新工作流程后重试');
 
-      const sourcePath = path.resolve(await mediaService.authorizeInput(String(request.returnedPath || '')));
+      const sourcePath = reviewMatch?.path
+        ? path.resolve(reviewMatch.path)
+        : path.resolve(await mediaService.authorizeInput(String(request.returnedPath || '')));
       if (!fs.existsSync(sourcePath) || !IMAGE_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) throw new Error('返图文件不存在或格式不受支持');
       const uploadDirectory = path.join(teamDataDirectory(workspaceRoot, candidate.photoId, candidate.baseVersionId), 'uploads');
       await fs.promises.mkdir(uploadDirectory, { recursive: true });
@@ -2026,8 +2132,40 @@ const registerVersionIpc = context => {
         warning = `返图已保存，但下一位任务文件生成失败：${error.message || String(error)}`;
         writeLog('warn', 'Unable to refresh downstream workflow task file after visual confirmation', { projectName, taskId: candidate.task.id, error: error.message || String(error) });
       });
+      if (reviewTarget?.session && reviewMatch) {
+        try {
+          const matches = reviewTarget.session.result.matches.map(match => String(match.returnId) === String(request.returnId) ? {
+            ...match,
+            taskId: candidate.task.id,
+            photoId: candidate.photoId,
+            baseVersionId: candidate.baseVersionId,
+            personIndex: candidate.personIndex,
+            identityId: candidate.identity?.id,
+            photoName: candidate.photoName,
+            personName: candidate.identity?.name,
+            patchPath: candidate.task.patchPath,
+            matched: true,
+            accepted: true,
+            confidence: 'manual',
+          } : match);
+          const reviewCount = matches.filter(match => !match.accepted).length;
+          reviewTarget.session.updatedAt = Date.now();
+          reviewTarget.session.result = {
+            ...reviewTarget.session.result,
+            matches,
+            acceptedCount: matches.filter(match => match.accepted).length,
+            reviewCount,
+            missingTaskCount: Math.max(0, Number(reviewTarget.session.result.missingTaskCount || 0) - 1),
+          };
+          if (reviewCount > 0) await writeTeamWorkflowReturnReview(reviewTarget.sessionPath, reviewTarget.session);
+          else await discardTeamWorkflowReturnReview(workspaceRoot, projectName, reviewTarget.session.id);
+        } catch (error) {
+          warning = [warning, `审核进度保存失败：${error.message || String(error)}`].filter(Boolean).join('；');
+          writeLog('warn', 'Unable to persist workflow return review progress', { projectName, reviewSessionId: request.reviewSessionId, error: error.message || String(error) });
+        }
+      }
       copiedPath = '';
-      return { success: true, taskId: candidate.task.id, warning: warning || undefined };
+      return { success: true, taskId: candidate.task.id, reviewSessionCompleted: Boolean(reviewTarget?.session && reviewTarget.session.result.reviewCount === 0), warning: warning || undefined };
     } catch (error) {
       if (copiedPath) await fs.promises.rm(copiedPath, { force: true }).catch(() => undefined);
       return { success: false, error: error.message || String(error) };

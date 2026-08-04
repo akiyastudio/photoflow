@@ -77,10 +77,10 @@ const registerMediaIpc = context => {
       }
   
       // Chromium cannot decode camera RAW containers directly. Prefer the
-      // camera-embedded JPEG, then fall back to the optional LibRaw component.
+      // camera-embedded JPEG, then fall back to the bundled LibRaw decoder.
       const stat = await fs.promises.stat(sourcePath);
       const previewPath = await rawPreviewPath(sourcePath, stat, cacheConfig);
-      if (!previewPath) throw new Error('RAW 文件无法生成预览；请安装“高级 RAW 解码”组件，或检查文件是否损坏或受支持');
+      if (!previewPath) throw new Error('RAW 文件无法生成预览；请检查文件是否损坏或属于当前支持的 RAW 格式');
       let orientationTimer;
       const orientation = await Promise.race([
         rawOrientationCorrection(sourcePath, previewPath, stat),
@@ -135,7 +135,7 @@ const registerMediaIpc = context => {
       const sourcePath = await mediaService.authorizeInput(filePath);
       if (!RAW_EXTENSIONS.has(path.extname(sourcePath).toLowerCase()) || !fs.existsSync(sourcePath)) throw new Error('RAW 文件不存在或格式不受支持');
       const preview = await rawPreviewPath(sourcePath, await fs.promises.stat(sourcePath), cacheConfig);
-      return preview ? { success: true, previewUrl: mediaService.toUrl(preview) } : { success: false, error: 'RAW 文件既没有可用内嵌预览，也未能通过高级 RAW 解码组件显影' };
+      return preview ? { success: true, previewUrl: mediaService.toUrl(preview) } : { success: false, error: 'RAW 文件既没有可用内嵌预览，也未能通过内置 LibRaw 解码器显影' };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
   });
   

@@ -489,7 +489,7 @@ const loadMainWindowRenderer = () => {
 };
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'ffmpeg_transcode', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'backup_db']);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'ffmpeg_transcode', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'backup_db']);
 const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract', 'screenshot_main_image']);
 
 const getDevelopmentPython = () => {
@@ -1075,8 +1075,7 @@ const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bm
 const IMAGE_PREVIEW_CONVERSION_EXTENSIONS = new Set(['.tif', '.tiff', '.heic', '.heif', '.hif']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.crm']);
 const RAW_EXTENSIONS = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
-const RAW_DECODER_COMPONENT_ID = 'raw-decoder-libraw';
-const RAW_DECODER_CACHE_VERSION = PLUGIN_DEFINITIONS[RAW_DECODER_COMPONENT_ID].version;
+const RAW_DECODER_CACHE_VERSION = 'libraw-rawpy-v1';
 const HIDDEN_SYSTEM_ENTRY_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store']);
 
 const getMediaCacheDir = (config = {}) => {
@@ -1494,8 +1493,8 @@ const runImageDecoderWithRawFallback = async (pool, sourcePath, kind, outputs, u
     return await pool.run(sourcePath, kind, outputs, urgent);
   } catch (embeddedError) {
     if (kind !== 'raw') throw embeddedError;
-    const result = await pluginService.runJson(RAW_DECODER_COMPONENT_ID, ['--source', sourcePath, '--outputs', JSON.stringify(outputs)], 5 * 60 * 1000);
-    if (!result?.success || !Array.isArray(result.generated)) throw new Error(result?.error || '高级 RAW 解码组件未能生成预览');
+    const result = await runPythonJsonAction('raw_decoder.py', ['--source', sourcePath, '--outputs', JSON.stringify(outputs)], 5 * 60 * 1000);
+    if (!result?.success || !Array.isArray(result.generated)) throw new Error(result?.error || '内置 RAW 解码器未能生成预览');
     return result.generated;
   }
 };

@@ -1,4 +1,4 @@
-const { existsSync, rmSync } = require('fs');
+const { existsSync, readdirSync, rmSync } = require('fs');
 const { spawnSync } = require('child_process');
 const { join } = require('path');
 
@@ -8,23 +8,32 @@ const venvPython = process.platform === 'win32'
   : join(root, '.venv', 'bin', 'python');
 const python = existsSync(venvPython) ? venvPython : 'python';
 const sharedWorkerName = 'PhotoFlowImportWorker';
+const releaseRoot = join(root, 'release');
 
 // These workers now share the tools runtime. Remove stale standalone outputs
 // so local release inspection cannot mistake them for packaged resources.
 for (const retiredOutput of ['thumbnail-image-worker', 'workspace-db-worker', 'tools', 'tools.exe', sharedWorkerName, 'thumbnail-image-worker.exe', 'workspace-db-worker.exe']) {
   rmSync(join(root, 'python', 'dist', retiredOutput), { recursive: true, force: true });
 }
+rmSync(join(releaseRoot, 'components', 'raw-decoder-libraw'), { recursive: true, force: true });
+if (existsSync(releaseRoot)) {
+  for (const entry of readdirSync(releaseRoot, { withFileTypes: true })) {
+    if (entry.isFile() && entry.name.startsWith('PhotoFlow-raw-decoder-libraw-') && entry.name.endsWith('.zip')) {
+      rmSync(join(releaseRoot, entry.name), { force: true });
+    }
+  }
+}
 
 const result = spawnSync(python, [
   '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm', '--specpath', 'build/specs',
-  '--name', sharedWorkerName, '--exclude-module', 'imageio_ffmpeg', '--exclude-module', 'rawpy',
-  '--exclude-module', 'numpy', '--exclude-module', 'scipy', '--exclude-module', 'cv2',
+  '--name', sharedWorkerName, '--exclude-module', 'imageio_ffmpeg',
+  '--collect-binaries', 'rawpy', '--exclude-module', 'scipy', '--exclude-module', 'cv2',
   '--exclude-module', 'torch', '--exclude-module', 'torchvision',
   '--exclude-module', 'torchaudio', '--exclude-module', 'triton',
   '--exclude-module', 'PIL._imagingmath',
   '--exclude-module', 'PIL._imagingtk',
   '--hidden-import', 'catch', '--hidden-import', 'classify', '--hidden-import', 'ffmpeg_transcode',
-  '--hidden-import', 'cut_video', '--hidden-import', 'png_to_jpg',
+  '--hidden-import', 'cut_video', '--hidden-import', 'png_to_jpg', '--hidden-import', 'raw_decoder', '--hidden-import', 'rawpy',
   '--hidden-import', 'rename',
   '--hidden-import', 'thumbnail_db', '--hidden-import', 'thumbnail_image',
   '--hidden-import', 'video_preview', '--hidden-import', 'workspace_db', '--hidden-import', 'backup_db',

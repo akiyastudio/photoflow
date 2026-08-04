@@ -10,6 +10,7 @@ host_system="$(uname -s)"
 cross_flags=()
 x264_cross_flags=()
 x265_cross_flags=()
+zlib_tool_prefix=""
 objdump_command=objdump
 if [[ "$host_system" == Linux* ]]; then
   jobs="${PHOTOFLOW_BUILD_JOBS:-$(nproc)}"
@@ -21,6 +22,7 @@ if [[ "$host_system" == Linux* ]]; then
     -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++
     -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres
   )
+  zlib_tool_prefix="x86_64-w64-mingw32-"
   objdump_command=x86_64-w64-mingw32-objdump
 fi
 
@@ -87,6 +89,12 @@ if [[ ! -f "$work_root/prefix/lib/libx265.a" ]]; then
   cmake --build "$work_root/x265-build" --parallel "$jobs"
   cmake --install "$work_root/x265-build"
 fi
+x265_pkg_config="$work_root/prefix/lib/pkgconfig/x265.pc"
+if [[ -f "$x265_pkg_config" ]]; then
+  # x265 4.2 emits explicit shared libgcc entries even for a static build.
+  # Use the static exception runtime so the packaged FFmpeg has no MinGW DLL dependency.
+  sed -i 's/-lgcc_s/-lgcc_eh/g' "$x265_pkg_config"
+fi
 
 if [[ ! -d "$work_root/src/zlib/.git" ]]; then
   git clone --filter=blob:none "$zlib_repo" "$work_root/src/zlib"
@@ -94,7 +102,7 @@ fi
 git -C "$work_root/src/zlib" checkout --detach "$zlib_commit"
 if [[ ! -f "$work_root/prefix/lib/libz.a" ]]; then
   pushd "$work_root/src/zlib"
-  make -f win32/Makefile.gcc PREFIX=x86_64-w64-mingw32- -j"$jobs"
+  make -f win32/Makefile.gcc PREFIX="$zlib_tool_prefix" -j"$jobs" libz.a
   mkdir -p "$work_root/prefix/include" "$work_root/prefix/lib"
   cp zlib.h zconf.h "$work_root/prefix/include/"
   cp libz.a "$work_root/prefix/lib/"
@@ -128,7 +136,7 @@ ffmpeg_flags=(
   --pkg-config=pkg-config
   --pkg-config-flags=--static
   --extra-cflags=-I$work_root/prefix/include
-  "--extra-ldflags=-static -L$work_root/prefix/lib"
+  "--extra-ldflags=-static -static-libgcc -static-libstdc++ -L$work_root/prefix/lib"
 )
 printf '%s\n' "${ffmpeg_flags[@]}" > "$work_root/configure-flags.txt"
 pushd "$work_root/src/ffmpeg"

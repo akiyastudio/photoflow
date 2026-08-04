@@ -3,7 +3,7 @@
   "productName": "照片流",
   "private": true,
   "license": "UNLICENSED",
-  "version": "26.8.3",
+  "version": "26.8.4",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -17,8 +17,6 @@
     "build": "tsc -b && vite build",
     "build:python": "node scripts/prepare-ffmpeg.cjs && node scripts/build-python.cjs",
     "build:components": "node scripts/build-components.cjs --only team-retouch",
-    "setup:raw-decoder": "node scripts/setup-raw-decoder.cjs",
-    "build:raw-decoder": "npm run setup:raw-decoder && node scripts/build-components.cjs --only raw-decoder-libraw",
     "build:advanced-package": "node scripts/build-team-retouch-advanced-package.cjs",
     "build:advanced-video-decoder": "node scripts/build-advanced-video-decoder.cjs",
     "build:advanced-video-release": "npm run build:media-runtime:libmpv && node scripts/build-advanced-video-decoder.cjs --mpv-root release/media-runtime/libmpv-lgpl-windows-x64",

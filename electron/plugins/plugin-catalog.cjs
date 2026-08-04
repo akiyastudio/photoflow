@@ -17,14 +17,6 @@ const PLUGIN_DEFINITIONS = Object.freeze({
     description: '使用独立 libmpv 进程、硬件解码和预读缓存播放相机原始视频。',
     capabilities: ['video-playback.advanced'],
   },
-  'raw-decoder-libraw': {
-    id: 'raw-decoder-libraw',
-    version: '26.8.3.1',
-    name: '高级 RAW 解码',
-    description: '使用独立 LibRaw/rawpy 进程显影没有可用内嵌预览的相机 RAW 文件。',
-    capabilities: ['image-decoding.raw'],
-    developmentEntry: ['components', 'raw-decoder-libraw', 'raw_decoder.py'],
-  },
 });
 
 const findPluginByCapability = capability => Object.values(PLUGIN_DEFINITIONS)
