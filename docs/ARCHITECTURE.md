@@ -43,7 +43,8 @@ file workflows.
   are stored in SQLite.
 - `python/tools.py`: source entry point for the shared packaged runtime,
   published as `PhotoFlowImportWorker` (`PhotoFlowImportWorker.exe` on Windows),
-  for lightweight Python commands, the thumbnail image server, and workspace database processes. They still run
+  for lightweight Python commands, the thumbnail image server, the built-in
+  LibRaw/rawpy RAW decoder, and workspace database processes. They still run
   as isolated child processes while sharing one on-disk Python/Pillow/SQLite
   runtime. OpenCV-based analysis remains in `python/inspiration_tools.py` so
   the large vision dependencies are not duplicated into the core runtime.

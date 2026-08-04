@@ -537,6 +537,7 @@ export interface TeamPatchReturnBatchResult {
   merges: Array<{ photoId: string; photoName: string; relativePath?: string; success: boolean; skipped?: boolean; outputPath?: string; versionId?: string; baseVersionId?: string; needsReview?: boolean; error?: string }>;
   error?: string;
   warning?: string;
+  reviewSessionId?: string;
 }
 
 export interface ComponentStatus {
@@ -777,7 +778,9 @@ export interface IElectronAPI {
   onTeamWorkflowGenerationProgress: (callback: (value: TeamWorkflowGenerationProgress) => void) => () => void;
   exportTeamIdentityTasks: (workspacePath: string, status: ProjectStatus, name: string, request: { week: number; identityId: string }) => Promise<{ success: boolean; count?: number; path?: string; error?: string }>;
   returnTeamWorkflowBatch: (workspacePath: string, name: string, request: { status: ProjectStatus; returnedFiles: string[]; items: Array<{ photoId: string; baseVersionId: string; personIndex: number; taskId: string; taskOrder: number[] }> }) => Promise<TeamPatchReturnBatchResult>;
-  confirmTeamWorkflowReturn: (workspacePath: string, name: string, request: { status: ProjectStatus; returnedPath: string; photoId: string; baseVersionId: string; personIndex: number; taskId: string; taskOrder: number[] }) => Promise<{ success: boolean; taskId?: string; editedPatchPath?: string; warning?: string; error?: string }>;
+  getTeamWorkflowReturnReview: (workspacePath: string, name: string, status: ProjectStatus) => Promise<{ success: boolean; review: TeamPatchReturnBatchResult | null; error?: string }>;
+  discardTeamWorkflowReturnReview: (workspacePath: string, name: string, reviewSessionId: string) => Promise<{ success: boolean; discarded: boolean; error?: string }>;
+  confirmTeamWorkflowReturn: (workspacePath: string, name: string, request: { status: ProjectStatus; returnedPath: string; reviewSessionId?: string; returnId?: string; photoId: string; baseVersionId: string; personIndex: number; taskId: string; taskOrder: number[] }) => Promise<{ success: boolean; taskId?: string; editedPatchPath?: string; reviewSessionCompleted?: boolean; warning?: string; error?: string }>;
   detectTeamPatchPeople: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; baseVersionId: string; restoreExcluded?: boolean }) => Promise<TeamPatchBundle>;
   onTeamPatchDetectionProgress: (callback: (value: { photoId: string; baseVersionId: string; progress: number; message: string }) => void) => () => void;
   detectTeamPatchBatch: (workspacePath: string, status: ProjectStatus, name: string, request: { relativePaths: string[] }) => Promise<{ success: boolean; persistentBackend?: boolean; requestedMode?: string; advancedUsedCount?: number; fallbackCount?: number; results: Array<{ relativePath: string; name: string; success: boolean; photoId?: string; baseVersionId?: string; personCount?: number; workTileCount?: number; deliveryDirectory?: string; detector?: string; fallbackReason?: string; error?: string }>; error?: string }>;

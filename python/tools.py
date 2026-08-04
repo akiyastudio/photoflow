@@ -8,6 +8,7 @@ TOOLS = {
     "cut_video": "cut_video",
     "ffmpeg_transcode": "ffmpeg_transcode",
     "png_to_jpg": "png_to_jpg",
+    "raw_decoder": "raw_decoder",
     "rename": "rename",
     "thumbnail_db": "thumbnail_db",
     "thumbnail_image": "thumbnail_image",

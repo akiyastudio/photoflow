@@ -22,16 +22,26 @@ const run = async () => {
     await fs.promises.writeFile(source.manifest, JSON.stringify({ version: 2, projectName: '7-21', status: '后期中', groups: [] }), 'utf8');
     await fs.promises.writeFile(source.settings, JSON.stringify({ preferredIdentityOrder: ['person-1'] }), 'utf8');
     await fs.promises.writeFile(source.similarities, JSON.stringify({ similarities: [{ left: 'a', right: 'b' }] }), 'utf8');
+    await fs.promises.mkdir(source.reviewSession, { recursive: true });
+    await fs.promises.writeFile(path.join(source.reviewSession, 'return-1.jpg'), 'pending-return', 'utf8');
+    await fs.promises.writeFile(path.join(source.reviewSession, 'session.json'), JSON.stringify({
+      version: 1,
+      id: 'review-1',
+      projectName: '7-21',
+      status: '后期中',
+      result: { matches: [{ returnId: 'return-1', path: path.join(source.reviewSession, 'return-1.jpg') }] },
+    }), 'utf8');
 
     const renamed = await service.migrate(temporaryRoot,
       { status: '后期中', projectName: '7-21' },
       { status: '后期中', projectName: '26-7-21' });
-    assert.deepStrictEqual(renamed.map(result => result.state), ['migrated', 'migrated', 'migrated']);
+    assert.deepStrictEqual(renamed.map(result => result.state), ['migrated', 'migrated', 'migrated', 'migrated']);
 
     const destination = service.artifactPaths(temporaryRoot, '后期中', '26-7-21');
     assert.strictEqual(fs.existsSync(source.manifest), false);
     assert.strictEqual(fs.existsSync(source.settings), false);
     assert.strictEqual(fs.existsSync(source.similarities), false);
+    assert.strictEqual(fs.existsSync(source.reviewSession), false);
     assert.deepStrictEqual(JSON.parse(await fs.promises.readFile(destination.manifest, 'utf8')), {
       version: 2,
       projectName: '26-7-21',
@@ -39,16 +49,22 @@ const run = async () => {
       groups: [],
     });
     assert.deepStrictEqual(JSON.parse(await fs.promises.readFile(destination.settings, 'utf8')), { preferredIdentityOrder: ['person-1'] });
+    const migratedReview = JSON.parse(await fs.promises.readFile(path.join(destination.reviewSession, 'session.json'), 'utf8'));
+    assert.strictEqual(migratedReview.projectName, '26-7-21');
+    assert.strictEqual(migratedReview.status, '后期中');
+    assert.strictEqual(migratedReview.result.matches[0].path, path.join(destination.reviewSession, 'return-1.jpg'));
 
     const movedStatus = await service.migrate(temporaryRoot,
       { status: '后期中', projectName: '26-7-21' },
       { status: '已完成', projectName: '26-7-21' });
     assert.strictEqual(movedStatus.find(result => result.kind === 'manifest').state, 'migrated');
     assert.strictEqual(movedStatus.find(result => result.kind === 'settings').state, 'missing');
+    assert.strictEqual(movedStatus.find(result => result.kind === 'reviewSession').state, 'updated');
     const completed = service.artifactPaths(temporaryRoot, '已完成', '26-7-21');
     const completedManifest = JSON.parse(await fs.promises.readFile(completed.manifest, 'utf8'));
     assert.strictEqual(completedManifest.status, '已完成');
     assert.strictEqual(fs.existsSync(destination.settings), true, 'status changes must keep name-keyed settings in place');
+    assert.strictEqual(JSON.parse(await fs.promises.readFile(path.join(destination.reviewSession, 'session.json'), 'utf8')).status, '已完成');
 
     const conflictSource = service.artifactPaths(temporaryRoot, '后期中', 'old-name');
     const conflictDestination = service.artifactPaths(temporaryRoot, '后期中', 'occupied-name');

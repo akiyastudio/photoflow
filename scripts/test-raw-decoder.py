@@ -11,7 +11,7 @@ from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_PATH = ROOT / "components" / "raw-decoder-libraw" / "raw_decoder.py"
+MODULE_PATH = ROOT / "python" / "raw_decoder.py"
 POSTPROCESS_CALLS: list[dict] = []
 
 
@@ -69,4 +69,4 @@ with tempfile.TemporaryDirectory(prefix="photoflow-raw-decoder-") as temporary:
     with Image.open(full) as image:
         assert image.size == (32, 24)
 
-print("RAW decoder component tests passed")
+print("Built-in RAW decoder tests passed")

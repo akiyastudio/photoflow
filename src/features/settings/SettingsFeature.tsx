@@ -374,7 +374,7 @@ const PROJECT_TOOLBAR_ITEMS: Record<ProjectToolbarActionId, { label: string; des
   'select-media': { label: '选片', description: '把当前选择的图片或视频加入选片结果', icon: <CheckCircle2 size={17}/> },
   storyboard: { label: '视频工具', description: '截取分镜帧或打开视频转码面板', icon: <Video size={17}/> },
   'screenshot-main-image': { label: '提取截图主图', description: '从所选截图中识别并截取主要图片区域', icon: <Crop size={17}/> },
-  photoshop: { label: '在 PS 中打开', description: '把所选图片或 RAW 发送到 Photoshop', icon: <span className="flex h-[17px] w-[17px] items-center justify-center rounded border border-blue-400 text-[9px] font-bold text-blue-600">Ps</span> },
+  photoshop: { label: '在 PS 中打开', description: '把所选图片、RAW 或 PSD/PSB 发送到 Photoshop', icon: <span className="flex h-[17px] w-[17px] items-center justify-center rounded border border-blue-400 text-[9px] font-bold text-blue-600">Ps</span> },
   'png-converter': { label: 'PNG 转 JPG', description: '转换所选 PNG 文件或文件夹', icon: <ImageIcon size={17}/> },
   'version-management': { label: '版本管理', description: '管理素材版本或标记进度文件夹', icon: <GitBranch size={17}/> },
   'team-retouch': { label: '团片协作', description: '打开项目的团片协作工作区', icon: <UsersRound size={17}/> },

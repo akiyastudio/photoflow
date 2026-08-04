@@ -283,7 +283,8 @@ const WorkflowReturnReviewDialog = ({ result, cacheConfig, busy, onClose, onConf
   const viewStyle: React.CSSProperties = { transform: `scale(${zoom})`, transformOrigin: 'center', transition: 'transform 120ms ease-out' };
   const layerClass = 'absolute inset-0 h-full w-full';
   const workflowBusy = busy.startsWith('workflow-');
-  return <div role="dialog" aria-modal="true" aria-label="批量返图图片确认" className="fixed inset-0 z-[460] flex items-center justify-center bg-slate-950/70 p-4" onMouseDown={event => { if (event.target === event.currentTarget && !workflowBusy) onClose(); }}>
+  const pendingReviewCount = result.matches.filter(match => !match.accepted).length;
+  return <div role="dialog" aria-modal="true" aria-label="批量返图图片确认" className="fixed inset-0 z-[460] flex items-center justify-center bg-slate-950/70 p-4">
     <div className="flex max-h-[94vh] w-full max-w-[1500px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
       <header className="flex shrink-0 items-start gap-4 border-b border-slate-200 px-5 py-4"><div className="min-w-0 flex-1"><h3 className="font-bold text-slate-900">批量返图 · 看图确认</h3>{result.success ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="rounded-full bg-emerald-50 px-2.5 py-1 font-bold text-emerald-700">已确认 {result.acceptedCount || 0}</span><span className="rounded-full bg-amber-50 px-2.5 py-1 font-bold text-amber-700">待确认 {result.reviewCount || 0}</span>{Boolean(result.missingTaskCount) && <span className="text-slate-500">另有 {result.missingTaskCount} 个任务未收到可靠返图</span>}<span className="text-slate-400">左侧选返图，右侧直接核对照片内容</span></div> : <p className="mt-1 text-sm text-red-600">{result.error || '批量返图失败'}</p>}</div><button type="button" onClick={onClose} disabled={workflowBusy} className="rounded-md p-2 text-slate-500 hover:bg-slate-100 disabled:opacity-40"><X size={19}/></button></header>
       {result.success && result.matches.length > 0 ? <div className="grid min-h-0 flex-1 grid-cols-[330px_minmax(0,1fr)]">
@@ -293,7 +294,7 @@ const WorkflowReturnReviewDialog = ({ result, cacheConfig, busy, onClose, onConf
           <div className="relative min-h-[360px] flex-1 overflow-hidden bg-black">{activeCandidate?.patchPath ? <>{mode === 'side-by-side' ? <div className="grid h-full grid-cols-2 gap-px bg-white/15"><div className="relative min-w-0"><ReturnImage filePath={activeCandidate.patchPath} cacheConfig={cacheConfig} eager style={viewStyle} className="h-full w-full"/><span className="absolute left-3 top-3 rounded bg-black/70 px-2 py-1 text-xs">任务图</span></div><div className="relative min-w-0"><ReturnImage filePath={activeMatch.mediaPath || activeMatch.path} cacheConfig={cacheConfig} eager style={viewStyle} className="h-full w-full"/><span className="absolute left-3 top-3 rounded bg-black/70 px-2 py-1 text-xs">返图</span></div></div> : <><ReturnImage filePath={activeCandidate.patchPath} cacheConfig={cacheConfig} eager style={viewStyle} className={layerClass}/>{mode === 'split' && <div className={layerClass} style={{ clipPath: `inset(0 0 0 ${split}%)` }}><ReturnImage filePath={activeMatch.mediaPath || activeMatch.path} cacheConfig={cacheConfig} eager style={viewStyle} className="h-full w-full"/></div>}{mode === 'split' && <span className="absolute bottom-0 top-0 z-10 w-px bg-white shadow" style={{ left: `${split}%` }}/>} {mode === 'overlay' && <div className={layerClass} style={{ opacity: opacity / 100 }}><ReturnImage filePath={activeMatch.mediaPath || activeMatch.path} cacheConfig={cacheConfig} eager style={viewStyle} className="h-full w-full"/></div>}{mode === 'blink' && blinkRight && <ReturnImage filePath={activeMatch.mediaPath || activeMatch.path} cacheConfig={cacheConfig} eager style={viewStyle} className={layerClass}/>}</>}</> : <div className="flex h-full flex-col items-center justify-center gap-4"><ReturnImage filePath={activeMatch.mediaPath || activeMatch.path} cacheConfig={cacheConfig} eager className="h-full w-full"/><p className="absolute bottom-4 rounded bg-black/75 px-3 py-2 text-xs text-amber-300">没有可对比的候选任务，请单独处理这张返图</p></div>}</div>
           <footer className="shrink-0 border-t border-white/10 bg-slate-900 px-4 py-3"><div className="flex items-end gap-3"><div className="min-w-0 flex-1"><p className="mb-2 text-xs font-bold text-slate-300">候选任务（点击缩略图切换对比）</p><div className="flex gap-2 overflow-x-auto">{candidates.length ? candidates.map(candidate => { const used = Boolean(candidate.taskId && usedTaskIds.has(candidate.taskId) && !(activeMatch.accepted && candidate.taskId === activeMatch.taskId)); return <button type="button" key={candidate.taskId} disabled={used} onClick={() => setCandidateByReturn(current => ({ ...current, [activeMatch.returnId]: candidate.taskId || '' }))} className={`flex w-44 shrink-0 items-center gap-2 rounded-lg border p-1.5 text-left disabled:opacity-35 ${activeCandidate?.taskId === candidate.taskId ? 'border-blue-400 bg-blue-500/15' : 'border-white/10 bg-white/5 hover:border-white/25'}`}><ReturnImage filePath={candidate.patchPath} cacheConfig={cacheConfig} className="h-12 w-16 shrink-0 rounded"/><span className="min-w-0"><span className="block truncate text-[11px] font-bold text-slate-200">{candidate.photoName || '未知照片'}</span><span className="mt-1 block truncate text-[10px] text-slate-400">{candidate.personName || '未知人物'} · {Math.round(candidate.score * 100)}%</span></span></button>; }) : <p className="py-3 text-xs text-slate-500">没有可用候选</p>}</div></div><div className="shrink-0 text-right">{activeMatch.accepted ? <div><span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/15 px-3 py-2 text-xs font-bold text-emerald-300"><CheckCircle2 size={14}/>已确认并完成</span><p className="mt-1 text-[10px] text-slate-500">匹配度 {Math.round(activeMatch.score * 100)}%</p></div> : <button type="button" disabled={!activeCandidate?.taskId || !activeCandidate.photoId || !activeCandidate.baseVersionId || activeCandidate.personIndex === undefined || candidateAlreadyUsed || workflowBusy} onClick={() => activeCandidate && onConfirm(activeMatch, activeCandidate)} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40">{busy === `workflow-confirm:${activeMatch.returnId}` ? <Loader2 size={14} className="animate-spin"/> : <CheckCircle2 size={14}/>}确认匹配并完成</button>}{candidateAlreadyUsed && <p className="mt-1 text-[10px] text-amber-300">这个任务已被另一张返图占用</p>}</div></div></footer></> : null}</section>
       </div> : result.success ? <div className="flex min-h-64 items-center justify-center text-sm text-slate-500">没有可确认的返图</div> : null}
-      <div className="flex shrink-0 justify-end border-t border-slate-200 bg-slate-50 px-5 py-3"><button type="button" onClick={onClose} disabled={workflowBusy} className="dialog-primary">完成</button></div>
+      <div className="flex shrink-0 items-center justify-between gap-4 border-t border-slate-200 bg-slate-50 px-5 py-3"><span className="text-xs text-slate-500">点击四周不会关闭；退出时会保留或明确放弃未确认返图。</span><button type="button" onClick={onClose} disabled={workflowBusy} className="dialog-primary">{pendingReviewCount ? '退出审核…' : '完成并关闭'}</button></div>
     </div>
   </div>;
 };
@@ -349,7 +350,46 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
   const [assigningSubject, setAssigningSubject] = useState<Subject | null>(null);
   useEscapeLayer(Boolean(assigningSubject), () => setAssigningSubject(null), !busy);
   const [workflowReturnResult, setWorkflowReturnResult] = useState<TeamPatchReturnBatchResult | null>(null);
-  useEscapeLayer(Boolean(workflowReturnResult), () => setWorkflowReturnResult(null), !busy.startsWith('workflow-'));
+  const [workflowReturnReviewOpen, setWorkflowReturnReviewOpen] = useState(false);
+  const pendingWorkflowReturnReviewCount = workflowReturnResult?.matches.filter(match => !match.accepted).length || 0;
+  const requestCloseWorkflowReturnReview = async () => {
+    if (!workflowReturnResult || busy.startsWith('workflow-')) return;
+    if (!pendingWorkflowReturnReviewCount) {
+      setWorkflowReturnReviewOpen(false);
+      setWorkflowReturnResult(null);
+      return;
+    }
+    const canSuspend = Boolean(workflowReturnResult.reviewSessionId);
+    const action = await appDialog.choice({
+      title: `还有 ${pendingWorkflowReturnReviewCount} 张返图未确认`,
+      message: canSuspend ? '未确认返图已安全暂存在当前项目的审核批次中。' : '本批次还有返图没有确认，直接关闭会丢失当前审核进度。',
+      detail: canSuspend ? '暂存并退出后，可从“继续处理未确认返图”恢复；放弃本批次会删除暂存副本，但不影响已经确认完成的返图。' : '请继续标注，或明确放弃本批次。',
+      choices: [
+        ...(canSuspend ? [{ value: 'suspend', label: '暂存并退出' }] : []),
+        { value: 'discard', label: '放弃本批次', tone: 'danger' as const },
+      ],
+      cancelLabel: '继续标注',
+      cancelDefault: true,
+    });
+    if (action === 'suspend') {
+      setWorkflowReturnReviewOpen(false);
+      return;
+    }
+    if (action !== 'discard') return;
+    if (workflowReturnResult.reviewSessionId) {
+      setBusy('workflow-review-discard');
+      const result = await window.electronAPI.discardTeamWorkflowReturnReview(workspacePath, project.name, workflowReturnResult.reviewSessionId);
+      setBusy('');
+      if (!result.success) {
+        onNotice(`放弃返图审核批次失败：${result.error || '未知错误'}`);
+        return;
+      }
+    }
+    setWorkflowReturnReviewOpen(false);
+    setWorkflowReturnResult(null);
+    onNotice('已放弃本批次未确认返图；已经确认完成的返图不受影响');
+  };
+  useEscapeLayer(Boolean(workflowReturnResult) && workflowReturnReviewOpen, () => void requestCloseWorkflowReturnReview(), !busy.startsWith('workflow-'));
   const [workflowReturnProgress, setWorkflowReturnProgress] = useState({ progress: 0, message: '' });
   const [workflowGeneration, setWorkflowGeneration] = useState<TeamWorkflowGenerationProgress | null>(null);
   const [similarities, setSimilarities] = useState<NonNullable<TeamIdentityWorkspace['similarities']>>([]);
@@ -365,6 +405,23 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
     setWorkspace(result);
   };
   useEffect(() => { void load(true); }, [workspacePath, project.name]);
+  useEffect(() => {
+    let active = true;
+    setWorkflowReturnResult(null);
+    setWorkflowReturnReviewOpen(false);
+    void window.electronAPI.getTeamWorkflowReturnReview(workspacePath, project.name, project.status).then(result => {
+      if (!active) return;
+      if (!result.success) {
+        onNotice(`恢复未确认返图失败：${result.error || '未知错误'}`);
+        return;
+      }
+      if (result.review) {
+        setWorkflowReturnResult(result.review);
+        setWorkflowReturnReviewOpen(true);
+      }
+    });
+    return () => { active = false; };
+  }, [workspacePath, project.name, project.status]);
   useEffect(() => window.electronAPI.onTeamPatchReturnBatchProgress(value => {
     setWorkflowReturnProgress({ progress: value.progress, message: value.message });
   }), []);
@@ -716,6 +773,7 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
   const receiveWorkflowBatch = async (items: WorkflowItem[]) => {
     setBusy('workflow-return');
     setWorkflowReturnResult(null);
+    setWorkflowReturnReviewOpen(false);
     setWorkflowReturnProgress({ progress: 0, message: '请选择本轮收到的全部返图' });
     try {
       const selected = await window.electronAPI.selectTeamPatchReturns(project.name);
@@ -735,9 +793,12 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
             .map(candidate => candidate.personIndex),
         })),
       });
-      setWorkflowReturnResult(result);
       setBusy('');
       if (!result.success) { onNotice(`工作流程批量返图失败：${result.error || '未知错误'}`); return; }
+      if ((result.reviewCount || 0) > 0) {
+        setWorkflowReturnResult(result);
+        setWorkflowReturnReviewOpen(true);
+      }
       await load(false);
       onProjectChanged();
       onNotice(result.warning || `批量返图完成：自动识别并标记完成 ${result.acceptedCount || 0} 张，${result.reviewCount || 0} 张需要单独确认`);
@@ -756,6 +817,8 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
     const result = await window.electronAPI.confirmTeamWorkflowReturn(workspacePath, project.name, {
       status: project.status,
       returnedPath: match.mediaPath || match.path,
+      reviewSessionId: workflowReturnResult?.reviewSessionId,
+      returnId: match.returnId,
       photoId: candidate.photoId,
       baseVersionId: candidate.baseVersionId,
       personIndex: candidate.personIndex,
@@ -766,6 +829,7 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
     if (!result.success) { onNotice(`确认返图失败：${result.error || '未知错误'}`); return; }
     setWorkflowReturnResult(current => current ? {
       ...current,
+      reviewSessionId: result.reviewSessionCompleted ? undefined : current.reviewSessionId,
       acceptedCount: (current.acceptedCount || 0) + 1,
       reviewCount: Math.max(0, (current.reviewCount || 0) - 1),
       missingTaskCount: Math.max(0, (current.missingTaskCount || 0) - 1),
@@ -894,7 +958,7 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
       <div className="flex min-h-14 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-2.5">
         <span className="text-xs font-bold text-slate-700">流程概览</span><span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-bold text-violet-700">{weeks.length} 周</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{personWeekCount} 个批次</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{splitIdentityCount} 人跨周</span>{Boolean(workspace.missingReturnCount) && <span title="返图文件已被外部删除或移动；恢复原路径后会自动重新连接" className="rounded-full bg-red-50 px-2.5 py-1 text-xs font-bold text-red-700">返图缺失 {workspace.missingReturnCount}</span>}<span className="text-xs text-slate-500">当前可接收 {readyWorkflowItems.length} 张返图</span>
         <label title={workflowOrderLocked ? '已有任务返图或完成，开工顺序已锁定' : workspace.workflowNeedsRegeneration ? '排期已调整，请重新生成工作流程' : workspace.workflowGenerated ? '仍可调整优先顺序；修改后需要重新生成工作流程' : '加入多个人物后，可在下方拖拽调整优先顺序'} className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-600"><span>优先队列</span><select value="" disabled={Boolean(busy) || workflowOrderLocked || !availableWorkflowIdentities.length} onChange={event => void addPreferredIdentity(event.target.value)} className="max-w-44 bg-transparent text-xs font-medium text-slate-700 outline-none disabled:cursor-not-allowed disabled:text-slate-400"><option value="">{preferredIdentityOrder.length ? `已排序 ${preferredIdentityOrder.length} 人 · 添加人物` : '自动排期 · 添加人物'}</option>{availableWorkflowIdentities.map(identity => <option key={identity.id} value={identity.id}>{identity.name}</option>)}</select>{busy === 'workflow-settings' && <Loader2 size={13} className="animate-spin"/>}</label>
-        {workflowOrderLocked ? <span className="text-[11px] text-amber-600">已有返图或完成，顺序已锁定</span> : workspace.workflowNeedsRegeneration ? <span className="text-[11px] font-bold text-amber-600">排期已调整 · 请重新生成</span> : workspace.workflowGenerated ? <span className="text-[11px] text-blue-600">流程已生成 · 仍可调整顺序</span> : null}<TeamOutputProgressPicker controller={outputProgress} disabled={Boolean(busy)}/><button disabled={!workflowGroups.size || Boolean(busy) || workflowGenerating} onClick={() => void generateWorkflow()} className="dialog-secondary ml-auto inline-flex items-center gap-2">{workflowGenerating ? <Loader2 size={15} className="animate-spin"/> : <FolderOutput size={15}/>} {workflowGenerating ? `生成中 ${Math.round(workflowGeneration.progress)}%` : workspace.workflowGenerated ? '重新生成工作流程' : '生成工作流程'}</button><button disabled={!workflowReady || !readyWorkflowItems.length || Boolean(busy)} onClick={() => void receiveWorkflowBatch(readyWorkflowItems)} className="dialog-primary inline-flex items-center gap-2">{busy === 'workflow-return' ? <Loader2 size={15} className="animate-spin"/> : <Upload size={15}/>}批量导入返图并识别</button><button disabled={!mergeablePhotos.length || Boolean(busy)} onClick={() => void mergeCompletedPhotos()} className="dialog-primary inline-flex items-center gap-2">{busy === 'merge-workflow' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}合成已完成图片（{mergeablePhotos.length}）</button>
+        {workflowOrderLocked ? <span className="text-[11px] text-amber-600">已有返图或完成，顺序已锁定</span> : workspace.workflowNeedsRegeneration ? <span className="text-[11px] font-bold text-amber-600">排期已调整 · 请重新生成</span> : workspace.workflowGenerated ? <span className="text-[11px] text-blue-600">流程已生成 · 仍可调整顺序</span> : null}<TeamOutputProgressPicker controller={outputProgress} disabled={Boolean(busy)}/><button disabled={!workflowGroups.size || Boolean(busy) || workflowGenerating} onClick={() => void generateWorkflow()} className="dialog-secondary ml-auto inline-flex items-center gap-2">{workflowGenerating ? <Loader2 size={15} className="animate-spin"/> : <FolderOutput size={15}/>} {workflowGenerating ? `生成中 ${Math.round(workflowGeneration.progress)}%` : workspace.workflowGenerated ? '重新生成工作流程' : '生成工作流程'}</button>{workflowReturnResult?.reviewSessionId && !workflowReturnReviewOpen && <button disabled={Boolean(busy)} onClick={() => setWorkflowReturnReviewOpen(true)} className="dialog-secondary inline-flex items-center gap-2"><CheckCircle2 size={15}/>继续处理未确认返图（{pendingWorkflowReturnReviewCount}）</button>}<button disabled={!workflowReady || !readyWorkflowItems.length || Boolean(busy) || Boolean(workflowReturnResult?.reviewSessionId)} title={workflowReturnResult?.reviewSessionId ? '请先继续处理或放弃当前未确认返图批次' : undefined} onClick={() => void receiveWorkflowBatch(readyWorkflowItems)} className="dialog-primary inline-flex items-center gap-2">{busy === 'workflow-return' ? <Loader2 size={15} className="animate-spin"/> : <Upload size={15}/>}批量导入返图并识别</button><button disabled={!mergeablePhotos.length || Boolean(busy)} onClick={() => void mergeCompletedPhotos()} className="dialog-primary inline-flex items-center gap-2">{busy === 'merge-workflow' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}合成已完成图片（{mergeablePhotos.length}）</button>
       </div>
       {!!preferredWorkflowIdentities.length && <div className="flex min-h-12 flex-wrap items-center gap-2 border-b border-violet-100 bg-violet-50/70 px-5 py-2"><span className="mr-1 text-xs font-bold text-violet-800">拖拽开工顺序</span>{preferredWorkflowIdentities.map((identity, index) => <div key={identity.id} className="contents">{index > 0 && <button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void toggleSameWeekIdentity(identity.id)} title={sameWeekIdentityIds.includes(identity.id) ? `“${identity.name}”与前一人物同周开始，点击改为下一周` : `“${identity.name}”在前一人物之后开始，点击改为同周`} className={`rounded-full border px-2 py-1 text-xs font-black transition disabled:opacity-40 ${sameWeekIdentityIds.includes(identity.id) ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-violet-200 bg-white text-violet-500'}`}>{sameWeekIdentityIds.includes(identity.id) ? '＋' : '→'}</button>}<div draggable={!workflowOrderLocked && !busy} onDragStart={event => { setDraggedWorkflowIdentityId(identity.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', identity.id); }} onDragOver={event => { if (!workflowOrderLocked && !busy) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; } }} onDrop={event => { event.preventDefault(); const sourceIdentityId = draggedWorkflowIdentityId || event.dataTransfer.getData('text/plain'); setDraggedWorkflowIdentityId(''); void movePreferredIdentity(sourceIdentityId, identity.id); }} onDragEnd={() => setDraggedWorkflowIdentityId('')} className={`inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-white py-1 pl-1.5 pr-2 text-xs font-bold text-violet-800 shadow-sm ${draggedWorkflowIdentityId === identity.id ? 'opacity-40' : ''} ${workflowOrderLocked || busy ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'}`}><GripVertical size={13} className="text-violet-400"/><span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-violet-100 px-1 text-[10px] text-violet-700">{index + 1}</span><span className="max-w-32 truncate">{identity.name}</span><button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void removePreferredIdentity(identity.id)} title={`将“${identity.name}”交回自动排期`} className="ml-0.5 rounded-full p-0.5 text-violet-400 hover:bg-violet-100 hover:text-violet-700 disabled:opacity-40"><X size={12}/></button></div></div>)}<span className="text-[11px] text-violet-600">点击 ＋/→ 切换同周或下一周；未加入的人物继续自动安排</span><button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void savePreferredIdentityOrder([], [], '已恢复自动排期；如已生成工作流程，请重新生成')} className="ml-auto text-xs font-bold text-violet-700 hover:text-violet-900 disabled:opacity-40">全部恢复自动</button></div>}
     </>}
@@ -928,7 +992,7 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
           return <article key={`${week}:${group.identity.id}`} className="workflow-person-lane overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm"><header className="workflow-person-summary flex items-center gap-3 border-b border-slate-100 p-4"><span className="h-3 w-3 shrink-0 rounded-full" style={{ background: group.identity.color }}/><div className="min-w-0"><h4 className="truncate font-bold text-slate-800">{group.identity.name}</h4><p className="mt-1 text-xs leading-5 text-slate-400">本周 {group.items.length} 张<br/>可分发 {ready.length} 张 · 已完成 {group.items.length - pending.length} 张</p></div><button disabled={!workflowReady || Boolean(busy) || !ready.length} onClick={() => void markWeekNoRetouch(group.identity, week, group.items)} title={workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成工作流程' : `将“${group.identity.name}”本周当前可分发的 ${ready.length} 个未上传任务标记为不用修`} className="dialog-secondary ml-auto inline-flex shrink-0 items-center gap-2">{busy === `skip:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <CheckCircle2 size={14}/>}标记本周不用修</button><button disabled={!workflowReady || Boolean(busy) || !ready.length} title={!workspace.workflowGenerated ? '请先生成工作流程' : workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成工作流程' : !ready.length ? '等待上一位返图' : '打开当前可分发任务文件夹'} onClick={() => void openTaskFolder(group.identity, week)} className="dialog-primary inline-flex shrink-0 items-center gap-2">{busy === `open:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <FolderOutput size={14}/>}打开任务文件夹</button></header><div className="workflow-task-strip">{group.items.map(item => { const returnMissing = Boolean(item.assignment?.returnMissing); const returned = item.assignment?.completionKind === 'returned' && Boolean(item.assignment.editedPatchPath) && !returnMissing; return <div key={item.key} className="workflow-task-card border-r border-slate-100 p-3 last:border-0"><div className="workflow-task-thumbnail shrink-0"><SubjectThumb subject={item} cacheConfig={cacheConfig}/></div><div className="min-w-0"><p className="truncate text-sm font-bold text-slate-700">{item.photo.name} · 人物 {item.personIndex}</p><p className={`mt-1 truncate text-xs ${workspace.workflowNeedsRegeneration ? 'font-bold text-amber-600' : returnMissing ? 'font-bold text-red-600' : item.assignment?.completed ? 'text-emerald-600' : item.ready ? 'text-blue-600' : 'text-amber-600'}`} title={workspace.workflowNeedsRegeneration ? '排期已调整，请重新生成工作流程' : returnMissing ? '返图文件已被外部删除或移动；恢复原路径后会自动重新连接，也可以重新上传' : item.blockedBy.join('、')}>{workspace.workflowNeedsRegeneration ? '排期已调整，等待重新生成' : returnMissing ? '返图文件丢失' : item.assignment?.completed ? returned ? '已返图' : '不用修' : item.ready ? '可以分发' : `等待 ${item.blockedBy.join('、')} 完成`}</p></div><button disabled={!workflowReady || !item.ready || Boolean(busy)} onClick={() => void upload(item)} className="workflow-task-action dialog-secondary inline-flex items-center justify-center">{busy === `upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : <Upload size={12}/>}上传</button><button disabled={!workflowReady || !item.assignment || Boolean(busy) || !item.ready && !item.assignment.completed} onClick={() => void (item.assignment?.completed && returned ? removeUpload(item) : toggleComplete(item))} title={workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成工作流程' : returnMissing ? '返图文件已丢失；可以重新上传，或明确标记为不用修' : item.assignment?.completed ? returned ? '删除返图并撤销完成标记' : '撤销不用修' : '该任务不用修，直接标记完成'} className={`workflow-task-action group inline-flex items-center justify-center rounded-md border font-bold transition ${returnMissing ? 'border-red-200 bg-red-50 text-red-700' : item.assignment?.completed ? returned ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-red-200 hover:bg-red-50 hover:text-red-600' : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-amber-200 hover:bg-amber-50 hover:text-amber-700' : 'border-slate-200 text-slate-600'}`}>{busy === `complete:${item.key}` || busy === `remove-upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : item.assignment?.completed ? <><CheckCircle2 size={12} className="group-hover:hidden"/>{returned ? <Trash2 size={12} className="hidden group-hover:block"/> : <X size={12} className="hidden group-hover:block"/>}</> : <AlertTriangle size={12}/>} {item.assignment?.completed ? <><span className="group-hover:hidden">{returned ? '已返图' : '不用修'}</span><span className="hidden group-hover:inline">{returned ? '删除返图' : '撤销不用修'}</span></> : returnMissing ? '返图丢失' : '不用修'}</button></div>; })}</div></article>;
         })}</div></section>)}</div>}</>}
     </div></div></main>}
-    {workflowReturnResult && createPortal(<WorkflowReturnReviewDialog result={workflowReturnResult} cacheConfig={cacheConfig} busy={busy} onClose={() => setWorkflowReturnResult(null)} onConfirm={(match, candidate) => void confirmWorkflowReturn(match, candidate)}/>, document.body)}
+    {workflowReturnResult && workflowReturnReviewOpen && createPortal(<WorkflowReturnReviewDialog result={workflowReturnResult} cacheConfig={cacheConfig} busy={busy} onClose={() => void requestCloseWorkflowReturnReview()} onConfirm={(match, candidate) => void confirmWorkflowReturn(match, candidate)}/>, document.body)}
     {assigningSubject && <div role="dialog" aria-modal="true" aria-label="看图修改人物归属" className="fixed inset-0 z-[450] flex items-center justify-center bg-slate-950/70 p-5" onMouseDown={event => { if (event.target === event.currentTarget) setAssigningSubject(null); }}><div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><header className="flex items-center gap-3 border-b border-slate-200 px-5 py-4"><div><h3 className="font-bold text-slate-900">这是谁？</h3><p className="mt-1 text-xs text-slate-500">左边是识别错误的人；从右边选择同一个人的代表图，不需要记“待确认人物”编号。</p></div><button onClick={() => setAssigningSubject(null)} className="ml-auto rounded-md p-2 text-slate-500 hover:bg-slate-100"><X size={19}/></button></header><div className="grid min-h-0 flex-1 grid-cols-[300px_minmax(0,1fr)]"><aside className="border-r border-slate-200 bg-slate-50 p-5"><p className="mb-2 text-xs font-bold text-slate-500">待修改</p><SubjectThumb subject={assigningSubject} cacheConfig={cacheConfig} interactive={false}/><p className="mt-3 text-sm font-bold text-slate-800">{assigningSubject.photo.name} · 人物 {assigningSubject.personIndex}</p><p className="mt-1 text-xs text-slate-500">当前：{assigningSubject.identity?.name || '未标注'}</p><div className="mt-5 space-y-2"><button onClick={() => void assign(assigningSubject, '')} className="dialog-secondary w-full">设为未标注</button><button onClick={() => void createIdentityForSubject(assigningSubject)} className="dialog-primary w-full">这是一个新人物</button></div></aside><section className="min-h-0 overflow-y-auto p-5"><h4 className="mb-3 text-sm font-bold text-slate-700">选择同一个人</h4><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{pickerIdentities.map(identity => { const examples = grouped.get(identity.id) || []; const representative = examples.find(item => item.key !== assigningSubject.key) || examples[0]; return <button key={identity.id} onClick={() => void assign(assigningSubject, identity.id)} className={`overflow-hidden rounded-xl border bg-white text-left transition hover:border-blue-400 hover:shadow-md ${assigningSubject.identity?.id === identity.id ? 'border-blue-500 ring-2 ring-blue-100' : 'border-slate-200'}`}>{representative ? <SubjectThumb subject={representative} cacheConfig={cacheConfig} interactive={false}/> : <div className="flex aspect-[4/3] items-center justify-center bg-slate-100 text-slate-400"><UserRound/></div>}<div className="flex items-center gap-2 p-3"><span className="h-2.5 w-2.5 rounded-full" style={{ background: identity.color }}/><span className="min-w-0 flex-1 truncate text-sm font-bold text-slate-800">{identity.name}</span><span className="text-[10px] text-slate-400">{examples.length} 张</span></div></button>; })}</div></section></div></div></div>}
   </div>;
 };

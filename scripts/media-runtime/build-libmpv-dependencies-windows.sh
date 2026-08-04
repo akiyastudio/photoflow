@@ -22,7 +22,7 @@ lock_value() {
   node -p "require('./media-runtime.lock.json')$1"
 }
 
-ffmpeg_repo="$(lock_value '.ffmpeg.repository')"
+ffmpeg_repo="${PHOTOFLOW_FFMPEG_REPOSITORY_OVERRIDE:-$(lock_value '.ffmpeg.repository')}"
 ffmpeg_commit="$(lock_value '.ffmpeg.commit')"
 zlib_repo="$(lock_value '.zlib.repository')"
 zlib_commit="$(lock_value '.zlib.commit')"
@@ -37,12 +37,27 @@ declare -A dependency_dirs=(
   [libplacebo]=libplacebo
 )
 
-rm -rf "$work_root"
+if [[ "${PHOTOFLOW_MPV_DEPENDENCY_RESUME:-0}" != 1 ]]; then
+  rm -rf "$work_root"
+fi
 mkdir -p "$prefix/include" "$prefix/lib/pkgconfig" "$source_root" "$build_root" "$artifact_root"
 
 clone_locked() {
   local name="$1" repo="$2" commit="$3" destination="$4"
-  git clone --filter=blob:none "$repo" "$destination"
+  if [[ ! -d "$destination/.git" ]]; then
+    local attempt
+    for attempt in 1 2 3; do
+      rm -rf "$destination"
+      if git clone --filter=blob:none "$repo" "$destination"; then
+        break
+      fi
+      if [[ "$attempt" == 3 ]]; then
+        echo "Failed to clone $name after $attempt attempts" >&2
+        return 1
+      fi
+      sleep 2
+    done
+  fi
   git -C "$destination" checkout --detach "$commit"
   local actual
   actual="$(git -C "$destination" rev-parse HEAD)"
@@ -67,10 +82,11 @@ export PKG_CONFIG_PATH="$prefix/lib/pkgconfig:$prefix/share/pkgconfig"
 export PKG_CONFIG_LIBDIR="$PKG_CONFIG_PATH"
 export CFLAGS="-O2"
 export CXXFLAGS="-O2"
-export LDFLAGS="-static-libgcc -static-libstdc++"
+winpthread_archive="$(cygpath -m /ucrt64/lib/libwinpthread.a)"
+export LDFLAGS="-static-libgcc -static-libstdc++ -Wl,--whole-archive,$winpthread_archive,--no-whole-archive"
 
 pushd "$source_root/zlib"
-make -f win32/Makefile.gcc PREFIX=x86_64-w64-mingw32- -j"$jobs"
+make -f win32/Makefile.gcc PREFIX= -j"$jobs" libz.a
 cp zlib.h zconf.h "$prefix/include/"
 cp libz.a "$prefix/lib/"
 popd
@@ -119,7 +135,9 @@ meson install -C "$build_root/libass"
 
 cmake -S "$source_root/spirv-cross" -B "$build_root/spirv-cross" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" \
-  -DCMAKE_SHARED_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
+  -DCMAKE_SHARED_LINKER_FLAGS="-static-libgcc -static-libstdc++ -Wl,--whole-archive,$winpthread_archive,--no-whole-archive" \
+  "-DCMAKE_C_STANDARD_LIBRARIES=-l:libwinpthread.a" \
+  "-DCMAKE_CXX_STANDARD_LIBRARIES=-l:libwinpthread.a" \
   -DSPIRV_CROSS_CLI=OFF -DSPIRV_CROSS_ENABLE_TESTS=OFF \
   -DSPIRV_CROSS_STATIC=OFF -DSPIRV_CROSS_SHARED=ON
 cmake --build "$build_root/spirv-cross" --parallel "$jobs"
@@ -157,6 +175,7 @@ ffmpeg_flags=(
   --pkg-config=pkg-config
   --extra-cflags=-I$prefix/include
   "--extra-ldflags=-static-libgcc -static-libstdc++ -L$prefix/lib"
+  --extra-libs=-l:libwinpthread.a
 )
 printf '%s\n' "${ffmpeg_flags[@]}" > "$work_root/ffmpeg-configure-flags.txt"
 pushd "$source_root/ffmpeg"
@@ -221,6 +240,15 @@ cp "$source_root/spirv-cross/LICENSES/MIT.txt" "$package_root/licenses/SPIRV-Cro
 cp "$source_root/libplacebo/LICENSE" "$package_root/licenses/libplacebo-LICENSE"
 cp "$source_root/libplacebo/3rdparty/jinja/LICENSE.txt" "$package_root/licenses/libplacebo-build-Jinja-LICENSE.txt"
 cp "$source_root/libplacebo/3rdparty/markupsafe/LICENSE.txt" "$package_root/licenses/libplacebo-build-MarkupSafe-LICENSE.txt"
+for package_license in \
+  /ucrt64/share/licenses/shaderc/LICENSE \
+  /ucrt64/share/licenses/glslang/LICENSE.txt \
+  /ucrt64/share/licenses/spirv-tools/LICENSE; do
+  test -f "$package_license" || { echo "Missing shader toolchain license: $package_license" >&2; exit 1; }
+done
+cp /ucrt64/share/licenses/shaderc/LICENSE "$package_root/licenses/shaderc-LICENSE"
+cp /ucrt64/share/licenses/glslang/LICENSE.txt "$package_root/licenses/glslang-LICENSE.txt"
+cp /ucrt64/share/licenses/spirv-tools/LICENSE "$package_root/licenses/SPIRV-Tools-LICENSE"
 
 zip_directory() {
   local source="$1" destination="$2" source_win destination_win

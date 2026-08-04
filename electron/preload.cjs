@@ -134,6 +134,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onTeamWorkflowGenerationProgress: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-team-workflow-progress', subscription); return () => ipcRenderer.removeListener('workspace-team-workflow-progress', subscription); },
   exportTeamIdentityTasks: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-team-identity-export', workspacePath, status, projectName, request),
   returnTeamWorkflowBatch: (workspacePath, projectName, request) => ipcRenderer.invoke('workspace-team-workflow-return-batch', workspacePath, projectName, request),
+  getTeamWorkflowReturnReview: (workspacePath, projectName, status) => ipcRenderer.invoke('workspace-team-workflow-return-review-get', workspacePath, projectName, status),
+  discardTeamWorkflowReturnReview: (workspacePath, projectName, reviewSessionId) => ipcRenderer.invoke('workspace-team-workflow-return-review-discard', workspacePath, projectName, reviewSessionId),
   detectTeamPatchPeople: (workspacePath, status, projectName, request) => invokeFeature('team_person_detect', 'workspace-team-patch-detect', workspacePath, status, projectName, request),
   onTeamPatchDetectionProgress: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-team-patch-detect-progress', subscription); return () => ipcRenderer.removeListener('workspace-team-patch-detect-progress', subscription); },
   detectTeamPatchBatch: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-team-patch-detect-batch', workspacePath, status, projectName, request),
