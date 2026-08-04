@@ -7,7 +7,8 @@
 
 ## 对外文件
 
-- `INSTALLER_TERMS.html`：安装时展示的用户协议与隐私政策合并页面
+- `INSTALLER_TERMS.html`：用户协议与隐私政策的安装条款合并页面
+- `INSTALLER_TERMS.txt`：由上述 HTML 正文自动生成、供 NSIS 原生许可控件显示的 UTF-8 文本副本
 - `PRIVACY_POLICY.html`：隐私政策
 - `USER_AGREEMENT.html`：用户协议及内测条款
 - `FACE_RECOGNITION_RULES.html`：人脸信息处理规则

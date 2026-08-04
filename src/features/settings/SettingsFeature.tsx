@@ -372,13 +372,13 @@ const SettingsNavigator = ({ activeSection, components, onSelect }: { activeSect
 const PROJECT_TOOLBAR_ITEMS: Record<ProjectToolbarActionId, { label: string; description: string; icon: React.ReactNode }> = {
   'filename-selection': { label: '从文件名选片', description: '按文件名把选中的素材整理到选片文件夹', icon: <FileText size={17}/> },
   'select-media': { label: '选片', description: '把当前选择的图片或视频加入选片结果', icon: <CheckCircle2 size={17}/> },
-  storyboard: { label: '提取分镜帧', description: '从所选视频或文件夹提取分镜帧', icon: <Video size={17}/> },
+  storyboard: { label: '视频工具', description: '截取分镜帧或打开视频转码面板', icon: <Video size={17}/> },
   'screenshot-main-image': { label: '提取截图主图', description: '从所选截图中识别并截取主要图片区域', icon: <Crop size={17}/> },
   photoshop: { label: '在 PS 中打开', description: '把所选图片或 RAW 发送到 Photoshop', icon: <span className="flex h-[17px] w-[17px] items-center justify-center rounded border border-blue-400 text-[9px] font-bold text-blue-600">Ps</span> },
   'png-converter': { label: 'PNG 转 JPG', description: '转换所选 PNG 文件或文件夹', icon: <ImageIcon size={17}/> },
   'version-management': { label: '版本管理', description: '管理素材版本或标记进度文件夹', icon: <GitBranch size={17}/> },
   'team-retouch': { label: '团片协作', description: '打开项目的团片协作工作区', icon: <UsersRound size={17}/> },
-  'final-versions': { label: '浏览最终版', description: '浏览项目中所有已经标记为最终版的图片', icon: <Heart size={17}/> },
+  'final-versions': { label: '查看喜爱', description: '浏览项目中所有已经标记为喜爱的图片', icon: <Heart size={17}/> },
 };
 
 const ProjectToolbarSettingsEditor = ({ value, onChange }: { value: AppConfig['projectToolbar']; onChange: (value: AppConfig['projectToolbar']) => void }) => {
@@ -779,7 +779,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     </>}
     {activeSection === 'project' && <>
     <SettingsPageGroup title="新建项目">
-      <SettingsRow title="自动创建策划文件夹" description="新建项目时创建“策划”文件夹，不影响已有项目。"><SettingsToggle label="自动创建策划文件夹" checked={draft.createPlanningFolder} onChange={checked => update('createPlanningFolder', checked)}/></SettingsRow>
+      <SettingsRow title="新建项目时创建策划文件夹" description="新建项目时创建“策划”文件夹。"><SettingsToggle label="新建项目时创建策划文件夹" checked={draft.createPlanningFolder} onChange={checked => update('createPlanningFolder', checked)}/></SettingsRow>
     </SettingsPageGroup>
     <SettingsPageGroup title="项目分类">
       <div className="px-4 py-3.5"><h4 className="text-sm font-bold text-slate-800">分类与顺序</h4><p className="mt-1 text-xs leading-5 text-slate-500">拖动左侧手柄或使用箭头调整顺序。内置分类固定保留；自定义分类为空时可以删除。</p></div>

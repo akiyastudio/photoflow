@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 import classify  # noqa: E402
-from classify import build_capture_groups, build_video_preview_command, generate_missing_raw_jpgs, stage_import_and_organize, stage_import_broll, stage_plan_import  # noqa: E402
+from classify import build_capture_groups, generate_missing_raw_jpgs, stage_import_and_organize, stage_import_broll, stage_plan_import  # noqa: E402
+from ffmpeg_transcode import build_video_preview_command  # noqa: E402
 from PIL import Image  # noqa: E402
 
 

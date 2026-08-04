@@ -12,6 +12,19 @@ const requested = process.argv.includes('--only') ? process.argv[process.argv.in
 const componentIds = requested ? [requested] : (process.platform === 'win32' ? ['team-retouch'] : []);
 
 const definitions = {
+  'raw-decoder-libraw': {
+    source: path.join(root, 'components', 'raw-decoder-libraw', 'raw_decoder.py'),
+    template: path.join(root, 'components', 'raw-decoder-libraw', 'component.template.json'),
+    models: [],
+    pyInstallerArgs: [
+      '--collect-binaries', 'rawpy',
+      '--hidden-import', 'rawpy',
+      '--exclude-module', 'pi_heif', '--exclude-module', 'cv2',
+      '--exclude-module', 'scipy', '--exclude-module', 'matplotlib',
+      '--exclude-module', 'torch', '--exclude-module', 'torchvision', '--exclude-module', 'torchaudio',
+    ],
+    requiredModules: ['rawpy'],
+  },
   'team-retouch': {
     source: path.join(root, 'components', 'team-retouch', 'team_retouch.py'),
     template: path.join(root, 'components', 'team-retouch', 'component.template.json'),
@@ -114,6 +127,9 @@ const build = id => {
   }
   if (id === 'team-retouch' && !probeModule('onnxruntime')) {
     throw new Error('onnxruntime-directml is not installed in the component build environment');
+  }
+  for (const moduleName of definition.requiredModules || []) {
+    if (!probeModule(moduleName)) throw new Error(`${moduleName} is not installed in the component build environment`);
   }
   if (id === 'team-retouch' && !hasDirectML()) {
     throw new Error('The component build environment has ONNX Runtime, but not the DirectML execution provider');

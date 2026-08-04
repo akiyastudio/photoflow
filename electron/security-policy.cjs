@@ -5,6 +5,7 @@ const RENDERER_PYTHON_TOOLS = new Set([
   'catch.py',
   'classify.py',
   'cut_video.py',
+  'ffmpeg_transcode.py',
   'png_to_jpg.py',
   'research.py',
 ]);

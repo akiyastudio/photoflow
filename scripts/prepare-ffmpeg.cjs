@@ -20,9 +20,10 @@ if (!fs.existsSync(manifestPath)) {
 const manifest = validateFfmpegManifest(readJson(manifestPath), vendorRoot);
 const lock = readJson(path.join(root, 'media-runtime.lock.json'));
 const x264 = manifest.components.find(item => item.name === 'x264');
+const x265 = manifest.components.find(item => item.name === 'x265');
 const zlib = manifest.components.find(item => item.name === 'zlib');
-if (manifest.ffmpeg?.version !== lock.ffmpeg.version || manifest.ffmpeg?.commit !== lock.ffmpeg.commit || x264?.commit !== lock.x264.commit || zlib?.commit !== lock.zlib.commit) {
-  throw new Error('FFmpeg/x264/zlib 运行时与 media-runtime.lock.json 固定版本不一致');
+if (manifest.ffmpeg?.version !== lock.ffmpeg.version || manifest.ffmpeg?.commit !== lock.ffmpeg.commit || x264?.commit !== lock.x264.commit || x265?.commit !== lock.x265.commit || zlib?.commit !== lock.zlib.commit) {
+  throw new Error('FFmpeg/x264/x265/zlib 运行时与 media-runtime.lock.json 固定版本不一致');
 }
 const runtimeArchive = path.join(vendorRoot, manifest.artifacts.runtimeArchive.file);
 const destinationRoot = path.join(root, 'python', 'dist');

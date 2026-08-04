@@ -650,11 +650,11 @@ def _trim_uniform_borders(image: np.ndarray, rectangle: tuple[int, int, int, int
     return left + left_trim, top + top_trim, right - right_trim, bottom - bottom_trim
 
 
-def _unique_output_path(source: Path) -> Path:
+def _unique_output_path(source: Path, label: str = "主图") -> Path:
     suffix = source.suffix.lower() if source.suffix.lower() in SUPPORTED_EXTENSIONS else ".png"
     for index in range(1, 10000):
         extra = "" if index == 1 else f"_{index}"
-        candidate = source.with_name(f"{source.stem}_主图{extra}{suffix}")
+        candidate = source.with_name(f"{source.stem}_{label}{extra}{suffix}")
         if not candidate.exists():
             return candidate
     raise RuntimeError("无法创建唯一的输出文件名")
@@ -664,9 +664,11 @@ def _write_image_atomic(destination: Path, image: np.ndarray) -> None:
     suffix = destination.suffix.lower()
     params: list[int] = []
     if suffix in {".jpg", ".jpeg"}:
-        params = [cv2.IMWRITE_JPEG_QUALITY, 95]
+        params = [cv2.IMWRITE_JPEG_QUALITY, 100, cv2.IMWRITE_JPEG_OPTIMIZE, 1]
     elif suffix == ".png":
         params = [cv2.IMWRITE_PNG_COMPRESSION, 3]
+    elif suffix == ".webp":
+        params = [cv2.IMWRITE_WEBP_QUALITY, 100]
     success, encoded = cv2.imencode(suffix, image, params)
     if not success:
         raise RuntimeError("无法编码裁剪后的图片")
@@ -712,7 +714,7 @@ def analyze_main_image(input_path: str) -> dict[str, object]:
         return result
 
 
-def crop_main_image(input_path: str, rectangle: str) -> dict[str, object]:
+def crop_main_image(input_path: str, rectangle: str, output_suffix: str = "主图") -> dict[str, object]:
     source = Path(input_path).resolve()
     result: dict[str, object] = {"input": str(source), "inputName": source.name, "success": False, "cropped": False}
     try:
@@ -725,7 +727,7 @@ def crop_main_image(input_path: str, rectangle: str) -> dict[str, object]:
         right, bottom = left + crop_width, top + crop_height
         if left < 0 or top < 0 or crop_width < 20 or crop_height < 20 or right > original_width or bottom > original_height:
             raise ValueError("裁剪范围超出图片边界")
-        destination = _unique_output_path(source)
+        destination = _unique_output_path(source, "裁剪" if output_suffix == "裁剪" else "主图")
         _write_image_atomic(destination, image[top:bottom, left:right])
         result.update(
             success=True,
@@ -787,6 +789,7 @@ def run(args_list: list[str]) -> None:
     crop_parser = subparsers.add_parser("crop")
     crop_parser.add_argument("--input", action="append", required=True, dest="inputs")
     crop_parser.add_argument("--rectangle", action="append", required=True, dest="rectangles")
+    crop_parser.add_argument("--output-suffix", choices=("主图", "裁剪"), default="主图")
     args = parser.parse_args(args_list)
 
     if args.command == "crop" and len(args.inputs) != len(args.rectangles):
@@ -808,7 +811,7 @@ def run(args_list: list[str]) -> None:
         if args.command == "analyze":
             results.append(analyze_main_image(input_path))
         elif args.command == "crop":
-            results.append(crop_main_image(input_path, args.rectangles[index - 1]))
+            results.append(crop_main_image(input_path, args.rectangles[index - 1], args.output_suffix))
         else:
             results.append(extract_main_image(input_path))
         print(json.dumps({

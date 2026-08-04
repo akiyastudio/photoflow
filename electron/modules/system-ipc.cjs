@@ -361,6 +361,12 @@ const registerSystemIpc = context => {
   ipcMain.on('window-close', event => BrowserWindow.fromWebContents(event.sender)?.close());
   
   ipcMain.handle('window-is-maximized', event => BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false);
+  ipcMain.handle('window-set-fullscreen', (event, enabled) => {
+    const targetWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!targetWindow || targetWindow.isDestroyed()) return false;
+    targetWindow.setFullScreen(Boolean(enabled));
+    return targetWindow.isFullScreen();
+  });
 
   ipcMain.handle('cursor-screen-point', () => screen.getCursorScreenPoint());
   
@@ -636,7 +642,7 @@ const registerSystemIpc = context => {
     const writesImportFiles = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage);
     const tracksImportTask = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage);
     const cancellableClassify = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage);
-    const cancellable = (scriptName === 'catch.py' || cancellableClassify) && /^[a-z0-9-]{8,80}$/i.test(normalizedRequestId);
+    const cancellable = (scriptName === 'catch.py' || scriptName === 'ffmpeg_transcode.py' || cancellableClassify) && /^[a-z0-9-]{8,80}$/i.test(normalizedRequestId);
     const cancelFile = cancellable ? path.join(app.getPath('temp'), `photoflow-cancel-${normalizedRequestId}.flag`) : '';
     let runtimeArgs = cancellable ? [...args, '--cancel_file', cancelFile] : [...args];
     if (scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage)) {
@@ -1058,6 +1064,15 @@ const registerSystemIpc = context => {
       title: '选择要导入的底片文件',
       properties: ['openFile', 'multiSelections'],
       filters: [{ name: '照片、RAW 与视频', extensions: ['jpg', 'jpeg', 'png', 'webp', 'tif', 'tiff', 'avif', 'heic', 'heif', 'hif', 'arw', 'cr2', 'cr3', 'dng', 'nef', 'orf', 'mp4', 'mov', 'avi', 'crm', 'rwl', 'raf', '3fr', 'fff'] }],
+    });
+    return choice.canceled ? { cancelled: true, paths: [] } : { paths: choice.filePaths };
+  });
+
+  ipcMain.handle('choose-video-files', async () => {
+    const choice = await dialog.showOpenDialog(mainWindow, {
+      title: '选择要转码的视频',
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: '视频', extensions: ['mp4', 'mov', 'm4v', 'mkv', 'avi', 'webm', 'crm', 'mts', 'm2ts', 'ts'] }],
     });
     return choice.canceled ? { cancelled: true, paths: [] } : { paths: choice.filePaths };
   });

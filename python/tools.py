@@ -6,6 +6,7 @@ TOOLS = {
     "catch": "catch",
     "classify": "classify",
     "cut_video": "cut_video",
+    "ffmpeg_transcode": "ffmpeg_transcode",
     "png_to_jpg": "png_to_jpg",
     "rename": "rename",
     "thumbnail_db": "thumbnail_db",

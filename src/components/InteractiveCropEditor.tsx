@@ -4,7 +4,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react';
 export type CropRectangle = { x: number; y: number; width: number; height: number };
 type CropHandle = 'move' | 'nw' | 'ne' | 'sw' | 'se';
 
-const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange, large = false, snapGuides = { x: [], y: [] }, snapEnabled = false }: { previewUrl: string; imageSize: { width: number; height: number }; crop: CropRectangle; onChange: (crop: CropRectangle) => void; large?: boolean; snapGuides?: { x: number[]; y: number[] }; snapEnabled?: boolean }) => {
+const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange, large = false, embedded = false, snapGuides = { x: [], y: [] }, snapEnabled = false }: { previewUrl: string; imageSize: { width: number; height: number }; crop: CropRectangle; onChange: (crop: CropRectangle) => void; large?: boolean; embedded?: boolean; snapGuides?: { x: number[]; y: number[] }; snapEnabled?: boolean }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const dragRef = useRef<{ pointerId: number; handle: CropHandle; x: number; y: number; crop: CropRectangle } | null>(null);
   const minimumSize = Math.max(40, Math.round(Math.min(imageSize.width, imageSize.height) * .025));
@@ -77,7 +77,7 @@ const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange, large = 
     { handle: 'nw', x: crop.x, y: crop.y, cursor: 'nwse-resize' }, { handle: 'ne', x: crop.x + crop.width, y: crop.y, cursor: 'nesw-resize' },
     { handle: 'sw', x: crop.x, y: crop.y + crop.height, cursor: 'nesw-resize' }, { handle: 'se', x: crop.x + crop.width, y: crop.y + crop.height, cursor: 'nwse-resize' },
   ];
-  return <div className={`mt-4 flex justify-center overflow-hidden rounded-xl bg-slate-950 ${large ? 'h-[68vh] max-h-[760px] min-h-[420px]' : 'max-h-80'}`}><svg ref={svgRef} className={`${large ? 'h-full' : 'max-h-80'} w-full select-none touch-none`} viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} preserveAspectRatio="xMidYMid meet" onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>
+  return <div className={`flex justify-center overflow-hidden bg-slate-950 ${embedded ? 'h-full w-full' : `mt-4 rounded-xl ${large ? 'h-[68vh] max-h-[760px] min-h-[420px]' : 'max-h-80'}`}`}><svg ref={svgRef} className={`${embedded || large ? 'h-full' : 'max-h-80'} w-full select-none touch-none`} viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} preserveAspectRatio="xMidYMid meet" onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>
     <image href={previewUrl} width={imageSize.width} height={imageSize.height} pointerEvents="none"/>
     {activeGuides.x !== undefined && <line x1={activeGuides.x} y1="0" x2={activeGuides.x} y2={imageSize.height} stroke="#22d3ee" strokeWidth={Math.max(2, imageSize.width / 1000)} strokeDasharray={`${Math.max(8, imageSize.width / 120)} ${Math.max(6, imageSize.width / 180)}`} pointerEvents="none"/>}
     {activeGuides.y !== undefined && <line x1="0" y1={activeGuides.y} x2={imageSize.width} y2={activeGuides.y} stroke="#22d3ee" strokeWidth={Math.max(2, imageSize.width / 1000)} strokeDasharray={`${Math.max(8, imageSize.width / 120)} ${Math.max(6, imageSize.width / 180)}`} pointerEvents="none"/>}

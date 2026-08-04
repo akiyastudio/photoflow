@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-const RENDERER_PYTHON_TOOLS = new Set(['catch.py', 'classify.py', 'cut_video.py', 'png_to_jpg.py', 'research.py']);
+const RENDERER_PYTHON_TOOLS = new Set(['catch.py', 'classify.py', 'cut_video.py', 'ffmpeg_transcode.py', 'png_to_jpg.py', 'research.py']);
 const validatePythonInvocation = (scriptName, args, requestId) => {
   if (typeof scriptName !== 'string' || !RENDERER_PYTHON_TOOLS.has(scriptName)) throw new Error('Python tool is not available');
   if (!Array.isArray(args) || args.length > 256 || args.some(value => typeof value !== 'string' || value.length > 32768 || /[\0\r\n]/.test(value))) {
@@ -81,6 +81,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   watchFileRoot: (workspacePath, status, name) => ipcRenderer.invoke('workspace-watch-file-root', workspacePath, status, name),
   unwatchFileRoot: (workspacePath, status, name) => ipcRenderer.invoke('workspace-unwatch-file-root', workspacePath, status, name),
   browseProjectFiles: (workspacePath, status, name, relativePath, cacheConfig) => ipcRenderer.invoke('workspace-browse-files', workspacePath, status, name, relativePath, cacheConfig),
+  inspectProjectToolSources: (workspacePath, status, name, relativePaths, collectVideos, collectDirectPng) => ipcRenderer.invoke('workspace-inspect-tool-sources', workspacePath, status, name, relativePaths, collectVideos, collectDirectPng),
   resolveProjectShortcut: (workspacePath, status, name, relativePath) => ipcRenderer.invoke('workspace-resolve-shortcut', workspacePath, status, name, relativePath),
   searchProjectFiles: (workspacePath, status, name, scopeRelativePath, query) => ipcRenderer.invoke('workspace-search-files', workspacePath, status, name, scopeRelativePath, query),
   listRecentProjectFiles: (workspacePath, status, name, scopeRelativePath, limit, cursor) => ipcRenderer.invoke('workspace-recent-files', workspacePath, status, name, scopeRelativePath, limit, cursor),
@@ -88,6 +89,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   addInspirationToProject: (inspirationRoot, targetWorkspacePath, targetStatus, targetProjectName, relativePaths) => ipcRenderer.invoke('workspace-add-inspiration-to-project', inspirationRoot, targetWorkspacePath, targetStatus, targetProjectName, relativePaths),
   extractOfficeImages: (workspacePath, status, name, relativePaths) => invokeFeature('office_media_extract', 'workspace-extract-office-images', workspacePath, status, name, relativePaths),
   extractScreenshotMainImages: (workspacePath, status, name, relativePaths, options) => invokeFeature('screenshot_main_image', 'workspace-extract-screenshot-main-images', workspacePath, status, name, relativePaths, options),
+  trimProjectVideo: (workspacePath, status, name, relativePath, request) => invokeFeature('video_trim', 'workspace-trim-video', workspacePath, status, name, relativePath, request),
   onScreenshotMainImageProgress: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-screenshot-main-image-progress', subscription); return () => ipcRenderer.removeListener('workspace-screenshot-main-image-progress', subscription); },
   getProjectFileDetails: (workspacePath, status, name, relativePaths) => ipcRenderer.invoke('workspace-file-details', workspacePath, status, name, relativePaths),
   getProjectEntryDetails: (workspacePath, status, name, relativePath) => ipcRenderer.invoke('workspace-entry-details', workspacePath, status, name, relativePath),
@@ -173,6 +175,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   chooseCacheDirectory: () => ipcRenderer.invoke('choose-cache-directory'),
   chooseWorkspaceDirectory: (currentPath) => ipcRenderer.invoke('choose-workspace-directory', currentPath),
   chooseImportSourceFiles: () => ipcRenderer.invoke('choose-import-source-files'),
+  chooseVideoFiles: () => ipcRenderer.invoke('choose-video-files'),
   getMediaCacheInfo: (cacheConfig) => ipcRenderer.invoke('media-cache-info', cacheConfig),
   clearMediaCache: (cacheConfig, olderThanDays) => ipcRenderer.invoke('media-cache-clear', cacheConfig, olderThanDays),
   getStorageUsageOverview: (force) => ipcRenderer.invoke('storage-usage-overview', force),
@@ -215,5 +218,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   toggleMaximizeWindow: () => ipcRenderer.invoke('window-toggle-maximize'),
   closeWindow: () => ipcRenderer.send('window-close'),
   isWindowMaximized: () => ipcRenderer.invoke('window-is-maximized'),
+  setWindowFullscreen: (enabled) => ipcRenderer.invoke('window-set-fullscreen', enabled),
   onWindowMaximizedChange: (callback) => { const subscription = (_event, maximized) => callback(maximized); ipcRenderer.on('window-maximized-change', subscription); return () => ipcRenderer.removeListener('window-maximized-change', subscription); },
 });

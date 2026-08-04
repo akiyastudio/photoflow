@@ -2,7 +2,9 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, useLayoutEffe
 import { createPortal } from 'react-dom';
 import { FolderInput, FileInput, FolderPlus, Folder, Image as ImageIcon, ScanSearch, GalleryVerticalEnd, Play, Trash2, Edit, X, Plus, Loader2, CheckCircle2, ExternalLink, Video, ChevronDown, ChevronUp, File, FileImage, MemoryStick, LayoutList, Grid2X2, FileText, Copy, Scissors as Cut, ClipboardPaste, CheckSquare, ArrowLeft, ArrowRight, Camera, Aperture, Timer, Gauge, Ruler, Calendar, Activity, Volume2, PanelLeftOpen, ArrowUpDown, ArrowUp, ArrowDown, Search, Info, GripVertical, Maximize2, Minimize2, GitBranch, UsersRound, Heart, RefreshCw, Crop } from 'lucide-react';
 import { VersionManager } from '../../components/VersionManager';
-import { AdvancedVideoPlayer } from '../../components/AdvancedVideoPlayer';
+import { AdvancedVideoPlayer, videoDirectionalAction, videoDirectionalKeyboardInput } from '../../components/AdvancedVideoPlayer';
+import { InteractiveCropEditor } from '../../components/InteractiveCropEditor';
+import type { CropRectangle } from '../../components/InteractiveCropEditor';
 import { TeamRetouchManager } from '../../components/TeamRetouchManager';
 import { PersonIdentityManager } from '../../components/PersonIdentityManager';
 import { ProjectVersionTree } from '../../components/ProjectVersionTree';
@@ -10,7 +12,7 @@ import type { TeamRetouchStep } from '../../components/TeamRetouchSteps';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import { MediaCacheSettings } from '../settings/SettingsFeature';
-import { ConverterView, ImportCard, MatchView, ResearchView, ScreenshotMainImageView } from '../tools/ToolViews';
+import { ConverterView, ImportCard, MatchView, ResearchView, ScreenshotMainImageView, VideoTranscodeView } from '../tools/ToolViews';
 import { PROJECT_FILE_BROWSER_CONTEXT } from '../file-browser/browser-context';
 import type { FileBrowserContext } from '../file-browser/browser-context';
 import { normalizeProjectCategoryOrder, PROJECT_TOOLBAR_ACTION_IDS, projectStatusLabel } from '../../types';
@@ -30,6 +32,14 @@ const OFFICE_OPEN_XML_EXTENSIONS = new Set([
 const isOfficeOpenXmlEntry = (entry: ProjectFileEntry) => entry.kind === 'file' && OFFICE_OPEN_XML_EXTENSIONS.has(entry.extension.toLocaleLowerCase());
 const SCREENSHOT_MAIN_IMAGE_EXTENSIONS = new Set(['.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp']);
 const isScreenshotMainImageEntry = (entry: ProjectFileEntry) => entry.kind === 'image' && SCREENSHOT_MAIN_IMAGE_EXTENSIONS.has(entry.extension.toLocaleLowerCase());
+
+type PreviewImageCropAnalysis = {
+  success: boolean;
+  crop?: CropRectangle;
+  snapGuides?: { x: number[]; y: number[] };
+  originalSize?: { width: number; height: number };
+  error?: string;
+};
 
 const PhotoshopIcon = ({ size = 16 }: { size?: number }) => (
   <svg aria-hidden="true" width={size} height={size} viewBox="0 0 18 18" className="shrink-0">
@@ -246,15 +256,17 @@ const ColumnResizeHandle = ({ onDrag, label }: { onDrag: (deltaX: number) => voi
 
 type CompareMatch = { source: string; reference: string; target: string; confidence: string; distance: number };
 
-type ProjectPanel = 'import' | 'negative-import' | 'broll' | 'file-import' | 'match' | 'research' | 'converter' | 'screenshot-main-image' | 'trash' | 'cache' | null;
+type ProjectPanel = 'import' | 'negative-import' | 'broll' | 'file-import' | 'match' | 'research' | 'video-transcode' | 'converter' | 'screenshot-main-image' | 'trash' | 'cache' | null;
 type MountedProjectPanel = Exclude<ProjectPanel, null>;
+type ToolSourceAvailability = { loading: boolean; hasVideo: boolean; hasPng: boolean; pngPaths: string[] };
 const PROJECT_PANEL_TITLES: Record<MountedProjectPanel, string> = {
   import: '从 SD 卡导入',
   'negative-import': '导入底片',
   broll: '导入花絮',
   'file-import': '导入文件',
   match: '从文件名选片',
-  research: '提取分镜帧',
+  research: '截取分镜帧',
+  'video-transcode': '视频转码',
   converter: 'PNG 转 JPG',
   'screenshot-main-image': '提取截图主图',
   trash: '移入回收站',
@@ -634,6 +646,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
   const previousPaneLayoutRef = useRef('');
   const paneLayoutRevealPendingRef = useRef(false);
   const paneLayoutRevealPathRef = useRef('');
+  const metadataAutoOpenDismissedFoldersRef = useRef(new Set<string>());
   const [metadataPaneOpen, setMetadataPaneOpen] = useState(false);
   const [columnWidths, setColumnWidths] = useState(() => ({
     files: readStoredNumber('photoflow:files-column-width', 560),
@@ -678,6 +691,14 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
   const [researchTargetPath, setResearchTargetPath] = useState('');
   const [researchTargetKind, setResearchTargetKind] = useState<'file' | 'folder'>('file');
   const [researchTargetHasTxt, setResearchTargetHasTxt] = useState(false);
+  const [videoTranscodeTargets, setVideoTranscodeTargets] = useState<string[]>([]);
+  const [videoTranscodeSourceFolders, setVideoTranscodeSourceFolders] = useState<string[]>([]);
+  const [videoTranscodeCollecting, setVideoTranscodeCollecting] = useState(false);
+  const [selectedToolSourceAvailability, setSelectedToolSourceAvailability] = useState<ToolSourceAvailability>({ loading: false, hasVideo: false, hasPng: false, pngPaths: [] });
+  const [fileMenuToolSourceAvailability, setFileMenuToolSourceAvailability] = useState<ToolSourceAvailability>({ loading: false, hasVideo: false, hasPng: false, pngPaths: [] });
+  const selectedToolSourceInspectionSequenceRef = useRef(0);
+  const fileMenuToolSourceInspectionSequenceRef = useRef(0);
+  const videoTranscodeInspectionSequenceRef = useRef(0);
   const researchInspectionSequenceRef = useRef(0);
   useEffect(() => {
     if (!panel) return;
@@ -710,6 +731,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
   const [shellNewTypesLoaded, setShellNewTypesLoaded] = useState(false);
   const [shellNewTypesLoading, setShellNewTypesLoading] = useState(false);
   const [showImportMenu, setShowImportMenu] = useState(false);
+  const [showVideoToolsMenu, setShowVideoToolsMenu] = useState(false);
   const [progressSetup, setProgressSetup] = useState<ProgressSetupDraft | null>(null);
   const [progressImportCompletion, setProgressImportCompletion] = useState('');
   const [progressCompare, setProgressCompare] = useState<ProgressCompareConfirmation | null>(null);
@@ -738,12 +760,14 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
   const [photoshopAvailable, setPhotoshopAvailable] = useState(false);
   const [conversionTargets, setConversionTargets] = useState<string[]>([]);
   const [screenshotMainImageTargets, setScreenshotMainImageTargets] = useState<string[]>([]);
+  const [screenshotMainImageMode, setScreenshotMainImageMode] = useState<'extract' | 'crop'>('extract');
   const [versionEntry, setVersionEntry] = useState<ProjectFileEntry | null>(null);
   const [teamRetouchEntries, setTeamRetouchEntries] = useState<ProjectFileEntry[]>([]);
   const [teamRetouchHistory, setTeamRetouchHistory] = useState<ProjectFileEntry[]>([]);
   const [teamRetouchStep, setTeamRetouchStep] = useState<TeamRetouchStep | null>(null);
   const [teamRetouchOpening, setTeamRetouchOpening] = useState(false);
   const teamRetouchHistoryRequestRef = useRef<Promise<ProjectFileEntry[]> | null>(null);
+  const teamRetouchWorkflowGeneratedRef = useRef(false);
   const [finalVersionSummary, setFinalVersionSummary] = useState({ count: 0, availableCount: 0, missingCount: 0 });
   const [finalExporting, setFinalExporting] = useState(false);
   const [finalViewOpen, setFinalViewOpen] = useState(false);
@@ -837,11 +861,13 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
   const loadTeamRetouchHistory = useCallback((): Promise<ProjectFileEntry[]> => {
     if (!projectWorkflows || !teamRetouchAvailable) {
       setTeamRetouchHistory([]);
+      teamRetouchWorkflowGeneratedRef.current = false;
       return Promise.resolve([]);
     }
     if (teamRetouchHistoryRequestRef.current) return teamRetouchHistoryRequestRef.current;
     const request: Promise<ProjectFileEntry[]> = window.electronAPI.getTeamProjectWorkspace(workspacePath, project.name, project.status).then(result => {
       if (!result.success) throw new Error(result.error || '无法读取团片协作记录');
+      teamRetouchWorkflowGeneratedRef.current = Boolean(result.workflowGenerated);
       const entries = result.photos.map(photo => {
         const name = photo.sourcePath.split(/[\\/]/).pop() || photo.name;
         const extension = name.includes('.') ? `.${name.split('.').pop()}`.toLocaleLowerCase() : '';
@@ -866,7 +892,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
   }, [progressCompare, progressCompareFilter]);
 
   useEffect(() => {
-    if (!teamRetouchAvailable) { setTeamRetouchEntries([]); setTeamRetouchStep(null); }
+    if (!teamRetouchAvailable) { setTeamRetouchEntries([]); setTeamRetouchStep(null); teamRetouchWorkflowGeneratedRef.current = false; }
     void loadTeamRetouchHistory().catch(() => undefined);
   }, [teamRetouchAvailable, loadTeamRetouchHistory]);
 
@@ -937,11 +963,11 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     try {
       const result = await window.electronAPI.browseFinalVersions(workspacePath, project.status, project.name);
       if (!result.success) {
-        onNotice(`读取最终版失败：${result.error || '未知错误'}`);
+        onNotice(`读取喜爱图片失败：${result.error || '未知错误'}`);
         return null;
       }
       setFinalViewEntries(result.entries);
-      if (showMissingNotice && result.missingCount) onNotice(`已显示 ${result.availableCount} 张最终版；另有 ${result.missingCount} 张文件已被删除、移动或不在项目中。`, 7000);
+      if (showMissingNotice && result.missingCount) onNotice(`已显示 ${result.availableCount} 张喜爱图片；另有 ${result.missingCount} 张文件已被删除、移动或不在项目中。`, 7000);
       return result;
     } finally {
       setFinalViewLoading(false);
@@ -950,7 +976,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
   const openFinalVersionView = async () => {
     const result = await loadFinalViewEntries(true);
     if (!result?.count) {
-      if (result) onNotice('当前项目还没有标记最终版的图片');
+      if (result) onNotice('当前项目还没有标记为喜爱的图片');
       return;
     }
     setFinalViewOpen(true);
@@ -1315,7 +1341,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     };
   }, [finalViewOpen, loadMoreRecentFiles, recentHasMore, recentLoadingMore, recursiveFlatOpen, searchEntries.length, searchQuery]);
   useEffect(() => {
-    const closeMenus = () => { setFileMenu(null); setSurfaceMenu(null); setMissingProgressMenu(null); setShowStatusMenu(false); setShowCreateMenu(false); setShowImportMenu(false); setShowSortMenu(false); };
+    const closeMenus = () => { setFileMenu(null); setSurfaceMenu(null); setMissingProgressMenu(null); setShowStatusMenu(false); setShowCreateMenu(false); setShowImportMenu(false); setShowVideoToolsMenu(false); setShowSortMenu(false); };
     window.addEventListener('click', closeMenus);
     window.addEventListener('photoflow-menu-open', closeMenus);
     return () => { window.removeEventListener('click', closeMenus); window.removeEventListener('photoflow-menu-open', closeMenus); };
@@ -2373,8 +2399,42 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     if (projectPanelIsRunning('screenshot-main-image')) { setPanel('screenshot-main-image'); return; }
     const targets = entries.filter(isScreenshotMainImageEntry).map(entry => entry.relativePath);
     if (!targets.length) return;
+    setScreenshotMainImageMode('extract');
     setScreenshotMainImageTargets(targets);
     setPanel('screenshot-main-image');
+  };
+  const analyzePreviewImageCrop = async (entry: ProjectFileEntry): Promise<PreviewImageCropAnalysis> => {
+    if (!isScreenshotMainImageEntry(entry) || entry.viaShortcut) {
+      return { success: false, error: '当前图片格式暂不支持裁剪' };
+    }
+    try {
+      const analysis = await window.electronAPI.extractScreenshotMainImages(workspacePath, project.status, project.name, [entry.relativePath], { analyzeOnly: true });
+      const result = analysis.results[0];
+      if (!result?.success || !result.crop || !result.originalSize) return { success: false, error: result?.error || analysis.error || '无法识别可裁剪范围' };
+      return {
+        success: true,
+        crop: result.crop,
+        originalSize: result.originalSize,
+        snapGuides: result.snapGuides || { x: [0, result.originalSize.width], y: [0, result.originalSize.height] }
+      };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+  const savePreviewImageCrop = async (entry: ProjectFileEntry, crop: CropRectangle): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const extraction = await window.electronAPI.extractScreenshotMainImages(workspacePath, project.status, project.name, [entry.relativePath], { crops: [crop], outputSuffix: '裁剪' });
+      const result = extraction.results[0];
+      if (!result?.success || !result.cropped) return { success: false, error: result?.error || extraction.error || '裁剪失败' };
+      directoryEntriesCacheRef.current.clear();
+      setRecentRefreshToken(value => value + 1);
+      await refresh(currentRelativePathRef.current);
+      if (finalViewOpen) await loadFinalViewEntries();
+      onNotice(`裁剪完成：${result.outputName || '已在原图旁生成裁剪图片'}`);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
   };
   const toggleSelected = (relativePath: string) => {
     selectionAnchorPathRef.current = relativePath;
@@ -2430,7 +2490,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     refresh();
   };
   const beginRename = (targetPaths = selectedPaths) => {
-    if (finalViewOpen) { onNotice('最终版浏览是只读视图，请回到原文件夹重命名'); return; }
+    if (finalViewOpen) { onNotice('喜爱图片浏览是只读视图，请回到原文件夹重命名'); return; }
     if (!targetPaths.length) return;
     if (activeFileEntries.some(entry => targetPaths.includes(entry.relativePath) && entry.viaShortcut)) { onNotice('快捷方式中的文件是只读浏览内容，不能在项目中重命名'); return; }
     if (activeFileEntries.some(entry => targetPaths.includes(entry.relativePath) && isProtectedRenameEntry(entry))) { onNotice('所选内容包含工作流管理的文件夹，不能普通重命名；进度文件夹请使用“修改进度”。'); return; }
@@ -2509,9 +2569,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     if (selectionBaselineChanged) await ensureSelectionBaseline();
     refresh();
   };
-  const openFileMenu = (event: React.MouseEvent, entry: ProjectFileEntry, selectEntry = true) => {
-    event.preventDefault();
-    event.stopPropagation();
+  const openFileMenuAt = (x: number, y: number, entry: ProjectFileEntry, selectEntry = true) => {
     filesSurfaceRef.current?.focus({ preventScroll: true });
     window.dispatchEvent(new Event('photoflow-menu-open'));
     setSurfaceMenu(null);
@@ -2520,7 +2578,12 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
       if (!selectedPaths.includes(entry.relativePath)) selectionAnchorPathRef.current = entry.relativePath;
       setSelectedPaths(current => current.includes(entry.relativePath) ? current : [entry.relativePath]);
     }
-    setFileMenu({ entry, x: event.clientX, y: event.clientY });
+    setFileMenu({ entry, x, y });
+  };
+  const openFileMenu = (event: React.MouseEvent, entry: ProjectFileEntry, selectEntry = true) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openFileMenuAt(event.clientX, event.clientY, entry, selectEntry);
   };
   const openSurfaceMenu = (event: React.MouseEvent<HTMLElement>, targetRelativePath = currentRelativePath, targetLabel = '') => {
     if ((event.target as HTMLElement).closest('[data-entry-path]')) return;
@@ -2643,7 +2706,6 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     return left && right ? compareProgressKeys(right.versionKey, left.versionKey) : 0;
   });
   const hasVersionProgressForEntry = (entry?: ProjectFileEntry) => Boolean(progressFolderForMediaEntry(entry));
-  const hasVersionTrackingForEntry = (entry?: ProjectFileEntry) => Boolean(progressFolderForMediaEntry(entry)?.trackingEnabled);
   const openVersions = (entry?: ProjectFileEntry) => {
     const target = entry || selectedEntries[0];
     if (!target || !['image', 'raw', 'video'].includes(target.kind)) {
@@ -2662,23 +2724,23 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     const summary = await loadFinalVersionSummary();
     if (!summary.count) return;
     if (summary.missingCount) {
-      onNotice(`有 ${summary.missingCount} 个最终版文件已被删除或移动，请先在版本管理中重新定位。`, 7000);
+      onNotice(`有 ${summary.missingCount} 个喜爱图片已被删除或移动，请先重新定位。`, 7000);
       return;
     }
     const latestFolders = await loadProgressFolders();
     const latestRootNumber = latestFolders
       .filter(folder => folder.mediaKind === 'image' && /^\d+$/.test(folder.versionKey))
       .reduce((highest, folder) => Math.max(highest, Number(folder.versionKey)), 0);
-    const expectedName = `图片后期_${latestRootNumber + 1}_最终版`;
+    const expectedName = `图片后期_${latestRootNumber + 1}_喜爱`;
     if (!await appDialog.confirm({
-      title: '确定创建最终版进度吗？',
-      message: `将 ${summary.availableCount} 张最终版图片复制到新进度“${expectedName}”。`,
+      title: '确定整理喜爱图片吗？',
+      message: `将 ${summary.availableCount} 张喜爱图片复制到新进度“${expectedName}”。`,
       confirmLabel: '创建并复制',
     })) return;
     setFinalExporting(true);
     try {
       const result = await window.electronAPI.exportFinalVersions(workspacePath, project.status, project.name);
-      if (!result.success || !result.folder) throw new Error(result.error || '无法创建最终版进度');
+      if (!result.success || !result.folder) throw new Error(result.error || '无法整理喜爱图片');
       directoryEntriesCacheRef.current.clear();
       await loadProgressFolders();
       await loadFinalVersionSummary();
@@ -2689,9 +2751,9 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
       setPreviewPaneOpen(false);
       setMetadataPaneOpen(false);
       navigateToDirectory(result.folder.relativePath);
-      onNotice(`成功复制文件：已将 ${result.count} 张最终版图片放入“${result.displayName}”。`, 6000);
+      onNotice(`成功复制文件：已将 ${result.count} 张喜爱图片放入“${result.displayName}”。`, 6000);
     } catch (error) {
-      onNotice(`创建最终版进度失败：${error instanceof Error ? error.message : String(error)}`, 7000);
+      onNotice(`整理喜爱图片失败：${error instanceof Error ? error.message : String(error)}`, 7000);
     } finally {
       setFinalExporting(false);
     }
@@ -2703,6 +2765,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
       : selectedEntries;
     const validTargets = targets.filter(target => target.kind === 'image');
     if (!validTargets.length && teamRetouchStep && teamRetouchEntries.length) {
+      setTeamRetouchStep(teamRetouchWorkflowGeneratedRef.current ? 'workflow' : 'detect');
       onOpenToolTab('team', `团片 · ${project.name}`);
       return;
     }
@@ -2726,7 +2789,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
         void loadTeamRetouchHistory().catch(() => undefined);
       }
       setTeamRetouchEntries([...combined.values()]);
-      setTeamRetouchStep(current => current || 'detect');
+      setTeamRetouchStep(validTargets.length ? 'detect' : teamRetouchWorkflowGeneratedRef.current ? 'workflow' : 'detect');
       onOpenToolTab('team', `团片 · ${project.name}`);
       onNotice(`团片协作已加载，共 ${combined.size} 张图片`);
     } catch (error) {
@@ -2776,12 +2839,14 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
   };
   const startSelectionDrag = (event: React.PointerEvent<HTMLDivElement>) => {
     const pointerTarget = event.target as HTMLElement;
-    const recursiveFolder = pointerTarget.closest<HTMLElement>('[data-recursive-folder-path]');
-    if (recursiveFolder?.dataset.recursiveFolderReadonly !== 'true') setOperationDirectoryPath(normalizeProjectRelativePath(recursiveFolder?.dataset.recursiveFolderPath || currentRelativePath));
-    else if (!recursiveFolder) setOperationDirectoryPath(currentRelativePath);
     if (event.button !== 0 || pointerTarget.closest('[data-entry-path], button, input, select, textarea')) return;
     const surface = filesSurfaceRef.current;
     if (!surface) return;
+    const surfaceRect = surface.getBoundingClientRect();
+    if (event.clientY < surfaceRect.top) return;
+    const recursiveFolder = pointerTarget.closest<HTMLElement>('[data-recursive-folder-path]');
+    if (recursiveFolder?.dataset.recursiveFolderReadonly !== 'true') setOperationDirectoryPath(normalizeProjectRelativePath(recursiveFolder?.dataset.recursiveFolderPath || currentRelativePath));
+    else if (!recursiveFolder) setOperationDirectoryPath(currentRelativePath);
     surface.focus({ preventScroll: true });
     cancelInlineRename();
     event.preventDefault();
@@ -2855,7 +2920,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     setClipboardHasFiles(result.hasFiles);
   };
   const runFileOperation = async (operation: 'trash' | 'copy' | 'cut' | 'paste' | 'rename', nextName?: string, targetPaths = selectedPaths, destinationRelativePath = operationDirectoryPath) => {
-    if (finalViewOpen && operation !== 'copy') { onNotice('最终版浏览是只读视图，请回到原文件夹修改文件'); return; }
+    if (finalViewOpen && operation !== 'copy') { onNotice('喜爱图片浏览是只读视图，请回到原文件夹修改文件'); return; }
     if (operation !== 'paste' && activeFileEntries.some(entry => targetPaths.includes(entry.relativePath) && entry.viaShortcut)) { onNotice('快捷方式中的文件是只读浏览内容，不能执行此操作'); return; }
     if (operation === 'trash' && projectWorkflows) {
       const normalizedTargets = new Set(targetPaths.map(normalizeProjectRelativePath));
@@ -3027,7 +3092,10 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
   const currentPreviewMetadataFields = previewEntry && previewMetadataResolvedPath === previewEntry.path ? previewMetadataFields : [];
   const currentPreviewMetadataLoading = Boolean(previewEntry && (previewMetadataLoading || previewMetadataResolvedPath !== previewEntry.path));
   const currentPreviewMetadataError = previewEntry && previewMetadataResolvedPath === previewEntry.path ? previewMetadataError : '';
-  const previewCanMarkFinal = Boolean(previewEntry && hasVersionTrackingForEntry(previewEntry));
+  // The persisted isFinal flag is retained for backward compatibility, but the
+  // product concept is now a project-wide image favorite and no longer depends
+  // on a version-progress folder.
+  const previewCanMarkFinal = Boolean(previewEntry && !previewEntry.viaShortcut && (previewEntry.kind === 'image' || previewEntry.kind === 'raw'));
   const previewVersionCacheKey = previewEntry ? `${workspacePath}|${project.name}|${previewEntry.path.replace(/\\/g, '/').toLocaleLowerCase()}|${previewEntry.updatedAt}` : '';
   useEffect(() => {
     let active = true;
@@ -3067,7 +3135,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     const result = await window.electronAPI.updateMediaVersion(workspacePath, { versionId: previewVersion.id, isFinal: nextFinalState });
     setPreviewVersionBusy(false);
     if (!result.success) {
-      onNotice(`更新最终版失败：${result.error || '未知错误'}`);
+      onNotice(`更新喜爱状态失败：${result.error || '未知错误'}`);
       return;
     }
     const updatedPreviewVersion = result.versions.find(version => version.id === previewVersion.id) || null;
@@ -3082,7 +3150,22 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
         setMetadataPaneOpen(false);
       }
     }
-    onNotice(nextFinalState ? '已标记为最终版' : '已取消最终版');
+    onNotice(nextFinalState ? '已标记为喜爱' : '已取消喜爱');
+  };
+  const trimPreviewVideo = async (start: number, end: number, saveMode: 'new' | 'replace') => {
+    if (!previewEntry || previewEntry.kind !== 'video' || previewEntry.viaShortcut) return { success: false, error: '当前视频不可剪辑' };
+    const result = await window.electronAPI.trimProjectVideo(workspacePath, project.status, project.name, previewEntry.relativePath, { start, end, saveMode });
+    if (!result.success) {
+      onNotice(`视频剪辑失败：${result.error || '未知错误'}`, 7000);
+      return result;
+    }
+    directoryEntriesCacheRef.current.clear();
+    setRecentRefreshToken(value => value + 1);
+    await refresh(currentRelativePathRef.current);
+    onNotice(result.replaced
+      ? `已用剪辑结果覆盖原视频：${previewEntry.name}`
+      : `视频剪辑已保存：${result.relativePath?.split('/').pop() || '新视频'}`);
+    return result;
   };
   const previewMediaEntries = displayedFileEntries.filter(entry => entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video');
   const scrollFileEntryIntoView = useCallback((relativePath: string, align: 'nearest' | 'center' = 'nearest') => {
@@ -3237,7 +3320,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
       setPreviewMetadataResolvedPath(previewEntry.path);
     }).finally(() => { if (active) setPreviewMetadataLoading(false); });
     return () => { active = false; };
-  }, [previewEntry?.path]);
+  }, [previewEntry?.path, previewEntry?.updatedAt]);
   useEffect(() => {
     let active = true;
     setPreviewEntryDetails(null);
@@ -3320,6 +3403,64 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     const entry = activeFileEntries.find(candidate => candidate.relativePath === path);
     return Boolean(entry && !entry.viaShortcut && entryIsInSelectionSourceFolder(entry) && (entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video'));
   });
+  const selectedToolSourceKey = selectedPaths.join('\0');
+  const fileMenuToolSourceKey = fileMenu ? fileMenuTargetPaths.join('\0') : '';
+  useEffect(() => {
+    const sequence = ++selectedToolSourceInspectionSequenceRef.current;
+    let retryTimer = 0;
+    if (finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length) {
+      setSelectedToolSourceAvailability({ loading: false, hasVideo: false, hasPng: false, pngPaths: [] });
+      return () => undefined;
+    }
+    setSelectedToolSourceAvailability(current => ({ ...current, loading: true }));
+    const readIndex = async () => {
+      const result = await window.electronAPI.inspectProjectToolSources(workspacePath, project.status, project.name, selectedPaths);
+      if (sequence !== selectedToolSourceInspectionSequenceRef.current) return;
+      if (!result.success) {
+        setSelectedToolSourceAvailability({ loading: false, hasVideo: false, hasPng: false, pngPaths: [] });
+        return;
+      }
+      if (!result.indexed) {
+        setSelectedToolSourceAvailability({ loading: true, hasVideo: false, hasPng: false, pngPaths: [] });
+        retryTimer = window.setTimeout(() => void readIndex(), 800);
+        return;
+      }
+      setSelectedToolSourceAvailability({ loading: false, hasVideo: result.hasVideo, hasPng: result.hasPng, pngPaths: result.pngPaths });
+    };
+    void readIndex();
+    return () => {
+      selectedToolSourceInspectionSequenceRef.current += 1;
+      if (retryTimer) window.clearTimeout(retryTimer);
+    };
+  }, [workspacePath, project.status, project.name, selectedToolSourceKey, recentRefreshToken, finalViewOpen, selectedContainsShortcutContent]);
+  useEffect(() => {
+    const sequence = ++fileMenuToolSourceInspectionSequenceRef.current;
+    let retryTimer = 0;
+    if (!fileMenu || fileMenuContainsShortcutContent || !fileMenuTargetPaths.length) {
+      setFileMenuToolSourceAvailability({ loading: false, hasVideo: false, hasPng: false, pngPaths: [] });
+      return () => undefined;
+    }
+    setFileMenuToolSourceAvailability(current => ({ ...current, loading: true }));
+    const readIndex = async () => {
+      const result = await window.electronAPI.inspectProjectToolSources(workspacePath, project.status, project.name, fileMenuTargetPaths, false, true);
+      if (sequence !== fileMenuToolSourceInspectionSequenceRef.current) return;
+      if (!result.success) {
+        setFileMenuToolSourceAvailability({ loading: false, hasVideo: false, hasPng: false, pngPaths: [] });
+        return;
+      }
+      if (!result.indexed) {
+        setFileMenuToolSourceAvailability({ loading: true, hasVideo: false, hasPng: false, pngPaths: [] });
+        retryTimer = window.setTimeout(() => void readIndex(), 800);
+        return;
+      }
+      setFileMenuToolSourceAvailability({ loading: false, hasVideo: result.hasVideo, hasPng: result.hasPng, pngPaths: result.pngPaths });
+    };
+    void readIndex();
+    return () => {
+      fileMenuToolSourceInspectionSequenceRef.current += 1;
+      if (retryTimer) window.clearTimeout(retryTimer);
+    };
+  }, [workspacePath, project.status, project.name, fileMenuToolSourceKey, recentRefreshToken, fileMenuContainsShortcutContent]);
   const gatherInspiration = async (targetProject: WorkspaceProject, targetPaths: string[]) => {
     if (!gatherToProject || gatheringInspiration) return;
     if (!inspirationTargetWorkspacePath?.trim()) { onNotice('请先设置项目工作目录'); return; }
@@ -3369,8 +3510,41 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     if (sequence !== researchInspectionSequenceRef.current) return;
     setResearchTargetHasTxt(Boolean(result.success && result.entries.some(candidate => candidate.extension.toLocaleLowerCase() === '.txt')));
   };
+  const openVideoTranscode = async (targetRelativePaths = selectedPaths) => {
+    setShowVideoToolsMenu(false);
+    if (projectPanelIsRunning('video-transcode')) {
+      setPanel('video-transcode');
+      return;
+    }
+    if (!targetRelativePaths.length) {
+      onNotice('请先选择包含视频的文件或文件夹');
+      return;
+    }
+    const sequence = ++videoTranscodeInspectionSequenceRef.current;
+    setVideoTranscodeTargets([]);
+    setVideoTranscodeSourceFolders([]);
+    setVideoTranscodeCollecting(true);
+    setPanel('video-transcode');
+    while (sequence === videoTranscodeInspectionSequenceRef.current) {
+      const result = await window.electronAPI.inspectProjectToolSources(workspacePath, project.status, project.name, targetRelativePaths, true);
+      if (sequence !== videoTranscodeInspectionSequenceRef.current) return;
+      if (!result.success) {
+        setVideoTranscodeCollecting(false);
+        onNotice(`读取视频索引失败：${result.error || '未知错误'}`);
+        return;
+      }
+      if (result.indexed) {
+        setVideoTranscodeTargets(result.videoPaths);
+        setVideoTranscodeSourceFolders(result.folderPaths || []);
+        setVideoTranscodeCollecting(false);
+        if (!result.videoPaths.length) onNotice('所选文件或文件夹中没有视频');
+        return;
+      }
+      await new Promise<void>(resolve => window.setTimeout(resolve, 800));
+    }
+  };
   const selectMediaFiles = async (targetPaths = selectedPaths) => {
-    if (finalViewOpen) { onNotice('最终版浏览是只读视图，请回到原文件夹进行选片'); return; }
+    if (finalViewOpen) { onNotice('喜爱图片浏览是只读视图，请回到原文件夹进行选片'); return; }
     const targetEntries = activeFileEntries.filter(entry => targetPaths.includes(entry.relativePath));
     const canSelectTargets = targetEntries.length > 0 && targetEntries.length === targetPaths.length && targetEntries.every(entry => entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video');
     if (!canSelectTargets) { onNotice(targetPaths.length ? '只能选择媒体文件' : '请先选择媒体文件'); return; }
@@ -3395,6 +3569,18 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     setPreviewTechnicalMetadata({});
     setPreviewPaneOpen(true);
     setMetadataPaneOpen(true);
+  };
+  const metadataPreferenceFolderKey = (entry?: ProjectFileEntry) => {
+    const relativeFolder = entry && !entry.viaShortcut
+      ? projectRelativeParentPath(entry.relativePath)
+      : currentRelativePath;
+    return `${project.path}|${normalizeProjectRelativePath(relativeFolder)}`;
+  };
+  const closeMetadataPaneByUser = () => {
+    if (previewEntry?.kind === 'image' || previewEntry?.kind === 'raw') {
+      metadataAutoOpenDismissedFoldersRef.current.add(metadataPreferenceFolderKey(previewEntry));
+    }
+    setMetadataPaneOpen(false);
   };
   const openPreviewOnly = (entry: ProjectFileEntry) => {
     if (entry.kind !== 'image' && entry.kind !== 'raw' && entry.kind !== 'video') return;
@@ -3428,7 +3614,9 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
       return;
     }
     if (entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video') {
-      if (previewOnlyOnMediaClick) openPreviewOnly(entry);
+      const imageMetadataAutoOpenDismissed = (entry.kind === 'image' || entry.kind === 'raw')
+        && metadataAutoOpenDismissedFoldersRef.current.has(metadataPreferenceFolderKey(entry));
+      if (previewOnlyOnMediaClick || imageMetadataAutoOpenDismissed) openPreviewOnly(entry);
       else openPreviewAndMetadata(entry);
       return;
     }
@@ -3633,7 +3821,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     event.preventDefault();
     event.stopPropagation();
     setSurfaceDropActive(false);
-    if (finalViewOpen) { onNotice('最终版浏览是只读视图，不能导入文件'); return; }
+    if (finalViewOpen) { onNotice('喜爱图片浏览是只读视图，不能导入文件'); return; }
     const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, 'import', externalPaths, currentRelativePath);
     if (!result.success) { onNotice(`导入失败：${result.error || '未知错误'}`); return; }
     onNotice(`已导入 ${result.count} 个项目`);
@@ -3705,13 +3893,15 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
   const progressCompareListItems = progressCompare ? buildProgressCompareListItems(progressCompare, progressCompareFilter) : [];
   const activeProgressCompareItem = progressCompareListItems.find(item => item.key === activeProgressCompareItemKey);
   const photoshopToolbarAvailable = photoshopAvailable && !selectedContainsShortcutContent && selectedEntries.length > 0 && selectedEntries.length === selectedPaths.length && selectedEntries.every(entry => entry.kind === 'image' || entry.kind === 'raw');
-  const pngConverterToolbarAvailable = !finalViewOpen && !selectedContainsShortcutContent && selectedEntries.length > 0 && selectedEntries.length === selectedPaths.length;
+  const pngConverterToolbarAvailable = !finalViewOpen && !selectedContainsShortcutContent && !selectedToolSourceAvailability.loading && selectedToolSourceAvailability.hasPng;
+  const videoToolsToolbarAvailable = !finalViewOpen && !selectedContainsShortcutContent && !selectedToolSourceAvailability.loading && selectedToolSourceAvailability.hasVideo;
+  const fileMenuHasToolActions = Boolean(fileMenu && (fileMenu.entry.kind !== 'folder' || fileMenuToolSourceAvailability.loading || fileMenuToolSourceAvailability.hasVideo || fileMenuToolSourceAvailability.hasPng));
   const versionManagementToolbarAvailable = Boolean(selectedRegisteredProgressFolder) || selectedEntries.length === 1 && hasVersionProgressForEntry(selectedEntries[0]);
   const teamRetouchToolbarAvailable = teamRetouchInstalled && (selectedEntries.some(entry => entry.kind === 'image') || teamRetouchHistory.length > 0);
   const projectToolbarAvailability: Record<ProjectToolbarActionId, boolean> = {
     'filename-selection': true,
     'select-media': canSelectMedia,
-    storyboard: Boolean(selectedResearchTarget),
+    storyboard: videoToolsToolbarAvailable,
     'screenshot-main-image': canExtractScreenshotMainImage,
     photoshop: photoshopToolbarAvailable,
     'png-converter': pngConverterToolbarAvailable,
@@ -3722,14 +3912,20 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
   const unavailableProjectToolbarTitle = (label: string, reason: string) => `${label}，${reason}`;
   const projectToolbarButtons: Record<ProjectToolbarActionId, React.ReactNode> = {
     'filename-selection': <button onClick={() => togglePanel('match')} title="从文件名选片" aria-label="从文件名选片" className="project-action-button"><FileText size={16}/>从文件名选片</button>,
-    'select-media': <button disabled={!canSelectMedia} title={canSelectMedia ? '选片：把所选素材加入图片或视频选片结果' : unavailableProjectToolbarTitle('选片', finalViewOpen ? '最终版为只读' : selectedContainsShortcutContent ? '快捷方式内容为只读' : '需选择选片源素材使用')} aria-label="选片" onClick={() => void selectMediaFiles()} className="project-action-button"><CheckCircle2 size={16}/>选片</button>,
-    storyboard: <button type="button" disabled={!selectedResearchTarget} onClick={() => { if (!selectedResearchTarget) return; if (panel === 'research') setPanel(null); else void openResearchForEntry(selectedResearchTarget); }} title={selectedResearchTarget ? '提取分镜帧：从所选视频或文件夹中提取代表性画面' : unavailableProjectToolbarTitle('提取分镜帧', '需选择视频/文件夹使用')} aria-label="提取所选视频或文件夹的分镜帧" aria-pressed={panel === 'research'} className={`project-action-button ${panel === 'research' ? 'bg-blue-50 text-blue-600' : ''}`}><Video size={16}/>提取分镜帧</button>,
-    'screenshot-main-image': <button type="button" disabled={!canExtractScreenshotMainImage} onClick={() => { if (panel === 'screenshot-main-image') setPanel(null); else openScreenshotMainImage(selectedScreenshotMainImageEntries); }} title={canExtractScreenshotMainImage ? selectedScreenshotMainImageEntries.length > 1 ? `提取截图主图：批量识别并裁出所选 ${selectedScreenshotMainImageEntries.length} 张截图中的主要图片区域` : '提取截图主图：识别并裁出所选截图中的主要图片区域' : unavailableProjectToolbarTitle('提取截图主图', finalViewOpen ? '最终版为只读' : selectedContainsShortcutContent ? '快捷方式内容为只读' : '需选择截图图片使用')} aria-label="提取截图主图" aria-pressed={panel === 'screenshot-main-image'} className={`project-action-button ${panel === 'screenshot-main-image' ? 'bg-blue-50 text-blue-600' : ''}`}><Crop size={16}/>提取截图主图{selectedScreenshotMainImageEntries.length > 1 ? `（${selectedScreenshotMainImageEntries.length} 张）` : ''}</button>,
+    'select-media': <button disabled={!canSelectMedia} title={canSelectMedia ? '选片：把所选素材加入图片或视频选片结果' : unavailableProjectToolbarTitle('选片', finalViewOpen ? '喜爱图片为只读' : selectedContainsShortcutContent ? '快捷方式内容为只读' : '需选择选片源素材使用')} aria-label="选片" onClick={() => void selectMediaFiles()} className="project-action-button"><CheckCircle2 size={16}/>选片</button>,
+    storyboard: <div className="relative" onClick={event => event.stopPropagation()}>
+      <button type="button" disabled={!videoToolsToolbarAvailable} onClick={() => { const next = !showVideoToolsMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowVideoToolsMenu(next); }} title={selectedToolSourceAvailability.loading ? '项目媒体索引正在建立' : videoToolsToolbarAvailable ? '视频工具' : '所选文件或文件夹中没有视频'} aria-label="视频工具" aria-haspopup="menu" aria-expanded={showVideoToolsMenu} aria-pressed={panel === 'research' || panel === 'video-transcode'} className={`project-action-button ${panel === 'research' || panel === 'video-transcode' ? 'bg-blue-50 text-blue-600' : ''}`}>{selectedToolSourceAvailability.loading ? <Loader2 size={16} className="animate-spin"/> : <Video size={16}/>}视频工具</button>
+      {showVideoToolsMenu && <div role="menu" className="absolute left-0 top-full z-40 mt-1 w-48 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">
+        <button type="button" role="menuitem" disabled={!selectedResearchTarget || !selectedToolSourceAvailability.hasVideo} title={selectedResearchTarget ? '从所选视频或文件夹中提取代表性画面' : '需单独选择一个视频或文件夹'} className="project-menu-item" onClick={() => { if (!selectedResearchTarget) return; setShowVideoToolsMenu(false); void openResearchForEntry(selectedResearchTarget); }}><Video size={14}/>截取分镜帧</button>
+        <button type="button" role="menuitem" className="project-menu-item" onClick={() => void openVideoTranscode()}><Gauge size={14}/>视频转码</button>
+      </div>}
+    </div>,
+    'screenshot-main-image': <button type="button" disabled={!canExtractScreenshotMainImage} onClick={() => { if (panel === 'screenshot-main-image') setPanel(null); else openScreenshotMainImage(selectedScreenshotMainImageEntries); }} title={canExtractScreenshotMainImage ? selectedScreenshotMainImageEntries.length > 1 ? `提取截图主图：批量识别并裁出所选 ${selectedScreenshotMainImageEntries.length} 张截图中的主要图片区域` : '提取截图主图：识别并裁出所选截图中的主要图片区域' : unavailableProjectToolbarTitle('提取截图主图', finalViewOpen ? '喜爱图片为只读' : selectedContainsShortcutContent ? '快捷方式内容为只读' : '需选择截图图片使用')} aria-label="提取截图主图" aria-pressed={panel === 'screenshot-main-image'} className={`project-action-button ${panel === 'screenshot-main-image' ? 'bg-blue-50 text-blue-600' : ''}`}><Crop size={16}/>提取截图主图{selectedScreenshotMainImageEntries.length > 1 ? `（${selectedScreenshotMainImageEntries.length} 张）` : ''}</button>,
     photoshop: <button disabled={!photoshopToolbarAvailable} onClick={() => void openProjectEntriesInPhotoshop(selectedEntries)} title={photoshopToolbarAvailable ? selectedEntries.length > 1 ? `在 PS 中打开：把所选 ${selectedEntries.length} 张图片或 RAW 发送到 Photoshop` : '在 PS 中打开：把所选图片或 RAW 发送到 Photoshop' : unavailableProjectToolbarTitle('在 PS 中打开', !photoshopAvailable ? '未检测到 Photoshop' : selectedContainsShortcutContent ? '快捷方式内容暂不支持' : '需选择图片/RAW 使用')} aria-label="在 Photoshop 中打开所选图片或 RAW" className="project-action-button"><PhotoshopIcon size={16}/>在 PS 中打开{selectedEntries.length > 1 && photoshopToolbarAvailable ? `（${selectedEntries.length} 张）` : ''}</button>,
-    'png-converter': <button disabled={!pngConverterToolbarAvailable} onClick={() => { if (panel === 'converter') setPanel(null); else openPngConverter(selectedEntries.map(entry => entry.path)); }} title={pngConverterToolbarAvailable ? selectedEntries.length > 1 ? `PNG 转 JPG：转换所选 ${selectedEntries.length} 个文件或文件夹中的 PNG` : 'PNG 转 JPG：转换所选文件或文件夹中的 PNG' : unavailableProjectToolbarTitle('PNG 转 JPG', finalViewOpen ? '最终版为只读' : selectedContainsShortcutContent ? '快捷方式内容为只读' : '需选择图片使用')} aria-label="PNG 转 JPG" aria-pressed={panel === 'converter'} className={`project-action-button ${panel === 'converter' ? 'bg-blue-50 text-blue-600' : ''}`}><ImageIcon size={16}/>PNG 转 JPG</button>,
+    'png-converter': <button disabled={!pngConverterToolbarAvailable} onClick={() => { if (panel === 'converter') setPanel(null); else openPngConverter(selectedEntries.map(entry => entry.path)); }} title={pngConverterToolbarAvailable ? selectedEntries.length > 1 ? `PNG 转 JPG：转换所选 ${selectedEntries.length} 个文件或文件夹中的 PNG` : 'PNG 转 JPG：转换所选文件或文件夹中的 PNG' : unavailableProjectToolbarTitle('PNG 转 JPG', selectedToolSourceAvailability.loading ? '项目媒体索引正在建立' : finalViewOpen ? '喜爱图片为只读' : selectedContainsShortcutContent ? '快捷方式内容为只读' : '所选文件或文件夹中没有 PNG')} aria-label="PNG 转 JPG" aria-pressed={panel === 'converter'} className={`project-action-button ${panel === 'converter' ? 'bg-blue-50 text-blue-600' : ''}`}>{selectedToolSourceAvailability.loading ? <Loader2 size={16} className="animate-spin"/> : <ImageIcon size={16}/>}PNG 转 JPG</button>,
     'version-management': selectedRegisteredProgressFolder ? selectedRegisteredProgressFolder.trackingState === 'needs_repair' ? <button onClick={() => void openProgressRepair(selectedRegisteredProgressFolder)} title="修复版本批次：继续处理未完成的版本提交操作" aria-label="修复版本批次" className="project-action-button !text-amber-600"><RefreshCw size={16}/>修复版本批次</button> : <button disabled={selectedRegisteredProgressFolder.trackingState === 'committing'} onClick={() => void openMarkProgress(selectedProgressFolder!)} title={selectedRegisteredProgressFolder.trackingState === 'committing' ? unavailableProjectToolbarTitle('版本管理', '版本批次正在提交') : '修改当前进度：调整当前进度文件夹的版本信息'} aria-label="修改进度" className="project-action-button"><GitBranch size={16}/>{selectedRegisteredProgressFolder.trackingState === 'committing' ? '正在提交' : '修改进度'}</button> : selectedEntries.length === 1 && hasVersionProgressForEntry(selectedEntries[0]) ? <button onClick={() => openVersions()} title="版本管理：查看和管理素材的当前版本与历史版本" aria-label="版本管理" className="project-action-button"><GitBranch size={16}/>版本管理</button> : <button disabled title={unavailableProjectToolbarTitle('版本管理', '需选择图片使用')} aria-label="版本管理" className="project-action-button"><GitBranch size={16}/>版本管理</button>,
     'team-retouch': <button type="button" disabled={!teamRetouchToolbarAvailable || teamRetouchOpening} onClick={() => void openTeamRetouch()} title={!teamRetouchInstalled ? unavailableProjectToolbarTitle('团片协作', '组件未安装') : !teamRetouchToolbarAvailable ? unavailableProjectToolbarTitle('团片协作', '需选择图片使用') : teamRetouchOpening ? unavailableProjectToolbarTitle('团片协作', '正在加载') : selectedEntries.some(entry => entry.kind === 'image') ? '团片协作：打开协作工作区并加入所选图片' : `团片协作：打开项目已有的 ${teamRetouchHistory.length} 张协作图片`} className="project-action-button">{teamRetouchOpening ? <Loader2 size={16} className="animate-spin"/> : <UsersRound size={16}/>}团片协作{teamRetouchHistory.length ? `（${teamRetouchHistory.length} 张）` : ''}</button>,
-    'final-versions': <button disabled={finalVersionSummary.count === 0 || finalViewLoading} onClick={() => void openFinalVersionView()} title={finalViewLoading ? unavailableProjectToolbarTitle('浏览最终版', '正在加载') : finalVersionSummary.count > 0 ? `浏览最终版：浏览项目中已标记的 ${finalVersionSummary.availableCount} 张最终版图片${finalVersionSummary.missingCount ? `，另有 ${finalVersionSummary.missingCount} 张文件丢失` : ''}` : unavailableProjectToolbarTitle('浏览最终版', '暂无最终版')} aria-label="浏览所有已标记最终版的图片" aria-pressed={finalViewOpen} className={`project-action-button ${finalVersionSummary.count > 0 ? '!text-emerald-600 hover:!bg-emerald-50' : ''} ${finalViewOpen ? '!bg-emerald-50' : ''}`}>{finalViewLoading ? <Loader2 size={16} className="animate-spin"/> : <Heart size={16} fill={finalVersionSummary.count > 0 ? 'currentColor' : 'none'}/>}</button>,
+    'final-versions': <button disabled={finalVersionSummary.count === 0 || finalViewLoading} onClick={() => void openFinalVersionView()} title={finalViewLoading ? unavailableProjectToolbarTitle('查看喜爱', '正在加载') : finalVersionSummary.count > 0 ? `查看喜爱：浏览项目中已标记的 ${finalVersionSummary.availableCount} 张喜爱图片${finalVersionSummary.missingCount ? `，另有 ${finalVersionSummary.missingCount} 张文件丢失` : ''}` : unavailableProjectToolbarTitle('查看喜爱', '暂无喜爱图片')} aria-label="查看所有已标记为喜爱的图片" aria-pressed={finalViewOpen} className={`project-action-button ${finalVersionSummary.count > 0 ? '!text-red-500 hover:!bg-red-50' : ''} ${finalViewOpen ? '!bg-red-50' : ''}`}>{finalViewLoading ? <Loader2 size={16} className="animate-spin"/> : <Heart size={16} fill={finalVersionSummary.count > 0 ? 'currentColor' : 'none'}/>}</button>,
   };
   const hiddenProjectToolbarActions = new Set(projectToolbar.hidden);
   const visibleProjectToolbarActionIds = projectToolbar.order.filter(id => !hiddenProjectToolbarActions.has(id) && (!projectToolbar.onlyShowAvailable || projectToolbarAvailability[id]));
@@ -3750,16 +3946,18 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
         {projectWorkflows && canSelectFileMenuMedia && <><button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); selectMediaFiles(targets); }}><CheckCircle2 size={14}/>选片</button><div className="my-1 border-t border-slate-100"/></>}
         {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openPreviewAndMetadata(entry); }}><PanelLeftOpen size={14}/>打开预览和详细信息</button>}
         {fileMenu.entry.kind !== 'folder' && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openProjectEntry(entry); }}><ExternalLink size={14}/>{fileMenu.entry.kind === 'shortcut' ? '打开快捷方式' : '用默认方式打开'}</button>}
-        {(fileMenu.entry.kind === 'video' || fileMenu.entry.kind === 'folder') && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openResearchForEntry(entry); }}><Video size={14}/>提取分镜帧</button>}
+        {fileMenuToolSourceAvailability.loading && <button disabled className="project-menu-item"><Loader2 size={14} className="animate-spin"/>正在建立媒体索引…</button>}
+        {!fileMenuToolSourceAvailability.loading && fileMenuToolSourceAvailability.hasVideo && (fileMenu.entry.kind === 'video' || fileMenu.entry.kind === 'folder') && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openResearchForEntry(entry); }}><Video size={14}/>提取分镜帧</button>}
+        {!fileMenuToolSourceAvailability.loading && fileMenuToolSourceAvailability.hasVideo && <button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); void openVideoTranscode(targets); }}><Gauge size={14}/>视频转码</button>}
         {!fileMenuContainsShortcutContent && fileMenuScreenshotMainImageEntries.length > 0 && <button title={fileMenuScreenshotMainImageEntries.length > 1 ? `批量提取 ${fileMenuScreenshotMainImageEntries.length} 张截图中的主图` : '提取截图中的主图'} className="project-menu-item" onClick={() => { const entries = fileMenuScreenshotMainImageEntries; setFileMenu(null); openScreenshotMainImage(entries); }}><Crop size={14}/>提取截图主图{fileMenuScreenshotMainImageEntries.length > 1 ? `（${fileMenuScreenshotMainImageEntries.length} 张）` : ''}</button>}
         {officeImageExtractorAvailable && isOfficeOpenXmlEntry(fileMenu.entry) && <button disabled={fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : undefined} className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(isOfficeOpenXmlEntry) : [fileMenu.entry]; setFileMenu(null); void extractOfficeImages(entries); }}><ImageIcon size={14}/>提取图片{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(isOfficeOpenXmlEntry).length > 1 ? `（${selectedEntries.filter(isOfficeOpenXmlEntry).length} 个文档）` : ''}</button>}
         {photoshopAvailable && (fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw') && <button disabled={fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件暂不支持直接发送到 Photoshop' : undefined} className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(entry => entry.kind === 'image' || entry.kind === 'raw') : [fileMenu.entry]; setFileMenu(null); void openProjectEntriesInPhotoshop(entries); }}><PhotoshopIcon size={14}/>用 Photoshop 打开{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(entry => entry.kind === 'image' || entry.kind === 'raw').length > 1 ? `（${selectedEntries.filter(entry => entry.kind === 'image' || entry.kind === 'raw').length} 个）` : ''}</button>}
-        {fileMenu.entry.kind === 'folder' && <button className="project-menu-item" onClick={() => { setFileMenu(null); openPngConverter(fileMenu.entry.path); }}><ImageIcon size={14}/>PNG 转 JPG</button>}
-        <div className="my-1 border-t border-slate-100"/>
+        {!fileMenuToolSourceAvailability.loading && fileMenuToolSourceAvailability.hasPng && <button className="project-menu-item" onClick={() => { const targets = fileMenuToolSourceAvailability.pngPaths; setFileMenu(null); openPngConverter(targets); }}><ImageIcon size={14}/>PNG 转 JPG</button>}
+        {fileMenuHasToolActions && <div className="my-1 border-t border-slate-100"/>}
         <button disabled={finalViewOpen || fileMenuContainsShortcutContent || fileMenuContainsProtectedRenameEntry} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : fileMenuContainsProtectedRenameEntry ? '该文件夹由项目工作流管理，不能普通重命名' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); beginRename(targets); }}><Edit size={14}/>{fileMenuTargetPaths.length > 1 ? '批量重命名' : '重命名'}</button>
         <button disabled={finalViewOpen || fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('cut', undefined, targets); }}><Cut size={14}/>剪切</button>
         <button disabled={fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('copy', undefined, targets); }}><Copy size={14}/>复制</button>
-        <button disabled={finalViewOpen || fileMenuContainsShortcutContent || !clipboardHasFiles} title={fileMenuContainsShortcutContent ? '快捷方式指向的外部文件夹是只读浏览区域' : finalViewOpen ? '最终版浏览为只读视图' : clipboardHasFiles ? '粘贴到此文件所在文件夹' : '剪贴板中没有文件'} className="project-menu-item" onClick={() => { setFileMenu(null); runFileOperation('paste'); }}><ClipboardPaste size={14}/>粘贴</button>
+        <button disabled={finalViewOpen || fileMenuContainsShortcutContent || !clipboardHasFiles} title={fileMenuContainsShortcutContent ? '快捷方式指向的外部文件夹是只读浏览区域' : finalViewOpen ? '喜爱图片浏览为只读视图' : clipboardHasFiles ? '粘贴到此文件所在文件夹' : '剪贴板中没有文件'} className="project-menu-item" onClick={() => { setFileMenu(null); runFileOperation('paste'); }}><ClipboardPaste size={14}/>粘贴</button>
         <button disabled={finalViewOpen || fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : undefined} className="project-menu-item project-menu-danger" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('trash', undefined, targets); }}><Trash2 size={14}/>删除</button>
         <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openEntryDetails(entry); }}><Info size={14}/>详细信息</button>
         <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); copyEntryPath(entry); }}><FileText size={14}/>{fileMenu.entry.kind === 'folder' ? '复制文件夹地址' : '复制文件地址'}</button>
@@ -3776,7 +3974,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
         <button className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void copyCurrentDirectoryPath(target); }}><FileText size={14}/>复制此文件夹地址</button>
       </ViewportContextMenu>, document.body)}
       <div ref={projectColumnLayoutRef} className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-      <div ref={filesColumnRef} style={previewPaneOpen || metadataPaneOpen ? { width: displayedColumnWidths.files } : undefined} className={`flex min-h-0 flex-col gap-3 overflow-y-auto overscroll-contain [overflow-anchor:none] px-6 pb-6 ${previewPaneOpen || metadataPaneOpen ? 'shrink-0' : 'flex-1'}`}>
+      <div ref={filesColumnRef} style={previewPaneOpen || metadataPaneOpen ? { width: displayedColumnWidths.files } : undefined} onPointerDown={startSelectionDrag} onPointerMove={updateSelectionDrag} onPointerUp={finishSelectionDrag} onPointerCancel={finishSelectionDrag} onLostPointerCapture={cancelSelectionDrag} className={`flex min-h-0 flex-col gap-3 overflow-y-auto overscroll-contain [overflow-anchor:none] px-6 pb-6 ${previewPaneOpen || metadataPaneOpen ? 'shrink-0' : 'flex-1'}`}>
       {viewportStatus && createPortal(<div role="status" className="pointer-events-none fixed bottom-2 z-[35] flex max-w-[calc(100vw-3rem)] items-center gap-3 rounded-lg border border-white/10 bg-slate-950/80 px-3.5 py-2 text-xs font-medium text-white shadow-xl backdrop-blur-md" style={{ right: Math.max(12, projectLayoutWidth - displayedColumnWidths.files + 12) }}>
         {viewportStatus.captureDateTime && <>
           <span className="truncate" title={viewportStatus.captureDateTime}>{viewportStatus.captureDateTime}</span>
@@ -3823,11 +4021,11 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
         </div>
         <span aria-hidden className="toolbar-divider"/>
         {selectedPaths.length > 0 && <span className="mr-1 self-center text-xs text-slate-500">已选 {selectedPaths.length}</span>}
-        <button disabled={finalViewOpen || selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : selectedContainsProtectedRenameEntry ? '所选文件夹由项目工作流管理，不能普通重命名' : finalViewOpen ? '最终版浏览为只读视图' : selectedPaths.length > 1 ? '批量重命名' : '重命名'} onClick={() => beginRename()} className="project-action-button compact-hide-file-action"><Edit size={16}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
-        <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : finalViewOpen ? '最终版浏览为只读视图' : '剪切'} onClick={() => runFileOperation('cut')} className="project-action-button compact-hide-file-action"><Cut size={16}/>剪切</button>
+        <button disabled={finalViewOpen || selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : selectedContainsProtectedRenameEntry ? '所选文件夹由项目工作流管理，不能普通重命名' : finalViewOpen ? '喜爱图片浏览为只读视图' : selectedPaths.length > 1 ? '批量重命名' : '重命名'} onClick={() => beginRename()} className="project-action-button compact-hide-file-action"><Edit size={16}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
+        <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : finalViewOpen ? '喜爱图片浏览为只读视图' : '剪切'} onClick={() => runFileOperation('cut')} className="project-action-button compact-hide-file-action"><Cut size={16}/>剪切</button>
         <button disabled={selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : '复制'} onClick={() => runFileOperation('copy')} className="project-action-button compact-hide-file-action"><Copy size={16}/>复制</button>
-        <button disabled={finalViewOpen || !clipboardHasFiles} title={finalViewOpen ? '最终版浏览为只读视图' : clipboardHasFiles ? '粘贴到当前文件夹' : '剪贴板中没有文件'} onClick={() => runFileOperation('paste')} className="project-action-button compact-hide-file-action"><ClipboardPaste size={16}/>粘贴</button>
-        <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : finalViewOpen ? '最终版浏览为只读视图' : '删除'} onClick={() => runFileOperation('trash')} className="project-action-button project-action-danger compact-hide-file-action"><Trash2 size={16}/>删除</button>
+        <button disabled={finalViewOpen || !clipboardHasFiles} title={finalViewOpen ? '喜爱图片浏览为只读视图' : clipboardHasFiles ? '粘贴到当前文件夹' : '剪贴板中没有文件'} onClick={() => runFileOperation('paste')} className="project-action-button compact-hide-file-action"><ClipboardPaste size={16}/>粘贴</button>
+        <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : finalViewOpen ? '喜爱图片浏览为只读视图' : '删除'} onClick={() => runFileOperation('trash')} className="project-action-button project-action-danger compact-hide-file-action"><Trash2 size={16}/>删除</button>
         <button disabled={!selectedPaths.length} title="取消选择" onClick={() => setSelectedPaths([])} className="project-action-button"><X size={16}/>取消选择</button>
         {(gatherToProject || projectWorkflows && hasProjectToolbarActions) && <span aria-hidden className="toolbar-divider"/>}
         {gatherToProject && <div className="flex items-stretch">
@@ -3853,14 +4051,14 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
       </div>
       <div className="flex min-w-0 items-center px-6 py-2">
         <div className="flex min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap text-sm text-slate-500">
-          {finalViewOpen ? <><button type="button" onClick={closeFinalVersionView} title="退出最终版浏览" aria-label="退出最终版浏览" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X size={17}/></button><span className="inline-flex h-8 shrink-0 items-center px-1.5 font-bold leading-none text-slate-700">最终版</span></> : versionTreeOpen ? <><button type="button" onClick={() => selectFolderBrowseMode('grid')} title="返回图标模式" aria-label="退出版本树" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800"><ArrowLeft size={17}/></button><span className="inline-flex h-8 shrink-0 items-center px-1.5 font-bold leading-none text-slate-700">{browserContext.title}</span><span className="inline-flex h-8 shrink-0 items-center leading-none text-slate-300">/</span><span className="inline-flex h-8 shrink-0 items-center gap-1.5 px-1.5 font-bold leading-none text-blue-700"><GitBranch size={15}/>版本树</span></> : <><button type="button" onClick={navigateBack} disabled={!directoryHistory.back.length} title="后退" aria-label="后退" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"><ArrowLeft size={17}/></button><button type="button" onClick={navigateForward} disabled={!directoryHistory.forward.length} title="前进" aria-label="前进" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"><ArrowRight size={17}/></button><button type="button" onClick={() => navigateToDirectory('')} title={`返回${browserRootLabel}根目录`} className="mr-1 inline-flex h-8 shrink-0 items-center rounded border border-transparent px-1.5 font-bold leading-none text-slate-800 transition hover:border-slate-300 hover:bg-slate-100">{browserContext.title}</button>{breadcrumbs.map((crumb, index) => <React.Fragment key={crumb.relativePath || 'root'}><span className="inline-flex h-8 shrink-0 items-center leading-none text-slate-300">/</span><button onClick={() => navigateToDirectory(crumb.relativePath)} title={`进入 ${crumb.label}`} className={`inline-flex h-8 min-w-0 items-center truncate rounded border border-transparent px-1.5 text-sm leading-none transition hover:border-slate-300 hover:bg-slate-100 hover:text-slate-800 ${index === breadcrumbs.length - 1 ? 'font-bold text-slate-700' : ''}`}>{crumb.label}</button></React.Fragment>)}</>}
+          {finalViewOpen ? <><button type="button" onClick={closeFinalVersionView} title="退出喜爱图片浏览" aria-label="退出喜爱图片浏览" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X size={17}/></button><span className="inline-flex h-8 shrink-0 items-center px-1.5 font-bold leading-none text-slate-700">喜爱</span></> : versionTreeOpen ? <><button type="button" onClick={() => selectFolderBrowseMode('grid')} title="返回图标模式" aria-label="退出版本树" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800"><ArrowLeft size={17}/></button><span className="inline-flex h-8 shrink-0 items-center px-1.5 font-bold leading-none text-slate-700">{browserContext.title}</span><span className="inline-flex h-8 shrink-0 items-center leading-none text-slate-300">/</span><span className="inline-flex h-8 shrink-0 items-center gap-1.5 px-1.5 font-bold leading-none text-blue-700"><GitBranch size={15}/>版本树</span></> : <><button type="button" onClick={navigateBack} disabled={!directoryHistory.back.length} title="后退" aria-label="后退" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"><ArrowLeft size={17}/></button><button type="button" onClick={navigateForward} disabled={!directoryHistory.forward.length} title="前进" aria-label="前进" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"><ArrowRight size={17}/></button><button type="button" onClick={() => navigateToDirectory('')} title={`返回${browserRootLabel}根目录`} className="mr-1 inline-flex h-8 shrink-0 items-center rounded border border-transparent px-1.5 font-bold leading-none text-slate-800 transition hover:border-slate-300 hover:bg-slate-100">{browserContext.title}</button>{breadcrumbs.map((crumb, index) => <React.Fragment key={crumb.relativePath || 'root'}><span className="inline-flex h-8 shrink-0 items-center leading-none text-slate-300">/</span><button onClick={() => navigateToDirectory(crumb.relativePath)} title={`进入 ${crumb.label}`} className={`inline-flex h-8 min-w-0 items-center truncate rounded border border-transparent px-1.5 text-sm leading-none transition hover:border-slate-300 hover:bg-slate-100 hover:text-slate-800 ${index === breadcrumbs.length - 1 ? 'font-bold text-slate-700' : ''}`}>{crumb.label}</button></React.Fragment>)}</>}
         </div>
-        {finalViewOpen && <button type="button" disabled={finalExporting || !finalViewEntries.length} onClick={() => void exportFinalVersions()} className="ml-auto shrink-0 rounded-md px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40">{finalExporting ? '正在整理…' : '整理到最终版'}</button>}
+        {finalViewOpen && <button type="button" disabled={finalExporting || !finalViewEntries.length} onClick={() => void exportFinalVersions()} className="ml-auto shrink-0 rounded-md px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40">{finalExporting ? '正在整理…' : '整理喜爱图片'}</button>}
       </div>
       </div>
 
       {mountedPanels.has('converter') && <ToolModal title={PROJECT_PANEL_TITLES.converter} scopeKey={project.path} panelKind="converter" open={panel === 'converter'} onClose={() => setPanel(null)}><ConverterView embedded initialTargetPaths={conversionTargets}/></ToolModal>}
-      {mountedPanels.has('screenshot-main-image') && <ToolModal title={PROJECT_PANEL_TITLES['screenshot-main-image']} scopeKey={project.path} panelKind="screenshot-main-image" open={panel === 'screenshot-main-image'} onClose={() => setPanel(null)}><ScreenshotMainImageView embedded workspacePath={workspacePath} projectStatus={project.status} projectName={project.name} initialRelativePaths={screenshotMainImageTargets} cacheConfig={mediaCacheConfig} onFilesChanged={async () => {
+      {mountedPanels.has('screenshot-main-image') && <ToolModal title={screenshotMainImageMode === 'crop' ? '裁剪图片' : PROJECT_PANEL_TITLES['screenshot-main-image']} scopeKey={project.path} panelKind="screenshot-main-image" open={panel === 'screenshot-main-image'} onClose={() => setPanel(null)}><ScreenshotMainImageView embedded cropMode={screenshotMainImageMode === 'crop'} workspacePath={workspacePath} projectStatus={project.status} projectName={project.name} initialRelativePaths={screenshotMainImageTargets} cacheConfig={mediaCacheConfig} onFilesChanged={async () => {
         directoryEntriesCacheRef.current.clear();
         setRecentRefreshToken(value => value + 1);
         await refresh(currentRelativePathRef.current);
@@ -3878,6 +4076,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
       {mountedPanels.has('file-import') && <ToolModal title={PROJECT_PANEL_TITLES['file-import']} scopeKey={project.path} panelKind="file-import" open={panel === 'file-import'} busy={panelImportBusy === 'files'} onClose={() => { setPanelImportResult(null); setPanel(null); }}>{panelImportResult?.kind === 'files' ? <ImportCompletion message={`已导入 ${panelImportResult.count} 个文件，源文件${panelImportResult.sourceDeleted ? '已删除' : '已保留'}。`} onClose={() => { setPanelImportResult(null); setPanel(null); }}/> : <div className="space-y-4"><div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3"><p className="text-sm font-bold text-blue-800">导入到“{fileImportTarget || project.name}”</p><p className="mt-1 text-xs leading-5 text-blue-600">选择任意文件导入当前目录；重名文件会自动生成不冲突的名称，不覆盖现有文件。</p></div><label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3"><input type="checkbox" checked={deleteFileSources} disabled={Boolean(panelImportBusy)} onChange={event => setDeleteFileSources(event.target.checked)} className="mt-0.5"/><span><span className="block text-sm font-bold text-slate-700">导入后删除源文件</span><span className="mt-1 block text-xs leading-5 text-slate-500">初始值来自设置。成功导入后移动来源；取消勾选则复制并保留来源。</span></span></label><div className="flex justify-end border-t border-slate-200 pt-4"><button onClick={() => void importFiles()} disabled={Boolean(panelImportBusy)} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-50">{panelImportBusy === 'files' && <Loader2 size={15} className="animate-spin"/>}{panelImportBusy === 'files' ? '正在选择或导入…' : '选择文件并导入'}</button></div></div>}</ToolModal>}
       {mountedPanels.has('match') && <ToolModal title={PROJECT_PANEL_TITLES.match} scopeKey={project.path} panelKind="match" open={panel === 'match'} onClose={() => setPanel(null)}><MatchView embedded config={matchConfig} projectPath={project.path} folderOptions={folders} onUpdateConfig={onMatchConfigChange}/></ToolModal>}
       {mountedPanels.has('research') && <ToolModal title={PROJECT_PANEL_TITLES.research} scopeKey={project.path} panelKind="research" open={panel === 'research'} onClose={() => setPanel(null)}><ResearchView embedded initialTargetPath={researchTargetPath} targetKind={researchTargetKind} hasTxtFiles={researchTargetHasTxt} config={researchConfig} onUpdateConfig={onResearchConfigChange}/></ToolModal>}
+      {mountedPanels.has('video-transcode') && <ToolModal title={PROJECT_PANEL_TITLES['video-transcode']} scopeKey={project.path} panelKind="video-transcode" open={panel === 'video-transcode'} onClose={() => { videoTranscodeInspectionSequenceRef.current += 1; setVideoTranscodeCollecting(false); setPanel(null); }}><VideoTranscodeView embedded initialTargetPaths={videoTranscodeTargets} initialSourceFolders={videoTranscodeSourceFolders} sourcesLoading={videoTranscodeCollecting}/></ToolModal>}
       {mountedPanels.has('cache') && <ToolModal title={PROJECT_PANEL_TITLES.cache} scopeKey={project.path} panelKind="cache" open={panel === 'cache'} onClose={() => setPanel(null)}><MediaCacheSettings config={mediaCacheConfig} onChange={onMediaCacheConfigChange}/></ToolModal>}
       {mountedPanels.has('trash') && <ToolModal title={PROJECT_PANEL_TITLES.trash} scopeKey={project.path} panelKind="trash" open={panel === 'trash'} onClose={() => setPanel(null)}><p className="text-sm text-slate-500">项目“{project.name}”及其全部内容将移入系统回收站。</p><button onClick={moveToTrash} className="mt-4 rounded-lg bg-red-600 px-4 py-2 text-sm font-bold text-white hover:bg-red-500">确认移入回收站</button></ToolModal>}
       {gatherPickerPaths && createPortal(<div role="dialog" aria-modal="true" aria-label="选择灵感汇聚项目" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><section className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="flex items-center justify-between gap-3"><div><h3 className="text-lg font-bold text-slate-900">选择目标项目</h3><p className="mt-1 text-sm text-slate-500">所选灵感将会出现在目录项目下的“策划”文件夹。</p></div><button type="button" disabled={gatheringInspiration} onClick={() => setGatherPickerPaths(null)} title="关闭" className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100"><X size={17}/></button></div><div className="mt-4 max-h-80 space-y-1 overflow-y-auto">{inspirationProjects.map(targetProject => <button key={targetProject.path} type="button" disabled={gatheringInspiration} onClick={() => void gatherInspiration(targetProject, gatherPickerPaths)} className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm hover:bg-blue-50 ${targetProject.path === inspirationTargetProject?.path ? 'bg-blue-50 font-bold text-blue-700' : 'text-slate-700'}`}><Folder size={17} className="shrink-0 text-blue-500"/><span className="min-w-0 flex-1 truncate">{targetProject.name}</span><span className="shrink-0 text-xs text-slate-400">{targetProject.status}</span></button>)}{!inspirationProjects.length && <p className="rounded-lg bg-slate-50 px-3 py-5 text-center text-sm text-slate-500">当前工作目录中没有可用项目。</p>}</div></section></div>, document.body)}
@@ -3993,7 +4192,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
       /></div>}
 
       <section className="flex min-h-[220px] min-w-0 flex-auto flex-col">
-        {versionTreeOpen ? <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={event => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-entry-path]'); target?.focus({ preventScroll: true }); if (target?.dataset.entryPath) entryPointerModifiersRef.current = { path: target.dataset.entryPath, additive: event.ctrlKey || event.metaKey, range: event.shiftKey }; }} onPointerDown={startSelectionDrag} onPointerMove={updateSelectionDrag} onPointerUp={finishSelectionDrag} onPointerCancel={finishSelectionDrag} onLostPointerCapture={cancelSelectionDrag} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} className={`relative -mx-6 min-h-[220px] flex-1 select-none px-6 outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
+        {versionTreeOpen ? <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={event => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-entry-path]'); target?.focus({ preventScroll: true }); if (target?.dataset.entryPath) entryPointerModifiersRef.current = { path: target.dataset.entryPath, additive: event.ctrlKey || event.metaKey, range: event.shiftKey }; }} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} className={`relative -mx-6 min-h-[220px] flex-1 select-none px-6 outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
           {selectionBox && <div className="pointer-events-none absolute z-20 border border-blue-500 bg-blue-400/15" style={selectionBox}/>}
           <ProjectVersionTree
             progressFolders={progressFolders}
@@ -4005,7 +4204,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
             teamRetouchParentProgressIds={teamRetouchParentProgressIds}
             onOpenMissingProgressMenu={openMissingProgressMenu}
           />
-        </div> : <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={event => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-entry-path]'); target?.focus({ preventScroll: true }); if (target?.dataset.entryPath) entryPointerModifiersRef.current = { path: target.dataset.entryPath, additive: event.ctrlKey || event.metaKey, range: event.shiftKey }; }} onPointerDown={startSelectionDrag} onPointerMove={updateSelectionDrag} onPointerUp={finishSelectionDrag} onPointerCancel={finishSelectionDrag} onLostPointerCapture={cancelSelectionDrag} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} className={`relative -mx-6 min-h-[220px] flex-1 select-none px-6 outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
+        </div> : <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={event => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-entry-path]'); target?.focus({ preventScroll: true }); if (target?.dataset.entryPath) entryPointerModifiersRef.current = { path: target.dataset.entryPath, additive: event.ctrlKey || event.metaKey, range: event.shiftKey }; }} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} className={`relative -mx-6 min-h-[220px] flex-1 select-none px-6 outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
           {selectionBox && <div className="pointer-events-none absolute z-20 border border-blue-500 bg-blue-400/15" style={selectionBox}/>}
           {groupedResultsActive && (searchLoading ? <p className="py-12 text-center text-sm text-slate-400"><Loader2 size={17} className="mr-2 inline animate-spin"/>{searchQuery.trim() ? `正在搜索${currentRelativePath ? '当前文件夹及其子文件夹' : '整个项目'}…` : '正在读取最近文件…'}</p> : searchError ? <p className="py-8 text-center text-sm text-red-600">{searchQuery.trim() ? '搜索' : '读取最近文件'}失败：{searchError}</p> : searchResultGroups.length ? <div className="pb-4">
             <p className="px-1 text-xs text-slate-500">{searchQuery.trim() ? `在${currentRelativePath ? `“${currentRelativePath}”及其子文件夹` : '整个项目'}中找到 ${displayedFileEntries.length} 个文件` : `已加载${currentRelativePath ? `“${currentRelativePath}”及其子文件夹` : '整个项目'}最近修改的 ${displayedFileEntries.length} 个文件`}</p>
@@ -4036,8 +4235,8 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
       </section>
 
       </div>
-      {previewPaneOpen && <><ColumnResizeHandle label="调整文件区和预览区宽度" onDrag={resizeFilesAndPreview}/><MediaPreviewPane entry={previewEntry} cacheConfig={mediaCacheConfig} width={displayedColumnWidths.preview} advancedVideoAvailable={active && installedComponentIds.has('video-playback-mpv')} keyboardSettings={advancedVideoSettings} photoshopAvailable={photoshopAvailable && !previewEntry?.viaShortcut} finalVersionAvailable={previewCanMarkFinal} finalVersion={previewVersion} finalVersionLoading={previewVersionLoading} finalVersionBusy={previewVersionBusy} onToggleFinal={() => void togglePreviewFinalVersion()} onTechnicalMetadata={setPreviewTechnicalMetadata} onNavigate={navigatePreviewMedia} onContextMenu={event => previewEntry && openFileMenu(event, previewEntry, false)} onOpen={() => previewEntry && openProjectEntry(previewEntry)} onOpenInPhotoshop={() => previewEntry && openProjectEntriesInPhotoshop([previewEntry])} onClose={() => setPreviewPaneOpen(false)}/></>}
-      {metadataPaneOpen && <><ColumnResizeHandle label={previewPaneOpen ? '调整预览区和详细信息区宽度' : '调整文件区和详细信息区宽度'} onDrag={previewPaneOpen ? resizePreviewAndMetadata : resizeFilesAndMetadata}/><FileMetadataPane entry={previewEntry} entryDetails={previewEntryDetails} metadataFields={currentPreviewMetadataFields} metadataLoading={currentPreviewMetadataLoading} metadataError={currentPreviewMetadataError} technicalMetadata={previewTechnicalMetadata} formatFileSize={formatFileSize} width={displayedColumnWidths.metadata} onOpen={() => previewEntry && openProjectEntry(previewEntry)} onCopyPath={() => previewEntry && copyEntryPath(previewEntry)} onClose={() => setMetadataPaneOpen(false)}/></>}
+      {previewPaneOpen && <><ColumnResizeHandle label="调整文件区和预览区宽度" onDrag={resizeFilesAndPreview}/><MediaPreviewPane entry={previewEntry} cacheConfig={mediaCacheConfig} width={displayedColumnWidths.preview} advancedVideoAvailable={active && installedComponentIds.has('video-playback-mpv')} keyboardSettings={advancedVideoSettings} photoshopAvailable={photoshopAvailable && !previewEntry?.viaShortcut} finalVersionAvailable={previewCanMarkFinal} finalVersion={previewVersion} finalVersionLoading={previewVersionLoading} finalVersionBusy={previewVersionBusy} onToggleFinal={() => void togglePreviewFinalVersion()} onTechnicalMetadata={setPreviewTechnicalMetadata} onNavigate={navigatePreviewMedia} onContextMenu={event => previewEntry && openFileMenu(event, previewEntry, false)} onContextMenuAt={(x, y) => previewEntry && openFileMenuAt(x, y, previewEntry, false)} onAnalyzeImageCrop={analyzePreviewImageCrop} onConfirmImageCrop={savePreviewImageCrop} onTrimVideo={trimPreviewVideo} onOpen={() => previewEntry && openProjectEntry(previewEntry)} onOpenInPhotoshop={() => previewEntry && openProjectEntriesInPhotoshop([previewEntry])} onClose={() => setPreviewPaneOpen(false)}/></>}
+      {metadataPaneOpen && <><ColumnResizeHandle label={previewPaneOpen ? '调整预览区和详细信息区宽度' : '调整文件区和详细信息区宽度'} onDrag={previewPaneOpen ? resizePreviewAndMetadata : resizeFilesAndMetadata}/><FileMetadataPane entry={previewEntry} entryDetails={previewEntryDetails} metadataFields={currentPreviewMetadataFields} metadataLoading={currentPreviewMetadataLoading} metadataError={currentPreviewMetadataError} technicalMetadata={previewTechnicalMetadata} formatFileSize={formatFileSize} width={displayedColumnWidths.metadata} onOpen={() => previewEntry && openProjectEntry(previewEntry)} onCopyPath={() => previewEntry && copyEntryPath(previewEntry)} onClose={closeMetadataPaneByUser}/></>}
       </div>
 
       {confirmDelete && <div className="fixed inset-0 z-[320] flex items-center justify-center bg-slate-950/40 p-4"><div role="dialog" aria-modal="true" aria-label="删除项目" className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="mb-3 flex items-center justify-between"><h3 className="font-bold text-slate-800">确定要删除项目吗？</h3><button onClick={() => setConfirmDelete(false)}><X size={18}/></button></div><p className="text-sm text-slate-500">删除项目会将项目文件夹“{project.name}”移入回收站。</p><div className="mt-5 flex justify-end gap-2"><button onClick={() => setConfirmDelete(false)} className="dialog-secondary">取消</button><button onClick={async () => { setConfirmDelete(false); await moveToTrash(); }} className="rounded-md bg-red-600 px-3 py-2 text-sm font-bold text-white hover:bg-red-500">删除项目</button></div></div></div>}
@@ -4056,7 +4255,78 @@ const formatMediaDuration = (seconds?: number) => {
     : `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
 };
 
-const MediaPreviewPane = ({ entry, cacheConfig, width, advancedVideoAvailable, keyboardSettings, photoshopAvailable, finalVersionAvailable, finalVersion, finalVersionLoading, finalVersionBusy, onToggleFinal, onTechnicalMetadata, onNavigate, onContextMenu, onOpen, onOpenInPhotoshop, onClose }: {
+const VideoTrimTimeline = ({ duration, start, end, currentTime, frames, busyMode, onChange, onPreview, onCancel, onSave }: {
+  duration: number;
+  start: number;
+  end: number;
+  currentTime: number;
+  frames: string[];
+  busyMode: 'new' | 'replace' | '';
+  onChange: (edge: 'start' | 'end', time: number) => void;
+  onPreview: (time: number) => void;
+  onCancel: () => void;
+  onSave: (mode: 'new' | 'replace') => void;
+}) => {
+  const railRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ pointerId: number; edge: 'start' | 'end' } | null>(null);
+  const safeDuration = Math.max(.05, duration);
+  const percent = (value: number) => Math.max(0, Math.min(100, value / safeDuration * 100));
+  const startPercent = percent(start);
+  const endPercent = percent(end);
+  const playheadPercent = percent(currentTime);
+  const timeAtClientX = (clientX: number) => {
+    const rect = railRef.current?.getBoundingClientRect();
+    if (!rect?.width) return 0;
+    return Math.max(0, Math.min(safeDuration, (clientX - rect.left) / rect.width * safeDuration));
+  };
+  const beginDrag = (event: React.PointerEvent<HTMLButtonElement>, edge: 'start' | 'end') => {
+    if (busyMode) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dragRef.current = { pointerId: event.pointerId, edge };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const time = timeAtClientX(event.clientX);
+    onChange(edge, time);
+  };
+  const moveDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const time = timeAtClientX(event.clientX);
+    onChange(drag.edge, time);
+  };
+  const endDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    dragRef.current = null;
+  };
+  const selectedDuration = Math.max(0, end - start);
+
+  return <div role="dialog" aria-label="剪辑视频" className="relative z-30 shrink-0 border-t border-white/10 bg-[#070b15] px-3 pb-3 pt-2.5 text-white shadow-[0_-12px_30px_rgba(0,0,0,.35)]" onContextMenu={event => event.stopPropagation()}>
+    <div className="mb-2 flex items-center justify-between gap-3 text-[11px]">
+      <div className="min-w-0"><span className="font-bold text-white">剪辑视频</span><span className="ml-2 text-slate-400">拖动左右边缘，画面会实时定位</span></div>
+      <div className="shrink-0 tabular-nums text-slate-300"><span className="text-white">{formatMediaDuration(start)}</span><span className="mx-1.5 text-slate-600">—</span><span className="text-white">{formatMediaDuration(end)}</span><span className="ml-2 text-slate-500">保留 {formatMediaDuration(selectedDuration)}</span></div>
+    </div>
+    <div ref={railRef} onPointerDown={event => { if (busyMode || (event.target as HTMLElement).closest('button')) return; const time = timeAtClientX(event.clientX); onPreview(Math.max(start, Math.min(end, time))); }} className="relative h-16 select-none overflow-hidden rounded-lg border border-white/10 bg-slate-900" style={{ touchAction: 'none' }}>
+      <div className="pointer-events-none absolute inset-0 grid grid-cols-8 opacity-60">
+        {Array.from({ length: 8 }, (_, index) => <div key={index} className="border-r border-black/25 bg-slate-800 bg-cover bg-center last:border-r-0" style={frames[index] ? { backgroundImage: `url(${JSON.stringify(frames[index]).slice(1, -1)})` } : undefined}/>)}
+      </div>
+      <div className="pointer-events-none absolute inset-y-0 left-0 bg-black/70" style={{ width: `${startPercent}%` }}/>
+      <div className="pointer-events-none absolute inset-y-0 right-0 bg-black/70" style={{ width: `${100 - endPercent}%` }}/>
+      <div className="pointer-events-none absolute inset-y-0 rounded border-y-[3px] border-amber-400" style={{ left: `${startPercent}%`, width: `${Math.max(0, endPercent - startPercent)}%` }}/>
+      {currentTime >= start && currentTime <= end && (
+        <div className="pointer-events-none absolute inset-y-1 z-20 w-0.5 -translate-x-1/2 bg-white shadow-[0_0_5px_rgba(0,0,0,.9)]" style={{ left: `${playheadPercent}%` }}/>
+      )}
+      <button type="button" aria-label={`调整开始时间，当前 ${formatMediaDuration(start)}`} disabled={Boolean(busyMode)} onPointerDown={event => beginDrag(event, 'start')} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} className="absolute inset-y-0 z-30 w-5 -translate-x-1/2 cursor-ew-resize rounded-l-md border-y-[3px] border-l-[3px] border-amber-400 bg-amber-400/20 outline-none disabled:cursor-default" style={{ left: `${startPercent}%`, touchAction: 'none' }}><span className="absolute left-1/2 top-1/2 h-5 w-0.5 -translate-x-1/2 -translate-y-1/2 rounded bg-amber-100"/></button>
+      <button type="button" aria-label={`调整结束时间，当前 ${formatMediaDuration(end)}`} disabled={Boolean(busyMode)} onPointerDown={event => beginDrag(event, 'end')} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} className="absolute inset-y-0 z-30 w-5 -translate-x-1/2 cursor-ew-resize rounded-r-md border-y-[3px] border-r-[3px] border-amber-400 bg-amber-400/20 outline-none disabled:cursor-default" style={{ left: `${endPercent}%`, touchAction: 'none' }}><span className="absolute left-1/2 top-1/2 h-5 w-0.5 -translate-x-1/2 -translate-y-1/2 rounded bg-amber-100"/></button>
+    </div>
+    <div className="mt-2.5 flex items-center justify-between gap-2">
+      <p className="min-w-0 truncate text-[10px] text-slate-500">保持原视频编码、音轨和画质；实际切点受关键帧位置限制。</p>
+      <div className="flex shrink-0 items-center gap-2"><button type="button" disabled={Boolean(busyMode)} onClick={onCancel} className="rounded-md px-2.5 py-1.5 text-xs font-bold text-slate-300 hover:bg-white/10 disabled:opacity-40">取消</button><button type="button" disabled={Boolean(busyMode) || selectedDuration < .05} onClick={() => onSave('new')} className="inline-flex items-center gap-1.5 rounded-md bg-white/10 px-2.5 py-1.5 text-xs font-bold text-white hover:bg-white/20 disabled:opacity-40">{busyMode === 'new' && <Loader2 size={13} className="animate-spin"/>}{busyMode === 'new' ? '正在另存…' : '另存为新视频'}</button><button type="button" disabled={Boolean(busyMode) || selectedDuration < .05} onClick={() => onSave('replace')} className="inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-2.5 py-1.5 text-xs font-bold text-slate-950 hover:bg-amber-400 disabled:opacity-40">{busyMode === 'replace' && <Loader2 size={13} className="animate-spin"/>}{busyMode === 'replace' ? '正在替换…' : '替换原视频'}</button></div>
+    </div>
+  </div>;
+};
+
+const MediaPreviewPane = ({ entry, cacheConfig, width, advancedVideoAvailable, keyboardSettings, photoshopAvailable, finalVersionAvailable, finalVersion, finalVersionLoading, finalVersionBusy, onToggleFinal, onTechnicalMetadata, onNavigate, onContextMenu, onContextMenuAt, onAnalyzeImageCrop, onConfirmImageCrop, onTrimVideo, onOpen, onOpenInPhotoshop, onClose }: {
   entry?: ProjectFileEntry;
   cacheConfig: AppConfig['mediaCache'];
   width: number;
@@ -4071,6 +4341,10 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, advancedVideoAvailable, k
   onTechnicalMetadata: (metadata: PreviewTechnicalMetadata) => void;
   onNavigate: (direction: -1 | 1) => void;
   onContextMenu: (event: React.MouseEvent<HTMLElement>) => void;
+  onContextMenuAt: (x: number, y: number) => void;
+  onAnalyzeImageCrop: (entry: ProjectFileEntry) => Promise<PreviewImageCropAnalysis>;
+  onConfirmImageCrop: (entry: ProjectFileEntry, crop: CropRectangle) => Promise<{ success: boolean; error?: string }>;
+  onTrimVideo: (start: number, end: number, saveMode: 'new' | 'replace') => Promise<{ success: boolean; error?: string }>;
   onOpen: () => void;
   onOpenInPhotoshop: () => void;
   onClose: () => void;
@@ -4087,10 +4361,24 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, advancedVideoAvailable, k
   const [imageSurfaceSize, setImageSurfaceSize] = useState({ width: 0, height: 0 });
   const [imageDragging, setImageDragging] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  const [fullscreenControlsVisible, setFullscreenControlsVisible] = useState(true);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [videoPlaybackTime, setVideoPlaybackTime] = useState(0);
+  const [advancedEditorSeek, setAdvancedEditorSeek] = useState<{ id: number; time: number; pause?: boolean }>();
+  const [videoTrimFrames, setVideoTrimFrames] = useState<string[]>([]);
+  const [trimEditor, setTrimEditor] = useState<{ start: number; end: number } | null>(null);
+  const [trimBusyMode, setTrimBusyMode] = useState<'new' | 'replace' | ''>('');
+  const [imageCropEditor, setImageCropEditor] = useState<{ crop: CropRectangle; snapGuides: { x: number[]; y: number[] }; originalSize: { width: number; height: number } } | null>(null);
+  const [imageCropPhase, setImageCropPhase] = useState<'analyzing' | 'editing' | 'saving' | ''>('');
+  const [imageCropError, setImageCropError] = useState('');
+  const trimBusy = Boolean(trimBusyMode);
   const imageSurfaceRef = useRef<HTMLDivElement>(null);
   const fallbackVideoRef = useRef<HTMLVideoElement>(null);
   const imageDragRef = useRef<{ pointerId: number; startX: number; startY: number; panX: number; panY: number } | null>(null);
   const previewResourcePathRef = useRef('');
+  const fullscreenControlsTimerRef = useRef(0);
+  const imageCropRequestRef = useRef(0);
+  const editorSeekIdRef = useRef(0);
 
   useEffect(() => {
     let active = true;
@@ -4104,6 +4392,15 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, advancedVideoAvailable, k
       setImagePan({ x: 0, y: 0 });
       setImageNaturalSize({ width: 0, height: 0 });
       setImageDragging(false);
+      setVideoDuration(0);
+      setVideoPlaybackTime(0);
+      setAdvancedEditorSeek(undefined);
+      setVideoTrimFrames([]);
+      setTrimEditor(null);
+      imageCropRequestRef.current += 1;
+      setImageCropEditor(null);
+      setImageCropPhase('');
+      setImageCropError('');
       imageDragRef.current = null;
     }
     const cachedPreviewUrl = entry ? findCachedMediaThumbnailPreview(entry.path, entry.updatedAt) : undefined;
@@ -4247,9 +4544,34 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, advancedVideoAvailable, k
     const observer = new ResizeObserver(measure);
     observer.observe(surface);
     return () => observer.disconnect();
-  }, [displayedImageUrl, entry?.kind, fullscreen]);
+  }, [displayedImageUrl, entry?.kind, fullscreen, Boolean(imageCropEditor)]);
 
+  useEffect(() => {
+    if (!fullscreen) return;
+    setFullscreenControlsVisible(true);
+    fullscreenControlsTimerRef.current = window.setTimeout(() => setFullscreenControlsVisible(false), 1800);
+    void window.electronAPI.setWindowFullscreen(true);
+    return () => {
+      window.clearTimeout(fullscreenControlsTimerRef.current);
+      void window.electronAPI.setWindowFullscreen(false);
+    };
+  }, [fullscreen]);
+  const revealFullscreenControls = () => {
+    if (!fullscreen) return;
+    setFullscreenControlsVisible(true);
+    window.clearTimeout(fullscreenControlsTimerRef.current);
+    fullscreenControlsTimerRef.current = window.setTimeout(() => setFullscreenControlsVisible(false), 1800);
+  };
+  const cancelImageCrop = () => {
+    if (imageCropPhase === 'saving') return;
+    imageCropRequestRef.current += 1;
+    setImageCropEditor(null);
+    setImageCropPhase('');
+    setImageCropError('');
+  };
   useEscapeLayer(fullscreen, () => setFullscreen(false));
+  useEscapeLayer(Boolean(trimEditor), () => { if (!trimBusy) setTrimEditor(null); }, !trimBusy);
+  useEscapeLayer(Boolean(imageCropPhase), cancelImageCrop, imageCropPhase !== 'saving');
 
   // Fit against the full preview viewport. The previous 12px inset on every
   // side became especially visible after a portrait RAW was rotated.
@@ -4349,6 +4671,51 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, advancedVideoAvailable, k
     imageDragRef.current = null;
     setImageDragging(false);
   };
+  const beginImageCrop = async () => {
+    if (!entry || entry.kind !== 'image' || entry.viaShortcut || imageCropPhase) return;
+    const requestId = imageCropRequestRef.current + 1;
+    imageCropRequestRef.current = requestId;
+    setImageCropError('');
+    setImageCropEditor(null);
+    setImageCropPhase('analyzing');
+    const result = await onAnalyzeImageCrop(entry);
+    if (imageCropRequestRef.current !== requestId) return;
+    if (!result.success || !result.crop || !result.originalSize) {
+      setImageCropPhase('');
+      setImageCropError(result.error || '无法识别图片边缘');
+      return;
+    }
+    setImageCropEditor({
+      crop: result.crop,
+      originalSize: result.originalSize,
+      snapGuides: result.snapGuides || { x: [0, result.originalSize.width], y: [0, result.originalSize.height] }
+    });
+    setImageCropPhase('editing');
+  };
+  const confirmImageCrop = async () => {
+    if (!entry || !imageCropEditor || imageCropPhase !== 'editing') return;
+    const requestId = imageCropRequestRef.current;
+    const { originalSize } = imageCropEditor;
+    const x = Math.max(0, Math.min(originalSize.width - 20, Math.round(imageCropEditor.crop.x)));
+    const y = Math.max(0, Math.min(originalSize.height - 20, Math.round(imageCropEditor.crop.y)));
+    const crop = {
+      x,
+      y,
+      width: Math.max(20, Math.min(originalSize.width - x, Math.round(imageCropEditor.crop.width))),
+      height: Math.max(20, Math.min(originalSize.height - y, Math.round(imageCropEditor.crop.height)))
+    };
+    setImageCropError('');
+    setImageCropPhase('saving');
+    const result = await onConfirmImageCrop(entry, crop);
+    if (imageCropRequestRef.current !== requestId) return;
+    if (result.success) {
+      setImageCropEditor(null);
+      setImageCropPhase('');
+      return;
+    }
+    setImageCropPhase('editing');
+    setImageCropError(result.error || '裁剪失败');
+  };
   const handleVideoPlaybackError = () => {
     if (!entry || entry.kind !== 'video') return;
     setPlaybackFailed(true);
@@ -4361,15 +4728,116 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, advancedVideoAvailable, k
     console.warn('Advanced video decoder failed; falling back to Chromium playback', message);
     window.electronAPI.trackTelemetry('media_preview_failed', { media_kind: 'video', reason: 'advanced_decoder_fallback' });
   };
+  const previewVideoTrimTime = (requestedTime: number) => {
+    const time = Math.max(0, Math.min(videoDuration, requestedTime));
+    setVideoPlaybackTime(time);
+    if (useAdvancedVideo) {
+      editorSeekIdRef.current += 1;
+      setAdvancedEditorSeek({ id: editorSeekIdRef.current, time, pause: true });
+      return;
+    }
+    const video = fallbackVideoRef.current;
+    if (!video) return;
+    video.pause();
+    video.currentTime = time;
+  };
+  const changeVideoTrimEdge = (edge: 'start' | 'end', requestedTime: number) => {
+    if (!trimEditor || trimBusy) return;
+    const time = edge === 'start'
+      ? Math.max(0, Math.min(trimEditor.end - .05, requestedTime))
+      : Math.min(videoDuration, Math.max(trimEditor.start + .05, requestedTime));
+    setTrimEditor(current => current ? { ...current, [edge]: time } : current);
+    previewVideoTrimTime(time);
+  };
+  const openVideoTrim = () => {
+    if (!videoDuration) return;
+    const currentTime = useAdvancedVideo ? videoPlaybackTime : Number(fallbackVideoRef.current?.currentTime || 0);
+    const start = Math.max(0, Math.min(videoDuration - .05, currentTime));
+    setTrimEditor({ start, end: videoDuration });
+    previewVideoTrimTime(start);
+  };
+  const confirmVideoTrim = async (saveMode: 'new' | 'replace') => {
+    if (!trimEditor || trimBusy || trimEditor.end - trimEditor.start < .05) return;
+    setTrimBusyMode(saveMode);
+    try {
+      // Unmount the active video backend before replacing the source so Windows
+      // does not keep the original file locked while the atomic rename runs.
+      await new Promise<void>(resolve => window.requestAnimationFrame(() => resolve()));
+      const result = await onTrimVideo(trimEditor.start, trimEditor.end, saveMode);
+      if (result.success) setTrimEditor(null);
+    } finally {
+      setTrimBusyMode('');
+    }
+  };
   const useAdvancedVideo = Boolean(entry && entry.kind === 'video' && advancedVideoAvailable && !advancedPlaybackFailed);
+  const trimEditing = Boolean(trimEditor);
+
+  useEffect(() => {
+    let active = true;
+    setVideoTrimFrames([]);
+    if (!trimEditing || !resource.mediaUrl || !videoDuration) return () => { active = false; };
+    const source = document.createElement('video');
+    source.muted = true;
+    source.preload = 'auto';
+    source.playsInline = true;
+    const waitForEvent = (name: 'loadedmetadata' | 'seeked') => new Promise<void>((resolve, reject) => {
+      const failed = () => { cleanup(); reject(new Error('无法读取视频时间轴画面')); };
+      const completed = () => { cleanup(); resolve(); };
+      const cleanup = () => {
+        source.removeEventListener(name, completed);
+        source.removeEventListener('error', failed);
+      };
+      source.addEventListener(name, completed, { once: true });
+      source.addEventListener('error', failed, { once: true });
+    });
+    void (async () => {
+      source.src = resource.mediaUrl || '';
+      source.load();
+      if (source.readyState < 1) await waitForEvent('loadedmetadata');
+      const canvas = document.createElement('canvas');
+      canvas.width = 160;
+      canvas.height = 90;
+      const context = canvas.getContext('2d');
+      if (!context) return;
+      const frames: string[] = [];
+      for (let index = 0; index < 8 && active; index += 1) {
+        source.currentTime = Math.min(videoDuration - .01, videoDuration * (index + .5) / 8);
+        await waitForEvent('seeked');
+        const sourceRatio = source.videoWidth / Math.max(1, source.videoHeight);
+        const targetRatio = canvas.width / canvas.height;
+        let sx = 0; let sy = 0; let sw = source.videoWidth; let sh = source.videoHeight;
+        if (sourceRatio > targetRatio) { sw = source.videoHeight * targetRatio; sx = (source.videoWidth - sw) / 2; }
+        else { sh = source.videoWidth / targetRatio; sy = (source.videoHeight - sh) / 2; }
+        context.drawImage(source, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+        frames.push(canvas.toDataURL('image/jpeg', .72));
+      }
+      if (active) setVideoTrimFrames(frames);
+    })().catch(() => { if (active) setVideoTrimFrames([]); });
+    return () => {
+      active = false;
+      source.pause();
+      source.removeAttribute('src');
+      source.load();
+    };
+  }, [trimEditing, resource.mediaUrl, videoDuration, entry?.path]);
+
+  const videoTrimControls = trimEditor ? <VideoTrimTimeline
+    duration={videoDuration}
+    start={trimEditor.start}
+    end={trimEditor.end}
+    currentTime={videoPlaybackTime}
+    frames={videoTrimFrames}
+    busyMode={trimBusyMode}
+    onChange={changeVideoTrimEdge}
+    onPreview={previewVideoTrimTime}
+    onCancel={() => { if (!trimBusy) setTrimEditor(null); }}
+    onSave={mode => void confirmVideoTrim(mode)}
+  /> : undefined;
 
   useEffect(() => {
     if (!entry || entry.kind !== 'video' || useAdvancedVideo) return;
-    const runDirectionalAction = (direction: -1 | 1, arrowKeys: boolean) => {
-      const shouldNavigate = arrowKeys
-        ? keyboardSettings.arrowKeyAction === 'navigate'
-        : keyboardSettings.arrowKeyAction !== 'navigate';
-      if (shouldNavigate) {
+    const runDirectionalAction = (direction: -1 | 1, group: 'arrows' | 'forward-back') => {
+      if (videoDirectionalAction(keyboardSettings.arrowKeyAction, group) === 'navigate') {
         onNavigate(direction);
         return;
       }
@@ -4379,21 +4847,20 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, advancedVideoAvailable, k
       video.currentTime = Math.max(0, Math.min(duration, video.currentTime + direction * 5));
     };
     const handleFallbackVideoKey = (event: KeyboardEvent) => {
-      const arrowKeys = event.key === 'ArrowLeft' || event.key === 'ArrowRight';
-      const browserKeys = event.key === 'BrowserBack' || event.key === 'BrowserForward';
-      if (!arrowKeys && !browserKeys) return;
+      const input = videoDirectionalKeyboardInput(event.key);
+      if (!input) return;
       if (event.ctrlKey || event.metaKey || event.altKey) return;
       const target = event.target as HTMLElement | null;
       if (target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
       event.preventDefault();
       event.stopPropagation();
-      runDirectionalAction(event.key === 'ArrowRight' || event.key === 'BrowserForward' ? 1 : -1, arrowKeys);
+      runDirectionalAction(input.direction, input.group);
     };
     const handleFallbackMouseNavigationButton = (event: MouseEvent) => {
       if (event.button !== 3 && event.button !== 4) return;
       event.preventDefault();
       event.stopPropagation();
-      runDirectionalAction(event.button === 4 ? 1 : -1, false);
+      runDirectionalAction(event.button === 4 ? 1 : -1, 'forward-back');
     };
     window.addEventListener('keydown', handleFallbackVideoKey);
     window.addEventListener('mousedown', handleFallbackMouseNavigationButton);
@@ -4403,17 +4870,28 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, advancedVideoAvailable, k
     };
   }, [entry?.path, useAdvancedVideo, keyboardSettings.arrowKeyAction, onNavigate]);
 
-  const previewPane = <section onContextMenu={onContextMenu} style={fullscreen ? undefined : { width }} className={`flex min-h-0 shrink-0 flex-col bg-slate-50 ${fullscreen ? 'fixed inset-x-0 bottom-0 top-10 z-40 w-screen' : ''}`}>
-    <header className="flex min-h-14 shrink-0 items-center justify-between border-b border-slate-200 px-3 py-2">
-      <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wider text-slate-400">预览</p><p className="truncate text-sm font-semibold text-slate-700">{entry?.name || '未选择媒体'}</p></div>
-      <div className="flex items-center gap-1">{entry && <>{(finalVersionAvailable || finalVersion) && <button type="button" disabled={finalVersionLoading || finalVersionBusy || !finalVersion || finalVersion.fileMissing} onClick={onToggleFinal} title={finalVersion?.isFinal ? '取消标记最终版' : finalVersionLoading ? '正在读取最终版状态' : '标记为最终版'} className={`group min-w-[96px] rounded-md border px-2.5 py-1.5 text-[11px] font-medium transition hover:!border-red-300 hover:!bg-red-50 hover:!text-red-700 disabled:opacity-40 ${finalVersion?.isFinal ? 'border-red-200 bg-red-50 text-red-600' : 'border-slate-200 bg-slate-50 text-slate-500'}`}>{finalVersionBusy ? '处理中…' : finalVersionLoading ? '读取最终版状态…' : finalVersion?.isFinal ? <><span className="group-hover:hidden">已标记最终版</span><span className="hidden group-hover:inline">取消标记最终版</span></> : '标记为最终版'}</button>}{!fullscreen && <button type="button" onClick={() => setFullscreen(true)} title="全屏查看预览图" aria-label="全屏查看预览图" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Maximize2 size={16}/></button>}{photoshopAvailable && (entry.kind === 'image' || entry.kind === 'raw') && <button type="button" onClick={onOpenInPhotoshop} title="使用 Photoshop 打开" aria-label="使用 Photoshop 打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><PhotoshopIcon size={16}/></button>}<button type="button" onClick={onOpen} title="使用系统默认应用打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><ExternalLink size={16}/></button></>}{fullscreen ? <button type="button" onClick={() => setFullscreen(false)} title="缩小预览（Esc）" aria-label="缩小预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Minimize2 size={16}/></button> : <button type="button" onClick={onClose} title="关闭预览" aria-label="关闭预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X size={16}/></button>}</div>
-    </header>
-    <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-slate-50">
+  const previewPane = <section onContextMenu={onContextMenu} onMouseMove={revealFullscreenControls} style={fullscreen ? undefined : { width }} className={`flex min-h-0 shrink-0 flex-col ${fullscreen ? 'fixed inset-0 z-[500] h-screen w-screen bg-black' : 'bg-slate-50'}`}>
+    {!fullscreen && <header className="flex min-h-14 shrink-0 items-center justify-between border-b border-slate-200 px-3 py-2">
+      <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wider text-slate-400">{imageCropPhase ? '裁剪' : trimEditor ? '剪辑' : '预览'}</p><p className="truncate text-sm font-semibold text-slate-700">{entry?.name || '未选择媒体'}</p></div>
+      {imageCropPhase ? <div className="ml-2 flex shrink-0 items-center gap-2">
+        <button type="button" disabled={imageCropPhase === 'saving'} onClick={cancelImageCrop} className="rounded-md px-2.5 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-40">取消</button>
+        <button type="button" disabled={imageCropPhase !== 'editing'} onClick={() => void confirmImageCrop()} className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-blue-500 disabled:bg-blue-400">
+          {(imageCropPhase === 'analyzing' || imageCropPhase === 'saving') && <Loader2 size={13} className="animate-spin"/>}
+          {imageCropPhase === 'analyzing' ? '识别边缘中' : imageCropPhase === 'saving' ? '正在裁剪…' : '确定裁剪'}
+        </button>
+      </div> : trimEditor ? <button type="button" disabled={trimBusy} onClick={() => setTrimEditor(null)} className="rounded-md px-2.5 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-40">取消剪辑</button> : <div className="flex items-center gap-1">{entry && <><button type="button" onClick={() => setFullscreen(true)} title="全屏查看" aria-label="全屏查看" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Maximize2 size={16}/></button>{(finalVersionAvailable || finalVersion) && <button type="button" disabled={finalVersionLoading || finalVersionBusy || !finalVersion || finalVersion.fileMissing} onClick={onToggleFinal} title={finalVersion?.isFinal ? '取消喜爱' : finalVersionLoading ? '正在读取喜爱状态' : '标记为喜爱'} aria-label={finalVersion?.isFinal ? '取消喜爱' : '标记为喜爱'} className={`rounded-md p-2 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-40 ${finalVersion?.isFinal ? 'text-red-500' : 'text-slate-500'}`}><Heart size={16} fill={finalVersion?.isFinal ? 'currentColor' : 'none'}/></button>}{photoshopAvailable && (entry.kind === 'image' || entry.kind === 'raw') && <button type="button" onClick={onOpenInPhotoshop} title="使用 Photoshop 打开" aria-label="使用 Photoshop 打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><PhotoshopIcon size={16}/></button>}<button type="button" disabled={entry.kind === 'raw' || entry.viaShortcut || entry.kind === 'video' && !videoDuration} onClick={entry.kind === 'video' ? openVideoTrim : () => void beginImageCrop()} title={entry.kind === 'video' ? videoDuration ? '剪辑视频（保持原编码和画质）' : '正在读取视频时长' : entry.kind === 'raw' ? 'RAW 暂不支持直接裁剪' : '裁剪图片（识别并磁吸边缘）'} aria-label={entry.kind === 'video' ? '剪辑视频' : '裁剪图片'} className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-35"><Crop size={16}/></button></>}<button type="button" onClick={onClose} title="关闭预览" aria-label="关闭预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X size={16}/></button></div>}
+    </header>}
+    {fullscreen && fullscreenControlsVisible && <button type="button" onClick={() => setFullscreen(false)} title="退出全屏（Esc）" aria-label="退出全屏" className="fixed right-5 top-5 z-[520] rounded-full bg-black/60 p-2.5 text-white shadow-lg backdrop-blur transition hover:bg-black/80"><X size={20}/></button>}
+    <div className={`relative flex min-h-0 flex-1 items-center justify-center overflow-hidden ${fullscreen ? 'bg-black' : 'bg-slate-50'}`}>
       {!entry && <div className="max-w-[220px] text-center"><ImageIcon size={38} strokeWidth={1.4} className="mx-auto text-slate-600"/><p className="mt-3 text-sm font-medium text-slate-300">点击图片、RAW 或视频文件</p><p className="mt-1 text-xs leading-5 text-slate-500">此处会显示大图或轻量视频预览</p></div>}
-      {useAdvancedVideo && entry && <AdvancedVideoPlayer filePath={entry.path} poster={resource.previewUrl} keyboardSettings={keyboardSettings} onError={handleAdvancedVideoError} onMetadata={metadata => { setLoading(false); onTechnicalMetadata(metadata); }} onNavigate={onNavigate}/>}
-      {entry && entry.kind === 'video' && !useAdvancedVideo && resource.mediaUrl && !playbackFailed && <video ref={fallbackVideoRef} key={resource.mediaUrl} controls preload="metadata" poster={resource.previewUrl} className="max-h-full max-w-full bg-black" onLoadedMetadata={event => { setLoading(false); onTechnicalMetadata({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight, duration: event.currentTarget.duration }); }} onError={handleVideoPlaybackError}><source src={resource.mediaUrl}/></video>}
-      {entry && entry.kind === 'video' && !useAdvancedVideo && (!resource.mediaUrl || playbackFailed) && <div className="flex max-h-full w-full flex-col items-center justify-center gap-4 text-center">{resource.previewUrl ? <img src={resource.previewUrl} alt={entry.name} draggable={false} className="max-h-[70%] max-w-full object-contain"/> : <Video size={52} strokeWidth={1.3} className="text-slate-600"/>}<div className="max-w-sm px-6"><p className="text-sm font-medium text-slate-700">{resource.importedVideoWithoutPreview ? '此导入视频没有软件内快速预览' : playbackFailed ? resource.usingImportedPreview ? '导入的视频预览无法播放' : '当前原始编码无法在应用内播放' : loading ? '正在准备视频预览…' : resource.previewUrl ? '视频封面已就绪' : '没有可用的视频封面'}</p>{resource.importedVideoWithoutPreview && <p className="mt-1 text-xs leading-5 text-slate-500">请在导入设置中开启“生成视频预览”。浏览时不会为这类大型导入视频临时转码。</p>}{playbackFailed && !resource.importedVideoWithoutPreview && <p className="mt-1 text-xs leading-5 text-slate-500">可以使用系统默认播放器打开原文件。</p>}<button type="button" onClick={onOpen} className="mt-3 inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-500"><ExternalLink size={14}/>外部打开</button></div></div>}
-      {entry && entry.kind !== 'video' && displayedImageUrl && (
+      {useAdvancedVideo && entry && !trimBusy && <AdvancedVideoPlayer filePath={entry.path} poster={resource.previewUrl} keyboardSettings={keyboardSettings} bottomControls={videoTrimControls} editorSeekRequest={advancedEditorSeek} onPlaybackState={playback => setVideoPlaybackTime(playback.time)} onError={handleAdvancedVideoError} onMetadata={metadata => { setLoading(false); setVideoDuration(Number(metadata.duration) || 0); onTechnicalMetadata(metadata); }} onNavigate={onNavigate} onContextMenuAt={onContextMenuAt} onPointerActivity={revealFullscreenControls} topRightOverlayHole={fullscreen && fullscreenControlsVisible ? 72 : 0} onEscape={() => setFullscreen(false)}/>}
+      {entry && entry.kind === 'video' && !useAdvancedVideo && !trimBusy && resource.mediaUrl && !playbackFailed && <div className="absolute inset-0 flex min-h-0 flex-col bg-black"><video ref={fallbackVideoRef} key={resource.mediaUrl} autoPlay controls={!trimEditor} preload="metadata" poster={resource.previewUrl} className="min-h-0 w-full flex-1 bg-black object-contain" onTimeUpdate={event => setVideoPlaybackTime(event.currentTarget.currentTime)} onLoadedMetadata={event => { setLoading(false); setVideoDuration(Number(event.currentTarget.duration) || 0); setVideoPlaybackTime(event.currentTarget.currentTime); onTechnicalMetadata({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight, duration: event.currentTarget.duration }); void event.currentTarget.play().catch(() => undefined); }} onError={handleVideoPlaybackError}><source src={resource.mediaUrl}/></video>{videoTrimControls}</div>}
+      {entry && entry.kind === 'video' && !useAdvancedVideo && !trimBusy && (!resource.mediaUrl || playbackFailed) && <div className="flex max-h-full w-full flex-col items-center justify-center gap-4 text-center">{resource.previewUrl ? <img src={resource.previewUrl} alt={entry.name} draggable={false} className="max-h-[70%] max-w-full object-contain"/> : <Video size={52} strokeWidth={1.3} className="text-slate-600"/>}<div className="max-w-sm px-6"><p className="text-sm font-medium text-slate-700">{resource.importedVideoWithoutPreview ? '此导入视频没有软件内快速预览' : playbackFailed ? resource.usingImportedPreview ? '导入的视频预览无法播放' : '当前原始编码无法在应用内播放' : loading ? '正在准备视频预览…' : resource.previewUrl ? '视频封面已就绪' : '没有可用的视频封面'}</p>{resource.importedVideoWithoutPreview && <p className="mt-1 text-xs leading-5 text-slate-500">请在导入设置中开启“生成视频预览”。浏览时不会为这类大型导入视频临时转码。</p>}{playbackFailed && !resource.importedVideoWithoutPreview && <p className="mt-1 text-xs leading-5 text-slate-500">可以使用系统默认播放器打开原文件。</p>}<button type="button" onClick={onOpen} className="mt-3 inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-500"><ExternalLink size={14}/>外部打开</button></div></div>}
+      {entry && entry.kind === 'image' && displayedImageUrl && imageCropEditor && <div className="absolute inset-0 bg-slate-950">
+        <InteractiveCropEditor embedded snapEnabled snapGuides={imageCropEditor.snapGuides} previewUrl={displayedImageUrl} imageSize={imageCropEditor.originalSize} crop={imageCropEditor.crop} onChange={crop => { if (imageCropPhase === 'editing') setImageCropEditor(current => current ? { ...current, crop } : current); }}/>
+        <span className="pointer-events-none absolute bottom-4 left-4 rounded-md bg-slate-950/80 px-2.5 py-1.5 text-[11px] font-bold text-cyan-200 shadow-lg">磁吸边缘已开启</span>
+      </div>}
+      {entry && entry.kind !== 'video' && displayedImageUrl && !imageCropEditor && (
         <div ref={imageSurfaceRef} onWheel={zoomImage} onDoubleClick={resetImageZoom} onPointerDown={beginImagePan} onPointerMove={moveImagePan} onPointerUp={finishImagePan} onPointerCancel={finishImagePan} style={{ touchAction: 'none' }} className={`absolute inset-0 overflow-hidden ${imageZoom > 1 ? imageDragging ? 'cursor-grabbing' : 'cursor-grab' : ''}`}>
           <div
             style={{
@@ -4457,9 +4935,12 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, advancedVideoAvailable, k
           </div>
         </div>
       )}
-      {entry && entry.kind !== 'video' && displayedImageUrl && <button type="button" onClick={resetImageZoom} title="恢复适合窗口" className="absolute bottom-4 right-4 rounded-md bg-slate-900/75 px-2 py-1 font-mono text-[11px] text-slate-200 shadow-lg">{Math.round(imageZoom * 100)}%</button>}
+      {entry && entry.kind !== 'video' && displayedImageUrl && !imageCropPhase && <button type="button" onClick={resetImageZoom} title="恢复适合窗口" className="absolute bottom-4 right-4 rounded-md bg-slate-900/75 px-2 py-1 font-mono text-[11px] text-slate-200 shadow-lg">{Math.round(imageZoom * 100)}%</button>}
       {entry && entry.kind !== 'video' && !displayedImageUrl && !loading && <div className="text-center"><FileImage size={48} strokeWidth={1.3} className="mx-auto text-slate-600"/><p className="mt-3 text-sm text-slate-400">无法生成此文件的预览</p><button type="button" onClick={onOpen} className="mt-3 inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-500"><ExternalLink size={14}/>外部打开</button></div>}
       {entry && loading && <span className="absolute right-4 top-4 rounded-full bg-slate-900/80 p-2 text-slate-300"><Loader2 size={17} className="animate-spin"/></span>}
+      {imageCropPhase === 'analyzing' && <div role="status" className="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/35"><span className="inline-flex items-center gap-2 rounded-lg bg-slate-950/85 px-3 py-2 text-xs font-bold text-white shadow-xl"><Loader2 size={15} className="animate-spin text-cyan-300"/>识别边缘中</span></div>}
+      {imageCropPhase === 'saving' && <div role="status" className="absolute inset-0 z-20 flex items-center justify-center bg-slate-950/35"><span className="inline-flex items-center gap-2 rounded-lg bg-slate-950/85 px-3 py-2 text-xs font-bold text-white shadow-xl"><Loader2 size={15} className="animate-spin text-blue-300"/>正在生成裁剪图片…</span></div>}
+      {imageCropError && <div role="alert" className="absolute bottom-4 left-1/2 z-30 max-w-[calc(100%-2rem)] -translate-x-1/2 rounded-lg bg-red-950/90 px-3 py-2 text-xs text-red-100 shadow-xl" title={imageCropError}>{imageCropError}</div>}
       {originalLoading && <div role="status" className="absolute bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-lg bg-slate-900/85 px-3 py-2 text-xs font-bold text-white shadow-xl"><Loader2 size={15} className="animate-spin text-blue-300"/><span>正在加载原图…</span></div>}
       {!originalLoading && originalLoadError && displayedImageUrl && <div role="status" className="absolute bottom-4 left-1/2 z-20 max-w-[calc(100%-2rem)] -translate-x-1/2 truncate rounded-lg bg-slate-900/85 px-3 py-2 text-xs text-amber-200 shadow-xl" title={originalLoadError}>{originalLoadError}</div>}
     </div>
@@ -4501,9 +4982,16 @@ const FileMetadataPane = ({ entry, entryDetails, metadataFields, metadataLoading
 
   const mediaType = entry?.kind === 'folder' ? '文件夹' : entry?.kind === 'image' ? '图片' : entry?.kind === 'raw' ? 'RAW 图片' : entry?.kind === 'video' ? '视频' : '文件';
   const firstValue = (...names: string[]) => pickMetadataValue(metadataFields, ...names);
-  const exactWidth = firstValue('ImageWidth', 'SourceImageWidth', 'ExifImageWidth');
-  const exactHeight = firstValue('ImageHeight', 'SourceImageHeight', 'ExifImageHeight');
-  const dimensions = exactWidth && exactHeight ? `${exactWidth} × ${exactHeight}` : technicalMetadata.width && technicalMetadata.height ? `${technicalMetadata.width} × ${technicalMetadata.height}` : undefined;
+  const exactWidth = firstValue('ImageWidth', 'SourceImageWidth', 'ExifImageWidth', 'PixelWidth');
+  const exactHeight = firstValue('ImageHeight', 'SourceImageHeight', 'ExifImageHeight', 'PixelHeight');
+  const compositeDimensionMatch = firstValue('ImageSize')?.match(/(\d+)\s*[x×]\s*(\d+)/i);
+  const dimensions = exactWidth && exactHeight
+    ? `${exactWidth} × ${exactHeight}`
+    : compositeDimensionMatch
+      ? `${compositeDimensionMatch[1]} × ${compositeDimensionMatch[2]}`
+      : technicalMetadata.width && technicalMetadata.height
+        ? `${technicalMetadata.width} × ${technicalMetadata.height}`
+        : undefined;
   const cameraMake = firstValue('Make');
   const cameraModel = firstValue('Model');
   const camera = cameraMake && cameraModel && cameraModel.toLocaleLowerCase().startsWith(cameraMake.toLocaleLowerCase()) ? cameraModel : [cameraMake, cameraModel].filter(Boolean).join(' ');
@@ -4516,6 +5004,8 @@ const FileMetadataPane = ({ entry, entryDetails, metadataFields, metadataLoading
   ]).filter((item): item is string[] => Boolean(item[1] && item[1] !== '—'));
   const applicationFields: MediaMetadataField[] = entry ? [
     { group: 'Application', name: '文件名', value: entry.name }, { group: 'Application', name: '媒体类型', value: mediaType },
+    ...((entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video') && dimensions ? [{ group: 'Application', name: '像素尺寸', value: dimensions }] : []),
+    ...(entry.extension ? [{ group: 'Application', name: '文件格式', value: firstValue('FileType') || entry.extension.replace(/^\./, '').toLocaleUpperCase() }] : []),
     { group: 'Application', name: '大小', value: entryDetails ? formatFileSize(entryDetails.size) : entry.size >= 0 ? formatFileSize(entry.size) : '正在计算…' },
     ...(entryDetails ? [{ group: 'Application', name: '创建时间', value: new Date(entryDetails.createdAt).toLocaleString() }, { group: 'Application', name: '修改时间', value: new Date(entryDetails.updatedAt).toLocaleString() }] : []),
     ...(entry?.kind === 'folder' && entryDetails ? [{ group: 'Application', name: '包含', value: `${entryDetails.fileCount} 个文件，${entryDetails.folderCount} 个文件夹` }] : []),

@@ -7,22 +7,23 @@ const venvPython = process.platform === 'win32'
   ? join(root, '.venv', 'Scripts', 'python.exe')
   : join(root, '.venv', 'bin', 'python');
 const python = existsSync(venvPython) ? venvPython : 'python';
+const sharedWorkerName = 'PhotoFlowImportWorker';
 
 // These workers now share the tools runtime. Remove stale standalone outputs
 // so local release inspection cannot mistake them for packaged resources.
-for (const retiredOutput of ['thumbnail-image-worker', 'workspace-db-worker', 'tools.exe', 'thumbnail-image-worker.exe', 'workspace-db-worker.exe']) {
+for (const retiredOutput of ['thumbnail-image-worker', 'workspace-db-worker', 'tools', 'tools.exe', sharedWorkerName, 'thumbnail-image-worker.exe', 'workspace-db-worker.exe']) {
   rmSync(join(root, 'python', 'dist', retiredOutput), { recursive: true, force: true });
 }
 
 const result = spawnSync(python, [
   '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm', '--specpath', 'build/specs',
-  '--name', 'tools', '--exclude-module', 'imageio_ffmpeg',
+  '--name', sharedWorkerName, '--exclude-module', 'imageio_ffmpeg', '--exclude-module', 'rawpy',
   '--exclude-module', 'numpy', '--exclude-module', 'scipy', '--exclude-module', 'cv2',
   '--exclude-module', 'torch', '--exclude-module', 'torchvision',
   '--exclude-module', 'torchaudio', '--exclude-module', 'triton',
   '--exclude-module', 'PIL._imagingmath',
   '--exclude-module', 'PIL._imagingtk',
-  '--hidden-import', 'catch', '--hidden-import', 'classify',
+  '--hidden-import', 'catch', '--hidden-import', 'classify', '--hidden-import', 'ffmpeg_transcode',
   '--hidden-import', 'cut_video', '--hidden-import', 'png_to_jpg',
   '--hidden-import', 'rename',
   '--hidden-import', 'thumbnail_db', '--hidden-import', 'thumbnail_image',

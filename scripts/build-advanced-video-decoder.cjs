@@ -23,8 +23,18 @@ if (!fs.existsSync(runtimeManifestPath)) {
 const runtimeManifest = validateMpvManifest(readJson(runtimeManifestPath), mpvRoot);
 const mediaRuntimeLock = readJson(path.join(root, 'media-runtime.lock.json'));
 if (runtimeManifest.mpv?.version !== mediaRuntimeLock.mpv.version
-  || !String(runtimeManifest.mpv?.commit || '').startsWith(mediaRuntimeLock.mpv.commit)) {
+  || String(runtimeManifest.mpv?.commit || '') !== mediaRuntimeLock.mpv.commit) {
   throw new Error('libmpv 运行时与 media-runtime.lock.json 固定版本不一致');
+}
+if (runtimeManifest.linkedFfmpeg?.commit !== mediaRuntimeLock.ffmpeg.commit) {
+  throw new Error('libmpv 链接的 FFmpeg 与 media-runtime.lock.json 固定版本不一致');
+}
+const lockedDependencies = { zlib: mediaRuntimeLock.zlib, ...mediaRuntimeLock.mpvDependencies };
+for (const [name, locked] of Object.entries(lockedDependencies)) {
+  const actual = runtimeManifest.components.find(component => component.name === name);
+  if (!actual || actual.version !== locked.version || actual.commit !== locked.commit || actual.license !== locked.license) {
+    throw new Error(`libmpv 依赖与 media-runtime.lock.json 固定版本不一致：${name}`);
+  }
 }
 
 const findFile = (directory, names) => {

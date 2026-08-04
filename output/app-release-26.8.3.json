@@ -1,0 +1,13 @@
+{
+  "_id": "win32-stable-26-8-3",
+  "channel": "stable",
+  "downloadUrl": "https://pan.quark.cn/s/524d0b50abae",
+  "mandatory": true,
+  "notes": "Bug修复和工作流优化。此版本涉及到数据安全性更新。",
+  "platform": "win32",
+  "published": true,
+  "publishedAt": "2026-08-03T03:33:02.387Z",
+  "sha256": "6f0eabade26ccba244e92e35445b1fad63cfc0fafc296f297291dcb24babda85",
+  "version": "26.8.3",
+  "versionCode": 260803
+}

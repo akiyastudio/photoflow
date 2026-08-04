@@ -6,12 +6,13 @@ import argparse
 import json
 import math
 import os
-import re
 import subprocess
 import sys
 import tempfile
 import threading
+import uuid
 
+from ffmpeg_transcode import probe_duration
 from ffmpeg_utils import get_ffmpeg_exe
 
 
@@ -25,24 +26,56 @@ def emit(event_type: str, message: str, progress: float | None = None, **extra):
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
-def probe_duration(ffmpeg_exe: str, input_file: str) -> float:
-    result = subprocess.run(
-        [ffmpeg_exe, "-hide_banner", "-i", input_file],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
+def trim_video_losslessly(input_file: str, start_seconds: float, end_seconds: float, output_file: str):
+    """Create a stream-copy trim so codecs, bitrates and pixel data stay unchanged."""
+    input_file = os.path.abspath(input_file)
+    output_file = os.path.abspath(output_file)
+    if not os.path.isfile(input_file):
+        raise FileNotFoundError(f"找不到文件：{input_file}")
+    if os.path.normcase(input_file) == os.path.normcase(output_file):
+        raise ValueError("剪辑结果不能覆盖原视频")
+    ffmpeg_exe = get_ffmpeg_exe()
+    duration = probe_duration(input_file)
+    start_seconds = max(0.0, float(start_seconds))
+    end_seconds = min(duration, float(end_seconds))
+    if end_seconds - start_seconds < 0.05:
+        raise ValueError("保留片段的时长必须大于 0.05 秒")
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    extension = os.path.splitext(output_file)[1]
+    temporary = os.path.join(
+        os.path.dirname(output_file),
+        f".{os.path.splitext(os.path.basename(output_file))[0]}.{uuid.uuid4().hex}.photoflow-part{extension}",
     )
-    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", result.stderr)
-    if not match:
-        raise RuntimeError("无法读取视频时长，请检查文件是否完整或编码是否受支持")
-    hours, minutes, seconds = match.groups()
-    duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-    if duration <= 0:
-        raise RuntimeError("视频时长无效")
-    return duration
+    command = [
+        ffmpeg_exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+        "-ss", f"{start_seconds:.6f}", "-i", input_file,
+        "-t", f"{end_seconds - start_seconds:.6f}",
+        "-map", "0", "-map_metadata", "0", "-map_chapters", "0",
+        "-c", "copy", "-avoid_negative_ts", "make_zero", temporary,
+    ]
+    try:
+        completed = subprocess.run(
+            command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", check=False,
+        )
+        if completed.returncode != 0 or not os.path.isfile(temporary) or os.path.getsize(temporary) <= 0:
+            raise RuntimeError(completed.stderr.strip()[-2000:] or "FFmpeg 未能生成剪辑结果")
+        os.replace(temporary, output_file)
+    finally:
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+    result = {
+        "success": True,
+        "output": output_file,
+        "start": start_seconds,
+        "end": end_seconds,
+        "duration": end_seconds - start_seconds,
+        "sourceDuration": duration,
+    }
+    print(json.dumps(result, ensure_ascii=False), flush=True)
+    return result
 
 
 def fast_lossless_split(input_file: str, output_dir: str | None = None, output_stem: str | None = None):
@@ -57,7 +90,7 @@ def fast_lossless_split(input_file: str, output_dir: str | None = None, output_s
 
     ffmpeg_exe = get_ffmpeg_exe()
     emit("progress", f"正在分析视频：{os.path.basename(input_file)}", 2)
-    total_seconds = probe_duration(ffmpeg_exe, input_file)
+    total_seconds = probe_duration(input_file)
     part_count = math.ceil(file_size / TARGET_SIZE)
     segment_duration = total_seconds / part_count
 
@@ -148,8 +181,22 @@ def run(args_list=None):
     parser.add_argument("video_path", help="Path to the input video")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--output-stem", default=None)
+    parser.add_argument("--trim-start", type=float)
+    parser.add_argument("--trim-end", type=float)
+    parser.add_argument("--output-path")
     args = parser.parse_args(args_list)
     try:
+        trim_requested = args.trim_start is not None or args.trim_end is not None or args.output_path is not None
+        if trim_requested:
+            if args.trim_start is None or args.trim_end is None or not args.output_path:
+                raise ValueError("剪辑视频需要开始时间、结束时间和输出路径")
+            trim_video_losslessly(
+                args.video_path.strip('"').strip("'"),
+                args.trim_start,
+                args.trim_end,
+                args.output_path,
+            )
+            return 0
         fast_lossless_split(
             args.video_path.strip('"').strip("'"),
             output_dir=args.output_dir,

@@ -17,6 +17,7 @@ assert.strictEqual(normalizeBundledPythonTool('classify'), 'classify.py');
 assert.throws(() => normalizeBundledPythonTool('../../Windows/System32/calc'), /Invalid Python tool name/);
 assert.throws(() => normalizeBundledPythonTool('classify.py/../calc'), /Invalid Python tool name/);
 assert.strictEqual(validateRendererPythonInvocation('research.py', ['--path', 'C:\\media'], 'abcd1234').scriptName, 'research.py');
+assert.strictEqual(validateRendererPythonInvocation('ffmpeg_transcode.py', ['C:\\media\\clip.mov'], 'abcd1234').scriptName, 'ffmpeg_transcode.py');
 assert.throws(() => validateRendererPythonInvocation('workspace_db.py', [], 'abcd1234'), /not available/);
 assert.throws(() => validateRendererPythonInvocation('classify.py', ['safe\n--overwrite'], 'abcd1234'), /Invalid Python tool argument/);
 assert.throws(() => validateRendererPythonInvocation('classify.py', [], 'short'), /request identifier/);

@@ -1,8 +1,10 @@
 const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = require('../services/protected-project-folder.cjs');
 const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
+const { createTeamWorkflowArtifactService } = require('../services/team-workflow-artifact-service.cjs');
 
 const registerWorkspaceIpc = context => {
   const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
+  const teamWorkflowArtifacts = createTeamWorkflowArtifactService({ crypto, fs, getWorkspaceDataRoot, path, writeLog });
   const isValidProjectStatus = value => typeof value === 'string' && value === value.trim() && value.length > 0 && value.length <= 24 && ![...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
   const availableProjectStatuses = catalog => {
     const values = [...WORKSPACE_STATUSES, ...((catalog?.projects || []).map(project => project.status))];
@@ -15,7 +17,13 @@ const registerWorkspaceIpc = context => {
       return true;
     });
   };
-  const isInternalFileOperationEntry = name => name.toLowerCase().endsWith('.photoflow-part') || name.toLowerCase() === '_photoflow_safety_temp' || /^\.photoflow-(?:import-|paste|replace|undo|team-workflow-)/i.test(name);
+  const isInternalFileOperationEntry = name => {
+    const normalized = name.toLowerCase();
+    return normalized.endsWith('.photoflow-part')
+      || normalized === '_photoflow_safety_temp'
+      || normalized.startsWith('.') && normalized.includes('.photoflow-transcode')
+      || /^\.photoflow-(?:import-|paste|replace|split-|undo|team-workflow-)/i.test(normalized);
+  };
   const officeOpenXmlExtensions = new Set([
     '.docx', '.docm', '.dotx', '.dotm',
     '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam',
@@ -326,6 +334,11 @@ const registerWorkspaceIpc = context => {
       }
       const previousProjectDate = readProjectDate(catalog.byName.get(projectName.toLocaleLowerCase()));
       await mutateWorkspaceCatalog(root, 'renameProject', { name: projectName, nextName: cleanedName, relativePath: path.relative(root, destination), ...(legacyCall ? {} : { projectDate }) });
+      if (cleanedName !== projectName) {
+        await teamWorkflowArtifacts.migrate(root,
+          { status, projectName },
+          { status, projectName: cleanedName });
+      }
       if (cleanedName !== projectName) await pushUndoOperation({ kind: 'project', source, destination, status, workspaceRoot: root, beforeName: projectName, afterName: cleanedName, beforeProjectDate: previousProjectDate, afterProjectDate: projectDate });
       return { success: true, project: { name: cleanedName, path: destination, status, updatedAt: Date.now(), projectDate: projectDate === undefined ? previousProjectDate : projectDate || undefined } };
     } catch (error) {
@@ -657,6 +670,9 @@ const registerWorkspaceIpc = context => {
       const response = { success: true, message: `已撤销重命名：${operation.afterName} → ${operation.beforeName}` };
       if (operation.kind === 'project') {
         await mutateWorkspaceCatalog(operation.workspaceRoot, 'renameProject', { name: operation.afterName, nextName: operation.beforeName, relativePath: path.relative(operation.workspaceRoot, operation.source), ...(Object.prototype.hasOwnProperty.call(operation, 'beforeProjectDate') ? { projectDate: operation.beforeProjectDate || null } : {}) });
+        await teamWorkflowArtifacts.migrate(operation.workspaceRoot,
+          { status: operation.status, projectName: operation.afterName },
+          { status: operation.status, projectName: operation.beforeName });
         response.project = { name: operation.beforeName, path: operation.source, status: operation.status, updatedAt: Date.now(), projectDate: operation.beforeProjectDate };
       }
       return response;
@@ -675,6 +691,9 @@ const registerWorkspaceIpc = context => {
       const source = getProjectPath(workspacePath, currentStatus, projectName);
       if (!fs.existsSync(source)) throw new Error('项目不存在');
       await mutateWorkspaceCatalog(root, 'setProjectStatus', { name: projectName, status: nextStatus });
+      await teamWorkflowArtifacts.migrate(root,
+        { status: currentStatus, projectName },
+        { status: nextStatus, projectName });
       return { success: true, project: { name: projectName, path: source, status: nextStatus, updatedAt: Date.now() } };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
@@ -693,7 +712,12 @@ const registerWorkspaceIpc = context => {
       for (const row of importedRows) {
         const projectPath = path.join(root, row.relative_path);
         if (!fs.existsSync(projectPath)) continue;
-        if (row.status !== plannedStatus) await workspaceRepository.setProjectStatus(root, { name: row.name, status: plannedStatus });
+        if (row.status !== plannedStatus) {
+          await workspaceRepository.setProjectStatus(root, { name: row.name, status: plannedStatus });
+          await teamWorkflowArtifacts.migrate(root,
+            { status: row.status, projectName: row.name },
+            { status: plannedStatus, projectName: row.name });
+        }
         projects.push({ name: row.name, path: projectPath, status: plannedStatus, updatedAt: fs.statSync(projectPath).mtimeMs });
       }
   
@@ -824,6 +848,29 @@ const registerWorkspaceIpc = context => {
     } catch (error) {
       writeLog('warn', 'Unable to browse project directory', { projectName, relativePath, error: error.message || String(error) });
       return { success: false, missingDirectory: error?.code === 'ENOENT' || error?.code === 'ENOTDIR', error: error.message || String(error), entries: [] };
+    }
+  });
+
+  ipcMain.handle('workspace-inspect-tool-sources', async (_event, workspacePath, status, projectName, relativePaths = [], collectVideos = false, collectDirectPng = false) => {
+    try {
+      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const requestedPaths = [...new Set((Array.isArray(relativePaths) ? relativePaths : [])
+        .filter(value => typeof value === 'string' && value.length <= 32768))];
+      if (!requestedPaths.length) return { success: true, indexed: true, hasVideo: false, hasPng: false, videoPaths: [], pngPaths: [], folderPaths: [] };
+      if (requestedPaths.length > 4096) throw new Error('一次最多处理 4096 个所选文件或文件夹');
+      const targets = requestedPaths.map(relativePath => assertInside(root, path.resolve(root, relativePath), '工具来源路径', true));
+      const folderPaths = [];
+      for (const target of targets) {
+        try {
+          if ((await fs.promises.stat(target)).isDirectory()) folderPaths.push(target);
+        } catch { /* inspectToolSources reports missing source details */ }
+      }
+      const result = await thumbnailService.inspectToolSources(root, targets, collectVideos, collectDirectPng);
+      if (!result.indexed) void thumbnailService.scanProject(root, mediaRuntimeState.activeMediaCacheConfig);
+      return { success: true, ...result, folderPaths };
+    } catch (error) {
+      writeLog('warn', 'Unable to read project tool-source index', { projectName, error: error.message || String(error) });
+      return { success: false, indexed: false, hasVideo: false, hasPng: false, videoPaths: [], pngPaths: [], folderPaths: [], error: error.message || String(error) };
     }
   });
 
@@ -1217,6 +1264,7 @@ const registerWorkspaceIpc = context => {
     const requestId = String(options?.requestId || '');
     const analyzeOnly = options?.analyzeOnly === true;
     const confirmedCrops = Array.isArray(options?.crops) ? options.crops : null;
+    const outputSuffix = options?.outputSuffix === '裁剪' ? '裁剪' : '主图';
     const publish = payload => {
       if (requestId && !event.sender.isDestroyed()) event.sender.send('workspace-screenshot-main-image-progress', { requestId, ...payload });
     };
@@ -1236,7 +1284,7 @@ const registerWorkspaceIpc = context => {
       for (let offset = 0; offset < targets.length; offset += 60) {
         const chunk = targets.slice(offset, offset + 60);
         const cropChunk = confirmedCrops?.slice(offset, offset + chunk.length) || [];
-        const args = [command, ...chunk.flatMap((target, index) => {
+        const args = [command, ...(confirmedCrops && outputSuffix === '裁剪' ? ['--output-suffix', '裁剪'] : []), ...chunk.flatMap((target, index) => {
           if (!confirmedCrops) return ['--input', target];
           const crop = cropChunk[index] || {};
           const values = ['x', 'y', 'width', 'height'].map(key => Math.round(Number(crop[key]) || 0));
@@ -1287,6 +1335,54 @@ const registerWorkspaceIpc = context => {
       publish({ phase: 'failed', progress: 0, message: `提取失败：${error.message || String(error)}` });
       writeLog('warn', 'Screenshot main image extraction failed', { projectName, error: error.message || String(error) });
       return { success: false, error: error.message || String(error), results: [] };
+    }
+  });
+
+  ipcMain.handle('workspace-trim-video', async (_event, workspacePath, status, projectName, relativePath, request = {}) => {
+    try {
+      const sourcePath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
+      const stat = await fs.promises.stat(sourcePath);
+      const extension = path.extname(sourcePath).toLowerCase();
+      if (!stat.isFile() || !VIDEO_EXTENSIONS.has(extension)) throw new Error('请选择项目中的视频文件');
+      const start = Number(request.start);
+      const end = Number(request.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) throw new Error('剪辑时间范围无效');
+      const saveMode = request.saveMode === 'replace' ? 'replace' : 'new';
+      const parsed = path.parse(sourcePath);
+      const projectRoot = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const generatedPath = saveMode === 'replace'
+        ? path.join(parsed.dir, `.${parsed.name}.${crypto.randomUUID()}.photoflow-trim${parsed.ext}`)
+        : uniqueDestination(parsed.dir, `${parsed.name}_剪辑${parsed.ext}`);
+      let safeOutput = '';
+      try {
+        const result = await runPythonJsonAction('cut_video.py', [sourcePath, '--trim-start', String(start), '--trim-end', String(end), '--output-path', generatedPath], 60 * 60 * 1000);
+        if (!result?.success || !fs.existsSync(generatedPath)) throw new Error(result?.error || '视频剪辑失败');
+        const safeGenerated = assertInside(projectRoot, generatedPath, '视频剪辑输出路径');
+        if (saveMode === 'replace') {
+          for (let attempt = 0; ; attempt += 1) {
+            try {
+              await fs.promises.rename(safeGenerated, sourcePath);
+              break;
+            } catch (error) {
+              const fileStillOpen = ['EBUSY', 'EACCES', 'EPERM'].includes(String(error?.code || ''));
+              if (!fileStillOpen || attempt >= 20) throw error;
+              await new Promise(resolve => setTimeout(resolve, 100));
+            }
+          }
+          safeOutput = sourcePath;
+        } else safeOutput = safeGenerated;
+      } finally {
+        if (saveMode === 'replace' && fs.existsSync(generatedPath)) await fs.promises.unlink(generatedPath).catch(() => undefined);
+      }
+      void thumbnailService.syncChangedPaths(projectRoot, [safeOutput], mediaRuntimeState.activeMediaCacheConfig).catch(error => {
+        writeLog('warn', 'Unable to queue trimmed-video thumbnail', { projectName, error: error.message || String(error) });
+      });
+      const workspaceRoot = path.resolve(resolveWorkspaceRoot(workspacePath));
+      mainWindow?.webContents.send('workspace-files-changed', { root: workspaceRoot, fileName: path.relative(workspaceRoot, safeOutput), eventType: saveMode === 'replace' ? 'change' : 'rename' });
+      return { success: true, outputPath: safeOutput, relativePath: path.relative(projectRoot, safeOutput).replace(/\\/g, '/'), duration: end - start, replaced: saveMode === 'replace' };
+    } catch (error) {
+      writeLog('warn', 'Video trim failed', { projectName, relativePath, error: error.message || String(error) });
+      return { success: false, error: error.message || String(error) };
     }
   });
   

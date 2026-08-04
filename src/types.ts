@@ -476,6 +476,7 @@ export interface TeamIdentityWorkspace {
   assignments: TeamPersonAssignment[];
   missingReturnCount?: number;
   workflowGenerated?: boolean;
+  workflowNeedsRegeneration?: boolean;
   workflowAvailableKeys?: string[];
   workflowSettings?: {
     preferredIdentityOrder?: string[];
@@ -572,7 +573,7 @@ export interface ComponentStatus {
 
 export interface AdvancedVideoState {
   sessionId: string;
-  type: 'ready' | 'loading' | 'file-loaded' | 'state' | 'ended' | 'navigate' | 'error' | 'fatal';
+  type: 'ready' | 'loading' | 'file-loaded' | 'state' | 'ended' | 'navigate' | 'context-menu' | 'pointer-activity' | 'escape' | 'error' | 'fatal';
   time?: number;
   duration?: number;
   paused?: boolean;
@@ -583,6 +584,8 @@ export interface AdvancedVideoState {
   width?: number;
   height?: number;
   direction?: -1 | 1;
+  x?: number;
+  y?: number;
   error?: string;
 }
 
@@ -673,6 +676,7 @@ export interface IElectronAPI {
   toggleMaximizeWindow: () => Promise<boolean>;
   closeWindow: () => void;
   isWindowMaximized: () => Promise<boolean>;
+  setWindowFullscreen: (enabled: boolean) => Promise<boolean>;
   onWindowMaximizedChange: (callback: (maximized: boolean) => void) => () => void;
   getWorkspaceProjects: (workspacePath: string) => Promise<{ success: boolean; root?: string; statuses: WorkspaceStatusGroup[]; error?: string }> ;
   onWorkspaceFilesChanged: (callback: (change: { root: string; fileName: string; eventType?: 'rename' | 'change'; reconciled?: boolean; watcherFailed?: boolean }) => void) => () => void;
@@ -693,13 +697,14 @@ export interface IElectronAPI {
   watchFileRoot: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; root?: string; error?: string }>;
   unwatchFileRoot: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; error?: string }>;
   browseProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath?: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path?: string; entries: ProjectFileEntry[]; missingDirectory?: boolean; error?: string }>;
+  inspectProjectToolSources: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], collectVideos?: boolean, collectDirectPng?: boolean) => Promise<{ success: boolean; indexed: boolean; hasVideo: boolean; hasPng: boolean; videoPaths: string[]; pngPaths: string[]; folderPaths: string[]; error?: string }>;
   resolveProjectShortcut: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; target?: string; targetKind?: 'folder' | 'file'; error?: string }>;
   searchProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, scopeRelativePath: string, query: string) => Promise<{ success: boolean; scope?: string; entries: ProjectFileEntry[]; error?: string }>;
   listRecentProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, scopeRelativePath: string, limit?: number, cursor?: string) => Promise<{ success: boolean; scope?: string; entries: ProjectFileEntry[]; cursor?: string; hasMore?: boolean; truncated?: boolean; scannedDirectories?: number; error?: string }>;
   listWorkspaceFolders: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; folders: Array<{ name: string; relativePath: string; parentRelativePath: string; depth: number }>; truncated?: boolean; error?: string }>;
   addInspirationToProject: (inspirationRoot: string, targetWorkspacePath: string, targetStatus: ProjectStatus, targetProjectName: string, relativePaths: string[]) => Promise<{ success: boolean; count?: number; fileCount?: number; shortcutCount?: number; planningFolder?: string; error?: string }>;
   extractOfficeImages: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<{ success: boolean; documentCount?: number; successfulCount?: number; failedCount?: number; imageCount?: number; results: Array<{ document: string; documentName: string; success: boolean; count: number; totalBytes?: number; outputFolder?: string; files?: string[]; message?: string; error?: string }>; error?: string }>;
-  extractScreenshotMainImages: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], options?: { requestId?: string; analyzeOnly?: boolean; crops?: Array<{ x: number; y: number; width: number; height: number }> }) => Promise<{
+  extractScreenshotMainImages: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], options?: { requestId?: string; analyzeOnly?: boolean; crops?: Array<{ x: number; y: number; width: number; height: number }>; outputSuffix?: '主图' | '裁剪' }) => Promise<{
     success: boolean;
     inputCount?: number;
     croppedCount?: number;
@@ -727,6 +732,7 @@ export interface IElectronAPI {
     }>;
     error?: string;
   }>;
+  trimProjectVideo: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, request: { start: number; end: number; saveMode: 'new' | 'replace' }) => Promise<{ success: boolean; outputPath?: string; relativePath?: string; duration?: number; replaced?: boolean; error?: string }>;
   onScreenshotMainImageProgress: (callback: (progress: { requestId: string; phase: 'extracting' | 'complete' | 'failed' | string; progress: number; processedCount?: number; totalCount?: number; currentName?: string; message: string }) => void) => () => void;
   getProjectFileDetails: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<{ success: boolean; details: Array<{ relativePath: string; size: number; createdAt: number; updatedAt: number }>; error?: string }>;
   getProjectEntryDetails: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; details?: { size: number; createdAt: number; updatedAt: number; fileCount: number; folderCount: number }; error?: string }>;
@@ -791,7 +797,15 @@ export interface IElectronAPI {
   cancelMediaThumbnail: (filePath: string, requestedSize?: number) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
   onThumbnailStateChanged: (callback: (update: { filePath: string; state: ThumbnailState; previewUrls?: Partial<Record<'small' | 'medium' | 'large', string>>; sourceMtimeMs?: number; sourceSize?: number; error?: string }) => void) => () => void;
   startAdvancedVideo: (filePath: string, arrowKeyAction?: AdvancedVideoComponentSettings['arrowKeyAction']) => Promise<{ success: boolean; sessionId?: string; error?: string }>;
-  setAdvancedVideoBounds: (sessionId: string, bounds: { x: number; y: number; width: number; height: number; visible: boolean }) => void;
+  setAdvancedVideoBounds: (sessionId: string, bounds: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    visible: boolean;
+    overlayHole?: { x: number; y: number; width: number; height: number };
+    cornerOverlayHole?: { x: number; y: number; width: number; height: number };
+  }) => void;
   controlAdvancedVideo: (sessionId: string, request: { action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop'; value?: number | boolean }) => void;
   captureAdvancedVideoFrame: (sessionId: string) => Promise<{ success: boolean; path?: string; error?: string }>;
   stopAdvancedVideo: (sessionId: string) => Promise<{ success: boolean }>;
@@ -812,6 +826,7 @@ export interface IElectronAPI {
   chooseCacheDirectory: () => Promise<{ cancelled?: boolean; path?: string }>;
   chooseWorkspaceDirectory: (currentPath?: string) => Promise<{ success?: boolean; cancelled?: boolean; path?: string }>;
   chooseImportSourceFiles: () => Promise<{ cancelled?: boolean; paths: string[] }>;
+  chooseVideoFiles: () => Promise<{ cancelled?: boolean; paths: string[] }>;
   getMediaCacheInfo: (cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path: string; sizeBytes: number; fileCount: number; error?: string }>;
   clearMediaCache: (cacheConfig?: AppConfig['mediaCache'], olderThanDays?: number) => Promise<{ success: boolean; deletedCount?: number; prunedSourceCount?: number; taskId?: string; error?: string }>;
   getStorageUsageOverview: (force?: boolean) => Promise<StorageUsageOverview>;

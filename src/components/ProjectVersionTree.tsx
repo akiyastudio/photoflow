@@ -176,12 +176,22 @@ export const ProjectVersionTree = ({ progressFolders, entries, activeRelativePat
       const sourceColumnOffset = nodeWidth + columnGap;
       positioned.forEach(item => { item.x += sourceColumnOffset; });
       let unattachedY = Math.max(nextLeafY, canvasPadding);
+      let nextSourceY = canvasPadding;
       for (const mediaKind of ['image', 'video'] as const) {
         const sources = sourceEntries.filter(item => item.sourceKind === mediaKind);
         if (!sources.length) continue;
         const baseline = positioned.find(item => item.folder?.mediaKind === mediaKind && item.folder.versionKey === '0');
         const spacing = nodeHeight + rowGap;
-        const firstY = baseline ? baseline.y - (sources.length - 1) * spacing / 2 : unattachedY;
+        const desiredFirstY = baseline ? baseline.y - (sources.length - 1) * spacing / 2 : unattachedY;
+        const firstY = Math.max(desiredFirstY, nextSourceY);
+        const mediaShiftY = firstY - desiredFirstY;
+        if (baseline && mediaShiftY > 0) {
+          const mediaNodes = new Set(positioned.filter(item => item.folder?.mediaKind === mediaKind));
+          edges
+            .filter(edge => edge.kind === 'team-workspace' && mediaNodes.has(edge.parent))
+            .forEach(edge => mediaNodes.add(edge.child));
+          mediaNodes.forEach(item => { item.y += mediaShiftY; });
+        }
         sources.forEach(({ entry, sourceKind }, index) => {
           const sourceNode: PositionedItem = {
             key: `source:${normalizePath(entry.relativePath)}`,
@@ -193,6 +203,7 @@ export const ProjectVersionTree = ({ progressFolders, entries, activeRelativePat
           positioned.push(sourceNode);
           if (baseline) edges.push({ parent: sourceNode, child: baseline });
         });
+        nextSourceY = firstY + sources.length * spacing;
         if (!baseline) unattachedY += sources.length * spacing + rowGap;
       }
       const minimumY = Math.min(...positioned.map(item => item.y));

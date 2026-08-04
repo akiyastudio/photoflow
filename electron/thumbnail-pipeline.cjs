@@ -13,6 +13,13 @@ const THUMBNAIL_SIZES = [
 ];
 const PRIORITY = { visible: 0, nearby: 1, directory: 2, project: 3 };
 const pathKey = filePath => process.platform === 'win32' ? path.resolve(filePath).toLocaleLowerCase() : path.resolve(filePath);
+const isInternalTransientMediaPath = filePath => path.resolve(filePath)
+  .split(path.sep)
+  .some(segment => {
+    const normalized = segment.toLowerCase();
+    return normalized.startsWith('.') && normalized.includes('.photoflow-transcode')
+      || /^\.photoflow-(?:import-|paste|replace|split-|undo|team-workflow-)/i.test(normalized);
+  });
 
 const chooseSize = requestedSize => {
   const requested = Math.max(1, Number(requestedSize) || 640);
@@ -196,6 +203,7 @@ class ThumbnailPipeline {
     this.queues = [[], [], [], []];
     this.directoryIndexes = new Map();
     this.projectScans = new Map();
+    this.projectIndexUpdates = new Map();
     this.projectScanQueue = [];
     this.activeProjectScans = 0;
     this.projectScanPumpTimer = null;
@@ -564,6 +572,17 @@ class ThumbnailPipeline {
     return scan;
   }
 
+  async inspectToolSources(projectRoot, filePaths, collectVideos = false, collectDirectPng = false) {
+    const root = path.resolve(projectRoot);
+    if (this.projectScans.has(root) || (this.projectIndexUpdates.get(root) || 0) > 0) return { indexed: false, hasVideo: false, hasPng: false, videoPaths: [], pngPaths: [] };
+    return this.database.call('inspect_tool_sources', {
+      project_root: root,
+      paths: filePaths.map(filePath => path.resolve(filePath)),
+      collect_videos: Boolean(collectVideos),
+      collect_direct_png: Boolean(collectDirectPng),
+    });
+  }
+
   pumpProjectScans() {
     if (this.activeProjectScans || !this.projectScanQueue.length) return;
     // Foreground directory indexes are intentionally drained first. Starting a
@@ -602,14 +621,27 @@ class ThumbnailPipeline {
   }
 
   async syncChangedPaths(projectRoot, filePaths, cacheConfig) {
+    const root = path.resolve(projectRoot);
+    this.projectIndexUpdates.set(root, (this.projectIndexUpdates.get(root) || 0) + 1);
+    try {
+      return await this.runChangedPathSync(root, filePaths, cacheConfig);
+    } finally {
+      const remaining = (this.projectIndexUpdates.get(root) || 1) - 1;
+      if (remaining > 0) this.projectIndexUpdates.set(root, remaining);
+      else this.projectIndexUpdates.delete(root);
+    }
+  }
+
+  async runChangedPathSync(projectRoot, filePaths, cacheConfig) {
     const imageExtensions = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.hif', '.avif']);
     const videoExtensions = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv']);
     const rawExtensions = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
     const mediaExtensions = new Set([...imageExtensions, ...videoExtensions, ...rawExtensions]);
-    const mediaPaths = [...new Map(filePaths
+    const visibleFilePaths = filePaths.filter(filePath => !isInternalTransientMediaPath(filePath));
+    const mediaPaths = [...new Map(visibleFilePaths
       .filter(filePath => mediaExtensions.has(path.extname(filePath).toLowerCase()))
       .map(filePath => [pathKey(filePath), path.resolve(filePath)])).values()];
-    const needsProjectScan = filePaths.some(filePath => !mediaExtensions.has(path.extname(filePath).toLowerCase()));
+    const needsProjectScan = visibleFilePaths.some(filePath => !mediaExtensions.has(path.extname(filePath).toLowerCase()));
 
     // Editors often emit several watcher events while a file is still being
     // replaced. Keep the old thumbnail visible during that short window, then
@@ -650,10 +682,8 @@ class ThumbnailPipeline {
         return null;
       }
     }));
-    const changedMediaPaths = changed.filter(Boolean);
-
-    if (changedMediaPaths.length) {
-      void this.database.call('sync_paths', { project_root: projectRoot, paths: changedMediaPaths, calculate_hash: false }, 60 * 1000)
+    if (mediaPaths.length) {
+      await this.database.call('sync_paths', { project_root: projectRoot, paths: mediaPaths, calculate_hash: false }, 60 * 1000)
         .catch(error => this.log('warn', 'Thumbnail watcher index update deferred', { projectRoot, error: error.message || String(error) }));
     }
     if (needsProjectScan) void this.scanProject(projectRoot, cacheConfig);
@@ -693,6 +723,7 @@ class ThumbnailPipeline {
     this.projectScanPumpTimer = null;
     this.thumbnailPumpTimer = null;
     this.sourceChangeVersions.clear();
+    this.projectIndexUpdates.clear();
     this.backgroundResumeTimer = null;
     this.memory.clear();
     this.database.stop();

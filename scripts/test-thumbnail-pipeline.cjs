@@ -126,6 +126,52 @@ const run = async () => {
     assert.equal(changedResult.state, 'READY');
     changedPipeline.stop();
 
+    const missingVideo = path.join(temporaryRoot, 'deleted-video.mp4');
+    const watcherCalls = [];
+    const watcherPipeline = createPipeline({
+      root: temporaryRoot,
+      target: path.join(temporaryRoot, 'unused.jpg'),
+      generate: async () => [],
+    });
+    watcherPipeline.database.call = async (operation, args) => {
+      watcherCalls.push({ operation, args });
+      return { success: true };
+    };
+    await watcherPipeline.syncChangedPaths(temporaryRoot, [missingVideo], {});
+    assert.deepEqual(
+      watcherCalls.find(call => call.operation === 'sync_paths')?.args.paths,
+      [missingVideo],
+      'a deleted media path must be marked missing in the persistent project index',
+    );
+    const transientVideo = path.join(temporaryRoot, '.clip.123.photoflow-transcode.mp4');
+    fs.writeFileSync(transientVideo, 'incomplete transcode');
+    const watcherCallCount = watcherCalls.length;
+    const transientSync = await watcherPipeline.syncChangedPaths(temporaryRoot, [transientVideo], {});
+    assert.equal(transientSync.queued, 0, 'an in-progress transcode must not queue thumbnail generation');
+    assert.equal(transientSync.projectScanScheduled, false, 'an in-progress transcode must not trigger a project scan');
+    assert.equal(watcherCalls.length, watcherCallCount, 'an in-progress transcode must not enter the persistent media index');
+    watcherPipeline.stop();
+
+    const indexedPipeline = createPipeline({
+      root: temporaryRoot,
+      target: path.join(temporaryRoot, 'unused-index.jpg'),
+      generate: async () => [],
+    });
+    const indexedCalls = [];
+    indexedPipeline.database.call = async (operation, args) => {
+      indexedCalls.push({ operation, args });
+      return { indexed: true, hasVideo: true, hasPng: false, videoPaths: [missingVideo], pngPaths: [] };
+    };
+    const indexedResult = await indexedPipeline.inspectToolSources(temporaryRoot, [missingVideo], true, true);
+    assert.equal(indexedResult.hasVideo, true);
+    assert.equal(indexedCalls[0]?.operation, 'inspect_tool_sources', 'tool availability must read the existing project index');
+    assert.equal(indexedCalls[0]?.args.collect_direct_png, true, 'folder menu inspection must request direct PNG children');
+    indexedPipeline.projectScans.set(path.resolve(temporaryRoot), Promise.resolve());
+    const buildingResult = await indexedPipeline.inspectToolSources(temporaryRoot, [missingVideo], true);
+    assert.equal(buildingResult.indexed, false, 'tool availability must report a queued background project scan as building');
+    assert.equal(indexedCalls.length, 1, 'a building project scan must not expose stale database results');
+    indexedPipeline.stop();
+
     const failureTarget = path.join(temporaryRoot, 'failure.jpg');
     let failureNotify = () => undefined;
     const failurePipeline = createPipeline({
