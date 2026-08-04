@@ -456,12 +456,12 @@ const registerVersionIpc = context => {
         try {
           const filePath = path.resolve(String(version.filePath || ''));
           const relative = path.relative(projectPath, filePath);
-          if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || version.fileMissing) throw new Error('最终版文件不可用');
+          if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || version.fileMissing) throw new Error('喜爱图片不可用');
           const stat = await fs.promises.stat(filePath);
-          if (!stat.isFile()) throw new Error('最终版文件不是文件');
+          if (!stat.isFile()) throw new Error('喜爱图片不是文件');
           const extension = path.extname(filePath).toLowerCase();
           const kind = IMAGE_EXTENSIONS.has(extension) ? 'image' : RAW_EXTENSIONS.has(extension) ? 'raw' : null;
-          if (!kind) throw new Error('最终版不是支持的图片');
+          if (!kind) throw new Error('喜爱项目不是支持的图片');
           entries.push({
             name: path.basename(filePath),
             path: filePath,
@@ -489,9 +489,9 @@ const registerVersionIpc = context => {
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       const finalResult = await versionService.listFinalVersions(workspaceRoot, projectName);
       const versions = Array.isArray(finalResult.versions) ? finalResult.versions : [];
-      if (!versions.length) throw new Error('当前项目还没有标记最终版的图片');
+      if (!versions.length) throw new Error('当前项目还没有标记为喜爱的图片');
       const missing = versions.filter(version => version.fileMissing || !fs.existsSync(version.filePath));
-      if (missing.length) throw new Error(`有 ${missing.length} 个最终版文件已被删除或移动，请先重新定位`);
+      if (missing.length) throw new Error(`有 ${missing.length} 个喜爱图片已被删除或移动，请先重新定位`);
 
       const progressResult = await versionService.listProgress(workspaceRoot, projectName);
       const imageRoots = (progressResult.progressFolders || [])
@@ -499,10 +499,10 @@ const registerVersionIpc = context => {
         .sort((left, right) => Number(left.versionKey) - Number(right.versionKey));
       const latestRoot = imageRoots.at(-1);
       const versionKey = String((latestRoot ? Number(latestRoot.versionKey) : 0) + 1);
-      const displayName = `图片后期_${versionKey}_最终版`;
+      const displayName = `图片后期_${versionKey}_喜爱`;
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
       folderPath = path.resolve(projectPath, displayName);
-      if (!folderPath.startsWith(projectPath + path.sep)) throw new Error('最终版进度文件夹路径无效');
+      if (!folderPath.startsWith(projectPath + path.sep)) throw new Error('喜爱图片进度文件夹路径无效');
       if (fs.existsSync(folderPath)) throw new Error(`文件夹“${displayName}”已经存在`);
 
       await fs.promises.mkdir(folderPath);
@@ -1103,6 +1103,13 @@ const registerVersionIpc = context => {
       const workflowTarget = status ? await readTeamWorkflowManifest(workspaceRoot, status, projectName) : null;
       const workflowManifest = workflowTarget?.manifest || null;
       const workflowGenerated = Boolean(workflowManifest && Number(workflowManifest.version) >= 2);
+      const generatedSettings = workflowManifest?.workflowSettings;
+      const generatedOrder = Array.isArray(generatedSettings?.preferredIdentityOrder) ? generatedSettings.preferredIdentityOrder.map(String) : [];
+      const generatedSameWeekIdentityIds = Array.isArray(generatedSettings?.sameWeekIdentityIds) ? generatedSettings.sameWeekIdentityIds.map(String) : [];
+      const workflowNeedsRegeneration = Boolean(workflowGenerated && generatedSettings && (
+        JSON.stringify(generatedOrder) !== JSON.stringify(preferredIdentityOrder)
+        || JSON.stringify(generatedSameWeekIdentityIds) !== JSON.stringify(sameWeekIdentityIds)
+      ));
       const workflowAvailableKeys = workflowGenerated
         ? (workflowManifest.groups || []).flatMap(group => (group.items || []).filter(item => {
           if (!item.available || !item.relativePath) return false;
@@ -1110,7 +1117,7 @@ const registerVersionIpc = context => {
           return isInside(workflowTarget.outputDirectory, itemPath) && fs.existsSync(itemPath);
         }).map(item => `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`))
         : [];
-      return { ...workspace, workflowGenerated, workflowAvailableKeys, workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds } };
+      return { ...workspace, workflowGenerated, workflowNeedsRegeneration, workflowAvailableKeys, workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds } };
     } catch (error) {
       writeLog('error', 'Unable to load team retouch project workspace', {
         projectName: String(projectName || ''),

@@ -29,6 +29,19 @@ MEDIA_EXTENSIONS = {
 }
 
 
+def is_internal_transient_media_path(value: str) -> bool:
+    for segment in Path(value).parts:
+        normalized = segment.lower()
+        if normalized.startswith(".") and ".photoflow-transcode" in normalized:
+            return True
+        if normalized.startswith((
+            ".photoflow-import-", ".photoflow-paste", ".photoflow-replace",
+            ".photoflow-split-", ".photoflow-undo", ".photoflow-team-workflow-",
+        )):
+            return True
+    return False
+
+
 def now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -94,6 +107,13 @@ class ThumbnailDatabase:
             );
             CREATE INDEX IF NOT EXISTS thumbnails_accessed
                 ON thumbnails(last_accessed_at);
+
+            CREATE TABLE IF NOT EXISTS project_indexes (
+                project_root TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                completed_at INTEGER
+            );
             """
         )
         # Jobs interrupted by a previous shutdown are safe to retry. Secondary
@@ -196,12 +216,27 @@ class ThumbnailDatabase:
 
     def sync_project(self, project_root: str) -> dict:
         project_root = canonical(project_root)
+        started_at = now_ms()
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO project_indexes (project_root, state, started_at, completed_at)
+                   VALUES (?, 'BUILDING', ?, NULL)
+                   ON CONFLICT(project_root) DO UPDATE SET
+                     state='BUILDING', started_at=excluded.started_at, completed_at=NULL""",
+                (project_root, started_at),
+            )
         seen = set()
         pending = []
         changed_count = 0
         writes_since_commit = 0
-        for directory, _directory_names, file_names in os.walk(project_root):
+        for directory, directory_names, file_names in os.walk(project_root):
+            directory_names[:] = [
+                name for name in directory_names
+                if not is_internal_transient_media_path(os.path.join(directory, name))
+            ]
             for name in file_names:
+                if is_internal_transient_media_path(os.path.join(directory, name)):
+                    continue
                 kind = MEDIA_EXTENSIONS.get(Path(name).suffix.lower())
                 if not kind:
                     continue
@@ -240,7 +275,77 @@ class ThumbnailDatabase:
                         "UPDATE files SET thumbnail_state='MISSING', exists_on_disk=0, updated_at=? WHERE path=?",
                         (timestamp, row["path"]),
                     )
+            self.connection.execute(
+                "UPDATE project_indexes SET state='READY', completed_at=? WHERE project_root=?",
+                (timestamp, project_root),
+            )
         return {"fileCount": len(seen), "changedCount": changed_count, "pending": pending}
+
+    def inspect_tool_sources(self, project_root: str, paths: list[str], collect_videos: bool = False,
+                             collect_direct_png: bool = False) -> dict:
+        """Read tool availability from the existing background-built media index."""
+        project_root = canonical(project_root)
+        index_row = self.connection.execute(
+            "SELECT state FROM project_indexes WHERE project_root=?", (project_root,)
+        ).fetchone()
+        if not index_row or index_row["state"] != "READY":
+            return {"indexed": False, "hasVideo": False, "hasPng": False, "videoPaths": [], "pngPaths": []}
+
+        targets = list(dict.fromkeys(canonical(value) for value in paths if value))
+        if not targets:
+            return {"indexed": True, "hasVideo": False, "hasPng": False, "videoPaths": [], "pngPaths": []}
+
+        has_video = False
+        has_png = False
+        video_paths = []
+        png_paths = []
+        # Keep every query comfortably below SQLite's host-parameter limit,
+        # including when the renderer has selected thousands of individual files.
+        for offset in range(0, len(targets), 200):
+            conditions = []
+            parameters: list[str] = [project_root]
+            for target in targets[offset:offset + 200]:
+                escaped = target.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                conditions.append("(path=? OR path LIKE ? ESCAPE '\\')")
+                parameters.extend((target, escaped + os.sep.replace("\\", "\\\\") + "%"))
+            scope = " OR ".join(conditions)
+            base_query = f"FROM files WHERE project_root=? AND exists_on_disk=1 AND ({scope})"
+            chunk_has_video = self.connection.execute(
+                f"SELECT 1 {base_query} AND kind='video' LIMIT 1", parameters
+            ).fetchone() is not None
+            has_video = has_video or chunk_has_video
+            if collect_direct_png:
+                direct_conditions = []
+                direct_parameters: list[object] = [project_root]
+                for target in targets[offset:offset + 200]:
+                    direct_prefix = target + os.sep
+                    escaped_prefix = direct_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    direct_conditions.append("(path=? OR (path LIKE ? ESCAPE '\\' AND instr(substr(path, ?), ?) = 0))")
+                    direct_parameters.extend((target, escaped_prefix + "%", len(direct_prefix) + 1, os.sep))
+                direct_scope = " OR ".join(direct_conditions)
+                direct_query = f"FROM files WHERE project_root=? AND exists_on_disk=1 AND ({direct_scope}) AND lower(path) LIKE '%.png'"
+                direct_png_rows = self.connection.execute(f"SELECT path {direct_query}", direct_parameters).fetchall()
+                has_png = has_png or bool(direct_png_rows)
+                png_paths.extend(row["path"] for row in direct_png_rows)
+            else:
+                has_png = has_png or self.connection.execute(
+                    f"SELECT 1 {base_query} AND lower(path) LIKE '%.png' LIMIT 1", parameters
+                ).fetchone() is not None
+            if collect_videos and chunk_has_video:
+                video_paths.extend(row["path"] for row in self.connection.execute(
+                    f"SELECT path {base_query} AND kind='video'", parameters
+                ).fetchall())
+            if not collect_videos and not collect_direct_png and has_video and has_png:
+                break
+        video_paths.sort(key=str.casefold)
+        png_paths = sorted(dict.fromkeys(png_paths), key=str.casefold)
+        return {
+            "indexed": True,
+            "hasVideo": has_video,
+            "hasPng": has_png,
+            "videoPaths": video_paths,
+            "pngPaths": png_paths,
+        }
 
     def sync_paths(self, project_root: str, paths: list[str], calculate_hash: bool = False) -> dict:
         project_root = canonical(project_root)
@@ -248,6 +353,8 @@ class ThumbnailDatabase:
         with self.connection:
             for value in paths:
                 file_path = canonical(value)
+                if is_internal_transient_media_path(file_path):
+                    continue
                 kind = MEDIA_EXTENSIONS.get(Path(file_path).suffix.lower())
                 if os.path.isfile(file_path) and kind:
                     records.append(self._upsert_file(project_root, file_path, kind, os.stat(file_path), calculate_hash=calculate_hash))

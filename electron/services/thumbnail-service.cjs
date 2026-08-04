@@ -24,6 +24,7 @@ const createThumbnailService = ({ pipeline, backgroundTasks }) => {
     noteForegroundActivity: () => pipeline.noteForegroundActivity(),
     indexDirectory: (...args) => pipeline.indexDirectory(...args),
     scanProject: (...args) => pipeline.scanProject(...args),
+    inspectToolSources: (...args) => pipeline.inspectToolSources(...args),
     syncChangedPaths: (...args) => pipeline.syncChangedPaths(...args),
     invalidateDeleted: (...args) => pipeline.invalidateDeleted(...args),
     invalidateSources: (...args) => pipeline.invalidateSources(...args),

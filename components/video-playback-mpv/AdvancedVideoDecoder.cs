@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -348,6 +349,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private string lastState = string.Empty;
         private bool loading;
         private bool arrowKeysNavigate;
+        private int lastPointerActivityTick;
 
         internal DecoderHost(IntPtr parentWindow)
         {
@@ -418,10 +420,22 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 int y = ReadInt(value, "y");
                 int width = Math.Max(1, ReadInt(value, "width"));
                 int height = Math.Max(1, ReadInt(value, "height"));
+                int holeX = ReadInt(value, "holeX");
+                int holeY = ReadInt(value, "holeY");
+                int holeWidth = ReadInt(value, "holeWidth");
+                int holeHeight = ReadInt(value, "holeHeight");
+                int cornerHoleX = ReadInt(value, "cornerHoleX");
+                int cornerHoleY = ReadInt(value, "cornerHoleY");
+                int cornerHoleWidth = ReadInt(value, "cornerHoleWidth");
+                int cornerHoleHeight = ReadInt(value, "cornerHoleHeight");
                 bool visible = ReadBool(value, "visible") && ReadInt(value, "width") > 0 && ReadInt(value, "height") > 0;
                 BeginInvoke(new Action(() => {
                     if (shuttingDown) return;
                     NativeMethods.MoveWindow(Handle, x, y, width, height, true);
+                    ApplyOverlayHoles(
+                        width, height,
+                        holeX, holeY, holeWidth, holeHeight,
+                        cornerHoleX, cornerHoleY, cornerHoleWidth, cornerHoleHeight);
                     if (visible)
                     {
                         NativeMethods.ShowWindow(Handle, NativeMethods.SW_SHOWNOACTIVATE);
@@ -496,19 +510,67 @@ namespace PhotoFlow.AdvancedVideoDecoder
             }
             else if (eventArgs.Button == MouseButtons.XButton1 || eventArgs.Button == MouseButtons.XButton2)
                 HandleDirectionalInput(eventArgs.Button == MouseButtons.XButton2 ? 1 : -1, false);
+            else if (eventArgs.Button == MouseButtons.Right)
+                Emit(new Dictionary<string, object> {
+                    { "type", "context-menu" }, { "x", eventArgs.X }, { "y", eventArgs.Y }
+                });
+        }
+
+        private static void ExcludeOverlayHole(System.Drawing.Region region, int width, int height, int holeX, int holeY, int holeWidth, int holeHeight)
+        {
+            if (holeWidth <= 0 || holeHeight <= 0) return;
+            int left = Math.Max(0, Math.Min(width, holeX));
+            int top = Math.Max(0, Math.Min(height, holeY));
+            int clippedWidth = Math.Max(0, Math.Min(width - left, holeWidth));
+            int clippedHeight = Math.Max(0, Math.Min(height - top, holeHeight));
+            if (clippedWidth > 0 && clippedHeight > 0)
+                region.Exclude(new Rectangle(left, top, clippedWidth, clippedHeight));
+        }
+
+        private void ApplyOverlayHoles(
+            int width, int height,
+            int holeX, int holeY, int holeWidth, int holeHeight,
+            int cornerHoleX, int cornerHoleY, int cornerHoleWidth, int cornerHoleHeight)
+        {
+            System.Drawing.Region previous = Region;
+            bool hasPanelHole = holeWidth > 0 && holeHeight > 0;
+            bool hasCornerHole = cornerHoleWidth > 0 && cornerHoleHeight > 0;
+            if (hasPanelHole || hasCornerHole)
+            {
+                var next = new System.Drawing.Region(new Rectangle(0, 0, width, height));
+                ExcludeOverlayHole(next, width, height, holeX, holeY, holeWidth, holeHeight);
+                ExcludeOverlayHole(next, width, height, cornerHoleX, cornerHoleY, cornerHoleWidth, cornerHoleHeight);
+                Region = next;
+            }
+            else Region = null;
+            if (previous != null) previous.Dispose();
+        }
+
+        protected override void OnMouseMove(MouseEventArgs eventArgs)
+        {
+            base.OnMouseMove(eventArgs);
+            int now = Environment.TickCount;
+            if (unchecked(now - lastPointerActivityTick) < 200) return;
+            lastPointerActivityTick = now;
+            Emit(new Dictionary<string, object> { { "type", "pointer-activity" } });
         }
 
         protected override bool ProcessCmdKey(ref Message message, Keys keyData)
         {
             Keys key = keyData & Keys.KeyCode;
+            if (key == Keys.Escape)
+            {
+                Emit(new Dictionary<string, object> { { "type", "escape" } });
+                return base.ProcessCmdKey(ref message, keyData);
+            }
             if (key == Keys.Left || key == Keys.Right)
             {
                 HandleDirectionalInput(key == Keys.Right ? 1 : -1, true);
                 return true;
             }
-            if (key == Keys.BrowserBack || key == Keys.BrowserForward)
+            if (key == Keys.BrowserBack || key == Keys.BrowserForward || key == Keys.MediaPreviousTrack || key == Keys.MediaNextTrack)
             {
-                HandleDirectionalInput(key == Keys.BrowserForward ? 1 : -1, false);
+                HandleDirectionalInput(key == Keys.BrowserForward || key == Keys.MediaNextTrack ? 1 : -1, false);
                 return true;
             }
             return base.ProcessCmdKey(ref message, keyData);
@@ -516,7 +578,9 @@ namespace PhotoFlow.AdvancedVideoDecoder
 
         private void HandleDirectionalInput(int direction, bool arrowKeys)
         {
-            bool navigate = arrowKeys ? arrowKeysNavigate : !arrowKeysNavigate;
+            // The two key groups are deliberately complementary: exactly one
+            // navigates between videos and the other seeks by five seconds.
+            bool navigate = arrowKeys == arrowKeysNavigate;
             if (navigate)
             {
                 Emit(new Dictionary<string, object> { { "type", "navigate" }, { "direction", direction } });

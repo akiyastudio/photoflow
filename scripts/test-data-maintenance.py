@@ -59,6 +59,43 @@ def test_thumbnail_missing_prune(root: Path) -> None:
     database.close()
 
 
+def test_thumbnail_tool_sources_limit_png_to_direct_children(root: Path) -> None:
+    project = root / "tool-source-project"
+    mixed_folder = project / "mixed"
+    direct_png = mixed_folder / "direct.png"
+    nested_png = mixed_folder / "nested" / "nested.png"
+    nested_only_folder = project / "nested-only"
+    deeply_nested_png = nested_only_folder / "child" / "deep.png"
+    for file_path in (direct_png, nested_png, deeply_nested_png):
+        write_media(file_path, b"png")
+
+    database = ThumbnailDatabase(str(root / "tool-sources.sqlite3"))
+    try:
+        database.sync_project(str(project))
+
+        recursive = database.inspect_tool_sources(str(project), [str(nested_only_folder)])
+        assert recursive["hasPng"], "regular tool availability should preserve recursive PNG detection"
+
+        direct_only = database.inspect_tool_sources(
+            str(project), [str(mixed_folder)], collect_direct_png=True
+        )
+        assert direct_only["hasPng"]
+        assert [value.casefold() for value in direct_only["pngPaths"]] == [str(direct_png.resolve()).casefold()]
+
+        nested_only = database.inspect_tool_sources(
+            str(project), [str(nested_only_folder)], collect_direct_png=True
+        )
+        assert not nested_only["hasPng"]
+        assert nested_only["pngPaths"] == []
+
+        direct_file = database.inspect_tool_sources(
+            str(project), [str(nested_png)], collect_direct_png=True
+        )
+        assert [value.casefold() for value in direct_file["pngPaths"]] == [str(nested_png.resolve()).casefold()]
+    finally:
+        database.close()
+
+
 def test_team_return_missing_reconciliation(root: Path) -> None:
     workspace = root / "team-return-workspace"
     project = workspace / "Project"
@@ -445,6 +482,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="photoflow-maintenance-") as directory:
         root = Path(directory)
         test_thumbnail_missing_prune(root)
+        test_thumbnail_tool_sources_limit_png_to_direct_children(root)
         test_team_return_missing_reconciliation(root)
         test_missing_progress_replacement(root)
         test_incremental_progress_append_preserves_existing_items(root)

@@ -1,6 +1,38 @@
 const registerMediaIpc = context => {
   const { Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog } = context;
 
+  const pngHeaderDimensionFields = (sourcePath, extension) => {
+    if (extension !== '.png') return [];
+    let descriptor;
+    try {
+      descriptor = fs.openSync(sourcePath, 'r');
+      const header = Buffer.alloc(24);
+      if (fs.readSync(descriptor, header, 0, header.length, 0) !== header.length) return [];
+      if (header.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' || header.toString('ascii', 12, 16) !== 'IHDR') return [];
+      const width = header.readUInt32BE(16);
+      const height = header.readUInt32BE(20);
+      if (!width || !height) return [];
+      return [
+        { group: 'PNG', name: 'ImageWidth', value: String(width) },
+        { group: 'PNG', name: 'ImageHeight', value: String(height) },
+        { group: 'Composite', name: 'ImageSize', value: `${width}x${height}` },
+      ];
+    } catch {
+      return [];
+    } finally {
+      if (descriptor !== undefined) {
+        try { fs.closeSync(descriptor); } catch { /* the metadata fallback must not fail while closing */ }
+      }
+    }
+  };
+
+  const withPngHeaderDimensions = (sourcePath, extension, fields) => {
+    const hasName = name => fields.some(field => field.name === name);
+    if (hasName('ImageWidth') && hasName('ImageHeight')) return fields;
+    const fallbacks = pngHeaderDimensionFields(sourcePath, extension);
+    return [...fields, ...fallbacks.filter(field => !hasName(field.name))];
+  };
+
   ipcMain.handle('media-thumbnail', async (_event, filePath, kind, cacheConfig = {}, requestedSize = 640, priority = PRIORITY.visible, queueOrder = Number.MAX_SAFE_INTEGER) => {
     try {
       const sourcePath = await mediaService.authorizeInput(filePath);
@@ -44,11 +76,11 @@ const registerMediaIpc = context => {
         return { success: true, mediaUrl: mediaService.toUrl(previewPath, true), original: false };
       }
   
-      // Chromium cannot decode camera RAW containers directly. Use the largest
-      // camera-embedded JPEG, which is the closest displayable source preview.
+      // Chromium cannot decode camera RAW containers directly. Prefer the
+      // camera-embedded JPEG, then fall back to the optional LibRaw component.
       const stat = await fs.promises.stat(sourcePath);
       const previewPath = await rawPreviewPath(sourcePath, stat, cacheConfig);
-      if (!previewPath) throw new Error('RAW 文件中没有可显示的内嵌原图');
+      if (!previewPath) throw new Error('RAW 文件无法生成预览；请安装“高级 RAW 解码”组件，或检查文件是否损坏或受支持');
       let orientationTimer;
       const orientation = await Promise.race([
         rawOrientationCorrection(sourcePath, previewPath, stat),
@@ -64,9 +96,11 @@ const registerMediaIpc = context => {
   });
   
   ipcMain.handle('media-metadata', async (_event, filePath) => {
+    let sourcePath = '';
+    let extension = '';
     try {
-      const sourcePath = await mediaService.authorizeInput(filePath);
-      const extension = path.extname(sourcePath).toLowerCase();
+      sourcePath = await mediaService.authorizeInput(filePath);
+      extension = path.extname(sourcePath).toLowerCase();
       if (![...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS, ...RAW_EXTENSIONS].includes(extension) || !fs.existsSync(sourcePath)) throw new Error('媒体文件不存在或格式不受支持');
       const stat = await fs.promises.stat(sourcePath);
       const cacheKey = `${sourcePath}|${stat.size}|${stat.mtimeMs}`;
@@ -74,19 +108,24 @@ const registerMediaIpc = context => {
       if (cached) return cached;
   
       const tags = await exiftool.readRaw(sourcePath, ['-G1', '-struct', '-api', 'largefilesupport=1']);
-      const fields = Object.entries(tags).flatMap(([qualifiedName, rawValue]) => {
+      const extractedFields = Object.entries(tags).flatMap(([qualifiedName, rawValue]) => {
         if (qualifiedName === 'SourceFile') return [];
         const separatorIndex = qualifiedName.indexOf(':');
         const group = separatorIndex > 0 ? qualifiedName.slice(0, separatorIndex) : '其他';
         const name = separatorIndex > 0 ? qualifiedName.slice(separatorIndex + 1) : qualifiedName;
         return flattenMetadataValue(group, name, rawValue);
       });
+      const fields = withPngHeaderDimensions(sourcePath, extension, extractedFields);
       const result = { success: true, fields };
       if (mediaMetadataCache.size >= 32) mediaMetadataCache.delete(mediaMetadataCache.keys().next().value);
       mediaMetadataCache.set(cacheKey, result);
       return result;
     } catch (error) {
       writeLog('warn', 'Unable to read media metadata', { filePath, error: error.message || String(error) });
+      if (sourcePath && IMAGE_EXTENSIONS.has(extension)) {
+        const fields = pngHeaderDimensionFields(sourcePath, extension);
+        if (fields.length) return { success: true, fields };
+      }
       return { success: false, fields: [], error: error.message || String(error) };
     }
   });
@@ -96,7 +135,7 @@ const registerMediaIpc = context => {
       const sourcePath = await mediaService.authorizeInput(filePath);
       if (!RAW_EXTENSIONS.has(path.extname(sourcePath).toLowerCase()) || !fs.existsSync(sourcePath)) throw new Error('RAW 文件不存在或格式不受支持');
       const preview = await rawPreviewPath(sourcePath, await fs.promises.stat(sourcePath), cacheConfig);
-      return preview ? { success: true, previewUrl: mediaService.toUrl(preview) } : { success: false, error: '未找到内嵌预览' };
+      return preview ? { success: true, previewUrl: mediaService.toUrl(preview) } : { success: false, error: 'RAW 文件既没有可用内嵌预览，也未能通过高级 RAW 解码组件显影' };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
   });
   

@@ -7,6 +7,7 @@ const os = require('os');
 const { exiftool, exiftoolPath } = require('exiftool-vendored');
 const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY, isThumbnailSizeSufficient } = require('./thumbnail-pipeline.cjs');
 const { createComponentRegistry } = require('./component-registry.cjs');
+const { PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
 const { registerBrollImportIpc } = require('./modules/broll-import.cjs');
 const { registerSystemIpc } = require('./modules/system-ipc.cjs');
 const { registerWorkspaceIpc } = require('./modules/workspace-ipc.cjs');
@@ -170,7 +171,10 @@ const workspaceWatchSuppressions = new Map();
 const mediaTrackingTimers = new Map();
 const isInternalWorkspaceChange = fileName => String(fileName || '')
   .split(/[\\/]/)
-  .some(segment => segment.toLowerCase().endsWith('.photoflow-part') || segment.toLowerCase() === '.photoflow-workspace-id' || segment.toLowerCase() === '_photoflow_safety_temp' || /^\.photoflow-(?:paste|replace|undo|team-workflow-)/i.test(segment));
+  .some(segment => { const normalized = segment.toLowerCase(); return normalized.endsWith('.photoflow-part')
+    || ['.photoflow-workspace-id', '_photoflow_safety_temp'].includes(normalized)
+    || normalized.startsWith('.') && normalized.includes('.photoflow-transcode')
+    || /^\.photoflow-(?:import-|paste|replace|split-|undo|team-workflow-)/i.test(normalized); });
 const comparableWorkspacePath = value => {
   const resolved = path.resolve(value);
   return process.platform === 'win32' ? resolved.toLocaleLowerCase() : resolved;
@@ -485,7 +489,7 @@ const loadMainWindowRenderer = () => {
 };
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'backup_db']);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'ffmpeg_transcode', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'backup_db']);
 const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract', 'screenshot_main_image']);
 
 const getDevelopmentPython = () => {
@@ -515,7 +519,7 @@ const getRunConfig = (scriptName, args) => {
     const exeSuffix = isWin ? '.exe' : '';
     if (MERGED_PYTHON_TOOLS.has(baseName)) {
       return {
-        command: path.join(process.resourcesPath, 'python', 'tools', `tools${exeSuffix}`),
+        command: path.join(process.resourcesPath, 'python', 'PhotoFlowImportWorker', `PhotoFlowImportWorker${exeSuffix}`),
         args: [baseName, ...args]
       };
     }
@@ -1067,29 +1071,12 @@ const watchWorkspace = (root) => {
   }
 };
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.hif', '.avif']);
 const IMAGE_PREVIEW_CONVERSION_EXTENSIONS = new Set(['.tif', '.tiff', '.heic', '.heif', '.hif']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.crm']);
 const RAW_EXTENSIONS = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
+const RAW_DECODER_COMPONENT_ID = 'raw-decoder-libraw';
+const RAW_DECODER_CACHE_VERSION = PLUGIN_DEFINITIONS[RAW_DECODER_COMPONENT_ID].version;
 const HIDDEN_SYSTEM_ENTRY_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store']);
 
 const getMediaCacheDir = (config = {}) => {
@@ -1232,8 +1219,8 @@ const rawPreviewPath = (sourcePath, stat, cacheConfig) => decodedImagePreviewPat
 const convertedImagePreviewPath = (sourcePath, stat, cacheConfig) => decodedImagePreviewPath(sourcePath, stat, cacheConfig, 'image');
 
 const mediaSourceCacheKey = sourcePath => process.platform === 'win32' ? path.resolve(sourcePath).toLowerCase() : path.resolve(sourcePath);
-const decodedImagePreviewCacheFile = (sourcePath, stat, cacheDir, kind) => path.join(cacheDir, crypto.createHash('sha256').update(`decoded-preview|v1|${kind}|${mediaSourceCacheKey(sourcePath)}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
-const mediaThumbnailCacheFile = (sourcePath, stat, cacheDir, requestedSize, version = THUMBNAIL_VERSION) => path.join(cacheDir, crypto.createHash('sha256').update(`thumbnail|v${version}|${requestedSize}|${mediaSourceCacheKey(sourcePath)}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
+const decodedImagePreviewCacheFile = (sourcePath, stat, cacheDir, kind) => path.join(cacheDir, crypto.createHash('sha256').update(`decoded-preview|v2|${kind}|${kind === 'raw' ? RAW_DECODER_CACHE_VERSION : 'builtin'}|${mediaSourceCacheKey(sourcePath)}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
+const mediaThumbnailCacheFile = (sourcePath, stat, cacheDir, requestedSize, version = THUMBNAIL_VERSION) => path.join(cacheDir, crypto.createHash('sha256').update(`thumbnail|v${version}|${RAW_EXTENSIONS.has(path.extname(sourcePath).toLowerCase()) ? RAW_DECODER_CACHE_VERSION : 'builtin'}|${requestedSize}|${mediaSourceCacheKey(sourcePath)}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
 
 const isCompleteJpegBuffer = buffer => buffer.length >= 128
   && buffer[0] === 0xff && buffer[1] === 0xd8
@@ -1502,9 +1489,20 @@ class ThumbnailImageWorkerPool {
   }
 }
 
+const runImageDecoderWithRawFallback = async (pool, sourcePath, kind, outputs, urgent) => {
+  try {
+    return await pool.run(sourcePath, kind, outputs, urgent);
+  } catch (embeddedError) {
+    if (kind !== 'raw') throw embeddedError;
+    const result = await pluginService.runJson(RAW_DECODER_COMPONENT_ID, ['--source', sourcePath, '--outputs', JSON.stringify(outputs)], 5 * 60 * 1000);
+    if (!result?.success || !Array.isArray(result.generated)) throw new Error(result?.error || '高级 RAW 解码组件未能生成预览');
+    return result.generated;
+  }
+};
+
 const generateImageThumbnailFiles = (sourcePath, kind, outputs, urgent = false) => {
   if (!thumbnailImageWorkerPool) thumbnailImageWorkerPool = new ThumbnailImageWorkerPool(2);
-  return thumbnailImageWorkerPool.run(sourcePath, kind, outputs, urgent);
+  return runImageDecoderWithRawFallback(thumbnailImageWorkerPool, sourcePath, kind, outputs, urgent);
 };
 
 const generateOriginalImagePreviewFile = (sourcePath, kind, outputs) => {
@@ -1512,7 +1510,7 @@ const generateOriginalImagePreviewFile = (sourcePath, kind, outputs) => {
   // A dedicated one-worker pool keeps selection latency bounded even while the
   // background scheduler is decoding hundreds of files.
   if (!originalImageWorkerPool) originalImageWorkerPool = new ThumbnailImageWorkerPool(1);
-  return originalImageWorkerPool.run(sourcePath, kind, outputs, true);
+  return runImageDecoderWithRawFallback(originalImageWorkerPool, sourcePath, kind, outputs, true);
 };
 
 const generateVideoCoverSource = (sourcePath, stat, cacheDir, requestedSize) => new Promise((resolve, reject) => {

@@ -41,8 +41,9 @@ file workflows.
   behind domain-specific repository functions rather than IPC handlers.
   It also owns the lightweight persistent undo journal; no deleted media bytes
   are stored in SQLite.
-- `python/tools.py`: shared packaged runtime for lightweight Python commands,
-  the thumbnail image server, and workspace database processes. They still run
+- `python/tools.py`: source entry point for the shared packaged runtime,
+  published as `PhotoFlowImportWorker` (`PhotoFlowImportWorker.exe` on Windows),
+  for lightweight Python commands, the thumbnail image server, and workspace database processes. They still run
   as isolated child processes while sharing one on-disk Python/Pillow/SQLite
   runtime. OpenCV-based analysis remains in `python/inspiration_tools.py` so
   the large vision dependencies are not duplicated into the core runtime.

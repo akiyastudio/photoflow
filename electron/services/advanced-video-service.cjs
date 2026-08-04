@@ -138,6 +138,7 @@ const createAdvancedVideoService = ({ BrowserWindow, crypto, mediaService, path,
       await readyPromise;
       sendCommand(session, { command: 'set-keyboard-mode', value: arrowKeyAction === 'navigate' ? 'navigate' : 'seek' });
       if (!sendCommand(session, { command: 'open', path: authorizedPath })) throw new Error('无法向高级视频解码组件发送文件');
+      if (!sendCommand(session, { command: 'play' })) throw new Error('无法启动高级视频播放');
       writeLog('info', 'Advanced video decoder started', { sessionId: id, filePath: authorizedPath });
       return { sessionId: id };
     } catch (error) {
@@ -152,6 +153,16 @@ const createAdvancedVideoService = ({ BrowserWindow, crypto, mediaService, path,
     const number = (value, fallback = 0) => Number.isFinite(Number(value)) ? Math.round(Number(value)) : fallback;
     const width = Math.max(0, Math.min(32768, number(bounds.width)));
     const height = Math.max(0, Math.min(32768, number(bounds.height)));
+    const requestedHole = bounds.overlayHole && typeof bounds.overlayHole === 'object' ? bounds.overlayHole : {};
+    const holeX = Math.max(0, Math.min(width, number(requestedHole.x)));
+    const holeY = Math.max(0, Math.min(height, number(requestedHole.y)));
+    const holeWidth = Math.max(0, Math.min(width - holeX, number(requestedHole.width)));
+    const holeHeight = Math.max(0, Math.min(height - holeY, number(requestedHole.height)));
+    const requestedCornerHole = bounds.cornerOverlayHole && typeof bounds.cornerOverlayHole === 'object' ? bounds.cornerOverlayHole : {};
+    const cornerHoleX = Math.max(0, Math.min(width, number(requestedCornerHole.x)));
+    const cornerHoleY = Math.max(0, Math.min(height, number(requestedCornerHole.y)));
+    const cornerHoleWidth = Math.max(0, Math.min(width - cornerHoleX, number(requestedCornerHole.width)));
+    const cornerHoleHeight = Math.max(0, Math.min(height - cornerHoleY, number(requestedCornerHole.height)));
     sendCommand(session, {
       command: 'set-bounds',
       x: Math.max(-32768, Math.min(32768, number(bounds.x))),
@@ -159,6 +170,14 @@ const createAdvancedVideoService = ({ BrowserWindow, crypto, mediaService, path,
       width,
       height,
       visible: Boolean(bounds.visible) && width > 1 && height > 1,
+      holeX,
+      holeY,
+      holeWidth,
+      holeHeight,
+      cornerHoleX,
+      cornerHoleY,
+      cornerHoleWidth,
+      cornerHoleHeight,
     });
   };
 

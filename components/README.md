@@ -64,6 +64,9 @@ The current component IDs are:
 - `video-playback-mpv`: “高级视频解码”. It runs libmpv in an isolated process,
   embeds the native video surface in PhotoFlow, and falls back to Chromium
   playback if startup or decoding fails.
+- `raw-decoder-libraw`: the optional advanced RAW decoder. It uses an isolated
+  LibRaw/rawpy process only when a RAW file has no usable embedded JPEG.
+
 The inspiration library, scene organizer, and Office image extractor are part
 of the main application and are not component IDs.
 
@@ -77,6 +80,12 @@ the user's machine.
 `npm run build:components` builds the optional team-retouch component. Components remain
 separate from the base PhotoFlow installer so the core application stays small.
 
-`npm run build:advanced-video-decoder -- --mpv-root <directory>` builds only the
-optional advanced video ZIP. It is intentionally not part of `electron:build`,
-so the main installer does not depend on or include libmpv.
+`npm run build:advanced-video-release` builds the pinned LGPL dependency stack,
+audited libmpv runtime, compliance archives, and installable advanced-video ZIP.
+If that runtime already exists, `npm run build:advanced-video-decoder --
+--mpv-root <directory>` only performs the final component packaging step. The
+component remains outside `electron:build`, so the main installer does not
+depend on or include libmpv.
+
+`npm run build:raw-decoder` prepares rawpy and builds the optional RAW decoder
+ZIP. NumPy, rawpy, and LibRaw remain outside the main application installer.

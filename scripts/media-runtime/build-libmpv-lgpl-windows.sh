@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Builds libmpv itself. LGPL-compatible FFmpeg/libass/libplacebo and their
-# transitive DLLs must already be present in LGPL_PREFIX; this script rejects
-# a prefix whose FFmpeg was built with GPL or nonfree options.
+# Builds the complete release-ready libmpv runtime. By default it first builds
+# a pinned LGPL-compatible dependency prefix; advanced callers may still pass
+# their own audited prefix and compliance archives through the LGPL_* variables.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source_root="${MPV_SOURCE_ROOT:-$repo_root/.media-runtime-build/mpv/src}"
 build_root="${MPV_BUILD_ROOT:-$repo_root/.media-runtime-build/mpv/build}"
 output_root="${PHOTOFLOW_MPV_OUTPUT_ROOT:-$repo_root/release/media-runtime/libmpv-lgpl-windows-x64}"
-prefix="${LGPL_PREFIX:?Set LGPL_PREFIX to the Windows x64 LGPL dependency prefix}"
-dependency_sources="${LGPL_DEPENDENCY_SOURCE_ARCHIVE:?Set LGPL_DEPENDENCY_SOURCE_ARCHIVE to the exact FFmpeg/libass/libplacebo dependency sources}"
-dependency_licenses="${LGPL_DEPENDENCY_LICENSE_ARCHIVE:?Set LGPL_DEPENDENCY_LICENSE_ARCHIVE to the dependency license bundle}"
-ffmpeg_commit="${LGPL_FFMPEG_COMMIT:?Set LGPL_FFMPEG_COMMIT to the full 40-character commit used for the linked FFmpeg}"
+dependency_root="${PHOTOFLOW_MPV_DEPENDENCY_ROOT:-$repo_root/.media-runtime-build/mpv-dependencies}"
+if [[ -z "${LGPL_PREFIX:-}" ]]; then
+  bash "$repo_root/scripts/media-runtime/build-libmpv-dependencies-windows.sh"
+  prefix="$dependency_root/prefix"
+  dependency_sources="$dependency_root/artifacts/dependency-corresponding-source.zip"
+  dependency_licenses="$dependency_root/artifacts/dependency-licenses.zip"
+  ffmpeg_commit="$(node -p "require('./media-runtime.lock.json').ffmpeg.commit")"
+else
+  prefix="$LGPL_PREFIX"
+  dependency_sources="${LGPL_DEPENDENCY_SOURCE_ARCHIVE:?Set LGPL_DEPENDENCY_SOURCE_ARCHIVE when LGPL_PREFIX is provided}"
+  dependency_licenses="${LGPL_DEPENDENCY_LICENSE_ARCHIVE:?Set LGPL_DEPENDENCY_LICENSE_ARCHIVE when LGPL_PREFIX is provided}"
+  ffmpeg_commit="${LGPL_FFMPEG_COMMIT:?Set LGPL_FFMPEG_COMMIT when LGPL_PREFIX is provided}"
+fi
 mpv_ref="$(node -p "require('./media-runtime.lock.json').mpv.ref")"
 mpv_repo="$(node -p "require('./media-runtime.lock.json').mpv.repository")"
 mpv_commit="$(node -p "require('./media-runtime.lock.json').mpv.commit")"
@@ -48,23 +57,46 @@ actual_mpv_commit="$(git -C "$source_root" rev-parse HEAD)"
 mkdir -p "$build_root" "$output_root"
 
 export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+export PKG_CONFIG_LIBDIR="$PKG_CONFIG_PATH"
 export PATH="$prefix/bin:$PATH"
+export LDFLAGS="-static-libgcc -static-libstdc++"
+mpv_options=(
+  -Dgpl=false
+  -Dlibmpv=true
+  -Dcplayer=false
+  -Dbuild-date=false
+  -Dtests=false
+  -Dauto_features=disabled
+  -Dwasapi=enabled
+  -Dd3d11=enabled
+  -Dd3d-hwaccel=enabled
+  -Dd3d9-hwaccel=enabled
+  -Dwin32-threads=enabled
+  -Dzlib=enabled
+  -Dgl=disabled
+  -Dvulkan=disabled
+)
+printf '%s\n' "${mpv_options[@]}" > "$build_root-meson-options.txt"
 meson setup "$build_root" "$source_root" \
   --buildtype=release \
   --prefix="$output_root" \
-  -Dgpl=false \
-  -Dlibmpv=true \
-  -Dcplayer=false \
-  -Dbuild-date=false \
-  -Dtests=false
+  "${mpv_options[@]}"
 meson compile -C "$build_root"
 meson install -C "$build_root"
 meson configure "$build_root" > "$output_root/meson-configure.txt"
+cp "$build_root-meson-options.txt" "$output_root/mpv-meson-options.txt"
 grep -Eq '^gpl[[:space:]]+false' "$output_root/meson-configure.txt" || { echo 'mpv gpl=false was not preserved' >&2; exit 1; }
 
 find "$build_root" -type f \( -iname 'libmpv-2.dll' -o -iname 'mpv-2.dll' \) -exec cp {} "$output_root/libmpv-2.dll" \;
 test -f "$output_root/libmpv-2.dll" || { echo 'Meson build did not produce libmpv-2.dll' >&2; exit 1; }
 find "$prefix/bin" -maxdepth 1 -type f -iname '*.dll' -exec cp -n {} "$output_root/" \;
+for binary in "$output_root"/*.dll; do
+  if objdump -p "$binary" | grep -Eiq 'DLL Name:.*(libwinpthread|libgcc|libstdc\+\+)'; then
+    echo "Runtime contains an undeclared MinGW support DLL dependency: $binary" >&2
+    objdump -p "$binary" | grep -Ei 'DLL Name:' >&2
+    exit 1
+  fi
+done
 cp "$source_root/Copyright" "$output_root/mpv-Copyright"
 cp "$repo_root/components/video-playback-mpv/LICENSES.md" "$output_root/PhotoFlow-LICENSES.md"
 cp "$repo_root/media-runtime.lock.json" "$output_root/media-runtime.lock.json"
@@ -78,7 +110,9 @@ mkdir -p "$compliance_root/source/mpv" "$compliance_root/source/build-materials"
 git -C "$source_root" archive HEAD | tar -x -C "$compliance_root/source/mpv"
 cp "$dependency_sources" "$compliance_root/source/dependency-corresponding-source.zip"
 cp "$repo_root/scripts/media-runtime/build-libmpv-lgpl-windows.sh" "$compliance_root/source/build-materials/build-libmpv-lgpl-windows.sh"
+cp "$repo_root/scripts/media-runtime/build-libmpv-dependencies-windows.sh" "$compliance_root/source/build-materials/build-libmpv-dependencies-windows.sh"
 cp "$output_root/meson-configure.txt" "$compliance_root/source/build-materials/meson-configure.txt"
+cp "$output_root/mpv-meson-options.txt" "$compliance_root/source/build-materials/mpv-meson-options.txt"
 cp "$output_root/linked-ffmpeg-buildconf.txt" "$compliance_root/source/build-materials/linked-ffmpeg-buildconf.txt"
 cp "$output_root/linked-ffmpeg-version.txt" "$compliance_root/source/build-materials/linked-ffmpeg-version.txt"
 cp "$output_root/linked-ffmpeg-commit.txt" "$compliance_root/source/build-materials/linked-ffmpeg-commit.txt"

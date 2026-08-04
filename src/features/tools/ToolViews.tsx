@@ -1237,7 +1237,7 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
             </div>
             <p className="text-xs text-slate-600 flex items-center gap-1">
                <AlertCircle size={12}/>
-               所选 PNG 文件及文件夹当前层级内的 PNG 会转为 JPG，原始 PNG 会移入回收站
+               所选 PNG 文件及文件夹全部子目录中的 PNG 会转为 JPG，原始 PNG 会移入回收站
             </p>
         </div>
 
@@ -1332,6 +1332,7 @@ const ScreenshotCropPreview = ({ item, cacheConfig, queueOrder, onEdit }: { item
 
 const ScreenshotMainImageView = ({
   embedded = false,
+  cropMode = false,
   workspacePath,
   projectStatus,
   projectName,
@@ -1340,6 +1341,7 @@ const ScreenshotMainImageView = ({
   onFilesChanged,
 }: {
   embedded?: boolean;
+  cropMode?: boolean;
   workspacePath: string;
   projectStatus: ProjectStatus;
   projectName: string;
@@ -1350,7 +1352,7 @@ const ScreenshotMainImageView = ({
   const appDialog = useAppDialog();
   const [targetPaths, setTargetPaths] = useState(() => initialRelativePaths.filter(Boolean));
   const [isRunning, setIsRunning] = useState(false);
-  const [preserveOriginal, setPreserveOriginal] = useState(false);
+  const [preserveOriginal, setPreserveOriginal] = useState(cropMode);
   const [progress, setProgress] = useState(0);
   const [statusMessage, setStatusMessage] = useState('进度');
   const [summary, setSummary] = useState<ScreenshotMainImageSummary | null>(null);
@@ -1381,7 +1383,8 @@ const ScreenshotMainImageView = ({
     setCropEditor(null);
     setProgress(0);
     setStatusMessage('进度');
-  }, [initialRelativePaths]);
+    setPreserveOriginal(cropMode);
+  }, [initialRelativePaths, cropMode]);
 
   useEffect(() => window.electronAPI.onScreenshotMainImageProgress(value => {
     if (!requestIdRef.current || value.requestId !== requestIdRef.current) return;
@@ -1400,7 +1403,7 @@ const ScreenshotMainImageView = ({
     setProgress(0);
     setReviewItems([]);
     setAnalysisErrors([]);
-    setStatusMessage('正在分析截图主图…');
+    setStatusMessage(cropMode ? '正在识别图片边缘…' : '正在分析截图主图…');
     try {
       const analysis = await window.electronAPI.extractScreenshotMainImages(workspacePath, projectStatus, projectName, targetPaths, { requestId, analyzeOnly: true });
       const nextItems = analysis.results.flatMap((result, index) => result.success && result.crop && result.originalSize ? [{
@@ -1433,7 +1436,7 @@ const ScreenshotMainImageView = ({
     setStatusMessage('正在按确认范围生成主图…');
     const confirmedPaths = includedReviewItems.map(item => item.relativePath);
     try {
-      const extraction = await window.electronAPI.extractScreenshotMainImages(workspacePath, projectStatus, projectName, confirmedPaths, { requestId, crops: includedReviewItems.map(item => item.crop) });
+      const extraction = await window.electronAPI.extractScreenshotMainImages(workspacePath, projectStatus, projectName, confirmedPaths, { requestId, crops: includedReviewItems.map(item => item.crop), ...(cropMode ? { outputSuffix: '裁剪' as const } : {}) });
       let nextSummary: ScreenshotMainImageSummary = extraction;
       const croppedRelativePaths = confirmedPaths.filter((_relativePath, index) => extraction.results[index]?.success && extraction.results[index]?.cropped);
       if (!preserveOriginal && croppedRelativePaths.length) {
@@ -1477,22 +1480,22 @@ const ScreenshotMainImageView = ({
   };
 
   return <div className="w-full space-y-6">
-    {!embedded && <h2 className="text-2xl font-bold text-slate-800">提取截图主图</h2>}
+    {!embedded && <h2 className="text-2xl font-bold text-slate-800">{cropMode ? '裁剪图片' : '提取截图主图'}</h2>}
     <div className={embedded ? 'space-y-5' : 'space-y-5 rounded-xl border border-slate-200 bg-white p-6'}>
       <div className="space-y-2">
-        <p className="text-sm leading-6 text-slate-600">先生成主图候选框，再处理确认后的范围。低置信结果会重点提示并允许拖动调整，确认前不会生成文件或处理原图。</p>
+        <p className="text-sm leading-6 text-slate-600">{cropMode ? '先识别可裁剪边缘，再用磁吸边缘的裁剪框确认范围。输出使用原始像素与最高质量编码，并保留原文件。' : '先生成主图候选框，再处理确认后的范围。低置信结果会重点提示并允许拖动调整，确认前不会生成文件或处理原图。'}</p>
         <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white text-blue-600 shadow-sm"><Crop size={18}/></span>
           <div className="min-w-0">
-            <p className="text-sm font-bold text-slate-800">已选择 {targetPaths.length} 张截图</p>
+            <p className="text-sm font-bold text-slate-800">已选择 {targetPaths.length} 张{cropMode ? '图片' : '截图'}</p>
             <p className="mt-0.5 truncate text-xs text-slate-500" title={targetPaths.length === 1 ? firstTargetName : undefined}>{targetPaths.length === 1 ? firstTargetName : '将按同一版式批量识别主图区域'}</p>
           </div>
         </div>
-        <p className="flex items-center gap-1 text-xs text-slate-500"><AlertCircle size={12}/>主图保存在原图旁；黄色项目需要确认，绿色项目可直接批量生成。</p>
-        <label className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+        <p className="flex items-center gap-1 text-xs text-slate-500"><AlertCircle size={12}/>{cropMode ? '裁剪结果保存在原图旁，原文件不会被覆盖。' : '主图保存在原图旁；黄色项目需要确认，绿色项目可直接批量生成。'}</p>
+        {!cropMode && <label className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
           <input type="checkbox" checked={preserveOriginal} disabled={isRunning} onChange={event => setPreserveOriginal(event.currentTarget.checked)} className="mt-0.5 h-4 w-4 accent-blue-600"/>
           <span><span className="font-bold">保留原图</span><span className="mt-1 block text-xs leading-5 text-slate-500">默认关闭；关闭时仅把成功裁剪的原图移入系统回收站，跳过或失败的图片保持不变。</span></span>
-        </label>
+        </label>}
       </div>
 
       {!!reviewItems.length && <section className="space-y-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-sm font-bold text-slate-800">检查裁剪范围</h3><p className="mt-0.5 text-xs text-slate-500">{pendingReviewCount ? `还有 ${pendingReviewCount} 张需要确认` : `已确认 ${includedReviewItems.length} 张，可以生成主图`}</p></div><span className={`rounded-full px-2.5 py-1 text-xs font-bold ${pendingReviewCount ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{pendingReviewCount ? '待检查' : '已就绪'}</span></div><div className="grid gap-3 md:grid-cols-2">{reviewItems.map((item, index) => <article key={item.relativePath} className={`rounded-xl border p-3 ${!item.included ? 'border-slate-200 bg-slate-50 opacity-65' : item.confirmed ? 'border-emerald-200 bg-emerald-50/40' : 'border-amber-300 bg-amber-50/60'}`}><div className="mb-2 flex items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-xs font-bold text-slate-800" title={item.inputName}>{item.inputName}</p><p className="mt-0.5 text-[11px] text-slate-500">置信度 {Math.round(item.confidence * 100)}% · {item.crop.width} × {item.crop.height}</p></div><span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${item.confirmed ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{item.confirmed ? '已确认' : '需检查'}</span></div><ScreenshotCropPreview item={item} cacheConfig={cacheConfig} queueOrder={index} onEdit={previewUrl => setCropEditor({ index, previewUrl, crop: { ...item.crop }, snapEnabled: true })}/>{item.reason && <p className="mt-2 text-[11px] leading-4 text-amber-700">{item.reason}</p>}<div className="mt-3 flex justify-between gap-2"><button type="button" onClick={() => updateReviewItem(index, { included: !item.included, confirmed: item.included ? item.confirmed : true })} className="dialog-secondary px-3 py-1.5 text-xs">{item.included ? '不处理这张' : '恢复处理'}</button>{item.included && !item.confirmed && <button type="button" onClick={() => updateReviewItem(index, { confirmed: true })} className="rounded-md bg-amber-500 px-3 py-1.5 text-xs font-bold text-white hover:bg-amber-400">范围正确</button>}</div></article>)}</div></section>}
@@ -1699,6 +1702,185 @@ const MatchView = ({
     );
 };
 
+type VideoTranscodeViewProps = {
+  embedded?: boolean;
+  initialTargetPaths?: string[];
+  initialSourceFolders?: string[];
+  sourcesLoading?: boolean;
+};
+
+const normalizedWindowsPath = (value: string) => value.replace(/\//g, '\\').replace(/\\+$/g, '');
+const videoPathName = (value: string) => {
+  const normalized = normalizedWindowsPath(value);
+  return normalized.slice(normalized.lastIndexOf('\\') + 1) || normalized;
+};
+const videoPathDirectory = (value: string) => {
+  const normalized = normalizedWindowsPath(value);
+  const separator = normalized.lastIndexOf('\\');
+  return separator > 0 ? normalized.slice(0, separator) : normalized;
+};
+const videoPathIsInside = (value: string, folder: string) => {
+  const normalizedValue = normalizedWindowsPath(value).toLocaleLowerCase();
+  const normalizedFolder = normalizedWindowsPath(folder).toLocaleLowerCase();
+  return normalizedValue === normalizedFolder || normalizedValue.startsWith(`${normalizedFolder}\\`);
+};
+
+const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initialSourceFolders = [], sourcesLoading = false }: VideoTranscodeViewProps) => {
+  const initialTargetKey = initialTargetPaths.join('\n');
+  const initialSourceFolderKey = initialSourceFolders.join('\n');
+  const [pathsText, setPathsText] = useState(initialTargetKey);
+  const [sourceFolders, setSourceFolders] = useState(() => [...new Set(initialSourceFolders.filter(Boolean))]);
+  const [expandedVideoGroups, setExpandedVideoGroups] = useState<Set<string>>(() => new Set());
+  const [container, setContainer] = useState<'mp4' | 'mov' | 'mkv'>('mp4');
+  const [videoMode, setVideoMode] = useState<'h264' | 'h265' | 'copy'>('h264');
+  const [quality, setQuality] = useState<'high' | 'balanced' | 'small'>('balanced');
+  const [resolution, setResolution] = useState<'original' | '2160p' | '1080p' | '720p'>('original');
+  const [frameRate, setFrameRate] = useState<'original' | '24' | '25' | '30' | '50' | '60'>('original');
+  const [audioMode, setAudioMode] = useState<'copy' | 'aac' | 'remove'>('aac');
+  const [outputMode, setOutputMode] = useState<'new' | 'replace'>('new');
+  const { logs, isRunning, isCancelling, progress, statusMsg, start, cancel } = usePythonTask('ffmpeg_transcode.py', '等待选择视频');
+  const paths = useMemo(() => [...new Set(pathsText.split(/\r?\n/).map(value => value.trim().replace(/^"|"$/g, '')).filter(Boolean))], [pathsText]);
+  const activeSourceFolders = useMemo(() => sourceFolders.filter(folder => paths.some(path => videoPathIsInside(path, folder))), [paths, sourceFolders]);
+  const videoGroups = useMemo(() => {
+    const groups = new Map<string, Array<{ path: string; index: number }>>();
+    paths.forEach((path, index) => {
+      const directory = videoPathDirectory(path);
+      const items = groups.get(directory) || [];
+      items.push({ path, index });
+      groups.set(directory, items);
+    });
+    return [...groups.entries()].map(([directory, items]) => ({ directory, items }));
+  }, [paths]);
+  const activeItemMatch = statusMsg.match(/（(\d+)\/(\d+)）$/);
+  const activeItemIndex = activeItemMatch ? Number(activeItemMatch[1]) - 1 : -1;
+  const lastActiveItemIndexRef = React.useRef(-1);
+  if (activeItemIndex >= 0) lastActiveItemIndexRef.current = activeItemIndex;
+  const allLargeGroupsExpanded = videoGroups.every(group => group.items.length <= 3 || expandedVideoGroups.has(group.directory));
+
+  const itemState = (index: number) => {
+    if (!isRunning && progress >= 100) return { label: '已完成', className: 'bg-emerald-100 text-emerald-700' };
+    if (isRunning && activeItemIndex >= 0) {
+      if (index < activeItemIndex) return { label: '已完成', className: 'bg-emerald-100 text-emerald-700' };
+      if (index === activeItemIndex) return { label: '编码中', className: 'bg-blue-100 text-blue-700' };
+    }
+    if (!isRunning && statusMsg === '发生错误') {
+      if (index < lastActiveItemIndexRef.current) return { label: '已完成', className: 'bg-emerald-100 text-emerald-700' };
+      if (index === lastActiveItemIndexRef.current) return { label: '失败', className: 'bg-red-100 text-red-700' };
+    }
+    return { label: '等待', className: 'bg-slate-100 text-slate-500' };
+  };
+
+  useEffect(() => {
+    setPathsText(initialTargetKey);
+  }, [initialTargetKey]);
+  useEffect(() => {
+    setSourceFolders([...new Set(initialSourceFolderKey.split('\n').filter(Boolean))]);
+    setExpandedVideoGroups(new Set());
+  }, [initialSourceFolderKey]);
+
+  useEffect(() => {
+    if (videoMode !== 'copy') return;
+    setResolution('original');
+    setFrameRate('original');
+  }, [videoMode]);
+  useEffect(() => {
+    if ((paths.length !== 1 || activeSourceFolders.length) && outputMode === 'replace') setOutputMode('new');
+  }, [activeSourceFolders.length, paths.length, outputMode]);
+
+  const addDroppedFiles = (event: React.DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const dropped = Array.from(event.dataTransfer.files)
+      .map(file => (file as File & { path?: string }).path || '')
+      .filter(Boolean);
+    if (!dropped.length) return;
+    setPathsText(current => [...new Set([...current.split(/\r?\n/).map(value => value.trim()).filter(Boolean), ...dropped])].join('\n'));
+  };
+  const removeVideoPath = (pathToRemove: string) => {
+    setPathsText(current => current.split(/\r?\n/).map(value => value.trim()).filter(value => value && value !== pathToRemove).join('\n'));
+  };
+  const clearVideoPaths = () => {
+    setPathsText('');
+    setSourceFolders([]);
+    setExpandedVideoGroups(new Set());
+  };
+  const chooseVideos = async () => {
+    const result = await window.electronAPI.chooseVideoFiles();
+    if (result.cancelled || !result.paths.length) return;
+    setPathsText(current => [...new Set([...current.split(/\r?\n/).map(value => value.trim()).filter(Boolean), ...result.paths])].join('\n'));
+  };
+  const startTranscode = () => {
+    if (!paths.length || isRunning || sourcesLoading) return;
+    start([
+      ...paths,
+      '--container', container,
+      '--video-mode', videoMode,
+      '--quality', quality,
+      '--resolution', resolution,
+      '--frame-rate', frameRate,
+      '--audio-mode', audioMode,
+      '--output-mode', outputMode,
+      ...activeSourceFolders.flatMap(folder => ['--source-folder', folder]),
+    ], '正在准备视频转码…');
+  };
+
+  return <div className={embedded ? 'w-full space-y-6' : 'mx-auto w-full max-w-5xl space-y-6'}>
+    {!embedded && <div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><Video size={25}/>视频转码</h2><p className="mt-1 text-sm text-slate-500">支持封装转换、H.264 兼容转码和更省空间的 H.265 硬件转码。</p></div>}
+    <div className={embedded ? 'space-y-6' : 'space-y-6 rounded-xl border border-slate-200 bg-white p-6'}>
+      {sourcesLoading && <div role="status" className="flex items-center gap-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-700"><Loader2 size={16} className="animate-spin"/>项目媒体索引正在建立，完成后会自动加入所选文件或文件夹中的视频。</div>}
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div><p className="text-xs font-semibold uppercase text-slate-500">已选择 {paths.length} 个视频</p><p className="mt-1 text-xs text-slate-500">按文件夹分组，批量任务按列表顺序处理。</p></div>
+          <div className="flex items-center gap-2">
+            {videoGroups.some(group => group.items.length > 3) && <button type="button" disabled={isRunning || sourcesLoading} onClick={() => setExpandedVideoGroups(allLargeGroupsExpanded ? new Set() : new Set(videoGroups.map(group => group.directory)))} className="dialog-secondary px-3 py-1.5 text-xs disabled:opacity-50">{allLargeGroupsExpanded ? '全部收起' : '展开全部'}</button>}
+            <button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseVideos()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><Plus size={14}/>追加视频</button>
+            <button type="button" disabled={isRunning || sourcesLoading || !paths.length} onClick={clearVideoPaths} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 disabled:opacity-50"><Trash2 size={14}/>清空</button>
+          </div>
+        </div>
+        <div onDrop={addDroppedFiles} onDragOver={event => { event.preventDefault(); event.stopPropagation(); }} className={`max-h-72 space-y-2 overflow-y-auto rounded-xl border p-2 ${paths.length ? 'border-slate-200 bg-slate-50' : 'border-dashed border-slate-300 bg-slate-50/70'}`}>
+          {!paths.length && <button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseVideos()} className="flex min-h-28 w-full flex-col items-center justify-center gap-2 rounded-lg text-sm text-slate-500 hover:bg-white disabled:opacity-50"><FolderInput size={24} className="text-slate-400"/><span>{sourcesLoading ? '正在读取所选文件夹中的视频…' : '拖入视频，或点击追加视频'}</span></button>}
+          {videoGroups.map(group => {
+            const expanded = group.items.length <= 3 || expandedVideoGroups.has(group.directory);
+            return <div key={group.directory} className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+              <button type="button" disabled={group.items.length <= 3} onClick={() => setExpandedVideoGroups(current => { const next = new Set(current); if (next.has(group.directory)) next.delete(group.directory); else next.add(group.directory); return next; })} className="flex w-full items-center gap-2 px-3 py-2 text-left disabled:cursor-default">
+                <FolderInput size={15} className="shrink-0 text-blue-500"/>
+                <span className="min-w-0 flex-1 truncate text-sm font-bold text-slate-700" title={group.directory}>{videoPathName(group.directory)}</span>
+                <span className="shrink-0 text-xs text-slate-500">{group.items.length} 个文件</span>
+                {group.items.length > 3 && (expanded ? <ChevronUp size={15} className="text-slate-400"/> : <ChevronDown size={15} className="text-slate-400"/>)}
+              </button>
+              {expanded && <div className="border-t border-slate-100">
+                {group.items.map(item => { const state = itemState(item.index); return <div key={item.path} className={`flex items-center gap-2 border-b border-slate-100 px-3 py-2 last:border-b-0 ${state.label === '编码中' ? 'bg-blue-50/70' : ''}`}>
+                  <Video size={14} className="shrink-0 text-slate-400"/>
+                  <span className="min-w-0 flex-1 truncate text-xs text-slate-700" title={item.path}>{videoPathName(item.path)}</span>
+                  <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${state.className}`}>{state.label}</span>
+                  <button type="button" disabled={isRunning || sourcesLoading} onClick={() => removeVideoPath(item.path)} aria-label={`移除 ${videoPathName(item.path)}`} title="移除" className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-40"><X size={13}/></button>
+                </div>; })}
+              </div>}
+            </div>;
+          })}
+        </div>
+        {activeSourceFolders.length > 0 && <p className="rounded-md bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-700">来自 {activeSourceFolders.length} 个所选文件夹的视频将输出到原文件夹旁的新“_转码”文件夹，并保留子目录结构。</p>}
+        <details className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+          <summary className="cursor-pointer text-xs font-bold text-slate-600">高级 · 批量粘贴路径</summary>
+          <textarea value={pathsText} disabled={isRunning || sourcesLoading} onChange={event => setPathsText(event.target.value)} placeholder="每行粘贴一个视频的绝对路径" className="mt-2 h-28 w-full resize-y rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 font-mono text-xs text-slate-900 outline-none transition focus:border-blue-500 disabled:opacity-60"/>
+        </details>
+      </section>
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <label className="text-xs font-bold text-slate-600">输出封装<select value={container} disabled={isRunning} onChange={event => setContainer(event.target.value as typeof container)} className="form-input mt-1"><option value="mp4">MP4</option><option value="mov">MOV</option><option value="mkv">MKV</option></select></label>
+        <label className="text-xs font-bold text-slate-600">视频处理<select value={videoMode} disabled={isRunning} onChange={event => setVideoMode(event.target.value as typeof videoMode)} className="form-input mt-1"><option value="h264">H.264 · 兼容性优先</option><option value="h265">H.265 · 节省空间</option><option value="copy">只更换封装（不重新编码）</option></select></label>
+        <label className="text-xs font-bold text-slate-600">画质<select value={quality} disabled={isRunning || videoMode === 'copy'} onChange={event => setQuality(event.target.value as typeof quality)} className="form-input mt-1 disabled:opacity-50"><option value="high">高质量</option><option value="balanced">平衡</option><option value="small">更小文件</option></select></label>
+        <label className="text-xs font-bold text-slate-600">分辨率<select value={resolution} disabled={isRunning || videoMode === 'copy'} onChange={event => setResolution(event.target.value as typeof resolution)} className="form-input mt-1 disabled:opacity-50"><option value="original">保持原分辨率</option><option value="2160p">最长边限制到 4K</option><option value="1080p">最长边限制到 1080p</option><option value="720p">最长边限制到 720p</option></select></label>
+        <label className="text-xs font-bold text-slate-600">帧率<select value={frameRate} disabled={isRunning || videoMode === 'copy'} onChange={event => setFrameRate(event.target.value as typeof frameRate)} className="form-input mt-1 disabled:opacity-50"><option value="original">保持原帧率</option>{['24', '25', '30', '50', '60'].map(value => <option key={value} value={value}>{value} fps</option>)}</select></label>
+        <label className="text-xs font-bold text-slate-600">音频<select value={audioMode} disabled={isRunning} onChange={event => setAudioMode(event.target.value as typeof audioMode)} className="form-input mt-1"><option value="copy">保留原音频编码</option><option value="aac">转换为 AAC · 192 kbps</option><option value="remove">移除音频</option></select></label>
+      </div>
+      <div className="grid gap-3 md:grid-cols-2"><label className={`rounded-lg border p-3 text-sm ${outputMode === 'new' ? 'border-blue-400 bg-blue-50' : 'border-slate-200'}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="new" checked={outputMode === 'new'} disabled={isRunning} onChange={() => setOutputMode('new')} className="mt-0.5"/><span><b className="block text-slate-800">另存为新视频</b><span className="mt-1 block text-xs leading-5 text-slate-500">{activeSourceFolders.length ? '文件夹任务输出到原文件夹旁的新“_转码”目录。' : '保存在原视频旁边，文件名增加“_转码”。发生重名时自动编号。'}</span></span></span></label><label className={`rounded-lg border p-3 text-sm ${outputMode === 'replace' ? 'border-red-400 bg-red-50' : 'border-slate-200'} ${paths.length !== 1 || activeSourceFolders.length ? 'opacity-50' : ''}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="replace" checked={outputMode === 'replace'} disabled={isRunning || paths.length !== 1 || Boolean(activeSourceFolders.length)} onChange={() => setOutputMode('replace')} className="mt-0.5"/><span><b className="block text-slate-800">替换原视频</b><span className="mt-1 block text-xs leading-5 text-red-600">仅限直接选择的单个文件且封装不变。验证成功后原子替换，无法在软件内撤销。</span></span></span></label></div>
+      {videoMode === 'h264' && <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">H.264 兼容模式会自动选择可用的 GPU 编码器，并在任务日志中显示实际编码器；GPU 不可用时回退 CPU。输出为 8-bit yuv420p，HDR、10-bit 或 BT.2020 素材建议先用“只更换封装”。</div>}
+      {videoMode === 'h265' && <div className="rounded-lg bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">H.265 通常能以相近画质生成更小的文件，但老旧设备兼容性低于 H.264。此模式依次尝试 NVIDIA、Intel、AMD 和 Windows 硬件编码器，均不可用时回退 libx265 CPU 编码；输出为 8-bit yuv420p，不保留 HDR 或 10-bit。</div>}
+      <TaskProgress logs={logs} progress={progress} isRunning={isRunning} idleMessage={sourcesLoading ? '正在读取后台媒体索引…' : statusMsg} statusMessage={sourcesLoading ? '正在读取后台媒体索引…' : statusMsg} action={<button type="button" onClick={isRunning ? () => void cancel() : startTranscode} disabled={isCancelling || sourcesLoading || (!isRunning && !paths.length)} className={`flex items-center gap-2 rounded-lg px-6 py-2.5 font-bold transition ${isRunning ? 'bg-red-600 text-white hover:bg-red-500' : paths.length && !sourcesLoading ? 'bg-blue-600 text-white hover:bg-blue-500' : 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400'}`}>{isRunning ? isCancelling ? <Loader2 size={17} className="animate-spin"/> : <X size={17}/> : sourcesLoading ? <Loader2 size={17} className="animate-spin"/> : <Play size={17} fill="currentColor"/>}{isRunning ? isCancelling ? '正在取消…' : '取消转码' : sourcesLoading ? '正在建立索引' : '开始转码'}</button>}/>
+    </div>
+  </div>;
+};
+
 const VideoSplitView = () => {
   const [videoPath, setVideoPath] = useState("");
   const { logs, isRunning, progress, statusMsg, start } = usePythonTask('cut_video.py', '等待输入...');
@@ -1785,4 +1967,4 @@ const VideoSplitView = () => {
 
 // --- 组件 ---
 
-export { DashboardView, HomePanel, ImportCard, ConverterView, ScreenshotMainImageView, ResearchView, MatchView, VideoSplitView };
+export { DashboardView, HomePanel, ImportCard, ConverterView, ScreenshotMainImageView, ResearchView, MatchView, VideoTranscodeView, VideoSplitView };

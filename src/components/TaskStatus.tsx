@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import type { LogEntry } from '../types';
 import { ProgressBar } from './ProgressBar';
 import { usePanelTaskReporter } from '../features/background-tasks/TaskCenter';
@@ -8,35 +8,87 @@ interface TaskProgressProps {
   progress: number;
   isRunning: boolean;
   idleMessage?: string;
+  statusMessage?: string;
   action?: React.ReactNode;
   reportToTaskCenter?: boolean;
 }
 
-/** Shared execution area used by every tool. The newest script output is the status title. */
+type TaskCenterProgressReport = {
+  state: 'idle' | 'running' | 'completed' | 'failed';
+  progress: number;
+  message: string;
+  logs: LogEntry[];
+};
+
+const TASK_CENTER_REPORT_INTERVAL_MS = 250;
+
+/** Shared execution area used by every tool, with an optional task-specific status title. */
 export const TaskProgress: React.FC<TaskProgressProps> = ({
   logs,
   progress,
   isRunning,
   idleMessage = '进度',
+  statusMessage,
   action,
   reportToTaskCenter = true,
 }) => {
   const latest = logs[logs.length - 1];
-  const message = latest?.message || (progress >= 100 ? '处理完成' : idleMessage);
+  const message = statusMessage || latest?.message || (progress >= 100 ? '处理完成' : idleMessage);
   const color = latest?.type === 'error' ? 'text-red-500' : latest?.type === 'success' || progress >= 100 ? 'text-emerald-600' : latest?.type === 'warning' ? 'text-amber-600' : 'text-slate-800';
   const percentage = Math.min(100, Math.max(0, progress));
   const reporter = usePanelTaskReporter();
   const latestType = latest?.type;
+  const reporterRef = useRef(reporter);
+  const pendingReportRef = useRef<TaskCenterProgressReport | null>(null);
+  const reportTimerRef = useRef<number | null>(null);
+  const lastReportAtRef = useRef(0);
+  const lastReportedStateRef = useRef<TaskCenterProgressReport['state'] | ''>('');
+  reporterRef.current = reporter;
+
+  const flushTaskCenterReport = useCallback(() => {
+    if (reportTimerRef.current !== null) {
+      window.clearTimeout(reportTimerRef.current);
+      reportTimerRef.current = null;
+    }
+    const nextReport = pendingReportRef.current;
+    const nextReporter = reporterRef.current;
+    pendingReportRef.current = null;
+    if (!nextReport || !nextReporter) return;
+    lastReportAtRef.current = Date.now();
+    lastReportedStateRef.current = nextReport.state;
+    nextReporter(nextReport);
+  }, []);
 
   useEffect(() => {
-    if (!reporter || !reportToTaskCenter) return;
-    reporter({
-      state: isRunning ? 'running' : latestType === 'error' ? 'failed' : percentage >= 100 ? 'completed' : 'idle',
+    if (!reporter || !reportToTaskCenter) {
+      pendingReportRef.current = null;
+      if (reportTimerRef.current !== null) {
+        window.clearTimeout(reportTimerRef.current);
+        reportTimerRef.current = null;
+      }
+      return;
+    }
+    const state: TaskCenterProgressReport['state'] = isRunning ? 'running' : latestType === 'error' ? 'failed' : percentage >= 100 ? 'completed' : 'idle';
+    pendingReportRef.current = {
+      state,
       progress: percentage,
       message,
       logs,
-    });
-  }, [isRunning, latestType, logs, message, percentage, reporter, reportToTaskCenter]);
+    };
+
+    const elapsed = Date.now() - lastReportAtRef.current;
+    if (state !== lastReportedStateRef.current || elapsed >= TASK_CENTER_REPORT_INTERVAL_MS) {
+      flushTaskCenterReport();
+      return;
+    }
+    if (reportTimerRef.current === null) {
+      reportTimerRef.current = window.setTimeout(flushTaskCenterReport, TASK_CENTER_REPORT_INTERVAL_MS - elapsed);
+    }
+  }, [flushTaskCenterReport, isRunning, latestType, logs, message, percentage, reporter, reportToTaskCenter]);
+
+  useEffect(() => () => {
+    if (reportTimerRef.current !== null) window.clearTimeout(reportTimerRef.current);
+  }, []);
 
   return (
     <section className="rounded-xl border border-slate-200 bg-slate-50 p-4" aria-live="polite" aria-busy={isRunning}>

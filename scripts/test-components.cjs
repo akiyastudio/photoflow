@@ -40,12 +40,15 @@ try {
   assert(artifactCleanup.includes("entry.name.endsWith('-win.zip')"), 'artifact cleanup must remove legacy application ZIPs');
 
   const installer = fs.readFileSync(path.join(repositoryRoot, 'build', 'installer.nsh'), 'utf8');
-  assert.strictEqual(packageJson.build.nsis.license, 'docs/legal/INSTALLER_TERMS.html', 'NSIS must require acceptance of the combined HTML installation terms');
+  assert.strictEqual(packageJson.build.nsis.license, 'docs/legal/INSTALLER_TERMS.txt', 'NSIS must use the native text license renderer instead of the unreliable legacy HTML control');
   assert.strictEqual(packageJson.build.nsis.perMachine, false, 'installer consent must remain scoped to the current Windows user');
-  const installerLicenseText = fs.readFileSync(path.join(repositoryRoot, packageJson.build.nsis.license), 'utf8');
-  assert(installerLicenseText.startsWith('<!doctype html>') && installerLicenseText.includes('<meta charset="utf-8">'), 'NSIS installation terms must be a complete UTF-8 HTML document');
+  const installerLicense = fs.readFileSync(path.join(repositoryRoot, packageJson.build.nsis.license));
+  assert.deepStrictEqual([...installerLicense.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'NSIS installation terms must use a UTF-8 BOM so Chinese text renders correctly');
+  const installerLicenseText = installerLicense.toString('utf8');
   assert(installerLicenseText.includes('照片流用户协议及内测条款') && installerLicenseText.includes('照片流隐私政策（内测版）'), 'installation terms must contain the complete agreement and privacy policy');
   assert(installerLicenseText.includes('只有明确接受后，安装程序才会继续') && installerLicenseText.includes('实际使用前仍会另行展示规则并取得单独同意'), 'installation terms must explain the installation gate and preserve separate face-recognition consent');
+  const installerHtml = fs.readFileSync(path.join(repositoryRoot, 'docs', 'legal', 'INSTALLER_TERMS.html'), 'utf8');
+  assert(installerHtml.startsWith('<!doctype html>') && installerHtml.includes('<meta charset="utf-8">'), 'the canonical combined installation terms must remain available as complete HTML');
   assert(releaseCommand.includes('npm run generate:installer-terms'), 'release builds must regenerate the combined installation terms from the current HTML policies');
   const legalResource = packageJson.build.extraResources.find(resource => resource.to === 'legal');
   assert.deepStrictEqual(legalResource?.filter, ['*.html'], 'release packages must include only the user-facing HTML legal documents');
@@ -136,18 +139,18 @@ try {
   assert(teamRetouchEngine.includes('people = spatially_order_people(people)') && teamRetouchEngine.includes('def bounded_planning_box'), 'crowd numbering must be left-to-right and leaked masks must not control spatial grouping');
 
   const settingsFeature = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
-  assert(settingsFeature.includes('基础版 · RTMDet'), 'settings must describe the basic person-detection engine');
-  assert(settingsFeature.includes('增强版 · PairDETR + SAM 2.1'), 'settings must describe the enhanced person-detection engine');
-  assert(settingsFeature.includes('人物检测增强 ZIP 原样放在这里，无需解压') && settingsFeature.includes('身份识别模型已经包含在组件 ZIP 中'), 'settings must explain which models and add-ons are included in the component');
-  assert(settingsFeature.includes('支持 WSL CUDA 的 NVIDIA 显卡与驱动') && settingsFeature.includes('目标磁盘至少 35 GB'), 'settings must disclose hard requirements for enhanced person detection');
-  assert(settingsFeature.includes('至少 8 GB 显存、16 GB 系统内存') && settingsFeature.includes('不作为安装硬门槛'), 'settings must distinguish performance recommendations from enforced requirements');
+  assert(settingsFeature.includes('基础人物检测') && settingsFeature.includes('RTMDet'), 'settings must describe the basic person-detection engine');
+  assert(settingsFeature.includes('PairDETR + SAM 2.1'), 'settings must describe the enhanced person-detection engine');
+  assert(settingsFeature.includes('基础组件、身份识别模型和检测增强包统一放在这里') && settingsFeature.includes('ZIP 无需解压'), 'settings must explain which models and add-ons are included in the component');
+  assert(settingsFeature.includes('支持 WSL CUDA 的 NVIDIA 显卡与驱动') && settingsFeature.includes('至少 35 GB 可用空间'), 'settings must disclose hard requirements for enhanced person detection');
+  assert(settingsFeature.includes('至少 8 GB 显存和 16 GB 系统内存') && settingsFeature.includes('不作为安装门槛'), 'settings must distinguish performance recommendations from enforced requirements');
   assert(!settingsFeature.includes('AdaFace 来源') && !settingsFeature.includes('OSNet 来源'), 'model sources must live in open-source licenses instead of the install panel');
   assert(settingsFeature.includes('团片协作组件目录'), 'settings must expose one directory for all team-retouch packages');
   assert(!settingsFeature.includes('安装身份识别增强包') && settingsFeature.includes('安装检测增强包'), 'settings must only expose the optional detection add-on installer');
   assert(!settingsFeature.includes('统一组件安装包目录') && !settingsFeature.includes('高级安装包目录'), 'settings must not expose separate team-retouch package locations');
-  assert.strictEqual((settingsFeature.match(/优先使用 GPU 进行全身人物检测/g) || []).length, 1, 'GPU preference must appear once');
-  assert(settingsFeature.indexOf('优先使用 GPU 进行全身人物检测') < settingsFeature.indexOf('<TeamRetouchEngineSettings'), 'GPU preference must be the first team-retouch setting');
-  assert(settingsFeature.indexOf('通常手机修图软件能导出的画质长边不超过 4000 像素') > settingsFeature.indexOf('人物超过 4000 像素时'), '4000-pixel guidance must live with the oversize crop setting');
+  assert.strictEqual((settingsFeature.match(/title="优先使用 GPU"/g) || []).length, 1, 'GPU preference must appear once');
+  assert(settingsFeature.indexOf('title="优先使用 GPU"') < settingsFeature.indexOf('<TeamRetouchEngineSettings'), 'GPU preference must be the first team-retouch setting');
+  assert(settingsFeature.includes('人物超过 4000 像素时选择保持尺寸或扩大裁剪'), '4000-pixel guidance must live with the oversize crop setting');
 const teamRetouchManager = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'TeamRetouchManager.tsx'), 'utf8');
 assert.match(teamRetouchManager, /dimension \/ scale/, '团片协作原图标记应使用代理图缩放比例反推原图尺寸');
 assert(teamRetouchManager.includes('人物 {member.personIndex}'), '工作图预览应直接标出人物编号');
@@ -183,7 +186,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(teamRetouchSteps.includes('人物识别与标记') && teamRetouchSteps.includes('任务编排与返图') && !teamRetouchSteps.includes("id: 'people'"), 'team retouch must expose the integrated two-step workflow');
   assert(teamRetouchManager.includes('<TeamRetouchSteps') && personIdentityManager.includes('<TeamRetouchSteps'), 'all team-retouch panels must reuse the same step navigation');
   assert(!projectWorkspace.includes('团片协作菜单'), 'project toolbar must not expose a separate team-retouch dropdown menu');
-  assert(projectWorkspace.includes("setTeamRetouchStep(current => current || 'detect')"), 'the single team-retouch entry must start at person detection without resetting an existing tab');
+  assert(projectWorkspace.includes('teamRetouchWorkflowGeneratedRef.current = Boolean(result.workflowGenerated)') && projectWorkspace.includes("setTeamRetouchStep(validTargets.length ? 'detect' : teamRetouchWorkflowGeneratedRef.current ? 'workflow' : 'detect')"), 'existing generated workflows must reopen on task scheduling while newly added images still start at person detection');
   assert(projectWorkspace.includes('const [directoryLoading, setDirectoryLoading]') && projectWorkspace.includes('role="status" aria-live="polite"') && projectWorkspace.includes('加载中…'), 'project browsing must distinguish directory loading from an empty directory');
   const markProgressSource = projectWorkspace.slice(projectWorkspace.indexOf('const openMarkProgress'), projectWorkspace.indexOf('useEffect(() => {', projectWorkspace.indexOf('const openMarkProgress')));
   assert(markProgressSource.indexOf('setProgressSetup(initialDraft)') < markProgressSource.indexOf('void loadProgressFolders().then'), 'mark-progress must open from cached data before refreshing progress folders');
@@ -203,6 +206,8 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(personIdentityManager.includes('taskOrder: workflow'), 'workflow returns must send the exact displayed hand-off order');
   assert(!personIdentityManager.includes('subjects.filter(subject => !subject.task.needsReview)'), 'suggested-review work images must remain available in the downstream workflow planner');
   assert(personIdentityManager.includes('sameWeekIdentityIds') && personIdentityManager.includes("? '＋' : '→'") && personIdentityManager.includes('toggleSameWeekIdentity'), 'priority labels must switch between same-week and next-week scheduling');
+  assert(!personIdentityManager.includes('const workflowOrderLocked = Boolean(workspace.workflowGenerated)') && personIdentityManager.includes('流程已生成 · 仍可调整顺序') && personIdentityManager.includes('排期已调整 · 请重新生成'), 'a generated workflow must remain reorderable until a return or completion starts real work');
+  assert(personIdentityManager.includes('workflowNeedsRegeneration') && personIdentityManager.includes('const workflowReady = Boolean'), 'workflow execution must pause after reordering until its folders are regenerated');
   assert(!personIdentityManager.includes('无需修图') && !personIdentityManager.includes('setTeamWorkflowNoRetouch'), 'workflow tasks must always be generated before the user decides whether to upload a return');
   assert(personIdentityManager.includes('}上传</button>') && personIdentityManager.includes('删除返图') && personIdentityManager.includes('撤销不用修'), 'workflow task actions must expose compact upload and reversible no-retouch states');
   assert(personIdentityManager.includes('标记本周不用修') && personIdentityManager.includes('markWeekNoRetouch'), 'each workflow person lane must scope bulk no-retouch completion to the displayed week');
@@ -262,7 +267,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(systemIpc.includes('packageSizeBytes'), 'successful installers must report the actual package size for cleanup confirmation');
   assert(systemIpc.includes("const teamRetouchRoot"), 'all team-retouch packages must share one component directory');
   assert(systemIpc.includes("path.join(teamRetouchRoot(), 'advanced')") && !systemIpc.includes("path.join(teamRetouchRoot(), 'identity-models')"), 'only the optional detection engine may retain a team-retouch add-on directory');
-  assert(settingsFeature.includes('YuNet + AdaFace IR-18 + OSNet x1.0') && !settingsFeature.includes('SFace') && !settingsFeature.includes('OSNet x0.25'), 'settings must expose the single enhanced cross-photo identity engine');
+  assert(settingsFeature.includes('YuNet、AdaFace IR-18 与 OSNet x1.0') && !settingsFeature.includes('SFace') && !settingsFeature.includes('OSNet x0.25'), 'settings must expose the single enhanced cross-photo identity engine');
   assert(!settingsFeature.includes('实验人物识别模型 · 用户自备'), 'settings must not require end users to compile identity models');
 
   assert(componentBuilder.includes("'.model-lab', 'adaface', 'adaface_ir18_webface4m.onnx") && componentBuilder.includes("'.model-lab', 'osnet', 'osnet_x1_0_msmt17.onnx"), 'team-retouch component must contain both enhanced identity ONNX models');
@@ -277,12 +282,12 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
     assert(modelLicenses.includes(`name: '${modelName}'`), `open-source licenses must include ${modelName}`);
   }
   const softwareLicenses = fs.readFileSync(path.join(repositoryRoot, 'src', 'licenses', 'softwareLicenses.ts'), 'utf8');
-  for (const dependency of ['照片流应用代码', 'Electron', 'Chromium', 'Node.js', 'React / React DOM', 'ExifTool', 'Python', 'PyInstaller', 'OpenCV / opencv-python-headless', 'ONNX Runtime DirectML', 'FFmpeg + x264 + zlib', 'PyTorch / TorchVision', 'NVIDIA CUDA 运行库']) {
+  for (const dependency of ['照片流应用代码', 'Electron', 'Chromium', 'Node.js', 'React / React DOM', 'ExifTool', 'Python', 'PyInstaller', 'OpenCV / opencv-python-headless', 'ONNX Runtime DirectML', 'FFmpeg + x264 + x265 + zlib', 'PyTorch / TorchVision', 'NVIDIA CUDA 运行库']) {
     assert(softwareLicenses.includes(`name: '${dependency}'`), `third-party software notices must include ${dependency}`);
   }
-  assert(softwareLicenses.includes("license: 'GPL-2.0-or-later'") && softwareLicenses.includes('libx264') && softwareLicenses.includes('禁用 x265'), 'FFmpeg notice must disclose the fixed minimal GPL+x264 build');
+  assert(softwareLicenses.includes("license: 'GPL-2.0-or-later'") && softwareLicenses.includes('libx264') && softwareLicenses.includes('libx265'), 'FFmpeg notice must disclose the fixed GPL x264/x265 build');
   assert(softwareLicenses.includes('上游代码授权未明确'), 'PairDETR redistribution uncertainty must remain visible');
-  assert(settingsFeature.lastIndexOf('使用提示') < settingsFeature.lastIndexOf('开源许可'), 'usage guidance must appear before open-source licenses');
+  assert(settingsFeature.indexOf("['customer-data'") < settingsFeature.indexOf("['open-source'"), 'customer-data guidance must appear before open-source licenses');
 
   writeComponent(path.join(path.dirname(executablePath), 'components'), 'team-retouch', '99.0.0');
   writeComponent(path.join(resourcesPath, 'components'), 'team-retouch', '99.0.1');
@@ -298,7 +303,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
 
   assert.strictEqual(registry.list().length, Object.keys(PLUGIN_DEFINITIONS).length);
   const advancedVideoManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'components', 'video-playback-mpv', 'component.template.json'), 'utf8'));
-  assert.strictEqual(PLUGIN_DEFINITIONS['video-playback-mpv'].version, '26.7.29.1', 'the app must accept the latest published advanced-video component');
+  assert.strictEqual(PLUGIN_DEFINITIONS['video-playback-mpv'].version, '26.8.3.1', 'the app must accept the latest published advanced-video component');
   assert.strictEqual(advancedVideoManifest.version, PLUGIN_DEFINITIONS['video-playback-mpv'].version, 'the advanced-video manifest and app compatibility pin must stay aligned');
   assert.strictEqual(registry.resolve('team-retouch'), null);
   assert.strictEqual(registry.resolve('office-media-extractor'), null);

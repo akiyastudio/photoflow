@@ -36,8 +36,8 @@ def run(args_list):
     parser.add_argument("--quality", type=int, default=100)
     args = parser.parse_args(args_list)
 
-    # 扫描所选文件以及所选目录的当前层级。路径可能同时包含目录和其中的
-    # 文件，因此以规范化绝对路径去重。
+    # 扫描所选文件以及所选目录的全部子目录。路径可能同时包含父目录、
+    # 子目录和其中的文件，因此稍后以规范化绝对路径去重。
     candidate_files = []
     for raw_path in args.paths:
         target_path = raw_path.strip('"')
@@ -46,9 +46,12 @@ def run(args_list):
             continue
         if os.path.isdir(target_path):
             try:
-                candidate_files.extend(
-                    os.path.join(target_path, name) for name in os.listdir(target_path)
-                )
+                for directory, directory_names, file_names in os.walk(target_path):
+                    directory_names[:] = [
+                        name for name in directory_names
+                        if not os.path.islink(os.path.join(directory, name))
+                    ]
+                    candidate_files.extend(os.path.join(directory, name) for name in file_names)
             except OSError as error:
                 log_error(f"无法读取目录 '{target_path}': {str(error)}")
                 return

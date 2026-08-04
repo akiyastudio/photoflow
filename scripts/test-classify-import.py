@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'python'))
 
 import classify  # noqa: E402
+import ffmpeg_transcode  # noqa: E402
 
 
 class ClassifyImportTests(unittest.TestCase):
@@ -47,13 +48,25 @@ class ClassifyImportTests(unittest.TestCase):
             source.write_bytes(b'video')
             filesystem_time = datetime.datetime(2030, 1, 2, 3, 4, 5).timestamp()
             os.utime(source, (filesystem_time, filesystem_time))
-            probe = mock.Mock(stderr='    creation_time   : 2024-05-06T07:08:09Z\n')
-
-            with mock.patch.object(classify, 'get_ffmpeg_exe', return_value='ffmpeg'), mock.patch.object(classify.subprocess, 'run', return_value=probe):
+            with mock.patch.object(classify, 'probe_creation_time_values', return_value=('2024-05-06T07:08:09Z',)):
                 actual = classify.get_file_time(str(source))
 
             expected = datetime.datetime(2024, 5, 6, 7, 8, 9, tzinfo=datetime.timezone.utc).timestamp()
             self.assertEqual(actual, expected)
+
+    def test_ffmpeg_metadata_probe_orders_creation_time_fields(self):
+        metadata = """
+            creation_time : 2024-05-06T07:08:09Z
+            com.apple.quicktime.creationdate : 2024-05-06T06:00:00Z
+            date : 2024-05-05
+        """
+        with mock.patch.object(ffmpeg_transcode, 'probe_media_text', return_value=metadata):
+            values = ffmpeg_transcode.probe_creation_time_values('clip.mov')
+        self.assertEqual(values, (
+            '2024-05-06T06:00:00Z',
+            '2024-05-06T07:08:09Z',
+            '2024-05-05',
+        ))
 
     def test_all_date_filter_skips_capture_time_pre_scan(self):
         files = ['one.jpg', 'two.mp4']
@@ -154,24 +167,251 @@ class ClassifyImportTests(unittest.TestCase):
 
     def test_video_preview_prefers_gpu_and_falls_back_to_cpu(self):
         with tempfile.TemporaryDirectory() as temporary:
-            target = Path(temporary)
-            source_dir = target / 'mov'
-            source_dir.mkdir()
-            (source_dir / 'clip.mov').write_bytes(b'video')
+            source = Path(temporary) / 'clip.mov'
+            output = Path(temporary) / 'clip-preview.mp4'
+            source.write_bytes(b'video')
             failed_gpu = mock.Mock(returncode=1, stderr='no compatible GPU')
             succeeded_cpu = mock.Mock(returncode=0, stderr='')
 
-            with mock.patch.object(classify, 'get_ffmpeg_exe', return_value='ffmpeg'), \
-                    mock.patch.object(classify, 'video_preview_encoder_candidates', return_value=['h264_nvenc', 'libx264']), \
-                    mock.patch.object(classify.subprocess, 'run', side_effect=[failed_gpu, failed_gpu, succeeded_cpu]) as run:
-                succeeded, total = classify.generate_video_previews(str(target))
+            with mock.patch.object(ffmpeg_transcode, 'get_ffmpeg_exe', return_value='ffmpeg'), \
+                    mock.patch.object(ffmpeg_transcode.subprocess, 'run', side_effect=[failed_gpu, failed_gpu, succeeded_cpu]) as run:
+                encoder = ffmpeg_transcode.transcode_video_preview(
+                    str(source),
+                    str(output),
+                    encoder_candidates=['h264_nvenc', 'libx264'],
+                )
 
-            self.assertEqual((succeeded, total), (1, 1))
+            self.assertEqual(encoder, 'libx264')
             self.assertEqual(run.call_count, 3)
             self.assertIn('h264_nvenc', run.call_args_list[0].args[0])
             self.assertIn('-hwaccel', run.call_args_list[0].args[0])
             self.assertNotIn('-hwaccel', run.call_args_list[1].args[0])
             self.assertIn('libx264', run.call_args_list[2].args[0])
+
+    def test_general_video_transcode_builds_crf_and_remux_commands(self):
+        command = ffmpeg_transcode.build_general_transcode_command(
+            'ffmpeg', 'clip.mov', 'clip.mp4',
+            container='mp4', video_mode='h264', quality='high',
+            resolution='1080p', frame_rate='30', audio_mode='aac',
+        )
+        self.assertIn('libx264', command)
+        self.assertEqual(command[command.index('-crf') + 1], '18')
+        self.assertIn('fps=30', command[command.index('-vf') + 1])
+        self.assertIn('min(1920,iw)', command[command.index('-vf') + 1])
+        self.assertIn('+faststart', command)
+
+        nvenc = ffmpeg_transcode.build_general_transcode_command(
+            'ffmpeg', 'clip.mov', 'clip.mp4',
+            container='mp4', video_mode='h264', quality='balanced',
+            resolution='1080p', frame_rate='original', audio_mode='aac',
+            encoder='h264_nvenc',
+        )
+        self.assertEqual(nvenc[nvenc.index('-c:v') + 1], 'h264_nvenc')
+        self.assertEqual(nvenc[nvenc.index('-cq') + 1], '22')
+        self.assertNotIn('libx264', nvenc)
+
+        hevc_cpu = ffmpeg_transcode.build_general_transcode_command(
+            'ffmpeg', 'clip.mov', 'clip.mp4',
+            container='mp4', video_mode='h265', quality='balanced',
+            resolution='original', frame_rate='original', audio_mode='aac',
+        )
+        self.assertEqual(hevc_cpu[hevc_cpu.index('-c:v') + 1], 'libx265')
+        self.assertEqual(hevc_cpu[hevc_cpu.index('-crf') + 1], '25')
+        self.assertEqual(hevc_cpu[hevc_cpu.index('-tag:v') + 1], 'hvc1')
+
+        hevc_nvenc = ffmpeg_transcode.build_general_transcode_command(
+            'ffmpeg', 'clip.mov', 'clip.mkv',
+            container='mkv', video_mode='h265', quality='high',
+            resolution='original', frame_rate='original', audio_mode='copy',
+            encoder='hevc_nvenc',
+        )
+        self.assertEqual(hevc_nvenc[hevc_nvenc.index('-c:v') + 1], 'hevc_nvenc')
+        self.assertEqual(hevc_nvenc[hevc_nvenc.index('-cq') + 1], '21')
+        self.assertNotIn('-tag:v', hevc_nvenc)
+
+        remux = ffmpeg_transcode.build_general_transcode_command(
+            'ffmpeg', 'clip.mov', 'clip.mkv',
+            container='mkv', video_mode='copy', quality='balanced',
+            resolution='original', frame_rate='original', audio_mode='remove',
+        )
+        self.assertEqual(remux[remux.index('-c:v') + 1], 'copy')
+        self.assertIn('-an', remux)
+        self.assertNotIn('-vf', remux)
+        self.assertNotIn('-movflags', remux)
+
+        with self.assertRaisesRegex(ValueError, '不能调整分辨率或帧率'):
+            ffmpeg_transcode.build_general_transcode_command(
+                'ffmpeg', 'clip.mov', 'clip.mp4',
+                container='mp4', video_mode='copy', quality='balanced',
+                resolution='1080p', frame_rate='original', audio_mode='copy',
+            )
+
+    def test_general_video_transcode_prefers_gpu_and_falls_back_to_cpu(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / 'clip.mov'
+            source.write_bytes(b'video')
+            attempts = []
+            logs = []
+
+            def run_attempt(command, _duration, _on_progress, _cancel_check):
+                attempts.append(command)
+                if 'h264_nvenc' in command:
+                    Path(command[-1]).write_bytes(b'partial')
+                    return 1, 'NVENC initialization failed'
+                Path(command[-1]).write_bytes(b'transcoded')
+                return 0, ''
+
+            with mock.patch.object(ffmpeg_transcode, 'get_ffmpeg_exe', return_value='ffmpeg'), \
+                    mock.patch.object(ffmpeg_transcode, 'video_preview_encoder_candidates', return_value=['h264_nvenc', 'libx264']), \
+                    mock.patch.object(ffmpeg_transcode, 'probe_duration', return_value=10.0), \
+                    mock.patch.object(ffmpeg_transcode, '_run_general_transcode_attempt', side_effect=run_attempt):
+                output = ffmpeg_transcode.transcode_video(str(source), on_log=logs.append)
+
+            self.assertEqual(len(attempts), 2)
+            self.assertIn('h264_nvenc', attempts[0])
+            self.assertIn('libx264', attempts[1])
+            self.assertEqual(Path(output).read_bytes(), b'transcoded')
+            self.assertTrue(any('GPU 编码器 h264_nvenc 不可用' in message for message in logs))
+            self.assertIn('视频编码器：libx264（CPU）', logs)
+
+    def test_h265_transcode_falls_back_from_gpu_to_libx265(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / 'clip.mov'
+            source.write_bytes(b'video')
+            attempts = []
+            logs = []
+
+            def run_attempt(command, _duration, _on_progress, _cancel_check):
+                attempts.append(command)
+                if 'hevc_nvenc' in command:
+                    Path(command[-1]).write_bytes(b'partial')
+                    return 1, 'NVENC HEVC initialization failed'
+                Path(command[-1]).write_bytes(b'transcoded-hevc')
+                return 0, ''
+
+            with mock.patch.object(ffmpeg_transcode, 'get_ffmpeg_exe', return_value='ffmpeg'), \
+                    mock.patch.object(ffmpeg_transcode, 'general_transcode_encoder_candidates', return_value=['hevc_nvenc', 'libx265']), \
+                    mock.patch.object(ffmpeg_transcode, 'probe_duration', return_value=10.0), \
+                    mock.patch.object(ffmpeg_transcode, '_run_general_transcode_attempt', side_effect=run_attempt):
+                output = ffmpeg_transcode.transcode_video(
+                    str(source), video_mode='h265', on_log=logs.append,
+                )
+
+            self.assertEqual(len(attempts), 2)
+            self.assertIn('hevc_nvenc', attempts[0])
+            self.assertIn('libx265', attempts[1])
+            self.assertEqual(Path(output).read_bytes(), b'transcoded-hevc')
+            self.assertTrue(any('GPU 编码器 hevc_nvenc 不可用' in message for message in logs))
+            self.assertIn('视频编码器：libx265（CPU）', logs)
+
+    def test_video_transcode_cli_status_shows_backend_file_and_count(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            first = Path(temporary) / 'one.mp4'
+            second = Path(temporary) / 'two.mp4'
+            first.write_bytes(b'video-one')
+            second.write_bytes(b'video-two')
+
+            def transcode(path, **kwargs):
+                backend = 'GPU' if Path(path).name == 'one.mp4' else 'CPU'
+                kwargs['on_log'](f'正在尝试 {backend} 编码器：test-encoder')
+                kwargs['on_progress'](50.0)
+                return f'{path}.output.mp4'
+
+            output = io.StringIO()
+            with mock.patch.object(ffmpeg_transcode, 'transcode_video', side_effect=transcode), \
+                    contextlib.redirect_stdout(output):
+                exit_code = ffmpeg_transcode.run([
+                    str(first), str(second), '--video-mode', 'h265',
+                ])
+
+            events = [json.loads(line) for line in output.getvalue().splitlines()]
+            status_messages = [event['message'] for event in events if event['type'] in {'status', 'progress'}]
+            self.assertEqual(exit_code, 0)
+            self.assertIn('正在编码（GPU）：one.mp4（1/2）', status_messages)
+            self.assertIn('正在编码（CPU）：two.mp4（2/2）', status_messages)
+
+    def test_folder_video_transcode_uses_new_sibling_folder_and_keeps_structure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source_folder = Path(temporary) / '素材'
+            nested_folder = source_folder / '第一天'
+            nested_folder.mkdir(parents=True)
+            source = nested_folder / 'clip.mp4'
+            source.write_bytes(b'video')
+            (Path(temporary) / '素材_转码').mkdir()
+            calls = []
+
+            def transcode(path, **kwargs):
+                calls.append((path, kwargs))
+                return str(Path(kwargs['destination_directory']) / Path(path).name)
+
+            output = io.StringIO()
+            with mock.patch.object(ffmpeg_transcode, 'transcode_video', side_effect=transcode), \
+                    contextlib.redirect_stdout(output):
+                exit_code = ffmpeg_transcode.run([
+                    str(source), '--video-mode', 'h265',
+                    '--source-folder', str(source_folder),
+                ])
+
+            events = [json.loads(line) for line in output.getvalue().splitlines()]
+            expected_directory = Path(temporary) / '素材_转码_2' / '第一天'
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(Path(calls[0][1]['destination_directory']), expected_directory)
+            self.assertEqual(calls[0][1]['output_mode'], 'new')
+            self.assertTrue(any(
+                event['type'] == 'log' and f'{source_folder} → {Path(temporary) / "素材_转码_2"}' in event['message']
+                for event in events
+            ))
+
+            replace_output = io.StringIO()
+            with contextlib.redirect_stdout(replace_output):
+                replace_code = ffmpeg_transcode.run([
+                    str(source), '--source-folder', str(source_folder), '--output-mode', 'replace',
+                ])
+            self.assertEqual(replace_code, 1)
+            self.assertIn('文件夹转码任务不能替换原视频', replace_output.getvalue())
+
+    def test_transcode_commit_retries_windows_sharing_violations(self):
+        calls = []
+
+        def operation():
+            calls.append(True)
+            if len(calls) < 3:
+                error = OSError('sharing violation')
+                error.winerror = 32
+                raise error
+            return 'committed'
+
+        with mock.patch.object(ffmpeg_transcode.time, 'sleep') as sleep:
+            result = ffmpeg_transcode._retry_windows_sharing_violation(operation)
+
+        self.assertEqual(result, 'committed')
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_lossless_split_service_commits_segments_transactionally(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / 'clip.mov'
+            source.write_bytes(b'0123456789')
+
+            def create_segments(command, _cancel_check):
+                pattern = command[-1]
+                Path(pattern.replace('%03d', '000')).write_bytes(b'first')
+                Path(pattern.replace('%03d', '001')).write_bytes(b'second')
+                return 0, ''
+
+            with mock.patch.object(ffmpeg_transcode, 'probe_duration', return_value=10.0), \
+                    mock.patch.object(ffmpeg_transcode, '_run_cancellable_process', side_effect=create_segments):
+                outputs = ffmpeg_transcode.split_video_by_size(
+                    str(source),
+                    split_threshold_bytes=1,
+                    target_segment_bytes=5,
+                    maximum_segment_bytes=10,
+                    keep_original=True,
+                )
+
+            self.assertEqual([Path(path).name for path in outputs], ['clip_part000.mov', 'clip_part001.mov'])
+            self.assertTrue(source.is_file())
+            self.assertFalse(any(Path(temporary).glob('.photoflow-split-*')))
 
     def test_sd_broll_uses_project_broll_root_and_split_setting(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -614,17 +854,13 @@ class ClassifyImportTests(unittest.TestCase):
             new_video = source_dir / 'new.mov'
             old_video.write_bytes(b'old')
             new_video.write_bytes(b'new')
-            succeeded = mock.Mock(returncode=0, stderr='')
-
-            with mock.patch.object(classify, 'get_ffmpeg_exe', return_value='ffmpeg'), \
-                    mock.patch.object(classify, 'video_preview_encoder_candidates', return_value=['libx264']), \
-                    mock.patch.object(classify.subprocess, 'run', return_value=succeeded) as run:
+            with mock.patch.object(classify, 'transcode_video_preview', return_value='libx264') as transcode:
                 result = classify.generate_video_previews(str(target), source_paths=[str(new_video)])
 
             self.assertEqual(result, (1, 1))
-            command = run.call_args.args[0]
-            self.assertIn(str(new_video), command)
-            self.assertNotIn(str(old_video), command)
+            self.assertEqual(transcode.call_count, 1)
+            self.assertEqual(transcode.call_args.args[0], str(new_video))
+            self.assertNotEqual(transcode.call_args.args[0], str(old_video))
 
     def test_import_fails_before_copy_when_disk_space_is_insufficient(self):
         with tempfile.TemporaryDirectory() as temporary:

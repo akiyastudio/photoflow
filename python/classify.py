@@ -15,19 +15,15 @@ from pathlib import Path
 import gc
 from PIL import Image
 from event_protocol import ask_user, emit, log_error, log_info, log_progress, log_status, log_success
-from ffmpeg_utils import get_ffmpeg_exe
+from ffmpeg_transcode import (
+    FFmpegTranscodeError,
+    VIDEO_PREVIEW_QUALITY_PROFILES,
+    normalize_video_preview_quality,
+    probe_creation_time_values,
+    split_video_by_size,
+    transcode_video_preview,
+)
 from thumbnail_image import _embedded_jpeg
-
-VIDEO_PREVIEW_QUALITY_PROFILES = {
-    'medium': {
-        'label': '中', 'preset': 'medium', 'video_bitrate': '4M',
-        'maxrate': '5M', 'bufsize': '8M', 'audio_bitrate': '128k',
-    },
-    'high': {
-        'label': '高', 'preset': 'medium', 'video_bitrate': '10M',
-        'maxrate': '12M', 'bufsize': '20M', 'audio_bitrate': '192k',
-    },
-}
 
 EXIFTOOL_PATH = ''
 CAPTURE_TIME_MEMORY_CACHE = {}
@@ -155,19 +151,8 @@ def _image_capture_timestamp(file_path):
 
 def _video_capture_timestamp(file_path):
     try:
-        result = subprocess.run(
-            [get_ffmpeg_exe(), '-hide_banner', '-i', file_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            timeout=15,
-        )
-        metadata = result.stderr or ''
-        for key in ('com.apple.quicktime.creationdate', 'creation_time', 'date'):
-            match = re.search(rf'(?im)^\s*{re.escape(key)}\s*:\s*(.+?)\s*$', metadata)
-            timestamp = _parse_capture_timestamp(match.group(1)) if match else None
+        for value in probe_creation_time_values(file_path, timeout=15):
+            timestamp = _parse_capture_timestamp(value)
             if timestamp is not None:
                 return timestamp
     except (OSError, subprocess.SubprocessError):
@@ -1221,57 +1206,6 @@ def generate_missing_raw_jpgs(target_folder, imported_paths, converter=generate_
             on_progress(index, len(candidates), os.path.basename(source_path))
     return succeeded, len(candidates)
 
-def normalize_video_preview_quality(quality):
-    return quality if quality in VIDEO_PREVIEW_QUALITY_PROFILES else 'medium'
-
-
-GPU_VIDEO_ENCODERS = ('h264_nvenc', 'h264_qsv', 'h264_amf', 'h264_mf')
-
-
-@functools.lru_cache(maxsize=4)
-def available_video_preview_encoders(ffmpeg_exe):
-    try:
-        result = subprocess.run(
-            [ffmpeg_exe, '-hide_banner', '-encoders'],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding='utf-8',
-            errors='replace',
-            timeout=20,
-        )
-        output = result.stdout or ''
-        return tuple(encoder for encoder in (*GPU_VIDEO_ENCODERS, 'libx264') if re.search(rf'(?m)^\s*V\S*\s+{re.escape(encoder)}\s', output))
-    except (OSError, subprocess.SubprocessError):
-        return ('libx264',)
-
-
-def video_preview_encoder_candidates(ffmpeg_exe):
-    available = set(available_video_preview_encoders(ffmpeg_exe))
-    return [encoder for encoder in GPU_VIDEO_ENCODERS if encoder in available] + ['libx264']
-
-
-def build_video_preview_command(ffmpeg_exe, input_path, output_path, quality='medium', encoder='libx264', hardware_decode=False):
-    profile = VIDEO_PREVIEW_QUALITY_PROFILES[normalize_video_preview_quality(quality)]
-    selected_encoder = encoder if encoder in (*GPU_VIDEO_ENCODERS, 'libx264') else 'libx264'
-    encoder_options = {
-        'h264_nvenc': ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr'],
-        'h264_qsv': ['-c:v', 'h264_qsv', '-preset', 'medium'],
-        'h264_amf': ['-c:v', 'h264_amf', '-quality', 'balanced'],
-        'h264_mf': ['-c:v', 'h264_mf'],
-        'libx264': ['-c:v', 'libx264', '-preset', profile['preset']],
-    }[selected_encoder]
-    return [
-        ffmpeg_exe, '-y', *(['-hwaccel', 'auto'] if hardware_decode else []), '-i', input_path,
-        '-map', '0:v:0', '-map', '0:a?',
-        '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', '-pix_fmt', 'yuv420p',
-        *encoder_options,
-        '-b:v', profile['video_bitrate'], '-maxrate', profile['maxrate'], '-bufsize', profile['bufsize'],
-        '-c:a', 'aac', '-b:a', profile['audio_bitrate'],
-        '-movflags', '+faststart', output_path,
-    ]
-
-
 def generate_video_previews(target_folder, quality='medium', on_generated=None, source_paths=None):
     """Create H.264 MP4 previews for the already classified video files."""
     quality = normalize_video_preview_quality(quality)
@@ -1297,9 +1231,6 @@ def generate_video_previews(target_folder, quality='medium', on_generated=None, 
 
     output_dir = os.path.join(target_folder, 'mov_预览')
     os.makedirs(output_dir, exist_ok=True)
-    ffmpeg_exe = get_ffmpeg_exe()
-    encoder_candidates = video_preview_encoder_candidates(ffmpeg_exe)
-    failed_gpu_encoders = set()
     announced_encoder = ''
     succeeded = 0
 
@@ -1311,25 +1242,8 @@ def generate_video_previews(target_folder, quality='medium', on_generated=None, 
         if os.path.exists(output_path):
             output_path = os.path.join(output_dir, f"{Path(file_name).stem}_{int(time.time())}.mp4")
 
-        result = None
-        used_encoder = ''
-        for encoder in encoder_candidates:
-            if encoder in failed_gpu_encoders:
-                continue
-            decode_attempts = (True, False) if encoder != 'libx264' else (False,)
-            for hardware_decode in decode_attempts:
-                command = build_video_preview_command(ffmpeg_exe, input_path, output_path, quality, encoder, hardware_decode)
-                result = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
-                if result.returncode == 0:
-                    used_encoder = encoder
-                    break
-            if used_encoder:
-                break
-            if encoder != 'libx264':
-                failed_gpu_encoders.add(encoder)
-                detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else '硬件编码器不可用'
-                log_info(f'GPU 编码器 {encoder} 不可用，将尝试其他编码器：{detail}')
-        if result is not None and result.returncode == 0:
+        try:
+            used_encoder = transcode_video_preview(input_path, output_path, quality, on_log=log_info)
             succeeded += 1
             if used_encoder and announced_encoder != used_encoder:
                 announced_encoder = used_encoder
@@ -1337,9 +1251,8 @@ def generate_video_previews(target_folder, quality='medium', on_generated=None, 
             if on_generated:
                 on_generated(output_path)
             log_info(f"视频预览版 {index}/{len(video_files)}：{os.path.basename(output_path)}")
-        else:
-            detail = result.stderr.strip().splitlines()[-1] if result and result.stderr.strip() else '未知转码错误'
-            emit('warning', f"视频预览生成失败，已保留原视频 {file_name}：{detail}")
+        except FFmpegTranscodeError as error:
+            emit('warning', f"视频预览生成失败，已保留原视频 {file_name}：{error}")
 
     return succeeded, len(video_files)
 
@@ -1349,8 +1262,7 @@ def split_large_videos(target_folder, on_split=None, source_paths=None):
     if not os.path.isdir(source_dir):
         return 0
 
-    target_size = 3.95 * 1024 * 1024 * 1024
-    ffmpeg_exe = get_ffmpeg_exe()
+    target_size = SPLIT_TARGET_BYTES
     split_count = 0
     file_names = list(os.listdir(source_dir)) if source_paths is None else [
         os.path.basename(file_path) for file_path in source_paths
@@ -1363,130 +1275,44 @@ def split_large_videos(target_folder, on_split=None, source_paths=None):
         if not os.path.isfile(input_path) or os.path.getsize(input_path) <= target_size:
             continue
 
-        probe = subprocess.run([ffmpeg_exe, '-i', input_path], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
-        match = re.search(r'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)', probe.stderr)
-        if not match:
-            emit('warning', f'无法读取视频时长，未分割：{file_name}')
-            continue
-
-        hours, minutes, seconds = match.groups()
-        total_seconds = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-        segment_duration = total_seconds * (target_size / os.path.getsize(input_path))
-        stem, extension = os.path.splitext(input_path)
-        output_pattern = f'{stem}_part%03d{extension}'
         log_info(f'正在将超过 4GB 的视频分割为约 3.95GB：{file_name}')
-        result = subprocess.run([
-            ffmpeg_exe, '-y', '-i', input_path, '-c', 'copy', '-f', 'segment',
-            '-segment_time', str(segment_duration), '-reset_timestamps', '1', output_pattern
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
-        prefix = os.path.basename(stem) + '_part'
-        segments = [name for name in os.listdir(source_dir) if name.startswith(prefix) and name.lower().endswith(extension.lower())]
-        if result.returncode == 0 and len(segments) >= 2:
-            segment_paths = [os.path.join(source_dir, segment) for segment in sorted(segments)]
+        try:
+            segment_paths = split_video_by_size(
+                input_path,
+                split_threshold_bytes=target_size,
+                target_segment_bytes=target_size,
+                maximum_segment_bytes=FOUR_GB,
+                cancel_check=ensure_not_cancelled,
+            )
+            if not segment_paths:
+                continue
             if on_split:
                 on_split(input_path, segment_paths)
-            os.remove(input_path)
             split_count += 1
-            log_info(f'视频分割完成：{file_name} → {len(segments)} 段')
-        else:
-            for segment in segments:
-                try: os.remove(os.path.join(source_dir, segment))
-                except OSError: pass
-            detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else '未生成完整分段'
-            emit('warning', f'视频分割失败，已保留原文件 {file_name}：{detail}')
+            log_info(f'视频分割完成：{file_name} → {len(segment_paths)} 段')
+        except FFmpegTranscodeError as error:
+            emit('warning', f'视频分割失败，已保留原文件 {file_name}：{error}')
     return split_count
 # --- 3. 核心导入流程 ---
-def _run_cancellable_process(command):
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding='utf-8',
-        errors='replace',
-    )
-    try:
-        while process.poll() is None:
-            ensure_not_cancelled()
-            time.sleep(0.2)
-        _stdout, stderr = process.communicate()
-        return process.returncode, stderr or ''
-    except BaseException:
-        process.terminate()
-        try:
-            process.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        raise
-
-
 def split_broll_video(input_path, keep_original=False):
     """Losslessly split one imported B-roll video and return its new segments."""
     if not os.path.isfile(input_path) or os.path.getsize(input_path) <= FOUR_GB:
         return []
     ensure_not_cancelled()
-    ffmpeg_exe = get_ffmpeg_exe()
-    probe = subprocess.run(
-        [ffmpeg_exe, '-hide_banner', '-i', input_path],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding='utf-8',
-        errors='replace',
-    )
-    match = re.search(r'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)', probe.stderr)
-    if not match:
-        raise IOError(f'无法读取视频时长，不能安全分割：{os.path.basename(input_path)}')
-    hours, minutes, seconds = match.groups()
-    total_seconds = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-    segment_duration = total_seconds * (SPLIT_TARGET_BYTES / os.path.getsize(input_path))
-    source_dir = os.path.dirname(input_path)
-    stem, extension = os.path.splitext(input_path)
-    prefix = os.path.basename(stem) + '_part'
-    existing = {
-        name for name in os.listdir(source_dir)
-        if name.startswith(prefix) and name.lower().endswith(extension.lower())
-    }
-    if existing:
-        raise IOError(f'目标分段文件已经存在：{prefix}…{extension}')
-    temporary_dir = os.path.join(source_dir, f'.photoflow-split-{os.getpid()}-{time.time_ns()}')
-    os.makedirs(temporary_dir, exist_ok=False)
-    output_pattern = os.path.join(temporary_dir, f'{os.path.basename(stem)}_part%03d{extension}')
     log_info(f'正在将超过 4GB 的花絮视频分割为约 3.95GB：{os.path.basename(input_path)}')
-    committed_segments = []
     try:
-        code, stderr = _run_cancellable_process([
-            ffmpeg_exe, '-hide_banner', '-loglevel', 'error', '-n', '-i', input_path,
-            '-map', '0', '-c', 'copy', '-f', 'segment', '-segment_time', str(segment_duration),
-            '-reset_timestamps', '1', output_pattern,
-        ])
-        ensure_not_cancelled()
-        temporary_segments = sorted(
-            os.path.join(temporary_dir, name) for name in os.listdir(temporary_dir)
-            if name.startswith(prefix) and name.lower().endswith(extension.lower())
+        segments = split_video_by_size(
+            input_path,
+            split_threshold_bytes=FOUR_GB,
+            target_segment_bytes=SPLIT_TARGET_BYTES,
+            maximum_segment_bytes=FOUR_GB,
+            keep_original=keep_original,
+            cancel_check=ensure_not_cancelled,
         )
-        complete = code == 0 and len(temporary_segments) >= 2 and all(0 < os.path.getsize(segment) <= FOUR_GB for segment in temporary_segments)
-        if not complete:
-            detail = stderr.strip().splitlines()[-1] if stderr.strip() else '未生成完整且不超过 4GB 的分段'
-            raise IOError(detail)
-        for temporary_segment in temporary_segments:
-            final_segment = os.path.join(source_dir, os.path.basename(temporary_segment))
-            if os.path.exists(final_segment):
-                raise FileExistsError(f'目标分段文件已经存在：{os.path.basename(final_segment)}')
-            os.replace(temporary_segment, final_segment)
-            committed_segments.append(final_segment)
-    except Exception:
-        for segment in committed_segments:
-            try: os.remove(segment)
-            except OSError: pass
-        raise
-    finally:
-        shutil.rmtree(temporary_dir, ignore_errors=True)
-    if not keep_original:
-        os.remove(input_path)
-    log_info(f'花絮视频分割完成：{os.path.basename(input_path)} → {len(committed_segments)} 段')
-    return committed_segments
+    except FFmpegTranscodeError as error:
+        raise IOError(f'无法安全分割 {os.path.basename(input_path)}：{error}') from error
+    log_info(f'花絮视频分割完成：{os.path.basename(input_path)} → {len(segments)} 段')
+    return segments
 
 
 def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, should_split=None, generate_video_preview=False, split_large_files=False, project_routes=None, direct_project=False, video_preview_quality='medium', direct_source=False, source_paths=None, delete_source=False, generate_jpg_from_raw=False, import_session='', date_filter='all'):
