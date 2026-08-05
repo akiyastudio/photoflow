@@ -580,7 +580,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
       return true;
     });
   }, [customProjectCategories, project.status, projectCategoryOrder]);
-  const { panelTasks } = useTaskCenter();
+  const { backgroundTasks, panelTasks } = useTaskCenter();
   const [folders, setFolders] = useState<Array<{ name: string; path: string; updatedAt: number }>>([]);
   const [progressFolders, setProgressFolders] = useState<ProgressFolder[]>([]);
   const [fileEntries, setFileEntries] = useState<ProjectFileEntry[]>([]);
@@ -649,6 +649,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     setSelectedPaths([]);
   }, [fileFilter]);
   const [cutPaths, setCutPaths] = useState<string[]>([]);
+  const [pasteRequestPending, setPasteRequestPending] = useState(false);
   const [dragTargetPath, setDragTargetPath] = useState('');
   const [recursiveDropTargetPath, setRecursiveDropTargetPath] = useState<string | null>(null);
   const [surfaceDropActive, setSurfaceDropActive] = useState(false);
@@ -1572,6 +1573,23 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     if (recursiveFlatOpen) setRecentRefreshToken(current => current + 1);
   };
   const formatFileSize = (size: number) => size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${Math.round(size / 1024)} KB` : size < 1024 * 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MB` : `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  const activePasteTask = backgroundTasks.find(task => task.type === 'project-file-operation'
+    && task.metadata?.operation === 'paste'
+    && task.metadata?.projectName === project.name
+    && (task.state === 'queued' || task.state === 'running'));
+  const pasteTaskMetadata = activePasteTask?.metadata || {};
+  const pasteFilesCopied = Number(pasteTaskMetadata.filesCopied || 0);
+  const pasteTotalFiles = Number(pasteTaskMetadata.totalFiles || 0);
+  const pasteBytesCopied = Number(pasteTaskMetadata.bytesCopied || 0);
+  const pasteTotalBytes = Number(pasteTaskMetadata.totalBytes || 0);
+  const pasteActivityVisible = pasteRequestPending || Boolean(activePasteTask);
+  const pasteActivityMessage = activePasteTask?.state === 'queued'
+    ? '正在等待可用的磁盘任务…'
+    : activePasteTask?.message || '正在读取系统剪贴板并准备文件…';
+  const pasteActivityDetails = [
+    pasteTotalFiles > 0 ? `${pasteFilesCopied}/${pasteTotalFiles} 个文件` : '',
+    pasteTotalBytes > 0 ? `${formatFileSize(pasteBytesCopied)}/${formatFileSize(pasteTotalBytes)}` : '',
+  ].filter(Boolean).join(' · ');
   const openFolder = async (folderName?: string) => {
     const result = await window.electronAPI.openWorkspaceProject(workspacePath, project.status, project.name, folderName);
     if (!result.success) onNotice(`打开文件夹失败：${result.error || '未知错误'}`);
@@ -2968,21 +2986,35 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
       setClipboardHasFiles(true);
       onNotice(operation === 'copy' ? '成功复制文件' : `已剪切 ${targetPaths.length} 个项目`);
     }
+    if (operation === 'paste') {
+      setPasteRequestPending(true);
+      onNotice('已接收粘贴操作，正在准备文件…');
+    }
     const normalizedDestination = normalizeProjectRelativePath(destinationRelativePath);
-    let result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, operation, targetPaths, normalizedDestination, nextName);
-    if (result.requiresDecision?.kind === 'paste-conflict') {
-      const policy = await appDialog.choice({
-        title: '目标位置已有同名项目',
-        message: result.requiresDecision.message,
-        detail: result.requiresDecision.detail,
-        choices: [
-          { value: 'replace', label: '替换并继续', tone: 'danger' },
-          { value: 'keep-both', label: '保留两者' },
-        ],
-        defaultValue: 'keep-both',
-      });
-      if (policy !== 'replace' && policy !== 'keep-both') { onNotice('粘贴已取消'); refresh(); return; }
-      result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, operation, targetPaths, normalizedDestination, nextName, { pasteConflictPolicy: policy });
+    let result: Awaited<ReturnType<typeof window.electronAPI.projectFileOperation>>;
+    try {
+      result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, operation, targetPaths, normalizedDestination, nextName);
+      if (result.requiresDecision?.kind === 'paste-conflict') {
+        setPasteRequestPending(false);
+        const policy = await appDialog.choice({
+          title: '目标位置已有同名项目',
+          message: result.requiresDecision.message,
+          detail: result.requiresDecision.detail,
+          choices: [
+            { value: 'replace', label: '替换并继续', tone: 'danger' },
+            { value: 'keep-both', label: '保留两者' },
+          ],
+          defaultValue: 'keep-both',
+        });
+        if (policy !== 'replace' && policy !== 'keep-both') { onNotice('粘贴已取消'); refresh(); return; }
+        setPasteRequestPending(true);
+        result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, operation, targetPaths, normalizedDestination, nextName, { pasteConflictPolicy: policy });
+      }
+    } catch (error) {
+      onNotice(`操作失败：${error instanceof Error ? error.message : String(error || '未知错误')}`);
+      return;
+    } finally {
+      if (operation === 'paste') setPasteRequestPending(false);
     }
     if (result.cancelled) { onNotice('粘贴已取消'); refresh(); return; }
     if (!result.success) {
@@ -3994,7 +4026,7 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
       {surfaceMenu && createPortal(<ViewportContextMenu x={surfaceMenu.x} y={surfaceMenu.y} widthClass="w-56" allowSubmenus>
         <p className="truncate px-2 py-1 text-[11px] font-bold text-slate-400" title={surfaceMenu.targetLabel}>在“{surfaceMenu.targetLabel}”中操作</p>
         <div className="group/submenu relative"><button className="project-menu-item w-full"><FolderPlus size={14}/>新建<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-72 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100">{projectWorkflows && !recursiveFlatOpen && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); void openProgressSetup('create'); }}><FolderPlus size={14}/>新建进度</button>}<button className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void createFolder(target); }}><Folder size={14}/>新建文件夹</button><div className="my-1 border-t border-slate-100"/><div className="flex items-center justify-between px-2 pb-1 pt-1"><p className="text-[11px] font-bold text-slate-400">Windows 文件类型</p><button type="button" title="重新扫描 Windows 新建文件类型" disabled={shellNewTypesLoading} onClick={() => void loadShellNewTypes(true)} className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"><RefreshCw size={12} className={shellNewTypesLoading ? 'animate-spin' : ''}/></button></div><div className="max-h-72 overflow-y-auto">{shellNewTypesLoading && <p className="px-2 py-2 text-xs text-slate-400">正在读取系统新建菜单…</p>}{!shellNewTypesLoading && shellNewTypes.map(type => <button key={type.id} className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void createShellNewFile(type, target); }}>{type.iconDataUrl ? <img src={type.iconDataUrl} alt="" className="h-4 w-4 shrink-0 object-contain"/> : <File size={14} className="shrink-0"/>}<span className="min-w-0 flex-1 truncate">{type.label}</span><span className="ml-auto shrink-0 font-mono text-[10px] text-slate-400">{type.extension}</span></button>)}{!shellNewTypesLoading && shellNewTypesLoaded && !shellNewTypes.length && <p className="px-2 py-2 text-xs text-slate-400">系统没有可用的新建文件类型</p>}</div></div></div>
-        <div className="group/submenu relative"><button className="project-menu-item w-full"><FolderInput size={14}/>导入<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-52 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100"><button className="project-menu-item" onClick={() => { setSurfaceMenu(null); setPanel('import'); }}><MemoryStick size={14}/>从 SD 卡导入</button><button className="project-menu-item" onClick={() => { setSurfaceMenu(null); setPanel('negative-import'); }}><Aperture size={14}/>导入底片</button>{projectWorkflows && !recursiveFlatOpen && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); void openProgressSetup('import'); }}><FolderInput size={14}/>导入进度</button>}{projectWorkflows && !recursiveFlatOpen && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); setDeleteBrollSources(importDefaults.deleteSourceAfterImport); setPanel('broll'); }}><FolderInput size={14}/>导入花絮</button>}<div className="my-1 border-t border-slate-100"/><button className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); openFileImport(target); }}><FileInput size={14}/>导入文件</button></div></div>
+        <div className="group/submenu relative"><button className="project-menu-item w-full"><FolderInput size={14}/>导入<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-52 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100">{projectWorkflows && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); setPanel('import'); }}><MemoryStick size={14}/>从 SD 卡导入</button>}{projectWorkflows && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); setPanel('negative-import'); }}><Aperture size={14}/>导入底片</button>}{projectWorkflows && !recursiveFlatOpen && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); void openProgressSetup('import'); }}><FolderInput size={14}/>导入进度</button>}{projectWorkflows && !recursiveFlatOpen && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); setDeleteBrollSources(importDefaults.deleteSourceAfterImport); setPanel('broll'); }}><FolderInput size={14}/>导入花絮</button>}{projectWorkflows && <div className="my-1 border-t border-slate-100"/>}<button className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); openFileImport(target); }}><FileInput size={14}/>导入文件</button></div></div>
         <div className="my-1 border-t border-slate-100"/>
         <button disabled={!clipboardHasFiles} title={clipboardHasFiles ? `粘贴到“${surfaceMenu.targetLabel}”` : '剪贴板中没有文件'} className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void runFileOperation('paste', undefined, [], target); }}><ClipboardPaste size={14}/>粘贴</button>
         <button className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void copyCurrentDirectoryPath(target); }}><FileText size={14}/>复制此文件夹地址</button>
@@ -4037,11 +4069,11 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
         <div className="relative" onClick={event => event.stopPropagation()}>
           <button onClick={() => { const next = !showImportMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowImportMenu(next); }} title="导入" aria-label="导入" aria-haspopup="menu" aria-expanded={showImportMenu} className="project-action-button"><FolderInput size={16}/>导入</button>
           {showImportMenu && <div className="absolute left-0 top-full z-40 mt-1 w-48 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">
-            <button className="project-menu-item" onClick={() => { setShowImportMenu(false); setPanel('import'); }}><MemoryStick size={14}/>从 SD 卡导入</button>
-            <button className="project-menu-item" onClick={() => { setShowImportMenu(false); setPanel('negative-import'); }}><Aperture size={14}/>导入底片</button>
+            {projectWorkflows && <button className="project-menu-item" onClick={() => { setShowImportMenu(false); setPanel('import'); }}><MemoryStick size={14}/>从 SD 卡导入</button>}
+            {projectWorkflows && <button className="project-menu-item" onClick={() => { setShowImportMenu(false); setPanel('negative-import'); }}><Aperture size={14}/>导入底片</button>}
             {projectWorkflows && <button className="project-menu-item" onClick={() => void openProgressSetup('import')}><FolderInput size={14}/>导入进度</button>}
             {projectWorkflows && <button className="project-menu-item" onClick={() => { setShowImportMenu(false); setDeleteBrollSources(importDefaults.deleteSourceAfterImport); setPanel('broll'); }}><FolderInput size={14}/>导入花絮</button>}
-            <div className="my-1 border-t border-slate-100"/>
+            {projectWorkflows && <div className="my-1 border-t border-slate-100"/>}
             <button className="project-menu-item" onClick={() => openFileImport()}><FileInput size={14}/>导入文件</button>
           </div>}
         </div>
@@ -4081,6 +4113,17 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
         </div>
         {finalViewOpen && <button type="button" disabled={finalExporting || !finalViewEntries.length} onClick={() => void exportFinalVersions()} className="ml-auto shrink-0 rounded-md px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40">{finalExporting ? '正在整理…' : '整理喜爱图片'}</button>}
       </div>
+      {pasteActivityVisible && <div role="status" aria-live="polite" className="mx-6 mb-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2.5 shadow-sm">
+        <div className="flex min-w-0 items-center gap-3">
+          <Loader2 size={16} className="shrink-0 animate-spin text-blue-600"/>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center justify-between gap-3 text-xs"><span className="truncate font-bold text-blue-800">{pasteActivityMessage}</span><span className="shrink-0 font-mono font-bold tabular-nums text-blue-700">{Math.round(activePasteTask?.progress || 0)}%</span></div>
+            <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-600 transition-[width] duration-150" style={{ width: `${Math.max(activePasteTask ? 2 : 0, activePasteTask?.progress || 0)}%` }}/></div>
+            <p className="mt-1 text-[11px] tabular-nums text-blue-600">{pasteActivityDetails || '文件准备完成后会自动显示在当前文件夹；可以继续使用软件。'}</p>
+          </div>
+          {activePasteTask?.cancellable && <button type="button" onClick={() => void window.electronAPI.cancelBackgroundTask(activePasteTask.id)} className="shrink-0 rounded-md px-2.5 py-1.5 text-xs font-bold text-red-600 hover:bg-red-50">取消</button>}
+        </div>
+      </div>}
       </div>
 
       {mountedPanels.has('converter') && <ToolModal title={PROJECT_PANEL_TITLES.converter} scopeKey={project.path} panelKind="converter" open={panel === 'converter'} onClose={() => setPanel(null)}><ConverterView embedded initialTargetPaths={conversionTargets}/></ToolModal>}
