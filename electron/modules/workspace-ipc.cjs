@@ -31,6 +31,7 @@ const registerWorkspaceIpc = context => {
   ]);
   const screenshotMainImageExtensions = new Set(['.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp']);
   const missingProjectRetentionMs = 30 * 24 * 60 * 60 * 1000;
+  const recentFilesSessionExpiredCode = 'RECENT_FILES_SESSION_EXPIRED';
   const recentFileSessions = new Map();
   const progressImportConflictCache = new Map();
   const pruneRecentFileSessions = () => {
@@ -952,7 +953,9 @@ const registerWorkspaceIpc = context => {
       pruneRecentFileSessions();
       let cursor = String(requestedCursor || '');
       let session = cursor ? recentFileSessions.get(cursor) : null;
-      if (cursor && (!session || session.root !== root || session.scope !== scope)) throw new Error('递归显示会话已失效，请重新打开递归显示');
+      if (cursor && (!session || session.root !== root || session.scope !== scope)) {
+        throw Object.assign(new Error('递归显示会话已失效，正在自动重新加载'), { code: recentFilesSessionExpiredCode });
+      }
       if (!session) {
         while (recentFileSessions.size >= 16) {
           const oldest = [...recentFileSessions.entries()].sort((left, right) => left[1].touchedAt - right[1].touchedAt)[0];
@@ -1068,7 +1071,12 @@ const registerWorkspaceIpc = context => {
       };
     } catch (error) {
       writeLog('warn', 'Unable to list recent project files', { projectName, scopeRelativePath, error: error.message || String(error) });
-      return { success: false, entries: [], error: error.message || String(error) };
+      return {
+        success: false,
+        entries: [],
+        error: error.message || String(error),
+        errorCode: error?.code === recentFilesSessionExpiredCode ? recentFilesSessionExpiredCode : undefined,
+      };
     }
   });
 

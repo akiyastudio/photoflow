@@ -842,7 +842,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     </>}
     {activeSection === 'video-playback-mpv' && <>
     <SettingsPageGroup title="视频浏览">
-      <SettingsRow title="左右方向键行为" description="另一组后退/前进键会自动执行相反操作，确保切换视频和快进快退均可使用。"><select value={advancedVideoSettings.arrowKeyAction} onChange={event => updateAdvancedVideoSettings({ arrowKeyAction: event.target.value as 'seek' | 'navigate' })} className="form-input ml-auto max-w-sm"><option value="seek">快退 / 快进 5 秒（默认）</option><option value="navigate">切换上一个 / 下一个视频</option></select></SettingsRow>
+      <SettingsRow title="左右方向键行为" description="播放器播放/暂停键左右两侧的后退、前进按钮会自动执行相反操作，确保切换视频和快进快退均可使用。"><select value={advancedVideoSettings.arrowKeyAction} onChange={event => updateAdvancedVideoSettings({ arrowKeyAction: event.target.value as 'seek' | 'navigate' })} className="form-input ml-auto max-w-sm"><option value="seek">快退 / 快进 5 秒（默认）</option><option value="navigate">切换上一个 / 下一个视频</option></select></SettingsRow>
     </SettingsPageGroup>
     </>}
     {activeSection === 'import' && <>

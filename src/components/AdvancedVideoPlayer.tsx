@@ -28,8 +28,6 @@ const videoDirectionalAction = (arrowKeyAction: AdvancedVideoComponentSettings['
 const videoDirectionalKeyboardInput = (key: string): { direction: -1 | 1; group: VideoDirectionalInputGroup } | null => {
   if (key === 'ArrowLeft') return { direction: -1, group: 'arrows' };
   if (key === 'ArrowRight') return { direction: 1, group: 'arrows' };
-  if (key === 'BrowserBack' || key === 'GoBack' || key === 'MediaTrackPrevious') return { direction: -1, group: 'forward-back' };
-  if (key === 'BrowserForward' || key === 'GoForward' || key === 'MediaTrackNext') return { direction: 1, group: 'forward-back' };
   return null;
 };
 
@@ -323,17 +321,9 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
       event.stopPropagation();
       runDirectionalAction(input.direction, input.group);
     };
-    const handleMouseNavigationButton = (event: MouseEvent) => {
-      if (event.button !== 3 && event.button !== 4) return;
-      event.preventDefault();
-      event.stopPropagation();
-      runDirectionalAction(event.button === 4 ? 1 : -1, 'forward-back');
-    };
     window.addEventListener('keydown', handleDirectionalKey);
-    window.addEventListener('mousedown', handleMouseNavigationButton);
     return () => {
       window.removeEventListener('keydown', handleDirectionalKey);
-      window.removeEventListener('mousedown', handleMouseNavigationButton);
     };
   }, [keyboardSettings.arrowKeyAction, seekRelative]);
   const captureFrame = async () => {
@@ -353,6 +343,14 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
     }
   };
 
+  const forwardBackAction = videoDirectionalAction(keyboardSettings.arrowKeyAction, 'forward-back');
+  const runForwardBackControl = (direction: -1 | 1) => {
+    if (forwardBackAction === 'navigate') onNavigateRef.current(direction);
+    else seekRelative(direction * SKIP_SECONDS);
+  };
+  const backwardControlLabel = forwardBackAction === 'navigate' ? '上一个视频' : '快退 5 秒';
+  const forwardControlLabel = forwardBackAction === 'navigate' ? '下一个视频' : '快进 5 秒';
+
   return <div className="absolute inset-0 flex min-h-0 flex-col bg-black">
     <div
       ref={surfaceRef}
@@ -371,9 +369,9 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
       style={poster ? { backgroundImage: `url(${JSON.stringify(poster).slice(1, -1)})` } : undefined}
     />
     {bottomControls || <div className="relative z-20 flex h-12 shrink-0 items-center gap-1 border-t border-white/10 bg-[#070b15] px-2 text-white">
-        {showNavigation && <button type="button" onClick={() => onNavigateRef.current(-1)} title="上一个视频" aria-label="上一个视频" className="rounded p-1.5 text-slate-100 hover:bg-white/10"><SkipBack size={16}/></button>}
+        {showNavigation && <button type="button" onClick={() => runForwardBackControl(-1)} title={backwardControlLabel} aria-label={backwardControlLabel} className="rounded p-1.5 text-slate-100 hover:bg-white/10"><SkipBack size={16}/></button>}
         <button type="button" disabled={!sessionId} onClick={togglePlayback} title={paused ? '播放' : '暂停'} aria-label={paused ? '播放' : '暂停'} className="rounded p-1.5 text-slate-100 hover:bg-white/10 disabled:opacity-40">{paused ? <Play size={17} fill="currentColor"/> : <Pause size={17} fill="currentColor"/>}</button>
-        {showNavigation && <button type="button" onClick={() => onNavigateRef.current(1)} title="下一个视频" aria-label="下一个视频" className="rounded p-1.5 text-slate-100 hover:bg-white/10"><SkipForward size={16}/></button>}
+        {showNavigation && <button type="button" onClick={() => runForwardBackControl(1)} title={forwardControlLabel} aria-label={forwardControlLabel} className="rounded p-1.5 text-slate-100 hover:bg-white/10"><SkipForward size={16}/></button>}
         <span className="w-10 text-right text-[11px] tabular-nums text-slate-300">{formatTime(time)}</span>
         <input type="range" min={0} max={Math.max(0.01, duration)} step={0.01} value={Math.min(time, Math.max(0.01, duration))} disabled={!duration} onChange={event => control('seek', Number(event.currentTarget.value))} aria-label="播放进度" className="min-w-12 flex-1 accent-blue-500 disabled:opacity-40"/>
         <span className="w-10 text-[11px] tabular-nums text-slate-300">{formatTime(duration)}</span>
