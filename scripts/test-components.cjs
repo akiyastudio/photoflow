@@ -179,6 +179,7 @@ assert(teamRetouchManager.includes('Math.round(task.crop.width)') && teamRetouch
 assert(teamRetouchManager.includes('openNextUnmarkedIdentity') && teamRetouchManager.includes('未标记 {unmarkedIdentityCount}'), 'the unmarked counter must open the next unmarked person');
 assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity candidate selection must prevent duplicate assignments from the same photo');
   const personIdentityManager = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'PersonIdentityManager.tsx'), 'utf8');
+  assert(personIdentityManager.includes('className="workflow-task-card p-3"') && !personIdentityManager.includes('last:border-0'), 'every workflow task card, including the final card, must retain its full outline');
   const teamOutputProgress = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'TeamRetouchOutputProgress.tsx'), 'utf8');
   const teamRetouchSteps = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'TeamRetouchSteps.tsx'), 'utf8');
   const projectWorkspace = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');

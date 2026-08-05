@@ -1076,7 +1076,7 @@ const IMAGE_PREVIEW_CONVERSION_EXTENSIONS = new Set(['.tif', '.tiff', '.heic', '
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.crm']);
 const RAW_EXTENSIONS = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
 const RAW_DECODER_CACHE_VERSION = 'libraw-rawpy-v1';
-const HIDDEN_SYSTEM_ENTRY_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store']);
+const HIDDEN_SYSTEM_ENTRY_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store', '.photoflow-workspace-id']);
 
 const getMediaCacheDir = (config = {}) => {
   const requested = typeof config.directory === 'string' ? config.directory.trim() : '';

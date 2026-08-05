@@ -13,6 +13,7 @@ fs.mkdirSync(path.join(sourceRoot, '参考目录'), { recursive: true });
 fs.mkdirSync(targetRoot, { recursive: true });
 fs.writeFileSync(path.join(sourceRoot, '参考目录', '说明.txt'), 'folder target');
 fs.writeFileSync(path.join(sourceRoot, '画面.jpg'), 'image payload');
+fs.writeFileSync(path.join(sourceRoot, '.photoflow-workspace-id'), 'inspiration-workspace-id');
 
 const handlers = new Map();
 const undoOperations = [];
@@ -49,14 +50,19 @@ const assertInside = (root, candidate) => {
 
 registerWorkspaceIpc({
   Array, Boolean, Date, Error, Math, Object, Promise, Set, String,
-  HIDDEN_SYSTEM_ENTRY_NAMES: new Set(), IMAGE_EXTENSIONS: new Set(['.jpg']), RAW_EXTENSIONS: new Set(), VIDEO_EXTENSIONS: new Set(), WORKSPACE_STATUSES: ['未分类', '策划中'],
+  HIDDEN_SYSTEM_ENTRY_NAMES: new Set(['.photoflow-workspace-id']), IMAGE_EXTENSIONS: new Set(['.jpg']), RAW_EXTENSIONS: new Set(), VIDEO_EXTENSIONS: new Set(), WORKSPACE_STATUSES: ['未分类', '策划中'],
   fs: handlerFs, path, crypto, copyFileAtomic, uniqueDestination, assertInside, assertExistingInside,
   ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
   acquireFileRootWatcher: root => { watchedRoots.push(path.resolve(root)); return { success: true, root: path.resolve(root) }; },
   releaseFileRootWatcher: root => releasedRoots.push(path.resolve(root)),
+  ensureWorkspace: workspacePath => workspacePath,
   getProjectPath: (_workspacePath, _status, projectName) => projectName === '.__photoflow_inspiration__' ? sourceRoot : targetRoot,
   resolveProjectEntry: (_workspacePath, _status, _projectName, relativePath) => path.resolve(sourceRoot, relativePath),
+  normalizeMediaCacheSizeGB: value => value,
+  mediaRuntimeState: {},
   mediaService: { grantRoot: () => sourceRoot },
+  thumbnailService: { indexDirectory: async () => false, scanProject: async () => undefined },
+  scheduleMediaTrackingScan: () => undefined,
   shell: {
     writeShortcutLink: (shortcutPath, options) => { fs.writeFileSync(shortcutPath, options.target); return true; },
     readShortcutLink: shortcutPath => ({ target: fs.readFileSync(shortcutPath, 'utf8') }),
@@ -76,6 +82,11 @@ registerWorkspaceIpc({
     await unwatchFileRoot({}, sourceRoot, '未分类', '.__photoflow_inspiration__');
     assert.deepStrictEqual(watchedRoots, [path.resolve(sourceRoot)]);
     assert.deepStrictEqual(releasedRoots, [path.resolve(sourceRoot)]);
+    const browseFiles = handlers.get('workspace-browse-files');
+    assert(browseFiles, 'browse-files IPC handler was not registered');
+    const browseResult = await browseFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__');
+    assert.strictEqual(browseResult.success, true, browseResult.error);
+    assert(!browseResult.entries.some(entry => entry.name === '.photoflow-workspace-id'), 'the inspiration library must hide its workspace identity marker');
     const gather = handlers.get('workspace-add-inspiration-to-project');
     assert(gather, 'inspiration gather IPC handler was not registered');
     const result = await gather({}, sourceRoot, temporaryRoot, '策划中', '项目', ['参考目录', '画面.jpg']);
