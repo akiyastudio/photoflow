@@ -41,7 +41,7 @@ try {
 
   const installer = fs.readFileSync(path.join(repositoryRoot, 'build', 'installer.nsh'), 'utf8');
   assert.strictEqual(packageJson.build.nsis.license, 'docs/legal/INSTALLER_TERMS.txt', 'NSIS must use the native text license renderer instead of the unreliable legacy HTML control');
-  assert.strictEqual(packageJson.build.nsis.perMachine, false, 'installer consent must remain scoped to the current Windows user');
+  assert.strictEqual(packageJson.build.nsis.perMachine, true, 'installer must request administrator approval before installing for all Windows users');
   const installerLicense = fs.readFileSync(path.join(repositoryRoot, packageJson.build.nsis.license));
   assert.deepStrictEqual([...installerLicense.subarray(0, 3)], [0xef, 0xbb, 0xbf], 'NSIS installation terms must use a UTF-8 BOM so Chinese text renders correctly');
   const installerLicenseText = installerLicense.toString('utf8');
@@ -215,12 +215,13 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   const workflowReturnDialog = personIdentityManager.slice(personIdentityManager.indexOf('const WorkflowReturnReviewDialog'), personIdentityManager.indexOf('type WorkflowItem'));
   assert(!workflowReturnDialog.includes('event.target === event.currentTarget') && workflowReturnDialog.includes('点击四周不会关闭'), 'the returned-image review dialog must never discard progress when its backdrop is clicked');
   assert(personIdentityManager.includes('getTeamWorkflowReturnReview') && personIdentityManager.includes('继续处理未确认返图') && personIdentityManager.includes('暂存并退出') && personIdentityManager.includes('放弃本批次'), 'unfinished returned-image reviews must persist and expose explicit resume, suspend, and discard actions');
+  assert(personIdentityManager.includes('不是任务返图') && personIdentityManager.includes('ignoreTeamWorkflowReturnReview') && personIdentityManager.includes('没有任务被完成'), 'each unmatched returned image must be individually removable without forcing an incorrect task match');
   const returnImageLoader = personIdentityManager.slice(personIdentityManager.indexOf('const ReturnImage'), personIdentityManager.indexOf('const returnCandidates'));
   assert(returnImageLoader.includes("if (eager)") && returnImageLoader.indexOf('getMediaOriginal') < returnImageLoader.indexOf('getMediaThumbnail') && !returnImageLoader.includes("eager ? 1600"), 'full return comparison must load the original directly instead of depending on an oversized Shell thumbnail');
   const visualIdentityPicker = personIdentityManager.slice(personIdentityManager.indexOf('const handlePick'), personIdentityManager.indexOf("window.addEventListener('photoflow-team-person-pick'"));
   assert(!visualIdentityPicker.includes("tab !== 'people'") && visualIdentityPicker.includes("tab === 'workflow'") && visualIdentityPicker.indexOf('setAssigningSubject(subject)') < visualIdentityPicker.indexOf('getTeamIdentitySimilarities'), 'workflow thumbnails must open the visual identity picker immediately while protecting completed tasks');
   const versionsIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
-  assert(versionsIpc.includes("workspace-team-workflow-return-review-get") && versionsIpc.includes("workspace-team-workflow-return-review-discard") && versionsIpc.includes("workflow-return-reviews"), 'the main process must persist and manage unfinished workflow return review sessions');
+  assert(versionsIpc.includes("workspace-team-workflow-return-review-get") && versionsIpc.includes("workspace-team-workflow-return-review-discard") && versionsIpc.includes("workspace-team-workflow-return-review-ignore") && versionsIpc.includes("workflow-return-reviews"), 'the main process must persist and manage unfinished workflow return review sessions');
   const workflowReturnBatchIpc = versionsIpc.slice(versionsIpc.indexOf("workspace-team-workflow-return-batch"), versionsIpc.indexOf("workspace-team-workflow-return-confirm"));
   assert(workflowReturnBatchIpc.indexOf('mkdir(reviewTarget.reviewRoot') < workflowReturnBatchIpc.indexOf('pluginService.runJson(') && workflowReturnBatchIpc.indexOf('mkdir(reviewTarget.reviewRoot') < workflowReturnBatchIpc.indexOf('mkdir(stagingDirectory'), 'the workflow return review parent directory must be verified before matching or completing any task');
   assert(versionsIpc.includes('const requestedSameWeekIdentityIds = new Set((settings.sameWeekIdentityIds || []).map(String))') && versionsIpc.includes('const generatedSameWeekSet = new Set(') && versionsIpc.includes('generatedOrder.slice(1).filter(identityId => generatedSameWeekSet.has(identityId))'), 'same-week workflow settings must compare semantic membership instead of persisted array order');

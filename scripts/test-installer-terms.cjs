@@ -9,7 +9,7 @@ const privacyService = fs.readFileSync(path.join(repositoryRoot, 'electron', 'pr
 
 assert.strictEqual(packageJson.build.nsis.license, 'docs/legal/INSTALLER_TERMS.txt');
 assert.strictEqual(packageJson.build.nsis.oneClick, false);
-assert.strictEqual(packageJson.build.nsis.perMachine, false);
+assert.strictEqual(packageJson.build.nsis.perMachine, true);
 assert(packageJson.scripts['electron:build'].includes('npm run generate:installer-terms'));
 
 const text = fs.readFileSync(path.join(repositoryRoot, packageJson.build.nsis.license));

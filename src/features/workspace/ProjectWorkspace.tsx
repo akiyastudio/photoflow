@@ -24,6 +24,7 @@ const CONTEXT_MENU_VIEWPORT_MARGIN = 8;
 const FILE_VIRTUAL_OVERSCAN_ROWS = 10;
 const RECENT_FILES_PAGE_SIZE = 240;
 const RECENT_FILES_LOAD_AHEAD_PX = 900;
+const RECENT_FILES_SESSION_EXPIRED = 'RECENT_FILES_SESSION_EXPIRED';
 const OFFICE_OPEN_XML_EXTENSIONS = new Set([
   '.docx', '.docm', '.dotx', '.dotm',
   '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam',
@@ -161,9 +162,26 @@ const pickMetadataValue = (fields: MediaMetadataField[], ...names: string[]) => 
   }
   return undefined;
 };
-const formatCaptureDate = (value?: string) => value
-  ? value.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3').replace(/([+-]\d{2}):?(\d{2})$/, ' $1:$2')
-  : undefined;
+const formatCaptureDate = (value?: string) => {
+  const source = value?.trim();
+  if (!source) return undefined;
+  const parts = source.match(/^(\d{4})[:-](\d{2})[:-](\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (parts) {
+    const [, yearText, monthText, dayText, hourText = '00', minuteText = '00', secondText = '00'] = parts;
+    const year = Number(yearText); const month = Number(monthText); const day = Number(dayText);
+    const hour = Number(hourText); const minute = Number(minuteText); const second = Number(secondText);
+    const maximumDay = year > 0 && month >= 1 && month <= 12 ? new Date(Date.UTC(year, month, 0)).getUTCDate() : 0;
+    if (year < 1 || month < 1 || month > 12 || day < 1 || day > maximumDay || hour > 23 || minute > 59 || second > 59) return undefined;
+  }
+  return source.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3').replace(/([+-]\d{2}):?(\d{2})$/, ' $1:$2');
+};
+const pickCaptureDate = (fields: MediaMetadataField[], ...names: string[]) => {
+  for (const name of names) {
+    const formatted = formatCaptureDate(pickMetadataValue(fields, name));
+    if (formatted) return formatted;
+  }
+  return undefined;
+};
 const formatShutterSpeed = (value?: string) => {
   if (!value) return undefined;
   if (/\//.test(value)) return value;
@@ -180,7 +198,7 @@ const requestCaptureDateTime = (entry: ProjectFileEntry) => {
   if (cached) return cached;
   const request = window.electronAPI.getMediaMetadata(entry.path).then(result => {
     if (!result.success) return undefined;
-    return formatCaptureDate(pickMetadataValue(result.fields, 'DateTimeOriginal', 'CreateDate', 'MediaCreateDate', 'TrackCreateDate', 'CreationDate'));
+    return pickCaptureDate(result.fields, 'DateTimeOriginal', 'CreateDate', 'MediaCreateDate', 'TrackCreateDate', 'CreationDate', 'FileModifyDate');
   });
   if (captureDateTimeRequestCache.size >= 256) captureDateTimeRequestCache.delete(captureDateTimeRequestCache.keys().next().value as string);
   captureDateTimeRequestCache.set(cacheKey, request);
@@ -1306,8 +1324,12 @@ const FileBrowserWorkspace = ({ active, activeView, project, workspacePath, insp
     setRecentLoadError('');
     const sequence = searchSequenceRef.current;
     try {
-      const result = await window.electronAPI.listRecentProjectFiles(workspacePath, project.status, project.name, currentRelativePath, RECENT_FILES_PAGE_SIZE, recentCursor);
+      let result = await window.electronAPI.listRecentProjectFiles(workspacePath, project.status, project.name, currentRelativePath, RECENT_FILES_PAGE_SIZE, recentCursor);
       if (sequence !== searchSequenceRef.current) return;
+      if (!result.success && result.errorCode === RECENT_FILES_SESSION_EXPIRED) {
+        result = await window.electronAPI.listRecentProjectFiles(workspacePath, project.status, project.name, currentRelativePath, RECENT_FILES_PAGE_SIZE);
+        if (sequence !== searchSequenceRef.current) return;
+      }
       if (!result.success) {
         setRecentHasMore(false);
         setRecentLoadError(result.error || '继续读取最近文件失败');
@@ -4860,17 +4882,9 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, advancedVideoAvailable, k
       event.stopPropagation();
       runDirectionalAction(input.direction, input.group);
     };
-    const handleFallbackMouseNavigationButton = (event: MouseEvent) => {
-      if (event.button !== 3 && event.button !== 4) return;
-      event.preventDefault();
-      event.stopPropagation();
-      runDirectionalAction(event.button === 4 ? 1 : -1, 'forward-back');
-    };
     window.addEventListener('keydown', handleFallbackVideoKey);
-    window.addEventListener('mousedown', handleFallbackMouseNavigationButton);
     return () => {
       window.removeEventListener('keydown', handleFallbackVideoKey);
-      window.removeEventListener('mousedown', handleFallbackMouseNavigationButton);
     };
   }, [entry?.path, useAdvancedVideo, keyboardSettings.arrowKeyAction, onNavigate]);
 
@@ -5003,7 +5017,7 @@ const FileMetadataPane = ({ entry, entryDetails, metadataFields, metadataLoading
     ['编码', firstValue('CompressorName', 'VideoCodec', 'Encoder')], ['尺寸', dimensions], ['帧率', firstValue('VideoFrameRate', 'CaptureFrameRate')],
     ['时长', firstValue('Duration') || formatMediaDuration(technicalMetadata.duration)], ['码率', firstValue('AvgBitrate', 'VideoAvgBitrate', 'Bitrate')], ['音频', firstValue('AudioFormat', 'AudioCodec')]
   ] : [
-    ['相机', camera], ['镜头', firstValue('LensModel', 'Lens')], ['拍摄时间', formatCaptureDate(firstValue('DateTimeOriginal', 'CreateDate', 'MediaCreateDate', 'TrackCreateDate'))], ['尺寸', dimensions],
+    ['相机', camera], ['镜头', firstValue('LensModel', 'Lens')], ['拍摄时间', pickCaptureDate(metadataFields, 'DateTimeOriginal', 'CreateDate', 'MediaCreateDate', 'TrackCreateDate')], ['尺寸', dimensions],
     ['光圈', firstValue('FNumber', 'Aperture')], ['快门', formatShutterSpeed(firstValue('ExposureTime', 'ShutterSpeed'))], ['ISO', firstValue('ISO')], ['焦距', firstValue('FocalLength')]
   ]).filter((item): item is string[] => Boolean(item[1] && item[1] !== '—'));
   const applicationFields: MediaMetadataField[] = entry ? [

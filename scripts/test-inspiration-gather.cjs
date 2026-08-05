@@ -48,7 +48,7 @@ const assertInside = (root, candidate) => {
 };
 
 registerWorkspaceIpc({
-  Array, Boolean, Date, Error, Object, Promise, Set, String,
+  Array, Boolean, Date, Error, Math, Object, Promise, Set, String,
   HIDDEN_SYSTEM_ENTRY_NAMES: new Set(), IMAGE_EXTENSIONS: new Set(['.jpg']), RAW_EXTENSIONS: new Set(), VIDEO_EXTENSIONS: new Set(), WORKSPACE_STATUSES: ['未分类', '策划中'],
   fs: handlerFs, path, crypto, copyFileAtomic, uniqueDestination, assertInside, assertExistingInside,
   ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
@@ -97,6 +97,9 @@ registerWorkspaceIpc({
     assert.strictEqual(undoOperations[0].paths.length, 2);
     const recentFiles = handlers.get('workspace-recent-files');
     assert(recentFiles, 'recent-files IPC handler was not registered');
+    const expiredRecentResult = await recentFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__', '', 1, 'expired-cursor');
+    assert.strictEqual(expiredRecentResult.success, false);
+    assert.strictEqual(expiredRecentResult.errorCode, 'RECENT_FILES_SESSION_EXPIRED');
     readDirectories.length = 0;
     const recentResult = await recentFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__', '', 1);
     assert.strictEqual(recentResult.success, true, recentResult.error);

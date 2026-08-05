@@ -1936,6 +1936,35 @@ const registerVersionIpc = context => {
     }
   });
 
+  ipcMain.handle('workspace-team-workflow-return-review-ignore', async (_event, workspacePath, projectName, reviewSessionId, returnId) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const reviewTarget = await readTeamWorkflowReturnReview(workspaceRoot, projectName);
+      if (!reviewTarget.session || String(reviewTarget.session.id) !== String(reviewSessionId)) throw new Error('待确认返图批次已经变化，请重新进入项目后继续');
+      const ignoredMatch = (reviewTarget.session.result?.matches || []).find(match => String(match.returnId) === String(returnId));
+      if (!ignoredMatch || ignoredMatch.accepted) throw new Error('这张返图已经处理或不属于当前审核批次');
+      const matches = reviewTarget.session.result.matches.filter(match => String(match.returnId) !== String(returnId));
+      const reviewCount = matches.filter(match => !match.accepted).length;
+      reviewTarget.session.updatedAt = Date.now();
+      reviewTarget.session.result = {
+        ...reviewTarget.session.result,
+        matches,
+        reviewCount,
+        ignoredCount: Number(reviewTarget.session.result.ignoredCount || 0) + 1,
+      };
+      if (reviewCount > 0) {
+        await writeTeamWorkflowReturnReview(reviewTarget.sessionPath, reviewTarget.session);
+        const ignoredPath = path.resolve(String(ignoredMatch.path || ''));
+        if (isInside(reviewTarget.directory, ignoredPath)) await fs.promises.rm(ignoredPath, { force: true });
+      } else {
+        await discardTeamWorkflowReturnReview(workspaceRoot, projectName, reviewTarget.session.id);
+      }
+      return { success: true, reviewSessionCompleted: reviewCount === 0 };
+    } catch (error) {
+      return { success: false, reviewSessionCompleted: false, error: error.message || String(error) };
+    }
+  });
+
   ipcMain.handle('workspace-team-workflow-return-batch', async (event, workspacePath, projectName, request = {}) => {
     let manifestPath = '';
     try {

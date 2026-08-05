@@ -508,8 +508,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     if (player != null) player.TogglePause();
                 }
             }
-            else if (eventArgs.Button == MouseButtons.XButton1 || eventArgs.Button == MouseButtons.XButton2)
-                HandleDirectionalInput(eventArgs.Button == MouseButtons.XButton2 ? 1 : -1, false);
             else if (eventArgs.Button == MouseButtons.Right)
                 Emit(new Dictionary<string, object> {
                     { "type", "context-menu" }, { "x", eventArgs.X }, { "y", eventArgs.Y }
@@ -565,23 +563,15 @@ namespace PhotoFlow.AdvancedVideoDecoder
             }
             if (key == Keys.Left || key == Keys.Right)
             {
-                HandleDirectionalInput(key == Keys.Right ? 1 : -1, true);
-                return true;
-            }
-            if (key == Keys.BrowserBack || key == Keys.BrowserForward || key == Keys.MediaPreviousTrack || key == Keys.MediaNextTrack)
-            {
-                HandleDirectionalInput(key == Keys.BrowserForward || key == Keys.MediaNextTrack ? 1 : -1, false);
+                HandleArrowKeyInput(key == Keys.Right ? 1 : -1);
                 return true;
             }
             return base.ProcessCmdKey(ref message, keyData);
         }
 
-        private void HandleDirectionalInput(int direction, bool arrowKeys)
+        private void HandleArrowKeyInput(int direction)
         {
-            // The two key groups are deliberately complementary: exactly one
-            // navigates between videos and the other seeks by five seconds.
-            bool navigate = arrowKeys == arrowKeysNavigate;
-            if (navigate)
+            if (arrowKeysNavigate)
             {
                 Emit(new Dictionary<string, object> { { "type", "navigate" }, { "direction", direction } });
                 return;

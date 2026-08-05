@@ -64,7 +64,12 @@ const mediaKind = (filePath: string): 'image' | 'raw' | 'video' => {
   return 'image';
 };
 
-type VersionResourceData = { url?: string; videoUrl?: string };
+type VersionResourceData = {
+  url?: string;
+  videoUrl?: string;
+  orientationMatrix?: number[];
+  orientationSwapsAxes?: boolean;
+};
 const versionResourceCache = new Map<string, VersionResourceData>();
 const versionResourceRequests = new Map<string, Promise<VersionResourceData>>();
 const versionResourceCacheKey = (version: MediaVersion) => `${version.filePath.replace(/\\/g, '/').toLocaleLowerCase()}|${version.fileModifiedAt || 0}|${version.fileSize}`;
@@ -78,17 +83,92 @@ const loadVersionResource = (version: MediaVersion, cacheConfig: AppConfig['medi
   const request = window.electronAPI.getMediaThumbnail(version.filePath, kind, cacheConfig, 1600, 0, -1).then(async result => {
     if (!result.success) return {};
     let url = result.previewUrl;
+    let orientationMatrix: number[] | undefined;
+    let orientationSwapsAxes: boolean | undefined;
     if (kind !== 'video') {
       const original = await window.electronAPI.getMediaOriginal(version.filePath, kind, cacheConfig);
-      if (original.success && original.mediaUrl) url = original.mediaUrl;
+      if (original.success && original.mediaUrl) {
+        url = original.mediaUrl;
+        orientationMatrix = original.orientation?.matrix;
+        orientationSwapsAxes = original.orientation?.swapsAxes;
+      }
     }
-    const resource = { url, videoUrl: result.mediaUrl };
+    const resource = { url, videoUrl: result.mediaUrl, orientationMatrix, orientationSwapsAxes };
     if (versionResourceCache.size >= 80) versionResourceCache.delete(versionResourceCache.keys().next().value as string);
     versionResourceCache.set(key, resource);
     return resource;
   }).catch(() => ({})).finally(() => versionResourceRequests.delete(key));
   versionResourceRequests.set(key, request);
   return request;
+};
+
+const OrientedVersionImage = ({ src, alt, orientationMatrix, contentStyle }: {
+  src: string;
+  alt: string;
+  orientationMatrix?: number[];
+  contentStyle?: React.CSSProperties;
+}) => {
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const [surfaceSize, setSurfaceSize] = useState({ width: 0, height: 0 });
+  const [naturalSize, setNaturalSize] = useState({ width: 0, height: 0 });
+  const matrix = orientationMatrix?.length === 4 ? orientationMatrix : [1, 0, 0, 1];
+  const matrixKey = matrix.join(',');
+
+  useEffect(() => {
+    setNaturalSize({ width: 0, height: 0 });
+  }, [src, matrixKey]);
+  useEffect(() => {
+    const surface = surfaceRef.current;
+    if (!surface) return;
+    const measure = () => setSurfaceSize({ width: surface.clientWidth, height: surface.clientHeight });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(surface);
+    return () => observer.disconnect();
+  }, []);
+
+  const orientedSize = {
+    width: Math.abs(matrix[0]) * naturalSize.width + Math.abs(matrix[2]) * naturalSize.height,
+    height: Math.abs(matrix[1]) * naturalSize.width + Math.abs(matrix[3]) * naturalSize.height,
+  };
+  const fittedScale = orientedSize.width && orientedSize.height
+    ? Math.min(surfaceSize.width / orientedSize.width, surfaceSize.height / orientedSize.height)
+    : 0;
+  const fittedElementSize = {
+    width: naturalSize.width * fittedScale,
+    height: naturalSize.height * fittedScale,
+  };
+  const fittedOrientedSize = {
+    width: orientedSize.width * fittedScale,
+    height: orientedSize.height * fittedScale,
+  };
+
+  return <div ref={surfaceRef} className="absolute inset-0" style={contentStyle}>
+    <div
+      className="pointer-events-none absolute left-1/2 top-1/2"
+      style={{
+        width: fittedOrientedSize.width || '100%',
+        height: fittedOrientedSize.height || '100%',
+        transform: 'translate(-50%, -50%)',
+      }}
+    >
+      <img
+        src={src}
+        alt={alt}
+        draggable={false}
+        onLoad={event => setNaturalSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
+        className="pointer-events-none absolute left-1/2 top-1/2 select-none object-contain"
+        style={{
+          width: fittedElementSize.width || '100%',
+          height: fittedElementSize.height || '100%',
+          maxWidth: fittedElementSize.width ? 'none' : '100%',
+          maxHeight: fittedElementSize.height ? 'none' : '100%',
+          transform: `translate(-50%, -50%) matrix(${matrixKey}, 0, 0)`,
+          transformOrigin: 'center',
+        }}
+      />
+    </div>
+  </div>;
 };
 
 const VersionResource = ({ version, cacheConfig, className = '', contentStyle, videoPlayback = true }: { version: MediaVersion; cacheConfig: AppConfig['mediaCache']; className?: string; contentStyle?: React.CSSProperties; videoPlayback?: boolean }) => {
@@ -119,7 +199,7 @@ const VersionResource = ({ version, cacheConfig, className = '', contentStyle, v
   }} onMetadata={() => undefined}/></div>;
   if (kind === 'video' && videoPlayback && resource.videoUrl) return <video controls preload="metadata" poster={resource.url} style={contentStyle} className={`bg-black object-contain ${className}`}><source src={resource.videoUrl}/></video>;
   return <div className={`relative flex items-center justify-center overflow-hidden bg-slate-100 ${className}`}>
-    {resource.url ? <img src={resource.url} alt={version.versionName} draggable={false} style={contentStyle} className="h-full w-full object-contain"/> : <ImageIcon size={28} className="text-slate-400"/>}
+    {resource.url ? <OrientedVersionImage src={resource.url} alt={version.versionName} orientationMatrix={resource.orientationMatrix} contentStyle={contentStyle}/> : <ImageIcon size={28} className="text-slate-400"/>}
     {loading && <span className="absolute rounded-full bg-slate-900/70 p-2 text-white"><Loader2 size={16} className="animate-spin"/></span>}
   </div>;
 };
