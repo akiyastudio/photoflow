@@ -6,6 +6,8 @@ import type { ProgressFolder, ProjectFileEntry } from '../types';
 type ProjectVersionTreeProps = {
   progressFolders: ProgressFolder[];
   entries: ProjectFileEntry[];
+  structureEntries?: ProjectFileEntry[];
+  filterActive?: boolean;
   activeRelativePath: string;
   gridIconSize: number;
   projectRelativePath: (absolutePath: string) => string;
@@ -54,25 +56,25 @@ const compareProgressFolders = (left: ProgressFolder, right: ProgressFolder) => 
   return left.createdAt - right.createdAt;
 };
 
-export const ProjectVersionTree = ({ progressFolders, entries, activeRelativePath, gridIconSize, projectRelativePath, renderEntry, teamRetouchParentProgressIds = [], onOpenMissingProgressMenu }: ProjectVersionTreeProps) => {
+export const ProjectVersionTree = ({ progressFolders, entries, structureEntries = entries, filterActive = false, activeRelativePath, gridIconSize, projectRelativePath, renderEntry, teamRetouchParentProgressIds = [], onOpenMissingProgressMenu }: ProjectVersionTreeProps) => {
   const scopePath = normalizePath(activeRelativePath);
   const scopedFolders = useMemo(() => progressFolders
     .filter(folder => parentPath(projectRelativePath(folder.folderPath)) === scopePath)
     .sort(compareProgressFolders), [progressFolders, projectRelativePath, scopePath]);
 
-  const entryByPath = useMemo(() => new Map(entries.map(entry => [normalizePath(entry.relativePath), entry])), [entries]);
+  const entryByPath = useMemo(() => new Map(structureEntries.map(entry => [normalizePath(entry.relativePath), entry])), [structureEntries]);
   const versionItems = useMemo<VersionTreeItem[]>(() => scopedFolders.map(folder => ({
     folder,
     entry: entryByPath.get(normalizePath(projectRelativePath(folder.folderPath))),
   })), [entryByPath, projectRelativePath, scopedFolders]);
-  const sourceEntries = useMemo(() => entries.reduce<SourceTreeItem[]>((items, entry) => {
+  const sourceEntries = useMemo(() => structureEntries.reduce<SourceTreeItem[]>((items, entry) => {
     if (entry.kind !== 'folder') return items;
     const name = entry.name.toLocaleLowerCase('zh-CN');
     if (name === 'raw' || name === 'jpg') items.push({ entry, sourceKind: 'image' });
     if (name === 'mov') items.push({ entry, sourceKind: 'video' });
     return items;
-  }, []), [entries]);
-  const teamWorkspaceEntry = useMemo(() => entries.find(entry => entry.kind === 'folder' && entry.name === '团片协作'), [entries]);
+  }, []), [structureEntries]);
+  const teamWorkspaceEntry = useMemo(() => structureEntries.find(entry => entry.kind === 'folder' && entry.name === '团片协作'), [structureEntries]);
   const scopedProgressIds = useMemo(() => new Set(versionItems.map(item => item.folder.id)), [versionItems]);
   const teamWorkspaceParentIds = useMemo(() => teamRetouchParentProgressIds.filter(id => scopedProgressIds.has(id)), [scopedProgressIds, teamRetouchParentProgressIds]);
   const trackedEntryPaths = useMemo(() => new Set([
@@ -255,6 +257,8 @@ export const ProjectVersionTree = ({ progressFolders, entries, activeRelativePat
         {ordinaryEntries.map(entry => <div key={`${entry.relativePath}|${entry.path}`} className="min-w-0">{renderEntry(entry)}</div>)}
       </div>
     </section>}
+
+    {filterActive && hasGraphItems && !ordinaryEntries.length && <p className="mt-5 border-t border-slate-200 py-6 text-center text-xs text-slate-400">版本关系节点已保留；没有其他文件符合当前搜索或筛选条件。</p>}
 
     {!hasGraphItems && !ordinaryEntries.length && <p className="border-y border-slate-200 py-12 text-center text-sm text-slate-400">当前文件夹为空。</p>}
   </div>;

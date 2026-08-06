@@ -76,6 +76,13 @@ def test_thumbnail_tool_sources_limit_png_to_direct_children(root: Path) -> None
         recursive = database.inspect_tool_sources(str(project), [str(nested_only_folder)])
         assert recursive["hasPng"], "regular tool availability should preserve recursive PNG detection"
 
+        recursive_list = database.inspect_tool_sources(
+            str(project), [str(mixed_folder)], collect_recursive_png=True
+        )
+        assert [value.casefold() for value in recursive_list["pngPaths"]] == sorted(
+            [str(direct_png.resolve()).casefold(), str(nested_png.resolve()).casefold()]
+        )
+
         direct_only = database.inspect_tool_sources(
             str(project), [str(mixed_folder)], collect_direct_png=True
         )

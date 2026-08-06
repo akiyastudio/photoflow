@@ -6,6 +6,8 @@ import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
 import { InteractiveCropEditor, type CropRectangle } from '../../components/InteractiveCropEditor';
+import { ImportSourceControls } from '../../components/ImportSourceControls';
+import { PanelSwitch } from '../../components/PanelSwitch';
 
 const IMAGE_SELECTION_FOLDER_NAME = '图片选片';
 const VIDEO_SELECTION_FOLDER_NAME = '视频选片';
@@ -158,7 +160,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
   return { logs, isRunning, isCancelling, progress, statusMsg, preview, clearPreview: () => setPreview(null), start, cancel };
 };
 
-const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspaceProjects, active = true, directSource = false, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitLargeBrollFiles = false, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitLargeBrollFiles?: boolean, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (projectNames: string[]) => void, completedActionLabel?: string, onCompletedAction?: () => void }) => {
+const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspaceProjects, active = true, directSource = false, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitLargeBrollFiles = false, onChooseSourceFiles, onChooseSourceFolder, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitLargeBrollFiles?: boolean, onChooseSourceFiles?: () => void, onChooseSourceFolder?: () => void, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (projectNames: string[]) => void, completedActionLabel?: string, onCompletedAction?: () => void }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'completed'>('idle');
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("等待连接...");
@@ -168,6 +170,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   const [completedProjectNames, setCompletedProjectNames] = useState<string[]>([]);
   const [isCancellingImport, setIsCancellingImport] = useState(false);
   const [shouldDeleteSourceAfterImport, setShouldDeleteSourceAfterImport] = useState(deleteSourceAfterImport);
+  const [drivePickerOpen, setDrivePickerOpen] = useState(false);
   const selectedDrives = config?.sdPaths?.length ? config.sdPaths : config?.sdPath ? [config.sdPath] : [];
   const driveTypes = config?.sdDriveTypes || {};
   // 【关键修改】使用 Ref 来做“防抖”锁，防止 SD 卡接触不良导致多次触发 startImport
@@ -187,6 +190,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   const driveImportSessionsRef = React.useRef(new Map<string, string>());
   const currentImportSessionKeyRef = React.useRef('');
   const retryDrivePathsRef = React.useRef<string[]>([]);
+  const drivePickerRef = React.useRef<HTMLDivElement>(null);
   const currentImportSessionRef = React.useRef('');
   const continueAfterDriveFailureRef = React.useRef<(drive: string, message: string, requestId?: string) => void>(() => undefined);
   const continueRoutedImportRef = React.useRef<(routes: Record<string, string>) => void>(() => undefined);
@@ -195,6 +199,20 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   const onImportCompleteRef = React.useRef(onImportComplete);
   useEffect(() => { onImportCompleteRef.current = onImportComplete; }, [onImportComplete]);
   useEffect(() => { drivesRef.current = drives; }, [drives]);
+  useEffect(() => {
+    if (active && status === 'idle') setShouldDeleteSourceAfterImport(deleteSourceAfterImport);
+  }, [active, deleteSourceAfterImport, status]);
+  useEffect(() => {
+    if (!drivePickerOpen) return;
+    const closeDrivePicker = (event: PointerEvent) => {
+      if (!drivePickerRef.current?.contains(event.target as Node)) setDrivePickerOpen(false);
+    };
+    document.addEventListener('pointerdown', closeDrivePicker);
+    return () => document.removeEventListener('pointerdown', closeDrivePicker);
+  }, [drivePickerOpen]);
+  useEffect(() => {
+    if (status !== 'idle') setDrivePickerOpen(false);
+  }, [status]);
   const importSessionStorageKey = 'photoflow:sd-import-sessions:v1';
   const readPersistedImportSessions = () => {
     try {
@@ -746,6 +764,19 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
             ? 'bg-emerald-50 text-emerald-600'
             : 'bg-slate-100 text-slate-500';
 
+    if (directSource && status === 'idle') return <ImportSourceControls
+      selectionTitle="选择一个或多个底片文件，或选择底片文件夹"
+      selectionDescription="文件与文件夹是两个独立的选择入口"
+      selectedCount={selectedDrives.length}
+      onChooseFiles={() => onChooseSourceFiles?.()}
+      onChooseFolder={onChooseSourceFolder ? () => onChooseSourceFolder() : undefined}
+      deleteSourceAfterImport={shouldDeleteSourceAfterImport}
+      onDeleteSourceAfterImportChange={setShouldDeleteSourceAfterImport}
+      deleteSourceDescription="初始值来自设置。只有全部文件复制并校验成功后才会删除所选底片；关闭则保留源文件。"
+      startDisabled={!canStartImport}
+      onStart={startBatchImport}
+    />;
+
     return (
       <div className="w-full space-y-3">
       <div className="w-full bg-white/50 border border-slate-200 rounded-xl p-4 flex items-center justify-between animate-in fade-in transition-all">
@@ -760,13 +791,13 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
         </div>
 
         <div className="flex items-center gap-2">
-          {!directSource && <details className="relative" onClick={event => event.stopPropagation()}>
-            <summary className="flex h-9 min-w-36 cursor-pointer list-none items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:border-blue-400"><span className="max-w-40 truncate">{selectedDrives.length ? `已选 ${selectedDrives.length} 个盘符` : '选择盘符'}</span><ChevronDown size={15}/></summary>
-            <div className="mt-1 min-w-56 rounded-lg border border-slate-200 bg-white p-2 shadow-xl">
+          {!directSource && <div ref={drivePickerRef} className="relative" onClick={event => event.stopPropagation()}>
+            <button type="button" aria-haspopup="menu" aria-expanded={drivePickerOpen} onClick={() => setDrivePickerOpen(open => !open)} className="flex h-9 min-w-36 items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:border-blue-400"><span className="max-w-40 truncate">{selectedDrives.length ? `已选 ${selectedDrives.length} 个盘符` : '选择盘符'}</span><ChevronDown size={15} className={`transition-transform ${drivePickerOpen ? 'rotate-180' : ''}`}/></button>
+            {drivePickerOpen && <div role="menu" className="absolute right-0 top-full z-50 mt-1 max-h-64 min-w-72 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2 shadow-xl">
               {[...new Set([...selectedDrives, ...drives])].map(drive => <div key={drive} className="flex items-center gap-2 rounded-md px-2 py-2 text-sm hover:bg-slate-50"><label className="flex min-w-0 cursor-pointer items-center gap-2"><input type="checkbox" checked={selectedDrives.includes(drive)} onChange={() => toggleDrive(drive)}/><span className="font-mono">{drive}</span></label><select aria-label={`${drive} 导入类型`} value={driveTypes[drive] || 'work'} onChange={event => setDriveType(drive, event.target.value as 'work' | 'broll')} className="ml-auto rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600" disabled={!selectedDrives.includes(drive)}><option value="work">工作文件</option><option value="broll">花絮</option></select><span className={`text-xs ${drives.includes(drive) ? 'text-emerald-600' : 'text-slate-400'}`}>{drives.includes(drive) ? '已连接' : '未连接'}</span></div>)}
               {!drives.length && !selectedDrives.length && <p className="px-2 py-1 text-xs text-slate-500">未检测到可用盘符</p>}
-            </div>
-          </details>}
+            </div>}
+          </div>}
           {canStartImport && status === 'idle' ? (
             <button onClick={startBatchImport} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-bold flex items-center gap-2 shadow-md shadow-blue-500/20 transition-all animate-in zoom-in-95"><Download size={16} />{directSource ? '开始导入' : connectedDrives.length > 1 ? '批量导入' : '开始导入'}</button>
           ) : (
@@ -775,10 +806,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
         </div>
       </div>
       {status === 'idle' && <>
-        <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-          <input type="checkbox" checked={shouldDeleteSourceAfterImport} onChange={event => setShouldDeleteSourceAfterImport(event.target.checked)} className="mt-0.5"/>
-          <span><span className="block text-sm font-bold text-slate-700">导入后删除源文件</span><span className="mt-1 block text-xs leading-5 text-slate-500">初始值来自设置。只有全部文件复制并校验成功后才会删除{directSource ? '所选底片' : '所选 SD 卡中的媒体'}；取消勾选则保留源文件。</span></span>
-        </label>
+        <PanelSwitch title="导入后删除源文件" description={`初始值来自设置。只有全部文件复制并校验成功后才会删除${directSource ? '所选底片' : '所选 SD 卡中的媒体'}；关闭则保留源文件。`} checked={shouldDeleteSourceAfterImport} onChange={setShouldDeleteSourceAfterImport}/>
       </>}
       </div>
     );
@@ -821,7 +849,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
                 共导入 {formatTransferBytes(transferStats.totalBytes || transferStats.bytesCopied)}
                 {transferStats.totalFiles ? ` · ${transferStats.totalFiles} 个文件` : ''}
               </p>}
-              <button type="button" onClick={() => { if (onCompletedAction) onCompletedAction(); else resetCompletedImport(); }} className="dialog-primary mt-5">{completedActionLabel}</button>
+              <button type="button" onClick={() => { resetCompletedImport(); onCompletedAction?.(); }} className="dialog-primary mt-5">{completedActionLabel}</button>
             </div>
           )}
 
@@ -1201,9 +1229,38 @@ const HomePanel = ({ title, initiallyOpen = false, tone, children, ...dragProps 
   </section>;
 };
 
-const ConverterView = ({ embedded = false, initialTargetPath = "", initialTargetPaths }: { embedded?: boolean; initialTargetPath?: string; initialTargetPaths?: string[] }) => {
+const sourceFileDetails = (sourcePath: string) => {
+  const parts = sourcePath.split(/[\\/]/).filter(Boolean);
+  const name = parts.pop() || sourcePath;
+  const extension = name.includes('.') ? name.split('.').pop()?.toLocaleUpperCase() || '文件' : '文件';
+  return { name, extension, parent: parts.slice(-2).join(' / ') };
+};
+
+const SelectedToolSourceList = ({ paths, title, itemLabel, description, loading = false }: { paths: string[]; title: string; itemLabel: string; description: string; loading?: boolean }) => (
+  <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+    <header className="flex items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3">
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-bold text-slate-800">{loading ? '正在读取素材…' : `${title} ${paths.length} 个${itemLabel}`}</p>
+        <p className="mt-0.5 text-xs text-slate-500">{loading ? '正在从后台媒体索引读取文件列表' : description}</p>
+      </div>
+      <span className="rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-500">{loading ? <Loader2 size={12} className="animate-spin"/> : `${paths.length} 个${itemLabel}`}</span>
+    </header>
+    {paths.length > 0 ? <div className="max-h-52 divide-y divide-slate-100 overflow-y-auto">
+      {paths.map(sourcePath => {
+        const details = sourceFileDetails(sourcePath);
+        return <div key={sourcePath} className="flex items-center gap-3 px-4 py-2.5">
+          <span className="flex h-8 w-10 shrink-0 items-center justify-center rounded-md bg-blue-50 text-[10px] font-bold text-blue-700">{details.extension}</span>
+          <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-slate-700" title={details.name}>{details.name}</span><span className="mt-0.5 block truncate text-[10px] text-slate-400" title={details.parent}>{details.parent || '当前目录'} · 等待</span></span>
+        </div>;
+      })}
+    </div> : <div className="flex min-h-24 items-center justify-center px-4 py-5 text-xs text-slate-400">{loading ? '正在建立列表…' : '没有可处理的文件'}</div>}
+  </section>
+);
+
+const ConverterView = ({ embedded = false, initialTargetPath = "", initialTargetPaths, sourcesLoading = false }: { embedded?: boolean; initialTargetPath?: string; initialTargetPaths?: string[]; sourcesLoading?: boolean }) => {
   const [targetPaths, setTargetPaths] = useState<string[]>(() => initialTargetPaths?.filter(Boolean) || (initialTargetPath ? [initialTargetPath] : []));
   const [quality, setQuality] = useState(100);
+  const [deleteOriginal, setDeleteOriginal] = useState(true);
   const { logs, isRunning, progress, start } = usePythonTask('png_to_jpg.py', '进度');
 
   useEffect(() => {
@@ -1212,7 +1269,7 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
 
   const startConversion = () => {
     if (!targetPaths.length) return;
-    start(['--quality', quality.toString(), ...targetPaths], '正在转换…');
+    start(['--quality', quality.toString(), ...(deleteOriginal ? [] : ['--keep-original']), ...targetPaths], '正在转换…');
   };
 
   return (
@@ -1220,26 +1277,8 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
       {!embedded && <h2 className="text-2xl font-bold text-slate-800">PNG 转 JPG </h2>}
       <div className={embedded ? 'space-y-6' : 'bg-white border border-slate-200 rounded-xl p-6 space-y-6'}>
 
-        {/* Path Input with Drag & Drop */}
-        <div className="space-y-2">
-            <label className="text-xs font-semibold text-slate-500 uppercase">目标文件或文件夹{targetPaths.length > 1 ? `（${targetPaths.length} 项）` : ''}</label>
-            <div className="relative">
-                <div className="absolute left-3 top-3 text-slate-500">
-                    <FolderInput size={18} />
-                </div>
-                <textarea
-                  value={targetPaths.join('\n')}
-                  readOnly
-                  rows={Math.min(5, Math.max(1, targetPaths.length))}
-                  aria-label="要转换的文件或文件夹"
-                  className="w-full resize-none rounded-lg border border-slate-200 bg-slate-50 py-3 pl-10 pr-4 font-mono text-sm text-slate-700"
-                />
-            </div>
-            <p className="text-xs text-slate-600 flex items-center gap-1">
-               <AlertCircle size={12}/>
-               所选 PNG 文件及文件夹全部子目录中的 PNG 会转为 JPG，原始 PNG 会移入回收站
-            </p>
-        </div>
+        <SelectedToolSourceList paths={targetPaths} loading={sourcesLoading} title="已选择" itemLabel="PNG 文件" description="包含所选文件及所选文件夹全部子目录中的 PNG"/>
+        <p className="flex items-center gap-1 text-xs text-slate-600"><AlertCircle size={12}/>{deleteOriginal ? '转换并验证成功后，原始 PNG 会移入回收站' : '转换后保留原始 PNG'}</p>
 
         <div className="flex items-center justify-between gap-4 rounded-lg bg-slate-50 p-3 border border-slate-200">
           <label className="text-sm font-medium text-slate-700">导出JPG 画质</label>
@@ -1250,6 +1289,7 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
             <option value={75}>节省空间（75）</option>
           </select>
         </div>
+        <PanelSwitch title="转换成功后删除原始 PNG" description="默认开启。只有对应 JPG 写入并验证成功后，原始 PNG 才会移入系统回收站。" checked={deleteOriginal} disabled={isRunning} onChange={setDeleteOriginal}/>
         {/* Progress & Actions */}
         <TaskProgress
           logs={logs}
@@ -1258,15 +1298,15 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
           idleMessage={isRunning ? '正在转换…' : '进度'}
           action={<button
                 onClick={startConversion}
-                disabled={!targetPaths.length || isRunning}
+                disabled={!targetPaths.length || isRunning || sourcesLoading}
                 className={`px-8 py-2 rounded-lg font-bold transition flex items-center gap-2 ${
-                  isRunning || !targetPaths.length
+                  isRunning || !targetPaths.length || sourcesLoading
                     ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200 shadow-none'
                     : 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-500/20'
                 }`}
              >
-                {isRunning ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} fill="currentColor" />}
-                {isRunning ? '转换中...' : '开始转换'}
+                {isRunning || sourcesLoading ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} fill="currentColor" />}
+                {isRunning ? '转换中...' : sourcesLoading ? '正在读取' : '开始转换'}
              </button>}
         />
       </div>
@@ -1492,10 +1532,7 @@ const ScreenshotMainImageView = ({
           </div>
         </div>
         <p className="flex items-center gap-1 text-xs text-slate-500"><AlertCircle size={12}/>{cropMode ? '裁剪结果保存在原图旁，原文件不会被覆盖。' : '主图保存在原图旁；黄色项目需要确认，绿色项目可直接批量生成。'}</p>
-        {!cropMode && <label className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-          <input type="checkbox" checked={preserveOriginal} disabled={isRunning} onChange={event => setPreserveOriginal(event.currentTarget.checked)} className="mt-0.5 h-4 w-4 accent-blue-600"/>
-          <span><span className="font-bold">保留原图</span><span className="mt-1 block text-xs leading-5 text-slate-500">默认关闭；关闭时仅把成功裁剪的原图移入系统回收站，跳过或失败的图片保持不变。</span></span>
-        </label>}
+        {!cropMode && <PanelSwitch title="保留原图" description="默认关闭；关闭时仅把成功裁剪的原图移入系统回收站，跳过或失败的图片保持不变。" checked={preserveOriginal} disabled={isRunning} onChange={setPreserveOriginal}/>}
       </div>
 
       {!!reviewItems.length && <section className="space-y-3"><div className="flex flex-wrap items-center justify-between gap-2"><div><h3 className="text-sm font-bold text-slate-800">检查裁剪范围</h3><p className="mt-0.5 text-xs text-slate-500">{pendingReviewCount ? `还有 ${pendingReviewCount} 张需要确认` : `已确认 ${includedReviewItems.length} 张，可以生成主图`}</p></div><span className={`rounded-full px-2.5 py-1 text-xs font-bold ${pendingReviewCount ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>{pendingReviewCount ? '待检查' : '已就绪'}</span></div><div className="grid gap-3 md:grid-cols-2">{reviewItems.map((item, index) => <article key={item.relativePath} className={`rounded-xl border p-3 ${!item.included ? 'border-slate-200 bg-slate-50 opacity-65' : item.confirmed ? 'border-emerald-200 bg-emerald-50/40' : 'border-amber-300 bg-amber-50/60'}`}><div className="mb-2 flex items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-xs font-bold text-slate-800" title={item.inputName}>{item.inputName}</p><p className="mt-0.5 text-[11px] text-slate-500">置信度 {Math.round(item.confidence * 100)}% · {item.crop.width} × {item.crop.height}</p></div><span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${item.confirmed ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{item.confirmed ? '已确认' : '需检查'}</span></div><ScreenshotCropPreview item={item} cacheConfig={cacheConfig} queueOrder={index} onEdit={previewUrl => setCropEditor({ index, previewUrl, crop: { ...item.crop }, snapEnabled: true })}/>{item.reason && <p className="mt-2 text-[11px] leading-4 text-amber-700">{item.reason}</p>}<div className="mt-3 flex justify-between gap-2"><button type="button" onClick={() => updateReviewItem(index, { included: !item.included, confirmed: item.included ? item.confirmed : true })} className="dialog-secondary px-3 py-1.5 text-xs">{item.included ? '不处理这张' : '恢复处理'}</button>{item.included && !item.confirmed && <button type="button" onClick={() => updateReviewItem(index, { confirmed: true })} className="rounded-md bg-amber-500 px-3 py-1.5 text-xs font-bold text-white hover:bg-amber-400">范围正确</button>}</div></article>)}</div></section>}
@@ -1514,7 +1551,16 @@ const ScreenshotMainImageView = ({
       />
       {!!issueResults.length && <details className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"><summary className="cursor-pointer font-semibold">查看 {issueResults.length} 个异常项目</summary><div className="mt-2 max-h-36 space-y-1.5 overflow-y-auto">{issueResults.map((result, index) => <p key={`${result.input}-${index}`} className="break-words"><span className="font-semibold">{result.inputName}</span>：{result.skipped ? result.reason || '已跳过' : result.error || '处理失败'}</p>)}</div></details>}
     </div>
-    {cropEditor && (() => { const item = reviewItems[cropEditor.index]; if (!item) return null; return <div role="dialog" aria-modal="true" className="fixed inset-0 z-[470] flex items-center justify-center bg-slate-950/75 p-3"><div className="flex max-h-[96vh] w-full max-w-6xl flex-col overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl"><div className="flex items-start gap-3"><div><h3 className="font-bold text-slate-900">调整主图范围</h3><p className="mt-1 text-xs text-slate-500">拖动框体移动，拖动四角调整大小；靠近检测边缘时会自动吸附。</p></div><label className="ml-auto inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-xs font-bold text-slate-700"><input type="checkbox" checked={cropEditor.snapEnabled} onChange={event => setCropEditor(current => current ? { ...current, snapEnabled: event.currentTarget.checked } : current)} className="accent-blue-600"/>磁吸边缘</label><button type="button" onClick={() => setCropEditor(null)} className="rounded-md p-2 text-slate-500 hover:bg-slate-100"><X size={18}/></button></div><InteractiveCropEditor large snapEnabled={cropEditor.snapEnabled} snapGuides={item.snapGuides} previewUrl={cropEditor.previewUrl} imageSize={item.originalSize} crop={cropEditor.crop} onChange={crop => setCropEditor(current => current ? { ...current, crop } : current)}/><div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">{(['x', 'y', 'width', 'height'] as const).map(key => <label key={key} className="text-xs font-bold text-slate-600">{{ x: '左边 X', y: '顶部 Y', width: '宽度', height: '高度' }[key]}<input type="number" min={key === 'x' || key === 'y' ? 0 : 20} value={cropEditor.crop[key]} onChange={event => setCropEditor(current => current ? { ...current, crop: { ...current.crop, [key]: Math.max(key === 'x' || key === 'y' ? 0 : 20, Math.round(Number(event.target.value) || 0)) } } : current)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2"/></label>)}</div><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setCropEditor(null)} className="dialog-secondary">取消</button><button type="button" onClick={saveEditedCrop} className="dialog-primary">确认范围</button></div></div></div>; })()}
+    {cropEditor && (() => {
+      const item = reviewItems[cropEditor.index];
+      if (!item) return null;
+      return <div role="dialog" aria-modal="true" className="fixed inset-0 z-[470] flex items-center justify-center bg-slate-950/75 p-3"><div className="flex max-h-[96vh] w-full max-w-6xl flex-col overflow-y-auto rounded-2xl bg-white p-5 shadow-2xl">
+        <div className="flex items-start gap-3"><div><h3 className="font-bold text-slate-900">调整主图范围</h3><p className="mt-1 text-xs text-slate-500">拖动框体移动，拖动四角调整大小；靠近检测边缘时会自动吸附。</p></div><PanelSwitch title="磁吸边缘" checked={cropEditor.snapEnabled} onChange={snapEnabled => setCropEditor(current => current ? { ...current, snapEnabled } : current)} className="ml-auto !rounded-lg !px-3 !py-2"/><button type="button" onClick={() => setCropEditor(null)} className="rounded-md p-2 text-slate-500 hover:bg-slate-100"><X size={18}/></button></div>
+        <InteractiveCropEditor large snapEnabled={cropEditor.snapEnabled} snapGuides={item.snapGuides} previewUrl={cropEditor.previewUrl} imageSize={item.originalSize} crop={cropEditor.crop} onChange={crop => setCropEditor(current => current ? { ...current, crop } : current)}/>
+        <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">{(['x', 'y', 'width', 'height'] as const).map(key => <label key={key} className="text-xs font-bold text-slate-600">{{ x: '左边 X', y: '顶部 Y', width: '宽度', height: '高度' }[key]}<input type="number" min={key === 'x' || key === 'y' ? 0 : 20} value={cropEditor.crop[key]} onChange={event => setCropEditor(current => current ? { ...current, crop: { ...current.crop, [key]: Math.max(key === 'x' || key === 'y' ? 0 : 20, Math.round(Number(event.target.value) || 0)) } } : current)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2"/></label>)}</div>
+        <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setCropEditor(null)} className="dialog-secondary">取消</button><button type="button" onClick={saveEditedCrop} className="dialog-primary">确认范围</button></div>
+      </div></div>;
+    })()}
   </div>;
 };
 
@@ -1523,6 +1569,8 @@ const ResearchView = ({
   config,
   onUpdateConfig,
   initialTargetPath = '',
+  initialTargetPaths = [],
+  sourcesLoading = false,
   targetKind = 'file',
   hasTxtFiles = false,
 }: {
@@ -1530,6 +1578,8 @@ const ResearchView = ({
   config: AppConfig['research'];
   onUpdateConfig: (newConfig: AppConfig['research']) => void;
   initialTargetPath?: string;
+  initialTargetPaths?: string[];
+  sourcesLoading?: boolean;
   targetKind?: 'file' | 'folder';
   hasTxtFiles?: boolean;
 }) => {
@@ -1559,17 +1609,7 @@ const ResearchView = ({
         <div className="space-y-2">
           <p className="mt-2 text-gray-600">对视频的分镜执行转场识别，并从每个分镜中挑选清晰的画面导出。</p>
         </div>
-        {/* 路径设置 */}
-        <div className="space-y-2">
-           <label className="text-xs font-semibold text-slate-500 uppercase">读取目录或视频</label>
-           <input
-             type="text"
-             value={targetPath}
-             readOnly
-             aria-label={targetKind === 'folder' ? '要处理的文件夹' : '要处理的视频'}
-             className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-2 text-slate-700 font-mono text-sm outline-none"
-           />
-        </div>
+        <SelectedToolSourceList paths={initialTargetPaths} loading={sourcesLoading} title="已选择" itemLabel="视频" description="按分镜识别为每段导出清晰画面"/>
         <div className="grid gap-4 md:grid-cols-2">
           <div>
             <label className="form-label">检测灵敏度</label>
@@ -1582,7 +1622,7 @@ const ResearchView = ({
             <p className="mt-1 text-xs leading-5 text-slate-500">数值越大，短暂画面会被过滤，最终导出的截图越少。</p>
           </div>
         </div>
-        {targetKind === 'folder' && hasTxtFiles && <label className="settings-check"><input type="checkbox" checked={organizeData} onChange={event => setOrganizeData(event.target.checked)}/><span><span className="block">整理 data 文件</span><span className="mt-1 block text-xs leading-5 text-slate-500">处理完成后，将当前目录中的 TXT 文件移入 data 文件夹。</span></span></label>}
+        {targetKind === 'folder' && hasTxtFiles && <PanelSwitch title="整理 data 文件" description="处理完成后，将当前目录中的 TXT 文件移入 data 文件夹。" checked={organizeData} onChange={setOrganizeData}/>}
 
         <TaskProgress
           logs={logs}
@@ -1591,15 +1631,15 @@ const ResearchView = ({
           idleMessage={statusMsg}
           action={<button
                onClick={runAnalysis}
-               disabled={isRunning || !targetPath.trim()}
+               disabled={isRunning || sourcesLoading || !targetPath.trim() || !initialTargetPaths.length}
                className={`px-6 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
-                 isRunning
+                 isRunning || sourcesLoading || !initialTargetPaths.length
                   ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none'
                   : 'bg-blue-600 text-white hover:bg-blue-500 shadow-md shadow-blue-500/20'
                }`}
              >
-                {isRunning ? <Loader2 className="animate-spin" size={18}/> : <Play size={18} fill="currentColor" />}
-                {isRunning ? '处理中' : '开始处理'}
+                {isRunning || sourcesLoading ? <Loader2 className="animate-spin" size={18}/> : <Play size={18} fill="currentColor" />}
+                {isRunning ? '处理中' : sourcesLoading ? '正在读取' : '开始处理'}
              </button>}
         />
       </div>
@@ -1914,6 +1954,11 @@ const VideoSplitView = ({ embedded = false, initialTargetPath = '' }: { embedded
     if (!videoPath.trim()) return;
     start([videoPath], '正在启动处理...');
   };
+  const chooseVideo = async () => {
+    if (isRunning) return;
+    const result = await window.electronAPI.chooseVideoFiles();
+    if (!result.cancelled && result.paths.length) setVideoPath(result.paths[0]);
+  };
 
   return (
     <div className="w-full space-y-4">
@@ -1928,45 +1973,29 @@ const VideoSplitView = ({ embedded = false, initialTargetPath = '' }: { embedded
           </p>
         </div>
 
-        {/* Path Input */}
-        <div className="space-y-2">
-            <label className="text-xs font-bold text-slate-600">目标视频文件</label>
-            <div className="relative">
-                <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">
-                    <Video size={18} />
-                </div>
-                <input
-                  type="text"
-                  value={videoPath}
-                  onChange={(e) => setVideoPath(e.target.value)}
-                  onDrop={handleDrop}
-                  onDragOver={handleDragOver}
-                  placeholder="将 .mov / .mp4 视频文件拖入此处，或粘贴绝对路径"
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-10 pr-4 py-3 text-slate-900 focus:outline-none focus:border-blue-500 transition-colors font-mono text-sm"
-                />
-            </div>
+        <div onDrop={handleDrop} onDragOver={handleDragOver}>
+          <SelectedToolSourceList paths={videoPath ? [videoPath] : []} title="已选择" itemLabel="视频" description="原视频保留；分段文件写入原视频所在目录"/>
         </div>
 
         <div className="grid gap-3 md:grid-cols-2"><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">分段大小</span><span className="mt-1 block text-sm font-bold text-slate-700">约 3.95 GB（固定）</span></label><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">输出名称</span><span className="mt-1 block truncate font-mono text-sm font-bold text-slate-700">{videoPath ? `${videoPath.split(/[\\/]/).pop()?.replace(/(\.[^.]+)$/u, '_part001$1')}` : '视频名_part001.mp4'}</span></label></div>
 
-        {/* Progress & Actions */}
         <TaskProgress
           logs={logs}
           progress={progress}
           isRunning={isRunning}
           idleMessage={statusMsg}
-          action={<button
-              onClick={startSplit}
-              disabled={!videoPath || isRunning}
-              className={`px-8 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
-                isRunning || !videoPath
-                  ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none'
-                  : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20'
-              }`}
-            >
-              {isRunning ? <Loader2 className="animate-spin" size={18} /> : <Scissors size={18} fill="currentColor" />}
-              {isRunning ? '切割中...' : '开始切割'}
-            </button>}
+          action={<div className="flex items-center gap-2"><button type="button" disabled={isRunning} onClick={() => void chooseVideo()} className="dialog-secondary px-4 py-2.5 text-sm disabled:opacity-50">重新选择</button><button
+            onClick={startSplit}
+            disabled={!videoPath || isRunning}
+            className={`px-8 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
+              isRunning || !videoPath
+                ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none'
+                : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20'
+            }`}
+          >
+            {isRunning ? <Loader2 className="animate-spin" size={18} /> : <Scissors size={18} fill="currentColor" />}
+            {isRunning ? '切割中...' : '开始切割'}
+          </button></div>}
         />
       </div>
 

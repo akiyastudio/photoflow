@@ -1,0 +1,13 @@
+{
+  "_id": "win32-stable-26-8-6",
+  "channel": "stable",
+  "downloadUrl": "https://pan.quark.cn/s/a785cc47f965",
+  "mandatory": false,
+  "notes": "若干交互优化",
+  "platform": "win32",
+  "published": true,
+  "publishedAt": "2026-08-06T03:44:18.721Z",
+  "sha256": "0ba8ebb0298cfb2fcb1684c15540663958987068d4484bea9e5d63e9567eb516",
+  "version": "26.8.6",
+  "versionCode": 260806
+}

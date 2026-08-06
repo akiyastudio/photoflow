@@ -34,6 +34,7 @@ def run(args_list):
     parser = argparse.ArgumentParser()
     parser.add_argument("paths", nargs='+', help="要处理的文件或目录路径")
     parser.add_argument("--quality", type=int, default=100)
+    parser.add_argument("--keep-original", action="store_true")
     args = parser.parse_args(args_list)
 
     # 扫描所选文件以及所选目录的全部子目录。路径可能同时包含父目录、
@@ -99,8 +100,9 @@ def run(args_list):
                     icc_profile=_SRGB_ICC_PROFILE,
                 )
                 
-                # 移入回收站
-                send2trash(file_path)
+                if not args.keep_original:
+                    # 只有 JPG 成功写入后才处理原文件。
+                    send2trash(file_path)
                 
                 success_count += 1
                 

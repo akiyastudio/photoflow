@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Folder, FolderOpen, HardDrive, Palette, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, Loader2, Wrench, ExternalLink, AtSign, GripVertical, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, Crop, Heart, ShieldCheck, MessageSquareText, Send, LockKeyhole, Plus, X, MemoryStick, Aperture, FolderInput, FileInput, Gauge, Scissors, FileImage } from 'lucide-react';
+import { Folder, FolderOpen, HardDrive, Palette, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, Loader2, Wrench, ExternalLink, AtSign, GripVertical, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, ShieldCheck, MessageSquareText, Send, LockKeyhole, Plus, X, FileImage } from 'lucide-react';
 import { BUILT_IN_PROJECT_STATUSES, PROJECT_TOOLBAR_ACTION_IDS, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from '../../types';
 import type { AppConfig, BackupSpaceStatus, BackupStatus, ComponentStatus, LegalDocumentId, PrivacyConsentState, ProjectToolbarActionId, StorageUsageOverview, WorkspaceProject } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
@@ -397,24 +397,14 @@ const SettingsNavigator = ({ activeSection, components, onSelect }: { activeSect
 };
 
 const PROJECT_TOOLBAR_ITEMS: Record<ProjectToolbarActionId, { label: string; description: string; icon: React.ReactNode }> = {
-  'sd-import': { label: '从 SD 卡导入', description: '分析 SD 卡并把素材导入当前项目', icon: <MemoryStick size={17}/> },
-  'negative-import': { label: '导入底片', description: '从文件或文件夹导入底片', icon: <Aperture size={17}/> },
-  'progress-import': { label: '导入进度', description: '导入图片或视频版本进度', icon: <FolderInput size={17}/> },
-  'broll-import': { label: '导入花絮', description: '批量导入图片与视频花絮', icon: <FolderInput size={17}/> },
-  'file-import': { label: '导入文件', description: '向当前目录导入任意文件', icon: <FileInput size={17}/> },
   'filename-selection': { label: '从文件名选片', description: '按文件名把选中的素材整理到选片文件夹', icon: <FileText size={17}/> },
   'select-media': { label: '选片', description: '把当前选择的图片或视频加入选片结果', icon: <CheckCircle2 size={17}/> },
-  storyboard: { label: '截取分镜帧', description: '从所选视频中提取代表性画面', icon: <Video size={17}/> },
-  'video-transcode': { label: '视频转码', description: '转换视频封装与编码格式', icon: <Gauge size={17}/> },
-  'video-split': { label: '视频切割', description: '把大型视频无损切成连续分段', icon: <Scissors size={17}/> },
-  'screenshot-main-image': { label: '提取截图主图', description: '从所选截图中识别并截取主要图片区域', icon: <Crop size={17}/> },
+  'video-tools': { label: '视频工具', description: '截取分镜帧、视频转码和视频切割', icon: <Video size={17}/> },
+  'image-tools': { label: '图片工具', description: 'PNG 转 JPG 和提取截图主图', icon: <ImageIcon size={17}/> },
   photoshop: { label: '在 PS 中打开', description: '把所选图片、RAW 或 PSD/PSB 发送到 Photoshop', icon: <span className="flex h-[17px] w-[17px] items-center justify-center rounded border border-blue-400 text-[9px] font-bold text-blue-600">Ps</span> },
-  'png-converter': { label: 'PNG 转 JPG', description: '转换所选 PNG 文件或文件夹', icon: <ImageIcon size={17}/> },
   'office-extract': { label: '提取 Office 图片', description: '提取 Word、PowerPoint 与 Excel 内嵌图片', icon: <FileImage size={17}/> },
-  'project-trash': { label: '移入回收站', description: '将整个项目移入系统回收站', icon: <Trash2 size={17}/> },
   'version-management': { label: '版本管理', description: '管理素材版本或标记进度文件夹', icon: <GitBranch size={17}/> },
   'team-retouch': { label: '团片协作', description: '打开项目的团片协作工作区', icon: <UsersRound size={17}/> },
-  'final-versions': { label: '查看喜爱', description: '浏览项目中所有已经标记为喜爱的图片', icon: <Heart size={17}/> },
 };
 
 const ProjectToolbarSettingsEditor = ({ value, onChange }: { value: AppConfig['projectToolbar']; onChange: (value: AppConfig['projectToolbar']) => void }) => {
