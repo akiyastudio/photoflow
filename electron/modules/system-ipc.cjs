@@ -933,8 +933,13 @@ const registerSystemIpc = context => {
   ipcMain.handle('saveConfig', async (event, config) => {
     try {
       const customProjectCategories = normalizeCustomProjectCategories(config?.customProjectCategories);
+      const workspacePaths = [config?.workspacePath, ...(Array.isArray(config?.workspacePaths) ? config.workspacePaths : [])]
+        .map(value => String(value || '').trim())
+        .filter((value, index, values) => value && values.findIndex(candidate => path.resolve(candidate).toLocaleLowerCase() === path.resolve(value).toLocaleLowerCase()) === index);
       const normalizedConfig = {
         ...config,
+        workspacePath: workspacePaths[0] || '',
+        workspacePaths,
         customProjectCategories,
         projectCategoryOrder: normalizeProjectCategoryOrder(config?.projectCategoryOrder, customProjectCategories),
         telemetry: {

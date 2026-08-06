@@ -1,12 +1,31 @@
+import { useEffect, useState, type ReactNode } from 'react';
 import { AlertTriangle, ChevronRight, ExternalLink, Gift, HardDrive, Loader2, ShieldCheck } from 'lucide-react';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import type { BackupStatus } from '../../types';
+
+export const WindowControls = () => {
+  const [maximized, setMaximized] = useState(false);
+  useEffect(() => {
+    void window.electronAPI.isWindowMaximized().then(setMaximized);
+    return window.electronAPI.onWindowMaximizedChange(setMaximized);
+  }, []);
+  return <div className="app-titlebar-control flex h-10 w-[138px] shrink-0 items-stretch">
+    <button type="button" onClick={() => window.electronAPI.minimizeWindow()} aria-label="最小化" title="最小化" className="window-control-button"><span className="window-glyph window-glyph-minimize"/></button>
+    <button type="button" onClick={async () => setMaximized(await window.electronAPI.toggleMaximizeWindow())} aria-label={maximized ? '还原' : '最大化'} title={maximized ? '还原' : '最大化'} className="window-control-button">{maximized ? <span className="window-glyph window-glyph-restore"/> : <span className="window-glyph window-glyph-maximize"/>}</button>
+    <button type="button" onClick={() => window.electronAPI.closeWindow()} aria-label="关闭" title="关闭" className="window-control-button window-control-close"><span className="window-glyph window-glyph-close"/></button>
+  </div>;
+};
+
+export const StartupWindowFrame = ({ children }: { children: ReactNode }) => <div className="h-screen w-full overflow-auto">
+  <header className="startup-window-titlebar fixed inset-x-0 top-0 z-[2000] flex h-10 items-stretch"><div title="拖动窗口" className="app-window-drag-region min-w-0 flex-1"/><WindowControls/></header>
+  {children}
+</div>;
 
 export const BackupHomeCard = ({ status, onOpen, onRun }: { status: BackupStatus; onOpen: () => void; onRun: () => void }) => {
   const running = status.state === 'running';
   const protectedState = status.state === 'protected';
   const offline = status.state === 'offline';
-  const title = running ? `正在备份 ${Math.round(status.task?.progress || 0)}%`
+  const title = running ? '正在备份'
     : protectedState ? '备份已保护'
       : offline ? '备份盘未连接'
         : status.state === 'never-backed-up' ? '尚未创建备份'

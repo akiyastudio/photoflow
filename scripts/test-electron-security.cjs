@@ -65,6 +65,9 @@ Promise.resolve()
     assert.strictEqual(rejected, 2);
 
     const main = fs.readFileSync(path.join(root, 'electron', 'main.cjs'), 'utf8');
+    const preload = fs.readFileSync(path.join(root, 'electron', 'preload.cjs'), 'utf8');
+    const projectWorkspace = fs.readFileSync(path.join(root, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
+    const toolViews = fs.readFileSync(path.join(root, 'src', 'features', 'tools', 'ToolViews.tsx'), 'utf8');
     const securityPolicy = fs.readFileSync(path.join(root, 'electron', 'security-policy.cjs'), 'utf8');
     const systemIpc = fs.readFileSync(path.join(root, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
     const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
@@ -73,6 +76,9 @@ Promise.resolve()
     assert(securityPolicy.includes("webContents.on('will-navigate'"));
     assert(securityPolicy.includes('setPermissionRequestHandler'));
     assert(main.includes('sandbox: true'));
+    assert(preload.includes('getPathForFile: (file) => webUtils.getPathForFile(file)'));
+    assert(projectWorkspace.includes('window.electronAPI.getPathForFile(file)') && toolViews.includes('window.electronAPI.getPathForFile(file)'));
+    assert(!projectWorkspace.includes('File & { path?: string }') && !toolViews.includes('File & { path?: string }'));
     assert(systemIpc.includes('validateRendererPythonInvocation(scriptName, args, requestId)'));
     assert(html.includes('Content-Security-Policy'));
     assert(html.includes("object-src 'none'"));

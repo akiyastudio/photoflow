@@ -96,16 +96,16 @@ export const ProjectVersionTree = ({ progressFolders, entries, activeRelativePat
       if (parentId && parentId !== item.folder.id && byId.has(parentId)) effectiveParent.set(item.folder.id, parentId);
     }
 
-    // V0 is the project baseline rather than a manually selected branch parent.
-    // Visually attach the first root version of each media kind to it so the
-    // project history reads naturally as V0 → V1.
+    // Older projects may start at V1 (or any other number). The earliest known
+    // root is the adoption baseline; a physical V0 folder is not required.
     for (const mediaKind of ['image', 'video'] as const) {
-      const baseline = versionItems.find(item => item.folder.mediaKind === mediaKind && item.folder.versionKey === '0');
+      const roots = versionItems
+        .filter(item => item.folder.mediaKind === mediaKind && !effectiveParent.has(item.folder.id))
+        .sort((left, right) => compareProgressFolders(left.folder, right.folder));
+      const baseline = roots[0];
       if (!baseline) continue;
-      const firstRoot = versionItems
-        .filter(item => item.folder.mediaKind === mediaKind && item.folder.versionKey !== '0' && !effectiveParent.has(item.folder.id))
-        .sort((left, right) => compareProgressFolders(left.folder, right.folder))[0];
-      if (firstRoot) effectiveParent.set(firstRoot.folder.id, baseline.folder.id);
+      const firstLaterRoot = roots[1];
+      if (firstLaterRoot) effectiveParent.set(firstLaterRoot.folder.id, baseline.folder.id);
     }
 
     const childrenByParent = new Map<string, VersionTreeItem[]>();
@@ -180,7 +180,9 @@ export const ProjectVersionTree = ({ progressFolders, entries, activeRelativePat
       for (const mediaKind of ['image', 'video'] as const) {
         const sources = sourceEntries.filter(item => item.sourceKind === mediaKind);
         if (!sources.length) continue;
-        const baseline = positioned.find(item => item.folder?.mediaKind === mediaKind && item.folder.versionKey === '0');
+        const baseline = positioned
+          .filter(item => item.folder?.mediaKind === mediaKind && !effectiveParent.has(item.folder.id))
+          .sort((left, right) => left.folder && right.folder ? compareProgressFolders(left.folder, right.folder) : 0)[0];
         const spacing = nodeHeight + rowGap;
         const desiredFirstY = baseline ? baseline.y - (sources.length - 1) * spacing / 2 : unattachedY;
         const firstY = Math.max(desiredFirstY, nextSourceY);

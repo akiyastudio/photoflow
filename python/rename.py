@@ -17,19 +17,19 @@ VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.m4v', '.mkv', '.webm', '.crm')
 RAW_EXTENSIONS = ('.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw')
 FFMPEG_IMAGE_EXTENSIONS = RAW_EXTENSIONS
 JPG_PROXY_EXTENSIONS = ('.jpg', '.jpeg')
-IMAGE_SELECTION_FOLDER_NAME = '图片选片'
+JPG_PROXY_FOLDER_NAMES = {'jpg', 'jpeg', 'preview', 'previews', 'proxy', 'proxies', '预览', '代理', 'jpg预览'}
 
 
 def find_selection_jpg_proxy_folder(reference_folder):
-    """Find the project's JPG originals used only as visual proxies for RAW V0 files."""
+    """Find a unique sibling JPG/proxy folder for any imported version folder."""
     reference_folder = os.path.abspath(reference_folder)
-    if os.path.basename(reference_folder).casefold() != IMAGE_SELECTION_FOLDER_NAME.casefold():
-        return None
     project_folder = os.path.dirname(reference_folder)
     try:
         candidates = [
             entry.path for entry in os.scandir(project_folder)
-            if entry.is_dir() and entry.name.casefold() == 'jpg'
+            if entry.is_dir()
+            and os.path.abspath(entry.path) != reference_folder
+            and entry.name.casefold() in JPG_PROXY_FOLDER_NAMES
         ]
     except OSError:
         return None
@@ -41,12 +41,17 @@ def build_jpg_proxy_index(proxy_folder):
     candidates = {}
     if not proxy_folder:
         return candidates
-    for directory, _directory_names, file_names in os.walk(proxy_folder):
-        for file_name in file_names:
-            if not file_name.lower().endswith(JPG_PROXY_EXTENSIONS):
-                continue
-            stem = os.path.splitext(file_name)[0].casefold()
-            candidates.setdefault(stem, []).append(os.path.join(directory, file_name))
+    proxy_folders = [proxy_folder] if isinstance(proxy_folder, (str, os.PathLike)) else list(proxy_folder)
+    for root in proxy_folders:
+        for directory, _directory_names, file_names in os.walk(root):
+            for file_name in file_names:
+                if not file_name.lower().endswith(JPG_PROXY_EXTENSIONS):
+                    continue
+                stem = os.path.splitext(file_name)[0].casefold()
+                candidate_path = os.path.join(directory, file_name)
+                paths = candidates.setdefault(stem, [])
+                if os.path.normcase(os.path.abspath(candidate_path)) not in {os.path.normcase(os.path.abspath(path)) for path in paths}:
+                    paths.append(candidate_path)
     # A duplicated camera filename is ambiguous. Falling back to the RAW preview
     # is safer than linking a returned edit to the wrong photo.
     return {stem: paths[0] for stem, paths in candidates.items() if len(paths) == 1}
@@ -185,9 +190,13 @@ def copy_unmatched_a_files(unmatched_files_a, folder_a):
 def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_only=False, move_unmatched=False, source_files=None):
     media_extensions = IMAGE_EXTENSIONS + FFMPEG_IMAGE_EXTENSIONS + VIDEO_EXTENSIONS
     jpg_proxy_folder = find_selection_jpg_proxy_folder(folder_a)
-    jpg_proxy_index = build_jpg_proxy_index(jpg_proxy_folder)
+    # Companion JPGs may live beside the RAW files or in a sibling JPG/proxy
+    # folder. They are visual adapters, not separate version assets.
+    jpg_proxy_index = build_jpg_proxy_index([folder_a, *([jpg_proxy_folder] if jpg_proxy_folder else [])])
     proxy_count = 0
     list_a = [f for f in os.listdir(folder_a) if f.lower().endswith(media_extensions)]
+    raw_stems = {os.path.splitext(file_name)[0].casefold() for file_name in list_a if file_name.lower().endswith(RAW_EXTENSIONS)}
+    list_a = [file_name for file_name in list_a if not (file_name.lower().endswith(JPG_PROXY_EXTENSIONS) and os.path.splitext(file_name)[0].casefold() in raw_stems)]
     list_b = [f for f in os.listdir(folder_b) if f.lower().endswith(media_extensions)]
     if source_files is not None:
         selected_names = {str(file_name).casefold() for file_name in source_files}
@@ -244,7 +253,7 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
         if h_coarse is not None: files_a[f] = (path, h_coarse, h_fine, 'video' if f.lower().endswith(VIDEO_EXTENSIONS) else 'image')
         if i % 10 == 0: log_progress(f"分析 A: {i}/{len(list_a)}", int(i/len(list_a)*20))
     if proxy_count:
-        log_info(f"已使用 {proxy_count} 个同名 JPG 作为图片选片 RAW 的 V0 视觉代理")
+        log_info(f"已使用 {proxy_count} 个同名 JPG 作为 RAW 的视觉代理")
 
     # 2. 分析 文件夹B
     log_info("正在分析 文件夹B (待处理组)...")

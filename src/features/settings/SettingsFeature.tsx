@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Folder, FolderOpen, HardDrive, Palette, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, Loader2, Wrench, ExternalLink, AtSign, GripVertical, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, Crop, Heart, ShieldCheck, MessageSquareText, Send, LockKeyhole, Plus, X } from 'lucide-react';
-import { BUILT_IN_PROJECT_STATUSES, PROJECT_TOOLBAR_ACTION_IDS, normalizeProjectCategoryOrder } from '../../types';
+import { Folder, FolderOpen, HardDrive, Palette, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, Loader2, Wrench, ExternalLink, AtSign, GripVertical, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, Crop, Heart, ShieldCheck, MessageSquareText, Send, LockKeyhole, Plus, X, MemoryStick, Aperture, FolderInput, FileInput, Gauge, Scissors, FileImage } from 'lucide-react';
+import { BUILT_IN_PROJECT_STATUSES, PROJECT_TOOLBAR_ACTION_IDS, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from '../../types';
 import type { AppConfig, BackupSpaceStatus, BackupStatus, ComponentStatus, LegalDocumentId, PrivacyConsentState, ProjectToolbarActionId, StorageUsageOverview, WorkspaceProject } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { FORMAL_MODEL_LICENSES } from '../../licenses/modelLicenses';
@@ -58,6 +58,33 @@ const WorkspaceFolderPicker = ({ value, onChange }: { value: string; onChange: (
   return <div className="flex gap-2"><div title={value || '需选择工作文件夹'} className="min-w-0 flex-1 truncate rounded-lg border border-slate-200 bg-white px-3 py-2.5 font-mono text-sm text-slate-700">{value || '需选择工作文件夹'}</div><button type="button" onClick={() => void choose()} className="dialog-secondary inline-flex shrink-0 items-center gap-2"><FolderOpen size={16}/>选择文件夹</button></div>;
 };
 
+const WorkspaceFoldersPicker = ({ primary, values, onChange }: { primary: string; values: string[]; onChange: (primary: string, paths: string[]) => void }) => {
+  const paths = normalizeWorkspacePaths(primary, values);
+  const add = async () => {
+    const result = await window.electronAPI.chooseWorkspaceDirectory(primary);
+    if (result.cancelled || !result.path) return;
+    const next = normalizeWorkspacePaths(primary || result.path, [...paths, result.path]);
+    onChange(next[0], next);
+  };
+  const makePrimary = (workspacePath: string) => {
+    const next = normalizeWorkspacePaths(workspacePath, paths.filter(item => item.toLocaleLowerCase() !== workspacePath.toLocaleLowerCase()));
+    onChange(next[0], next);
+  };
+  const remove = (workspacePath: string) => {
+    const next = paths.filter(item => item.toLocaleLowerCase() !== workspacePath.toLocaleLowerCase());
+    if (!next.length) return;
+    onChange(next[0], next);
+  };
+  return <div className="space-y-2">
+    {paths.map(workspacePath => { const isPrimary = workspacePath.toLocaleLowerCase() === primary.toLocaleLowerCase(); return <div key={workspacePath.toLocaleLowerCase()} className="flex min-w-0 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
+      <div className="min-w-0 flex-1"><p title={workspacePath} className="truncate font-mono text-sm text-slate-700">{workspacePath}</p>{isPrimary && <p className="mt-0.5 text-[10px] font-bold text-blue-600">默认写入目录</p>}</div>
+      {!isPrimary && <button type="button" onClick={() => makePrimary(workspacePath)} className="dialog-secondary shrink-0 text-xs">设为默认</button>}
+      <button type="button" disabled={paths.length === 1} onClick={() => remove(workspacePath)} className="rounded-md p-2 text-slate-400 hover:bg-red-50 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-30" aria-label={`移除工作目录 ${workspacePath}`} title="移除"><X size={15}/></button>
+    </div>; })}
+    <button type="button" onClick={() => void add()} className="dialog-secondary inline-flex items-center gap-2"><Plus size={15}/>添加工作目录</button>
+  </div>;
+};
+
 const WorkspaceSetupPage = ({ config, onSave }: { config: AppConfig; onSave: (config: AppConfig) => void | Promise<void> }) => {
   const [workspacePath, setWorkspacePath] = useState(config.workspacePath);
   const [recoveryStatus, setRecoveryStatus] = useState<BackupStatus>();
@@ -65,7 +92,7 @@ const WorkspaceSetupPage = ({ config, onSave }: { config: AppConfig; onSave: (co
   const [restoringSnapshot, setRestoringSnapshot] = useState('');
   const confirm = async () => {
     const selectedPath = workspacePath.trim();
-    if (selectedPath) await onSave({ ...config, workspacePath: selectedPath });
+    if (selectedPath) await onSave({ ...config, workspacePath: selectedPath, workspacePaths: [selectedPath] });
   };
   const inspectBackup = async () => {
     const selected = await window.electronAPI.chooseBackupTarget(config.backup.targetPath);
@@ -80,7 +107,7 @@ const WorkspaceSetupPage = ({ config, onSave }: { config: AppConfig; onSave: (co
       const result = await window.electronAPI.restoreBackupWorkspace('', snapshotId);
       if (result.success && result.workspacePath) {
         setWorkspacePath(result.workspacePath);
-        await onSave({ ...config, workspacePath: result.workspacePath, backup: { ...config.backup, enabled: true, targetType: recoveryBackupPath.startsWith('\\\\') ? 'nas' : 'local', targetPath: recoveryBackupPath } });
+        await onSave({ ...config, workspacePath: result.workspacePath, workspacePaths: [result.workspacePath], backup: { ...config.backup, enabled: true, targetType: recoveryBackupPath.startsWith('\\\\') ? 'nas' : 'local', targetPath: recoveryBackupPath } });
       }
     } finally { setRestoringSnapshot(''); }
   };
@@ -370,12 +397,21 @@ const SettingsNavigator = ({ activeSection, components, onSelect }: { activeSect
 };
 
 const PROJECT_TOOLBAR_ITEMS: Record<ProjectToolbarActionId, { label: string; description: string; icon: React.ReactNode }> = {
+  'sd-import': { label: '从 SD 卡导入', description: '分析 SD 卡并把素材导入当前项目', icon: <MemoryStick size={17}/> },
+  'negative-import': { label: '导入底片', description: '从文件或文件夹导入底片', icon: <Aperture size={17}/> },
+  'progress-import': { label: '导入进度', description: '导入图片或视频版本进度', icon: <FolderInput size={17}/> },
+  'broll-import': { label: '导入花絮', description: '批量导入图片与视频花絮', icon: <FolderInput size={17}/> },
+  'file-import': { label: '导入文件', description: '向当前目录导入任意文件', icon: <FileInput size={17}/> },
   'filename-selection': { label: '从文件名选片', description: '按文件名把选中的素材整理到选片文件夹', icon: <FileText size={17}/> },
   'select-media': { label: '选片', description: '把当前选择的图片或视频加入选片结果', icon: <CheckCircle2 size={17}/> },
-  storyboard: { label: '视频工具', description: '截取分镜帧或打开视频转码面板', icon: <Video size={17}/> },
+  storyboard: { label: '截取分镜帧', description: '从所选视频中提取代表性画面', icon: <Video size={17}/> },
+  'video-transcode': { label: '视频转码', description: '转换视频封装与编码格式', icon: <Gauge size={17}/> },
+  'video-split': { label: '视频切割', description: '把大型视频无损切成连续分段', icon: <Scissors size={17}/> },
   'screenshot-main-image': { label: '提取截图主图', description: '从所选截图中识别并截取主要图片区域', icon: <Crop size={17}/> },
   photoshop: { label: '在 PS 中打开', description: '把所选图片、RAW 或 PSD/PSB 发送到 Photoshop', icon: <span className="flex h-[17px] w-[17px] items-center justify-center rounded border border-blue-400 text-[9px] font-bold text-blue-600">Ps</span> },
   'png-converter': { label: 'PNG 转 JPG', description: '转换所选 PNG 文件或文件夹', icon: <ImageIcon size={17}/> },
+  'office-extract': { label: '提取 Office 图片', description: '提取 Word、PowerPoint 与 Excel 内嵌图片', icon: <FileImage size={17}/> },
+  'project-trash': { label: '移入回收站', description: '将整个项目移入系统回收站', icon: <Trash2 size={17}/> },
   'version-management': { label: '版本管理', description: '管理素材版本或标记进度文件夹', icon: <GitBranch size={17}/> },
   'team-retouch': { label: '团片协作', description: '打开项目的团片协作工作区', icon: <UsersRound size={17}/> },
   'final-versions': { label: '查看喜爱', description: '浏览项目中所有已经标记为喜爱的图片', icon: <Heart size={17}/> },
@@ -524,7 +560,8 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       while (pendingSaveRef.current) {
         const next = pendingSaveRef.current;
         pendingSaveRef.current = null;
-        changed = await onSave({ ...next, workspacePath: next.workspacePath.trim() }) || changed;
+        const workspacePaths = normalizeWorkspacePaths(next.workspacePath, next.workspacePaths);
+        changed = await onSave({ ...next, workspacePath: workspacePaths[0] || '', workspacePaths }) || changed;
       }
     } finally {
       savingRef.current = false;
@@ -557,13 +594,15 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     setAddingProjectCategory(false);
   };
   const removeProjectCategory = async (name: string) => {
-    if (draft.workspacePath.trim()) {
-      const workspace = await window.electronAPI.getWorkspaceProjects(draft.workspacePath);
-      if (!workspace.success) { onNotice(`无法检查分类：${workspace.error || '工作区读取失败'}`, 5000); return; }
-      const categoryGroup = workspace.statuses.find(group => group.status === name);
-      const projectCount = categoryGroup?.projects.length || 0;
+    const workspacePaths = normalizeWorkspacePaths(draft.workspacePath, draft.workspacePaths);
+    if (workspacePaths.length) {
+      const workspaces = await Promise.all(workspacePaths.map(workspacePath => window.electronAPI.getWorkspaceProjects(workspacePath)));
+      const failed = workspaces.find(workspace => !workspace.success);
+      if (failed) { onNotice(`无法检查分类：${failed.error || '工作区读取失败'}`, 5000); return; }
+      const categoryGroups = workspaces.map(workspace => workspace.statuses.find(group => group.status === name)).filter(Boolean);
+      const projectCount = categoryGroups.reduce((total, group) => total + (group?.projects.length || 0), 0);
       if (projectCount > 0) { onNotice(`“${name}”中还有 ${projectCount} 个项目，请先移到其他分类`, 5000); return; }
-      if (categoryGroup) { onNotice(`“${name}”仍被离线项目记录使用，请恢复或清理这些项目后再删除`, 5000); return; }
+      if (categoryGroups.length) { onNotice(`“${name}”仍被离线项目记录使用，请恢复或清理这些项目后再删除`, 5000); return; }
     }
     if (!await appDialog.confirm({ title: `删除“${name}”分类吗？`, message: '只会删除这个自定义分类，不会删除任何项目文件。', confirmLabel: '删除分类', tone: 'danger' })) return;
     commitSettings({
@@ -725,7 +764,8 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       const result = await window.electronAPI.restoreBackupWorkspace(draft.workspacePath, snapshotId);
       if (result.cancelled) return;
       if (!result.success || !result.workspacePath) { onNotice(result.error || '工作区恢复失败', 6000); return; }
-      const next = { ...draft, workspacePath: result.workspacePath };
+      const workspacePaths = normalizeWorkspacePaths(result.workspacePath, [...draft.workspacePaths, result.workspacePath]);
+      const next = { ...draft, workspacePath: result.workspacePath, workspacePaths };
       commitSettings(next);
       onNotice('工作区恢复完成，已切换到恢复位置', 6000);
       window.dispatchEvent(new Event('workspace-projects-changed'));
@@ -759,7 +799,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       confirmLabel: '恢复默认设置',
     })) return;
     const defaults = await getDefaultSettings();
-    commitSettings({ ...defaults, workspacePath: draft.workspacePath.trim() || defaults.workspacePath });
+    commitSettings({ ...defaults, workspacePath: draft.workspacePath.trim() || defaults.workspacePath, workspacePaths: normalizeWorkspacePaths(draft.workspacePath, draft.workspacePaths) });
   };
   return <section className="min-h-full w-full bg-white"><div className="mx-auto w-full max-w-6xl space-y-10 px-8 py-10 lg:px-12">
     <h2 className="text-2xl font-bold text-slate-900">{SETTINGS_SECTION_LABELS[activeSection]}</h2>
@@ -769,7 +809,9 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       <SettingsRow title="固定灵感库页面" description="固定在主页右侧，并阻止误关闭。"><SettingsToggle label="固定灵感库页面" checked={draft.pinInspirationLibrary} onChange={checked => update('pinInspirationLibrary', checked)}/></SettingsRow>
       <SettingsRow title="显示角色生日" description="在首页显示角色生日提醒。"><SettingsToggle label="显示角色生日" checked={draft.birthdayEnabled} onChange={checked => update('birthdayEnabled', checked)}/></SettingsRow>
     </SettingsPageGroup>
-    <SettingsPageGroup title="文件夹">
+    <SettingsPageGroup title="文件浏览">
+      <SettingsRow title="打开文件与文件夹" description="应用于文件夹、图片、视频和普通文件；双击模式下，单击只选中并显示详细信息。"><select value={draft.itemOpenMode} onChange={event => update('itemOpenMode', event.target.value as AppConfig['itemOpenMode'])} className="form-input ml-auto max-w-sm"><option value="single">单击打开（默认）</option><option value="double">双击打开</option></select></SettingsRow>
+      <SettingsRow title="图片评分显示" description="两种界面都直接读写图片自身的 XMP 星级；喜欢模式会把任意星级视为喜欢，点喜欢时写入五星。"><select value={draft.favoriteDisplayMode} onChange={event => update('favoriteDisplayMode', event.target.value as AppConfig['favoriteDisplayMode'])} className="form-input ml-auto max-w-sm"><option value="binary">喜欢 / 不喜欢</option><option value="stars">一星到五星</option></select></SettingsRow>
       <SettingsRow title="文件夹默认排序方式" description=""><select value={draft.defaultFolderSort} onChange={event => update('defaultFolderSort', event.target.value as AppConfig['defaultFolderSort'])} className="form-input ml-auto max-w-sm"><option value="date">修改日期（最新优先）</option><option value="name">文件名（A–Z）</option><option value="size">大小（从大到小）</option></select></SettingsRow>
     </SettingsPageGroup>
     <section><h3 className="text-sm font-bold text-slate-800">项目工具栏</h3><p className="mt-1 text-xs leading-5 text-slate-500">调整项目文件浏览器中工作流按钮的显示状态、可用性策略和排列顺序。</p><ProjectToolbarSettingsEditor value={draft.projectToolbar} onChange={projectToolbar => update('projectToolbar', projectToolbar)}/></section>
@@ -795,10 +837,10 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     {activeSection === 'privacy' && <PrivacySettings onNotice={onNotice}/>}
     {(activeSection === 'backup' || activeSection === 'storage') && <>
       <SettingsPageGroup title="统计">
-        <StorageVolumeOverview sourceSignature={[draft.workspacePath, inspirationLibrarySettings.rootPath, draft.archive.targetPath, draft.backup.targetPath, draft.mediaCache.directory].join('\u0000')}/>
+        <StorageVolumeOverview sourceSignature={[...normalizeWorkspacePaths(draft.workspacePath, draft.workspacePaths), inspirationLibrarySettings.rootPath, draft.archive.targetPath, draft.backup.targetPath, draft.mediaCache.directory].join('\u0000')}/>
       </SettingsPageGroup>
       <SettingsPageGroup title="工作目录">
-      <SettingsRow title="项目工作目录" description="项目直接放在选中的客户文件夹中；选择磁盘根目录时使用其下的“照片流”文件夹。"><WorkspaceFolderPicker value={draft.workspacePath} onChange={workspacePath => update('workspacePath', workspacePath)}/></SettingsRow>
+      <SettingsRow title="项目工作目录" description="可以同时读取多个磁盘中的项目。默认写入目录用于新建项目、导入项目和 SD 卡导入；打开已有项目后，操作会自动使用它所属的磁盘。" align="start"><WorkspaceFoldersPicker primary={draft.workspacePath} values={draft.workspacePaths} onChange={(workspacePath, workspacePaths) => commitSettings({ ...draft, workspacePath, workspacePaths })}/></SettingsRow>
       <SettingsRow title="灵感库目录" description="选择后立即保存，并纳入磁盘占用统计。"><WorkspaceFolderPicker value={inspirationLibrarySettings.rootPath} onChange={rootPath => void updateInspirationLibraryRoot(rootPath)}/></SettingsRow>
       <SettingsRow title="使用独立项目归档盘" description={draft.archive.enabled ? (archiveStatus.state === 'connected' ? '归档盘已连接。' : archiveStatus.state === 'offline' ? '归档盘当前离线。' : '请选择归档盘。') : '将“已归档”项目迁移到其他存储盘。'}><SettingsToggle label="使用独立项目归档盘" checked={draft.archive.enabled} onChange={checked => { if (checked && !draft.archive.targetPath) void chooseArchiveTarget(); else update('archive', { ...draft.archive, enabled: checked }); }}/></SettingsRow>
       <SettingsRow title="项目归档盘位置" description={archiveStatus.freeBytes !== undefined ? `剩余 ${formatStorageSize(archiveStatus.freeBytes)} / ${formatStorageSize(archiveStatus.totalBytes)}` : '选择用于保存已归档项目的位置。'}><fieldset disabled={!draft.archive.enabled} className="flex min-w-0 gap-2 disabled:opacity-50"><input readOnly value={draft.archive.targetPath} placeholder="尚未选择归档盘" className="form-input min-w-0 flex-1"/><button type="button" onClick={() => void chooseArchiveTarget()} className="dialog-secondary shrink-0">选择</button><button type="button" onClick={() => void window.electronAPI.openArchiveTarget()} disabled={!draft.archive.targetPath} className="dialog-secondary shrink-0 disabled:opacity-45">打开</button></fieldset></SettingsRow>
@@ -826,7 +868,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       </div>
       </SettingsPageGroup>
       <SettingsPageGroup title="缓存">
-        <MediaCacheSettings config={draft.mediaCache} onChange={mediaCache => update('mediaCache', mediaCache)} rowsOnly/>
+        <MediaCacheSettings config={draft.mediaCache} onChange={mediaCache => update('mediaCache', mediaCache)}/>
         <InterfaceCacheSettings onNotice={onNotice}/>
         <SettingsRow title="自动清理已删除项目的数据" description="每天首次启动时检查；系统外删除的项目保留 30 天恢复期，无法确认状态时继续保留。"><SettingsToggle label="自动清理已删除项目的数据" checked={draft.autoCleanupDeletedProjectData} onChange={checked => update('autoCleanupDeletedProjectData', checked)}/></SettingsRow>
         <LogSettings onNotice={onNotice}/>
@@ -997,7 +1039,7 @@ const AboutSettings = () => {
   </div>;
 };
 
-const MediaCacheSettings = ({ config, onChange, rowsOnly = false }: { config: AppConfig['mediaCache']; onChange: (config: AppConfig['mediaCache']) => void; rowsOnly?: boolean }) => {
+const MediaCacheSettings = ({ config, onChange }: { config: AppConfig['mediaCache']; onChange: (config: AppConfig['mediaCache']) => void }) => {
   const [info, setInfo] = useState({ path: '', sizeBytes: 0, fileCount: 0 });
   const [busy, setBusy] = useState(false);
   const [capacityInput, setCapacityInput] = useState(String(config.maxSizeGB));
@@ -1027,20 +1069,12 @@ const MediaCacheSettings = ({ config, onChange, rowsOnly = false }: { config: Ap
     } finally { setBusy(false); }
   };
   const sizeText = info.sizeBytes >= 1024 * 1024 * 1024 ? `${(info.sizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB` : `${Math.round(info.sizeBytes / 1024 / 1024)} MB`;
-  if (rowsOnly) return <>
+  return <>
     <SettingsRow title="最大缩略图缓存容量" description="超过上限时自动清理最久未使用的缩略图。"><div className="ml-auto flex max-w-xs items-center gap-2"><input type="number" min={0} step={0.1} inputMode="decimal" value={capacityInput} onChange={event => setCapacityInput(event.target.value)} onBlur={commitCapacity} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} className="form-input"/><span className="text-sm text-slate-500">GB</span></div></SettingsRow>
     <SettingsRow title="缩略图缓存目录" description="图片、RAW 和视频缩略图的保存位置。"><div className="flex min-w-0 gap-2"><input readOnly value={info.path || config.directory || '默认应用缓存目录'} className="form-input min-w-0 flex-1 font-mono text-xs"/><button onClick={chooseDirectory} className="dialog-secondary shrink-0">选择</button></div></SettingsRow>
     <SettingsRow title="自动清理 30 天前的缓存" description="每天首次启动时检查，并移除已确认不存在的源文件索引。"><SettingsToggle label="自动清理 30 天前的缓存" checked={config.autoCleanup30Days} onChange={checked => onChange({ ...config, autoCleanup30Days: checked })}/></SettingsRow>
     <SettingsRow title="当前缩略图缓存" description={`${sizeText} · ${info.fileCount} 个缓存文件`}><button onClick={clearAll} disabled={busy} className="ml-auto flex w-fit items-center gap-1.5 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-50"><Trash2 size={14}/>{busy ? '正在清理…' : '清空缓存'}</button></SettingsRow>
   </>;
-  return <div className="grid gap-5 md:grid-cols-[1fr_auto] md:items-end">
-    <div className="space-y-4">
-      <div><label className="form-label">最大缓存容量</label><div className="flex max-w-xs items-center gap-2"><input type="number" min={0} step={0.1} inputMode="decimal" value={capacityInput} onChange={event => setCapacityInput(event.target.value)} onBlur={commitCapacity} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} className="form-input"/><span className="text-sm font-medium text-slate-500">GB</span></div><p className="mt-2 text-xs text-slate-500">超过上限时自动清理最久未使用的缩略图。</p></div>
-      <div><label className="form-label">缓存目录</label><div className="flex gap-2"><input readOnly value={info.path || config.directory || '默认应用缓存目录'} className="form-input min-w-0 font-mono text-xs"/><button onClick={chooseDirectory} className="dialog-secondary shrink-0">选择目录</button></div></div>
-      <label className="settings-check"><input type="checkbox" checked={config.autoCleanup30Days} onChange={event => onChange({ ...config, autoCleanup30Days: event.target.checked })}/><span><span className="block">自动清理 30 天以前的缓存</span><span className="mt-1 block text-xs leading-5 text-slate-500">启用后每天第一次启动软件时检查一次，同时移除已经确认不存在的源文件索引；当天再次启动不会重复检查。</span></span></label>
-    </div>
-    <div className="rounded-lg border border-slate-200 bg-white p-4 text-sm"><p className="font-bold text-slate-800">当前缓存：{sizeText}</p><p className="mt-1 text-xs text-slate-500">{info.fileCount} 个缓存文件</p><div className="mt-3 flex flex-wrap gap-2"><button onClick={clearAll} disabled={busy} className="inline-flex items-center gap-1.5 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-50"><Trash2 size={14}/>{busy ? '正在清理…' : '清空全部缓存'}</button></div></div>
-  </div>;
 };
 
 const InterfaceCacheSettings = ({ onNotice }: { onNotice: (message: string, duration?: number) => void }) => {
@@ -1066,4 +1100,4 @@ const InterfaceCacheSettings = ({ onNotice }: { onNotice: (message: string, dura
   return <SettingsRow title="界面缓存" description="软件会自动清理和容量淘汰，通常只需在释放空间或界面资源异常时手动清理。"><button type="button" disabled={busy} onClick={() => void clear()} className="dialog-secondary ml-auto flex w-fit items-center gap-2 disabled:opacity-50"><Trash2 size={14}/>{busy ? '正在清理…' : '清理界面缓存'}</button></SettingsRow>;
 };
 
-export { WorkspaceSetupPage, SettingsNavigator, SettingsPage, MediaCacheSettings };
+export { WorkspaceSetupPage, SettingsNavigator, SettingsPage };

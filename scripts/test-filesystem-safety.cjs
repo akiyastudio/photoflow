@@ -73,6 +73,18 @@ const runJson = (command, args, input) => {
       displayName: '图片选片（原图）', folderPath: selectionPath, trackingEnabled: true,
     })]);
     assert.strictEqual(repeatedSelectionProgress.progressFolder.versionKey, '0', 'ensuring the selection baseline repeatedly must be idempotent');
+    const nestedProgressPath = path.join(projectPath, '外部结构', '交付批次');
+    fs.mkdirSync(nestedProgressPath, { recursive: true });
+    const nestedProgress = runJson(python, [script, 'progress_register', '--root', workspace, '--database', database, '--payload', JSON.stringify({
+      projectName: 'progress-project', mediaKind: 'image', versionKey: '7',
+      displayName: '图片后期_7_接管', folderPath: nestedProgressPath, trackingEnabled: false,
+    })]).progressFolder;
+    assert.strictEqual(path.resolve(nestedProgress.folderPath), path.resolve(nestedProgressPath), 'any descendant folder must be eligible for version progress');
+    const updatedNestedProgress = runJson(python, [script, 'progress_update_tree', '--root', workspace, '--database', database, '--payload', JSON.stringify({
+      projectName: 'progress-project', primaryProgressId: nestedProgress.id,
+      updates: [{ id: nestedProgress.id, mediaKind: 'image', versionKey: '8', parentProgressId: repeatedSelectionProgress.progressFolder.id, displayName: '图片后期_8_接管', folderPath: nestedProgressPath, trackingEnabled: false, trackingState: 'disabled' }],
+    })]).progressFolders.find(folder => folder.id === nestedProgress.id);
+    assert.strictEqual(path.resolve(updatedNestedProgress.folderPath), path.resolve(nestedProgressPath), 'editing adopted progress metadata must preserve its nested physical path');
     runJson(python, [script, 'batch_register_baseline', '--root', workspace, '--database', database, '--payload', JSON.stringify({
       projectName: 'progress-project', folderPath: selectionPath, versionName: '图片选片（原图）',
     })]);
@@ -123,6 +135,14 @@ const runJson = (command, args, input) => {
     assert.strictEqual(path.resolve(trackedCurrent.filePath), path.resolve(renamedSourceFile), 'batch version must track the real renamed source file');
     assert.strictEqual(trackedCurrent.versionName, '图片后期_2', 'batch version display name must use the progress name without an R sequence prefix');
     assert.strictEqual(fs.existsSync(path.join(projectPath, 'Versions')), false, 'batch tracking must not create a Versions history library');
+    fs.appendFileSync(renamedSourceFile, 'xmp-rating-metadata');
+    const metadataRefresh = runJson(python, [script, 'media_refresh_metadata_fingerprint', '--root', workspace, '--database', database, '--payload', JSON.stringify({ filePath: renamedSourceFile })]);
+    assert.strictEqual(metadataRefresh.updatedCount, 1, 'metadata-only writes must refresh the tracked fingerprint');
+    const afterMetadataRefresh = runJson(python, [script, 'media_get', '--root', workspace, '--database', database, '--payload', JSON.stringify({
+      projectName: 'progress-project', filePath: renamedSourceFile,
+    })]).versions.find(version => version.id === trackedCurrent.id);
+    assert.strictEqual(afterMetadataRefresh.contentChanged, false, 'an accepted metadata rating write must not become a visual version change');
+    assert.strictEqual(afterMetadataRefresh.fileSize, fs.statSync(renamedSourceFile).size);
     runJson(python, [script, 'media_update_version', '--root', workspace, '--database', database, '--payload', JSON.stringify({
       versionId: trackedCurrent.id, isFinal: true,
     })]);

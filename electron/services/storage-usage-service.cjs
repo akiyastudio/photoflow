@@ -43,7 +43,9 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
 
   const configuredSources = async () => {
     const config = readSavedConfig() || {};
-    const workspaceRoot = String(config.workspacePath || '').trim();
+    const workspaceRoots = [config.workspacePath, ...(Array.isArray(config.workspacePaths) ? config.workspacePaths : [])]
+      .map(value => String(value || '').trim())
+      .filter((value, index, values) => value && values.findIndex(candidate => comparable(candidate) === comparable(value)) === index);
     const sources = [];
     const add = (kind, sourcePath) => {
       if (!sourcePath) return;
@@ -51,11 +53,12 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
       const key = `${kind}:${comparable(absolute)}`;
       if (!sources.some(item => item.key === key)) sources.push({ key, kind, label: roleDetails[kind].label, path: absolute });
     };
-    let id = '';
-    if (workspaceRoot) {
+    const workspaceIds = [];
+    for (const workspaceRoot of workspaceRoots) {
       add('workspace', workspaceRoot);
-      id = await workspaceId(workspaceRoot);
+      const id = await workspaceId(workspaceRoot);
       if (id) {
+        workspaceIds.push(id);
         add('internal', getWorkspaceDataRoot(workspaceRoot));
         add('internal', getWorkspaceDatabasePath(workspaceRoot));
       }
@@ -63,7 +66,7 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
     const inspirationRoot = String(config.inspirationLibrary?.rootPath || '').trim();
     if (inspirationRoot) add('inspiration', inspirationRoot);
     const archiveTarget = String(config.archive?.targetPath || '').trim();
-    if (archiveTarget && id) add('archive', path.join(archiveTarget, id));
+    if (archiveTarget) for (const id of workspaceIds) add('archive', path.join(archiveTarget, id));
     const backupTarget = String(config.backup?.targetPath || '').trim();
     if (backupTarget) add('backup', path.join(backupTarget, BACKUP_STORE_DIRECTORY));
     const cacheRoot = String(config.mediaCache?.directory || '').trim() || path.join(app.getPath('userData'), 'media-cache');

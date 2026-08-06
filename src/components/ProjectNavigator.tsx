@@ -1,13 +1,44 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, ChevronRight, Folder, FolderOpen, FolderPlus, HardDrive, X } from 'lucide-react';
-import { normalizeProjectCategoryOrder, projectStatusLabel } from '../types';
+import { ChevronDown, ChevronRight, Folder, FolderInput, FolderOpen, FolderPlus, HardDrive, Loader2, X } from 'lucide-react';
+import { normalizeProjectCategoryOrder, normalizeWorkspacePaths, projectStatusLabel } from '../types';
 import type { BackupStatus, ProjectDate, ProjectStatus, WorkspaceProject, WorkspaceStatusGroup } from '../types';
 import { useAppDialog } from './AppDialogProvider';
 import { useEscapeLayer } from './LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../utils/recycleBinFailure';
+import { useTaskCenter } from '../features/background-tasks/TaskCenter';
 
 type Action = 'import' | 'broll' | 'match';
+type ExistingProjectCandidate = {
+  relativePath: string;
+  name: string;
+  imageCount: number;
+  rawCount: number;
+  videoCount: number;
+  fileCount: number;
+  mediaKind: 'image' | 'video';
+  suggestedRole: 'baseline' | 'progress';
+};
+type ExistingProjectDraft = {
+  sourcePath: string;
+  name: string;
+  fileCount: number;
+  folderCount: number;
+  totalBytes: number;
+  truncated: boolean;
+  candidates: ExistingProjectCandidate[];
+};
+type ExistingProjectImportResult = {
+  project: WorkspaceProject;
+  sourceRetained: boolean;
+  candidateCount: number;
+};
+const formatBytes = (value: number) => {
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const unit = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
+  return `${(value / 1024 ** unit).toFixed(unit ? 1 : 0)} ${units[unit]}`;
+};
 const cleanupCheckedWorkspaces = new Set<string>();
 const localDateKey = () => {
   const now = new Date();
@@ -66,8 +97,9 @@ const projectEditorValue = (project: WorkspaceProject) => {
   return { year: '', month: '', day: '', quickDate: '', name: project.name };
 };
 
-export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, autoCleanupDeletedProjectData, createPlanningFolder, customProjectCategories, projectCategoryOrder, selectedProject, onSelectProject, onProjectDeleted, onWorkspaceResolved, onOpenBackup }: {
+export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled, backupStatus, autoCleanupDeletedProjectData, createPlanningFolder, customProjectCategories, projectCategoryOrder, selectedProject, onSelectProject, onProjectDeleted, onWorkspacesResolved, onOpenBackup }: {
   workspacePath: string;
+  workspacePaths: string[];
   backupEnabled: boolean;
   backupStatus: BackupStatus;
   autoCleanupDeletedProjectData: boolean;
@@ -78,11 +110,13 @@ export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, a
   onSelectProject: (project: WorkspaceProject, replacePath?: string) => void;
   onProjectAction: (action: Action, project: WorkspaceProject) => void;
   onProjectDeleted: (project: WorkspaceProject) => void;
-  onWorkspaceResolved: (workspacePath: string) => void;
+  onWorkspacesResolved: (workspacePaths: string[]) => void;
   onOpenBackup: (project?: WorkspaceProject) => void;
 }) => {
   const appDialog = useAppDialog();
+  const { backgroundTasks } = useTaskCenter();
   const [groups, setGroups] = useState<WorkspaceStatusGroup[]>([]);
+  const configuredWorkspacePaths = useMemo(() => normalizeWorkspacePaths(workspacePath, workspacePaths), [workspacePath, workspacePaths]);
   const statuses = useMemo<ProjectStatus[]>(() => {
     const ordered = ['未分类', ...normalizeProjectCategoryOrder(projectCategoryOrder, customProjectCategories), ...groups.map(group => group.status)];
     const seen = new Set<string>();
@@ -103,6 +137,18 @@ export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, a
   const [error, setError] = useState('');
   const [menu, setMenu] = useState<{ project: WorkspaceProject; x: number; y: number } | null>(null);
   const [showNew, setShowNew] = useState(false);
+  const [choosingExistingProject, setChoosingExistingProject] = useState(false);
+  const [existingProjectDraft, setExistingProjectDraft] = useState<ExistingProjectDraft | null>(null);
+  const [existingProjectName, setExistingProjectName] = useState('');
+  const [existingProjectMode, setExistingProjectMode] = useState<'copy' | 'move'>('copy');
+  const [existingProjectError, setExistingProjectError] = useState('');
+  const [isImportingExistingProject, setIsImportingExistingProject] = useState(false);
+  const [isCancellingExistingProject, setIsCancellingExistingProject] = useState(false);
+  const [existingProjectResult, setExistingProjectResult] = useState<ExistingProjectImportResult | null>(null);
+  const existingProjectImportTask = useMemo(() => backgroundTasks.find(task => task.type === 'project-file-operation'
+    && task.metadata?.operation === 'import-project'
+    && task.metadata?.projectName === existingProjectName.trim()
+    && (task.state === 'queued' || task.state === 'running')), [backgroundTasks, existingProjectName]);
   const initialDate = initialProjectDate();
   const [editor, setEditor] = useState({ year: initialDate.year, month: initialDate.month, day: initialDate.day, quickDate: `${initialDate.year}-${initialDate.month}-${initialDate.day}`, name: '' });
   const { year, month, day, quickDate, name } = editor;
@@ -123,6 +169,85 @@ export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, a
     setName('');
     setNewProjectError('');
     setShowNew(true);
+  };
+  const chooseExistingProject = async () => {
+    setChoosingExistingProject(true);
+    setExistingProjectError('');
+    setExistingProjectResult(null);
+    try {
+      const result = await window.electronAPI.chooseExistingProject();
+      if (result.cancelled) return;
+      if (!result.success || !result.sourcePath || !result.name) {
+        setCreateNotice(result.error || '无法读取已有项目');
+        window.setTimeout(() => setCreateNotice(''), 4000);
+        return;
+      }
+      const draft: ExistingProjectDraft = {
+        sourcePath: result.sourcePath,
+        name: result.name,
+        fileCount: result.fileCount || 0,
+        folderCount: result.folderCount || 0,
+        totalBytes: result.totalBytes || 0,
+        truncated: Boolean(result.truncated),
+        candidates: result.candidates || [],
+      };
+      setExistingProjectDraft(draft);
+      setExistingProjectName(draft.name);
+      setExistingProjectMode('copy');
+    } finally {
+      setChoosingExistingProject(false);
+    }
+  };
+  const cancelExistingProjectImport = async () => {
+    if (!existingProjectImportTask?.cancellable || isCancellingExistingProject) return;
+    setIsCancellingExistingProject(true);
+    setExistingProjectError('');
+    const result = await window.electronAPI.cancelBackgroundTask(existingProjectImportTask.id);
+    if (!result.success) {
+      setIsCancellingExistingProject(false);
+      setExistingProjectError('无法取消导入，请重试。');
+    }
+  };
+  const closeExistingProjectImport = () => {
+    if (isImportingExistingProject) {
+      void cancelExistingProjectImport();
+      return;
+    }
+    if (existingProjectResult) onSelectProject({ ...existingProjectResult.project, workspacePath });
+    setExistingProjectDraft(null);
+    setExistingProjectResult(null);
+    setExistingProjectError('');
+  };
+  const importExistingProject = async () => {
+    if (!existingProjectDraft || !existingProjectName.trim() || isImportingExistingProject) return;
+    setExistingProjectError('');
+    setIsImportingExistingProject(true);
+    setIsCancellingExistingProject(false);
+    try {
+      const result = await window.electronAPI.importExistingProject(workspacePath, existingProjectDraft.sourcePath, {
+        name: existingProjectName.trim(),
+        mode: existingProjectMode,
+      });
+      if (result.cancelled) {
+        setExistingProjectDraft(null);
+        return;
+      }
+      if (!result.success || !result.project) {
+        setExistingProjectError(result.error || '导入已有项目失败');
+        return;
+      }
+      try {
+        window.localStorage.setItem(`photoflow:imported-project-tracking:${result.project.path}`, JSON.stringify(result.candidates || existingProjectDraft.candidates));
+      } catch { /* onboarding suggestions are optional */ }
+      setExpanded(current => ({ ...current, 策划中: true }));
+      await refresh();
+      setExistingProjectResult({ project: result.project, sourceRetained: Boolean(result.sourceRetained), candidateCount: (result.candidates || existingProjectDraft.candidates).length });
+    } catch (importError) {
+      setExistingProjectError(importError instanceof Error ? importError.message : '导入已有项目失败');
+    } finally {
+      setIsImportingExistingProject(false);
+      setIsCancellingExistingProject(false);
+    }
   };
   const openRenameProject = (project: WorkspaceProject) => {
     setEditor(projectEditorValue(project));
@@ -150,36 +275,48 @@ export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, a
   const nextProjectDisplayName = [formattedDate, name.trim()].filter(Boolean).join(' ');
 
   const refresh = async () => {
-    if (!workspacePath.trim()) {
+    if (!configuredWorkspacePaths.length) {
       setGroups([]);
       setError('');
       return;
     }
-    const result = await window.electronAPI.getWorkspaceProjects(workspacePath);
-    if (result.success) {
-      setGroups(result.statuses);
-      if (result.root && result.root !== workspacePath) onWorkspaceResolved(result.root);
-      setError('');
-    } else setError(result.error || '无法读取工作目录');
+    const results = await Promise.all(configuredWorkspacePaths.map(async requestedPath => ({ requestedPath, result: await window.electronAPI.getWorkspaceProjects(requestedPath) })));
+    const merged = new Map<ProjectStatus, WorkspaceProject[]>();
+    for (const { requestedPath, result } of results) {
+      if (!result.success) continue;
+      const resolvedRoot = result.root || requestedPath;
+      for (const group of result.statuses) {
+        const projects = merged.get(group.status) || [];
+        projects.push(...group.projects.map(project => ({ ...project, workspacePath: resolvedRoot })));
+        merged.set(group.status, projects);
+      }
+    }
+    setGroups([...merged].map(([status, projects]) => ({ status, projects })));
+    const resolvedWorkspacePaths = normalizeWorkspacePaths(results[0]?.result.root || configuredWorkspacePaths[0], results.map(({ requestedPath, result }) => result.success && result.root ? result.root : requestedPath));
+    if (resolvedWorkspacePaths.join('\0').toLocaleLowerCase() !== configuredWorkspacePaths.join('\0').toLocaleLowerCase()) onWorkspacesResolved(resolvedWorkspacePaths);
+    const failures = results.filter(({ result }) => !result.success);
+    setError(failures.length ? `${failures.length} 个工作目录暂时无法读取，其余项目仍可使用` : '');
   };
 
-  useEffect(() => { refresh(); }, [workspacePath]);
+  useEffect(() => { void refresh(); }, [configuredWorkspacePaths]);
   useEffect(() => {
-    if (!autoCleanupDeletedProjectData || !workspacePath.trim()) return;
-    const key = workspacePath.trim().toLocaleLowerCase();
-    if (cleanupCheckedWorkspaces.has(key)) return;
-    cleanupCheckedWorkspaces.add(key);
-    const storageKey = `photoflow:maintenance:deleted-project-cleanup:${key}`;
-    const today = localDateKey();
-    if (window.localStorage.getItem(storageKey) === today) return;
+    if (!autoCleanupDeletedProjectData || !configuredWorkspacePaths.length) return;
     let disposed = false;
-    void window.electronAPI.cleanupDeletedWorkspaceProjects(workspacePath).then(result => {
-      if (!result.success) return;
-      window.localStorage.setItem(storageKey, today);
-      if (!disposed && result.cleanedCount > 0) void refresh();
-    });
+    for (const currentWorkspacePath of configuredWorkspacePaths) {
+      const key = currentWorkspacePath.toLocaleLowerCase();
+      if (cleanupCheckedWorkspaces.has(key)) continue;
+      cleanupCheckedWorkspaces.add(key);
+      const storageKey = `photoflow:maintenance:deleted-project-cleanup:${key}`;
+      const today = localDateKey();
+      if (window.localStorage.getItem(storageKey) === today) continue;
+      void window.electronAPI.cleanupDeletedWorkspaceProjects(currentWorkspacePath).then(result => {
+        if (!result.success) return;
+        window.localStorage.setItem(storageKey, today);
+        if (!disposed && result.cleanedCount > 0) void refresh();
+      });
+    }
     return () => { disposed = true; };
-  }, [workspacePath, autoCleanupDeletedProjectData]);
+  }, [configuredWorkspacePaths, autoCleanupDeletedProjectData]);
   useEffect(() => {
     const close = () => setMenu(null);
     let refreshTimer = 0;
@@ -192,13 +329,20 @@ export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, a
     window.addEventListener('photoflow-menu-open', close);
     window.addEventListener('workspace-projects-changed', changed);
     return () => { window.clearTimeout(refreshTimer); unsubscribe(); window.removeEventListener('click', close); window.removeEventListener('photoflow-menu-open', close); window.removeEventListener('workspace-projects-changed', changed); };
-  }, [workspacePath]);
+  }, [configuredWorkspacePaths]);
   useEffect(() => {
     const hasOfflineArchive = groups.some(group => group.projects.some(project => project.archived && project.availability === 'missing'));
     if (!hasOfflineArchive) return;
     const timer = window.setInterval(() => void refresh(), 15000);
     return () => window.clearInterval(timer);
-  }, [groups, workspacePath]);
+  }, [groups, configuredWorkspacePaths]);
+  useEffect(() => {
+    if (configuredWorkspacePaths.length < 2) return;
+    const timer = window.setInterval(() => void refresh(), 15000);
+    return () => window.clearInterval(timer);
+  }, [configuredWorkspacePaths]);
+
+  const workspaceFor = (project?: WorkspaceProject | null) => project?.workspacePath || workspacePath;
 
   const createProject = async () => {
     setNewProjectError('');
@@ -214,7 +358,7 @@ export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, a
       resetProjectDate();
       setName('');
       setExpanded(current => ({ ...current, 策划中: true }));
-      onSelectProject(result.project);
+      onSelectProject({ ...result.project, workspacePath });
       refresh();
       setCreateNotice(`项目“${createdName}”已创建成功`);
       window.setTimeout(() => setCreateNotice(''), 2000);
@@ -229,12 +373,13 @@ export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, a
     setNewProjectError('');
     setIsCreating(true);
     try {
-      const result = await window.electronAPI.renameWorkspaceProject(workspacePath, renameProject.status, renameProject.name, projectDate(), name);
+      const projectWorkspacePath = workspaceFor(renameProject);
+      const result = await window.electronAPI.renameWorkspaceProject(projectWorkspacePath, renameProject.status, renameProject.name, projectDate(), name);
       if (!result.success || !result.project) {
         setNewProjectError(result.error || '重命名失败');
         return;
       }
-      if (selectedProject?.path === renameProject.path) onSelectProject(result.project, renameProject.path);
+      if (selectedProject?.path === renameProject.path) onSelectProject({ ...result.project, workspacePath: projectWorkspacePath }, renameProject.path);
       closeProjectEditor();
       refresh();
     } catch (renameError) {
@@ -245,6 +390,7 @@ export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, a
   };
   const move = async (project: WorkspaceProject, status: ProjectStatus) => {
     if (status === project.status) return;
+    const projectWorkspacePath = workspaceFor(project);
     if (project.archived && status !== '已归档') {
       await moveBack(project, status);
       return;
@@ -263,22 +409,22 @@ export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, a
         });
         if (!choice) return;
         if (choice === 'move') {
-          const result = await window.electronAPI.archiveWorkspaceProject(workspacePath, project.name);
+          const result = await window.electronAPI.archiveWorkspaceProject(projectWorkspacePath, project.name);
           setCreateNotice(result.success ? '归档任务已开始；完成后请再确认独立备份' : result.error || '无法开始归档');
           window.setTimeout(() => setCreateNotice(''), result.success ? 4500 : 6000);
           return;
         }
       }
     }
-    const result = await window.electronAPI.moveWorkspaceProject(workspacePath, project.status, project.name, status);
+    const result = await window.electronAPI.moveWorkspaceProject(projectWorkspacePath, project.status, project.name, status);
     if (!result.success) setError(result.error || '更改状态失败');
-    else if (result.project && selectedProject?.path === project.path) onSelectProject(result.project, project.path);
+    else if (result.project && selectedProject?.path === project.path) onSelectProject({ ...result.project, workspacePath: projectWorkspacePath }, project.path);
     setExpanded(current => ({ ...current, [status]: true }));
     refresh();
   };
   const moveBack = async (project: WorkspaceProject, statusAfter: Exclude<ProjectStatus, '已归档'> = '后期中') => {
     if (!await appDialog.confirm({ title: `将“${project.name}”移回工作盘？`, message: `项目将从归档盘移回原工作区位置，并更改为“${projectStatusLabel(statusAfter)}”。`, confirmLabel: '移回工作盘' })) return;
-    const result = await window.electronAPI.moveArchivedProjectBack(workspacePath, project.name, statusAfter);
+    const result = await window.electronAPI.moveArchivedProjectBack(workspaceFor(project), project.name, statusAfter);
     setCreateNotice(result.success ? '移回工作盘任务已开始' : result.error || '无法移回项目');
     window.setTimeout(() => setCreateNotice(''), result.success ? 3500 : 6000);
   };
@@ -289,7 +435,7 @@ export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, a
       confirmLabel: '删除项目',
       tone: 'danger',
     })) return;
-    const result = await window.electronAPI.trashWorkspaceProject(workspacePath, project.status, project.name);
+    const result = await window.electronAPI.trashWorkspaceProject(workspaceFor(project), project.status, project.name);
     if (!result.success) {
       if (isRecycleBinFailure(result.error, result.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
       else setError(result.error || '删除项目失败');
@@ -305,12 +451,17 @@ export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, a
       setError('项目文件夹当前不可用；数据库记录和历史版本已保留。恢复原文件夹后会自动重新连接。');
       return;
     }
-    const result = await window.electronAPI.openWorkspaceProject(workspacePath, project.status, project.name);
+    const result = await window.electronAPI.openWorkspaceProject(workspaceFor(project), project.status, project.name);
     if (!result.success) setError(result.error || '无法打开文件夹');
   };
   return <>
     {createNotice && <div className="fixed left-1/2 top-10 z-[400] -translate-x-1/2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-xl animate-in fade-in slide-in-from-top-2">{createNotice}</div>}
-    <div className="px-4 pt-4"><button onClick={openNewProject} className="w-full rounded-lg bg-blue-600 px-3 py-2.5 text-sm font-bold text-white shadow-md shadow-blue-500/20 hover:bg-blue-500"><span className="flex items-center justify-center gap-2"><FolderPlus size={17}/>新建项目</span></button></div>
+    <div className="relative px-4 pt-4" onClick={event => event.stopPropagation()}>
+      <div aria-label="项目操作" className="grid w-full grid-cols-2 overflow-hidden rounded-lg shadow-md shadow-blue-500/20">
+        <button type="button" onClick={openNewProject} className="min-w-0 bg-blue-600 px-2 py-2.5 text-xs font-bold text-white hover:bg-blue-500"><span className="flex items-center justify-center gap-1.5"><FolderPlus size={16}/><span className="truncate">新建项目</span></span></button>
+        <button type="button" disabled={choosingExistingProject} onClick={() => void chooseExistingProject()} className="min-w-0 border-l border-blue-400 bg-blue-600 px-2 py-2.5 text-xs font-bold text-white hover:bg-blue-500 disabled:opacity-60"><span className="flex items-center justify-center gap-1.5">{choosingExistingProject ? <Loader2 size={16} className="animate-spin"/> : <FolderInput size={16}/>}<span className="truncate">导入项目</span></span></button>
+      </div>
+    </div>
     <nav className="project-navigator-scroll flex-1 overflow-y-auto p-4 pt-2">
       {statuses.filter(status => status !== '未分类' || (groups.find(group => group.status === status)?.projects.length || 0) > 0).map(status => {
         const projects = (groups.find(group => group.status === status)?.projects || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
@@ -340,10 +491,31 @@ export const ProjectNavigator = ({ workspacePath, backupEnabled, backupStatus, a
         <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={closeProjectEditor} disabled={isCreating} className="dialog-secondary">取消</button><button type="submit" disabled={isCreating || !nextProjectDisplayName} className="dialog-primary">{isCreating ? renameProject ? '重命名中…' : '创建中…' : renameProject ? '确认重命名' : '创建'}</button></div>
       </form>
     </ProjectDialog>}
+    {existingProjectDraft && <ProjectImportDialog title="导入项目" busy={isImportingExistingProject} onClose={closeExistingProjectImport}>
+      {existingProjectResult ? <div className="space-y-4">
+        <section className={`rounded-xl border px-4 py-4 ${existingProjectResult.sourceRetained ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'}`}>
+          <div className="flex items-start gap-3"><span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${existingProjectResult.sourceRetained ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}><FolderInput size={18}/></span><div><h4 className="text-sm font-bold text-slate-800">项目导入完成</h4><p className="mt-1 text-xs leading-5 text-slate-600">项目已接入“策划中”{existingProjectResult.sourceRetained ? '；源项目有内容未能安全清理，仍保留在原位置。' : '，可以继续确认首版基线和后续版本关系。'}</p></div></div>
+          <div className="mt-4 grid grid-cols-3 gap-2">{[['文件', existingProjectDraft.fileCount.toLocaleString()], ['文件夹', existingProjectDraft.folderCount.toLocaleString()], ['识别目录', String(existingProjectResult.candidateCount)]].map(([label, value]) => <div key={label} className="rounded-lg border border-white/80 bg-white/75 px-3 py-2"><span className="block text-[10px] text-slate-400">{label}</span><b className="mt-1 block text-sm text-slate-700">{value}</b></div>)}</div>
+        </section>
+        <div className="flex justify-end"><button type="button" onClick={closeExistingProjectImport} className="dialog-primary">关闭并打开项目</button></div>
+      </div> : <form className="space-y-4" onSubmit={event => { event.preventDefault(); void importExistingProject(); }}>
+        <section className="overflow-hidden rounded-xl border border-slate-200 bg-white"><header className="flex items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3"><span className="flex h-8 w-10 shrink-0 items-center justify-center rounded-md bg-blue-50 text-[10px] font-bold text-blue-700">DIR</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-slate-800">{existingProjectDraft.name}</p><p title={existingProjectDraft.sourcePath} className="mt-0.5 truncate text-xs text-slate-500">{existingProjectDraft.sourcePath} · {existingProjectDraft.fileCount.toLocaleString()} 个文件 · {existingProjectDraft.folderCount.toLocaleString()} 个文件夹</p></div><span className="shrink-0 text-xs font-bold text-slate-500">{formatBytes(existingProjectDraft.totalBytes)}</span></header></section>
+        <div className="grid gap-3 md:grid-cols-2"><label className="text-xs font-bold text-slate-600">项目名称<input autoFocus value={existingProjectName} disabled={isImportingExistingProject} onInput={event => setExistingProjectName(event.currentTarget.value)} className="form-input mt-1" placeholder="项目名称"/></label><label className="text-xs font-bold text-slate-600">导入方式<select value={existingProjectMode} disabled={isImportingExistingProject} onChange={event => setExistingProjectMode(event.target.value as 'copy' | 'move')} className="form-input mt-1"><option value="copy">复制并接管（推荐）</option><option value="move">移动并接管</option></select></label></div>
+        <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3"><p className="text-sm font-bold text-blue-800">已识别 {existingProjectDraft.candidates.length} 个素材或进度文件夹</p><p className="mt-1 text-xs leading-5 text-blue-600">导入完成后，可在项目内确认首版基线和后续版本关系。原有文件夹结构不会被改写。</p></div>
+        <section className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3"><div className="flex items-center justify-between gap-3 text-xs"><b className="text-slate-700">{isImportingExistingProject ? existingProjectImportTask?.message || '正在准备导入项目…' : '等待开始导入项目'}</b><span className="font-mono text-slate-500">{Math.round(existingProjectImportTask?.progress || 0)}%</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200"><span className="block h-full rounded-full bg-blue-600 transition-[width]" style={{ width: `${existingProjectImportTask?.progress || 0}%` }}/></div><p className="mt-2 truncate font-mono text-[10px] text-slate-400">{isImportingExistingProject ? existingProjectImportTask?.message || '正在建立任务…' : '状态与异常会显示在此区域'}</p></section>
+        {existingProjectError && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{existingProjectError}</div>}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-4"><span className="text-xs text-slate-500">将接入“策划中”</span><div className="flex gap-2"><button type="button" disabled={isImportingExistingProject || choosingExistingProject} onClick={() => void chooseExistingProject()} className="dialog-secondary">{choosingExistingProject ? '正在读取…' : '重新选择'}</button>{isImportingExistingProject && <button type="button" onClick={() => void cancelExistingProjectImport()} disabled={!existingProjectImportTask?.cancellable || isCancellingExistingProject} className="dialog-secondary">{isCancellingExistingProject ? '正在取消…' : '取消导入'}</button>}<button type="submit" disabled={isImportingExistingProject || !existingProjectName.trim()} className="dialog-primary">{isImportingExistingProject ? '正在导入…' : '开始导入'}</button></div></div>
+      </form>}
+    </ProjectImportDialog>}
   </>;
 };
 
 const ProjectDialog = ({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) => {
   useEscapeLayer(true, onClose);
   return createPortal(<div className="fixed inset-x-0 bottom-0 top-10 z-[500] overflow-y-auto bg-slate-950/40 p-4"><div className="flex min-h-full items-center justify-center"><div role="dialog" aria-modal="true" aria-label={title} className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="mb-3 flex items-center justify-between"><h3 className="font-bold text-slate-800">{title}</h3><button onClick={onClose} aria-label="关闭" className="rounded p-1 text-slate-500 hover:bg-slate-100"><X size={18}/></button></div>{children}</div></div></div>, document.body);
+};
+
+const ProjectImportDialog = ({ title, busy, onClose, children }: { title: string; busy: boolean; onClose: () => void; children: React.ReactNode }) => {
+  useEscapeLayer(true, onClose);
+  return createPortal(<div className="tool-panel-backdrop fixed inset-x-0 bottom-0 top-10 z-[500] flex items-center justify-center p-4" onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose(); }}><section role="dialog" aria-modal="true" aria-label={title} className="tool-panel-window flex max-h-[90vh] w-full max-w-[960px] flex-col overflow-hidden border bg-white"><header className="tool-panel-header flex shrink-0 items-center gap-3 border-b border-slate-200 px-5"><span className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[10px] bg-blue-50 text-blue-600"><FolderInput size={18}/></span><div className="min-w-0 flex-1"><h3 className="truncate text-[15px] font-bold text-slate-800">{title}</h3><p className="mt-0.5 truncate text-[10px] text-slate-400">把现有项目文件夹复制或移动到工作目录，并接入“策划中”。</p></div><button type="button" onClick={onClose} aria-label={busy ? '取消导入' : '关闭'} title={busy ? '取消当前导入任务' : '关闭'} className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100"><X size={18}/></button></header><div className="tool-panel-body min-h-0 flex-1 overflow-y-auto p-[22px]">{children}</div></section></div>, document.body);
 };

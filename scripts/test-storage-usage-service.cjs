@@ -8,6 +8,7 @@ const run = async () => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'photoflow-storage-usage-'));
   try {
     const workspace = path.join(root, 'workspace');
+    const secondaryWorkspace = path.join(root, 'workspace-secondary');
     const archive = path.join(root, 'archive');
     const backup = path.join(root, 'backup');
     const cache = path.join(root, 'cache');
@@ -15,10 +16,11 @@ const run = async () => {
     const userData = path.join(root, 'user-data');
     const workspaceData = path.join(userData, 'workspace-data', 'ws01');
     const database = path.join(userData, 'workspace-data', 'ws01.sqlite3');
-    await Promise.all([workspace, path.join(archive, 'ws01'), path.join(backup, '.photoflow-backup'), cache, inspiration, workspaceData].map(directory => fs.promises.mkdir(directory, { recursive: true })));
+    await Promise.all([workspace, secondaryWorkspace, path.join(archive, 'ws01'), path.join(backup, '.photoflow-backup'), cache, inspiration, workspaceData].map(directory => fs.promises.mkdir(directory, { recursive: true })));
     const files = [
       [path.join(workspace, '.photoflow-workspace-id'), 'ws01\n'],
       [path.join(workspace, 'photo.raw'), 'w'.repeat(11)],
+      [path.join(secondaryWorkspace, 'second.raw'), 's'.repeat(7)],
       [path.join(archive, 'ws01', 'archived.raw'), 'a'.repeat(13)],
       [path.join(backup, '.photoflow-backup', 'object'), 'b'.repeat(17)],
       [path.join(cache, 'thumb.jpg'), 'c'.repeat(19)],
@@ -44,6 +46,7 @@ const run = async () => {
     };
     const config = {
       workspacePath: workspace,
+      workspacePaths: [workspace, secondaryWorkspace],
       archive: { targetPath: archive },
       backup: { targetPath: backup },
       mediaCache: { directory: cache },
@@ -64,7 +67,8 @@ const run = async () => {
     const measured = await service.overview(false);
     const items = measured.volumes.flatMap(volume => volume.items);
     assert.equal(measured.scanning, false);
-    assert.equal(items.length, 7);
+    assert.equal(items.length, 8);
+    assert.equal(items.filter(item => item.kind === 'workspace').length, 2);
     assert.equal(items.find(item => item.kind === 'inspiration')?.path, inspiration);
     assert.equal(items.every(item => item.measured), true);
     const rolePriority = { workspace: 1, inspiration: 2, cache: 3, internal: 3, archive: 4, backup: 5 };

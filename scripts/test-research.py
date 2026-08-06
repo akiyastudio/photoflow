@@ -327,13 +327,20 @@ def main():
             for event in events
         )
 
+        same_folder = project_directory / "legacy-version"
+        same_folder.mkdir()
+        (same_folder / "DSC_0001.NEF").write_bytes(b"not-a-decodable-raw")
+        Image.new("RGB", (20, 16), (18, 72, 120)).save(same_folder / "DSC_0001.jpg")
+        same_folder_index = build_jpg_proxy_index(str(same_folder))
+        assert visual_reference_path(str(same_folder / "DSC_0001.NEF"), same_folder_index).endswith("DSC_0001.jpg")
+
         nested_jpg_directory = jpg_directory / "second-card"
         nested_jpg_directory.mkdir()
         Image.new("RGB", (32, 24), (38, 91, 143)).save(nested_jpg_directory / "IMG_1234.jpg")
         proxy_index = build_jpg_proxy_index(str(jpg_directory))
         assert "img_1234" not in proxy_index, "duplicate camera names must not select an unsafe V0 proxy"
         assert find_selection_jpg_proxy_folder(str(reference_directory)) == str(jpg_directory)
-        assert find_selection_jpg_proxy_folder(str(source_directory)) is None
+        assert find_selection_jpg_proxy_folder(str(source_directory)) == str(jpg_directory)
         assert visual_reference_path(str(reference_directory / "IMG_1234.CR3"), proxy_index).endswith("IMG_1234.CR3")
     print("Research worker regression tests passed")
 

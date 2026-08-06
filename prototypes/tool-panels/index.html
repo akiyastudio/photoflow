@@ -1,0 +1,936 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PhotoFlow · 工具面板原型</title>
+  <style>
+    :root {
+      --blue: #2563eb;
+      --blue-50: #eff6ff;
+      --blue-100: #dbeafe;
+      --ink: #172033;
+      --muted: #667085;
+      --line: #e2e8f0;
+      --surface: #ffffff;
+      --canvas: #eef2f7;
+      --nav: #f7f9fc;
+      --danger: #dc2626;
+      --warning: #d97706;
+      --success: #059669;
+      --radius: 14px;
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+      color: var(--ink);
+      background: var(--canvas);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body { margin: 0; min-width: 320px; background: var(--canvas); }
+    button, input, select, textarea { font: inherit; }
+    button { color: inherit; }
+    svg { display: block; }
+
+    .app {
+      height: 100vh;
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: 52px minmax(0, 1fr);
+      background: #f8fafc;
+    }
+
+    .titlebar {
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 18px;
+      color: #dbeafe;
+      background: linear-gradient(118deg, #0b1220 0%, #142039 58%, #172b50 100%);
+      border-bottom: 1px solid rgba(255,255,255,.08);
+      box-shadow: 0 2px 12px rgba(15,23,42,.2);
+    }
+
+    .brand-mark {
+      width: 28px;
+      height: 28px;
+      display: grid;
+      place-items: center;
+      border-radius: 9px;
+      background: linear-gradient(145deg, #60a5fa, #2563eb 60%, #1d4ed8);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.4), 0 4px 14px rgba(37,99,235,.35);
+    }
+
+    .brand-mark svg { width: 17px; height: 17px; }
+    .brand { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+    .brand strong { color: white; font-size: 14px; letter-spacing: .02em; }
+    .brand span { color: #94a3b8; font-size: 12px; }
+    .titlebar-spacer { flex: 1; }
+    .prototype-badge { padding: 5px 9px; border: 1px solid rgba(147,197,253,.24); border-radius: 999px; color: #bfdbfe; background: rgba(37,99,235,.14); font-size: 11px; font-weight: 700; }
+    .prototype-state-control { display: flex; align-items: center; gap: 14px; padding: 10px 24px; color: #cbd5e1; background: #111c30; border-bottom: 1px solid #263650; }
+    .prototype-state-control[hidden] { display: none; }
+    .prototype-state-control-label { flex: 0 0 auto; white-space: nowrap; color: #93c5fd; font-size: 10px; font-weight: 800; letter-spacing: .04em; }
+    .prototype-state-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+    .prototype-state-button { min-height: 29px; padding: 0 11px; border: 1px solid #3a4a64; border-radius: 7px; color: #cbd5e1; background: #1a2942; cursor: pointer; font-size: 10px; font-weight: 800; }
+    .prototype-state-button:hover { border-color: #60a5fa; background: #203452; }
+    .prototype-state-button.active { color: #fff; border-color: #3b82f6; background: #2563eb; }
+    .prototype-state-button:focus-visible { outline: 3px solid rgba(96,165,250,.32); outline-offset: 1px; }
+    .window-actions { display: flex; gap: 2px; }
+    .window-actions span { width: 32px; height: 28px; display: grid; place-items: center; border-radius: 6px; color: #94a3b8; font-size: 13px; }
+
+    .layout { min-height: 0; display: grid; grid-template-columns: 252px minmax(0, 1fr); }
+    .sidebar {
+      min-height: 0;
+      padding: 18px 12px 16px;
+      overflow-y: auto;
+      background: var(--nav);
+      border-right: 1px solid var(--line);
+    }
+
+    .sidebar-head { padding: 0 10px 14px; }
+    .sidebar-head h1 { margin: 0; font-size: 17px; letter-spacing: -.02em; }
+    .sidebar-head p { margin: 5px 0 0; color: #8490a4; font-size: 11px; line-height: 1.55; }
+    .section-label { margin: 16px 10px 6px; color: #98a2b3; font-size: 10px; font-weight: 800; letter-spacing: .11em; }
+    .nav-list { display: grid; gap: 3px; }
+    .nav-item {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 30px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 9px;
+      padding: 7px 9px;
+      border: 0;
+      border-radius: 9px;
+      text-align: left;
+      background: transparent;
+      cursor: pointer;
+      transition: background .16s, color .16s, transform .16s;
+    }
+
+    .nav-item:hover { background: #edf2f8; }
+    .nav-item.active { color: #174ea6; background: #e7f0ff; box-shadow: inset 0 0 0 1px #d5e5ff; }
+    .nav-item.active .nav-icon { color: white; background: var(--blue); box-shadow: 0 4px 10px rgba(37,99,235,.24); }
+    .nav-item:focus-visible { outline: 3px solid rgba(37,99,235,.18); outline-offset: 1px; }
+    .nav-icon { width: 30px; height: 30px; display: grid; place-items: center; color: #667085; background: #fff; border: 1px solid #e5eaf1; border-radius: 8px; font-size: 13px; font-weight: 800; }
+    .nav-icon svg { width: 16px; height: 16px; }
+    .nav-copy { min-width: 0; }
+    .nav-copy b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .nav-copy small { display: block; margin-top: 2px; color: #98a2b3; font-size: 9px; }
+    .nav-count { min-width: 20px; padding: 2px 5px; border-radius: 99px; color: #8490a4; background: #fff; border: 1px solid #e4e9f0; text-align: center; font-size: 9px; }
+
+    .content { min-width: 0; min-height: 0; overflow: auto; background: #f8fafc; }
+    .content-head {
+      min-height: 82px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 16px 24px;
+      background: rgba(255,255,255,.88);
+      border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(12px);
+    }
+
+    .content-head-copy { min-width: 0; }
+    .crumb { color: #98a2b3; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+    .content-head h2 { margin: 3px 0 0; font-size: 20px; letter-spacing: -.025em; }
+    .content-head p { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
+    .content-head-meta { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #10b981; box-shadow: 0 0 0 4px #d1fae5; }
+    .status-text { color: #667085; font-size: 10px; font-weight: 700; }
+
+    .stage {
+      min-height: calc(100vh - 134px);
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 30px;
+      background-color: #e8edf5;
+      background-image: radial-gradient(circle at 1px 1px, rgba(71,85,105,.13) 1px, transparent 0);
+      background-size: 22px 22px;
+    }
+
+    .panel-window {
+      width: min(100%, 960px);
+      overflow: hidden;
+      border: 1px solid rgba(148,163,184,.42);
+      border-radius: 16px;
+      background: white;
+      box-shadow: 0 24px 60px rgba(15,23,42,.18), 0 2px 8px rgba(15,23,42,.06);
+      animation: panel-in .23s ease-out;
+    }
+
+    @keyframes panel-in { from { opacity: 0; transform: translateY(5px) scale(.994); } to { opacity: 1; transform: none; } }
+    .panel-window-head { min-height: 58px; display: flex; align-items: center; gap: 12px; padding: 0 20px; border-bottom: 1px solid var(--line); background: #fff; }
+    .panel-title-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; color: var(--blue); background: var(--blue-50); font-size: 15px; font-weight: 800; }
+    .panel-title-icon svg { width: 18px; height: 18px; }
+    .panel-window-head h3 { margin: 0; font-size: 15px; }
+    .panel-window-head p { margin: 2px 0 0; color: #98a2b3; font-size: 10px; }
+    .panel-close { margin-left: auto; width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 7px; color: #64748b; background: transparent; font-size: 18px; }
+    .panel-body { padding: 22px; background: #fff; }
+    .demo-area { pointer-events: none; user-select: none; }
+    .demo-ribbon { position: relative; }
+    .demo-ribbon::after { content: "展示原型"; position: absolute; z-index: 2; right: 18px; top: 14px; padding: 4px 7px; border-radius: 5px; color: #64748b; background: #f1f5f9; border: 1px solid #e2e8f0; font-size: 9px; font-weight: 800; letter-spacing: .04em; }
+
+    .overview { width: min(100%, 1180px); }
+    .overview-intro { display: flex; align-items: flex-end; gap: 16px; margin-bottom: 18px; }
+    .overview-intro h3 { margin: 0; font-size: 22px; letter-spacing: -.03em; }
+    .overview-intro p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+    .overview-stat { margin-left: auto; color: #1d4ed8; font-size: 12px; font-weight: 800; }
+    .overview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .overview-card { min-width: 0; overflow: hidden; border: 1px solid #dce3ed; border-radius: 13px; background: #fff; box-shadow: 0 7px 18px rgba(15,23,42,.05); cursor: pointer; transition: transform .17s, box-shadow .17s, border-color .17s; }
+    .overview-card:hover { transform: translateY(-2px); border-color: #b9d2ff; box-shadow: 0 12px 26px rgba(37,99,235,.1); }
+    .overview-card:focus-visible { outline: 3px solid rgba(37,99,235,.2); outline-offset: 2px; }
+    .mini-panel { height: 118px; padding: 12px; background: linear-gradient(145deg,#f9fbfe,#edf3fa); border-bottom: 1px solid #e7ecf2; }
+    .mini-window { height: 100%; overflow: hidden; border: 1px solid #d8e0ea; border-radius: 7px; background: white; box-shadow: 0 5px 12px rgba(15,23,42,.08); }
+    .mini-head { height: 21px; display: flex; align-items: center; padding: 0 7px; border-bottom: 1px solid #e6eaf0; }
+    .mini-head::before { content: ""; width: 28%; height: 4px; border-radius: 9px; background: #94a3b8; }
+    .mini-head::after { content: "×"; margin-left: auto; color: #a8b1bf; font-size: 9px; }
+    .mini-body { display: grid; gap: 5px; padding: 7px; }
+    .mini-callout { height: 14px; border-radius: 4px; background: #eaf2ff; border: 1px solid #d7e7ff; }
+    .mini-row { height: 10px; border-radius: 3px; background: #edf0f4; }
+    .mini-row.short { width: 63%; }
+    .mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+    .mini-grid span { height: 24px; border-radius: 4px; background: #f3f5f8; border: 1px solid #e7ebf0; }
+    .mini-button { justify-self: end; width: 38%; height: 12px; border-radius: 4px; background: #3b82f6; }
+    .overview-card-copy { padding: 12px 13px 13px; }
+    .overview-card-copy b { display: block; font-size: 12px; }
+    .overview-card-copy span { display: block; margin-top: 4px; color: #8490a4; font-size: 10px; line-height: 1.45; }
+    .overview-card-copy em { display: inline-block; margin-top: 8px; padding: 2px 6px; border-radius: 99px; color: #4b5563; background: #f1f5f9; font-size: 9px; font-style: normal; font-weight: 700; }
+
+    .stack { display: grid; gap: 14px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .card { border: 1px solid var(--line); border-radius: 11px; background: #fff; }
+    .card-pad { padding: 15px; }
+    .card.soft { background: #f8fafc; }
+    .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .card-head b { font-size: 12px; }
+    .card-head span { margin-left: auto; color: #98a2b3; font-size: 10px; }
+    .callout { padding: 12px 14px; border-radius: 10px; color: #1e4e90; background: #eff6ff; border: 1px solid #dbeafe; }
+    .callout.warning { color: #92400e; background: #fffbeb; border-color: #fde68a; }
+    .callout.danger { color: #991b1b; background: #fef2f2; border-color: #fecaca; }
+    .callout.success { color: #065f46; background: #ecfdf5; border-color: #a7f3d0; }
+    .callout b { display: block; font-size: 12px; }
+    .callout p { margin: 4px 0 0; font-size: 10px; line-height: 1.6; }
+
+    .field { display: grid; gap: 6px; min-width: 0; }
+    .field > span, .field-label { color: #5e6b7e; font-size: 10px; font-weight: 800; }
+    .input, .select, .textarea { width: 100%; border: 1px solid #d7dee8; border-radius: 8px; color: #27364d; background: #fff; outline: none; }
+    .input, .select { height: 36px; padding: 0 10px; font-size: 11px; }
+    .textarea { min-height: 72px; padding: 9px 10px; resize: none; font-size: 10px; line-height: 1.55; }
+    .input.mono, .textarea.mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: #42526a; }
+    .input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+    .button { min-height: 34px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 0 13px; border: 1px solid #d7dee8; border-radius: 8px; color: #46556a; background: #fff; font-size: 10px; font-weight: 800; }
+    .button.primary { color: white; border-color: var(--blue); background: var(--blue); box-shadow: 0 5px 12px rgba(37,99,235,.18); }
+    .button.danger { color: white; border-color: var(--danger); background: var(--danger); }
+    .button.ghost-danger { color: var(--danger); border-color: #fecaca; background: #fff; }
+    .button:disabled { color: #98a2b3; border-color: #e2e8f0; background: #f1f5f9; box-shadow: none; }
+    .actions { display: flex; justify-content: flex-end; align-items: center; gap: 9px; padding-top: 4px; }
+    .actions .hint { margin-right: auto; color: #98a2b3; font-size: 10px; }
+
+    .state-scene { display: grid; gap: 12px; margin-bottom: 16px; padding: 15px; border: 1px solid #dbe4f0; border-radius: 11px; background: #f8fbff; }
+    .state-scene.warning { border-color: #fde68a; background: #fffbeb; }
+    .state-scene.success { border-color: #a7f3d0; background: #ecfdf5; }
+    .state-scene.danger { border-color: #fecaca; background: #fef2f2; }
+    .state-scene-head { display: flex; align-items: flex-start; gap: 10px; }
+    .state-scene-head > div { min-width: 0; }
+    .state-scene-head b { display: block; font-size: 12px; }
+    .state-scene-head p { margin: 4px 0 0; color: #64748b; font-size: 10px; line-height: 1.6; }
+    .state-badge { flex: 0 0 auto; padding: 4px 7px; border-radius: 999px; color: #1d4ed8; background: #dbeafe; font-size: 9px; font-weight: 800; }
+    .state-scene.warning .state-badge { color: #92400e; background: #fde68a; }
+    .state-scene.success .state-badge { color: #065f46; background: #a7f3d0; }
+    .state-scene.danger .state-badge { color: #991b1b; background: #fecaca; }
+    .state-percent { margin-left: auto; color: #475569; font-size: 11px; font-weight: 800; }
+    .state-metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }
+    .state-metric { padding: 9px 10px; border: 1px solid rgba(148,163,184,.24); border-radius: 8px; background: rgba(255,255,255,.72); }
+    .state-metric span { display: block; color: #8490a4; font-size: 9px; }
+    .state-metric b { display: block; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+    .issue-list { overflow: hidden; border: 1px solid #f3c7a7; border-radius: 8px; background: rgba(255,255,255,.76); }
+    .issue-list-head { padding: 8px 10px; color: #9a3412; background: #fff7ed; border-bottom: 1px solid #fed7aa; font-size: 10px; font-weight: 800; }
+    .issue-row { display: grid; grid-template-columns: minmax(140px,.7fr) minmax(0,1.3fr); gap: 10px; padding: 8px 10px; border-bottom: 1px solid #f3e8df; font-size: 10px; }
+    .issue-row:last-child { border-bottom: 0; }
+    .issue-row b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .issue-row span { color: #9a3412; }
+    .state-log { display: grid; gap: 4px; padding: 9px 10px; border-radius: 8px; color: #cbd5e1; background: #111c30; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 9px; line-height: 1.55; }
+    .state-log span::before { content: "› "; color: #60a5fa; }
+    .state-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .panel-base.is-hidden { display: none; }
+
+    .dropzone { min-height: 122px; display: grid; place-items: center; padding: 20px; border: 1.5px dashed #cbd5e1; border-radius: 11px; text-align: center; background: #fafcff; }
+    .drop-icon { width: 42px; height: 42px; display: grid; place-items: center; margin: 0 auto 9px; border-radius: 12px; color: var(--blue); background: var(--blue-50); font-size: 18px; font-weight: 800; }
+    .dropzone b { display: block; font-size: 12px; }
+    .dropzone p { margin: 5px 0 0; color: #8490a4; font-size: 10px; }
+
+    .toggle-row, .list-row { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 9px 11px; border-bottom: 1px solid #edf0f4; }
+    .toggle-row:last-child, .list-row:last-child { border-bottom: 0; }
+    .toggle-copy { min-width: 0; }
+    .toggle-copy b, .list-row b { display: block; font-size: 11px; }
+    .toggle-copy small, .list-row small { display: block; margin-top: 3px; color: #98a2b3; font-size: 9px; line-height: 1.4; }
+    .switch { flex: 0 0 auto; width: 31px; height: 18px; position: relative; margin-left: auto; border-radius: 99px; background: #cbd5e1; }
+    .switch::after { content: ""; position: absolute; width: 14px; height: 14px; left: 2px; top: 2px; border-radius: 50%; background: white; box-shadow: 0 1px 4px rgba(15,23,42,.25); }
+    .switch.on { background: var(--blue); }
+    .switch.on::after { left: 15px; }
+
+    .file-icon { flex: 0 0 auto; width: 30px; height: 30px; display: grid; place-items: center; border-radius: 8px; color: #2563eb; background: #eff6ff; font-size: 9px; font-weight: 900; }
+    .file-icon.video { color: #7c3aed; background: #f5f3ff; }
+    .file-icon.raw { color: #b45309; background: #fffbeb; }
+    .file-icon.danger { color: #dc2626; background: #fef2f2; }
+    .row-meta { margin-left: auto; color: #98a2b3; font-size: 9px; white-space: nowrap; }
+    .pill { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border-radius: 99px; color: #475569; background: #f1f5f9; font-size: 9px; font-weight: 800; }
+    .pill.blue { color: #1d4ed8; background: #dbeafe; }
+    .pill.green { color: #047857; background: #d1fae5; }
+    .pill.amber { color: #b45309; background: #fef3c7; }
+    .pill.red { color: #b91c1c; background: #fee2e2; }
+
+    .progress-wrap { padding: 13px; border-radius: 10px; background: #0f172a; color: #cbd5e1; }
+    .progress-head { display: flex; gap: 8px; align-items: center; margin-bottom: 9px; font-size: 10px; }
+    .progress-head b { color: white; }
+    .progress-head span { margin-left: auto; color: #93c5fd; font-weight: 800; }
+    .progress { height: 5px; overflow: hidden; border-radius: 99px; background: #334155; }
+    .progress i { display: block; height: 100%; width: var(--value, 38%); border-radius: inherit; background: linear-gradient(90deg,#3b82f6,#60a5fa); }
+    .log { margin-top: 9px; color: #7f8fa7; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 8px; }
+
+    .segmented { display: inline-flex; padding: 3px; border-radius: 8px; background: #f1f5f9; }
+    .segmented span { padding: 5px 9px; border-radius: 6px; color: #64748b; font-size: 9px; font-weight: 800; }
+    .segmented span.active { color: #1d4ed8; background: white; box-shadow: 0 1px 4px rgba(15,23,42,.08); }
+    .section-title { display: flex; align-items: center; gap: 8px; }
+    .section-title b { font-size: 12px; }
+    .section-title small { color: #98a2b3; font-size: 9px; }
+    .section-title .pill { margin-left: auto; }
+
+    .media-preview { position: relative; min-height: 192px; overflow: hidden; border-radius: 11px; background: linear-gradient(135deg,#172033,#334155); }
+    .media-preview::before { content: ""; position: absolute; inset: 16% 10%; border-radius: 10px; background: linear-gradient(150deg,#f5d0a9 0 28%,#78a6b6 28% 53%,#263a51 53% 100%); opacity: .9; }
+    .media-preview::after { content: "预览画面"; position: absolute; left: 12px; bottom: 10px; padding: 3px 6px; border-radius: 5px; color: white; background: rgba(15,23,42,.65); font-size: 8px; }
+    .crop-box { position: absolute; z-index: 1; left: 25%; right: 18%; top: 17%; bottom: 16%; border: 2px solid white; box-shadow: 0 0 0 999px rgba(15,23,42,.43), 0 0 0 1px rgba(37,99,235,.8); }
+    .crop-box::before, .crop-box::after { content: ""; position: absolute; width: 7px; height: 7px; border-radius: 2px; background: white; }
+    .crop-box::before { left: -4px; top: -4px; }
+    .crop-box::after { right: -4px; bottom: -4px; }
+
+    .cache-meter { display: flex; align-items: center; gap: 18px; }
+    .donut { width: 88px; height: 88px; display: grid; place-items: center; border-radius: 50%; background: conic-gradient(#3b82f6 0 62%,#e5eaf1 62% 100%); }
+    .donut::before { content: "62%"; width: 64px; height: 64px; display: grid; place-items: center; border-radius: 50%; color: #334155; background: white; font-size: 14px; font-weight: 900; }
+    .cache-copy strong { display: block; font-size: 18px; }
+    .cache-copy p { margin: 5px 0 0; color: #8490a4; font-size: 10px; line-height: 1.6; }
+
+    .timeline { position: relative; display: grid; gap: 12px; padding-left: 23px; }
+    .timeline::before { content: ""; position: absolute; left: 7px; top: 8px; bottom: 8px; width: 1px; background: #dbe3ee; }
+    .timeline-item { position: relative; padding: 11px 12px; border: 1px solid #e3e8ef; border-radius: 9px; background: #fff; }
+    .timeline-item::before { content: ""; position: absolute; left: -21px; top: 16px; width: 9px; height: 9px; border: 2px solid white; border-radius: 50%; background: #94a3b8; box-shadow: 0 0 0 1px #cbd5e1; }
+    .timeline-item.active { border-color: #bfdbfe; background: #eff6ff; }
+    .timeline-item.active::before { background: #2563eb; box-shadow: 0 0 0 2px #dbeafe; }
+    .timeline-item b { font-size: 11px; }
+    .timeline-item p { margin: 4px 0 0; color: #8490a4; font-size: 9px; }
+
+    .avatar-stack { display: flex; }
+    .avatar { width: 30px; height: 30px; display: grid; place-items: center; margin-left: -5px; border: 2px solid white; border-radius: 50%; color: white; background: linear-gradient(145deg,#60a5fa,#6366f1); font-size: 9px; font-weight: 900; }
+    .avatar:first-child { margin-left: 0; }
+    .retouch-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .photo-tile { position: relative; aspect-ratio: 1.18; overflow: hidden; border-radius: 9px; background: linear-gradient(135deg,#c4b5fd,#6366f1 52%,#1e293b); }
+    .photo-tile:nth-child(2) { background: linear-gradient(145deg,#fde68a,#f97316 50%,#334155); }
+    .photo-tile:nth-child(3) { background: linear-gradient(145deg,#a7f3d0,#14b8a6 50%,#1e293b); }
+    .photo-tile:nth-child(4) { background: linear-gradient(145deg,#fbcfe8,#db2777 50%,#312e81); }
+    .photo-tile span { position: absolute; left: 7px; right: 7px; bottom: 6px; color: white; font-size: 8px; font-weight: 800; text-shadow: 0 1px 4px #0f172a; }
+    .photo-tile i { position: absolute; right: 6px; top: 6px; width: 8px; height: 8px; border: 2px solid white; border-radius: 50%; background: #10b981; }
+
+    .danger-file-count { width: 86px; height: 86px; display: grid; place-items: center; border-radius: 50%; color: #b91c1c; background: #fee2e2; border: 7px solid #fef2f2; font-size: 24px; font-weight: 900; }
+    .trash-summary { display: flex; align-items: center; gap: 18px; padding: 5px 4px; }
+    .trash-summary h4 { margin: 0; font-size: 15px; }
+    .trash-summary p { margin: 5px 0 0; color: #8490a4; font-size: 10px; line-height: 1.55; }
+    .workspace-preview-grid { display: grid; grid-template-columns: 260px minmax(0, 1fr) 220px; min-height: 390px; overflow: hidden; border: 1px solid #e2e8f0; border-radius: 11px; }
+
+    .mobile-nav { display: none; }
+    .mobile-nav select { width: 100%; height: 38px; padding: 0 12px; border: 1px solid #d7dee8; border-radius: 9px; color: #27364d; background: #fff; }
+
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 218px minmax(0, 1fr); }
+      .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .stage { padding: 22px; }
+      .grid-3 { grid-template-columns: repeat(2,minmax(0,1fr)); }
+    }
+
+    @media (max-width: 720px) {
+      .app { grid-template-rows: 48px minmax(0, 1fr); }
+      .titlebar { padding: 0 12px; }
+      .brand span, .prototype-badge, .window-actions { display: none; }
+      .prototype-state-control { display: block; padding: 9px 15px; }
+      .prototype-state-control-label { display: block; margin-bottom: 7px; }
+      .layout { display: block; }
+      .sidebar { display: none; }
+      .content-head { min-height: 110px; display: block; padding: 13px 15px; }
+      .content-head h2 { font-size: 18px; }
+      .content-head-meta { display: none; }
+      .mobile-nav { display: block; margin-top: 10px; }
+      .stage { min-height: calc(100vh - 158px); padding: 12px; }
+      .panel-window { border-radius: 12px; }
+      .panel-window-head { padding: 0 14px; }
+      .panel-body { padding: 14px; }
+      .demo-ribbon::after { display: none; }
+      .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      .overview-grid { grid-template-columns: 1fr; }
+      .overview-intro { align-items: flex-start; }
+      .overview-stat { white-space: nowrap; }
+      .retouch-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .workspace-preview-grid { grid-template-columns: 1fr; }
+      .workspace-preview-grid > * { min-height: 230px; border-left: 0 !important; border-right: 0 !important; border-bottom: 1px solid #e2e8f0; }
+      .workspace-preview-grid > *:last-child { border-bottom: 0; }
+      .state-metrics { grid-template-columns: 1fr; }
+      .issue-row { grid-template-columns: 1fr; gap: 3px; }
+      .actions { flex-wrap: wrap; }
+      .actions .hint { width: 100%; }
+      .cache-meter { align-items: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="titlebar">
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M5 6.5h3l1.2-2h5.6l1.2 2h3A2 2 0 0 1 21 8.5v9A2 2 0 0 1 19 19H5a2 2 0 0 1-2-2v-8.5a2 2 0 0 1 2-2Z" stroke="white" stroke-width="1.8"/><circle cx="12" cy="12.7" r="3.5" stroke="white" stroke-width="1.8"/></svg>
+      </div>
+      <div class="brand"><strong>PhotoFlow</strong><span>照片流</span></div>
+      <div class="prototype-badge">工具面板 Prototype</div>
+      <div class="titlebar-spacer"></div>
+      <div class="window-actions" aria-hidden="true"><span>—</span><span>□</span><span>×</span></div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="sidebar-head"><h1>工具面板</h1><p>按现有入口与隐藏能力整理<br>共 16 个面板 · 仅展示</p></div>
+        <nav id="nav" aria-label="工具面板目录"></nav>
+      </aside>
+
+      <main class="content">
+        <header class="content-head">
+          <div class="content-head-copy">
+            <div class="crumb" id="breadcrumb">面板总览 / All panels</div>
+            <h2 id="page-title">全部工具面板</h2>
+            <p id="page-description">统一查看导入、处理、协作与管理工具的静态界面。</p>
+          </div>
+          <div class="content-head-meta"><span class="status-dot"></span><span class="status-text">16 / 16 已收录</span></div>
+          <div class="mobile-nav"><select id="mobile-select" aria-label="选择工具面板"></select></div>
+        </header>
+        <section class="prototype-state-control" id="prototype-state-control" aria-label="Prototype 状态预览" hidden>
+          <span class="prototype-state-control-label">PROTOTYPE · 状态预览</span>
+          <div class="prototype-state-buttons" id="prototype-state-buttons"></div>
+        </section>
+        <section class="stage" id="stage" aria-live="polite"></section>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    const iconPaths = {
+      'layout-grid': '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+      'memory-stick': '<path d="M6 19v-3"/><path d="M10 19v-3"/><path d="M14 19v-3"/><path d="M18 19v-3"/><path d="M8 11V9"/><path d="M16 11V9"/><path d="M12 11V9"/><path d="M2 15h20"/><path d="M2 7a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v1.1a2 2 0 0 0 0 3.837V17a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-5.1a2 2 0 0 0 0-3.837Z"/>',
+      'aperture': '<circle cx="12" cy="12" r="10"/><path d="m14.31 8 5.74 9.94M9.69 8h11.48M7.38 12l5.74-9.94M9.69 16 3.95 6.06M14.31 16H2.83M16.62 12l-5.74 9.94"/>',
+      'folder-input': '<path d="M2 9V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1"/><path d="M2 13h10"/><path d="m9 16 3-3-3-3"/>',
+      'file-input': '<path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M2 15h10"/><path d="m9 18 3-3-3-3"/>',
+      'file-text': '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+      'file-image': '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><circle cx="10" cy="12" r="2"/><path d="m20 17-1.296-1.296a2.41 2.41 0 0 0-3.408 0L9 22"/>',
+      'video': '<path d="m22 8-6 4 6 4V8Z"/><rect x="2" y="6" width="14" height="12" rx="2" ry="2"/>',
+      'gauge': '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+      'image': '<rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>',
+      'crop': '<path d="M6 2v14a2 2 0 0 0 2 2h14M18 22V8a2 2 0 0 0-2-2H2"/>',
+      'scissors': '<circle cx="6" cy="7" r="3"/><circle cx="6" cy="17" r="3"/><path d="m8.7 8.3 10.6 6.4M8.7 15.7 19.3 9.3"/>',
+      'git-branch': '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
+      'users-round': '<path d="M18 21a8 8 0 0 0-16 0"/><circle cx="10" cy="8" r="5"/><path d="M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3"/>',
+      'trash': '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
+      'hard-drive': '<line x1="22" y1="12" x2="2" y2="12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/><line x1="6" y1="16" x2="6.01" y2="16"/><line x1="10" y1="16" x2="10.01" y2="16"/>'
+    };
+    const iconSvg = name => `<svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${iconPaths[name] || iconPaths['layout-grid']}</svg>`;
+
+    const groups = [
+      { title: '总览', items: [{ id: 'overview', icon: 'layout-grid', title: '全部面板', subtitle: '16 个功能面板' }] },
+      { title: '导入', items: [
+        { id: 'project-import', icon: 'folder-input', title: '导入项目', subtitle: '复制或移动已有项目' },
+        { id: 'sd-import', icon: 'memory-stick', title: '从 SD 卡导入', subtitle: '开始后分析并匹配项目' },
+        { id: 'negative-import', icon: 'aperture', title: '导入底片', subtitle: '文件 / 文件夹' },
+        { id: 'progress-import', icon: 'folder-input', title: '导入进度', subtitle: '图片 / 视频版本进度' },
+        { id: 'broll-import', icon: 'folder-input', title: '导入花絮', subtitle: '批量素材归档' },
+        { id: 'file-import', icon: 'file-input', title: '导入文件', subtitle: '通用文件导入' }
+      ]},
+      { title: '处理', items: [
+        { id: 'filename-match', icon: 'file-text', title: '从文件名选片', subtitle: 'RAW / MOV 匹配' },
+        { id: 'storyboard', icon: 'video', title: '截取分镜帧', subtitle: '视频画面提取' },
+        { id: 'video-transcode', icon: 'gauge', title: '视频转码', subtitle: 'H.264 / H.265' },
+        { id: 'png-jpg', icon: 'image', title: 'PNG 转 JPG', subtitle: '批量格式转换' },
+        { id: 'main-image', icon: 'crop', title: '提取截图主图', subtitle: '分析、确认再生成' }
+      ]},
+      { title: '协作与管理', items: [
+        { id: 'version-manager', icon: 'git-branch', title: '版本管理', subtitle: '版本树、预览与对比' },
+        { id: 'team-retouch', icon: 'users-round', title: '团片协作', subtitle: '人物识别、标记与返图' },
+        { id: 'trash', icon: 'trash', title: '移入回收站', subtitle: '整个项目删除确认' }
+      ]},
+      { title: '隐藏与待补入口', items: [
+        { id: 'video-split', icon: 'scissors', title: '视频切割', subtitle: '约 3.95 GB 无损分段' },
+        { id: 'office-extract', icon: 'file-image', title: '提取 Office 图片', subtitle: 'Word / PowerPoint / Excel' }
+      ]}
+    ];
+
+    const panelItems = groups.flatMap(group => group.items).filter(item => item.id !== 'overview');
+    const details = Object.fromEntries(groups.flatMap(group => group.items.map(item => [item.id, { ...item, group: group.title }])));
+    const detailedStateCatalog = {
+      'sd-import': [
+        { id:'idle', label:'等待开始', tone:'info', title:'已识别 2 张 SD 卡', detail:'设备已就绪，但首页入口此时还没有确定目标项目。', metrics:[['设备','2 / 2 已连接'],['预计素材','486 个文件'],['预计容量','68.4 GB']], actions:['刷新设备','开始导入'] },
+        { id:'planning', label:'分析计划', tone:'info', title:'正在读取素材并生成导入计划', detail:'扫描拍摄时间、文件类型和已有项目，暂时不会把素材归入某个项目。', progress:18, metrics:[['当前阶段','读取拍摄时间'],['已扫描','92 / 486'],['目标项目','尚未确定']], logs:['正在扫描 SONY_SD','已发现 RAW 74 个、JPG 16 个、MOV 2 个','正在构建拍摄时间段…'], actions:['取消导入'] },
+        { id:'routing', label:'归属确认', tone:'warning', title:'有 1 个拍摄时间段无法唯一匹配', detail:'系统已给出建议项目；确认所有时间段归属后才会开始正式复制。', metrics:[['时间段','2 个'],['已自动匹配','1 个'],['待选择','1 个']], logs:['09:12–11:48 → 26-8-5 春日人像','16:20–18:03 → 等待选择项目'], actions:['取消本次导入','确认归属并开始导入'] },
+        { id:'importing', label:'正在导入', tone:'info', title:'正在复制并校验素材', detail:'归属已经锁定；完成校验前不会删除 SD 卡源文件。', progress:63, metrics:[['已处理','304 / 486'],['已复制','42.1 GB'],['当前项目','春日人像']], logs:['正在复制 DSC08301.ARW','正在校验 C0048.MOV','平均速度 176 MB/s'], actions:['取消导入'] },
+        { id:'completed', label:'全部完成', tone:'success', title:'素材导入完成', detail:'全部文件复制和校验成功；本次素材已归入 2 个项目。', progress:100, metrics:[['成功','486 个文件'],['目标项目','2 个'],['源文件','已按设置处理']], logs:['工作文件 392 个导入完成','花絮 94 个导入完成','导入记录已写入任务中心'], actions:['刷新卡片'] },
+        { id:'partial', label:'部分失败', tone:'danger', title:'导入结束，但有 14 个文件未完成', detail:'成功项目已经保留；失败文件对应的源文件不会删除。', progress:100, metrics:[['成功','472 个'],['失败','14 个'],['源文件','失败项已保留']], logs:['C0051.MOV 校验失败','13 个文件读取中断','已生成失败清单'], actions:['重新扫描'] }
+      ],
+      'negative-import': [
+        { id:'empty', label:'未选来源', tone:'info', title:'等待选择底片来源', detail:'可以选择多个底片文件，或选择一个底片文件夹。', metrics:[['目标项目','春日人像'],['来源','尚未选择'],['删除源文件','关闭']], actions:['选择文件','选择文件夹'] },
+        { id:'ready', label:'准备导入', tone:'info', title:'已选择 3 个来源', detail:'目标项目已经确定，可以开始读取并整理底片。', metrics:[['来源','3 项'],['目标项目','春日人像'],['预计容量','18.6 GB']], actions:['重新选择','开始导入'] },
+        { id:'importing', label:'正在导入', tone:'info', title:'正在复制并校验底片', detail:'RAW 缺少同名 JPG 时是否创建代理图由全局设置决定。', progress:46, metrics:[['已处理','128 / 276'],['已复制','8.7 GB'],['当前文件','DSC08236.ARW']], logs:['正在复制底片','正在检查同名 JPG','完成后再处理源文件'], actions:['取消导入'] },
+        { id:'completed', label:'导入完成', tone:'success', title:'276 个底片已导入', detail:'项目已标记为进行中，导入结果已经记录。', progress:100, metrics:[['成功','276 个'],['目标项目','春日人像'],['源文件','已保留']], actions:['关闭'] },
+        { id:'failed', label:'导入失败', tone:'danger', title:'底片导入未完成', detail:'目标磁盘空间不足，未完成文件的源数据保持不变。', metrics:[['已完成','128 个'],['未完成','148 个'],['原因','空间不足']], logs:['目标卷剩余 2.1 GB','任务已安全停止','可释放空间后重新导入'], actions:['重新选择'] }
+      ],
+      'broll-import': [
+        { id:'ready', label:'等待选择', tone:'info', title:'准备导入花絮', detail:'文件将进入当前项目的“花絮”目录。', metrics:[['目标','春日人像 / 花絮'],['来源','尚未选择'],['大型视频','按设置处理']], actions:['选择花絮文件并导入'] },
+        { id:'importing', label:'正在导入', tone:'info', title:'正在复制图片与视频', detail:'全部复制和校验成功前不会删除源文件。', progress:54, metrics:[['已处理','38 / 71'],['已复制','21.4 GB'],['当前文件','DJI_0834.MP4']], logs:['正在写入花絮目录','正在校验 DJI_0833.MP4'], actions:['取消导入'] },
+        { id:'splitting', label:'分割大视频', tone:'warning', title:'正在无损分割超过 4GB 的视频', detail:'根据设置将大文件切成约 3.95GB 的片段。', progress:82, metrics:[['原视频','12.7 GB'],['已生成','3 个片段'],['阶段','校验片段']], logs:['DJI_0834_part01.MP4 完成','DJI_0834_part02.MP4 完成','正在生成 part03'], actions:['取消导入'] },
+        { id:'completed', label:'导入完成', tone:'success', title:'71 个花絮文件已导入', detail:'目录整理和大文件分割均已完成。', progress:100, metrics:[['成功','71 个'],['分割视频','2 个'],['源文件','已按设置处理']], actions:['关闭'] },
+        { id:'failed', label:'部分失败', tone:'danger', title:'68 个成功，3 个失败', detail:'失败文件没有删除来源。', metrics:[['成功','68 个'],['失败','3 个'],['源文件','失败项已保留']], actions:['关闭'] }
+      ],
+      'file-import': [
+        { id:'ready', label:'等待选择', tone:'info', title:'准备导入当前目录', detail:'重名文件会自动编号，不会覆盖现有文件。', metrics:[['目标','策划 / 客户资料'],['来源','尚未选择'],['重名策略','自动改名']], actions:['选择文件并导入'] },
+        { id:'importing', label:'正在导入', tone:'info', title:'正在复制文件', detail:'目标目录已经锁定。', progress:68, metrics:[['已处理','17 / 25'],['重命名','2 个'],['当前文件','参考图-03.pdf']], logs:['合同.pdf → 合同 (2).pdf','正在校验参考图-03.pdf'], actions:['取消导入'] },
+        { id:'completed', label:'导入完成', tone:'success', title:'25 个文件已导入', detail:'其中 2 个重名文件已自动生成不冲突的名称。', progress:100, metrics:[['成功','25 个'],['自动改名','2 个'],['覆盖文件','0 个']], actions:['关闭'] },
+        { id:'failed', label:'导入失败', tone:'danger', title:'有 1 个文件无法读取', detail:'其余 24 个文件已经保留在目标目录。', metrics:[['成功','24 个'],['失败','1 个'],['失败来源','已保留']], actions:['查看详情','关闭'] }
+      ],
+      'filename-match': [
+        { id:'ready', label:'等待输入', tone:'info', title:'等待文件名与来源目录', detail:'填写空格分隔的文件名后才能开始预检。', metrics:[['图片目录','RAW'],['视频目录','MOV'],['文件名','4 个']], actions:['开始选片'] },
+        { id:'precheck', label:'正在预检', tone:'info', title:'正在查找完整文件名匹配项', detail:'当前阶段只统计，不会复制文件。', progress:72, metrics:[['已扫描','1,842 个'],['关键字','4 个'],['阶段','检查冲突']], logs:['DSC08214 → 找到 RAW + JPG','C0048 → 找到 MOV','正在检查目标目录…'], actions:['取消预检'] },
+        { id:'confirm', label:'复制确认', tone:'warning', title:'预检完成，等待确认复制', detail:'确认后才会把匹配文件复制到图片选片和视频选片目录。', metrics:[['准备复制','7 个'],['已存在','1 个'],['未找到','1 个']], logs:['图片 5 个，视频 2 个','同名冲突 0 个','未找到 DSC08301'], actions:['返回修改','开始复制'] },
+        { id:'copying', label:'正在复制', tone:'info', title:'正在复制匹配文件', detail:'取消时会清理本次已复制内容并进入回滚。', progress:57, metrics:[['已复制','4 / 7'],['当前文件','C0048.MOV'],['写入目录','视频选片']], logs:['图片选片写入完成','正在复制 C0048.MOV'], actions:['取消并回滚'] },
+        { id:'rollback', label:'正在回滚', tone:'warning', title:'正在撤销本次复制', detail:'清理本次任务产生的文件，不影响任务开始前已经存在的内容。', progress:43, metrics:[['待清理','4 个'],['已清理','2 个'],['原始文件','不受影响']], logs:['已移除 DSC08214.ARW','正在移除 DSC08214.JPG'], actions:[] },
+        { id:'completed', label:'选片完成', tone:'success', title:'7 个匹配文件复制完成', detail:'未找到的编号保留在结果记录中。', progress:100, metrics:[['图片','5 个'],['视频','2 个'],['未找到','1 个']], actions:['再次选片'] }
+      ],
+      'storyboard': [
+        { id:'ready', label:'准备就绪', tone:'info', title:'等待开始处理', detail:'已确定输入视频、灵敏度和最小片段时长。', metrics:[['输入','3 个视频'],['灵敏度','标准'],['最小时长','0.3 秒']], actions:['开始处理'] },
+        { id:'processing', label:'处理中', tone:'info', title:'正在识别转场并挑选清晰帧', detail:'完成后按视频输出分镜截图。', progress:41, metrics:[['当前视频','C0048.MOV'],['已识别分镜','26 个'],['已导出','18 张']], logs:['检测到硬切 18 处','正在分析渐变转场','正在计算清晰度'], actions:['取消处理'] },
+        { id:'completed', label:'处理完成', tone:'success', title:'分镜帧已经导出', detail:'3 个视频共生成 74 张截图，TXT 已按选项整理。', progress:100, metrics:[['视频','3 个'],['截图','74 张'],['TXT','已移入 data']], actions:['再次处理'] },
+        { id:'failed', label:'部分失败', tone:'danger', title:'2 个视频完成，1 个无法解码', detail:'已完成结果不会删除。', metrics:[['成功','2 个'],['失败','1 个'],['已导出','51 张']], actions:['重新选择'] }
+      ],
+      'video-transcode': [
+        { id:'ready', label:'等待开始', tone:'info', title:'3 个视频已加入队列', detail:'参数已经确定，将按文件夹和列表顺序处理。', metrics:[['队列','3 个'],['预计输入','12.8 GB'],['输出模式','另存为新视频']], actions:['追加视频','开始转码'] },
+        { id:'indexing', label:'建立索引', tone:'info', title:'正在读取后台媒体索引', detail:'确认视频路径和基础媒体信息后才会开始编码。', progress:12, metrics:[['已读取','1 / 3'],['阶段','媒体探测'],['编码器','待选择']], logs:['正在探测 C0048.MOV','读取分辨率和色彩信息'], actions:['取消'] },
+        { id:'transcoding', label:'正在转码', tone:'info', title:'正在转换 C0049.MOV', detail:'实际编码器和输出路径会写入任务日志。', progress:58, metrics:[['队列进度','2 / 3'],['实际编码器','h264_nvenc'],['预计剩余','08:24']], logs:['C0048_转码.mp4 已验证','C0049.MOV → H.264 / AAC','速度 1.8×'], actions:['取消转码'] },
+        { id:'cancelling', label:'正在取消', tone:'warning', title:'正在安全停止编码任务', detail:'等待 FFmpeg 退出并清理未完成的临时文件。', progress:58, metrics:[['已完成','1 个'],['当前文件','正在停止'],['临时输出','待清理']], actions:[] },
+        { id:'completed', label:'全部完成', tone:'success', title:'3 个视频转码完成', detail:'输出已验证，可在原目录旁找到新文件。', progress:100, metrics:[['成功','3 个'],['输出','9.2 GB'],['失败','0 个']], actions:['清空','继续添加'] },
+        { id:'partial', label:'部分失败', tone:'danger', title:'2 个成功，1 个失败', detail:'已成功输出的文件保留，失败项可单独重试。', metrics:[['成功','2 个'],['失败','1 个'],['原因','编码器中断']], actions:['重试失败项'] }
+      ],
+      'png-jpg': [
+        { id:'ready', label:'等待开始', tone:'info', title:'已选择 2 个目标项', detail:'将递归处理其中的 PNG；成功转换的原 PNG 会移入系统回收站。', metrics:[['目标项','2 项'],['JPG 画质','100'],['原图处理','移入回收站']], actions:['开始转换'] },
+        { id:'converting', label:'转换中', tone:'info', title:'正在转换 PNG 并验证 JPG', detail:'每张 JPG 成功写入后才处理对应的 PNG 原图。', progress:64, metrics:[['已处理','16 / 25'],['当前文件','海报-08.png'],['已回收原图','15 张']], logs:['海报-07.jpg 写入完成','海报-07.png 已移入回收站','正在转换海报-08.png'], actions:[] },
+        { id:'completed', label:'转换完成', tone:'success', title:'25 张 PNG 已转换为 JPG', detail:'所有输出均验证成功，原 PNG 已移入系统回收站。', progress:100, metrics:[['成功','25 张'],['失败','0 张'],['回收原图','25 张']], actions:['再次转换'] },
+        { id:'partial', label:'部分失败', tone:'danger', title:'23 张成功，2 张失败', detail:'失败 PNG 保持原位；成功项的 JPG 和回收结果不回滚。', metrics:[['成功','23 张'],['失败','2 张'],['失败原图','已保留']], actions:['再次转换'] }
+      ],
+      'main-image': [
+        { id:'ready', label:'等待分析', tone:'info', title:'已选择 2 张截图', detail:'先分析主图候选范围，当前不会生成文件或处理原图。', metrics:[['截图','2 张'],['保留原图','关闭'],['下一步','分析范围']], actions:['分析范围（2 张）'] },
+        { id:'analyzing', label:'分析中', tone:'info', title:'正在检测主图候选范围', detail:'读取图片尺寸、边缘和版式信息。', progress:50, metrics:[['已分析','1 / 2'],['当前图片','截图-02.png'],['输出文件','尚未生成']], logs:['截图-01.png 置信度 94%','正在分析截图-02.png'], actions:[] },
+        { id:'review', label:'等待确认', tone:'warning', title:'还有 1 张需要检查裁剪范围', detail:'可调整范围、确认范围或将单张图片排除；确认完成前不能生成。', metrics:[['自动确认','1 张'],['需要检查','1 张'],['排除处理','0 张']], logs:['截图-01.png → 已确认 1820 × 2420','截图-02.png → 置信度 61%，建议检查'], actions:['不处理这张','调整范围','范围正确'] },
+        { id:'generating', label:'正在生成', tone:'info', title:'正在生成 2 张主图', detail:'成功裁剪后，才会按“保留原图”选项处理对应原图。', progress:72, metrics:[['已生成','1 / 2'],['原图回收','1 张'],['当前图片','截图-02.png']], logs:['截图-01_主图.png 已生成','截图-01.png 已移入回收站'], actions:[] },
+        { id:'completed', label:'处理完成', tone:'success', title:'2 张主图已生成', detail:'成功项已按设置处理原图，跳过或失败图片不受影响。', progress:100, metrics:[['生成','2 张'],['跳过','0 张'],['回收原图','2 张']], actions:['重新分析'] },
+        { id:'partial', label:'存在异常', tone:'danger', title:'1 张生成成功，1 张处理失败', detail:'成功结果保留；失败图片及其原图未被删除。', metrics:[['成功','1 张'],['失败','1 张'],['失败原图','已保留']], actions:['重新分析'] }
+      ],
+      'version-manager': [
+        { id:'loading', label:'读取中', tone:'info', title:'正在读取版本树与预览', detail:'从版本记录解析文件路径和媒体信息。', progress:42, metrics:[['版本记录','3 个'],['预览','正在生成'],['当前文件','DSC08214.psd']], actions:[] },
+        { id:'normal', label:'正常查看', tone:'info', title:'版本树已就绪', detail:'选择版本查看预览与详细信息，勾选两个版本可进入对比。', metrics:[['版本','3 个'],['当前版本','V3'],['文件状态','正常']], actions:['编辑版本说明','复制文件地址'] },
+        { id:'compare', label:'版本对比', tone:'info', title:'正在对比 V2 与 V3', detail:'并排查看两个实际文件；版本管理本身不保存历史文件副本。', metrics:[['左侧','V2 精修二版'],['右侧','V3 精修三版'],['差异模式','并排预览']], actions:['交换两侧','退出对比'] },
+        { id:'missing', label:'文件丢失', tone:'danger', title:'V2 对应文件无法找到', detail:'记录仍然存在，但原路径已移动、离线或被删除。', metrics:[['版本','V2'],['记录状态','文件丢失'],['可用操作','重新定位']], actions:['重新定位文件','删除版本记录'] },
+        { id:'relinking', label:'重新定位', tone:'warning', title:'等待选择 V2 的实际文件', detail:'重新定位只更新版本记录的文件路径，不恢复历史内容。', metrics:[['原路径','不可用'],['目标版本','V2'],['当前状态','等待选择']], actions:['取消','选择文件'] }
+      ],
+      'team-retouch': [
+        { id:'recognizing', label:'人物识别中', tone:'info', title:'正在识别工作图和人物区域', detail:'识别完成后进入逐张检查与人物标记。', progress:36, metrics:[['图片','4 张'],['已识别','1 张'],['工作图','3 张']], logs:['正在分析 DSC08215.jpg','已创建 3 张工作图','发现 7 个人物区域'], actions:['取消识别'] },
+        { id:'marking', label:'人物标记', tone:'warning', title:'3 / 4 个人物已标记', detail:'橙色工作图建议检查；未标记人物需要选择已有身份或新建人物。', metrics:[['工作图','2 张'],['已标记','3 人'],['待检查','1 张']], actions:['调整范围','重新自动标记人物'] },
+        { id:'arranging', label:'任务编排', tone:'info', title:'正在按人物生成修图任务', detail:'身份确认后，为每位人物分配工作图并准备导出。', progress:58, metrics:[['人物','6 位'],['任务','18 个'],['已分配','12 个']], logs:['林女士 → 4 张工作图','陈先生 → 3 张工作图','6 个任务等待分配'], actions:['返回人物标记','导出任务'] },
+        { id:'waiting', label:'等待返图', tone:'warning', title:'已导出 18 个修图任务', detail:'等待接收各人物的返图；未返图任务保持待处理。', metrics:[['已导出','18 个'],['已返图','11 个'],['待返图','7 个']], actions:['打开导出目录','接收返图'] },
+        { id:'compositing', label:'合成返图', tone:'info', title:'正在校验并合成返图', detail:'逐项检查尺寸与任务身份，再写回项目版本。', progress:67, metrics:[['已处理','12 / 18'],['校验失败','1 个'],['正在合成','林女士-04']], logs:['11 个返图校验通过','陈先生-02 尺寸不匹配','正在合成林女士-04'], actions:['取消处理'] },
+        { id:'completed', label:'流程完成', tone:'success', title:'17 个返图已完成写回', detail:'1 个异常任务保留在待处理列表，可单独替换。', progress:100, metrics:[['完成','17 个'],['异常','1 个'],['写回版本','已建立']], actions:['关闭工作区'] }
+      ],
+      'trash': [
+        { id:'confirm', label:'等待确认', tone:'warning', title:'确认删除整个项目', detail:'项目目录及全部内容将移入系统回收站。', metrics:[['项目','春日人像'],['删除范围','整个项目目录'],['恢复方式','系统回收站']], actions:['取消','确认移入回收站'] },
+        { id:'moving', label:'正在移动', tone:'info', title:'正在把项目移入系统回收站', detail:'完成前保持项目标签关闭，避免继续写入文件。', progress:68, metrics:[['项目文件','486 个'],['已移动','331 个'],['当前阶段','更新工作区']], actions:[] },
+        { id:'completed', label:'删除完成', tone:'success', title:'项目已移入系统回收站', detail:'项目入口已从工作区移除，可以通过系统回收站恢复文件。', progress:100, metrics:[['项目','已移除'],['文件','486 个'],['位置','系统回收站']], actions:['关闭'] },
+        { id:'failed', label:'删除失败', tone:'danger', title:'项目未能完整移入回收站', detail:'项目仍保留在工作区；请关闭占用文件的程序后重试。', metrics:[['状态','未删除'],['原因','文件被占用'],['项目入口','仍然保留']], actions:['查看占用详情','重试'] }
+      ]
+    };
+    const stateCatalog = {
+      'project-import': [
+        { id:'ready', label:'准备', base:true },
+        { id:'running', label:'导入中', kind:'progress', title:'正在复制并校验已有项目', progress:64, logs:['1,846 / 2,864 个文件','已复制 61.9 / 96.8 GB','正在处理 图片后期_2_精修'], actions:['取消导入'] },
+        { id:'result', label:'结果', kind:'result', tone:'warning', title:'项目导入完成', detail:'项目已接入“策划中”；移动来源时有一项未能清理，原项目仍然保留。', metrics:[['文件','2,864'],['文件夹','42'],['识别目录','6']], issues:[['E:\\旧项目\\26-7-18 海边婚礼','源项目仍保留：部分文件正在被占用']], actions:['关闭'] }
+      ],
+      'sd-import': [
+        { id:'idle', label:'准备', base:true },
+        { id:'routing', label:'项目确认', kind:'confirm', tone:'warning', title:'选择素材归属', detail:'1 个拍摄时间段需要选择项目。', metrics:[['09:12–11:48','春日人像'],['16:20–18:03','待选择']], actions:['取消','确认并导入'] },
+        { id:'running', label:'导入中', kind:'progress', title:'正在复制并校验素材', progress:63, logs:['304 / 486 个文件','42.1 GB','DSC08301.ARW'], actions:['取消导入'] },
+        { id:'result', label:'结果', kind:'result', tone:'warning', title:'导入结束', detail:'483 个成功，3 个失败；失败项源文件已保留。', metrics:[['成功','483'],['失败','3'],['项目','2 个']], issues:[['C0051.MOV','校验失败'],['DSC08314.ARW','读取中断'],['DJI_0841.MP4','目标磁盘空间不足']], actions:['重新扫描','关闭'] }
+      ],
+      'negative-import': [
+        { id:'ready', label:'准备', base:true },
+        { id:'running', label:'导入中', kind:'progress', title:'正在导入底片', progress:46, logs:['128 / 276 个文件','8.7 GB','DSC08236.ARW'], actions:['取消导入'] },
+        { id:'result', label:'结果', kind:'result', tone:'success', title:'底片导入完成', detail:'276 个文件已导入，源文件已按本次设置处理。', metrics:[['成功','276'],['失败','0']], actions:['关闭'] }
+      ],
+      'progress-import': [
+        { id:'ready', label:'准备', base:true },
+        { id:'running', label:'导入中', kind:'progress', title:'正在导入图片进度', progress:58, logs:['159 / 276 个文件','图片后期_2_调色','正在校验 DSC08236.psd'], actions:['取消导入'] },
+        { id:'confirm', label:'关系确认', kind:'confirm', tone:'warning', title:'确认版本关系', detail:'V1 初修 → V2 调色；确认识别结果后完成项目跟踪。', metrics:[['识别匹配','248'],['新素材','28'],['旧版未返回','3']], actions:['返回检查','确认版本关系'] },
+        { id:'result', label:'结果', kind:'result', tone:'warning', title:'进度导入结束', detail:'274 个文件已导入，2 个异常文件留在本页等待处理。', metrics:[['成功','274'],['失败','2'],['版本','V2']], issues:[['DSC08301.psd','文件正在被其他程序占用'],['DSC08317.jpg','读取时校验失败']], actions:['关闭'] }
+      ],
+      'broll-import': [
+        { id:'ready', label:'准备', base:true },
+        { id:'running', label:'导入中', kind:'progress', title:'正在导入花絮', progress:82, logs:['正在处理 DJI_0834.MP4','大视频分割 3 / 4','校验片段'], actions:['取消导入'] },
+        { id:'result', label:'结果', kind:'result', tone:'warning', title:'花絮导入结束', detail:'68 个成功，3 个失败；失败项源文件已保留。', metrics:[['成功','68'],['失败','3'],['分割视频','2']], issues:[['DJI_0835.MP4','文件被占用'],['C0081.MOV','分割后校验失败'],['花絮-12.jpg','无法读取文件']], actions:['关闭'] }
+      ],
+      'file-import': [
+        { id:'ready', label:'准备', base:true },
+        { id:'running', label:'导入中', kind:'progress', title:'正在导入文件', progress:68, logs:['17 / 25 个文件','2 个重名文件已改名','参考图-03.pdf'], actions:['取消导入'] },
+        { id:'result', label:'结果', kind:'result', tone:'success', title:'文件导入完成', detail:'25 个文件已导入，没有覆盖现有文件。', metrics:[['成功','25'],['自动改名','2']], actions:['关闭'] }
+      ],
+      'filename-match': [
+        { id:'ready', label:'准备', base:true },
+        { id:'confirm', label:'复制确认', kind:'confirm', tone:'warning', title:'预检完成', detail:'将复制 7 个文件；目标中已存在 1 个；未找到 1 个编号：DSC08301。', metrics:[['图片','5'],['视频','2'],['已存在','1']], actions:['取消','开始复制'] },
+        { id:'running', label:'复制中', kind:'progress', title:'正在复制匹配文件', progress:57, logs:['4 / 7 个文件','C0048.MOV','取消后在此区域执行回滚'], actions:['取消并回滚'] },
+        { id:'result', label:'结果', kind:'result', tone:'success', title:'选片完成', detail:'7 个匹配文件已复制；未找到：DSC08301。', metrics:[['图片','5'],['视频','2'],['未找到','1']], actions:['再次选片'] }
+      ],
+      'storyboard': [
+        { id:'ready', label:'准备', base:true },
+        { id:'running', label:'处理中', kind:'progress', title:'正在识别转场并导出画面', progress:41, logs:['C0048.MOV','26 个分镜','已导出 18 张'], actions:['取消处理'] },
+        { id:'result', label:'结果', kind:'result', tone:'warning', title:'处理结束', detail:'2 个视频完成，1 个视频失败。', metrics:[['成功','2'],['失败','1'],['截图','51']], issues:[['C0050.MOV','视频无法解码']], actions:['重新处理'] }
+      ],
+      'video-transcode': [
+        { id:'ready', label:'准备', base:true },
+        { id:'running', label:'转码中', kind:'progress', title:'正在转码视频', progress:58, logs:['2 / 3 个视频','h264_nvenc','预计剩余 08:24'], actions:['取消转码'] },
+        { id:'result', label:'结果', kind:'result', tone:'warning', title:'转码结束', detail:'2 个成功，1 个失败；成功输出已保留。', metrics:[['成功','2'],['失败','1'],['输出','6.4 GB']], issues:[['DJI_0834.MP4','编码器异常退出']], actions:['重试失败项'] }
+      ],
+      'png-jpg': [
+        { id:'ready', label:'准备', base:true },
+        { id:'running', label:'转换中', kind:'progress', title:'正在转换 PNG', progress:67, logs:['2 / 3 张','海报-02.png','成功项原图已移入回收站'], actions:[] },
+        { id:'result', label:'结果', kind:'result', tone:'warning', title:'转换结束', detail:'2 张成功，1 张失败；失败 PNG 保持原位。', metrics:[['成功','2'],['失败','1']], issues:[['图标集-03.png','没有写入权限']], actions:['再次转换'] }
+      ],
+      'main-image': [
+        { id:'ready', label:'准备', base:true },
+        { id:'review', label:'范围确认', kind:'confirm', tone:'warning', title:'检查裁剪范围', detail:'1 张已自动确认，1 张需要检查。', metrics:[['已确认','1'],['待检查','1']], actions:['不处理这张','调整范围','范围正确'] },
+        { id:'running', label:'处理中', kind:'progress', title:'正在生成主图', progress:72, logs:['1 / 2 张','截图-02.png','成功后处理对应原图'], actions:[] },
+        { id:'result', label:'结果', kind:'result', tone:'warning', title:'主图处理结束', detail:'1 张成功，1 张失败；失败原图未删除。', metrics:[['成功','1'],['失败','1']], issues:[['截图-02.png','未检测到有效主图区域']], actions:['重新分析'] }
+      ],
+      'version-manager': [
+        { id:'normal', label:'正常', base:true },
+        { id:'compare', label:'对比', kind:'view', tone:'info', title:'V2 与 V3 对比', detail:'并排查看两个实际文件。', metrics:[['左侧','V2'],['右侧','V3']], actions:['交换两侧','退出对比'] },
+        { id:'missing', label:'文件丢失', kind:'view', tone:'danger', title:'V2 文件无法找到', detail:'可以重新定位文件，或删除这条版本记录。', actions:['重新定位','删除记录'] }
+      ],
+      'team-retouch': [
+        { id:'people', label:'人物标记', base:true },
+        { id:'tasks', label:'任务编排', kind:'view', tone:'info', title:'编排修图任务', detail:'18 个任务中有 12 个已分配。', metrics:[['人物','6'],['任务','18'],['已分配','12']], actions:['返回标记','导出任务'] },
+        { id:'returning', label:'返图处理', kind:'progress', title:'正在校验并合成返图', progress:67, logs:['12 / 18 个任务','1 个校验失败','林女士-04'], actions:['取消处理'] },
+        { id:'result', label:'结果', kind:'result', tone:'warning', title:'返图处理结束', detail:'17 个完成，1 个异常任务等待处理。', metrics:[['完成','17'],['异常','1']], issues:[['陈先生-02.psd','返图尺寸与任务不一致']], actions:['关闭工作区'] }
+      ],
+      'trash': [
+        { id:'confirm', label:'确认', base:true },
+        { id:'running', label:'处理中', kind:'progress', title:'正在移入系统回收站', progress:68, logs:['331 / 486 个文件','正在更新工作区'], actions:[] },
+        { id:'result', label:'结果', kind:'result', tone:'success', title:'项目已移入回收站', detail:'项目入口已从工作区移除。', metrics:[['文件','486'],['位置','系统回收站']], actions:['关闭'] }
+      ],
+      'video-split': [
+        { id:'ready', label:'准备', base:true },
+        { id:'running', label:'切割中', kind:'progress', title:'正在无损切割视频', progress:61, logs:['DJI_0834.MP4','已生成 2 / 4 个片段','正在写入 part003'], actions:[] },
+        { id:'result', label:'结果', kind:'result', tone:'success', title:'视频切割完成', detail:'原视频已保留，4 个分段文件已写入同一目录。', metrics:[['分段','4'],['每段','约 3.95 GB'],['原视频','已保留']], actions:['继续切割'] }
+      ],
+      'office-extract': [
+        { id:'ready', label:'准备', base:true },
+        { id:'running', label:'提取中', kind:'progress', title:'正在提取文档内图片', progress:58, logs:['2 / 3 个文档','客户方案.pptx','已提取 34 张'], actions:[] },
+        { id:'result', label:'结果', kind:'result', tone:'warning', title:'图片提取结束', detail:'2 个文档完成，1 个文档失败；成功结果已保留。', metrics:[['成功文档','2'],['失败文档','1'],['图片','47']], issues:[['报价清单.xlsx','文档不是有效的 Office Open XML 文件']], actions:['重新选择'] }
+      ]
+    };
+    const defaultPanelStates = { 'version-manager':'normal', 'team-retouch':'people' };
+    const selectedPanelStates = Object.fromEntries(Object.entries(stateCatalog).map(([id, states]) => [id, defaultPanelStates[id] || states[0].id]));
+
+    const button = (label, kind = '') => `<button class="button ${kind}" type="button">${label}</button>`;
+    const field = (label, value, type = 'input') => `<label class="field"><span>${label}</span>${type === 'select' ? `<select class="select"><option>${value}</option></select>` : `<input class="input${value.includes('\\') ? ' mono' : ''}" value="${value}" readonly>`}</label>`;
+    const toggle = (title, description, on = true) => `<div class="toggle-row"><div class="toggle-copy"><b>${title}</b><small>${description}</small></div><span class="switch ${on ? 'on' : ''}"></span></div>`;
+    const fileRow = (ext, name, meta, tone = '') => `<div class="list-row"><span class="file-icon ${tone}">${ext}</span><div><b>${name}</b><small>${meta}</small></div><span class="row-meta">⋯</span></div>`;
+    const selectedFileList = (title, subtitle, badge, files) => `<div class="section-title"><div><b>${title}</b><br><small>${subtitle}</small></div><span class="pill blue">${badge}</span></div><section class="card">${files.map(file => fileRow(...file)).join('')}</section>`;
+    const sourcePicker = (title, subtitle, primaryLabel = '选择文件', secondaryLabel = '') => `<div class="dropzone"><div><div class="drop-icon">＋</div><b>${title}</b><p>${subtitle}</p><div style="margin-top:12px">${button(primaryLabel,'primary')}${secondaryLabel ? ` ${button(secondaryLabel)}` : ''}</div></div></div>`;
+    const progress = (message, percent = 38) => `<div class="progress-wrap"><div class="progress-head"><b>${message}</b><span>${percent}%</span></div><div class="progress"><i style="--value:${percent}%"></i></div><div class="log">等待任务开始 · 状态与异常会显示在此区域</div></div>`;
+
+    function updatePrototypeStateControl(panelId) {
+      const control = document.getElementById('prototype-state-control');
+      const buttons = document.getElementById('prototype-state-buttons');
+      const states = stateCatalog[panelId] || [];
+      if (!states.length) {
+        control.hidden = true;
+        buttons.innerHTML = '';
+        return;
+      }
+      control.hidden = false;
+      const active = selectedPanelStates[panelId] || states[0].id;
+      buttons.innerHTML = states.map(state => `<button type="button" class="prototype-state-button ${state.id === active ? 'active' : ''}" data-prototype-panel="${panelId}" data-prototype-state="${state.id}">${state.label}</button>`).join('');
+    }
+
+    function renderStateScene(panelId) {
+      const states = stateCatalog[panelId] || [];
+      const state = states.find(item => item.id === selectedPanelStates[panelId]) || states[0];
+      if (!state || state.base) return '';
+      const metrics = state.metrics?.length ? `<div class="state-metrics">${state.metrics.map(([label,value]) => `<div class="state-metric"><span>${label}</span><b>${value}</b></div>`).join('')}</div>` : '';
+      const issues = state.issues?.length ? `<div class="issue-list"><div class="issue-list-head">未完成项目（${state.issues.length}）</div>${state.issues.map(([name,reason]) => `<div class="issue-row"><b>${name}</b><span>${reason}</span></div>`).join('')}</div>` : '';
+      const actions = state.actions?.length ? `<div class="actions">${state.actions.map((label,index) => button(label, index === state.actions.length - 1 ? (state.tone === 'danger' ? 'danger' : 'primary') : '')).join('')}</div>` : '';
+      if (state.kind === 'progress') {
+        return `<section class="progress-wrap demo-area" style="margin-bottom:16px"><div class="progress-head"><b>${state.title}</b><span>${state.progress}%</span></div><div class="progress"><i style="--value:${state.progress}%"></i></div><div class="log">${(state.logs || []).join(' · ')}</div>${actions}</section>`;
+      }
+      return `<section class="state-scene ${state.tone || 'info'} demo-area"><div class="state-scene-head"><div><b>${state.title}</b>${state.detail ? `<p>${state.detail}</p>` : ''}</div></div>${metrics}${issues}${actions}</section>`;
+    }
+
+    const templates = {
+      'project-import': () => panel('project-import', 'folder-input', '导入项目', '把现有项目文件夹复制或移动到工作目录，并接入“策划中”。', `
+        <div class="stack demo-area">
+          ${selectedFileList('已选择 1 个项目文件夹','软件已读取文件结构和容量','96.8 GB',[
+            ['DIR','26-7-18 海边婚礼','E:\\旧项目 · 2,864 个文件 · 42 个文件夹','blue']
+          ])}
+          <div class="grid-2">
+            ${field('项目名称','26-7-18 海边婚礼')}
+            ${field('导入方式','复制并接管（推荐）','select')}
+          </div>
+          <div class="callout"><b>已识别 6 个素材或进度文件夹</b><p>导入完成后，可在项目内确认首版基线和后续版本关系。</p></div>
+          ${progress('等待开始导入项目', 0)}
+          <div class="actions"><span class="hint">将接入“策划中”</span>${button('重新选择')}${button('开始导入','primary')}</div>
+        </div>`),
+
+      'sd-import': () => panel('sd-import', 'memory-stick', '从 SD 卡导入', '首页入口：先暂存与分析素材，再匹配项目归属。', `
+        <div class="stack demo-area">
+          <section class="card card-pad">
+            <div style="display:flex;align-items:center;gap:12px">
+              <span class="panel-title-icon" style="color:#059669;background:#ecfdf5">${iconSvg('hard-drive')}</span>
+              <div><b style="display:block;font-size:12px">从 SD 卡导入媒体</b><small style="display:block;margin-top:4px;color:#667085;font-size:10px">已连接 2/2 张卡，点击右侧按钮批量导入</small></div>
+              <div style="margin-left:auto;display:flex;gap:8px">${button('已选 2 个盘符')}${button('批量导入','primary')}</div>
+            </div>
+          </section>
+          <section class="card">${toggle('导入后删除源文件','只有全部文件复制并校验成功后才会删除所选 SD 卡中的媒体；取消勾选则保留源文件。',true)}</section>
+        </div>`),
+
+      'negative-import': () => panel('negative-import', 'aperture', '导入底片', '项目内入口：目标项目在打开面板时已确定。', `
+        <div class="stack demo-area">
+          <div class="callout"><b>导入到“26-8-5 春日人像”</b><p>可直接读取文件或文件夹。</p></div>
+          ${sourcePicker('选择一个或多个底片文件，或选择底片文件夹','文件与文件夹是两个独立的选择入口','选择文件','选择文件夹')}
+          <section class="card">${toggle('导入后删除源文件','只有全部文件复制并校验成功后才会删除所选底片；取消勾选则保留源文件。',false)}</section>
+          <div class="actions"><span class="hint">尚未选择来源</span>${button('开始导入')}</div>
+        </div>`),
+
+      'progress-import': () => panel('progress-import', 'folder-input', '导入进度', '把外部图片、RAW 或视频导入为当前项目的版本进度。', `
+        <div class="stack demo-area">
+          <div class="callout"><b>导入到“26-8-5 春日人像”</b><p>将创建新的版本进度目录。</p></div>
+          ${sourcePicker('选择一个或多个进度文件','根据进度类型筛选图片、RAW 或视频','选择文件')}
+          <div class="grid-3">
+            ${field('进度类型','图片进度','select')}
+            ${field('版本关系','新主版本','select')}
+            ${field('对比版本','V1 · 图片后期_1_初修','select')}
+            ${field('版本编号','V2')}
+            ${field('进度名字','调色')}
+            ${field('进度文件夹','图片后期_2_调色')}
+          </div>
+          <section class="card">
+            ${toggle('导入后删除源文件','全部文件导入成功后再处理来源。',false)}
+            ${toggle('开启项目跟踪','导入后登记版本关系。',true)}
+            ${toggle('沿用上一版本文件名','仅重命名匹配文件。',true)}
+            ${toggle('补齐缺失媒体','从 V1 复制缺失文件，不覆盖同名文件。',false)}
+          </section>
+          ${progress('等待开始导入进度', 0)}
+          <div class="actions"><span class="hint">尚未选择来源</span>${button('开始导入')}</div>
+        </div>`),
+
+      'broll-import': () => panel('broll-import', 'folder-input', '导入花絮', '从项目菜单进入，目标固定为当前项目的“花絮”目录。', `
+        <div class="stack demo-area">
+          <div class="callout"><b>导入到“26-8-5 春日人像 / 花絮”</b><p>支持图片与视频；大于 4GB 的视频是否分割由设置决定。</p></div>
+          ${sourcePicker('选择一个或多个花絮文件','可一次选择多个图片或视频','选择文件')}
+          <section class="card">${toggle('导入后删除源文件','初始值来自设置。只有花絮成功导入后才会删除源文件；取消勾选则复制并保留来源。',true)}</section>
+          <div class="actions"><span class="hint">尚未选择来源</span>${button('开始导入')}</div>
+        </div>`),
+
+      'file-import': () => panel('file-import', 'file-input', '导入文件', '从当前文件夹或右键菜单进入，目标目录已确定。', `
+        <div class="stack demo-area">
+          <div class="callout"><b>导入到“26-8-5 春日人像 / 策划 / 客户资料”</b><p>选择任意文件导入当前目录；重名文件会自动生成不冲突的名称，不覆盖现有文件。</p></div>
+          ${sourcePicker('选择一个或多个文件','文件将在确认后导入当前目录','选择文件')}
+          <section class="card">${toggle('导入后删除源文件','初始值来自设置。成功导入后移动来源；取消勾选则复制并保留来源。',false)}</section>
+          <div class="actions"><span class="hint">尚未选择来源</span>${button('开始导入')}</div>
+        </div>`),
+
+      'filename-match': () => panel('filename-match', 'file-text', '从文件名选片', '在当前项目内按完整文件名预检，确认后再复制。', `
+        <div class="stack demo-area">
+          <div class="grid-2"><label class="field"><span>从文件夹选择图片</span><select class="select"><option>RAW</option></select><small style="color:#667085;font-size:9px">选中的图片会存放到“图片选片”文件夹</small></label><label class="field"><span>从文件夹选择视频</span><select class="select"><option>MOV</option></select><small style="color:#667085;font-size:9px">选中的视频会存放到“视频选片”文件夹</small></label></div>
+          <label class="field"><span>文件名</span><textarea class="textarea mono" readonly>DSC08214 DSC08236 C0048 DSC08301</textarea><small style="color:#667085;font-size:9px">文件名需要用空格分开，一个空格分开一个文件名</small></label>
+          ${progress('进度', 0)}
+          <div class="callout"><b>开始选片会先执行预检</b><p>预检统计图片、视频、已存在文件、同名冲突和未找到编号；只有确认“开始复制”后才会实际复制，取消运行时会进入回滚。</p></div>
+          <div class="actions">${button('开始选片','primary')}</div>
+        </div>`),
+
+      'storyboard': () => panel('storyboard', 'video', '截取分镜帧', '对视频执行转场识别，并从每个分镜挑选清晰画面。', `
+        <div class="stack demo-area">
+          ${selectedFileList('已选择 3 个视频','按列表顺序识别分镜并导出画面','3 个文件',[
+            ['MOV','C0048.MOV','春日人像 / MOV · 等待','video'],
+            ['MOV','C0049.MOV','春日人像 / MOV · 等待','video'],
+            ['MP4','DJI_0834.MP4','春日人像 / 花絮 · 等待','video']
+          ])}
+          <div class="grid-2"><label class="field"><span>检测灵敏度</span><select class="select"><option>标准</option></select><small style="color:#667085;font-size:9px">兼顾硬切、渐变与误判率。</small></label><label class="field"><span>最小片段时长（秒）</span><input class="input" value="0.3" readonly><small style="color:#667085;font-size:9px">数值越大，短暂画面会被过滤，最终导出的截图越少。</small></label></div>
+          <section class="card">${toggle('整理 data 文件','处理完成后，将当前目录中的 TXT 文件移入 data 文件夹。',true)}</section>
+          ${progress('准备就绪', 0)}
+          <div class="actions">${button('开始处理','primary')}</div>
+        </div>`),
+
+      'video-transcode': () => panel('video-transcode', 'gauge', '视频转码', '支持封装转换、H.264 兼容转码与 H.265 硬件转码。', `
+        <div class="stack demo-area">
+          ${selectedFileList('已选择 3 个视频','按文件夹分组，依列表顺序处理','共 12.8 GB',[
+            ['MOV','C0048.MOV','春日人像 / MOV · 等待','video'],
+            ['MOV','C0049.MOV','春日人像 / MOV · 等待','video'],
+            ['MP4','DJI_0834.MP4','春日人像 / 花絮 · 等待','video']
+          ])}
+          <div class="grid-3">${field('输出封装','MP4','select')}${field('视频处理','H.264 · 兼容性优先','select')}${field('画质','平衡','select')}${field('分辨率','保持原分辨率','select')}${field('帧率','保持原帧率','select')}${field('音频','转换为 AAC · 192 kbps','select')}</div>
+          <div class="grid-2">
+            <div class="callout"><b>● 另存为新视频</b><p>保存在原视频旁，文件名增加“_转码”。</p></div>
+            <div class="callout danger"><b>○ 替换原视频</b><p>仅限单个文件，验证成功后原子替换。</p></div>
+          </div>
+          ${progress('等待开始视频转码', 0)}
+          <div class="actions">${button('追加视频')}${button('清空','ghost-danger')}${button('开始转码','primary')}</div>
+        </div>`),
+
+      'png-jpg': () => panel('png-jpg', 'image', 'PNG 转 JPG', '处理所选 PNG 文件及文件夹子目录中的 PNG。', `
+        <div class="stack demo-area">
+          ${selectedFileList('已选择 3 个 PNG 文件','包含所选文件夹子目录中的 PNG','3 个文件',[
+            ['PNG','海报-01.png','春日人像 / 设计稿 · 等待'],
+            ['PNG','海报-02.png','春日人像 / 设计稿 · 等待'],
+            ['PNG','图标集-03.png','春日人像 / 设计稿 / 图标 · 等待']
+          ])}
+          <div class="card card-pad"><div style="display:flex;align-items:center;justify-content:space-between;gap:16px"><b style="font-size:11px">导出 JPG 画质</b><select class="select" style="width:170px"><option>最高（100）</option></select></div></div>
+          <section class="card">${toggle('转换成功后删除原始 PNG','默认开启。只有对应 JPG 写入并验证成功后，原始 PNG 才会移入系统回收站。',true)}</section>
+          ${progress('进度', 0)}
+          <div class="actions">${button('开始转换','primary')}</div>
+        </div>`),
+
+      'main-image': () => panel('main-image', 'crop', '提取截图主图', '先分析候选范围，确认后才生成文件或处理原图。', `
+        <div class="stack demo-area">
+          ${selectedFileList('已选择 2 张截图','按列表顺序分析主图区域','2 个文件',[
+            ['PNG','截图-01.png','春日人像 / 截图 · 等待'],
+            ['PNG','截图-02.png','春日人像 / 截图 · 等待']
+          ])}
+          <section class="card">${toggle('保留原图','默认关闭；关闭时仅把成功裁剪的原图移入系统回收站，跳过或失败的图片保持不变。',false)}</section>
+          ${progress('进度', 0)}
+          <div class="actions">${button('分析范围（2 张）','primary')}</div>
+        </div>`),
+
+      'version-manager': () => panel('version-manager', 'git-branch', '版本管理 · DSC08214.psd', '独立工作区标签：记录路径与版本关系，不保存历史文件副本。', `
+        <div class="stack demo-area">
+          <div class="callout warning"><b>版本管理不保存历史文件副本</b><p>原地覆盖或永久删除的旧内容无法通过本功能恢复；文件移动或删除后会显示“文件丢失”，可重新定位或删除记录。</p></div>
+          <div class="workspace-preview-grid">
+            <aside style="padding:12px;background:#fff;border-right:1px solid #e2e8f0"><div class="card-head"><b>版本树</b><span>3 个版本</span></div><div class="timeline"><div class="timeline-item active"><b>V3 · 精修三版 ✓</b><p>当前版本 · 今天 18:42</p></div><div class="timeline-item"><b>V2 · 精修二版</b><p>昨天 23:16</p></div><div class="timeline-item"><b>V1 · 初修</b><p>8 月 3 日 14:28</p></div></div><p style="margin:12px 2px 0;color:#8490a4;font-size:9px">勾选任意两个可进入版本对比。</p></aside>
+            <main style="display:flex;flex-direction:column;background:#f8fafc"><div style="padding:11px 13px;border-bottom:1px solid #e2e8f0"><b style="font-size:10px">预览</b><small style="display:block;margin-top:3px;color:#8490a4;font-size:9px">DSC08214.psd</small></div><div class="media-preview" style="flex:1;border-radius:0"></div></main>
+            <aside style="padding:12px;background:#fff;border-left:1px solid #e2e8f0"><div class="card-head"><b>详细信息</b><span>⋯</span></div><dl style="margin:0;font-size:10px"><div class="list-row" style="padding-left:0;padding-right:0"><span style="color:#98a2b3">版本</span><b style="margin-left:auto">V3 · 精修三版</b></div><div class="list-row" style="padding-left:0;padding-right:0"><span style="color:#98a2b3">标记</span><b style="margin-left:auto">当前版本</b></div><div class="list-row" style="padding-left:0;padding-right:0"><span style="color:#98a2b3">文件大小</span><b style="margin-left:auto">218.6 MB</b></div><div class="list-row" style="padding-left:0;padding-right:0"><span style="color:#98a2b3">状态</span><b style="margin-left:auto">正常</b></div><div style="padding:10px 0;border-bottom:1px solid #edf0f4"><span style="color:#98a2b3">版本说明</span><p style="margin:5px 0 0;line-height:1.5">完成肤色与背景调整</p></div></dl><div class="stack" style="gap:6px;margin-top:12px">${button('编辑版本说明')}${button('复制文件地址')}${button('删除版本记录','ghost-danger')}</div></aside>
+          </div>
+        </div>`),
+
+      'team-retouch': () => panel('team-retouch', 'users-round', '团片协作 · 4 张图片', '独立工作区标签：先识别与标记人物，再进入任务编排与返图。', `
+        <div class="stack demo-area">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><div class="segmented"><span class="active">① 人物识别与标记</span><span>② 任务编排与返图</span></div><div style="margin-left:auto;display:flex;gap:8px">${button('重新识别全部图片')}${button('重新自动标记人物','primary')}</div></div>
+          <section class="card"><header style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid #e2e8f0"><div><b style="font-size:12px">DSC08214.jpg</b><small style="display:block;margin-top:3px;color:#667085;font-size:9px">2 张工作图 · 3/4 个人物已标记 · 1 张建议检查</small></div><span class="pill amber" style="margin-left:auto">建议检查</span></header>
+            <div class="grid-2" style="padding:14px"><div><div class="media-preview"><span class="crop-box"></span></div><p style="margin:8px 0 0;color:#8490a4;font-size:9px;line-height:1.5">蓝框是工作图范围；每个人物使用独立颜色和编号。橙色框表示建议检查。</p></div><div class="stack" style="gap:9px"><article class="card card-pad"><div class="card-head"><b>工作图 1</b><span class="pill green">已标记</span></div><div class="list-row"><span class="pill blue">人物 1</span><b>林女士</b><span class="row-meta">已人工确认</span></div><div class="list-row"><span class="pill amber">人物 2</span><b>陈先生</b><span class="row-meta">自动候选</span></div></article><article class="card card-pad"><div class="card-head"><b>工作图 2</b><span class="pill amber">建议检查</span></div><div class="list-row"><span class="pill">人物 3</span><b>未标记</b><span class="row-meta">去标记</span></div><div class="actions" style="margin-top:10px">${button('调整范围')}${button('删除工作图','ghost-danger')}</div></article></div></div>
+          </section>
+          <div class="callout"><b>人物标记完成后才进入第二步</b><p>第二步由身份管理工作区生成任务、导出工作图、接收返图并合成；不是在线成员协同面板，也没有“在线人数”概念。</p></div>
+        </div>`),
+
+      'trash': () => panel('trash', 'trash', '移入回收站', '项目级删除确认，不是所选文件列表。', `
+        <div class="stack demo-area">
+          <p style="margin:0;color:#667085;font-size:12px">项目“26-8-5 春日人像”及其全部内容将移入系统回收站。</p>
+          <div class="callout danger"><b>删除范围：整个项目目录</b><p>该入口来自项目菜单；项目内所选文件的删除使用文件操作确认，不会打开这个项目删除面板。</p></div>
+          <div class="actions">${button('确认移入回收站','danger')}</div>
+        </div>`),
+
+      'video-split': () => panel('video-split', 'scissors', '视频切割', '将单个大型视频无损切成约 3.95 GB 的连续分段。', `
+        <div class="stack demo-area">
+          ${selectedFileList('已选择 1 个视频','原视频保留；分段文件写入原视频所在目录','12.7 GB',[
+            ['MP4','DJI_0834.MP4','春日人像 / 花絮 · 等待','video']
+          ])}
+          <div class="grid-2">
+            ${field('分段大小','约 3.95 GB（固定）')}
+            ${field('输出名称','DJI_0834_part001.MP4')}
+          </div>
+          ${progress('等待开始视频切割', 0)}
+          <div class="actions">${button('重新选择')}${button('开始切割','primary')}</div>
+        </div>`),
+
+      'office-extract': () => panel('office-extract', 'file-image', '提取 Office 图片', '从 Office Open XML 文档中提取内嵌图片，并在文档旁生成结果文件夹。', `
+        <div class="stack demo-area">
+          ${selectedFileList('已选择 3 个 Office 文档','支持 Word、PowerPoint 与 Excel 的 Open XML 文件','3 个文件',[
+            ['PPTX','客户方案.pptx','春日人像 / 策划 · 等待'],
+            ['DOCX','拍摄需求.docx','春日人像 / 客户资料 · 等待'],
+            ['XLSX','报价清单.xlsx','春日人像 / 客户资料 · 等待']
+          ])}
+          <div class="callout"><b>输出到文档旁</b><p>每个文档分别生成“文档名_media”文件夹；重名时自动编号，不修改原 Office 文档。</p></div>
+          ${progress('等待开始提取图片', 0)}
+          <div class="actions">${button('重新选择')}${button('开始提取','primary')}</div>
+        </div>`)
+    };
+
+    function panel(panelId, icon, title, description, body) {
+      const defaultState = defaultPanelStates[panelId] || stateCatalog[panelId]?.[0]?.id;
+      const hideBase = selectedPanelStates[panelId] !== defaultState;
+      return `<article class="panel-window demo-ribbon"><header class="panel-window-head"><span class="panel-title-icon">${iconSvg(icon)}</span><div><h3>${title}</h3><p>${description}</p></div><button class="panel-close" aria-label="关闭" type="button">×</button></header><div class="panel-body">${renderStateScene(panelId)}<div class="panel-base ${hideBase ? 'is-hidden' : ''}">${body}</div></div></article>`;
+    }
+
+    function miniPreview(index) {
+      const variants = [
+        '<div class="mini-callout"></div><div class="mini-grid"><span></span><span></span></div><div class="mini-button"></div>',
+        '<div class="mini-row"></div><div class="mini-row short"></div><div class="mini-callout"></div><div class="mini-button"></div>',
+        '<div class="mini-grid"><span></span><span></span></div><div class="mini-row"></div><div class="mini-row short"></div>',
+        '<div class="mini-callout"></div><div class="mini-row"></div><div class="mini-row"></div><div class="mini-button"></div>'
+      ];
+      return `<div class="mini-panel"><div class="mini-window"><div class="mini-head"></div><div class="mini-body">${variants[index % variants.length]}</div></div></div>`;
+    }
+
+    function renderOverview() {
+      const stateCount = Object.values(stateCatalog).reduce((total, states) => total + states.length, 0);
+      return `<div class="overview"><div class="overview-intro"><div><h3>全部工具面板</h3><p>同时列出当前可达面板，以及已有能力但入口不明显或尚未接入的面板。</p></div><div class="overview-stat">16 个面板 · ${stateCount} 个状态</div></div><div class="overview-grid">${panelItems.map((item,index) => `<article class="overview-card" tabindex="0" data-open="${item.id}">${miniPreview(index)}<div class="overview-card-copy"><b>${item.title}</b><span>${item.subtitle}</span><em>${details[item.id].group} · ${stateCatalog[item.id].length} 个状态</em></div></article>`).join('')}</div></div>`;
+    }
+
+    function renderNav() {
+      const nav = document.getElementById('nav');
+      nav.innerHTML = groups.map(group => `<div class="section-label">${group.title}</div><div class="nav-list">${group.items.map(item => `<button class="nav-item" data-id="${item.id}" type="button"><span class="nav-icon">${iconSvg(item.icon)}</span><span class="nav-copy"><b>${item.title}</b><small>${item.subtitle}</small></span>${item.id === 'overview' ? '<span class="nav-count">16</span>' : ''}</button>`).join('')}</div>`).join('');
+      const mobile = document.getElementById('mobile-select');
+      mobile.innerHTML = groups.map(group => `<optgroup label="${group.title}">${group.items.map(item => `<option value="${item.id}">${item.title}</option>`).join('')}</optgroup>`).join('');
+    }
+
+    function showPanel(id, updateHash = true) {
+      if (!details[id]) id = 'overview';
+      const item = details[id];
+      const stage = document.getElementById('stage');
+      stage.innerHTML = id === 'overview' ? renderOverview() : templates[id]();
+      updatePrototypeStateControl(id);
+      document.getElementById('page-title').textContent = id === 'overview' ? '全部工具面板' : item.title;
+      document.getElementById('page-description').textContent = id === 'overview' ? '统一查看导入、处理、协作与管理工具及其过程状态。' : item.subtitle + ` · ${stateCatalog[id]?.length || 0} 个静态状态，不执行真实业务。`;
+      document.getElementById('breadcrumb').textContent = id === 'overview' ? '面板总览 / All panels' : item.group + ' / ' + item.title;
+      document.querySelectorAll('.nav-item').forEach(button => button.classList.toggle('active', button.dataset.id === id));
+      document.getElementById('mobile-select').value = id;
+      if (updateHash) history.replaceState(null, '', '#' + id);
+      document.querySelector('.content').scrollTo({ top: 0, behavior: 'instant' });
+      document.querySelectorAll('[data-open]').forEach(card => {
+        const open = () => showPanel(card.dataset.open);
+        card.addEventListener('click', open);
+        card.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
+      });
+    }
+
+    renderNav();
+    document.getElementById('nav').addEventListener('click', event => {
+      const button = event.target.closest('[data-id]');
+      if (button) showPanel(button.dataset.id);
+    });
+    document.getElementById('mobile-select').addEventListener('change', event => showPanel(event.target.value));
+    document.getElementById('prototype-state-buttons').addEventListener('click', event => {
+      const button = event.target.closest('[data-prototype-state]');
+      if (!button) return;
+      const panelId = button.dataset.prototypePanel;
+      selectedPanelStates[panelId] = button.dataset.prototypeState;
+      showPanel(panelId, false);
+    });
+    window.addEventListener('hashchange', () => showPanel(location.hash.slice(1) || 'overview', false));
+    showPanel(location.hash.slice(1) || 'overview', false);
+  </script>
+</body>
+</html>
