@@ -80,6 +80,25 @@ const createFileRootWatcherService = ({
     state.watcher?.close();
     watchers.delete(key);
   };
+  const suspend = rootPath => {
+    const key = comparable(rootPath);
+    const state = watchers.get(key);
+    if (!state) return 0;
+    if (state.timer) clearTimeout(state.timer);
+    state.watcher?.close();
+    watchers.delete(key);
+    return Math.max(1, state.references || 1);
+  };
+  const resume = (rootPath, references = 1) => {
+    const referenceCount = Math.max(0, Number(references) || 0);
+    if (!referenceCount) return { success: true, root: path.resolve(rootPath) };
+    const result = acquire(rootPath);
+    if (result.success) {
+      const state = watchers.get(comparable(rootPath));
+      if (state) state.references = referenceCount;
+    }
+    return result;
+  };
   const discardChangesInside = targetPath => {
     const suppressed = comparable(targetPath);
     for (const state of watchers.values()) {
@@ -96,7 +115,7 @@ const createFileRootWatcherService = ({
     }
     watchers.clear();
   };
-  return { acquire, release, discardChangesInside, stop };
+  return { acquire, release, suspend, resume, discardChangesInside, stop };
 };
 
 module.exports = { createFileRootWatcherService };

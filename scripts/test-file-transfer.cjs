@@ -178,6 +178,94 @@ const run = async () => {
     await assert.rejects(removeCopiedSources(growingPlan), /发生变化/);
     assert.strictEqual(fs.readFileSync(path.join(growingSource, 'new.txt'), 'utf8'), 'new during copy');
 
+    const dragImportProject = path.join(root, 'drag-import-project');
+    const dragImportSource = path.join(root, 'drag-import-source');
+    fs.mkdirSync(dragImportProject);
+    fs.mkdirSync(path.join(dragImportSource, 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(dragImportSource, 'nested', 'photo.jpg'), Buffer.alloc(2 * 1024 * 1024, 0x6a));
+    const dragImportHandlers = new Map();
+    const dragImportReports = [];
+    let dragImportCompleted = '';
+    let dragImportUndo;
+    const dragImportAbort = new AbortController();
+    registerFileOperationsIpc({
+      Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => dragImportHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: () => dragImportProject, activeProjectFileOperations: new Map(),
+      fileOperationState: { projectFileClipboard: null }, writeLog: () => {},
+      assertInside, assertDiskSpace, collectCopyPlan, copyPlannedFiles, removeCreatedPasteTargets, throwIfCancelled, uniqueDestination,
+      backgroundTasks: {
+        create: () => ({
+          deduplicated: false,
+          context: {
+            signal: dragImportAbort.signal,
+            report: (progress, message, metadata) => dragImportReports.push({ progress, message, metadata }),
+          },
+          waitForStart: async () => {},
+          complete: message => { dragImportCompleted = message; },
+          fail: error => { throw error; },
+          cancelled: () => {},
+          isFinished: () => false,
+        }),
+        cancel: () => dragImportAbort.abort(),
+      },
+      pushUndoOperation: async operation => { dragImportUndo = operation; },
+    });
+    const dragImportResult = await dragImportHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      'workspace', '策划中', 'project', 'import', [dragImportSource], '',
+    );
+    assert.strictEqual(dragImportResult.success, true);
+    assert.strictEqual(fs.statSync(path.join(dragImportProject, 'drag-import-source', 'nested', 'photo.jpg')).size, 2 * 1024 * 1024);
+    assert(dragImportReports.some(report => report.progress === 100 && report.metadata.operation === 'import'), 'drag import must publish completion through the shared file-transfer task');
+    assert(dragImportReports.some(report => report.metadata.totalBytes === 2 * 1024 * 1024 && report.metadata.totalFiles === 1), 'drag import must publish byte and file totals');
+    assert.strictEqual(dragImportCompleted, '文件导入完成');
+    assert.strictEqual(dragImportUndo.kind, 'remove-created');
+
+    const cancelledDragProject = path.join(root, 'cancelled-drag-project');
+    const cancelledDragSource = path.join(root, 'cancelled-drag-source');
+    fs.mkdirSync(cancelledDragProject);
+    fs.mkdirSync(cancelledDragSource);
+    fs.writeFileSync(path.join(cancelledDragSource, 'partial.bin'), Buffer.alloc(1024, 0x2a));
+    const cancelledDragHandlers = new Map();
+    const cancelledDragAbort = new AbortController();
+    let cancelledDragReported = false;
+    registerFileOperationsIpc({
+      Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => cancelledDragHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: () => cancelledDragProject, activeProjectFileOperations: new Map(),
+      fileOperationState: { projectFileClipboard: null }, writeLog: () => {},
+      assertInside, assertDiskSpace, collectCopyPlan, removeCreatedPasteTargets, throwIfCancelled, uniqueDestination,
+      copyPlannedFiles: async (plan, options) => {
+        const fileEntry = plan.find(entry => entry.kind === 'file');
+        fs.mkdirSync(path.dirname(fileEntry.destination), { recursive: true });
+        options.onCreated(path.dirname(fileEntry.destination));
+        fs.writeFileSync(fileEntry.destination, 'partial');
+        cancelledDragAbort.abort();
+        throwIfCancelled(options.isCancelled);
+      },
+      backgroundTasks: {
+        create: () => ({
+          deduplicated: false,
+          context: { signal: cancelledDragAbort.signal, report: () => {} },
+          waitForStart: async () => {},
+          complete: () => {},
+          fail: () => {},
+          cancelled: () => { cancelledDragReported = true; },
+          isFinished: () => false,
+        }),
+        cancel: () => cancelledDragAbort.abort(),
+      },
+      pushUndoOperation: async () => {},
+    });
+    const cancelledDragResult = await cancelledDragHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      'workspace', '策划中', 'project', 'import', [cancelledDragSource], '',
+    );
+    assert.strictEqual(cancelledDragResult.cancelled, true);
+    assert.strictEqual(cancelledDragReported, true);
+    assert.strictEqual(fs.existsSync(path.join(cancelledDragProject, 'cancelled-drag-source')), false, 'cancelled drag import must roll back partial targets');
+
     const conflictProject = path.join(root, 'conflict-project');
     const conflictExternal = path.join(root, 'conflict-external');
     fs.mkdirSync(conflictProject);
@@ -205,6 +293,34 @@ const run = async () => {
     assert.strictEqual(conflictResult.requiresDecision.kind, 'paste-conflict');
     assert(conflictResult.requiresDecision.message.includes('same.jpg'), 'the current Windows clipboard item must drive conflict detection');
     assert.strictEqual(fs.readFileSync(path.join(conflictProject, 'same.jpg'), 'utf8'), 'existing destination', 'decision preflight must not modify the destination');
+
+    const screenshotProject = path.join(root, 'screenshot-paste-project');
+    fs.mkdirSync(screenshotProject);
+    const screenshotHandlers = new Map();
+    let screenshotUndo;
+    const screenshotBytes = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex');
+    registerFileOperationsIpc({
+      Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => screenshotHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: () => screenshotProject, activeProjectFileOperations: new Map(),
+      fileOperationState: { projectFileClipboard: null },
+      clipboard: { readImage: () => ({ isEmpty: () => false, toPNG: () => screenshotBytes }) },
+      readSystemFileClipboard: async () => null,
+      writeLog: () => {}, assertInside, assertExistingInside, throwIfCancelled, uniqueDestination,
+      pushUndoOperation: async operation => { screenshotUndo = operation; },
+    });
+    const screenshotStatus = await screenshotHandlers.get('workspace-file-clipboard-status')();
+    assert.strictEqual(screenshotStatus.hasImage, true, 'clipboard image data must enable paste');
+    const screenshotResult = await screenshotHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      'workspace', '策划中', 'project', 'paste', [], '',
+    );
+    assert.strictEqual(screenshotResult.success, true);
+    assert.strictEqual(screenshotResult.count, 1);
+    const screenshotPath = path.join(screenshotProject, screenshotResult.createdItems[0].name);
+    assert.deepStrictEqual(fs.readFileSync(screenshotPath), screenshotBytes, 'clipboard screenshot must be persisted as PNG');
+    assert.strictEqual(screenshotUndo.kind, 'remove-created');
+    assert.strictEqual(screenshotUndo.label, '粘贴截图');
 
     const failureProject = path.join(root, 'replacement-failure-project');
     const failureExternal = path.join(root, 'replacement-failure-external');
@@ -334,6 +450,84 @@ const run = async () => {
     assert.strictEqual(renamedRestore.success, true);
     assert.strictEqual(fs.readFileSync(occupiedRestorePath, 'utf8'), 'new occupant');
     assert.strictEqual(fs.readFileSync(path.join(root, 'occupied-restore (已恢复).txt'), 'utf8'), 'restored item');
+
+    const projectRenameHandlers = new Map();
+    const renameWorkspaceRoot = path.join(root, 'rename-workspace');
+    const renameSourceName = '26-8-16 临时占用测试';
+    const renameTargetName = '26-8-18 临时占用测试';
+    const renameSource = path.join(renameWorkspaceRoot, renameSourceName);
+    const renameTarget = path.join(renameWorkspaceRoot, renameTargetName);
+    fs.mkdirSync(renameSource, { recursive: true });
+    let projectRenameAttempts = 0;
+    let suspendedRenameWatchers = 0;
+    let resumedRenameWatchers = 0;
+    const renameFs = {
+      ...fs,
+      promises: {
+        ...fs.promises,
+        rename: async (sourcePath, destinationPath) => {
+          if (sourcePath === renameSource && destinationPath === renameTarget && projectRenameAttempts++ < 2) {
+            throw Object.assign(new Error('temporarily locked'), { code: 'EPERM' });
+          }
+          return fs.promises.rename(sourcePath, destinationPath);
+        },
+      },
+    };
+    registerWorkspaceIpc({
+      Array, Boolean, Date, Error, Math, Object, Promise, Set, String, undefined, crypto,
+      ipcMain: { handle: (name, handler) => projectRenameHandlers.set(name, handler) }, fs: renameFs, path,
+      WORKSPACE_STATUSES: ['策划中'], HIDDEN_SYSTEM_ENTRY_NAMES: new Set(), IMAGE_EXTENSIONS: new Set(), RAW_EXTENSIONS: new Set(), VIDEO_EXTENSIONS: new Set(),
+      cleanProjectName: value => String(value).trim(), ensureWorkspace: () => renameWorkspaceRoot,
+      getProjectPath: (_workspacePath, _status, name) => path.join(renameWorkspaceRoot, name),
+      getWorkspaceDataRoot: () => path.join(renameWorkspaceRoot, '.data'),
+      workspaceCatalogs: new Map([[renameWorkspaceRoot, { byName: new Map([[renameSourceName.toLocaleLowerCase(), { name: renameSourceName, extra_json: '{}' }]]) }]]),
+      mutateWorkspaceCatalog: async () => undefined, pushUndoOperation: async () => undefined,
+      cancelMediaTrackingScan: () => undefined, suppressWorkspaceWatchPath: () => undefined, releaseWorkspaceWatchPath: () => undefined,
+      suspendFileRootWatcher: () => { suspendedRenameWatchers += 1; return 1; },
+      resumeFileRootWatcher: () => { resumedRenameWatchers += 1; return { success: true }; },
+      writeLog: () => undefined,
+    });
+    const projectRenameResult = await projectRenameHandlers.get('workspace-rename-project')(null, renameWorkspaceRoot, '策划中', renameSourceName, { year: 2026, month: 8, day: 18 }, '临时占用测试');
+    assert.strictEqual(projectRenameResult.success, true, projectRenameResult.error);
+    assert.strictEqual(projectRenameAttempts, 3, 'project rename should retry transient Windows locks');
+    assert.strictEqual(suspendedRenameWatchers, 1, 'project rename should suspend its recursive watcher before renaming');
+    assert.strictEqual(resumedRenameWatchers, 0, 'a successful rename should let the renderer attach a watcher to the new path');
+    assert.strictEqual(fs.existsSync(renameTarget), true);
+
+    const importProjectHandlers = new Map();
+    const importWorkspaceRoot = path.join(root, 'import-existing-workspace');
+    const importSource = path.join(root, 'outside-existing-project');
+    fs.mkdirSync(path.join(importWorkspaceRoot, '策划中'), { recursive: true });
+    fs.mkdirSync(path.join(importSource, 'RAW'), { recursive: true });
+    fs.mkdirSync(path.join(importSource, 'JPG'), { recursive: true });
+    fs.mkdirSync(path.join(importSource, '图片后期_2'), { recursive: true });
+    fs.writeFileSync(path.join(importSource, 'RAW', 'IMG_0001.CR3'), 'raw');
+    fs.writeFileSync(path.join(importSource, 'JPG', 'IMG_0001.JPG'), 'proxy');
+    fs.writeFileSync(path.join(importSource, '图片后期_2', 'IMG_0001.jpg'), 'edited');
+    let importedCatalogEntry = null;
+    registerWorkspaceIpc({
+      Array, Boolean, Date, Error, Math, Object, Promise, Set, String, undefined, crypto,
+      ipcMain: { handle: (name, handler) => importProjectHandlers.set(name, handler) }, fs, path,
+      CANCELLED_CODE, WORKSPACE_STATUSES: ['策划中'], HIDDEN_SYSTEM_ENTRY_NAMES: new Set(),
+      IMAGE_EXTENSIONS: new Set(['.jpg', '.jpeg']), RAW_EXTENSIONS: new Set(['.cr3']), VIDEO_EXTENSIONS: new Set(['.mov']),
+      cleanProjectName: value => String(value).trim(), ensureWorkspace: () => importWorkspaceRoot,
+      getProjectPath: (_workspacePath, status, name) => path.join(importWorkspaceRoot, status, name),
+      getWorkspaceDataRoot: () => path.join(importWorkspaceRoot, '.data'),
+      workspaceCatalogs: new Map([[importWorkspaceRoot, { byName: new Map(), projects: [] }]]),
+      mutateWorkspaceCatalog: async (_root, _operation, entry) => { importedCatalogEntry = entry; },
+      activeProjectFileOperations: new Map(), assertDiskSpace, collectCopyPlan, copyPlannedFiles, removeCopiedSources, throwIfCancelled,
+      pushUndoOperation: async () => undefined, writeLog: () => undefined, mainWindow: null,
+    });
+    const importedProject = await importProjectHandlers.get('workspace-import-existing-project')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      importWorkspaceRoot, importSource, { name: '接管测试', mode: 'copy' },
+    );
+    assert.strictEqual(importedProject.success, true, importedProject.error);
+    assert.strictEqual(fs.readFileSync(path.join(importWorkspaceRoot, '策划中', '接管测试', 'RAW', 'IMG_0001.CR3'), 'utf8'), 'raw');
+    assert.strictEqual(fs.existsSync(importSource), true, 'copy import must preserve the external project');
+    assert.strictEqual(importedCatalogEntry.name, '接管测试');
+    assert.strictEqual(importedProject.candidates[0].name, 'RAW', 'RAW should be proposed as the adoption baseline');
+    assert(!importedProject.candidates.some(candidate => candidate.name === 'JPG'), 'a companion JPG folder should be treated as a RAW proxy instead of a second progress');
 
     const concurrencyHandlers = new Map();
     const activeOperations = new Map();

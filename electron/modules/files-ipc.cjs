@@ -68,16 +68,24 @@ const registerFileOperationsIpc = context => {
   });
   
   ipcMain.handle('workspace-file-clipboard-status', async () => {
+    let fileClipboardError = null;
     try {
       const systemClipboard = await readSystemFileClipboard();
       if (systemClipboard) {
         const systemSources = systemClipboard.sources?.filter(source => fs.existsSync(path.resolve(source))) || [];
-        return { success: true, hasFiles: systemSources.length > 0 };
+        if (systemSources.length > 0) return { success: true, hasFiles: true };
       }
     } catch (error) {
       writeLog('warn', 'Unable to inspect the system file clipboard', error);
-      if (process.platform === 'win32') return { success: false, hasFiles: false, error: error.message || String(error) };
+      fileClipboardError = error;
     }
+    try {
+      const image = clipboard.readImage();
+      if (image && !image.isEmpty()) return { success: true, hasFiles: true, hasImage: true };
+    } catch (error) {
+      writeLog('warn', 'Unable to inspect clipboard image data', error);
+    }
+    if (process.platform === 'win32' && fileClipboardError) return { success: false, hasFiles: false, error: fileClipboardError.message || String(fileClipboardError) };
     if (process.platform === 'win32') return { success: true, hasFiles: false };
     return { success: true, hasFiles: Boolean(fileOperationState.projectFileClipboard?.sources?.some(source => fs.existsSync(source))) };
   });
@@ -123,6 +131,11 @@ const registerFileOperationsIpc = context => {
         return target;
       };
       if (operation === 'import') {
+        const operationId = crypto.randomUUID();
+        let job = { cancelled: false, finishing: false };
+        let task = null;
+        const publish = payload => task?.publish(payload);
+        const createdTargets = [];
         if (!Array.isArray(relativePaths) || !relativePaths.length || relativePaths.length > 500) throw new Error('没有可导入的文件');
         const destinationDir = resolveInsideProject(targetRelativePath);
         if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
@@ -145,21 +158,79 @@ const registerFileOperationsIpc = context => {
               : path.join(destinationDir, `${parsed.name} (${index++})${parsed.ext}`);
           }
           reservedDestinations.add(destination.toLowerCase());
-          return { source, destination };
+          return { source, destination, isDirectory: stat.isDirectory() };
         });
-        const createdTargets = [];
+        task = createProjectFileTask({
+          backgroundTasks, event, operationId, operation: 'import', title: `导入文件 · ${projectName}`,
+          projectName, resources: [destinationDir, ...sources], cancelledCode: CANCELLED_CODE,
+        });
+        job = task.job;
+        job.cancel = task.cancel;
+        activeProjectFileOperations.set(operationId, job);
         try {
+          await task.start();
+          const plan = [];
+          publish({ phase: 'scanning', progress: 0, currentName: '', bytesCopied: 0, totalBytes: 0, filesCopied: 0, totalFiles: 0 });
           for (const entry of importPlan) {
-            createdTargets.push(entry.destination);
-            await fs.promises.cp(entry.source, entry.destination, { recursive: true, errorOnExist: true, preserveTimestamps: true });
+            throwIfCancelled(() => job.cancelled);
+            await collectCopyPlan(entry.source, entry.destination, plan, { isCancelled: () => job.cancelled });
           }
+          const totalBytes = plan.reduce((sum, entry) => sum + entry.size, 0);
+          const totalFiles = plan.filter(entry => entry.kind === 'file').length;
+          await assertDiskSpace(destinationDir, totalBytes);
+          let bytesCopied = 0;
+          let filesCopied = 0;
+          let lastPublishedAt = 0;
+          const reportCopyProgress = (currentName, force = false) => {
+            const now = Date.now();
+            if (!force && now - lastPublishedAt < 150) return;
+            lastPublishedAt = now;
+            const progress = totalBytes > 0
+              ? Math.min(99, Math.round(bytesCopied / totalBytes * 100))
+              : Math.min(99, Math.round(filesCopied / Math.max(1, totalFiles) * 100));
+            publish({ phase: 'copying', progress, currentName, bytesCopied, totalBytes, filesCopied, totalFiles });
+          };
+          reportCopyProgress('', true);
+          const transferStats = await copyPlannedFiles(plan, {
+            destinationRoot: destinationDir,
+            diskSpaceChecked: true,
+            isCancelled: () => job.cancelled,
+            onCreated: target => createdTargets.push(target),
+            onFileStart: entry => reportCopyProgress(path.basename(entry.source)),
+            onProgress: ({ entry, bytesDelta, fileCompleted }) => {
+              bytesCopied += bytesDelta;
+              if (fileCompleted) filesCopied += 1;
+              reportCopyProgress(path.basename(entry.source));
+            },
+          });
+          throwIfCancelled(() => job.cancelled);
+          job.finishing = true;
+          publish({ phase: 'finishing', progress: 99, currentName: '正在完成文件导入', bytesCopied, totalBytes, filesCopied, totalFiles });
+          if (importPlan.length) await pushUndoOperation({ kind: 'remove-created', paths: importPlan.map(item => item.destination), label: '导入' });
+          publish({ phase: 'complete', progress: 100, currentName: '文件导入完成', bytesCopied, totalBytes, filesCopied, totalFiles });
+          task.complete('文件导入完成');
+          writeLog('info', 'External files imported by drag and drop', { projectName, targetRelativePath, count: importPlan.length, operationId, ...transferStats });
+          return {
+            success: true,
+            count: importPlan.length,
+            operationId,
+            createdItems: importPlan.map(item => ({
+              name: path.basename(item.destination),
+              relativePath: path.relative(root, item.destination).replace(/\\/g, '/'),
+              isDirectory: item.isDirectory,
+            })),
+          };
         } catch (error) {
           await removeCreatedPasteTargets(createdTargets);
+          const cancelled = error?.code === CANCELLED_CODE;
+          publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, currentName: '', error: error.message || String(error) });
+          if (cancelled) task.cancelled();
+          else task.fail(error);
+          if (cancelled) return { success: false, cancelled: true, count: 0, operationId, error: '导入已取消' };
           throw error;
+        } finally {
+          activeProjectFileOperations.delete(operationId);
         }
-        writeLog('info', 'External files imported by drag and drop', { projectName, targetRelativePath, count: importPlan.length });
-        if (importPlan.length) await pushUndoOperation({ kind: 'remove-created', paths: importPlan.map(item => item.destination), label: '导入' });
-        return { success: true, count: importPlan.length };
       }
       const sources = relativePaths.map(resolveInsideProject);
       if (operation === 'move') {
@@ -223,6 +294,7 @@ const registerFileOperationsIpc = context => {
           if (!fs.existsSync(requestedDestination) || !fs.statSync(requestedDestination).isDirectory()) throw new Error('目标文件夹不存在');
           const destinationDir = assertExistingInside(root, requestedDestination, '粘贴目标文件夹', true);
           let clipboardSnapshot = null;
+          let fileClipboardError = null;
           try {
             const systemClipboard = await readSystemFileClipboard();
             if (systemClipboard) {
@@ -230,11 +302,57 @@ const registerFileOperationsIpc = context => {
               if (systemSources.length) clipboardSnapshot = { operation: systemClipboard.operation, sources: systemSources };
             }
           } catch (error) {
-            if (process.platform === 'win32') throw new Error(`无法读取 Windows 文件剪贴板：${error.message || String(error)}`);
-            writeLog('warn', 'Unable to read system file clipboard; using internal fallback', error);
+            fileClipboardError = error;
+            writeLog('warn', 'Unable to read system file clipboard; checking image clipboard data', error);
           }
           if (!clipboardSnapshot && process.platform !== 'win32' && fileOperationState.projectFileClipboard?.sources?.length) {
             clipboardSnapshot = { operation: fileOperationState.projectFileClipboard.operation, sources: [...fileOperationState.projectFileClipboard.sources] };
+          }
+          if (!clipboardSnapshot?.sources?.length) {
+            let clipboardImage;
+            try { clipboardImage = clipboard.readImage(); } catch (error) { writeLog('warn', 'Unable to read clipboard image data', error); }
+            if (clipboardImage && !clipboardImage.isEmpty()) {
+              const png = clipboardImage.toPNG();
+              if (!png.length) throw new Error('剪贴板截图无法转换为 PNG');
+              const stamp = new Date();
+              const pad = value => String(value).padStart(2, '0');
+              const screenshotName = `截图_${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}_${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}.png`;
+              const destination = uniqueDestination(destinationDir, screenshotName, new Set(), false);
+              const temporary = path.join(destinationDir, `.photoflow-paste-${operationId}.png`);
+              task = createProjectFileTask({
+                backgroundTasks, event, operationId, operation: 'paste', title: `粘贴截图 · ${projectName}`,
+                projectName, resources: [destinationDir], cancelledCode: CANCELLED_CODE,
+              });
+              job = task.job;
+              job.cancel = task.cancel;
+              activeProjectFileOperations.set(operationId, job);
+              await task.start();
+              publish({ phase: 'copying', progress: 10, currentName: screenshotName, bytesCopied: 0, totalBytes: png.length, filesCopied: 0, totalFiles: 1 });
+              throwIfCancelled(() => job.cancelled);
+              try {
+                await fs.promises.writeFile(temporary, png, { flag: 'wx' });
+                throwIfCancelled(() => job.cancelled);
+                await fs.promises.rename(temporary, destination);
+              } catch (error) {
+                await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
+                throw error;
+              }
+              createdTargets.push(destination);
+              job.finishing = true;
+              await pushUndoOperation({ kind: 'remove-created', paths: [destination], label: '粘贴截图' }).catch(error => writeLog('warn', 'Unable to record screenshot paste undo history', error));
+              publish({ phase: 'complete', progress: 100, currentName: screenshotName, bytesCopied: png.length, totalBytes: png.length, filesCopied: 1, totalFiles: 1, count: 1 });
+              task.complete('截图已粘贴');
+              writeLog('info', 'Clipboard screenshot pasted into project', { projectName, targetRelativePath, destination, operationId });
+              return {
+                success: true,
+                count: 1,
+                operationId,
+                createdItems: [{ name: path.basename(destination), relativePath: path.relative(root, destination).replace(/\\/g, '/') }],
+              };
+            }
+            if (fileClipboardError) {
+              if (process.platform === 'win32') throw new Error(`无法读取 Windows 文件剪贴板：${fileClipboardError.message || String(fileClipboardError)}`);
+            }
           }
           if (!clipboardSnapshot?.sources?.length) throw new Error('剪贴板中没有文件或文件夹');
 

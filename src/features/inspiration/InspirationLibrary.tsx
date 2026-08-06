@@ -340,10 +340,10 @@ export const InspirationLibraryPage = ({
     researchConfig={config.research}
     mediaCacheConfig={config.mediaCache}
     defaultFolderSort={config.defaultFolderSort}
+    itemOpenMode={config.itemOpenMode}
     onImportConfigChange={smartImport => onUpdateConfig({ ...config, smartImport })}
     onMatchConfigChange={smartMatch => onUpdateConfig({ ...config, smartMatch })}
     onResearchConfigChange={research => onUpdateConfig({ ...config, research })}
-    onMediaCacheConfigChange={mediaCache => onUpdateConfig({ ...config, mediaCache })}
     onNotice={onNotice}
   />;
 };

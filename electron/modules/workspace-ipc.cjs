@@ -3,7 +3,7 @@ const { createProjectFileTask } = require('../services/project-file-task-service
 const { createTeamWorkflowArtifactService } = require('../services/team-workflow-artifact-service.cjs');
 
 const registerWorkspaceIpc = context => {
-  const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, copyFileAtomic, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
+  const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
   const teamWorkflowArtifacts = createTeamWorkflowArtifactService({ crypto, fs, getWorkspaceDataRoot, path, writeLog });
   const isValidProjectStatus = value => typeof value === 'string' && value === value.trim() && value.length > 0 && value.length <= 24 && ![...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
   const availableProjectStatuses = catalog => {
@@ -34,6 +34,22 @@ const registerWorkspaceIpc = context => {
   const recentFilesSessionExpiredCode = 'RECENT_FILES_SESSION_EXPIRED';
   const recentFileSessions = new Map();
   const progressImportConflictCache = new Map();
+  const transientRenameErrorCodes = new Set(['EACCES', 'EBUSY', 'EPERM']);
+  const renamePathWithRetry = async (source, destination) => {
+    const retryDelays = [0, 80, 180, 360, 700];
+    let lastError;
+    for (const delay of retryDelays) {
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+      try {
+        await fs.promises.rename(source, destination);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (!transientRenameErrorCodes.has(error?.code)) throw error;
+      }
+    }
+    throw lastError;
+  };
   const pruneRecentFileSessions = () => {
     const expiry = Date.now() - 10 * 60 * 1000;
     for (const [cursor, session] of recentFileSessions) {
@@ -313,8 +329,153 @@ const registerWorkspaceIpc = context => {
       return { success: false, error: error.message || String(error) };
     }
   });
+
+  const inspectExistingProject = async sourcePath => {
+    const source = path.resolve(sourcePath);
+    const sourceStat = await fs.promises.stat(source);
+    if (!sourceStat.isDirectory()) throw new Error('请选择一个项目文件夹');
+    const topLevel = new Map();
+    const queue = [{ directory: source, topLevelName: '' }];
+    let fileCount = 0;
+    let folderCount = 0;
+    let totalBytes = 0;
+    let truncated = false;
+    while (queue.length) {
+      const current = queue.shift();
+      const entries = await fs.promises.readdir(current.directory, { withFileTypes: true });
+      for (const entry of entries) {
+        if (fileCount + folderCount >= 100000) { truncated = true; queue.length = 0; break; }
+        const entryPath = path.join(current.directory, entry.name);
+        const topLevelName = current.topLevelName || entry.name;
+        if (entry.isDirectory()) {
+          folderCount += 1;
+          if (!current.topLevelName) topLevel.set(entry.name, { relativePath: entry.name, name: entry.name, imageCount: 0, rawCount: 0, videoCount: 0, fileCount: 0 });
+          queue.push({ directory: entryPath, topLevelName });
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        fileCount += 1;
+        const stat = await fs.promises.stat(entryPath);
+        totalBytes += stat.size;
+        const candidate = topLevel.get(topLevelName);
+        if (!candidate) continue;
+        candidate.fileCount += 1;
+        const extension = path.extname(entry.name).toLowerCase();
+        if (RAW_EXTENSIONS.has(extension)) candidate.rawCount += 1;
+        else if (IMAGE_EXTENSIONS.has(extension)) candidate.imageCount += 1;
+        else if (VIDEO_EXTENSIONS.has(extension)) candidate.videoCount += 1;
+      }
+    }
+    const baselinePattern = /(raw|jpg|原片|原图|底片|选片|素材|original)/iu;
+    const progressPattern = /(修图|后期|精修|调色|成片|交付|final|版本|\bv\s*\d+)/iu;
+    const mediaCandidates = [...topLevel.values()].filter(item => item.imageCount + item.rawCount + item.videoCount > 0);
+    const hasRawCandidate = mediaCandidates.some(item => item.rawCount > 0);
+    const candidates = mediaCandidates.filter(item => !(hasRawCandidate && /^(jpg|jpeg|preview|previews|proxy|预览|代理)$/iu.test(item.name) && item.rawCount === 0)).map(item => ({
+      ...item,
+      mediaKind: item.videoCount > item.imageCount + item.rawCount ? 'video' : 'image',
+      suggestedRole: baselinePattern.test(item.name) ? 'baseline' : progressPattern.test(item.name) ? 'progress' : 'progress',
+    })).sort((left, right) => Number(right.suggestedRole === 'baseline') - Number(left.suggestedRole === 'baseline'));
+    return { sourcePath: source, name: path.basename(source), fileCount, folderCount, totalBytes, truncated, candidates };
+  };
+
+  ipcMain.handle('workspace-choose-existing-project', async () => {
+    try {
+      const choice = await dialog.showOpenDialog(mainWindow, { title: '选择已有项目文件夹', properties: ['openDirectory'] });
+      if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true };
+      return { success: true, ...(await inspectExistingProject(choice.filePaths[0])) };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-import-existing-project', async (event, workspacePath, sourcePath, options = {}) => {
+    const operationId = crypto.randomUUID();
+    let task = null;
+    let job = { cancelled: false, finishing: false };
+    let stagedPath = '';
+    let projectPath = '';
+    let catalogAdded = false;
+    const publish = payload => task?.publish(payload);
+    try {
+      const inspection = await inspectExistingProject(sourcePath);
+      const projectName = cleanProjectName(String(options.name || inspection.name || ''));
+      if (!projectName) throw new Error('项目名称不能为空');
+      const mode = options.mode === 'move' ? 'move' : 'copy';
+      const root = ensureWorkspace(workspacePath);
+      const catalog = workspaceCatalogs.get(root) || await refreshWorkspaceCatalog(root);
+      if (catalog.byName.has(projectName.toLocaleLowerCase())) throw new Error('同名项目已存在');
+      projectPath = path.resolve(getProjectPath(workspacePath, '策划中', projectName));
+      if (fs.existsSync(projectPath)) throw new Error('同名项目已存在');
+      if (projectPath === inspection.sourcePath || projectPath.startsWith(`${inspection.sourcePath}${path.sep}`)) throw new Error('不能把项目导入到它自身内部');
+      stagedPath = path.join(path.dirname(projectPath), `.photoflow-import-project-${operationId}`);
+      task = createProjectFileTask({
+        backgroundTasks, event, operationId, operation: 'import-project', title: `接管项目 · ${projectName}`,
+        projectName, resources: [inspection.sourcePath, path.dirname(projectPath)], cancelledCode: CANCELLED_CODE,
+      });
+      job = task.job;
+      job.cancel = task.cancel;
+      activeProjectFileOperations.set(operationId, job);
+      await task.start();
+      const plan = [];
+      publish({ phase: 'scanning', progress: 0, currentName: '正在扫描已有项目', bytesCopied: 0, totalBytes: inspection.totalBytes, filesCopied: 0, totalFiles: inspection.fileCount });
+      await collectCopyPlan(inspection.sourcePath, stagedPath, plan, { isCancelled: () => job.cancelled });
+      const totalBytes = plan.reduce((sum, entry) => sum + entry.size, 0);
+      const totalFiles = plan.filter(entry => entry.kind === 'file').length;
+      await assertDiskSpace(path.dirname(projectPath), totalBytes);
+      let bytesCopied = 0;
+      let filesCopied = 0;
+      let lastPublishedAt = 0;
+      const report = (currentName, force = false) => {
+        const now = Date.now();
+        if (!force && now - lastPublishedAt < 150) return;
+        lastPublishedAt = now;
+        const progress = totalBytes > 0 ? Math.min(99, Math.round(bytesCopied / totalBytes * 100)) : Math.min(99, Math.round(filesCopied / Math.max(1, totalFiles) * 100));
+        publish({ phase: 'copying', progress, currentName, bytesCopied, totalBytes, filesCopied, totalFiles });
+      };
+      report('', true);
+      await copyPlannedFiles(plan, {
+        destinationRoot: path.dirname(projectPath), diskSpaceChecked: true, durable: mode === 'move', isCancelled: () => job.cancelled,
+        onFileStart: entry => report(path.basename(entry.source)),
+        onProgress: ({ entry, bytesDelta, fileCompleted }) => { bytesCopied += bytesDelta; if (fileCompleted) filesCopied += 1; report(path.basename(entry.source)); },
+      });
+      throwIfCancelled(() => job.cancelled);
+      await fs.promises.rename(stagedPath, projectPath);
+      stagedPath = '';
+      await mutateWorkspaceCatalog(root, 'addProject', { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath), extra: { importedAt: Date.now(), importedFrom: inspection.sourcePath } });
+      catalogAdded = true;
+      let sourceRetained = false;
+      if (mode === 'move') {
+        job.finishing = true;
+        publish({ phase: 'finishing', progress: 99, currentName: '正在移除已安全复制的源文件', bytesCopied, totalBytes, filesCopied, totalFiles });
+        try { await removeCopiedSources(plan); }
+        catch (error) { sourceRetained = true; writeLog('warn', 'Imported project source retained after safe copy', { sourcePath: inspection.sourcePath, error: error.message || String(error) }); }
+      }
+      const project = { name: projectName, path: projectPath, status: '策划中', updatedAt: Date.now() };
+      await pushUndoOperation(mode === 'move' && !sourceRetained
+        ? { kind: 'external-move', moves: [{ source: inspection.sourcePath, destination: projectPath }] }
+        : { kind: 'remove-created', paths: [projectPath], label: '导入已有项目' }).catch(error => writeLog('warn', 'Unable to record imported project undo', error));
+      publish({ phase: 'complete', progress: 100, currentName: '项目接管完成', bytesCopied: totalBytes, totalBytes, filesCopied: totalFiles, totalFiles });
+      task.complete('项目接管完成');
+      mainWindow?.webContents.send('workspace-projects-changed', { root, reason: 'project-imported' });
+      return { success: true, operationId, project, sourceRetained, candidates: inspection.candidates };
+    } catch (error) {
+      const cancelled = error?.code === CANCELLED_CODE;
+      if (stagedPath) await fs.promises.rm(stagedPath, { recursive: true, force: true }).catch(() => undefined);
+      if (projectPath && !catalogAdded) await fs.promises.rm(projectPath, { recursive: true, force: true }).catch(() => undefined);
+      publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, currentName: '', error: error.message || String(error) });
+      if (cancelled) task?.cancelled(); else task?.fail(error);
+      return { success: false, cancelled, operationId, error: cancelled ? '项目接管已取消' : error.message || String(error) };
+    } finally {
+      activeProjectFileOperations.delete(operationId);
+    }
+  });
   
   ipcMain.handle('workspace-rename-project', async (_event, workspacePath, status, projectName, dateOrNextName, nextName) => {
+    let source = '';
+    let destination = '';
+    let suspendedWatcherReferences = 0;
+    let renameCompleted = false;
+    let watchPathsSuppressed = false;
     try {
       const legacyCall = typeof dateOrNextName === 'string' && nextName === undefined;
       const projectDate = legacyCall ? undefined : normalizeProjectDate(dateOrNextName);
@@ -326,12 +487,18 @@ const registerWorkspaceIpc = context => {
       const catalog = workspaceCatalogs.get(root) || await refreshWorkspaceCatalog(root);
       const existingProject = catalog.byName.get(cleanedName.toLocaleLowerCase());
       if (existingProject && existingProject.name.toLocaleLowerCase() !== projectName.toLocaleLowerCase()) throw new Error('同名项目已存在');
-      const source = getProjectPath(workspacePath, status, projectName);
-      const destination = path.join(path.dirname(source), cleanedName);
+      source = getProjectPath(workspacePath, status, projectName);
+      destination = path.join(path.dirname(source), cleanedName);
       if (!fs.existsSync(source)) throw new Error('项目不存在');
       if (cleanedName !== projectName) {
         if (fs.existsSync(destination)) throw new Error('同名项目已存在');
-        await fs.promises.rename(source, destination);
+        cancelMediaTrackingScan(root, projectName);
+        suppressWorkspaceWatchPath(source);
+        suppressWorkspaceWatchPath(destination);
+        watchPathsSuppressed = true;
+        suspendedWatcherReferences = typeof suspendFileRootWatcher === 'function' ? suspendFileRootWatcher(source) : 0;
+        await renamePathWithRetry(source, destination);
+        renameCompleted = true;
       }
       const previousProjectDate = readProjectDate(catalog.byName.get(projectName.toLocaleLowerCase()));
       await mutateWorkspaceCatalog(root, 'renameProject', { name: projectName, nextName: cleanedName, relativePath: path.relative(root, destination), ...(legacyCall ? {} : { projectDate }) });
@@ -343,7 +510,18 @@ const registerWorkspaceIpc = context => {
       if (cleanedName !== projectName) await pushUndoOperation({ kind: 'project', source, destination, status, workspaceRoot: root, beforeName: projectName, afterName: cleanedName, beforeProjectDate: previousProjectDate, afterProjectDate: projectDate });
       return { success: true, project: { name: cleanedName, path: destination, status, updatedAt: Date.now(), projectDate: projectDate === undefined ? previousProjectDate : projectDate || undefined } };
     } catch (error) {
-      return { success: false, error: error.message || String(error) };
+      if (suspendedWatcherReferences && !renameCompleted && source && fs.existsSync(source) && typeof resumeFileRootWatcher === 'function') {
+        resumeFileRootWatcher(source, suspendedWatcherReferences);
+      }
+      const message = transientRenameErrorCodes.has(error?.code)
+        ? 'Windows 暂时占用了项目文件夹，软件已暂停内部监听并多次重试。请关闭正在浏览该项目的资源管理器窗口或其他软件后再试。'
+        : error.message || String(error);
+      return { success: false, error: message };
+    } finally {
+      if (watchPathsSuppressed) {
+        releaseWorkspaceWatchPath(source);
+        releaseWorkspaceWatchPath(destination);
+      }
     }
   });
   

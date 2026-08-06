@@ -3,7 +3,82 @@ const { CANCELLED_CODE: WORKFLOW_CANCELLED_CODE, buildWorkflowPlan, copyWorkflow
 const workflowGenerationJobs = new Map();
 
 const registerVersionIpc = context => {
-  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog } = context;
+  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, exiftool, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaMetadataCache, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog } = context;
+  const mediaRatingCache = new Map();
+  const normalizedMediaRating = value => Math.max(0, Math.min(5, Math.round(Number(value) || 0)));
+  const clearMediaRatingCaches = filePath => {
+    const prefix = `${path.resolve(filePath)}|`;
+    for (const key of mediaRatingCache.keys()) if (key.startsWith(prefix)) mediaRatingCache.delete(key);
+    for (const key of mediaMetadataCache.keys()) if (key.startsWith(`${path.resolve(filePath)}|`)) mediaMetadataCache.delete(key);
+  };
+  const mediaRatingFromTags = tags => {
+    const entries = Object.entries(tags || {});
+    const direct = entries.find(([name]) => /^XMP[^:]*:Rating$/i.test(name))
+      || entries.find(([name]) => /(?:^|:)Rating$/i.test(name));
+    if (direct) return normalizedMediaRating(direct[1]);
+    const percent = Number(entries.find(([name]) => /(?:^|:)RatingPercent$/i.test(name))?.[1]);
+    if (!Number.isFinite(percent) || percent <= 0) return 0;
+    if (percent <= 1) return 1;
+    if (percent <= 25) return 2;
+    if (percent <= 50) return 3;
+    if (percent <= 75) return 4;
+    return 5;
+  };
+  const readMediaRating = async filePath => {
+    const stat = await fs.promises.stat(filePath);
+    const cacheKey = `${path.resolve(filePath)}|${stat.size}|${stat.mtimeMs}`;
+    if (mediaRatingCache.has(cacheKey)) return mediaRatingCache.get(cacheKey);
+    const tags = await exiftool.readRaw(filePath, ['-G1', '-Rating#', '-RatingPercent#', '-n', '-api', 'largefilesupport=1']);
+    const rating = mediaRatingFromTags(tags);
+    if (mediaRatingCache.size >= 4000) mediaRatingCache.delete(mediaRatingCache.keys().next().value);
+    mediaRatingCache.set(cacheKey, rating);
+    return rating;
+  };
+  const shouldSkipRatedScanDirectory = name => name.startsWith('.photoflow-') || /^图片后期_\d+(?:_\d+)*_喜爱$/u.test(name);
+  const listRatedProjectMedia = async projectPath => {
+    const candidates = [];
+    const directories = [projectPath];
+    while (directories.length) {
+      const directory = directories.pop();
+      for (const entry of await fs.promises.readdir(directory, { withFileTypes: true })) {
+        const filePath = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          if (!shouldSkipRatedScanDirectory(entry.name)) directories.push(filePath);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        const extension = path.extname(entry.name).toLowerCase();
+        if (IMAGE_EXTENSIONS.has(extension) || RAW_EXTENSIONS.has(extension)) candidates.push({ filePath, extension });
+      }
+    }
+    const entries = [];
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(6, candidates.length) }, async () => {
+      while (cursor < candidates.length) {
+        const candidate = candidates[cursor++];
+        try {
+          const rating = await readMediaRating(candidate.filePath);
+          if (!rating) continue;
+          const stat = await fs.promises.stat(candidate.filePath);
+          entries.push({
+            name: path.basename(candidate.filePath),
+            path: candidate.filePath,
+            relativePath: path.relative(projectPath, candidate.filePath).replace(/\\/g, '/'),
+            kind: IMAGE_EXTENSIONS.has(candidate.extension) ? 'image' : 'raw',
+            extension: candidate.extension,
+            size: stat.size,
+            createdAt: stat.birthtimeMs || stat.ctimeMs,
+            updatedAt: stat.mtimeMs,
+            rating,
+          });
+        } catch (error) {
+          writeLog('warn', 'Unable to inspect media rating', { filePath: candidate.filePath, error: error.message || String(error) });
+        }
+      }
+    });
+    await Promise.all(workers);
+    return entries.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+  };
   const teamDataDirectory = (workspaceRoot, photoId, baseVersionId) => path.join(getWorkspaceDataRoot(workspaceRoot), 'team-retouch', photoId, baseVersionId);
   const deliveryName = (photo, basePath) => path.parse(photo?.originalName || photo?.displayName || basePath).name;
   const deliveryDirectory = (photo, basePath) => path.join(path.dirname(photo?.originalFilePath || basePath), `${deliveryName(photo, basePath)}_裁切`);
@@ -464,17 +539,46 @@ const registerVersionIpc = context => {
     }
   });
 
-  ipcMain.handle('workspace-final-version-summary', async (_event, workspacePath, projectName) => {
+  ipcMain.handle('workspace-media-rating-read', async (_event, filePath) => {
     try {
-      const workspaceRoot = ensureWorkspace(workspacePath);
-      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
-      const result = await versionService.listFinalVersions(workspaceRoot, projectName);
-      return {
-        success: true,
-        count: Number(result.count) || 0,
-        availableCount: Number(result.availableCount) || 0,
-        missingCount: Number(result.missingCount) || 0,
-      };
+      const sourcePath = await mediaService.authorizeInput(filePath);
+      const extension = path.extname(sourcePath).toLowerCase();
+      if (!IMAGE_EXTENSIONS.has(extension) && !RAW_EXTENSIONS.has(extension)) throw new Error('只有图片和 RAW 文件可以标星');
+      return { success: true, rating: await readMediaRating(sourcePath) };
+    } catch (error) {
+      return { success: false, rating: 0, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-media-rating-write', async (_event, workspacePath, filePath, rating) => {
+    try {
+      const sourcePath = await mediaService.authorizeInput(filePath);
+      const extension = path.extname(sourcePath).toLowerCase();
+      if (!IMAGE_EXTENSIONS.has(extension) && !RAW_EXTENSIONS.has(extension)) throw new Error('只有图片和 RAW 文件可以标星');
+      const nextRating = normalizedMediaRating(rating);
+      suppressWorkspaceWatchPath(sourcePath);
+      try {
+        await exiftool.write(sourcePath, { 'XMP:Rating': nextRating }, { writeArgs: ['-overwrite_original', '-P'] });
+      } finally {
+        releaseWorkspaceWatchPath(sourcePath);
+      }
+      clearMediaRatingCaches(sourcePath);
+      try {
+        await versionService.refreshMetadataFingerprint(ensureWorkspace(workspacePath), { filePath: sourcePath });
+      } catch (error) {
+        writeLog('warn', 'Unable to refresh tracked fingerprint after metadata rating write', { filePath: sourcePath, error: error.message || String(error) });
+      }
+      return { success: true, rating: await readMediaRating(sourcePath) };
+    } catch (error) {
+      writeLog('warn', 'Unable to write media rating metadata', { filePath, rating, error: error.message || String(error) });
+      return { success: false, rating: 0, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-final-version-summary', async (_event, workspacePath, status, projectName) => {
+    try {
+      const entries = await listRatedProjectMedia(path.resolve(getProjectPath(workspacePath, status, projectName)));
+      return { success: true, count: entries.length, availableCount: entries.length, missingCount: 0 };
     } catch (error) {
       return { success: false, count: 0, availableCount: 0, missingCount: 0, error: error.message || String(error) };
     }
@@ -482,38 +586,9 @@ const registerVersionIpc = context => {
 
   ipcMain.handle('workspace-final-version-browse', async (_event, workspacePath, status, projectName) => {
     try {
-      const workspaceRoot = ensureWorkspace(workspacePath);
-      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const result = await versionService.listFinalVersions(workspaceRoot, projectName);
-      const versions = Array.isArray(result.versions) ? result.versions : [];
-      const entries = [];
-      let unavailableCount = 0;
-      for (const version of versions) {
-        try {
-          const filePath = path.resolve(String(version.filePath || ''));
-          const relative = path.relative(projectPath, filePath);
-          if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || version.fileMissing) throw new Error('喜爱图片不可用');
-          const stat = await fs.promises.stat(filePath);
-          if (!stat.isFile()) throw new Error('喜爱图片不是文件');
-          const extension = path.extname(filePath).toLowerCase();
-          const kind = IMAGE_EXTENSIONS.has(extension) ? 'image' : RAW_EXTENSIONS.has(extension) ? 'raw' : null;
-          if (!kind) throw new Error('喜爱项目不是支持的图片');
-          entries.push({
-            name: path.basename(filePath),
-            path: filePath,
-            relativePath: relative.replace(/\\/g, '/'),
-            kind,
-            extension,
-            size: stat.size,
-            createdAt: stat.birthtimeMs || stat.ctimeMs,
-            updatedAt: stat.mtimeMs,
-          });
-        } catch {
-          unavailableCount += 1;
-        }
-      }
-      return { success: true, count: versions.length, availableCount: entries.length, missingCount: unavailableCount, entries };
+      const entries = await listRatedProjectMedia(projectPath);
+      return { success: true, count: entries.length, availableCount: entries.length, missingCount: 0, entries };
     } catch (error) {
       return { success: false, count: 0, availableCount: 0, missingCount: 0, entries: [], error: error.message || String(error) };
     }
@@ -524,11 +599,9 @@ const registerVersionIpc = context => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
-      const finalResult = await versionService.listFinalVersions(workspaceRoot, projectName);
-      const versions = Array.isArray(finalResult.versions) ? finalResult.versions : [];
-      if (!versions.length) throw new Error('当前项目还没有标记为喜爱的图片');
-      const missing = versions.filter(version => version.fileMissing || !fs.existsSync(version.filePath));
-      if (missing.length) throw new Error(`有 ${missing.length} 个喜爱图片已被删除或移动，请先重新定位`);
+      const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const ratedEntries = await listRatedProjectMedia(projectPath);
+      if (!ratedEntries.length) throw new Error('当前项目还没有标星的图片');
 
       const progressResult = await versionService.listProgress(workspaceRoot, projectName);
       const imageRoots = (progressResult.progressFolders || [])
@@ -537,7 +610,6 @@ const registerVersionIpc = context => {
       const latestRoot = imageRoots.at(-1);
       const versionKey = String((latestRoot ? Number(latestRoot.versionKey) : 0) + 1);
       const displayName = `图片后期_${versionKey}_喜爱`;
-      const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
       folderPath = path.resolve(projectPath, displayName);
       if (!folderPath.startsWith(projectPath + path.sep)) throw new Error('喜爱图片进度文件夹路径无效');
       if (fs.existsSync(folderPath)) throw new Error(`文件夹“${displayName}”已经存在`);
@@ -545,8 +617,8 @@ const registerVersionIpc = context => {
       await fs.promises.mkdir(folderPath);
       const reserved = new Set();
       const copiedFiles = [];
-      for (const version of versions) {
-        const sourcePath = await mediaService.authorizeInput(version.filePath);
+      for (const entry of ratedEntries) {
+        const sourcePath = await mediaService.authorizeInput(entry.path);
         const destinationPath = uniqueDestination(folderPath, path.basename(sourcePath), reserved);
         await copyFileAtomic(sourcePath, destinationPath);
         copiedFiles.push(destinationPath);
@@ -642,7 +714,8 @@ const registerVersionIpc = context => {
       const requestedParent = requestedParentId ? progressFolders.find(progress => progress.id === requestedParentId) : null;
       if (requestedParentId && (!requestedParent || requestedParent.mediaKind !== current.mediaKind)) throw new Error('父版本进度不存在');
       if (requestedParent) {
-        if (!versionKey.startsWith(`${requestedParent.versionKey}_`) || versionKey.split('_').length !== requestedParent.versionKey.split('_').length + 1) {
+        const isSequentialRoot = !versionKey.includes('_') && !requestedParent.versionKey.includes('_');
+        if (!isSequentialRoot && (!versionKey.startsWith(`${requestedParent.versionKey}_`) || versionKey.split('_').length !== requestedParent.versionKey.split('_').length + 1)) {
           throw new Error(`版本 _${versionKey} 必须是 _${requestedParent.versionKey} 的直接分支`);
         }
       } else if (versionKey.includes('_')) {
@@ -668,7 +741,7 @@ const registerVersionIpc = context => {
           parentProgressId: progress.id === current.id ? requestedParentId : progress.parentProgressId || null,
           displayName: nextDisplayName,
           previousFolderPath: path.resolve(progress.folderPath),
-          folderPath: path.resolve(projectPath, nextDisplayName),
+          folderPath: request.preserveFolderPath ? path.resolve(progress.folderPath) : path.resolve(projectPath, nextDisplayName),
           trackingEnabled: progress.id === current.id
             ? request.trackingEnabled === undefined ? Boolean(current.trackingEnabled) : Boolean(request.trackingEnabled)
             : Boolean(progress.trackingEnabled),
@@ -738,12 +811,13 @@ const registerVersionIpc = context => {
       await versionService.syncProject(workspaceRoot, projectName).catch(error => {
         writeLog('warn', 'Progress tree updated but media rescan failed', { projectName, error: error.message || String(error) });
       });
+      const updatedFolderPath = updates.find(update => update.id === current.id)?.folderPath || current.folderPath;
       return {
         ...updated,
         folder: {
-          name: displayName,
-          path: path.resolve(projectPath, displayName),
-          relativePath: displayName,
+          name: path.basename(updatedFolderPath),
+          path: updatedFolderPath,
+          relativePath: path.relative(projectPath, updatedFolderPath).replace(/\\/g, '/'),
           updatedAt: Date.now(),
         },
       };

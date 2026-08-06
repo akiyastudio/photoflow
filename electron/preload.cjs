@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const RENDERER_PYTHON_TOOLS = new Set(['catch.py', 'classify.py', 'cut_video.py', 'ffmpeg_transcode.py', 'png_to_jpg.py', 'research.py']);
 const validatePythonInvocation = (scriptName, args, requestId) => {
@@ -67,6 +67,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onWorkspaceFilesChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-files-changed', subscription); return () => ipcRenderer.removeListener('workspace-files-changed', subscription); },
   onWorkspaceProjectsChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-projects-changed', subscription); return () => ipcRenderer.removeListener('workspace-projects-changed', subscription); },
   createWorkspaceProject: (workspacePath, date, name, options) => ipcRenderer.invoke('workspace-create-project', workspacePath, date, name, options),
+  chooseExistingProject: () => ipcRenderer.invoke('workspace-choose-existing-project'),
+  importExistingProject: (workspacePath, sourcePath, options) => ipcRenderer.invoke('workspace-import-existing-project', workspacePath, sourcePath, options),
   renameWorkspaceProject: (workspacePath, status, name, date, nextName) => ipcRenderer.invoke('workspace-rename-project', workspacePath, status, name, date, nextName),
   renameProjectFolder: (workspacePath, status, name, folderName, nextName) => ipcRenderer.invoke('workspace-rename-project-folder', workspacePath, status, name, folderName, nextName),
   createProjectFolder: (workspacePath, status, name, folderName, relativePath, makeUnique) => ipcRenderer.invoke('workspace-create-project-folder', workspacePath, status, name, folderName, relativePath, makeUnique),
@@ -103,9 +105,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openMediaVersion: (filePath) => ipcRenderer.invoke('workspace-open-version', filePath),
   getProgressFolders: (workspacePath, projectName) => ipcRenderer.invoke('workspace-progress-folders', workspacePath, projectName),
   ensureSelectionBaseline: (workspacePath, status, projectName) => ipcRenderer.invoke('workspace-selection-baseline-ensure', workspacePath, status, projectName),
-  getFinalVersionSummary: (workspacePath, projectName) => ipcRenderer.invoke('workspace-final-version-summary', workspacePath, projectName),
+  getFinalVersionSummary: (workspacePath, status, projectName) => ipcRenderer.invoke('workspace-final-version-summary', workspacePath, status, projectName),
   browseFinalVersions: (workspacePath, status, projectName) => ipcRenderer.invoke('workspace-final-version-browse', workspacePath, status, projectName),
   exportFinalVersions: (workspacePath, status, projectName) => invokeFeature('final_version_export', 'workspace-final-version-export', workspacePath, status, projectName),
+  getMediaRating: filePath => ipcRenderer.invoke('workspace-media-rating-read', filePath),
+  setMediaRating: (workspacePath, filePath, rating) => ipcRenderer.invoke('workspace-media-rating-write', workspacePath, filePath, rating),
   createProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-create-progress-folder', workspacePath, status, projectName, request),
   registerProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-progress-register', workspacePath, status, projectName, request),
   updateProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-progress-update', workspacePath, status, projectName, request),
@@ -171,6 +175,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   projectFileOperation: (workspacePath, status, projectName, operation, paths, targetRelativePath, nextName, options) => ipcRenderer.invoke('workspace-file-operation', workspacePath, status, projectName, operation, paths, targetRelativePath, nextName, options),
   getProjectFileClipboardStatus: () => ipcRenderer.invoke('workspace-file-clipboard-status'),
   cancelProjectFileCut: (workspacePath, status, projectName, paths) => ipcRenderer.invoke('workspace-cancel-file-cut', workspacePath, status, projectName, paths),
+  getPathForFile: (file) => webUtils.getPathForFile(file),
   startProjectFileDrag: (workspacePath, status, projectName, paths) => ipcRenderer.send('workspace-start-file-drag', workspacePath, status, projectName, paths),
   onProjectFileDragEnd: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-file-drag-ended', subscription); return () => ipcRenderer.removeListener('workspace-file-drag-ended', subscription); },
   onProjectFileOperationProgress: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-file-operation-progress', subscription); return () => ipcRenderer.removeListener('workspace-file-operation-progress', subscription); },

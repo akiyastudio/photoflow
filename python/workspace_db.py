@@ -836,6 +836,18 @@ def canonical_path(value: str) -> str:
     return os.path.normpath(os.path.abspath(value))
 
 
+def is_project_descendant(candidate_path: str, project_path: str) -> bool:
+    """Return True only for an existing path strictly inside the project."""
+    candidate = canonical_path(candidate_path)
+    project = canonical_path(project_path)
+    if candidate.casefold() == project.casefold():
+        return False
+    try:
+        return os.path.commonpath((candidate, project)).casefold() == project.casefold()
+    except ValueError:
+        return False
+
+
 def media_type(path: str):
     extension = os.path.splitext(path)[1].lower()
     if extension in IMAGE_EXTENSIONS:
@@ -1480,8 +1492,8 @@ def progress_register(root: str, db, payload: dict):
         raise ValueError("无效的版本编号")
     project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
     folder_path = canonical_path(payload["folderPath"])
-    if os.path.dirname(folder_path).casefold() != project_path.casefold() or not os.path.isdir(folder_path):
-        raise ValueError("版本进度必须是项目根目录下的文件夹")
+    if not is_project_descendant(folder_path, project_path) or not os.path.isdir(folder_path):
+        raise ValueError("版本进度必须是项目内的文件夹")
     parent_id = payload.get("parentProgressId") or None
     if parent_id:
         parent = db.execute(
@@ -1613,8 +1625,8 @@ def progress_update_tree(root: str, db, payload: dict):
         if not display_name:
             raise ValueError("进度名称不能为空")
         folder_path = canonical_path(update.get("folderPath") or "")
-        if os.path.dirname(folder_path).casefold() != project_path.casefold() or not os.path.isdir(folder_path):
-            raise ValueError("版本进度必须是项目根目录下的文件夹")
+        if not is_project_descendant(folder_path, project_path) or not os.path.isdir(folder_path):
+            raise ValueError("版本进度必须是项目内的文件夹")
         parent_id = update.get("parentProgressId") or None
         if parent_id:
             parent = rows.get(parent_id)
@@ -1625,7 +1637,8 @@ def progress_update_tree(root: str, db, payload: dict):
                 parent_version_key = str(parent_update.get("versionKey") or "")
             else:
                 parent_version_key = parent["version_key"]
-            if not version_key.startswith(f"{parent_version_key}_") or len(version_key.split("_")) != len(parent_version_key.split("_")) + 1:
+            is_sequential_root = "_" not in version_key and "_" not in parent_version_key
+            if not is_sequential_root and (not version_key.startswith(f"{parent_version_key}_") or len(version_key.split("_")) != len(parent_version_key.split("_")) + 1):
                 raise ValueError(f"版本 _{version_key} 与父版本 _{parent_version_key} 不匹配")
         elif "_" in version_key:
             raise ValueError(f"分支版本 _{version_key} 必须指定父版本")
@@ -2611,6 +2624,41 @@ def media_update_version(db, payload: dict):
     db.execute(f"UPDATE versions SET {', '.join(fields)} WHERE id=?", values)
     db.commit()
     return {"success": True, **media_bundle(db, row["photo_id"])}
+
+
+def media_refresh_metadata_fingerprint(db, payload: dict):
+    """Accept an in-app metadata-only write without flagging a visual version change."""
+    file_path = canonical_path(payload["filePath"])
+    if not os.path.isfile(file_path):
+        return {"success": True, "updatedCount": 0}
+    rows = db.execute(
+        """SELECT id,photo_id,version_number FROM versions
+           WHERE file_path_key=? AND is_deleted=0""",
+        (file_path.casefold(),),
+    ).fetchall()
+    if not rows:
+        return {"success": True, "updatedCount": 0}
+    stat = os.stat(file_path)
+    identity = file_identity(file_path)
+    fingerprint = quick_fingerprint(file_path, stat)
+    authoritative_hash = full_fingerprint(file_path)
+    modified_at = int(stat.st_mtime_ns / 1_000_000)
+    timestamp = int(time.time() * 1000)
+    for row in rows:
+        db.execute(
+            """UPDATE versions SET file_id=?,file_fingerprint=?,file_size=?,file_modified_at=?,
+               file_missing=0,updated_at=? WHERE id=?""",
+            (identity, fingerprint, stat.st_size, modified_at, timestamp, row["id"]),
+        )
+        if row["version_number"] == 0:
+            db.execute(
+                """UPDATE photos SET original_file_path=?,original_file_id=?,original_fingerprint=?,updated_at=?
+                   WHERE id=?""",
+                (file_path, identity, fingerprint, timestamp, row["photo_id"]),
+            )
+        upsert_file_record(db, row["id"], file_path, stat, identity, fingerprint, authoritative_hash)
+    db.commit()
+    return {"success": True, "updatedCount": len(rows)}
 
 
 def final_version_list(db, payload: dict):
@@ -3988,6 +4036,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = media_update_version(db, payload)
         db.close()
         return result
+    elif action == "media_refresh_metadata_fingerprint":
+        result = media_refresh_metadata_fingerprint(db, payload)
+        db.close()
+        return result
     elif action == "final_version_list":
         result = final_version_list(db, payload)
         db.close()
@@ -4112,7 +4164,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "archive_project", "unarchive_project", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "missing_projects_list", "purge_missing_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_update_tree", "progress_delete_missing", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
+    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "archive_project", "unarchive_project", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "missing_projects_list", "purge_missing_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_update_tree", "progress_delete_missing", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "media_refresh_metadata_fingerprint", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")

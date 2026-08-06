@@ -1,0 +1,13 @@
+{
+  "_id": "win32-stable-26-8-5",
+  "channel": "stable",
+  "downloadUrl": "https://pan.quark.cn/s/a785cc47f965",
+  "mandatory": false,
+  "notes": "交互优化和bug修复。",
+  "platform": "win32",
+  "published": true,
+  "publishedAt": "2026-08-05T05:21:32.528Z",
+  "sha256": "2c4ffe521b71b82d8a54c5367519c45cede46574d2da2d8e61f3d881d4424057",
+  "version": "26.8.5",
+  "versionCode": 260805
+}

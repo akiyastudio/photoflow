@@ -1791,7 +1791,10 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
     event.preventDefault();
     event.stopPropagation();
     const dropped = Array.from(event.dataTransfer.files)
-      .map(file => (file as File & { path?: string }).path || '')
+      .map(file => {
+        try { return window.electronAPI.getPathForFile(file); }
+        catch { return ''; }
+      })
       .filter(Boolean);
     if (!dropped.length) return;
     setPathsText(current => [...new Set([...current.split(/\r?\n/).map(value => value.trim()).filter(Boolean), ...dropped])].join('\n'));
@@ -1881,9 +1884,13 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
   </div>;
 };
 
-const VideoSplitView = () => {
-  const [videoPath, setVideoPath] = useState("");
+const VideoSplitView = ({ embedded = false, initialTargetPath = '' }: { embedded?: boolean; initialTargetPath?: string }) => {
+  const [videoPath, setVideoPath] = useState(initialTargetPath);
   const { logs, isRunning, progress, statusMsg, start } = usePythonTask('cut_video.py', '等待输入...');
+
+  useEffect(() => {
+    if (!isRunning) setVideoPath(initialTargetPath);
+  }, [initialTargetPath, isRunning]);
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -1909,21 +1916,21 @@ const VideoSplitView = () => {
   };
 
   return (
-    <div className="w-full space-y-6">
-      <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
+    <div className="w-full space-y-4">
+      {!embedded && <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2">
           <Scissors size={24} /> 视频切割
-      </h2>
-      <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
+      </h2>}
+      <div className={`space-y-4 ${embedded ? '' : 'rounded-xl border border-slate-200 bg-white p-6'}`}>
 
         <div className="space-y-2">
-          <p className="mt-2 text-gray-600">
-            无损将视频切割分为4GB为一个的视频文件。用于处理过长的花絮/素材文件。
+          <p className="text-sm text-slate-600">
+            原视频保持不变，分段文件写入原视频所在目录。
           </p>
         </div>
 
         {/* Path Input */}
         <div className="space-y-2">
-            <label className="text-xs font-semibold text-slate-500 uppercase">目标视频文件</label>
+            <label className="text-xs font-bold text-slate-600">目标视频文件</label>
             <div className="relative">
                 <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">
                     <Video size={18} />
@@ -1939,6 +1946,8 @@ const VideoSplitView = () => {
                 />
             </div>
         </div>
+
+        <div className="grid gap-3 md:grid-cols-2"><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">分段大小</span><span className="mt-1 block text-sm font-bold text-slate-700">约 3.95 GB（固定）</span></label><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">输出名称</span><span className="mt-1 block truncate font-mono text-sm font-bold text-slate-700">{videoPath ? `${videoPath.split(/[\\/]/).pop()?.replace(/(\.[^.]+)$/u, '_part001$1')}` : '视频名_part001.mp4'}</span></label></div>
 
         {/* Progress & Actions */}
         <TaskProgress
