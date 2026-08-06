@@ -103,6 +103,15 @@ const registerBrollImportIpc = ({
   backgroundTasks,
   getTelemetry,
 }) => {
+  ipcMain.handle('choose-broll-source-files', async () => {
+    const choice = await dialog.showOpenDialog(getMainWindow(), {
+      title: '选择花絮文件',
+      properties: ['openFile', 'multiSelections'],
+      filters: [{ name: '媒体文件', extensions: [...BROLL_EXTENSIONS].map(value => value.slice(1)) }],
+    });
+    return choice.canceled ? { cancelled: true, paths: [] } : { paths: choice.filePaths };
+  });
+
   ipcMain.handle('workspace-import-broll', async (event, workspacePath, status, projectName, options = {}) => {
     const operationId = crypto.randomUUID();
     let job = { cancelled: false, finishing: false };
@@ -115,17 +124,22 @@ const registerBrollImportIpc = ({
       const preserveOriginal = !deleteSourceAfterImport;
       const splitLargeFiles = Boolean(options?.splitLargeFiles);
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const choice = await dialog.showOpenDialog(getMainWindow(), {
-        title: '选择花絮文件',
-        properties: ['openFile', 'multiSelections'],
-        filters: [{ name: '媒体文件', extensions: [...BROLL_EXTENSIONS].map(value => value.slice(1)) }],
-      });
-      if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, count: 0, splitCount: 0, clearedCount: 0 };
+      let sourcePaths = Array.isArray(options?.sourcePaths) ? options.sourcePaths.map(source => String(source)) : [];
+      if (!sourcePaths.length) {
+        const choice = await dialog.showOpenDialog(getMainWindow(), {
+          title: '选择花絮文件',
+          properties: ['openFile', 'multiSelections'],
+          filters: [{ name: '媒体文件', extensions: [...BROLL_EXTENSIONS].map(value => value.slice(1)) }],
+        });
+        if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, count: 0, splitCount: 0, clearedCount: 0 };
+        sourcePaths = choice.filePaths;
+      }
+      if (sourcePaths.length > 500) throw new Error('一次最多导入 500 个花絮文件');
 
       const destinationDir = assertInside(projectPath, path.join(projectPath, '花絮'), '花絮目录');
       await fs.promises.mkdir(destinationDir, { recursive: true });
       const sources = [];
-      for (const selected of choice.filePaths) {
+      for (const selected of sourcePaths) {
         const info = await assertRegularFile(selected);
         const extension = path.extname(info.path).toLowerCase();
         if (!BROLL_EXTENSIONS.has(extension)) throw new Error(`不支持的花絮文件格式：${path.basename(info.path)}`);

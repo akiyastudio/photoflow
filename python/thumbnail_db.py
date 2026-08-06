@@ -282,7 +282,7 @@ class ThumbnailDatabase:
         return {"fileCount": len(seen), "changedCount": changed_count, "pending": pending}
 
     def inspect_tool_sources(self, project_root: str, paths: list[str], collect_videos: bool = False,
-                             collect_direct_png: bool = False) -> dict:
+                             collect_direct_png: bool = False, collect_recursive_png: bool = False) -> dict:
         """Read tool availability from the existing background-built media index."""
         project_root = canonical(project_root)
         index_row = self.connection.execute(
@@ -314,7 +314,13 @@ class ThumbnailDatabase:
                 f"SELECT 1 {base_query} AND kind='video' LIMIT 1", parameters
             ).fetchone() is not None
             has_video = has_video or chunk_has_video
-            if collect_direct_png:
+            if collect_recursive_png:
+                recursive_png_rows = self.connection.execute(
+                    f"SELECT path {base_query} AND lower(path) LIKE '%.png'", parameters
+                ).fetchall()
+                has_png = has_png or bool(recursive_png_rows)
+                png_paths.extend(row["path"] for row in recursive_png_rows)
+            elif collect_direct_png:
                 direct_conditions = []
                 direct_parameters: list[object] = [project_root]
                 for target in targets[offset:offset + 200]:
@@ -335,7 +341,7 @@ class ThumbnailDatabase:
                 video_paths.extend(row["path"] for row in self.connection.execute(
                     f"SELECT path {base_query} AND kind='video'", parameters
                 ).fetchall())
-            if not collect_videos and not collect_direct_png and has_video and has_png:
+            if not collect_videos and not collect_direct_png and not collect_recursive_png and has_video and has_png:
                 break
         video_paths.sort(key=str.casefold)
         png_paths = sorted(dict.fromkeys(png_paths), key=str.casefold)

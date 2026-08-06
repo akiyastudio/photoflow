@@ -1018,11 +1018,11 @@ const registerWorkspaceIpc = context => {
           return { name: entry.name, path: entryPath, relativePath: path.relative(root, entryPath), kind, extension, size: -1, createdAt: 0, updatedAt: 0 };
         })
         .sort((a, b) => (a.kind === 'folder' ? 0 : 1) - (b.kind === 'folder' ? 0 : 1) || a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
-      const directoryIndex = thumbnailService.indexDirectory(root, currentPath, entries, mediaRuntimeState.activeMediaCacheConfig);
-      if (!relativePath) {
-        void directoryIndex.then(indexed => indexed && thumbnailService.scanProject(root, mediaRuntimeState.activeMediaCacheConfig));
-        if (projectName !== '.__photoflow_inspiration__') scheduleMediaTrackingScan(ensureWorkspace(workspacePath), projectName);
-      }
+      // Index only the directory the user opened. Whole-project thumbnail and
+      // version scans on every restored project tab made application startup
+      // recursively read all source media; watcher events and explicit tools
+      // already request the broader reconciliation when it is actually needed.
+      void thumbnailService.indexDirectory(root, currentPath, entries, mediaRuntimeState.activeMediaCacheConfig);
       return { success: true, path: path.relative(root, currentPath), entries };
     } catch (error) {
       writeLog('warn', 'Unable to browse project directory', { projectName, relativePath, error: error.message || String(error) });
@@ -1030,7 +1030,7 @@ const registerWorkspaceIpc = context => {
     }
   });
 
-  ipcMain.handle('workspace-inspect-tool-sources', async (_event, workspacePath, status, projectName, relativePaths = [], collectVideos = false, collectDirectPng = false) => {
+  ipcMain.handle('workspace-inspect-tool-sources', async (_event, workspacePath, status, projectName, relativePaths = [], collectVideos = false, collectDirectPng = false, collectRecursivePng = false) => {
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
       const requestedPaths = [...new Set((Array.isArray(relativePaths) ? relativePaths : [])
@@ -1044,7 +1044,7 @@ const registerWorkspaceIpc = context => {
           if ((await fs.promises.stat(target)).isDirectory()) folderPaths.push(target);
         } catch { /* inspectToolSources reports missing source details */ }
       }
-      const result = await thumbnailService.inspectToolSources(root, targets, collectVideos, collectDirectPng);
+      const result = await thumbnailService.inspectToolSources(root, targets, collectVideos, collectDirectPng, collectRecursivePng);
       if (!result.indexed) void thumbnailService.scanProject(root, mediaRuntimeState.activeMediaCacheConfig);
       return { success: true, ...result, folderPaths };
     } catch (error) {
@@ -1621,9 +1621,14 @@ const registerWorkspaceIpc = context => {
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
       const destinationDir = assertInside(projectPath, path.resolve(projectPath, relativePath || '.'), '导入位置', true);
       if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('当前文件夹不存在');
-      const choice = await dialog.showOpenDialog(mainWindow, { title: '选择要导入的文件', properties: ['openFile', 'multiSelections'] });
-      if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, count: 0 };
-      const sourceInfos = await Promise.all(choice.filePaths.map(source => assertRegularFile(source)));
+      let sourcePaths = Array.isArray(options?.sourcePaths) ? options.sourcePaths.map(source => String(source)) : [];
+      if (!sourcePaths.length) {
+        const choice = await dialog.showOpenDialog(mainWindow, { title: '选择要导入的文件', properties: ['openFile', 'multiSelections'] });
+        if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, count: 0 };
+        sourcePaths = choice.filePaths;
+      }
+      if (sourcePaths.length > 500) throw new Error('一次最多导入 500 个文件');
+      const sourceInfos = await Promise.all(sourcePaths.map(source => assertRegularFile(source)));
       task = createProjectFileTask({
         backgroundTasks, event, operationId, operation: 'import-files', title: `导入文件 · ${projectName}`,
         projectName, resources: [destinationDir, ...sourceInfos.map(source => source.path)], cancelledCode: CANCELLED_CODE,
@@ -1663,15 +1668,15 @@ const registerWorkspaceIpc = context => {
       publish({ phase: 'finishing', progress: 99, currentName: '正在完成文件导入', bytesCopied: totalBytes, totalBytes, filesCopied: sourceInfos.length, totalFiles: sourceInfos.length });
       if (preserveOriginal && createdTargets.length) await pushUndoOperation({ kind: 'remove-created', paths: createdTargets, label: '导入' });
       if (!preserveOriginal && moves.length) await pushUndoOperation({ kind: 'external-move', moves });
-      writeLog('info', 'Files imported into current project directory', { projectName, relativePath, count: choice.filePaths.length, preserveOriginal });
+      writeLog('info', 'Files imported into current project directory', { projectName, relativePath, count: sourcePaths.length, preserveOriginal });
       telemetryService?.track('photos_imported', {
-        count_bucket: telemetryService.countBucket(choice.filePaths.length),
+        count_bucket: telemetryService.countBucket(sourcePaths.length),
         source: 'project_files',
         preserve_original: preserveOriginal,
       });
       publish({ phase: 'complete', progress: 100, currentName: '文件导入完成', bytesCopied: totalBytes, totalBytes, filesCopied: sourceInfos.length, totalFiles: sourceInfos.length });
       task.complete('文件导入完成');
-      return { success: true, operationId, count: choice.filePaths.length };
+      return { success: true, operationId, count: sourcePaths.length };
     } catch (error) {
       for (const move of [...moves].reverse()) {
         try {

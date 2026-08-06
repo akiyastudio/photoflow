@@ -526,7 +526,6 @@ class ThumbnailPipeline {
     }
     if (lastError) throw lastError;
 
-    const pending = [];
     for (const entry of entries) {
       if (!['image', 'raw', 'video'].includes(entry.kind)) continue;
       try {
@@ -546,17 +545,12 @@ class ThumbnailPipeline {
               fileSize: (await fs.promises.stat(item.target)).size,
             }))),
           }).catch(() => undefined);
-          if (cached.some(item => item.size.label === 'small')) continue;
         }
       } catch { /* the worker will classify missing/offline files */ }
-      pending.push(entry);
     }
-    if (pending.length) {
-      await this.database.call('set_states', { file_paths: pending.map(entry => entry.path), state: 'QUEUED' }, 10 * 60 * 1000);
-      for (const [index, entry] of pending.entries()) {
-        this.enqueue({ filePath: entry.path, kind: entry.kind, cacheConfig, persistState: false, requestedSizes: [THUMBNAIL_SIZES[0]], queueOrder: index }, PRIORITY.directory);
-      }
-    }
+    // Directory indexing is metadata-only. MediaThumbnail requests visible and
+    // near-visible tiles through IntersectionObserver; warming every uncached
+    // file here kept HDDs at 100% long after the UI had finished loading.
     return true;
   }
 
@@ -572,7 +566,7 @@ class ThumbnailPipeline {
     return scan;
   }
 
-  async inspectToolSources(projectRoot, filePaths, collectVideos = false, collectDirectPng = false) {
+  async inspectToolSources(projectRoot, filePaths, collectVideos = false, collectDirectPng = false, collectRecursivePng = false) {
     const root = path.resolve(projectRoot);
     if (this.projectScans.has(root) || (this.projectIndexUpdates.get(root) || 0) > 0) return { indexed: false, hasVideo: false, hasPng: false, videoPaths: [], pngPaths: [] };
     return this.database.call('inspect_tool_sources', {
@@ -580,6 +574,7 @@ class ThumbnailPipeline {
       paths: filePaths.map(filePath => path.resolve(filePath)),
       collect_videos: Boolean(collectVideos),
       collect_direct_png: Boolean(collectDirectPng),
+      collect_recursive_png: Boolean(collectRecursivePng),
     });
   }
 

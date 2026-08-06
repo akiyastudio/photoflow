@@ -1073,6 +1073,14 @@ const registerSystemIpc = context => {
     return choice.canceled ? { cancelled: true, paths: [] } : { paths: choice.filePaths };
   });
 
+  ipcMain.handle('choose-project-import-files', async () => {
+    const choice = await dialog.showOpenDialog(mainWindow, {
+      title: '选择要导入的文件',
+      properties: ['openFile', 'multiSelections'],
+    });
+    return choice.canceled ? { cancelled: true, paths: [] } : { paths: choice.filePaths };
+  });
+
   ipcMain.handle('choose-video-files', async () => {
     const choice = await dialog.showOpenDialog(mainWindow, {
       title: '选择要转码的视频',

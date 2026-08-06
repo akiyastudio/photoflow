@@ -395,7 +395,7 @@
 
     <div class="layout">
       <aside class="sidebar">
-        <div class="sidebar-head"><h1>工具面板</h1><p>按现有入口与隐藏能力整理<br>共 16 个面板 · 仅展示</p></div>
+        <div class="sidebar-head"><h1>工具面板</h1><p>按当前真实入口整理<br>共 17 个面板 · 仅展示</p></div>
         <nav id="nav" aria-label="工具面板目录"></nav>
       </aside>
 
@@ -406,7 +406,7 @@
             <h2 id="page-title">全部工具面板</h2>
             <p id="page-description">统一查看导入、处理、协作与管理工具的静态界面。</p>
           </div>
-          <div class="content-head-meta"><span class="status-dot"></span><span class="status-text">16 / 16 已收录</span></div>
+          <div class="content-head-meta"><span class="status-dot"></span><span class="status-text">17 / 17 已收录</span></div>
           <div class="mobile-nav"><select id="mobile-select" aria-label="选择工具面板"></select></div>
         </header>
         <section class="prototype-state-control" id="prototype-state-control" aria-label="Prototype 状态预览" hidden>
@@ -424,6 +424,7 @@
       'memory-stick': '<path d="M6 19v-3"/><path d="M10 19v-3"/><path d="M14 19v-3"/><path d="M18 19v-3"/><path d="M8 11V9"/><path d="M16 11V9"/><path d="M12 11V9"/><path d="M2 15h20"/><path d="M2 7a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v1.1a2 2 0 0 0 0 3.837V17a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-5.1a2 2 0 0 0 0-3.837Z"/>',
       'aperture': '<circle cx="12" cy="12" r="10"/><path d="m14.31 8 5.74 9.94M9.69 8h11.48M7.38 12l5.74-9.94M9.69 16 3.95 6.06M14.31 16H2.83M16.62 12l-5.74 9.94"/>',
       'folder-input': '<path d="M2 9V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1"/><path d="M2 13h10"/><path d="m9 16 3-3-3-3"/>',
+      'folder-plus': '<path d="M12 10v6"/><path d="M9 13h6"/><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
       'file-input': '<path d="M4 22h14a2 2 0 0 0 2-2V7l-5-5H6a2 2 0 0 0-2 2v4"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M2 15h10"/><path d="m9 18 3-3-3-3"/>',
       'file-text': '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
       'file-image': '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><circle cx="10" cy="12" r="2"/><path d="m20 17-1.296-1.296a2.41 2.41 0 0 0-3.408 0L9 22"/>',
@@ -440,7 +441,7 @@
     const iconSvg = name => `<svg class="tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${iconPaths[name] || iconPaths['layout-grid']}</svg>`;
 
     const groups = [
-      { title: '总览', items: [{ id: 'overview', icon: 'layout-grid', title: '全部面板', subtitle: '16 个功能面板' }] },
+      { title: '总览', items: [{ id: 'overview', icon: 'layout-grid', title: '全部面板', subtitle: '17 个功能面板' }] },
       { title: '导入', items: [
         { id: 'project-import', icon: 'folder-input', title: '导入项目', subtitle: '复制或移动已有项目' },
         { id: 'sd-import', icon: 'memory-stick', title: '从 SD 卡导入', subtitle: '开始后分析并匹配项目' },
@@ -453,17 +454,16 @@
         { id: 'filename-match', icon: 'file-text', title: '从文件名选片', subtitle: 'RAW / MOV 匹配' },
         { id: 'storyboard', icon: 'video', title: '截取分镜帧', subtitle: '视频画面提取' },
         { id: 'video-transcode', icon: 'gauge', title: '视频转码', subtitle: 'H.264 / H.265' },
+        { id: 'video-split', icon: 'scissors', title: '视频切割', subtitle: '约 3.95 GB 无损分段' },
         { id: 'png-jpg', icon: 'image', title: 'PNG 转 JPG', subtitle: '批量格式转换' },
-        { id: 'main-image', icon: 'crop', title: '提取截图主图', subtitle: '分析、确认再生成' }
+        { id: 'main-image', icon: 'crop', title: '提取截图主图', subtitle: '分析、确认再生成' },
+        { id: 'office-extract', icon: 'file-image', title: '提取 Office 图片', subtitle: 'Word / PowerPoint / Excel' }
       ]},
       { title: '协作与管理', items: [
+        { id: 'progress-create', icon: 'folder-plus', title: '新建进度', subtitle: '创建图片 / 视频版本目录' },
         { id: 'version-manager', icon: 'git-branch', title: '版本管理', subtitle: '版本树、预览与对比' },
         { id: 'team-retouch', icon: 'users-round', title: '团片协作', subtitle: '人物识别、标记与返图' },
         { id: 'trash', icon: 'trash', title: '移入回收站', subtitle: '整个项目删除确认' }
-      ]},
-      { title: '隐藏与待补入口', items: [
-        { id: 'video-split', icon: 'scissors', title: '视频切割', subtitle: '约 3.95 GB 无损分段' },
-        { id: 'office-extract', icon: 'file-image', title: '提取 Office 图片', subtitle: 'Word / PowerPoint / Excel' }
       ]}
     ];
 
@@ -615,6 +615,9 @@
         { id:'review', label:'范围确认', kind:'confirm', tone:'warning', title:'检查裁剪范围', detail:'1 张已自动确认，1 张需要检查。', metrics:[['已确认','1'],['待检查','1']], actions:['不处理这张','调整范围','范围正确'] },
         { id:'running', label:'处理中', kind:'progress', title:'正在生成主图', progress:72, logs:['1 / 2 张','截图-02.png','成功后处理对应原图'], actions:[] },
         { id:'result', label:'结果', kind:'result', tone:'warning', title:'主图处理结束', detail:'1 张成功，1 张失败；失败原图未删除。', metrics:[['成功','1'],['失败','1']], issues:[['截图-02.png','未检测到有效主图区域']], actions:['重新分析'] }
+      ],
+      'progress-create': [
+        { id:'ready', label:'设置', base:true }
       ],
       'version-manager': [
         { id:'normal', label:'正常', base:true },
@@ -816,6 +819,20 @@
           <div class="actions">${button('分析范围（2 张）','primary')}</div>
         </div>`),
 
+      'progress-create': () => panel('progress-create', 'folder-plus', '新建进度', '在当前项目根目录创建统一命名的图片或视频版本文件夹。', `
+        <div class="stack demo-area">
+          <div class="callout"><b>在“26-8-5 春日人像”中新建进度</b><p>只创建空的进度文件夹，不选择或导入媒体。</p></div>
+          <div class="grid-2">
+            ${field('进度类型','图片进度','select')}
+            ${field('版本关系','主版本','select')}
+            ${field('版本编号','V3')}
+            ${field('进度名字','精修')}
+          </div>
+          <section class="card">${toggle('项目跟踪','导入媒体后可开启。',false)}</section>
+          <div class="callout"><b>文件夹将创建为</b><p class="mono">图片后期_3_精修</p></div>
+          <div class="actions"><span class="hint">版本编号已按现有进度自动建议</span>${button('创建文件夹','primary')}</div>
+        </div>`),
+
       'version-manager': () => panel('version-manager', 'git-branch', '版本管理 · DSC08214.psd', '独立工作区标签：记录路径与版本关系，不保存历史文件副本。', `
         <div class="stack demo-area">
           <div class="callout warning"><b>版本管理不保存历史文件副本</b><p>原地覆盖或永久删除的旧内容无法通过本功能恢复；文件移动或删除后会显示“文件丢失”，可重新定位或删除记录。</p></div>
@@ -886,12 +903,12 @@
 
     function renderOverview() {
       const stateCount = Object.values(stateCatalog).reduce((total, states) => total + states.length, 0);
-      return `<div class="overview"><div class="overview-intro"><div><h3>全部工具面板</h3><p>同时列出当前可达面板，以及已有能力但入口不明显或尚未接入的面板。</p></div><div class="overview-stat">16 个面板 · ${stateCount} 个状态</div></div><div class="overview-grid">${panelItems.map((item,index) => `<article class="overview-card" tabindex="0" data-open="${item.id}">${miniPreview(index)}<div class="overview-card-copy"><b>${item.title}</b><span>${item.subtitle}</span><em>${details[item.id].group} · ${stateCatalog[item.id].length} 个状态</em></div></article>`).join('')}</div></div>`;
+      return `<div class="overview"><div class="overview-intro"><div><h3>全部工具面板</h3><p>按当前入口统一展示导入、处理、协作与管理功能。</p></div><div class="overview-stat">17 个面板 · ${stateCount} 个状态</div></div><div class="overview-grid">${panelItems.map((item,index) => `<article class="overview-card" tabindex="0" data-open="${item.id}">${miniPreview(index)}<div class="overview-card-copy"><b>${item.title}</b><span>${item.subtitle}</span><em>${details[item.id].group} · ${stateCatalog[item.id].length} 个状态</em></div></article>`).join('')}</div></div>`;
     }
 
     function renderNav() {
       const nav = document.getElementById('nav');
-      nav.innerHTML = groups.map(group => `<div class="section-label">${group.title}</div><div class="nav-list">${group.items.map(item => `<button class="nav-item" data-id="${item.id}" type="button"><span class="nav-icon">${iconSvg(item.icon)}</span><span class="nav-copy"><b>${item.title}</b><small>${item.subtitle}</small></span>${item.id === 'overview' ? '<span class="nav-count">16</span>' : ''}</button>`).join('')}</div>`).join('');
+      nav.innerHTML = groups.map(group => `<div class="section-label">${group.title}</div><div class="nav-list">${group.items.map(item => `<button class="nav-item" data-id="${item.id}" type="button"><span class="nav-icon">${iconSvg(item.icon)}</span><span class="nav-copy"><b>${item.title}</b><small>${item.subtitle}</small></span>${item.id === 'overview' ? '<span class="nav-count">17</span>' : ''}</button>`).join('')}</div>`).join('');
       const mobile = document.getElementById('mobile-select');
       mobile.innerHTML = groups.map(group => `<optgroup label="${group.title}">${group.items.map(item => `<option value="${item.id}">${item.title}</option>`).join('')}</optgroup>`).join('');
     }

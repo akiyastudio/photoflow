@@ -930,18 +930,10 @@ const reconcileWorkspaceState = async root => {
       const previousProjectsSnapshot = JSON.stringify(workspaceCatalogs.get(root)?.projects || []);
       const catalog = await reconcileWorkspaceCatalog(root);
       const catalogChanged = previousProjectsSnapshot !== JSON.stringify(catalog.projects || []);
-      let completed = 0;
-      for (const project of catalog.projects) {
-        if (project.availability !== 'missing') scheduleMediaTrackingScan(root, project.name);
-        if (thumbnailService && project.availability !== 'missing') {
-          await thumbnailService.scanProject(path.join(root, project.relative_path), mediaRuntimeState.activeMediaCacheConfig);
-        }
-        completed += 1;
-        task.report(10 + Math.round((completed / Math.max(1, catalog.projects.length)) * 85), `正在核对 ${project.name}`);
-      }
-      // File changes are delivered by the workspace watcher. A blank periodic
-      // file event forced every open directory to redraw even when nothing on
-      // disk had changed.
+      // Recursive media/version scans are driven by actual file watcher events
+      // or explicit tool requests. Rewalking every project here kept the disk
+      // saturated even when the workspace was completely idle.
+      task.report(95, '项目目录核对完成');
       writeLog('info', 'Periodic workspace reconciliation completed', { root, projects: catalog.projects.length, catalogChanged });
       return catalog;
     });

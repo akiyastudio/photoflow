@@ -99,6 +99,23 @@ const run = async () => {
     assert.equal(grants, 2);
     cachedPipeline.stop();
 
+    const directoryTarget = path.join(temporaryRoot, 'directory-target.jpg');
+    let directoryGenerationCount = 0;
+    const directoryPipeline = createPipeline({
+      root: temporaryRoot,
+      target: directoryTarget,
+      generate: async () => { directoryGenerationCount += 1; return []; },
+    });
+    directoryPipeline.lastForegroundActivityAt = 0;
+    let directoryQueuedCount = 0;
+    const originalDirectoryEnqueue = directoryPipeline.enqueue.bind(directoryPipeline);
+    directoryPipeline.enqueue = (...args) => { directoryQueuedCount += 1; return originalDirectoryEnqueue(...args); };
+    await directoryPipeline.runDirectoryIndex(temporaryRoot, temporaryRoot, [{ path: source, kind: 'image' }], {});
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(directoryQueuedCount, 0, 'opening a directory must not queue every uncached source for hidden thumbnail warming');
+    assert.equal(directoryGenerationCount, 0, 'directory indexing must stay metadata-only until a tile becomes visible');
+    directoryPipeline.stop();
+
     const changedTarget = path.join(temporaryRoot, 'changed.jpg');
     const changedNotifications = [];
     let changedNotify = () => undefined;
@@ -166,10 +183,12 @@ const run = async () => {
     assert.equal(indexedResult.hasVideo, true);
     assert.equal(indexedCalls[0]?.operation, 'inspect_tool_sources', 'tool availability must read the existing project index');
     assert.equal(indexedCalls[0]?.args.collect_direct_png, true, 'folder menu inspection must request direct PNG children');
+    await indexedPipeline.inspectToolSources(temporaryRoot, [missingVideo], false, false, true);
+    assert.equal(indexedCalls[1]?.args.collect_recursive_png, true, 'PNG conversion must request recursive PNG source collection');
     indexedPipeline.projectScans.set(path.resolve(temporaryRoot), Promise.resolve());
     const buildingResult = await indexedPipeline.inspectToolSources(temporaryRoot, [missingVideo], true);
     assert.equal(buildingResult.indexed, false, 'tool availability must report a queued background project scan as building');
-    assert.equal(indexedCalls.length, 1, 'a building project scan must not expose stale database results');
+    assert.equal(indexedCalls.length, 2, 'a building project scan must not expose stale database results');
     indexedPipeline.stop();
 
     const failureTarget = path.join(temporaryRoot, 'failure.jpg');

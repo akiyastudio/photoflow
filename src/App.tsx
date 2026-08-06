@@ -60,12 +60,14 @@ const normalizeHomeOrder = (value: unknown): HomeCardId[] => {
 const normalizeProjectToolbar = (value: unknown): AppConfig['projectToolbar'] => {
   const source = value && typeof value === 'object' ? value as Partial<AppConfig['projectToolbar']> : {};
   const valid = new Set<ProjectToolbarActionId>(PROJECT_TOOLBAR_ACTION_IDS);
-  const order = Array.isArray(source.order) ? source.order.filter((id): id is ProjectToolbarActionId => valid.has(id as ProjectToolbarActionId)) : [];
+  const migrateToolbarId = (id: unknown): ProjectToolbarActionId | undefined => {
+    if (valid.has(id as ProjectToolbarActionId)) return id as ProjectToolbarActionId;
+    if (id === 'storyboard' || id === 'video-transcode' || id === 'video-split') return 'video-tools';
+    if (id === 'png-converter' || id === 'screenshot-main-image') return 'image-tools';
+    return undefined;
+  };
+  const order = Array.isArray(source.order) ? source.order.map(migrateToolbarId).filter((id): id is ProjectToolbarActionId => Boolean(id)) : [];
   const hidden = Array.isArray(source.hidden) ? source.hidden.filter((id): id is ProjectToolbarActionId => valid.has(id as ProjectToolbarActionId)) : [];
-  if (order.length && !order.includes('screenshot-main-image')) {
-    const storyboardIndex = order.indexOf('storyboard');
-    order.splice(storyboardIndex < 0 ? order.length : storyboardIndex + 1, 0, 'screenshot-main-image');
-  }
   return {
     order: [...new Set([...order, ...PROJECT_TOOLBAR_ACTION_IDS])],
     hidden: [...new Set(hidden)],

@@ -137,6 +137,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   const [error, setError] = useState('');
   const [menu, setMenu] = useState<{ project: WorkspaceProject; x: number; y: number } | null>(null);
   const [showNew, setShowNew] = useState(false);
+  const [showCreateMenu, setShowCreateMenu] = useState(false);
   const [choosingExistingProject, setChoosingExistingProject] = useState(false);
   const [existingProjectDraft, setExistingProjectDraft] = useState<ExistingProjectDraft | null>(null);
   const [existingProjectName, setExistingProjectName] = useState('');
@@ -165,12 +166,14 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     setEditor(current => ({ ...current, year: value.year, month: value.month, day: value.day, quickDate: `${value.year}-${value.month}-${value.day}` }));
   };
   const openNewProject = () => {
+    setShowCreateMenu(false);
     resetProjectDate();
     setName('');
     setNewProjectError('');
     setShowNew(true);
   };
   const chooseExistingProject = async () => {
+    setShowCreateMenu(false);
     setChoosingExistingProject(true);
     setExistingProjectError('');
     setExistingProjectResult(null);
@@ -318,7 +321,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     return () => { disposed = true; };
   }, [configuredWorkspacePaths, autoCleanupDeletedProjectData]);
   useEffect(() => {
-    const close = () => setMenu(null);
+    const close = () => { setMenu(null); setShowCreateMenu(false); };
     let refreshTimer = 0;
     const changed = () => {
       window.clearTimeout(refreshTimer);
@@ -457,10 +460,11 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   return <>
     {createNotice && <div className="fixed left-1/2 top-10 z-[400] -translate-x-1/2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-xl animate-in fade-in slide-in-from-top-2">{createNotice}</div>}
     <div className="relative px-4 pt-4" onClick={event => event.stopPropagation()}>
-      <div aria-label="项目操作" className="grid w-full grid-cols-2 overflow-hidden rounded-lg shadow-md shadow-blue-500/20">
-        <button type="button" onClick={openNewProject} className="min-w-0 bg-blue-600 px-2 py-2.5 text-xs font-bold text-white hover:bg-blue-500"><span className="flex items-center justify-center gap-1.5"><FolderPlus size={16}/><span className="truncate">新建项目</span></span></button>
-        <button type="button" disabled={choosingExistingProject} onClick={() => void chooseExistingProject()} className="min-w-0 border-l border-blue-400 bg-blue-600 px-2 py-2.5 text-xs font-bold text-white hover:bg-blue-500 disabled:opacity-60"><span className="flex items-center justify-center gap-1.5">{choosingExistingProject ? <Loader2 size={16} className="animate-spin"/> : <FolderInput size={16}/>}<span className="truncate">导入项目</span></span></button>
+      <div className="flex w-full shadow-md shadow-blue-500/20">
+        <button onClick={openNewProject} className="min-w-0 flex-1 rounded-l-lg bg-blue-600 px-3 py-2.5 text-sm font-bold text-white hover:bg-blue-500"><span className="flex items-center justify-center gap-2"><FolderPlus size={17}/>新建项目</span></button>
+        <button type="button" disabled={choosingExistingProject} aria-haspopup="menu" aria-expanded={showCreateMenu} aria-label="更多项目创建方式" title="更多项目创建方式" onClick={() => setShowCreateMenu(current => !current)} className="flex w-10 items-center justify-center rounded-r-lg border-l border-blue-400 bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-60">{choosingExistingProject ? <Loader2 size={16} className="animate-spin"/> : <ChevronDown size={16}/>}</button>
       </div>
+      {showCreateMenu && <div role="menu" className="absolute left-4 right-4 top-full z-[250] mt-1 rounded-lg border border-slate-200 bg-white p-1 shadow-xl"><button role="menuitem" type="button" onClick={() => void chooseExistingProject()} className="project-menu-item"><FolderInput size={15}/>导入项目</button></div>}
     </div>
     <nav className="project-navigator-scroll flex-1 overflow-y-auto p-4 pt-2">
       {statuses.filter(status => status !== '未分类' || (groups.find(group => group.status === status)?.projects.length || 0) > 0).map(status => {
