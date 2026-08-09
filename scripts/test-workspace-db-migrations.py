@@ -442,11 +442,13 @@ def main():
         create_legacy_database(database, project_id, photo_id, version_id)
 
         db = workspace_db.connect(workspace_root, database)
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "17"
+        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "21"
         assignment_columns = {row[1] for row in db.execute("PRAGMA table_info(team_person_assignments)").fetchall()}
         assert {"completion_kind", "edited_patch_path", "return_missing", "return_missing_since", "completed_at"} <= assignment_columns
-        assert "tracking_state" in {row[1] for row in db.execute("PRAGMA table_info(progress_folders)").fetchall()}
-        assert "missing_since" in {row[1] for row in db.execute("PRAGMA table_info(progress_folders)").fetchall()}
+        progress_columns = {row[1] for row in db.execute("PRAGMA table_info(progress_folders)").fetchall()}
+        assert {"node_role", "relation_kind", "tracking_state", "rename_from_parent",
+                "copy_missing_from_parent", "last_tracked_at", "tracking_snapshot_json",
+                "folder_signature", "missing_since", "tombstone_json"} <= progress_columns
         assert db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='batch_file_operations'").fetchone()
         assert db.execute("SELECT COUNT(*) FROM file_records").fetchone()[0] == 1
         assert db.execute("SELECT value FROM meta WHERE key='migration_12_orphan_file_records_removed'").fetchone()[0] == "1"
@@ -480,16 +482,26 @@ def main():
         db.rollback()
 
         workspace_db.sync_directories(workspace_root, db)
-        missing = db.execute("SELECT availability,missing_since,missing_checks FROM projects WHERE id=?", (project_id,)).fetchone()
+        missing = db.execute("SELECT availability,missing_since,missing_checks,updated_at FROM projects WHERE id=?", (project_id,)).fetchone()
         assert missing[0] == "missing" and missing[1] is not None and missing[2] == 1
+        first_missing_state = missing[:]
+        for _ in range(5):
+            time.sleep(0.002)
+            workspace_db.sync_directories(workspace_root, db)
+            repeated_missing = db.execute(
+                "SELECT availability,missing_since,missing_checks,updated_at FROM projects WHERE id=?",
+                (project_id,),
+            ).fetchone()
+            assert repeated_missing[:] == first_missing_state, "repeated missing sync must be a no-op"
         assert db.execute("SELECT COUNT(*) FROM photos WHERE project_id=?", (project_id,)).fetchone()[0] == 1
         offline_scan = workspace_db.media_sync_project(workspace_root, db, {"projectName": "迁移测试"})
         assert offline_scan["projectUnavailable"] is True
 
         os.mkdir(os.path.join(workspace_root, "迁移测试"))
         workspace_db.sync_directories(workspace_root, db)
-        restored = db.execute("SELECT availability,missing_since,missing_checks FROM projects WHERE id=?", (project_id,)).fetchone()
-        assert restored[:] == ("available", None, 0)
+        restored = db.execute("SELECT availability,missing_since,missing_checks,updated_at FROM projects WHERE id=?", (project_id,)).fetchone()
+        assert restored[:3] == ("available", None, 0)
+        assert restored[3] > first_missing_state[3]
 
         db.execute("SAVEPOINT cascade_test")
         db.execute("DELETE FROM versions WHERE id=?", (version_id,))

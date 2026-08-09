@@ -18,9 +18,12 @@ import { ProjectNavigator } from './components/ProjectNavigator';
 import { ProjectWorkspace } from './features/workspace/ProjectWorkspace';
 import { AppErrorBoundary } from './features/app/AppErrorBoundary';
 import { BackupHomeCard, StartupWindowFrame, UpdateModal, WindowControls } from './features/app/AppChrome';
-import { projectTabId, useTitlebarTabOrder, workspaceToolTabId } from './features/app/useTitlebarTabOrder';
+import { inspirationTabId, projectTabId, useTitlebarTabOrder, workspaceToolTabId } from './features/app/useTitlebarTabOrder';
+import { useWorkspaceTabs } from './features/app/useWorkspaceTabs';
+import { browserPageActivation } from './features/app/workspace-tab-model';
 import { BackgroundTaskIndicator } from './features/background-tasks/BackgroundTaskIndicator';
 import { useTaskCenter } from './features/background-tasks/TaskCenter';
+import { useTopToastStack } from './features/app/useTopToastStack';
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
 import { UsagePreferencesOnboarding, USAGE_PREFERENCES_VERSION } from './features/settings/UsagePreferencesOnboarding';
 import type { SettingsSection } from './features/settings/SettingsFeature';
@@ -46,7 +49,7 @@ const normalizeProjectCategories = (value: unknown) => {
   return result;
 };
 type WorkspaceToolKind = 'version' | 'team';
-type WorkspaceToolTab = { projectPath: string; kind: WorkspaceToolKind; label: string; busy: boolean };
+type WorkspaceToolTab = { ownerPageId: string; projectId: string; projectPath: string; kind: WorkspaceToolKind; label: string; busy: boolean };
 const localDateKey = () => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -74,8 +77,7 @@ const normalizeProjectToolbar = (value: unknown): AppConfig['projectToolbar'] =>
     onlyShowAvailable: source.onlyShowAvailable === true,
   };
 };
-const IMAGE_SELECTION_FOLDER_NAME = '图片选片';
-const VIDEO_SELECTION_FOLDER_NAME = '视频选片';
+const IMAGE_SELECTION_FOLDER_NAME = '', VIDEO_SELECTION_FOLDER_NAME = ''; // legacy config fields only
 const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
@@ -197,8 +199,8 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
     oversizeCropMode: 'face-centered'
   },
   smartMatch: {
-    imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME,
-    videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME,
+    imageDestFolderName: '',
+    videoDestFolderName: '',
     imageSourceFolderName: 'raw',
     videoSourceFolderName: 'mov'
   },
@@ -221,12 +223,8 @@ interface PythonEvent {
 
 const App: React.FC = () => {
   const appDialog = useAppDialog();
-  const { panelTasks } = useTaskCenter();
   const [activeTab, setActiveTab] = useState<ToolType>('home');
   const [settingsTabOpen, setSettingsTabOpen] = useState(false);
-  const [inspirationTabOpen, setInspirationTabOpen] = useState(false);
-  const [inspirationRelativePath, setInspirationRelativePath] = useState('');
-  const [inspirationNavigationRequest, setInspirationNavigationRequest] = useState<{ path: string; id: number }>();
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
   const [showWorkspaceSetup, setShowWorkspaceSetup] = useState(false);
 
@@ -236,14 +234,12 @@ const App: React.FC = () => {
   const [privacyConsentRequired, setPrivacyConsentRequired] = useState(true);
   const [updateInfo, setUpdateInfo] = useState<{version: string, url: string, notes: string} | null>(null);
   const [selectedProject, setSelectedProject] = useState<WorkspaceProject | null>(null);
-  const [openProjects, setOpenProjects] = useState<WorkspaceProject[]>([]);
+  const { pages: projectPages, activePageId, createPage, activatePage, updatePagePath, closePage, updateProject, closeProject, selectSidebarProject, requestInspirationPath, ensureInspirationRoot, resetInspirationPages } = useWorkspaceTabs();
+  const { dismissPanelTasksByOwnerPageId } = useTaskCenter(); const openPageIds = useMemo(() => new Set(projectPages.map(page => page.id)), [projectPages]);
   const [workspaceToolTabs, setWorkspaceToolTabs] = useState<WorkspaceToolTab[]>([]);
-  const [projectOperations, setProjectOperations] = useState<Record<string, 'import' | 'broll' | 'match' | null>>({});
   const [, setProjectDestination] = useState<string | null>(null);
-  const [undoNotice, setUndoNotice] = useState('');
-  const noticeTimerRef = useRef<number>();
+  const { showNotice, topToastStack } = useTopToastStack();
   const autoBackedUpImportTasksRef = useRef(new Set<string>());
-  const lastNoticeRef = useRef({ message: '', shownAt: 0 });
   const cacheCleanupCheckedRef = useRef(false);
   const [homeOrder, setHomeOrder] = useState<HomeCardId[]>(DEFAULT_HOME_ORDER);
   const [draggedHomeCard, setDraggedHomeCard] = useState<HomeCardId | null>(null);
@@ -256,16 +252,19 @@ const App: React.FC = () => {
   const [titlebarTabScroll, setTitlebarTabScroll] = useState({ overflow: false, canScrollLeft: false, canScrollRight: false });
   useEffect(() => {
     const restorePanelTask = (event: Event) => {
-      const scopeKey = (event as CustomEvent<{ scopeKey?: string }>).detail?.scopeKey;
-      const project = openProjects.find(item => item.path === scopeKey);
-      if (!project) return;
-      setSelectedProject(project);
-      setProjectDestination(project.path);
-      setActiveTab('project');
+      const ownerPageId = (event as CustomEvent<{ ownerPageId?: string }>).detail?.ownerPageId;
+      const page = projectPages.find(item => item.id === ownerPageId);
+      if (!page) return;
+      activatePage(page.id);
+      if (page.project) {
+        setSelectedProject(page.project); setProjectDestination(page.project.path); setActiveTab('project');
+      } else if (page.kind === 'inspiration') {
+        setSelectedProject(null); setProjectDestination(null); setActiveTab('inspiration');
+      }
     };
     window.addEventListener('photoflow:restore-panel-task', restorePanelTask);
     return () => window.removeEventListener('photoflow:restore-panel-task', restorePanelTask);
-  }, [openProjects]);
+  }, [activatePage, projectPages]);
   const [components, setComponents] = useState<ComponentStatus[]>(() => {
     try {
       const cached = JSON.parse(window.localStorage.getItem('photoflow:components-cache') || '[]');
@@ -298,14 +297,29 @@ const App: React.FC = () => {
     window.localStorage.setItem('photoflow:sidebar-collapsed', String(sidebarCollapsed));
   }, [sidebarCollapsed]);
 
+  const previousInspirationRootRef = useRef<string>();
   useEffect(() => {
-    if (config?.pinInspirationLibrary) setInspirationTabOpen(true);
-  }, [config?.pinInspirationLibrary]);
+    if (!configLoaded || !config) return;
+    const rootPath = config.inspirationLibrary.rootPath.trim();
+    if (previousInspirationRootRef.current === rootPath) {
+      if (config.pinInspirationLibrary) ensureInspirationRoot(rootPath);
+      return;
+    }
+    const activeWasInspiration = projectPages.some(page => page.id === activePageId && page.kind === 'inspiration');
+    previousInspirationRootRef.current = rootPath;
+    resetInspirationPages(rootPath, config.pinInspirationLibrary);
+    if (activeWasInspiration) { setSelectedProject(null); setActiveTab(config.pinInspirationLibrary ? 'inspiration' : 'home'); }
+  }, [activePageId, config, configLoaded, ensureInspirationRoot, projectPages, resetInspirationPages]);
 
+  const titlebarPages = useMemo(() => ({
+    inspiration: projectPages.filter(page => page.kind === 'inspiration').map(page => ({ id: page.id, currentRelativePath: page.currentRelativePath })),
+    pinnedInspirationPageId: config?.pinInspirationLibrary ? projectPages.find(page => page.kind === 'inspiration' && page.currentRelativePath === '')?.id : undefined,
+    projects: projectPages.filter(page => page.project).map(page => ({ id: page.id, projectPath: page.project!.path })),
+  }), [config?.pinInspirationLibrary, projectPages]);
   const titlebarTabDragProps = useTitlebarTabOrder({
-    inspirationOpen: inspirationTabOpen,
-    inspirationPinned: config?.pinInspirationLibrary === true,
-    projectPaths: openProjects.map(project => project.path),
+    inspirationPages: titlebarPages.inspiration,
+    pinnedInspirationPageId: titlebarPages.pinnedInspirationPageId,
+    projectPages: titlebarPages.projects,
     toolTabs: workspaceToolTabs,
     settingsOpen: settingsTabOpen,
   });
@@ -334,7 +348,7 @@ const App: React.FC = () => {
       observer.disconnect();
       element.removeEventListener('scroll', updateTitlebarTabScroll);
     };
-  }, [configLoaded, inspirationTabOpen, openProjects.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
+  }, [configLoaded, projectPages.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -343,7 +357,7 @@ const App: React.FC = () => {
       updateTitlebarTabScroll();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [configLoaded, activeTab, inspirationTabOpen, selectedProject?.path, openProjects.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
+  }, [configLoaded, activeTab, activePageId, projectPages.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
 
   const scrollTitlebarTabs = (direction: -1 | 1) => {
     const element = titlebarTabsRef.current;
@@ -383,17 +397,6 @@ const App: React.FC = () => {
   // The rendered width may shrink temporarily and returns automatically when
   // the window is enlarged again.
   const renderedSidebarWidth = clampNumber(sidebarWidth, 128, Math.min(420, Math.max(128, viewportWidth - 700)));
-
-  const showNotice = useCallback((message: string, duration = 3500) => {
-    const cleanMessage = message.trim() || '发生未知错误';
-    const isFailure = /失败|错误|异常|无法/.test(cleanMessage);
-    const now = Date.now();
-    if (lastNoticeRef.current.message === cleanMessage && now - lastNoticeRef.current.shownAt < 800) return;
-    lastNoticeRef.current = { message: cleanMessage, shownAt: now };
-    setUndoNotice(cleanMessage);
-    window.clearTimeout(noticeTimerRef.current);
-    if (!isFailure) noticeTimerRef.current = window.setTimeout(() => setUndoNotice(''), duration);
-  }, []);
 
   useEffect(() => {
     const showTextCopyNotice = (event: ClipboardEvent) => {
@@ -470,7 +473,6 @@ const App: React.FC = () => {
       window.removeEventListener('unhandledrejection', handleUnhandledRejection);
       removePythonListener?.();
       removeMainErrorListener?.();
-      window.clearTimeout(noticeTimerRef.current);
     };
   }, [showNotice]);
 
@@ -513,6 +515,7 @@ const App: React.FC = () => {
             const customProjectCategories = normalizeProjectCategories(fileConfig.customProjectCategories);
             const configuredWorkspacePaths = normalizeWorkspacePaths(fileConfig.workspacePath, fileConfig.workspacePaths);
             let normalizedConfig = { ...legacyConfig, theme: fileConfig.theme ?? 'system', telemetry: { enabled: fileConfig.telemetry?.enabled === true, crashReports: fileConfig.telemetry?.crashReports === true }, workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, customProjectCategories, projectCategoryOrder: normalizeProjectCategoryOrder(fileConfig.projectCategoryOrder, customProjectCategories), defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', itemOpenMode: fileConfig.itemOpenMode === 'double' || legacyFolderOpenMode === 'double' ? 'double' : 'single', favoriteDisplayMode: fileConfig.favoriteDisplayMode === 'stars' ? 'stars' : 'binary', usagePreferencesVersion: Number(fileConfig.usagePreferencesVersion) || 0, projectToolbar: normalizeProjectToolbar(fileConfig.projectToolbar), homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, pinInspirationLibrary: fileConfig.pinInspirationLibrary === true, componentSettings, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, backup: { enabled: fileConfig.backup?.enabled === true, targetType: fileConfig.backup?.targetType === 'nas' || (fileConfig.backup?.targetType === undefined && fileConfig.backup?.targetPath?.startsWith('\\\\')) ? 'nas' : 'local', targetPath: fileConfig.backup?.targetPath ?? '', mode: fileConfig.backup?.mode === 'latest' ? 'latest' : 'history', automaticDaily: fileConfig.backup?.automaticDaily ?? true, afterImport: fileConfig.backup?.afterImport ?? true, retention: { daily: Math.max(1, Number(fileConfig.backup?.retention?.daily) || 7), weekly: Math.max(0, Number(fileConfig.backup?.retention?.weekly) || 4), monthly: Math.max(0, Number(fileConfig.backup?.retention?.monthly) || 12) }, nas: { credentialRef: fileConfig.backup?.nas?.credentialRef ?? '', limitEnabled: fileConfig.backup?.nas?.limitEnabled === true, bandwidthLimitMBps: Math.max(1, Number(fileConfig.backup?.nas?.bandwidthLimitMBps) || 20), limitStart: fileConfig.backup?.nas?.limitStart || '09:00', limitEnd: fileConfig.backup?.nas?.limitEnd || '18:00' } }, archive: { enabled: fileConfig.archive?.enabled === true, targetPath: fileConfig.archive?.targetPath ?? '' }, importDefaults: { deleteSourceAfterImport: fileConfig.importDefaults?.deleteSourceAfterImport ?? !(legacyFileImport?.preserveOriginal ?? false), generateJpgFromRaw: fileConfig.importDefaults?.generateJpgFromRaw ?? false }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: fileConfig.smartImport?.splitLargeFiles ?? false, dateFilter: fileConfig.smartImport?.dateFilter === 'today' || fileConfig.smartImport?.dateFilter === 'today_yesterday' ? fileConfig.smartImport.dateFilter : 'all' }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false }, inspirationLibrary, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: !configuredImageSource || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: !configuredVideoSource || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
+            normalizedConfig.smartMatch.sourceFolderRelativePath = fileConfig.smartMatch?.sourceFolderRelativePath;
             normalizedConfig = { ...normalizedConfig, workspacePath: configuredWorkspacePaths[0] || '', workspacePaths: configuredWorkspacePaths };
             if (normalizedConfig.workspacePaths.length) {
               const resolved = await Promise.all(normalizedConfig.workspacePaths.map(async requestedPath => {
@@ -716,79 +719,118 @@ const App: React.FC = () => {
     if (saved) setPrivacyConsentRequired(false);
   };
   const openProjectTab = (project: WorkspaceProject, operation: 'import' | 'broll' | 'match' | null = null, replacePath?: string) => {
-    setOpenProjects(current => {
-      const prepared = replacePath && replacePath !== project.path ? current.filter(item => item.path !== replacePath) : current;
-      return prepared.some(item => item.path === project.path) ? prepared.map(item => item.path === project.path ? project : item) : [...prepared, project];
-    });
-    setProjectOperations(current => {
-      const next = { ...current };
-      const preservedOperation = replacePath ? next[replacePath] ?? null : operation;
-      if (replacePath && replacePath !== project.path) delete next[replacePath];
-      next[project.path] = operation ?? preservedOperation;
-      return next;
-    });
+    if (replacePath !== undefined) {
+      updateProject(project);
+      setWorkspaceToolTabs(current => current.map(tab => tab.projectId === project.id ? { ...tab, projectPath: project.path } : tab));
+      setSelectedProject(current => current?.id === project.id ? project : current);
+      if (projectPages.some(page => page.id === activePageId && page.projectId === project.id)) setProjectDestination(project.path);
+      return;
+    }
+    const rootPage = projectPages.find(page => page.projectId === project.id && page.currentRelativePath === '');
+    if (projectPages.some(page => page.projectId === project.id)) updateProject(project);
+    if (rootPage) activatePage(rootPage.id);
+    else createPage({ kind: 'project', projectId: project.id, project, currentRelativePath: '', initialRelativePath: '', operation });
     setSelectedProject(project);
     setProjectDestination(project.path);
     setActiveTab('project');
   };
-  const openWorkspaceToolTab = (project: WorkspaceProject, kind: WorkspaceToolKind, label: string) => {
-    setOpenProjects(current => current.some(item => item.path === project.path) ? current : [...current, project]);
+  const activateProjectPage = (pageId: string) => {
+    const page = projectPages.find(candidate => candidate.id === pageId);
+    if (!page?.project) return;
+    activatePage(pageId);
+    setSelectedProject(page.project);
+    setProjectDestination(page.project.path);
+    setActiveTab('project');
+  };
+  const selectSidebarProjectPage = (project: WorkspaceProject, replacePath?: string) => {
+    if (replacePath !== undefined) {
+      openProjectTab(project, null, replacePath);
+      return;
+    }
+    selectSidebarProject(project);
+    setSelectedProject(project);
+    setProjectDestination(project.path);
+    setActiveTab('project');
+  };
+  const openProjectDirectoryPage = (project: WorkspaceProject, initialRelativePath: string) => {
+    createPage({ kind: 'project', projectId: project.id, project, currentRelativePath: initialRelativePath, initialRelativePath, operation: null });
+    setSelectedProject(project);
+    setProjectDestination(project.path);
+    setActiveTab('project');
+  };
+  const openWorkspaceToolTab = (ownerPageId: string, project: WorkspaceProject, kind: WorkspaceToolKind, label: string) => {
     setWorkspaceToolTabs(current => {
-      const existing = current.find(tab => tab.projectPath === project.path && tab.kind === kind);
+      const existing = current.find(tab => tab.ownerPageId === ownerPageId && tab.kind === kind);
       return existing
-        ? current.map(tab => tab === existing ? { ...tab, label } : tab)
-        : [...current, { projectPath: project.path, kind, label, busy: false }];
+        ? current.map(tab => tab === existing ? { ...tab, projectId: project.id, projectPath: project.path, label } : tab)
+        : [...current, { ownerPageId, projectId: project.id, projectPath: project.path, kind, label, busy: false }];
     });
+    activatePage(ownerPageId);
     setSelectedProject(project);
     setProjectDestination(project.path);
     setActiveTab(kind === 'version' ? 'project-version' : 'project-team');
   };
-  const activateWorkspaceToolTab = (project: WorkspaceProject, kind: WorkspaceToolKind) => {
+  const activateWorkspaceToolTab = (tab: WorkspaceToolTab, project: WorkspaceProject) => {
+    activatePage(tab.ownerPageId);
     setSelectedProject(project);
     setProjectDestination(project.path);
-    setActiveTab(kind === 'version' ? 'project-version' : 'project-team');
+    setActiveTab(tab.kind === 'version' ? 'project-version' : 'project-team');
   };
-  const updateWorkspaceToolTabBusy = useCallback((projectPath: string, kind: WorkspaceToolKind, busy: boolean) => {
+  const updateWorkspaceToolTabBusy = useCallback((ownerPageId: string, kind: WorkspaceToolKind, busy: boolean) => {
     setWorkspaceToolTabs(current => {
       let changed = false;
       const next = current.map(tab => {
-        if (tab.projectPath !== projectPath || tab.kind !== kind || tab.busy === busy) return tab;
+        if (tab.ownerPageId !== ownerPageId || tab.kind !== kind || tab.busy === busy) return tab;
         changed = true;
         return { ...tab, busy };
       });
       return changed ? next : current;
     });
   }, []);
-  const closeWorkspaceToolTab = async (projectPath: string, kind: WorkspaceToolKind) => {
-    const tab = workspaceToolTabs.find(item => item.projectPath === projectPath && item.kind === kind);
+  const closeWorkspaceToolTab = async (ownerPageId: string, kind: WorkspaceToolKind) => {
+    const tab = workspaceToolTabs.find(item => item.ownerPageId === ownerPageId && item.kind === kind);
     if (kind === 'team' && tab?.busy && !await appDialog.confirm({
       title: '团片任务仍在运行',
       message: '关闭标签不会取消后台任务；稍后重新打开团片协作可以继续查看进度。',
       confirmLabel: '关闭标签',
     })) return;
-    setWorkspaceToolTabs(current => current.filter(item => item.projectPath !== projectPath || item.kind !== kind));
-    const closingActiveTab = selectedProject?.path === projectPath
+    setWorkspaceToolTabs(current => current.filter(item => item.ownerPageId !== ownerPageId || item.kind !== kind));
+    const closingActiveTab = activePageId === ownerPageId
       && activeTab === (kind === 'version' ? 'project-version' : 'project-team');
     if (closingActiveTab) setActiveTab('project');
   };
   const showHomeTab = () => {
-    setSelectedProject(null);
-    setProjectDestination(null);
-    setActiveTab('home');
+    setSelectedProject(null); setProjectDestination(null); setActiveTab('home');
   };
   const openInspirationTab = () => {
-    setInspirationTabOpen(true);
+    if (!config) return;
+    requestInspirationPath(config.inspirationLibrary.rootPath.trim(), '');
     setSelectedProject(null);
     setActiveTab('inspiration');
   };
-  const closeInspirationTab = () => {
-    if (config?.pinInspirationLibrary) return;
-    setInspirationTabOpen(false);
-    if (activeTab === 'inspiration') showHomeTab();
+  const disposePageOwnedUi = useCallback((pageIds: string[]) => {
+    if (!pageIds.length) return; const pageIdSet = new Set(pageIds);
+    for (const pageId of pageIds) dismissPanelTasksByOwnerPageId(pageId);
+    setWorkspaceToolTabs(current => current.filter(tab => !pageIdSet.has(tab.ownerPageId)));
+  }, [dismissPanelTasksByOwnerPageId]);
+  const closeInspirationTab = (pageId: string) => {
+    const page = projectPages.find(candidate => candidate.id === pageId);
+    if (!page || page.kind !== 'inspiration') return;
+    if (config?.pinInspirationLibrary && page.currentRelativePath === '' && !projectPages.some(candidate => candidate.kind === 'inspiration' && candidate.id !== pageId && candidate.currentRelativePath === '')) return;
+    const closingIndex = projectPages.findIndex(candidate => candidate.id === pageId);
+    const remaining = projectPages.filter(candidate => candidate.id !== pageId);
+    disposePageOwnedUi([pageId]);
+    closePage(pageId);
+    if (activePageId !== pageId) return;
+    const nextPage = remaining[Math.min(Math.max(closingIndex, 0), remaining.length - 1)];
+    if (nextPage?.kind === 'inspiration') { setSelectedProject(null); setProjectDestination(null); setActiveTab('inspiration'); }
+    else if (nextPage?.project) { setSelectedProject(nextPage.project); setProjectDestination(nextPage.project.path); setActiveTab('project'); }
+    else showHomeTab();
   };
   const navigateInspiration = (path: string) => {
-    setInspirationTabOpen(true);
-    setInspirationNavigationRequest({ path, id: Date.now() });
+    if (!config) return;
+    requestInspirationPath(config.inspirationLibrary.rootPath.trim(), path);
+    setSelectedProject(null);
     setActiveTab('inspiration');
   };
   const openSettingsTab = () => {
@@ -804,35 +846,42 @@ const App: React.FC = () => {
     setSettingsTabOpen(false);
     if (activeTab === 'settings') showHomeTab();
   };
-  const closeProjectTab = async (projectPath: string, force = false) => {
-    const runningPanelTask = Object.values(panelTasks).find(task => task.scopeKey === projectPath && task.state === 'running');
-    if (!force && runningPanelTask) {
-      await appDialog.alert({
-        title: '组件任务仍在运行',
-        message: `“${runningPanelTask.title}”仍在运行，请等待完成或在组件面板中明确取消任务后再关闭项目标签。`,
-        detail: '你可以切换到其他项目或页面；任务面板和进度不会丢失。',
-      });
-      return;
-    }
-    const runningTeamTab = workspaceToolTabs.find(tab => tab.projectPath === projectPath && tab.kind === 'team' && tab.busy);
+  const closeProjectTab = async (pageId: string, force = false) => {
+    const page = projectPages.find(candidate => candidate.id === pageId);
+    if (!page?.project) return;
+    const runningTeamTab = workspaceToolTabs.find(tab => tab.ownerPageId === pageId && tab.kind === 'team' && tab.busy);
     if (!force && runningTeamTab && !await appDialog.confirm({
       title: '团片任务仍在运行',
       message: '关闭项目标签会同时关闭它的团片标签，但不会取消后台任务。',
       confirmLabel: '关闭项目标签',
     })) return;
-    const closingIndex = openProjects.findIndex(project => project.path === projectPath);
-    const remaining = openProjects.filter(project => project.path !== projectPath);
-    setOpenProjects(remaining);
-    setWorkspaceToolTabs(current => current.filter(tab => tab.projectPath !== projectPath));
-    setProjectOperations(current => {
-      const next = { ...current };
-      delete next[projectPath];
-      return next;
-    });
-    if (selectedProject?.path !== projectPath) return;
-    const nextProject = remaining[Math.min(Math.max(closingIndex, 0), remaining.length - 1)];
-    if (nextProject) openProjectTab(nextProject, projectOperations[nextProject.path] ?? null);
-    else showHomeTab();
+    const remaining = projectPages.filter(candidate => candidate.id !== pageId);
+    const closingIndex = projectPages.findIndex(candidate => candidate.id === pageId);
+    disposePageOwnedUi([pageId]);
+    closePage(pageId);
+    if (activePageId !== pageId) return;
+    const nextPage = remaining[Math.min(Math.max(closingIndex, 0), remaining.length - 1)];
+    if (nextPage?.project) {
+      activatePage(nextPage.id); setActiveTab('project');
+      setSelectedProject(nextPage.project); setProjectDestination(nextPage.project.path);
+    } else if (nextPage?.kind === 'inspiration') {
+      activatePage(nextPage.id);
+      setSelectedProject(null);
+      setProjectDestination(null);
+      setActiveTab('inspiration');
+    } else showHomeTab();
+  };
+  const closeAllPagesForProject = (project: WorkspaceProject) => {
+    const closingPageIds = projectPages.filter(page => page.projectId === project.id).map(page => page.id); const activeBelongsToProject = projectPages.some(page => page.id === activePageId && page.projectId === project.id); const remaining = projectPages.filter(page => page.projectId !== project.id);
+    disposePageOwnedUi(closingPageIds);
+    closeProject(project.id);
+    if (!activeBelongsToProject) return;
+    const nextPage = remaining[0];
+    const nextActivation = browserPageActivation(nextPage);
+    if (nextPage) activatePage(nextPage.id);
+    setSelectedProject(nextActivation.selectedProject);
+    setProjectDestination(nextActivation.projectDestination);
+    setActiveTab(nextActivation.activeTab);
   };
   const handleHomeImportComplete = async (projectNames: string[] = []) => {
     if (!config) return;
@@ -870,7 +919,7 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden bg-slate-50 text-slate-900 font-sans selection:bg-blue-500/30">
-      {undoNotice && <div className="fixed left-1/2 top-10 z-[400] flex -translate-x-1/2 items-center gap-3 rounded-lg bg-slate-900 px-4 py-2.5 text-sm font-bold text-white shadow-xl animate-in fade-in slide-in-from-top-2"><span>{undoNotice}</span><button onClick={() => setUndoNotice('')} aria-label="关闭提示" className="rounded p-0.5 text-slate-300 hover:bg-white/15 hover:text-white"><X size={15}/></button></div>}
+      {topToastStack}
 
       {updateInfo && (
         <UpdateModal
@@ -897,28 +946,28 @@ const App: React.FC = () => {
             <button type="button" {...titlebarTabDragProps('home')} data-active-tab={activeTab === 'home'} onClick={showHomeTab} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[92px] max-w-[180px] items-center gap-2 rounded-t-lg border px-3 text-xs font-medium transition ${activeTab === 'home' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
               <Home size={14} className="shrink-0"/><span className="truncate">主页</span>
             </button>
-            {inspirationTabOpen && <div {...titlebarTabDragProps('inspiration')} data-active-tab={activeTab === 'inspiration'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[112px] max-w-[190px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'inspiration' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={openInspirationTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Lightbulb size={14} className="shrink-0"/><span className="truncate">灵感库</span></button>{config.pinInspirationLibrary ? <span aria-label="灵感库已固定" title="灵感库已固定" className="mr-2 text-blue-500"><Pin size={12}/></span> : <button type="button" data-tab-drag-ignore="true" aria-label="关闭灵感库" title="关闭灵感库" onClick={closeInspirationTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>}</div>}
-            {openProjects.map(project => <React.Fragment key={project.path}>
-              <div {...titlebarTabDragProps(projectTabId(project.path))} title={project.name} data-active-tab={selectedProject?.path === project.path && activeTab === 'project'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[120px] max-w-[220px] items-center rounded-t-lg border text-xs font-medium transition ${selectedProject?.path === project.path && activeTab === 'project' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
-                <button type="button" onClick={() => openProjectTab(project, projectOperations[project.path] ?? null)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Folder size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{project.name}</span></button>
-                <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${project.name}`} title={`关闭 ${project.name}`} onClick={() => void closeProjectTab(project.path)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
+            {projectPages.filter(page => page.kind === 'inspiration').map(page => { const folderName = page.currentRelativePath.split('/').filter(Boolean).pop(); const label = page.currentRelativePath ? `灵感库 · ${folderName || page.currentRelativePath}` : '灵感库'; const pinnedRoot = config.pinInspirationLibrary && page.currentRelativePath === ''; const isActive = activePageId === page.id && activeTab === 'inspiration'; return <div key={page.id} {...titlebarTabDragProps(inspirationTabId(page.id))} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[112px] max-w-[210px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={() => { activatePage(page.id); setSelectedProject(null); setActiveTab('inspiration'); }} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Lightbulb size={14} className="shrink-0"/><span className="truncate">{label}</span></button>{pinnedRoot ? <span aria-label="灵感库已固定" title="灵感库已固定" className="mr-2 text-blue-500"><Pin size={12}/></span> : <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${label}`} title={`关闭 ${label}`} onClick={() => closeInspirationTab(page.id)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>}</div>; })}
+            {projectPages.filter(page => page.project).map(page => { const project = page.project!; const folderName = page.currentRelativePath.split('/').filter(Boolean).pop(); const label = page.initialRelativePath ? `${project.name} · ${folderName || page.initialRelativePath}` : project.name; return <React.Fragment key={page.id}>
+              <div {...titlebarTabDragProps(projectTabId(page.id))} title={label} data-active-tab={activePageId === page.id && activeTab === 'project'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[120px] max-w-[220px] items-center rounded-t-lg border text-xs font-medium transition ${activePageId === page.id && activeTab === 'project' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
+                <button type="button" onClick={() => activateProjectPage(page.id)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Folder size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{label}</span></button>
+                <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${label}`} title={`关闭 ${label}`} onClick={() => void closeProjectTab(page.id)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
               </div>
-              {workspaceToolTabs.filter(tab => tab.projectPath === project.path).map(tab => {
+              {workspaceToolTabs.filter(tab => tab.ownerPageId === page.id).map(tab => {
                 const tabType = tab.kind === 'version' ? 'project-version' : 'project-team';
-                const isActive = selectedProject?.path === project.path && activeTab === tabType;
+                const isActive = activePageId === tab.ownerPageId && activeTab === tabType;
                 const Icon = tab.kind === 'version' ? GitBranch : UsersRound;
-                return <div key={`${project.path}:${tab.kind}`} {...titlebarTabDragProps(workspaceToolTabId(project.path, tab.kind))} title={tab.label} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[128px] max-w-[230px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
-                  <button type="button" onClick={() => activateWorkspaceToolTab(project, tab.kind)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Icon size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{tab.label}</span>{tab.kind === 'team' && tab.busy && <span aria-label="任务运行中" title="任务运行中" className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-violet-500"/>}</button>
-                  <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${tab.label}`} title={`关闭 ${tab.label}`} onClick={() => void closeWorkspaceToolTab(project.path, tab.kind)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
+                return <div key={`${tab.ownerPageId}:${tab.kind}`} {...titlebarTabDragProps(workspaceToolTabId(tab.ownerPageId, tab.kind))} title={tab.label} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[128px] max-w-[230px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
+                  <button type="button" onClick={() => activateWorkspaceToolTab(tab, project)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Icon size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{tab.label}</span>{tab.kind === 'team' && tab.busy && <span aria-label="任务运行中" title="任务运行中" className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-violet-500"/>}</button>
+                  <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${tab.label}`} title={`关闭 ${tab.label}`} onClick={() => void closeWorkspaceToolTab(tab.ownerPageId, tab.kind)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
                 </div>;
               })}
-            </React.Fragment>)}
+            </React.Fragment>; })}
             {settingsTabOpen && <div {...titlebarTabDragProps('settings')} data-active-tab={activeTab === 'settings'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[108px] max-w-[180px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'settings' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={openSettingsTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Settings size={14} className="shrink-0"/><span className="truncate">设置</span></button><button type="button" data-tab-drag-ignore="true" aria-label="关闭设置" title="关闭设置" onClick={closeSettingsTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}
           </div>
           {titlebarTabScroll.overflow && <button type="button" aria-label="向右滚动标签" title="向右滚动标签" disabled={!titlebarTabScroll.canScrollRight} onClick={() => scrollTitlebarTabs(1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronRight size={15}/></button>}
           <div aria-label="拖动窗口" className="app-window-drag-region min-w-8 flex-1"/>
         </div>
-        <BackgroundTaskIndicator/>
+        <BackgroundTaskIndicator ownerPageIds={openPageIds}/>
         <WindowControls/>
       </header>
 
@@ -926,7 +975,7 @@ const App: React.FC = () => {
       {/* Sidebar */}
       <aside style={{ width: sidebarCollapsed ? 0 : renderedSidebarWidth }} className="relative z-30 flex min-w-0 shrink-0 flex-col overflow-hidden bg-white transition-[width] duration-200">
         {activeTab === 'settings' && <SettingsNavigator activeSection={settingsSection} components={components} onSelect={section => { setSettingsSection(section); if (section === 'backup' || section === 'storage') setBackupProjectFocus(null); }}/>}
-        {inspirationTabOpen && <div className={activeTab === 'inspiration' ? 'contents' : 'hidden'}><InspirationLibraryNavigator active={activeTab === 'inspiration'} rootPath={config.inspirationLibrary.rootPath} targetWorkspacePath={config.workspacePath} currentRelativePath={inspirationRelativePath} onNavigate={navigateInspiration} onOpenSettings={openSettingsTab} onNotice={showNotice}/></div>}
+        {projectPages.some(page => page.kind === 'inspiration') && <div className={activeTab === 'inspiration' ? 'contents' : 'hidden'}><InspirationLibraryNavigator active={activeTab === 'inspiration'} rootPath={config.inspirationLibrary.rootPath} targetWorkspacePath={config.workspacePath} currentRelativePath={projectPages.find(page => page.id === activePageId && page.kind === 'inspiration')?.currentRelativePath || ''} onNavigate={navigateInspiration} onOpenSettings={openSettingsTab} onNotice={showNotice}/></div>}
         {activeTab !== 'settings' && activeTab !== 'inspiration' && <><ProjectNavigator
           workspacePath={config.workspacePath}
           workspacePaths={config.workspacePaths}
@@ -937,9 +986,9 @@ const App: React.FC = () => {
           customProjectCategories={config.customProjectCategories}
           projectCategoryOrder={config.projectCategoryOrder}
           selectedProject={selectedProject}
-          onSelectProject={(project, replacePath) => openProjectTab(project, null, replacePath)}
+          onSelectProject={(project, replacePath) => selectSidebarProjectPage(project, replacePath)}
           onProjectAction={handleProjectAction}
-          onProjectDeleted={project => void closeProjectTab(project.path, true)}
+          onProjectDeleted={closeAllPagesForProject}
           onWorkspacesResolved={workspacePaths => { if (workspacePaths.length) handleConfigUpdate({ ...config, workspacePath: workspacePaths[0], workspacePaths }); }}
           onOpenBackup={openBackupSettings}
 
@@ -980,12 +1029,13 @@ const App: React.FC = () => {
                 </div>;
           return <div key={card} className={draggedHomeCard === card ? 'opacity-40' : undefined}>{content}</div>;
         })}</div>
-        {inspirationTabOpen && <div className={activeTab === 'inspiration' ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage active={activeTab === 'inspiration'} navigationRequest={inspirationNavigationRequest} config={config} components={components} componentsLoading={componentsLoading} onUpdateConfig={handleConfigUpdate} onDirectoryChange={setInspirationRelativePath} onNotice={showNotice}/></div>}
+        {projectPages.filter(page => page.kind === 'inspiration').map(page => { const active = activeTab === 'inspiration' && activePageId === page.id; return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage pageId={page.id} active={active} initialRelativePath={page.initialRelativePath} config={config} components={components} componentsLoading={componentsLoading} onUpdateConfig={handleConfigUpdate} onDirectoryChange={(pageId, relativePath) => updatePagePath(pageId, relativePath)} onNotice={showNotice}/></div>; })}
         {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} backupProjectFocus={backupProjectFocus} onClearBackupProjectFocus={() => setBackupProjectFocus(null)} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={refreshComponents} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} getDefaultSettings={getDefaultSettings} onNotice={showNotice}/>}
-        {openProjects.map(project => {
-          const active = activeTab.startsWith('project') && selectedProject?.path === project.path;
+        {projectPages.filter(page => page.project).map(page => { const project = page.project!;
+          const active = activeTab.startsWith('project') && activePageId === page.id;
           const activeView = activeTab === 'project-version' ? 'version' : activeTab === 'project-team' ? 'team' : 'project';
-          return <div key={project.path} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace
+          return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace
+            pageId={page.id}
             active={active}
             activeView={activeView}
             project={project}
@@ -998,7 +1048,9 @@ const App: React.FC = () => {
             projectToolbar={config.projectToolbar}
             customProjectCategories={config.customProjectCategories}
             projectCategoryOrder={config.projectCategoryOrder}
-            initialPanel={projectOperations[project.path] ?? null}
+            initialPanel={page.operation}
+            initialRelativePath={page.initialRelativePath}
+            onDirectoryChange={(pageId, relativePath) => updatePagePath(pageId, relativePath)}
             importConfig={config.smartImport}
             importDefaults={config.importDefaults}
             brollConfig={config.brollImport}
@@ -1009,29 +1061,24 @@ const App: React.FC = () => {
             itemOpenMode={config.itemOpenMode}
             favoriteDisplayMode={config.favoriteDisplayMode}
             onOpenInspirationPath={navigateInspiration}
-            onOpenToolTab={(kind, label) => openWorkspaceToolTab(project, kind, label)}
-            onCloseToolTab={kind => void closeWorkspaceToolTab(project.path, kind)}
-            onToolTabBusyChange={(kind, busy) => updateWorkspaceToolTabBusy(project.path, kind, busy)}
+            onOpenDirectoryPage={relativePath => openProjectDirectoryPage(project, relativePath)}
+            onOpenToolTab={(pageId, kind, label) => openWorkspaceToolTab(pageId, project, kind, label)}
+            onCloseToolTab={(pageId, kind) => void closeWorkspaceToolTab(pageId, kind)}
+            onToolTabBusyChange={(pageId, kind, busy) => updateWorkspaceToolTabBusy(pageId, kind, busy)}
             onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })}
             onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })}
             onResearchConfigChange={(research: AppConfig['research']) => handleConfigUpdate({ ...config, research })}
             onNotice={showNotice}
             onProjectMoved={nextProject => {
               nextProject = { ...nextProject, workspacePath: project.workspacePath || config.workspacePath };
-              setOpenProjects(current => current.map(item => item.path === project.path ? nextProject : item));
-              setWorkspaceToolTabs(current => current.map(tab => tab.projectPath === project.path ? { ...tab, projectPath: nextProject.path, label: tab.kind === 'team' ? `团片 · ${nextProject.name}` : tab.label } : tab));
-              setProjectOperations(current => {
-                if (nextProject.path === project.path) return current;
-                const next = { ...current, [nextProject.path]: current[project.path] ?? null };
-                delete next[project.path];
-                return next;
-              });
+              updateProject(nextProject);
+              setWorkspaceToolTabs(current => current.map(tab => tab.projectId === project.id ? { ...tab, projectPath: nextProject.path, label: tab.kind === 'team' ? `团片 · ${nextProject.name}` : tab.label } : tab));
               setSelectedProject(nextProject);
               setProjectDestination(nextProject.path);
               window.dispatchEvent(new Event('workspace-projects-changed'));
             }}
             onDeleted={() => {
-              void closeProjectTab(project.path, true);
+              closeAllPagesForProject(project);
               window.dispatchEvent(new Event('workspace-projects-changed'));
             }}
           /></div>;

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronRight, Folder, FolderInput, FolderOpen, FolderPlus, HardDrive, Loader2, X } from 'lucide-react';
 import { normalizeProjectCategoryOrder, normalizeWorkspacePaths, projectStatusLabel } from '../types';
@@ -117,6 +117,12 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   const { backgroundTasks } = useTaskCenter();
   const [groups, setGroups] = useState<WorkspaceStatusGroup[]>([]);
   const configuredWorkspacePaths = useMemo(() => normalizeWorkspacePaths(workspacePath, workspacePaths), [workspacePath, workspacePaths]);
+  const configuredWorkspacePathsRef = useRef(configuredWorkspacePaths);
+  configuredWorkspacePathsRef.current = configuredWorkspacePaths;
+  const refreshInFlightRef = useRef<Promise<void> | null>(null);
+  const refreshQueuedRef = useRef(false);
+  const refreshGenerationRef = useRef(0);
+  const mountedRef = useRef(true);
   const statuses = useMemo<ProjectStatus[]>(() => {
     const ordered = ['未分类', ...normalizeProjectCategoryOrder(projectCategoryOrder, customProjectCategories), ...groups.map(group => group.status)];
     const seen = new Set<string>();
@@ -277,13 +283,26 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   const formattedDate = year.trim() && month.trim() ? `${String(year).trim().slice(-2)}-${Number(month)}${day.trim() ? `-${Number(day)}` : ''}` : '';
   const nextProjectDisplayName = [formattedDate, name.trim()].filter(Boolean).join(' ');
 
-  const refresh = async () => {
-    if (!configuredWorkspacePaths.length) {
+  const refreshOnce = async () => {
+    const requestedWorkspacePaths = configuredWorkspacePathsRef.current;
+    const requestKey = requestedWorkspacePaths.join('\0').toLocaleLowerCase();
+    const generation = ++refreshGenerationRef.current;
+    if (!requestedWorkspacePaths.length) {
       setGroups([]);
       setError('');
       return;
     }
-    const results = await Promise.all(configuredWorkspacePaths.map(async requestedPath => ({ requestedPath, result: await window.electronAPI.getWorkspaceProjects(requestedPath) })));
+    let results: Array<{ requestedPath: string; result: Awaited<ReturnType<typeof window.electronAPI.getWorkspaceProjects>> }>;
+    try {
+      results = await Promise.all(requestedWorkspacePaths.map(async requestedPath => ({ requestedPath, result: await window.electronAPI.getWorkspaceProjects(requestedPath) })));
+    } catch (refreshError) {
+      if (mountedRef.current && generation === refreshGenerationRef.current) {
+        setError(refreshError instanceof Error ? refreshError.message : '无法刷新项目目录');
+      }
+      return;
+    }
+    if (!mountedRef.current || generation !== refreshGenerationRef.current
+        || requestKey !== configuredWorkspacePathsRef.current.join('\0').toLocaleLowerCase()) return;
     const merged = new Map<ProjectStatus, WorkspaceProject[]>();
     for (const { requestedPath, result } of results) {
       if (!result.success) continue;
@@ -295,11 +314,37 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       }
     }
     setGroups([...merged].map(([status, projects]) => ({ status, projects })));
-    const resolvedWorkspacePaths = normalizeWorkspacePaths(results[0]?.result.root || configuredWorkspacePaths[0], results.map(({ requestedPath, result }) => result.success && result.root ? result.root : requestedPath));
-    if (resolvedWorkspacePaths.join('\0').toLocaleLowerCase() !== configuredWorkspacePaths.join('\0').toLocaleLowerCase()) onWorkspacesResolved(resolvedWorkspacePaths);
+    const resolvedWorkspacePaths = normalizeWorkspacePaths(results[0]?.result.root || requestedWorkspacePaths[0], results.map(({ requestedPath, result }) => result.success && result.root ? result.root : requestedPath));
+    if (resolvedWorkspacePaths.join('\0').toLocaleLowerCase() !== requestKey) onWorkspacesResolved(resolvedWorkspacePaths);
     const failures = results.filter(({ result }) => !result.success);
     setError(failures.length ? `${failures.length} 个工作目录暂时无法读取，其余项目仍可使用` : '');
   };
+
+  const refresh = async () => {
+    if (refreshInFlightRef.current) {
+      refreshQueuedRef.current = true;
+      return refreshInFlightRef.current;
+    }
+    const operation = (async () => {
+      do {
+        refreshQueuedRef.current = false;
+        await refreshOnce();
+      } while (refreshQueuedRef.current && mountedRef.current);
+    })().finally(() => {
+      refreshInFlightRef.current = null;
+    });
+    refreshInFlightRef.current = operation;
+    return operation;
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      refreshQueuedRef.current = false;
+      refreshGenerationRef.current += 1;
+    };
+  }, []);
 
   useEffect(() => { void refresh(); }, [configuredWorkspacePaths]);
   useEffect(() => {
@@ -382,7 +427,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
         setNewProjectError(result.error || '重命名失败');
         return;
       }
-      if (selectedProject?.path === renameProject.path) onSelectProject({ ...result.project, workspacePath: projectWorkspacePath }, renameProject.path);
+      onSelectProject({ ...result.project, workspacePath: projectWorkspacePath }, renameProject.path);
       closeProjectEditor();
       refresh();
     } catch (renameError) {
@@ -421,7 +466,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     }
     const result = await window.electronAPI.moveWorkspaceProject(projectWorkspacePath, project.status, project.name, status);
     if (!result.success) setError(result.error || '更改状态失败');
-    else if (result.project && selectedProject?.path === project.path) onSelectProject({ ...result.project, workspacePath: projectWorkspacePath }, project.path);
+    else if (result.project) onSelectProject({ ...result.project, workspacePath: projectWorkspacePath }, project.path);
     setExpanded(current => ({ ...current, [status]: true }));
     refresh();
   };

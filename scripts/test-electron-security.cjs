@@ -9,6 +9,11 @@ const {
   normalizeExternalUrl,
   validateRendererPythonInvocation,
 } = require('../electron/security-policy.cjs');
+const {
+  normalizeProjectFileListFilter,
+  projectFileListEntryMatchesFilter,
+  projectFileListSessionMatches,
+} = require('../electron/modules/workspace-ipc.cjs');
 
 const root = path.resolve(__dirname, '..');
 const rendererFile = path.join(root, 'dist', 'index.html');
@@ -38,6 +43,22 @@ assert.strictEqual(normalizeExternalUrl('file:///C:/Windows/System32/calc.exe'),
 assert.strictEqual(normalizeExternalUrl('https://evil.example/download'), null);
 assert.strictEqual(normalizeExternalUrl('https://github.com@example.test/download'), null);
 
+const normalizedFileListFilter = normalizeProjectFileListFilter({ query: '  Wedding   FILM  ', kinds: ['video', 'VIDEO', 'invalid'], extensions: ['MOV', '.mov'] });
+assert.deepStrictEqual(normalizedFileListFilter.kinds, ['video']);
+assert.deepStrictEqual(normalizedFileListFilter.extensions, ['.mov']);
+assert.strictEqual(normalizedFileListFilter.query, 'wedding film');
+assert.strictEqual(normalizeProjectFileListFilter({ query: `  ${'A'.repeat(220)}  ` }).query.length, 160, 'file-list queries must have a bounded normalized length');
+assert(projectFileListEntryMatchesFilter('Our Wedding Film.mov', 'video', '.mov', normalizedFileListFilter), 'project-root query must keep a matching file');
+assert(!projectFileListEntryMatchesFilter('Portrait Film.mov', 'video', '.mov', normalizedFileListFilter), 'project-root query must reject a non-matching file');
+const emptyQueryFilter = normalizeProjectFileListFilter({ query: '   ', kinds: ['video'] });
+assert(projectFileListEntryMatchesFilter('Any Name.mov', 'video', '.mov', emptyQueryFilter), 'an empty query must preserve whole-scope listing behavior');
+const fileListSession = { root: 'C:\\workspace\\project', scope: 'C:\\workspace\\project', filterSignature: normalizedFileListFilter.signature };
+assert(projectFileListSessionMatches(fileListSession, fileListSession.root, fileListSession.scope, normalizedFileListFilter));
+assert(!projectFileListSessionMatches(fileListSession, 'D:\\workspace\\project', fileListSession.scope, normalizedFileListFilter), 'cursor must be bound to its project root');
+assert(!projectFileListSessionMatches(fileListSession, fileListSession.root, `${fileListSession.scope}\\child`, normalizedFileListFilter), 'cursor must be bound to its scope');
+assert(!projectFileListSessionMatches(fileListSession, fileListSession.root, fileListSession.scope, normalizeProjectFileListFilter({ query: 'portrait film', kinds: ['video'], extensions: ['.mov'] })), 'changing query must invalidate the cursor signature');
+assert(!projectFileListSessionMatches(fileListSession, fileListSession.root, fileListSession.scope, normalizeProjectFileListFilter({ query: 'wedding film', kinds: ['image'], extensions: ['.mov'] })), 'changing file type must invalidate the cursor signature');
+
 const registered = {};
 const rawIpcMain = {
   handle: (channel, listener) => { registered[`handle:${channel}`] = listener; },
@@ -66,6 +87,7 @@ Promise.resolve()
 
     const main = fs.readFileSync(path.join(root, 'electron', 'main.cjs'), 'utf8');
     const preload = fs.readFileSync(path.join(root, 'electron', 'preload.cjs'), 'utf8');
+    const workspaceIpc = fs.readFileSync(path.join(root, 'electron', 'modules', 'workspace-ipc.cjs'), 'utf8');
     const projectWorkspace = fs.readFileSync(path.join(root, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
     const toolViews = fs.readFileSync(path.join(root, 'src', 'features', 'tools', 'ToolViews.tsx'), 'utf8');
     const securityPolicy = fs.readFileSync(path.join(root, 'electron', 'security-policy.cjs'), 'utf8');
@@ -77,6 +99,17 @@ Promise.resolve()
     assert(securityPolicy.includes('setPermissionRequestHandler'));
     assert(main.includes('sandbox: true'));
     assert(preload.includes('getPathForFile: (file) => webUtils.getPathForFile(file)'));
+    assert(preload.includes("ipcRenderer.invoke('workspace-browse-shortcut-preview', workspacePath, status, name, relativePath)"), 'shortcut previews must accept only project identity and a project-relative shortcut path');
+    assert(preload.includes("ipcRenderer.invoke('workspace-list-files', workspacePath, status, name, scopeRelativePath, pageSize, cursor, filter)") && preload.includes("ipcRenderer.invoke('workspace-cancel-list-files', cursor)"), 'recursive file listing and cancellation must expose only the bounded main-process IPC');
+    const shortcutPreviewHandler = workspaceIpc.slice(workspaceIpc.indexOf("ipcMain.handle('workspace-browse-shortcut-preview'"), workspaceIpc.indexOf("ipcMain.handle('workspace-search-files'"));
+    assert(shortcutPreviewHandler.includes("path.extname(shortcutPath).toLowerCase() !== '.lnk'") && shortcutPreviewHandler.includes('assertInside(root') && shortcutPreviewHandler.includes('shell.readShortcutLink(target)'), 'main must validate and resolve shortcut files itself');
+    assert(!shortcutPreviewHandler.includes('children.slice(0, 12)') && shortcutPreviewHandler.includes('entries.length >= previewLimit') && shortcutPreviewHandler.includes('maximumInspectedPreviewChildren') && shortcutPreviewHandler.includes('readOnly: true') && shortcutPreviewHandler.includes('viaShortcut: true'), 'external shortcut previews must scan a bounded number of children until enough valid read-only candidates are found');
+    assert(shortcutPreviewHandler.indexOf('mediaService.grantRoot(target)') > shortcutPreviewHandler.indexOf('fs.promises.readdir(target'), 'shortcut targets must be granted only after the final directory is readable');
+    assert(!shortcutPreviewHandler.includes('targetPath =') && !preload.includes('browseProjectShortcutPreview: (target'), 'renderer must not supply an external shortcut target path');
+    const listFilesHandler = workspaceIpc.slice(workspaceIpc.indexOf("ipcMain.handle('workspace-list-files'"), workspaceIpc.indexOf("ipcMain.handle('workspace-recent-files'"));
+    assert(listFilesHandler.includes('assertInside(root') && listFilesHandler.includes('assertExistingInside(root') && listFilesHandler.includes('maximumDirectoriesPerPage = 32') && listFilesHandler.includes('maximumInspectedEntriesPerPage = 1000') && listFilesHandler.includes('Math.min(200'), 'recursive listings must validate scope and enforce per-page work limits');
+    assert(listFilesHandler.includes('projectFileListSessionMatches(session, root, scope, filter)'), 'file-list cursors must be bound to project root, scope, query, and file type filter');
+    assert(!listFilesHandler.includes('readShortcutLink') && !listFilesHandler.includes('thumbnail') && !listFilesHandler.includes('xmp'), 'plain recursive listings must not follow shortcuts or read media content');
     assert(projectWorkspace.includes('window.electronAPI.getPathForFile(file)') && toolViews.includes('window.electronAPI.getPathForFile(file)'));
     assert(!projectWorkspace.includes('File & { path?: string }') && !toolViews.includes('File & { path?: string }'));
     assert(systemIpc.includes('validateRendererPythonInvocation(scriptName, args, requestId)'));

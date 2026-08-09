@@ -267,8 +267,9 @@ export const InspirationLibraryNavigator = ({
 };
 
 export const InspirationLibraryPage = ({
+  pageId,
   active,
-  navigationRequest,
+  initialRelativePath,
   config,
   components,
   componentsLoading,
@@ -276,13 +277,14 @@ export const InspirationLibraryPage = ({
   onDirectoryChange,
   onNotice,
 }: {
+  pageId: string;
   active: boolean;
-  navigationRequest?: { path: string; id: number };
+  initialRelativePath: string;
   config: AppConfig;
   components: ComponentStatus[];
   componentsLoading: boolean;
   onUpdateConfig: (config: AppConfig) => void | boolean | Promise<void | boolean>;
-  onDirectoryChange: (relativePath: string) => void;
+  onDirectoryChange: (pageId: string, relativePath: string) => void;
   onNotice: (message: string, duration?: number) => void;
 }) => {
   const rootPath = config.inspirationLibrary.rootPath.trim();
@@ -297,11 +299,11 @@ export const InspirationLibraryPage = ({
       const nextConfig = { ...config, inspirationLibrary: { ...config.inspirationLibrary, rootPath: result.path } };
       const saved = await onUpdateConfig(nextConfig);
       if (saved === false) onNotice('保存灵感库文件夹失败，请重试。', 6000);
-      else onDirectoryChange('');
+      else onDirectoryChange(pageId, '');
     } finally {
       setChoosingRoot(false);
     }
-  }, [choosingRoot, config, onDirectoryChange, onNotice, onUpdateConfig, rootPath]);
+  }, [choosingRoot, config, onDirectoryChange, onNotice, onUpdateConfig, pageId, rootPath]);
   useEffect(() => {
     if (!active || rootPath || attemptedInitialChoiceRef.current) return;
     attemptedInitialChoiceRef.current = true;
@@ -312,6 +314,7 @@ export const InspirationLibraryPage = ({
     return <div className="flex h-full items-center justify-center p-8 text-center"><div><Folder size={42} className="mx-auto text-slate-300"/><h2 className="mt-4 text-xl font-bold text-slate-800">设置灵感库文件夹</h2><p className="mt-2 text-sm text-slate-500">首次使用灵感库，需要先选择用于收集和整理素材的文件夹。</p><button type="button" onClick={() => void chooseRoot()} disabled={choosingRoot} className="dialog-primary mt-5 disabled:opacity-50">{choosingRoot ? '正在选择…' : '选择灵感库文件夹'}</button></div></div>;
   }
   const project: WorkspaceProject = {
+    id: `inspiration:${rootPath}`,
     name: INSPIRATION_PROJECT_NAME,
     path: rootPath,
     status: '未分类',
@@ -320,11 +323,12 @@ export const InspirationLibraryPage = ({
   const installedComponentIds = new Set(components.filter(component => component.installed).map(component => component.id));
   const teamRetouchStatus = components.find(component => component.id === 'team-retouch');
   return <FileBrowserWorkspace
+    pageId={pageId}
     active={active}
     activeView="project"
     browserContext={INSPIRATION_FILE_BROWSER_CONTEXT}
-    navigationRequest={navigationRequest}
-    onDirectoryChange={onDirectoryChange}
+    initialRelativePath={initialRelativePath}
+    onDirectoryChange={relativePath => onDirectoryChange(pageId, relativePath)}
     project={project}
     workspacePath={rootPath}
     inspirationTargetWorkspacePath={config.workspacePath}

@@ -9,7 +9,7 @@ if (process.platform !== 'win32' || process.arch !== 'x64') {
 }
 
 const root = path.resolve(__dirname, '..');
-const sourceRoot = path.join(root, 'components', 'video-playback-mpv');
+const sourceRoot = path.join(root, 'extensions', 'video-playback-mpv');
 const templatePath = path.join(sourceRoot, 'component.template.json');
 const manifest = JSON.parse(fs.readFileSync(templatePath, 'utf8'));
 const argumentIndex = process.argv.indexOf('--mpv-root');
@@ -71,7 +71,7 @@ const frameworkRoots = [
 const frameworkRoot = frameworkRoots.find(candidate => fs.existsSync(path.join(candidate, 'csc.exe')));
 if (!frameworkRoot) throw new Error('找不到 Windows C# 编译器，无法构建高级视频解码桥接程序');
 
-const outputRoot = path.join(root, 'release', 'components');
+const outputRoot = path.join(root, 'artifacts', 'installers', 'components');
 const target = path.join(outputRoot, manifest.id);
 const relativeTarget = path.relative(outputRoot, target);
 if (!relativeTarget || relativeTarget.startsWith('..') || path.isAbsolute(relativeTarget)) throw new Error(`不安全的组件输出路径：${target}`);
@@ -134,7 +134,7 @@ fs.writeFileSync(path.join(target, 'build-info.json'), JSON.stringify({
   files,
 }, null, 2));
 
-const releaseRoot = path.join(root, 'release');
+const releaseRoot = path.join(root, 'artifacts', 'installers');
 const artifactName = `PhotoFlow-${manifest.id}-${manifest.version}-${process.platform}-${process.arch}.zip`;
 const artifactPath = path.join(releaseRoot, artifactName);
 for (const existingName of fs.readdirSync(releaseRoot)) {

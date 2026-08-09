@@ -4,7 +4,7 @@ const path = require('path');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
-const installer = fs.readFileSync(path.join(repositoryRoot, 'build', 'installer.nsh'), 'utf8');
+const installer = fs.readFileSync(path.join(repositoryRoot, 'packaging', 'installer.nsh'), 'utf8');
 const privacyService = fs.readFileSync(path.join(repositoryRoot, 'electron', 'privacy-service.cjs'), 'utf8');
 
 assert.strictEqual(packageJson.build.nsis.license, 'docs/legal/INSTALLER_TERMS.txt');

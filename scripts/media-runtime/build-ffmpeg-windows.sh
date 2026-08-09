@@ -3,8 +3,8 @@ set -euo pipefail
 
 # Run from an MSYS2 UCRT64 shell. The GitHub workflow installs the exact toolchain.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-work_root="${PHOTOFLOW_MEDIA_WORK_ROOT:-$repo_root/.media-runtime-build/ffmpeg}"
-output_root="${PHOTOFLOW_MEDIA_OUTPUT_ROOT:-$repo_root/release/media-runtime}"
+work_root="${PHOTOFLOW_MEDIA_WORK_ROOT:-$repo_root/.cache/media-runtime-build/ffmpeg}"
+output_root="${PHOTOFLOW_MEDIA_OUTPUT_ROOT:-$repo_root/artifacts/installers/media-runtime}"
 jobs="${NUMBER_OF_PROCESSORS:-4}"
 host_system="$(uname -s)"
 cross_flags=()
@@ -28,7 +28,7 @@ fi
 
 resolved_work_root="$(realpath -m "$work_root")"
 case "$resolved_work_root" in
-  "$repo_root"/.media-runtime-build/*) ;;
+  "$repo_root"/.cache/media-runtime-build/*) ;;
   *) echo "Refusing to clean unsafe FFmpeg work directory: $resolved_work_root" >&2; exit 1 ;;
 esac
 work_root="$resolved_work_root"

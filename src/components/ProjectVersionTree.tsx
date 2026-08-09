@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
-import { AlertTriangle, Folder } from 'lucide-react';
 import type { ReactNode } from 'react';
 import type { ProgressFolder, ProjectFileEntry } from '../types';
+import { projectVisibleVersionGraph, trackingStateLabel } from '../features/versioning/versioning-v2-model';
 
 type ProjectVersionTreeProps = {
   progressFolders: ProgressFolder[];
@@ -16,72 +16,29 @@ type ProjectVersionTreeProps = {
   onOpenMissingProgressMenu?: (folder: ProgressFolder, x: number, y: number) => void;
 };
 
-type VersionTreeItem = {
-  folder: ProgressFolder;
-  entry?: ProjectFileEntry;
-};
-
-type SourceTreeItem = {
-  entry: ProjectFileEntry;
-  sourceKind: 'image' | 'video';
-};
-
-type PositionedItem = {
-  key: string;
-  folder?: ProgressFolder;
-  entry?: ProjectFileEntry;
-  sourceKind?: 'image' | 'video';
-  x: number;
-  y: number;
-};
-
-type PositionedEdge = {
-  parent: PositionedItem;
-  child: PositionedItem;
-  kind?: 'team-workspace';
-};
+type PositionedItem = { key: string; folder?: ProgressFolder; entry: ProjectFileEntry; x: number; y: number };
+type PositionedEdge = { parent: PositionedItem; child: PositionedItem; kind: 'main' | 'auxiliary' | 'team-workspace' };
 
 const normalizePath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLocaleLowerCase('zh-CN');
 const parentPath = (value: string) => normalizePath(value).split('/').slice(0, -1).join('/');
-const versionSegments = (value: string) => value.split('_').map(segment => Number(segment) || 0);
-const compareProgressFolders = (left: ProgressFolder, right: ProgressFolder) => {
-  if (left.mediaKind !== right.mediaKind) return left.mediaKind === 'image' ? -1 : 1;
-  const leftSegments = versionSegments(left.versionKey);
-  const rightSegments = versionSegments(right.versionKey);
-  const length = Math.max(leftSegments.length, rightSegments.length);
-  for (let index = 0; index < length; index += 1) {
-    const difference = (leftSegments[index] || 0) - (rightSegments[index] || 0);
-    if (difference) return difference;
-  }
-  return left.createdAt - right.createdAt;
-};
 
-export const ProjectVersionTree = ({ progressFolders, entries, structureEntries = entries, filterActive = false, activeRelativePath, gridIconSize, projectRelativePath, renderEntry, teamRetouchParentProgressIds = [], onOpenMissingProgressMenu }: ProjectVersionTreeProps) => {
+export const ProjectVersionTree = ({ progressFolders, entries, structureEntries = entries, filterActive = false, activeRelativePath, gridIconSize, projectRelativePath, renderEntry, teamRetouchParentProgressIds = [] }: ProjectVersionTreeProps) => {
   const scopePath = normalizePath(activeRelativePath);
-  const scopedFolders = useMemo(() => progressFolders
-    .filter(folder => parentPath(projectRelativePath(folder.folderPath)) === scopePath)
-    .sort(compareProgressFolders), [progressFolders, projectRelativePath, scopePath]);
-
+  const graph = useMemo(() => projectVisibleVersionGraph(progressFolders), [progressFolders]);
   const entryByPath = useMemo(() => new Map(structureEntries.map(entry => [normalizePath(entry.relativePath), entry])), [structureEntries]);
-  const versionItems = useMemo<VersionTreeItem[]>(() => scopedFolders.map(folder => ({
-    folder,
-    entry: entryByPath.get(normalizePath(projectRelativePath(folder.folderPath))),
-  })), [entryByPath, projectRelativePath, scopedFolders]);
-  const sourceEntries = useMemo(() => structureEntries.reduce<SourceTreeItem[]>((items, entry) => {
-    if (entry.kind !== 'folder') return items;
-    const name = entry.name.toLocaleLowerCase('zh-CN');
-    if (name === 'raw' || name === 'jpg') items.push({ entry, sourceKind: 'image' });
-    if (name === 'mov') items.push({ entry, sourceKind: 'video' });
-    return items;
-  }, []), [structureEntries]);
+  const versionItems = useMemo(() => graph.folders.flatMap(folder => {
+    const relativePath = projectRelativePath(folder.folderPath);
+    const entry = entryByPath.get(normalizePath(relativePath));
+    return entry && parentPath(relativePath) === scopePath ? [{ folder, entry }] : [];
+  }), [entryByPath, graph.folders, projectRelativePath, scopePath]);
+  const visibleIds = useMemo(() => new Set(versionItems.map(item => item.folder.id)), [versionItems]);
+  const visibleEdges = useMemo(() => graph.edges.filter(edge => visibleIds.has(edge.parentId) && visibleIds.has(edge.childId)), [graph.edges, visibleIds]);
   const teamWorkspaceEntry = useMemo(() => structureEntries.find(entry => entry.kind === 'folder' && entry.name === '团片协作'), [structureEntries]);
-  const scopedProgressIds = useMemo(() => new Set(versionItems.map(item => item.folder.id)), [versionItems]);
-  const teamWorkspaceParentIds = useMemo(() => teamRetouchParentProgressIds.filter(id => scopedProgressIds.has(id)), [scopedProgressIds, teamRetouchParentProgressIds]);
+  const teamParentIds = useMemo(() => teamRetouchParentProgressIds.filter(id => visibleIds.has(id)), [teamRetouchParentProgressIds, visibleIds]);
   const trackedEntryPaths = useMemo(() => new Set([
-    ...versionItems.flatMap(item => item.entry ? [normalizePath(item.entry.relativePath)] : []),
-    ...sourceEntries.map(item => normalizePath(item.entry.relativePath)),
-    ...(teamWorkspaceEntry && teamWorkspaceParentIds.length ? [normalizePath(teamWorkspaceEntry.relativePath)] : []),
-  ]), [sourceEntries, teamWorkspaceEntry, teamWorkspaceParentIds.length, versionItems]);
+    ...versionItems.map(item => normalizePath(item.entry.relativePath)),
+    ...(teamWorkspaceEntry && teamParentIds.length ? [normalizePath(teamWorkspaceEntry.relativePath)] : []),
+  ]), [teamParentIds.length, teamWorkspaceEntry, versionItems]);
   const ordinaryEntries = useMemo(() => entries.filter(entry => !trackedEntryPaths.has(normalizePath(entry.relativePath))), [entries, trackedEntryPaths]);
 
   const nodeWidth = Math.max(80, gridIconSize);
@@ -89,132 +46,38 @@ export const ProjectVersionTree = ({ progressFolders, entries, structureEntries 
   const columnGap = Math.max(58, Math.round(nodeWidth * 0.42));
   const rowGap = 28;
   const canvasPadding = 12;
-
   const layout = useMemo(() => {
-    const byId = new Map(versionItems.map(item => [item.folder.id, item]));
-    const effectiveParent = new Map<string, string>();
+    const parentByChild = new Map(visibleEdges.map(edge => [edge.childId, edge.parentId]));
+    const depthById = new Map<string, number>();
     for (const item of versionItems) {
-      const parentId = item.folder.parentProgressId;
-      if (parentId && parentId !== item.folder.id && byId.has(parentId)) effectiveParent.set(item.folder.id, parentId);
-    }
-
-    // Older projects may start at V1 (or any other number). The earliest known
-    // root is the adoption baseline; a physical V0 folder is not required.
-    for (const mediaKind of ['image', 'video'] as const) {
-      const roots = versionItems
-        .filter(item => item.folder.mediaKind === mediaKind && !effectiveParent.has(item.folder.id))
-        .sort((left, right) => compareProgressFolders(left.folder, right.folder));
-      const baseline = roots[0];
-      if (!baseline) continue;
-      const firstLaterRoot = roots[1];
-      if (firstLaterRoot) effectiveParent.set(firstLaterRoot.folder.id, baseline.folder.id);
-    }
-
-    const childrenByParent = new Map<string, VersionTreeItem[]>();
-    for (const item of versionItems) {
-      const parentId = effectiveParent.get(item.folder.id);
-      if (!parentId) continue;
-      const children = childrenByParent.get(parentId) || [];
-      children.push(item);
-      childrenByParent.set(parentId, children);
-    }
-    childrenByParent.forEach(children => children.sort((left, right) => compareProgressFolders(left.folder, right.folder)));
-
-    const positioned: PositionedItem[] = [];
-    const visited = new Set<string>();
-    let nextLeafY = canvasPadding;
-    const primaryTeamParentId = teamWorkspaceEntry ? teamWorkspaceParentIds[0] : undefined;
-    const positionBranch = (item: VersionTreeItem, depth: number): number => {
-      if (visited.has(item.folder.id)) return nextLeafY;
-      visited.add(item.folder.id);
-      const children = (childrenByParent.get(item.folder.id) || []).filter(child => !visited.has(child.folder.id));
-      const hasTeamWorkspaceChild = item.folder.id === primaryTeamParentId;
-      let y: number;
-      if (!children.length && !hasTeamWorkspaceChild) {
-        y = nextLeafY;
-        nextLeafY += nodeHeight + rowGap;
-      } else {
-        const childYs = children.map(child => positionBranch(child, depth + 1));
-        if (hasTeamWorkspaceChild && teamWorkspaceEntry) {
-          const teamY = nextLeafY;
-          nextLeafY += nodeHeight + rowGap;
-          positioned.push({
-            key: `team-workspace:${normalizePath(teamWorkspaceEntry.relativePath)}`,
-            entry: teamWorkspaceEntry,
-            x: canvasPadding + (depth + 1) * (nodeWidth + columnGap),
-            y: teamY,
-          });
-          childYs.push(teamY);
-        }
-        y = (childYs[0] + childYs[childYs.length - 1]) / 2;
+      let cursor = item.folder.id;
+      let depth = 0;
+      const visited = new Set<string>();
+      while (parentByChild.has(cursor) && !visited.has(cursor)) {
+        visited.add(cursor);
+        cursor = parentByChild.get(cursor)!;
+        depth += 1;
       }
-      positioned.push({ key: item.folder.id, ...item, x: canvasPadding + depth * (nodeWidth + columnGap), y });
-      return y;
-    };
-
-    const roots = versionItems.filter(item => !effectiveParent.has(item.folder.id));
-    roots.forEach((item, index) => {
-      if (index && nextLeafY > canvasPadding) nextLeafY += rowGap;
-      positionBranch(item, 0);
+      depthById.set(item.folder.id, depth);
+    }
+    const sorted = [...versionItems].sort((left, right) => (depthById.get(left.folder.id) || 0) - (depthById.get(right.folder.id) || 0) || left.folder.createdAt - right.folder.createdAt || left.folder.id.localeCompare(right.folder.id));
+    const positioned: PositionedItem[] = sorted.map((item, index) => ({
+      key: item.folder.id,
+      ...item,
+      x: canvasPadding + (depthById.get(item.folder.id) || 0) * (nodeWidth + columnGap),
+      y: canvasPadding + index * (nodeHeight + rowGap),
+    }));
+    const byId = new Map(positioned.map(item => [item.folder!.id, item]));
+    const edges: PositionedEdge[] = visibleEdges.flatMap(edge => {
+      const parent = byId.get(edge.parentId);
+      const child = byId.get(edge.childId);
+      return parent && child ? [{ parent, child, kind: edge.relationKind }] : [];
     });
-    versionItems.filter(item => !visited.has(item.folder.id)).forEach(item => positionBranch(item, 0));
-
-    const positionedById = new Map(positioned.flatMap(item => item.folder ? [[item.folder.id, item] as const] : []));
-    const edges: PositionedEdge[] = positioned.flatMap(child => {
-      if (!child.folder) return [];
-      const parentId = effectiveParent.get(child.folder.id);
-      const parent = parentId ? positionedById.get(parentId) : undefined;
-      return parent ? [{ parent, child }] : [];
-    });
-    const teamNode = positioned.find(item => item.key.startsWith('team-workspace:'));
-    if (teamNode) {
-      teamWorkspaceParentIds
-        .map(id => positionedById.get(id))
-        .filter((item): item is PositionedItem => Boolean(item))
-        .forEach(parent => edges.push({ parent, child: teamNode, kind: 'team-workspace' }));
-    }
-
-    if (sourceEntries.length) {
-      const sourceColumnOffset = nodeWidth + columnGap;
-      positioned.forEach(item => { item.x += sourceColumnOffset; });
-      let unattachedY = Math.max(nextLeafY, canvasPadding);
-      let nextSourceY = canvasPadding;
-      for (const mediaKind of ['image', 'video'] as const) {
-        const sources = sourceEntries.filter(item => item.sourceKind === mediaKind);
-        if (!sources.length) continue;
-        const baseline = positioned
-          .filter(item => item.folder?.mediaKind === mediaKind && !effectiveParent.has(item.folder.id))
-          .sort((left, right) => left.folder && right.folder ? compareProgressFolders(left.folder, right.folder) : 0)[0];
-        const spacing = nodeHeight + rowGap;
-        const desiredFirstY = baseline ? baseline.y - (sources.length - 1) * spacing / 2 : unattachedY;
-        const firstY = Math.max(desiredFirstY, nextSourceY);
-        const mediaShiftY = firstY - desiredFirstY;
-        if (baseline && mediaShiftY > 0) {
-          const mediaNodes = new Set(positioned.filter(item => item.folder?.mediaKind === mediaKind));
-          edges
-            .filter(edge => edge.kind === 'team-workspace' && mediaNodes.has(edge.parent))
-            .forEach(edge => mediaNodes.add(edge.child));
-          mediaNodes.forEach(item => { item.y += mediaShiftY; });
-        }
-        sources.forEach(({ entry, sourceKind }, index) => {
-          const sourceNode: PositionedItem = {
-            key: `source:${normalizePath(entry.relativePath)}`,
-            entry,
-            sourceKind,
-            x: canvasPadding,
-            y: firstY + index * spacing,
-          };
-          positioned.push(sourceNode);
-          if (baseline) edges.push({ parent: sourceNode, child: baseline });
-        });
-        nextSourceY = firstY + sources.length * spacing;
-        if (!baseline) unattachedY += sources.length * spacing + rowGap;
-      }
-      const minimumY = Math.min(...positioned.map(item => item.y));
-      if (minimumY < canvasPadding) {
-        const shiftY = canvasPadding - minimumY;
-        positioned.forEach(item => { item.y += shiftY; });
-      }
+    if (teamWorkspaceEntry && teamParentIds.length) {
+      const teamDepth = Math.max(...teamParentIds.map(id => depthById.get(id) || 0)) + 1;
+      const team: PositionedItem = { key: `team-workspace:${normalizePath(teamWorkspaceEntry.relativePath)}`, entry: teamWorkspaceEntry, x: canvasPadding + teamDepth * (nodeWidth + columnGap), y: canvasPadding + positioned.length * (nodeHeight + rowGap) };
+      positioned.push(team);
+      teamParentIds.forEach(id => { const parent = byId.get(id); if (parent) edges.push({ parent, child: team, kind: 'team-workspace' }); });
     }
     return {
       positioned,
@@ -222,44 +85,24 @@ export const ProjectVersionTree = ({ progressFolders, entries, structureEntries 
       width: Math.max(nodeWidth, ...positioned.map(item => item.x + nodeWidth + canvasPadding)),
       height: Math.max(nodeHeight, ...positioned.map(item => item.y + nodeHeight + canvasPadding)),
     };
-  }, [columnGap, nodeHeight, nodeWidth, sourceEntries, teamWorkspaceEntry, teamWorkspaceParentIds, versionItems]);
+  }, [columnGap, nodeHeight, nodeWidth, teamParentIds, teamWorkspaceEntry, versionItems, visibleEdges]);
 
-  const hasGraphItems = versionItems.length > 0 || sourceEntries.length > 0 || Boolean(teamWorkspaceEntry && teamWorkspaceParentIds.length);
-
+  const hasGraphItems = layout.positioned.length > 0;
   return <div className="min-w-0 flex-1 pb-4">
-    {hasGraphItems && <div className="overflow-auto">
-      <div className="relative" style={{ width: layout.width, height: layout.height }}>
-        <svg aria-hidden className="pointer-events-none absolute inset-0 h-full w-full overflow-visible">
-          {layout.edges.map(({ parent, child, kind }) => {
-            const startX = parent.x + nodeWidth * 0.82;
-            const startY = parent.y + nodeWidth * 0.48;
-            const endX = child.x + nodeWidth * 0.18;
-            const endY = child.y + nodeWidth * 0.48;
-            const bend = Math.max(28, (endX - startX) * 0.5);
-            const childFolderMissing = Boolean(child.folder && (!child.entry || child.folder.folderMissing));
-            return <path key={`${parent.key}-${child.key}`} d={`M ${startX} ${startY} C ${startX + bend} ${startY}, ${endX - bend} ${endY}, ${endX} ${endY}`} fill="none" stroke={kind === 'team-workspace' ? '#8b5cf6' : childFolderMissing ? '#fca5a5' : '#94a3b8'} strokeWidth="2" strokeDasharray={kind === 'team-workspace' ? '7 5' : childFolderMissing ? '6 5' : undefined}/>;
-          })}
-        </svg>
-        {layout.positioned.map(item => <div key={item.key} className="absolute" style={{ left: item.x, top: item.y, width: nodeWidth, minHeight: nodeHeight }}>
-          {item.entry ? renderEntry(item.entry, item.folder, item.sourceKind) : item.folder ? <div tabIndex={0} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); onOpenMissingProgressMenu?.(item.folder!, event.clientX, event.clientY); }} onKeyDown={event => { if (!onOpenMissingProgressMenu || event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return; event.preventDefault(); const rect = event.currentTarget.getBoundingClientRect(); onOpenMissingProgressMenu(item.folder!, rect.left + Math.min(rect.width, 24), rect.top + Math.min(rect.height, 24)); }} title={`${item.folder.displayName} 对应的文件夹已失效；右键可管理失效记录。`} className="relative flex min-h-full flex-col items-center rounded-lg p-2 text-center text-red-500 outline-none focus-visible:ring-2 focus-visible:ring-red-300">
-            <span className="absolute right-2 top-2 z-10 rounded-full bg-red-50 px-2 py-1 font-mono text-[10px] font-bold">V{item.folder.versionKey}</span>
-            <span className="relative flex aspect-square w-full items-center justify-center"><Folder size={Math.max(46, nodeWidth * 0.48)} strokeWidth={1.4} fill="currentColor" className="text-red-300"/><AlertTriangle size={18} className="absolute text-red-600"/></span>
-            <span className="mt-2 w-full truncate text-xs font-medium">{item.folder.displayName}</span>
-            <span className="mt-0.5 text-[10px] font-bold">文件夹失效 · 记录已保留</span>
-          </div> : null}
-        </div>)}
-      </div>
-    </div>}
-
-    {ordinaryEntries.length > 0 && <section className={hasGraphItems ? 'mt-5 border-t border-slate-200 pt-4' : undefined}>
-      {hasGraphItems && <p className="mb-2 px-1 text-xs font-medium text-slate-400">其他</p>}
-      <div className="grid w-full content-start gap-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${gridIconSize}px), 1fr))` }}>
-        {ordinaryEntries.map(entry => <div key={`${entry.relativePath}|${entry.path}`} className="min-w-0">{renderEntry(entry)}</div>)}
-      </div>
-    </section>}
-
-    {filterActive && hasGraphItems && !ordinaryEntries.length && <p className="mt-5 border-t border-slate-200 py-6 text-center text-xs text-slate-400">版本关系节点已保留；没有其他文件符合当前搜索或筛选条件。</p>}
-
+    {graph.cycleNodeIds.length > 0 && <div role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">版本关系需要修复：{graph.cycleNodeIds.join('、')}</div>}
+    {hasGraphItems && <div className="overflow-auto"><div className="relative" style={{ width: layout.width, height: layout.height }}>
+      <svg aria-hidden className="pointer-events-none absolute inset-0 h-full w-full overflow-visible">{layout.edges.map(({ parent, child, kind }) => {
+        const startX = parent.x + nodeWidth * 0.82;
+        const startY = parent.y + nodeWidth * 0.48;
+        const endX = child.x + nodeWidth * 0.18;
+        const endY = child.y + nodeWidth * 0.48;
+        const bend = Math.max(28, (endX - startX) * 0.5);
+        return <path key={`${parent.key}-${child.key}`} data-relation-kind={kind} d={`M ${startX} ${startY} C ${startX + bend} ${startY}, ${endX - bend} ${endY}, ${endX} ${endY}`} fill="none" stroke={kind === 'team-workspace' ? '#8b5cf6' : kind === 'auxiliary' ? '#8b5cf6' : '#94a3b8'} strokeWidth="2" strokeDasharray={kind === 'auxiliary' || kind === 'team-workspace' ? '7 5' : undefined}/>;
+      })}</svg>
+      {layout.positioned.map(item => <div key={item.key} className="absolute" data-node-role={item.folder?.nodeRole} data-tracking-label={item.folder ? trackingStateLabel(item.folder) : undefined} style={{ left: item.x, top: item.y, width: nodeWidth, minHeight: nodeHeight }}>{renderEntry(item.entry, item.folder)}</div>)}
+    </div></div>}
+    {ordinaryEntries.length > 0 && <section className={hasGraphItems ? 'mt-5 border-t border-slate-200 pt-4' : undefined}>{hasGraphItems && <p className="mb-2 px-1 text-xs font-medium text-slate-400">其他</p>}<div className="grid w-full content-start gap-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${gridIconSize}px), 1fr))` }}>{ordinaryEntries.map(entry => <div key={`${entry.relativePath}|${entry.path}`} className="min-w-0">{renderEntry(entry)}</div>)}</div></section>}
+    {filterActive && hasGraphItems && !ordinaryEntries.length && <p className="mt-5 border-t border-slate-200 py-6 text-center text-xs text-slate-400">没有其他文件符合当前搜索或筛选条件。</p>}
     {!hasGraphItems && !ordinaryEntries.length && <p className="border-y border-slate-200 py-12 text-center text-sm text-slate-400">当前文件夹为空。</p>}
   </div>;
 };

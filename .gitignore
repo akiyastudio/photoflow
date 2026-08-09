@@ -8,7 +8,6 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-dist
 dist-ssr
 *.local
 
@@ -24,8 +23,6 @@ dist-ssr
 *.sw?
 
 # Python 编译和打包生成的文件夹
-python/build/
-python/dist/
 python/*.egg-info/
 __pycache__/
 *.pyc
@@ -35,24 +32,17 @@ venv/
 .venv/
 env/
 
-# Local model-lab runtimes, downloaded checkpoints, caches, and benchmark output
-.model-lab/
+# Local build tools, downloaded models, compiler caches, and stale cleanup remnants
+/.cache/
 
 # Electron 和 前端构建文件 (常规建议一起加上)
 node_modules/
-dist/
-build/
-!/build/
-/build/*
-!/build/installer.nsh
-release/
+/artifacts/
 out/
 electron/bin/
 media-runtime/vendor/
-.media-runtime-build/
-/.tools/
-/components/video-playback-mpv/runtime/
-/components/video-playback-mpv/vendor/
+/extensions/video-playback-mpv/runtime/
+/extensions/video-playback-mpv/vendor/
 
 # 系统文件
 .DS_Store

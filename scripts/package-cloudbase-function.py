@@ -6,8 +6,8 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
-SOURCE_ROOT = REPOSITORY_ROOT / "cloudbase" / "telemetry-function"
-OUTPUT_PATH = REPOSITORY_ROOT / "output" / "photoflow-cloud-function-dashboard-cloudbase.zip"
+SOURCE_ROOT = REPOSITORY_ROOT / "services" / "cloudbase" / "telemetry-function"
+OUTPUT_PATH = REPOSITORY_ROOT / "artifacts" / "cloudbase" / "photoflow-cloud-function-dashboard-cloudbase.zip"
 FILES = (
     "index.js",
     "package.json",

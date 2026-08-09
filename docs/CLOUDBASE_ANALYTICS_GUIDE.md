@@ -1,7 +1,7 @@
 # PhotoFlow 接入腾讯云 CloudBase：统计、更新与崩溃上报
 
 这份说明对应当前仓库中的 Electron 客户端和
-`cloudbase/telemetry-function` HTTP 云函数。安装包放在你自己的网盘，
+`services/cloudbase/telemetry-function` HTTP 云函数。安装包放在你自己的网盘，
 云函数只负责统计、崩溃报告和返回网盘下载链接。完成后可得到：
 
 - 激活量：首次同意统计并启动软件的匿名安装数
@@ -112,7 +112,7 @@ $bytes = New-Object byte[] 32
 可以直接上传的 ZIP 已生成在：
 
 ```text
-output/photoflow-cloud-function-dashboard-cloudbase.zip
+artifacts/cloudbase/photoflow-cloud-function-dashboard-cloudbase.zip
 ```
 
 控制台操作：
@@ -123,7 +123,7 @@ output/photoflow-cloud-function-dashboard-cloudbase.zip
 4. 函数名称填写 `photoflow-api`。
 5. 运行时选择 `Node.js 20`；如果没有则选择 `Node.js 18`。
 6. 部署方式选择「本地上传」或「上传 ZIP」。
-7. 上传 `output/photoflow-cloud-function-dashboard-cloudbase.zip`。
+7. 上传 `artifacts/cloudbase/photoflow-cloud-function-dashboard-cloudbase.zip`。
 8. 端口使用 HTTP 云函数固定端口 `9000`。
 9. 内存选择 `256 MB` 或 `512 MB`，超时设为 `10 秒`。
 10. 添加上一节的三个环境变量。

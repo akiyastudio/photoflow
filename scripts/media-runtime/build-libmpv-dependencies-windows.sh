@@ -4,12 +4,12 @@ set -euo pipefail
 # Builds the complete, pinned LGPL-compatible dependency prefix used by
 # build-libmpv-lgpl-windows.sh. Run from an MSYS2 UCRT64 shell.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-work_root="${PHOTOFLOW_MPV_DEPENDENCY_ROOT:-$repo_root/.media-runtime-build/mpv-dependencies}"
+work_root="${PHOTOFLOW_MPV_DEPENDENCY_ROOT:-$repo_root/.cache/media-runtime-build/mpv-dependencies}"
 jobs="${NUMBER_OF_PROCESSORS:-4}"
 
 work_root="$(realpath -m "$work_root")"
 case "$work_root" in
-  "$repo_root"/.media-runtime-build/*) ;;
+  "$repo_root"/.cache/media-runtime-build/*) ;;
   *) echo "Refusing to clean unsafe dependency directory: $work_root" >&2; exit 1 ;;
 esac
 

@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { pipeline } = require('stream/promises');
 
 const CANCELLED_CODE = 'EOPCANCELLED';
+const SOURCE_CLEANUP_INCOMPLETE_CODE = 'ESOURCECLEANUP';
 const DEFAULT_SMALL_FILE_THRESHOLD = 2 * 1024 * 1024;
 const DEFAULT_SMALL_FILE_CONCURRENCY = 8;
 const WINDOWS_TRANSIENT_FILE_ERRORS = new Set(['EACCES', 'EBUSY', 'EPERM']);
@@ -185,7 +186,7 @@ const copyFileAtomic = async (source, destination, options = {}) => {
 };
 
 const collectCopyPlan = async (source, destination, plan, options = {}) => {
-  const { isCancelled = () => false } = options;
+  const { isCancelled = () => false, onDiscovered = () => undefined } = options;
   const identityFromStat = stat => ({
     device: stat.dev.toString(),
     inode: stat.ino.toString(),
@@ -204,12 +205,14 @@ const collectCopyPlan = async (source, destination, plan, options = {}) => {
         const stat = await fs.promises.lstat(entrySource).catch(error => { throw attachTransferContext(error, 'inspect-source', entrySource, entryDestination); });
         const childDirectory = { kind: 'directory', source: entrySource, destination: entryDestination, size: 0, sourceIdentity: identityFromStat(stat), children: [] };
         plan.push(childDirectory);
+        onDiscovered(childDirectory, plan.length);
         await visitDirectory(entrySource, entryDestination, childDirectory);
         continue;
       }
       if (!entry.isFile()) throw new Error(`不支持复制此文件类型：${entry.name}`);
       const stat = await fs.promises.lstat(entrySource).catch(error => { throw attachTransferContext(error, 'inspect-source', entrySource, entryDestination); });
       plan.push({ kind: 'file', source: entrySource, destination: entryDestination, size: stat.size, mode: stat.mode, atime: stat.atime, mtime: stat.mtime, sourceIdentity: identityFromStat(stat) });
+      onDiscovered(plan[plan.length - 1], plan.length);
     }
   };
 
@@ -218,11 +221,13 @@ const collectCopyPlan = async (source, destination, plan, options = {}) => {
   if (stat.isDirectory()) {
     const rootDirectory = { kind: 'directory', source, destination, size: 0, sourceIdentity: identityFromStat(stat), children: [] };
     plan.push(rootDirectory);
+    onDiscovered(rootDirectory, plan.length);
     await visitDirectory(source, destination, rootDirectory);
     return plan;
   }
   if (!stat.isFile()) throw new Error(`不支持复制此文件类型：${path.basename(source)}`);
   plan.push({ kind: 'file', source, destination, size: stat.size, mode: stat.mode, atime: stat.atime, mtime: stat.mtime, sourceIdentity: identityFromStat(stat) });
+  onDiscovered(plan[plan.length - 1], plan.length);
   return plan;
 };
 
@@ -246,13 +251,14 @@ const assertCopyPlanSourcesUnchanged = async plan => {
   }
 };
 
-const removeCopiedSources = async plan => {
+const removeCopiedSources = async (plan, options = {}) => {
+  const removeFile = options.removeFile || fs.promises.rm.bind(fs.promises);
   await assertCopyPlanSourcesUnchanged(plan);
   const files = plan.filter(entry => entry.kind === 'file');
   const directories = plan.filter(entry => entry.kind === 'directory').sort((left, right) => right.source.length - left.source.length);
   for (const entry of files) {
     await assertCopyPlanSourcesUnchanged([entry]);
-    await fs.promises.rm(entry.source, { force: false });
+    await removeFile(entry.source, { force: false });
   }
   for (const entry of directories) {
     const children = await fs.promises.readdir(entry.source);
@@ -422,28 +428,50 @@ const movePathAtomic = async (source, destination, options = {}) => {
     if (error?.code !== 'EXDEV') throw error;
   }
 
-  // A directory cannot be renamed across volumes. Copy it under a hidden,
-  // unique name on the destination volume first, then expose it with a
-  // same-volume rename so an incomplete tree never appears at the final path.
+  // Cross-volume directories use the same planned atomic-copy pipeline as cut/paste.
   const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.photoflow-part`);
+  const plan = [];
+  let targetCommitted = false;
   try {
-    await fs.promises.cp(resolvedSource, temporary, {
-      recursive: true,
-      preserveTimestamps: true,
-      errorOnExist: true,
-      force: false,
+    await collectCopyPlan(resolvedSource, temporary, plan, {
+      isCancelled: options.isCancelled,
+      onDiscovered: options.onDiscovered,
     });
+    const totalBytes = plan.reduce((sum, entry) => sum + entry.size, 0);
+    await assertDiskSpace(path.dirname(target), totalBytes);
+    await copyPlannedFiles(plan, {
+      destinationRoot: path.dirname(target),
+      diskSpaceChecked: true,
+      durable: true,
+      isCancelled: options.isCancelled,
+      onFileStart: options.onFileStart,
+      onProgress: options.onProgress,
+    });
+    throwIfCancelled(options.isCancelled || (() => false));
+    await assertCopyPlanSourcesUnchanged(plan);
     await fs.promises.rename(temporary, target);
+    targetCommitted = true;
+    throwIfCancelled(options.isCancelled || (() => false));
+    await removeCopiedSources(plan, { removeFile: options.removeFile });
   } catch (error) {
     await fs.promises.rm(temporary, { recursive: true, force: true }).catch(() => undefined);
+    if (targetCommitted) {
+      const cleanupError = new Error(`目标目录已完整保存，但源清理未完成，可能存在重复内容：${error?.message || '未知错误'}`);
+      cleanupError.code = SOURCE_CLEANUP_INCOMPLETE_CODE;
+      cleanupError.cause = error;
+      cleanupError.transferStage = 'cleanup-source';
+      cleanupError.sourcePath = resolvedSource;
+      cleanupError.destinationPath = target;
+      throw cleanupError;
+    }
     throw error;
   }
-  await fs.promises.rm(resolvedSource, { recursive: true, force: false });
   return { source: resolvedSource, destination: target, copied: true };
 };
 
 module.exports = {
   CANCELLED_CODE,
+  SOURCE_CLEANUP_INCOMPLETE_CODE,
   DEFAULT_SMALL_FILE_CONCURRENCY,
   DEFAULT_SMALL_FILE_THRESHOLD,
   assertDiskSpace,

@@ -4,11 +4,14 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { registerWorkspaceIpc } = require('../electron/modules/workspace-ipc.cjs');
+const { createMediaAccessService } = require('../electron/services/media-access-service.cjs');
 const { copyFileAtomic, uniqueDestination } = require('../electron/services/file-transfer-service.cjs');
 
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-inspiration-gather-'));
 const sourceRoot = path.join(temporaryRoot, '灵感库');
 const targetRoot = path.join(temporaryRoot, '项目');
+const offlinePreviewRoot = path.join(temporaryRoot, 'offline-preview');
+const latePreviewRoot = path.join(temporaryRoot, 'late-preview');
 fs.mkdirSync(path.join(sourceRoot, '参考目录'), { recursive: true });
 fs.mkdirSync(targetRoot, { recursive: true });
 fs.writeFileSync(path.join(sourceRoot, '参考目录', '说明.txt'), 'folder target');
@@ -20,14 +23,24 @@ const undoOperations = [];
 const readDirectories = [];
 const watchedRoots = [];
 const releasedRoots = [];
+const grantedRoots = [];
+const mediaAccessService = createMediaAccessService({ getWorkspaceRoots: () => [targetRoot] });
 const handlerFs = {
   ...fs,
   promises: new Proxy(fs.promises, {
     get(target, property) {
       if (property === 'readdir') return async (...args) => {
+        if (path.resolve(args[0]) === path.resolve(offlinePreviewRoot)) return new Promise((_, reject) => {
+          setTimeout(() => reject(Object.assign(new Error('network directory unavailable'), { code: 'EHOSTUNREACH' })), 2500);
+        });
         readDirectories.push(path.resolve(args[0]));
-        return fs.promises.readdir(...args);
+        const entries = await fs.promises.readdir(...args);
+        if (path.resolve(args[0]) !== path.resolve(latePreviewRoot)) return entries;
+        return entries.sort((left, right) => Number(right.isDirectory()) - Number(left.isDirectory()));
       };
+      if (property === 'stat') return async candidate => path.resolve(candidate) === path.resolve(offlinePreviewRoot)
+        ? { isDirectory: () => true, isFile: () => false }
+        : fs.promises.stat(candidate);
       return Reflect.get(target, property);
     },
   }),
@@ -60,7 +73,13 @@ registerWorkspaceIpc({
   resolveProjectEntry: (_workspacePath, _status, _projectName, relativePath) => path.resolve(sourceRoot, relativePath),
   normalizeMediaCacheSizeGB: value => value,
   mediaRuntimeState: {},
-  mediaService: { grantRoot: () => sourceRoot },
+  mediaService: {
+    grantRoot: value => {
+      const grantedRoot = mediaAccessService.grantRoot(value);
+      grantedRoots.push(grantedRoot);
+      return grantedRoot;
+    },
+  },
   thumbnailService: { indexDirectory: async () => false, scanProject: async () => undefined },
   scheduleMediaTrackingScan: () => undefined,
   shell: {
@@ -102,6 +121,85 @@ registerWorkspaceIpc({
       assert.strictEqual(shortcutResult.success, true, shortcutResult.error);
       assert.strictEqual(shortcutResult.target, path.join(sourceRoot, '参考目录'));
       assert.strictEqual(shortcutResult.targetKind, 'folder');
+      const previewShortcut = handlers.get('workspace-browse-shortcut-preview');
+      assert(previewShortcut, 'shortcut preview IPC handler was not registered');
+      const shortcutTargetPath = path.join(sourceRoot, '参考目录');
+      const shortcutTargetTimes = fs.statSync(shortcutTargetPath);
+      const shortcutMediaPaths = Array.from({ length: 13 }, (_, index) => path.join(shortcutTargetPath, `cover-${index}.jpg`));
+      for (const mediaPath of shortcutMediaPaths) fs.writeFileSync(mediaPath, 'preview image');
+      grantedRoots.length = 0;
+      const folderPreview = await previewShortcut({}, temporaryRoot, '策划中', '项目', path.join('策划', '参考目录.lnk'));
+      assert.strictEqual(folderPreview.success, true, folderPreview.error);
+      assert.strictEqual(folderPreview.targetKind, 'folder');
+      assert.strictEqual(folderPreview.entries.length, 12);
+      assert.strictEqual(folderPreview.truncated, true);
+      assert(folderPreview.entries.every(entry => entry.readOnly === true && entry.viaShortcut === true));
+      assert.deepStrictEqual(grantedRoots, [path.resolve(sourceRoot, '参考目录')], 'a validated folder shortcut must grant only its final target, exactly once');
+      const returnedMedia = folderPreview.entries.find(entry => entry.kind === 'image');
+      assert(returnedMedia, 'the bounded preview should include a media entry');
+      assert.strictEqual(await mediaAccessService.authorizeInput(returnedMedia.path), await fs.promises.realpath(returnedMedia.path), 'returned external media must become authorized after preview validation');
+
+      const fileShortcutPath = path.join(targetRoot, '策划', '画面文件.lnk');
+      fs.writeFileSync(fileShortcutPath, path.join(sourceRoot, '画面.jpg'));
+      const filePreview = await previewShortcut({}, temporaryRoot, '策划中', '项目', path.join('策划', '画面文件.lnk'));
+      assert.strictEqual(filePreview.success, true, filePreview.error);
+      assert.strictEqual(filePreview.targetKind, 'file');
+      assert.deepStrictEqual(filePreview.entries, []);
+      assert.strictEqual(grantedRoots.length, 1, 'file shortcut targets must not grant their parent directory');
+
+      const invalidShortcutPath = path.join(targetRoot, '策划', '无效.lnk');
+      fs.writeFileSync(invalidShortcutPath, '');
+      const invalidPreview = await previewShortcut({}, temporaryRoot, '策划中', '项目', path.join('策划', '无效.lnk'));
+      assert.strictEqual(invalidPreview.success, false);
+      assert.strictEqual(invalidPreview.errorCode, 'SHORTCUT_INVALID');
+      assert.strictEqual(grantedRoots.length, 1, 'invalid shortcuts must not grant media roots');
+
+      const missingShortcutPath = path.join(targetRoot, '策划', '失效.lnk');
+      fs.writeFileSync(missingShortcutPath, path.join(sourceRoot, '不存在'));
+      const missingPreview = await previewShortcut({}, temporaryRoot, '策划中', '项目', path.join('策划', '失效.lnk'));
+      assert.strictEqual(missingPreview.success, false);
+      assert.strictEqual(missingPreview.errorCode, 'SHORTCUT_TARGET_MISSING');
+      assert.strictEqual(grantedRoots.length, 1, 'missing shortcut targets must not grant media roots');
+
+      const escapedPreview = await previewShortcut({}, temporaryRoot, '策划中', '项目', path.join('..', '外部.lnk'));
+      assert.strictEqual(escapedPreview.success, false);
+      assert.strictEqual(escapedPreview.errorCode, 'SHORTCUT_INVALID');
+      assert.strictEqual(grantedRoots.length, 1, 'project-escaping shortcut requests must not grant media roots');
+
+      const loopA = path.join(targetRoot, '策划', '循环-A.lnk');
+      const loopB = path.join(targetRoot, '策划', '循环-B.lnk');
+      fs.writeFileSync(loopA, loopB);
+      fs.writeFileSync(loopB, loopA);
+      const loopPreview = await previewShortcut({}, temporaryRoot, '策划中', '项目', path.join('策划', '循环-A.lnk'));
+      assert.strictEqual(loopPreview.success, false);
+      assert.strictEqual(loopPreview.errorCode, 'SHORTCUT_LOOP');
+      assert.strictEqual(grantedRoots.length, 1, 'shortcut loops must not grant media roots');
+
+      const offlineShortcut = path.join(targetRoot, '策划', '离线目录.lnk');
+      fs.writeFileSync(offlineShortcut, offlinePreviewRoot);
+      const offlineStartedAt = Date.now();
+      const offlinePreview = await previewShortcut({}, temporaryRoot, '策划中', '项目', path.join('策划', '离线目录.lnk'));
+      assert.strictEqual(offlinePreview.success, false);
+      assert.strictEqual(offlinePreview.errorCode, 'SHORTCUT_TARGET_OFFLINE');
+      assert(Date.now() - offlineStartedAt < 3000, 'offline shortcut previews must fail within the main-process timeout');
+      assert.strictEqual(grantedRoots.length, 1, 'unreadable shortcut directories must not grant media roots');
+
+      fs.mkdirSync(latePreviewRoot, { recursive: true });
+      for (let index = 0; index < 12; index += 1) fs.mkdirSync(path.join(latePreviewRoot, `folder-${String(index).padStart(2, '0')}`));
+      const lateMediaPath = path.join(latePreviewRoot, 'late-cover.jpg');
+      fs.writeFileSync(lateMediaPath, 'late preview image');
+      const lateShortcutPath = path.join(path.dirname(fileShortcutPath), 'late-preview.lnk');
+      fs.writeFileSync(lateShortcutPath, latePreviewRoot);
+      const latePreview = await previewShortcut({}, temporaryRoot, '策划中', '项目', path.relative(targetRoot, lateShortcutPath));
+      assert.strictEqual(latePreview.success, true, latePreview.error);
+      assert.strictEqual(latePreview.entries.length, 1, 'folder entries must not consume the 12 valid shortcut preview candidate slots');
+      assert.strictEqual(latePreview.entries[0].path, lateMediaPath, 'preview scanning must continue past the first 12 folders to find later media');
+      assert.strictEqual(latePreview.entries[0].kind, 'image');
+      assert.strictEqual(grantedRoots.at(-1), path.resolve(latePreviewRoot));
+      fs.rmSync(latePreviewRoot, { recursive: true, force: true });
+      fs.rmSync(lateShortcutPath, { force: true });
+      for (const mediaPath of shortcutMediaPaths) fs.unlinkSync(mediaPath);
+      fs.utimesSync(shortcutTargetPath, shortcutTargetTimes.atime, shortcutTargetTimes.mtime);
     }
     assert.strictEqual(undoOperations.length, 1);
     assert.strictEqual(undoOperations[0].kind, 'remove-created');
@@ -134,6 +232,42 @@ registerWorkspaceIpc({
       assert.strictEqual(linkedEntry.viaShortcut, true);
       assert(readDirectories.includes(path.resolve(sourceRoot, '参考目录')), 'recent recursive browsing must read the shortcut target directory');
     }
+    const bulkDirectory = path.join(sourceRoot, 'bulk');
+    fs.mkdirSync(bulkDirectory);
+    for (let index = 0; index < 205; index += 1) fs.writeFileSync(path.join(bulkDirectory, `image-${String(index).padStart(3, '0')}.jpg`), 'x');
+    fs.writeFileSync(path.join(bulkDirectory, '.photoflow-paste-hidden.jpg'), 'hidden');
+    const listFiles = handlers.get('workspace-list-files');
+    const cancelListFiles = handlers.get('workspace-cancel-list-files');
+    assert(listFiles && cancelListFiles, 'bounded file-list IPC handlers were not registered');
+    const escapedList = await listFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__', '../outside', 50, '', { kinds: ['image'] });
+    assert.strictEqual(escapedList.success, false, 'file-list scope must not escape the project root');
+    const expiredList = await listFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__', '', 50, 'expired-file-list-cursor', { kinds: ['image'] });
+    assert.strictEqual(expiredList.errorCode, 'FILE_LIST_SESSION_EXPIRED');
+    const firstListPage = await listFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__', '', 50, '', { kinds: ['image'] });
+    assert.strictEqual(firstListPage.success, true, firstListPage.error);
+    assert.strictEqual(firstListPage.entries.length, 50);
+    assert.strictEqual(firstListPage.hasMore, true);
+    assert(firstListPage.entries.every(entry => entry.kind === 'image' && typeof entry.parentRelativePath === 'string' && entry.parentName), 'file-list entries must include filter results and parent directory metadata');
+    assert(!firstListPage.entries.some(entry => entry.name.includes('photoflow')), 'file-list pages must hide internal photoflow entries');
+    const mismatchedCursor = await listFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__', '', 50, firstListPage.cursor, { kinds: ['video'] });
+    assert.strictEqual(mismatchedCursor.errorCode, 'FILE_LIST_SESSION_EXPIRED', 'a cursor must be bound to its original filter');
+    let cursor = firstListPage.cursor;
+    let pageCount = 1;
+    let listedImages = firstListPage.entries.length;
+    while (cursor) {
+      const page = await listFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__', '', 50, cursor, { kinds: ['image'] });
+      assert.strictEqual(page.success, true, page.error);
+      pageCount += 1;
+      listedImages += page.entries.length;
+      cursor = page.cursor;
+    }
+    assert(pageCount > 1, 'large recursive listings must be returned over multiple pages');
+    assert.strictEqual(listedImages, 206);
+    const cancellablePage = await listFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__', '', 1);
+    assert(cancellablePage.cursor, 'a partial listing must expose a cancellable cursor');
+    assert.strictEqual((await cancelListFiles({}, cancellablePage.cursor)).success, true);
+    const cancelledPage = await listFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__', '', 1, cancellablePage.cursor);
+    assert.strictEqual(cancelledPage.errorCode, 'FILE_LIST_CANCELLED');
     console.log('Inspiration gather workflow passed.');
   } finally {
     const resolvedTemporaryRoot = path.resolve(temporaryRoot);

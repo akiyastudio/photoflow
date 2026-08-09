@@ -4,8 +4,23 @@ const TITLEBAR_TAB_ORDER_KEY = 'photoflow:titlebar-tab-order';
 const TAB_DRAG_THRESHOLD_PX = 5;
 const TAB_EDGE_SCROLL_ZONE_PX = 36;
 
-export const projectTabId = (projectPath: string) => `project:${projectPath}`;
-export const workspaceToolTabId = (projectPath: string, kind: string) => `project-tool:${kind}:${projectPath}`;
+export const projectTabId = (pageId: string) => `project-page:${pageId}`;
+export const inspirationTabId = (pageId: string) => `inspiration-page:${pageId}`;
+export const workspaceToolTabId = (ownerPageId: string, kind: string) => `project-tool:${kind}:${ownerPageId}`;
+
+export const migrateLegacyWorkspaceToolTabId = (
+  id: string,
+  toolTabs: Array<{ ownerPageId: string; projectPath: string; kind: string }>,
+) => {
+  if (!id.startsWith('project-tool:')) return id;
+  if (toolTabs.some(tab => workspaceToolTabId(tab.ownerPageId, tab.kind) === id)) return id;
+  const legacyMatch = /^project-tool:([^:]+):(.*)$/.exec(id);
+  if (!legacyMatch) return id;
+  const [, kind, legacyProjectPath] = legacyMatch;
+  const tab = toolTabs.find(candidate => candidate.kind === kind
+    && candidate.projectPath.toLocaleLowerCase() === legacyProjectPath.toLocaleLowerCase());
+  return tab ? workspaceToolTabId(tab.ownerPageId, tab.kind) : id;
+};
 
 const completeVisibleOrder = (savedOrder: string[], visibleIds: string[]) => {
   const visible = new Set(visibleIds);
@@ -13,24 +28,24 @@ const completeVisibleOrder = (savedOrder: string[], visibleIds: string[]) => {
   return [...ordered, ...visibleIds.filter(id => !ordered.includes(id))];
 };
 
-const keepPinnedInspirationBesideHome = (orderedIds: string[], inspirationPinned: boolean) => {
-  if (!inspirationPinned || !orderedIds.includes('home') || !orderedIds.includes('inspiration')) return orderedIds;
-  const next = orderedIds.filter(id => id !== 'inspiration');
-  next.splice(next.indexOf('home') + 1, 0, 'inspiration');
+const keepPinnedInspirationBesideHome = (orderedIds: string[], pinnedInspirationId?: string) => {
+  if (!pinnedInspirationId || !orderedIds.includes('home') || !orderedIds.includes(pinnedInspirationId)) return orderedIds;
+  const next = orderedIds.filter(id => id !== pinnedInspirationId);
+  next.splice(next.indexOf('home') + 1, 0, pinnedInspirationId);
   return next;
 };
 
 export const useTitlebarTabOrder = ({
-  inspirationOpen,
-  inspirationPinned,
-  projectPaths,
+  inspirationPages,
+  pinnedInspirationPageId,
+  projectPages,
   toolTabs,
   settingsOpen,
 }: {
-  inspirationOpen: boolean;
-  inspirationPinned: boolean;
-  projectPaths: string[];
-  toolTabs: Array<{ projectPath: string; kind: string }>;
+  inspirationPages: Array<{ id: string; currentRelativePath: string }>;
+  pinnedInspirationPageId?: string;
+  projectPages: Array<{ id: string; projectPath: string }>;
+  toolTabs: Array<{ ownerPageId: string; projectPath: string; kind: string }>;
   settingsOpen: boolean;
 }) => {
   const [order, setOrder] = useState<string[]>(() => {
@@ -58,18 +73,36 @@ export const useTitlebarTabOrder = ({
 
   const visibleIds = useMemo(() => [
     'home',
-    ...(inspirationOpen ? ['inspiration'] : []),
-    ...projectPaths.flatMap(projectPath => [
-      projectTabId(projectPath),
-      ...toolTabs.filter(tab => tab.projectPath === projectPath).map(tab => workspaceToolTabId(projectPath, tab.kind)),
+    ...inspirationPages.map(page => inspirationTabId(page.id)),
+    ...projectPages.flatMap(page => [
+      projectTabId(page.id),
+      ...toolTabs.filter(tab => tab.ownerPageId === page.id).map(tab => workspaceToolTabId(tab.ownerPageId, tab.kind)),
     ]),
     ...(settingsOpen ? ['settings'] : []),
-  ], [inspirationOpen, projectPaths, settingsOpen, toolTabs]);
+  ], [inspirationPages, projectPages, settingsOpen, toolTabs]);
+
+  useEffect(() => {
+    setOrder(current => {
+      const migrated = current.map(id => {
+        if (id === 'inspiration') {
+          const rootPage = inspirationPages.find(page => page.currentRelativePath === '') || inspirationPages[0];
+          return rootPage ? inspirationTabId(rootPage.id) : id;
+        }
+        if (id.startsWith('project:')) {
+          const legacyPath = id.slice('project:'.length).toLocaleLowerCase();
+          const page = projectPages.find(candidate => candidate.projectPath.toLocaleLowerCase() === legacyPath);
+          return page ? projectTabId(page.id) : id;
+        }
+        return migrateLegacyWorkspaceToolTabId(id, toolTabs);
+      });
+      return migrated.every((id, index) => id === current[index]) ? current : migrated;
+    });
+  }, [inspirationPages, projectPages, toolTabs]);
 
   const orderedVisibleIds = useMemo(() => keepPinnedInspirationBesideHome(
     completeVisibleOrder(order, visibleIds),
-    inspirationPinned,
-  ), [inspirationPinned, order, visibleIds]);
+    pinnedInspirationPageId ? inspirationTabId(pinnedInspirationPageId) : undefined,
+  ), [order, pinnedInspirationPageId, visibleIds]);
 
   const reorder = useCallback((sourceId: string, targetId: string, side: 'before' | 'after') => {
     if (sourceId === targetId) return;
@@ -78,12 +111,12 @@ export const useTitlebarTabOrder = ({
       const targetIndex = next.indexOf(targetId);
       if (targetIndex < 0) return current;
       next.splice(targetIndex + (side === 'after' ? 1 : 0), 0, sourceId);
-      return keepPinnedInspirationBesideHome(next, inspirationPinned);
+      return keepPinnedInspirationBesideHome(next, pinnedInspirationPageId ? inspirationTabId(pinnedInspirationPageId) : undefined);
     });
-  }, [inspirationPinned, visibleIds]);
+  }, [pinnedInspirationPageId, visibleIds]);
 
   return (id: string) => {
-    const draggable = id !== 'inspiration' || !inspirationPinned;
+    const draggable = id !== (pinnedInspirationPageId ? inspirationTabId(pinnedInspirationPageId) : undefined);
     return {
       'data-titlebar-tab-id': id,
       'data-tab-draggable': draggable || undefined,

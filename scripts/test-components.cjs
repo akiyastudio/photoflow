@@ -2,6 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const ts = require('typescript');
 const { createComponentRegistry } = require('../electron/component-registry.cjs');
 const { PLUGIN_DEFINITIONS } = require('../electron/plugins/plugin-catalog.cjs');
 
@@ -39,7 +40,7 @@ try {
   assert(artifactCleanup.includes("path.join(outputDirectory, 'win-unpacked')"), 'artifact cleanup must remove win-unpacked');
   assert(artifactCleanup.includes("entry.name.endsWith('-win.zip')"), 'artifact cleanup must remove legacy application ZIPs');
 
-  const installer = fs.readFileSync(path.join(repositoryRoot, 'build', 'installer.nsh'), 'utf8');
+  const installer = fs.readFileSync(path.join(repositoryRoot, 'packaging', 'installer.nsh'), 'utf8');
   assert.strictEqual(packageJson.build.nsis.license, 'docs/legal/INSTALLER_TERMS.txt', 'NSIS must use the native text license renderer instead of the unreliable legacy HTML control');
   assert.strictEqual(packageJson.build.nsis.perMachine, true, 'installer must request administrator approval before installing for all Windows users');
   const installerLicense = fs.readFileSync(path.join(repositoryRoot, packageJson.build.nsis.license));
@@ -82,11 +83,11 @@ try {
   const currentPrivacyVersion = privacyService.match(/CURRENT_PRIVACY_NOTICE_VERSION = '([^']+)'/)?.[1];
   assert(installer.includes(`!define PhotoFlowTermsVersion "${currentTermsVersion}"`) && installer.includes(`!define PhotoFlowPrivacyVersion "${currentPrivacyVersion}"`), 'installer receipt versions must match the application consent versions');
   assert(privacyService.includes('coreConsentRevokedAt') && privacyService.includes("coreConsentSource: 'interactive-installer'"), 'the application must import installer consent without allowing an old receipt to undo withdrawal');
-  assert(!installer.includes('release\\components'), 'base installer must not embed optional components');
+  assert(!installer.includes('artifacts\\installers\\components'), 'base installer must not embed optional components');
   assert(!installer.includes('PhotoFlow-team-retouch-') && !installer.includes('PhotoFlowComponentPage'), 'application installer must not discover or offer team-retouch packages');
   assert(!installer.includes('nsisunz::Unzip') && !installer.includes('$INSTDIR\\components'), 'application installer must never write components into the program directory');
   assert(!installer.includes('$EXEDIR\\components') && !installer.includes('CopyFiles /SILENT'), 'installer-adjacent component folders and packages must not be supported');
-  assert(!installer.includes('File /r "${PROJECT_DIR}\\release\\components'), 'component binaries must not be compiled into the base installer');
+  assert(!installer.includes('File /r "${PROJECT_DIR}\\artifacts\\installers\\components'), 'component binaries must not be compiled into the base installer');
   assert(installer.includes('customUnWelcomePage') && installer.includes('同时清空照片流的用户数据和注册表'), 'assisted uninstall must offer an explicit user-data cleanup option');
   assert(installer.includes('${NSD_Uncheck} $PhotoFlowDeleteUserDataCheckbox'), 'destructive uninstall cleanup must be opt-in');
   assert(installer.includes('RMDir /r "$APPDATA\\Photoflow"') && installer.includes('RMDir /r "$LOCALAPPDATA\\PhotoFlow"'), 'opt-in cleanup must remove the application user-data and component roots');
@@ -121,18 +122,18 @@ try {
   const offlinePackageBuilder = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'create-team-retouch-advanced-offline-package.ps1'), 'utf8');
   assert(offlinePackageBuilder.includes('--export') && offlinePackageBuilder.includes('--vhd'), 'deployment tooling must export a complete verified WSL disk');
 
-  const advancedBridge = fs.readFileSync(path.join(repositoryRoot, 'components', 'team-retouch', 'advanced_bridge.py'), 'utf8');
+  const advancedBridge = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'advanced_bridge.py'), 'utf8');
   assert(advancedBridge.includes('DEFAULT_DISTROS = ("PhotoFlowNative", "PhotoflowLab")'), 'advanced backend must support both WSL distribution names');
   assert(advancedBridge.includes('WSL_E_DISTRO_NOT_FOUND'), 'advanced backend must fall through only when a distribution is absent');
   assert(advancedBridge.includes('HCS/ERROR_PATH_NOT_FOUND'), 'advanced backend must skip a registered distro whose VHDX is missing');
   assert(advancedBridge.includes('PHOTOFLOW_WSL_DISTRO'), 'custom WSL distribution override must remain supported');
   assert(advancedBridge.includes('class AdvancedBatchSession'), 'batch retouch must keep advanced models resident for the batch lifetime');
   assert(advancedBridge.includes('payload_b64'), 'persistent WSL requests must preserve Unicode paths');
-  const pairDetrScript = fs.readFileSync(path.join(repositoryRoot, 'components', 'team-retouch', 'advanced', 'pairdetr_service.py'), 'utf8');
-  const sam2Script = fs.readFileSync(path.join(repositoryRoot, 'components', 'team-retouch', 'advanced', 'sam2_service.py'), 'utf8');
+  const pairDetrScript = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'advanced', 'pairdetr_service.py'), 'utf8');
+  const sam2Script = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'advanced', 'sam2_service.py'), 'utf8');
   assert(pairDetrScript.includes('parser.add_argument("--serve"'), 'PairDETR must expose persistent service mode');
   assert(sam2Script.includes('parser.add_argument("--serve"'), 'SAM 2.1 must expose persistent service mode');
-  const teamRetouchEngine = fs.readFileSync(path.join(repositoryRoot, 'components', 'team-retouch', 'team_retouch.py'), 'utf8');
+  const teamRetouchEngine = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'team_retouch.py'), 'utf8');
   assert(teamRetouchEngine.includes('choices=("auto", "basic", "advanced")'), 'team-retouch must expose automatic, basic, and strict advanced modes');
   assert(teamRetouchEngine.includes('if advanced_mode == "advanced"'), 'strict advanced mode must not silently fall back');
   assert(teamRetouchEngine.includes('def probe_advanced_runtime()'), 'advanced installation must be verified by loading both production services');
@@ -183,6 +184,37 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   const teamOutputProgress = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'TeamRetouchOutputProgress.tsx'), 'utf8');
   const teamRetouchSteps = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'TeamRetouchSteps.tsx'), 'utf8');
   const projectWorkspace = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
+  const marqueeAutoScroll = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'workspace', 'marquee-auto-scroll.ts'), 'utf8');
+  const projectWorkspaceLifecycleSource = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'workspace', 'project-workspace-lifecycle.ts'), 'utf8');
+  const compiledProjectWorkspaceLifecycle = ts.transpileModule(projectWorkspaceLifecycleSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const projectWorkspaceLifecycleModule = { exports: {} };
+  new Function('module', 'exports', compiledProjectWorkspaceLifecycle)(projectWorkspaceLifecycleModule, projectWorkspaceLifecycleModule.exports);
+  const { resolveProjectWorkspaceLifecycle } = projectWorkspaceLifecycleModule.exports;
+  const pageIdentity = (pageId, overrides = {}) => ({ pageId, projectId: 'shared-project', projectPath: 'C:\\projects\\original', projectName: 'original', projectStatus: 'planning', ...overrides });
+  const pageAIdentity = pageIdentity('page-a');
+  const pageBIdentity = pageIdentity('page-b');
+  assert.deepStrictEqual(resolveProjectWorkspaceLifecycle(undefined, pageAIdentity, '', 'selection'), { kind: 'initialize', relativePath: 'selection', resetNavigation: true });
+  assert.deepStrictEqual(resolveProjectWorkspaceLifecycle(undefined, pageBIdentity, '', 'retouch'), { kind: 'initialize', relativePath: 'retouch', resetNavigation: true });
+  const movedPageA = pageIdentity('page-a', { projectPath: 'D:\\archive\\renamed', projectName: 'renamed' });
+  const movedPageB = pageIdentity('page-b', { projectPath: 'D:\\archive\\renamed', projectName: 'renamed' });
+  assert.deepStrictEqual(resolveProjectWorkspaceLifecycle(pageAIdentity, movedPageA, 'selection/group-a', 'selection'), { kind: 'refresh', relativePath: 'selection/group-a', resetNavigation: false }, 'page A must retain its independently navigated folder after project rename or move');
+  assert.deepStrictEqual(resolveProjectWorkspaceLifecycle(pageBIdentity, movedPageB, 'retouch/group-b', 'retouch'), { kind: 'refresh', relativePath: 'retouch/group-b', resetNavigation: false }, 'page B must retain its independently navigated folder after the same project rename or move');
+  const statusChangedPageA = { ...movedPageA, projectStatus: 'delivered' };
+  assert.deepStrictEqual(resolveProjectWorkspaceLifecycle(movedPageA, statusChangedPageA, 'selection/group-a', 'selection'), { kind: 'refresh', relativePath: 'selection/group-a', resetNavigation: false }, 'project status changes must refresh page A at its current folder');
+  const shortcutPreviewStateModelSource = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'workspace', 'shortcut-preview-state-model.ts'), 'utf8');
+  const compiledShortcutPreviewStateModel = ts.transpileModule(shortcutPreviewStateModelSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const shortcutPreviewStateModelModule = { exports: {} };
+  new Function('module', 'exports', compiledShortcutPreviewStateModel)(shortcutPreviewStateModelModule, shortcutPreviewStateModelModule.exports);
+  const { applyShortcutPreviewState } = shortcutPreviewStateModelModule.exports;
+  const shortcutPath = 'C:\\project\\planning\\reference.lnk';
+  const shortcutState = { shortcutTargetKind: 'folder', shortcutBroken: false };
+  const shortcutEntry = updatedAt => ({ path: shortcutPath, relativePath: 'planning/reference.lnk', kind: 'shortcut', updatedAt });
+  const currentFolderEntries = applyShortcutPreviewState([shortcutEntry(42)], shortcutPath, 42, shortcutState);
+  assert.strictEqual(currentFolderEntries[0].shortcutTargetKind, 'folder', 'current-folder shortcut entries must receive resolved cover state');
+  const currentProjectEntries = applyShortcutPreviewState([shortcutEntry(42)], shortcutPath, 42, shortcutState);
+  assert.strictEqual(currentProjectEntries[0].shortcutTargetKind, 'folder', 'current-project filter entries must receive resolved cover state');
+  const recursiveEntries = applyShortcutPreviewState([shortcutEntry(0)], shortcutPath, 42, shortcutState);
+  assert.strictEqual(recursiveEntries[0].shortcutTargetKind, 'folder', 'recursive flat results with deferred timestamps must receive resolved cover state by path');
   const appSource = fs.readFileSync(path.join(repositoryRoot, 'src', 'App.tsx'), 'utf8');
   assert(teamRetouchSteps.includes('人物识别与标记') && teamRetouchSteps.includes('任务编排与返图') && !teamRetouchSteps.includes("id: 'people'"), 'team retouch must expose the integrated two-step workflow');
   assert(teamRetouchManager.includes('<TeamRetouchSteps') && personIdentityManager.includes('<TeamRetouchSteps'), 'all team-retouch panels must reuse the same step navigation');
@@ -192,15 +224,38 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   const markProgressSource = projectWorkspace.slice(projectWorkspace.indexOf('const openMarkProgress'), projectWorkspace.indexOf('useEffect(() => {', projectWorkspace.indexOf('const openMarkProgress')));
   assert(markProgressSource.indexOf('setProgressSetup(initialDraft)') < markProgressSource.indexOf('void loadProgressFolders().then'), 'mark-progress must open from cached data before refreshing progress folders');
   assert(markProgressSource.includes('current === initialDraft ? latestDraft : current'), 'background progress refresh must not overwrite a mark-progress draft after the user edits it');
-  assert(projectWorkspace.includes('设为版本进度…') && projectWorkspace.includes('preserveFolderPath: Boolean(draft.preserveFolderName)') && projectWorkspace.includes('不需要补建 V0'), 'any imported project folder must be adoptable as a tracked version without a physical V0 rename');
+  assert(projectWorkspace.includes('设为版本进度…') && projectWorkspace.includes('moveToRoot') && projectWorkspace.includes('registered.relativePath || relativePath'), 'the component must expose version adoption and consume the backend-confirmed root move; executable IPC/DB tests cover rollback and V0-free registration');
   const projectNavigator = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'ProjectNavigator.tsx'), 'utf8');
   assert(projectNavigator.includes('<FolderInput size={15}/>导入项目') && projectNavigator.includes('importExistingProject') && projectNavigator.includes('photoflow:imported-project-tracking:'), 'the split project-create action must import existing projects and continue into tracking onboarding');
   const fileTransferToast = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'background-tasks', 'FileTransferToast.tsx'), 'utf8');
-  assert(projectNavigator.includes('cancelExistingProjectImport') && projectNavigator.includes('cancelBackgroundTask(existingProjectImportTask.id)') && fileTransferToast.includes('z-[510]'), 'existing-project imports must remain cancellable from both the modal and the transfer toast above its backdrop');
+  const taskToastModel = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'background-tasks', 'task-toast-model.ts'), 'utf8');
+  const indexCss = fs.readFileSync(path.join(repositoryRoot, 'src', 'index.css'), 'utf8');
+  const topToastStack = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'app', 'useTopToastStack.tsx'), 'utf8');
+  assert(projectNavigator.includes('cancelExistingProjectImport') && projectNavigator.includes('cancelBackgroundTask(existingProjectImportTask.id)') && indexCss.includes('z-index:510'), 'existing-project imports must remain cancellable from both the modal and the transfer toast above its backdrop');
+  assert(fileTransferToast.includes('aria-label="缩小到后台"') && fileTransferToast.includes('onMinimize(task.id)') && fileTransferToast.includes('isTaskToastMinimized(task.id)') && fileTransferToast.includes('selectProjectFileTaskToasts(backgroundTasks, minimizedTaskIds)'), 'each active file-transfer toast must minimize without cancelling and stay hidden until restored');
+  assert(fileTransferToast.includes('selectProjectFileTaskToasts') && taskToastModel.includes("task.type === 'project-file-operation'") && !taskToastModel.includes("operation === 'paste'"), 'all active project file operations must use one task-type based toast eligibility rule');
+  assert(taskToastModel.includes("left.state === 'running' ? -1 : 1") && taskToastModel.includes('left.createdAt - right.createdAt') && taskToastModel.includes('eligible.slice(0, limit)') && fileTransferToast.includes('还有 {overflowCount} 个任务'), 'the transfer toast model must prioritize running tasks, preserve creation order, and cap visible cards');
+  assert(indexCss.includes('.top-toast-stack') && indexCss.includes('display:flex') && indexCss.includes('gap:.75rem') && indexCss.includes('.app-notice-toast') && fileTransferToast.includes('previousTop - top') && fileTransferToast.includes('element.animate(') && !fileTransferToast.includes('style={{ top:') && !fileTransferToast.includes('className="fixed'), 'ordinary notices and file tasks must share one gap-based top stack and animate actual layout movement without per-card positioning');
+  assert(topToastStack.includes('enqueueTopToastNotice') && topToastStack.includes('notice.count > 1') && topToastStack.includes('dismissNotice(notice.id)'), 'persistent notices must use the bounded merge model while retaining per-toast manual dismissal');
+  assert(projectWorkspace.includes("entry.kind !== 'folder' && entry.kind !== 'shortcut'") && projectWorkspace.includes('browseProjectShortcutPreview(workspacePath, project.status, project.name, entry.relativePath)') && projectWorkspace.includes('shortcut:${entry.relativePath}:${entry.updatedAt}'), 'folder covers must lazily load project folders and shortcut folders through separate bounded APIs and versioned cache keys');
+  assert(projectWorkspace.includes("entry.shortcutTargetKind === 'folder'") && projectWorkspace.includes('<FolderCover entry={entry}') && projectWorkspace.includes('shortcut-cover-badge') && projectWorkspace.includes('ArrowUpRight'), 'folder shortcuts must reuse the normal folder cover with a shortcut badge');
+  assert(projectWorkspace.includes('entry.shortcutBroken') && projectWorkspace.includes('AlertTriangle') && indexCss.includes('.shortcut-folder-cover.is-broken'), 'broken shortcut folders must use a gray folder treatment with a warning badge');
+  assert(projectWorkspace.includes('setFileEntries(applyState)') && projectWorkspace.includes('setScopeEntries(applyState)') && projectWorkspace.includes('setSearchEntries(applyState)') && projectWorkspace.includes('directoryEntriesCacheRef.current.set(directoryKey, next)'), 'shortcut cover resolution must update current-folder, current-project, recursive, and cached directory entries');
+  assert(projectWorkspace.includes('pageId: string') && projectWorkspace.includes('initialRelativePath =') && projectWorkspace.includes('useState(initialRelativePath)') && projectWorkspace.includes('onDirectoryChange?.(pageId, relativePath)'), 'each project page instance must own its initial directory and report navigation by page id');
+  assert(projectWorkspace.includes('resolveProjectWorkspaceLifecycle(projectLifecycleRef.current') && projectWorkspace.includes("if (lifecycle.kind === 'refresh')") && projectWorkspace.includes('refresh(lifecycle.relativePath)') && projectWorkspace.includes("if (lifecycle.kind === 'none') return"), 'project metadata changes must refresh the current page path without re-running page initialization');
+  assert(projectWorkspace.includes('在新页面打开') && projectWorkspace.includes('onOpenDirectoryPage?.(entry.relativePath)') && projectWorkspace.includes("!fileMenu.entry.viaShortcut"), 'project folders must open independent pages without granting that action to shortcut content');
   const projectVersionTree = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'ProjectVersionTree.tsx'), 'utf8');
-  assert(projectVersionTree.includes('physical V0 folder is not required') && !projectVersionTree.includes("folder.versionKey === '0'"), 'version tree baselines must not require a V0 progress folder');
+  assert(projectVersionTree.includes('projectVisibleVersionGraph(progressFolders)') && !projectVersionTree.includes("folder.versionKey === '0'"), 'version tree baselines must be driven by explicit graph roles instead of requiring a V0 progress folder');
   assert(projectVersionTree.includes('structureEntries = entries') && projectWorkspace.includes('structureEntries={fileEntries}'), 'version-tree structure must remain independent from search and filter results');
   assert(appSource.includes("'project-version'") && appSource.includes("'project-team'") && projectWorkspace.includes("onOpenToolTab('version'") && projectWorkspace.includes("onOpenToolTab('team'"), 'version management and team retouch must open in reusable project tool tabs');
+  assert(appSource.includes('ownerPageId: string; projectId: string') && appSource.includes('openWorkspaceToolTab(pageId, project, kind, label)') && projectWorkspace.includes('onOpenToolTab?.(pageId, kind, label)'), 'project tool tabs must retain the page instance that opened them');
+  assert(appSource.includes('closeWorkspaceToolTab(pageId, kind)') && appSource.includes('updateWorkspaceToolTabBusy(pageId, kind, busy)') && projectWorkspace.includes('onToolTabBusyChange?.(pageId, kind, busy)'), 'tool close and busy callbacks must remain scoped to their owner page');
+  const inspirationLibrary = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'inspiration', 'InspirationLibrary.tsx'), 'utf8');
+  assert(appSource.includes("page.kind === 'inspiration'") && appSource.includes('inspirationTabId(page.id)') && appSource.includes('key={page.id}') && inspirationLibrary.includes('initialRelativePath={initialRelativePath}'), 'each inspiration page must mount a stateful browser instance under its own page id');
+  assert(inspirationLibrary.includes('onDirectoryChange(pageId, relativePath)') && !inspirationLibrary.includes('navigationRequest?:'), 'inspiration navigation must update only the owning page instead of a singleton navigation request');
+  assert(projectWorkspace.includes("useState<ProjectFilterScope>('current-folder')") && projectWorkspace.includes("changeFilterScope('current-folder')") && projectWorkspace.includes("changeFilterScope('project-root')"), 'each file-browser page must own a current-folder/project-root filter scope');
+  assert(projectWorkspace.includes('browserContext.rootFilterLabel') && projectWorkspace.includes('当前文件夹'), 'the shared filter menu must use project and inspiration-specific scope labels');
+  assert(projectWorkspace.includes("window.electronAPI.listProjectFiles(workspacePath, project.status, project.name, '', FILE_LIST_PAGE_SIZE") && projectWorkspace.includes('window.electronAPI.cancelListProjectFiles'), 'project-root filtering must use the cancellable paginated file-list API');
   assert(appSource.includes('photoflow:components-cache') && appSource.includes('componentsLoading={componentsLoading}'), 'installed component state must be restored before opening a project');
   assert(projectWorkspace.includes('teamRetouchInstalled || componentsLoading'), 'the team-retouch toolbar entry must render immediately while component status is refreshing');
   assert(personIdentityManager.includes('批量导入返图并识别'), 'workflow must expose batch returned-image recognition');
@@ -230,6 +285,16 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   const visualIdentityPicker = personIdentityManager.slice(personIdentityManager.indexOf('const handlePick'), personIdentityManager.indexOf("window.addEventListener('photoflow-team-person-pick'"));
   assert(!visualIdentityPicker.includes("tab !== 'people'") && visualIdentityPicker.includes("tab === 'workflow'") && visualIdentityPicker.indexOf('setAssigningSubject(subject)') < visualIdentityPicker.indexOf('getTeamIdentitySimilarities'), 'workflow thumbnails must open the visual identity picker immediately while protecting completed tasks');
   const versionsIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
+  assert(versionsIpc.includes("ipcMain.handle('workspace-media-rating-read-batch'") && versionsIpc.includes('Math.min(6, entries.length)') && versionsIpc.includes('requestedEntries.slice(0, 200)'), 'batch rating reads must be finite and use bounded HDD concurrency');
+  assert(projectWorkspace.includes('getMediaRatings(batch.map') && projectWorkspace.includes('offset += 200') && projectWorkspace.includes('filterRatingSequenceRef.current') && projectWorkspace.includes('已检查 {filterRatingsCheckedCount} 个文件'), 'rating filters must read only enumerated batches, invalidate stale results, and expose progress');
+  assert(projectWorkspace.includes('viewportPointToContentPoint({ x: event.clientX, y: event.clientY }') && projectWorkspace.includes('scrollLeft: container.scrollLeft') && projectWorkspace.includes('scrollTop: container.scrollTop'), 'marquee drag origins must be stored in file-column content coordinates');
+  assert(projectWorkspace.includes('hitMarqueeIndices(selection, displayedFileEntries.length, layout)') && !projectWorkspace.includes('measuredEntryRects'), 'virtualized grid and list marquee selection must use logical index geometry');
+  assert(projectWorkspace.includes('calculateFileGridGeometry(surfaceWidth, gridIconSize') && projectWorkspace.includes('calculateFileGridGeometry(surface.clientWidth, gridIconSize') && projectWorkspace.includes('gap: FILE_GRID_GAP'), 'virtual scrolling, marquee hit testing, and the rendered grid must share one content-box geometry model');
+  assert(projectWorkspace.includes('onPointerCancel={cancelSelectionDrag}') && projectWorkspace.includes('onLostPointerCapture={cancelSelectionDrag}') && projectWorkspace.includes("window.addEventListener('blur', cancelSelectionDrag)"), 'pointer cancellation, capture loss, and window blur must clear marquee state');
+  assert(indexCss.includes('.marquee-logical-canvas') && projectWorkspace.includes('overflow-auto') && projectWorkspace.includes('advanceMarqueeAutoScroll(container') && marqueeAutoScroll.includes('container.scrollTop =') && marqueeAutoScroll.includes('container.scrollLeft ='), 'the logical marquee canvas must support horizontal and vertical auto-scroll');
+  assert(projectWorkspace.includes('scheduleDirectoryRefresh(result.affectedDirectories') && projectWorkspace.includes('pendingDirectoryRefreshesRef.current.add(normalized)') && projectWorkspace.includes('}, 180)'), 'file mutations and watcher events must coalesce targeted directory refreshes within 100-250ms');
+  const ratingFilterEffect = projectWorkspace.slice(projectWorkspace.indexOf('filterRatingSequenceRef.current += 1'), projectWorkspace.indexOf('const displayedFileEntries'));
+  assert(ratingFilterEffect.includes("ratingFilter === 'all'") && !ratingFilterEffect.includes('getMediaRating(entry.path)') && !ratingFilterEffect.includes('searchProjectFiles'), 'file-type-only filtering and an all-rating condition must not trigger per-file XMP scans');
   assert(versionsIpc.includes("workspace-team-workflow-return-review-get") && versionsIpc.includes("workspace-team-workflow-return-review-discard") && versionsIpc.includes("workspace-team-workflow-return-review-ignore") && versionsIpc.includes("workflow-return-reviews"), 'the main process must persist and manage unfinished workflow return review sessions');
   const workflowReturnBatchIpc = versionsIpc.slice(versionsIpc.indexOf("workspace-team-workflow-return-batch"), versionsIpc.indexOf("workspace-team-workflow-return-confirm"));
   assert(workflowReturnBatchIpc.indexOf('mkdir(reviewTarget.reviewRoot') < workflowReturnBatchIpc.indexOf('pluginService.runJson(') && workflowReturnBatchIpc.indexOf('mkdir(reviewTarget.reviewRoot') < workflowReturnBatchIpc.indexOf('mkdir(stagingDirectory'), 'the workflow return review parent directory must be verified before matching or completing any task');
@@ -269,7 +334,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
 
   for (const component of Object.values(PLUGIN_DEFINITIONS)) {
     assert.match(component.version, /^\d{2}\.\d{1,2}\.\d{1,2}\.\d+$/, `${component.id} must use the date revision version format`);
-    const template = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'components', component.id, 'component.template.json'), 'utf8'));
+    const template = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'extensions', component.id, 'component.template.json'), 'utf8'));
     assert.strictEqual(template.version, component.version, `${component.id} catalog and package versions must match`);
   }
 
@@ -287,11 +352,11 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(settingsFeature.includes('YuNet、AdaFace IR-18 与 OSNet x1.0') && !settingsFeature.includes('SFace') && !settingsFeature.includes('OSNet x0.25'), 'settings must expose the single enhanced cross-photo identity engine');
   assert(!settingsFeature.includes('实验人物识别模型 · 用户自备'), 'settings must not require end users to compile identity models');
 
-  assert(componentBuilder.includes("'.model-lab', 'adaface', 'adaface_ir18_webface4m.onnx") && componentBuilder.includes("'.model-lab', 'osnet', 'osnet_x1_0_msmt17.onnx"), 'team-retouch component must contain both enhanced identity ONNX models');
+  assert(componentBuilder.includes("'.cache', 'model-lab', 'adaface', 'adaface_ir18_webface4m.onnx") && componentBuilder.includes("'.cache', 'model-lab', 'osnet', 'osnet_x1_0_msmt17.onnx"), 'team-retouch component must contain both enhanced identity ONNX models');
   assert(!componentBuilder.includes('face_recognition_sface_2021dec.onnx') && !componentBuilder.includes('osnet_x0_25_msmt17.onnx'), 'team-retouch component must not contain the retired identity models');
-  const teamRetouchTemplate = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'components', 'team-retouch', 'component.template.json'), 'utf8'));
+  const teamRetouchTemplate = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'component.template.json'), 'utf8'));
   assert(teamRetouchTemplate.requiredFiles.includes('_internal/models/adaface_ir18_webface4m.onnx') && teamRetouchTemplate.requiredFiles.includes('_internal/models/osnet_x1_0_msmt17.onnx'), 'component installation must reject a package missing either enhanced identity model');
-  const identityEngine = fs.readFileSync(path.join(repositoryRoot, 'components', 'team-retouch', 'identity_engine.py'), 'utf8');
+  const identityEngine = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'identity_engine.py'), 'utf8');
   assert(identityEngine.includes('self.face_backend = "adaface-ir18"') && identityEngine.includes('self.body_backend = "osnet-x1"'), 'identity runtime must report only the enhanced backends');
   assert(!identityEngine.includes('FaceRecognizerSF_create') && !identityEngine.includes('osnet-x0.25') && !identityEngine.includes('face_recognition_sface'), 'identity runtime must not retain the basic-model fallback');
   const modelLicenses = fs.readFileSync(path.join(repositoryRoot, 'src', 'licenses', 'modelLicenses.ts'), 'utf8');
@@ -319,7 +384,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   });
 
   assert.strictEqual(registry.list().length, Object.keys(PLUGIN_DEFINITIONS).length);
-  const advancedVideoManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'components', 'video-playback-mpv', 'component.template.json'), 'utf8'));
+  const advancedVideoManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'extensions', 'video-playback-mpv', 'component.template.json'), 'utf8'));
   assert.strictEqual(PLUGIN_DEFINITIONS['video-playback-mpv'].version, '26.8.3.1', 'the app must accept the latest published advanced-video component');
   assert.strictEqual(advancedVideoManifest.version, PLUGIN_DEFINITIONS['video-playback-mpv'].version, 'the advanced-video manifest and app compatibility pin must stay aligned');
   assert.strictEqual(registry.resolve('team-retouch'), null);
@@ -358,3 +423,5 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   const relative = path.relative(tempRoot, resolved);
   if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) fs.rmSync(resolved, { recursive: true, force: true });
 }
+
+require('child_process').execFileSync(process.execPath, [path.join(__dirname, 'test-recent-files-active-pagination.cjs')], { stdio: 'inherit' });

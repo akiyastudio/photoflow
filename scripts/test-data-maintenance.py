@@ -179,7 +179,7 @@ def test_missing_progress_replacement(root: Path) -> None:
             "displayName": "图片后期_1", "folderPath": str(original), "trackingEnabled": True,
         })["progressFolder"]
         original.rmdir()
-        missing = progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"][0]
+        missing = progress_list(str(workspace), db, {"projectName": "Project", "includeMissing": True})["progressFolders"][0]
         assert missing["id"] == registered["id"] and missing["folderMissing"] and missing["missingSince"]
 
         # Recreating the original path produces a new filesystem identity. It
@@ -192,7 +192,7 @@ def test_missing_progress_replacement(root: Path) -> None:
         followed = progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"][0]
         assert Path(followed["folderPath"]).resolve() == relocated.resolve()
         relocated.rmdir()
-        missing_again = progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"][0]
+        missing_again = progress_list(str(workspace), db, {"projectName": "Project", "includeMissing": True})["progressFolders"][0]
         assert missing_again["folderMissing"] and missing_again["missingSince"]
 
         replacement = project / "图片后期_1_替换"
@@ -291,7 +291,9 @@ def test_modify_progress_replaces_missing_version(root: Path) -> None:
             ],
         })
         assert updated["progressFolder"]["id"] == missing["id"]
-        rows = {item["id"]: item for item in progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"]}
+        rows = {item["id"]: item for item in progress_list(
+            str(workspace), db, {"projectName": "Project", "includeMissing": True}
+        )["progressFolders"]}
         assert not rows[missing["id"]]["folderMissing"] and rows[missing["id"]]["versionKey"] == "1"
         assert rows[active["id"]]["folderMissing"] and rows[active["id"]]["versionKey"] == "2"
         assert rows[child["id"]]["parentProgressId"] == missing["id"] and rows[child["id"]]["versionKey"] == "1_1"

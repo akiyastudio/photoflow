@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PhotoFlow · 版本跟踪 V2 面板原型</title>
+  <style>
+    :root { color-scheme: light; --ink:#172033; --muted:#667085; --line:#dfe5ee; --blue:#2563eb; --blue-soft:#eff6ff; --green:#07845d; --amber:#b86800; --red:#c62929; --canvas:#e9eef5; font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-width:320px; color:var(--ink); background:var(--canvas); }
+    button,input,select { font:inherit; }
+    button { cursor:pointer; }
+    .app { min-height:100vh; display:grid; grid-template-rows:54px minmax(0,1fr); }
+    .titlebar { display:flex; align-items:center; gap:12px; padding:0 20px; color:#dce9ff; background:linear-gradient(115deg,#0e1728,#172944); box-shadow:0 2px 16px #1720332b; }
+    .mark { width:30px; height:30px; display:grid; place-items:center; border-radius:9px; color:white; background:linear-gradient(145deg,#69a9ff,#2563eb); font-weight:900; }
+    .titlebar strong { color:white; font-size:14px; }
+    .titlebar span { font-size:11px; color:#9cb0ca; }
+    .badge { margin-left:auto; padding:5px 9px; border:1px solid #5f779b; border-radius:99px; color:#cfe1ff!important; background:#ffffff0d; font-weight:800; }
+    .layout { min-height:0; display:grid; grid-template-columns:244px minmax(0,1fr); }
+    aside { padding:20px 12px; background:#f8fafc; border-right:1px solid var(--line); }
+    aside h1 { margin:0 10px 5px; font-size:17px; }
+    aside p { margin:0 10px 18px; color:var(--muted); font-size:11px; line-height:1.55; }
+    .nav { display:grid; gap:5px; }
+    .nav button { display:grid; grid-template-columns:34px 1fr; align-items:center; gap:10px; padding:9px; border:0; border-radius:10px; color:#4b596d; text-align:left; background:transparent; }
+    .nav button:hover { background:#edf2f8; }
+    .nav button.active { color:#174da4; background:#e7f0ff; box-shadow:inset 0 0 0 1px #d3e3ff; }
+    .nav-icon { width:34px; height:34px; display:grid; place-items:center; border:1px solid #e1e7ef; border-radius:9px; background:white; font-size:13px; font-weight:900; }
+    .nav button.active .nav-icon { color:white; border-color:var(--blue); background:var(--blue); }
+    .nav b { display:block; font-size:12px; }
+    .nav small { display:block; margin-top:3px; color:#8b96a8; font-size:9px; }
+    main { min-width:0; overflow:auto; }
+    .context { min-height:82px; display:flex; align-items:center; gap:16px; padding:15px 26px; background:#ffffffed; border-bottom:1px solid var(--line); }
+    .context small { color:#8190a4; font-size:10px; font-weight:800; letter-spacing:.08em; }
+    .context h2 { margin:3px 0; font-size:20px; }
+    .context p { margin:0; color:var(--muted); font-size:11px; }
+    .legend { margin-left:auto; display:flex; gap:8px; }
+    .pill { padding:4px 8px; border-radius:99px; color:#385271; background:#edf2f7; font-size:9px; font-weight:800; }
+    .pill.main { color:#1757b4; background:#dceaff; }
+    .pill.aux { border:1px dashed #9b70d4; color:#7542ad; background:#f6efff; }
+    .workspace { min-height:calc(100vh - 136px); padding:26px; background-color:#e9eef5; background-image:radial-gradient(#8190a426 1px,transparent 1px); background-size:22px 22px; }
+    .state-switcher { max-width:1040px; display:flex; align-items:center; gap:12px; margin:0 auto 12px; padding:10px 12px; border:1px solid #293e5e; border-radius:11px; color:#c5d3e8; background:#13223a; box-shadow:0 8px 24px #14213a21; }
+    .state-switcher > b { flex:0 0 auto; color:#89b8ff; font-size:10px; letter-spacing:.06em; }
+    .state-buttons { display:flex; flex-wrap:wrap; gap:6px; }
+    .state-buttons button { min-height:29px; padding:0 10px; border:1px solid #3c506f; border-radius:7px; color:#c5d3e8; background:#1c2e49; font-size:10px; font-weight:800; }
+    .state-buttons button.active { color:white; border-color:#4b8eff; background:var(--blue); }
+    .panel { max-width:1040px; margin:auto; overflow:hidden; border:1px solid #cfd7e3; border-radius:16px; background:white; box-shadow:0 24px 56px #19284026,0 2px 8px #19284012; }
+    .panel-head { min-height:64px; display:flex; align-items:center; gap:12px; padding:0 21px; border-bottom:1px solid var(--line); }
+    .panel-icon { width:36px; height:36px; display:grid; place-items:center; border-radius:10px; color:var(--blue); background:var(--blue-soft); font-weight:900; }
+    .panel-head h3 { margin:0; font-size:15px; }
+    .panel-head p { margin:3px 0 0; color:#8a96a7; font-size:10px; }
+    .status-chip { margin-left:auto; padding:5px 9px; border-radius:99px; color:#1d57ad; background:#dceaff; font-size:9px; font-weight:900; }
+    .panel-body { padding:22px; }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+    .stack { display:grid; gap:14px; }
+    .card { padding:15px; border:1px solid var(--line); border-radius:11px; background:#fff; }
+    .card.soft { background:#f8fafc; }
+    .card-head { display:flex; align-items:center; gap:8px; margin-bottom:12px; }
+    .card-head b { font-size:12px; }
+    .card-head span { margin-left:auto; color:#8b96a8; font-size:9px; }
+    label.field { display:grid; gap:6px; color:#59677a; font-size:10px; font-weight:800; }
+    .input-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; }
+    input[type=text],select { width:100%; height:37px; padding:0 10px; border:1px solid #d5dde8; border-radius:8px; color:#26364c; background:white; font-size:11px; }
+    .button { min-height:35px; padding:0 13px; border:1px solid #d2dae6; border-radius:8px; color:#46556a; background:white; font-size:10px; font-weight:850; }
+    .button.primary { color:white; border-color:var(--blue); background:var(--blue); box-shadow:0 5px 12px #2563eb2d; }
+    .button.danger { color:white; border-color:var(--red); background:var(--red); }
+    .button:disabled { cursor:not-allowed; color:#9aa5b4; border-color:#e0e5ec; background:#f0f3f6; box-shadow:none; }
+    .actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; padding-top:3px; }
+    .actions .hint { margin-right:auto; color:#8b96a8; font-size:9px; }
+    .callout { padding:12px 14px; border:1px solid #cfe0ff; border-radius:10px; color:#174b94; background:#eff6ff; }
+    .callout.warning { color:#855000; border-color:#f3d38c; background:#fffae9; }
+    .callout.danger { color:#9e2929; border-color:#f0bcbc; background:#fff1f1; }
+    .callout.success { color:#056947; border-color:#9cddc7; background:#ecfbf5; }
+    .callout b { display:block; font-size:11px; }
+    .callout p { margin:4px 0 0; font-size:10px; line-height:1.6; }
+    .choice-row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .choice { padding:11px; border:1px solid #d8e0ea; border-radius:9px; color:#536174; background:white; font-size:10px; }
+    .choice.active { color:#174e9f; border-color:#77a7ed; background:#eff6ff; box-shadow:inset 0 0 0 1px #cce0ff; }
+    .choice b { display:block; margin-bottom:3px; font-size:11px; }
+    .option { display:flex; align-items:flex-start; gap:9px; min-height:46px; padding:10px 0; border-bottom:1px solid #edf0f4; }
+    .option:last-child { border-bottom:0; }
+    .option input { margin-top:2px; }
+    .option b { display:block; font-size:10px; }
+    .option small { display:block; margin-top:3px; color:#8d98a8; font-size:9px; line-height:1.45; }
+    .option.disabled { color:#98a2b3; }
+    .tree { display:grid; gap:8px; }
+    .tree-row { display:flex; align-items:center; gap:9px; padding:8px 10px; border:1px solid #dfe5ed; border-radius:8px; font-size:10px; }
+    .tree-edge { width:30px; border-top:2px solid #4e78b8; }
+    .tree-edge.aux { border-top-style:dashed; border-color:#8e64bc; }
+    .tree-row small { margin-left:auto; color:#8d98a8; }
+    .scene { display:grid; gap:14px; }
+    .scene-title { display:flex; align-items:flex-start; gap:12px; padding:14px; border:1px solid #d8e4f3; border-radius:11px; background:#f7faff; }
+    .scene-title.warning { border-color:#efd28d; background:#fffbea; }
+    .scene-title.danger { border-color:#efb9b9; background:#fff2f2; }
+    .scene-title.success { border-color:#a5ddc9; background:#effbf6; }
+    .scene-title h4 { margin:0; font-size:13px; }
+    .scene-title p { margin:5px 0 0; color:#657387; font-size:10px; line-height:1.55; }
+    .scene-title .percent { margin-left:auto; color:#315c93; font-size:12px; font-weight:900; }
+    .progress { height:7px; overflow:hidden; border-radius:99px; background:#dce4ef; }
+    .progress i { display:block; width:var(--progress); height:100%; border-radius:inherit; background:linear-gradient(90deg,#2563eb,#62a0ff); }
+    .metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+    .metric { padding:10px; border:1px solid #dfe5ed; border-radius:8px; background:white; }
+    .metric span { display:block; color:#8b96a8; font-size:9px; }
+    .metric b { display:block; margin-top:4px; font-size:11px; }
+    .compare-table { overflow:hidden; border:1px solid #dce3ec; border-radius:9px; }
+    .compare-row { display:grid; grid-template-columns:minmax(150px,1fr) 110px 160px; align-items:center; gap:8px; min-height:42px; padding:8px 11px; border-bottom:1px solid #edf0f4; font-size:10px; }
+    .compare-row:last-child { border-bottom:0; }
+    .compare-row.head { min-height:34px; color:#78869a; background:#f7f9fc; font-size:9px; font-weight:800; }
+    .media-state { width:max-content; padding:4px 7px; border-radius:99px; font-size:9px; font-weight:850; }
+    .media-state.ok { color:#05704c; background:#dff7ee; }
+    .media-state.wait { color:#9a5c00; background:#fff0c5; }
+    .media-state.missing { color:#a42d2d; background:#ffe1e1; }
+    .row-actions { display:flex; gap:5px; }
+    .row-actions button { padding:4px 7px; border:1px solid #d4dce7; border-radius:6px; color:#526176; background:white; font-size:9px; }
+    .confirmation-layout { display:grid; grid-template-columns:310px minmax(0,1fr); gap:12px; min-height:430px; }
+    .confirmation-list { overflow:auto; max-height:520px; border:1px solid #dce3ec; border-radius:10px; background:#fff; }
+    .confirmation-item { width:100%; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:5px 8px; padding:11px; border:0; border-bottom:1px solid #edf0f4; text-align:left; background:white; }
+    .confirmation-item.selected { background:#eff6ff; box-shadow:inset 3px 0 #2563eb; }
+    .confirmation-item small { color:#7b8798; font-size:9px; }
+    .preview-card { min-width:0; display:grid; grid-template-rows:auto minmax(280px,1fr) auto; gap:10px; padding:12px; border:1px solid #dce3ec; border-radius:10px; background:#f8fafc; }
+    .preview-toolbar,.preview-footer { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
+    .preview-toolbar button,.preview-footer button { padding:5px 8px; border:1px solid #d4dce7; border-radius:6px; background:white; color:#46556a; font-size:9px; }
+    .preview-toolbar button.active { color:#174e9f; border-color:#77a7ed; background:#e7f0ff; }
+    .preview-stage { min-height:280px; display:grid; grid-template-columns:1fr 1fr; gap:8px; overflow:hidden; border-radius:8px; background:#182235; }
+    .preview-stage.overlay { display:grid; }
+    .preview-stage.overlay .preview-pane { grid-area:1/1; }
+    .preview-stage.overlay .preview-pane:last-child { opacity:.5; }
+    .preview-pane { min-width:0; position:relative; display:grid; place-items:center; overflow:hidden; color:#dce7f5; }
+    .preview-pane img { width:100%; height:100%; object-fit:contain; transform:scale(var(--zoom)); }
+    .preview-label { position:absolute; left:8px; top:8px; z-index:2; padding:4px 7px; border-radius:5px; color:white; background:#0f172acc; font-size:9px; }
+    .preview-missing { display:grid; place-items:center; min-height:100%; padding:20px; color:#cbd5e1; text-align:center; font-size:11px; background:#273449; }
+    .preview-meta { margin-left:auto; color:#667085; font-size:9px; }
+    @media (max-width:760px) { .layout{grid-template-columns:1fr} aside{border-right:0;border-bottom:1px solid var(--line)} .nav{grid-template-columns:1fr 1fr} .legend{display:none} .workspace{padding:14px} .grid,.choice-row{grid-template-columns:1fr} .state-switcher{display:block} .state-buttons{margin-top:8px} .metrics{grid-template-columns:1fr} .compare-row{grid-template-columns:1fr 90px}.compare-row>*:last-child{grid-column:1/-1} .confirmation-layout{grid-template-columns:1fr}.confirmation-list{max-height:220px}.preview-stage{min-height:240px} }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="titlebar"><div class="mark">P</div><strong>PhotoFlow</strong><span>版本跟踪 V2</span><span class="badge">交互原型 · 非生产界面</span></header>
+    <div class="layout">
+      <aside><h1>版本工具面板</h1><p>四个独立面板。选择面板后，使用顶部状态切换器查看完整流程。</p><nav class="nav" id="nav"></nav></aside>
+      <main>
+        <header class="context"><div><small>PROJECT / 26-8-9 夏日街拍</small><h2 id="context-title"></h2><p id="context-description"></p></div><div class="legend"><span class="pill main">实线 · main</span><span class="pill aux">虚线 · auxiliary</span></div></header>
+        <section class="workspace"><div class="state-switcher"><b>PROTOTYPE · 状态预览</b><div class="state-buttons" id="state-buttons"></div></div><div id="panel"></div></section>
+      </main>
+    </div>
+  </div>
+  <script src="versioning-v2-model.cjs"></script>
+  <script>
+    'use strict';
+    const model = window.VersioningV2Model;
+    const descriptions = {
+      create:'在项目根目录创建一个新的主分支进度，或从当前来源建立附属选择分支。',
+      import:'把任意项目内现有文件夹加入版本关系；非根目录 progress 先确认安全移动。',
+      modify:'修改角色、父节点与持久化跟踪策略，并刷新已经变成 stale 的版本。',
+      confirm:'按 sessionId 分页确认完整比较结果；新素材必须由用户决定后才能提交。'
+    };
+    const stateLabels = { ready:'准备', move_confirm:'移动确认', processing:'处理中', waiting_confirmation:'等待确认', result:'结果', failure:'失败', loading:'载入结果', committing:'提交中' };
+    const navMeta = { create:['＋','创建空进度'], import:['⇩','登记已有文件夹'], modify:['✎','策略与刷新'], confirm:['✓','逐项确认图片'] };
+    let activePanel = 'create';
+    const activeStates = Object.fromEntries(Object.entries(model.PANEL_DEFINITIONS).map(([id,definition]) => [id,definition.states[0]]));
+    let relationKind = 'main';
+    let selectedTrackingItemId;
+    let comparisonMode = 'side-by-side';
+    let comparisonZoom = 1;
+    let comparisonSwapped = false;
+    let trackingItems = [
+      { id:'recognized', sourceName:'DSC_8201.ARW', referenceName:'DSC_8201.ARW', targetName:'DSC_8201.ARW', status:'recognized', confidence:'98%', referencePreviewUrl:'assets/compare-reference.svg', sourcePreviewUrl:'assets/compare-current.svg' },
+      { id:'pending', sourceName:'DSC_8299.ARW', referenceName:null, targetName:'DSC_8299.ARW', status:'pending_confirmation', confidence:'61%', referencePreviewUrl:'', sourcePreviewUrl:'assets/compare-current.svg' },
+      { id:'missing', sourceName:'DSC_8100-edit.ARW', referenceName:'DSC_8100.ARW', targetName:'DSC_8100-edit.ARW', status:'missing_reference', confidence:'', referencePreviewUrl:'', sourcePreviewUrl:'assets/compare-current.svg' },
+      { id:'accepted', sourceName:'DSC_8112-edit.ARW', referenceName:'DSC_8112.ARW', targetName:'DSC_8112-edit.ARW', status:'accepted', confidence:'92%', referencePreviewUrl:'assets/compare-reference.svg', sourcePreviewUrl:'assets/compare-current.svg' },
+    ];
+
+    const button = (label, kind='', disabled=false) => `<button class="button ${kind}" ${disabled?'disabled':''}>${label}</button>`;
+    const option = (id,title,help,checked,disabled=false) => `<label class="option ${disabled?'disabled':''}"><input type="checkbox" data-policy="${id}" ${checked?'checked':''} ${disabled?'disabled':''}><span><b>${title}</b><small>${help}</small></span></label>`;
+    const policyCard = () => {
+      const auxiliary = relationKind === 'auxiliary';
+      return `<section class="card"><div class="card-head"><b>主分支跟踪策略</b><span>持久化字段</span></div>${auxiliary?'<div class="callout warning"><b>附属分支不能启用跟踪</b><p>图片跟踪、沿用上一版本文件名和补齐缺失媒体均不可用，保存时三个值强制为 false。</p></div>':''}${option('trackingEnabled','图片跟踪','检测当前文件夹的媒体变化。',!auxiliary,auxiliary)}${option('renameFromParent','沿用上一版本文件名','确认关联后使用父版本媒体文件名。',!auxiliary,auxiliary)}${option('copyMissingFromParent','补齐缺失媒体','父版本新增媒体后，此进度会变成“待刷新”。',!auxiliary,auxiliary)}</section>`;
+    };
+    const relationCard = () => `<section class="card"><div class="card-head"><b>关系类型</b><span>显式 relationKind</span></div><div class="choice-row"><button class="choice ${relationKind==='main'?'active':''}" data-relation="main"><b>主分支 · main</b>版本树使用实线；父节点必须是主分支节点。</button><button class="choice ${relationKind==='auxiliary'?'active':''}" data-relation="auxiliary"><b>附属分支 · auxiliary</b>版本树使用虚线；仅用于 selection。</button></div></section>`;
+    const folderField = (path='项目/RAW/调色一版') => `<label class="field">选择任意项目内文件夹<div class="input-row"><input type="text" readonly value="${path}">${button('浏览…')}</div></label>`;
+    const sourceTree = () => `<div class="tree"><div class="tree-row"><span class="tree-edge"></span><b>RAW</b><span class="pill">original</span><small>原始素材</small></div><div class="tree-row"><span class="tree-edge"></span><b>调色 V1</b><span class="pill main">progress</span><small>已跟踪</small></div><div class="tree-row"><span class="tree-edge aux"></span><b>调色 V1_选片</b><span class="pill aux">selection</span><small>未跟踪</small></div></div>`;
+
+    function readyBody(panelId) {
+      if (panelId === 'create') return `<div class="stack"><div class="callout"><b>关系由节点 ID 建立</b><p>文件夹名称只用于显示；新的主版本连接到“调色 V1”，不会连接到其选片附属节点。</p></div><div class="grid"><section class="card">${folderField('项目/调色 V1')}<label class="field" style="margin-top:12px">新进度文件夹名<input type="text" value="调色 V2"></label><label class="field" style="margin-top:12px">主分支父节点<select><option>调色 V1 · node_prg_01</option><option>RAW · node_original_01</option></select></label></section>${relationCard()}</div>${policyCard()}<div class="actions"><span class="hint">新建只创建空文件夹；跟踪会启动 compare 任务。</span>${button('取消')}${button('新建并开始比较','primary')}</div></div>`;
+      if (panelId === 'import') return `<div class="stack"><div class="callout warning"><b>所选文件夹不在项目根目录</b><p>标记为 progress 前必须预检并移动到“项目/调色一版”。快捷方式或重解析点指向的外部目录不能移动或覆盖。</p></div><div class="grid"><section class="card">${folderField()}<label class="field" style="margin-top:12px">关系父节点<select><option>RAW · node_original_01</option><option>调色 V1 · node_prg_01</option></select></label></section>${relationCard()}</div>${policyCard()}<div class="actions">${button('取消')}${button('继续并检查移动','primary')}</div></div>`;
+      if (panelId === 'modify') return `<div class="stack"><div class="callout warning"><b>调色 V1 · 待刷新</b><p>当前文件夹内容已变化；父版本也新增 3 张媒体且本节点开启了“补齐缺失媒体”。auxiliary 子节点不会跟随刷新。</p></div><div class="grid"><section class="card"><label class="field">当前节点<select><option>调色 V1 · node_prg_01</option></select></label><label class="field" style="margin-top:12px">主分支父节点<select><option>RAW · node_original_01</option></select></label></section>${relationCard()}</div>${policyCard()}<div class="actions"><span class="hint">策略保存后仍需刷新，才会重新变成“已跟踪”。</span>${button('仅保存设置')}${button('保存并刷新','primary')}</div></div>`;
+      return '';
+    }
+
+    const scene = (tone,title,detail,content,actions) => `<div class="scene"><div class="scene-title ${tone}"><div><h4>${title}</h4><p>${detail}</p></div></div>${content||''}<div class="actions">${actions||''}</div></div>`;
+    const metrics = (items) => `<div class="metrics">${items.map(([k,v])=>`<div class="metric"><span>${k}</span><b>${v}</b></div>`).join('')}</div>`;
+    const progress = (value) => `<div class="progress"><i style="--progress:${value}%"></i></div>`;
+    const confirmationPreview = () => {
+      if (!selectedTrackingItemId) selectedTrackingItemId = model.firstPreviewItemId(trackingItems);
+      const item = trackingItems.find(candidate => candidate.id === selectedTrackingItemId) || trackingItems[0];
+      const pair = model.comparisonPairForItem(item);
+      const reference = pair.referenceMissing ? `<div class="preview-missing">${item.referenceName ? '上一版本引用缺失<br>请重新定位或拒绝' : '未关联上一版本'}</div>` : `<img src="${pair.reference}" alt="上一版本预览">`;
+      const current = pair.current ? `<img src="${pair.current}" alt="当前版本预览">` : '<div class="preview-missing">当前版本不可预览</div>';
+      const panes = comparisonSwapped ? [[current,'当前版本'],[reference,'上一版本']] : [[reference,'上一版本'],[current,'当前版本']];
+      const rows = trackingItems.map(candidate => `<button class="confirmation-item ${candidate.id===item.id?'selected':''}" data-track-select="${candidate.id}"><b>${candidate.sourceName||candidate.targetName}</b><span class="media-state ${candidate.status==='missing_reference'?'missing':candidate.status==='pending_confirmation'?'wait':'ok'}">${candidate.status}</span><small>${candidate.referenceName||'未关联上一版本'}</small><small>${candidate.confidence||'—'}</small></button>`).join('');
+      return `<div class="confirmation-layout"><div class="confirmation-list">${rows}</div><section class="preview-card"><div class="preview-toolbar"><button data-compare-mode="side-by-side" class="${comparisonMode==='side-by-side'?'active':''}">并排</button><button data-compare-mode="overlay" class="${comparisonMode==='overlay'?'active':''}">叠加</button><button data-compare-swap>交换</button><button data-zoom="out">−</button><button data-zoom="in">＋</button><button data-zoom="fit">适合</button><span class="preview-meta">${item.sourceName} · ${item.status} · ${item.confidence||'无置信度'}</span></div><div class="preview-stage ${comparisonMode==='overlay'?'overlay':''}" style="--zoom:${comparisonZoom}">${panes.map(([content,label])=>`<div class="preview-pane"><span class="preview-label">${label}</span>${content}</div>`).join('')}</div><div class="preview-footer"><button data-preview-nav="previous">上一项</button><button data-preview-nav="next">下一项</button>${item.status==='missing_reference'?'<button data-track-relocate>重新定位</button>':''}${item.status==='pending_confirmation'||item.status==='missing_reference'?'<button data-track-decision="accepted">接受</button><button data-track-decision="rejected">拒绝</button>':''}<span class="preview-meta">${trackingItems.indexOf(item)+1} / ${trackingItems.length}</span></div></section></div>`;
+    };
+
+    function stateBody(panelId,state) {
+      if (state === 'ready') return readyBody(panelId);
+      if (state === 'move_confirm') return scene('warning','确认移动非根目录文件夹','来源“项目/RAW/调色一版”将安全移动到“项目/调色一版”。目标不存在且来源不是外部快捷方式；关系继续使用 node_prg_02。',metrics([['来源','RAW/调色一版'],['目标','项目根/调色一版'],['外部链接','未检测到']]),`${button('返回')}${button('确认移动并继续','primary')}`);
+      if (state === 'processing') return scene('','正在对比版本媒体','taskId: task_cmp_84 · sessionId: session_84。完整匹配结果不会写入任务 metadata。',`${progress(62)}${metrics([['已扫描','486 / 782'],['识别关联','451'],['疑似新素材','22']])}`,`${button('取消任务','danger')}${button('缩小到后台')}`);
+      if (state === 'loading') return scene('','正在读取确认会话','通过 sessionId 分页读取完整结果；任务 metadata 只提供计数与短摘要。',`${progress(38)}${metrics([['sessionId','session_84'],['当前页','2 / 6'],['已读取','200 / 486']])}`,button('缩小到后台'));
+      if (state === 'waiting_confirmation') { const gate=model.canCommitConfirmation(trackingItems); return scene('warning','比较完成，等待用户确认','软件判断为新素材的项目默认是 pending_confirmation；仍有待确认或缺失引用时不能提交。',`${metrics([['recognized',trackingItems.filter(i=>i.status==='recognized').length],['pending_confirmation',trackingItems.filter(i=>i.status==='pending_confirmation').length],['missing_reference',trackingItems.filter(i=>i.status==='missing_reference').length]])}${confirmationPreview()}`,`${button('保存并关闭')}${button('确认并提交','primary',!gate.allowed)}`); }
+      if (state === 'committing') return scene('','正在提交确认结果','节点状态为 committing；提交按 sessionId 幂等，重复操作不会重复复制或创建关系。',`${progress(81)}${metrics([['已提交','383 / 473'],['已拒绝','11'],['会话','session_84']])}`,button('缩小到后台'));
+      if (state === 'result') return scene('success',panelId==='confirm'?'跟踪结果已提交':'操作完成','主分支节点已更新；已有文件未被覆盖。任务中心仍可打开结果摘要。',`${metrics([['节点状态','已跟踪'],['新增并确认','20'],['跳过已有文件','6']])}${sourceTree()}`,`${button('关闭')}${button(panelId==='modify'?'打开版本树':'继续','primary')}`);
+      return scene('danger','任务失败，可恢复','来源在处理期间被移动。会话结果仍保留，可从任务中心恢复面板或使用同一配置重试。',metrics([['taskId','task_cmp_84'],['sessionId','session_84'],['已写入','0 个文件']]),`${button('关闭')}${button('恢复面板')}${button('重试','primary')}`);
+    }
+
+    function render() {
+      const definition = model.PANEL_DEFINITIONS[activePanel];
+      document.getElementById('nav').innerHTML = Object.entries(model.PANEL_DEFINITIONS).map(([id,item])=>`<button data-panel="${id}" class="${id===activePanel?'active':''}"><span class="nav-icon">${navMeta[id][0]}</span><span><b>${item.title}</b><small>${navMeta[id][1]}</small></span></button>`).join('');
+      document.getElementById('context-title').textContent = definition.title;
+      document.getElementById('context-description').textContent = descriptions[activePanel];
+      document.getElementById('state-buttons').innerHTML = definition.states.map(state=>`<button data-state="${state}" class="${activeStates[activePanel]===state?'active':''}">${stateLabels[state]}</button>`).join('');
+      const state = activeStates[activePanel];
+      document.getElementById('panel').innerHTML = `<article class="panel"><header class="panel-head"><span class="panel-icon">${navMeta[activePanel][0]}</span><div><h3>${definition.title}</h3><p>${descriptions[activePanel]}</p></div><span class="status-chip">${stateLabels[state]}</span></header><div class="panel-body">${stateBody(activePanel,state)}</div></article>`;
+    }
+
+    document.addEventListener('click',(event)=>{
+      const panelButton = event.target.closest('[data-panel]');
+      if (panelButton) { activePanel=panelButton.dataset.panel; relationKind='main'; render(); return; }
+      const stateButton = event.target.closest('[data-state]');
+      if (stateButton) { activeStates[activePanel]=stateButton.dataset.state; render(); return; }
+      const relationButton = event.target.closest('[data-relation]');
+      if (relationButton) { relationKind=relationButton.dataset.relation; render(); return; }
+      const selectButton = event.target.closest('[data-track-select]');
+      if (selectButton) { selectedTrackingItemId=selectButton.dataset.trackSelect; render(); return; }
+      const modeButton = event.target.closest('[data-compare-mode]');
+      if (modeButton) { comparisonMode=modeButton.dataset.compareMode; render(); return; }
+      if (event.target.closest('[data-compare-swap]')) { comparisonSwapped=!comparisonSwapped; render(); return; }
+      const zoomButton = event.target.closest('[data-zoom]');
+      if (zoomButton) { comparisonZoom=zoomButton.dataset.zoom==='fit'?1:Math.max(.5,Math.min(2.5,comparisonZoom+(zoomButton.dataset.zoom==='in' ? .2 : -.2))); render(); return; }
+      const navButton = event.target.closest('[data-preview-nav]');
+      if (navButton) { selectedTrackingItemId=navButton.dataset.previewNav==='previous'?model.previousPreviewItemId(trackingItems,selectedTrackingItemId):model.nextPreviewItemId(trackingItems,selectedTrackingItemId); render(); return; }
+      const decisionButton = event.target.closest('[data-track-decision]');
+      if (decisionButton) { const current=selectedTrackingItemId; trackingItems=model.applyTrackingDecision(trackingItems,current,decisionButton.dataset.trackDecision); selectedTrackingItemId=model.nextPendingItemId(trackingItems,current)||current; render(); return; }
+      if (event.target.closest('[data-track-relocate]')) { const current=selectedTrackingItemId; trackingItems=trackingItems.map(item=>item.id===current?{...item,referenceName:'DSC_8100.ARW',referencePreviewUrl:'assets/compare-alternate.svg'}:item); trackingItems=model.applyTrackingDecision(trackingItems,current,'accepted','DSC_8100.ARW'); selectedTrackingItemId=model.nextPendingItemId(trackingItems,current)||current; render(); }
+    });
+    render();
+  </script>
+</body>
+</html>

@@ -1,6 +1,10 @@
 const assert = require('assert');
 const { EventEmitter } = require('events');
 const { createBackgroundTaskService } = require('../electron/services/background-task-service.cjs');
+const fs = require('fs');
+const path = require('path');
+const projectFileTaskSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'project-file-task-service.cjs'), 'utf8');
+assert(projectFileTaskSource.includes("scanning: '正在统计'") && projectFileTaskSource.includes("concurrencyLimit = 2"), 'file tasks must show scanning immediately without raising the existing disk concurrency limit');
 
 const queued = async promise => {
   let settled = false;
@@ -25,8 +29,11 @@ const main = async () => {
   const second = service.create(definition('second', 'C:/projects/b'));
   const third = service.create(definition('third', 'C:/projects/c'));
   await Promise.all([first.waitForStart(), second.waitForStart()]);
+  assert.equal(service.get('first').state, 'running', 'independent disk tasks must keep running concurrently');
+  assert.equal(service.get('second').state, 'running', 'the existing concurrency limit must allow the second independent task');
   const thirdStart = third.waitForStart();
   assert.equal(await queued(thirdStart), true, '第三个磁盘任务应等待并发名额');
+  assert.equal(service.get('third').state, 'queued', 'tasks beyond the existing concurrency limit must remain queued');
   first.complete();
   await thirdStart;
   second.complete();
@@ -37,6 +44,7 @@ const main = async () => {
   await parent.waitForStart();
   const childStart = child.waitForStart();
   assert.equal(await queued(childStart), true, '父子路径重叠的任务应自动排队');
+  assert.equal(service.get('child').state, 'queued', 'path-conflicting tasks must remain queued without changing the concurrency limit');
   parent.complete();
   await childStart;
   child.complete();

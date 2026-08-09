@@ -8,12 +8,14 @@ const venvPython = process.platform === 'win32'
   : join(root, '.venv', 'bin', 'python');
 const python = existsSync(venvPython) ? venvPython : 'python';
 const sharedWorkerName = 'PhotoFlowImportWorker';
-const releaseRoot = join(root, 'release');
+const pythonDistRoot = join(root, 'artifacts', 'python');
+const pythonBuildRoot = join(root, 'artifacts', 'python-build');
+const releaseRoot = join(root, 'artifacts', 'installers');
 
 // These workers now share the tools runtime. Remove stale standalone outputs
 // so local release inspection cannot mistake them for packaged resources.
 for (const retiredOutput of ['thumbnail-image-worker', 'workspace-db-worker', 'tools', 'tools.exe', sharedWorkerName, 'thumbnail-image-worker.exe', 'workspace-db-worker.exe']) {
-  rmSync(join(root, 'python', 'dist', retiredOutput), { recursive: true, force: true });
+  rmSync(join(pythonDistRoot, retiredOutput), { recursive: true, force: true });
 }
 rmSync(join(releaseRoot, 'components', 'raw-decoder-libraw'), { recursive: true, force: true });
 if (existsSync(releaseRoot)) {
@@ -25,7 +27,10 @@ if (existsSync(releaseRoot)) {
 }
 
 const result = spawnSync(python, [
-  '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm', '--specpath', 'build/specs',
+  '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm',
+  '--specpath', join(pythonBuildRoot, 'specs'),
+  '--workpath', join(pythonBuildRoot, sharedWorkerName),
+  '--distpath', pythonDistRoot,
   '--name', sharedWorkerName, '--exclude-module', 'imageio_ffmpeg',
   '--collect-binaries', 'rawpy', '--exclude-module', 'scipy', '--exclude-module', 'cv2',
   '--exclude-module', 'torch', '--exclude-module', 'torchvision',
@@ -44,7 +49,10 @@ if (result.error) throw result.error;
 if ((result.status ?? 1) !== 0) process.exit(result.status ?? 1);
 
 const inspirationTools = spawnSync(python, [
-  '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm', '--specpath', 'build/specs',
+  '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm',
+  '--specpath', join(pythonBuildRoot, 'specs'),
+  '--workpath', join(pythonBuildRoot, 'inspiration-tools'),
+  '--distpath', pythonDistRoot,
   '--name', 'inspiration-tools', '--exclude-module', 'imageio_ffmpeg',
   '--exclude-module', 'scipy', '--exclude-module', 'matplotlib',
   '--exclude-module', 'torch', '--exclude-module', 'torchvision',

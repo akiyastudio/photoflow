@@ -14,11 +14,13 @@ const { registerWorkspaceIpc } = require('./modules/workspace-ipc.cjs');
 const { registerFileOperationsIpc } = require('./modules/files-ipc.cjs');
 const { registerMediaIpc } = require('./modules/media-ipc.cjs');
 const { registerVersionIpc } = require('./modules/versions-ipc.cjs');
+const { registerSelectionIpc } = require('./modules/selection-ipc.cjs');
 const { registerAdvancedVideoIpc } = require('./modules/advanced-video-ipc.cjs');
 const { registerBackupIpc } = require('./modules/backup-ipc.cjs');
 const { registerArchiveIpc } = require('./modules/archive-ipc.cjs');
 const { registerStorageUsageIpc } = require('./modules/storage-usage-ipc.cjs');
 const { createRecycleBinService } = require('./services/recycle-bin-service.cjs');
+const { createFileClipboardService } = require('./services/file-clipboard-service.cjs');
 const { createShellNewService } = require('./services/shell-new-service.cjs');
 const { createMediaAccessService } = require('./services/media-access-service.cjs');
 const { createMediaFileResponse } = require('./services/media-response-service.cjs');
@@ -38,6 +40,8 @@ const { createFileSystemService } = require('./services/file-system-service.cjs'
 const { createThumbnailService } = require('./services/thumbnail-service.cjs');
 const { createMediaService } = require('./services/media-service.cjs');
 const { createVersionService } = require('./services/version-service.cjs');
+const { createVersionStaleDetectionService } = require('./services/version-stale-detection-service.cjs');
+const { createSelectionService } = require('./services/selection-service.cjs');
 const { createTelemetryService } = require('./services/telemetry-service.cjs');
 const { createPrivacyService } = require('./privacy-service.cjs');
 const { createFileRootWatcherService } = require('./services/file-root-watcher-service.cjs');
@@ -209,6 +213,7 @@ const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
 
 const recycleBinService = createRecycleBinService({ app, shell, projectRoot });
+const fileClipboardService = createFileClipboardService({ app, projectRoot });
 const shellNewService = createShellNewService({ app });
 const fileSystemService = createFileSystemService({ recycleBinService });
 const {
@@ -303,7 +308,7 @@ const writeLog = (level, message, details) => {
   }
 };
 
-const rendererEntryFile = path.join(__dirname, '../dist/index.html');
+const rendererEntryFile = path.join(__dirname, '../artifacts/web/index.html');
 const isDevelopmentRenderer = () => process.env.NODE_ENV === 'development';
 const { configureWindowSecurity, ipcMain, openAllowedExternalUrl } = createElectronSecurity({
   electronIpcMain, getMainWindow: () => mainWindow, isDevelopment: isDevelopmentRenderer,
@@ -433,7 +438,7 @@ function createWindow(loadRenderer = true) {
     width: 1024,
     height: 768,
     show: false,
-    icon: app.isPackaged ? undefined : path.join(__dirname, '../build/icon.ico'),
+    icon: app.isPackaged ? undefined : path.join(__dirname, '../packaging/icon.ico'),
     backgroundColor: '#f8fafc',
     frame: false,
     // Keep the Windows resize frame so Aero Snap and drag-to-top maximize work
@@ -590,16 +595,18 @@ pluginService = createPluginService({ app, projectRoot, registry: componentRegis
 const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, onMessage) =>
   runJsonCommand(getRunConfig(scriptName, args), scriptName, timeoutMs, onMessage);
 
-const runPythonEventAction = (scriptName, args, timeoutMs = 20 * 60 * 1000) => new Promise((resolve, reject) => {
+const runPythonEventAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, signal) => new Promise((resolve, reject) => {
   const run = getRunConfig(scriptName, args);
   const child = spawn(run.command, run.args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   let finished = false;
+  let abortListener = null;
   const settle = callback => value => {
     if (finished) return;
     finished = true;
     clearTimeout(timer);
+    if (abortListener && signal) signal.removeEventListener('abort', abortListener);
     callback(value);
   };
   const succeed = settle(resolve);
@@ -622,6 +629,16 @@ const runPythonEventAction = (scriptName, args, timeoutMs = 20 * 60 * 1000) => n
     if (!child.killed) child.kill();
     fail(new Error(`${scriptName} 处理超时`));
   }, timeoutMs);
+  if (signal) {
+    abortListener = () => {
+      if (!child.killed) child.kill();
+      const error = new Error('任务已取消');
+      error.code = 'TASK_CANCELLED';
+      fail(error);
+    };
+    if (signal.aborted) abortListener();
+    else signal.addEventListener('abort', abortListener, { once: true });
+  }
 });
 
 const checkForUpdates = async () => {
@@ -837,6 +854,8 @@ const mediaDatabase = new PythonDatabaseClient({
 });
 const mediaRepository = createMediaRepository(mediaDatabase);
 const versionService = createVersionService({ repository: mediaRepository });
+let selectionService = null;
+const versionStaleDetectionService = createVersionStaleDetectionService({ versionService, writeLog });
 // Directory walks and deferred full-hash backfills can take minutes on large
 // projects. Run scheduled scans on a separate worker so opening team retouch
 // never waits behind background media tracking work.
@@ -860,10 +879,18 @@ const ensureWorkspace = workspaceService.ensureRoot;
 const refreshWorkspaceCatalog = workspaceService.refreshCatalog;
 const reconcileWorkspaceCatalogDirect = workspaceService.reconcileCatalog;
 const workspaceCatalogReconciliations = new Map();
+const stableCatalogValue = value => Array.isArray(value) ? value.map(stableCatalogValue)
+  : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stableCatalogValue(value[key])])) : value;
+const stableCatalogExtra = value => { try { return stableCatalogValue(JSON.parse(value || '{}')); } catch { return value || ''; } };
+const workspaceCatalogSemanticSnapshot = catalog => JSON.stringify((catalog?.projects || []).map(project => ({
+  name: project.name, status: project.status, relative_path: project.relative_path,
+  filesystem_id: project.filesystem_id, availability: project.availability, missing_since: project.missing_since,
+  extra_json: stableCatalogExtra(project.extra_json),
+})).sort((left, right) => `${left.relative_path}\0${left.name}`.localeCompare(`${right.relative_path}\0${right.name}`)));
 const reconcileWorkspaceCatalog = root => {
   const existing = workspaceCatalogReconciliations.get(root);
   if (existing) return existing;
-  const previousSnapshot = JSON.stringify(workspaceCatalogs.get(root)?.projects || []);
+  const previousSnapshot = workspaceCatalogSemanticSnapshot(workspaceCatalogs.get(root));
   const run = async () => {
     for (let attempt = 0; ; attempt += 1) {
       try {
@@ -875,7 +902,7 @@ const reconcileWorkspaceCatalog = root => {
     }
   };
   const operation = run().then(catalog => {
-    const changed = previousSnapshot !== JSON.stringify(catalog.projects || []);
+    const changed = previousSnapshot !== workspaceCatalogSemanticSnapshot(catalog);
     if (changed && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('workspace-projects-changed', { root, reconciled: true });
     }
@@ -899,8 +926,9 @@ const stopWorkspaceWatcher = () => {
   if (workspaceReconciliationTimer) clearInterval(workspaceReconciliationTimer);
   workspaceReconciliationTimer = null;
   workspaceReconciliationRunning = false;
-  for (const timer of mediaTrackingTimers.values()) clearTimeout(timer);
+  for (const state of mediaTrackingTimers.values()) clearTimeout(state?.timer || state);
   mediaTrackingTimers.clear();
+  versionStaleDetectionService.stop();
 };
 
 const stopFileRootWatchers = () => {
@@ -949,14 +977,20 @@ const startWorkspaceReconciliation = root => {
   workspaceReconciliationTimer = setInterval(() => { void reconcileWorkspaceState(root); }, 5 * 60 * 1000);
 };
 
-const scheduleMediaTrackingScan = (root, projectName) => {
+const scheduleMediaTrackingScan = (root, projectName, changedPaths = [], fullScan = false) => {
   if (!projectName) return;
+  versionStaleDetectionService.schedule(root, projectName, changedPaths, fullScan);
   const project = workspaceCatalogs.get(root)?.byName.get(projectName.toLocaleLowerCase());
   if (project?.availability === 'missing') return;
   const key = `${root}\0${projectName.toLocaleLowerCase()}`;
   const previous = mediaTrackingTimers.get(key);
-  if (previous) clearTimeout(previous);
-  mediaTrackingTimers.set(key, setTimeout(() => {
+  if (previous) clearTimeout(previous.timer || previous);
+  const state = {
+    changedPaths: new Set([...(previous?.changedPaths || []), ...changedPaths.map(value => path.resolve(value))]),
+    fullScan: Boolean(fullScan || previous?.fullScan),
+    timer: null,
+  };
+  state.timer = setTimeout(() => {
     mediaTrackingTimers.delete(key);
     void mediaScanService.syncProject(root, projectName).then(result => {
       const row = workspaceCatalogs.get(root)?.byName.get(projectName.toLocaleLowerCase());
@@ -973,15 +1007,17 @@ const scheduleMediaTrackingScan = (root, projectName) => {
     }).catch(error => {
       writeLog('warn', 'Media version tracking scan deferred', { projectName, error: error.message || String(error) });
     });
-  }, 1500));
+  }, 1500);
+  mediaTrackingTimers.set(key, state);
 };
 
 const cancelMediaTrackingScan = (root, projectName) => {
   if (!projectName) return;
   const key = `${root}\0${projectName.toLocaleLowerCase()}`;
-  const timer = mediaTrackingTimers.get(key);
-  if (timer) clearTimeout(timer);
+  const state = mediaTrackingTimers.get(key);
+  if (state) clearTimeout(state.timer || state);
   mediaTrackingTimers.delete(key);
+  versionStaleDetectionService.cancel(root, projectName);
 };
 
 const watchWorkspace = (root) => {
@@ -1025,13 +1061,20 @@ const watchWorkspace = (root) => {
         const changedTopLevelNames = new Set(changedSegments.map(segments => segments[0]).filter(Boolean));
         const catalogMayHaveChanged = !changedNames.length || changedSegments.some(segments => segments.length === 1 || !knownProjectPaths.has(String(segments[0] || '').toLocaleLowerCase()));
         const changedProjects = new Set();
+        const changedPathsByProject = new Map();
         for (const changedName of changedNames) {
           const firstSegment = changedName.split(/[\\/]/).filter(Boolean)[0];
           const project = catalog?.projects.find(item => item.relative_path.toLocaleLowerCase() === String(firstSegment || '').toLocaleLowerCase());
-          if (project) changedProjects.add(project.name);
+          if (project) {
+            changedProjects.add(project.name);
+            if (!changedPathsByProject.has(project.name)) changedPathsByProject.set(project.name, []);
+            changedPathsByProject.get(project.name).push(path.join(root, changedName));
+          }
         }
         if (!changedNames.length) for (const project of catalog?.projects || []) changedProjects.add(project.name);
-        for (const projectName of changedProjects) scheduleMediaTrackingScan(root, projectName);
+        for (const projectName of changedProjects) scheduleMediaTrackingScan(
+          root, projectName, changedPathsByProject.get(projectName) || [], !changedNames.length,
+        );
         if (mainWindow && !mainWindow.isDestroyed()) {
           for (const changedName of changedNames) {
             mainWindow.webContents.send('workspace-files-changed', { root, fileName: changedName, eventType: changedEventTypes.get(changedName) || 'rename' });
@@ -1049,6 +1092,12 @@ const watchWorkspace = (root) => {
         }
       }, 200);
     });
+    // Reopening a workspace only snapshots registered version folders. A
+    // catalog read must never fan out into an unrestricted media walk of every
+    // project.
+    for (const project of workspaceCatalogs.get(root)?.projects || []) {
+      versionStaleDetectionService.schedule(root, project.name, [], true);
+    }
     workspaceWatcher.on('error', error => {
       writeLog('warn', 'Workspace file watcher stopped', { root, error: error.message || String(error) });
       if (workspaceWatcher) workspaceWatcher.close();
@@ -1070,6 +1119,10 @@ const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bm
 const IMAGE_PREVIEW_CONVERSION_EXTENSIONS = new Set(['.tif', '.tiff', '.heic', '.heif', '.hif']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.crm']);
 const RAW_EXTENSIONS = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
+selectionService = createSelectionService({
+  fs, crypto, copyFileAtomic, versionService,
+  imageExtensions: IMAGE_EXTENSIONS, rawExtensions: RAW_EXTENSIONS, videoExtensions: VIDEO_EXTENSIONS,
+});
 const RAW_DECODER_CACHE_VERSION = 'libraw-rawpy-v1';
 const HIDDEN_SYSTEM_ENTRY_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store', '.photoflow-workspace-id']);
 
@@ -1675,97 +1728,22 @@ const flattenMetadataValue = (group, name, value, depth = 0) => {
 
 
 
-const runWindowsClipboardScript = script => new Promise((resolve, reject) => {
-  const encodedCommand = Buffer.from(script, 'utf16le').toString('base64');
-  const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', encodedCommand], { windowsHide: true });
-  let stdout = '';
-  let stderr = '';
-  let settled = false;
-  const finish = (error, value) => {
-    if (settled) return;
-    settled = true;
-    clearTimeout(timeout);
-    if (error) reject(error);
-    else resolve(value);
-  };
-  const timeout = setTimeout(() => {
-    child.kill();
-    finish(new Error('系统剪贴板响应超时'));
-  }, 8000);
-  child.stdout.on('data', data => { stdout += data.toString('utf8'); });
-  child.stderr.on('data', data => { stderr += data.toString('utf8'); });
-  child.on('error', error => finish(error));
-  child.on('close', code => finish(code === 0 ? null : new Error(stderr.trim() || `PowerShell 退出，代码 ${code}`), stdout.trim()));
-});
-
-let systemFileClipboardWriteQueue = Promise.resolve();
-const writeSystemFileClipboard = async (sources, operation) => {
-  if (process.platform !== 'win32') return false;
-  const payload = Buffer.from(JSON.stringify({ sources, operation }), 'utf8').toString('base64');
-  const script = `
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-Add-Type -AssemblyName System.Windows.Forms
-$json = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${payload}'))
-$payload = ConvertFrom-Json $json
-$files = New-Object System.Collections.Specialized.StringCollection
-foreach ($file in $payload.sources) { [void]$files.Add([string]$file) }
-$data = New-Object System.Windows.Forms.DataObject
-$data.SetFileDropList($files)
-$effect = if ($payload.operation -eq 'cut') { 2 } else { 1 }
-$effectBytes = [System.BitConverter]::GetBytes([int]$effect)
-$effectStream = New-Object System.IO.MemoryStream
-$effectStream.Write($effectBytes, 0, $effectBytes.Length)
-$effectStream.Position = 0
-$data.SetData('Preferred DropEffect', $false, $effectStream)
-for ($attempt = 0; $attempt -lt 5; $attempt++) {
-  try { [System.Windows.Forms.Clipboard]::SetDataObject($data, $true); exit 0 }
-  catch { if ($attempt -eq 4) { throw }; Start-Sleep -Milliseconds 80 }
-}`;
-  const write = systemFileClipboardWriteQueue.catch(() => undefined).then(() => runWindowsClipboardScript(script));
-  systemFileClipboardWriteQueue = write.catch(() => undefined);
-  await write;
-  return true;
-};
-
-const readSystemFileClipboard = async () => {
-  if (process.platform !== 'win32') return null;
-  const script = `
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-Add-Type -AssemblyName System.Windows.Forms
-$data = [System.Windows.Forms.Clipboard]::GetDataObject()
-$files = @([System.Windows.Forms.Clipboard]::GetFileDropList() | ForEach-Object { [string]$_ })
-$operation = 'copy'
-if ($data -and $data.GetDataPresent('Preferred DropEffect')) {
-  $effectData = $data.GetData('Preferred DropEffect')
-  if ($effectData -is [System.IO.Stream]) {
-    $effectData.Position = 0
-    $effect = $effectData.ReadByte()
-  } elseif ($effectData -is [byte[]] -and $effectData.Length) {
-    $effect = $effectData[0]
-  }
-  if (($effect -band 2) -eq 2) { $operation = 'cut' }
-}
-@{ sources = $files; operation = $operation } | ConvertTo-Json -Compress`;
-  const output = await runWindowsClipboardScript(script);
-  return output ? JSON.parse(output) : null;
-};
-
+const writeSystemFileClipboard = (sources, operation) => fileClipboardService.write(sources, operation);
+const readSystemFileClipboard = () => fileClipboardService.read();
+const clearSystemFileClipboardIfCurrent = snapshot => fileClipboardService.clearIfCurrent(snapshot);
 const cancelSystemFileCut = async expectedSources => {
   if (process.platform !== 'win32') return { cleared: false, hasFiles: false };
+  const current = await readSystemFileClipboard();
   const expectedKeys = new Set(expectedSources.map(source => path.resolve(source).toLocaleLowerCase()));
-  const cancel = systemFileClipboardWriteQueue.catch(() => undefined).then(async () => {
-    const current = await readSystemFileClipboard();
-    const currentSources = (current?.sources || []).map(source => path.resolve(source));
-    const currentKeys = new Set(currentSources.map(source => source.toLocaleLowerCase()));
-    const matchesExpectedCut = current?.operation === 'cut'
-      && currentKeys.size === expectedKeys.size
-      && [...currentKeys].every(source => expectedKeys.has(source));
-    if (!matchesExpectedCut) return { cleared: false, hasFiles: currentSources.some(source => fs.existsSync(source)) };
-    clipboard.clear();
-    return { cleared: true, hasFiles: false };
-  });
-  systemFileClipboardWriteQueue = cancel.catch(() => undefined);
-  return cancel;
+  const currentSources = (current?.sources || []).map(source => path.resolve(source));
+  const currentKeys = new Set(currentSources.map(source => source.toLocaleLowerCase()));
+  const matchesExpectedCut = current?.operation === 'cut'
+    && currentSources.length === expectedSources.length
+    && currentKeys.size === expectedKeys.size
+    && [...currentKeys].every(source => expectedKeys.has(source));
+  if (!matchesExpectedCut) return { cleared: false, hasFiles: currentSources.some(source => fs.existsSync(source)) };
+  const result = await clearSystemFileClipboardIfCurrent(current);
+  return { cleared: Boolean(result.cleared), hasFiles: !result.cleared && Boolean(result.sources?.some(source => fs.existsSync(source))) };
 };
 
 
@@ -1935,9 +1913,10 @@ app.whenReady().then(async () => {
 
   registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
   registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
-  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard });
+  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, exiftool, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaMetadataCache, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
+  registerSelectionIpc({ ipcMain, path, fs, selectionService, workspaceCatalogs });
   registerAdvancedVideoIpc({ BrowserWindow, app, crypto, ipcMain, mediaService, path, pluginService, spawn, writeLog });
   const credentialService = createCredentialService({ writeLog });
   const backupService = createBackupService({ app, backgroundTasks, credentialService, getConfigPath, getUserBirthdaysPath, getWorkspaceDatabasePath, getWorkspaceDataRoot, readSavedConfig, runPythonJsonAction, writeLog });

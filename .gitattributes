@@ -1,4 +1,4 @@
-components/team-retouch/models/rtmdet-ins_m_640x640.onnx filter=lfs diff=lfs merge=lfs -text
-components/team-retouch/models/face_detection_yunet_2023mar.onnx filter=lfs diff=lfs merge=lfs -text
-components/team-retouch/models/face_recognition_sface_2021dec.onnx filter=lfs diff=lfs merge=lfs -text
-components/team-retouch/models/osnet_x0_25_msmt17.onnx filter=lfs diff=lfs merge=lfs -text
+extensions/team-retouch/models/rtmdet-ins_m_640x640.onnx filter=lfs diff=lfs merge=lfs -text
+extensions/team-retouch/models/face_detection_yunet_2023mar.onnx filter=lfs diff=lfs merge=lfs -text
+extensions/team-retouch/models/face_recognition_sface_2021dec.onnx filter=lfs diff=lfs merge=lfs -text
+extensions/team-retouch/models/osnet_x0_25_msmt17.onnx filter=lfs diff=lfs merge=lfs -text
