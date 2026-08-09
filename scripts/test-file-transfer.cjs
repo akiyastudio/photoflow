@@ -8,6 +8,7 @@ const { registerWorkspaceIpc } = require('../electron/modules/workspace-ipc.cjs'
 const { addUndoIdentities, assertUndoIdentity, capturePathIdentity, samePathIdentity } = require('../electron/services/file-identity-service.cjs');
 const {
   CANCELLED_CODE,
+  SOURCE_CLEANUP_INCOMPLETE_CODE,
   DEFAULT_SMALL_FILE_CONCURRENCY,
   assertCopyPlanSourcesUnchanged,
   assertDiskSpace,
@@ -26,6 +27,13 @@ const {
 } = require('../electron/services/file-transfer-service.cjs');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-transfer-test-'));
+const filesIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'files-ipc.cjs'), 'utf8');
+const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
+
+assert(mainSource.includes('createFileClipboardService') && !mainSource.includes('runWindowsClipboardScript'), 'file clipboard access must use the native service instead of inline PowerShell');
+assert(filesIpcSource.includes('const clearClipboardIfSnapshotCurrent') && filesIpcSource.includes('clearSystemFileClipboardIfCurrent(snapshot)'), 'cut clipboard clearing must delegate sequence and path validation to the native helper');
+assert.strictEqual((filesIpcSource.match(/await clearClipboardIfSnapshotCurrent\(clipboardSnapshot\)/g) || []).length, 2, 'both paste completion branches must verify clipboard ownership before clearing');
+assert(filesIpcSource.includes('missingCutSources') && filesIpcSource.includes('剪切源已被其他粘贴任务移动或删除'), 'a later paste sharing an already-consumed cut snapshot must return a clear source error');
 
 const run = async () => {
   try {
@@ -82,6 +90,66 @@ const run = async () => {
     assert.strictEqual(fs.existsSync(crossVolumeDirectorySource), false);
     assert.strictEqual(fs.readFileSync(path.join(crossVolumeDirectoryTarget, 'nested', 'photo.jpg'), 'utf8'), 'directory move');
     assert.strictEqual(fs.readdirSync(root).some(name => name.endsWith('.photoflow-part')), false);
+
+    const cleanupFailureSource = path.join(root, 'cross-volume-cleanup-failure-source');
+    const cleanupFailureTarget = path.join(root, 'cross-volume-cleanup-failure-target');
+    const cleanupFailureFiles = ['first.raw', 'nested/second.jpg', 'nested/third.mov'];
+    for (const [index, relativePath] of cleanupFailureFiles.entries()) {
+      const sourcePath = path.join(cleanupFailureSource, relativePath);
+      fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+      fs.writeFileSync(sourcePath, `original-${index}`);
+    }
+    let sourceDeleteAttempt = 0;
+    await assert.rejects(
+      movePathAtomic(cleanupFailureSource, cleanupFailureTarget, {
+        renameFile: async () => { throw Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' }); },
+        removeFile: async (sourcePath, removeOptions) => {
+          sourceDeleteAttempt += 1;
+          if (sourceDeleteAttempt === 2) throw Object.assign(new Error('simulated source cleanup failure'), { code: 'EACCES' });
+          await fs.promises.rm(sourcePath, removeOptions);
+        },
+      }),
+      error => error.code === SOURCE_CLEANUP_INCOMPLETE_CODE
+        && error.transferStage === 'cleanup-source'
+        && /源清理未完成，可能存在重复内容/.test(error.message),
+    );
+    assert.strictEqual(sourceDeleteAttempt, 2, 'the injected failure must occur while deleting the second source file');
+    assert.strictEqual(fs.existsSync(path.join(cleanupFailureSource, cleanupFailureFiles[0])), false, 'the first source file must already be deleted before the injected failure');
+    assert.strictEqual(fs.existsSync(path.join(cleanupFailureSource, cleanupFailureFiles[1])), true, 'the failed source deletion must leave that source file in place');
+    assert.strictEqual(fs.existsSync(cleanupFailureTarget), true, 'a committed target directory must survive source cleanup failure');
+    for (const [index, relativePath] of cleanupFailureFiles.entries()) {
+      const sourcePath = path.join(cleanupFailureSource, relativePath);
+      const targetPath = path.join(cleanupFailureTarget, relativePath);
+      assert(fs.existsSync(sourcePath) || fs.existsSync(targetPath), `${relativePath} must remain in at least one location`);
+      assert.strictEqual(fs.readFileSync(targetPath, 'utf8'), `original-${index}`, `the target copy of ${relativePath} must remain complete`);
+    }
+
+    const rollbackProject = path.join(root, 'move-rollback-project');
+    const rollbackDestination = path.join(rollbackProject, 'destination');
+    fs.mkdirSync(rollbackDestination, { recursive: true });
+    fs.writeFileSync(path.join(rollbackProject, 'first.txt'), 'first');
+    fs.writeFileSync(path.join(rollbackProject, 'second.txt'), 'second');
+    const rollbackHandlers = new Map();
+    let moveAttempt = 0;
+    registerFileOperationsIpc({
+      Array, Boolean, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => rollbackHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: () => rollbackProject, activeProjectFileOperations: new Map(),
+      assertInside, movePathAtomic: async (sourcePath, destinationPath, options) => {
+        moveAttempt += 1;
+        if (moveAttempt === 2) throw Object.assign(new Error('simulated middle move failure'), { code: 'EIO' });
+        return movePathAtomic(sourcePath, destinationPath, options);
+      },
+      pushUndoOperation: async () => undefined, writeLog: () => undefined,
+    });
+    const rollbackResult = await rollbackHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'move', ['first.txt', 'second.txt'], 'destination',
+    );
+    assert.strictEqual(rollbackResult.success, false);
+    assert.strictEqual(fs.readFileSync(path.join(rollbackProject, 'first.txt'), 'utf8'), 'first', 'a failed batch move must roll back earlier items');
+    assert.strictEqual(fs.readFileSync(path.join(rollbackProject, 'second.txt'), 'utf8'), 'second');
+    assert.strictEqual(fs.readdirSync(rollbackDestination).length, 0, 'rollback must leave no moved item in the destination');
+    assert(rollbackResult.operationId && rollbackResult.affectedDirectories.includes('destination'));
 
     const cancelSource = path.join(root, 'cancel-source.bin');
     const cancelTarget = path.join(root, 'cancel-target.bin');
@@ -514,7 +582,10 @@ const run = async () => {
       getProjectPath: (_workspacePath, status, name) => path.join(importWorkspaceRoot, status, name),
       getWorkspaceDataRoot: () => path.join(importWorkspaceRoot, '.data'),
       workspaceCatalogs: new Map([[importWorkspaceRoot, { byName: new Map(), projects: [] }]]),
-      mutateWorkspaceCatalog: async (_root, _operation, entry) => { importedCatalogEntry = entry; },
+      mutateWorkspaceCatalog: async (_root, _operation, entry) => {
+        importedCatalogEntry = entry;
+        return { byName: new Map([[entry.name.toLocaleLowerCase(), { id: 'imported-project-id', name: entry.name }]]), projects: [] };
+      },
       activeProjectFileOperations: new Map(), assertDiskSpace, collectCopyPlan, copyPlannedFiles, removeCopiedSources, throwIfCancelled,
       pushUndoOperation: async () => undefined, writeLog: () => undefined, mainWindow: null,
     });

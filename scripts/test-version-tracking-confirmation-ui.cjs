@@ -1,0 +1,58 @@
+const assert = require('assert');
+const path = require('path');
+const { pathToFileURL } = require('url');
+
+(async () => {
+  const model = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'versioning', 'tracking-confirmation-model.ts')).href);
+  const session = id => ({ id, progressId: `progress-${id}`, parentProgressId: `parent-${id}`, mode: 'refresh', status: 'pending_confirm', renameFromParent: false, copyMissingFromParent: false, error: '', total: 3, unresolvedCount: 2 });
+  const items = [
+    { id: 'known', kind: 'recognized', sourceName: 'known.jpg', referenceName: 'known.jpg', targetName: 'known.jpg', status: 'recognized' },
+    { id: 'missing', kind: 'missing', sourceName: 'missing-edit.jpg', referenceName: 'missing.jpg', targetName: 'missing-edit.jpg', status: 'missing_reference' },
+    { id: 'pending', kind: 'new', sourceName: 'new.jpg', targetName: 'new.jpg', status: 'pending_confirmation' },
+  ];
+  assert.deepStrictEqual(model.groupTrackingConfirmationItems(items).map(group => [group.category, group.items.map(item => item.id)]), [
+    ['recognized', ['known']], ['accepted', []], ['pending', ['pending']], ['missing', ['missing']],
+  ], 'confirmation results are grouped into the four V2 categories');
+
+  let state = { sessionId: 'a', items: [], minimized: false };
+  state = model.mergeTrackingSessionPage(state, { session: session('a'), items: items.slice(0, 2), nextCursor: 2 });
+  state = model.mergeTrackingSessionPage(state, { session: session('a'), items: items.slice(2) });
+  assert.deepStrictEqual(state.items.map(item => item.id), ['known', 'missing', 'pending'], 'pagination pages merge without duplicates');
+  assert.strictEqual(state.selectedItemId, 'pending', 'default selection waits for all pages and prioritizes pending confirmation');
+
+  state = { ...state, selectedItemId: 'pending' };
+  assert.strictEqual(state.selectedItemId, 'pending', 'row click selection is client state');
+  state = model.applyTrackingItemDecision(state, 'pending', 'accepted');
+  assert.strictEqual(state.selectedItemId, 'missing', 'decision advances to the next unresolved item');
+  state = model.applyTrackingItemDecision(state, 'missing', 'accepted', 'relocated.jpg');
+  assert.strictEqual(state.items.find(item => item.id === 'missing').referenceName, 'relocated.jpg', 'relocation updates the persisted relationship name');
+  assert.strictEqual(model.canCommitTrackingSession(state.items), true, 'commit opens only after every item is resolved');
+  assert.strictEqual(model.canCommitTrackingSession(items), false, 'unresolved items gate commit');
+
+  const missingPaths = model.resolveTrackingComparisonPaths(items[2], 'C:\\parent', 'C:\\current');
+  assert.strictEqual(missingPaths.referenceMissing, true, 'new media renders the missing-reference placeholder');
+  assert.strictEqual(missingPaths.referencePath, '', 'placeholder does not invent a reference path');
+  assert.strictEqual(missingPaths.sourcePath, 'C:\\current\\new.jpg');
+
+  const minimized = model.setTrackingPanelMinimized(state, true);
+  const resumed = model.setTrackingPanelMinimized(minimized, false);
+  assert.strictEqual(resumed.sessionId, state.sessionId, 'minimize and resume retain the same session');
+  assert.strictEqual(resumed.items.length, state.items.length);
+
+  const gate = model.createPreviewRequestGate();
+  const staleRequest = gate.begin();
+  const currentRequest = gate.begin();
+  assert.strictEqual(gate.isCurrent(staleRequest), false, 'a stale image request cannot update the next selection');
+  assert.strictEqual(gate.isCurrent(currentRequest), true);
+
+  const pageA = model.mergeTrackingSessionPage({ sessionId: 'a', items: [], minimized: false }, { session: session('a'), items: [items[0]] });
+  const pageB = model.mergeTrackingSessionPage({ sessionId: 'b', items: [], minimized: false }, { session: session('b'), items: [items[2]] });
+  const isolated = model.mergeTrackingSessionPage(pageA, { session: session('b'), items: [items[2]] });
+  assert.deepStrictEqual(isolated.items.map(item => item.id), ['known'], 'pages from two workspaces stay isolated by session');
+  assert.deepStrictEqual(pageB.items.map(item => item.id), ['pending']);
+
+  console.log('version tracking confirmation UI model tests passed');
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

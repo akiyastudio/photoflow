@@ -6,7 +6,7 @@ const { PLUGIN_DEFINITIONS } = require('../electron/plugins/plugin-catalog.cjs')
 if (process.platform !== 'win32') throw new Error('The prepared advanced engine package can only be exported on Windows with WSL 2.');
 const root = path.resolve(__dirname, '..');
 const version = PLUGIN_DEFINITIONS['team-retouch'].version;
-const releaseRoot = path.join(root, 'release');
+const releaseRoot = path.join(root, 'artifacts', 'installers');
 const outputPath = path.join(releaseRoot, `PhotoFlow-team-retouch-advanced-${version}-win32-x64.zip`);
 fs.mkdirSync(releaseRoot, { recursive: true });
 const result = spawnSync('powershell.exe', [

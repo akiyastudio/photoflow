@@ -11,4 +11,8 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(packageVersion),
   },
   base: './', 
+  build: {
+    outDir: 'artifacts/web',
+    emptyOutDir: true,
+  },
 })

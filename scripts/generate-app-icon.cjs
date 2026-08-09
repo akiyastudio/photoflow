@@ -5,7 +5,7 @@ const { Resvg } = require('@resvg/resvg-js');
 
 const root = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'public', 'app-logo.svg'), 'utf8');
-const output = path.join(root, 'build', 'icon.ico');
+const output = path.join(root, 'packaging', 'icon.ico');
 
 function render(size) {
   return new Resvg(source, { fitTo: { mode: 'width', value: size } }).render().asPng();

@@ -18,11 +18,13 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import type { AppConfig, MediaMetadataField, MediaVersion, MediaVersionBundle, ProjectFileEntry, WorkspaceProject } from '../types';
+import type { AppConfig, MediaMetadataField, MediaVersion, MediaVersionBundle, ProjectFileEntry, TrackedPhoto, WorkspaceProject } from '../types';
 import { useAppDialog } from './AppDialogProvider';
 import { useEscapeLayer } from './LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG } from '../utils/recycleBinFailure';
 import { AdvancedVideoPlayer } from './AdvancedVideoPlayer';
+import { metadataFieldLabel, metadataGroupLabel } from '../features/metadata/metadata-labels';
+import { mainBranchPhotoSummaries, mainBranchVersionsForPhoto, paginateMainBranchPhotos, type MainBranchPhotoSummary } from '../features/versioning/version-manager-model';
 
 type VersionManagerProps = {
   entry: ProjectFileEntry;
@@ -33,6 +35,7 @@ type VersionManagerProps = {
   onNotice: (message: string) => void;
   onVersionStateChanged?: () => void;
   progressVersionKey?: string;
+  progressId?: string;
   initialCompareIds?: string[];
   initialCompareMode?: 'side-by-side' | 'split' | 'overlay' | 'blink' | 'difference';
 };
@@ -271,16 +274,6 @@ const SingleVersionView = ({ version, cacheConfig, busy, onClose, onNotice, onEd
   onRelocate: () => void;
   onDelete: () => void;
 }) => {
-  const metadataLabels: Record<string, string> = {
-    FileName: '文件名', FileSize: '文件大小', FileType: '文件类型', FileTypeExtension: '文件扩展名', MIMEType: '媒体类型', FilePermissions: '文件权限',
-    FileCreateDate: '文件创建时间', FileModifyDate: '文件修改时间', FileAccessDate: '文件访问时间', ImageWidth: '图像宽度', ImageHeight: '图像高度', ImageSize: '图像尺寸',
-    Make: '相机厂商', Model: '相机型号', Lens: '镜头', LensModel: '镜头型号', DateTimeOriginal: '原始拍摄时间', CreateDate: '创建时间', ModifyDate: '修改时间',
-    ExposureTime: '曝光时间', ShutterSpeed: '快门速度', FNumber: '光圈值', Aperture: '光圈', ISO: '感光度', FocalLength: '焦距', WhiteBalance: '白平衡', Flash: '闪光灯',
-    Orientation: '方向', ColorSpace: '色彩空间', Software: '处理软件', Artist: '作者', Copyright: '版权', Rating: '星级评分', RatingPercent: '评分百分比',
-    Duration: '时长', VideoFrameRate: '视频帧率', AvgBitrate: '平均码率', VideoCodec: '视频编码', AudioCodec: '音频编码', AudioFormat: '音频格式', GPSPosition: '坐标位置',
-  };
-  const metadataLabel = (name: string) => /\p{Script=Han}/u.test(name) ? name : metadataLabels[name] || '其他属性';
-  const metadataGroupLabel = (group: string) => ({ Application: '文件', System: '文件系统', File: '文件属性', IFD0: '图像与相机', ExifIFD: '拍摄信息', ExifIFD1: '拍摄信息', Composite: '计算信息', MakerNotes: '相机厂商信息', XMP: '可扩展元数据', QuickTime: '媒体容器', Track1: '视频轨道', Track2: '音频轨道', GPS: '位置信息', 其他: '其他元数据' } as Record<string, string>)[group] || '其他元数据';
   const [metadataFields, setMetadataFields] = useState<MediaMetadataField[]>([]);
   const [metadataLoading, setMetadataLoading] = useState(false);
   const [metadataError, setMetadataError] = useState('');
@@ -371,13 +364,13 @@ const SingleVersionView = ({ version, cacheConfig, busy, onClose, onNotice, onEd
         </dl></section>
         <div className="flex items-center justify-between border-b border-slate-200 py-2"><span className="text-[11px] text-slate-400">{metadataLoading ? '正在读取媒体元数据…' : `${metadataFields.length} 个媒体字段`}</span></div>
         {metadataError && <p className="my-2 rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs text-red-600">{metadataError}</p>}
-        {Array.from(groupedMetadata.entries()).map(([group, fields]) => <details key={group} className="border-b border-slate-200"><summary className="cursor-pointer py-2.5 text-xs font-bold text-slate-700">{metadataGroupLabel(group)}<span className="ml-2 text-[10px] font-normal text-slate-400">{fields.length}</span></summary><dl className="pb-2">{fields.map((field, index) => <div key={`${field.name}:${index}`} className="grid grid-cols-[82px_minmax(0,1fr)] gap-3 border-b border-slate-100 py-2 last:border-0"><dt title={field.name} className="break-words text-[11px] text-slate-400">{metadataLabel(field.name)}</dt><dd className="select-text break-words text-xs leading-5 text-slate-700">{field.value}</dd></div>)}</dl></details>)}
+        {Array.from(groupedMetadata.entries()).map(([group, fields]) => <details key={group} className="border-b border-slate-200"><summary className="cursor-pointer py-2.5 text-xs font-bold text-slate-700">{metadataGroupLabel(group)}<span className="ml-2 text-[10px] font-normal text-slate-400">{fields.length}</span></summary><dl className="pb-2">{fields.map((field, index) => <div key={`${field.name}:${index}`} className="grid grid-cols-[82px_minmax(0,1fr)] gap-3 border-b border-slate-100 py-2 last:border-0"><dt title={field.name} className="break-words text-[11px] text-slate-400">{metadataFieldLabel(field.name)}</dt><dd className="select-text break-words text-xs leading-5 text-slate-700">{field.value}</dd></div>)}</dl></details>)}
       </div>
     </aside>
   </div>;
 };
 
-export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onClose, onNotice, onVersionStateChanged, progressVersionKey = '', initialCompareIds = [], initialCompareMode = 'side-by-side' }: VersionManagerProps) => {
+export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onClose, onNotice, onVersionStateChanged, progressVersionKey = '', progressId = '', initialCompareIds = [], initialCompareMode = 'side-by-side' }: VersionManagerProps) => {
   const appDialog = useAppDialog();
   const initialCompareKey = initialCompareIds.join('|');
   const [bundle, setBundle] = useState<MediaVersionBundle>({ success: true, versions: [] });
@@ -386,6 +379,10 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
   const [selectedId, setSelectedId] = useState('');
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [editing, setEditing] = useState<MediaVersion | null>(null);
+  const [branchPhotos, setBranchPhotos] = useState<MainBranchPhotoSummary[]>([]);
+  const [branchPhotoPage, setBranchPhotoPage] = useState(0);
+  const [branchPhotoLoading, setBranchPhotoLoading] = useState(false);
+  const [activePhotoId, setActivePhotoId] = useState('');
   useEscapeLayer(Boolean(editing), () => setEditing(null), !busy);
   const initialCompareAppliedRef = useRef('');
   const [editNote, setEditNote] = useState('');
@@ -404,22 +401,85 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
     return Math.max(260, Math.min(760, available - 360, width));
   };
 
+  const trackedPhotoForBranch = (photoId: string, summary: MainBranchPhotoSummary | undefined, versions: MediaVersion[], fallback?: TrackedPhoto): TrackedPhoto => {
+    if (fallback?.id === photoId) return { ...fallback, currentVersionId: versions.find(version => version.isCurrent)?.id || versions.at(-1)?.id || fallback.currentVersionId };
+    const current = versions.find(version => version.isCurrent) || versions.at(-1);
+    const first = versions[0];
+    return {
+      id: photoId,
+      projectId: project.id,
+      mediaType: /\.(?:mp4|mov|mkv|avi|webm|m4v)$/i.test(current?.filePath || first?.filePath || '') ? 'video' : 'image',
+      originalName: summary?.originalName || photoId,
+      displayName: summary?.originalName || photoId,
+      currentVersionId: current?.id || '',
+      originalFilePath: first?.filePath || current?.filePath || '',
+      createdAt: first?.createdAt || Date.now(),
+      updatedAt: current?.updatedAt || first?.updatedAt || Date.now(),
+    };
+  };
+
+  const applyBranchPhoto = (photoId: string, versions: MediaVersion[], fallback?: TrackedPhoto, summaries = branchPhotos) => {
+    const photo = trackedPhotoForBranch(photoId, summaries.find(item => item.photoId === photoId), versions, fallback);
+    setBundle({ success: true, photo, versions });
+    setActivePhotoId(photoId);
+    setSelectedId(currentId => versions.some(version => version.id === currentId) ? currentId : versions.find(version => version.isCurrent)?.id || versions.at(-1)?.id || '');
+    setCompareIds(ids => ids.filter(id => versions.some(version => version.id === id && !version.fileMissing)).slice(0, 2));
+  };
+
+  const loadBranchPhoto = async (photoId: string, fallback?: TrackedPhoto, summaries = branchPhotos) => {
+    if (!progressId || !photoId) return false;
+    setBranchPhotoLoading(true);
+    const result = await window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId, photoId });
+    setBranchPhotoLoading(false);
+    if (!result.success) { onNotice(`读取主分支版本失败：${result.error || '未知错误'}`); return false; }
+    const versions = mainBranchVersionsForPhoto(result.entries, photoId);
+    if (!versions.length) { onNotice('该图片在当前主分支中没有版本记录'); return false; }
+    applyBranchPhoto(photoId, versions, fallback, summaries);
+    return true;
+  };
+
   const load = async () => {
     setLoading(true);
     const result = await window.electronAPI.getMediaVersions(workspacePath, project.status, project.name, entry.relativePath);
+    if (!result.success) { setLoading(false); onNotice(`读取版本失败：${result.error || '未知错误'}`); return; }
+    let visibleVersions = normalizeVisibleVersionBundle(result, entry.path, progressVersionKey).versions;
+    let summaries: MainBranchPhotoSummary[] = [];
+    if (progressId && result.photo?.id) {
+      const [photoBranch, fullBranch] = await Promise.all([
+        window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId, photoId: result.photo.id }),
+        window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId }),
+      ]);
+      if (fullBranch.success) {
+        summaries = mainBranchPhotoSummaries(fullBranch.entries);
+        setBranchPhotos(summaries);
+        setBranchPhotoPage(Math.max(0, Math.floor(Math.max(0, summaries.findIndex(item => item.photoId === result.photo!.id)) / 48)));
+      } else {
+        setBranchPhotos([]);
+      }
+      if (photoBranch.success) {
+        const branchVersions = mainBranchVersionsForPhoto(photoBranch.entries, result.photo.id);
+        if (branchVersions.length) visibleVersions = branchVersions;
+      } else {
+        onNotice(`读取主分支版本失败：${photoBranch.error || '未知错误'}`);
+      }
+    } else {
+      setBranchPhotos([]);
+    }
     setLoading(false);
-    if (!result.success) { onNotice(`读取版本失败：${result.error || '未知错误'}`); return; }
-    setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
-    const current = result.versions.find(version => version.isCurrent) || result.versions[result.versions.length - 1];
-    setSelectedId(value => result.versions.some(version => version.id === value) ? value : current?.id || '');
+    if (result.photo) applyBranchPhoto(result.photo.id, visibleVersions, result.photo, summaries);
+    else setBundle({ ...result, versions: visibleVersions });
+    const current = visibleVersions.find(version => version.isCurrent) || visibleVersions[visibleVersions.length - 1];
+    setSelectedId(value => visibleVersions.some(version => version.id === value) ? value : current?.id || '');
     const compareKey = initialCompareKey;
     if (compareKey && initialCompareAppliedRef.current !== compareKey) {
-      const availableIds = initialCompareIds.filter(id => result.versions.some(version => version.id === id && !version.fileMissing)).slice(0, 2);
+      const availableIds = initialCompareIds.filter(id => visibleVersions.some(version => version.id === id && !version.fileMissing)).slice(0, 2);
       if (availableIds.length === 2) setCompareIds(availableIds);
       initialCompareAppliedRef.current = compareKey;
     }
   };
-  useEffect(() => { void load(); }, [entry.path, entry.updatedAt, initialCompareKey]);
+  useEffect(() => { void load(); }, [entry.path, entry.updatedAt, initialCompareKey, progressId]);
+
+  const branchPhotoPagination = useMemo(() => paginateMainBranchPhotos(branchPhotos, branchPhotoPage), [branchPhotos, branchPhotoPage]);
 
   const selected = bundle.versions.find(version => version.id === selectedId);
   const compareVersions = compareIds.map(id => bundle.versions.find(version => version.id === id)).filter((version): version is MediaVersion => Boolean(version));
@@ -457,7 +517,7 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
     const result = await window.electronAPI.updateMediaVersion(workspacePath, request);
     setBusy(false);
     if (!result.success) { onNotice(`更新版本失败：${result.error || '未知错误'}`); return; }
-    setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
+    if (!result.photo || !await loadBranchPhoto(result.photo.id, result.photo)) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
     setEditing(null);
     onVersionStateChanged?.();
     onNotice(notice);
@@ -508,7 +568,7 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
     const result = await window.electronAPI.deleteMediaVersion(workspacePath, { photoId: bundle.photo.id, versionId: version.id, trashFile });
     setBusy(false);
     if (!result.success) { onNotice(`删除版本失败：${result.error || '未知错误'}`); return; }
-    setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
+    if (!result.photo || !await loadBranchPhoto(result.photo.id, result.photo)) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
     setSelectedId(result.versions.find(item => item.isCurrent)?.id || result.versions[0]?.id || '');
     setCompareIds(ids => ids.filter(id => id !== version.id));
     onVersionStateChanged?.();
@@ -544,7 +604,7 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
     }
     if (result.cancelled) return;
     if (!result.success) { onNotice(`重新定位失败：${result.error || '未知错误'}`); return; }
-    setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
+    if (!result.photo || !await loadBranchPhoto(result.photo.id, result.photo)) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
     onNotice(result.versions.find(item => item.id === version.id)?.contentChanged ? '版本已重新定位；因内容指纹不同，已标记内容变化' : '版本文件已重新定位');
   };
   const toggleCompare = (id: string) => setCompareIds(current => current.includes(id) ? current.filter(value => value !== id) : [...(current.length >= 2 ? current.slice(1) : current), id]);
@@ -555,6 +615,7 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
         <header className="sticky top-0 z-10 border-b border-slate-200 bg-white px-4 py-3"><div className="flex items-start gap-2"><GitBranch size={18} className="mt-0.5 shrink-0 text-blue-600"/><div className="min-w-0 flex-1"><h2 className="truncate text-sm font-bold text-slate-800">版本管理 · {bundle.photo?.displayName || entry.name}</h2><p className="mt-1 truncate text-[11px] text-slate-500" title={bundle.photo?.id}>Photo ID：<span className="font-mono">{bundle.photo?.id || '正在建立追踪…'}</span></p></div><button onClick={onClose} title="关闭版本管理" aria-label="关闭版本管理" className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100"><X size={17}/></button></div></header>
         <div className="flex items-start gap-2 border-b border-slate-200 bg-slate-50 px-4 py-2 text-[11px] leading-5 text-slate-600"><AlertTriangle size={14} className="mt-0.5 shrink-0 text-slate-400"/><span>版本管理记录文件路径与版本关系，不保存历史文件副本；原地覆盖或永久删除的旧内容无法通过本功能恢复。</span></div>
         {missingVersionCount > 0 && <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[11px] font-medium leading-5 text-amber-800"><AlertTriangle size={14} className="mt-0.5 shrink-0"/><span>{missingVersionCount} 个版本文件已被删除或移动，可选择对应版本重新定位或删除记录。</span></div>}
+        {branchPhotos.length > 1 && <section className="border-b border-slate-200 bg-slate-50/70 p-3"><div className="mb-2 flex items-center justify-between"><span className="text-xs font-bold text-slate-600">主分支图片</span><span className="text-[10px] text-slate-400">{branchPhotoPagination.total} 张</span></div><div className="max-h-48 space-y-1 overflow-y-auto">{branchPhotoPagination.items.map(photo => <button key={photo.photoId} type="button" disabled={branchPhotoLoading} aria-pressed={activePhotoId === photo.photoId} onClick={() => void loadBranchPhoto(photo.photoId)} className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs ${activePhotoId === photo.photoId ? 'bg-blue-100 font-bold text-blue-700' : 'text-slate-600 hover:bg-white'}`}><span className={`h-2 w-2 shrink-0 rounded-full ${photo.missing ? 'bg-red-400' : 'bg-emerald-400'}`}/><span className="min-w-0 flex-1 truncate" title={photo.originalName}>{photo.originalName}</span><span className="shrink-0 text-[10px] text-slate-400">{photo.versionCount} 版</span></button>)}</div>{branchPhotoPagination.pageCount > 1 && <div className="mt-2 flex items-center justify-between"><button type="button" disabled={branchPhotoPagination.currentPage === 0 || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => Math.max(0, page - 1))} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">上一页</button><span className="text-[10px] text-slate-400">{branchPhotoPagination.currentPage + 1} / {branchPhotoPagination.pageCount}</span><button type="button" disabled={branchPhotoPagination.currentPage + 1 >= branchPhotoPagination.pageCount || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => page + 1)} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">下一页</button></div>}</section>}
         <div className="p-3"><div className="mb-2 flex items-center justify-between px-2"><span className="text-xs font-bold uppercase tracking-wider text-slate-400">版本树</span><span className="text-xs text-slate-400">{bundle.versions.length} 个版本</span></div>
         <div className="space-y-2">{bundle.versions.map(version => <div key={version.id} role="button" tabIndex={0} onClick={() => setSelectedId(version.id)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedId(version.id); } }} className={`relative w-full cursor-pointer rounded-xl border p-3 text-left transition ${selectedId === version.id ? 'border-blue-400 bg-blue-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'}`} style={{ paddingLeft: 12 + (depths.get(version.id) || 0) * 14 }}>
           {(depths.get(version.id) || 0) > 0 && <span className="absolute bottom-1/2 top-0 w-px bg-slate-200" style={{ left: 8 + (depths.get(version.id) || 0) * 14 }}/>} 

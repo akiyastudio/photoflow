@@ -13,13 +13,14 @@
     "release:json": "node scripts/generate-release-json.cjs",
     "build:shell-thumbnail": "node scripts/build-shell-thumbnail.cjs",
     "build:recycle-bin-service": "node scripts/build-recycle-bin-service.cjs",
+    "build:file-clipboard-service": "node scripts/build-file-clipboard-service.cjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "build:python": "node scripts/prepare-ffmpeg.cjs && node scripts/build-python.cjs",
     "build:components": "node scripts/build-components.cjs --only team-retouch",
     "build:advanced-package": "node scripts/build-team-retouch-advanced-package.cjs",
     "build:advanced-video-decoder": "node scripts/build-advanced-video-decoder.cjs",
-    "build:advanced-video-release": "npm run build:media-runtime:libmpv && node scripts/build-advanced-video-decoder.cjs --mpv-root release/media-runtime/libmpv-lgpl-windows-x64",
+    "build:advanced-video-release": "npm run build:media-runtime:libmpv && node scripts/build-advanced-video-decoder.cjs --mpv-root artifacts/installers/media-runtime/libmpv-lgpl-windows-x64",
     "build:media-runtime:ffmpeg": "bash scripts/media-runtime/build-ffmpeg-windows.sh",
     "build:media-runtime:libmpv": "bash scripts/media-runtime/build-libmpv-lgpl-windows.sh",
     "verify:media-runtime": "node scripts/media-runtime/verify-runtime.cjs ffmpeg",
@@ -29,7 +30,9 @@
     "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
     "test:thumbnail-pipeline": "node scripts/test-thumbnail-pipeline.cjs",
     "test:file-transfer": "node scripts/test-file-transfer.cjs",
+    "test:file-clipboard-service": "node scripts/test-file-clipboard-service.cjs",
     "test:filesystem-safety": "node scripts/test-filesystem-safety.cjs",
+    "test:selection-v2": "node scripts/test-selection-v2.cjs",
     "test:catch": ".venv\\Scripts\\python.exe scripts\\test-catch.py",
     "test:media-formats": ".venv\\Scripts\\python.exe scripts\\test-media-formats.py",
     "test:deleted-project-cleanup": "node scripts/test-deleted-project-cleanup.cjs",
@@ -39,7 +42,15 @@
     "test:electron-security": "node scripts/test-electron-security.cjs",
     "test:privacy": "node scripts/test-privacy-service.cjs",
     "test:installer-terms": "node scripts/test-installer-terms.cjs",
+    "test:installer-directory": "node scripts/test-installer-directory.cjs",
     "test:background-tasks": "node scripts/test-background-task-service.cjs",
+    "test:panel-task-sessions": "node scripts/test-panel-task-sessions.cjs",
+    "test:workspace-tabs": "node scripts/test-workspace-tab-model.cjs && node scripts/test-titlebar-tab-order-hook.cjs",
+    "test:marquee-model": "node scripts/test-marquee-selection-model.cjs",
+    "test:progress-tree-model": "node scripts/test-progress-tree-model.cjs",
+    "test:version-tracking-confirmation-ui": "node scripts/test-version-tracking-confirmation-ui.cjs",
+    "test:versioning-v2-ui": "node scripts/test-versioning-v2-model.cjs && node scripts/test-versioning-v2-panels.cjs",
+    "test:version-manager-scope": "node scripts/test-metadata-labels.cjs && node scripts/test-version-manager-scope.cjs",
     "test:classify-import": ".venv\\Scripts\\python.exe scripts\\test-classify-import.py",
     "test:backup": ".venv\\Scripts\\python.exe scripts\\test-backup.py",
     "test:backup-service": "node scripts/test-backup-service.cjs",
@@ -55,23 +66,23 @@
     "test:team-retouch": ".venv\\Scripts\\python.exe scripts\\test-team-retouch.py",
     "test:team-workflow": "node scripts/test-team-workflow.mjs && node scripts/test-team-workflow-artifact-service.cjs",
     "preview": "vite preview",
-    "electron": "npm run build:shell-thumbnail && npm run build:recycle-bin-service && wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
+    "electron": "npm run build:shell-thumbnail && npm run build:recycle-bin-service && npm run build:file-clipboard-service && wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
     "electron:dev": "concurrently -k \"cross-env BROWSER=none npm run dev\" \"npm run electron\"",
     "cleanup:electron-artifacts": "node scripts/cleanup-electron-artifacts.cjs",
-    "electron:build": "npm run generate:icon && npm run generate:installer-terms && npm run build && npm run build:python && npm run build:shell-thumbnail && npm run build:recycle-bin-service && electron-builder && npm run cleanup:electron-artifacts"
+    "electron:build": "npm run generate:icon && npm run generate:installer-terms && npm run build && npm run build:python && npm run build:shell-thumbnail && npm run build:recycle-bin-service && npm run build:file-clipboard-service && electron-builder && npm run cleanup:electron-artifacts"
   },
   "build": {
     "appId": "com.photoflow.toolkit",
-    "icon": "build/icon.ico",
+    "icon": "packaging/icon.ico",
     "electronLanguages": [
       "zh-CN",
       "en-US"
     ],
     "directories": {
-      "output": "release"
+      "output": "artifacts/installers"
     },
     "files": [
-      "dist/**/*",
+      "artifacts/web/**/*",
       "electron/**/*"
     ],
     "asarUnpack": [
@@ -85,19 +96,19 @@
       ],
       "extraResources": [
         {
-          "from": "python/dist/PhotoFlowImportWorker",
+          "from": "artifacts/python/PhotoFlowImportWorker",
           "to": "python/PhotoFlowImportWorker"
         },
         {
-          "from": "python/dist/inspiration-tools",
+          "from": "artifacts/python/inspiration-tools",
           "to": "python/inspiration-tools"
         },
         {
-          "from": "python/dist/ffmpeg.zip",
+          "from": "artifacts/python/ffmpeg.zip",
           "to": "python/ffmpeg.zip"
         },
         {
-          "from": "python/dist/ffmpeg-runtime-manifest.json",
+          "from": "artifacts/python/ffmpeg-runtime-manifest.json",
           "to": "python/ffmpeg-runtime-manifest.json"
         },
         {
@@ -107,6 +118,10 @@
         {
           "from": "electron/bin/recycle-bin-service.exe",
           "to": "recycle-bin-service.exe"
+        },
+        {
+          "from": "electron/bin/file-clipboard-service.exe",
+          "to": "file-clipboard-service.exe"
         }
       ]
     },
@@ -116,7 +131,7 @@
       "allowToChangeInstallationDirectory": true,
       "license": "docs/legal/INSTALLER_TERMS.txt",
       "createDesktopShortcut": false,
-      "include": "build/installer.nsh",
+      "include": "packaging/installer.nsh",
       "shortcutName": "照片流",
       "uninstallDisplayName": "照片流"
     },
@@ -129,15 +144,15 @@
       },
       "extraResources": [
         {
-          "from": "python/dist/PhotoFlowImportWorker",
+          "from": "artifacts/python/PhotoFlowImportWorker",
           "to": "python/PhotoFlowImportWorker"
         },
         {
-          "from": "python/dist/inspiration-tools",
+          "from": "artifacts/python/inspiration-tools",
           "to": "python/inspiration-tools"
         },
         {
-          "from": "python/dist/ffmpeg.zip",
+          "from": "artifacts/python/ffmpeg.zip",
           "to": "python/ffmpeg.zip"
         }
       ]

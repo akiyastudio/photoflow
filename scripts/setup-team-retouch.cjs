@@ -8,12 +8,12 @@ const venvPython = process.platform === 'win32'
   ? path.join(venvRoot, 'Scripts', 'python.exe')
   : path.join(venvRoot, 'bin', 'python');
 const systemPython = process.platform === 'win32' ? 'python' : 'python3';
-const modelRoot = path.join(root, 'components', 'team-retouch', 'models');
+const modelRoot = path.join(root, 'extensions', 'team-retouch', 'models');
 const requiredModels = [
   [path.join(modelRoot, 'rtmdet-ins_m_640x640.onnx'), 100 * 1024 * 1024],
   [path.join(modelRoot, 'face_detection_yunet_2023mar.onnx'), 200 * 1024],
-  [path.join(root, '.model-lab', 'adaface', 'adaface_ir18_webface4m.onnx'), 80 * 1024 * 1024],
-  [path.join(root, '.model-lab', 'osnet', 'osnet_x1_0_msmt17.onnx'), 7 * 1024 * 1024],
+  [path.join(root, '.cache', 'model-lab', 'adaface', 'adaface_ir18_webface4m.onnx'), 80 * 1024 * 1024],
+  [path.join(root, '.cache', 'model-lab', 'osnet', 'osnet_x1_0_msmt17.onnx'), 7 * 1024 * 1024],
 ];
 
 const run = (command, args) => {
@@ -41,7 +41,7 @@ try {
       'opencv-python', 'opencv-python-headless',
       'opencv-contrib-python', 'opencv-contrib-python-headless']);
   }
-  run(venvPython, ['-m', 'pip', 'install', '-r', path.join('components', 'team-retouch', 'requirements.txt')]);
+  run(venvPython, ['-m', 'pip', 'install', '-r', path.join('extensions', 'team-retouch', 'requirements.txt')]);
   run(venvPython, ['-c', [
     'import importlib.metadata as metadata, pathlib, cv2',
     'distribution = metadata.distribution("opencv-python-headless")',

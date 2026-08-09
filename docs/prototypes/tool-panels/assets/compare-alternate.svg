@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="640" viewBox="0 0 960 640">
+  <rect width="960" height="640" fill="#e5e7eb"/>
+  <path d="M0 510 250 220l155 180 210-175 345 415H0Z" fill="#8995a3"/>
+  <circle cx="735" cy="145" r="58" fill="#fafafa"/>
+  <text x="48" y="76" fill="#374151" font-family="system-ui,sans-serif" font-size="28" font-weight="700">重新定位引用</text>
+</svg>

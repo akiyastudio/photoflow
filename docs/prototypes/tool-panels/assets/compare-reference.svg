@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="640" viewBox="0 0 960 640">
+  <rect width="960" height="640" fill="#dce4ec"/>
+  <path d="M0 480 230 255l140 137 180-215 410 463H0Z" fill="#9aa9b8"/>
+  <circle cx="720" cy="150" r="62" fill="#f7f9fb"/>
+  <text x="48" y="76" fill="#405266" font-family="system-ui,sans-serif" font-size="28" font-weight="700">上一版本</text>
+</svg>

@@ -29,6 +29,7 @@ try {
   fs.mkdirSync(projectPath, { recursive: true });
   fs.writeFileSync(path.join(projectPath, 'photo.jpg'), Buffer.from('test-image'));
   run('init');
+  run('catalog_sync');
   run('media_sync_project', { projectName });
   run('undo_record_add', {
     kind: 'trash',
@@ -60,6 +61,7 @@ try {
   const permanentProjectPath = path.join(workspace, permanentProjectName);
   fs.mkdirSync(permanentProjectPath, { recursive: true });
   run('init');
+  run('catalog_sync');
   run('undo_record_add', {
     kind: 'project-cleanup',
     payload: {

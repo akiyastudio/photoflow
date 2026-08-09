@@ -1,5 +1,5 @@
 const PHASE_MESSAGES = {
-  scanning: '正在准备文件',
+  scanning: '正在统计',
   copying: '正在复制文件',
   moving: '正在移动文件',
   splitting: '正在分割视频',
@@ -26,7 +26,7 @@ const createProjectFileTask = ({
     type: 'project-file-operation',
     title,
     message: '等待可用的磁盘任务名额',
-    runningMessage: '正在准备文件',
+    runningMessage: '正在统计',
     cancellable,
     concurrencyGroup,
     concurrencyLimit,

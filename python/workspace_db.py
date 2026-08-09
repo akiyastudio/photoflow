@@ -21,7 +21,14 @@ IMAGE_EXTENSIONS = {
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".crm"}
 SQLITE_BUSY_TIMEOUT_MS = 15_000
 LEGACY_PROGRESS_MIGRATION_KEY = "legacy_progress_folders_migrated"
-TARGET_SCHEMA_VERSION = 17
+TARGET_SCHEMA_VERSION = 21
+PROGRESS_NODE_ROLES = ("original", "progress", "selection")
+PROGRESS_RELATION_KINDS = ("main", "auxiliary")
+PROGRESS_TRACKING_STATES = (
+    "disabled", "pending_compare", "pending_confirm", "committing", "ready", "stale", "needs_repair",
+)
+PROGRESS_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+TRACKING_SESSION_RETENTION_MS = 24 * 60 * 60 * 1000
 INTEGRITY_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 MIGRATION_BACKUP_LIMIT = 5
 AUTOMATIC_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000
@@ -435,6 +442,314 @@ def _migration_17(db):
         db.execute("ALTER TABLE team_person_assignments ADD COLUMN return_missing_since INTEGER")
 
 
+def _progress_relation_cycles(db) -> list[tuple[str, ...]]:
+    """Find every parent-pointer cycle without recursive SQL or Python recursion."""
+    rows = db.execute("SELECT id,parent_progress_id FROM progress_folders ORDER BY id").fetchall()
+    parents = {str(row["id"]): str(row["parent_progress_id"]) if row["parent_progress_id"] else None for row in rows}
+    finished: set[str] = set()
+    cycles: list[tuple[str, ...]] = []
+    for start_id in sorted(parents):
+        if start_id in finished:
+            continue
+        path: list[str] = []
+        path_indexes: dict[str, int] = {}
+        current_id: str | None = start_id
+        while current_id is not None and current_id in parents and current_id not in finished:
+            if current_id in path_indexes:
+                cycles.append(tuple(sorted(path[path_indexes[current_id]:])))
+                break
+            path_indexes[current_id] = len(path)
+            path.append(current_id)
+            current_id = parents[current_id]
+        finished.update(path)
+    return sorted(set(cycles))
+
+
+def _repair_progress_relation_cycles(db) -> list[dict]:
+    """Deterministically break one edge per legacy cycle and retain an audit log."""
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS progress_relation_repair_log(
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             repaired_progress_id TEXT NOT NULL,
+             previous_parent_progress_id TEXT NOT NULL,
+             cycle_node_ids_json TEXT NOT NULL,
+             repair_kind TEXT NOT NULL,
+             repaired_at INTEGER NOT NULL
+           )"""
+    )
+    timestamp = int(time.time() * 1000)
+    repairs = []
+    for cycle_node_ids in _progress_relation_cycles(db):
+        repaired_id = min(cycle_node_ids)
+        row = db.execute(
+            "SELECT parent_progress_id,node_role FROM progress_folders WHERE id=?",
+            (repaired_id,),
+        ).fetchone()
+        if row is None or not row["parent_progress_id"]:
+            continue
+        previous_parent_id = str(row["parent_progress_id"])
+        db.execute(
+            """UPDATE progress_folders
+               SET parent_progress_id=NULL,relation_kind=NULL,
+                   node_role=CASE WHEN node_role='selection' THEN 'progress' ELSE node_role END,
+                   updated_at=? WHERE id=?""",
+            (timestamp, repaired_id),
+        )
+        cycle_json = json.dumps(list(cycle_node_ids), ensure_ascii=False, separators=(",", ":"))
+        db.execute(
+            """INSERT INTO progress_relation_repair_log(
+                 repaired_progress_id,previous_parent_progress_id,cycle_node_ids_json,repair_kind,repaired_at)
+               VALUES(?,?,?,'legacy_cycle_rooted',?)""",
+            (repaired_id, previous_parent_id, cycle_json, timestamp),
+        )
+        repairs.append({
+            "repairedProgressId": repaired_id,
+            "previousParentProgressId": previous_parent_id,
+            "cycleNodeIds": list(cycle_node_ids),
+        })
+    if repairs:
+        _set_meta(db, "last_progress_relation_cycle_repair", json.dumps(repairs, ensure_ascii=False, separators=(",", ":")))
+    return repairs
+
+
+def _migration_18(db):
+    """Add the explicit V2 folder-node model without inferring branches from names."""
+    columns = _table_columns(db, "progress_folders")
+    additions = (
+        ("node_role", "TEXT NOT NULL DEFAULT 'progress'"),
+        ("relation_kind", "TEXT"),
+        ("rename_from_parent", "INTEGER NOT NULL DEFAULT 0"),
+        ("copy_missing_from_parent", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_tracked_at", "INTEGER"),
+        ("tracking_snapshot_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("folder_signature", "TEXT"),
+        ("tombstone_json", "TEXT NOT NULL DEFAULT '{}'"),
+    )
+    for name, declaration in additions:
+        if name not in columns:
+            db.execute(f"ALTER TABLE progress_folders ADD COLUMN {name} {declaration}")
+
+    # Old underscore versions remain main progress nodes. Only explicit root
+    # baseline identities are promoted to original; the version key format is
+    # never used to infer an auxiliary relation.
+    db.execute(
+        """UPDATE progress_folders
+           SET node_role=CASE
+             WHEN parent_progress_id IS NULL AND (
+               version_key='0' OR lower(display_name) IN ('raw','jpg','mov')
+               OR lower(replace(folder_path,'\','/')) LIKE '%/raw'
+               OR lower(replace(folder_path,'\','/')) LIKE '%/jpg'
+               OR lower(replace(folder_path,'\','/')) LIKE '%/mov'
+             ) THEN 'original' ELSE 'progress' END,
+             relation_kind=CASE WHEN parent_progress_id IS NULL THEN NULL ELSE 'main' END,
+             tracking_state=CASE
+               WHEN tracking_state IN ('disabled','pending_compare','pending_confirm','committing','ready','stale','needs_repair')
+                 THEN tracking_state
+               WHEN tracking_enabled=1 THEN 'ready' ELSE 'disabled' END,
+             tracking_enabled=CASE
+               WHEN tracking_state='disabled' THEN 0 ELSE 1 END,
+             rename_from_parent=0,
+             copy_missing_from_parent=0,
+             last_tracked_at=CASE WHEN tracking_state='ready' THEN COALESCE(last_tracked_at,updated_at) ELSE last_tracked_at END,
+             tracking_snapshot_json=COALESCE(NULLIF(tracking_snapshot_json,''),'{}'),
+             tombstone_json=COALESCE(NULLIF(tombstone_json,''),'{}')"""
+    )
+    # Originals and auxiliary nodes never carry active tracking policy.
+    db.execute(
+        """UPDATE progress_folders SET tracking_enabled=0,rename_from_parent=0,
+           copy_missing_from_parent=0,tracking_state='disabled'
+           WHERE node_role='original' OR relation_kind='auxiliary'"""
+    )
+    # Existing schema-17 data may already contain cycles. Repair it before
+    # installing V2 triggers or running the post-migration integrity check.
+    _repair_progress_relation_cycles(db)
+    db.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS progress_folders_missing
+          ON progress_folders(project_id, missing_since);
+        CREATE INDEX IF NOT EXISTS progress_folders_branch
+          ON progress_folders(project_id, media_kind, relation_kind, parent_progress_id);
+
+        DROP TRIGGER IF EXISTS progress_folders_v2_shape_insert;
+        DROP TRIGGER IF EXISTS progress_folders_v2_shape_update;
+        DROP TRIGGER IF EXISTS progress_folders_v2_parent_insert;
+        DROP TRIGGER IF EXISTS progress_folders_v2_parent_update;
+        DROP TRIGGER IF EXISTS progress_folders_v2_cycle_insert;
+        DROP TRIGGER IF EXISTS progress_folders_v2_cycle_update;
+        DROP TRIGGER IF EXISTS progress_folders_v2_policy_insert;
+        DROP TRIGGER IF EXISTS progress_folders_v2_policy_update;
+
+        CREATE TRIGGER progress_folders_v2_shape_insert
+        BEFORE INSERT ON progress_folders WHEN
+          NEW.node_role NOT IN ('original','progress','selection')
+          OR (NEW.relation_kind IS NOT NULL AND NEW.relation_kind NOT IN ('main','auxiliary'))
+          OR (NEW.parent_progress_id IS NULL) != (NEW.relation_kind IS NULL)
+          OR (NEW.node_role='original' AND NEW.parent_progress_id IS NOT NULL)
+          OR (NEW.node_role='selection' AND NEW.relation_kind!='auxiliary')
+          OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind!='main')
+          OR (NEW.relation_kind='auxiliary' AND NEW.node_role!='selection')
+        BEGIN SELECT RAISE(ABORT,'invalid V2 progress node shape'); END;
+
+        CREATE TRIGGER progress_folders_v2_shape_update
+        BEFORE UPDATE OF node_role,relation_kind,parent_progress_id ON progress_folders WHEN
+          NEW.node_role NOT IN ('original','progress','selection')
+          OR (NEW.relation_kind IS NOT NULL AND NEW.relation_kind NOT IN ('main','auxiliary'))
+          OR (NEW.parent_progress_id IS NULL) != (NEW.relation_kind IS NULL)
+          OR (NEW.node_role='original' AND NEW.parent_progress_id IS NOT NULL)
+          OR (NEW.node_role='selection' AND NEW.relation_kind!='auxiliary')
+          OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind!='main')
+          OR (NEW.relation_kind='auxiliary' AND NEW.node_role!='selection')
+        BEGIN SELECT RAISE(ABORT,'invalid V2 progress node shape'); END;
+
+        CREATE TRIGGER progress_folders_v2_parent_insert
+        BEFORE INSERT ON progress_folders WHEN NEW.parent_progress_id IS NOT NULL AND NOT EXISTS(
+          SELECT 1 FROM progress_folders parent WHERE parent.id=NEW.parent_progress_id
+            AND parent.project_id=NEW.project_id AND parent.media_kind=NEW.media_kind
+            AND parent.node_role IN ('original','progress')
+        ) BEGIN SELECT RAISE(ABORT,'invalid V2 progress parent'); END;
+
+        CREATE TRIGGER progress_folders_v2_parent_update
+        BEFORE UPDATE OF parent_progress_id,project_id,media_kind ON progress_folders
+        WHEN NEW.parent_progress_id IS NOT NULL AND NOT EXISTS(
+          SELECT 1 FROM progress_folders parent WHERE parent.id=NEW.parent_progress_id
+            AND parent.project_id=NEW.project_id AND parent.media_kind=NEW.media_kind
+            AND parent.node_role IN ('original','progress')
+        ) BEGIN SELECT RAISE(ABORT,'invalid V2 progress parent'); END;
+
+        CREATE TRIGGER progress_folders_v2_cycle_insert
+        BEFORE INSERT ON progress_folders WHEN NEW.parent_progress_id IS NOT NULL AND EXISTS(
+          WITH RECURSIVE ancestors(id) AS (
+            SELECT NEW.parent_progress_id UNION
+            SELECT parent.parent_progress_id FROM progress_folders parent JOIN ancestors ON parent.id=ancestors.id
+            WHERE parent.parent_progress_id IS NOT NULL
+          ) SELECT 1 FROM ancestors WHERE id=NEW.id
+        ) BEGIN SELECT RAISE(ABORT,'progress relation cycle'); END;
+
+        CREATE TRIGGER progress_folders_v2_cycle_update
+        BEFORE UPDATE OF parent_progress_id ON progress_folders WHEN NEW.parent_progress_id IS NOT NULL AND EXISTS(
+          WITH RECURSIVE ancestors(id) AS (
+            SELECT NEW.parent_progress_id UNION
+            SELECT parent.parent_progress_id FROM progress_folders parent JOIN ancestors ON parent.id=ancestors.id
+            WHERE parent.parent_progress_id IS NOT NULL
+          ) SELECT 1 FROM ancestors WHERE id=NEW.id
+        ) BEGIN SELECT RAISE(ABORT,'progress relation cycle'); END;
+
+        CREATE TRIGGER progress_folders_v2_policy_insert
+        BEFORE INSERT ON progress_folders WHEN
+          NEW.tracking_state NOT IN ('disabled','pending_compare','pending_confirm','committing','ready','stale','needs_repair')
+          OR NEW.tracking_enabled NOT IN (0,1) OR NEW.rename_from_parent NOT IN (0,1)
+          OR NEW.copy_missing_from_parent NOT IN (0,1)
+          OR ((NEW.node_role='original' OR NEW.relation_kind='auxiliary') AND (
+            NEW.tracking_enabled!=0 OR NEW.rename_from_parent!=0 OR NEW.copy_missing_from_parent!=0 OR NEW.tracking_state!='disabled'))
+          OR (NEW.tracking_enabled=0 AND (NEW.rename_from_parent!=0 OR NEW.copy_missing_from_parent!=0))
+        BEGIN SELECT RAISE(ABORT,'invalid V2 tracking policy'); END;
+
+        CREATE TRIGGER progress_folders_v2_policy_update
+        BEFORE UPDATE OF node_role,relation_kind,tracking_enabled,rename_from_parent,copy_missing_from_parent,tracking_state
+        ON progress_folders WHEN
+          NEW.tracking_state NOT IN ('disabled','pending_compare','pending_confirm','committing','ready','stale','needs_repair')
+          OR NEW.tracking_enabled NOT IN (0,1) OR NEW.rename_from_parent NOT IN (0,1)
+          OR NEW.copy_missing_from_parent NOT IN (0,1)
+          OR ((NEW.node_role='original' OR NEW.relation_kind='auxiliary') AND (
+            NEW.tracking_enabled!=0 OR NEW.rename_from_parent!=0 OR NEW.copy_missing_from_parent!=0 OR NEW.tracking_state!='disabled'))
+          OR (NEW.tracking_enabled=0 AND (NEW.rename_from_parent!=0 OR NEW.copy_missing_from_parent!=0))
+        BEGIN SELECT RAISE(ABORT,'invalid V2 tracking policy'); END;
+        """
+    )
+
+
+def _migration_19(db):
+    """Persist V2 compare/refresh sessions and explicit confirmation decisions."""
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS tracking_sessions (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          progress_id TEXT NOT NULL REFERENCES progress_folders(id) ON DELETE CASCADE,
+          parent_progress_id TEXT NOT NULL REFERENCES progress_folders(id),
+          mode TEXT NOT NULL CHECK(mode IN ('compare','refresh')),
+          status TEXT NOT NULL CHECK(status IN ('comparing','pending_confirm','committing','committed','failed','cancelled')),
+          previous_tracking_state TEXT NOT NULL,
+          rename_from_parent INTEGER NOT NULL DEFAULT 0 CHECK(rename_from_parent IN (0,1)),
+          copy_missing_from_parent INTEGER NOT NULL DEFAULT 0 CHECK(copy_missing_from_parent IN (0,1)),
+          committed_batch_id TEXT REFERENCES version_batches(id) ON DELETE SET NULL,
+          error TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS tracking_sessions_progress
+          ON tracking_sessions(progress_id, created_at DESC);
+        CREATE TABLE IF NOT EXISTS tracking_session_items (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL REFERENCES tracking_sessions(id) ON DELETE CASCADE,
+          item_kind TEXT NOT NULL CHECK(item_kind IN ('recognized','new','copy_missing','missing')),
+          source_name TEXT,
+          reference_name TEXT,
+          target_name TEXT,
+          status TEXT NOT NULL CHECK(status IN ('recognized','pending_confirmation','accepted','missing_reference','rejected')),
+          distance REAL,
+          confidence TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(session_id,item_kind,source_name,reference_name)
+        );
+        CREATE INDEX IF NOT EXISTS tracking_session_items_session
+          ON tracking_session_items(session_id, created_at, id);
+        """
+    )
+
+
+def _migration_20(db):
+    """Repair cycles missed by older V2 builds and install terminating guards."""
+    _repair_progress_relation_cycles(db)
+    db.executescript(
+        """
+        DROP TRIGGER IF EXISTS progress_folders_v2_cycle_insert;
+        DROP TRIGGER IF EXISTS progress_folders_v2_cycle_update;
+
+        CREATE TRIGGER progress_folders_v2_cycle_insert
+        BEFORE INSERT ON progress_folders WHEN NEW.parent_progress_id IS NOT NULL AND EXISTS(
+          WITH RECURSIVE ancestors(id) AS (
+            SELECT NEW.parent_progress_id UNION
+            SELECT parent.parent_progress_id FROM progress_folders parent JOIN ancestors ON parent.id=ancestors.id
+            WHERE parent.parent_progress_id IS NOT NULL
+          ) SELECT 1 FROM ancestors WHERE id=NEW.id
+        ) BEGIN SELECT RAISE(ABORT,'progress relation cycle'); END;
+
+        CREATE TRIGGER progress_folders_v2_cycle_update
+        BEFORE UPDATE OF parent_progress_id ON progress_folders WHEN NEW.parent_progress_id IS NOT NULL AND EXISTS(
+          WITH RECURSIVE ancestors(id) AS (
+            SELECT NEW.parent_progress_id UNION
+            SELECT parent.parent_progress_id FROM progress_folders parent JOIN ancestors ON parent.id=ancestors.id
+            WHERE parent.parent_progress_id IS NOT NULL
+          ) SELECT 1 FROM ancestors WHERE id=NEW.id
+        ) BEGIN SELECT RAISE(ABORT,'progress relation cycle'); END;
+        """
+    )
+
+
+def _migration_21(db):
+    """Keep at most one resumable tracking session for each progress node."""
+    db.executescript(
+        """
+        DELETE FROM tracking_sessions
+        WHERE status IN ('comparing','pending_confirm','committing','failed')
+          AND EXISTS (
+            SELECT 1 FROM tracking_sessions newer
+            WHERE newer.progress_id=tracking_sessions.progress_id
+              AND newer.status IN ('comparing','pending_confirm','committing','failed')
+              AND (
+                newer.updated_at > tracking_sessions.updated_at
+                OR (newer.updated_at = tracking_sessions.updated_at AND newer.id > tracking_sessions.id)
+              )
+          );
+        CREATE UNIQUE INDEX IF NOT EXISTS tracking_sessions_one_active_progress
+          ON tracking_sessions(progress_id)
+          WHERE status IN ('comparing','pending_confirm','committing','failed');
+        """
+    )
+
+
 MIGRATIONS = {
     11: _migration_11,
     12: _migration_12,
@@ -443,6 +758,10 @@ MIGRATIONS = {
     15: _migration_15,
     16: _migration_16,
     17: _migration_17,
+    18: _migration_18,
+    19: _migration_19,
+    20: _migration_20,
+    21: _migration_21,
 }
 
 
@@ -458,12 +777,33 @@ def _check_integrity(db, force: bool = False):
         "versions.parent": """SELECT COUNT(*) FROM versions child WHERE parent_version_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM versions parent WHERE parent.id=child.parent_version_id AND parent.photo_id=child.photo_id)""",
         "version_batches.parent": """SELECT COUNT(*) FROM version_batches child WHERE parent_batch_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM version_batches parent WHERE parent.id=child.parent_batch_id AND parent.project_id=child.project_id)""",
         "progress_folders.parent": """SELECT COUNT(*) FROM progress_folders child WHERE parent_progress_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM progress_folders parent WHERE parent.id=child.parent_progress_id AND parent.project_id=child.project_id AND parent.media_kind=child.media_kind)""",
+        "progress_folders.v2_shape": """SELECT COUNT(*) FROM progress_folders WHERE
+          node_role NOT IN ('original','progress','selection')
+          OR (relation_kind IS NOT NULL AND relation_kind NOT IN ('main','auxiliary'))
+          OR (parent_progress_id IS NULL) != (relation_kind IS NULL)
+          OR (node_role='original' AND parent_progress_id IS NOT NULL)
+          OR (node_role='selection' AND relation_kind!='auxiliary')
+          OR (node_role='progress' AND parent_progress_id IS NOT NULL AND relation_kind!='main')""",
+        "progress_folders.v2_policy": """SELECT COUNT(*) FROM progress_folders WHERE
+          tracking_state NOT IN ('disabled','pending_compare','pending_confirm','committing','ready','stale','needs_repair')
+          OR tracking_enabled NOT IN (0,1) OR rename_from_parent NOT IN (0,1) OR copy_missing_from_parent NOT IN (0,1)
+          OR ((node_role='original' OR relation_kind='auxiliary') AND
+              (tracking_enabled!=0 OR rename_from_parent!=0 OR copy_missing_from_parent!=0 OR tracking_state!='disabled'))
+          OR (tracking_enabled=0 AND (rename_from_parent!=0 OR copy_missing_from_parent!=0))""",
+        "progress_folders.v2_parent_role": """SELECT COUNT(*) FROM progress_folders child
+          WHERE child.parent_progress_id IS NOT NULL AND NOT EXISTS(
+            SELECT 1 FROM progress_folders parent WHERE parent.id=child.parent_progress_id
+              AND parent.project_id=child.project_id AND parent.media_kind=child.media_kind
+              AND parent.node_role IN ('original','progress'))""",
         "batch_items.owner": """SELECT COUNT(*) FROM batch_items item WHERE NOT EXISTS(SELECT 1 FROM version_batches batch JOIN photos ON photos.project_id=batch.project_id JOIN versions ON versions.photo_id=photos.id WHERE batch.id=item.batch_id AND photos.id=item.photo_id AND versions.id=item.version_id)""",
         "team_retouch_photos.owner": """SELECT COUNT(*) FROM team_retouch_photos item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id)""",
         "team_person_assignments.owner": """SELECT COUNT(*) FROM team_person_assignments item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id) OR (item.identity_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM team_person_identities identity WHERE identity.id=item.identity_id AND identity.project_id=item.project_id))""",
         "team_person_exclusions.owner": """SELECT COUNT(*) FROM team_person_exclusions item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id)""",
     }
     business_errors = {name: db.execute(query).fetchone()[0] for name, query in business_checks.items()}
+    progress_cycles = _progress_relation_cycles(db)
+    if progress_cycles:
+        business_errors["progress_folders.v2_cycle"] = len(progress_cycles)
     business_errors = {name: count for name, count in business_errors.items() if count}
     if quick_check != ["ok"] or foreign_key_errors or business_errors:
         raise RuntimeError(
@@ -612,9 +952,17 @@ def connect(root: str, database: str):
             folder_path TEXT NOT NULL,
             folder_path_key TEXT NOT NULL,
             folder_id TEXT,
+            node_role TEXT NOT NULL DEFAULT 'progress',
+            relation_kind TEXT,
             tracking_enabled INTEGER NOT NULL DEFAULT 0,
             tracking_state TEXT NOT NULL DEFAULT 'disabled',
+            rename_from_parent INTEGER NOT NULL DEFAULT 0,
+            copy_missing_from_parent INTEGER NOT NULL DEFAULT 0,
+            last_tracked_at INTEGER,
+            tracking_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            folder_signature TEXT,
             missing_since INTEGER,
+            tombstone_json TEXT NOT NULL DEFAULT '{}',
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             UNIQUE(project_id, media_kind, version_key)
@@ -775,6 +1123,10 @@ def connect(root: str, database: str):
     if is_fresh:
         with db:
             _migration_13(db)
+            _migration_18(db)
+            _migration_19(db)
+            _migration_20(db)
+            _migration_21(db)
             _set_meta(db, "schema_version", TARGET_SCHEMA_VERSION)
     else:
         for next_version in range(schema_version + 1, TARGET_SCHEMA_VERSION + 1):
@@ -1283,7 +1635,7 @@ def serialize_batch(row):
 
 def serialize_progress(row):
     tracking_state = row["tracking_state"] if "tracking_state" in row.keys() else ("ready" if row["tracking_enabled"] else "disabled")
-    folder_missing = not os.path.isdir(row["folder_path"])
+    folder_missing = row["missing_since"] is not None if "missing_since" in row.keys() else not os.path.isdir(row["folder_path"])
     missing_since = row["missing_since"] if "missing_since" in row.keys() else None
     return {
         "id": row["id"], "projectId": row["project_id"], "mediaKind": row["media_kind"],
@@ -1291,17 +1643,26 @@ def serialize_progress(row):
         "parentVersionKey": row["parent_version_key"], "displayName": row["display_name"],
         "folderPath": row["folder_path"], "folderMissing": folder_missing,
         "missingSince": missing_since if folder_missing else None,
-        "trackingEnabled": tracking_state == "ready",
+        "nodeRole": row["node_role"] if "node_role" in row.keys() else "progress",
+        "relationKind": row["relation_kind"] if "relation_kind" in row.keys() else ("main" if row["parent_progress_id"] else None),
+        "trackingEnabled": bool(row["tracking_enabled"]),
+        "renameFromParent": bool(row["rename_from_parent"]) if "rename_from_parent" in row.keys() else False,
+        "copyMissingFromParent": bool(row["copy_missing_from_parent"]) if "copy_missing_from_parent" in row.keys() else False,
         "trackingState": tracking_state,
+        "lastTrackedAt": row["last_tracked_at"] if "last_tracked_at" in row.keys() else None,
+        "trackingSnapshot": json.loads(row["tracking_snapshot_json"] or "{}") if "tracking_snapshot_json" in row.keys() else {},
+        "folderSignature": row["folder_signature"] if "folder_signature" in row.keys() else None,
+        "tombstone": json.loads(row["tombstone_json"] or "{}") if "tombstone_json" in row.keys() else {},
         "repairBatchId": row["repair_batch_id"] if "repair_batch_id" in row.keys() else None,
         "pendingOperationCount": int(row["pending_operation_count"] or 0) if "pending_operation_count" in row.keys() else 0,
         "createdAt": row["created_at"], "updatedAt": row["updated_at"],
     }
 
 
-def progress_rows(db, project_id: str):
+def progress_rows(db, project_id: str, include_missing: bool = True):
+    missing_filter = "" if include_missing else " AND progress.missing_since IS NULL"
     return db.execute(
-        """SELECT progress.*, parent.version_key AS parent_version_key,
+        f"""SELECT progress.*, parent.version_key AS parent_version_key,
            (SELECT batches.id FROM version_batches batches
               WHERE batches.project_id=progress.project_id
                 AND batches.source_folder_path_key=progress.folder_path_key
@@ -1315,7 +1676,7 @@ def progress_rows(db, project_id: str):
                 AND operations.status IN ('pending','failed')) AS pending_operation_count
            FROM progress_folders AS progress
            LEFT JOIN progress_folders AS parent ON parent.id=progress.parent_progress_id
-           WHERE progress.project_id=?
+           WHERE progress.project_id=?{missing_filter}
            ORDER BY progress.media_kind, progress.created_at, progress.version_key""",
         (project_id,),
     ).fetchall()
@@ -1350,18 +1711,22 @@ def sync_progress_folder_locations(root: str, db, project):
                                     or tracked["folder_id"] != identity
                                     or tracked["missing_since"] is not None):
             db.execute(
-                """UPDATE progress_folders SET folder_path=?,folder_path_key=?,folder_id=?,missing_since=NULL,updated_at=?
+                """UPDATE progress_folders SET folder_path=?,folder_path_key=?,folder_id=?,missing_since=NULL,
+                   tombstone_json='{}',updated_at=?
                    WHERE id=?""",
                 (folder_path, folder_path.casefold(), identity, timestamp, tracked["id"]),
             )
     for row in progress_rows(db, project["id"]):
         if os.path.isdir(row["folder_path"]):
             if row["missing_since"] is not None:
-                db.execute("UPDATE progress_folders SET missing_since=NULL,updated_at=? WHERE id=?", (timestamp, row["id"]))
+                db.execute(
+                    "UPDATE progress_folders SET missing_since=NULL,tombstone_json='{}',updated_at=? WHERE id=?",
+                    (timestamp, row["id"]),
+                )
         elif row["missing_since"] is None:
             db.execute(
-                "UPDATE progress_folders SET missing_since=?,updated_at=? WHERE id=?",
-                (timestamp, timestamp, row["id"]),
+                "UPDATE progress_folders SET missing_since=?,tombstone_json=?,updated_at=? WHERE id=?",
+                (timestamp, json.dumps({"reason": "folder_missing", "path": row["folder_path"]}, ensure_ascii=False), timestamp, row["id"]),
             )
     db.commit()
 
@@ -1400,17 +1765,22 @@ def sync_legacy_progress_folders(root: str, db, project):
         if row is not None:
             db.execute(
                 """UPDATE progress_folders SET folder_path=?,folder_path_key=?,folder_id=?,
-                   parent_progress_id=COALESCE(parent_progress_id,?),missing_since=NULL,updated_at=? WHERE id=?""",
-                (folder_path, folder_path.casefold(), identity, parent["id"] if parent else None, timestamp, row["id"]),
+                   parent_progress_id=COALESCE(parent_progress_id,?),
+                   relation_kind=CASE WHEN COALESCE(parent_progress_id,?) IS NULL THEN NULL ELSE 'main' END,
+                   missing_since=NULL,updated_at=? WHERE id=?""",
+                (folder_path, folder_path.casefold(), identity, parent["id"] if parent else None,
+                 parent["id"] if parent else None, timestamp, row["id"]),
             )
         else:
             progress_id = str(uuid.uuid4())
             db.execute(
                 """INSERT INTO progress_folders(id,project_id,media_kind,version_key,parent_progress_id,
-                   display_name,folder_path,folder_path_key,folder_id,tracking_enabled,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,0,?,?)""",
+                   display_name,folder_path,folder_path_key,folder_id,node_role,relation_kind,
+                   tracking_enabled,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,'progress',?,0,?,?)""",
                 (progress_id, project["id"], media_kind, version_key, parent["id"] if parent else None,
-                 entry.name, folder_path, folder_path.casefold(), identity, timestamp, timestamp),
+                 entry.name, folder_path, folder_path.casefold(), identity,
+                 "main" if parent else None, timestamp, timestamp),
             )
             row = db.execute("SELECT * FROM progress_folders WHERE id=?", (progress_id,)).fetchone()
         by_key[(media_kind, version_key)] = row
@@ -1435,12 +1805,52 @@ def migrate_legacy_progress_folders_once(root: str, db, project):
     db.commit()
 
 
+def register_original_baselines(root: str, db, project):
+    """Register conventional baseline folders as explicit original nodes."""
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    if not os.path.isdir(project_path):
+        return
+    timestamp = int(time.time() * 1000)
+    changed = False
+    for entry in os.scandir(project_path):
+        baseline = entry.name.casefold()
+        if not entry.is_dir() or baseline not in {"raw", "jpg", "mov"}:
+            continue
+        media_kind = "video" if baseline == "mov" else "image"
+        folder_path = canonical_path(entry.path)
+        identity = directory_identity(folder_path)
+        existing = db.execute(
+            """SELECT id FROM progress_folders WHERE project_id=? AND (
+                 (folder_id IS NOT NULL AND folder_id=?) OR folder_path_key=?)""",
+            (project["id"], identity, folder_path.casefold()),
+        ).fetchone()
+        if existing is not None:
+            continue
+        db.execute(
+            """INSERT INTO progress_folders(
+                 id,project_id,media_kind,version_key,parent_progress_id,display_name,folder_path,
+                 folder_path_key,folder_id,node_role,relation_kind,tracking_enabled,tracking_state,
+                 rename_from_parent,copy_missing_from_parent,created_at,updated_at)
+               VALUES(?,?,?,?,NULL,?,?,?,?, 'original',NULL,0,'disabled',0,0,?,?)""",
+            (str(uuid.uuid4()), project["id"], media_kind, f"original-{baseline}", entry.name,
+             folder_path, folder_path.casefold(), identity, timestamp, timestamp),
+        )
+        changed = True
+    if changed:
+        db.commit()
+
+
 def progress_list(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     recover_stale_version_batches(db, project["id"])
     migrate_legacy_progress_folders_once(root, db, project)
+    register_original_baselines(root, db, project)
     sync_progress_folder_locations(root, db, project)
-    return {"success": True, "progressFolders": [serialize_progress(row) for row in progress_rows(db, project["id"])]}
+    include_missing = bool(payload.get("includeMissing"))
+    return {
+        "success": True,
+        "progressFolders": [serialize_progress(row) for row in progress_rows(db, project["id"], include_missing)],
+    }
 
 
 def recover_stale_version_batches(db, project_id: str):
@@ -1467,14 +1877,14 @@ def recover_stale_version_batches(db, project_id: str):
             )
             db.execute("UPDATE version_batches SET status='needs_repair',updated_at=? WHERE id=?", (timestamp, batch["id"]))
             db.execute(
-                """UPDATE progress_folders SET tracking_state='needs_repair',tracking_enabled=0,updated_at=?
+                """UPDATE progress_folders SET tracking_state='needs_repair',updated_at=?
                    WHERE project_id=? AND folder_path_key=?""",
                 (timestamp, project_id, batch["source_folder_path_key"]),
             )
         else:
             db.execute("UPDATE version_batches SET status='failed',updated_at=? WHERE id=?", (timestamp, batch["id"]))
             db.execute(
-                """UPDATE progress_folders SET tracking_state='pending_compare',tracking_enabled=0,updated_at=?
+                """UPDATE progress_folders SET tracking_state='pending_compare',updated_at=?
                    WHERE project_id=? AND folder_path_key=?""",
                 (timestamp, project_id, batch["source_folder_path_key"]),
             )
@@ -1485,25 +1895,43 @@ def progress_register(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     sync_progress_folder_locations(root, db, project)
     media_kind = str(payload.get("mediaKind") or "")
-    if media_kind not in ("image", "video"):
+    if media_kind not in ("image", "video", "mixed"):
         raise ValueError("无效的进度类型")
-    version_key = str(payload.get("versionKey") or "")
-    if not version_key or any(not part.isdigit() for part in version_key.split("_")):
+    version_key = str(payload.get("versionKey") or f"node-{uuid.uuid4().hex}").strip()
+    if not version_key or len(version_key) > 128 or any(ord(character) < 32 for character in version_key):
         raise ValueError("无效的版本编号")
     project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
     folder_path = canonical_path(payload["folderPath"])
     if not is_project_descendant(folder_path, project_path) or not os.path.isdir(folder_path):
         raise ValueError("版本进度必须是项目内的文件夹")
+    node_role = str(payload.get("nodeRole") or "progress")
+    if node_role not in PROGRESS_NODE_ROLES:
+        raise ValueError("无效的文件夹节点角色")
     parent_id = payload.get("parentProgressId") or None
+    relation_kind = payload.get("relationKind") or None
+    if parent_id and relation_kind is None:
+        relation_kind = "auxiliary" if node_role == "selection" else "main"
+    if not parent_id:
+        relation_kind = None
+    if relation_kind is not None:
+        relation_kind = str(relation_kind)
+    if relation_kind not in (*PROGRESS_RELATION_KINDS, None):
+        raise ValueError("无效的父子关系类型")
+    if node_role == "original" and parent_id:
+        raise ValueError("原始素材节点不能指定父节点")
+    if node_role == "selection" and (not parent_id or relation_kind != "auxiliary"):
+        raise ValueError("选片节点必须通过 auxiliary 关系连接来源节点")
+    if node_role == "progress" and parent_id and relation_kind != "main":
+        raise ValueError("进度节点必须通过 main 关系连接父节点")
     if parent_id:
         parent = db.execute(
             "SELECT * FROM progress_folders WHERE id=? AND project_id=? AND media_kind=?",
             (parent_id, project["id"], media_kind),
         ).fetchone()
-        if parent is None:
+        if parent is None or parent["node_role"] not in ("original", "progress"):
             raise ValueError("父版本进度不存在")
     timestamp = int(time.time() * 1000)
-    progress_id = str(payload.get("progressId") or "")
+    progress_id = str(payload.get("progressId") or payload.get("takeoverProgressId") or "")
     display_name = str(payload.get("displayName") or os.path.basename(folder_path))
     existing = None
     if progress_id:
@@ -1520,9 +1948,21 @@ def progress_register(root: str, db, payload: dict):
         ).fetchone()
         if existing is not None and os.path.isdir(existing["folder_path"]) and existing["folder_path_key"] != folder_path.casefold():
             raise ValueError(f"版本 _{version_key} 已存在")
+        if existing is None:
+            folder_identity = directory_identity(folder_path)
+            existing = db.execute(
+                """SELECT * FROM progress_folders WHERE project_id=? AND missing_since IS NOT NULL AND (
+                     (folder_id IS NOT NULL AND folder_id=?) OR folder_path_key=?)
+                   AND media_kind=? AND node_role=?
+                   ORDER BY missing_since LIMIT 1""",
+                (project["id"], folder_identity, folder_path.casefold(), media_kind, node_role),
+            ).fetchone()
+    if existing is not None and existing["missing_since"] is not None and existing["node_role"] != node_role:
+        raise ValueError("tombstone 节点角色与接管文件夹不兼容")
     existing_id = existing["id"] if existing is not None else progress_id
     duplicate_name = db.execute(
-        "SELECT id FROM progress_folders WHERE project_id=? AND display_name=? COLLATE NOCASE AND id<>?",
+        """SELECT id FROM progress_folders WHERE project_id=? AND display_name=? COLLATE NOCASE
+           AND id<>? AND missing_since IS NULL""",
         (project["id"], display_name, existing_id),
     ).fetchone()
     if duplicate_name is not None:
@@ -1534,21 +1974,41 @@ def progress_register(root: str, db, payload: dict):
         ).fetchone()
         if conflict is not None:
             raise ValueError(f"版本 _{version_key} 已存在")
-    allowed_tracking_states = {"disabled", "pending_compare", "pending_confirm", "committing", "ready", "needs_repair"}
     requested_tracking_state = payload.get("trackingState")
+    tracking_enabled = bool(payload.get("trackingEnabled"))
     if requested_tracking_state is None:
-        requested_tracking_state = "ready" if bool(payload.get("trackingEnabled")) else "disabled"
+        requested_tracking_state = "ready" if tracking_enabled else "disabled"
     tracking_state = str(requested_tracking_state)
-    if tracking_state not in allowed_tracking_states:
+    if tracking_state not in PROGRESS_TRACKING_STATES:
         raise ValueError("无效的版本跟踪状态")
+    if "trackingEnabled" not in payload:
+        tracking_enabled = tracking_state != "disabled"
+    rename_from_parent = bool(payload.get("renameFromParent"))
+    copy_missing_from_parent = bool(payload.get("copyMissingFromParent"))
+    if node_role == "original" or relation_kind == "auxiliary":
+        if tracking_enabled or rename_from_parent or copy_missing_from_parent or tracking_state != "disabled":
+            raise ValueError("original/auxiliary 节点禁止开启版本跟踪")
+        tracking_enabled = rename_from_parent = copy_missing_from_parent = False
+        tracking_state = "disabled"
+    if not tracking_enabled and (rename_from_parent or copy_missing_from_parent):
+        raise ValueError("未开启跟踪时不能保存沿用文件名或补齐策略")
+    snapshot = payload.get("trackingSnapshot") or {}
+    if not isinstance(snapshot, (dict, list)):
+        raise ValueError("无效的跟踪快照")
+    snapshot_json = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+    folder_signature = str(payload.get("folderSignature") or "") or None
+    last_tracked_at = int(payload.get("lastTrackedAt") or timestamp) if tracking_state == "ready" else None
     values = (
-        parent_id, display_name, folder_path,
-        folder_path.casefold(), directory_identity(folder_path), int(tracking_state == "ready"), tracking_state, timestamp,
+        parent_id, display_name, folder_path, folder_path.casefold(), directory_identity(folder_path),
+        node_role, relation_kind, int(tracking_enabled), tracking_state, int(rename_from_parent),
+        int(copy_missing_from_parent), last_tracked_at, snapshot_json, folder_signature, timestamp,
     )
     if existing:
         db.execute(
             """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,display_name=?,folder_path=?,folder_path_key=?,
-               folder_id=?,tracking_enabled=?,tracking_state=?,missing_since=NULL,updated_at=? WHERE id=?""",
+               folder_id=?,node_role=?,relation_kind=?,tracking_enabled=?,tracking_state=?,rename_from_parent=?,
+               copy_missing_from_parent=?,last_tracked_at=?,tracking_snapshot_json=?,folder_signature=?,
+               missing_since=NULL,tombstone_json='{}',updated_at=? WHERE id=?""",
             (media_kind, version_key, *values, existing["id"]),
         )
         progress_id = existing["id"]
@@ -1556,8 +2016,10 @@ def progress_register(root: str, db, payload: dict):
         progress_id = str(uuid.uuid4())
         db.execute(
             """INSERT INTO progress_folders(id,project_id,media_kind,version_key,parent_progress_id,
-               display_name,folder_path,folder_path_key,folder_id,tracking_enabled,tracking_state,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               display_name,folder_path,folder_path_key,folder_id,node_role,relation_kind,tracking_enabled,
+               tracking_state,rename_from_parent,copy_missing_from_parent,last_tracked_at,tracking_snapshot_json,
+               folder_signature,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (progress_id, project["id"], media_kind, version_key, *values[:-1], timestamp, timestamp),
         )
     db.commit()
@@ -1582,8 +2044,7 @@ def progress_update_tree(root: str, db, payload: dict):
     children_by_parent = {}
     for row in rows.values():
         parent_id = row["parent_progress_id"]
-        parent = rows.get(parent_id) if parent_id else None
-        if parent and row["version_key"].startswith(f"{parent['version_key']}_") and len(row["version_key"].split("_")) == len(parent["version_key"].split("_")) + 1:
+        if parent_id and row["relation_kind"] == "main" and row["node_role"] == "progress":
             children_by_parent.setdefault(parent_id, []).append(row["id"])
     expected_ids = set()
 
@@ -1615,11 +2076,13 @@ def progress_update_tree(root: str, db, payload: dict):
     for update in updates:
         progress_id = str(update["id"])
         row = rows[progress_id]
+        if row["node_role"] != "progress":
+            raise ValueError("修改版本树只接受 progress 节点")
         media_kind = str(update.get("mediaKind") or row["media_kind"])
         if media_kind != row["media_kind"]:
             raise ValueError("修改进度时不能改变图片或视频类型")
         version_key = str(update.get("versionKey") or "")
-        if not version_key or any(not part.isdigit() for part in version_key.split("_")):
+        if not version_key or len(version_key) > 128 or any(ord(character) < 32 for character in version_key):
             raise ValueError("无效的版本编号")
         display_name = str(update.get("displayName") or "").strip()
         if not display_name:
@@ -1630,18 +2093,8 @@ def progress_update_tree(root: str, db, payload: dict):
         parent_id = update.get("parentProgressId") or None
         if parent_id:
             parent = rows.get(parent_id)
-            if parent is None or parent["media_kind"] != media_kind:
+            if parent is None or parent["media_kind"] != media_kind or parent["node_role"] not in ("original", "progress"):
                 raise ValueError("父版本进度不存在")
-            if parent_id in update_ids:
-                parent_update = next(item for item in updates if str(item.get("id") or "") == parent_id)
-                parent_version_key = str(parent_update.get("versionKey") or "")
-            else:
-                parent_version_key = parent["version_key"]
-            is_sequential_root = "_" not in version_key and "_" not in parent_version_key
-            if not is_sequential_root and (not version_key.startswith(f"{parent_version_key}_") or len(version_key.split("_")) != len(parent_version_key.split("_")) + 1):
-                raise ValueError(f"版本 _{version_key} 与父版本 _{parent_version_key} 不匹配")
-        elif "_" in version_key:
-            raise ValueError(f"分支版本 _{version_key} 必须指定父版本")
 
         version_identity = (media_kind, version_key.casefold())
         name_identity = display_name.casefold()
@@ -1661,9 +2114,11 @@ def progress_update_tree(root: str, db, payload: dict):
             tracking_state = "ready" if bool(update["trackingEnabled"]) else "disabled"
         else:
             tracking_state = str(row["tracking_state"] or ("ready" if row["tracking_enabled"] else "disabled"))
-        if tracking_state not in {"disabled", "pending_compare", "pending_confirm", "committing", "ready", "needs_repair"}:
+        if tracking_state not in PROGRESS_TRACKING_STATES:
             raise ValueError("无效的版本跟踪状态")
-        tracking_enabled = int(tracking_state == "ready")
+        tracking_enabled = int(update.get("trackingEnabled", row["tracking_enabled"]))
+        if tracking_state == "disabled":
+            tracking_enabled = 0
         normalized.append((progress_id, media_kind, version_key, parent_id, display_name, folder_path, tracking_enabled, tracking_state))
 
     for row in rows.values():
@@ -1687,9 +2142,10 @@ def progress_update_tree(root: str, db, payload: dict):
             )
         for progress_id, media_kind, version_key, parent_id, display_name, folder_path, tracking_enabled, tracking_state in normalized:
             db.execute(
-                """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,display_name=?,
+                """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,
+                   relation_kind=CASE WHEN ? IS NULL THEN NULL ELSE 'main' END,display_name=?,
                    folder_path=?,folder_path_key=?,folder_id=?,tracking_enabled=?,tracking_state=?,missing_since=NULL,updated_at=? WHERE id=?""",
-                (media_kind, version_key, parent_id, display_name, folder_path, folder_path.casefold(),
+                (media_kind, version_key, parent_id, parent_id, display_name, folder_path, folder_path.casefold(),
                  directory_identity(folder_path), tracking_enabled, tracking_state, timestamp, progress_id),
             )
         if replacement_id:
@@ -1715,6 +2171,217 @@ def progress_update_tree(root: str, db, payload: dict):
     }
 
 
+def _progress_row_by_id(db, progress_id: str):
+    row = db.execute("SELECT project_id FROM progress_folders WHERE id=?", (progress_id,)).fetchone()
+    if row is None:
+        raise ValueError("版本节点不存在")
+    return next(item for item in progress_rows(db, row["project_id"]) if item["id"] == progress_id)
+
+
+def progress_policy_save(db, payload: dict):
+    progress_id = str(payload.get("progressId") or "")
+    row = _progress_row_by_id(db, progress_id)
+    tracking_enabled = bool(payload.get("trackingEnabled", row["tracking_enabled"]))
+    rename_from_parent = bool(payload.get("renameFromParent", row["rename_from_parent"]))
+    copy_missing_from_parent = bool(payload.get("copyMissingFromParent", row["copy_missing_from_parent"]))
+    if row["node_role"] == "original" or row["relation_kind"] == "auxiliary":
+        if tracking_enabled or rename_from_parent or copy_missing_from_parent:
+            raise ValueError("original/auxiliary 节点禁止开启版本跟踪")
+    if not tracking_enabled and (rename_from_parent or copy_missing_from_parent):
+        raise ValueError("未开启跟踪时不能保存沿用文件名或补齐策略")
+    tracking_state = str(payload.get("trackingState") or row["tracking_state"])
+    if tracking_state not in PROGRESS_TRACKING_STATES:
+        raise ValueError("无效的版本跟踪状态")
+    if not tracking_enabled:
+        tracking_state = "disabled"
+    timestamp = int(time.time() * 1000)
+    db.execute(
+        """UPDATE progress_folders SET tracking_enabled=?,rename_from_parent=?,copy_missing_from_parent=?,
+           tracking_state=?,updated_at=? WHERE id=?""",
+        (int(tracking_enabled), int(rename_from_parent), int(copy_missing_from_parent),
+         tracking_state, timestamp, progress_id),
+    )
+    db.commit()
+    return {"success": True, "progressFolder": serialize_progress(_progress_row_by_id(db, progress_id))}
+
+
+def progress_mark_stale(db, payload: dict):
+    progress_id = str(payload.get("progressId") or "")
+    timestamp = int(time.time() * 1000)
+    changed = db.execute(
+        """UPDATE progress_folders SET tracking_state='stale',updated_at=?
+           WHERE id=? AND node_role='progress' AND (relation_kind='main' OR parent_progress_id IS NULL)
+             AND tracking_enabled=1 AND tracking_state='ready' AND missing_since IS NULL""",
+        (timestamp, progress_id),
+    ).rowcount
+    db.commit()
+    return {"success": True, "changed": bool(changed), "progressFolder": serialize_progress(_progress_row_by_id(db, progress_id))}
+
+
+def progress_mark_ready(db, payload: dict):
+    progress_id = str(payload.get("progressId") or "")
+    row = _progress_row_by_id(db, progress_id)
+    if (row["node_role"] != "progress" or row["relation_kind"] == "auxiliary"
+            or not row["tracking_enabled"]):
+        raise ValueError("只有已开启跟踪的 main progress 可以恢复 ready")
+    snapshot = payload.get("trackingSnapshot") or {}
+    if not isinstance(snapshot, (dict, list)):
+        raise ValueError("无效的跟踪快照")
+    timestamp = int(payload.get("trackedAt") or int(time.time() * 1000))
+    signature = str(payload.get("folderSignature") or "") or None
+    db.execute(
+        """UPDATE progress_folders SET tracking_state='ready',last_tracked_at=?,tracking_snapshot_json=?,
+           folder_signature=?,updated_at=? WHERE id=?""",
+        (timestamp, json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")), signature, timestamp, progress_id),
+    )
+    db.commit()
+    return {"success": True, "progressFolder": serialize_progress(_progress_row_by_id(db, progress_id))}
+
+
+def progress_copy_missing_children(db, payload: dict):
+    progress_id = str(payload.get("progressId") or "")
+    parent = _progress_row_by_id(db, progress_id)
+    rows = db.execute(
+        """SELECT id FROM progress_folders WHERE project_id=? AND media_kind=? AND parent_progress_id=?
+           AND relation_kind='main' AND node_role='progress' AND tracking_enabled=1
+           AND copy_missing_from_parent=1 AND tracking_state='ready' AND missing_since IS NULL
+           ORDER BY created_at,id""",
+        (parent["project_id"], parent["media_kind"], progress_id),
+    ).fetchall()
+    return {"success": True, "progressIds": [row["id"] for row in rows]}
+
+
+def progress_main_branch(db, payload: dict):
+    progress_id = str(payload.get("progressId") or "")
+    start = _progress_row_by_id(db, progress_id)
+    if start["node_role"] == "selection" or start["relation_kind"] == "auxiliary":
+        return {"success": True, "progressFolders": []}
+    include_missing = bool(payload.get("includeMissing"))
+    rows = progress_rows(db, start["project_id"])
+    by_id = {row["id"]: row for row in rows}
+    selected = {progress_id}
+    cursor = start
+    while cursor["parent_progress_id"] and cursor["relation_kind"] == "main":
+        cursor = by_id.get(cursor["parent_progress_id"])
+        if cursor is None or cursor["node_role"] == "selection":
+            break
+        selected.add(cursor["id"])
+    queue = list(selected)
+    while queue:
+        parent_id = queue.pop(0)
+        for row in rows:
+            if row["parent_progress_id"] == parent_id and row["relation_kind"] == "main" and row["node_role"] != "selection" and row["id"] not in selected:
+                selected.add(row["id"])
+                queue.append(row["id"])
+    visible = [row for row in rows if row["id"] in selected and (include_missing or row["missing_since"] is None)]
+    return {"success": True, "progressFolders": [serialize_progress(row) for row in visible]}
+
+
+def progress_visible_relations(db, payload: dict):
+    progress_id = str(payload.get("progressId") or "")
+    start = _progress_row_by_id(db, progress_id)
+    rows = progress_rows(db, start["project_id"])
+    by_id = {row["id"]: row for row in rows}
+    ancestors = []
+    cursor = start
+    visited = set()
+    while cursor["parent_progress_id"]:
+        if cursor["id"] in visited:
+            raise ValueError("版本关系形成循环")
+        visited.add(cursor["id"])
+        cursor = by_id.get(cursor["parent_progress_id"])
+        if cursor is None:
+            break
+        if cursor["missing_since"] is None:
+            ancestors.append(cursor["id"])
+    descendants = []
+    visible_parent_by_id = {}
+    queue = [(progress_id, progress_id)]
+    while queue:
+        parent_id, nearest_visible = queue.pop(0)
+        for child in (row for row in rows if row["parent_progress_id"] == parent_id):
+            if child["missing_since"] is None:
+                descendants.append(child["id"])
+                visible_parent_by_id[child["id"]] = nearest_visible
+                queue.append((child["id"], child["id"]))
+            else:
+                queue.append((child["id"], nearest_visible))
+    return {
+        "success": True,
+        "visibleAncestorIds": ancestors,
+        "visibleDescendantIds": descendants,
+        "visibleParentById": visible_parent_by_id,
+    }
+
+
+def cleanup_progress_tombstones(root: str, db, cutoff: int | None = None):
+    cutoff = int(cutoff if cutoff is not None else int(time.time() * 1000) - PROGRESS_TOMBSTONE_RETENTION_MS)
+    candidates = db.execute(
+        """SELECT * FROM progress_folders WHERE missing_since IS NOT NULL AND missing_since<=?
+           ORDER BY project_id,media_kind,missing_since""",
+        (cutoff,),
+    ).fetchall()
+    removed = []
+    removed_selection_metadata = []
+    reparented = 0
+    skipped = []
+    timestamp = int(time.time() * 1000)
+    for candidate in candidates:
+        if db.execute(
+            "SELECT 1 FROM tracking_sessions WHERE progress_id=? OR parent_progress_id=? LIMIT 1",
+            (candidate["id"], candidate["id"]),
+        ).fetchone() is not None:
+            skipped.append(candidate["id"])
+            continue
+        if os.path.isdir(candidate["folder_path"]):
+            skipped.append(candidate["id"])
+            continue
+        parent_id = candidate["parent_progress_id"]
+        while parent_id:
+            parent = db.execute("SELECT * FROM progress_folders WHERE id=?", (parent_id,)).fetchone()
+            if parent is None:
+                parent_id = None
+                break
+            if parent["missing_since"] is None:
+                break
+            parent_id = parent["parent_progress_id"]
+        children = db.execute("SELECT * FROM progress_folders WHERE parent_progress_id=?", (candidate["id"],)).fetchall()
+        orphaned_selections = [child for child in children if parent_id is None and child["node_role"] == "selection"]
+        if orphaned_selections:
+            blocked_selection_ids = [child["id"] for child in orphaned_selections if db.execute(
+                """SELECT 1 WHERE EXISTS(SELECT 1 FROM tracking_sessions WHERE progress_id=? OR parent_progress_id=?)
+                   OR EXISTS(SELECT 1 FROM progress_folders WHERE parent_progress_id=?)""",
+                (child["id"], child["id"], child["id"]),
+            ).fetchone() is not None]
+            if blocked_selection_ids:
+                skipped.append(candidate["id"])
+                continue
+            # A selection node cannot legally become a root. Remove only its
+            # relationship metadata; its existing folder and media stay on disk
+            # and therefore become an ordinary project folder.
+            for child in orphaned_selections:
+                db.execute("DELETE FROM progress_folders WHERE id=?", (child["id"],))
+                removed.append(child["id"])
+                removed_selection_metadata.append(child["id"])
+            children = [child for child in children if child["id"] not in removed_selection_metadata]
+        for child in children:
+            relation_kind = None if parent_id is None else ("auxiliary" if child["node_role"] == "selection" else "main")
+            db.execute(
+                """UPDATE progress_folders SET parent_progress_id=?,relation_kind=?,updated_at=? WHERE id=?""",
+                (parent_id, relation_kind, timestamp, child["id"]),
+            )
+            reparented += 1
+        db.execute("DELETE FROM progress_folders WHERE id=?", (candidate["id"],))
+        removed.append(candidate["id"])
+    db.commit()
+    return {
+        "removedProgressIds": removed,
+        "removedSelectionMetadataIds": removed_selection_metadata,
+        "reparentedProgressCount": reparented,
+        "skippedProgressIds": skipped,
+    }
+
+
 def progress_delete_missing(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     sync_progress_folder_locations(root, db, project)
@@ -1725,7 +2392,7 @@ def progress_delete_missing(root: str, db, payload: dict):
     ).fetchone()
     if progress is None:
         raise ValueError("失效版本记录不存在")
-    if progress["version_key"] == "0":
+    if progress["node_role"] == "original" or progress["version_key"] == "0":
         raise ValueError("原始版本 V0 受保护，不能移除")
     if os.path.isdir(progress["folder_path"]):
         raise ValueError("版本文件夹仍然存在，不能按失效记录移除")
@@ -1772,8 +2439,10 @@ def progress_delete_missing(root: str, db, payload: dict):
 
     timestamp = int(time.time() * 1000)
     reparented_progress_count = db.execute(
-        "UPDATE progress_folders SET parent_progress_id=?,updated_at=? WHERE parent_progress_id=?",
-        (progress["parent_progress_id"], timestamp, progress_id),
+        """UPDATE progress_folders SET parent_progress_id=?,
+           relation_kind=CASE WHEN ? IS NULL THEN NULL WHEN node_role='selection' THEN 'auxiliary' ELSE 'main' END,
+           updated_at=? WHERE parent_progress_id=?""",
+        (progress["parent_progress_id"], progress["parent_progress_id"], timestamp, progress_id),
     ).rowcount
     db.execute("DELETE FROM progress_folders WHERE id=?", (progress_id,))
     db.commit()
@@ -1824,6 +2493,620 @@ def folder_media_files(folder_path: str):
         entry.path for entry in sorted(os.scandir(folder_path), key=lambda item: item.name.casefold())
         if entry.is_file() and media_type(entry.path)
     ]
+
+
+def folder_media_snapshot(folder_path: str):
+    snapshot = {}
+    for file_path in folder_media_files(folder_path):
+        stat = os.stat(file_path)
+        snapshot[os.path.basename(file_path)] = {
+            "size": stat.st_size,
+            "modifiedAt": int(stat.st_mtime_ns / 1_000_000),
+            "signature": quick_fingerprint(file_path, stat),
+        }
+    return snapshot
+
+
+def _tracking_snapshot_parts(row):
+    try:
+        stored = json.loads(row["tracking_snapshot_json"] or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        stored = {}
+    if not isinstance(stored, dict):
+        return {}, {}
+    files = stored.get("files") if isinstance(stored.get("files"), dict) else {}
+    parent = stored.get("parent") if isinstance(stored.get("parent"), dict) else {}
+    return files, parent
+
+
+def _validated_tracking_nodes(root: str, db, project_name: str, progress_id: str):
+    project = project_row(db, project_name)
+    progress = db.execute(
+        "SELECT * FROM progress_folders WHERE id=? AND project_id=?",
+        (progress_id, project["id"]),
+    ).fetchone()
+    if progress is None:
+        raise ValueError("主分支进度不存在")
+    if progress["node_role"] != "progress" or progress["relation_kind"] != "main":
+        raise ValueError("auxiliary/original 节点禁止版本比较、刷新或提交")
+    if not progress["tracking_enabled"]:
+        raise ValueError("该主分支进度未开启跟踪")
+    if not progress["parent_progress_id"]:
+        raise ValueError("主分支进度必须指定 parentProgressId")
+    parent = db.execute(
+        "SELECT * FROM progress_folders WHERE id=? AND project_id=? AND media_kind=?",
+        (progress["parent_progress_id"], project["id"], progress["media_kind"]),
+    ).fetchone()
+    if parent is None or parent["node_role"] not in ("original", "progress") or parent["relation_kind"] == "auxiliary":
+        raise ValueError("父节点不存在、媒体类型不兼容或不是主分支节点")
+
+    visited = {progress["id"]}
+    cursor = parent
+    while cursor is not None:
+        if cursor["id"] in visited:
+            raise ValueError("主分支关系形成循环")
+        visited.add(cursor["id"])
+        if not cursor["parent_progress_id"]:
+            break
+        cursor = db.execute(
+            "SELECT * FROM progress_folders WHERE id=? AND project_id=? AND media_kind=?",
+            (cursor["parent_progress_id"], project["id"], progress["media_kind"]),
+        ).fetchone()
+        if cursor is None:
+            raise ValueError("主分支父节点关系不完整")
+
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    project_real = canonical_path(os.path.realpath(project_path))
+    if not os.path.isdir(project_real):
+        raise ValueError("项目文件夹不存在")
+
+    def validated_folder(node):
+        folder_path = canonical_path(node["folder_path"])
+        real_path = canonical_path(os.path.realpath(folder_path))
+        if not os.path.isdir(folder_path) or not os.path.isdir(real_path) or node["missing_since"] is not None:
+            raise ValueError(f"版本节点文件夹不存在：{node['display_name']}")
+        try:
+            inside = os.path.commonpath((project_real, real_path)).casefold() == project_real.casefold()
+        except ValueError:
+            inside = False
+        if not inside or real_path.casefold() == project_real.casefold():
+            raise ValueError("版本节点目录越出项目范围")
+        return real_path
+
+    return project, parent, progress, validated_folder(parent), validated_folder(progress)
+
+
+def tracking_session_create(root: str, db, payload: dict):
+    progress_id = str(payload.get("progressId") or "")
+    mode = str(payload.get("mode") or "compare")
+    if mode not in ("compare", "refresh"):
+        raise ValueError("无效的跟踪模式")
+    project, parent, progress, parent_path, progress_path = _validated_tracking_nodes(
+        root, db, str(payload.get("projectName") or ""), progress_id,
+    )
+    active = db.execute(
+        """SELECT id FROM tracking_sessions WHERE progress_id=?
+           AND status IN ('comparing','pending_confirm','committing','failed') LIMIT 1""",
+        (progress["id"],),
+    ).fetchone()
+    if active is not None:
+        raise ValueError(f"progress already has an active tracking session: {active['id']}")
+    timestamp = int(time.time() * 1000)
+    session_id = str(payload.get("sessionId") or uuid.uuid4())
+    db.execute(
+        """INSERT INTO tracking_sessions(
+             id,project_id,progress_id,parent_progress_id,mode,status,previous_tracking_state,
+             rename_from_parent,copy_missing_from_parent,created_at,updated_at)
+           VALUES(?,?,?,?,?,'comparing',?,?,?,?,?)""",
+        (session_id, project["id"], progress["id"], parent["id"], mode, progress["tracking_state"],
+         progress["rename_from_parent"], progress["copy_missing_from_parent"], timestamp, timestamp),
+    )
+    db.execute(
+        "UPDATE progress_folders SET tracking_state='pending_compare',updated_at=? WHERE id=?",
+        (timestamp, progress["id"]),
+    )
+    db.commit()
+    return {
+        "success": True, "sessionId": session_id, "progressId": progress["id"],
+        "parentProgressId": parent["id"], "mode": mode,
+        "parentFolderPath": parent_path, "progressFolderPath": progress_path,
+    }
+
+
+def tracking_prepare(root: str, db, payload: dict):
+    progress_id = str(payload.get("progressId") or "")
+    mode = str(payload.get("mode") or "compare")
+    if mode not in ("compare", "refresh"):
+        raise ValueError("无效的跟踪模式")
+    project, parent, progress, parent_path, progress_path = _validated_tracking_nodes(
+        root, db, str(payload.get("projectName") or ""), progress_id,
+    )
+    current_files = folder_media_snapshot(progress_path)
+    current_parent = folder_media_snapshot(parent_path)
+    previous_files, previous_parent = _tracking_snapshot_parts(progress)
+    if mode == "refresh" and previous_files:
+        source_names = sorted(
+            name for name, signature in current_files.items()
+            if previous_files.get(name) != signature
+        )
+        removed_names = sorted(name for name in previous_files if name not in current_files)
+    else:
+        source_names = sorted(current_files)
+        removed_names = []
+    copy_candidate_names = []
+    if progress["copy_missing_from_parent"]:
+        copy_candidate_names = sorted(
+            name for name, signature in current_parent.items()
+            if previous_parent.get(name) != signature and name not in current_files
+        )
+    session_id = str(payload.get("sessionId") or "")
+    if session_id:
+        session = db.execute(
+            "SELECT * FROM tracking_sessions WHERE id=? AND project_id=? AND progress_id=?",
+            (session_id, project["id"], progress["id"]),
+        ).fetchone()
+        if session is None or session["status"] != "comparing" or session["mode"] != mode:
+            raise ValueError("跟踪会话不存在或状态无效")
+    else:
+        session_id = tracking_session_create(root, db, payload)["sessionId"]
+    return {
+        "success": True,
+        "sessionId": session_id,
+        "progressId": progress["id"],
+        "parentProgressId": parent["id"],
+        "mode": mode,
+        "parentFolderPath": parent_path,
+        "progressFolderPath": progress_path,
+        "sourceNames": source_names,
+        "removedNames": removed_names,
+        "copyCandidateNames": copy_candidate_names,
+        "renameFromParent": bool(progress["rename_from_parent"]),
+        "copyMissingFromParent": bool(progress["copy_missing_from_parent"]),
+    }
+
+
+def _valid_tracking_file_name(value) -> str:
+    value = str(value or "")
+    if not value or os.path.basename(value) != value or len(value) > 255:
+        raise ValueError("跟踪结果包含无效文件名")
+    return value
+
+
+def tracking_store_preview(db, payload: dict):
+    session_id = str(payload.get("sessionId") or "")
+    session = db.execute("SELECT * FROM tracking_sessions WHERE id=?", (session_id,)).fetchone()
+    if session is None or session["status"] != "comparing":
+        raise ValueError("跟踪会话不存在或状态无效")
+    raw_items = payload.get("items") or []
+    if not isinstance(raw_items, list) or len(raw_items) > 50_000:
+        raise ValueError("跟踪确认结果数量无效")
+    timestamp = int(time.time() * 1000)
+    db.execute("DELETE FROM tracking_session_items WHERE session_id=?", (session_id,))
+    for item in raw_items:
+        kind = str(item.get("kind") or "")
+        if kind not in ("recognized", "new", "copy_missing", "missing"):
+            raise ValueError("无效的跟踪确认项目类型")
+        source_name = _valid_tracking_file_name(item.get("sourceName")) if item.get("sourceName") else None
+        reference_name = _valid_tracking_file_name(item.get("referenceName")) if item.get("referenceName") else None
+        target_name = _valid_tracking_file_name(item.get("targetName")) if item.get("targetName") else source_name
+        status = str(item.get("status") or "")
+        expected_status = {
+            "recognized": "recognized", "new": "pending_confirmation",
+            "copy_missing": "pending_confirmation", "missing": "missing_reference",
+        }[kind]
+        if status != expected_status:
+            raise ValueError("比较结果不能跳过用户确认")
+        db.execute(
+            """INSERT INTO tracking_session_items(
+                 id,session_id,item_kind,source_name,reference_name,target_name,status,distance,
+                 confidence,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (str(uuid.uuid4()), session_id, kind, source_name, reference_name, target_name, status,
+             float(item["distance"]) if item.get("distance") is not None else None,
+             str(item.get("confidence") or "")[:40], timestamp, timestamp),
+        )
+    db.execute(
+        "UPDATE tracking_sessions SET status='pending_confirm',error='',updated_at=? WHERE id=?",
+        (timestamp, session_id),
+    )
+    db.execute(
+        "UPDATE progress_folders SET tracking_state='pending_confirm',updated_at=? WHERE id=?",
+        (timestamp, session["progress_id"]),
+    )
+    db.commit()
+    return tracking_session_get(db, {"sessionId": session_id, "cursor": 0, "limit": 200})
+
+
+def serialize_tracking_item(row):
+    return {
+        "id": row["id"], "kind": row["item_kind"], "sourceName": row["source_name"],
+        "referenceName": row["reference_name"], "targetName": row["target_name"],
+        "status": row["status"], "distance": row["distance"], "confidence": row["confidence"],
+    }
+
+
+def tracking_session_get(db, payload: dict):
+    session_id = str(payload.get("sessionId") or "")
+    session = db.execute("SELECT * FROM tracking_sessions WHERE id=?", (session_id,)).fetchone()
+    if session is None:
+        raise ValueError("跟踪会话不存在")
+    cursor = max(0, int(payload.get("cursor") or 0))
+    limit = max(1, min(500, int(payload.get("limit") or 100)))
+    total = db.execute("SELECT COUNT(*) FROM tracking_session_items WHERE session_id=?", (session_id,)).fetchone()[0]
+    items = db.execute(
+        """SELECT * FROM tracking_session_items WHERE session_id=? ORDER BY created_at,id
+           LIMIT ? OFFSET ?""",
+        (session_id, limit, cursor),
+    ).fetchall()
+    unresolved = db.execute(
+        """SELECT COUNT(*) FROM tracking_session_items WHERE session_id=?
+           AND status IN ('pending_confirmation','missing_reference')""",
+        (session_id,),
+    ).fetchone()[0]
+    return {
+        "success": True,
+        "session": {
+            "id": session["id"], "progressId": session["progress_id"],
+            "parentProgressId": session["parent_progress_id"], "mode": session["mode"],
+            "status": session["status"], "renameFromParent": bool(session["rename_from_parent"]),
+            "copyMissingFromParent": bool(session["copy_missing_from_parent"]),
+            "committedBatchId": session["committed_batch_id"], "error": session["error"],
+            "total": total, "unresolvedCount": unresolved,
+        },
+        "items": [serialize_tracking_item(row) for row in items],
+        "nextCursor": cursor + len(items) if cursor + len(items) < total else None,
+    }
+
+
+def tracking_session_release(db, payload: dict):
+    session_id = str(payload.get("sessionId") or "")
+    session = db.execute("SELECT * FROM tracking_sessions WHERE id=?", (session_id,)).fetchone()
+    if session is None:
+        return {"success": True, "released": False, "sessionId": session_id}
+    if session["status"] != "committed":
+        restore_state = session["previous_tracking_state"]
+        if restore_state not in PROGRESS_TRACKING_STATES or restore_state in ("pending_compare", "pending_confirm", "committing"):
+            restore_state = "stale" if session["mode"] == "refresh" else "needs_repair"
+        db.execute(
+            """UPDATE progress_folders SET tracking_state=?,updated_at=?
+               WHERE id=? AND tracking_state IN ('pending_compare','pending_confirm','committing')""",
+            (restore_state, int(time.time() * 1000), session["progress_id"]),
+        )
+    db.execute("DELETE FROM tracking_sessions WHERE id=?", (session_id,))
+    db.commit()
+    return {"success": True, "released": True, "sessionId": session_id}
+
+
+def cleanup_tracking_sessions(db, cutoff: int | None = None):
+    cutoff = int(cutoff if cutoff is not None else int(time.time() * 1000) - TRACKING_SESSION_RETENTION_MS)
+    rows = db.execute(
+        "SELECT id FROM tracking_sessions WHERE updated_at<=? ORDER BY updated_at,id",
+        (cutoff,),
+    ).fetchall()
+    released = []
+    for row in rows:
+        if tracking_session_release(db, {"sessionId": row["id"]})["released"]:
+            released.append(row["id"])
+    return {"releasedSessionIds": released, "releasedCount": len(released)}
+
+
+def progress_detect_stale(root: str, db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    sync_progress_folder_locations(root, db, project)
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    raw_changed_paths = payload.get("changedPaths") or []
+    if not isinstance(raw_changed_paths, list) or len(raw_changed_paths) > 10_000:
+        raise ValueError("变化路径列表无效")
+    changed_paths = []
+    for value in raw_changed_paths:
+        candidate = canonical_path(value)
+        if candidate.casefold() != project_path.casefold() and not is_project_descendant(candidate, project_path):
+            raise ValueError("变化路径超出项目范围")
+        changed_paths.append(candidate)
+    full_scan = not changed_paths
+    rows = progress_rows(db, project["id"])
+    by_id = {row["id"]: row for row in rows}
+    snapshot_cache = {}
+
+    def path_touched(folder_path):
+        if full_scan:
+            return True
+        folder_key = canonical_path(folder_path).casefold()
+        for changed_path in changed_paths:
+            changed_key = changed_path.casefold()
+            if changed_key == folder_key or changed_key.startswith(folder_key + os.sep) or folder_key.startswith(changed_key + os.sep):
+                return True
+        return False
+
+    def current_snapshot(node):
+        if node["id"] not in snapshot_cache:
+            snapshot_cache[node["id"]] = folder_media_snapshot(node["folder_path"]) if os.path.isdir(node["folder_path"]) else None
+        return snapshot_cache[node["id"]]
+
+    stale_ids = set()
+    propagated_ids = set()
+    scanned_ids = set()
+    timestamp = int(time.time() * 1000)
+    for node in rows:
+        if (node["node_role"] != "progress" or node["relation_kind"] != "main"
+                or not node["tracking_enabled"] or node["tracking_state"] != "ready"
+                or node["missing_since"] is not None or not path_touched(node["folder_path"])):
+            continue
+        previous_files, _previous_parent = _tracking_snapshot_parts(node)
+        current_files = current_snapshot(node)
+        scanned_ids.add(node["id"])
+        if current_files is None or current_files != previous_files:
+            stale_ids.add(node["id"])
+
+    for child in rows:
+        if (child["node_role"] != "progress" or child["relation_kind"] != "main"
+                or not child["tracking_enabled"] or not child["copy_missing_from_parent"]
+                or child["tracking_state"] != "ready" or not child["parent_progress_id"]):
+            continue
+        parent = by_id.get(child["parent_progress_id"])
+        if (parent is None or parent["node_role"] == "selection" or parent["relation_kind"] == "auxiliary"
+                or parent["missing_since"] is not None or not path_touched(parent["folder_path"])):
+            continue
+        _previous_files, previous_parent = _tracking_snapshot_parts(child)
+        current_parent = current_snapshot(parent)
+        scanned_ids.add(parent["id"])
+        if current_parent is not None and any(name not in previous_parent for name in current_parent):
+            stale_ids.add(child["id"])
+            propagated_ids.add(child["id"])
+    if stale_ids:
+        placeholders = ",".join("?" for _ in stale_ids)
+        db.execute(
+            f"UPDATE progress_folders SET tracking_state='stale',updated_at=? WHERE id IN ({placeholders}) AND tracking_state='ready'",
+            (timestamp, *sorted(stale_ids)),
+        )
+        db.commit()
+    return {
+        "success": True,
+        "projectName": project["name"],
+        "scannedProgressIds": sorted(scanned_ids),
+        "staleProgressIds": sorted(stale_ids),
+        "propagatedProgressIds": sorted(propagated_ids),
+    }
+
+
+def tracking_session_decide(root: str, db, payload: dict):
+    session_id = str(payload.get("sessionId") or "")
+    item_id = str(payload.get("itemId") or "")
+    decision = str(payload.get("status") or "")
+    if decision not in ("accepted", "rejected"):
+        raise ValueError("确认结果只能是 accepted 或 rejected")
+    session = db.execute("SELECT * FROM tracking_sessions WHERE id=?", (session_id,)).fetchone()
+    item = db.execute(
+        "SELECT * FROM tracking_session_items WHERE id=? AND session_id=?",
+        (item_id, session_id),
+    ).fetchone()
+    if session is None or item is None or session["status"] not in ("pending_confirm", "failed"):
+        raise ValueError("跟踪确认项目不存在或会话状态无效")
+    reference_name = item["reference_name"]
+    if payload.get("referenceName"):
+        reference_name = _valid_tracking_file_name(payload["referenceName"])
+        _project, _parent, _progress, parent_path, _progress_path = _validated_tracking_nodes(
+            root, db, db.execute("SELECT name FROM projects WHERE id=?", (session["project_id"],)).fetchone()[0],
+            session["progress_id"],
+        )
+        safe_folder_file(parent_path, reference_name)
+    if decision == "accepted" and item["item_kind"] in ("recognized", "copy_missing") and not reference_name:
+        raise ValueError("该确认项目缺少上一版本引用")
+    timestamp = int(time.time() * 1000)
+    db.execute(
+        "UPDATE tracking_session_items SET status=?,reference_name=?,updated_at=? WHERE id=?",
+        (decision, reference_name, timestamp, item_id),
+    )
+    db.execute("UPDATE tracking_sessions SET status='pending_confirm',error='',updated_at=? WHERE id=?", (timestamp, session_id))
+    db.commit()
+    return {"success": True, "item": serialize_tracking_item(db.execute("SELECT * FROM tracking_session_items WHERE id=?", (item_id,)).fetchone())}
+
+
+def tracking_commit_plan(root: str, db, payload: dict):
+    session_id = str(payload.get("sessionId") or "")
+    session = db.execute("SELECT * FROM tracking_sessions WHERE id=?", (session_id,)).fetchone()
+    if session is None:
+        raise ValueError("跟踪会话不存在")
+    if session["status"] == "committed":
+        return {"success": True, "alreadyCommitted": True, "sessionId": session_id, "batchId": session["committed_batch_id"]}
+    if session["status"] not in ("pending_confirm", "failed"):
+        raise ValueError("跟踪会话当前不能提交")
+    if session["status"] == "failed" and not session["committed_batch_id"]:
+        item_count = db.execute(
+            "SELECT COUNT(*) FROM tracking_session_items WHERE session_id=?", (session_id,)
+        ).fetchone()[0]
+        if not item_count:
+            raise ValueError("版本比较尚未产生可提交结果，请释放会话后重新比较")
+    unresolved = db.execute(
+        """SELECT COUNT(*) FROM tracking_session_items WHERE session_id=?
+           AND status IN ('pending_confirmation','missing_reference')""",
+        (session_id,),
+    ).fetchone()[0]
+    if unresolved:
+        raise ValueError(f"仍有 {unresolved} 个跟踪项目需要用户明确处理")
+    project_name = db.execute("SELECT name FROM projects WHERE id=?", (session["project_id"],)).fetchone()[0]
+    _project, parent, progress, parent_path, progress_path = _validated_tracking_nodes(
+        root, db, project_name, session["progress_id"],
+    )
+    rows = db.execute(
+        "SELECT * FROM tracking_session_items WHERE session_id=? AND status IN ('recognized','accepted') ORDER BY created_at,id",
+        (session_id,),
+    ).fetchall()
+    matches = []
+    incremental = []
+    copies = []
+    for item in rows:
+        if item["item_kind"] == "copy_missing":
+            copies.append(item["reference_name"])
+        elif item["reference_name"] and item["source_name"]:
+            matches.append({
+                "reference": item["reference_name"], "source": item["source_name"],
+                "target": item["reference_name"] if session["rename_from_parent"] else (item["target_name"] or item["source_name"]),
+                "distance": item["distance"] if item["distance"] is not None else 0,
+                "confidence": item["confidence"],
+            })
+            incremental.append(item["source_name"])
+        elif item["source_name"]:
+            incremental.append(item["source_name"])
+    timestamp = int(time.time() * 1000)
+    db.execute("UPDATE tracking_sessions SET status='committing',error='',updated_at=? WHERE id=?", (timestamp, session_id))
+    db.execute("UPDATE progress_folders SET tracking_state='committing',updated_at=? WHERE id=?", (timestamp, progress["id"]))
+    db.commit()
+    return {
+        "success": True, "alreadyCommitted": False, "sessionId": session_id,
+        "mode": session["mode"], "repairBatchId": session["committed_batch_id"],
+        "projectName": project_name, "progressId": progress["id"], "parentProgressId": parent["id"],
+        "parentFolderPath": parent_path, "progressFolderPath": progress_path,
+        "displayName": progress["display_name"], "renameFromParent": bool(session["rename_from_parent"]),
+        "copyMissingFromParent": bool(session["copy_missing_from_parent"]),
+        "matches": matches, "incrementalSources": sorted(set(incremental)), "copyReferences": sorted(set(copies)),
+    }
+
+
+def tracking_commit_complete(root: str, db, payload: dict):
+    session_id = str(payload.get("sessionId") or "")
+    session = db.execute("SELECT * FROM tracking_sessions WHERE id=?", (session_id,)).fetchone()
+    if session is None:
+        raise ValueError("跟踪会话不存在")
+    project_name = db.execute("SELECT name FROM projects WHERE id=?", (session["project_id"],)).fetchone()[0]
+    _project, _parent, progress, parent_path, progress_path = _validated_tracking_nodes(root, db, project_name, session["progress_id"])
+    snapshot = {"files": folder_media_snapshot(progress_path), "parent": folder_media_snapshot(parent_path)}
+    timestamp = int(time.time() * 1000)
+    db.execute(
+        """UPDATE tracking_sessions SET status='committed',committed_batch_id=?,error='',updated_at=? WHERE id=?""",
+        (payload.get("batchId") or session["committed_batch_id"], timestamp, session_id),
+    )
+    db.execute(
+        """UPDATE progress_folders SET tracking_state='ready',last_tracked_at=?,tracking_snapshot_json=?,
+           folder_signature=?,updated_at=? WHERE id=?""",
+        (timestamp, json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
+         hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode("utf-8")).hexdigest(), timestamp, progress["id"]),
+    )
+    db.commit()
+    return tracking_session_get(db, {"sessionId": session_id, "cursor": 0, "limit": 200})
+
+
+def tracking_commit_failed(db, payload: dict):
+    session_id = str(payload.get("sessionId") or "")
+    session = db.execute("SELECT * FROM tracking_sessions WHERE id=?", (session_id,)).fetchone()
+    if session is None:
+        raise ValueError("跟踪会话不存在")
+    timestamp = int(time.time() * 1000)
+    error = str(payload.get("error") or "提交失败")[:2000]
+    failed_while_comparing = session["status"] == "comparing"
+    db.execute(
+        """UPDATE tracking_sessions SET status='failed',error=?,
+           committed_batch_id=COALESCE(?,committed_batch_id),updated_at=? WHERE id=?""",
+        (error, payload.get("batchId") or None, timestamp, session_id),
+    )
+    if failed_while_comparing:
+        restore_state = "stale" if session["mode"] == "refresh" else "needs_repair"
+        db.execute(
+            "UPDATE progress_folders SET tracking_state=?,updated_at=? WHERE id=?",
+            (restore_state, timestamp, session["progress_id"]),
+        )
+    else:
+        db.execute(
+            """UPDATE progress_folders SET tracking_state=CASE WHEN tracking_state='needs_repair'
+                 THEN 'needs_repair' ELSE 'pending_confirm' END,updated_at=? WHERE id=?""",
+            (timestamp, session["progress_id"]),
+        )
+    db.commit()
+    return {"success": True, "sessionId": session_id, "retryable": True}
+
+
+def progress_main_branch_media(db, payload: dict):
+    progress_id = str(payload.get("progressId") or "")
+    photo_id = str(payload.get("photoId") or "") or None
+    if not progress_id and photo_id:
+        resolved = db.execute(
+            """SELECT progress.id FROM versions
+               JOIN batch_items items ON items.version_id=versions.id
+               JOIN version_batches batches ON batches.id=items.batch_id
+               JOIN progress_folders progress
+                 ON progress.project_id=batches.project_id
+                AND progress.folder_path_key=batches.source_folder_path_key
+               WHERE versions.photo_id=? AND versions.is_deleted=0
+                 AND progress.node_role IN ('original','progress')
+                 AND (progress.relation_kind IS NULL OR progress.relation_kind='main')
+               ORDER BY batches.sequence DESC,items.created_at DESC LIMIT 1""",
+            (photo_id,),
+        ).fetchone()
+        if resolved is None:
+            raise ValueError("找不到该媒体所属的主分支进度")
+        progress_id = resolved["id"]
+    if not progress_id:
+        raise ValueError("必须提供 progressId 或 photoId")
+    start = _progress_row_by_id(db, progress_id)
+    if start["node_role"] == "selection" or start["relation_kind"] == "auxiliary":
+        raise ValueError("auxiliary/selection 不属于主分支版本历史")
+    rows = progress_rows(db, start["project_id"])
+    by_id = {row["id"]: row for row in rows}
+    root_node = start
+    visited = set()
+    while root_node["parent_progress_id"] and root_node["relation_kind"] == "main":
+        if root_node["id"] in visited:
+            raise ValueError("主分支关系形成循环")
+        visited.add(root_node["id"])
+        parent = by_id.get(root_node["parent_progress_id"])
+        if parent is None or parent["node_role"] == "selection" or parent["relation_kind"] == "auxiliary":
+            break
+        root_node = parent
+    children = {}
+    for row in rows:
+        if row["relation_kind"] != "main" or row["node_role"] == "selection" or not row["parent_progress_id"]:
+            continue
+        children.setdefault(row["parent_progress_id"], []).append(row)
+    for values in children.values():
+        values.sort(key=lambda row: (row["created_at"], row["id"]))
+    ordered_nodes = []
+
+    def visit(node):
+        ordered_nodes.append(node)
+        for child in children.get(node["id"], []):
+            visit(child)
+
+    visit(root_node)
+    entries = []
+    seen_versions = set()
+    for branch_index, node in enumerate(ordered_nodes):
+        parameters = [node["project_id"], node["folder_path_key"]]
+        photo_filter = ""
+        if photo_id:
+            photo_filter = " AND versions.photo_id=?"
+            parameters.append(photo_id)
+        versions = db.execute(
+            f"""SELECT versions.*,photos.original_name,items.created_at AS item_created_at
+                FROM version_batches batches
+                JOIN batch_items items ON items.batch_id=batches.id
+                JOIN versions ON versions.id=items.version_id
+                JOIN photos ON photos.id=versions.photo_id
+                WHERE batches.project_id=? AND batches.source_folder_path_key=?
+                  AND versions.is_deleted=0{photo_filter}
+                ORDER BY batches.sequence,items.created_at,items.id""",
+            parameters,
+        ).fetchall()
+        for version in versions:
+            if version["id"] in seen_versions:
+                continue
+            seen_versions.add(version["id"])
+            serialized = serialize_version(version)
+            serialized["fileMissing"] = serialized["fileMissing"] or not os.path.isfile(version["file_path"])
+            entries.append({
+                "branchIndex": branch_index,
+                "progressId": node["id"],
+                "parentProgressId": node["parent_progress_id"],
+                "nodeRole": node["node_role"],
+                "relationKind": node["relation_kind"],
+                "photoId": version["photo_id"],
+                "originalName": version["original_name"],
+                "version": serialized,
+            })
+    return {
+        "success": True,
+        "progressId": progress_id,
+        "branchProgressIds": [node["id"] for node in ordered_nodes],
+        "entries": entries,
+    }
 
 
 def safe_folder_file(folder_path: str, file_name: str):
@@ -2189,11 +3472,15 @@ def serialize_batch_operation(row):
 
 
 def set_progress_tracking_state_for_folder(db, project_id: str, folder_path: str, state: str):
+    if state not in PROGRESS_TRACKING_STATES:
+        raise ValueError("无效的版本跟踪状态")
     timestamp = int(time.time() * 1000)
     db.execute(
-        """UPDATE progress_folders SET tracking_state=?,tracking_enabled=?,updated_at=?
-           WHERE project_id=? AND folder_path_key=?""",
-        (state, int(state == "ready"), timestamp, project_id, canonical_path(folder_path).casefold()),
+        """UPDATE progress_folders SET tracking_state=?,
+           last_tracked_at=CASE WHEN ?='ready' THEN ? ELSE last_tracked_at END,updated_at=?
+           WHERE project_id=? AND folder_path_key=? AND node_role='progress'
+             AND relation_kind='main' AND tracking_enabled=1""",
+        (state, state, timestamp, timestamp, project_id, canonical_path(folder_path).casefold()),
     )
 
 
@@ -3685,10 +4972,12 @@ def sync_directories(root: str, db):
         seen_ids.add(project_id)
 
     for row in rows:
-        if not row["is_deleted"] and row["id"] not in seen_ids and not os.path.isdir(os.path.join(root, row["relative_path"])):
+        if (not row["is_deleted"] and row["id"] not in seen_ids
+                and row["availability"] != "missing"
+                and not os.path.isdir(os.path.join(root, row["relative_path"]))):
             db.execute(
-                """UPDATE projects SET availability='missing',missing_since=COALESCE(missing_since,?),
-                   missing_checks=missing_checks+1,updated_at=? WHERE id=?""",
+                """UPDATE projects SET availability='missing',missing_since=?,
+                   missing_checks=1,updated_at=? WHERE id=?""",
                 (now, now, row["id"]),
             )
     db.commit()
@@ -3882,7 +5171,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         try:
             _check_integrity(db)
             _automatic_backup_if_due(db, database)
-            return {"success": True}
+            progress_cleanup = cleanup_progress_tombstones(root, db, payload.get("progressTombstoneCutoff"))
+            tracking_cleanup = cleanup_tracking_sessions(db, payload.get("trackingSessionCutoff"))
+            _check_integrity(db, force=True)
+            return {"success": True, "progressTombstones": progress_cleanup, "trackingSessions": tracking_cleanup}
         finally:
             db.close()
     if action == "add":
@@ -4010,6 +5302,74 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "progress_update_tree":
         result = progress_update_tree(root, db, payload)
+        db.close()
+        return result
+    elif action == "progress_policy_save":
+        result = progress_policy_save(db, payload)
+        db.close()
+        return result
+    elif action == "progress_mark_stale":
+        result = progress_mark_stale(db, payload)
+        db.close()
+        return result
+    elif action == "progress_mark_ready":
+        result = progress_mark_ready(db, payload)
+        db.close()
+        return result
+    elif action == "progress_main_branch":
+        result = progress_main_branch(db, payload)
+        db.close()
+        return result
+    elif action == "progress_visible_relations":
+        result = progress_visible_relations(db, payload)
+        db.close()
+        return result
+    elif action == "progress_copy_missing_children":
+        result = progress_copy_missing_children(db, payload)
+        db.close()
+        return result
+    elif action == "progress_detect_stale":
+        result = progress_detect_stale(root, db, payload)
+        db.close()
+        return result
+    elif action == "tracking_session_create":
+        result = tracking_session_create(root, db, payload)
+        db.close()
+        return result
+    elif action == "tracking_prepare":
+        result = tracking_prepare(root, db, payload)
+        db.close()
+        return result
+    elif action == "tracking_store_preview":
+        result = tracking_store_preview(db, payload)
+        db.close()
+        return result
+    elif action == "tracking_session_get":
+        result = tracking_session_get(db, payload)
+        db.close()
+        return result
+    elif action == "tracking_session_release":
+        result = tracking_session_release(db, payload)
+        db.close()
+        return result
+    elif action == "tracking_session_decide":
+        result = tracking_session_decide(root, db, payload)
+        db.close()
+        return result
+    elif action == "tracking_commit_plan":
+        result = tracking_commit_plan(root, db, payload)
+        db.close()
+        return result
+    elif action == "tracking_commit_complete":
+        result = tracking_commit_complete(root, db, payload)
+        db.close()
+        return result
+    elif action == "tracking_commit_failed":
+        result = tracking_commit_failed(db, payload)
+        db.close()
+        return result
+    elif action == "progress_main_branch_media":
+        result = progress_main_branch_media(db, payload)
         db.close()
         return result
     elif action == "progress_delete_missing":
@@ -4164,7 +5524,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "archive_project", "unarchive_project", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "missing_projects_list", "purge_missing_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_update_tree", "progress_delete_missing", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "media_refresh_metadata_fingerprint", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
+    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "archive_project", "unarchive_project", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "missing_projects_list", "purge_missing_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_update_tree", "progress_policy_save", "progress_mark_stale", "progress_mark_ready", "progress_main_branch", "progress_visible_relations", "progress_copy_missing_children", "progress_detect_stale", "tracking_session_create", "tracking_prepare", "tracking_store_preview", "tracking_session_get", "tracking_session_release", "tracking_session_decide", "tracking_commit_plan", "tracking_commit_complete", "tracking_commit_failed", "progress_main_branch_media", "progress_delete_missing", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "media_refresh_metadata_fingerprint", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")

@@ -5,10 +5,10 @@ set -euo pipefail
 # a pinned LGPL-compatible dependency prefix; advanced callers may still pass
 # their own audited prefix and compliance archives through the LGPL_* variables.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-source_root="${MPV_SOURCE_ROOT:-$repo_root/.media-runtime-build/mpv/src}"
-build_root="${MPV_BUILD_ROOT:-$repo_root/.media-runtime-build/mpv/build}"
-output_root="${PHOTOFLOW_MPV_OUTPUT_ROOT:-$repo_root/release/media-runtime/libmpv-lgpl-windows-x64}"
-dependency_root="${PHOTOFLOW_MPV_DEPENDENCY_ROOT:-$repo_root/.media-runtime-build/mpv-dependencies}"
+source_root="${MPV_SOURCE_ROOT:-$repo_root/.cache/media-runtime-build/mpv/src}"
+build_root="${MPV_BUILD_ROOT:-$repo_root/.cache/media-runtime-build/mpv/build}"
+output_root="${PHOTOFLOW_MPV_OUTPUT_ROOT:-$repo_root/artifacts/installers/media-runtime/libmpv-lgpl-windows-x64}"
+dependency_root="${PHOTOFLOW_MPV_DEPENDENCY_ROOT:-$repo_root/.cache/media-runtime-build/mpv-dependencies}"
 if [[ -z "${LGPL_PREFIX:-}" ]]; then
   bash "$repo_root/scripts/media-runtime/build-libmpv-dependencies-windows.sh"
   prefix="$dependency_root/prefix"
@@ -28,9 +28,9 @@ mpv_commit="$(node -p "require('./media-runtime.lock.json').mpv.commit")"
 source_root="$(realpath -m "$source_root")"
 build_root="$(realpath -m "$build_root")"
 output_root="$(realpath -m "$output_root")"
-case "$source_root" in "$repo_root"/.media-runtime-build/*) ;; *) echo "Refusing to clean unsafe mpv source directory: $source_root" >&2; exit 1 ;; esac
-case "$build_root" in "$repo_root"/.media-runtime-build/*) ;; *) echo "Refusing to clean unsafe mpv build directory: $build_root" >&2; exit 1 ;; esac
-case "$output_root" in "$repo_root"/release/media-runtime/*) ;; *) echo "Refusing to clean unsafe mpv output directory: $output_root" >&2; exit 1 ;; esac
+case "$source_root" in "$repo_root"/.cache/media-runtime-build/*) ;; *) echo "Refusing to clean unsafe mpv source directory: $source_root" >&2; exit 1 ;; esac
+case "$build_root" in "$repo_root"/.cache/media-runtime-build/*) ;; *) echo "Refusing to clean unsafe mpv build directory: $build_root" >&2; exit 1 ;; esac
+case "$output_root" in "$repo_root"/artifacts/installers/media-runtime/*) ;; *) echo "Refusing to clean unsafe mpv output directory: $output_root" >&2; exit 1 ;; esac
 
 ffmpeg_bin="$prefix/bin/ffmpeg.exe"
 test -x "$ffmpeg_bin" || { echo "Missing LGPL FFmpeg at $ffmpeg_bin" >&2; exit 1; }
@@ -111,7 +111,7 @@ for binary in "$output_root"/*.dll; do
   fi
 done
 cp "$source_root/Copyright" "$output_root/mpv-Copyright"
-cp "$repo_root/components/video-playback-mpv/LICENSES.md" "$output_root/PhotoFlow-LICENSES.md"
+cp "$repo_root/extensions/video-playback-mpv/LICENSES.md" "$output_root/PhotoFlow-LICENSES.md"
 cp "$repo_root/media-runtime.lock.json" "$output_root/media-runtime.lock.json"
 printf '%s\n' "$ffmpeg_configuration" > "$output_root/linked-ffmpeg-buildconf.txt"
 printf '%s\n' "$ffmpeg_version" > "$output_root/linked-ffmpeg-version.txt"
@@ -132,7 +132,7 @@ cp "$output_root/linked-ffmpeg-commit.txt" "$compliance_root/source/build-materi
 cp "$repo_root/media-runtime.lock.json" "$compliance_root/source/build-materials/media-runtime.lock.json"
 cp "$source_root/Copyright" "$compliance_root/licenses/mpv-Copyright"
 cp "$dependency_licenses" "$compliance_root/licenses/dependency-licenses.zip"
-cp "$repo_root/components/video-playback-mpv/LICENSES.md" "$compliance_root/licenses/PhotoFlow-LICENSES.md"
+cp "$repo_root/extensions/video-playback-mpv/LICENSES.md" "$compliance_root/licenses/PhotoFlow-LICENSES.md"
 
 zip_directory() {
   local source="$1"

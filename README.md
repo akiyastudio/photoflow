@@ -86,7 +86,7 @@
 %LOCALAPPDATA%\PhotoFlow\components
 ```
 
-不要把组件解压到照片流安装目录；打包和目录约定见 [components/README.md](components/README.md)。
+不要把组件解压到照片流安装目录；打包和目录约定见 [extensions/README.md](extensions/README.md)。
 
 ## 快速上手
 
@@ -181,7 +181,7 @@ npm run build
 npm run electron:build
 ```
 
-构建结果输出到 `release/`。可选组件会生成独立 ZIP，不会强制塞进主安装包。
+构建结果统一输出到 `artifacts/`；安装包和可选组件位于 `artifacts/installers/`，不会强制把可选组件塞进主安装包。
 
 ### 检查与测试
 
@@ -215,7 +215,11 @@ SQLite worker · Python 工具 · FFmpeg · ONNX · Windows C# 辅助程序
 - `electron/services/`：文件、媒体、缩略图、版本和后台任务工作流。
 - `electron/repositories/`：SQLite 访问边界。
 - `python/`：导入、选片、转换、媒体处理和数据库 worker。
-- `components/`：可独立分发的高级功能组件。
+- `extensions/`：可独立分发的高级功能组件源码。
+- `services/`：CloudBase 等独立后端服务源码。
+- `packaging/`：安装器脚本和应用图标。
+- `artifacts/`：前端、Python、安装包和验证产物（不提交 Git）。
+- `.cache/`：模型、编译工具及媒体运行库构建缓存（不提交 Git）。
 
 更详细的模块边界和依赖规则见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，文件操作风险与恢复策略见 [docs/FILESYSTEM_AUDIT.md](docs/FILESYSTEM_AUDIT.md)。
 

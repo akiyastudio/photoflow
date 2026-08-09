@@ -3,7 +3,9 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const root = path.join(__dirname, '..');
-const outputRoot = path.join(root, 'release', 'components');
+const releaseRoot = path.join(root, 'artifacts', 'installers');
+const outputRoot = path.join(releaseRoot, 'components');
+const pythonBuildRoot = path.join(root, 'artifacts', 'python-build');
 const venvPython = process.platform === 'win32'
   ? path.join(root, '.venv', 'Scripts', 'python.exe')
   : path.join(root, '.venv', 'bin', 'python');
@@ -13,17 +15,17 @@ const componentIds = requested ? [requested] : (process.platform === 'win32' ? [
 
 const definitions = {
   'team-retouch': {
-    source: path.join(root, 'components', 'team-retouch', 'team_retouch.py'),
-    template: path.join(root, 'components', 'team-retouch', 'component.template.json'),
+    source: path.join(root, 'extensions', 'team-retouch', 'team_retouch.py'),
+    template: path.join(root, 'extensions', 'team-retouch', 'component.template.json'),
     models: [
-      { path: path.join(root, 'components', 'team-retouch', 'models', 'rtmdet-ins_m_640x640.onnx'), minBytes: 100 * 1024 * 1024 },
-      { path: path.join(root, 'components', 'team-retouch', 'models', 'face_detection_yunet_2023mar.onnx'), minBytes: 200 * 1024 },
-      { path: path.join(root, '.model-lab', 'adaface', 'adaface_ir18_webface4m.onnx'), minBytes: 80 * 1024 * 1024 },
-      { path: path.join(root, '.model-lab', 'osnet', 'osnet_x1_0_msmt17.onnx'), minBytes: 7 * 1024 * 1024 },
+      { path: path.join(root, 'extensions', 'team-retouch', 'models', 'rtmdet-ins_m_640x640.onnx'), minBytes: 100 * 1024 * 1024 },
+      { path: path.join(root, 'extensions', 'team-retouch', 'models', 'face_detection_yunet_2023mar.onnx'), minBytes: 200 * 1024 },
+      { path: path.join(root, '.cache', 'model-lab', 'adaface', 'adaface_ir18_webface4m.onnx'), minBytes: 80 * 1024 * 1024 },
+      { path: path.join(root, '.cache', 'model-lab', 'osnet', 'osnet_x1_0_msmt17.onnx'), minBytes: 7 * 1024 * 1024 },
     ],
     advancedScripts: [
-      path.join(root, 'components', 'team-retouch', 'advanced', 'pairdetr_service.py'),
-      path.join(root, 'components', 'team-retouch', 'advanced', 'sam2_service.py'),
+      path.join(root, 'extensions', 'team-retouch', 'advanced', 'pairdetr_service.py'),
+      path.join(root, 'extensions', 'team-retouch', 'advanced', 'sam2_service.py'),
     ],
     advancedInstallerFiles: [
       path.join(root, 'scripts', 'setup-team-retouch-advanced.ps1'),
@@ -31,7 +33,7 @@ const definitions = {
     ],
     pyInstallerArgs: [
       '--collect-binaries', 'onnxruntime',
-      '--paths', path.join(root, 'components', 'team-retouch'),
+      '--paths', path.join(root, 'extensions', 'team-retouch'),
       '--hidden-import', 'patch_merge', '--hidden-import', 'advanced_bridge', '--hidden-import', 'identity_engine',
       '--exclude-module', 'scipy', '--exclude-module', 'matplotlib',
       '--exclude-module', 'torch', '--exclude-module', 'torchvision', '--exclude-module', 'torchaudio',
@@ -70,12 +72,12 @@ const packageComponent = id => {
   const componentRoot = path.join(outputRoot, id);
   const manifest = JSON.parse(fs.readFileSync(path.join(componentRoot, 'component.json'), 'utf8'));
   const artifactName = `PhotoFlow-${id}-${manifest.version}-${process.platform}-${process.arch}.zip`;
-  const artifactPath = path.join(root, 'release', artifactName);
+  const artifactPath = path.join(releaseRoot, artifactName);
   const artifactPrefix = `PhotoFlow-${id}-`;
   const artifactSuffix = `-${process.platform}-${process.arch}.zip`;
-  for (const existingName of fs.readdirSync(path.join(root, 'release'))) {
+  for (const existingName of fs.readdirSync(releaseRoot)) {
     if (existingName.startsWith(artifactPrefix) && existingName.endsWith(artifactSuffix) && existingName !== artifactName) {
-      fs.rmSync(path.join(root, 'release', existingName), { force: true });
+      fs.rmSync(path.join(releaseRoot, existingName), { force: true });
     }
   }
   const script = [
@@ -99,7 +101,7 @@ const build = id => {
   for (const model of definition.models || []) {
     const modelPath = typeof model === 'string' ? model : model.path;
     const minBytes = typeof model === 'string' ? 1024 * 1024 : model.minBytes;
-    if (!fs.existsSync(modelPath)) throw new Error(`Team-retouch model is missing: ${modelPath}\nSee components/team-retouch/MODEL-SOURCE.md`);
+    if (!fs.existsSync(modelPath)) throw new Error(`Team-retouch model is missing: ${modelPath}\nSee extensions/team-retouch/MODEL-SOURCE.md`);
     const stat = fs.statSync(modelPath);
     const prefix = fs.readFileSync(modelPath).subarray(0, 256).toString('utf8');
     if (stat.size < minBytes || prefix.startsWith('version https://git-lfs.github.com/spec/v1')) {
@@ -124,7 +126,7 @@ const build = id => {
   if (definition.requiresOpenCv) inspectOpenCvEnvironment();
 
   fs.mkdirSync(outputRoot, { recursive: true });
-  fs.mkdirSync(path.join(root, 'build', 'specs', 'components'), { recursive: true });
+  fs.mkdirSync(path.join(pythonBuildRoot, 'specs', 'components'), { recursive: true });
   const target = path.join(outputRoot, id);
   const relativeTarget = path.relative(outputRoot, target);
   if (!relativeTarget || relativeTarget.startsWith('..') || path.isAbsolute(relativeTarget)) throw new Error(`Unsafe component output path: ${target}`);
@@ -134,8 +136,8 @@ const build = id => {
   const advancedArgs = (definition.advancedScripts || []).flatMap(script => ['--add-data', `${script}${dataSeparator}advanced`]);
   const result = spawnSync(python, [
     '-m', 'PyInstaller', '--onedir', '--clean', '--noconfirm',
-    '--specpath', path.join(root, 'build', 'specs', 'components'),
-    '--workpath', path.join(root, 'build', 'pyinstaller-components', id),
+    '--specpath', path.join(pythonBuildRoot, 'specs', 'components'),
+    '--workpath', path.join(pythonBuildRoot, 'pyinstaller-components', id),
     '--distpath', outputRoot,
     '--name', id,
     ...definition.pyInstallerArgs,

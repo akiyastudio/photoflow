@@ -26,7 +26,7 @@ if (manifest.ffmpeg?.version !== lock.ffmpeg.version || manifest.ffmpeg?.commit 
   throw new Error('FFmpeg/x264/x265/zlib 运行时与 media-runtime.lock.json 固定版本不一致');
 }
 const runtimeArchive = path.join(vendorRoot, manifest.artifacts.runtimeArchive.file);
-const destinationRoot = path.join(root, 'python', 'dist');
+const destinationRoot = path.join(root, 'artifacts', 'python');
 const destination = path.join(destinationRoot, 'ffmpeg.zip');
 fs.mkdirSync(destinationRoot, { recursive: true });
 fs.copyFileSync(runtimeArchive, destination);

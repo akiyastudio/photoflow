@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components -- directional input helpers are intentionally colocated with the player contract */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Camera, Gauge, Loader2, Pause, Play, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
