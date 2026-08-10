@@ -89,7 +89,8 @@
       "en-US"
     ],
     "directories": {
-      "output": "artifacts/installers"
+      "output": "artifacts/installers",
+      "buildResources": "packaging"
     },
     "files": [
       "artifacts/web/**/*",

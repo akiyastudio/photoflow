@@ -891,6 +891,17 @@ const registerVersionIpc = context => {
     return parts.join('/');
   };
 
+  const versionTreeEntryNodeBelongsToScope = (nodeKey, scopeKey) => {
+    if (!nodeKey.startsWith('entry:')) return false;
+    const relativePath = nodeKey.slice('entry:'.length);
+    if (!relativePath || relativePath.length > 1024 || relativePath.includes('\\')) return false;
+    let normalizedPath;
+    try { normalizedPath = normalizeVersionTreeScope(relativePath); } catch { return false; }
+    if (normalizedPath !== relativePath) return false;
+    const parentScope = normalizedPath.split('/').slice(0, -1).join('/');
+    return parentScope.toLocaleLowerCase('zh-CN') === scopeKey.toLocaleLowerCase('zh-CN');
+  };
+
   ipcMain.handle('workspace-version-tree-layout-get', async (_event, workspacePath, projectName, scopeKey = '') => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
@@ -917,7 +928,7 @@ const registerVersionIpc = context => {
         const nodeKey = String(position?.nodeKey || '');
         const x = position?.x;
         const y = position?.y;
-        if (!allowedNodeKeys.has(nodeKey) || seen.has(nodeKey)) throw new Error('version_tree_layout_node_invalid: 节点不属于当前项目');
+        if ((!allowedNodeKeys.has(nodeKey) && !versionTreeEntryNodeBelongsToScope(nodeKey, scopeKey)) || seen.has(nodeKey)) throw new Error('version_tree_layout_node_invalid: 节点不属于当前项目');
         if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 1_000_000 || Math.abs(y) > 1_000_000) throw new Error('version_tree_layout_coordinate_invalid: 坐标无效');
         seen.add(nodeKey);
         return { nodeKey, x, y };

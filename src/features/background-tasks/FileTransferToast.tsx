@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef } from 'react';
-import { Clock3, Loader2, Minus } from 'lucide-react';
+import { Clock3, Loader2, Minimize2 } from 'lucide-react';
 import type { BackgroundTask } from '../../types';
 import { useTaskCenter } from './TaskCenter';
 import { selectProjectFileTaskToasts } from './task-toast-model';
@@ -36,7 +36,7 @@ export const FileTransferToastItem = ({ task, onMinimize }: { task: BackgroundTa
         {!queued && <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-600 transition-[width] duration-150" style={{ width: `${Math.max(2, progress)}%` }}/></div>}
         <p className="mt-1 line-clamp-1 text-[11px] tabular-nums text-blue-600">{queued ? task.title : details || '文件准备完成后会自动显示；可以继续使用软件。'}</p>
       </div>
-      <button type="button" onClick={() => onMinimize(task.id)} aria-label="缩小到后台" title="缩小到后台" className="shrink-0 rounded-md p-1.5 text-blue-600 hover:bg-blue-100"><Minus size={15}/></button>
+      <button type="button" onClick={() => onMinimize(task.id)} aria-label="收起到任务中心" title="收起到任务中心，任务会继续运行" className="inline-flex shrink-0 items-center gap-1 rounded-md border border-blue-200 bg-white/70 px-2 py-1.5 text-xs font-bold text-blue-700 transition hover:border-blue-300 hover:bg-blue-100"><Minimize2 size={14}/><span>后台</span></button>
       {task.cancellable && <button type="button" onClick={() => void window.electronAPI.cancelBackgroundTask(task.id)} className="shrink-0 rounded-md px-2.5 py-1.5 text-xs font-bold text-red-600 hover:bg-red-50">取消</button>}
     </div>
   </div>;

@@ -23,6 +23,7 @@ function assertion(input, policy, expected, failureCode) {
 }
 
 async function main() {
+  assert.strictEqual(packageJson.build.directories.buildResources, 'packaging', 'electron-builder must add the packaging directory to the NSIS include path');
   assert.strictEqual(packageJson.build.nsis.allowToChangeInstallationDirectory, true);
   assert(installerSource.includes('!insertmacro MUI_PAGE_DIRECTORY'), 'the supported custom-page hook must retain the directory chooser');
   assert(installerSource.includes('!macro customInit') && installerSource.includes('StrCmp $perMachineInstallationFolder "" 0 PhotoFlowPreserveRequestedInstallDirectory'), 'an existing registered installation must select the preserve policy during customInit');

@@ -31,6 +31,7 @@ class TestNode extends TestEventTarget {
       if (selector.includes('input') && cursor.nodeName === 'INPUT') return cursor;
       if (selector.includes('[data-version-tree-port]') && cursor.attributes?.has('data-version-tree-port')) return cursor;
       if (selector.includes('[data-relation-parent-id]') && cursor.attributes?.has('data-relation-parent-id')) return cursor;
+      if (selector.includes('[data-version-output-target-key]') && cursor.attributes?.has('data-version-output-target-key')) return cursor;
       if (selector.includes('[data-version-tree-node]') && cursor.attributes?.has('data-version-tree-node')) return cursor;
       if (selector.includes('[data-entry-path]') && cursor.attributes?.has('data-entry-path')) return cursor;
       cursor = cursor.parentNode;
@@ -112,11 +113,11 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: draft(mode), folders, onChange() {}, onSubmit() {}, onClose() {}, onChooseFolder() {} })));
     const content = textContent(container);
     assert(content.includes(model.VERSION_PANEL_DEFINITIONS[mode].title), `${mode} panel must mount with its V2 title`);
-    assert(content.includes('主分支') && content.includes('附属分支') && content.includes('沿用上一版本文件名') && content.includes('补齐缺失媒体'));
+    assert(content.includes('版本进度') && content.includes('选片辅助节点') && content.includes('沿用上一版本文件名') && content.includes('补齐缺失媒体'));
     if (mode !== 'create') assert(content.includes('需要移动到项目根目录'));
   }
   await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('modify'), relationKind: 'auxiliary', trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false }, folders, onChange() {}, onSubmit() {}, onClose() {} })));
-  assert(textContent(container).includes('附属分支禁止图片跟踪'));
+  assert(textContent(container).includes('选片辅助节点不参与版本跟踪'));
   const tracked = {
     ...folders[0],
     id: 'tracked',
@@ -177,10 +178,13 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     { kind: 'folder', name: 'Camera JPG', relativePath: 'Camera JPG', path: 'C:/p/Camera JPG', extension: '', size: 0, createdAt: 6, updatedAt: 6 },
     { kind: 'folder', name: 'Ambiguous Artifact', relativePath: 'Ambiguous Artifact', path: 'C:/p/Ambiguous Artifact', extension: '', size: 0, createdAt: 7, updatedAt: 7 },
     { kind: 'folder', name: '团片协作节点', relativePath: '团片协作节点', path: 'C:/p/团片协作节点', extension: '', size: 0, createdAt: 8, updatedAt: 8 },
+    { kind: 'folder', name: 'Other', relativePath: 'Other', path: 'C:/p/Other', extension: '', size: 0, createdAt: 9, updatedAt: 9 },
+    { kind: 'image', name: 'loose.jpg', relativePath: 'loose.jpg', path: 'C:/p/loose.jpg', extension: '.jpg', size: 100, createdAt: 10, updatedAt: 10 },
   ];
   const relationRequests = [];
   const supplementalDeletes = [];
   const supplementalCreates = [];
+  const createVersionRequests = [];
   const layoutNotices = [];
   let canvasController = null;
   let entryOpenClicks = 0;
@@ -204,6 +208,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     onRequestRelationChange(childProgressId, parentProgressId) { relationRequests.push({ childProgressId, parentProgressId }); },
     onRequestSupplementalEdgeDelete(edge) { supplementalDeletes.push(edge); },
     onRequestSupplementalEdgeCreate(sourceProgressId, targetProgressId, edgeKind) { supplementalCreates.push({ sourceProgressId, targetProgressId, edgeKind }); },
+    onRequestCreateVersion(source, target) { createVersionRequests.push({ sourceId: source.id, targetName: target.name }); },
     onCancelRelationEdit() {},
     onNotice(message) { layoutNotices.push(message); },
     onCanvasControllerChange(controller) { canvasController = controller; },
@@ -213,9 +218,16 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const rawEntryNode = allNodes(rawCanvasNode).find(node => node !== rawCanvasNode && node.nodeName === 'DIV' && node.textContent === 'RAW');
   const canvasNode = allNodes(container).find(node => node.nodeName === 'DIV' && node.attributes.get('data-version-tree-canvas') === 'true');
   const canvasViewport = allNodes(container).find(node => node.nodeName === 'DIV' && node.attributes.get('data-version-tree-viewport') === 'true');
-  assert(textContent(container).includes('图片工作流'), 'the mounted graph must expose a visible image swimlane label');
-  assert(allNodes(container).some(node => node.nodeName === 'BUTTON' && node.textContent === '适应窗口'));
-  assert(allNodes(container).some(node => node.nodeName === 'BUTTON' && node.textContent === '100%'));
+  assert(!textContent(container).includes('图片工作流') && !textContent(container).includes('视频工作流'), 'legacy workflow headings must be removed');
+  assert(allNodes(container).some(node => node.attributes.get('aria-label') === '图片区域'), 'the mounted graph must expose a Blender-like image region');
+  assert(allNodes(container).some(node => node.attributes.get('aria-label') === '其他区域'), 'ordinary folders must share the version-tree canvas in an other region');
+  const imageArea = allNodes(container).find(node => node.attributes.get('aria-label') === '图片区域');
+  const otherArea = allNodes(container).find(node => node.attributes.get('aria-label') === '其他区域');
+  assert(parseFloat(imageArea.style.top) + parseFloat(imageArea.style.height) <= parseFloat(otherArea.style.top), 'default semantic regions must not overlap');
+  assert(!textContent(container).includes('loose.jpg'), 'loose media files must not become canvas nodes');
+  assert(!textContent(container).includes('适应窗口') && !textContent(container).includes('100%') && !textContent(container).includes('剪线工具') && !textContent(container).includes('节点视图'), 'the version tree must not add a second top toolbar');
+  const miniMap = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('title') === '小地图：点击显示全部');
+  assert((miniMap?.attributes.get('class') || '').includes('fixed') && (miniMap?.attributes.get('class') || '').includes('bottom-4') && (miniMap?.attributes.get('class') || '').includes('right-4'), 'the mini map must remain fixed to the viewport bottom-right');
   assert.strictEqual(typeof canvasController.fitView, 'function');
   assert.strictEqual(typeof canvasController.resetZoom, 'function');
   const initialCanvasWidth = parseFloat(canvasNode.style.width);
@@ -297,18 +309,17 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   let nodeContextEvent;
   await React.act(async () => { nodeContextEvent = dispatch(rawCanvasNode, 'contextmenu', { clientX: 100, clientY: 100 }); });
   assert(nodeContextEvent.defaultPrevented && nodeContextEvent.cancelBubble, 'node context menus must not bubble to the blank canvas');
-  const trackedInputPort = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '连接或修改 Tracked 的输入关系');
-  assert(trackedInputPort, 'node relation ports must remain available without the top toolbar');
+  const trackedInputPort = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '断开 Tracked 的输入连接');
+  assert(trackedInputPort, 'connected nodes must expose a left-side disconnect control');
   assert((trackedInputPort.attributes.get('class') || '').includes('h-5') && (trackedInputPort.attributes.get('class') || '').includes('w-5'), 'relation port hit targets must be at least 20px');
   assert((trackedInputPort.attributes.get('class') || '').includes('group-focus-within/version-node:opacity-100'), 'node keyboard focus must reveal relation ports');
   const trackedInputDot = trackedInputPort.childNodes.find(node => node.nodeName === 'SPAN');
   assert((trackedInputDot?.attributes.get('class') || '').includes('h-2.5') && (trackedInputDot?.attributes.get('class') || '').includes('w-2.5'), 'relation port visible dots must remain 10px');
-  assert(!allNodes(rawCanvasNode).some(node => node.nodeName === 'BUTTON' && (node.attributes.get('aria-label') || '').includes('输入关系')), 'original nodes must not expose an input port');
+  assert(!allNodes(rawCanvasNode).some(node => node.nodeName === 'BUTTON' && (node.attributes.get('aria-label') || '').includes('输入连接')), 'original nodes must not expose a disconnect port');
   assert(allNodes(container).some(node => node.nodeName === 'BUTTON' && node.attributes.get('data-relation-parent-id') === 'raw'), 'eligible original nodes must expose an output port');
   assert(allNodes(container).some(node => node.nodeName === 'BUTTON' && node.attributes.get('data-relation-parent-id') === 'selection'), 'selection nodes must expose an output port for workflow_input');
   assert(allNodes(container).some(node => node.nodeName === 'BUTTON' && node.attributes.get('data-relation-parent-id') === 'workflow'), 'workflow nodes must expose legal workflow output ports');
-  assert(allNodes(container).some(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '连接或修改 团片协作节点 的输入关系'), 'workflow nodes must expose legal input ports');
-  assert(allNodes(container).some(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '连接或修改 Camera JPG 的输入关系'), 'artifact nodes must expose supplemental input ports');
+  assert(allNodes(container).some(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '断开 Camera JPG 的输入连接'), 'connected artifact nodes must expose supplemental disconnect controls');
   assert(!allNodes(container).some(node => node.nodeName === 'BUTTON' && node.attributes.get('data-relation-parent-id') === 'camera-jpg'), 'artifact nodes must not pretend to be legal relation sources');
   await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, hoverParentId: 'tracked' })));
   const invalidCandidate = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('data-relation-parent-id') === 'tracked');
@@ -316,29 +327,41 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert((invalidCandidate?.childNodes.find(node => node.nodeName === 'SPAN')?.attributes.get('class') || '').includes('bg-red-600'), 'hovered invalid candidates must turn red');
   assert(allNodes(invalidCandidate).some(node => node.attributes?.get('role') === 'tooltip' && node.textContent === '节点不能连接到自己'), 'hovered invalid candidates must render a visible reason tooltip');
   await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, pendingChildId: undefined, hoverParentId: undefined })));
-  const freeInputPort = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '连接或修改 Free 的输入关系');
-  const savesBeforeRelationLock = layoutRequests.saves.length;
-  await React.act(async () => dispatch(freeInputPort, 'pointerdown', { pointerId: 46, button: 0, clientX: 300, clientY: 200 }));
-  assert.strictEqual(canvasNode.attributes.get('data-drag-state'), 'relation', 'relation pointer capture must claim the shared drag state');
+  const freeInputPort = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '断开 Free 的输入连接');
+  const requestsBeforeDisconnect = relationRequests.length;
+  await React.act(async () => dispatch(freeInputPort, 'pointerdown', { pointerId: 45, button: 0 }));
+  assert.deepStrictEqual(relationRequests[requestsBeforeDisconnect], { childProgressId: 'free', parentProgressId: null }, 'left-side clicks must request disconnection instead of starting a new line');
+  assert(!canvasNode.attributes.has('data-drag-state'), 'left-side disconnect controls must never enter relation dragging');
+  const trackedOutputPort = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '从 Tracked 拖出连接');
+  const otherTarget = allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === 'entry:other');
+  assert(trackedOutputPort && otherTarget, 'progress output ports and ordinary folder targets must both mount');
+  elementAtPoint = otherTarget;
+  await React.act(async () => {
+    dispatch(trackedOutputPort, 'pointerdown', { pointerId: 46, button: 0, clientX: 300, clientY: 200 });
+    dispatch(trackedOutputPort, 'pointermove', { pointerId: 46, button: 0, clientX: 600, clientY: 600 });
+  });
+  assert.strictEqual(canvasNode.attributes.get('data-drag-state'), 'create-version', 'right-side progress dragging must claim the shared canvas drag state');
   await React.act(async () => {
     dispatch(rawCanvasNode, 'pointerdown', { pointerId: 47, button: 0, clientX: 700, clientY: 600 });
     dispatch(rawCanvasNode, 'pointermove', { pointerId: 47, button: 0, clientX: 800, clientY: 700 });
     dispatch(rawCanvasNode, 'pointerup', { pointerId: 47, button: 0, clientX: 800, clientY: 700 });
   });
-  assert.strictEqual(layoutRequests.saves.length, savesBeforeRelationLock, 'relation dragging must mutually exclude node dragging');
-  await React.act(async () => dispatch(freeInputPort, 'pointercancel', { pointerId: 46, button: 0, clientX: 300, clientY: 200 }));
-  assert(!canvasNode.attributes.has('data-drag-state'), 'cancelling relation dragging must release the shared drag state');
+  await React.act(async () => dispatch(trackedOutputPort, 'pointerup', { pointerId: 46, button: 0, clientX: 600, clientY: 600 }));
+  assert.deepStrictEqual(createVersionRequests.at(-1), { sourceId: 'tracked', targetName: 'Other' }, 'dropping a progress output on an ordinary folder must request the next-version setup');
+  assert(!canvasNode.attributes.has('data-drag-state'), 'finishing next-version dragging must release the shared drag state');
+  elementAtPoint = null;
   await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, treeProps)));
   const freeEdge = allNodes(container).find(node => node.nodeName === 'path' && (node.attributes.get('data-edge-id') || '').includes(':free:'));
   assert(freeEdge, 'main relation must expose a hit path');
   let edgeContextEvent;
   await React.act(async () => { edgeContextEvent = dispatch(freeEdge, 'contextmenu', { clientX: 100, clientY: 100 }); });
   assert(edgeContextEvent.defaultPrevented && edgeContextEvent.cancelBubble, 'edge context menus must not bubble to the blank canvas');
+  assert(textContent(container).includes('起点：RAW') && textContent(container).includes('终点：Free'), 'right-clicking a line must select it and expose the delete menu');
   assert.strictEqual(freeEdge.attributes.get('stroke-width'), '14', 'edge hit targets must stay within the 12-16px interaction width');
   const arrowedMainEdge = allNodes(container).find(node => node.nodeName === 'path' && node.attributes.get('data-relation-kind') === 'main' && node.attributes.has('marker-end'));
   assert(arrowedMainEdge, 'visible relations must render below nodes with a parent-to-child arrow marker');
   await React.act(async () => dispatch(freeEdge, 'click'));
-  assert(textContent(container).includes('起点：RAW') && textContent(container).includes('终点：Free') && textContent(container).includes('类型：主分支'), 'clicking a line must show its relation details');
+  assert(textContent(container).includes('起点：RAW') && textContent(container).includes('终点：Free') && textContent(container).includes('类型：版本关系'), 'clicking a line must show its relation details');
   assert.strictEqual(freeEdge.attributes.get('data-relation-kind'), 'main', 'selection highlighting must not change the relation kind');
   assert(allNodes(container).some(node => node.nodeName === 'circle' && node.attributes.get('data-edge-child-handle') === 'free'), 'selected line must expose a draggable child endpoint');
   const deleteButton = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.textContent === '删除关系');
@@ -361,6 +384,11 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const companionEdge = allNodes(container).find(node => node.nodeName === 'path' && node.attributes.get('data-edge-id') === 'companion-edge');
   assert.strictEqual(previewEdge?.attributes.get('aria-label'), '选择预览产物关系线');
   assert.strictEqual(companionEdge?.attributes.get('aria-label'), '选择配套素材关系线');
+  const visiblePreviewEdge = allNodes(container).find(node => node.nodeName === 'path' && node.attributes.get('data-relation-kind') === 'derived_preview' && node.attributes.get('aria-hidden') === 'true');
+  const visibleCompanionEdge = allNodes(container).find(node => node.nodeName === 'path' && node.attributes.get('data-relation-kind') === 'media_companion' && node.attributes.get('aria-hidden') === 'true');
+  assert(!visiblePreviewEdge.attributes.has('stroke-dasharray') && !visibleCompanionEdge.attributes.has('stroke-dasharray') && !arrowedMainEdge.attributes.has('stroke-dasharray'), 'all persisted graph relations must be solid');
+  assert(!visiblePreviewEdge.attributes.has('marker-end') && !visibleCompanionEdge.attributes.has('marker-end'), 'preview and companion associations must not render arrowheads');
+  assert(visiblePreviewEdge.attributes.get('d').includes(' L ') && visibleCompanionEdge.attributes.get('d').includes(' L '), 'preview and companion associations must render as straight lines');
   await React.act(async () => dispatch(companionEdge, 'click'));
   assert(textContent(container).includes('类型：配套素材'), 'supplemental relation details must show the real edge type');
   const companionDeleteButton = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.textContent === '删除关系');
@@ -368,51 +396,63 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   await React.act(async () => dispatch(companionDeleteButton, 'click'));
   assert.strictEqual(supplementalDeletes.at(-1).id, 'companion-edge', 'companion deletion must submit the persisted edge identity');
 
-  const withoutCompanion = treeProps.graphEdges.filter(edge => edge.id !== 'companion-edge');
-  await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, pendingChildId: undefined, graphEdges: withoutCompanion })));
-  let cameraInput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '连接或修改 Camera JPG 的输入关系');
-  let rawOutput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('data-relation-parent-id') === 'raw');
-  assert(cameraInput && rawOutput, 'deleting companion must leave legal endpoint ports for reconstruction');
-  elementAtPoint = rawOutput;
+  await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, graphEdges: treeProps.graphEdges.filter(edge => edge.id !== 'companion-edge') })));
+  const emptyCompanionInput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === 'Camera JPG 等待输入连接');
+  const rawOutput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '从 RAW 拖出连接');
+  const cameraTarget = allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === 'camera-jpg');
+  assert(emptyCompanionInput && rawOutput && cameraTarget, 'disconnecting a companion relation must leave a reconnectable empty input and source output');
+  elementAtPoint = cameraTarget;
   await React.act(async () => {
-    dispatch(cameraInput, 'pointerdown', { pointerId: 51, button: 0, clientX: 100, clientY: 100 });
-    dispatch(cameraInput, 'pointerup', { pointerId: 51, button: 0, clientX: 100, clientY: 100 });
+    dispatch(rawOutput, 'pointerdown', { pointerId: 48, button: 0, clientX: 100, clientY: 100 });
+    dispatch(rawOutput, 'pointermove', { pointerId: 48, button: 0, clientX: 400, clientY: 300 });
+    dispatch(rawOutput, 'pointerup', { pointerId: 48, button: 0, clientX: 400, clientY: 300 });
   });
-  assert.deepStrictEqual(supplementalCreates.at(-1), { sourceProgressId: 'raw', targetProgressId: 'camera-jpg', edgeKind: 'media_companion' }, 'deleted companion must be recreatable from blank endpoints');
+  assert.deepStrictEqual(supplementalCreates.at(-1), { sourceProgressId: 'raw', targetProgressId: 'camera-jpg', edgeKind: 'media_companion' }, 'RAW must reconnect JPG from the right output after a disconnect');
+  elementAtPoint = null;
 
-  await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, pendingChildId: undefined, graphEdges: [] })));
-  const previewInput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '连接或修改 generated JPG artifact 的输入关系');
-  rawOutput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('data-relation-parent-id') === 'raw');
-  elementAtPoint = rawOutput;
+  await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, graphEdges: [] })));
+  const previewInput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === 'generated JPG artifact 等待输入连接');
+  const previewTarget = allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === 'generated');
+  const refreshedRawOutput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '从 RAW 拖出连接');
+  assert(previewInput && previewTarget && refreshedRawOutput, 'disconnecting a preview relation must preserve both legal endpoints');
+  elementAtPoint = previewTarget;
   await React.act(async () => {
-    dispatch(previewInput, 'pointerdown', { pointerId: 52, button: 0, clientX: 100, clientY: 100 });
-    dispatch(previewInput, 'pointerup', { pointerId: 52, button: 0, clientX: 100, clientY: 100 });
+    dispatch(refreshedRawOutput, 'pointerdown', { pointerId: 49, button: 0, clientX: 100, clientY: 100 });
+    dispatch(refreshedRawOutput, 'pointerup', { pointerId: 49, button: 0, clientX: 450, clientY: 320 });
   });
-  assert.deepStrictEqual(supplementalCreates.at(-1), { sourceProgressId: 'raw', targetProgressId: 'generated', edgeKind: 'derived_preview' }, 'deleted preview must be recreatable from blank endpoints');
+  assert.deepStrictEqual(supplementalCreates.at(-1), { sourceProgressId: 'raw', targetProgressId: 'generated', edgeKind: 'derived_preview' }, 'MOV/RAW preview artifacts must be reconnectable from the source output');
+
   const submissionsBeforeIllegal = supplementalCreates.length + relationRequests.length;
-  elementAtPoint = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('data-relation-parent-id') === 'selection');
+  const selectionOutput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '从 RAW_选片 拖出连接');
+  elementAtPoint = previewTarget;
   await React.act(async () => {
-    dispatch(previewInput, 'pointerdown', { pointerId: 53, button: 0, clientX: 100, clientY: 100 });
-    dispatch(previewInput, 'pointerup', { pointerId: 53, button: 0, clientX: 100, clientY: 100 });
+    dispatch(selectionOutput, 'pointerdown', { pointerId: 50, button: 0, clientX: 100, clientY: 100 });
+    dispatch(selectionOutput, 'pointerup', { pointerId: 50, button: 0, clientX: 450, clientY: 320 });
   });
-  assert.strictEqual(supplementalCreates.length + relationRequests.length, submissionsBeforeIllegal, 'illegal role pairs must never submit a relation mutation');
-  const ambiguousInput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '连接或修改 Ambiguous Artifact 的输入关系');
-  elementAtPoint = rawOutput;
+  assert.strictEqual(supplementalCreates.length + relationRequests.length, submissionsBeforeIllegal, 'an incompatible source must never create a relation');
+
+  const ambiguousTarget = allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === 'ambiguous-artifact');
+  elementAtPoint = ambiguousTarget;
   await React.act(async () => {
-    dispatch(ambiguousInput, 'pointerdown', { pointerId: 54, button: 0, clientX: 100, clientY: 100 });
-    dispatch(ambiguousInput, 'pointerup', { pointerId: 54, button: 0, clientX: 100, clientY: 100 });
+    dispatch(refreshedRawOutput, 'pointerdown', { pointerId: 51, button: 0, clientX: 100, clientY: 100 });
+    dispatch(refreshedRawOutput, 'pointerup', { pointerId: 51, button: 0, clientX: 500, clientY: 350 });
   });
-  assert(textContent(container).includes('选择关系类型'), 'multiple legal role-derived types must open a chooser');
+  assert(textContent(container).includes('选择关系类型'), 'multiple compatible relation kinds must open an explicit chooser');
   const typeButtons = allNodes(container).filter(node => node.nodeName === 'BUTTON' && (node.textContent === '配套素材' || node.textContent === '预览产物'));
   assert.deepStrictEqual(typeButtons.map(node => node.textContent), ['配套素材', '预览产物']);
   await React.act(async () => dispatch(typeButtons[1], 'click'));
-  assert.deepStrictEqual(supplementalCreates.at(-1), { sourceProgressId: 'raw', targetProgressId: 'ambiguous-artifact', edgeKind: 'derived_preview' }, 'the chooser may submit only one role-derived finite edge type');
+  assert.deepStrictEqual(supplementalCreates.at(-1), { sourceProgressId: 'raw', targetProgressId: 'ambiguous-artifact', edgeKind: 'derived_preview' });
   elementAtPoint = null;
 
   await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, pendingChildId: 'free', mutatingChildIds: ['free'] })));
-  const busyPort = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '连接或修改 Free 的输入关系');
+  const busyPort = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '断开 Free 的输入连接');
   assert(busyPort && (busyPort.attributes.has('disabled') || busyPort.disabled === true), 'busy child relation port must be disabled');
   assert(!allNodes(container).some(node => node.nodeName === 'circle' && node.attributes.get('data-edge-child-handle') === 'free'), 'busy child endpoint must not remain draggable');
+
+  const thousandFolders = Array.from({ length: 1000 }, (_value, index) => ({ kind: 'folder', name: `Candidate ${index}`, relativePath: `Candidate ${index}`, path: `C:/p/Candidate ${index}`, extension: '', size: 0, createdAt: 20 + index, updatedAt: 20 + index }));
+  await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, entries: [...entries, ...thousandFolders], structureEntries: [...entries, ...thousandFolders], pendingChildId: undefined })));
+  const renderedCandidates = allNodes(container).filter(node => String(node.attributes?.get('data-version-output-target-key') || '').startsWith('entry:candidate '));
+  assert(renderedCandidates.length > 0 && renderedCandidates.length < 120, 'a thousand candidate folders must be viewport-virtualized instead of mounting one thousand rich nodes');
 
   let repairRequest;
   await React.act(async () => root.render(React.createElement(legacyRepairNotice.LegacySelectionRepairNotice, {
@@ -443,7 +483,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const pageACanvas = allNodes(pageAContainer).find(node => node.attributes?.get('data-version-tree-canvas') === 'true');
   const pageBCanvas = allNodes(pageBContainer).find(node => node.attributes?.get('data-version-tree-canvas') === 'true');
   const pageANode = allNodes(pageAContainer).find(node => node.attributes?.get('data-node-role') === 'original');
-  const pageCRelationPort = allNodes(pageCContainer).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '连接或修改 Free 的输入关系');
+  const pageCCreateVersionPort = allNodes(pageCContainer).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '从 Free 拖出连接');
   layoutRequests.holdSaves = true;
   const savesBeforeUnmountQueue = layoutRequests.saves.length;
   await React.act(async () => {
@@ -456,15 +496,15 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     dispatch(pageANode, 'pointerup', { pointerId: 62, button: 0, clientX: 240, clientY: 240 });
     dispatch(pageANode, 'pointerdown', { pointerId: 63, button: 0, clientX: 240, clientY: 240 });
     dispatch(pageBCanvas, 'pointerdown', { pointerId: 64, button: 1, clientX: 200, clientY: 200 });
-    dispatch(pageCRelationPort, 'pointerdown', { pointerId: 65, button: 0, clientX: 200, clientY: 200 });
+    dispatch(pageCCreateVersionPort, 'pointerdown', { pointerId: 65, button: 0, clientX: 200, clientY: 200 });
   });
   assert.strictEqual(layoutRequests.saves.length, savesBeforeUnmountQueue + 1, 'only the started save may reach IPC while the next save remains queued');
   assert.strictEqual(pageACanvas.attributes.get('data-drag-state'), 'node');
   assert.strictEqual(pageBCanvas.attributes.get('data-drag-state'), 'pan', 'two mounted pages must keep independent drag state');
-  assert(pageANode.hasPointerCapture(63) && pageBCanvas.hasPointerCapture(64) && pageCRelationPort.hasPointerCapture(65), 'node, canvas, and relation drags must own pointer capture before unmount');
+  assert(pageANode.hasPointerCapture(63) && pageBCanvas.hasPointerCapture(64) && pageCCreateVersionPort.hasPointerCapture(65), 'node, canvas, and next-version drags must own pointer capture before unmount');
   const noticesBeforeUnmount = pageANotices.length + pageBNotices.length;
   await React.act(async () => { pageARoot.unmount(); pageBRoot.unmount(); pageCRoot.unmount(); });
-  assert(!pageANode.hasPointerCapture(63) && !pageBCanvas.hasPointerCapture(64) && !pageCRelationPort.hasPointerCapture(65), 'unmount must release node, canvas, and relation pointer capture');
+  assert(!pageANode.hasPointerCapture(63) && !pageBCanvas.hasPointerCapture(64) && !pageCCreateVersionPort.hasPointerCapture(65), 'unmount must release node, canvas, and next-version pointer capture');
   layoutRequests.holdSaves = false;
   layoutRequests.saveReleases.splice(0).forEach(release => release());
   await new Promise(resolve => setImmediate(resolve));

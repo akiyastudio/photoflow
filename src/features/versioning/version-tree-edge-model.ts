@@ -14,8 +14,8 @@ export type VersionTreeRelationNode = {
 };
 
 const VERSION_TREE_RELATION_LABELS: Record<Exclude<VersionTreeEdgeKind, 'team-workspace'>, string> = {
-  main: '主分支',
-  auxiliary: '附属分支',
+  main: '版本关系',
+  auxiliary: '选片关联',
   media_companion: '配套素材',
   derived_preview: '预览产物',
   workflow_input: '工作流输入',
@@ -104,7 +104,7 @@ export const versionTreeEdgePresentation = (kind: VersionTreeEdgeKind, selected 
             : '#94a3b8',
   strokeWidth: selected ? 3 : kind === 'main' ? 2 : 1.7,
   opacity: selected ? 1 : kind === 'main' ? .82 : kind === 'auxiliary' ? .72 : .58,
-  strokeDasharray: kind === 'auxiliary' || kind === 'workflow_input' ? '7 5'
-    : kind === 'team-workspace' || kind === 'media_companion' || kind === 'derived_preview' ? '3 5'
-      : undefined,
+  // Every persisted relation is solid. Colour and arrow presence communicate
+  // semantics; a dashed line is reserved for no persisted state at all.
+  strokeDasharray: undefined,
 });

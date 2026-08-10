@@ -1,12 +1,13 @@
 import type { ProgressFolder, VersionGraphEdge } from '../../types';
 
-export type VersionPanelKind = 'create' | 'import' | 'modify' | 'confirm';
+export type VersionPanelKind = 'create' | 'create-next' | 'import' | 'modify' | 'confirm';
 export type VersionPanelState = 'ready' | 'move_confirm' | 'processing' | 'waiting_confirmation' | 'loading' | 'committing' | 'result' | 'failure';
 export type VersionRelationKind = 'main' | 'auxiliary';
 export type VersionTrackingPolicy = Pick<ProgressFolder, 'trackingEnabled' | 'renameFromParent' | 'copyMissingFromParent'>;
 
 export const VERSION_PANEL_DEFINITIONS: Record<VersionPanelKind, { title: string; states: readonly VersionPanelState[] }> = {
   create: { title: '新建进度', states: ['ready', 'processing', 'result', 'failure'] },
+  'create-next': { title: '创建下一版本', states: ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure'] },
   import: { title: '导入进度', states: ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure'] },
   modify: { title: '修改进度', states: ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure'] },
   confirm: { title: '确认跟踪图片', states: ['loading', 'waiting_confirmation', 'committing', 'result', 'failure'] },
@@ -38,7 +39,7 @@ export const versionNodeRole = (relationKind: VersionRelationKind): ProgressFold
 
 export const trackingStateLabel = (folder: Pick<ProgressFolder, 'nodeRole' | 'relationKind' | 'trackingState'>) => {
   if (folder.nodeRole === 'original') return '原始素材';
-  if (folder.nodeRole === 'selection' || folder.relationKind === 'auxiliary') return '选片分支';
+  if (folder.nodeRole === 'selection' || folder.relationKind === 'auxiliary') return '选片辅助节点';
   if (folder.nodeRole === 'artifact') return '派生产物';
   if (folder.nodeRole === 'workflow') return '工作流节点';
   if (folder.trackingState === 'disabled') return '未跟踪';
@@ -52,7 +53,7 @@ export const versionTreeNodeBadgeLabel = (folder: Pick<ProgressFolder, 'nodeRole
   if (folder.nodeRole === 'original') return '原始素材';
   if (folder.nodeRole === 'selection' || folder.relationKind === 'auxiliary') return '选片';
   if (folder.nodeRole === 'artifact' && folder.artifactKind === 'preview') return '预览';
-  if (folder.nodeRole === 'workflow' && folder.artifactKind === 'team_workspace') return '协作分支';
+  if (folder.nodeRole === 'workflow' && folder.artifactKind === 'team_workspace') return '协作';
   if (folder.nodeRole === 'artifact') return '派生产物';
   if (folder.nodeRole === 'workflow') return '工作流';
   return `V${folder.versionKey}`;
