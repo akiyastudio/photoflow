@@ -787,6 +787,38 @@ const registerVersionIpc = context => {
     }
   });
 
+  ipcMain.handle('workspace-progress-adopt-media', async (_event, workspacePath, status, request = {}) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      const allowed = ['projectName', 'relativePath', 'mode', 'mediaKind', 'sourceProgressId'];
+      if (!request || Object.keys(request).some(key => !allowed.includes(key))) {
+        throw new Error('media_adopt_payload_invalid: 请求字段无效');
+      }
+      const projectName = String(request.projectName || '').trim();
+      const relativePath = String(request.relativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+      const mode = String(request.mode || '');
+      const mediaKind = String(request.mediaKind || '');
+      const sourceProgressId = String(request.sourceProgressId || '').trim();
+      if (!projectName || !relativePath || relativePath.split('/').some(part => !part || part === '.' || part === '..')
+        || !['original', 'companion', 'preview'].includes(mode) || !['image', 'video'].includes(mediaKind)) {
+        throw new Error('media_adopt_payload_invalid: 项目内相对路径和素材类型必填');
+      }
+      const folderPath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
+      if (!fs.statSync(folderPath).isDirectory()) throw new Error('media_adopt_folder_invalid: 目标必须是文件夹');
+      const listed = await versionService.listProgress(workspaceRoot, projectName, true);
+      if (sourceProgressId && !(listed.progressFolders || []).some(folder => folder.id === sourceProgressId && !folder.folderMissing)) {
+        throw new Error('media_adopt_source_invalid: 来源不属于当前项目');
+      }
+      return await versionService.adoptMediaFolder(workspaceRoot, {
+        projectName, folderPath, mode, mediaKind,
+        ...(sourceProgressId ? { sourceProgressId } : {}),
+      });
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
   ipcMain.handle('workspace-progress-relation-update', async (_event, workspacePath, projectName, request = {}) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);

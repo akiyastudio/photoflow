@@ -2201,7 +2201,20 @@ def sync_progress_folder_locations(root: str, db, project, commit: bool = True):
     timestamp = int(time.time() * 1000)
     if not os.path.isdir(project_path):
         return
-    project_entries = [entry for entry in os.scandir(project_path) if entry.is_dir()]
+    # Follow root nodes plus same-parent renames of explicitly registered
+    # nested nodes. This remains bounded by the number of graph nodes and never
+    # turns progress refresh into a recursive project-wide scan.
+    scan_directories = {project_path}
+    for row in existing:
+        parent_directory = canonical_path(os.path.dirname(row["folder_path"]))
+        if is_project_descendant(parent_directory, project_path) and os.path.isdir(parent_directory):
+            scan_directories.add(parent_directory)
+    project_entries_by_path = {}
+    for directory in sorted(scan_directories):
+        for entry in os.scandir(directory):
+            if entry.is_dir():
+                project_entries_by_path[canonical_path(entry.path).casefold()] = entry
+    project_entries = list(project_entries_by_path.values())
     entry_locations = [
         (entry, canonical_path(entry.path), directory_identity(entry.path))
         for entry in project_entries
@@ -2226,6 +2239,15 @@ def sync_progress_folder_locations(root: str, db, project, commit: bool = True):
                    tombstone_json='{}',updated_at=?
                    WHERE id=?""",
                 (folder_path, folder_path.casefold(), identity, timestamp, tracked["id"]),
+            )
+            # Import graph slots are keyed by a project-relative path. Folder
+            # identity is the authority after an external rename, so keep the
+            # slot path in the same transaction as the progress-folder move.
+            relative_path_key = os.path.relpath(folder_path, project_path).replace("\\", "/").casefold()
+            db.execute(
+                """UPDATE media_import_artifact_slots SET relative_path_key=?,updated_at=?
+                   WHERE project_id=? AND progress_id=?""",
+                (relative_path_key, timestamp, project["id"], tracked["id"]),
             )
     for row in progress_rows(db, project["id"]):
         if os.path.isdir(row["folder_path"]):
@@ -2353,18 +2375,13 @@ def register_original_baselines(root: str, db, project):
 
 
 def migrate_legacy_media_workflow_graph_once(root: str, db, project):
-    """Convert only canonical legacy import/team artifacts into explicit graph records.
+    """Reconcile canonical import/team artifacts into explicit graph records.
 
-    This migration never infers main-version relationships.  It is limited to
-    exact legacy import destinations plus team sources already persisted in
-    team_retouch_photos.
+    Despite the historical function name this is intentionally repeatable:
+    projects can be opened before RAW/JPG/MOV folders are created. It never
+    infers main-version relationships and remains bounded to root-level exact
+    canonical destinations plus persisted team sources.
     """
-    migrated = db.execute(
-        "SELECT 1 FROM project_properties WHERE project_id=? AND key=?",
-        (project["id"], LEGACY_MEDIA_WORKFLOW_MIGRATION_KEY),
-    ).fetchone()
-    if migrated is not None:
-        return
     project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
     if not os.path.isdir(project_path):
         return
@@ -2466,7 +2483,7 @@ def migrate_legacy_media_workflow_graph_once(root: str, db, project):
                     add_edge(source, workflow, "workflow_input")
 
         db.execute(
-            "INSERT OR REPLACE INTO project_properties(project_id,key,value_json,updated_at) VALUES(?,?,?,?)",
+            "INSERT OR IGNORE INTO project_properties(project_id,key,value_json,updated_at) VALUES(?,?,?,?)",
             (project["id"], LEGACY_MEDIA_WORKFLOW_MIGRATION_KEY, "true", timestamp),
         )
         db.execute("RELEASE SAVEPOINT legacy_media_workflow_graph")
@@ -3467,9 +3484,56 @@ def media_workflow_import_commit(root: str, db, payload: dict):
             ).fetchone()
             expected_media, expected_role, expected_artifact = slot_shapes[item["importSlot"]]
             if existing is not None:
-                if mapping is None or mapping["progress_id"] != existing["id"]:
-                    raise ValueError(f"import_graph_role_conflict: {item['relativePath']} is not import-managed")
-                current_slot = str(mapping["import_slot"])
+                if mapping is not None and mapping["progress_id"] != existing["id"]:
+                    raise ValueError(f"import_graph_role_conflict: {item['relativePath']} mapping does not match its node")
+                current_slot = str(mapping["import_slot"]) if mapping is not None else ""
+                if mapping is None:
+                    # A bounded project-root scan or watcher may register the
+                    # directory before the importer commits its receipt. Adopt
+                    # only an untracked, structurally compatible material node;
+                    # ordinary progress/selection/workflow nodes remain denied.
+                    has_relations = db.execute(
+                        """SELECT 1 FROM version_graph_edges WHERE project_id=?
+                           AND (source_progress_id=? OR target_progress_id=?) LIMIT 1""",
+                        (project["id"], existing["id"], existing["id"]),
+                    ).fetchone() is not None
+                    compatible_slot = item["importSlot"]
+                    compatible = False
+                    if existing["media_kind"] == expected_media and not existing["tracking_enabled"] \
+                            and existing["tracking_state"] == "disabled" and existing["parent_progress_id"] is None:
+                        if item["importSlot"] in ("raw", "mov"):
+                            compatible = existing["node_role"] == "original" and existing["artifact_kind"] is None and not has_relations
+                        elif item["importSlot"] == "camera_jpg":
+                            compatible = existing["node_role"] == "original" and existing["artifact_kind"] in (None, "companion")
+                        elif item["importSlot"] == "generated_jpg" and existing["node_role"] == "original" \
+                                and existing["artifact_kind"] == "companion":
+                            # Canonical reconciliation has stronger evidence
+                            # that this is a camera companion; never silently
+                            # downgrade it into a generated preview.
+                            compatible = True
+                            compatible_slot = "camera_jpg"
+                        elif item["importSlot"] in ("generated_jpg", "video_preview"):
+                            compatible = existing["node_role"] == "artifact" and existing["artifact_kind"] == "preview"
+                    if not compatible:
+                        raise ValueError(f"import_graph_role_conflict: {item['relativePath']} is not safely adoptable")
+                    adopted_shape = slot_shapes[compatible_slot]
+                    db.execute(
+                        """UPDATE progress_folders SET node_role=?,artifact_kind=?,missing_since=NULL,
+                           tombstone_json='{}',updated_at=? WHERE id=?""",
+                        (adopted_shape[1], adopted_shape[2], timestamp, existing["id"]),
+                    )
+                    db.execute(
+                        """INSERT INTO media_import_artifact_slots(
+                             project_id,progress_id,import_slot,relative_path_key,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?)""",
+                        (project["id"], existing["id"], compatible_slot, item["relativePathKey"], timestamp, timestamp),
+                    )
+                    current_slot = compatible_slot
+                    mapping = db.execute(
+                        "SELECT * FROM media_import_artifact_slots WHERE project_id=? AND progress_id=?",
+                        (project["id"], existing["id"]),
+                    ).fetchone()
+                    existing = db.execute("SELECT * FROM progress_folders WHERE id=?", (existing["id"],)).fetchone()
                 current_shape = slot_shapes[current_slot]
                 if existing["media_kind"] != current_shape[0] or existing["node_role"] != current_shape[1] or existing["artifact_kind"] != current_shape[2]:
                     raise ValueError(f"import_graph_role_conflict: {item['relativePath']} import metadata is inconsistent")
@@ -3528,23 +3592,27 @@ def media_workflow_import_commit(root: str, db, payload: dict):
                WHERE slot.project_id=? AND progress.missing_since IS NULL ORDER BY slot.updated_at DESC,slot.progress_id""",
             (project["id"],),
         ).fetchall()
-        nodes_by_slot = {}
+        nodes_by_group_and_slot = {}
         for row in slot_rows:
-            nodes_by_slot.setdefault(row["import_slot"], []).append(row)
-        for slot, rows in nodes_by_slot.items():
+            relative_key = str(row["relative_path_key"] or "").replace("\\", "/")
+            group_key = relative_key.rsplit("/", 1)[0] if "/" in relative_key else ""
+            nodes_by_group_and_slot.setdefault((group_key, row["import_slot"]), []).append(row)
+        for (group_key, slot), rows in nodes_by_group_and_slot.items():
             if len(rows) > 1:
-                raise ValueError(f"import_graph_slot_ambiguous: multiple {slot} nodes are registered")
+                raise ValueError(f"import_graph_slot_ambiguous: multiple {slot} nodes are registered in {group_key or 'project root'}")
 
         desired_relations = []
-        def add_slot_relation(source_slot, target_slot, edge_kind):
-            source_rows = nodes_by_slot.get(source_slot, [])
-            target_rows = nodes_by_slot.get(target_slot, [])
+        group_keys = sorted({group_key for group_key, _slot in nodes_by_group_and_slot})
+        def add_slot_relation(group_key, source_slot, target_slot, edge_kind):
+            source_rows = nodes_by_group_and_slot.get((group_key, source_slot), [])
+            target_rows = nodes_by_group_and_slot.get((group_key, target_slot), [])
             if source_rows and target_rows:
                 desired_relations.append((source_rows[0], target_rows[0], edge_kind))
 
-        add_slot_relation("raw", "camera_jpg", "media_companion")
-        add_slot_relation("raw", "generated_jpg", "derived_preview")
-        add_slot_relation("mov", "video_preview", "derived_preview")
+        for group_key in group_keys:
+            add_slot_relation(group_key, "raw", "camera_jpg", "media_companion")
+            add_slot_relation(group_key, "raw", "generated_jpg", "derived_preview")
+            add_slot_relation(group_key, "mov", "video_preview", "derived_preview")
         committed_edges = []
         for source, target, edge_kind in desired_relations:
             edge_payload = {
@@ -3582,6 +3650,127 @@ def media_workflow_import_commit(root: str, db, payload: dict):
         )
         db.commit()
         raise
+
+
+def progress_adopt_media(root: str, db, payload: dict):
+    """Atomically adopt a user-created folder into the explicit media graph.
+
+    The renderer never supplies a node role, edge kind or arbitrary source
+    path. Electron resolves the project-relative path and this function derives
+    the only legal role/edge shape from ``mode``.
+    """
+    allowed = {"projectName", "folderPath", "mode", "mediaKind", "sourceProgressId"}
+    if not isinstance(payload, dict) or set(payload) - allowed:
+        raise ValueError("media_adopt_payload_invalid: 请求字段无效")
+    project_name = str(payload.get("projectName") or "").strip()
+    mode = str(payload.get("mode") or "").strip()
+    media_kind = str(payload.get("mediaKind") or "").strip()
+    source_id = str(payload.get("sourceProgressId") or "").strip()
+    if not project_name or mode not in ("original", "companion", "preview") or media_kind not in ("image", "video"):
+        raise ValueError("media_adopt_payload_invalid: 素材类型或接管方式无效")
+    if mode == "companion" and media_kind != "image":
+        raise ValueError("media_adopt_payload_invalid: 配套素材只适用于图片")
+    if (mode == "original" and source_id) or (mode != "original" and not source_id):
+        raise ValueError("media_adopt_payload_invalid: 来源节点无效")
+    project = project_row(db, project_name)
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    folder_path = canonical_path(payload.get("folderPath") or "")
+    if not is_project_descendant(folder_path, project_path) or not os.path.isdir(folder_path):
+        raise ValueError("media_adopt_folder_invalid: 只能接管项目内现有文件夹")
+    existing = db.execute(
+        "SELECT * FROM progress_folders WHERE project_id=? AND folder_path_key=?",
+        (project["id"], folder_path.casefold()),
+    ).fetchone()
+    source = None
+    if source_id:
+        source = db.execute(
+            "SELECT * FROM progress_folders WHERE id=? AND project_id=? AND missing_since IS NULL",
+            (source_id, project["id"]),
+        ).fetchone()
+        if source is None or source["media_kind"] != media_kind or source["node_role"] not in ("original", "progress"):
+            raise ValueError("media_adopt_source_invalid: 来源必须是同项目、同媒体类型的原始素材或主进度")
+        if mode == "companion" and source["node_role"] != "original":
+            raise ValueError("media_adopt_source_invalid: 配套素材来源必须是原始素材")
+        if source["folder_path_key"] == folder_path.casefold():
+            raise ValueError("media_adopt_source_invalid: 来源和目标不能相同")
+
+    target_role = "original" if mode in ("original", "companion") else "artifact"
+    artifact_kind = "companion" if mode == "companion" else "preview" if mode == "preview" else None
+    edge_kind = "media_companion" if mode == "companion" else "derived_preview" if mode == "preview" else None
+    timestamp = int(time.time() * 1000)
+    with db:
+        if existing is not None:
+            mapping = db.execute(
+                "SELECT * FROM media_import_artifact_slots WHERE project_id=? AND progress_id=?",
+                (project["id"], existing["id"]),
+            ).fetchone()
+            exact_shape = existing["media_kind"] == media_kind and existing["node_role"] == target_role \
+                and existing["artifact_kind"] == artifact_kind and existing["parent_progress_id"] is None
+            if mapping is not None and not exact_shape:
+                raise ValueError("media_adopt_import_managed: 导入器管理的素材不能改变角色")
+            relation_rows = db.execute(
+                """SELECT * FROM version_graph_edges WHERE project_id=?
+                   AND (source_progress_id=? OR target_progress_id=?)""",
+                (project["id"], existing["id"], existing["id"]),
+            ).fetchall()
+            expected_relation = edge_kind and any(
+                row["source_progress_id"] == source_id and row["target_progress_id"] == existing["id"]
+                and row["edge_kind"] == edge_kind for row in relation_rows
+            )
+            unexpected_relations = [row for row in relation_rows if not expected_relation or not (
+                row["source_progress_id"] == source_id and row["target_progress_id"] == existing["id"]
+                and row["edge_kind"] == edge_kind
+            )]
+            safely_convertible = existing["parent_progress_id"] is None and not existing["tracking_enabled"] \
+                and existing["tracking_state"] == "disabled" and existing["node_role"] in ("original", "artifact") \
+                and not unexpected_relations
+            if exact_shape and edge_kind and unexpected_relations:
+                raise ValueError("media_adopt_role_conflict: 产物已经连接到其他来源")
+            if not exact_shape and not safely_convertible:
+                raise ValueError("media_adopt_role_conflict: 文件夹已有版本或工作流关系，不能接管")
+        registered = progress_register(root, db, {
+            "projectName": project_name,
+            "progressId": existing["id"] if existing is not None else None,
+            "mediaKind": media_kind,
+            "versionKey": existing["version_key"] if existing is not None else "adopt-" + hashlib.sha256(
+                os.path.relpath(folder_path, project_path).replace("\\", "/").casefold().encode("utf-8")
+            ).hexdigest()[:24],
+            "displayName": existing["display_name"] if existing is not None else os.path.basename(folder_path),
+            "folderPath": folder_path,
+            "nodeRole": target_role,
+            "artifactKind": artifact_kind,
+            "trackingEnabled": False,
+            "trackingState": "disabled",
+            "renameFromParent": False,
+            "copyMissingFromParent": False,
+        }, commit=False, sync_locations=False)
+        target_id = registered["progressFolder"]["id"]
+        edge = None
+        if edge_kind:
+            edge = db.execute(
+                """SELECT * FROM version_graph_edges WHERE project_id=? AND source_progress_id=?
+                   AND target_progress_id=? AND edge_kind=?""",
+                (project["id"], source_id, target_id, edge_kind),
+            ).fetchone()
+            if edge is None:
+                _validated_version_graph_edge(db, {
+                    "projectId": project["id"], "sourceProgressId": source_id,
+                    "targetProgressId": target_id, "edgeKind": edge_kind,
+                })
+                edge_id = str(uuid.uuid4())
+                db.execute(
+                    """INSERT INTO version_graph_edges(
+                         id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (edge_id, project["id"], source_id, target_id, edge_kind, timestamp, timestamp),
+                )
+                edge = db.execute("SELECT * FROM version_graph_edges WHERE id=?", (edge_id,)).fetchone()
+    row = next(row for row in progress_rows(db, project["id"]) if row["id"] == target_id)
+    return {
+        "success": True,
+        "progressFolder": serialize_progress(row),
+        "edge": serialize_version_graph_edge(edge) if edge is not None else None,
+    }
 
 
 def progress_update_tree(root: str, db, payload: dict):
@@ -6975,6 +7164,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = media_workflow_import_commit(root, db, payload)
         db.close()
         return result
+    elif action == "progress_adopt_media":
+        result = progress_adopt_media(root, db, payload)
+        db.close()
+        return result
     elif action == "version_tree_layout_get":
         result = version_tree_layout_get(db, payload)
         db.close()
@@ -7203,7 +7396,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "archive_project", "unarchive_project", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "missing_projects_list", "purge_missing_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_register_with_graph", "progress_update_tree", "progress_relation_update", "progress_legacy_selection_repair", "version_graph_edge_create", "version_graph_edge_list", "version_graph_edge_delete", "version_graph_edge_replace_source", "media_workflow_import_commit", "version_tree_layout_get", "version_tree_layout_save", "progress_policy_save", "progress_mark_stale", "progress_mark_ready", "progress_main_branch", "progress_visible_relations", "progress_copy_missing_children", "progress_detect_stale", "tracking_session_create", "tracking_prepare", "tracking_store_preview", "tracking_session_get", "tracking_session_release", "tracking_session_decide", "tracking_commit_plan", "tracking_commit_complete", "tracking_commit_failed", "progress_main_branch_media", "progress_delete_missing", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "media_refresh_metadata_fingerprint", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
+    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "archive_project", "unarchive_project", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "missing_projects_list", "purge_missing_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_register_with_graph", "progress_adopt_media", "progress_update_tree", "progress_relation_update", "progress_legacy_selection_repair", "version_graph_edge_create", "version_graph_edge_list", "version_graph_edge_delete", "version_graph_edge_replace_source", "media_workflow_import_commit", "version_tree_layout_get", "version_tree_layout_save", "progress_policy_save", "progress_mark_stale", "progress_mark_ready", "progress_main_branch", "progress_visible_relations", "progress_copy_missing_children", "progress_detect_stale", "tracking_session_create", "tracking_prepare", "tracking_store_preview", "tracking_session_get", "tracking_session_release", "tracking_session_decide", "tracking_commit_plan", "tracking_commit_complete", "tracking_commit_failed", "progress_main_branch_media", "progress_delete_missing", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "media_refresh_metadata_fingerprint", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")

@@ -15,6 +15,7 @@ const createMediaRepository = client => ({
   listProgress: (root, projectName, includeMissing = false) => client.call(root, 'progress_list', { projectName, includeMissing }),
   registerProgress: (root, payload) => client.call(root, 'progress_register', payload),
   registerProgressWithGraph: (root, payload) => client.call(root, 'progress_register_with_graph', payload),
+  adoptMediaFolder: (root, payload) => client.call(root, 'progress_adopt_media', payload),
   updateProgressTree: (root, payload) => client.call(root, 'progress_update_tree', payload),
   updateProgressRelation: (root, payload) => client.call(root, 'progress_relation_update', payload),
   repairLegacySelectionRelation: (root, payload) => client.call(root, 'progress_legacy_selection_repair', payload),

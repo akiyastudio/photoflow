@@ -16,6 +16,7 @@ type UseVersionTreeCanvasInput = {
   scopeKey: string;
   nodeWidth: number;
   nodeHeight: number;
+  coordinateScale?: number;
   onNotice: (message: string, duration?: number) => void;
   selectedNodeIds?: ReadonlySet<string>;
   dragStateRef: MutableRefObject<VersionTreeDragState>;
@@ -37,7 +38,7 @@ type NodeDrag = {
 type CanvasPan = { element: Element; pointerId: number; clientX: number; clientY: number; scrollLeft: number; scrollTop: number };
 const DRAG_THRESHOLD = 5;
 
-export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeKey, nodeWidth, nodeHeight, onNotice, selectedNodeIds = new Set(), dragStateRef, onDragStateChange }: UseVersionTreeCanvasInput) => {
+export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeKey, nodeWidth, nodeHeight, coordinateScale = 1, onNotice, selectedNodeIds = new Set(), dragStateRef, onDragStateChange }: UseVersionTreeCanvasInput) => {
   const nodesRef = useRef(nodes);
   const dimensionsRef = useRef({ nodeWidth, nodeHeight });
   const serverPositionsRef = useRef(new Map<string, VersionTreeCanvasPosition>());
@@ -94,6 +95,10 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
     });
     const dimensions = dimensionsRef.current;
     applyPositions(reconcileVersionTreeCanvasPositions({ nodes: currentNodes, previous: saved, nodeWidth: dimensions.nodeWidth, nodeHeight: dimensions.nodeHeight }));
+    if (viewportRef.current) {
+      viewportRef.current.scrollLeft = 0;
+      viewportRef.current.scrollTop = 0;
+    }
   }, [applyPositions, onNotice, projectName, scopeKey, workspacePath]);
 
   useEffect(() => {
@@ -202,8 +207,9 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
     onPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => {
       const drag = nodeDragRef.current;
       if (!drag || drag.anchorId !== id || drag.pointerId !== event.pointerId) return;
-      const deltaX = event.clientX - drag.startClientX;
-      const deltaY = event.clientY - drag.startClientY;
+      const scale = Number.isFinite(coordinateScale) && coordinateScale > 0 ? coordinateScale : 1;
+      const deltaX = (event.clientX - drag.startClientX) / scale;
+      const deltaY = (event.clientY - drag.startClientY) / scale;
       if (!drag.dragged && Math.hypot(deltaX, deltaY) < DRAG_THRESHOLD) return;
       drag.dragged = true;
       event.preventDefault();
@@ -242,7 +248,7 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
       event.preventDefault();
       event.stopPropagation();
     },
-  }), [applyPositions, dragStateRef, enqueueSave, onDragStateChange, selectedNodeIds]);
+  }), [applyPositions, coordinateScale, dragStateRef, enqueueSave, onDragStateChange, selectedNodeIds]);
 
   const canvasPointerHandlers = {
     onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -284,10 +290,16 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
     return enqueueSave('replace', next, before, next);
   }, [defaultPositions, enqueueSave]);
 
+  const resetViewport = useCallback(() => {
+    if (!viewportRef.current) return;
+    viewportRef.current.scrollLeft = 0;
+    viewportRef.current.scrollTop = 0;
+  }, []);
+
   const hasManualLayout = nodes.some(node => {
     const position = positions.get(node.id);
     return Boolean(position && (position.x !== node.x || position.y !== node.y));
   });
 
-  return { positions, viewportRef, nodePointerHandlers, canvasPointerHandlers, refreshLayout, hasManualLayout };
+  return { positions, viewportRef, nodePointerHandlers, canvasPointerHandlers, refreshLayout, resetViewport, hasManualLayout };
 };

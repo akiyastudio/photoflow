@@ -38,6 +38,8 @@ type ProjectVersionTreeProps = {
 export type VersionTreeCanvasController = {
   hasManualLayout: boolean;
   refreshLayout: () => Promise<boolean>;
+  fitView: () => void;
+  resetZoom: () => void;
 };
 
 type PositionedItem = { key: string; nodeKey: string; folder?: ProgressFolder; entry: ProjectFileEntry; x: number; y: number };
@@ -48,12 +50,16 @@ const normalizePath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+
 const parentPath = (value: string) => normalizePath(value).split('/').slice(0, -1).join('/');
 const EMPTY_VERSION_TREE_IDS: string[] = [];
 const EMPTY_VERSION_TREE_EDGES: VersionGraphEdge[] = [];
+const afterVersionTreePaint = (callback: () => void) => typeof window.requestAnimationFrame === 'function'
+  ? window.requestAnimationFrame(callback)
+  : globalThis.setTimeout(callback, 0);
 
 export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION_TREE_EDGES, entries, structureEntries = entries, selectedRelativePaths = EMPTY_VERSION_TREE_IDS, filterActive = false, activeRelativePath, gridIconSize, workspacePath, projectName, projectRelativePath, renderEntry, pendingChildId, hoverParentId, mutatingChildIds = EMPTY_VERSION_TREE_IDS, onBeginRelationEdit, onHoverRelationParent, onRequestRelationChange, onRequestSupplementalEdgeDelete, onRequestSupplementalEdgeReconnect, onRequestSupplementalEdgeCreate, onCancelRelationEdit, onNotice, onCanvasControllerChange }: ProjectVersionTreeProps) => {
   const [pointerPoint, setPointerPoint] = useState<{ x: number; y: number } | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState('');
   const [dragState, setDragState] = useState<VersionTreeDragState>(null);
   const [relationChoice, setRelationChoice] = useState<{ sourceId: string; targetId: string; kinds: VersionTreeEdgeKind[] } | null>(null);
+  const [zoom, setZoom] = useState(1);
   const dragStateRef = useRef<VersionTreeDragState>(null);
   const changeDragState = useCallback((next: VersionTreeDragState) => {
     dragStateRef.current = next;
@@ -94,8 +100,9 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   const ordinaryEntries = useMemo(() => entries.filter(entry => !trackedEntryPaths.has(normalizePath(entry.relativePath))), [entries, trackedEntryPaths]);
 
   const nodeWidth = Math.max(80, gridIconSize);
-  const nodeHeight = nodeWidth + 66;
-  const { horizontalGap: columnGap, rowGap, auxiliaryGap, rootGap, padding: canvasPadding } = DEFAULT_VERSION_TREE_SPACING;
+  const nodeHeight = nodeWidth + 52;
+  const { horizontalGap: defaultColumnGap, rowGap, auxiliaryGap, rootGap, padding: canvasPadding } = DEFAULT_VERSION_TREE_SPACING;
+  const columnGap = Math.max(76, defaultColumnGap);
   const defaultLayout = useMemo(() => {
     const itemById = new Map(versionItems.map(item => [item.folder.id, item]));
     const forest = layoutVersionTree({
@@ -113,14 +120,9 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   const canvasNodes = useMemo(() => defaultLayout.positioned.map(item => ({ id: item.key, nodeKey: item.nodeKey, x: item.x, y: item.y })), [defaultLayout]);
   const canvas = useVersionTreeCanvas({
     nodes: canvasNodes,
-    workspacePath, projectName, scopeKey: activeRelativePath, nodeWidth, nodeHeight, onNotice,
+    workspacePath, projectName, scopeKey: activeRelativePath, nodeWidth, nodeHeight, coordinateScale: zoom, onNotice,
     selectedNodeIds, dragStateRef, onDragStateChange: changeDragState,
   });
-  useEffect(() => {
-    if (!onCanvasControllerChange) return;
-    onCanvasControllerChange({ hasManualLayout: canvas.hasManualLayout, refreshLayout: canvas.refreshLayout });
-    return () => onCanvasControllerChange(null);
-  }, [canvas.hasManualLayout, canvas.refreshLayout, onCanvasControllerChange]);
   const layout = useMemo(() => {
     const positioned = defaultLayout.positioned.flatMap(item => {
       const position = canvas.positions.get(item.key);
@@ -140,6 +142,34 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
     const bounds = versionTreeCanvasBounds(canvas.positions, nodeWidth, nodeHeight, canvasPadding);
     return { positioned, edges, width: bounds.width, height: bounds.height };
   }, [canvas.positions, canvasPadding, defaultLayout, nodeHeight, nodeWidth]);
+  const laneBands = useMemo(() => (['image', 'video'] as const).flatMap(mediaKind => {
+    const items = layout.positioned.filter(item => item.folder?.mediaKind === mediaKind);
+    if (!items.length) return [];
+    return [{ mediaKind, label: mediaKind === 'image' ? '图片工作流' : '视频工作流', top: Math.min(...items.map(item => item.y)), bottom: Math.max(...items.map(item => item.y + nodeHeight)) }];
+  }), [layout.positioned, nodeHeight]);
+  const fitView = useCallback(() => {
+    const viewport = canvas.viewportRef.current;
+    if (!viewport) return;
+    const measuredWidth = Number(viewport.clientWidth);
+    const availableWidth = Number.isFinite(measuredWidth) && measuredWidth > 24 ? measuredWidth - 24 : Math.max(1, layout.width);
+    const nextZoom = Math.max(.45, Math.min(1, availableWidth / Math.max(1, layout.width)));
+    setZoom(nextZoom);
+    afterVersionTreePaint(canvas.resetViewport);
+  }, [canvas.resetViewport, canvas.viewportRef, layout.width]);
+  const resetZoom = useCallback(() => {
+    setZoom(1);
+    afterVersionTreePaint(canvas.resetViewport);
+  }, [canvas.resetViewport]);
+  const refreshAndFit = useCallback(async () => {
+    const refreshed = await canvas.refreshLayout();
+    if (refreshed) afterVersionTreePaint(fitView);
+    return refreshed;
+  }, [canvas.refreshLayout, fitView]);
+  useEffect(() => {
+    if (!onCanvasControllerChange) return;
+    onCanvasControllerChange({ hasManualLayout: canvas.hasManualLayout, refreshLayout: refreshAndFit, fitView, resetZoom });
+    return () => onCanvasControllerChange(null);
+  }, [canvas.hasManualLayout, fitView, onCanvasControllerChange, refreshAndFit, resetZoom]);
 
   const visibleFolderById = useMemo(() => new Map(versionItems.map(item => [item.folder.id, item.folder])), [versionItems]);
   const mutatingIds = useMemo(() => new Set(mutatingChildIds), [mutatingChildIds]);
@@ -199,7 +229,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
     const canvas = currentTarget.closest<HTMLElement>('[data-version-tree-canvas]');
     if (!canvas) return undefined;
     const rect = canvas.getBoundingClientRect();
-    setPointerPoint({ x: clientX - rect.left, y: clientY - rect.top });
+    setPointerPoint({ x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom });
     const candidate = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>('[data-relation-parent-id]')?.dataset.relationParentId;
     onHoverRelationParent?.(candidate || undefined);
     return candidate;
@@ -312,10 +342,11 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   return <div className="relative min-w-0 flex-1 pb-4">
     {graph.cycleNodeIds.length > 0 && <div role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">版本关系需要修复：{graph.cycleNodeIds.join('、')}</div>}
     {relationChoice && <div role="dialog" aria-modal="true" aria-label="选择关系类型" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><section className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-4 shadow-2xl"><h3 className="font-bold text-slate-800">选择关系类型</h3><p className="mt-1 text-xs text-slate-500">两端节点支持多种合法关系，请明确选择本次连线语义。</p><div className="mt-4 grid gap-2">{relationChoice.kinds.map(kind => <button key={kind} type="button" onClick={() => submitNewRelation(relationChoice.sourceId, relationChoice.targetId, kind)} className="rounded-lg border border-slate-200 px-3 py-2 text-left text-sm hover:border-blue-400 hover:bg-blue-50">{versionTreeRelationLabel(kind)}</button>)}</div><button type="button" onClick={() => { setRelationChoice(null); onCancelRelationEdit?.(); }} className="mt-3 w-full rounded px-3 py-2 text-sm text-slate-500 hover:bg-slate-100">取消</button></section></div>}
-    {hasGraphItems && <div ref={canvas.viewportRef} className="overflow-auto"><div data-version-tree-canvas="true" data-drag-state={dragState?.type} onPointerDown={event => { canvas.canvasPointerHandlers.onPointerDown(event); if (!(event.target as Element).closest('[data-version-tree-node],[data-edge-id],button')) cancelRelationSelection(); }} onPointerMove={canvas.canvasPointerHandlers.onPointerMove} onPointerUp={canvas.canvasPointerHandlers.onPointerUp} onPointerCancel={canvas.canvasPointerHandlers.onPointerCancel} className="relative cursor-default" style={{ width: layout.width, height: layout.height, minWidth: '100%', minHeight: 360, touchAction: 'none', backgroundImage: 'radial-gradient(circle, rgb(148 163 184 / 0.05) 1px, transparent 1px)', backgroundSize: '20px 20px' }}>
+    {hasGraphItems && <div className="relative"><div className="mb-2 flex items-center justify-end gap-1 px-1 text-[11px] text-slate-400"><span className="mr-1 tabular-nums">{Math.round(zoom * 100)}%</span><button type="button" onClick={fitView} className="rounded border border-slate-200 bg-white/70 px-2 py-1 hover:bg-slate-100 hover:text-slate-600">适应窗口</button><button type="button" onClick={resetZoom} className="rounded border border-slate-200 bg-white/70 px-2 py-1 hover:bg-slate-100 hover:text-slate-600">100%</button></div><div ref={canvas.viewportRef} data-version-tree-viewport="true" className="overflow-auto"><div className="relative" style={{ width: layout.width * zoom, height: Math.max(360, layout.height * zoom), minWidth: '100%' }}><div data-version-tree-canvas="true" data-drag-state={dragState?.type} onPointerDown={event => { canvas.canvasPointerHandlers.onPointerDown(event); if (!(event.target as Element).closest('[data-version-tree-node],[data-edge-id],button')) cancelRelationSelection(); }} onPointerMove={canvas.canvasPointerHandlers.onPointerMove} onPointerUp={canvas.canvasPointerHandlers.onPointerUp} onPointerCancel={canvas.canvasPointerHandlers.onPointerCancel} className="absolute left-0 top-0 cursor-default" style={{ width: layout.width, height: layout.height, minHeight: 360, touchAction: 'none', transform: `scale(${zoom})`, transformOrigin: 'left top', backgroundImage: 'radial-gradient(circle, rgb(148 163 184 / 0.025) 1px, transparent 1px)', backgroundSize: '20px 20px' }}>
+      {laneBands.map((lane, index) => <div key={lane.mediaKind} aria-label={lane.label} className="pointer-events-none absolute left-3 right-3 z-[1] text-[10px] font-semibold tracking-[0.12em] text-slate-400/50" style={{ top: Math.max(4, lane.top - 21) }}><span>{lane.label}</span>{index > 0 && <span aria-hidden className="absolute -top-3 left-0 right-0 h-px bg-slate-400/10"/>}</div>)}
       <svg aria-label="版本关系连线" className="absolute inset-0 h-full w-full overflow-visible"><defs><marker id={arrowMarkerId} markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M 0 0 L 8 4 L 0 8 z" fill="context-stroke"/></marker></defs>{layout.edges.map(edge => { const presentation = versionTreeEdgePresentation(edge.kind, selectedEdgeId === edge.id); return <g key={edge.id}>
         <path data-edge-id={edge.id} data-relation-kind={edge.kind} role={edge.childId ? 'button' : undefined} tabIndex={edge.childId ? 0 : undefined} aria-label={edge.childId ? `选择${versionTreeRelationLabel(edge.kind)}关系线` : undefined} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.stopPropagation(); selectEdge(edge); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectEdge(edge); } }} d={edge.path} fill="none" stroke="transparent" strokeWidth="14" pointerEvents="stroke" className={edge.childId ? 'cursor-pointer' : undefined}/>
-        <path aria-hidden data-relation-kind={edge.kind} d={edge.path} fill="none" stroke={presentation.stroke} strokeWidth={presentation.strokeWidth} strokeDasharray={presentation.strokeDasharray} markerEnd={`url(#${arrowMarkerId})`} pointerEvents="none"/>
+        <path aria-hidden data-relation-kind={edge.kind} d={edge.path} fill="none" stroke={presentation.stroke} strokeWidth={presentation.strokeWidth} strokeDasharray={presentation.strokeDasharray} opacity={presentation.opacity} markerEnd={`url(#${arrowMarkerId})`} pointerEvents="none"/>
         {selectedEdgeId === edge.id && edge.childId && !mutatingIds.has(edge.childId) && <circle data-edge-child-handle={edge.childId} role="button" tabIndex={0} aria-label={`拖动${versionTreeRelationLabel(edge.kind)}终点以重新连接`} cx={edge.endX} cy={edge.endY} r="7" fill="white" stroke="#2563eb" strokeWidth="2" className="cursor-grab" onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }} onPointerDown={event => { beginRelationDrag(event, edge.childId!, { x: edge.endX, y: edge.endY }, selectedSupplementalEdge); }} onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) updatePointerCandidate(event.clientX, event.clientY, event.currentTarget); }} onPointerUp={event => endRelationDrag(event, edge.childId!)} onPointerCancel={cancelRelationDrag}/>} {null}
       </g>; })}{pendingPosition && pointerPoint && <path d={versionTreeEdgePath(pendingPosition.x, pendingPosition.y + nodeHeight / 2, pointerPoint.x, pointerPoint.y)} fill="none" stroke={hoverParentId && activeRelationChildId && relationError(activeRelationChildId, hoverParentId) ? '#ef4444' : '#2563eb'} strokeWidth="2" strokeDasharray="5 4" pointerEvents="none"/>}</svg>
       {selectedEdge && selectedChild && selectedParent && <div role="status" style={{ left: selectedEdge.menuX, top: selectedEdge.menuY }} className="absolute z-30 flex -translate-x-1/2 -translate-y-1/2 flex-wrap items-center gap-2 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs text-slate-600 shadow-lg">
@@ -345,7 +376,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
           {canBeParent && <button type="button" data-version-tree-port="true" data-relation-parent-id={item.folder.id} aria-label={`${item.folder.displayName} 关系来源候选`} title={activeRelationChildId ? candidateError || '可连接' : '关系来源输出触点'} className="absolute -right-2.5 top-1/2 z-20 flex h-5 w-5 -translate-y-1/2 items-center justify-center opacity-0 transition-opacity group-hover/version-node:opacity-100 group-focus-within/version-node:opacity-100 focus:opacity-100"><span aria-hidden className={`h-2.5 w-2.5 rounded-full border-2 border-white shadow ${candidateColor}`}/>{candidateHovered && candidateError && <span role="tooltip" className="pointer-events-none absolute left-5 top-1/2 z-40 -translate-y-1/2 whitespace-nowrap rounded bg-red-600 px-2 py-1 text-[10px] font-medium text-white shadow-lg">{candidateError}</span>}</button>}
         </>}
       </div>; })}
-    </div></div>}
+    </div></div></div></div>}
     {ordinaryEntries.length > 0 && <section className={hasGraphItems ? 'mt-5 border-t border-slate-200 pt-4' : undefined}>{hasGraphItems && <p className="mb-2 px-1 text-xs font-medium text-slate-400">其他</p>}<div className="grid w-full content-start gap-3" style={{ gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${gridIconSize}px), 1fr))` }}>{ordinaryEntries.map(entry => <div key={`${entry.relativePath}|${entry.path}`} className="min-w-0">{renderEntry(entry)}</div>)}</div></section>}
     {filterActive && hasGraphItems && !ordinaryEntries.length && <p className="mt-5 border-t border-slate-200 py-6 text-center text-xs text-slate-400">没有其他文件符合当前搜索或筛选条件。</p>}
     {!hasGraphItems && !ordinaryEntries.length && <p className="border-y border-slate-200 py-12 text-center text-sm text-slate-400">当前文件夹为空。</p>}

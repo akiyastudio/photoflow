@@ -192,7 +192,10 @@ export const layoutVersionTree = (input: VersionTreeLayoutInput): VersionTreeLay
 
   const nodeGroup = new Map<string, number>();
   groups.forEach((group, groupIndex) => group.forEach(node => nodeGroup.set(node.id, groupIndex)));
-  const bandGap = Math.max(input.rootGap * 2, Math.round(input.nodeHeight * .75));
+  // Swimlanes are separated by a stable visual gap. Their internal branch
+  // height still prevents overlap, but a tall image branch no longer adds an
+  // additional proportional gap before the video workflow.
+  const bandGap = 112;
   let offsetY = 0;
   let width = 0;
   const nodes: PositionedVersionNode[] = [];

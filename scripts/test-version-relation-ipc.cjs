@@ -1,4 +1,5 @@
 const assert = require('assert');
+const path = require('path');
 const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
 
 (async () => {
@@ -154,6 +155,49 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   assert.strictEqual(invalidCoordinate.success, false);
   assert.match(invalidCoordinate.error, /version_tree_layout_coordinate_invalid/);
   assert.strictEqual(filesystemCalls, 0, 'layout IPC must not scan or mutate project files');
+
+  const adoptionHandlers = new Map();
+  let adoptionPayload;
+  registerVersionIpc({
+    Array, Boolean, Error, JSON, Math, Number, Set, String, undefined, path,
+    ipcMain: { handle: (channel, registeredHandler) => adoptionHandlers.set(channel, registeredHandler) },
+    ensureWorkspace: value => { assert.strictEqual(value, workspaceRoot); return workspaceRoot; },
+    workspaceCatalogs: new Map([[workspaceRoot, { projects: [{ name: 'Trusted Project' }] }]]),
+    refreshWorkspaceCatalog: async () => { throw new Error('catalog should already be loaded'); },
+    resolveProjectEntry: (_workspace, _status, projectName, relativePath) => {
+      assert.strictEqual(projectName, 'Trusted Project');
+      if (path.isAbsolute(relativePath) || relativePath.includes('..')) throw new Error('项目路径越界');
+      return path.join('C:\\trusted-project', ...relativePath.split('/'));
+    },
+    fs: { statSync: () => ({ isDirectory: () => true }) },
+    versionService: {
+      listProgress: async () => ({ progressFolders: [parent] }),
+      adoptMediaFolder: async (root, payload) => { assert.strictEqual(root, workspaceRoot); adoptionPayload = payload; return { success: true, progressFolder: { id: 'adopted' } }; },
+    },
+  });
+  const adoptionHandler = adoptionHandlers.get('workspace-progress-adopt-media');
+  assert(adoptionHandler, 'manual media adoption IPC must be registered');
+  const absoluteAdoption = await adoptionHandler(null, workspaceRoot, '后期中', {
+    projectName: 'Trusted Project', relativePath: 'C:\\outside', mode: 'original', mediaKind: 'image',
+  });
+  assert.strictEqual(absoluteAdoption.success, false, 'renderer absolute paths must not reach media adoption');
+  assert.strictEqual(adoptionPayload, undefined);
+  const adopted = await adoptionHandler(null, workspaceRoot, '后期中', {
+    projectName: 'Trusted Project', relativePath: 'manual/source', mode: 'preview', mediaKind: 'image',
+    sourceProgressId: parent.id,
+  });
+  assert.strictEqual(adopted.success, true);
+  assert.deepStrictEqual(adoptionPayload, {
+    projectName: 'Trusted Project', folderPath: path.join('C:\\trusted-project', 'manual', 'source'),
+    mode: 'preview', mediaKind: 'image', sourceProgressId: parent.id,
+  }, 'repository must receive only the main-process-resolved path and derived adoption fields');
+  adoptionPayload = undefined;
+  const injectedAdoption = await adoptionHandler(null, workspaceRoot, '后期中', {
+    projectName: 'Trusted Project', relativePath: 'manual/source', mode: 'preview', mediaKind: 'image',
+    sourceProgressId: parent.id, folderPath: 'C:\\outside', nodeRole: 'progress', edgeKind: 'main',
+  });
+  assert.strictEqual(injectedAdoption.success, false);
+  assert.strictEqual(adoptionPayload, undefined);
 
   console.log('version relation IPC behavior tests passed');
 })().catch(error => {

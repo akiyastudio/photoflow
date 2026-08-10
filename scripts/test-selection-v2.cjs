@@ -269,6 +269,16 @@ const run = async () => {
     }
     if (externalLinkCreated) await expectReject(service.preflightFilename({ ...request('ExternalLink'), keywords: '1001' }), /项目外部/);
 
+    put(projectRoot, 'Interrupted/I_9201.JPG');
+    mkdir(path.join(projectRoot, 'Interrupted_选片'));
+    const interruptedMarker = path.join(projectRoot, 'Interrupted_选片.photoflow-selection-pending');
+    fs.writeFileSync(interruptedMarker, JSON.stringify({ sourceFolderRelativePath: 'Interrupted', targetFolderRelativePath: 'Interrupted_选片' }));
+    const interruptedPreview = await service.preflightFilename({ ...request('Interrupted'), keywords: '9201' });
+    assert.strictEqual(interruptedPreview.conflictCount, 0, 'a matching empty recovery target must resume after process interruption');
+    const interrupted = await service.executeFilename({ ...request('Interrupted'), keywords: '9201', expectedSignature: interruptedPreview.signature, operationId: 'interrupted-recovery' });
+    assert.strictEqual(interrupted.success, true);
+    assert(!fs.existsSync(interruptedMarker), 'successful node registration must release the recovery marker');
+
     put(projectRoot, 'Fail/F_9001.JPG');
     put(projectRoot, 'Fail/F_9002.JPG');
     const failPreview = await service.preflightFilename({ ...request('Fail'), keywords: '9001 9002' });
@@ -279,7 +289,14 @@ const run = async () => {
       await copyExclusive(source, destination);
     } });
     await expectReject(failingService.executeFilename({ ...request('Fail'), keywords: '9001 9002', expectedSignature: failPreview.signature, operationId: 'failure-rollback' }), /injected copy failure/);
-    assert(!fs.existsSync(path.join(projectRoot, 'Fail_选片')), '复制失败必须回滚本次创建内容');
+    assert(fs.existsSync(path.join(projectRoot, 'Fail_选片')), '复制失败后应保留已登记的恢复目标');
+    assert.strictEqual(fs.readdirSync(path.join(projectRoot, 'Fail_选片')).length, 0, '失败必须回滚本次已复制文件');
+    const failedSelection = versionService.nodes.find(node => node.nodeRole === 'selection' && /Fail_选片$/i.test(node.folderPath));
+    assert(failedSelection, '复制开始前必须已经持久化 selection 节点');
+    const retryPreview = await service.preflightFilename({ ...request('Fail'), keywords: '9001 9002' });
+    const retried = await service.executeFilename({ ...request('Fail'), keywords: '9001 9002', expectedSignature: retryPreview.signature, operationId: 'failure-retry' });
+    assert.strictEqual(retried.success, true);
+    assert.strictEqual(retried.selectionProgressId, failedSelection.id, '重试必须复用中断前的 selection 节点');
 
     put(projectRoot, 'Cancel/C_9101.JPG');
     put(projectRoot, 'Cancel/C_9102.JPG');
@@ -293,7 +310,9 @@ const run = async () => {
     } });
     const cancelled = await cancellingService.executeFilename({ ...request('Cancel'), keywords: '9101 9102', expectedSignature: cancelPreview.signature, operationId: 'cancel-rollback' });
     assert.strictEqual(cancelled.cancelled, true);
-    assert(!fs.existsSync(path.join(projectRoot, 'Cancel_选片')), '取消必须回滚本次创建内容');
+    assert(fs.existsSync(path.join(projectRoot, 'Cancel_选片')), '取消后应保留可恢复的已登记目标');
+    assert.strictEqual(fs.readdirSync(path.join(projectRoot, 'Cancel_选片')).length, 0, '取消必须回滚本次已复制文件');
+    assert(versionService.nodes.some(node => node.nodeRole === 'selection' && /Cancel_选片$/i.test(node.folderPath)));
 
     const handlers = new Map();
     let capturedRequest;

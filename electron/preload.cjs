@@ -147,6 +147,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     workflowInputProgressIds: request?.workflowInputProgressIds,
   }),
+  adoptVersionTreeFolder: (workspacePath, status, request) => ipcRenderer.invoke('workspace-progress-adopt-media', workspacePath, status, {
+    projectName: request?.projectName,
+    relativePath: request?.relativePath,
+    mode: request?.mode,
+    mediaKind: request?.mediaKind,
+    sourceProgressId: request?.sourceProgressId,
+  }),
   registerProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-progress-register', workspacePath, status, projectName, request),
   updateProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-progress-update', workspacePath, status, projectName, request),
   updateProgressRelation: (workspacePath, projectName, request) => ipcRenderer.invoke('workspace-progress-relation-update', workspacePath, projectName, {

@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import sys
 import tempfile
 import time
@@ -223,6 +224,88 @@ def test_legacy_canonical_graph_migration(root: Path, db):
     assert len(second["graphEdges"]) == len(first["graphEdges"]), "legacy graph migration must be idempotent"
 
 
+def test_late_canonical_reconciliation(root: Path, db):
+    project, project_id = make_project(root, db, "late-canonical")
+    empty = workspace_db.progress_list(str(root), db, {"projectName": "late-canonical"})
+    assert not empty["progressFolders"]
+    (project / "RAW").mkdir()
+    (project / "JPG").mkdir()
+    reconciled = workspace_db.progress_list(str(root), db, {"projectName": "late-canonical"})
+    by_name = {node["displayName"].casefold(): node for node in reconciled["progressFolders"]}
+    assert by_name["raw"]["nodeRole"] == "original"
+    assert by_name["jpg"]["nodeRole"] == "original" and by_name["jpg"]["artifactKind"] == "companion"
+    assert edge_count(db, project_id, "media_companion") == 1
+
+
+def test_safe_import_adoption_and_multiple_groups(root: Path, db):
+    project, project_id = make_project(root, db, "import-adoption")
+    (project / "manual-raw").mkdir()
+    manual = workspace_db.progress_register(str(root), db, {
+        "projectName": "import-adoption", "mediaKind": "image", "versionKey": "manual-raw",
+        "displayName": "Manual RAW", "folderPath": str(project / "manual-raw"),
+        "nodeRole": "original", "trackingEnabled": False,
+    })["progressFolder"]
+    adopted = commit(root, db, "import-adoption", "adopt-existing", [artifact("manual-raw", "raw")])
+    assert adopted["nodes"][0]["id"] == manual["id"]
+    assert db.execute("SELECT import_slot FROM media_import_artifact_slots WHERE progress_id=?", (manual["id"],)).fetchone()[0] == "raw"
+
+    for group in ("day-1", "day-2"):
+        (project / group / "RAW").mkdir(parents=True)
+        (project / group / "JPG").mkdir()
+    grouped = [
+        artifact("day-1/RAW", "raw"), artifact("day-1/JPG", "camera_jpg"),
+        artifact("day-2/RAW", "raw"), artifact("day-2/JPG", "camera_jpg"),
+    ]
+    commit(root, db, "import-adoption", "two-independent-groups", grouped)
+    assert edge_count(db, project_id, "media_companion") == 2, "each relative parent group must own its relation"
+
+
+def test_import_mapping_follows_external_rename(root: Path, db):
+    project, _project_id = make_project(root, db, "rename-slot")
+    (project / "day" / "RAW").mkdir(parents=True)
+    node = commit(root, db, "rename-slot", "rename-source", [artifact("day/RAW", "raw")])["nodes"][0]
+    os.rename(project / "day" / "RAW", project / "day" / "renamed-raw")
+    project_row = workspace_db.project_row(db, "rename-slot")
+    workspace_db.sync_progress_folder_locations(str(root), db, project_row)
+    mapping = db.execute("SELECT relative_path_key FROM media_import_artifact_slots WHERE progress_id=?", (node["id"],)).fetchone()
+    assert mapping["relative_path_key"] == "day/renamed-raw"
+
+
+def test_manual_media_adoption(root: Path, db):
+    project, project_id = make_project(root, db, "manual-adopt")
+    for name in ("camera-master", "camera-jpeg", "manual-preview", "ordinary-progress"):
+        (project / name).mkdir()
+    original = workspace_db.progress_adopt_media(str(root), db, {
+        "projectName": "manual-adopt", "folderPath": str(project / "camera-master"),
+        "mode": "original", "mediaKind": "image",
+    })["progressFolder"]
+    companion = workspace_db.progress_adopt_media(str(root), db, {
+        "projectName": "manual-adopt", "folderPath": str(project / "camera-jpeg"),
+        "mode": "companion", "mediaKind": "image", "sourceProgressId": original["id"],
+    })["progressFolder"]
+    preview = workspace_db.progress_adopt_media(str(root), db, {
+        "projectName": "manual-adopt", "folderPath": str(project / "manual-preview"),
+        "mode": "preview", "mediaKind": "image", "sourceProgressId": original["id"],
+    })["progressFolder"]
+    assert companion["artifactKind"] == "companion" and preview["artifactKind"] == "preview"
+    assert edge_count(db, project_id, "media_companion") == 1
+    assert edge_count(db, project_id, "derived_preview") == 1
+    tracked = workspace_db.progress_register(str(root), db, {
+        "projectName": "manual-adopt", "mediaKind": "image", "versionKey": "tracked",
+        "displayName": "Tracked", "folderPath": str(project / "ordinary-progress"),
+        "nodeRole": "progress", "trackingEnabled": True, "trackingState": "ready",
+    })["progressFolder"]
+    try:
+        workspace_db.progress_adopt_media(str(root), db, {
+            "projectName": "manual-adopt", "folderPath": str(project / "ordinary-progress"),
+            "mode": "original", "mediaKind": "image",
+        })
+        raise AssertionError("tracked progress must not be converted into original media")
+    except ValueError as error:
+        assert "media_adopt_role_conflict" in str(error)
+    assert db.execute("SELECT node_role FROM progress_folders WHERE id=?", (tracked["id"],)).fetchone()[0] == "progress"
+
+
 def test_selection_mainline_repair(root: Path, db):
     project, project_id = make_project(root, db, "selection-mainline-repair")
     for name in ("source", "selection", "progress"):
@@ -286,6 +369,10 @@ def main():
             test_generated_camera_promotion(root, db)
             test_atomic_rollback_and_retry(root, db)
             test_legacy_canonical_graph_migration(root, db)
+            test_late_canonical_reconciliation(root, db)
+            test_safe_import_adoption_and_multiple_groups(root, db)
+            test_import_mapping_follows_external_rename(root, db)
+            test_manual_media_adoption(root, db)
             test_selection_mainline_repair(root, db)
         finally:
             db.close()
