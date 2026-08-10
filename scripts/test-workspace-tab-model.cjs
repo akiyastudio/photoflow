@@ -17,6 +17,8 @@ const project = (overrides = {}) => ({
   assert.strictEqual(initialRootState.pages.length, 1, 'sidebar click must create a root page when the project has no pages');
   assert.strictEqual(initialRootState.pages[0].currentRelativePath, '');
   assert.strictEqual(initialRootState.pages[0].initialRelativePath, '');
+  assert.strictEqual(model.updateBrowserPagePath(initialRootState, 'initial-root', ''), initialRootState, 'reporting the current page path again must preserve state identity and cannot trigger a render loop');
+  assert.strictEqual(model.updateBrowserPagePath(initialRootState, 'missing-page', 'ignored'), initialRootState, 'a stale page notification must preserve state identity');
   const navigatedInitialRootState = model.updateBrowserPagePath(initialRootState, 'initial-root', '选片');
   const reopenedRootState = model.selectProjectFromSidebar(navigatedInitialRootState, project(), 'replacement-root');
   assert.strictEqual(reopenedRootState.pages.length, 2, 'a page initially opened at root must not be reused after it navigates into a child folder');

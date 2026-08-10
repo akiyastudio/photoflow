@@ -39,10 +39,14 @@ export const activateBrowserPage = (state: WorkspaceTabsState, pageId: string): 
   ? { ...state, activePageId: pageId }
   : state;
 
-export const updateBrowserPagePath = (state: WorkspaceTabsState, pageId: string, currentRelativePath: string): WorkspaceTabsState => ({
-  ...state,
-  pages: state.pages.map(page => page.id === pageId ? { ...page, currentRelativePath } : page),
-});
+export const updateBrowserPagePath = (state: WorkspaceTabsState, pageId: string, currentRelativePath: string): WorkspaceTabsState => {
+  const page = state.pages.find(candidate => candidate.id === pageId);
+  if (!page || page.currentRelativePath === currentRelativePath) return state;
+  return {
+    ...state,
+    pages: state.pages.map(candidate => candidate.id === pageId ? { ...candidate, currentRelativePath } : candidate),
+  };
+};
 
 export const closeBrowserPage = (state: WorkspaceTabsState, pageId: string): WorkspaceTabsState => {
   const closingIndex = state.pages.findIndex(page => page.id === pageId);

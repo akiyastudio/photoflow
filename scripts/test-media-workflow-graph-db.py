@@ -174,17 +174,121 @@ def test_atomic_rollback_and_retry(root: Path, db):
     assert len(retried["nodes"]) == 2 and edge_count(db, project_id, "media_companion") == 1
 
 
+def test_legacy_canonical_graph_migration(root: Path, db):
+    project, project_id = make_project(root, db, "legacy-canonical")
+    for name in ("raw", "jpg", "mov", "mov_预览", "团片协作", "ordinary-folder", "edit-source"):
+        (project / name).mkdir()
+    source = workspace_db.progress_register(str(root), db, {
+        "projectName": "legacy-canonical",
+        "mediaKind": "image",
+        "versionKey": "manual-source",
+        "displayName": "Explicit edit source",
+        "folderPath": str(project / "edit-source"),
+        "nodeRole": "progress",
+        "trackingEnabled": False,
+    })["progressFolder"]
+    now = int(time.time() * 1000)
+    photo_id = str(uuid.uuid4())
+    version_id = str(uuid.uuid4())
+    source_file = project / "edit-source" / "photo.jpg"
+    source_file.write_bytes(b"source")
+    db.execute(
+        """INSERT INTO photos(id,project_id,media_type,original_name,display_name,original_file_path,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?)""",
+        (photo_id, project_id, "image", "photo.jpg", "photo", str(source_file), now, now),
+    )
+    db.execute(
+        """INSERT INTO versions(id,photo_id,version_number,version_name,file_path,file_path_key,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?)""",
+        (version_id, photo_id, 1, "V1", str(source_file), str(source_file).casefold(), now, now),
+    )
+    db.execute(
+        "INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)",
+        (photo_id, project_id, version_id, now, now),
+    )
+    db.commit()
+
+    first = workspace_db.progress_list(str(root), db, {"projectName": "legacy-canonical"})
+    by_name = {node["displayName"].casefold(): node for node in first["progressFolders"]}
+    assert by_name["jpg"]["artifactKind"] == "companion"
+    assert by_name["mov_预览"]["nodeRole"] == "artifact" and by_name["mov_预览"]["artifactKind"] == "preview"
+    assert by_name["团片协作"]["nodeRole"] == "workflow" and by_name["团片协作"]["artifactKind"] == "team_workspace"
+    assert "ordinary-folder" not in by_name, "ordinary folders must never be inferred into the graph"
+    edges = {(edge["sourceProgressId"], edge["targetProgressId"], edge["edgeKind"]) for edge in first["graphEdges"]}
+    assert any(kind == "media_companion" for _source, _target, kind in edges)
+    assert any(kind == "derived_preview" for _source, _target, kind in edges)
+    assert (source["id"], by_name["团片协作"]["id"], "workflow_input") in edges
+    second = workspace_db.progress_list(str(root), db, {"projectName": "legacy-canonical"})
+    assert len(second["progressFolders"]) == len(first["progressFolders"])
+    assert len(second["graphEdges"]) == len(first["graphEdges"]), "legacy graph migration must be idempotent"
+
+
+def test_selection_mainline_repair(root: Path, db):
+    project, project_id = make_project(root, db, "selection-mainline-repair")
+    for name in ("source", "selection", "progress"):
+        (project / name).mkdir()
+    raw = workspace_db.progress_register(str(root), db, {
+        "projectName": "selection-mainline-repair", "mediaKind": "image", "versionKey": "raw",
+        "displayName": "Source", "folderPath": str(project / "source"), "nodeRole": "original",
+        "trackingEnabled": False,
+    })["progressFolder"]
+    selection = workspace_db.progress_register(str(root), db, {
+        "projectName": "selection-mainline-repair", "mediaKind": "image", "versionKey": "selection",
+        "displayName": "Selection", "folderPath": str(project / "selection"), "nodeRole": "selection",
+        "relationKind": "auxiliary", "parentProgressId": raw["id"], "trackingEnabled": False,
+    })["progressFolder"]
+    progress = workspace_db.progress_register(str(root), db, {
+        "projectName": "selection-mainline-repair", "mediaKind": "image", "versionKey": "1",
+        "displayName": "Progress 1", "folderPath": str(project / "progress"), "nodeRole": "progress",
+        "relationKind": "main", "parentProgressId": raw["id"], "trackingEnabled": False,
+    })["progressFolder"]
+    workspace_db.version_tree_layout_save(db, {
+        "projectName": "selection-mainline-repair", "scopeKey": "", "expectedRevision": 0,
+        "mode": "patch", "positions": [{"nodeKey": f"progress:{progress['id']}", "x": 10, "y": 500}],
+    })
+    parent_trigger = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='progress_folders_v2_parent_update'"
+    ).fetchone()[0]
+    db.execute("DROP TRIGGER progress_folders_v2_parent_update")
+    db.execute("UPDATE progress_folders SET parent_progress_id=? WHERE id=?", (selection["id"], progress["id"]))
+    db.execute(parent_trigger)
+    db.commit()
+    try:
+        workspace_db._check_integrity(db, force=True)
+        raise AssertionError("legacy selection-owned progress must fail the parent-role business check")
+    except RuntimeError as error:
+        assert "progress_folders.v2_parent_role" in str(error)
+
+    with db:
+        assert workspace_db.repair_selection_workflow_mainlines(db, project_id) == 1
+    repaired = db.execute("SELECT parent_progress_id,relation_kind FROM progress_folders WHERE id=?", (progress["id"],)).fetchone()
+    assert tuple(repaired) == (raw["id"], "main")
+    assert db.execute(
+        """SELECT COUNT(*) FROM version_graph_edges WHERE project_id=? AND source_progress_id=?
+           AND target_progress_id=? AND edge_kind='workflow_input'""",
+        (project_id, selection["id"], progress["id"]),
+    ).fetchone()[0] == 1
+    assert db.execute("SELECT 1 FROM version_tree_layouts WHERE project_id=?", (project_id,)).fetchone() is None
+    with db:
+        assert workspace_db.repair_selection_workflow_mainlines(db, project_id) == 0
+    workspace_db._check_integrity(db, force=True)
+
+
 def main():
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary) / "workspace"
         root.mkdir()
         db = workspace_db.connect(str(root), str(Path(temporary) / "workspace.db"))
-        test_idempotency_and_session_conflict(root, db)
-        test_existing_progress_is_never_overwritten(root, db)
-        test_cross_batch_relations(root, db)
-        test_generated_camera_promotion(root, db)
-        test_atomic_rollback_and_retry(root, db)
-        db.close()
+        try:
+            test_idempotency_and_session_conflict(root, db)
+            test_existing_progress_is_never_overwritten(root, db)
+            test_cross_batch_relations(root, db)
+            test_generated_camera_promotion(root, db)
+            test_atomic_rollback_and_retry(root, db)
+            test_legacy_canonical_graph_migration(root, db)
+            test_selection_mainline_repair(root, db)
+        finally:
+            db.close()
     print("media workflow graph database tests passed")
 
 

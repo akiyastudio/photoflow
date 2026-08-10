@@ -48,6 +48,16 @@ export const trackingStateLabel = (folder: Pick<ProgressFolder, 'nodeRole' | 're
   return '跟踪处理中';
 };
 
+export const versionTreeNodeBadgeLabel = (folder: Pick<ProgressFolder, 'nodeRole' | 'relationKind' | 'artifactKind' | 'versionKey'>) => {
+  if (folder.nodeRole === 'original') return '原始素材';
+  if (folder.nodeRole === 'selection' || folder.relationKind === 'auxiliary') return '选片';
+  if (folder.nodeRole === 'artifact' && folder.artifactKind === 'preview') return '预览';
+  if (folder.nodeRole === 'workflow' && folder.artifactKind === 'team_workspace') return '协作分支';
+  if (folder.nodeRole === 'artifact') return '派生产物';
+  if (folder.nodeRole === 'workflow') return '工作流';
+  return `V${folder.versionKey}`;
+};
+
 export const progressTrackingAction = (folder: ProgressFolder): 'refresh' | 'resume' | 'repair' | null => {
   if (folder.folderMissing || folder.nodeRole !== 'progress' || folder.relationKind === 'auxiliary') return null;
   if (folder.trackingState === 'needs_repair') return 'repair';

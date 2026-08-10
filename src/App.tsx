@@ -1030,7 +1030,7 @@ const App: React.FC = () => {
                 </div>;
           return <div key={card} className={draggedHomeCard === card ? 'opacity-40' : undefined}>{content}</div>;
         })}</div>
-        {projectPages.filter(page => page.kind === 'inspiration').map(page => { const active = activeTab === 'inspiration' && activePageId === page.id; return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage pageId={page.id} active={active} initialRelativePath={page.initialRelativePath} config={config} components={components} componentsLoading={componentsLoading} onUpdateConfig={handleConfigUpdate} onDirectoryChange={(pageId, relativePath) => updatePagePath(pageId, relativePath)} onNotice={showNotice}/></div>; })}
+        {projectPages.filter(page => page.kind === 'inspiration').map(page => { const active = activeTab === 'inspiration' && activePageId === page.id; return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage pageId={page.id} active={active} initialRelativePath={page.initialRelativePath} config={config} components={components} componentsLoading={componentsLoading} onUpdateConfig={handleConfigUpdate} onDirectoryChange={updatePagePath} onNotice={showNotice}/></div>; })}
         {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} backupProjectFocus={backupProjectFocus} onClearBackupProjectFocus={() => setBackupProjectFocus(null)} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={refreshComponents} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} getDefaultSettings={getDefaultSettings} onNotice={showNotice}/>}
         {projectPages.filter(page => page.project).map(page => { const project = page.project!;
           const active = activeTab.startsWith('project') && activePageId === page.id;
@@ -1051,7 +1051,7 @@ const App: React.FC = () => {
             projectCategoryOrder={config.projectCategoryOrder}
             initialPanel={page.operation}
             initialRelativePath={page.initialRelativePath}
-            onDirectoryChange={(pageId, relativePath) => updatePagePath(pageId, relativePath)}
+            onDirectoryChange={updatePagePath}
             importConfig={config.smartImport}
             importDefaults={config.importDefaults}
             brollConfig={config.brollImport}

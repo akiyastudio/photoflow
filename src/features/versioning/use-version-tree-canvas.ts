@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MutableRefObject, PointerEvent as ReactPointerEvent } from 'react';
-import { reconcileVersionTreeCanvasPositions, type VersionTreeCanvasPosition } from './version-tree-canvas-model';
+import { reconcileVersionTreeCanvasPositions, translateVersionTreeCanvasSelection, type VersionTreeCanvasPosition } from './version-tree-canvas-model';
 
 export type VersionTreeCanvasItem = { id: string; nodeKey: string; x: number; y: number };
 export type VersionTreeDragState =
@@ -17,6 +17,7 @@ type UseVersionTreeCanvasInput = {
   nodeWidth: number;
   nodeHeight: number;
   onNotice: (message: string, duration?: number) => void;
+  selectedNodeIds?: ReadonlySet<string>;
   dragStateRef: MutableRefObject<VersionTreeDragState>;
   onDragStateChange: (state: VersionTreeDragState) => void;
 };
@@ -24,10 +25,11 @@ type UseVersionTreeCanvasInput = {
 type NodeDrag = {
   element: Element;
   pointerId: number;
-  id: string;
+  anchorId: string;
+  ids: string[];
   startClientX: number;
   startClientY: number;
-  startPosition: VersionTreeCanvasPosition;
+  startPositions: Map<string, VersionTreeCanvasPosition>;
   before: Map<string, VersionTreeCanvasPosition>;
   dragged: boolean;
 };
@@ -35,7 +37,7 @@ type NodeDrag = {
 type CanvasPan = { element: Element; pointerId: number; clientX: number; clientY: number; scrollLeft: number; scrollTop: number };
 const DRAG_THRESHOLD = 5;
 
-export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeKey, nodeWidth, nodeHeight, onNotice, dragStateRef, onDragStateChange }: UseVersionTreeCanvasInput) => {
+export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeKey, nodeWidth, nodeHeight, onNotice, selectedNodeIds = new Set(), dragStateRef, onDragStateChange }: UseVersionTreeCanvasInput) => {
   const nodesRef = useRef(nodes);
   const dimensionsRef = useRef({ nodeWidth, nodeHeight });
   const serverPositionsRef = useRef(new Map<string, VersionTreeCanvasPosition>());
@@ -186,23 +188,33 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
       if (disposedRef.current || dragStateRef.current || event.button !== 0 || (event.target as Element).closest('button,input,select,textarea,[data-version-tree-port]')) return;
       const startPosition = positionsRef.current.get(id);
       if (!startPosition) return;
+      const ids = selectedNodeIds.has(id) && selectedNodeIds.size > 1
+        ? [...selectedNodeIds].filter(candidate => positionsRef.current.has(candidate))
+        : [id];
+      const startPositions = new Map(ids.flatMap(candidate => {
+        const position = positionsRef.current.get(candidate);
+        return position ? [[candidate, position] as const] : [];
+      }));
       event.currentTarget.setPointerCapture(event.pointerId);
       onDragStateChange({ type: 'node', nodeKey: id, pointerId: event.pointerId });
-      nodeDragRef.current = { element: event.currentTarget, pointerId: event.pointerId, id, startClientX: event.clientX, startClientY: event.clientY, startPosition, before: new Map(positionsRef.current), dragged: false };
+      nodeDragRef.current = { element: event.currentTarget, pointerId: event.pointerId, anchorId: id, ids, startClientX: event.clientX, startClientY: event.clientY, startPositions, before: new Map(positionsRef.current), dragged: false };
     },
     onPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => {
       const drag = nodeDragRef.current;
-      if (!drag || drag.id !== id || drag.pointerId !== event.pointerId) return;
+      if (!drag || drag.anchorId !== id || drag.pointerId !== event.pointerId) return;
       const deltaX = event.clientX - drag.startClientX;
       const deltaY = event.clientY - drag.startClientY;
       if (!drag.dragged && Math.hypot(deltaX, deltaY) < DRAG_THRESHOLD) return;
       drag.dragged = true;
       event.preventDefault();
-      applyPositions(new Map(positionsRef.current).set(id, { x: Math.max(0, drag.startPosition.x + deltaX), y: Math.max(0, drag.startPosition.y + deltaY), manual: true }));
+      const moved = translateVersionTreeCanvasSelection(drag.startPositions, deltaX, deltaY);
+      const next = new Map(positionsRef.current);
+      moved.forEach((position, nodeId) => next.set(nodeId, position));
+      applyPositions(next);
     },
     onPointerUp: (event: ReactPointerEvent<HTMLDivElement>) => {
       const drag = nodeDragRef.current;
-      if (!drag || drag.id !== id || drag.pointerId !== event.pointerId) return;
+      if (!drag || drag.anchorId !== id || drag.pointerId !== event.pointerId) return;
       if (drag.element.hasPointerCapture(drag.pointerId)) drag.element.releasePointerCapture(drag.pointerId);
       nodeDragRef.current = null;
       onDragStateChange(null);
@@ -210,12 +222,15 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
       event.preventDefault();
       event.stopPropagation();
       suppressClickRef.current = id;
-      const position = positionsRef.current.get(id);
-      if (position) void enqueueSave('patch', new Map([[id, position]]), drag.before);
+      const moved = new Map(drag.ids.flatMap(nodeId => {
+        const position = positionsRef.current.get(nodeId);
+        return position ? [[nodeId, position] as const] : [];
+      }));
+      if (moved.size) void enqueueSave('patch', moved, drag.before);
     },
     onPointerCancel: (event: ReactPointerEvent<HTMLDivElement>) => {
       const drag = nodeDragRef.current;
-      if (!drag || drag.id !== id || drag.pointerId !== event.pointerId) return;
+      if (!drag || drag.anchorId !== id || drag.pointerId !== event.pointerId) return;
       if (drag.element.hasPointerCapture(drag.pointerId)) drag.element.releasePointerCapture(drag.pointerId);
       nodeDragRef.current = null;
       onDragStateChange(null);
@@ -227,7 +242,7 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
       event.preventDefault();
       event.stopPropagation();
     },
-  }), [applyPositions, dragStateRef, enqueueSave, onDragStateChange]);
+  }), [applyPositions, dragStateRef, enqueueSave, onDragStateChange, selectedNodeIds]);
 
   const canvasPointerHandlers = {
     onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => {

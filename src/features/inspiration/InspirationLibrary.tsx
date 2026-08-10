@@ -309,6 +309,9 @@ export const InspirationLibraryPage = ({
     attemptedInitialChoiceRef.current = true;
     void chooseRoot();
   }, [active, chooseRoot, rootPath]);
+  const handleDirectoryChange = useCallback((relativePath: string) => {
+    onDirectoryChange(pageId, relativePath);
+  }, [onDirectoryChange, pageId]);
 
   if (!rootPath) {
     return <div className="flex h-full items-center justify-center p-8 text-center"><div><Folder size={42} className="mx-auto text-slate-300"/><h2 className="mt-4 text-xl font-bold text-slate-800">设置灵感库文件夹</h2><p className="mt-2 text-sm text-slate-500">首次使用灵感库，需要先选择用于收集和整理素材的文件夹。</p><button type="button" onClick={() => void chooseRoot()} disabled={choosingRoot} className="dialog-primary mt-5 disabled:opacity-50">{choosingRoot ? '正在选择…' : '选择灵感库文件夹'}</button></div></div>;
@@ -328,7 +331,7 @@ export const InspirationLibraryPage = ({
     activeView="project"
     browserContext={INSPIRATION_FILE_BROWSER_CONTEXT}
     initialRelativePath={initialRelativePath}
-    onDirectoryChange={relativePath => onDirectoryChange(pageId, relativePath)}
+    onDirectoryChange={handleDirectoryChange}
     project={project}
     workspacePath={rootPath}
     inspirationTargetWorkspacePath={config.workspacePath}
