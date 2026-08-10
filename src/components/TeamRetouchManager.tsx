@@ -7,6 +7,7 @@ import { useAppDialog } from './AppDialogProvider';
 import { useEscapeLayer } from './LayerProvider';
 import { TeamRetouchSteps, type TeamRetouchStep } from './TeamRetouchSteps';
 import { ensureFaceRecognitionConsent } from '../utils/privacyConsent';
+import { useTeamOutputProgress } from './useTeamOutputProgress';
 
 type Props = {
   entries: ProjectFileEntry[];
@@ -605,6 +606,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, co
   const [identityPickerBusyLabel, setIdentityPickerBusyLabel] = useState('正在保存整组人物标记…');
   const [photoRefreshTokens, setPhotoRefreshTokens] = useState<Record<string, number>>({});
   const [photoProcessingMessages, setPhotoProcessingMessages] = useState<Record<string, string>>({});
+  const teamGraph = useTeamOutputProgress(identityState.photos.length ? identityState.photos.map(photo => photo.sourcePath) : entries.map(entry => entry.path), workspacePath, project, onNotice);
   const identifyingRef = useRef(false);
   const lastUnmarkedSubjectKeyRef = useRef('');
   const identityLoadSequenceRef = useRef(0);
@@ -634,6 +636,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, co
       if (!result.success) throw new Error(result.error || '未知错误');
       if (syncLabels) await syncTaskLabels(workspacePath, result);
       if (sequence === identityLoadSequenceRef.current) setIdentityState(result);
+      if (result.workflowNodeCreated) onProjectChanged?.();
     } catch (error) {
       if (sequence === identityLoadSequenceRef.current) {
         const message = error instanceof Error ? error.message : String(error);
@@ -650,6 +653,12 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, co
     return () => { identityLoadSequenceRef.current += 1; };
   }, [workspacePath, project.name]);
   useEffect(() => window.electronAPI.onTeamPatchBatchProgress(value => setProgress({ itemIndex: value.itemIndex, itemCount: value.itemCount, progress: value.progress, itemName: value.itemName, message: value.message })), []);
+  useEffect(() => {
+    if (!identityState.workflowNode?.id || !teamGraph.sourceProgressIds.length) return;
+    void teamGraph.ensureWorkflowInputs(identityState.workflowNode.id).then(() => onProjectChanged?.()).catch(error => {
+      onNotice(`登记团片来源关系失败：${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, [identityState.workflowNode?.id, teamGraph.sourceProgressIds.join('|')]);
 
   const openIdentityPicker = (subjectKey: string) => {
     const subject = identitySubjects.find(candidate => candidate.key === subjectKey);

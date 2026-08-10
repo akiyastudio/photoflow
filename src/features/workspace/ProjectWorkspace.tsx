@@ -8,15 +8,15 @@ import { ImportSourceControls } from '../../components/ImportSourceControls';
 import type { CropRectangle } from '../../components/InteractiveCropEditor';
 import { TeamRetouchManager } from '../../components/TeamRetouchManager';
 import { PersonIdentityManager } from '../../components/PersonIdentityManager';
-import { ProjectVersionTree } from '../../components/ProjectVersionTree';
+import { ProjectVersionTree, type VersionTreeCanvasController } from '../../components/ProjectVersionTree';
 import type { TeamRetouchStep } from '../../components/TeamRetouchSteps';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
-import { ConverterView, ImportCard, MatchView, ResearchView, ScreenshotMainImageView, VideoSplitView, VideoTranscodeView } from '../tools/ToolViews';
+import { ConverterView, ImportCard, MatchView, ResearchView, ScreenshotMainImageView, VideoSplitView, VideoTranscodeView, type ImportCompletion } from '../tools/ToolViews';
 import { PROJECT_FILE_BROWSER_CONTEXT } from '../file-browser/browser-context';
 import type { FileBrowserContext } from '../file-browser/browser-context';
 import { normalizeProjectCategoryOrder, PROJECT_TOOLBAR_ACTION_IDS, projectStatusLabel } from '../../types';
-import type { AppConfig, ComponentStatus, MediaMetadataField, ProgressFolder, ProjectFileEntry, ProjectFileListFilter, ProjectFileSortField, ProjectFilterScope, ProjectToolbarActionId, ShellNewFileType, ThumbnailState, VersionBatchFileOperation, WorkspaceProject } from '../../types';
+import type { AppConfig, ComponentStatus, LegacySelectionRelationRepair, MediaMetadataField, ProgressFolder, ProjectFileEntry, ProjectFileListFilter, ProjectFileSortField, ProjectFilterScope, ProjectToolbarActionId, ShellNewFileType, ThumbnailState, VersionBatchFileOperation, VersionGraphEdge, WorkspaceProject } from '../../types';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
 import { PanelTaskScope, useTaskCenter } from '../background-tasks/TaskCenter';
 import { isPanelTaskRestoreForPage, panelTaskSessionKey, type PanelTaskRestoreDetail } from '../background-tasks/panel-task-session-model';
@@ -30,8 +30,11 @@ import { collectProgressSubtree, inspectProgressRelations } from './progress-tre
 import { TrackingConfirmationPanel } from '../versioning/TrackingConfirmationPanel';
 import { ProgressPairPreview as SharedProgressPairPreview } from '../versioning/ProgressPairPreview';
 import { VersionProgressPanel, type VersionProgressDraft } from '../versioning/VersionProgressPanel';
-import { normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressTrackingAction, progressTrackingActionLabel, trackingStateLabel, type VersionRelationKind } from '../versioning/versioning-v2-model';
+import { LegacySelectionRepairNotice } from '../versioning/LegacySelectionRepairNotice';
+import { defaultMainParentId, defaultWorkflowInputIds, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressRelationChangeError, progressTrackingAction, progressTrackingActionLabel, selectableVersionParents, trackingStateLabel, type VersionRelationKind } from '../versioning/versioning-v2-model';
+import { ProgressRelationMutationQueue } from '../versioning/progress-relation-mutation-queue';
 import { metadataFieldLabel, metadataGroupLabel } from '../metadata/metadata-labels';
+import { metadataGroupDependencyKey, previewMetadataFieldsForEntry, reconcileExpandedMetadataGroups } from '../metadata/metadata-pane-model';
 
 const CONTEXT_MENU_VIEWPORT_MARGIN = 8;
 const FILE_VIRTUAL_OVERSCAN_ROWS = 10;
@@ -185,7 +188,7 @@ const useThumbnailUpdates = (
   }), [filePath, sizeLabel]);
 };
 const METADATA_GROUP_PRIORITY = ['ExifIFD', 'ExifIFD1', 'IFD0', 'Composite', 'QuickTime', 'Track1', 'XMP', 'File', 'System', '其他'];
-const pickMetadataValue = (fields: MediaMetadataField[], ...names: string[]) => {
+const pickMetadataValue = (fields: readonly MediaMetadataField[], ...names: string[]) => {
   for (const name of names) {
     const matches = fields.filter(field => field.name === name);
     const preferred = [...matches].sort((left, right) => {
@@ -210,7 +213,7 @@ const formatCaptureDate = (value?: string) => {
   }
   return source.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3').replace(/([+-]\d{2}):?(\d{2})$/, ' $1:$2');
 };
-const pickCaptureDate = (fields: MediaMetadataField[], ...names: string[]) => {
+const pickCaptureDate = (fields: readonly MediaMetadataField[], ...names: string[]) => {
   for (const name of names) {
     const formatted = formatCaptureDate(pickMetadataValue(fields, name));
     if (formatted) return formatted;
@@ -367,6 +370,7 @@ type ProgressSetupDraft = {
   deleteSourceAfterImport: boolean;
   renameSources: boolean;
   copyMissingFromParent: boolean;
+  workflowInputProgressIds: string[];
   targetRelativePath?: string;
   existingProgressId?: string;
   preserveFolderName?: boolean;
@@ -452,6 +456,7 @@ const ProgressPairPreview = ({ match, parentFolder, progressFolder, cacheConfig 
   />;
 };
 type PreviewTechnicalMetadata = { width?: number; height?: number; duration?: number; unavailable?: boolean };
+const EMPTY_PREVIEW_TECHNICAL_METADATA: PreviewTechnicalMetadata = {};
 type ProjectEntryDetails = { size: number; createdAt: number; updatedAt: number; fileCount: number; folderCount: number };
 type BatchRenameToken = 'text' | 'original' | 'sequence' | 'letter' | 'datetime' | 'replace';
 type BatchRenamePart = {
@@ -560,6 +565,24 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const { backgroundTasks, panelTasks, dismissBackgroundTask } = useTaskCenter();
   const [folders, setFolders] = useState<Array<{ name: string; path: string; updatedAt: number }>>([]);
   const [progressFolders, setProgressFolders] = useState<ProgressFolder[]>([]);
+  const [versionGraphEdges, setVersionGraphEdges] = useState<VersionGraphEdge[]>([]);
+  const [legacySelectionRepairs, setLegacySelectionRepairs] = useState<LegacySelectionRelationRepair[]>([]);
+  const [legacySelectionRepairBusyIds, setLegacySelectionRepairBusyIds] = useState<string[]>([]);
+  const [draggingChildId, setDraggingChildId] = useState('');
+  const [hoverParentId, setHoverParentId] = useState('');
+  const [pendingRelationChange, setPendingRelationChange] = useState<{ childProgressId: string; parentProgressId: string | null } | null>(null);
+  const [relationMutationId, setRelationMutationId] = useState(0);
+  const relationMutationIdRef = useRef(0);
+  const progressFoldersRef = useRef<ProgressFolder[]>([]);
+  const relationMutationQueueRef = useRef(new ProgressRelationMutationQueue());
+  const relationMutationCountsRef = useRef(new Map<string, number>());
+  const [relationMutatingChildIds, setRelationMutatingChildIds] = useState<string[]>([]);
+  useEffect(() => { progressFoldersRef.current = progressFolders; }, [progressFolders]);
+  const cancelRelationEdit = useCallback(() => {
+    setDraggingChildId('');
+    setHoverParentId('');
+    setPendingRelationChange(null);
+  }, []);
   const dismissTrackingTaskForSession = (sessionId: string) => {
     const task = backgroundTasks.find(item => item.type === 'version-tracking' && item.metadata?.sessionId === sessionId);
     if (task) void dismissBackgroundTask(task.id);
@@ -857,11 +880,16 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   useEscapeLayer(Boolean(progressCompare), () => { void closeProgressCompare(); }, !progressSubmitting);
   useEscapeLayer(Boolean(progressRepair), () => setProgressRepair(null), !progressRepairBusy);
   useEscapeLayer(Boolean(pendingProgressFolders.length) && !progressSetup, () => setPendingProgressFolders([]));
+  useEscapeLayer(Boolean(draggingChildId || pendingRelationChange), cancelRelationEdit);
   useEscapeLayer(batchRenameOpen, () => { if (!renameCommitRef.current) setBatchRenameOpen(false); });
   useEscapeLayer(confirmDelete, () => setConfirmDelete(false));
   useEscapeLayer(Boolean(gatherPickerPaths), () => setGatherPickerPaths(null), !gatheringInspiration);
   const [fileMenu, setFileMenu] = useState<{ entry: ProjectFileEntry; x: number; y: number } | null>(null);
-  const [surfaceMenu, setSurfaceMenu] = useState<{ x: number; y: number; targetRelativePath: string; targetLabel: string } | null>(null);
+  const [surfaceMenu, setSurfaceMenu] = useState<{ x: number; y: number; targetRelativePath: string; targetLabel: string; kind: 'files' | 'version-tree-layout' } | null>(null);
+  const versionTreeCanvasControllerRef = useRef<VersionTreeCanvasController | null>(null);
+  const setVersionTreeCanvasController = useCallback((controller: VersionTreeCanvasController | null) => {
+    versionTreeCanvasControllerRef.current = controller;
+  }, []);
   const [missingProgressMenu, setMissingProgressMenu] = useState<{ folder: ProgressFolder; x: number; y: number } | null>(null);
   const [clipboardHasFiles, setClipboardHasFiles] = useState(false);
   const [clipboardPending, setClipboardPending] = useState(false);
@@ -880,6 +908,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const teamRetouchWorkflowGeneratedRef = useRef(false);
   const [, setFinalVersionSummary] = useState({ count: 0, availableCount: 0, missingCount: 0 });
   const [finalExporting, setFinalExporting] = useState(false);
+  const [finalExportParentId, setFinalExportParentId] = useState('');
   const [finalViewOpen, setFinalViewOpen] = useState(false);
   const [, setFinalViewLoading] = useState(false);
   const [finalViewEntries, setFinalViewEntries] = useState<ProjectFileEntry[]>([]);
@@ -1000,6 +1029,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (teamRetouchHistoryRequestRef.current) return teamRetouchHistoryRequestRef.current;
     const request: Promise<ProjectFileEntry[]> = window.electronAPI.getTeamProjectWorkspace(workspacePath, project.name, project.status).then(result => {
       if (!result.success) throw new Error(result.error || '无法读取团片协作记录');
+      if (result.workflowNodeCreated && result.workflowNode) {
+        setProgressFolders(current => {
+          const next = current.some(folder => folder.id === result.workflowNode!.id) ? current : [...current, result.workflowNode!];
+          progressFoldersRef.current = next;
+          return next;
+        });
+      }
       teamRetouchWorkflowGeneratedRef.current = Boolean(result.workflowGenerated);
       const entries = result.photos.map(photo => {
         const name = photo.sourcePath.split(/[\\/]/).pop() || photo.name;
@@ -1066,12 +1102,169 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const loadProgressFolders = useCallback(async () => {
     const result = await window.electronAPI.getProgressFolders(workspacePath, project.name);
     if (result.success) {
+      progressFoldersRef.current = result.progressFolders;
       setProgressFolders(result.progressFolders);
+      setVersionGraphEdges(result.graphEdges || []);
+      setLegacySelectionRepairs(result.legacySelectionRelationRepairs || []);
       return result.progressFolders;
     }
     onNotice(`读取版本进度失败：${result.error || '未知错误'}`);
     return [];
   }, [workspacePath, project.name, onNotice]);
+  const repairLegacySelectionRelation = async (progressId: string, sourceProgressId: string) => {
+    if (legacySelectionRepairBusyIds.includes(progressId)) return;
+    setLegacySelectionRepairBusyIds(current => current.includes(progressId) ? current : [...current, progressId]);
+    try {
+      const result = await window.electronAPI.repairLegacySelectionRelation(workspacePath, project.name, { progressId, sourceProgressId });
+      if (!result.success) {
+        onNotice(`修复旧选片关系失败：${result.error || '未知错误'}`, 7000);
+        await loadProgressFolders();
+        return;
+      }
+      await loadProgressFolders();
+      onNotice('旧选片关系已修复');
+    } catch (error) {
+      onNotice(`修复旧选片关系失败：${error instanceof Error ? error.message : '未知错误'}`, 7000);
+      await loadProgressFolders();
+    } finally {
+      setLegacySelectionRepairBusyIds(current => current.filter(id => id !== progressId));
+    }
+  };
+  const requestSupplementalEdgeDelete = async (edge: Pick<VersionGraphEdge, 'id' | 'sourceProgressId' | 'targetProgressId' | 'edgeKind'>) => {
+    const child = progressFoldersRef.current.find(folder => folder.id === edge.targetProgressId);
+    if (!child) { onNotice('关系终点不存在，请刷新后重试'); return; }
+    // Keep all relation mutations behind the same front-end validation entry.
+    progressRelationChangeError(progressFoldersRef.current, child.id, child.parentProgressId || null);
+    const confirmed = await appDialog.confirm({
+      title: '删除补充关系？',
+      message: '只会删除这条工作流或媒体关联，不会改变主版本父节点，也不会移动文件。',
+      confirmLabel: '删除关系',
+      tone: 'danger',
+    });
+    if (!confirmed) return;
+    const result = await window.electronAPI.deleteVersionGraphEdge(workspacePath, {
+      projectId: child.projectId,
+      sourceProgressId: edge.sourceProgressId,
+      targetProgressId: edge.targetProgressId,
+      edgeKind: edge.edgeKind,
+    });
+    if (!result.success) { onNotice(`删除补充关系失败：${result.error || '未知错误'}`, 7000); return; }
+    await loadProgressFolders();
+    onNotice('补充关系已删除');
+  };
+  const requestSupplementalEdgeReconnect = async (edge: Pick<VersionGraphEdge, 'id' | 'sourceProgressId' | 'targetProgressId' | 'edgeKind'>, newSourceProgressId: string) => {
+    const child = progressFoldersRef.current.find(folder => folder.id === edge.targetProgressId);
+    const source = progressFoldersRef.current.find(folder => folder.id === newSourceProgressId);
+    if (!child || !source) { onNotice('关系节点不存在，请刷新后重试'); cancelRelationEdit(); return; }
+    // Keep the shared structural validator in every relation-mutation entry path.
+    progressRelationChangeError(progressFoldersRef.current, child.id, child.parentProgressId || null);
+    if (edge.sourceProgressId === newSourceProgressId) { onNotice('补充关系没有变化'); cancelRelationEdit(); return; }
+    const confirmed = await appDialog.confirm({
+      title: '确认改接关系来源？',
+      message: `将这条关系的来源改为“${source.displayName}”。不会改变关系类型、主版本父节点或物理文件。`,
+      confirmLabel: '改接关系',
+    });
+    if (!confirmed) { cancelRelationEdit(); return; }
+    const result = await window.electronAPI.replaceVersionGraphEdgeSource(workspacePath, {
+      projectId: child.projectId,
+      sourceProgressId: edge.sourceProgressId,
+      targetProgressId: edge.targetProgressId,
+      edgeKind: edge.edgeKind,
+      newSourceProgressId,
+    });
+    cancelRelationEdit();
+    if (!result.success) { onNotice(`改接补充关系失败：${result.error || '未知错误'}`, 7000); return; }
+    await loadProgressFolders();
+    onNotice('补充关系来源已更新');
+  };
+  const requestProgressRelationChange = async (childProgressId: string, parentProgressId: string | null) => {
+    const child = progressFoldersRef.current.find(folder => folder.id === childProgressId);
+    const parent = parentProgressId ? progressFoldersRef.current.find(folder => folder.id === parentProgressId) : undefined;
+    if (!child) { onNotice('要修改的版本节点不存在，请刷新后重试'); return; }
+    const relationError = progressRelationChangeError(progressFoldersRef.current, childProgressId, parentProgressId);
+    if (relationError) { onNotice(relationError, 5000); cancelRelationEdit(); return; }
+    if ((child.parentProgressId || null) === parentProgressId) { onNotice('版本关系没有变化'); cancelRelationEdit(); return; }
+    const request = { childProgressId, parentProgressId };
+    setPendingRelationChange(request);
+    const confirmed = await appDialog.confirm({
+      title: '确认修改版本关系？',
+      message: child.nodeRole === 'selection'
+        ? `将“${child.displayName}”的来源改为“${parent?.displayName || '未知节点'}”。只修改版本关系，不会重新复制选片内容。`
+        : parent ? `将“${child.displayName}”连接到“${parent.displayName}”下面。不会移动或重命名物理文件夹。` : `将“${child.displayName}”断开为独立根节点。不会移动或重命名物理文件夹。`,
+      confirmLabel: '修改关系',
+    });
+    if (!confirmed) { cancelRelationEdit(); return; }
+    if (parent && (child.nodeRole === 'progress' && (parent.nodeRole === 'selection' || parent.nodeRole === 'workflow')
+      || child.nodeRole === 'workflow' && parent.nodeRole === 'progress')) {
+      const result = await window.electronAPI.createVersionGraphEdge(workspacePath, {
+        projectId: child.projectId,
+        sourceProgressId: parent.id,
+        targetProgressId: child.id,
+        edgeKind: 'workflow_input',
+      });
+      cancelRelationEdit();
+      if (!result.success) {
+        onNotice(`添加工作流输入关系失败：${result.error || '未知错误'}`, 7000);
+        return;
+      }
+      await loadProgressFolders();
+      onNotice('工作流输入关系已添加');
+      return;
+    }
+    const mutationId = Math.max(relationMutationIdRef.current, relationMutationId) + 1;
+    relationMutationIdRef.current = mutationId;
+    setRelationMutationId(mutationId);
+    relationMutationCountsRef.current.set(childProgressId, (relationMutationCountsRef.current.get(childProgressId) || 0) + 1);
+    setRelationMutatingChildIds(current => current.includes(childProgressId) ? current : [...current, childProgressId]);
+    const mutationQueue = relationMutationQueueRef.current;
+    const mutationGeneration = mutationQueue.captureGeneration();
+    try {
+      await mutationQueue.enqueue(childProgressId, async () => {
+        let latestChild = progressFoldersRef.current.find(folder => folder.id === childProgressId);
+        if (!latestChild) latestChild = (await loadProgressFolders()).find(folder => folder.id === childProgressId);
+        if (!latestChild) throw new Error('要修改的版本节点不存在，请刷新后重试');
+        if ((latestChild.parentProgressId || null) === parentProgressId) return;
+        const result = await window.electronAPI.updateProgressRelation(workspacePath, project.name, {
+          childProgressId,
+          parentProgressId,
+          expectedUpdatedAt: latestChild.updatedAt,
+        });
+        if (!mutationQueue.isGenerationCurrent(mutationGeneration)) return;
+        if (!result.success || !result.progressFolder) {
+          if ((result.error || '').includes('stale_update')) await loadProgressFolders();
+          throw new Error(result.error || '未知错误');
+        }
+        const updatedFolder = result.progressFolder;
+        setProgressFolders(current => {
+          const next = current.map(folder => folder.id === updatedFolder.id ? updatedFolder : folder);
+          progressFoldersRef.current = next;
+          return next;
+        });
+        onNotice('版本关系已更新');
+      });
+    } catch (error) {
+      mutationQueue.runIfCurrent(mutationGeneration, () => {
+        onNotice(`修改版本关系失败：${error instanceof Error ? error.message : '未知错误'}`, 7000);
+      });
+    } finally {
+      if (mutationQueue.isGenerationCurrent(mutationGeneration)) {
+        const remaining = Math.max(0, (relationMutationCountsRef.current.get(childProgressId) || 1) - 1);
+        if (remaining) relationMutationCountsRef.current.set(childProgressId, remaining);
+        else {
+          relationMutationCountsRef.current.delete(childProgressId);
+          setRelationMutatingChildIds(current => current.filter(id => id !== childProgressId));
+          setPendingRelationChange(current => current?.childProgressId === childProgressId ? null : current);
+          setDraggingChildId(current => current === childProgressId ? '' : current);
+          setHoverParentId('');
+        }
+      }
+    }
+  };
+  useEffect(() => () => {
+    relationMutationIdRef.current += 1;
+    relationMutationQueueRef.current.dispose();
+    relationMutationCountsRef.current.clear();
+  }, []);
   useEffect(() => {
     const openTrackingConfirmation = (event: Event) => {
       if (!active) return;
@@ -1238,7 +1431,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   };
 
   const removeMissingProgress = async (folder: ProgressFolder) => {
-    if (!folder.folderMissing || folder.versionKey === '0') return;
+    if (!folder.folderMissing || folder.nodeRole === 'original') return;
     const confirmed = await appDialog.confirm({
       title: `移除失效版本 V${folder.versionKey}？`,
       message: `将移除“${folder.displayName}”的数据库进度节点及其失效版本记录，不会删除项目目录中的素材文件；关联缓存和内部工作文件会在后台清理。后代版本会自动连接到上一级；移除后，即使恢复原文件夹也不会再自动连接。`,
@@ -1280,6 +1473,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     }
     currentRelativePathRef.current = lifecycle.relativePath;
     setProgressFolders([]);
+    setVersionGraphEdges([]);
     setFileEntries([]);
     setDirectoryHistory({ back: [], forward: [] });
     setPreviewPath('');
@@ -2090,7 +2284,22 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       setOfficeExtractBusy(false);
     }
   };
-  const markInProgress = async () => {
+  const completeSdImport = async (completion: ImportCompletion) => {
+    const result = await window.electronAPI.finalizeSdImportedProjects(workspacePath, completion.projectNames, {
+      moveProjectAfterImport: importConfig.autoMoveProjectAfterSdImport,
+      workProjectNames: completion.workProjectNames,
+    });
+    await refresh();
+    window.dispatchEvent(new Event('workspace-projects-changed'));
+    if (!result.success) { onNotice(`整理导入项目失败：${result.error || '未知错误'}`, 7000); return; }
+    const latestProject = result.projects.find(item => item.id === project.id || item.name.toLocaleLowerCase() === project.name.toLocaleLowerCase());
+    if (latestProject && latestProject.status !== project.status) onProjectMoved(latestProject);
+    if (result.failures.length) onNotice(`导入已完成，但有 ${result.failures.length} 个项目的分类更新失败。`, 7000);
+    else if (result.movedProjects.some(item => item.id === project.id || item.name.toLocaleLowerCase() === project.name.toLocaleLowerCase())) onNotice('导入完成，项目已移入“后期中”。');
+    else onNotice('导入完成，项目分类保持不变。');
+  };
+  const completeNegativeImport = async () => {
+    await refresh();
     if (project.status === '后期中') return;
     const result = await window.electronAPI.moveWorkspaceProject(workspacePath, project.status, project.name, '后期中');
     if (!result.success || !result.project) { onNotice(`项目状态更新失败：${result.error || '未知错误'}`); return; }
@@ -2174,8 +2383,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const progressVersionIsValid = (draft: ProgressSetupDraft) => {
     if (progressRelationInspection.needsRepair) return false;
     if (draft.relationKind === 'auxiliary' && !draft.parentProgressId) return false;
-    if (!draft.parentProgressId) return true;
-    const parent = progressFolders.find(folder => folder.id === draft.parentProgressId && !folder.folderMissing && folder.mediaKind === draft.mediaKind);
+    if (!draft.parentProgressId) return draft.mode === 'mark' && Boolean(draft.existingProgressId);
+    const parent = selectableVersionParents(progressFolders, draft).find(folder => folder.id === draft.parentProgressId);
     return Boolean(parent && !progressSubtreeIds(draft.existingProgressId).has(parent.id));
   };
   const progressSubtreeIds = (progressId?: string) => {
@@ -2194,20 +2403,22 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     return displayName.startsWith(generatedPrefix) ? displayName.slice(generatedPrefix.length) : fallback;
   };
   const makeProgressDraft = (mode: 'create' | 'import' | 'mark', mediaKind: 'image' | 'video', relation: 'root' | 'branch', parentProgressId = '', sourceFolders = progressFolders): ProgressSetupDraft => {
-    const kindFolders = sourceFolders.filter(folder => folder.mediaKind === mediaKind).sort((left, right) => compareProgressKeys(left.versionKey, right.versionKey));
+    const kindFolders = sourceFolders.filter(folder => folder.mediaKind === mediaKind && folder.nodeRole === 'progress' && folder.relationKind !== 'auxiliary').sort((left, right) => compareProgressKeys(left.versionKey, right.versionKey));
     const availableFolders = kindFolders.filter(folder => !folder.folderMissing);
     const rootFolders = availableFolders.filter(folder => !folder.versionKey.includes('_'));
-    const availableRootFolders = rootFolders.filter(folder => !folder.folderMissing);
-    const requestedParent = availableFolders.find(folder => folder.id === parentProgressId);
-    const branchParent = requestedParent || availableFolders[availableFolders.length - 1];
+    const structuralParents = selectableVersionParents(sourceFolders, { mediaKind, relationKind: 'main' });
+    const requestedParent = structuralParents.find(folder => folder.id === parentProgressId);
+    const semanticDefaultParentId = defaultMainParentId(sourceFolders, versionGraphEdges, mediaKind);
+    const branchParent = requestedParent || structuralParents.find(folder => folder.id === semanticDefaultParentId);
     const actualRelation = relation === 'branch' && branchParent ? 'branch' : 'root';
     let versionKey = '';
     let parentId = '';
     if (actualRelation === 'root') {
       const nextRoot = rootFolders.reduce((highest, folder) => Math.max(highest, Number(folder.versionKey) || 0), 0) + 1;
       versionKey = String(nextRoot);
-      parentId = availableRootFolders[availableRootFolders.length - 1]?.id || '';
+      parentId = requestedParent?.id || semanticDefaultParentId;
     } else {
+      if (!branchParent) throw new Error('分支进度缺少有效的结构父节点');
       const parentParts = branchParent.versionKey.split('_');
       const childPrefix = `${branchParent.versionKey}_`;
       const nextChild = availableFolders.reduce((highest, folder) => {
@@ -2219,7 +2430,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       versionKey = `${branchParent.versionKey}_${nextChild}`;
       parentId = branchParent.id;
     }
-    return { mode, mediaKind, relation: actualRelation, relationKind: 'main', parentProgressId: parentId, versionKey, progressName: '', trackingEnabled: mode !== 'create', deleteSourceAfterImport: importDefaults.deleteSourceAfterImport, renameSources: false, copyMissingFromParent: false };
+    return { mode, mediaKind, relation: actualRelation, relationKind: 'main', parentProgressId: parentId, versionKey, progressName: '', trackingEnabled: mode !== 'create', deleteSourceAfterImport: importDefaults.deleteSourceAfterImport, renameSources: false, copyMissingFromParent: false, workflowInputProgressIds: defaultWorkflowInputIds(sourceFolders, versionGraphEdges, parentId) };
   };
   const openProgressSetup = (mode: 'create' | 'import') => {
     setShowCreateMenu(false);
@@ -2250,6 +2461,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         targetRelativePath,
         existingProgressId: registered.id,
         preserveFolderName: targetRelativePath.includes('/') || entry.name !== registered.displayName,
+        workflowInputProgressIds: defaultWorkflowInputIds(sourceFolders, versionGraphEdges, registered.parentProgressId || '', registered.id),
       };
     }
     if (entry.kind !== 'folder') return null;
@@ -2314,6 +2526,26 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!updated.success || !updated.progressFolder) throw new Error(updated.error || '无法更新版本跟踪状态');
     return updated.progressFolder;
   };
+  const registerProgressWithWorkflow = async (progress: {
+    relativePath: string;
+    mediaKind: 'image' | 'video';
+    versionKey: string;
+    parentProgressId?: string;
+    displayName: string;
+    relationKind: VersionRelationKind;
+    trackingEnabled: boolean;
+    renameFromParent: boolean;
+    copyMissingFromParent: boolean;
+    trackingState: ProgressFolder['trackingState'];
+    progressId?: string;
+    moveToRoot?: boolean;
+  }, workflowInputProgressIds: string[]) => {
+    return window.electronAPI.registerProgressWithGraph(workspacePath, project.status, {
+      projectName: project.name,
+      progress,
+      workflowInputProgressIds,
+    });
+  };
   const submitProgressSetup = async () => {
     if (!progressSetup || progressSubmitting || !progressVersionIsValid(progressSetup) || progressNameHasConflict(progressSetup)) return;
     const draft = progressSetup;
@@ -2334,23 +2566,20 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         const created = await window.electronAPI.createProgressFolder(workspacePath, project.status, project.name, {
           mediaKind: draft.mediaKind,
           versionKey: draft.versionKey,
-          parentProgressId: draft.parentProgressId || undefined,
           displayName: generatedName,
         });
-        if (!created.success || !created.folder || !created.progressFolder) throw new Error(created.error || '无法创建进度文件夹');
+        if (!created.success || !created.folder) throw new Error(created.error || '无法创建进度文件夹');
         const policy = normalizeProgressSetupTrackingPolicy(draft.relationKind, draft);
-        const registered = await window.electronAPI.registerProgressFolder(workspacePath, project.status, project.name, {
+        const registered = await registerProgressWithWorkflow({
           relativePath: created.folder.relativePath,
           mediaKind: draft.mediaKind,
           versionKey: draft.versionKey,
           parentProgressId: draft.parentProgressId || undefined,
           displayName: generatedName,
-          nodeRole: draft.relationKind === 'auxiliary' ? 'selection' : 'progress',
           relationKind: draft.relationKind,
           ...policy,
           trackingState: policy.trackingEnabled ? 'pending_compare' : 'disabled',
-          progressId: created.progressFolder.id,
-        });
+        }, draft.workflowInputProgressIds);
         if (!registered.success || !registered.progressFolder) throw new Error(registered.error || '无法保存版本 V2 关系');
         setProgressSetup(null);
         setProgressFolders(current => current.some(folder => folder.id === registered.progressFolder!.id) ? current.map(folder => folder.id === registered.progressFolder!.id ? registered.progressFolder! : folder) : [...current, registered.progressFolder!]);
@@ -2377,19 +2606,18 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           || existingProgress.copyMissingFromParent !== policy.copyMissingFromParent
           || existingProgress.parentProgressId !== (draft.parentProgressId || undefined)
           || (existingProgress.relationKind || 'main') !== draft.relationKind;
-        const registered = await window.electronAPI.registerProgressFolder(workspacePath, project.status, project.name, {
+        const registered = await registerProgressWithWorkflow({
           relativePath,
           mediaKind: draft.mediaKind,
           versionKey: draft.versionKey,
           parentProgressId: draft.parentProgressId || undefined,
           displayName: generatedName,
-          nodeRole: draft.relationKind === 'auxiliary' ? 'selection' : draft.parentProgressId ? 'progress' : existingProgress.nodeRole === 'original' ? 'original' : 'progress',
           relationKind: draft.relationKind,
           ...policy,
           trackingState: policy.trackingEnabled && policyChanged ? 'pending_compare' : policy.trackingEnabled ? existingProgress.trackingState : 'disabled',
           progressId: existingProgress.id,
           moveToRoot,
-        });
+        }, draft.workflowInputProgressIds);
         if (!registered.success || !registered.progressFolder) throw new Error(registered.error || '无法保存版本 V2 设置');
         relativePath = registered.relativePath || relativePath;
         setProgressSetup(null);
@@ -2415,19 +2643,18 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         if (moveToRoot) setProgressTask('正在安全移动文件夹到项目根目录…');
         setProgressTask(`正在标记${draft.mediaKind === 'image' ? '图片' : '视频'}进度…`);
         const policy = normalizeProgressSetupTrackingPolicy(draft.relationKind, draft);
-        const registered = await window.electronAPI.registerProgressFolder(workspacePath, project.status, project.name, {
+        const registered = await registerProgressWithWorkflow({
           relativePath: targetRelativePath,
           mediaKind: draft.mediaKind,
           versionKey: draft.versionKey,
           parentProgressId: draft.parentProgressId || undefined,
           displayName: generatedName,
-          nodeRole: draft.relationKind === 'auxiliary' ? 'selection' : draft.parentProgressId ? 'progress' : 'original',
           relationKind: draft.relationKind,
           ...policy,
           trackingState: policy.trackingEnabled ? 'pending_compare' : 'disabled',
           progressId: draft.existingProgressId,
           moveToRoot,
-        });
+        }, draft.workflowInputProgressIds);
         if (!registered.success || !registered.progressFolder) throw new Error(registered.error || '无法登记进度文件夹');
         targetRelativePath = registered.relativePath || targetRelativePath;
         const progressFolder = registered.progressFolder;
@@ -2505,18 +2732,17 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       }
       if (!imported.progressFolder) throw new Error('版本进度没有完成数据库登记');
       const importPolicy = normalizeProgressSetupTrackingPolicy(draft.relationKind, draft);
-      const v2Imported = await window.electronAPI.registerProgressFolder(workspacePath, project.status, project.name, {
+      const v2Imported = await registerProgressWithWorkflow({
         relativePath: imported.folder.relativePath,
         mediaKind: draft.mediaKind,
         versionKey: draft.versionKey,
         parentProgressId: appendTarget?.parentProgressId || draft.parentProgressId || undefined,
         displayName: generatedName,
-        nodeRole: draft.relationKind === 'auxiliary' ? 'selection' : 'progress',
         relationKind: draft.relationKind,
         ...importPolicy,
         trackingState: importPolicy.trackingEnabled ? 'pending_compare' : 'disabled',
         progressId: imported.progressFolder.id,
-      });
+      }, draft.workflowInputProgressIds);
       if (!v2Imported.success || !v2Imported.progressFolder) throw new Error(v2Imported.error || '无法保存导入进度的 V2 关系');
       const progressFolder = v2Imported.progressFolder;
       await loadProgressFolders();
@@ -2939,6 +3165,18 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     openFileMenuAt(event.clientX, event.clientY, entry, selectEntry);
   };
   const openSurfaceMenu = (event: React.MouseEvent<HTMLElement>, targetRelativePath = currentRelativePath, targetLabel = '') => {
+    if (versionTreeOpen) {
+      event.preventDefault();
+      event.stopPropagation();
+      const target = event.target as Element;
+      const blankCanvas = target.closest('[data-version-tree-canvas]') && !target.closest('[data-version-tree-node],[data-edge-id],[data-edge-child-handle],button');
+      if (!blankCanvas || normalizeProjectRelativePath(currentRelativePath) || !hasVersionTreeFor()) return;
+      filesSurfaceRef.current?.focus({ preventScroll: true });
+      window.dispatchEvent(new Event('photoflow-menu-open'));
+      setFileMenu(null);
+      setSurfaceMenu({ x: event.clientX, y: event.clientY, targetRelativePath: '', targetLabel: '版本树', kind: 'version-tree-layout' });
+      return;
+    }
     if ((event.target as HTMLElement).closest('[data-entry-path]')) return;
     event.preventDefault();
     event.stopPropagation();
@@ -2950,8 +3188,23 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setSelectedPaths([]);
     const normalizedTarget = normalizeProjectRelativePath(targetRelativePath);
     setOperationDirectoryPath(normalizedTarget);
-    setSurfaceMenu({ x: event.clientX, y: event.clientY, targetRelativePath: normalizedTarget, targetLabel: targetLabel || normalizedTarget || '项目根目录' });
+    setSurfaceMenu({ x: event.clientX, y: event.clientY, targetRelativePath: normalizedTarget, targetLabel: targetLabel || normalizedTarget || '项目根目录', kind: 'files' });
     void loadShellNewTypes();
+  };
+  const restoreStandardVersionTreeLayout = async () => {
+    const controller = versionTreeCanvasControllerRef.current;
+    setSurfaceMenu(null);
+    if (!versionTreeOpen || normalizeProjectRelativePath(currentRelativePath) || !hasVersionTreeFor() || !controller) return;
+    if (controller.hasManualLayout) {
+      const confirmed = await appDialog.confirm({
+        title: '恢复版本树标准排版？',
+        message: '将恢复标准排版。版本关系和文件不会改变。',
+        confirmLabel: '刷新',
+      });
+      if (!confirmed) return;
+    }
+    const success = await controller.refreshLayout();
+    if (success) onNotice('版本树已恢复标准排版');
   };
   const openMissingProgressMenu = (folder: ProgressFolder, x: number, y: number) => {
     window.dispatchEvent(new Event('photoflow-menu-open'));
@@ -3047,18 +3300,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         && (entryPath === folderPath || entryPath.startsWith(`${folderPath}/`));
     });
   };
-  const teamRetouchProgressCounts = teamRetouchHistory.reduce((counts, entry) => {
-    const progressId = progressFolderForMediaEntry(entry)?.id;
-    if (progressId) counts.set(progressId, (counts.get(progressId) || 0) + 1);
-    return counts;
-  }, new Map<string, number>());
-  const teamRetouchParentProgressIds = [...teamRetouchProgressCounts.keys()].sort((leftId, rightId) => {
-    const countDifference = (teamRetouchProgressCounts.get(rightId) || 0) - (teamRetouchProgressCounts.get(leftId) || 0);
-    if (countDifference) return countDifference;
-    const left = progressFolders.find(folder => folder.id === leftId);
-    const right = progressFolders.find(folder => folder.id === rightId);
-    return left && right ? compareProgressKeys(right.versionKey, left.versionKey) : 0;
-  });
   const hasVersionProgressForEntry = (entry?: ProjectFileEntry) => Boolean(progressFolderForMediaEntry(entry));
   const openVersions = (entry?: ProjectFileEntry) => {
     const target = entry || selectedEntries[0];
@@ -3082,6 +3323,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       return;
     }
     const latestFolders = await loadProgressFolders();
+    const explicitParent = latestFolders.find(folder => folder.id === finalExportParentId && folder.mediaKind === 'image'
+      && !folder.folderMissing && folder.nodeRole !== 'selection' && folder.relationKind !== 'auxiliary');
+    if (!explicitParent) {
+      onNotice('请先选择喜爱图片新进度要连接的父节点', 6000);
+      return;
+    }
     const latestRootNumber = latestFolders
       .filter(folder => folder.mediaKind === 'image' && /^\d+$/.test(folder.versionKey))
       .reduce((highest, folder) => Math.max(highest, Number(folder.versionKey)), 0);
@@ -3093,7 +3340,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     })) return;
     setFinalExporting(true);
     try {
-      const result = await window.electronAPI.exportFinalVersions(workspacePath, project.status, project.name);
+      const result = await window.electronAPI.exportFinalVersions(workspacePath, project.status, project.name, { parentProgressId: explicitParent.id });
       if (!result.success || !result.folder) throw new Error(result.error || '无法整理喜爱图片');
       directoryEntriesCacheRef.current.clear();
       await loadProgressFolders();
@@ -3601,7 +3848,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const filesInCurrentDirectory = activeFileEntries.filter(entry => entry.kind !== 'folder');
   const viewportCurrentEntry = filesInCurrentDirectory.find(entry => entry.relativePath === viewportCurrentPath);
   const viewportCurrentFileNumber = viewportCurrentEntry ? filesInCurrentDirectory.findIndex(entry => entry.relativePath === viewportCurrentEntry.relativePath) + 1 : 0;
-  const currentPreviewMetadataFields = focusedEntry && previewMetadataResolvedPath === focusedEntry.path ? previewMetadataFields : [];
+  const currentPreviewMetadataFields = previewMetadataFieldsForEntry(previewMetadataFields, previewMetadataResolvedPath, focusedEntry?.path);
   const currentPreviewMetadataLoading = Boolean(focusedEntry && (previewMetadataLoading || previewMetadataResolvedPath !== focusedEntry.path));
   const currentPreviewMetadataError = focusedEntry && previewMetadataResolvedPath === focusedEntry.path ? previewMetadataError : '';
   const previewCanMarkFinal = Boolean(previewEntry && !previewEntry.viaShortcut && (previewEntry.kind === 'image' || previewEntry.kind === 'raw'));
@@ -3831,6 +4078,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         return;
       }
       setPreviewMetadataFields(result.fields);
+      setPreviewMetadataResolvedPath(focusedEntry.path);
+    }).catch(error => {
+      if (!active) return;
+      setPreviewMetadataError(error instanceof Error ? error.message : String(error || '无法读取完整详细信息'));
       setPreviewMetadataResolvedPath(focusedEntry.path);
     }).finally(() => { if (active) setPreviewMetadataLoading(false); });
     return () => { active = false; };
@@ -4396,8 +4647,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const renderVersionTreeEntry = (entry: ProjectFileEntry, progressFolder?: ProgressFolder, sourceKind?: 'image' | 'video') => <div
     role="button"
     tabIndex={0}
-    draggable={inlineRenamePath !== entry.relativePath}
-    onDragStart={event => startEntryDrag(event, entry)}
+    draggable={false}
     onDragOver={event => handleEntryDragOver(event, entry)}
     onDragLeave={event => handleEntryDragLeave(event, entry)}
     onDrop={event => void handleEntryDrop(event, entry)}
@@ -4412,12 +4662,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     className={`group relative min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) || previewPath === entry.relativePath ? 'bg-blue-50 ring-1 ring-blue-400' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'bg-blue-100 ring-2 ring-blue-500' : ''}`}
   >
     <span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span>
-    {progressFolder && <span className={`absolute right-3 top-3 z-10 rounded-full px-2 py-1 text-[10px] font-bold shadow-sm ${progressFolder.relationKind === 'auxiliary' ? 'bg-violet-600 text-white' : progressFolder.nodeRole === 'original' ? 'bg-slate-700 text-white' : 'bg-blue-600 text-white'}`}>{progressFolder.nodeRole === 'original' ? '原始素材' : progressFolder.relationKind === 'auxiliary' ? '附属' : `V${progressFolder.versionKey}`}</span>}
+    {progressFolder && <span className={`absolute right-3 top-3 z-10 rounded-full px-2 py-1 text-[10px] font-bold shadow-sm ${progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' ? 'bg-violet-600 text-white' : progressFolder.nodeRole === 'original' ? 'bg-slate-700 text-white' : 'bg-blue-600 text-white'}`}>{progressFolder.nodeRole === 'original' ? '原始素材' : progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' ? '选片' : `V${progressFolder.versionKey}`}</span>}
     {!progressFolder && sourceKind && <span className="absolute right-3 top-3 z-10 rounded-full bg-slate-700 px-2 py-1 text-[10px] font-bold text-white shadow-sm">底片</span>}
     {!progressFolder && entry.name === '团片协作' && <span className="absolute right-3 top-3 z-10 rounded-full bg-violet-600 px-2 py-1 text-[10px] font-bold text-white shadow-sm">协作分支</span>}
     <div className="relative flex aspect-square items-center justify-center">{renderEntryIcon(entry, true)}</div>
     {renderEntryName(entry, true)}
-    <p className={`mt-0.5 truncate text-[10px] ${progressFolder?.trackingState === 'needs_repair' ? 'font-bold text-amber-600' : 'uppercase text-slate-400'}`}>{progressFolder ? `${progressFolder.relationKind === 'auxiliary' ? '附属分支' : '文件夹'} · ${versionTreeStatusLabel(progressFolder)}` : sourceKind === 'image' ? '文件夹 · 原始图片素材' : sourceKind === 'video' ? '文件夹 · 原始视频素材' : entry.name === '团片协作' ? '文件夹 · 协作工作区' : entry.kind === 'folder' ? '文件夹' : entry.kind === 'shortcut' ? '快捷方式' : entry.extension.slice(1) || '文件'}</p>
+    <p className={`mt-0.5 truncate text-[10px] ${progressFolder?.trackingState === 'needs_repair' ? 'font-bold text-amber-600' : 'uppercase text-slate-400'}`}>{progressFolder ? progressFolder.nodeRole === 'original' ? '文件夹 · 原始素材' : progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' ? '文件夹 · 附属分支' : `文件夹 · ${versionTreeStatusLabel(progressFolder)}` : sourceKind === 'image' ? '文件夹 · 原始图片素材' : sourceKind === 'video' ? '文件夹 · 原始视频素材' : entry.name === '团片协作' ? '文件夹 · 协作工作区' : entry.kind === 'folder' ? '文件夹' : entry.kind === 'shortcut' ? '快捷方式' : entry.extension.slice(1) || '文件'}</p>
   </div>;
 
   const progressCompareCandidates = progressCompare ? [...progressCompare.matches, ...progressCompare.suggestions] : [];
@@ -4477,7 +4727,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       {missingProgressMenu && createPortal(<ViewportContextMenu x={missingProgressMenu.x} y={missingProgressMenu.y} widthClass="w-52">
         <p className="truncate px-2 py-1 text-[11px] font-bold text-slate-400" title={missingProgressMenu.folder.displayName}>V{missingProgressMenu.folder.versionKey} · {missingProgressMenu.folder.displayName}</p>
         <div className="my-1 border-t border-slate-100"/>
-        <button type="button" disabled={missingProgressMenu.folder.versionKey === '0'} title={missingProgressMenu.folder.versionKey === '0' ? '原始版本不可移除' : '仅移除数据库中的失效版本记录，不删除项目素材'} className="project-menu-item project-menu-danger" onClick={() => { const folder = missingProgressMenu.folder; setMissingProgressMenu(null); void removeMissingProgress(folder); }}><Trash2 size={14}/>移除记录</button>
+        <button type="button" disabled={missingProgressMenu.folder.nodeRole === 'original'} title={missingProgressMenu.folder.nodeRole === 'original' ? '原始素材不可移除' : '仅移除数据库中的失效版本记录，不删除项目素材'} className="project-menu-item project-menu-danger" onClick={() => { const folder = missingProgressMenu.folder; setMissingProgressMenu(null); void removeMissingProgress(folder); }}><Trash2 size={14}/>移除记录</button>
       </ViewportContextMenu>, document.body)}
       {fileMenu && createPortal(<ViewportContextMenu x={fileMenu.x} y={fileMenu.y} widthClass="w-52" allowSubmenus>
         {projectWorkflows && fileMenu.entry.kind === 'folder' && !fileMenu.entry.viaShortcut && <><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); onOpenDirectoryPage?.(entry.relativePath); }}><FolderPlus size={14}/>在新页面打开</button><div className="my-1 border-t border-slate-100"/></>}
@@ -4504,6 +4754,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         {projectWorkflows && (fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <><button disabled={!hasVersionProgressForEntry(fileMenu.entry)} title={hasVersionProgressForEntry(fileMenu.entry) ? '管理素材的当前版本和历史版本' : '请先标记或导入版本进度'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openVersions(entry); }}><GitBranch size={14}/>版本管理</button>{teamRetouchAvailable && fileMenu.entry.kind === 'image' && <button disabled={!teamRetouchInstalled || teamRetouchOpening} title={!teamRetouchInstalled ? '正在检查团片协作组件' : teamRetouchOpening ? '正在加载团片协作数据' : '团片协作'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openTeamRetouch(entry); }}>{teamRetouchOpening || !teamRetouchInstalled && componentsLoading ? <Loader2 size={14} className="animate-spin"/> : <UsersRound size={14}/>}团片协作</button>}</>}
       </ViewportContextMenu>, document.body)}
       {surfaceMenu && createPortal(<ViewportContextMenu x={surfaceMenu.x} y={surfaceMenu.y} widthClass="w-56" allowSubmenus>
+        {surfaceMenu.kind === 'version-tree-layout' ? <button type="button" title="恢复版本树标准排版" className="project-menu-item" onClick={() => void restoreStandardVersionTreeLayout()}><RefreshCw size={14}/>刷新</button> : <>
         <p className="truncate px-2 py-1 text-[11px] font-bold text-slate-400" title={surfaceMenu.targetLabel}>在“{surfaceMenu.targetLabel}”中操作</p>
         <div className="group/submenu relative"><button className="project-menu-item w-full"><FolderPlus size={14}/>新建<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-72 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100">{projectWorkflows && !recursiveFlatOpen && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); void openProgressSetup('create'); }}><FolderPlus size={14}/>新建进度</button>}<button className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void createFolder(target); }}><Folder size={14}/>新建文件夹</button><div className="my-1 border-t border-slate-100"/><div className="flex items-center justify-between px-2 pb-1 pt-1"><p className="text-[11px] font-bold text-slate-400">Windows 文件类型</p><button type="button" title="重新扫描 Windows 新建文件类型" disabled={shellNewTypesLoading} onClick={() => void loadShellNewTypes(true)} className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"><RefreshCw size={12} className={shellNewTypesLoading ? 'animate-spin' : ''}/></button></div><div className="max-h-72 overflow-y-auto">{shellNewTypesLoading && <p className="px-2 py-2 text-xs text-slate-400">正在读取系统新建菜单…</p>}{!shellNewTypesLoading && shellNewTypes.map(type => <button key={type.id} className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void createShellNewFile(type, target); }}>{type.iconDataUrl ? <img src={type.iconDataUrl} alt="" className="h-4 w-4 shrink-0 object-contain"/> : <File size={14} className="shrink-0"/>}<span className="min-w-0 flex-1 truncate">{type.label}</span><span className="ml-auto shrink-0 font-mono text-[10px] text-slate-400">{type.extension}</span></button>)}{!shellNewTypesLoading && shellNewTypesLoaded && !shellNewTypes.length && <p className="px-2 py-2 text-xs text-slate-400">系统没有可用的新建文件类型</p>}</div></div></div>
         <div className="group/submenu relative"><button className="project-menu-item w-full"><FolderInput size={14}/>导入<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-52 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100">{projectWorkflows && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); setPanel('import'); }}><MemoryStick size={14}/>从 SD 卡导入</button>}{projectWorkflows && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); setPanel('negative-import'); }}><Aperture size={14}/>导入底片</button>}{projectWorkflows && !recursiveFlatOpen && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); void openProgressSetup('import'); }}><FolderInput size={14}/>导入进度</button>}{projectWorkflows && !recursiveFlatOpen && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); setBrollSourcePaths([]); setDeleteBrollSources(importDefaults.deleteSourceAfterImport); setPanel('broll'); }}><FolderInput size={14}/>导入花絮</button>}{projectWorkflows && <div className="my-1 border-t border-slate-100"/>}<button className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); openFileImport(target); }}><FileInput size={14}/>导入文件</button></div></div>
@@ -4512,6 +4763,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         <button disabled={!clipboardHasFiles} title={clipboardHasFiles ? `粘贴到“${surfaceMenu.targetLabel}”` : '剪贴板中没有文件'} className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void runFileOperation('paste', undefined, [], target); }}><ClipboardPaste size={14}/>粘贴</button>
         <button className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void copyCurrentDirectoryPath(target); }}><FileText size={14}/>复制此文件夹地址</button>
         {projectWorkflows && <><div className="my-1 border-t border-slate-100"/><button className="project-menu-item project-menu-danger" onClick={() => { setSurfaceMenu(null); setPanel('trash'); }}><Trash2 size={14}/>将项目移入回收站</button></>}
+        </>}
       </ViewportContextMenu>, document.body)}
       <div ref={projectColumnLayoutRef} className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
       <div ref={filesColumnRef} style={previewPaneOpen || metadataPaneOpen ? { width: displayedColumnWidths.files } : undefined} onPointerDown={startSelectionDrag} onPointerMove={updateSelectionDrag} onPointerUp={finishSelectionDrag} onPointerCancel={cancelSelectionDrag} onLostPointerCapture={cancelSelectionDrag} className={`relative flex min-h-0 flex-col gap-3 overflow-auto overscroll-contain [overflow-anchor:none] px-6 pb-6 ${previewPaneOpen || metadataPaneOpen ? 'shrink-0' : 'flex-1'}`}>
@@ -4628,7 +4880,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         <div className="flex min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap text-sm text-slate-500">
           {finalViewOpen ? <><button type="button" onClick={closeFinalVersionView} title="退出喜爱图片浏览" aria-label="退出喜爱图片浏览" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X size={17}/></button><span className="inline-flex h-8 shrink-0 items-center px-1.5 font-bold leading-none text-slate-700">喜爱</span></> : versionTreeOpen ? <><button type="button" onClick={() => selectFolderBrowseMode('grid')} title="返回图标模式" aria-label="退出版本树" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800"><ArrowLeft size={17}/></button><span className="inline-flex h-8 shrink-0 items-center px-1.5 font-bold leading-none text-slate-700">{browserContext.title}</span><span className="inline-flex h-8 shrink-0 items-center leading-none text-slate-300">/</span><span className="inline-flex h-8 shrink-0 items-center gap-1.5 px-1.5 font-bold leading-none text-blue-700"><GitBranch size={15}/>版本树</span></> : <><button type="button" onClick={navigateBack} disabled={!directoryHistory.back.length} title="后退" aria-label="后退" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"><ArrowLeft size={17}/></button><button type="button" onClick={navigateForward} disabled={!directoryHistory.forward.length} title="前进" aria-label="前进" className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent"><ArrowRight size={17}/></button><button type="button" onClick={() => navigateToDirectory('')} title={`返回${browserRootLabel}根目录`} className="mr-1 inline-flex h-8 shrink-0 items-center rounded border border-transparent px-1.5 font-bold leading-none text-slate-800 transition hover:border-slate-300 hover:bg-slate-100">{browserContext.title}</button>{breadcrumbs.map((crumb, index) => <React.Fragment key={crumb.relativePath || 'root'}><span className="inline-flex h-8 shrink-0 items-center leading-none text-slate-300">/</span><button onClick={() => navigateToDirectory(crumb.relativePath)} title={`进入 ${crumb.label}`} className={`inline-flex h-8 min-w-0 items-center truncate rounded border border-transparent px-1.5 text-sm leading-none transition hover:border-slate-300 hover:bg-slate-100 hover:text-slate-800 ${index === breadcrumbs.length - 1 ? 'font-bold text-slate-700' : ''}`}>{crumb.label}</button></React.Fragment>)}</>}
         </div>
-        {finalViewOpen && <button type="button" disabled={finalExporting || !finalViewEntries.length} onClick={() => void exportFinalVersions()} className="ml-auto shrink-0 rounded-md px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40">{finalExporting ? '正在整理…' : '整理喜爱图片'}</button>}
+        {finalViewOpen && <div className="ml-auto flex min-w-0 items-center gap-2"><label className="flex min-w-0 items-center gap-1.5 text-xs text-slate-500">父节点<select aria-label="喜爱图片导出父节点" value={finalExportParentId} onChange={event => setFinalExportParentId(event.target.value)} className="max-w-48 rounded border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-700"><option value="">请选择</option>{progressFolders.filter(folder => folder.mediaKind === 'image' && !folder.folderMissing && folder.nodeRole !== 'selection' && folder.relationKind !== 'auxiliary').map(folder => <option key={folder.id} value={folder.id}>{folder.displayName}</option>)}</select></label><button type="button" disabled={finalExporting || !finalViewEntries.length || !finalExportParentId} onClick={() => void exportFinalVersions()} className="shrink-0 rounded-md px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40">{finalExporting ? '正在整理…' : '整理喜爱图片'}</button></div>}
       </div>
       </div>
 
@@ -4639,12 +4891,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         await refresh(currentRelativePathRef.current);
         if (finalViewOpen) await loadFinalViewEntries();
       }}/></ToolModal>}
-      {mountedPanels.has('import') && <ToolModal title={PROJECT_PANEL_TITLES.import} ownerPageId={pageId} panelKind="import" open={panel === 'import'} busy={sdImportBusy} onClose={() => setPanel(null)}><div className="space-y-4"><div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3"><p className="text-sm font-bold text-blue-800">导入到“{project.name}”</p><p className="mt-1 text-xs leading-5 text-blue-600">自动识别 SD 卡中的工作文件与花絮，并按项目结构整理。RAW 转 JPG 规则取自设置。</p></div><ImportCard config={importConfig} drives={drives} destinationPath={project.path} brollDestinationPath={project.path} active={active && panel === 'import'} deleteSourceAfterImport={importDefaults.deleteSourceAfterImport} generateJpgFromRaw={importDefaults.generateJpgFromRaw} splitLargeBrollFiles={brollConfig.splitLargeFiles} onBusyChange={setSdImportBusy} onImportConfigChange={onImportConfigChange} onImportComplete={markInProgress} completedActionLabel="关闭" onCompletedAction={() => setPanel(null)}/></div></ToolModal>}
+      {mountedPanels.has('import') && <ToolModal title={PROJECT_PANEL_TITLES.import} ownerPageId={pageId} panelKind="import" open={panel === 'import'} busy={sdImportBusy} onClose={() => setPanel(null)}><div className="space-y-4"><div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3"><p className="text-sm font-bold text-blue-800">导入到“{project.name}”</p><p className="mt-1 text-xs leading-5 text-blue-600">自动识别 SD 卡中的工作文件与花絮，并按项目结构整理。RAW 转 JPG 规则取自设置。</p></div><ImportCard config={importConfig} drives={drives} workspacePath={workspacePath} destinationPath={project.path} brollDestinationPath={project.path} active={active && panel === 'import'} deleteSourceAfterImport={importDefaults.deleteSourceAfterImport} generateJpgFromRaw={importDefaults.generateJpgFromRaw} splitLargeBrollFiles={brollConfig.splitLargeFiles} onBusyChange={setSdImportBusy} onImportConfigChange={onImportConfigChange} onImportComplete={completeSdImport} completedActionLabel="关闭" onCompletedAction={() => setPanel(null)}/></div></ToolModal>}
       {mountedPanels.has('negative-import') && <ToolModal title={PROJECT_PANEL_TITLES['negative-import']} ownerPageId={pageId} panelKind="negative-import" open={panel === 'negative-import'} busy={negativeImportBusy} onClose={() => { setNegativeSourcePaths([]); setPanel(null); }}>
         <div className="space-y-4">
           <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3"><p className="text-sm font-bold text-blue-800">导入到“{project.name}”</p><p className="mt-1 text-xs leading-5 text-blue-600">可直接读取文件或文件夹。</p></div>
           <ImportCard
             directSource
+            workspacePath={workspacePath}
             config={{ ...importConfig, sdPath: negativeSourcePaths[0], sdPaths: negativeSourcePaths }}
             drives={negativeSourcePaths}
             destinationPath={project.path}
@@ -4656,7 +4909,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             onChooseSourceFolder={() => void window.electronAPI.chooseWorkspaceDirectory('').then(result => { if (!result.cancelled && result.path) setNegativeSourcePaths([result.path]); })}
             onBusyChange={setNegativeImportBusy}
             onImportConfigChange={onImportConfigChange}
-            onImportComplete={() => { void markInProgress(); }}
+            onImportComplete={() => { void completeNegativeImport(); }}
             completedActionLabel="关闭"
             onCompletedAction={() => { setNegativeSourcePaths([]); setPanel(null); }}
           />
@@ -4744,6 +4997,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           trackingEnabled: progressSetup.trackingEnabled,
           renameFromParent: progressSetup.renameSources,
           copyMissingFromParent: progressSetup.copyMissingFromParent,
+          workflowInputProgressIds: progressSetup.workflowInputProgressIds,
           existingProgressId: progressSetup.existingProgressId,
         }}
         folders={progressFolders}
@@ -4761,6 +5015,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             trackingEnabled: policy.trackingEnabled,
             renameSources: policy.renameFromParent,
             copyMissingFromParent: policy.copyMissingFromParent,
+            workflowInputProgressIds: draft.workflowInputProgressIds,
           } : current);
         }}
         onSubmit={() => void submitProgressSetup()}
@@ -4828,7 +5083,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         onStepChange={setTeamRetouchStep}
         onNotice={onNotice}
         onEntriesChange={setTeamRetouchEntries}
-        onProjectChanged={() => void loadTeamRetouchHistory()}
+        onProjectChanged={() => { void Promise.all([loadTeamRetouchHistory(), loadProgressFolders()]); }}
         onBusyChange={busy => onToolTabBusyChange('team', busy)}
         onClose={() => { onCloseToolTab('team'); void loadTeamRetouchHistory(); }}
       /></div>}
@@ -4839,24 +5094,38 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         activeStep={teamRetouchStep}
         onStepChange={setTeamRetouchStep}
         onNotice={onNotice}
-        onProjectChanged={() => void loadTeamRetouchHistory()}
+        onProjectChanged={() => { void Promise.all([loadTeamRetouchHistory(), loadProgressFolders()]); }}
         onBusyChange={busy => onToolTabBusyChange('team', busy)}
         onClose={() => { onCloseToolTab('team'); void loadTeamRetouchHistory(); }}
       /></div>}
 
       <section className="flex min-h-[220px] min-w-0 flex-auto flex-col">
         {versionTreeOpen ? <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={event => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-entry-path]'); target?.focus({ preventScroll: true }); if (target?.dataset.entryPath) entryPointerModifiersRef.current = { path: target.dataset.entryPath, additive: event.ctrlKey || event.metaKey, range: event.shiftKey }; }} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} style={{ marginInline: -FILE_SURFACE_HORIZONTAL_PADDING, paddingInline: FILE_SURFACE_HORIZONTAL_PADDING }} className={`relative min-h-[220px] flex-1 select-none outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
+          <LegacySelectionRepairNotice repairs={legacySelectionRepairs} folders={progressFolders} busyProgressIds={legacySelectionRepairBusyIds} onRepair={(progressId, sourceProgressId) => void repairLegacySelectionRelation(progressId, sourceProgressId)}/>
           {progressRelationInspection.needsRepair ? <div role="alert" className="m-4 rounded-xl border border-amber-300 bg-amber-50 p-5 text-amber-900"><div className="flex items-center gap-2 font-bold"><AlertTriangle size={18}/>版本关系需要修复</div><p className="mt-2 text-sm">检测到循环关系，已停止版本树遍历，避免应用崩溃。</p><p className="mt-2 break-all font-mono text-xs text-amber-700">节点 ID：{progressRelationInspection.cycleNodeIds.join('、')}</p></div> : <ProjectVersionTree
             progressFolders={progressFolders}
+            graphEdges={versionGraphEdges}
             entries={displayedFileEntries}
             structureEntries={fileEntries}
             filterActive={Boolean(searchQuery.trim() || fileFilter !== 'all' || ratingFilter !== 'all')}
             activeRelativePath={currentRelativePath}
             gridIconSize={gridIconSize}
+            workspacePath={workspacePath}
+            projectName={project.name}
             projectRelativePath={projectRelativePath}
             renderEntry={renderVersionTreeEntry}
-            teamRetouchParentProgressIds={teamRetouchParentProgressIds}
             onOpenMissingProgressMenu={openMissingProgressMenu}
+            pendingChildId={pendingRelationChange?.childProgressId || draggingChildId || undefined}
+            hoverParentId={hoverParentId || undefined}
+            mutatingChildIds={relationMutatingChildIds}
+            onBeginRelationEdit={childId => { setDraggingChildId(childId); setHoverParentId(''); }}
+            onHoverRelationParent={parentId => setHoverParentId(parentId || '')}
+            onRequestRelationChange={(childProgressId, parentProgressId) => void requestProgressRelationChange(childProgressId, parentProgressId)}
+            onRequestSupplementalEdgeDelete={edge => void requestSupplementalEdgeDelete(edge)}
+            onRequestSupplementalEdgeReconnect={(edge, newSourceProgressId) => void requestSupplementalEdgeReconnect(edge, newSourceProgressId)}
+            onCancelRelationEdit={cancelRelationEdit}
+            onNotice={onNotice}
+            onCanvasControllerChange={setVersionTreeCanvasController}
           />}
         </div> : <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={event => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-entry-path]'); target?.focus({ preventScroll: true }); if (target?.dataset.entryPath) entryPointerModifiersRef.current = { path: target.dataset.entryPath, additive: event.ctrlKey || event.metaKey, range: event.shiftKey }; }} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} style={{ marginInline: -FILE_SURFACE_HORIZONTAL_PADDING, paddingInline: FILE_SURFACE_HORIZONTAL_PADDING }} className={`relative min-h-[220px] flex-1 select-none outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
           {groupedResultsActive && (groupedLoading ? <p className="py-12 text-center text-sm text-slate-400"><Loader2 size={17} className="mr-2 inline animate-spin"/>{projectRootFilterActive ? '正在分页读取全部文件…' : searchQuery.trim() ? `正在搜索${currentRelativePath ? '当前文件夹及其子文件夹' : '整个项目'}…` : '正在读取最近文件…'}</p> : groupedError ? <p className="py-8 text-center text-sm text-red-600">读取文件失败：{groupedError}</p> : searchResultGroups.length ? <div className="pb-4">
@@ -4889,7 +5158,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
 
       </div>
       {previewPaneOpen && <><ColumnResizeHandle label="调整文件区和预览区宽度" onDrag={resizeFilesAndPreview}/><MediaPreviewPane entry={previewEntry} cacheConfig={mediaCacheConfig} width={displayedColumnWidths.preview} pinned={previewPanePinned} advancedVideoAvailable={active && installedComponentIds.has('video-playback-mpv')} keyboardSettings={advancedVideoSettings} photoshopAvailable={photoshopAvailable && !previewEntry?.viaShortcut} ratingAvailable={previewCanMarkFinal} rating={previewRating} ratingMode={favoriteDisplayMode} ratingLoading={previewRatingLoading} ratingBusy={previewRatingBusy} onChangeRating={rating => void updatePreviewRating(rating)} onTogglePinned={togglePreviewPanePinned} onTechnicalMetadata={setPreviewTechnicalMetadata} onNavigate={navigatePreviewMedia} onContextMenu={event => previewEntry && openFileMenu(event, previewEntry, false)} onContextMenuAt={(x, y) => previewEntry && openFileMenuAt(x, y, previewEntry, false)} onAnalyzeImageCrop={analyzePreviewImageCrop} onConfirmImageCrop={savePreviewImageCrop} onTrimVideo={trimPreviewVideo} onOpen={() => previewEntry && openProjectEntry(previewEntry)} onOpenInPhotoshop={() => previewEntry && openProjectEntriesInPhotoshop([previewEntry])} onClose={closePreviewPaneByUser}/></>}
-      {metadataPaneOpen && <><ColumnResizeHandle label={previewPaneOpen ? '调整预览区和详细信息区宽度' : '调整文件区和详细信息区宽度'} onDrag={previewPaneOpen ? resizePreviewAndMetadata : resizeFilesAndMetadata}/><FileMetadataPane entry={focusedEntry} entryDetails={previewEntryDetails} metadataFields={currentPreviewMetadataFields} metadataLoading={currentPreviewMetadataLoading} metadataError={currentPreviewMetadataError} technicalMetadata={focusedEntry?.relativePath === previewEntry?.relativePath ? previewTechnicalMetadata : {}} formatFileSize={formatFileSize} width={displayedColumnWidths.metadata} pinned={metadataPanePinned} onTogglePinned={toggleMetadataPanePinned} onOpen={() => focusedEntry && openProjectEntry(focusedEntry)} onCopyPath={() => focusedEntry && copyEntryPath(focusedEntry)} onClose={closeMetadataPaneByUser}/></>}
+      {metadataPaneOpen && <><ColumnResizeHandle label={previewPaneOpen ? '调整预览区和详细信息区宽度' : '调整文件区和详细信息区宽度'} onDrag={previewPaneOpen ? resizePreviewAndMetadata : resizeFilesAndMetadata}/><FileMetadataPane entry={focusedEntry} entryDetails={previewEntryDetails} metadataFields={currentPreviewMetadataFields} metadataLoading={currentPreviewMetadataLoading} metadataError={currentPreviewMetadataError} technicalMetadata={focusedEntry?.relativePath === previewEntry?.relativePath ? previewTechnicalMetadata : EMPTY_PREVIEW_TECHNICAL_METADATA} formatFileSize={formatFileSize} width={displayedColumnWidths.metadata} pinned={metadataPanePinned} onTogglePinned={toggleMetadataPanePinned} onOpen={() => focusedEntry && openProjectEntry(focusedEntry)} onCopyPath={() => focusedEntry && copyEntryPath(focusedEntry)} onClose={closeMetadataPaneByUser}/></>}
       </div>
 
       {confirmDelete && <div className="fixed inset-0 z-[320] flex items-center justify-center bg-slate-950/40 p-4"><div role="dialog" aria-modal="true" aria-label="删除项目" className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="mb-3 flex items-center justify-between"><h3 className="font-bold text-slate-800">确定要删除项目吗？</h3><button onClick={() => setConfirmDelete(false)}><X size={18}/></button></div><p className="text-sm text-slate-500">删除项目会将项目文件夹“{project.name}”移入回收站。</p><div className="mt-5 flex justify-end gap-2"><button onClick={() => setConfirmDelete(false)} className="dialog-secondary">取消</button><button onClick={async () => { setConfirmDelete(false); await moveToTrash(); }} className="rounded-md bg-red-600 px-3 py-2 text-sm font-bold text-white hover:bg-red-500">删除项目</button></div></div></div>}
@@ -5605,7 +5874,7 @@ const MetadataRow = ({ label, sourceLabel, value }: { label: string; sourceLabel
 const FileMetadataPane = ({ entry, entryDetails, metadataFields, metadataLoading, metadataError, technicalMetadata, formatFileSize, width, pinned, onTogglePinned, onOpen, onCopyPath, onClose }: {
   entry?: ProjectFileEntry;
   entryDetails: ProjectEntryDetails | null;
-  metadataFields: MediaMetadataField[];
+  metadataFields: readonly MediaMetadataField[];
   metadataLoading: boolean;
   metadataError: string;
   technicalMetadata: PreviewTechnicalMetadata;
@@ -5618,10 +5887,11 @@ const FileMetadataPane = ({ entry, entryDetails, metadataFields, metadataLoading
   onClose: () => void;
 }) => {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const metadataGroupKey = metadataGroupDependencyKey(metadataFields);
 
   useEffect(() => {
-    setExpandedGroups(new Set(['Application', ...metadataFields.map(field => field.group)]));
-  }, [entry?.path, metadataFields]);
+    setExpandedGroups(current => reconcileExpandedMetadataGroups(current, entry?.path, metadataGroupKey));
+  }, [entry?.path, metadataGroupKey]);
 
   const mediaType = entry?.kind === 'folder' ? '文件夹' : entry?.kind === 'image' ? '图片' : entry?.kind === 'raw' ? 'RAW 图片' : entry?.kind === 'video' ? '视频' : '文件';
   const firstValue = (...names: string[]) => pickMetadataValue(metadataFields, ...names);

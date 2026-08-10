@@ -1,4 +1,4 @@
-import type { ProgressFolder } from '../../types';
+import type { ProgressFolder, VersionGraphEdge } from '../../types';
 
 export type VersionPanelKind = 'create' | 'import' | 'modify' | 'confirm';
 export type VersionPanelState = 'ready' | 'move_confirm' | 'processing' | 'waiting_confirmation' | 'loading' | 'committing' | 'result' | 'failure';
@@ -36,8 +36,11 @@ export const normalizeProgressSetupTrackingPolicy = (relationKind: VersionRelati
 
 export const versionNodeRole = (relationKind: VersionRelationKind): ProgressFolder['nodeRole'] => relationKind === 'auxiliary' ? 'selection' : 'progress';
 
-export const trackingStateLabel = (folder: Pick<ProgressFolder, 'nodeRole' | 'trackingState'>) => {
+export const trackingStateLabel = (folder: Pick<ProgressFolder, 'nodeRole' | 'relationKind' | 'trackingState'>) => {
   if (folder.nodeRole === 'original') return '原始素材';
+  if (folder.nodeRole === 'selection' || folder.relationKind === 'auxiliary') return '选片分支';
+  if (folder.nodeRole === 'artifact') return '派生产物';
+  if (folder.nodeRole === 'workflow') return '工作流节点';
   if (folder.trackingState === 'disabled') return '未跟踪';
   if (folder.trackingState === 'ready') return '已跟踪';
   if (folder.trackingState === 'stale') return '待刷新';
@@ -46,7 +49,7 @@ export const trackingStateLabel = (folder: Pick<ProgressFolder, 'nodeRole' | 'tr
 };
 
 export const progressTrackingAction = (folder: ProgressFolder): 'refresh' | 'resume' | 'repair' | null => {
-  if (folder.folderMissing || folder.nodeRole === 'selection' || folder.relationKind === 'auxiliary') return null;
+  if (folder.folderMissing || folder.nodeRole !== 'progress' || folder.relationKind === 'auxiliary') return null;
   if (folder.trackingState === 'needs_repair') return 'repair';
   if (folder.trackingState === 'pending_compare' || folder.trackingState === 'pending_confirm' || folder.trackingState === 'committing') return 'resume';
   return 'refresh';
@@ -67,6 +70,11 @@ export const planProgressRootMove = (relativePath: string) => {
   return { sourceRelativePath, targetRelativePath, requiresMove: Boolean(targetRelativePath && sourceRelativePath !== targetRelativePath) };
 };
 
+export const isStructuralMainParent = (folder: ProgressFolder) => !folder.folderMissing
+  && folder.relationKind !== 'auxiliary'
+  && (folder.nodeRole === 'progress'
+    || folder.nodeRole === 'original' && folder.artifactKind !== 'companion' && folder.artifactKind !== 'preview');
+
 export const selectableVersionParents = (folders: ProgressFolder[], draft: { mediaKind: ProgressFolder['mediaKind']; relationKind: VersionRelationKind; existingProgressId?: string }) => {
   const byParent = new Map<string, string[]>();
   folders.forEach(folder => {
@@ -86,14 +94,98 @@ export const selectableVersionParents = (folders: ProgressFolder[], draft: { med
   return folders.filter(folder => !folder.folderMissing
     && folder.mediaKind === draft.mediaKind
     && !excluded.has(folder.id)
-    && folder.nodeRole !== 'selection'
-    && folder.relationKind !== 'auxiliary');
+    && isStructuralMainParent(folder));
 };
 
-export type VisibleVersionEdge = { parentId: string; childId: string; relationKind: VersionRelationKind };
+export const defaultMainParentId = (
+  folders: ProgressFolder[],
+  graphEdges: VersionGraphEdge[],
+  mediaKind: ProgressFolder['mediaKind'],
+) => {
+  const candidates = selectableVersionParents(folders, { mediaKind, relationKind: 'main' });
+  const candidateIds = new Set(candidates.map(folder => folder.id));
+  const progressNodes = candidates.filter(folder => folder.nodeRole === 'progress');
+  if (progressNodes.length) {
+    const progressParentIds = new Set(progressNodes.map(folder => folder.parentProgressId).filter((id): id is string => Boolean(id) && candidateIds.has(id!)));
+    const leaves = progressNodes.filter(folder => !progressParentIds.has(folder.id));
+    return leaves.length === 1 ? leaves[0].id : '';
+  }
+
+  const originals = candidates.filter(folder => folder.nodeRole === 'original');
+  const companionTargets = new Set(graphEdges
+    .filter(edge => edge.edgeKind === 'media_companion' || edge.edgeKind === 'derived_preview')
+    .map(edge => edge.targetProgressId));
+  const semanticSources = originals.filter(folder => !companionTargets.has(folder.id));
+  return semanticSources.length === 1 ? semanticSources[0].id : '';
+};
+
+export const selectableWorkflowInputs = (folders: ProgressFolder[], mediaKind: ProgressFolder['mediaKind']) => folders.filter(folder => !folder.folderMissing
+  && (folder.nodeRole === 'selection' && folder.mediaKind === mediaKind
+    || folder.nodeRole === 'workflow' && folder.artifactKind === 'team_workspace'));
+
+export const workflowInputLabel = (folder: ProgressFolder) => folder.nodeRole === 'workflow'
+  ? '团片协作'
+  : folder.mediaKind === 'video' ? '视频选片' : '图片选片';
+
+export const defaultWorkflowInputIds = (
+  folders: ProgressFolder[],
+  graphEdges: VersionGraphEdge[],
+  parentProgressId: string,
+  existingProgressId?: string,
+) => {
+  if (existingProgressId) return graphEdges
+    .filter(edge => edge.edgeKind === 'workflow_input' && edge.targetProgressId === existingProgressId)
+    .map(edge => edge.sourceProgressId);
+  const parent = folders.find(folder => folder.id === parentProgressId);
+  if (!parent || parent.nodeRole !== 'original' || parent.folderMissing) return [];
+  const hasMainProgress = folders.some(folder => !folder.folderMissing
+    && folder.nodeRole === 'progress'
+    && folder.relationKind !== 'auxiliary'
+    && folder.parentProgressId === parent.id);
+  if (hasMainProgress) return [];
+  const selections = folders.filter(folder => !folder.folderMissing
+    && folder.nodeRole === 'selection'
+    && folder.mediaKind === parent.mediaKind
+    && folder.parentProgressId === parent.id);
+  return selections.length === 1 ? [selections[0].id] : [];
+};
+
+export const progressRelationChangeError = (folders: ProgressFolder[], childId: string, parentId: string | null) => {
+  const byId = new Map(folders.map(folder => [folder.id, folder]));
+  const child = byId.get(childId);
+  if (!child) return '子节点不存在';
+  if (child.nodeRole === 'original') return '原始素材不能拥有父节点';
+  if (child.nodeRole === 'artifact') return '产物节点不使用结构父关系';
+  if (parentId === null) {
+    if (child.nodeRole === 'selection') return '选片节点不能断开为根节点';
+    if (child.trackingEnabled) return '已开启跟踪的进度不能断开为根节点，请先关闭跟踪';
+    return '';
+  }
+  const parent = byId.get(parentId);
+  if (parent && !parent.folderMissing && parent.mediaKind === child.mediaKind
+    && child.nodeRole === 'progress' && (parent.nodeRole === 'selection' || parent.nodeRole === 'workflow')) return '';
+  if (parent && !parent.folderMissing && parent.mediaKind === child.mediaKind
+    && child.nodeRole === 'workflow' && parent.nodeRole === 'progress') return '';
+  if (child.nodeRole === 'workflow') return '团片协作只能接收普通后期版本作为工作流输入';
+  if (!parent || parent.folderMissing) return '候选父节点不存在或已经失效';
+  if (childId === parentId) return '节点不能连接到自己';
+  if (parent.mediaKind !== child.mediaKind) return '父子节点媒体类型不一致';
+  if (parent.nodeRole === 'selection' || parent.relationKind === 'auxiliary') return '不能挂到选片或附属分支下';
+  if (parent.nodeRole !== 'original' && parent.nodeRole !== 'progress') return '只能挂到原始素材或普通版本下面';
+  let cursor: ProgressFolder | undefined = parent;
+  const visited = new Set<string>();
+  while (cursor?.parentProgressId && !visited.has(cursor.id)) {
+    if (cursor.parentProgressId === childId) return '不能挂到自己的后代下面';
+    visited.add(cursor.id);
+    cursor = byId.get(cursor.parentProgressId);
+  }
+  return '';
+};
+
+export type VisibleVersionEdge = { id?: string; parentId: string; childId: string; relationKind: VersionRelationKind | VersionGraphEdge['edgeKind'] };
 export type VisibleVersionGraph = { folders: ProgressFolder[]; edges: VisibleVersionEdge[]; cycleNodeIds: string[] };
 
-export const projectVisibleVersionGraph = (folders: ProgressFolder[]): VisibleVersionGraph => {
+export const projectVisibleVersionGraph = (folders: ProgressFolder[], graphEdges: VersionGraphEdge[] = []): VisibleVersionGraph => {
   const byId = new Map(folders.map(folder => [folder.id, folder]));
   const visible = folders.filter(folder => !folder.folderMissing);
   const cycleNodeIds = new Set<string>();
@@ -132,11 +224,19 @@ export const projectVisibleVersionGraph = (folders: ProgressFolder[]): VisibleVe
     }
     if (parentId) edges.push({ parentId, childId: folder.id, relationKind: folder.relationKind || 'main' });
   }
+  for (const edge of [...graphEdges].sort((left, right) => left.edgeKind.localeCompare(right.edgeKind) || left.sourceProgressId.localeCompare(right.sourceProgressId) || left.targetProgressId.localeCompare(right.targetProgressId) || left.id.localeCompare(right.id))) {
+    const source = byId.get(edge.sourceProgressId);
+    const target = byId.get(edge.targetProgressId);
+    if (!source || !target || source.folderMissing || target.folderMissing) continue;
+    edges.push({ id: edge.id, parentId: edge.sourceProgressId, childId: edge.targetProgressId, relationKind: edge.edgeKind });
+  }
   return { folders: visible, edges, cycleNodeIds: [...cycleNodeIds] };
 };
 
 export const selectionOutputName = (sourceRelativePath: string) => {
   const name = normalizeVersionPath(sourceRelativePath).split('/').pop() || '';
+  if (name.toLocaleLowerCase() === 'raw') return '图片选片';
+  if (name.toLocaleLowerCase() === 'mov') return '视频选片';
   if (!name || /[\\/:*?"<>|]/.test(name)) throw new Error('来源文件夹名无效');
   return `${name}_选片`;
 };

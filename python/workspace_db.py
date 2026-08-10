@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -21,9 +22,19 @@ IMAGE_EXTENSIONS = {
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".crm"}
 SQLITE_BUSY_TIMEOUT_MS = 15_000
 LEGACY_PROGRESS_MIGRATION_KEY = "legacy_progress_folders_migrated"
-TARGET_SCHEMA_VERSION = 21
-PROGRESS_NODE_ROLES = ("original", "progress", "selection")
+TARGET_SCHEMA_VERSION = 25
+PROGRESS_NODE_ROLES = ("original", "progress", "selection", "artifact", "workflow")
 PROGRESS_RELATION_KINDS = ("main", "auxiliary")
+PROGRESS_ARTIFACT_KINDS = ("companion", "preview", "team_workspace")
+VERSION_GRAPH_EDGE_KINDS = ("media_companion", "derived_preview", "workflow_input")
+IMPORT_ARTIFACT_SLOTS = ("raw", "camera_jpg", "generated_jpg", "mov", "video_preview")
+IMPORT_ARTIFACT_SLOT_SHAPES = {
+    "raw": ("image", "original", None),
+    "camera_jpg": ("image", "original", "companion"),
+    "generated_jpg": ("image", "artifact", "preview"),
+    "mov": ("video", "original", None),
+    "video_preview": ("video", "artifact", "preview"),
+}
 PROGRESS_TRACKING_STATES = (
     "disabled", "pending_compare", "pending_confirm", "committing", "ready", "stale", "needs_repair",
 )
@@ -51,6 +62,10 @@ def is_internal_workspace_directory(value: str) -> bool:
 
 def _table_columns(db, table: str) -> set[str]:
     return {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _table_exists(db, table: str) -> bool:
+    return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
 
 
 def _meta_value(db, key: str):
@@ -465,6 +480,67 @@ def _progress_relation_cycles(db) -> list[tuple[str, ...]]:
     return sorted(set(cycles))
 
 
+def _version_graph_adjacency(db, project_id: str, exclude_edge_id: str | None = None) -> dict[str, set[str]]:
+    rows = db.execute(
+        "SELECT id,parent_progress_id FROM progress_folders WHERE project_id=?",
+        (project_id,),
+    ).fetchall()
+    adjacency = {str(row["id"]): set() for row in rows}
+    for row in rows:
+        if row["parent_progress_id"]:
+            adjacency.setdefault(str(row["parent_progress_id"]), set()).add(str(row["id"]))
+    edge_rows = db.execute(
+        "SELECT id,source_progress_id,target_progress_id FROM version_graph_edges WHERE project_id=?",
+        (project_id,),
+    ).fetchall() if _table_exists(db, "version_graph_edges") else []
+    for edge in edge_rows:
+        if exclude_edge_id and str(edge["id"]) == exclude_edge_id:
+            continue
+        adjacency.setdefault(str(edge["source_progress_id"]), set()).add(str(edge["target_progress_id"]))
+    return adjacency
+
+
+def _version_graph_reaches(db, project_id: str, start_id: str, target_id: str, exclude_edge_id: str | None = None) -> bool:
+    adjacency = _version_graph_adjacency(db, project_id, exclude_edge_id)
+    pending = [start_id]
+    visited: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current == target_id:
+            return True
+        if current in visited:
+            continue
+        visited.add(current)
+        pending.extend(adjacency.get(current, ()))
+    return False
+
+
+def _version_graph_cycle_nodes(db) -> set[str]:
+    if not _table_exists(db, "version_graph_edges"):
+        return set()
+    projects = [str(row[0]) for row in db.execute("SELECT id FROM projects").fetchall()]
+    cyclic: set[str] = set()
+    for project_id in projects:
+        adjacency = _version_graph_adjacency(db, project_id)
+        indegree = {node_id: 0 for node_id in adjacency}
+        for targets in adjacency.values():
+            for target_id in targets:
+                indegree[target_id] = indegree.get(target_id, 0) + 1
+        pending = [node_id for node_id, degree in indegree.items() if degree == 0]
+        removed: set[str] = set()
+        while pending:
+            node_id = pending.pop()
+            if node_id in removed:
+                continue
+            removed.add(node_id)
+            for target_id in adjacency.get(node_id, ()):
+                indegree[target_id] -= 1
+                if indegree[target_id] == 0:
+                    pending.append(target_id)
+        cyclic.update(set(indegree) - removed)
+    return cyclic
+
+
 def _repair_progress_relation_cycles(db) -> list[dict]:
     """Deterministically break one edge per legacy cycle and retain an audit log."""
     db.execute(
@@ -578,6 +654,9 @@ def _migration_18(db):
         DROP TRIGGER IF EXISTS progress_folders_v2_cycle_update;
         DROP TRIGGER IF EXISTS progress_folders_v2_policy_insert;
         DROP TRIGGER IF EXISTS progress_folders_v2_policy_update;
+        DROP TRIGGER IF EXISTS version_graph_edges_validate_insert;
+        DROP TRIGGER IF EXISTS version_graph_edges_validate_update;
+        DROP TRIGGER IF EXISTS progress_folders_graph_endpoint_update;
 
         CREATE TRIGGER progress_folders_v2_shape_insert
         BEFORE INSERT ON progress_folders WHEN
@@ -750,6 +829,372 @@ def _migration_21(db):
     )
 
 
+def _migration_22(db):
+    """Persist legacy selection nodes whose source cannot be repaired safely."""
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS legacy_selection_relation_repairs (
+          progress_id TEXT PRIMARY KEY REFERENCES progress_folders(id) ON DELETE CASCADE,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          legacy_name TEXT NOT NULL,
+          expected_source_name TEXT NOT NULL,
+          reason TEXT NOT NULL,
+          candidate_ids_json TEXT NOT NULL DEFAULT '[]',
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS legacy_selection_relation_repairs_project
+          ON legacy_selection_relation_repairs(project_id, created_at, progress_id);
+        """
+    )
+
+
+def _migration_23(db):
+    """Persist free-canvas version-tree positions by stable project node ID."""
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS version_tree_layouts (
+          project_id TEXT NOT NULL,
+          scope_key TEXT NOT NULL DEFAULT '',
+          revision INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(project_id, scope_key),
+          FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS version_tree_node_positions (
+          project_id TEXT NOT NULL,
+          scope_key TEXT NOT NULL DEFAULT '',
+          node_key TEXT NOT NULL,
+          x REAL NOT NULL,
+          y REAL NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(project_id, scope_key, node_key),
+          FOREIGN KEY(project_id, scope_key)
+            REFERENCES version_tree_layouts(project_id, scope_key) ON DELETE CASCADE
+        );
+        """
+    )
+
+
+def _migration_24(db):
+    """Add non-structural version-graph edges and explicit artifact/workflow nodes."""
+    columns = _table_columns(db, "progress_folders")
+    if "artifact_kind" not in columns:
+        db.execute("ALTER TABLE progress_folders ADD COLUMN artifact_kind TEXT")
+    db.execute(
+        """UPDATE progress_folders SET tracking_enabled=0,rename_from_parent=0,
+           copy_missing_from_parent=0,tracking_state='disabled'
+           WHERE node_role IN ('artifact','workflow')"""
+    )
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS version_graph_edges (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          source_progress_id TEXT NOT NULL REFERENCES progress_folders(id) ON DELETE CASCADE,
+          target_progress_id TEXT NOT NULL REFERENCES progress_folders(id) ON DELETE CASCADE,
+          edge_kind TEXT NOT NULL CHECK(edge_kind IN ('media_companion','derived_preview','workflow_input')),
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(project_id, source_progress_id, target_progress_id, edge_kind)
+        );
+        CREATE INDEX IF NOT EXISTS version_graph_edges_source
+          ON version_graph_edges(project_id, source_progress_id, edge_kind);
+        CREATE INDEX IF NOT EXISTS version_graph_edges_target
+          ON version_graph_edges(project_id, target_progress_id, edge_kind);
+        CREATE TABLE IF NOT EXISTS media_import_graph_sessions (
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          import_session_id TEXT NOT NULL,
+          manifest_json TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending','committed','failed')),
+          error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(project_id, import_session_id)
+        );
+
+        DROP TRIGGER IF EXISTS progress_folders_v2_shape_insert;
+        DROP TRIGGER IF EXISTS progress_folders_v2_shape_update;
+        DROP TRIGGER IF EXISTS progress_folders_v2_cycle_insert;
+        DROP TRIGGER IF EXISTS progress_folders_v2_cycle_update;
+        DROP TRIGGER IF EXISTS progress_folders_v2_policy_insert;
+        DROP TRIGGER IF EXISTS progress_folders_v2_policy_update;
+        DROP TRIGGER IF EXISTS version_graph_edges_validate_insert;
+        DROP TRIGGER IF EXISTS version_graph_edges_validate_update;
+        DROP TRIGGER IF EXISTS progress_folders_graph_endpoint_update;
+
+        CREATE TRIGGER progress_folders_v2_shape_insert
+        BEFORE INSERT ON progress_folders WHEN
+          NEW.node_role NOT IN ('original','progress','selection','artifact','workflow')
+          OR (NEW.relation_kind IS NOT NULL AND NEW.relation_kind NOT IN ('main','auxiliary'))
+          OR (NEW.artifact_kind IS NOT NULL AND NEW.artifact_kind NOT IN ('companion','preview','team_workspace'))
+          OR (NEW.parent_progress_id IS NULL) != (NEW.relation_kind IS NULL)
+          OR (NEW.node_role='original' AND (NEW.parent_progress_id IS NOT NULL OR NEW.artifact_kind NOT IN ('companion')))
+          OR (NEW.node_role='selection' AND (NEW.relation_kind!='auxiliary' OR NEW.artifact_kind IS NOT NULL))
+          OR (NEW.node_role='progress' AND ((NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind!='main') OR NEW.artifact_kind IS NOT NULL))
+          OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview')))
+          OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind!='team_workspace'))
+          OR (NEW.relation_kind='auxiliary' AND NEW.node_role!='selection')
+        BEGIN SELECT RAISE(ABORT,'invalid V3 progress node shape'); END;
+
+        CREATE TRIGGER progress_folders_v2_shape_update
+        BEFORE UPDATE OF node_role,artifact_kind,relation_kind,parent_progress_id ON progress_folders WHEN
+          NEW.node_role NOT IN ('original','progress','selection','artifact','workflow')
+          OR (NEW.relation_kind IS NOT NULL AND NEW.relation_kind NOT IN ('main','auxiliary'))
+          OR (NEW.artifact_kind IS NOT NULL AND NEW.artifact_kind NOT IN ('companion','preview','team_workspace'))
+          OR (NEW.parent_progress_id IS NULL) != (NEW.relation_kind IS NULL)
+          OR (NEW.node_role='original' AND (NEW.parent_progress_id IS NOT NULL OR NEW.artifact_kind NOT IN ('companion')))
+          OR (NEW.node_role='selection' AND (NEW.relation_kind!='auxiliary' OR NEW.artifact_kind IS NOT NULL))
+          OR (NEW.node_role='progress' AND ((NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind!='main') OR NEW.artifact_kind IS NOT NULL))
+          OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview')))
+          OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind!='team_workspace'))
+          OR (NEW.relation_kind='auxiliary' AND NEW.node_role!='selection')
+        BEGIN SELECT RAISE(ABORT,'invalid V3 progress node shape'); END;
+
+        CREATE TRIGGER progress_folders_v2_policy_insert
+        BEFORE INSERT ON progress_folders WHEN
+          NEW.tracking_state NOT IN ('disabled','pending_compare','pending_confirm','committing','ready','stale','needs_repair')
+          OR NEW.tracking_enabled NOT IN (0,1) OR NEW.rename_from_parent NOT IN (0,1)
+          OR NEW.copy_missing_from_parent NOT IN (0,1)
+          OR ((NEW.node_role IN ('original','artifact','workflow') OR NEW.relation_kind='auxiliary') AND (
+            NEW.tracking_enabled!=0 OR NEW.rename_from_parent!=0 OR NEW.copy_missing_from_parent!=0 OR NEW.tracking_state!='disabled'))
+          OR (NEW.tracking_enabled=0 AND (NEW.rename_from_parent!=0 OR NEW.copy_missing_from_parent!=0))
+        BEGIN SELECT RAISE(ABORT,'invalid V3 tracking policy'); END;
+
+        CREATE TRIGGER progress_folders_v2_policy_update
+        BEFORE UPDATE OF node_role,relation_kind,tracking_enabled,rename_from_parent,copy_missing_from_parent,tracking_state
+        ON progress_folders WHEN
+          NEW.tracking_state NOT IN ('disabled','pending_compare','pending_confirm','committing','ready','stale','needs_repair')
+          OR NEW.tracking_enabled NOT IN (0,1) OR NEW.rename_from_parent NOT IN (0,1)
+          OR NEW.copy_missing_from_parent NOT IN (0,1)
+          OR ((NEW.node_role IN ('original','artifact','workflow') OR NEW.relation_kind='auxiliary') AND (
+            NEW.tracking_enabled!=0 OR NEW.rename_from_parent!=0 OR NEW.copy_missing_from_parent!=0 OR NEW.tracking_state!='disabled'))
+          OR (NEW.tracking_enabled=0 AND (NEW.rename_from_parent!=0 OR NEW.copy_missing_from_parent!=0))
+        BEGIN SELECT RAISE(ABORT,'invalid V3 tracking policy'); END;
+
+        CREATE TRIGGER progress_folders_v2_cycle_insert
+        BEFORE INSERT ON progress_folders WHEN NEW.parent_progress_id IS NOT NULL AND EXISTS(
+          WITH RECURSIVE descendants(id) AS (
+            SELECT NEW.id
+            UNION
+            SELECT child.id FROM progress_folders child JOIN descendants ON child.parent_progress_id=descendants.id
+            UNION
+            SELECT edge.target_progress_id FROM version_graph_edges edge JOIN descendants ON edge.source_progress_id=descendants.id
+          ) SELECT 1 FROM descendants WHERE id=NEW.parent_progress_id
+        ) BEGIN SELECT RAISE(ABORT,'version graph cycle'); END;
+
+        CREATE TRIGGER progress_folders_v2_cycle_update
+        BEFORE UPDATE OF parent_progress_id ON progress_folders WHEN NEW.parent_progress_id IS NOT NULL AND EXISTS(
+          WITH RECURSIVE descendants(id) AS (
+            SELECT NEW.id
+            UNION
+            SELECT child.id FROM progress_folders child JOIN descendants ON child.parent_progress_id=descendants.id
+            UNION
+            SELECT edge.target_progress_id FROM version_graph_edges edge JOIN descendants ON edge.source_progress_id=descendants.id
+          ) SELECT 1 FROM descendants WHERE id=NEW.parent_progress_id
+        ) BEGIN SELECT RAISE(ABORT,'version graph cycle'); END;
+
+        CREATE TRIGGER version_graph_edges_validate_insert
+        BEFORE INSERT ON version_graph_edges WHEN
+          NEW.source_progress_id=NEW.target_progress_id
+          OR NOT EXISTS(SELECT 1 FROM projects WHERE id=NEW.project_id)
+          OR NOT EXISTS(
+            SELECT 1 FROM progress_folders source JOIN progress_folders target
+              ON target.id=NEW.target_progress_id
+            WHERE source.id=NEW.source_progress_id
+              AND source.project_id=NEW.project_id AND target.project_id=NEW.project_id
+              AND source.media_kind=target.media_kind
+              AND (
+                (NEW.edge_kind='media_companion' AND source.node_role='original' AND target.node_role='original' AND target.artifact_kind='companion')
+                OR (NEW.edge_kind='derived_preview' AND source.node_role IN ('original','progress') AND target.node_role='artifact' AND target.artifact_kind='preview')
+                OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress') OR (source.node_role IN ('original','progress') AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
+              )
+          )
+          OR EXISTS(
+            WITH RECURSIVE descendants(id) AS (
+              SELECT NEW.target_progress_id
+              UNION
+              SELECT child.id FROM progress_folders child JOIN descendants ON child.parent_progress_id=descendants.id
+              UNION
+              SELECT edge.target_progress_id FROM version_graph_edges edge JOIN descendants ON edge.source_progress_id=descendants.id
+            ) SELECT 1 FROM descendants WHERE id=NEW.source_progress_id
+          )
+        BEGIN SELECT RAISE(ABORT,'invalid version graph edge'); END;
+
+        CREATE TRIGGER version_graph_edges_validate_update
+        BEFORE UPDATE OF project_id,source_progress_id,target_progress_id,edge_kind ON version_graph_edges WHEN
+          NEW.source_progress_id=NEW.target_progress_id
+          OR NOT EXISTS(
+            SELECT 1 FROM progress_folders source JOIN progress_folders target
+              ON target.id=NEW.target_progress_id
+            WHERE source.id=NEW.source_progress_id
+              AND source.project_id=NEW.project_id AND target.project_id=NEW.project_id
+              AND source.media_kind=target.media_kind
+              AND (
+                (NEW.edge_kind='media_companion' AND source.node_role='original' AND target.node_role='original' AND target.artifact_kind='companion')
+                OR (NEW.edge_kind='derived_preview' AND source.node_role IN ('original','progress') AND target.node_role='artifact' AND target.artifact_kind='preview')
+                OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress') OR (source.node_role IN ('original','progress') AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
+              )
+          )
+          OR EXISTS(
+            WITH RECURSIVE descendants(id) AS (
+              SELECT NEW.target_progress_id
+              UNION
+              SELECT child.id FROM progress_folders child JOIN descendants ON child.parent_progress_id=descendants.id
+              UNION
+              SELECT edge.target_progress_id FROM version_graph_edges edge JOIN descendants ON edge.source_progress_id=descendants.id
+              WHERE edge.id!=OLD.id
+            ) SELECT 1 FROM descendants WHERE id=NEW.source_progress_id
+        )
+        BEGIN SELECT RAISE(ABORT,'invalid version graph edge'); END;
+
+        CREATE TRIGGER progress_folders_graph_endpoint_update
+        BEFORE UPDATE OF project_id,media_kind,node_role,artifact_kind ON progress_folders WHEN
+          EXISTS(
+            SELECT 1 FROM version_graph_edges edge JOIN progress_folders target ON target.id=edge.target_progress_id
+            WHERE edge.source_progress_id=OLD.id AND NOT(
+              NEW.project_id=edge.project_id AND target.project_id=edge.project_id
+              AND NEW.media_kind=target.media_kind AND (
+                (edge.edge_kind='media_companion' AND NEW.node_role='original' AND target.node_role='original' AND target.artifact_kind='companion')
+                OR (edge.edge_kind='derived_preview' AND NEW.node_role IN ('original','progress') AND target.node_role='artifact' AND target.artifact_kind='preview')
+                OR (edge.edge_kind='workflow_input' AND ((NEW.node_role IN ('selection','workflow') AND target.node_role='progress') OR (NEW.node_role IN ('original','progress') AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
+              )
+            )
+          )
+          OR EXISTS(
+            SELECT 1 FROM version_graph_edges edge JOIN progress_folders source ON source.id=edge.source_progress_id
+            WHERE edge.target_progress_id=OLD.id AND NOT(
+              NEW.project_id=edge.project_id AND source.project_id=edge.project_id
+              AND source.media_kind=NEW.media_kind AND (
+                (edge.edge_kind='media_companion' AND source.node_role='original' AND NEW.node_role='original' AND NEW.artifact_kind='companion')
+                OR (edge.edge_kind='derived_preview' AND source.node_role IN ('original','progress') AND NEW.node_role='artifact' AND NEW.artifact_kind='preview')
+                OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND NEW.node_role='progress') OR (source.node_role IN ('original','progress') AND NEW.node_role='workflow' AND NEW.artifact_kind='team_workspace')))
+              )
+            )
+          )
+        BEGIN SELECT RAISE(ABORT,'invalid version graph endpoint update'); END;
+        """
+    )
+
+
+def _migration_25(db):
+    """Persist importer-provided artifact semantics independently from node display metadata."""
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS media_import_artifact_slots (
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          progress_id TEXT NOT NULL REFERENCES progress_folders(id) ON DELETE CASCADE,
+          import_slot TEXT NOT NULL CHECK(import_slot IN ('raw','camera_jpg','generated_jpg','mov','video_preview')),
+          relative_path_key TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(project_id, progress_id),
+          UNIQUE(project_id, relative_path_key)
+        );
+        CREATE INDEX IF NOT EXISTS media_import_artifact_slots_kind
+          ON media_import_artifact_slots(project_id, import_slot, updated_at, progress_id);
+
+        DROP TRIGGER IF EXISTS media_import_artifact_slots_validate_insert;
+        DROP TRIGGER IF EXISTS media_import_artifact_slots_validate_update;
+        CREATE TRIGGER media_import_artifact_slots_validate_insert
+        BEFORE INSERT ON media_import_artifact_slots WHEN NOT EXISTS (
+          SELECT 1 FROM progress_folders progress
+          WHERE progress.id=NEW.progress_id AND progress.project_id=NEW.project_id
+        )
+        BEGIN SELECT RAISE(ABORT,'import artifact slot project mismatch'); END;
+        CREATE TRIGGER media_import_artifact_slots_validate_update
+        BEFORE UPDATE OF project_id,progress_id ON media_import_artifact_slots WHEN NOT EXISTS (
+          SELECT 1 FROM progress_folders progress
+          WHERE progress.id=NEW.progress_id AND progress.project_id=NEW.project_id
+        )
+        BEGIN SELECT RAISE(ABORT,'import artifact slot project mismatch'); END;
+        """
+    )
+    workspace_root = _meta_value(db, "workspace_root")
+    if not workspace_root or not _table_exists(db, "media_import_graph_sessions"):
+        return
+    projects = {row["id"]: row for row in db.execute("SELECT id,relative_path FROM projects").fetchall()}
+    for session in db.execute("SELECT project_id,manifest_json,updated_at FROM media_import_graph_sessions").fetchall():
+        project = projects.get(session["project_id"])
+        if project is None:
+            continue
+        try:
+            manifest = json.loads(session["manifest_json"] or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        artifacts = manifest.get("artifacts")
+        if not isinstance(artifacts, list):
+            continue
+        slots_by_path = {}
+        for item in artifacts:
+            if isinstance(item, dict) and item.get("importSlot") in IMPORT_ARTIFACT_SLOTS:
+                try:
+                    slots_by_path[_import_relative_path(item.get("relativePath")).casefold()] = item["importSlot"]
+                except ValueError:
+                    pass
+        # Legacy schema-24 manifests can only be backfilled when their explicit
+        # relation endpoints or media kind make the slot unambiguous.
+        for relation in manifest.get("relations") if isinstance(manifest.get("relations"), list) else []:
+            if not isinstance(relation, dict):
+                continue
+            try:
+                source_key = _import_relative_path(relation.get("sourceRelativePath")).casefold()
+                target_key = _import_relative_path(relation.get("targetRelativePath")).casefold()
+            except ValueError:
+                continue
+            if relation.get("edgeKind") == "media_companion":
+                slots_by_path[source_key] = "raw"
+                slots_by_path[target_key] = "camera_jpg"
+            elif relation.get("edgeKind") == "derived_preview":
+                target_artifact = next((item for item in artifacts if isinstance(item, dict)
+                                        and str(item.get("relativePath") or "").replace("\\", "/").strip("/").casefold() == target_key), None)
+                if target_artifact and target_artifact.get("mediaKind") == "video":
+                    slots_by_path[source_key] = "mov"
+                    slots_by_path[target_key] = "video_preview"
+                elif target_artifact and target_artifact.get("mediaKind") == "image":
+                    slots_by_path[source_key] = "raw"
+                    slots_by_path[target_key] = "generated_jpg"
+        for item in artifacts:
+            if not isinstance(item, dict):
+                continue
+            try:
+                relative_path = _import_relative_path(item.get("relativePath"))
+            except ValueError:
+                continue
+            path_key = relative_path.casefold()
+            slot = slots_by_path.get(path_key)
+            if slot is None and item.get("mediaKind") == "video" and item.get("nodeRole") == "original":
+                slot = "mov"
+            if slot is None:
+                continue
+            folder_path = canonical_path(os.path.join(workspace_root, project["relative_path"], *relative_path.split("/")))
+            progress = db.execute(
+                "SELECT * FROM progress_folders WHERE project_id=? AND folder_path_key=?",
+                (project["id"], folder_path.casefold()),
+            ).fetchone()
+            if progress is None:
+                continue
+            expected = IMPORT_ARTIFACT_SLOT_SHAPES[slot]
+            if (progress["media_kind"], progress["node_role"], progress["artifact_kind"]) != expected:
+                continue
+            existing = db.execute(
+                "SELECT * FROM media_import_artifact_slots WHERE project_id=? AND relative_path_key=?",
+                (project["id"], path_key),
+            ).fetchone()
+            timestamp = int(session["updated_at"] or 0)
+            if existing is None:
+                db.execute(
+                    """INSERT INTO media_import_artifact_slots(
+                         project_id,progress_id,import_slot,relative_path_key,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?)""",
+                    (project["id"], progress["id"], slot, path_key, timestamp, timestamp),
+                )
+            elif existing["progress_id"] == progress["id"] and existing["import_slot"] == "generated_jpg" and slot == "camera_jpg":
+                db.execute(
+                    "UPDATE media_import_artifact_slots SET import_slot='camera_jpg',updated_at=? WHERE project_id=? AND progress_id=?",
+                    (timestamp, project["id"], progress["id"]),
+                )
+
+
 MIGRATIONS = {
     11: _migration_11,
     12: _migration_12,
@@ -762,6 +1207,10 @@ MIGRATIONS = {
     19: _migration_19,
     20: _migration_20,
     21: _migration_21,
+    22: _migration_22,
+    23: _migration_23,
+    24: _migration_24,
+    25: _migration_25,
 }
 
 
@@ -778,16 +1227,19 @@ def _check_integrity(db, force: bool = False):
         "version_batches.parent": """SELECT COUNT(*) FROM version_batches child WHERE parent_batch_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM version_batches parent WHERE parent.id=child.parent_batch_id AND parent.project_id=child.project_id)""",
         "progress_folders.parent": """SELECT COUNT(*) FROM progress_folders child WHERE parent_progress_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM progress_folders parent WHERE parent.id=child.parent_progress_id AND parent.project_id=child.project_id AND parent.media_kind=child.media_kind)""",
         "progress_folders.v2_shape": """SELECT COUNT(*) FROM progress_folders WHERE
-          node_role NOT IN ('original','progress','selection')
+          node_role NOT IN ('original','progress','selection','artifact','workflow')
           OR (relation_kind IS NOT NULL AND relation_kind NOT IN ('main','auxiliary'))
+          OR (artifact_kind IS NOT NULL AND artifact_kind NOT IN ('companion','preview','team_workspace'))
           OR (parent_progress_id IS NULL) != (relation_kind IS NULL)
-          OR (node_role='original' AND parent_progress_id IS NOT NULL)
-          OR (node_role='selection' AND relation_kind!='auxiliary')
-          OR (node_role='progress' AND parent_progress_id IS NOT NULL AND relation_kind!='main')""",
+          OR (node_role='original' AND (parent_progress_id IS NOT NULL OR artifact_kind NOT IN ('companion')))
+          OR (node_role='selection' AND (relation_kind!='auxiliary' OR artifact_kind IS NOT NULL))
+          OR (node_role='progress' AND ((parent_progress_id IS NOT NULL AND relation_kind!='main') OR artifact_kind IS NOT NULL))
+          OR (node_role='artifact' AND (parent_progress_id IS NOT NULL OR relation_kind IS NOT NULL OR artifact_kind NOT IN ('companion','preview')))
+          OR (node_role='workflow' AND (parent_progress_id IS NOT NULL OR relation_kind IS NOT NULL OR artifact_kind!='team_workspace'))""",
         "progress_folders.v2_policy": """SELECT COUNT(*) FROM progress_folders WHERE
           tracking_state NOT IN ('disabled','pending_compare','pending_confirm','committing','ready','stale','needs_repair')
           OR tracking_enabled NOT IN (0,1) OR rename_from_parent NOT IN (0,1) OR copy_missing_from_parent NOT IN (0,1)
-          OR ((node_role='original' OR relation_kind='auxiliary') AND
+          OR ((node_role IN ('original','artifact','workflow') OR relation_kind='auxiliary') AND
               (tracking_enabled!=0 OR rename_from_parent!=0 OR copy_missing_from_parent!=0 OR tracking_state!='disabled'))
           OR (tracking_enabled=0 AND (rename_from_parent!=0 OR copy_missing_from_parent!=0))""",
         "progress_folders.v2_parent_role": """SELECT COUNT(*) FROM progress_folders child
@@ -795,6 +1247,24 @@ def _check_integrity(db, force: bool = False):
             SELECT 1 FROM progress_folders parent WHERE parent.id=child.parent_progress_id
               AND parent.project_id=child.project_id AND parent.media_kind=child.media_kind
               AND parent.node_role IN ('original','progress'))""",
+        "version_graph_edges.owner_kind": """SELECT COUNT(*) FROM version_graph_edges edge
+          WHERE edge.edge_kind NOT IN ('media_companion','derived_preview','workflow_input') OR NOT EXISTS(
+            SELECT 1 FROM progress_folders source JOIN progress_folders target ON target.id=edge.target_progress_id
+            WHERE source.id=edge.source_progress_id AND source.project_id=edge.project_id
+              AND target.project_id=edge.project_id AND source.media_kind=target.media_kind
+              AND ((edge.edge_kind='media_companion' AND source.node_role='original' AND target.node_role='original' AND target.artifact_kind='companion')
+                OR (edge.edge_kind='derived_preview' AND source.node_role IN ('original','progress') AND target.node_role='artifact' AND target.artifact_kind='preview')
+                OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress') OR (source.node_role IN ('original','progress') AND target.node_role='workflow' AND target.artifact_kind='team_workspace'))))
+          )""",
+        "media_import_artifact_slots.owner_kind": """SELECT COUNT(*) FROM media_import_artifact_slots slot
+          WHERE NOT EXISTS(SELECT 1 FROM progress_folders progress WHERE progress.id=slot.progress_id
+            AND progress.project_id=slot.project_id AND (
+              (slot.import_slot='raw' AND progress.media_kind='image' AND progress.node_role='original' AND progress.artifact_kind IS NULL)
+              OR (slot.import_slot='camera_jpg' AND progress.media_kind='image' AND progress.node_role='original' AND progress.artifact_kind='companion')
+              OR (slot.import_slot='generated_jpg' AND progress.media_kind='image' AND progress.node_role='artifact' AND progress.artifact_kind='preview')
+              OR (slot.import_slot='mov' AND progress.media_kind='video' AND progress.node_role='original' AND progress.artifact_kind IS NULL)
+              OR (slot.import_slot='video_preview' AND progress.media_kind='video' AND progress.node_role='artifact' AND progress.artifact_kind='preview')
+            ))""",
         "batch_items.owner": """SELECT COUNT(*) FROM batch_items item WHERE NOT EXISTS(SELECT 1 FROM version_batches batch JOIN photos ON photos.project_id=batch.project_id JOIN versions ON versions.photo_id=photos.id WHERE batch.id=item.batch_id AND photos.id=item.photo_id AND versions.id=item.version_id)""",
         "team_retouch_photos.owner": """SELECT COUNT(*) FROM team_retouch_photos item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id)""",
         "team_person_assignments.owner": """SELECT COUNT(*) FROM team_person_assignments item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id) OR (item.identity_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM team_person_identities identity WHERE identity.id=item.identity_id AND identity.project_id=item.project_id))""",
@@ -804,6 +1274,9 @@ def _check_integrity(db, force: bool = False):
     progress_cycles = _progress_relation_cycles(db)
     if progress_cycles:
         business_errors["progress_folders.v2_cycle"] = len(progress_cycles)
+    version_graph_cycle_nodes = _version_graph_cycle_nodes(db)
+    if version_graph_cycle_nodes:
+        business_errors["version_graph_edges.cycle"] = len(version_graph_cycle_nodes)
     business_errors = {name: count for name, count in business_errors.items() if count}
     if quick_check != ["ok"] or foreign_key_errors or business_errors:
         raise RuntimeError(
@@ -845,6 +1318,9 @@ def connect(root: str, database: str):
     backup_path = None
     if not is_fresh and schema_version < TARGET_SCHEMA_VERSION:
         backup_path = _backup_before_migration(db, database, schema_version)
+    # Migrations that reconcile trusted relative paths must use the workspace
+    # root from this connection, including after the workspace has moved.
+    _set_meta(db, "workspace_root", root)
     db.executescript("""
         PRAGMA foreign_keys=ON;
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -953,6 +1429,7 @@ def connect(root: str, database: str):
             folder_path_key TEXT NOT NULL,
             folder_id TEXT,
             node_role TEXT NOT NULL DEFAULT 'progress',
+            artifact_kind TEXT,
             relation_kind TEXT,
             tracking_enabled INTEGER NOT NULL DEFAULT 0,
             tracking_state TEXT NOT NULL DEFAULT 'disabled',
@@ -1127,6 +1604,10 @@ def connect(root: str, database: str):
             _migration_19(db)
             _migration_20(db)
             _migration_21(db)
+            _migration_22(db)
+            _migration_23(db)
+            _migration_24(db)
+            _migration_25(db)
             _set_meta(db, "schema_version", TARGET_SCHEMA_VERSION)
     else:
         for next_version in range(schema_version + 1, TARGET_SCHEMA_VERSION + 1):
@@ -1137,6 +1618,13 @@ def connect(root: str, database: str):
             with db:
                 migration(db)
                 _set_meta(db, "schema_version", next_version)
+    # Schema 24 was still under active development when import graph sessions
+    # and original/companion nodes were added. Apply this idempotent revision
+    # once so databases opened by an earlier schema-24 build are upgraded too.
+    if _meta_value(db, "schema_24_graph_revision") != "3":
+        with db:
+            _migration_24(db)
+            _set_meta(db, "schema_24_graph_revision", "3")
     _set_meta(db, "workspace_root", root)
     if backup_path:
         _set_meta(db, "last_migration_backup", backup_path)
@@ -1644,6 +2132,7 @@ def serialize_progress(row):
         "folderPath": row["folder_path"], "folderMissing": folder_missing,
         "missingSince": missing_since if folder_missing else None,
         "nodeRole": row["node_role"] if "node_role" in row.keys() else "progress",
+        "artifactKind": row["artifact_kind"] if "artifact_kind" in row.keys() else None,
         "relationKind": row["relation_kind"] if "relation_kind" in row.keys() else ("main" if row["parent_progress_id"] else None),
         "trackingEnabled": bool(row["tracking_enabled"]),
         "renameFromParent": bool(row["rename_from_parent"]) if "rename_from_parent" in row.keys() else False,
@@ -1682,7 +2171,7 @@ def progress_rows(db, project_id: str, include_missing: bool = True):
     ).fetchall()
 
 
-def sync_progress_folder_locations(root: str, db, project):
+def sync_progress_folder_locations(root: str, db, project, commit: bool = True):
     project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
     existing = progress_rows(db, project["id"])
     by_identity = {row["folder_id"]: row for row in existing if row["folder_id"]}
@@ -1728,7 +2217,8 @@ def sync_progress_folder_locations(root: str, db, project):
                 "UPDATE progress_folders SET missing_since=?,tombstone_json=?,updated_at=? WHERE id=?",
                 (timestamp, json.dumps({"reason": "folder_missing", "path": row["folder_path"]}, ensure_ascii=False), timestamp, row["id"]),
             )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 def sync_legacy_progress_folders(root: str, db, project):
@@ -1840,17 +2330,325 @@ def register_original_baselines(root: str, db, project):
         db.commit()
 
 
+def repair_legacy_selection_nodes(root: str, db, project):
+    """Repair only deterministic legacy selections, recording every ambiguous conflict."""
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    if not os.path.isdir(project_path):
+        return
+    root_directories = {
+        entry.name.casefold(): canonical_path(entry.path)
+        for entry in os.scandir(project_path)
+        if entry.is_dir()
+    }
+    definitions = {
+        "图片选片": {
+            "media_kind": "image", "source_name": "RAW",
+            "display_names": {"图片选片", "图片选片（原图）"},
+        },
+        "视频选片": {
+            "media_kind": "video", "source_name": "MOV",
+            "display_names": {"视频选片", "视频选片（原片）"},
+        },
+    }
+    timestamp = int(time.time() * 1000)
+
+    def record_repair(legacy_node, legacy_name, source_name, reason, candidate_ids):
+        db.execute(
+            """INSERT INTO legacy_selection_relation_repairs(
+                 progress_id,project_id,legacy_name,expected_source_name,reason,
+                 candidate_ids_json,created_at) VALUES(?,?,?,?,?,?,?)
+               ON CONFLICT(progress_id) DO UPDATE SET
+                 legacy_name=excluded.legacy_name,
+                 expected_source_name=excluded.expected_source_name,
+                 reason=excluded.reason,
+                 candidate_ids_json=excluded.candidate_ids_json""",
+            (legacy_node["id"], project["id"], legacy_name, source_name, reason,
+             json.dumps(candidate_ids, ensure_ascii=False), timestamp),
+        )
+
+    # sqlite's connection context is the transaction boundary: unexpected
+    # errors roll back every repair for this project before propagating.
+    with db:
+        for legacy_name, definition in definitions.items():
+            legacy_path = root_directories.get(legacy_name.casefold())
+            if legacy_path is None:
+                continue
+            legacy_nodes = db.execute(
+                """SELECT * FROM progress_folders
+                   WHERE project_id=? AND media_kind=? AND parent_progress_id IS NULL
+                     AND version_key='0' AND node_role IN ('original','progress')
+                     AND folder_path_key=?""",
+                (project["id"], definition["media_kind"], legacy_path.casefold()),
+            ).fetchall()
+            legacy_nodes = [
+                node for node in legacy_nodes
+                if os.path.basename(canonical_path(node["folder_path"])) == legacy_name
+                and node["display_name"] in definition["display_names"]
+            ]
+            if not legacy_nodes:
+                continue
+            source_path = root_directories.get(definition["source_name"].casefold())
+            candidates = [] if source_path is None else db.execute(
+                """SELECT id FROM progress_folders
+                   WHERE project_id=? AND media_kind=? AND node_role='original'
+                     AND parent_progress_id IS NULL AND folder_path_key=? AND missing_since IS NULL
+                   ORDER BY id""",
+                (project["id"], definition["media_kind"], source_path.casefold()),
+            ).fetchall()
+            source_ids = [row["id"] for row in candidates]
+            for legacy_node in legacy_nodes:
+                if len(source_ids) != 1:
+                    record_repair(
+                        legacy_node, legacy_name, definition["source_name"],
+                        "source_missing" if not source_ids else "source_ambiguous", source_ids,
+                    )
+                    continue
+                source_id = source_ids[0]
+                existing_selections = db.execute(
+                    """SELECT id FROM progress_folders
+                       WHERE project_id=? AND media_kind=? AND node_role='selection'
+                         AND relation_kind='auxiliary' AND parent_progress_id=?
+                         AND id<>? AND missing_since IS NULL ORDER BY id""",
+                    (project["id"], definition["media_kind"], source_id, legacy_node["id"]),
+                ).fetchall()
+                existing_selection_ids = [row["id"] for row in existing_selections]
+                if existing_selection_ids:
+                    record_repair(
+                        legacy_node, legacy_name, definition["source_name"],
+                        "selection_already_exists", existing_selection_ids,
+                    )
+                    continue
+                target_version_key = f"selection-{source_id}"
+                key_owner = db.execute(
+                    """SELECT id FROM progress_folders
+                       WHERE project_id=? AND media_kind=? AND version_key=? AND id<>?""",
+                    (project["id"], definition["media_kind"], target_version_key, legacy_node["id"]),
+                ).fetchone()
+                if key_owner is not None:
+                    record_repair(
+                        legacy_node, legacy_name, definition["source_name"],
+                        "selection_already_exists", [key_owner["id"]],
+                    )
+                    continue
+                try:
+                    db.execute(
+                        """UPDATE progress_folders SET node_role='selection',relation_kind='auxiliary',
+                           parent_progress_id=?,tracking_enabled=0,tracking_state='disabled',
+                           rename_from_parent=0,copy_missing_from_parent=0,version_key=?,updated_at=?
+                           WHERE id=?""",
+                        (source_id, target_version_key, timestamp, legacy_node["id"]),
+                    )
+                except sqlite3.IntegrityError:
+                    # A concurrent/key conflict is a repair decision, not a
+                    # reason for progress_list to fail and hide the whole tree.
+                    record_repair(
+                        legacy_node, legacy_name, definition["source_name"],
+                        "selection_already_exists", [],
+                    )
+                    continue
+                db.execute(
+                    "DELETE FROM legacy_selection_relation_repairs WHERE progress_id=?",
+                    (legacy_node["id"],),
+                )
+
+
 def progress_list(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     recover_stale_version_batches(db, project["id"])
     migrate_legacy_progress_folders_once(root, db, project)
     register_original_baselines(root, db, project)
+    repair_legacy_selection_nodes(root, db, project)
     sync_progress_folder_locations(root, db, project)
     include_missing = bool(payload.get("includeMissing"))
+    repair_rows = db.execute(
+        """SELECT progress_id,project_id,legacy_name,expected_source_name,reason,
+                  candidate_ids_json FROM legacy_selection_relation_repairs
+           WHERE project_id=? ORDER BY created_at,progress_id""",
+        (project["id"],),
+    ).fetchall()
     return {
         "success": True,
         "progressFolders": [serialize_progress(row) for row in progress_rows(db, project["id"], include_missing)],
+        "graphEdges": [
+            serialize_version_graph_edge(row) for row in db.execute(
+                "SELECT * FROM version_graph_edges WHERE project_id=? ORDER BY created_at,id",
+                (project["id"],),
+            ).fetchall()
+        ],
+        "legacySelectionRelationRepairs": [
+            {
+                "progressId": row["progress_id"],
+                "projectId": row["project_id"],
+                "legacyName": row["legacy_name"],
+                "expectedSourceName": row["expected_source_name"],
+                "reason": row["reason"],
+                "candidateIds": json.loads(row["candidate_ids_json"] or "[]"),
+            }
+            for row in repair_rows
+        ],
     }
+
+
+def progress_legacy_selection_repair(db, payload: dict):
+    progress_id = str(payload.get("progressId") or "").strip()
+    source_progress_id = str(payload.get("sourceProgressId") or "").strip()
+    if not progress_id or not source_progress_id:
+        raise ValueError("legacy_selection_repair_payload_invalid: 修复节点 ID 无效")
+    with db:
+        repair = db.execute(
+            "SELECT * FROM legacy_selection_relation_repairs WHERE progress_id=?",
+            (progress_id,),
+        ).fetchone()
+        legacy = db.execute("SELECT * FROM progress_folders WHERE id=?", (progress_id,)).fetchone()
+        source = db.execute("SELECT * FROM progress_folders WHERE id=?", (source_progress_id,)).fetchone()
+        if repair is None or legacy is None:
+            raise ValueError("legacy_selection_repair_not_found: 遗留选片修复记录不存在")
+        if source is None or source["project_id"] != repair["project_id"] or legacy["project_id"] != repair["project_id"]:
+            raise ValueError("legacy_selection_repair_project_mismatch: 节点不属于当前项目")
+        if source["media_kind"] != legacy["media_kind"]:
+            raise ValueError("legacy_selection_repair_media_mismatch: 来源媒体类型不一致")
+        if source["node_role"] != "original" or source["parent_progress_id"] is not None or source["missing_since"] is not None:
+            raise ValueError("legacy_selection_repair_source_invalid: 来源必须是有效的原始素材节点")
+        if legacy["parent_progress_id"] is not None or legacy["version_key"] != "0" or legacy["node_role"] not in ("original", "progress"):
+            raise ValueError("legacy_selection_repair_state_changed: 遗留节点状态已经变化，请刷新后重试")
+        preferred_key = f"selection-{source_progress_id}"
+        key_owner = db.execute(
+            """SELECT id FROM progress_folders
+               WHERE project_id=? AND media_kind=? AND version_key=? AND id<>?""",
+            (legacy["project_id"], legacy["media_kind"], preferred_key, progress_id),
+        ).fetchone()
+        version_key = f"legacy-selection-{progress_id}" if key_owner is not None else preferred_key
+        fallback_owner = db.execute(
+            """SELECT id FROM progress_folders
+               WHERE project_id=? AND media_kind=? AND version_key=? AND id<>?""",
+            (legacy["project_id"], legacy["media_kind"], version_key, progress_id),
+        ).fetchone()
+        if fallback_owner is not None:
+            raise ValueError("legacy_selection_repair_key_conflict: 遗留选片内部标识冲突")
+        timestamp = max(int(time.time() * 1000), int(legacy["updated_at"]) + 1)
+        db.execute(
+            """UPDATE progress_folders SET node_role='selection',relation_kind='auxiliary',
+               parent_progress_id=?,version_key=?,tracking_enabled=0,tracking_state='disabled',
+               rename_from_parent=0,copy_missing_from_parent=0,last_tracked_at=NULL,
+               tracking_snapshot_json='{}',folder_signature=NULL,updated_at=? WHERE id=?""",
+            (source_progress_id, version_key, timestamp, progress_id),
+        )
+        db.execute("DELETE FROM legacy_selection_relation_repairs WHERE progress_id=?", (progress_id,))
+    updated = next(row for row in progress_rows(db, legacy["project_id"], True) if row["id"] == progress_id)
+    return {"success": True, "progressFolder": serialize_progress(updated)}
+
+
+VERSION_TREE_MAX_COORDINATE = 1_000_000.0
+VERSION_TREE_MAX_POSITIONS = 1000
+
+
+def normalize_version_tree_scope(value) -> str:
+    raw = str(value or "").strip().replace("\\", "/")
+    if len(raw) > 1024 or raw.startswith("/") or (len(raw) >= 2 and raw[1] == ":"):
+        raise ValueError("version_tree_scope_invalid: scopeKey 必须是项目内相对路径")
+    parts = [part for part in raw.split("/") if part not in ("", ".")]
+    if any(part == ".." for part in parts):
+        raise ValueError("version_tree_scope_invalid: scopeKey 不能包含 ..")
+    return "/".join(parts)
+
+
+def version_tree_project_node_keys(db, project_id: str) -> set[str]:
+    keys = {f"progress:{row['id']}" for row in db.execute(
+        "SELECT id FROM progress_folders WHERE project_id=? AND missing_since IS NULL",
+        (project_id,),
+    ).fetchall()}
+    return keys
+
+
+def version_tree_layout_get(db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    scope_key = normalize_version_tree_scope(payload.get("scopeKey"))
+    valid_keys = version_tree_project_node_keys(db, project["id"])
+    with db:
+        layout = db.execute(
+            "SELECT revision,updated_at FROM version_tree_layouts WHERE project_id=? AND scope_key=?",
+            (project["id"], scope_key),
+        ).fetchone()
+        rows = db.execute(
+            """SELECT node_key,x,y,updated_at FROM version_tree_node_positions
+               WHERE project_id=? AND scope_key=? ORDER BY node_key""",
+            (project["id"], scope_key),
+        ).fetchall()
+        stale_keys = [row["node_key"] for row in rows if row["node_key"] not in valid_keys]
+        for node_key in stale_keys:
+            db.execute(
+                "DELETE FROM version_tree_node_positions WHERE project_id=? AND scope_key=? AND node_key=?",
+                (project["id"], scope_key, node_key),
+            )
+    return {
+        "success": True,
+        "scopeKey": scope_key,
+        "revision": int(layout["revision"]) if layout else 0,
+        "updatedAt": int(layout["updated_at"]) if layout else 0,
+        "positions": [
+            {"nodeKey": row["node_key"], "x": float(row["x"]), "y": float(row["y"]), "updatedAt": int(row["updated_at"])}
+            for row in rows if row["node_key"] in valid_keys
+        ],
+    }
+
+
+def version_tree_layout_save(db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    scope_key = normalize_version_tree_scope(payload.get("scopeKey"))
+    mode = str(payload.get("mode") or "")
+    if mode not in ("patch", "replace"):
+        raise ValueError("version_tree_layout_mode_invalid: mode 必须是 patch 或 replace")
+    expected_revision = payload.get("expectedRevision")
+    if isinstance(expected_revision, bool) or not isinstance(expected_revision, int) or expected_revision < 0:
+        raise ValueError("version_tree_layout_revision_invalid: expectedRevision 无效")
+    positions = payload.get("positions")
+    if not isinstance(positions, list) or len(positions) > VERSION_TREE_MAX_POSITIONS:
+        raise ValueError("version_tree_layout_positions_invalid: 单次保存节点数量无效")
+    valid_keys = version_tree_project_node_keys(db, project["id"])
+    normalized = []
+    seen = set()
+    for position in positions:
+        if not isinstance(position, dict):
+            raise ValueError("version_tree_layout_position_invalid: 坐标记录无效")
+        node_key = str(position.get("nodeKey") or "")
+        x = position.get("x")
+        y = position.get("y")
+        if node_key not in valid_keys or node_key in seen:
+            raise ValueError("version_tree_layout_node_invalid: 节点不属于当前项目")
+        if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            raise ValueError("version_tree_layout_coordinate_invalid: 坐标必须是有限数字")
+        x_value, y_value = float(x), float(y)
+        if not math.isfinite(x_value) or not math.isfinite(y_value) or abs(x_value) > VERSION_TREE_MAX_COORDINATE or abs(y_value) > VERSION_TREE_MAX_COORDINATE:
+            raise ValueError("version_tree_layout_coordinate_invalid: 坐标超出允许范围")
+        seen.add(node_key)
+        normalized.append((node_key, x_value, y_value))
+    timestamp = int(time.time() * 1000)
+    with db:
+        current = db.execute(
+            "SELECT revision FROM version_tree_layouts WHERE project_id=? AND scope_key=?",
+            (project["id"], scope_key),
+        ).fetchone()
+        current_revision = int(current["revision"]) if current else 0
+        if current_revision != expected_revision:
+            raise ValueError(f"stale_layout: 布局已更新（当前 revision={current_revision}）")
+        next_revision = current_revision + 1
+        db.execute(
+            """INSERT INTO version_tree_layouts(project_id,scope_key,revision,updated_at) VALUES(?,?,?,?)
+               ON CONFLICT(project_id,scope_key) DO UPDATE SET revision=excluded.revision,updated_at=excluded.updated_at""",
+            (project["id"], scope_key, next_revision, timestamp),
+        )
+        if mode == "replace":
+            db.execute(
+                "DELETE FROM version_tree_node_positions WHERE project_id=? AND scope_key=?",
+                (project["id"], scope_key),
+            )
+        db.executemany(
+            """INSERT INTO version_tree_node_positions(project_id,scope_key,node_key,x,y,updated_at)
+               VALUES(?,?,?,?,?,?) ON CONFLICT(project_id,scope_key,node_key) DO UPDATE SET
+               x=excluded.x,y=excluded.y,updated_at=excluded.updated_at""",
+            [(project["id"], scope_key, node_key, x, y, timestamp) for node_key, x, y in normalized],
+        )
+    return {"success": True, "scopeKey": scope_key, "revision": next_revision, "updatedAt": timestamp}
 
 
 def recover_stale_version_batches(db, project_id: str):
@@ -1891,9 +2689,10 @@ def recover_stale_version_batches(db, project_id: str):
     db.commit()
 
 
-def progress_register(root: str, db, payload: dict):
+def progress_register(root: str, db, payload: dict, commit: bool = True, sync_locations: bool = True):
     project = project_row(db, payload["projectName"])
-    sync_progress_folder_locations(root, db, project)
+    if sync_locations:
+        sync_progress_folder_locations(root, db, project, commit=commit)
     media_kind = str(payload.get("mediaKind") or "")
     if media_kind not in ("image", "video", "mixed"):
         raise ValueError("无效的进度类型")
@@ -1907,6 +2706,9 @@ def progress_register(root: str, db, payload: dict):
     node_role = str(payload.get("nodeRole") or "progress")
     if node_role not in PROGRESS_NODE_ROLES:
         raise ValueError("无效的文件夹节点角色")
+    artifact_kind = str(payload.get("artifactKind") or "") or None
+    if artifact_kind not in (*PROGRESS_ARTIFACT_KINDS, None):
+        raise ValueError("无效的产物节点类型")
     parent_id = payload.get("parentProgressId") or None
     relation_kind = payload.get("relationKind") or None
     if parent_id and relation_kind is None:
@@ -1923,6 +2725,14 @@ def progress_register(root: str, db, payload: dict):
         raise ValueError("选片节点必须通过 auxiliary 关系连接来源节点")
     if node_role == "progress" and parent_id and relation_kind != "main":
         raise ValueError("进度节点必须通过 main 关系连接父节点")
+    if node_role == "artifact" and (parent_id or relation_kind or artifact_kind not in ("companion", "preview")):
+        raise ValueError("产物节点不能使用结构父关系，且必须指定 companion 或 preview 类型")
+    if node_role == "workflow" and (parent_id or relation_kind or artifact_kind != "team_workspace"):
+        raise ValueError("工作流节点不能使用结构父关系，且必须是 team_workspace 类型")
+    if node_role == "original" and artifact_kind not in (None, "companion"):
+        raise ValueError("original nodes may only use the companion artifact kind")
+    if node_role in ("progress", "selection") and artifact_kind is not None:
+        raise ValueError("普通版本节点不能指定产物类型")
     if parent_id:
         parent = db.execute(
             "SELECT * FROM progress_folders WHERE id=? AND project_id=? AND media_kind=?",
@@ -1985,9 +2795,9 @@ def progress_register(root: str, db, payload: dict):
         tracking_enabled = tracking_state != "disabled"
     rename_from_parent = bool(payload.get("renameFromParent"))
     copy_missing_from_parent = bool(payload.get("copyMissingFromParent"))
-    if node_role == "original" or relation_kind == "auxiliary":
+    if node_role in ("original", "artifact", "workflow") or relation_kind == "auxiliary":
         if tracking_enabled or rename_from_parent or copy_missing_from_parent or tracking_state != "disabled":
-            raise ValueError("original/auxiliary 节点禁止开启版本跟踪")
+            raise ValueError("original/selection/artifact/workflow 节点禁止开启版本跟踪")
         tracking_enabled = rename_from_parent = copy_missing_from_parent = False
         tracking_state = "disabled"
     if not tracking_enabled and (rename_from_parent or copy_missing_from_parent):
@@ -2000,13 +2810,13 @@ def progress_register(root: str, db, payload: dict):
     last_tracked_at = int(payload.get("lastTrackedAt") or timestamp) if tracking_state == "ready" else None
     values = (
         parent_id, display_name, folder_path, folder_path.casefold(), directory_identity(folder_path),
-        node_role, relation_kind, int(tracking_enabled), tracking_state, int(rename_from_parent),
+        node_role, artifact_kind, relation_kind, int(tracking_enabled), tracking_state, int(rename_from_parent),
         int(copy_missing_from_parent), last_tracked_at, snapshot_json, folder_signature, timestamp,
     )
     if existing:
         db.execute(
             """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,display_name=?,folder_path=?,folder_path_key=?,
-               folder_id=?,node_role=?,relation_kind=?,tracking_enabled=?,tracking_state=?,rename_from_parent=?,
+               folder_id=?,node_role=?,artifact_kind=?,relation_kind=?,tracking_enabled=?,tracking_state=?,rename_from_parent=?,
                copy_missing_from_parent=?,last_tracked_at=?,tracking_snapshot_json=?,folder_signature=?,
                missing_since=NULL,tombstone_json='{}',updated_at=? WHERE id=?""",
             (media_kind, version_key, *values, existing["id"]),
@@ -2016,15 +2826,563 @@ def progress_register(root: str, db, payload: dict):
         progress_id = str(uuid.uuid4())
         db.execute(
             """INSERT INTO progress_folders(id,project_id,media_kind,version_key,parent_progress_id,
-               display_name,folder_path,folder_path_key,folder_id,node_role,relation_kind,tracking_enabled,
+               display_name,folder_path,folder_path_key,folder_id,node_role,artifact_kind,relation_kind,tracking_enabled,
                tracking_state,rename_from_parent,copy_missing_from_parent,last_tracked_at,tracking_snapshot_json,
                folder_signature,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (progress_id, project["id"], media_kind, version_key, *values[:-1], timestamp, timestamp),
         )
-    db.commit()
+    if commit:
+        db.commit()
     row = next(row for row in progress_rows(db, project["id"]) if row["id"] == progress_id)
     return {"success": True, "progressFolder": serialize_progress(row)}
+
+
+def progress_register_with_graph(root: str, db, payload: dict):
+    """Atomically register/update one main progress and synchronize workflow inputs."""
+    if not isinstance(payload, dict) or set(payload) - {"projectName", "progress", "workflowInputProgressIds"}:
+        raise ValueError("progress_graph_payload_invalid: only projectName, progress and workflow inputs are accepted")
+    project_name = str(payload.get("projectName") or "").strip()
+    progress_payload = payload.get("progress")
+    input_ids = payload.get("workflowInputProgressIds")
+    if not project_name or not isinstance(progress_payload, dict) or not isinstance(input_ids, list):
+        raise ValueError("progress_graph_payload_invalid: project, progress or workflow inputs are invalid")
+    allowed_progress_fields = {
+        "progressId", "mediaKind", "versionKey", "parentProgressId", "displayName", "folderPath",
+        "relationKind", "trackingEnabled", "trackingState", "renameFromParent", "copyMissingFromParent",
+    }
+    if set(progress_payload) - allowed_progress_fields or "nodeRole" in progress_payload or "edgeKind" in progress_payload:
+        raise ValueError("progress_graph_payload_invalid: renderer cannot assign node roles, paths or edge kinds")
+    normalized_inputs = []
+    for value in input_ids:
+        input_id = str(value or "").strip()
+        if not input_id or input_id in normalized_inputs:
+            raise ValueError("progress_graph_input_invalid: workflow input IDs must be unique and non-empty")
+        normalized_inputs.append(input_id)
+
+    project = project_row(db, project_name)
+    progress_id = str(progress_payload.get("progressId") or "").strip()
+    updates_progress = bool(set(progress_payload) - {"progressId"})
+    required = ("mediaKind", "versionKey", "displayName", "folderPath")
+    if (not progress_id or updates_progress) and any(not progress_payload.get(field) for field in required):
+        raise ValueError("progress_graph_payload_invalid: new or updated progress fields are incomplete")
+
+    try:
+        with db:
+            if updates_progress or not progress_id:
+                register_payload = {
+                    "projectName": project_name,
+                    "progressId": progress_id or None,
+                    "mediaKind": progress_payload["mediaKind"],
+                    "versionKey": progress_payload["versionKey"],
+                    "parentProgressId": progress_payload.get("parentProgressId"),
+                    "displayName": progress_payload["displayName"],
+                    "folderPath": progress_payload["folderPath"],
+                    "nodeRole": "progress",
+                    "relationKind": progress_payload.get("relationKind") or ("main" if progress_payload.get("parentProgressId") else None),
+                    "trackingEnabled": bool(progress_payload.get("trackingEnabled")),
+                    "trackingState": progress_payload.get("trackingState"),
+                    "renameFromParent": bool(progress_payload.get("renameFromParent")),
+                    "copyMissingFromParent": bool(progress_payload.get("copyMissingFromParent")),
+                }
+                registered = progress_register(root, db, register_payload, commit=False, sync_locations=False)
+                progress_id = registered["progressFolder"]["id"]
+            else:
+                existing = db.execute(
+                    "SELECT * FROM progress_folders WHERE id=? AND project_id=?",
+                    (progress_id, project["id"]),
+                ).fetchone()
+                if existing is None or existing["missing_since"] is not None:
+                    raise ValueError("progress_graph_target_invalid: target progress does not exist")
+
+            target = db.execute("SELECT * FROM progress_folders WHERE id=?", (progress_id,)).fetchone()
+            sources = {}
+            for source_id in normalized_inputs:
+                source = db.execute("SELECT * FROM progress_folders WHERE id=?", (source_id,)).fetchone()
+                if source is None or source["missing_since"] is not None:
+                    raise ValueError("progress_graph_input_invalid: an input progress does not exist")
+                sources[source_id] = source
+            if target["node_role"] == "workflow":
+                if any(source["node_role"] not in ("original", "progress") for source in sources.values()):
+                    raise ValueError("progress_graph_input_invalid: workflow inputs must be original or main progress nodes")
+            elif target["node_role"] == "progress":
+                if any(source["node_role"] not in ("selection", "workflow") for source in sources.values()):
+                    raise ValueError("progress_graph_input_invalid: progress inputs must be selection or workflow nodes")
+            else:
+                raise ValueError("progress_graph_target_invalid: target must be a workflow or main progress")
+
+            for source_id in normalized_inputs:
+                _validated_version_graph_edge(db, {
+                    "projectId": project["id"], "sourceProgressId": source_id,
+                    "targetProgressId": progress_id, "edgeKind": "workflow_input",
+                }) if db.execute(
+                    """SELECT 1 FROM version_graph_edges WHERE project_id=? AND source_progress_id=?
+                       AND target_progress_id=? AND edge_kind='workflow_input'""",
+                    (project["id"], source_id, progress_id),
+                ).fetchone() is None else None
+
+            if target["node_role"] == "workflow":
+                db.execute(
+                    """DELETE FROM version_graph_edges WHERE project_id=? AND target_progress_id=?
+                       AND edge_kind='workflow_input' AND source_progress_id NOT IN
+                       (SELECT value FROM json_each(?))""",
+                    (project["id"], progress_id, json.dumps(normalized_inputs)),
+                )
+            elif target["node_role"] == "progress":
+                db.execute(
+                    """DELETE FROM version_graph_edges WHERE project_id=? AND target_progress_id=?
+                       AND edge_kind='workflow_input' AND source_progress_id NOT IN
+                       (SELECT value FROM json_each(?))""",
+                    (project["id"], progress_id, json.dumps(normalized_inputs)),
+                )
+                workflow_inputs = [source_id for source_id, source in sources.items() if source["node_role"] == "workflow"]
+                for workflow_id in workflow_inputs:
+                    db.execute(
+                        """DELETE FROM version_graph_edges WHERE project_id=? AND source_progress_id=?
+                           AND edge_kind='workflow_input' AND target_progress_id<>?""",
+                        (project["id"], workflow_id, progress_id),
+                    )
+            timestamp = int(time.time() * 1000)
+            for source_id in normalized_inputs:
+                db.execute(
+                    """INSERT OR IGNORE INTO version_graph_edges(
+                         id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (str(uuid.uuid4()), project["id"], source_id, progress_id, "workflow_input", timestamp, timestamp),
+                )
+    except Exception:
+        db.rollback()
+        raise
+
+    row = next(row for row in progress_rows(db, project["id"], True) if row["id"] == progress_id)
+    edges = db.execute(
+        "SELECT * FROM version_graph_edges WHERE project_id=? AND (source_progress_id=? OR target_progress_id=?) ORDER BY created_at,id",
+        (project["id"], progress_id, progress_id),
+    ).fetchall()
+    return {"success": True, "progressFolder": serialize_progress(row), "edges": [serialize_version_graph_edge(edge) for edge in edges]}
+
+
+def progress_relation_update(db, payload: dict):
+    child_id = str(payload.get("childProgressId") or "").strip()
+    parent_value = payload.get("parentProgressId")
+    parent_id = str(parent_value).strip() if parent_value is not None else None
+    if not child_id or parent_id == "":
+        raise ValueError("relation_payload_invalid: 节点 ID 无效")
+    expected_updated_at = payload.get("expectedUpdatedAt")
+    with db:
+        child = db.execute("SELECT * FROM progress_folders WHERE id=?", (child_id,)).fetchone()
+        if child is None:
+            raise ValueError("child_not_found: 子节点不存在")
+        if expected_updated_at is not None and int(expected_updated_at) != int(child["updated_at"]):
+            raise ValueError("stale_update: 版本关系已被其他操作修改，请刷新后重试")
+        if child["node_role"] == "original":
+            raise ValueError("original_parent_forbidden: 原始素材不能拥有父节点")
+        if child["node_role"] not in ("progress", "selection"):
+            raise ValueError("child_role_invalid: 子节点角色无效")
+        if child["tracking_state"] in ("pending_compare", "pending_confirm", "committing"):
+            raise ValueError("node_busy: 节点正在比较或提交，暂时不能修改关系")
+        active_session = db.execute(
+            "SELECT 1 FROM tracking_sessions WHERE progress_id=? AND status IN ('comparing','pending_confirm','committing') LIMIT 1",
+            (child_id,),
+        ).fetchone()
+        if active_session is not None:
+            raise ValueError("node_busy: 节点正在比较或提交，暂时不能修改关系")
+        if child["node_role"] == "progress" and parent_id is None and child["tracking_enabled"]:
+            raise ValueError("tracked_detach_forbidden: 已开启跟踪的进度不能断开为根节点，请先关闭跟踪")
+        if child["node_role"] == "selection" and parent_id is None:
+            raise ValueError("selection_parent_required: 选片节点必须保留有效来源")
+        if parent_id is not None:
+            parent = db.execute("SELECT * FROM progress_folders WHERE id=?", (parent_id,)).fetchone()
+            if parent is None or parent["project_id"] != child["project_id"]:
+                raise ValueError("relation_project_mismatch: 父子节点不属于同一项目")
+            if parent["media_kind"] != child["media_kind"]:
+                raise ValueError("media_kind_mismatch: 父子节点媒体类型不一致")
+            if parent["node_role"] == "selection" or parent["relation_kind"] == "auxiliary":
+                raise ValueError("invalid_parent_role: 不能挂到选片或附属分支下")
+            if parent["missing_since"] is not None:
+                raise ValueError("parent_missing: 父节点已经失效")
+            if _version_graph_reaches(db, str(child["project_id"]), child_id, parent_id):
+                raise ValueError("cycle_detected: 结构关系和补充关系不能形成有向环")
+        relation_kind = "auxiliary" if child["node_role"] == "selection" else ("main" if parent_id else None)
+        tracking_state = "stale" if child["node_role"] == "progress" and child["tracking_enabled"] else "disabled"
+        timestamp = max(int(time.time() * 1000), int(child["updated_at"]) + 1)
+        version_key = f"selection-{parent_id}" if child["node_role"] == "selection" else child["version_key"]
+        db.execute(
+            """UPDATE progress_folders SET parent_progress_id=?,relation_kind=?,version_key=?,
+               tracking_state=?,last_tracked_at=NULL,tracking_snapshot_json='{}',folder_signature=NULL,
+               updated_at=? WHERE id=?""",
+            (parent_id, relation_kind, version_key, tracking_state, timestamp, child_id),
+        )
+    row = next(row for row in progress_rows(db, child["project_id"]) if row["id"] == child_id)
+    return {"success": True, "progressFolder": serialize_progress(row)}
+
+
+def serialize_version_graph_edge(row):
+    return {
+        "id": row["id"],
+        "projectId": row["project_id"],
+        "sourceProgressId": row["source_progress_id"],
+        "targetProgressId": row["target_progress_id"],
+        "edgeKind": row["edge_kind"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+    }
+
+
+def _strict_version_graph_payload(payload: dict, allowed: set[str]):
+    if not isinstance(payload, dict) or set(payload) - allowed:
+        raise ValueError("version_graph_edge_payload_invalid: 只能提交项目 ID、节点 ID 和关系类型")
+
+
+def _validated_version_graph_edge(db, payload: dict, exclude_edge_id: str | None = None):
+    _strict_version_graph_payload(payload, {"projectId", "sourceProgressId", "targetProgressId", "edgeKind"})
+    project_id = str(payload.get("projectId") or "").strip()
+    source_id = str(payload.get("sourceProgressId") or "").strip()
+    target_id = str(payload.get("targetProgressId") or "").strip()
+    edge_kind = str(payload.get("edgeKind") or "").strip()
+    if not project_id or not source_id or not target_id or edge_kind not in VERSION_GRAPH_EDGE_KINDS:
+        raise ValueError("version_graph_edge_payload_invalid: 项目、节点或关系类型无效")
+    if source_id == target_id:
+        raise ValueError("version_graph_edge_cycle: 节点不能连接到自己")
+    nodes = db.execute(
+        "SELECT * FROM progress_folders WHERE id IN (?,?)",
+        (source_id, target_id),
+    ).fetchall()
+    by_id = {str(row["id"]): row for row in nodes}
+    source = by_id.get(source_id)
+    target = by_id.get(target_id)
+    if source is None or target is None:
+        raise ValueError("version_graph_edge_node_missing: 补充关系节点不存在")
+    if source["project_id"] != project_id or target["project_id"] != project_id:
+        raise ValueError("version_graph_edge_project_mismatch: 所有节点必须属于指定项目")
+    if source["media_kind"] != target["media_kind"]:
+        raise ValueError("version_graph_edge_media_mismatch: 图片和视频节点不能互相连接")
+    valid_roles = (
+        edge_kind == "media_companion" and source["node_role"] == "original" and target["node_role"] == "original"
+        and target["artifact_kind"] == "companion"
+        or edge_kind == "derived_preview" and source["node_role"] in ("original", "progress")
+        and target["node_role"] == "artifact" and target["artifact_kind"] == "preview"
+        or edge_kind == "workflow_input" and (
+            source["node_role"] in ("selection", "workflow") and target["node_role"] == "progress"
+            or source["node_role"] in ("original", "progress") and target["node_role"] == "workflow"
+            and target["artifact_kind"] == "team_workspace"
+        )
+    )
+    if not valid_roles:
+        raise ValueError("version_graph_edge_role_invalid: 节点角色不符合补充关系类型")
+    duplicate = db.execute(
+        """SELECT 1 FROM version_graph_edges WHERE project_id=? AND source_progress_id=?
+           AND target_progress_id=? AND edge_kind=? AND (? IS NULL OR id<>?)""",
+        (project_id, source_id, target_id, edge_kind, exclude_edge_id, exclude_edge_id),
+    ).fetchone()
+    if duplicate is not None:
+        raise ValueError("version_graph_edge_duplicate: 同一补充关系不能重复")
+    if _version_graph_reaches(db, project_id, target_id, source_id, exclude_edge_id):
+        raise ValueError("version_graph_edge_cycle: 结构关系和补充关系不能形成有向环")
+    return project_id, source_id, target_id, edge_kind
+
+
+def version_graph_edge_create(db, payload: dict):
+    project_id, source_id, target_id, edge_kind = _validated_version_graph_edge(db, payload)
+    timestamp = int(time.time() * 1000)
+    edge_id = str(uuid.uuid4())
+    with db:
+        db.execute(
+            """INSERT INTO version_graph_edges(
+                 id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (edge_id, project_id, source_id, target_id, edge_kind, timestamp, timestamp),
+        )
+    row = db.execute("SELECT * FROM version_graph_edges WHERE id=?", (edge_id,)).fetchone()
+    return {"success": True, "edge": serialize_version_graph_edge(row)}
+
+
+def version_graph_edge_list(db, payload: dict):
+    _strict_version_graph_payload(payload, {"projectId"})
+    project_id = str(payload.get("projectId") or "").strip()
+    if not project_id:
+        raise ValueError("version_graph_edge_payload_invalid: 项目 ID 无效")
+    rows = db.execute(
+        "SELECT * FROM version_graph_edges WHERE project_id=? ORDER BY created_at,id",
+        (project_id,),
+    ).fetchall()
+    return {"success": True, "edges": [serialize_version_graph_edge(row) for row in rows]}
+
+
+def version_graph_edge_delete(db, payload: dict):
+    _strict_version_graph_payload(payload, {"projectId", "sourceProgressId", "targetProgressId", "edgeKind"})
+    project_id = str(payload.get("projectId") or "").strip()
+    source_id = str(payload.get("sourceProgressId") or "").strip()
+    target_id = str(payload.get("targetProgressId") or "").strip()
+    edge_kind = str(payload.get("edgeKind") or "").strip()
+    if not project_id or not source_id or not target_id or edge_kind not in VERSION_GRAPH_EDGE_KINDS:
+        raise ValueError("version_graph_edge_payload_invalid: 项目、节点或关系类型无效")
+    with db:
+        changed = db.execute(
+            """DELETE FROM version_graph_edges WHERE project_id=? AND source_progress_id=?
+               AND target_progress_id=? AND edge_kind=?""",
+            (project_id, source_id, target_id, edge_kind),
+        ).rowcount
+    if not changed:
+        raise ValueError("version_graph_edge_not_found: 补充关系不存在")
+    return {"success": True}
+
+
+def version_graph_edge_replace_source(db, payload: dict):
+    _strict_version_graph_payload(
+        payload,
+        {"projectId", "sourceProgressId", "targetProgressId", "edgeKind", "newSourceProgressId"},
+    )
+    project_id = str(payload.get("projectId") or "").strip()
+    source_id = str(payload.get("sourceProgressId") or "").strip()
+    target_id = str(payload.get("targetProgressId") or "").strip()
+    edge_kind = str(payload.get("edgeKind") or "").strip()
+    new_source_id = str(payload.get("newSourceProgressId") or "").strip()
+    if not project_id or not source_id or not target_id or not new_source_id or edge_kind not in VERSION_GRAPH_EDGE_KINDS:
+        raise ValueError("version_graph_edge_payload_invalid: 项目、节点或关系类型无效")
+    existing = db.execute(
+        """SELECT * FROM version_graph_edges WHERE project_id=? AND source_progress_id=?
+           AND target_progress_id=? AND edge_kind=?""",
+        (project_id, source_id, target_id, edge_kind),
+    ).fetchone()
+    if existing is None:
+        raise ValueError("version_graph_edge_not_found: 补充关系不存在")
+    if new_source_id == source_id:
+        return {"success": True, "edge": serialize_version_graph_edge(existing)}
+    edge_id = str(existing["id"])
+    timestamp = int(time.time() * 1000)
+    with db:
+        project_id, new_source_id, target_id, edge_kind = _validated_version_graph_edge(
+            db,
+            {
+                "projectId": project_id,
+                "sourceProgressId": new_source_id,
+                "targetProgressId": target_id,
+                "edgeKind": edge_kind,
+            },
+            edge_id,
+        )
+        db.execute(
+            """UPDATE version_graph_edges SET source_progress_id=?,updated_at=? WHERE id=?""",
+            (new_source_id, timestamp, edge_id),
+        )
+    row = db.execute("SELECT * FROM version_graph_edges WHERE id=?", (edge_id,)).fetchone()
+    return {"success": True, "edge": serialize_version_graph_edge(row)}
+
+
+def _import_relative_path(value) -> str:
+    normalized = str(value or "").replace("\\", "/").strip("/")
+    parts = normalized.split("/") if normalized else []
+    if not parts or any(part in ("", ".", "..") for part in parts) or os.path.isabs(str(value or "")):
+        raise ValueError("import_graph_relative_path_invalid: import graph paths must be project-relative")
+    return "/".join(parts)
+
+
+def media_workflow_import_commit(root: str, db, payload: dict):
+    """Commit an importer-authored V2 artifact manifest without inferring graph semantics from names."""
+    allowed = {"schemaVersion", "projectName", "importSessionId", "artifacts"}
+    if not isinstance(payload, dict) or set(payload) - allowed or payload.get("schemaVersion") != 2:
+        raise ValueError("import_graph_payload_invalid: schemaVersion 2 and supported fields are required")
+    project_name = str(payload.get("projectName") or "").strip()
+    session_id = str(payload.get("importSessionId") or "").strip()
+    if not project_name or not session_id or len(session_id) > 128 or any(ord(char) < 32 for char in session_id):
+        raise ValueError("import_graph_payload_invalid: project name and import session are required")
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise ValueError("import_graph_payload_invalid: artifacts must be a non-empty array")
+
+    slot_shapes = IMPORT_ARTIFACT_SLOT_SHAPES
+    normalized_artifacts = []
+    artifact_paths = set()
+    artifact_allowed = {"relativePath", "mediaKind", "importSlot", "displayName"}
+    for item in artifacts:
+        if not isinstance(item, dict) or set(item) - artifact_allowed:
+            raise ValueError("import_graph_artifact_invalid: unsupported artifact field")
+        relative_path = _import_relative_path(item.get("relativePath"))
+        relative_path_key = relative_path.casefold()
+        if relative_path_key in artifact_paths:
+            raise ValueError("import_graph_artifact_duplicate: artifact path is duplicated")
+        artifact_paths.add(relative_path_key)
+        import_slot = str(item.get("importSlot") or "")
+        media_kind = str(item.get("mediaKind") or "")
+        shape = slot_shapes.get(import_slot)
+        if shape is None or media_kind != shape[0]:
+            raise ValueError("import_graph_artifact_invalid: media kind does not match import slot")
+        display_name = str(item.get("displayName") or os.path.basename(relative_path)).strip()
+        if not display_name:
+            raise ValueError("import_graph_artifact_invalid: display name is required")
+        normalized_artifacts.append({
+            "relativePath": relative_path,
+            "relativePathKey": relative_path_key,
+            "mediaKind": media_kind,
+            "importSlot": import_slot,
+            "displayName": display_name,
+        })
+    normalized_artifacts.sort(key=lambda item: (item["relativePathKey"], item["importSlot"]))
+
+    canonical_manifest = json.dumps({
+        "schemaVersion": 2,
+        "projectName": project_name,
+        "importSessionId": session_id,
+        "artifacts": [
+            {key: item[key] for key in ("relativePath", "mediaKind", "importSlot", "displayName")}
+            for item in normalized_artifacts
+        ],
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    project = project_row(db, project_name)
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    timestamp = int(time.time() * 1000)
+    session = db.execute(
+        "SELECT * FROM media_import_graph_sessions WHERE project_id=? AND import_session_id=?",
+        (project["id"], session_id),
+    ).fetchone()
+    if session is not None and session["manifest_json"] != canonical_manifest:
+        raise ValueError("import_graph_session_conflict: the import session has a different manifest")
+    if session is None:
+        db.execute(
+            """INSERT INTO media_import_graph_sessions(project_id,import_session_id,manifest_json,status,error,created_at,updated_at)
+               VALUES(?,?,?,'pending',NULL,?,?)""",
+            (project["id"], session_id, canonical_manifest, timestamp, timestamp),
+        )
+    elif session["status"] != "committed":
+        db.execute(
+            "UPDATE media_import_graph_sessions SET status='pending',error=NULL,updated_at=? WHERE project_id=? AND import_session_id=?",
+            (timestamp, project["id"], session_id),
+        )
+    db.commit()
+
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        nodes_by_path = {}
+        for item in normalized_artifacts:
+            folder_path = canonical_path(os.path.join(project_path, *item["relativePath"].split("/")))
+            if not is_project_descendant(folder_path, project_path) or not os.path.isdir(folder_path):
+                raise ValueError(f"import_graph_folder_missing: {item['relativePath']}")
+            existing = db.execute(
+                "SELECT * FROM progress_folders WHERE project_id=? AND folder_path_key=?",
+                (project["id"], folder_path.casefold()),
+            ).fetchone()
+            mapping = db.execute(
+                "SELECT * FROM media_import_artifact_slots WHERE project_id=? AND relative_path_key=?",
+                (project["id"], item["relativePathKey"]),
+            ).fetchone()
+            expected_media, expected_role, expected_artifact = slot_shapes[item["importSlot"]]
+            if existing is not None:
+                if mapping is None or mapping["progress_id"] != existing["id"]:
+                    raise ValueError(f"import_graph_role_conflict: {item['relativePath']} is not import-managed")
+                current_slot = str(mapping["import_slot"])
+                current_shape = slot_shapes[current_slot]
+                if existing["media_kind"] != current_shape[0] or existing["node_role"] != current_shape[1] or existing["artifact_kind"] != current_shape[2]:
+                    raise ValueError(f"import_graph_role_conflict: {item['relativePath']} import metadata is inconsistent")
+                if current_slot == "generated_jpg" and item["importSlot"] == "camera_jpg":
+                    db.execute(
+                        "DELETE FROM version_graph_edges WHERE project_id=? AND target_progress_id=? AND edge_kind='derived_preview'",
+                        (project["id"], existing["id"]),
+                    )
+                    db.execute(
+                        """UPDATE progress_folders SET node_role='original',artifact_kind='companion',missing_since=NULL,
+                           tombstone_json='{}',updated_at=? WHERE id=?""",
+                        (timestamp, existing["id"]),
+                    )
+                    db.execute(
+                        "UPDATE media_import_artifact_slots SET import_slot='camera_jpg',updated_at=? WHERE project_id=? AND progress_id=?",
+                        (timestamp, project["id"], existing["id"]),
+                    )
+                elif current_slot == "camera_jpg" and item["importSlot"] == "generated_jpg":
+                    pass
+                elif current_slot != item["importSlot"]:
+                    raise ValueError(f"import_graph_role_conflict: {item['relativePath']} import slot cannot be changed")
+                else:
+                    db.execute(
+                        "UPDATE progress_folders SET missing_since=NULL,tombstone_json='{}' WHERE id=?",
+                        (existing["id"],),
+                    )
+                registered_row = next(row for row in progress_rows(db, project["id"]) if row["id"] == existing["id"])
+                registered = serialize_progress(registered_row)
+            else:
+                if mapping is not None:
+                    raise ValueError(f"import_graph_role_conflict: {item['relativePath']} mapping does not match its node")
+                registered = progress_register(root, db, {
+                    "projectName": project_name,
+                    "mediaKind": expected_media,
+                    "versionKey": "import-" + hashlib.sha256(item["relativePathKey"].encode("utf-8")).hexdigest()[:24],
+                    "displayName": item["displayName"],
+                    "folderPath": folder_path,
+                    "nodeRole": expected_role,
+                    "artifactKind": expected_artifact,
+                    "trackingEnabled": False,
+                    "renameFromParent": False,
+                    "copyMissingFromParent": False,
+                    "trackingState": "disabled",
+                }, commit=False, sync_locations=False)["progressFolder"]
+                db.execute(
+                    """INSERT INTO media_import_artifact_slots(
+                         project_id,progress_id,import_slot,relative_path_key,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?)""",
+                    (project["id"], registered["id"], item["importSlot"], item["relativePathKey"], timestamp, timestamp),
+                )
+            nodes_by_path[item["relativePath"].casefold()] = registered
+
+        slot_rows = db.execute(
+            """SELECT slot.*,progress.* FROM media_import_artifact_slots slot
+               JOIN progress_folders progress ON progress.id=slot.progress_id AND progress.project_id=slot.project_id
+               WHERE slot.project_id=? AND progress.missing_since IS NULL ORDER BY slot.updated_at DESC,slot.progress_id""",
+            (project["id"],),
+        ).fetchall()
+        nodes_by_slot = {}
+        for row in slot_rows:
+            nodes_by_slot.setdefault(row["import_slot"], []).append(row)
+        for slot, rows in nodes_by_slot.items():
+            if len(rows) > 1:
+                raise ValueError(f"import_graph_slot_ambiguous: multiple {slot} nodes are registered")
+
+        desired_relations = []
+        def add_slot_relation(source_slot, target_slot, edge_kind):
+            source_rows = nodes_by_slot.get(source_slot, [])
+            target_rows = nodes_by_slot.get(target_slot, [])
+            if source_rows and target_rows:
+                desired_relations.append((source_rows[0], target_rows[0], edge_kind))
+
+        add_slot_relation("raw", "camera_jpg", "media_companion")
+        add_slot_relation("raw", "generated_jpg", "derived_preview")
+        add_slot_relation("mov", "video_preview", "derived_preview")
+        committed_edges = []
+        for source, target, edge_kind in desired_relations:
+            edge_payload = {
+                "projectId": project["id"],
+                "sourceProgressId": source["id"],
+                "targetProgressId": target["id"],
+                "edgeKind": edge_kind,
+            }
+            existing = db.execute(
+                """SELECT * FROM version_graph_edges WHERE project_id=? AND source_progress_id=?
+                   AND target_progress_id=? AND edge_kind=?""",
+                (project["id"], source["id"], target["id"], edge_kind),
+            ).fetchone()
+            if existing is None:
+                project_id, source_id, target_id, edge_kind = _validated_version_graph_edge(db, edge_payload)
+                edge_id = str(uuid.uuid4())
+                db.execute(
+                    """INSERT INTO version_graph_edges(id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (edge_id, project_id, source_id, target_id, edge_kind, timestamp, timestamp),
+                )
+                existing = db.execute("SELECT * FROM version_graph_edges WHERE id=?", (edge_id,)).fetchone()
+            committed_edges.append(serialize_version_graph_edge(existing))
+        db.execute(
+            "UPDATE media_import_graph_sessions SET status='committed',error=NULL,updated_at=? WHERE project_id=? AND import_session_id=?",
+            (timestamp, project["id"], session_id),
+        )
+        db.commit()
+        return {"success": True, "importSessionId": session_id, "nodes": list(nodes_by_path.values()), "edges": committed_edges}
+    except Exception as error:
+        db.rollback()
+        db.execute(
+            "UPDATE media_import_graph_sessions SET status='failed',error=?,updated_at=? WHERE project_id=? AND import_session_id=?",
+            (str(error), int(time.time() * 1000), project["id"], session_id),
+        )
+        db.commit()
+        raise
 
 
 def progress_update_tree(root: str, db, payload: dict):
@@ -2184,15 +3542,16 @@ def progress_policy_save(db, payload: dict):
     tracking_enabled = bool(payload.get("trackingEnabled", row["tracking_enabled"]))
     rename_from_parent = bool(payload.get("renameFromParent", row["rename_from_parent"]))
     copy_missing_from_parent = bool(payload.get("copyMissingFromParent", row["copy_missing_from_parent"]))
-    if row["node_role"] == "original" or row["relation_kind"] == "auxiliary":
+    restricted_policy = row["node_role"] in ("original", "artifact", "workflow") or row["relation_kind"] == "auxiliary"
+    if restricted_policy:
         if tracking_enabled or rename_from_parent or copy_missing_from_parent:
-            raise ValueError("original/auxiliary 节点禁止开启版本跟踪")
+            raise ValueError("original/selection/artifact/workflow 节点禁止开启版本跟踪")
     if not tracking_enabled and (rename_from_parent or copy_missing_from_parent):
         raise ValueError("未开启跟踪时不能保存沿用文件名或补齐策略")
     tracking_state = str(payload.get("trackingState") or row["tracking_state"])
     if tracking_state not in PROGRESS_TRACKING_STATES:
         raise ValueError("无效的版本跟踪状态")
-    if not tracking_enabled:
+    if not tracking_enabled or restricted_policy:
         tracking_state = "disabled"
     timestamp = int(time.time() * 1000)
     db.execute(
@@ -4349,12 +5708,40 @@ def reconcile_team_return_artifacts(db, project_id: str) -> dict:
     return {"missingCount": missing_count, "changedCount": changed_count}
 
 
+def ensure_team_workflow_node(root: str, db, project):
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    folder_path = canonical_path(os.path.join(project_path, "团片协作"))
+    if not os.path.isdir(folder_path):
+        return None, False
+    existing = db.execute(
+        "SELECT id FROM progress_folders WHERE project_id=? AND folder_path_key=?",
+        (project["id"], folder_path.casefold()),
+    ).fetchone()
+    request = {
+        "projectName": project["name"],
+        "mediaKind": "image",
+        "versionKey": "team-workspace",
+        "displayName": "团片协作",
+        "folderPath": folder_path,
+        "nodeRole": "workflow",
+        "artifactKind": "team_workspace",
+        "trackingEnabled": False,
+        "trackingState": "disabled",
+        "renameFromParent": False,
+        "copyMissingFromParent": False,
+    }
+    if existing is not None:
+        request["progressId"] = existing["id"]
+    return progress_register(root, db, request)["progressFolder"], existing is None
+
+
 def team_project_workspace(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     return_artifacts = reconcile_team_return_artifacts(db, project["id"])
     if cleanup_empty_generated_team_identities(db, project["id"]):
         db.commit()
     project_path = os.path.join(os.path.abspath(root), project["relative_path"])
+    workflow_node, workflow_node_created = ensure_team_workflow_node(root, db, project)
     rows = db.execute(
         """SELECT task.*, photos.display_name AS photo_name, photos.original_name, photos.current_version_id,
                   versions.file_path AS source_path
@@ -4436,6 +5823,7 @@ def team_project_workspace(root: str, db, payload: dict):
         item["returnMissing"] = bool(item["returnMissing"])
         item["completed"] = bool(item["completed"]) and not item["returnMissing"]
     return {"success": True, "photos": photos, "identities": identities, "assignments": assignments,
+            "workflowNode": workflow_node, "workflowNodeCreated": workflow_node_created,
             "missingReturnCount": return_artifacts["missingCount"]}
 
 
@@ -5158,6 +6546,57 @@ def missing_projects_list(db, payload: dict):
     return {"success": True, "projects": projects}
 
 
+def cleanup_media_workflow_graph(root: str, db, session_cutoff: int | None = None):
+    """Remove stale retry metadata and graph records that no longer satisfy endpoint rules."""
+    now = int(time.time() * 1000)
+    cutoff = int(session_cutoff if session_cutoff is not None else now - 30 * 24 * 60 * 60 * 1000)
+    for project in db.execute("SELECT * FROM projects WHERE is_deleted=0").fetchall():
+        sync_progress_folder_locations(root, db, project, commit=False)
+    removed_slot_mappings = db.execute(
+        """DELETE FROM media_import_artifact_slots AS slot WHERE NOT EXISTS(
+             SELECT 1 FROM progress_folders progress WHERE progress.id=slot.progress_id
+               AND progress.project_id=slot.project_id AND (
+                 (slot.import_slot='raw' AND progress.media_kind='image' AND progress.node_role='original' AND progress.artifact_kind IS NULL)
+                 OR (slot.import_slot='camera_jpg' AND progress.media_kind='image' AND progress.node_role='original' AND progress.artifact_kind='companion')
+                 OR (slot.import_slot='generated_jpg' AND progress.media_kind='image' AND progress.node_role='artifact' AND progress.artifact_kind='preview')
+                 OR (slot.import_slot='mov' AND progress.media_kind='video' AND progress.node_role='original' AND progress.artifact_kind IS NULL)
+                 OR (slot.import_slot='video_preview' AND progress.media_kind='video' AND progress.node_role='artifact' AND progress.artifact_kind='preview')
+               )
+           )"""
+    ).rowcount
+    removed_edges = []
+    rows = db.execute(
+        """SELECT edge.*,source.media_kind AS source_media_kind,source.node_role AS source_role,
+                  source.artifact_kind AS source_artifact_kind,target.media_kind AS target_media_kind,
+                  target.node_role AS target_role,target.artifact_kind AS target_artifact_kind
+           FROM version_graph_edges edge
+           LEFT JOIN progress_folders source ON source.id=edge.source_progress_id
+           LEFT JOIN progress_folders target ON target.id=edge.target_progress_id"""
+    ).fetchall()
+    for row in rows:
+        valid = row["source_role"] is not None and row["target_role"] is not None and row["source_media_kind"] == row["target_media_kind"] and (
+            row["edge_kind"] == "media_companion" and row["source_role"] == "original"
+            and row["target_role"] == "original" and row["target_artifact_kind"] == "companion"
+            or row["edge_kind"] == "derived_preview" and row["source_role"] in ("original", "progress")
+            and row["target_role"] == "artifact" and row["target_artifact_kind"] == "preview"
+            or row["edge_kind"] == "workflow_input" and (
+                row["source_role"] in ("selection", "workflow") and row["target_role"] == "progress"
+                or row["source_role"] in ("original", "progress") and row["target_role"] == "workflow"
+                and row["target_artifact_kind"] == "team_workspace"
+            )
+        )
+        if not valid:
+            db.execute("DELETE FROM version_graph_edges WHERE id=?", (row["id"],))
+            removed_edges.append(row["id"])
+    removed_sessions = db.execute(
+        "DELETE FROM media_import_graph_sessions WHERE updated_at<=?",
+        (cutoff,),
+    ).rowcount
+    db.commit()
+    return {"removedEdgeIds": removed_edges, "removedImportSessionCount": removed_sessions,
+            "removedImportSlotMappingCount": removed_slot_mappings}
+
+
 def mutate(root: str, database: str, action: str, payload: dict):
     db = connect(root, database)
     now = int(time.time() * 1000)
@@ -5169,12 +6608,13 @@ def mutate(root: str, database: str, action: str, payload: dict):
             db.close()
     if action == "maintenance_run":
         try:
+            graph_cleanup = cleanup_media_workflow_graph(root, db, payload.get("importSessionCutoff"))
             _check_integrity(db)
             _automatic_backup_if_due(db, database)
             progress_cleanup = cleanup_progress_tombstones(root, db, payload.get("progressTombstoneCutoff"))
             tracking_cleanup = cleanup_tracking_sessions(db, payload.get("trackingSessionCutoff"))
             _check_integrity(db, force=True)
-            return {"success": True, "progressTombstones": progress_cleanup, "trackingSessions": tracking_cleanup}
+            return {"success": True, "progressTombstones": progress_cleanup, "trackingSessions": tracking_cleanup, "mediaWorkflowGraph": graph_cleanup}
         finally:
             db.close()
     if action == "add":
@@ -5300,8 +6740,48 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = progress_register(root, db, payload)
         db.close()
         return result
+    elif action == "progress_register_with_graph":
+        result = progress_register_with_graph(root, db, payload)
+        db.close()
+        return result
     elif action == "progress_update_tree":
         result = progress_update_tree(root, db, payload)
+        db.close()
+        return result
+    elif action == "progress_relation_update":
+        result = progress_relation_update(db, payload)
+        db.close()
+        return result
+    elif action == "progress_legacy_selection_repair":
+        result = progress_legacy_selection_repair(db, payload)
+        db.close()
+        return result
+    elif action == "version_graph_edge_create":
+        result = version_graph_edge_create(db, payload)
+        db.close()
+        return result
+    elif action == "version_graph_edge_list":
+        result = version_graph_edge_list(db, payload)
+        db.close()
+        return result
+    elif action == "version_graph_edge_delete":
+        result = version_graph_edge_delete(db, payload)
+        db.close()
+        return result
+    elif action == "version_graph_edge_replace_source":
+        result = version_graph_edge_replace_source(db, payload)
+        db.close()
+        return result
+    elif action == "media_workflow_import_commit":
+        result = media_workflow_import_commit(root, db, payload)
+        db.close()
+        return result
+    elif action == "version_tree_layout_get":
+        result = version_tree_layout_get(db, payload)
+        db.close()
+        return result
+    elif action == "version_tree_layout_save":
+        result = version_tree_layout_save(db, payload)
         db.close()
         return result
     elif action == "progress_policy_save":
@@ -5524,7 +7004,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "archive_project", "unarchive_project", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "missing_projects_list", "purge_missing_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_update_tree", "progress_policy_save", "progress_mark_stale", "progress_mark_ready", "progress_main_branch", "progress_visible_relations", "progress_copy_missing_children", "progress_detect_stale", "tracking_session_create", "tracking_prepare", "tracking_store_preview", "tracking_session_get", "tracking_session_release", "tracking_session_decide", "tracking_commit_plan", "tracking_commit_complete", "tracking_commit_failed", "progress_main_branch_media", "progress_delete_missing", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "media_refresh_metadata_fingerprint", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
+    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "archive_project", "unarchive_project", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "missing_projects_list", "purge_missing_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_register_with_graph", "progress_update_tree", "progress_relation_update", "progress_legacy_selection_repair", "version_graph_edge_create", "version_graph_edge_list", "version_graph_edge_delete", "version_graph_edge_replace_source", "media_workflow_import_commit", "version_tree_layout_get", "version_tree_layout_save", "progress_policy_save", "progress_mark_stale", "progress_mark_ready", "progress_main_branch", "progress_visible_relations", "progress_copy_missing_children", "progress_detect_stale", "tracking_session_create", "tracking_prepare", "tracking_store_preview", "tracking_session_get", "tracking_session_release", "tracking_session_decide", "tracking_commit_plan", "tracking_commit_complete", "tracking_commit_failed", "progress_main_branch_media", "progress_delete_missing", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "media_refresh_metadata_fingerprint", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")

@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createSelectionService } = require('../electron/services/selection-service.cjs');
+const { SELECTION_LIMITS, createSelectionService } = require('../electron/services/selection-service.cjs');
 const { registerSelectionIpc } = require('../electron/modules/selection-ipc.cjs');
 
 const mkdir = value => fs.mkdirSync(value, { recursive: true });
@@ -69,10 +69,109 @@ const run = async () => {
     const folders = await service.listSourceFolders(request('RAW'));
     assert(folders.folders.some(folder => folder.relativePath === 'shoot/day/JPG'), '嵌套来源应出现在文件夹列表');
 
-    const rootPreview = await service.preflightFilename({ ...request('RAW'), keywords: '1001 9999' });
+    const virtualRealpath = value => path.resolve(value);
+    virtualRealpath.native = virtualRealpath;
+    const virtualRoot = path.join(temporaryRoot, 'virtual-project-a');
+    const virtualRootB = path.join(temporaryRoot, 'virtual-project-b');
+    const wideEntries = Array.from({ length: SELECTION_LIMITS.maxDirectoriesPerTask + 5 }, (_, index) => ({
+      name: `folder-${String(index).padStart(5, '0')}`,
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+      isFile: () => false,
+    }));
+    let virtualReaddirCount = 0;
+    const virtualFs = {
+      ...fs,
+      realpathSync: virtualRealpath,
+      promises: { ...fs.promises, readdir: async directory => {
+        virtualReaddirCount += 1;
+        return path.resolve(directory) === path.resolve(virtualRoot) ? [...wideEntries] : [];
+      } },
+    };
+    const virtualService = createSelectionService({ ...options, fs: virtualFs });
+    const collectVirtualFolders = async () => {
+      const collected = [];
+      let cursor;
+      let last;
+      do {
+        last = await virtualService.listSourceFolders({ workspaceRoot, projectName: 'Virtual A', projectRoot: virtualRoot, cursor, pageSize: 999 });
+        assert(last.folders.length <= SELECTION_LIMITS.sourceFolderPageSize, '单页不得超过 500 个目录');
+        collected.push(...last.folders.map(folder => folder.relativePath));
+        cursor = last.nextCursor;
+      } while (cursor);
+      return { collected, last };
+    };
+    const firstListing = await collectVirtualFolders();
+    const secondListing = await collectVirtualFolders();
+    assert.strictEqual(firstListing.collected.length, SELECTION_LIMITS.maxDirectoriesPerTask);
+    assert.strictEqual(new Set(firstListing.collected).size, firstListing.collected.length, '分页不得返回重复目录');
+    assert.deepStrictEqual(secondListing.collected, firstListing.collected, '相同目录的分页顺序必须稳定');
+    assert.strictEqual(firstListing.last.truncated, true, '超过单任务目录上限必须明确标记 truncated');
+    assert.strictEqual(virtualReaddirCount, 2, '宽目录分页不应重复 readdir');
+
+    const crossProjectFirst = await virtualService.listSourceFolders({ workspaceRoot, projectName: 'Virtual A', projectRoot: virtualRoot, pageSize: 1 });
+    await expectReject(virtualService.listSourceFolders({ workspaceRoot, projectName: 'Virtual B', projectRoot: virtualRootB, cursor: crossProjectFirst.nextCursor, pageSize: 1 }), /cursor.*当前项目/i);
+    await expectReject(virtualService.listSourceFolders({ workspaceRoot, projectName: 'Virtual A', projectRoot: virtualRoot, cursor: 'forged-cursor', pageSize: 1 }), /cursor.*无效/i);
+
+    const deepRoot = path.join(temporaryRoot, 'deep-project');
+    const deepFs = {
+      ...fs,
+      realpathSync: virtualRealpath,
+      promises: { ...fs.promises, readdir: async directory => {
+        const relative = path.relative(deepRoot, directory);
+        const depth = relative ? relative.split(path.sep).length : 0;
+        return depth < SELECTION_LIMITS.maxDirectoryDepth + 1 ? [{ name: 'd', isDirectory: () => true, isSymbolicLink: () => false, isFile: () => false }] : [];
+      } },
+    };
+    const deepService = createSelectionService({ ...options, fs: deepFs });
+    const deepResult = await deepService.listSourceFolders({ workspaceRoot, projectName: 'Deep', projectRoot: deepRoot });
+    assert.strictEqual(deepResult.truncated, true, '超过最大深度必须标记 truncated');
+    assert(deepResult.folders.every(folder => folder.relativePath.split('/').length <= SELECTION_LIMITS.maxDirectoryDepth));
+
+    const linkRoot = path.join(temporaryRoot, 'link-project');
+    const linkPath = path.join(linkRoot, 'outside-link');
+    const linkRealpath = value => path.resolve(value) === path.resolve(linkPath) ? path.join(temporaryRoot, 'outside-link-target') : path.resolve(value);
+    linkRealpath.native = linkRealpath;
+    const linkFs = { ...fs, realpathSync: linkRealpath, promises: { ...fs.promises, readdir: async () => [{ name: 'outside-link', isDirectory: () => false, isSymbolicLink: () => true, isFile: () => false }] } };
+    const linkService = createSelectionService({ ...options, fs: linkFs });
+    await expectReject(linkService.listSourceFolders({ workspaceRoot, projectName: 'Link', projectRoot: linkRoot }), /指向项目外部/);
+
+    let cancelListingService;
+    let cancelledReaddirCount = 0;
+    const cancelListFs = { ...fs, realpathSync: virtualRealpath, promises: { ...fs.promises, readdir: async () => {
+      cancelledReaddirCount += 1;
+      cancelListingService.cancel('listing-cancel-001');
+      return wideEntries.slice(0, 10);
+    } } };
+    cancelListingService = createSelectionService({ ...options, fs: cancelListFs });
+    const cancelledListing = await cancelListingService.listSourceFolders({ workspaceRoot, projectName: 'Cancel list', projectRoot: virtualRoot, operationId: 'listing-cancel-001' });
+    assert.strictEqual(cancelledListing.cancelled, true);
+    assert.strictEqual(cancelledReaddirCount, 1, '取消后不得继续 readdir');
+
+    mkdir(path.join(projectRoot, 'ScanLimit'));
+    const excessiveFiles = Array.from({ length: SELECTION_LIMITS.maxSourceFiles + 1 }, (_, index) => ({ name: `file-${index}.jpg`, isDirectory: () => false, isSymbolicLink: () => false, isFile: () => true }));
+    const fileLimitFs = { ...fs, promises: { ...fs.promises, readdir: async directory => path.resolve(directory) === path.resolve(path.join(projectRoot, 'ScanLimit')) ? excessiveFiles : [] } };
+    const fileLimitService = createSelectionService({ ...options, fs: fileLimitFs });
+    await expectReject(fileLimitService.preflightFilename({ ...request('ScanLimit'), keywords: '1001', operationId: 'file-limit-001' }), /selection_file_limit_exceeded.*50000/);
+
+    let cancelScanService;
+    let cancelledScanReaddirCount = 0;
+    const cancelScanFs = { ...fs, promises: { ...fs.promises, readdir: async () => {
+      cancelledScanReaddirCount += 1;
+      cancelScanService.cancel('scan-cancel-001');
+      return [];
+    } } };
+    cancelScanService = createSelectionService({ ...options, fs: cancelScanFs });
+    const cancelledScan = await cancelScanService.preflightFilename({ ...request('ScanLimit'), keywords: '1001', operationId: 'scan-cancel-001' });
+    assert.strictEqual(cancelledScan.cancelled, true);
+    assert.strictEqual(cancelledScanReaddirCount, 1, '来源扫描取消后不得继续 readdir');
+
+    const scanProgress = [];
+    const rootPreview = await service.preflightFilename({ ...request('RAW'), keywords: '1001 9999', operationId: 'progress-scan-001', onProgress: progress => scanProgress.push(progress) });
+    assert(scanProgress.some(progress => progress.phase === 'scanning_source' && progress.filesScanned >= 1), '来源扫描必须报告进度');
     assert.strictEqual(rootPreview.sourceFolderRelativePath, 'RAW');
-    assert.strictEqual(rootPreview.targetFolderRelativePath, 'RAW_选片');
-    assert.strictEqual(rootPreview.outputFolderName, 'RAW_选片');
+    assert.strictEqual(rootPreview.targetFolderRelativePath, '图片选片');
+    assert.strictEqual(rootPreview.outputFolderName, '图片选片');
     assert.strictEqual(rootPreview.matchedCount, 1);
     assert.strictEqual(rootPreview.filesToCopy, 1);
     assert.strictEqual(rootPreview.missingCount, 1);
@@ -83,7 +182,7 @@ const run = async () => {
     assert.strictEqual(first.success, true);
     assert.strictEqual(first.copiedCount, 1);
     assert(first.items.some(item => item.status === 'copied'));
-    assert(fs.existsSync(path.join(projectRoot, 'RAW_选片', 'IMG_1001.CR3')));
+    assert(fs.existsSync(path.join(projectRoot, '图片选片', 'IMG_1001.CR3')));
 
     const sourceNode = versionService.nodes.find(node => node.id === first.sourceProgressId);
     const selectionNode = versionService.nodes.find(node => node.id === first.selectionProgressId);
@@ -93,8 +192,10 @@ const run = async () => {
     assert.strictEqual(selectionNode.relationKind, 'auxiliary');
     assert.strictEqual(selectionNode.parentProgressId, sourceNode.id);
     assert.strictEqual(selectionNode.trackingEnabled, false);
+    assert.strictEqual(selectionNode.trackingState, 'disabled');
     assert.strictEqual(selectionNode.renameFromParent, false);
     assert.strictEqual(selectionNode.copyMissingFromParent, false);
+    await expectReject(service.preflightFilename({ ...request('图片选片'), keywords: '1001' }), /selection|附属分支/);
 
     put(projectRoot, 'RAW/IMG_1002.CR3');
     const repeatedPreview = await service.preflightFilename({ ...request('RAW'), keywords: '1001 1002' });
@@ -109,6 +210,13 @@ const run = async () => {
     assert.strictEqual(nestedPreview.targetFolderRelativePath, 'shoot/day/JPG_选片');
     const nested = await service.executeFilename({ ...request('shoot/day/JPG'), keywords: '2002', expectedSignature: nestedPreview.signature, operationId: 'nested-copy-2002' });
     assert.strictEqual(nested.success, true);
+    const jpgSourceNode = versionService.nodes.find(node => node.id === nested.sourceProgressId);
+    const jpgSelectionNode = versionService.nodes.find(node => node.id === nested.selectionProgressId);
+    assert.strictEqual(jpgSourceNode.nodeRole, 'original');
+    assert.strictEqual(jpgSelectionNode.nodeRole, 'selection');
+    assert.strictEqual(jpgSelectionNode.parentProgressId, jpgSourceNode.id);
+    assert.notStrictEqual(jpgSelectionNode.parentProgressId, sourceNode.id, 'JPG_选片不得错误连接到 RAW');
+    assert.strictEqual(jpgSelectionNode.relationKind, 'auxiliary');
 
     const videoPreview = await service.preflightFilename({ ...request('MOV'), keywords: '3003' });
     assert.strictEqual(videoPreview.videoCount, 1);
@@ -120,11 +228,11 @@ const run = async () => {
     put(projectRoot, 'b/RAW/B_5005.JPG');
     for (const [source, keyword, operationId] of [['a/RAW', '4004', 'same-name-a'], ['b/RAW', '5005', 'same-name-b']]) {
       const preview = await service.preflightFilename({ ...request(source), keywords: keyword });
-      assert.strictEqual(preview.outputFolderName, 'RAW_选片');
+      assert.strictEqual(preview.outputFolderName, '图片选片');
       const result = await service.executeFilename({ ...request(source), keywords: keyword, expectedSignature: preview.signature, operationId });
       assert.strictEqual(result.success, true);
     }
-    const sameNameSelections = versionService.nodes.filter(node => node.nodeRole === 'selection' && /[\\/]RAW_选片$/i.test(node.folderPath));
+    const sameNameSelections = versionService.nodes.filter(node => node.nodeRole === 'selection' && /[\\/]图片选片$/i.test(node.folderPath));
     assert.strictEqual(sameNameSelections.length, 3);
     assert.strictEqual(new Set(sameNameSelections.map(node => node.folderPath.toLocaleLowerCase())).size, 3);
 
@@ -144,9 +252,11 @@ const run = async () => {
     mkdir(path.join(projectRoot, 'Conflict'));
     put(projectRoot, 'Conflict/C_8008.JPG');
     mkdir(path.join(projectRoot, 'Conflict_选片'));
+    const nodeCountBeforeConflict = versionService.nodes.length;
     const conflict = await service.preflightFilename({ ...request('Conflict'), keywords: '8008' });
     assert.strictEqual(conflict.conflictCount, 1);
     await expectReject(service.executeFilename({ ...request('Conflict'), keywords: '8008', expectedSignature: conflict.signature, operationId: 'output-conflict' }), /output_name_conflict/);
+    assert.strictEqual(versionService.nodes.length, nodeCountBeforeConflict, '无效目标不得创建任何数据库节点');
 
     const outside = path.join(temporaryRoot, 'outside');
     mkdir(outside);
@@ -187,12 +297,13 @@ const run = async () => {
 
     const handlers = new Map();
     let capturedRequest;
+    const ipcProgressEvents = [];
     registerSelectionIpc({
       ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) }, path, fs,
       workspaceCatalogs: new Map([[workspaceRoot, { projects: [{ name: 'Project A', relative_path: 'Project A' }] }]]),
       selectionService: {
         preflightFilename: async value => { capturedRequest = value; return { success: true }; },
-        listSourceFolders: async () => ({ success: true, folders: [] }),
+        listSourceFolders: async value => { value.onProgress({ operationId: 'ipc-progress', phase: 'listing_source_folders', directoriesScanned: 1 }); return { success: true, folders: [], nextCursor: null, truncated: false }; },
         executeFilename: async () => ({ success: true }),
         preflightManual: async () => ({ success: true }),
         executeManual: async () => ({ success: true }),
@@ -208,6 +319,11 @@ const run = async () => {
     assert.strictEqual(capturedRequest.projectName, 'Project A', 'renderer 不能覆盖可信 projectName');
     const unknownProject = await handlers.get('workspace-selection-filename-preflight')(null, outside, {});
     assert.strictEqual(unknownProject.success, false);
+    const unknownFolderScan = await handlers.get('workspace-selection-source-folders')(null, outside, { pageSize: 500 });
+    assert.strictEqual(unknownFolderScan.success, false, '未登记绝对路径不得成为文件夹扫描根');
+    const registeredFolderScan = await handlers.get('workspace-selection-source-folders')({ sender: { send: (channel, payload) => ipcProgressEvents.push([channel, payload]) } }, projectRoot, { pageSize: 500 });
+    assert.strictEqual(registeredFolderScan.success, true);
+    assert.strictEqual(ipcProgressEvents[0][0], 'workspace-selection-progress', '文件夹扫描进度必须通过可取消任务通道返回');
 
     console.log('selection V2 behavior tests passed');
   } finally {

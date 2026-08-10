@@ -11,6 +11,7 @@ import functools
 import hashlib
 import math
 import ctypes
+import uuid
 from pathlib import Path
 import gc
 from PIL import Image
@@ -379,6 +380,7 @@ def filter_media_by_capture_date(files, date_filter='all', today=None, on_progre
 
 
 STAGING_MANIFEST_NAME = '.photoflow-import-manifest.json'
+IMPORT_GRAPH_RECEIPT_NAME = '.photoflow-import-graph-receipt.json'
 STAGING_RETENTION_SECONDS = 30 * 24 * 60 * 60
 SOURCE_FINGERPRINT_BYTES = 64 * 1024
 
@@ -476,6 +478,8 @@ def cleanup_expired_import_staging(dest_path, retention_seconds=STAGING_RETENTIO
     for name in os.listdir(staging_root):
         session_dir = os.path.join(staging_root, name)
         manifest_path = _staging_manifest_path(session_dir)
+        if os.path.isfile(_import_graph_receipt_path(session_dir)):
+            continue
         try:
             if os.path.isdir(session_dir) and os.path.getmtime(manifest_path) < cutoff:
                 shutil.rmtree(session_dir)
@@ -507,6 +511,46 @@ def _write_staging_manifest(staging_dir, payload):
         manifest_file.flush()
         os.fsync(manifest_file.fileno())
     os.replace(temporary_path, manifest_path)
+
+
+def _import_graph_receipt_path(staging_dir):
+    return os.path.join(staging_dir, IMPORT_GRAPH_RECEIPT_NAME)
+
+
+def write_import_graph_receipt(staging_dir, import_session, manifests):
+    """Persist the authoritative graph handoff before reporting import success."""
+    session_id = str(import_session or '').strip()
+    if not session_id:
+        raise ValueError('import_session_required: import session is required before media is moved')
+    normalized = list(manifests or [])
+    if not normalized or any(not isinstance(item, dict) or item.get('schemaVersion') != 2 or item.get('importSessionId') != session_id for item in normalized):
+        raise ValueError('import_receipt_invalid: receipt manifests must use schema version 2 and the active session')
+    payload = {
+        'receiptVersion': 1,
+        'importSessionId': session_id,
+        'manifests': normalized,
+        'createdAt': int(time.time() * 1000),
+    }
+    os.makedirs(staging_dir, exist_ok=True)
+    receipt_path = _import_graph_receipt_path(staging_dir)
+    temporary_path = f'{receipt_path}.tmp-{os.getpid()}'
+    with open(temporary_path, 'w', encoding='utf-8') as receipt_file:
+        json.dump(payload, receipt_file, ensure_ascii=False, indent=2)
+        receipt_file.flush()
+        os.fsync(receipt_file.fileno())
+    os.replace(temporary_path, receipt_path)
+    return receipt_path
+
+
+def load_import_graph_receipt(staging_dir):
+    try:
+        with open(_import_graph_receipt_path(staging_dir), 'r', encoding='utf-8') as receipt_file:
+            payload = json.load(receipt_file)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get('receiptVersion') != 1 or not str(payload.get('importSessionId') or '').strip() or not isinstance(payload.get('manifests'), list):
+        return None
+    return payload
 
 
 def load_staged_import(dest_path, import_session=''):
@@ -1123,6 +1167,65 @@ def classified_destination_directory(folder_path, file_name):
     return os.path.join(folder_path, subfolder) if subfolder else folder_path
 
 
+def build_import_graph_manifest(dest_path, target_folder, project_name, import_session,
+                                imported_paths, generated_jpg_paths=None, generated_preview_paths=None):
+    """Describe importer-owned artifact slots from files already handled by this session."""
+    target_folder = os.path.abspath(target_folder)
+    imported = {os.path.abspath(value) for value in (imported_paths or [])}
+    generated_jpg = {os.path.abspath(value) for value in (generated_jpg_paths or [])}
+    generated_preview = {os.path.abspath(value) for value in (generated_preview_paths or [])}
+    del dest_path  # Project ownership is resolved later from the trusted workspace catalog.
+    session_id = str(import_session or '').strip()
+    if not session_id:
+        raise ValueError('import_session_required: import graph manifest requires a session')
+    artifacts_by_path = {}
+    display_names = {
+        'raw': 'RAW', 'camera_jpg': 'JPG', 'generated_jpg': 'JPG',
+        'mov': 'MOV', 'video_preview': 'MOV_预览',
+    }
+
+    def add(file_path, media_kind, import_slot):
+        directory = os.path.abspath(os.path.dirname(file_path))
+        if os.path.commonpath((target_folder, directory)) != target_folder:
+            raise ValueError(f'导入产物不属于目标项目：{os.path.basename(file_path)}')
+        relative_path = os.path.relpath(directory, target_folder).replace(os.sep, '/')
+        if relative_path in ('', '.'):
+            raise ValueError(f'导入产物必须位于项目子目录：{os.path.basename(file_path)}')
+        key = relative_path.casefold()
+        current = artifacts_by_path.get(key)
+        if current:
+            if current['importSlot'] == 'camera_jpg' and import_slot == 'generated_jpg':
+                return
+            if current['importSlot'] != import_slot \
+                    and not (current['importSlot'] == 'generated_jpg' and import_slot == 'camera_jpg'):
+                raise ValueError(f'同一导入目录包含不兼容的产物语义：{relative_path}')
+        artifacts_by_path[key] = {
+            'relativePath': relative_path,
+            'mediaKind': media_kind,
+            'importSlot': import_slot,
+            'displayName': display_names[import_slot],
+        }
+
+    for file_path in imported:
+        lowered = file_path.lower()
+        if lowered.endswith(CLASSIFY_EXTENSION_MAP['raw']):
+            add(file_path, 'image', 'raw')
+        elif lowered.endswith(CLASSIFY_EXTENSION_MAP['mov']):
+            add(file_path, 'video', 'mov')
+        else:
+            add(file_path, 'image', 'camera_jpg')
+    for file_path in generated_jpg:
+        add(file_path, 'image', 'generated_jpg')
+    for file_path in generated_preview:
+        add(file_path, 'video', 'video_preview')
+    return {
+        'schemaVersion': 2,
+        'projectName': project_name,
+        'importSessionId': session_id,
+        'artifacts': sorted(artifacts_by_path.values(), key=lambda item: item['relativePath'].casefold()),
+    }
+
+
 def classify_files_by_type(folder_path):
     """整理子文件夹"""
     moved_paths = {}
@@ -1321,6 +1424,7 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
     success_imported_count = 0
     created_projects = []
 
+    import_session = str(import_session or '').strip() or str(uuid.uuid4())
     try:
         # Step 1-2: 先完整复制到安全暂存区；若规划阶段已完成，则直接复用本地副本。
         staged_import = stage_media_to_safety_temp(sd_path, dest_path, direct_source, source_paths, import_session, progress_end=75, date_filter=date_filter)
@@ -1427,6 +1531,8 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
 
         processed_target_list = list(processed_targets)
         generated_jpg_count = 0
+        generated_jpg_paths_by_target = {}
+        generated_preview_paths_by_target = {}
         raw_without_jpg_count = 0
         if generate_jpg_from_raw:
             all_candidates = [
@@ -1450,7 +1556,10 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                     target_folder,
                     imported_paths_by_target.get(target_folder, []),
                     on_progress=publish_raw_jpg_progress,
-                    on_generated=imported_output_paths.add,
+                    on_generated=lambda generated_path, target=target_folder: (
+                        imported_output_paths.add(generated_path),
+                        generated_jpg_paths_by_target.setdefault(target, []).append(generated_path),
+                    ),
                 )
                 generated_jpg_count += generated
                 raw_without_jpg_count += candidate_count
@@ -1476,10 +1585,14 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                 if split_count:
                     log_info(f'大文件分割完成：共处理 {split_count} 个视频')
             if generate_video_preview:
+                def record_generated_preview(generated_path, target=target_folder):
+                    imported_output_paths.add(generated_path)
+                    generated_preview_paths_by_target.setdefault(target, []).append(generated_path)
+
                 preview_count, video_count = generate_video_previews(
                     target_folder,
                     video_preview_quality,
-                    on_generated=imported_output_paths.add,
+                    on_generated=record_generated_preview,
                     source_paths=imported_paths_by_target.get(target_folder, []),
                 )
                 if video_count:
@@ -1492,6 +1605,16 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
         # Step 5: 最终校验与清理 SD 卡
         if success_imported_count == len(original_sd_files):
             log_info(f"整理完成，共处理 {success_imported_count} 个文件")
+            import_manifests = [
+                build_import_graph_manifest(
+                    dest_path, target_folder, os.path.basename(target_folder), import_session,
+                    imported_paths_by_target.get(target_folder, []),
+                    generated_jpg_paths_by_target.get(target_folder, []),
+                    generated_preview_paths_by_target.get(target_folder, []),
+                )
+                for target_folder in sorted(processed_target_list)
+            ]
+            write_import_graph_receipt(temp_dir, import_session, import_manifests)
             
             deleted_source_count = 0
             should_delete_sources = False
@@ -1519,10 +1642,8 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
             else:
                 log_progress("正在保留源文件...", 99, {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": success_imported_count, "totalFiles": len(original_sd_files)})
             
-            # 只有全部成功，才清理临时目录
-            cleanup_import_staging(temp_dir)
             log_progress("导入流程全部完成", 100, {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": success_imported_count, "totalFiles": len(original_sd_files)})
-            log_success("导入完成，源文件已按设置处理", {"projectNames": created_projects, "importedCount": success_imported_count, "sourceFilesDeleted": should_delete_sources, "generatedJpgCount": generated_jpg_count, "importedPaths": sorted(imported_output_paths)})
+            log_success("导入完成，源文件已按设置处理", {"projectNames": created_projects, "importedCount": success_imported_count, "sourceFilesDeleted": should_delete_sources, "generatedJpgCount": generated_jpg_count, "importedPaths": sorted(imported_output_paths), "importSessionId": import_session, "importManifests": import_manifests, "receiptPending": True})
         else:
             log_error(f"警告：导入数量不匹配（应有{len(original_sd_files)}，实际{success_imported_count}）。SD 卡未清理，请检查桌面临时文件夹。")
 

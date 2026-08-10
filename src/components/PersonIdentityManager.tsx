@@ -404,6 +404,7 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
     if (showLoading) setLoading(false);
     if (!result.success) { onNotice(`读取人物识别失败：${result.error || '未知错误'}`); return; }
     setWorkspace(result);
+    if (result.workflowNodeCreated) onProjectChanged();
   };
   useEffect(() => { void load(true); }, [workspacePath, project.name]);
   useEffect(() => {
@@ -482,6 +483,12 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
     || workspace.photos.some(photo => photo.tasks.some(task => Boolean(task.editedPatchPath) || !['', 'exported'].includes(String(task.status || 'exported'))));
   const workflowReady = Boolean(workspace.workflowGenerated && !workspace.workflowNeedsRegeneration);
   const outputProgress = useTeamOutputProgress(workspace.photos.map(photo => photo.sourcePath), workspacePath, project, onNotice);
+  useEffect(() => {
+    if (!workspace.workflowNode?.id || !outputProgress.sourceProgressIds.length) return;
+    void outputProgress.ensureWorkflowInputs(workspace.workflowNode.id).then(() => onProjectChanged()).catch(error => {
+      onNotice(`登记团片来源关系失败：${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, [workspace.workflowNode?.id, outputProgress.sourceProgressIds.join('|')]);
   const grouped = useMemo(() => {
     const groups = new Map<string, Subject[]>();
     for (const identity of workspace.identities) groups.set(identity.id, []);
@@ -966,7 +973,7 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
     if (!mergeablePhotos.length) return;
     setBusy('merge-workflow');
     try {
-      const target = await outputProgress.ensureTargetProgress();
+      const target = await outputProgress.ensureTargetProgress(workspace.workflowNode?.id);
       let merged = 0;
       for (const photo of mergeablePhotos) {
         const result = await window.electronAPI.mergeTeamPatches(workspacePath, project.status, project.name, {

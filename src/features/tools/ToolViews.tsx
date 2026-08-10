@@ -1,13 +1,16 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { FolderInput, ScanSearch, HardDrive, Play, Trash2, AlertCircle, Edit, X, Plus, User, Loader2, RotateCcw, Download, Scissors, Video, ChevronDown, ChevronUp, Crop, CheckCircle2 } from 'lucide-react';
 import { TaskProgress } from '../../components/TaskStatus';
-import type { AppConfig, LogEntry, ProjectStatus, WorkspaceProject } from '../../types';
+import type { AppConfig, LogEntry, MediaWorkflowImportManifest, ProjectStatus, WorkspaceProject } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
 import { InteractiveCropEditor, type CropRectangle } from '../../components/InteractiveCropEditor';
 import { ImportSourceControls } from '../../components/ImportSourceControls';
 import { PanelSwitch } from '../../components/PanelSwitch';
+import { appendImportSuccess, type ImportCompletion } from './import-completion-model';
+
+export type { ImportCompletion } from './import-completion-model';
 
 interface PythonEvent {
   type: 'log' | 'error' | 'progress' | 'status' | 'ask_user' | 'success' | 'warning' | 'preview' | 'cancelled' | 'complete';
@@ -158,7 +161,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
   return { logs, isRunning, isCancelling, progress, statusMsg, preview, clearPreview: () => setPreview(null), start, cancel };
 };
 
-const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspaceProjects, active = true, directSource = false, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitLargeBrollFiles = false, onChooseSourceFiles, onChooseSourceFolder, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitLargeBrollFiles?: boolean, onChooseSourceFiles?: () => void, onChooseSourceFolder?: () => void, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (projectNames: string[]) => void, completedActionLabel?: string, onCompletedAction?: () => void }) => {
+const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspacePath, workspaceProjects, active = true, directSource = false, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitLargeBrollFiles = false, onChooseSourceFiles, onChooseSourceFolder, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspacePath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitLargeBrollFiles?: boolean, onChooseSourceFiles?: () => void, onChooseSourceFolder?: () => void, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (result: ImportCompletion) => void | Promise<void>, completedActionLabel?: string, onCompletedAction?: () => void }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'completed'>('idle');
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("等待连接...");
@@ -181,6 +184,9 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   const cancelRequestedRef = React.useRef(false);
   const stagingCompleteRef = React.useRef(false);
   const importedProjectNamesRef = React.useRef<string[]>([]);
+  const importedWorkProjectNamesRef = React.useRef<string[]>([]);
+  const importedBrollProjectNamesRef = React.useRef<string[]>([]);
+  const importedCountRef = React.useRef(0);
   const completedDriveCountRef = React.useRef(0);
   const failedDrivesRef = React.useRef<string[]>([]);
   const skippedDrivesRef = React.useRef<string[]>([]);
@@ -195,7 +201,39 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   const startImportRef = React.useRef<(sdPath?: string, type?: 'work' | 'broll') => void>(() => undefined);
   const startBatchRef = React.useRef<() => void>(() => undefined);
   const onImportCompleteRef = React.useRef(onImportComplete);
+  const pendingImportGraphsStorageKey = 'photoflow:pending-import-graphs:v1';
+  const commitImportGraphs = React.useCallback(async (manifests: MediaWorkflowImportManifest[]) => {
+    if (!manifests.length) return;
+    if (!workspacePath) throw new Error('缺少工作区路径，无法保存媒体关系');
+    const readPending = () => {
+      try { return JSON.parse(window.localStorage.getItem(pendingImportGraphsStorageKey) || '{}') as Record<string, { workspacePath: string; manifest: MediaWorkflowImportManifest }>; }
+      catch { return {}; }
+    };
+    const pending = readPending();
+    for (const manifest of manifests) {
+      const key = `${workspacePath}\u0000${manifest.projectName}\u0000${manifest.importSessionId}`;
+      pending[key] = { workspacePath, manifest };
+    }
+    window.localStorage.setItem(pendingImportGraphsStorageKey, JSON.stringify(pending));
+    for (const manifest of manifests) {
+      const result = await window.electronAPI.commitMediaWorkflowImport(workspacePath, manifest);
+      if (!result.success) throw new Error(result.error || '媒体关系保存失败');
+      const key = `${workspacePath}\u0000${manifest.projectName}\u0000${manifest.importSessionId}`;
+      delete pending[key];
+      window.localStorage.setItem(pendingImportGraphsStorageKey, JSON.stringify(pending));
+    }
+  }, [workspacePath]);
   useEffect(() => { onImportCompleteRef.current = onImportComplete; }, [onImportComplete]);
+  useEffect(() => {
+    if (!active || !workspacePath) return;
+    void window.electronAPI.recoverMediaWorkflowImports(workspacePath).then(result => {
+      if (result.failures.length) setStatusMsg('媒体已导入，关系待恢复；将自动继续重试。');
+      let pending: Record<string, { workspacePath: string; manifest: MediaWorkflowImportManifest }> = {};
+      try { pending = JSON.parse(window.localStorage.getItem(pendingImportGraphsStorageKey) || '{}'); } catch { return; }
+      const manifests = Object.values(pending).filter(item => item.workspacePath === workspacePath).map(item => item.manifest);
+      if (manifests.length) void commitImportGraphs(manifests).catch(() => undefined);
+    }).catch(() => undefined);
+  }, [active, commitImportGraphs, workspacePath]);
   useEffect(() => { drivesRef.current = drives; }, [drives]);
   useEffect(() => {
     if (active && status === 'idle') setShouldDeleteSourceAfterImport(deleteSourceAfterImport);
@@ -234,6 +272,13 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
     const key = importSessionKeyFor(sdPath, type);
     return Boolean(key && readPersistedImportSessions()[key]?.stagingComplete);
   };
+  const importCompletion = (): ImportCompletion => ({
+    projectNames: [...importedProjectNamesRef.current],
+    workProjectNames: [...importedWorkProjectNamesRef.current],
+    brollProjectNames: [...importedBrollProjectNamesRef.current],
+    importedCount: importedCountRef.current,
+    skipped: importedCountRef.current === 0 && skippedDrivesRef.current.length > 0,
+  });
   continueAfterDriveFailureRef.current = (failedDrive, message, requestId = '') => {
     if (failedDrive && !failedDrivesRef.current.includes(failedDrive)) failedDrivesRef.current.push(failedDrive);
     currentDriveRef.current = '';
@@ -268,12 +313,13 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
       const failedLabel = failedDrivesRef.current.join('、');
       retryDrivePathsRef.current = [...failedDrivesRef.current];
       if (completedDriveCountRef.current > 0) {
-        const completedProjectNames = importedProjectNamesRef.current;
+        const completion = importCompletion();
+        const completedProjectNames = completion.projectNames;
         setStatus('completed');
         setProgress(100);
         setCompletedProjectNames(completedProjectNames);
         setStatusMsg(`批量导入已结束：${completedDriveCountRef.current} 张卡完成，${failedLabel} 未完成，可重新插卡后续传`);
-        onImportCompleteRef.current?.(completedProjectNames);
+        void onImportCompleteRef.current?.(completion);
       } else {
         setStatus('idle');
         setProgress(0);
@@ -377,7 +423,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   useEffect(() => {
     if (!window.electronAPI?.onPythonEvent) return;
 
-    const cleanup = window.electronAPI.onPythonEvent((event: PythonEvent) => {
+    const cleanup = window.electronAPI.onPythonEvent(async (event: PythonEvent) => {
       if (!active && !isBusyRef.current) return;
       if (event.scriptName !== 'classify.py') return;
       if (!event.requestId || event.requestId !== importRequestIdRef.current) return;
@@ -465,6 +511,19 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
 
         case 'success':
           {
+            const importManifests = Array.isArray(event.data?.importManifests) ? event.data.importManifests as MediaWorkflowImportManifest[] : [];
+            if (importManifests.length) {
+              try {
+                setStatusMsg('正在保存媒体工作流关系…');
+                await commitImportGraphs(importManifests);
+              } catch (error) {
+                isBusyRef.current = false;
+                setStatus('completed');
+                setStatusMsg(`文件已导入，但媒体关系保存失败；将保留导入会话并重试：${error instanceof Error ? error.message : String(error)}`);
+                setIsCancellingImport(false);
+                return;
+              }
+            }
             const skipped = event.data?.skipped === true;
             const importedCount = Number(event.data?.importedCount);
             if (Number.isFinite(importedCount) && importedCount > 0) {
@@ -474,8 +533,16 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
                 media_kind: 'mixed',
               });
             }
-            const importedNames = Array.isArray(event.data?.projectNames) ? event.data.projectNames.map(String) : [];
-            importedProjectNamesRef.current = Array.from(new Set([...importedProjectNamesRef.current, ...importedNames]));
+            const completion = appendImportSuccess(importCompletion(), {
+              projectNames: event.data?.projectNames,
+              importedCount: event.data?.importedCount,
+              skipped,
+              sourceType: currentDriveTypeRef.current,
+            });
+            importedProjectNamesRef.current = completion.projectNames;
+            importedWorkProjectNamesRef.current = completion.workProjectNames;
+            importedBrollProjectNamesRef.current = completion.brollProjectNames;
+            importedCountRef.current = completion.importedCount;
             const completedDrive = currentDriveRef.current;
             if (completedDrive && currentImportSessionKeyRef.current) {
               driveImportSessionsRef.current.delete(currentImportSessionKeyRef.current);
@@ -497,7 +564,8 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
                 : `${currentDriveRef.current} 导入完成，接下来导入 ${nextDrive.path}`);
               setTimeout(() => startImportRef.current(nextDrive.path, nextDrive.type), 500);
             } else {
-              const completedProjectNames = importedProjectNamesRef.current;
+              const completion = importCompletion();
+              const completedProjectNames = completion.projectNames;
               isBusyRef.current = false; // 【解锁】
               currentDriveRef.current = '';
               currentStageRef.current = '';
@@ -505,6 +573,9 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
               currentImportSessionKeyRef.current = '';
               stagingCompleteRef.current = false;
               importedProjectNamesRef.current = [];
+              importedWorkProjectNamesRef.current = [];
+              importedBrollProjectNamesRef.current = [];
+              importedCountRef.current = 0;
               setStatus('completed');
               setProgress(100);
               setStatusMsg(failedDrivesRef.current.length
@@ -516,7 +587,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
               setDecisionData(null);
               setCompletedProjectNames(completedProjectNames);
               setIsCancellingImport(false);
-              onImportCompleteRef.current?.(completedProjectNames);
+              void onImportCompleteRef.current?.(completion);
             }
           }
           break;
@@ -558,7 +629,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
     });
 
     return cleanup;
-  }, [active]);
+  }, [active, commitImportGraphs]);
 
   // 自动检查逻辑
   useEffect(() => {
@@ -675,6 +746,9 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
       : connected.map(path => ({ path, type: driveTypes[path] || 'work' as const }));
     importQueueRef.current = queue.slice(1);
     importedProjectNamesRef.current = [];
+    importedWorkProjectNamesRef.current = [];
+    importedBrollProjectNamesRef.current = [];
+    importedCountRef.current = 0;
     completedDriveCountRef.current = 0;
     failedDrivesRef.current = [];
     skippedDrivesRef.current = [];
@@ -1047,7 +1121,7 @@ const DashboardView = ({
   projectDestination?: string | null;
   projectName?: string;
   onImportConfigChange: (config: AppConfig['smartImport']) => void;
-  onImportComplete?: (projectNames: string[]) => void | Promise<void>;
+  onImportComplete?: (result: ImportCompletion) => void | Promise<void>;
   dragProps?: HomePanelDragProps;
 }) => {
   // 生日逻辑保持不变
@@ -1156,7 +1230,7 @@ const DashboardView = ({
 
       {section !== 'birthday' && <HomePanel title="从 SD 卡导入" initiallyOpen {...dragProps}>
         <div className="flex flex-col gap-6">
-          <ImportCard config={config} drives={drives} destinationPath={projectDestination ?? workspacePath} brollDestinationPath={projectDestination} workspaceProjects={projectDestination ? undefined : workspaceProjects} deleteSourceAfterImport={importDefaults.deleteSourceAfterImport} generateJpgFromRaw={importDefaults.generateJpgFromRaw} splitLargeBrollFiles={brollConfig.splitLargeFiles} onImportConfigChange={onImportConfigChange} onImportComplete={projectDestination ? undefined : projectNames => { void onImportComplete?.(projectNames); }} completedActionLabel="刷新卡片" />
+          <ImportCard config={config} drives={drives} workspacePath={workspacePath} destinationPath={projectDestination ?? workspacePath} brollDestinationPath={projectDestination} workspaceProjects={projectDestination ? undefined : workspaceProjects} deleteSourceAfterImport={importDefaults.deleteSourceAfterImport} generateJpgFromRaw={importDefaults.generateJpgFromRaw} splitLargeBrollFiles={brollConfig.splitLargeFiles} onImportConfigChange={onImportConfigChange} onImportComplete={projectDestination ? undefined : result => { void onImportComplete?.(result); }} completedActionLabel="刷新卡片" />
         </div>
       </HomePanel>}
       {section !== 'import' && <HomePanel title="角色生日" initiallyOpen tone="birthday" {...dragProps}>
@@ -1659,6 +1733,8 @@ const MatchView = ({
 }) => {
   const [keywords, setKeywords] = useState('');
   const [sourceFolders, setSourceFolders] = useState<Array<{ name: string; relativePath: string }>>([]);
+  const [sourceFoldersNextCursor, setSourceFoldersNextCursor] = useState<string | null>(null);
+  const [sourceFoldersTruncated, setSourceFoldersTruncated] = useState(false);
   const [loadingFolders, setLoadingFolders] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
@@ -1667,6 +1743,7 @@ const MatchView = ({
   const [statusMsg, setStatusMsg] = useState('请选择来源文件夹并输入文件名');
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const operationIdRef = React.useRef('');
+  const folderListingOperationIdRef = React.useRef('');
   const appDialog = useAppDialog();
   const selectedRelativePath = config.sourceFolderRelativePath || '';
   const selectedName = selectedRelativePath.split('/').filter(Boolean).at(-1) || '';
@@ -1676,16 +1753,41 @@ const MatchView = ({
     let active = true;
     if (!projectPath) {
       setSourceFolders([]);
+      setSourceFoldersNextCursor(null);
       return () => { active = false; };
     }
+    const operationId = crypto.randomUUID();
+    folderListingOperationIdRef.current = operationId;
     setLoadingFolders(true);
-    void window.electronAPI.getSelectionSourceFolders(projectPath).then(result => {
+    void window.electronAPI.getSelectionSourceFolders(projectPath, { pageSize: 500, operationId }).then(result => {
       if (!active) return;
       setSourceFolders(result.success ? result.folders : []);
+      setSourceFoldersNextCursor(result.nextCursor || null);
+      setSourceFoldersTruncated(result.truncated);
       if (!result.success) setStatusMsg(result.error || '无法读取项目文件夹');
     }).finally(() => { if (active) setLoadingFolders(false); });
-    return () => { active = false; };
+    return () => { active = false; if (folderListingOperationIdRef.current === operationId) void window.electronAPI.cancelSelectionOperation(operationId); };
   }, [projectPath]);
+
+  useEffect(() => window.electronAPI.onSelectionOperationProgress(progressEvent => {
+    if (progressEvent.operationId !== operationIdRef.current && progressEvent.operationId !== folderListingOperationIdRef.current) return;
+    if (progressEvent.phase === 'scanning_source') {
+      setStatusMsg(`正在扫描来源：${Number(progressEvent.directoriesScanned || 0)} 个目录，${Number(progressEvent.filesScanned || 0)} 个文件`);
+      setProgress(current => Math.max(current, 10));
+    }
+  }), []);
+
+  const loadMoreSourceFolders = async () => {
+    if (!projectPath || !sourceFoldersNextCursor || loadingFolders) return;
+    setLoadingFolders(true);
+    try {
+      const result = await window.electronAPI.getSelectionSourceFolders(projectPath, { cursor: sourceFoldersNextCursor, pageSize: 500 });
+      if (!result.success) { setStatusMsg(result.error || '无法继续读取项目文件夹'); return; }
+      setSourceFolders(current => [...current, ...result.folders]);
+      setSourceFoldersNextCursor(result.nextCursor || null);
+      setSourceFoldersTruncated(result.truncated);
+    } finally { setLoadingFolders(false); }
+  };
 
   const appendLog = (message: string, type: LogEntry['type'] = 'info') => {
     setLogs(current => [...current, { timestamp: new Date().toLocaleTimeString(), message, type }]);
@@ -1704,11 +1806,16 @@ const MatchView = ({
     setLogs([]);
     try {
       const tokens = keywords.trim().split(/\s+/);
+      const preflightOperationId = crypto.randomUUID();
+      operationIdRef.current = preflightOperationId;
       const preview = await window.electronAPI.preflightFilenameSelection(projectPath, {
         sourceFolderRelativePath: selectedRelativePath,
         keywords: tokens,
+        operationId: preflightOperationId,
       });
+      if (preview.cancelled) { setStatusMsg('已取消来源扫描'); setProgress(0); return; }
       if (!preview.success || !preview.signature) throw new Error(preview.error || '选片预检失败');
+      operationIdRef.current = '';
       setProgress(30);
       appendLog(`来源：${preview.sourceFolderRelativePath}`, 'info');
       appendLog(`目标：${preview.targetFolderRelativePath}`, 'info');
@@ -1782,6 +1889,8 @@ const MatchView = ({
         </select>
         <span className="mt-1 block text-xs text-slate-500">完整相对路径：{selectedRelativePath || '未选择'}</span>
         <span className="mt-1 block text-xs font-bold text-slate-600">实际输出：{outputFolderName || '选择来源后显示'}</span>
+        {sourceFoldersNextCursor && <button type="button" onClick={() => void loadMoreSourceFolders()} disabled={loadingFolders} className="mt-2 text-xs font-bold text-blue-600 hover:text-blue-500 disabled:opacity-50">加载更多文件夹</button>}
+        {sourceFoldersTruncated && !sourceFoldersNextCursor && <span className="mt-2 block text-xs text-amber-700">目录数量或深度已达安全上限，请缩小项目范围。</span>}
       </label>
       <div className="space-y-2"><label className="text-xs font-semibold uppercase text-slate-500">文件名</label><textarea value={keywords} onChange={event => setKeywords(event.target.value)} placeholder="输入文件名或末尾编号，以空格分隔" className="h-24 min-h-24 w-full resize-y rounded-lg border border-slate-200 bg-slate-50 p-4 font-mono text-sm text-slate-900 focus:border-blue-500 focus:outline-none"/></div>
       <TaskProgress logs={logs} progress={progress} isRunning={isRunning} idleMessage={statusMsg} action={<button onClick={isRunning ? () => void cancel() : () => void runTask()} disabled={isCancelling || isConfirming || (!isRunning && (!projectPath || !selectedRelativePath || !keywords.trim()))} className={`flex items-center gap-2 rounded-lg px-8 py-2.5 font-bold transition ${isRunning ? 'bg-red-600 text-white hover:bg-red-500' : isConfirming || !selectedRelativePath || !keywords.trim() ? 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400' : 'bg-blue-600 text-white hover:bg-blue-500'}`}>{isRunning ? (isCancelling ? <Loader2 className="animate-spin" size={18}/> : <X size={18}/>) : <ScanSearch size={18}/>} {isRunning ? (isCancelling ? '正在回滚…' : '取消任务') : isConfirming ? '等待确认' : '开始选片'}</button>}/>

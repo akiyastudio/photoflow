@@ -24,14 +24,14 @@ import { browserPageActivation } from './features/app/workspace-tab-model';
 import { BackgroundTaskIndicator } from './features/background-tasks/BackgroundTaskIndicator';
 import { useTaskCenter } from './features/background-tasks/TaskCenter';
 import { useTopToastStack } from './features/app/useTopToastStack';
+import { rendererErrorFingerprint, rendererErrorNoticeSummary, shouldReportRendererError, type RendererErrorOccurrence } from './features/app/renderer-error-notice-model';
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
 import { UsagePreferencesOnboarding, USAGE_PREFERENCES_VERSION } from './features/settings/UsagePreferencesOnboarding';
 import type { SettingsSection } from './features/settings/SettingsFeature';
-import { DashboardView, MatchView, VideoSplitView } from './features/tools/ToolViews';
+import { DashboardView, MatchView, VideoSplitView, type ImportCompletion } from './features/tools/ToolViews';
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
 import { BUILT_IN_PROJECT_STATUSES, PROJECT_TOOLBAR_ACTION_IDS, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
 import type { AppConfig, BackupStatus, ComponentStatus, HomeCardId, ProjectToolbarActionId, ToolType, WorkspaceProject } from './types';
-
 const DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'inspiration'];
 const RESERVED_PROJECT_CATEGORIES = new Set<string>(['未分类', ...BUILT_IN_PROJECT_STATUSES]);
 const normalizeProjectCategories = (value: unknown) => {
@@ -177,6 +177,7 @@ const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   },
   smartImport: {
     autoStart: false,
+    autoMoveProjectAfterSdImport: true,
     sdPath: isMac ? "/Volumes" : "H:/",
     sdPaths: [isMac ? "/Volumes" : "H:/"],
     sdDriveTypes: {},
@@ -239,7 +240,7 @@ const App: React.FC = () => {
   const [workspaceToolTabs, setWorkspaceToolTabs] = useState<WorkspaceToolTab[]>([]);
   const [, setProjectDestination] = useState<string | null>(null);
   const { showNotice, topToastStack } = useTopToastStack();
-  const autoBackedUpImportTasksRef = useRef(new Set<string>());
+  const autoBackedUpImportTasksRef = useRef(new Set<string>()); const lastRendererErrorRef = useRef<RendererErrorOccurrence | null>(null);
   const cacheCleanupCheckedRef = useRef(false);
   const [homeOrder, setHomeOrder] = useState<HomeCardId[]>(DEFAULT_HOME_ORDER);
   const [draggedHomeCard, setDraggedHomeCard] = useState<HomeCardId | null>(null);
@@ -444,10 +445,10 @@ const App: React.FC = () => {
     window.localStorage.setItem('photoflow:components-cache', JSON.stringify(nextComponents));
     setComponentInstallPath(result.installPath || '');
   }), []);
-
   useEffect(() => {
     const report = (message: string, details?: string) => {
-      showNotice(`发生错误：${message}`, 5000);
+      const now = Date.now(); if (!shouldReportRendererError(lastRendererErrorRef.current, message, now)) return;
+      lastRendererErrorRef.current = { fingerprint: rendererErrorFingerprint(message), reportedAt: now }; showNotice(`发生错误：${rendererErrorNoticeSummary(message)}`, 5000);
       window.electronAPI?.reportRendererError?.(message, details);
     };
     const originalConsoleError = console.error;
@@ -464,7 +465,7 @@ const App: React.FC = () => {
     const removePythonListener = window.electronAPI?.onPythonEvent?.((event: PythonEvent) => {
       if (event.type === 'error') report(event.message || `${event.scriptName || '后台任务'}执行失败`);
     });
-    const removeMainErrorListener = window.electronAPI?.onAppError?.(message => showNotice(`发生错误：${message}`, 5000));
+    const removeMainErrorListener = window.electronAPI?.onAppError?.(message => report(message));
     window.addEventListener('error', handleWindowError);
     window.addEventListener('unhandledrejection', handleUnhandledRejection);
     return () => {
@@ -515,6 +516,7 @@ const App: React.FC = () => {
             const customProjectCategories = normalizeProjectCategories(fileConfig.customProjectCategories);
             const configuredWorkspacePaths = normalizeWorkspacePaths(fileConfig.workspacePath, fileConfig.workspacePaths);
             let normalizedConfig = { ...legacyConfig, theme: fileConfig.theme ?? 'system', telemetry: { enabled: fileConfig.telemetry?.enabled === true, crashReports: fileConfig.telemetry?.crashReports === true }, workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, customProjectCategories, projectCategoryOrder: normalizeProjectCategoryOrder(fileConfig.projectCategoryOrder, customProjectCategories), defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', itemOpenMode: fileConfig.itemOpenMode === 'double' || legacyFolderOpenMode === 'double' ? 'double' : 'single', favoriteDisplayMode: fileConfig.favoriteDisplayMode === 'stars' ? 'stars' : 'binary', usagePreferencesVersion: Number(fileConfig.usagePreferencesVersion) || 0, projectToolbar: normalizeProjectToolbar(fileConfig.projectToolbar), homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, pinInspirationLibrary: fileConfig.pinInspirationLibrary === true, componentSettings, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, backup: { enabled: fileConfig.backup?.enabled === true, targetType: fileConfig.backup?.targetType === 'nas' || (fileConfig.backup?.targetType === undefined && fileConfig.backup?.targetPath?.startsWith('\\\\')) ? 'nas' : 'local', targetPath: fileConfig.backup?.targetPath ?? '', mode: fileConfig.backup?.mode === 'latest' ? 'latest' : 'history', automaticDaily: fileConfig.backup?.automaticDaily ?? true, afterImport: fileConfig.backup?.afterImport ?? true, retention: { daily: Math.max(1, Number(fileConfig.backup?.retention?.daily) || 7), weekly: Math.max(0, Number(fileConfig.backup?.retention?.weekly) || 4), monthly: Math.max(0, Number(fileConfig.backup?.retention?.monthly) || 12) }, nas: { credentialRef: fileConfig.backup?.nas?.credentialRef ?? '', limitEnabled: fileConfig.backup?.nas?.limitEnabled === true, bandwidthLimitMBps: Math.max(1, Number(fileConfig.backup?.nas?.bandwidthLimitMBps) || 20), limitStart: fileConfig.backup?.nas?.limitStart || '09:00', limitEnd: fileConfig.backup?.nas?.limitEnd || '18:00' } }, archive: { enabled: fileConfig.archive?.enabled === true, targetPath: fileConfig.archive?.targetPath ?? '' }, importDefaults: { deleteSourceAfterImport: fileConfig.importDefaults?.deleteSourceAfterImport ?? !(legacyFileImport?.preserveOriginal ?? false), generateJpgFromRaw: fileConfig.importDefaults?.generateJpgFromRaw ?? false }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, backupEnabled: false, generateVideoPreview: fileConfig.smartImport?.generateVideoPreview ?? false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: fileConfig.smartImport?.splitLargeFiles ?? false, dateFilter: fileConfig.smartImport?.dateFilter === 'today' || fileConfig.smartImport?.dateFilter === 'today_yesterday' ? fileConfig.smartImport.dateFilter : 'all' }, brollImport: { splitLargeFiles: fileConfig.brollImport?.splitLargeFiles ?? false }, inspirationLibrary, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: !configuredImageSource || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: !configuredVideoSource || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
+            normalizedConfig.smartImport.autoMoveProjectAfterSdImport = fileConfig.smartImport?.autoMoveProjectAfterSdImport ?? true;
             normalizedConfig.smartMatch.sourceFolderRelativePath = fileConfig.smartMatch?.sourceFolderRelativePath;
             normalizedConfig = { ...normalizedConfig, workspacePath: configuredWorkspacePaths[0] || '', workspacePaths: configuredWorkspacePaths };
             if (normalizedConfig.workspacePaths.length) {
@@ -528,7 +530,7 @@ const App: React.FC = () => {
               setShowWorkspaceSetup(true);
             }
             setConfig(normalizedConfig);
-            if (JSON.stringify(fileConfig.workspacePaths) !== JSON.stringify(normalizedConfig.workspacePaths) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
+            if ((JSON.stringify(fileConfig.workspacePaths) !== JSON.stringify(normalizedConfig.workspacePaths) || fileConfig.smartImport?.autoMoveProjectAfterSdImport === undefined) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.createPlanningFolder === undefined || JSON.stringify(fileConfig.customProjectCategories) !== JSON.stringify(normalizedConfig.customProjectCategories) || JSON.stringify(fileConfig.projectCategoryOrder) !== JSON.stringify(normalizedConfig.projectCategoryOrder) || fileConfig.defaultFolderSort === undefined || fileConfig.itemOpenMode !== normalizedConfig.itemOpenMode || fileConfig.favoriteDisplayMode !== normalizedConfig.favoriteDisplayMode || fileConfig.usagePreferencesVersion !== normalizedConfig.usagePreferencesVersion || legacyFolderOpenMode !== undefined || fileConfig.birthdayEnabled === undefined || fileConfig.pinInspirationLibrary === undefined || !fileConfig.backup || fileConfig.backup?.targetType === undefined || !fileConfig.backup?.nas || !fileConfig.archive || !fileConfig.importDefaults || legacyFileImport !== undefined || legacyBrollClearSource !== undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.videoPreviewQuality !== normalizedConfig.smartImport.videoPreviewQuality || fileConfig.smartImport?.splitLargeFiles === undefined || fileConfig.smartImport?.dateFilter !== normalizedConfig.smartImport.dateFilter || !fileConfig.brollImport || !fileConfig.inspirationLibrary || JSON.stringify(fileConfig.research) !== JSON.stringify(researchSettings) || fileConfig.personDetection?.useGpu === undefined || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || JSON.stringify(fileConfig.projectToolbar) !== JSON.stringify(normalizedConfig.projectToolbar) || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             console.log('📋 Configuration loaded from file');
           } else {
@@ -586,9 +588,9 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!configLoaded || !config?.workspacePath) return;
-    void refreshBackupStatus();
+    void window.electronAPI.recoverMediaWorkflowImports(config.workspacePath).then(result => { if (result.failures.length) showNotice('媒体已导入，关系待恢复；应用将在下次启动或打开导入页时重试。', 8000); }).catch(() => undefined); void refreshBackupStatus();
     if (config.backup.enabled && config.backup.automaticDaily) void window.electronAPI.runBackupIfDue(config.workspacePath);
-  }, [configLoaded, config?.workspacePath, config?.backup.enabled, config?.backup.automaticDaily, config?.backup.targetPath, refreshBackupStatus]);
+  }, [configLoaded, config?.workspacePath, config?.backup.enabled, config?.backup.automaticDaily, config?.backup.targetPath, refreshBackupStatus, showNotice]);
 
   useEffect(() => window.electronAPI.onBackgroundTaskChanged(task => {
     if (task.type === 'workspace-backup' || task.type === 'backup-verify' || task.type.endsWith('-restore')) void refreshBackupStatus();
@@ -883,14 +885,13 @@ const App: React.FC = () => {
     setProjectDestination(nextActivation.projectDestination);
     setActiveTab(nextActivation.activeTab);
   };
-  const handleHomeImportComplete = async (projectNames: string[] = []) => {
-    if (!config) return;
-    const result = await window.electronAPI.archiveImportedProjects(config.workspacePath, projectNames);
+  const handleHomeImportComplete = async (completion: ImportCompletion) => { if (!config) return;
+    const result = await window.electronAPI.finalizeSdImportedProjects(config.workspacePath, completion.projectNames, { moveProjectAfterImport: config.smartImport.autoMoveProjectAfterSdImport, workProjectNames: completion.workProjectNames });
     if (!result.success) { showNotice(`整理导入项目失败：${result.error || '未知错误'}`, 5000); return; }
-    if (result.projects.length === 1) {
-      openProjectTab(result.projects[0]);
-    }
-    window.dispatchEvent(new Event('workspace-projects-changed'));
+    if (result.failures.length) showNotice(`导入已完成，但有 ${result.failures.length} 个项目的分类更新失败。`, 7000);
+    else if (result.movedProjects.length) showNotice('导入完成，项目已移入“后期中”。');
+    else showNotice('导入完成，项目分类保持不变。');
+    if (result.projects.length === 1) openProjectTab(result.projects[0]); window.dispatchEvent(new Event('workspace-projects-changed'));
   };
   // 等待配置加载完成再渲染主界面
   const handleProjectAction = (action: 'import' | 'broll' | 'match', project: WorkspaceProject) => {

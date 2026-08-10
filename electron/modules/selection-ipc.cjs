@@ -16,9 +16,11 @@ const registerSelectionIpc = ({ ipcMain, path, fs, selectionService, workspaceCa
     throw new Error('项目未在当前工作区登记');
   };
   const requestFor = (projectPath, request) => ({ ...request, ...resolveRegisteredProject(projectPath) });
-  const handle = method => async (_event, projectPath, request = {}) => {
+  const handle = method => async (event, projectPath, request = {}) => {
     try {
-      return await selectionService[method](requestFor(projectPath, request));
+      const trustedRequest = requestFor(projectPath, request);
+      trustedRequest.onProgress = progress => event?.sender?.send?.('workspace-selection-progress', progress);
+      return await selectionService[method](trustedRequest);
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
