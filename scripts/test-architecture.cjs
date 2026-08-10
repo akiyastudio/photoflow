@@ -14,6 +14,7 @@ const preload = read('electron/preload.cjs');
 const app = read('src/App.tsx');
 const titlebarTabOrder = read('src/features/app/useTitlebarTabOrder.ts');
 const toolViews = read('src/features/tools/ToolViews.tsx');
+const importCompletionModel = read('src/features/tools/import-completion-model.ts');
 const classifyImport = read('python/classify.py');
 const ffmpegTranscode = read('python/ffmpeg_transcode.py');
 const componentBuilder = read('scripts/build-components.cjs');
@@ -25,6 +26,7 @@ const types = read('src/types.ts');
 const marqueeSelectionModel = read('src/features/workspace/marquee-selection-model.ts');
 const marqueeAutoScroll = read('src/features/workspace/marquee-auto-scroll.ts');
 const projectVersionTree = read('src/components/ProjectVersionTree.tsx');
+const versionTreeCanvas = read('src/features/versioning/use-version-tree-canvas.ts');
 const browserContext = read('src/features/file-browser/browser-context.ts');
 const inspirationLibrary = read('src/features/inspiration/InspirationLibrary.tsx');
 const projectNavigator = read('src/components/ProjectNavigator.tsx');
@@ -52,6 +54,8 @@ const workspaceIpc = read('electron/modules/workspace-ipc.cjs');
 const mediaIpc = read('electron/modules/media-ipc.cjs');
 const brollImport = read('electron/modules/broll-import.cjs');
 const versionsIpc = read('electron/modules/versions-ipc.cjs');
+const selectionIpc = read('electron/modules/selection-ipc.cjs');
+const selectionService = read('electron/services/selection-service.cjs');
 const systemIpc = read('electron/modules/system-ipc.cjs');
 const backupService = read('electron/services/backup-service.cjs');
 const retiredCacheService = read('electron/services/retired-cache-service.cjs');
@@ -70,13 +74,18 @@ assert(projectWorkspace.includes('void loadShellNewTypes();') && projectWorkspac
 assert(projectWorkspace.includes('const ToolModal') && projectWorkspace.includes("panel === 'negative-import'") && projectWorkspace.includes('从 SD 卡导入</button>') && projectWorkspace.includes('导入底片</button>'), 'project tools and classified negative import must use the modal import workflow');
 assert(projectWorkspace.includes('chooseImportSourceFiles') && projectWorkspace.includes('chooseWorkspaceDirectory') && projectWorkspace.includes('directSource'), 'negative import must accept explicit files and folders');
 assert(toolViews.includes('已选择 ${selectedDrives.length} 个来源，点击右侧按钮开始导入') && toolViews.indexOf('else if (directSource)') < toolViews.indexOf('张卡，点击右侧按钮批量导入'), 'direct negative import must describe files and folders as sources instead of SD cards');
-assert(toolViews.includes("if (directSource && status === 'idle') return <ImportSourceControls") && projectWorkspace.includes('onImportComplete={() => { void markInProgress(); }}'), 'negative import must show shared source controls only while idle and retain its completion result inside ImportCard');
+assert(toolViews.includes("if (directSource && status === 'idle') return <ImportSourceControls") && projectWorkspace.includes('onImportComplete={() => { void completeNegativeImport(); }}'), 'negative import must show shared source controls only while idle and retain its independent completion behavior');
+assert(types.includes('autoMoveProjectAfterSdImport: boolean') && app.includes('autoMoveProjectAfterSdImport: true') && app.includes('fileConfig.smartImport?.autoMoveProjectAfterSdImport ?? true') && systemIpc.includes('normalizeSdImportAutoMove(config?.smartImport?.autoMoveProjectAfterSdImport)'), 'the SD post-import setting must default on for old configs and persist explicit false values');
+assert(settingsFeature.includes('autoMoveProjectAfterSdImport') && settingsFeature.includes('导入后自动移动项目分类'), 'SD import settings must expose the project-category post action');
+assert(preload.includes("ipcRenderer.invoke('workspace-finalize-sd-imports'") && workspaceIpc.includes("ipcMain.handle('workspace-finalize-sd-imports'") && types.includes('finalizeSdImportedProjects:') && !preload.includes('workspace-archive-imports') && !types.includes('archiveImportedProjects'), 'SD import finalization must use the semantic API and retire the archive-named bridge');
+assert(projectWorkspace.includes('const completeSdImport = async (completion: ImportCompletion)') && projectWorkspace.includes('const completeNegativeImport = async ()') && projectWorkspace.includes('moveProjectAfterImport: importConfig.autoMoveProjectAfterSdImport'), 'SD and direct-source imports must use separate completion handlers');
+assert(toolViews.includes('appendImportSuccess(importCompletion()') && importCompletionModel.includes("sourceType: 'work' | 'broll'") && importCompletionModel.includes('event.skipped !== true') && importCompletionModel.includes('count > 0'), 'ImportCard must derive movable work projects only from successful positive-count classifier events');
 assert(projectWorkspace.includes('dismissPanelTask(taskKey)') && !projectWorkspace.includes("state: 'completed', progress: 100, message: task?.message || '处理完成'"), 'completed import panels must leave the background task center instead of retaining a duplicate completed state');
 assert(toolViews.includes("setStatus('completed')") && toolViews.includes("status === 'completed'") && toolViews.includes('onCompletedAction') && projectWorkspace.includes('panelImportResult?.kind') && projectWorkspace.includes('progressImportCompletion'), 'all import panels must retain a visible completion state until the user closes or refreshes the panel');
 assert(toolViews.includes('const orderedProjects = [...(workspaceProjects || [])].sort') && toolViews.includes('orderedProjects.map(project => <option'), 'suggested project routes must appear before the remaining projects in each classification selector');
 assert(systemIpc.includes("ipcMain.handle('choose-import-source-files'") && preload.includes("ipcRenderer.invoke('choose-import-source-files')"), 'negative file selection must be exposed through a registered IPC channel');
 assert(read('python/classify.py').includes('def scan_direct_media') && read('python/classify.py').includes('args.direct_source') && read('python/classify.py').includes('source_paths =') && toolViews.includes("'--source_paths', JSON.stringify(selectedDrives)"), 'negative import must scan all selected sources as one batch instead of requiring DCIM/PRIVATE');
-assert(classifyImport.includes('def stage_media_to_safety_temp') && classifyImport.includes("'stagingComplete': True") && classifyImport.includes('cleanup_import_staging(temp_dir)') && classifyImport.includes('导入流程全部完成", 100'), 'imports must finish session-scoped safety staging before local organization, post-processing, and cleanup reach 100%');
+assert(classifyImport.includes('def stage_media_to_safety_temp') && classifyImport.includes("'stagingComplete': True") && classifyImport.indexOf('write_import_graph_receipt(temp_dir') < classifyImport.indexOf('导入流程全部完成", 100') && workspaceIpc.includes("ipcMain.handle('workspace-media-workflow-import-recover'") && preload.includes("ipcRenderer.invoke('workspace-media-workflow-import-recover'"), 'work imports must persist an authoritative receipt before success and expose main-process recovery');
 assert(toolViews.includes('shouldDeleteSourceAfterImport') && toolViews.includes("...(shouldDeleteSourceAfterImport ? ['--delete_source'] : [])") && projectWorkspace.includes('deleteSourceAfterImport: true') && projectWorkspace.includes('deleteSourceAfterImport: draft.deleteSourceAfterImport') && classifyImport.includes('if delete_source:') && workspaceIpc.includes('options?.deleteSourceAfterImport === true') && brollImport.includes('options?.deleteSourceAfterImport === true'), 'every import must expose an explicit source-deletion choice, default it on in the UI, and require an explicit backend flag');
 assert(toolViews.includes('setShouldDeleteSourceAfterImport(deleteSourceAfterImport)') && projectWorkspace.includes("active={active && panel === 'import'}") && projectWorkspace.includes("active={active && panel === 'negative-import'}"), 'SD-card and negative-import panels must refresh their source-deletion choice from settings whenever opened');
 assert(!projectNavigator.includes('从 SD 卡导入</button>') && !projectNavigator.includes('从文件名选片</button>'), 'project-list context menus must not duplicate project import tools');
@@ -187,7 +196,100 @@ assert(projectWorkspace.includes("state === 'STALE'") && projectWorkspace.includ
 assert(projectWorkspace.includes('folder.mediaKind === mediaKind && !folder.folderMissing') && projectWorkspace.includes('const hasVersionProgressForEntry'), 'version management must recognize every available progress folder');
 assert(/openVersions[\s\S]*?if \(!hasVersionProgressForEntry\(target\)\)/.test(projectWorkspace), 'version management must require a registered progress folder without requiring automatic tracking');
 assert(projectWorkspace.includes('progressTrackingAction(fileMenuRegisteredProgressFolder)') && projectWorkspace.includes('刷新版本跟踪') && projectWorkspace.includes('void refreshProgressTracking(progressFolder)'), 'registered main nodes must expose the unified V2 refresh action');
-assert(!projectWorkspace.includes('ensureSelectionBaseline') && !projectWorkspace.includes('fileMenuIsSelectionBaselineFolder') && projectWorkspace.includes('executeManualSelection'), 'the renderer must use selection V2 and never recreate automatic V0 selection baselines');
+assert(!projectWorkspace.includes('ensureSelectionBaseline')
+  && !projectWorkspace.includes('fileMenuIsSelectionBaselineFolder')
+  && projectWorkspace.includes('executeManualSelection')
+  && !preload.includes('ensureSelectionBaseline')
+  && !preload.includes('workspace-selection-baseline-ensure')
+  && !versionsIpc.includes('workspace-selection-baseline-ensure')
+  && !types.includes('ensureSelectionBaseline'), 'selection V2 must be the only selection entry point; the retired automatic V0 baseline API must not remain exposed or registered');
+assert(selectionService.includes('sourceFolderPageSize: 500')
+  && selectionService.includes('maxDirectoryDepth: 32')
+  && selectionService.includes('maxDirectoriesPerTask: 10000')
+  && selectionService.includes('maxSourceFiles: 50000')
+  && selectionService.includes('folderListingCursors')
+  && selectionIpc.includes("event?.sender?.send?.('workspace-selection-progress'")
+  && preload.includes("ipcRenderer.on('workspace-selection-progress'")
+  && types.includes('nextCursor?: string | null'), 'selection folder and media scans must use bounded pagination, cancellation progress, and an opaque cursor boundary');
+assert(versionsIpc.includes("ipcMain.handle('workspace-final-version-export'")
+  && versionsIpc.includes("const parentProgressId = String(request.parentProgressId || '')")
+  && !versionsIpc.includes('parentProgressId: latestRoot?.id')
+  && !versionsIpc.includes('const latestRoot ='), 'favorite export must require an explicit parent ID instead of inferring the latest version');
+assert(versionsIpc.includes("current.nodeRole !== 'progress'") && !versionsIpc.includes("current.versionKey === '0'"), 'V2 progress edit permissions must be role-based rather than version-key based');
+assert(!projectWorkspace.includes('relationEditMode')
+  && !projectVersionTree.includes('editingRelations')
+  && !projectVersionTree.includes('onEditingRelationsChange')
+  && projectWorkspace.includes('const [draggingChildId, setDraggingChildId]')
+  && projectWorkspace.includes('const [hoverParentId, setHoverParentId]')
+  && projectWorkspace.includes('const [pendingRelationChange, setPendingRelationChange]')
+  && projectWorkspace.includes('const [relationMutationId, setRelationMutationId]'), 'relation mutation state must remain page-local without restoring the retired relation edit mode');
+assert(!projectVersionTree.includes('编辑关系')
+  && !projectVersionTree.includes('完成关系编辑')
+  && projectVersionTree.includes('group-hover/version-node:opacity-100')
+  && projectVersionTree.includes('data-relation-parent-id')
+  && projectVersionTree.includes('data-edge-child-handle')
+  && projectVersionTree.includes("event.key === 'Delete'")
+  && projectVersionTree.includes('progressRelationChangeError'), 'version relation editing must use hover/pointer/keyboard controls without restoring the old top toolbar');
+assert(projectVersionTree.includes('useVersionTreeCanvas')
+  && projectVersionTree.includes('canvas.nodePointerHandlers(item.key)')
+  && projectWorkspace.includes('draggable={false}')
+  && versionTreeCanvas.includes('Math.hypot(deltaX, deltaY) < DRAG_THRESHOLD')
+  && versionTreeCanvas.includes('setPointerCapture(event.pointerId)')
+  && versionTreeCanvas.includes("enqueueSave('patch'")
+  && versionTreeCanvas.includes("enqueueSave('replace'")
+  && versionTreeCanvas.includes('await loadServerLayout(')
+  && versionTreeCanvas.includes("event.code === 'Space'"), 'version tree nodes must use thresholded pointer-capture dragging with one-shot persistence, rollback reload, refresh replacement, and free-canvas panning');
+assert(versionTreeCanvas.includes('export type VersionTreeDragState')
+  && versionTreeCanvas.includes("type: 'node'")
+  && versionTreeCanvas.includes("type: 'relation'")
+  && versionTreeCanvas.includes("type: 'pan'")
+  && projectVersionTree.includes('dragStateRef.current')
+  && projectVersionTree.includes('beginRelationDrag')
+  && projectVersionTree.includes('group-focus-within/version-node:opacity-100')
+  && projectVersionTree.includes('h-5 w-5')
+  && projectVersionTree.includes('role="tooltip"')
+  && projectWorkspace.includes('progressRelationChangeError(progressFoldersRef.current, childProgressId, parentProgressId)'), 'node, relation, and pan interactions must share an exclusive drag state while hover/focus ports retain explicit client validation feedback');
+const restoreVersionTreeLayoutBody = projectWorkspace.match(/const restoreStandardVersionTreeLayout = async \(\) => \{[\s\S]*?\n  \};/)?.[0] || '';
+assert(projectWorkspace.includes("kind: 'files' | 'version-tree-layout'")
+  && projectWorkspace.includes("surfaceMenu.kind === 'version-tree-layout'")
+  && projectWorkspace.includes("!blankCanvas || normalizeProjectRelativePath(currentRelativePath) || !hasVersionTreeFor()")
+  && projectWorkspace.includes('恢复版本树标准排版')
+  && projectWorkspace.includes('将恢复标准排版。版本关系和文件不会改变。')
+  && restoreVersionTreeLayoutBody.includes('controller.refreshLayout()')
+  && !restoreVersionTreeLayoutBody.includes('refreshProgressTracking')
+  && !restoreVersionTreeLayoutBody.includes('refresh(')
+  && !projectVersionTree.includes('aria-label="刷新版本树布局"')
+  && /saveVersionTreeLayout[\s\S]*?if \(result\.success\) \{[\s\S]*?if \(applyOnSuccess\) \{[\s\S]*?applyPositions\(applyOnSuccess\)/.test(versionTreeCanvas), 'blank root version-tree context refresh must stay isolated from tracking/files and only publish default coordinates after atomic replace succeeds');
+assert(projectWorkspace.includes('ProgressRelationMutationQueue')
+  && projectWorkspace.includes('relationMutatingChildIds')
+  && projectWorkspace.includes('expectedUpdatedAt: latestChild.updatedAt')
+  && projectWorkspace.includes('relationMutationQueueRef.current.dispose()')
+  && !projectWorkspace.includes('relationMutationIdRef.current !== mutationId'), 'relation mutations must serialize per child and must not discard successful responses using a global mutation ID');
+assert(versionsIpc.includes("ipcMain.handle('workspace-legacy-selection-relation-repair'")
+  && preload.includes('repairLegacySelectionRelation:')
+  && types.includes('interface LegacySelectionRelationRepair')
+  && projectWorkspace.includes('<LegacySelectionRepairNotice'), 'unresolved legacy selection repairs must cross the trusted ID-only API boundary and be visible in the version tree');
+assert(workspaceDb.includes('TARGET_SCHEMA_VERSION = 25')
+  && workspaceDb.includes('CREATE TABLE IF NOT EXISTS version_tree_layouts')
+  && workspaceDb.includes('CREATE TABLE IF NOT EXISTS version_tree_node_positions')
+  && versionsIpc.includes("ipcMain.handle('workspace-version-tree-layout-get'")
+  && versionsIpc.includes("ipcMain.handle('workspace-version-tree-layout-save'")
+  && preload.includes('getVersionTreeLayout:')
+  && preload.includes('saveVersionTreeLayout:')
+  && types.includes('interface VersionTreeLayoutResult')
+  && projectVersionTree.includes('nodeKey: `progress:${node.id}`')
+  && !projectVersionTree.includes("team-workspace:primary"), 'version-tree coordinates must use persisted progress/workflow node keys and a constrained preload/API boundary');
+assert(workspaceDb.includes('CREATE TABLE IF NOT EXISTS version_graph_edges')
+  && workspaceDb.includes("VERSION_GRAPH_EDGE_KINDS = (\"media_companion\", \"derived_preview\", \"workflow_input\")")
+  && workspaceDb.includes("PROGRESS_NODE_ROLES = (\"original\", \"progress\", \"selection\", \"artifact\", \"workflow\")")
+  && workspaceDb.includes('artifact_kind TEXT')
+  && workspaceDb.includes('def version_graph_edge_create')
+  && workspaceDb.includes('def version_graph_edge_delete')
+  && workspaceDb.includes('只能提交项目 ID、节点 ID 和关系类型')
+  && workspaceDb.includes("source.media_kind=target.media_kind")
+  && workspaceDb.includes("target.node_role='progress'")
+  && types.includes("'artifact' | 'workflow'")
+  && types.includes("artifactKind?: 'companion' | 'preview' | 'team_workspace'"), 'schema 24 must keep structural parents singular while adding constrained, ID-only supplemental graph edges and artifact/workflow roles');
 assert(!/ipcMain\.(?:handle|on)\s*\(/.test(main), 'main.cjs must not own IPC handlers');
 assert(lines(main) < 2000, 'main.cjs exceeded the architecture size budget');
 assert(/workspaceDatabase = new PythonDatabaseClient\([\s\S]*?defaultTimeoutMs: 2 \* 60 \* 1000/.test(main), 'workspace recovery must allow long project-catalog reconciliation to finish');

@@ -12,6 +12,8 @@ from thumbnail_db import ThumbnailDatabase  # noqa: E402
 from workspace_db import (  # noqa: E402
     batch_commit_compare,
     batch_register_baseline,
+    cleanup_media_workflow_graph,
+    cleanup_progress_tombstones,
     connect,
     media_create_version,
     media_delete_version,
@@ -20,10 +22,12 @@ from workspace_db import (  # noqa: E402
     media_get_photo,
     media_set_thumbnail,
     media_version_delete_scope,
+    media_workflow_import_commit,
     progress_list,
     progress_delete_missing,
     progress_register,
     progress_update_tree,
+    version_graph_edge_create,
     team_identity_complete,
     team_identity_save,
     team_patch_cleanup,
@@ -57,6 +61,67 @@ def test_thumbnail_missing_prune(root: Path) -> None:
     assert str(cached.resolve()).casefold() in {str(Path(item).resolve()).casefold() for item in result["thumbnailPaths"]}
     assert database.get_file(str(source)) is None
     database.close()
+
+
+def test_media_workflow_graph_cleanup(root: Path) -> None:
+    workspace = root / "workflow-cleanup-workspace"
+    project = workspace / "Project"
+    progress_path = project / "图片后期_1"
+    team_path = project / "团片协作"
+    import_path = project / "explicit-import-slot"
+    progress_path.mkdir(parents=True)
+    team_path.mkdir()
+    import_path.mkdir()
+    db = connect(str(workspace), str(root / "workflow-cleanup.sqlite3"))
+    db.execute(
+        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+        ("workflow-cleanup-project", "Project", "后期中", "Project", 1, 1),
+    )
+    db.commit()
+    progress = progress_register(str(workspace), db, {
+        "projectName": "Project", "mediaKind": "image", "versionKey": "1",
+        "displayName": "图片后期_1", "folderPath": str(progress_path),
+        "nodeRole": "progress", "trackingEnabled": False,
+    })["progressFolder"]
+    workflow = team_project_workspace(str(workspace), db, {"projectName": "Project"})["workflowNode"]
+    imported = media_workflow_import_commit(str(workspace), db, {
+        "schemaVersion": 2,
+        "projectName": "Project",
+        "importSessionId": "maintenance-slot",
+        "artifacts": [{
+            "relativePath": "explicit-import-slot", "mediaKind": "image",
+            "importSlot": "raw", "displayName": "Imported source",
+        }],
+    })["nodes"][0]
+    version_graph_edge_create(db, {
+        "projectId": "workflow-cleanup-project", "sourceProgressId": progress["id"],
+        "targetProgressId": workflow["id"], "edgeKind": "workflow_input",
+    })
+    version_graph_edge_create(db, {
+        "projectId": "workflow-cleanup-project", "sourceProgressId": imported["id"],
+        "targetProgressId": workflow["id"], "edgeKind": "workflow_input",
+    })
+    preserved = cleanup_media_workflow_graph(str(workspace), db, session_cutoff=0)
+    assert preserved["removedEdgeIds"] == []
+    assert db.execute("SELECT COUNT(*) FROM version_graph_edges").fetchone()[0] == 2
+    db.execute(
+        """INSERT INTO media_import_graph_sessions(project_id,import_session_id,manifest_json,status,error,created_at,updated_at)
+           VALUES(?,?,?,'committed',NULL,1,1)""",
+        ("workflow-cleanup-project", "stale-session", "{}"),
+    )
+    db.commit()
+    team_path.rmdir()
+    import_path.rmdir()
+    cleaned = cleanup_media_workflow_graph(str(workspace), db, session_cutoff=2)
+    assert cleaned["removedImportSessionCount"] == 1
+    missing = db.execute("SELECT missing_since FROM progress_folders WHERE id=?", (workflow["id"],)).fetchone()
+    assert missing and missing[0]
+    cleanup_progress_tombstones(str(workspace), db, cutoff=missing[0] + 1)
+    assert db.execute("SELECT 1 FROM progress_folders WHERE id=?", (workflow["id"],)).fetchone() is None
+    assert db.execute("SELECT COUNT(*) FROM version_graph_edges").fetchone()[0] == 0
+    assert db.execute("SELECT 1 FROM progress_folders WHERE id=?", (imported["id"],)).fetchone() is None
+    assert db.execute("SELECT COUNT(*) FROM media_import_artifact_slots").fetchone()[0] == 0
+    db.close()
 
 
 def test_thumbnail_tool_sources_limit_png_to_direct_children(root: Path) -> None:
@@ -307,9 +372,11 @@ def test_missing_progress_removal_is_safe(root: Path) -> None:
     baseline_folder = project / "selection"
     missing_folder = project / "progress-v1"
     child_folder = project / "progress-v1-child"
+    preview_folder = project / "progress-v1-preview"
     write_media(baseline_folder / "one.jpg", b"baseline")
     write_media(missing_folder / "one.jpg", b"version-one")
     child_folder.mkdir(parents=True)
+    preview_folder.mkdir(parents=True)
     db = connect(str(workspace), str(root / "remove-progress.sqlite3"))
     db.execute(
         "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
@@ -331,6 +398,16 @@ def test_missing_progress_removal_is_safe(root: Path) -> None:
             "parentProgressId": parent_progress["id"], "displayName": "progress-v1-child",
             "folderPath": str(child_folder), "trackingEnabled": True,
         })["progressFolder"]
+        preview_progress = progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "preview-v1",
+            "displayName": "progress-v1-preview", "folderPath": str(preview_folder),
+            "nodeRole": "artifact", "artifactKind": "preview", "trackingEnabled": False,
+            "trackingState": "disabled",
+        })["progressFolder"]
+        preview_edge = version_graph_edge_create(db, {
+            "projectId": "remove-progress-project", "sourceProgressId": parent_progress["id"],
+            "targetProgressId": preview_progress["id"], "edgeKind": "derived_preview",
+        })["edge"]
         batch_register_baseline(str(workspace), db, {
             "projectName": "Project", "folderPath": str(baseline_folder),
         })
@@ -383,6 +460,8 @@ def test_missing_progress_removal_is_safe(root: Path) -> None:
         remaining = {item["id"]: item for item in progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"]}
         assert parent_progress["id"] not in remaining
         assert remaining[child_progress["id"]]["parentProgressId"] == baseline_progress["id"]
+        assert preview_progress["id"] in remaining
+        assert db.execute("SELECT 1 FROM version_graph_edges WHERE id=?", (preview_edge["id"],)).fetchone() is None
         assert db.execute("SELECT is_deleted FROM versions WHERE id=?", (version_id,)).fetchone()[0] == 1
     finally:
         db.close()
@@ -491,6 +570,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="photoflow-maintenance-") as directory:
         root = Path(directory)
         test_thumbnail_missing_prune(root)
+        test_media_workflow_graph_cleanup(root)
         test_thumbnail_tool_sources_limit_png_to_direct_children(root)
         test_team_return_missing_reconciliation(root)
         test_missing_progress_replacement(root)

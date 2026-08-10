@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import shutil
 import sqlite3
@@ -430,6 +431,260 @@ def test_missing_project_can_reconnect_before_retention_cleanup(temp_root):
     assert workspace_db.load(workspace_root, database)["projects"] == []
 
 
+def test_legacy_selection_nodes_are_repaired_after_original_registration(temp_root):
+    workspace_root = os.path.join(temp_root, "legacy-selection-workspace")
+    project_path = os.path.join(workspace_root, "legacy-selection-project")
+    unresolved_path = os.path.join(workspace_root, "unresolved-selection-project")
+    coexist_path = os.path.join(workspace_root, "coexisting-selection-project")
+    for folder in ("RAW", "MOV", "JPG", "图片选片", "视频选片"):
+        os.makedirs(os.path.join(project_path, folder))
+    for folder in ("JPG", "图片选片"):
+        os.makedirs(os.path.join(unresolved_path, folder))
+    for folder in ("RAW", "图片选片", "RAW_选片"):
+        os.makedirs(os.path.join(coexist_path, folder))
+    legacy_media_path = os.path.join(project_path, "图片选片", "IMG_0001.jpg")
+    with open(legacy_media_path, "wb") as output:
+        output.write(b"legacy-selection-media")
+
+    database = os.path.join(temp_root, "legacy-selection.sqlite3")
+    workspace_db.mutate(workspace_root, database, "catalog_sync", {})
+    db = workspace_db.connect(workspace_root, database)
+    image_legacy = workspace_db.progress_register(workspace_root, db, {
+        "projectName": "legacy-selection-project", "mediaKind": "image", "versionKey": "0",
+        "displayName": "图片选片（原图）", "folderPath": os.path.join(project_path, "图片选片"),
+        "nodeRole": "original", "trackingEnabled": False, "trackingState": "disabled",
+    })["progressFolder"]
+    video_legacy = workspace_db.progress_register(workspace_root, db, {
+        "projectName": "legacy-selection-project", "mediaKind": "video", "versionKey": "0",
+        "displayName": "视频选片（原片）", "folderPath": os.path.join(project_path, "视频选片"),
+        "nodeRole": "original", "trackingEnabled": False, "trackingState": "disabled",
+    })["progressFolder"]
+    unresolved_legacy = workspace_db.progress_register(workspace_root, db, {
+        "projectName": "unresolved-selection-project", "mediaKind": "image", "versionKey": "0",
+        "displayName": "图片选片（原图）", "folderPath": os.path.join(unresolved_path, "图片选片"),
+        "nodeRole": "original", "trackingEnabled": False, "trackingState": "disabled",
+    })["progressFolder"]
+    coexist_raw = workspace_db.progress_register(workspace_root, db, {
+        "projectName": "coexisting-selection-project", "mediaKind": "image", "versionKey": "original-raw",
+        "displayName": "RAW", "folderPath": os.path.join(coexist_path, "RAW"),
+        "nodeRole": "original", "trackingEnabled": False, "trackingState": "disabled",
+    })["progressFolder"]
+    coexist_legacy = workspace_db.progress_register(workspace_root, db, {
+        "projectName": "coexisting-selection-project", "mediaKind": "image", "versionKey": "0",
+        "displayName": "图片选片（原图）", "folderPath": os.path.join(coexist_path, "图片选片"),
+        "nodeRole": "original", "trackingEnabled": False, "trackingState": "disabled",
+    })["progressFolder"]
+    coexist_modern = workspace_db.progress_register(workspace_root, db, {
+        "projectName": "coexisting-selection-project", "mediaKind": "image",
+        "versionKey": f"selection-{coexist_raw['id']}", "displayName": "RAW_选片",
+        "folderPath": os.path.join(coexist_path, "RAW_选片"), "nodeRole": "selection",
+        "relationKind": "auxiliary", "parentProgressId": coexist_raw["id"],
+        "trackingEnabled": False, "trackingState": "disabled",
+    })["progressFolder"]
+    project = workspace_db.project_row(db, "legacy-selection-project")
+    legacy_batch = workspace_db.ensure_reference_batch(
+        workspace_root, db, project, os.path.join(project_path, "图片选片")
+    )
+    media_version = workspace_db.ensure_source_version(db, project, legacy_media_path)
+    db.execute("UPDATE meta SET value='21' WHERE key='schema_version'")
+    db.commit()
+    db.close()
+    db = workspace_db.connect(workspace_root, database)
+    backup_path = db.execute("SELECT value FROM meta WHERE key='last_migration_backup'").fetchone()[0]
+    assert os.path.isfile(backup_path), "migration must back up the v21 database before upgrading"
+    workspace_db.progress_list(workspace_root, db, {"projectName": "legacy-selection-project"})
+    unresolved_result = workspace_db.progress_list(workspace_root, db, {"projectName": "unresolved-selection-project"})
+    coexist_result = workspace_db.progress_list(workspace_root, db, {"projectName": "coexisting-selection-project"})
+    assert coexist_result["success"] is True, "selection conflicts must never make progress_list fail"
+    assert unresolved_result["legacySelectionRelationRepairs"][0]["reason"] == "source_missing"
+    assert unresolved_result["legacySelectionRelationRepairs"][0]["progressId"] == unresolved_legacy["id"]
+    assert coexist_result["legacySelectionRelationRepairs"][0]["reason"] == "selection_already_exists"
+    assert coexist_result["legacySelectionRelationRepairs"][0]["candidateIds"] == [coexist_modern["id"]]
+    repaired = {row["id"]: row for row in db.execute("SELECT * FROM progress_folders").fetchall()}
+    legacy_project_id = workspace_db.project_row(db, "legacy-selection-project")["id"]
+    raw = next(row for row in repaired.values() if row["project_id"] == legacy_project_id and os.path.basename(row["folder_path"]) == "RAW")
+    mov = next(row for row in repaired.values() if row["project_id"] == legacy_project_id and os.path.basename(row["folder_path"]) == "MOV")
+    assert raw["node_role"] == "original" and mov["node_role"] == "original"
+    assert repaired[image_legacy["id"]]["node_role"] == "selection"
+    assert repaired[image_legacy["id"]]["parent_progress_id"] == raw["id"]
+    assert repaired[image_legacy["id"]]["relation_kind"] == "auxiliary"
+    assert repaired[video_legacy["id"]]["node_role"] == "selection"
+    assert repaired[video_legacy["id"]]["parent_progress_id"] == mov["id"]
+    assert repaired[video_legacy["id"]]["relation_kind"] == "auxiliary"
+    assert db.execute("SELECT id FROM versions WHERE id=?", (media_version["id"],)).fetchone()[0] == media_version["id"]
+    assert db.execute("SELECT id FROM version_batches WHERE id=?", (legacy_batch["id"],)).fetchone()[0] == legacy_batch["id"]
+    unresolved = repaired[unresolved_legacy["id"]]
+    assert unresolved["parent_progress_id"] is None, "missing RAW must not make legacy selection attach to JPG"
+    pending = db.execute(
+        "SELECT reason,expected_source_name FROM legacy_selection_relation_repairs WHERE progress_id=?",
+        (unresolved_legacy["id"],),
+    ).fetchone()
+    assert pending[:] == ("source_missing", "RAW")
+    coexist_rows = {row["id"]: row for row in db.execute(
+        "SELECT * FROM progress_folders WHERE project_id=?",
+        (workspace_db.project_row(db, "coexisting-selection-project")["id"],),
+    ).fetchall()}
+    assert coexist_rows[coexist_legacy["id"]]["node_role"] == "original"
+    assert coexist_rows[coexist_legacy["id"]]["parent_progress_id"] is None
+    assert coexist_rows[coexist_legacy["id"]]["version_key"] == "0"
+    assert coexist_rows[coexist_modern["id"]]["node_role"] == "selection"
+    assert coexist_rows[coexist_modern["id"]]["parent_progress_id"] == coexist_raw["id"]
+    coexist_repair = db.execute(
+        "SELECT reason,candidate_ids_json FROM legacy_selection_relation_repairs WHERE progress_id=?",
+        (coexist_legacy["id"],),
+    ).fetchone()
+    assert coexist_repair["reason"] == "selection_already_exists"
+    assert json.loads(coexist_repair["candidate_ids_json"]) == [coexist_modern["id"]]
+    assert os.path.isdir(os.path.join(coexist_path, "图片选片"))
+    assert os.path.isdir(os.path.join(coexist_path, "RAW_选片"))
+    before = [tuple(row) for row in db.execute(
+        "SELECT id,node_role,relation_kind,parent_progress_id,version_key,updated_at FROM progress_folders ORDER BY id"
+    ).fetchall()]
+    workspace_db.progress_list(workspace_root, db, {"projectName": "legacy-selection-project"})
+    unresolved_result = workspace_db.progress_list(workspace_root, db, {"projectName": "unresolved-selection-project"})
+    workspace_db.progress_list(workspace_root, db, {"projectName": "coexisting-selection-project"})
+    after = [tuple(row) for row in db.execute(
+        "SELECT id,node_role,relation_kind,parent_progress_id,version_key,updated_at FROM progress_folders ORDER BY id"
+    ).fetchall()]
+    assert after == before, "repeated startup repair must be idempotent"
+    db.close()
+
+
+def test_schema_22_upgrades_to_layout_schema_23(temp_root):
+    workspace_root = os.path.join(temp_root, "schema-23-workspace")
+    database = os.path.join(temp_root, "schema-23.sqlite3")
+    os.makedirs(workspace_root)
+    db = workspace_db.connect(workspace_root, database)
+    db.execute("DROP TABLE version_tree_node_positions")
+    db.execute("DROP TABLE version_tree_layouts")
+    db.execute("UPDATE meta SET value='22' WHERE key='schema_version'")
+    db.commit()
+    db.close()
+
+    upgraded = workspace_db.connect(workspace_root, database)
+    try:
+        assert upgraded.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+        assert upgraded.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_tree_layouts'").fetchone()
+        assert upgraded.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_tree_node_positions'").fetchone()
+        backup_path = upgraded.execute("SELECT value FROM meta WHERE key='last_migration_backup'").fetchone()[0]
+        assert os.path.isfile(backup_path), "schema 22 to 23 migration must create a database backup"
+    finally:
+        upgraded.close()
+    reopened = workspace_db.connect(workspace_root, database)
+    try:
+        assert reopened.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+        assert reopened.execute("SELECT COUNT(*) FROM version_tree_layouts").fetchone()[0] == 0
+    finally:
+        reopened.close()
+
+
+def test_schema_23_upgrades_to_graph_schema_24(temp_root):
+    workspace_root = os.path.join(temp_root, "schema-24-workspace")
+    database = os.path.join(temp_root, "schema-24.sqlite3")
+    os.makedirs(workspace_root)
+    db = workspace_db.connect(workspace_root, database)
+    db.executescript(
+        """
+        DROP TRIGGER IF EXISTS version_graph_edges_validate_insert;
+        DROP TRIGGER IF EXISTS version_graph_edges_validate_update;
+        DROP TRIGGER IF EXISTS progress_folders_graph_endpoint_update;
+        DROP TRIGGER IF EXISTS progress_folders_graph_endpoint_update;
+        DROP TRIGGER IF EXISTS progress_folders_v2_shape_insert;
+        DROP TRIGGER IF EXISTS progress_folders_v2_shape_update;
+        DROP TRIGGER IF EXISTS progress_folders_v2_cycle_insert;
+        DROP TRIGGER IF EXISTS progress_folders_v2_cycle_update;
+        DROP TRIGGER IF EXISTS progress_folders_v2_policy_insert;
+        DROP TRIGGER IF EXISTS progress_folders_v2_policy_update;
+        DROP TABLE version_graph_edges;
+        ALTER TABLE progress_folders DROP COLUMN artifact_kind;
+        UPDATE meta SET value='23' WHERE key='schema_version';
+        """
+    )
+    db.commit()
+    db.close()
+
+    upgraded = workspace_db.connect(workspace_root, database)
+    try:
+        assert upgraded.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+        assert "artifact_kind" in {row[1] for row in upgraded.execute("PRAGMA table_info(progress_folders)")}
+        assert upgraded.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_graph_edges'").fetchone()
+        edge_foreign_keys = upgraded.execute("PRAGMA foreign_key_list(version_graph_edges)").fetchall()
+        assert sum(row[2] == "progress_folders" and row[6] == "CASCADE" for row in edge_foreign_keys) == 2
+        assert upgraded.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='version_graph_edges_validate_insert'").fetchone()
+        backup_path = upgraded.execute("SELECT value FROM meta WHERE key='last_migration_backup'").fetchone()[0]
+        assert os.path.isfile(backup_path), "schema 23 to 24 migration must create a database backup"
+    finally:
+        upgraded.close()
+
+
+def test_schema_24_upgrades_to_import_slots_schema_25(temp_root):
+    workspace_root = os.path.join(temp_root, "schema-25-workspace")
+    database = os.path.join(temp_root, "schema-25.sqlite3")
+    os.makedirs(workspace_root)
+    db = workspace_db.connect(workspace_root, database)
+    project_path = os.path.join(workspace_root, "Project")
+    raw_path = os.path.join(project_path, "source-a")
+    camera_path = os.path.join(project_path, "source-b")
+    os.makedirs(raw_path)
+    os.makedirs(camera_path)
+    now = int(time.time() * 1000)
+    db.execute(
+        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+        ("schema-25-project", "Project", "后期中", "Project", now, now),
+    )
+    raw = workspace_db.progress_register(workspace_root, db, {
+        "projectName": "Project", "mediaKind": "image", "versionKey": "legacy-raw",
+        "displayName": "Legacy source", "folderPath": raw_path, "nodeRole": "original",
+        "trackingEnabled": False,
+    })["progressFolder"]
+    camera = workspace_db.progress_register(workspace_root, db, {
+        "projectName": "Project", "mediaKind": "image", "versionKey": "legacy-camera",
+        "displayName": "Legacy companion", "folderPath": camera_path, "nodeRole": "original",
+        "artifactKind": "companion", "trackingEnabled": False,
+    })["progressFolder"]
+    legacy_manifest = {
+        "projectName": "Project", "projectRelativePath": "Project", "importSessionId": "legacy-session",
+        "artifacts": [
+            {"relativePath": "source-a", "mediaKind": "image", "nodeRole": "original", "displayName": "Legacy source"},
+            {"relativePath": "source-b", "mediaKind": "image", "nodeRole": "original", "artifactKind": "companion", "displayName": "Legacy companion"},
+        ],
+        "relations": [{"sourceRelativePath": "source-a", "targetRelativePath": "source-b", "edgeKind": "media_companion"}],
+    }
+    db.execute(
+        """INSERT INTO media_import_graph_sessions(
+             project_id,import_session_id,manifest_json,status,error,created_at,updated_at)
+           VALUES(?,?,?,'committed',NULL,?,?)""",
+        ("schema-25-project", "legacy-session", json.dumps(legacy_manifest), now, now),
+    )
+    db.executescript(
+        """DROP TRIGGER IF EXISTS media_import_artifact_slots_validate_insert;
+           DROP TRIGGER IF EXISTS media_import_artifact_slots_validate_update;
+           DROP TABLE media_import_artifact_slots;
+           UPDATE meta SET value='24' WHERE key='schema_version';"""
+    )
+    db.commit()
+    db.close()
+
+    upgraded = workspace_db.connect(workspace_root, database)
+    try:
+        assert upgraded.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+        assert upgraded.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_import_artifact_slots'").fetchone()
+        foreign_keys = upgraded.execute("PRAGMA foreign_key_list(media_import_artifact_slots)").fetchall()
+        assert any(row[2] == "projects" and row[6] == "CASCADE" for row in foreign_keys)
+        assert any(row[2] == "progress_folders" and row[6] == "CASCADE" for row in foreign_keys)
+        assert upgraded.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='media_import_artifact_slots_validate_insert'").fetchone()
+        slots = {row["progress_id"]: row["import_slot"] for row in upgraded.execute("SELECT * FROM media_import_artifact_slots")}
+        assert slots == {raw["id"]: "raw", camera["id"]: "camera_jpg"}
+        backup_path = upgraded.execute("SELECT value FROM meta WHERE key='last_migration_backup'").fetchone()[0]
+        backup = sqlite3.connect(backup_path)
+        try:
+            assert backup.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "24"
+        finally:
+            backup.close()
+    finally:
+        upgraded.close()
+
+
 def main():
     temp_root = tempfile.mkdtemp(prefix="photoflow-db-migration-")
     try:
@@ -442,13 +697,16 @@ def main():
         create_legacy_database(database, project_id, photo_id, version_id)
 
         db = workspace_db.connect(workspace_root, database)
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "21"
+        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_tree_layouts'").fetchone()
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_tree_node_positions'").fetchone()
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_graph_edges'").fetchone()
         assignment_columns = {row[1] for row in db.execute("PRAGMA table_info(team_person_assignments)").fetchall()}
         assert {"completion_kind", "edited_patch_path", "return_missing", "return_missing_since", "completed_at"} <= assignment_columns
         progress_columns = {row[1] for row in db.execute("PRAGMA table_info(progress_folders)").fetchall()}
         assert {"node_role", "relation_kind", "tracking_state", "rename_from_parent",
                 "copy_missing_from_parent", "last_tracked_at", "tracking_snapshot_json",
-                "folder_signature", "missing_since", "tombstone_json"} <= progress_columns
+                "folder_signature", "missing_since", "tombstone_json", "artifact_kind"} <= progress_columns
         assert db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='batch_file_operations'").fetchone()
         assert db.execute("SELECT COUNT(*) FROM file_records").fetchone()[0] == 1
         assert db.execute("SELECT value FROM meta WHERE key='migration_12_orphan_file_records_removed'").fetchone()[0] == "1"
@@ -516,6 +774,10 @@ def main():
         test_project_list_is_read_only_until_catalog_sync(temp_root)
         test_import_staging_directory_never_becomes_a_project(temp_root)
         test_missing_project_can_reconnect_before_retention_cleanup(temp_root)
+        test_legacy_selection_nodes_are_repaired_after_original_registration(temp_root)
+        test_schema_22_upgrades_to_layout_schema_23(temp_root)
+        test_schema_23_upgrades_to_graph_schema_24(temp_root)
+        test_schema_24_upgrades_to_import_slots_schema_25(temp_root)
         print("workspace database migration tests passed")
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)

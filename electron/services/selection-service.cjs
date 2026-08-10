@@ -1,5 +1,14 @@
 const path = require('path');
 
+const SELECTION_LIMITS = Object.freeze({
+  sourceFolderPageSize: 500,
+  maxDirectoryDepth: 32,
+  maxDirectoriesPerTask: 10000,
+  maxSourceFiles: 50000,
+  cursorTtlMs: 15 * 60 * 1000,
+  maxActiveFolderListings: 100,
+});
+
 const normalizeRelativePath = value => {
   const normalized = String(value || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
   if (!normalized || path.posix.isAbsolute(normalized) || /^[a-z]:/i.test(normalized)) throw new Error('必须选择项目内相对路径');
@@ -16,6 +25,8 @@ const parseSelectionKeywords = values => {
 
 const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, imageExtensions, rawExtensions, videoExtensions }) => {
   const activeOperations = new Map();
+  const folderListingCursors = new Map();
+  const folderListingOperations = new Map();
   const mediaKind = filePath => {
     const extension = path.extname(filePath).toLocaleLowerCase();
     if (videoExtensions.has(extension)) return 'video';
@@ -40,7 +51,13 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
     return { normalized, path: candidate, real, projectReal };
   };
   const targetForSource = (projectRoot, source) => {
-    const outputName = `${path.basename(source.path)}_选片`;
+    const sourceName = path.basename(source.path);
+    const normalizedSourceName = sourceName.toLocaleLowerCase();
+    const outputName = normalizedSourceName === 'raw'
+      ? '图片选片'
+      : normalizedSourceName === 'mov'
+        ? '视频选片'
+        : `${sourceName}_选片`;
     const targetPath = path.join(path.dirname(source.path), outputName);
     const targetRelativePath = path.relative(projectRoot, targetPath).replace(/\\/g, '/');
     const parentReal = fs.realpathSync.native(path.dirname(targetPath));
@@ -52,19 +69,46 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
     }
     return { outputName, targetPath, targetRelativePath };
   };
-  const listFiles = async source => {
+  const cancelledError = () => Object.assign(new Error('选片任务已取消'), { code: 'TASK_CANCELLED' });
+  const ensureActive = job => { if (job?.cancelled) throw cancelledError(); };
+  const publishProgress = (request, payload) => request.onProgress?.({ operationId: request.operationId, ...payload });
+  const listFiles = async (source, request, job) => {
     const files = [];
-    const queue = [source.path];
+    const queue = [{ directory: source.path, depth: 0 }];
+    const visited = new Set();
+    let directoriesScanned = 0;
     while (queue.length) {
-      const directory = queue.pop();
+      ensureActive(job);
+      const { directory, depth } = queue.shift();
       const directoryReal = fs.realpathSync.native(directory);
       if (!inside(source.real, directoryReal, true)) throw new Error('来源子目录指向来源文件夹外部');
-      for (const entry of await fs.promises.readdir(directory, { withFileTypes: true })) {
+      const directoryKey = comparable(directoryReal);
+      if (visited.has(directoryKey)) continue;
+      visited.add(directoryKey);
+      directoriesScanned += 1;
+      if (directoriesScanned > SELECTION_LIMITS.maxDirectoriesPerTask) throw new Error(`selection_directory_limit_exceeded：来源文件夹超过 ${SELECTION_LIMITS.maxDirectoriesPerTask} 个目录，请缩小范围`);
+      const entries = await fs.promises.readdir(directory, { withFileTypes: true });
+      ensureActive(job);
+      entries.sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' }));
+      for (const entry of entries) {
+        ensureActive(job);
         const candidate = path.join(directory, entry.name);
-        if (entry.isSymbolicLink()) continue;
-        if (entry.isDirectory()) queue.push(candidate);
-        else if (entry.isFile()) files.push(candidate);
+        if (entry.isSymbolicLink()) {
+          const linkedReal = fs.realpathSync.native(candidate);
+          if (!inside(source.real, linkedReal, true)) throw new Error('来源快捷方式或重解析目录指向来源外部');
+          continue;
+        }
+        if (entry.isDirectory()) {
+          const childReal = fs.realpathSync.native(candidate);
+          if (!inside(source.real, childReal, true)) throw new Error('来源子目录指向来源文件夹外部');
+          if (depth + 1 > SELECTION_LIMITS.maxDirectoryDepth) throw new Error(`selection_depth_limit_exceeded：来源文件夹深度超过 ${SELECTION_LIMITS.maxDirectoryDepth} 层，请缩小范围`);
+          queue.push({ directory: candidate, depth: depth + 1 });
+        } else if (entry.isFile()) {
+          files.push(candidate);
+          if (files.length > SELECTION_LIMITS.maxSourceFiles) throw new Error(`selection_file_limit_exceeded：来源文件超过 ${SELECTION_LIMITS.maxSourceFiles} 个，请缩小范围`);
+        }
       }
+      if (directoriesScanned % 25 === 0 || !queue.length) publishProgress(request, { phase: 'scanning_source', directoriesScanned, filesScanned: files.length, maxDirectories: SELECTION_LIMITS.maxDirectoriesPerTask, maxFiles: SELECTION_LIMITS.maxSourceFiles });
     }
     return files.sort((left, right) => left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' }));
   };
@@ -168,11 +212,11 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
       },
     };
   };
-  const preflightFilename = async request => {
+  const preflightFilename = async (request, job) => {
     const source = resolveProjectEntry(request.projectRoot, request.sourceFolderRelativePath, { directory: true });
     const keywords = parseSelectionKeywords(request.keywords);
     if (!keywords.length) throw new Error('没有可用的文件名编号');
-    const allFiles = await listFiles(source);
+    const allFiles = await listFiles(source, request, job);
     const byKeyword = new Map();
     for (const filePath of allFiles) {
       const key = filenameSelectionKey(path.basename(filePath));
@@ -193,28 +237,89 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
     }
     return planFromFiles({ ...request, files: [...new Set(files)], keywords, missingKeywords, unsupportedPaths: [...new Set(unsupportedPaths)] });
   };
-  const listSourceFolders = async request => {
-    const projectReal = fs.realpathSync.native(request.projectRoot);
-    const folders = [];
-    const queue = [request.projectRoot];
-    while (queue.length) {
-      const directory = queue.pop();
-      for (const entry of await fs.promises.readdir(directory, { withFileTypes: true })) {
-        if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith('.photoflow-')) continue;
-        const candidate = path.join(directory, entry.name);
-        const real = fs.realpathSync.native(candidate);
-        if (!inside(projectReal, real)) continue;
-        const relativePath = path.relative(request.projectRoot, candidate).replace(/\\/g, '/');
-        folders.push({ name: entry.name, relativePath });
-        queue.push(candidate);
-      }
+  const purgeExpiredCursors = () => {
+    const cutoff = Date.now() - SELECTION_LIMITS.cursorTtlMs;
+    for (const [cursor, state] of folderListingCursors) if (state.updatedAt < cutoff) {
+      folderListingCursors.delete(cursor);
+      folderListingOperations.delete(state.operationId);
     }
-    folders.sort((left, right) => left.relativePath.localeCompare(right.relativePath, undefined, { numeric: true, sensitivity: 'base' }));
-    return { success: true, folders };
+  };
+  const listSourceFolders = async request => {
+    purgeExpiredCursors();
+    const pageSize = Math.max(1, Math.min(SELECTION_LIMITS.sourceFolderPageSize, Number(request.pageSize) || SELECTION_LIMITS.sourceFolderPageSize));
+    const binding = `${comparable(request.workspaceRoot)}\u0000${String(request.projectName).toLocaleLowerCase()}\u0000${comparable(request.projectRoot)}`;
+    let state;
+    if (request.cursor) {
+      state = folderListingCursors.get(String(request.cursor));
+      folderListingCursors.delete(String(request.cursor));
+      if (!state || state.binding !== binding) {
+        if (state) folderListingOperations.delete(state.operationId);
+        throw new Error('selection_cursor_invalid：cursor 无效、已过期或不属于当前项目');
+      }
+    } else {
+      if (folderListingOperations.size >= SELECTION_LIMITS.maxActiveFolderListings) throw new Error('selection_listing_busy：待完成的文件夹列表任务过多');
+      const operationId = String(request.operationId || crypto.randomUUID());
+      if (!/^[0-9a-z-]{8,128}$/i.test(operationId) || folderListingOperations.has(operationId)) throw new Error('文件夹列表 operationId 无效或重复');
+      const projectReal = fs.realpathSync.native(request.projectRoot);
+      state = { binding, operationId, projectReal, queue: [{ directory: request.projectRoot, depth: 0 }], pending: [], visited: new Set(), directoriesDiscovered: 0, directoriesScanned: 0, truncated: false, cancelled: false, updatedAt: Date.now() };
+      folderListingOperations.set(operationId, state);
+    }
+    request.operationId = state.operationId;
+    try {
+    if (state.cancelled) {
+      folderListingOperations.delete(state.operationId);
+      return { success: false, cancelled: true, operationId: state.operationId, folders: [], nextCursor: null, truncated: state.truncated };
+    }
+    while (state.pending.length < pageSize && state.queue.length && !state.truncated) {
+      ensureActive(state);
+      const { directory, depth } = state.queue.shift();
+      const real = fs.realpathSync.native(directory);
+      if (!inside(state.projectReal, real, true)) throw new Error('项目目录中的重解析目录指向项目外部');
+      const realKey = comparable(real);
+      if (state.visited.has(realKey)) continue;
+      state.visited.add(realKey);
+      state.directoriesScanned += 1;
+      const entries = await fs.promises.readdir(directory, { withFileTypes: true });
+      ensureActive(state);
+      entries.sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true, sensitivity: 'base' }));
+      for (const entry of entries) {
+        ensureActive(state);
+        if ((!entry.isDirectory() && !entry.isSymbolicLink()) || entry.name.startsWith('.photoflow-') || entry.name.toLocaleLowerCase() === '_photoflow_safety_temp') continue;
+        const candidate = path.join(directory, entry.name);
+        const candidateReal = fs.realpathSync.native(candidate);
+        if (!inside(state.projectReal, candidateReal)) throw new Error('项目快捷方式或重解析目录指向项目外部');
+        if (entry.isSymbolicLink()) continue;
+        const nextDepth = depth + 1;
+        if (nextDepth > SELECTION_LIMITS.maxDirectoryDepth) { state.truncated = true; break; }
+        const relativePath = path.relative(request.projectRoot, candidate).replace(/\\/g, '/');
+        state.pending.push({ name: entry.name, relativePath });
+        state.directoriesDiscovered += 1;
+        if (state.directoriesDiscovered >= SELECTION_LIMITS.maxDirectoriesPerTask) { state.truncated = true; state.queue = []; break; }
+        if (nextDepth < SELECTION_LIMITS.maxDirectoryDepth) state.queue.push({ directory: candidate, depth: nextDepth });
+        else state.truncated = true;
+      }
+      if (state.directoriesScanned % 25 === 0 || !state.queue.length || state.pending.length >= pageSize) publishProgress(request, { phase: 'listing_source_folders', directoriesScanned: state.directoriesScanned, directoriesDiscovered: state.directoriesDiscovered, maxDirectories: SELECTION_LIMITS.maxDirectoriesPerTask });
+    }
+    const folders = state.pending.splice(0, pageSize);
+    const hasMore = state.pending.length > 0 || state.queue.length > 0 && !state.truncated;
+    let nextCursor = null;
+    if (hasMore) {
+      nextCursor = crypto.randomBytes(32).toString('base64url');
+      state.updatedAt = Date.now();
+      folderListingCursors.set(nextCursor, state);
+    } else folderListingOperations.delete(state.operationId);
+    return { success: true, operationId: state.operationId, folders, nextCursor, truncated: state.truncated };
+    } catch (error) {
+      folderListingOperations.delete(state.operationId);
+      for (const [cursor, candidate] of folderListingCursors) if (candidate === state) folderListingCursors.delete(cursor);
+      if (state.cancelled || error?.code === 'TASK_CANCELLED') return { success: false, cancelled: true, operationId: state.operationId, folders: [], nextCursor: null, truncated: state.truncated };
+      throw error;
+    }
   };
   const preflightManual = async request => {
     const source = resolveProjectEntry(request.projectRoot, request.sourceFolderRelativePath, { directory: true });
     if (!Array.isArray(request.relativePaths) || !request.relativePaths.length) throw new Error('没有选择媒体文件');
+    if (request.relativePaths.length > SELECTION_LIMITS.maxSourceFiles) throw new Error(`selection_file_limit_exceeded：手动选择文件超过 ${SELECTION_LIMITS.maxSourceFiles} 个，请缩小范围`);
     const files = request.relativePaths.map(relativePath => {
       const item = resolveProjectEntry(request.projectRoot, relativePath);
       if (!inside(source.path, item.path)) throw new Error(`媒体不属于来源文件夹：${item.normalized}`);
@@ -222,6 +327,22 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
       return item.path;
     });
     return planFromFiles({ ...request, files: [...new Set(files)] });
+  };
+  const runPreflight = async (request, buildPlan) => {
+    const operationId = String(request.operationId || crypto.randomUUID());
+    if (!/^[0-9a-z-]{8,128}$/i.test(operationId) || activeOperations.has(operationId)) throw new Error('选片 operationId 无效或重复');
+    const job = { cancelled: false };
+    const normalizedRequest = { ...request, operationId };
+    activeOperations.set(operationId, job);
+    try {
+      const plan = await buildPlan(normalizedRequest, job);
+      return { ...plan.summary, operationId };
+    } catch (error) {
+      if (job.cancelled || error?.code === 'TASK_CANCELLED') return { success: false, cancelled: true, operationId, error: '选片任务已取消' };
+      throw error;
+    } finally {
+      activeOperations.delete(operationId);
+    }
   };
   const ensureNodes = async (request, plan) => {
     let { sourceNode, targetNode, nodes } = plan.context;
@@ -238,7 +359,9 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
         trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false, trackingState: 'disabled',
       })).progressFolder;
     }
-    if (!sourceNode || sourceNode.nodeRole === 'selection') throw new Error('无法登记选片来源节点');
+    if (!sourceNode || sourceNode.nodeRole === 'selection' || sourceNode.relationKind === 'auxiliary') {
+      throw new Error('selection_source_invalid：选片或附属分支不能作为新的选片来源');
+    }
     if (targetNode && (targetNode.nodeRole !== 'selection' || targetNode.parentProgressId !== sourceNode.id)) throw new Error('output_name_conflict');
     const selectionDisplayName = nodes.some(node => node.id !== targetNode?.id && node.displayName.toLocaleLowerCase() === plan.target.outputName.toLocaleLowerCase())
       ? plan.target.targetRelativePath : plan.target.outputName;
@@ -262,7 +385,7 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
     const createdFiles = [];
     const createdDirectories = [];
     try {
-      const plan = await buildPlan();
+      const plan = await buildPlan(job);
       if (!request.expectedSignature || request.expectedSignature !== plan.signature) throw new Error('预检结果已经过期，请重新预检');
       if (plan.context.outputConflict || plan.conflicts.length) throw new Error('output_name_conflict：选片输出名称或文件目标存在冲突');
       if (!fs.existsSync(plan.target.targetPath)) {
@@ -302,17 +425,20 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
 
   return {
     listSourceFolders,
-    preflightFilename: async request => (await preflightFilename(request)).summary,
-    executeFilename: request => executePlan(request, () => preflightFilename(request)),
-    preflightManual: async request => (await preflightManual(request)).summary,
+    preflightFilename: request => runPreflight(request, (normalizedRequest, job) => preflightFilename(normalizedRequest, job)),
+    executeFilename: request => executePlan(request, job => preflightFilename(request, job)),
+    preflightManual: request => runPreflight(request, normalizedRequest => preflightManual(normalizedRequest)),
     executeManual: request => executePlan(request, () => preflightManual(request)),
     cancel: operationId => {
-      const job = activeOperations.get(String(operationId || ''));
+      const normalizedOperationId = String(operationId || '');
+      const job = activeOperations.get(normalizedOperationId) || folderListingOperations.get(normalizedOperationId);
       if (!job) return false;
       job.cancelled = true;
+      for (const [cursor, state] of folderListingCursors) if (state === job) folderListingCursors.delete(cursor);
+      folderListingOperations.delete(normalizedOperationId);
       return true;
     },
   };
 };
 
-module.exports = { createSelectionService, filenameSelectionKey, normalizeRelativePath, parseSelectionKeywords };
+module.exports = { SELECTION_LIMITS, createSelectionService, filenameSelectionKey, normalizeRelativePath, parseSelectionKeywords };

@@ -3,6 +3,9 @@ const { createProjectFileTask } = require('../services/project-file-task-service
 const { createTeamWorkflowArtifactService } = require('../services/team-workflow-artifact-service.cjs');
 
 const PROJECT_FILE_LIST_QUERY_MAX_LENGTH = 160;
+const IMPORT_STAGING_ROOT_NAME = '_PhotoFlow_Safety_Temp';
+const IMPORT_GRAPH_RECEIPT_NAME = '.photoflow-import-graph-receipt.json';
+const validImportSessionId = value => /^[a-zA-Z0-9_-]{1,128}$/.test(String(value || ''));
 const normalizeProjectFileListFilter = value => {
   const allowedKinds = new Set(['file', 'image', 'raw', 'video', 'shortcut']);
   const kinds = [...new Set((Array.isArray(value?.kinds) ? value.kinds : []).map(kind => String(kind).toLowerCase()).filter(kind => allowedKinds.has(kind)))].sort();
@@ -19,6 +22,54 @@ const projectFileListEntryMatchesFilter = (name, kind, extension, filter) => (!f
 const registerWorkspaceIpc = context => {
   const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
   const teamWorkflowArtifacts = createTeamWorkflowArtifactService({ crypto, fs, getWorkspaceDataRoot, path, writeLog });
+  const importStagingRoots = (root, catalog) => {
+    const normalizedRoot = path.resolve(root);
+    return [...new Set([normalizedRoot, ...(catalog?.projects || []).map(project => path.resolve(normalizedRoot, project.relative_path))]
+      .filter(candidate => candidate === normalizedRoot || candidate.startsWith(`${normalizedRoot}${path.sep}`))
+      .map(candidate => path.join(candidate, IMPORT_STAGING_ROOT_NAME)))];
+  };
+  const readImportReceipt = async receiptPath => {
+    try {
+      const payload = JSON.parse(await fs.promises.readFile(receiptPath, 'utf8'));
+      if (payload?.receiptVersion !== 1 || !validImportSessionId(payload?.importSessionId) || !Array.isArray(payload?.manifests)) return null;
+      return payload;
+    } catch { return null; }
+  };
+  const receiptLocationsForSession = async (root, catalog, sessionId) => {
+    if (!validImportSessionId(sessionId)) return [];
+    const results = [];
+    for (const stagingRoot of importStagingRoots(root, catalog)) {
+      const location = { sessionDir: path.join(stagingRoot, sessionId), receiptPath: path.join(stagingRoot, sessionId, IMPORT_GRAPH_RECEIPT_NAME) };
+      if (await pathExists(location.receiptPath)) results.push(location);
+    }
+    return results;
+  };
+  const acknowledgeImportReceipt = async (location, projectName) => {
+    const receipt = await readImportReceipt(location.receiptPath);
+    if (!receipt) return false;
+    const expected = [...new Set(receipt.manifests.map(item => String(item?.projectName || '').toLocaleLowerCase()).filter(Boolean))];
+    const acknowledgedProjects = [...new Set([...(Array.isArray(receipt.acknowledgedProjects) ? receipt.acknowledgedProjects : []), projectName]
+      .map(value => String(value).toLocaleLowerCase()).filter(value => expected.includes(value)))];
+    if (expected.length && expected.every(value => acknowledgedProjects.includes(value))) {
+      await fs.promises.rm(location.sessionDir, { recursive: true, force: true });
+      return true;
+    }
+    const temporaryPath = `${location.receiptPath}.tmp-${crypto.randomUUID()}`;
+    await fs.promises.writeFile(temporaryPath, JSON.stringify({ ...receipt, acknowledgedProjects }, null, 2), 'utf8');
+    await fs.promises.rename(temporaryPath, location.receiptPath);
+    return false;
+  };
+  const commitImportManifest = (workspaceRoot, manifest) => versionService.commitImportGraph(workspaceRoot, {
+    schemaVersion: manifest?.schemaVersion,
+    projectName: manifest?.projectName,
+    importSessionId: manifest?.importSessionId,
+    artifacts: Array.isArray(manifest?.artifacts) ? manifest.artifacts.map(item => ({
+      relativePath: item?.relativePath,
+      mediaKind: item?.mediaKind,
+      importSlot: item?.importSlot,
+      displayName: item?.displayName,
+    })) : [],
+  });
   const isValidProjectStatus = value => typeof value === 'string' && value === value.trim() && value.length > 0 && value.length <= 24 && ![...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
   const availableProjectStatuses = catalog => {
     const values = [...WORKSPACE_STATUSES, ...((catalog?.projects || []).map(project => project.status))];
@@ -916,37 +967,60 @@ const registerWorkspaceIpc = context => {
     }
   });
   
-  ipcMain.handle('workspace-archive-imports', async (_event, workspacePath, projectNames = []) => {
+  ipcMain.handle('workspace-finalize-sd-imports', async (_event, workspacePath, projectNames = [], options = {}) => {
     try {
       const root = ensureWorkspace(workspacePath);
-      const plannedStatus = '后期中';
-      const catalog = await reconcileWorkspaceCatalog(root);
-      const requestedNames = new Set((Array.isArray(projectNames) ? projectNames : []).map(value => cleanProjectName(String(value))).filter(Boolean).map(value => value.toLocaleLowerCase()));
-      const importedRows = catalog.projects.filter(project => requestedNames.has(project.name.toLocaleLowerCase()));
-      const projects = [];
-  
-      for (const row of importedRows) {
-        const projectPath = path.join(root, row.relative_path);
-        if (!fs.existsSync(projectPath)) continue;
-        if (row.status !== plannedStatus) {
-          await workspaceRepository.setProjectStatus(root, { name: row.name, status: plannedStatus });
-          await teamWorkflowArtifacts.migrate(root,
-            { status: row.status, projectName: row.name },
-            { status: plannedStatus, projectName: row.name });
+      const targetStatus = '后期中';
+      const normalizedNames = values => [...new Set((Array.isArray(values) ? values : [])
+        .map(value => cleanProjectName(String(value))).filter(Boolean).map(value => value.toLocaleLowerCase()))];
+      const requestedNames = new Set(normalizedNames(projectNames));
+      const workNames = new Set(normalizedNames(options.workProjectNames).filter(name => requestedNames.has(name)));
+      const moveProjectAfterImport = options.moveProjectAfterImport === true;
+      await reconcileWorkspaceCatalog(root);
+      const movedNames = new Set();
+      const failures = [];
+
+      for (const requestedName of requestedNames) {
+        const currentCatalog = await reconcileWorkspaceCatalog(root);
+        const row = currentCatalog.projects.find(project => project.name.toLocaleLowerCase() === requestedName);
+        if (!row || !workNames.has(requestedName) || !moveProjectAfterImport || row.status !== '待拍摄') continue;
+        try {
+          await workspaceRepository.setProjectStatus(root, { name: row.name, status: targetStatus });
+          try {
+            const migrationResults = await teamWorkflowArtifacts.migrate(root,
+              { status: row.status, projectName: row.name },
+              { status: targetStatus, projectName: row.name });
+            if (migrationResults.some(result => result.state === 'failed')) throw new Error('团队工作流数据迁移失败');
+          } catch (migrationError) {
+            await workspaceRepository.setProjectStatus(root, { name: row.name, status: row.status }).catch(() => undefined);
+            await teamWorkflowArtifacts.migrate(root,
+              { status: targetStatus, projectName: row.name },
+              { status: row.status, projectName: row.name }).catch(() => undefined);
+            throw migrationError;
+          }
+          movedNames.add(requestedName);
+        } catch (error) {
+          failures.push({ projectName: row.name, error: error.message || String(error) });
         }
-        projects.push({ id: row.id, name: row.name, path: projectPath, status: plannedStatus, updatedAt: fs.statSync(projectPath).mtimeMs });
       }
-  
-      if (projects.length) {
-        await refreshWorkspaceCatalog(root);
-        for (const project of projects) scheduleMediaTrackingScan(root, project.name);
-      }
-  
-      writeLog('info', 'Imported projects moved to post-production', { root, requested: [...requestedNames], count: projects.length });
-      return { success: true, projects };
+
+      const finalCatalog = await reconcileWorkspaceCatalog(root);
+      const projects = finalCatalog.projects.flatMap(row => {
+        if (!requestedNames.has(row.name.toLocaleLowerCase())) return [];
+        const projectPath = path.join(root, row.relative_path);
+        if (!fs.existsSync(projectPath)) return [];
+        return [{ id: row.id, name: row.name, path: projectPath, status: row.status, updatedAt: fs.statSync(projectPath).mtimeMs }];
+      });
+      await refreshWorkspaceCatalog(root);
+      for (const project of projects) scheduleMediaTrackingScan(root, project.name);
+      mainWindow?.webContents.send('workspace-projects-changed', { root, reason: 'sd-import-finalized' });
+      const movedProjects = projects.filter(project => movedNames.has(project.name.toLocaleLowerCase()));
+      const unchangedProjects = projects.filter(project => !movedNames.has(project.name.toLocaleLowerCase()));
+      writeLog('info', 'SD imported projects finalized', { root, requested: [...requestedNames], work: [...workNames], moved: movedProjects.length, failures: failures.length });
+      return { success: true, projects, movedProjects, unchangedProjects, failures };
     } catch (error) {
-      writeLog('error', 'Unable to archive imported folders', error);
-      return { success: false, error: error.message || String(error), projects: [] };
+      writeLog('error', 'Unable to finalize SD imported folders', error);
+      return { success: false, error: error.message || String(error), projects: [], movedProjects: [], unchangedProjects: [], failures: [] };
     }
   });
   
@@ -1612,6 +1686,54 @@ const registerWorkspaceIpc = context => {
     } catch (error) {
       if (folderPath) await fs.promises.rmdir(folderPath).catch(() => undefined);
       return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-media-workflow-import-commit', async (_event, workspacePath, manifest = {}) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const catalog = workspaceCatalogs.get(workspaceRoot) || await refreshWorkspaceCatalog(workspaceRoot);
+      const result = await commitImportManifest(workspaceRoot, manifest);
+      const locations = await receiptLocationsForSession(workspaceRoot, catalog, manifest?.importSessionId);
+      for (const location of locations) await acknowledgeImportReceipt(location, String(manifest?.projectName || ''));
+      return { success: true, ...result };
+    } catch (error) {
+      writeLog('error', 'Unable to commit imported media workflow graph', { error: error.message || String(error) });
+      return { success: false, retryable: true, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-media-workflow-import-recover', async (_event, workspacePath) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const catalog = await reconcileWorkspaceCatalog(workspaceRoot);
+      const recovered = [];
+      const failures = [];
+      for (const stagingRoot of importStagingRoots(workspaceRoot, catalog)) {
+        let sessions = [];
+        try { sessions = await fs.promises.readdir(stagingRoot, { withFileTypes: true }); } catch { continue; }
+        for (const entry of sessions) {
+          if (!entry.isDirectory() || !validImportSessionId(entry.name)) continue;
+          const location = { sessionDir: path.join(stagingRoot, entry.name), receiptPath: path.join(stagingRoot, entry.name, IMPORT_GRAPH_RECEIPT_NAME) };
+          const receipt = await readImportReceipt(location.receiptPath);
+          if (!receipt || receipt.importSessionId !== entry.name) continue;
+          for (const manifest of receipt.manifests) {
+            const projectName = String(manifest?.projectName || '');
+            const acknowledged = (receipt.acknowledgedProjects || []).map(value => String(value).toLocaleLowerCase());
+            if (acknowledged.includes(projectName.toLocaleLowerCase())) continue;
+            try {
+              await commitImportManifest(workspaceRoot, manifest);
+              recovered.push({ importSessionId: entry.name, projectName });
+              await acknowledgeImportReceipt(location, projectName);
+            } catch (error) {
+              failures.push({ importSessionId: entry.name, projectName, error: error.message || String(error) });
+            }
+          }
+        }
+      }
+      return { success: failures.length === 0, recovered, failures };
+    } catch (error) {
+      return { success: false, recovered: [], failures: [], error: error.message || String(error) };
     }
   });
   

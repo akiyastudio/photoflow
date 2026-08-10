@@ -252,6 +252,7 @@ export interface AppConfig {
   };
   smartImport: {
     autoStart: boolean;
+    autoMoveProjectAfterSdImport: boolean;
     sdPath: string;
     sdPaths: string[];
     sdDriveTypes: Record<string, 'work' | 'broll'>;
@@ -430,7 +431,8 @@ export interface ProgressFolder {
   folderPath: string;
   folderMissing: boolean;
   missingSince?: number;
-  nodeRole: 'original' | 'progress' | 'selection';
+  nodeRole: 'original' | 'progress' | 'selection' | 'artifact' | 'workflow';
+  artifactKind?: 'companion' | 'preview' | 'team_workspace';
   relationKind?: 'main' | 'auxiliary';
   trackingEnabled: boolean;
   renameFromParent: boolean;
@@ -444,6 +446,53 @@ export interface ProgressFolder {
   pendingOperationCount?: number;
   createdAt: number;
   updatedAt: number;
+}
+
+export interface MediaWorkflowImportManifest {
+  schemaVersion: 2;
+  projectName: string;
+  importSessionId: string;
+  artifacts: Array<{
+    relativePath: string;
+    mediaKind: 'image' | 'video';
+    importSlot: 'raw' | 'camera_jpg' | 'generated_jpg' | 'mov' | 'video_preview';
+    displayName: string;
+  }>;
+}
+
+export interface VersionGraphEdge {
+  id: string;
+  projectId: string;
+  sourceProgressId: string;
+  targetProgressId: string;
+  edgeKind: 'media_companion' | 'derived_preview' | 'workflow_input';
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface LegacySelectionRelationRepair {
+  progressId: string;
+  projectId: string;
+  legacyName: string;
+  expectedSourceName: string;
+  reason: 'source_missing' | 'source_ambiguous' | 'selection_already_exists';
+  candidateIds: string[];
+}
+
+export interface VersionTreeLayoutPosition {
+  nodeKey: string;
+  x: number;
+  y: number;
+  updatedAt?: number;
+}
+
+export interface VersionTreeLayoutResult {
+  success: boolean;
+  scopeKey?: string;
+  revision: number;
+  updatedAt?: number;
+  positions: VersionTreeLayoutPosition[];
+  error?: string;
 }
 
 export type TrackingConfirmationItemStatus = 'recognized' | 'pending_confirmation' | 'accepted' | 'missing_reference' | 'rejected';
@@ -497,6 +546,8 @@ export interface MainBranchMediaEntry {
 
 export interface SelectionPreflightResult {
   success: boolean;
+  operationId?: string;
+  cancelled?: boolean;
   sourceFolderRelativePath?: string;
   targetFolderRelativePath?: string;
   outputFolderName?: string;
@@ -619,6 +670,8 @@ export interface TeamProjectPhoto {
 
 export interface TeamIdentityWorkspace {
   success: boolean;
+  workflowNode?: ProgressFolder;
+  workflowNodeCreated?: boolean;
   photos: TeamProjectPhoto[];
   identities: TeamIdentity[];
   assignments: TeamPersonAssignment[];
@@ -840,7 +893,7 @@ export interface IElectronAPI {
   createProjectShellNewFile: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, typeId: string) => Promise<{ success: boolean; file?: { name: string; path: string; relativePath: string; extension: string; updatedAt: number }; error?: string }>;
   undoLastRename: (workspacePath?: string, options?: { restoreConflictPolicy?: 'rename' | 'overwrite' }) => Promise<{ success: boolean; message?: string; project?: WorkspaceProject; requiresDecision?: { kind: 'restore-conflict'; names: string[]; conflictCount: number; message: string; detail: string }; error?: string }> ;
   moveWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, nextStatus: ProjectStatus) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
-  archiveImportedProjects: (workspacePath: string, projectNames?: string[]) => Promise<{ success: boolean; projects: WorkspaceProject[]; error?: string }>;
+  finalizeSdImportedProjects: (workspacePath: string, projectNames: string[], options: { moveProjectAfterImport: boolean; workProjectNames: string[] }) => Promise<{ success: boolean; projects: WorkspaceProject[]; movedProjects: WorkspaceProject[]; unchangedProjects: WorkspaceProject[]; failures: Array<{ projectName: string; error: string }>; error?: string }>;
   trashWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; operationId?: string; permanent?: boolean; error?: string; errorCode?: string }>;
   cleanupDeletedWorkspaceProjects: (workspacePath: string) => Promise<{ success: boolean; checkedCount: number; cleanedCount: number; outcomes: Array<{ projectId: string; name: string; cleaned: boolean; status: 'in_recycle_bin' | 'missing' | 'restored' | 'unknown'; removedArtifactCount?: number }>; error?: string }>;
 
@@ -899,23 +952,33 @@ export interface IElectronAPI {
   deleteProjectMissingMediaVersion: (workspacePath: string, versionId: string) => Promise<{ success: boolean; deletedCount: number; versionNumber?: number; reparentedCount?: number; removedArtifactCount?: number; error?: string }>;
   recordMediaVersionCompare: (workspacePath: string, request: { photoId: string; leftVersionId: string; rightVersionId: string; compareMode: string }) => Promise<{ success: boolean; error?: string }>;
   openMediaVersion: (filePath: string) => Promise<{ success: boolean; error?: string }>;
-  getProgressFolders: (workspacePath: string, projectName: string) => Promise<{ success: boolean; progressFolders: ProgressFolder[]; error?: string }>;
-  ensureSelectionBaseline: (workspacePath: string, status: ProjectStatus, projectName: string) => Promise<{ success: boolean; registered: boolean; count: number; imageCount?: number; videoCount?: number; progressFolder?: ProgressFolder; batch?: VersionBatch; baselines?: Array<{ mediaKind: 'image' | 'video'; count: number; progressFolder?: ProgressFolder; batch?: VersionBatch }>; error?: string }>;
-  getSelectionSourceFolders: (projectPath: string) => Promise<{ success: boolean; folders: Array<{ name: string; relativePath: string }>; error?: string }>;
-  preflightFilenameSelection: (projectPath: string, request: { sourceFolderRelativePath: string; keywords: string[] }) => Promise<SelectionPreflightResult>;
+  getProgressFolders: (workspacePath: string, projectName: string) => Promise<{ success: boolean; progressFolders: ProgressFolder[]; graphEdges: VersionGraphEdge[]; legacySelectionRelationRepairs: LegacySelectionRelationRepair[]; error?: string }>;
+  getSelectionSourceFolders: (projectPath: string, request?: { cursor?: string; pageSize?: number; operationId?: string }) => Promise<{ success: boolean; operationId?: string; folders: Array<{ name: string; relativePath: string }>; nextCursor?: string | null; truncated: boolean; cancelled?: boolean; error?: string }>;
+  preflightFilenameSelection: (projectPath: string, request: { sourceFolderRelativePath: string; keywords: string[]; operationId?: string }) => Promise<SelectionPreflightResult>;
   executeFilenameSelection: (projectPath: string, request: { sourceFolderRelativePath: string; keywords: string[]; expectedSignature: string; operationId: string }) => Promise<SelectionExecutionResult>;
-  preflightManualSelection: (projectPath: string, request: { sourceFolderRelativePath: string; relativePaths: string[] }) => Promise<SelectionPreflightResult>;
+  preflightManualSelection: (projectPath: string, request: { sourceFolderRelativePath: string; relativePaths: string[]; operationId?: string }) => Promise<SelectionPreflightResult>;
   executeManualSelection: (projectPath: string, request: { sourceFolderRelativePath: string; relativePaths: string[]; expectedSignature: string; operationId: string }) => Promise<SelectionExecutionResult>;
   cancelSelectionOperation: (operationId: string) => Promise<{ success: boolean }>;
+  onSelectionOperationProgress: (callback: (progress: { operationId: string; phase: 'listing_source_folders' | 'scanning_source' | string; directoriesScanned: number; directoriesDiscovered?: number; filesScanned?: number; maxDirectories: number; maxFiles?: number }) => void) => () => void;
   getFinalVersionSummary: (workspacePath: string, status: ProjectStatus, projectName: string) => Promise<{ success: boolean; count: number; availableCount: number; missingCount: number; error?: string }>;
   browseFinalVersions: (workspacePath: string, status: ProjectStatus, projectName: string) => Promise<{ success: boolean; count: number; availableCount: number; missingCount: number; entries: ProjectFileEntry[]; error?: string }>;
-  exportFinalVersions: (workspacePath: string, status: ProjectStatus, projectName: string) => Promise<{ success: boolean; count: number; displayName?: string; versionKey?: string; progressFolder?: ProgressFolder; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
+  exportFinalVersions: (workspacePath: string, status: ProjectStatus, projectName: string, request: { parentProgressId: string }) => Promise<{ success: boolean; count: number; displayName?: string; versionKey?: string; progressFolder?: ProgressFolder; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
   getMediaRating: (filePath: string) => Promise<{ success: boolean; rating: number; error?: string }>;
   getMediaRatings: (entries: Array<{ path: string; updatedAt: number }>) => Promise<{ success: boolean; results: Array<{ path: string; updatedAt: number; success: boolean; rating: number; error?: string }>; checked: number; error?: string }>;
   setMediaRating: (workspacePath: string, filePath: string, rating: number) => Promise<{ success: boolean; rating: number; error?: string }>;
   createProgressFolder: (workspacePath: string, status: ProjectStatus, projectName: string, request: { mediaKind: 'image' | 'video'; versionKey: string; parentProgressId?: string; displayName: string }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
+  registerProgressWithGraph: (workspacePath: string, status: ProjectStatus, request: { projectName: string; progress: { progressId?: string; relativePath?: string; mediaKind?: 'image' | 'video'; versionKey?: string; parentProgressId?: string; displayName?: string; relationKind?: 'main' | 'auxiliary'; trackingEnabled?: boolean; trackingState?: ProgressFolder['trackingState']; renameFromParent?: boolean; copyMissingFromParent?: boolean; moveToRoot?: boolean }; workflowInputProgressIds: string[] }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; edges?: VersionGraphEdge[]; relativePath?: string; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
   registerProgressFolder: (workspacePath: string, status: ProjectStatus, projectName: string, request: { relativePath: string; mediaKind: 'image' | 'video' | 'mixed'; versionKey: string; parentProgressId?: string; displayName: string; nodeRole?: ProgressFolder['nodeRole']; relationKind?: ProgressFolder['relationKind']; trackingEnabled: boolean; renameFromParent?: boolean; copyMissingFromParent?: boolean; trackingState?: ProgressFolder['trackingState']; progressId?: string; moveToRoot?: boolean }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; relativePath?: string; error?: string }>;
   updateProgressFolder: (workspacePath: string, status: ProjectStatus, projectName: string, request: { progressId: string; mediaKind: 'image' | 'video'; versionKey: string; parentProgressId?: string; displayName: string; trackingEnabled: boolean; trackingState?: ProgressFolder['trackingState']; preserveFolderPath?: boolean }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; progressFolders?: ProgressFolder[]; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
+  updateProgressRelation: (workspacePath: string, projectName: string, request: { childProgressId: string; parentProgressId: string | null; expectedUpdatedAt?: number }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; error?: string }>;
+  repairLegacySelectionRelation: (workspacePath: string, projectName: string, request: { progressId: string; sourceProgressId: string }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; error?: string }>;
+  commitMediaWorkflowImport: (workspacePath: string, manifest: MediaWorkflowImportManifest) => Promise<{ success: boolean; importSessionId?: string; nodes?: ProgressFolder[]; edges?: VersionGraphEdge[]; retryable?: boolean; error?: string }>;
+  recoverMediaWorkflowImports: (workspacePath: string) => Promise<{ success: boolean; recovered: Array<{ importSessionId: string; projectName: string }>; failures: Array<{ importSessionId: string; projectName: string; error: string }>; error?: string }>;
+  createVersionGraphEdge: (workspacePath: string, request: Pick<VersionGraphEdge, 'projectId' | 'sourceProgressId' | 'targetProgressId' | 'edgeKind'>) => Promise<{ success: boolean; edge?: VersionGraphEdge; error?: string }>;
+  deleteVersionGraphEdge: (workspacePath: string, request: Pick<VersionGraphEdge, 'projectId' | 'sourceProgressId' | 'targetProgressId' | 'edgeKind'>) => Promise<{ success: boolean; error?: string }>;
+  replaceVersionGraphEdgeSource: (workspacePath: string, request: Pick<VersionGraphEdge, 'projectId' | 'sourceProgressId' | 'targetProgressId' | 'edgeKind'> & { newSourceProgressId: string }) => Promise<{ success: boolean; edge?: VersionGraphEdge; error?: string }>;
+  getVersionTreeLayout: (workspacePath: string, projectName: string, scopeKey: string) => Promise<VersionTreeLayoutResult>;
+  saveVersionTreeLayout: (workspacePath: string, projectName: string, request: { scopeKey: string; expectedRevision: number; mode: 'patch' | 'replace'; positions: VersionTreeLayoutPosition[] }) => Promise<{ success: boolean; scopeKey?: string; revision?: number; updatedAt?: number; error?: string }>;
   deleteMissingProgressFolder: (workspacePath: string, projectName: string, progressId: string) => Promise<{ success: boolean; progressId?: string; versionKey?: string; deletedVersionCount?: number; deletedBatchCount?: number; reparentedProgressCount?: number; removedArtifactCount?: number; error?: string }>;
   registerVersionBaseline: (workspacePath: string, status: ProjectStatus, projectName: string, relativePath: string) => Promise<{ success: boolean; batch?: VersionBatch; error?: string }>;
   compareVersionFolders: (workspacePath: string, status: ProjectStatus, projectName: string, referenceRelativePath: string, sourceRelativePath: string, sourceNames?: string[]) => Promise<{ success: boolean; matches: Array<{ source: string; reference: string; target: string; confidence: string; distance: number }>; suggestions: Array<{ source: string; reference: string; target: string; confidence: string; distance: number }>; unmatched: string[]; unmatchedReference: string[]; error?: string }>;

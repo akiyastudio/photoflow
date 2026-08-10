@@ -1,5 +1,7 @@
 const { validateRendererPythonInvocation } = require('../security-policy.cjs');
 
+const normalizeSdImportAutoMove = value => value !== false;
+
 const RESERVED_PROJECT_CATEGORIES = new Set(['未分类', '策划中', '待拍摄', '后期中', '已归档']);
 const normalizeCustomProjectCategories = value => {
   const result = [];
@@ -938,6 +940,10 @@ const registerSystemIpc = context => {
         .filter((value, index, values) => value && values.findIndex(candidate => path.resolve(candidate).toLocaleLowerCase() === path.resolve(value).toLocaleLowerCase()) === index);
       const normalizedConfig = {
         ...config,
+        smartImport: {
+          ...config?.smartImport,
+          autoMoveProjectAfterSdImport: normalizeSdImportAutoMove(config?.smartImport?.autoMoveProjectAfterSdImport),
+        },
         workspacePath: workspacePaths[0] || '',
         workspacePaths,
         customProjectCategories,
@@ -1096,4 +1102,4 @@ const registerSystemIpc = context => {
   });
 };
 
-module.exports = { registerSystemIpc };
+module.exports = { normalizeSdImportAutoMove, registerSystemIpc };

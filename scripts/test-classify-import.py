@@ -789,7 +789,10 @@ class ClassifyImportTests(unittest.TestCase):
             success = next(event for event in events if event.get('type') == 'success')
             self.assertTrue((project / 'jpg' / 'photo.jpg').is_file())
             self.assertFalse(success['data']['sourceFilesDeleted'])
-            self.assertIsNone(classify.load_staged_import(str(root), session))
+            self.assertIsNotNone(classify.load_staged_import(str(root), session))
+            receipt = classify.load_import_graph_receipt(classify.get_import_staging_dir(str(root), session))
+            self.assertEqual(receipt['importSessionId'], session)
+            self.assertEqual(receipt['manifests'][0]['schemaVersion'], 2)
 
     def test_same_drive_changed_source_never_reuses_old_staging(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -817,10 +820,15 @@ class ClassifyImportTests(unittest.TestCase):
             project.mkdir()
             (dcim / 'photo.jpg').write_bytes(b'image')
 
-            with mock.patch.object(classify, 'staged_files_with_capture_times', side_effect=AssertionError('fixed projects do not need capture times')):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), mock.patch.object(classify, 'staged_files_with_capture_times', side_effect=AssertionError('fixed projects do not need capture times')):
                 classify.stage_import_and_organize(str(root / 'card'), str(project), direct_project=True)
 
             self.assertTrue((project / 'jpg' / 'photo.jpg').is_file())
+            events = [json.loads(line) for line in output.getvalue().splitlines() if line.strip().startswith('{')]
+            success = next(event for event in events if event.get('type') == 'success')
+            self.assertTrue(success['data']['importSessionId'])
+            self.assertEqual(success['data']['importManifests'][0]['importSessionId'], success['data']['importSessionId'])
 
     def test_work_import_recovers_pending_commit_without_duplicate(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -844,6 +852,35 @@ class ClassifyImportTests(unittest.TestCase):
 
             self.assertEqual(sorted(path.name for path in jpg_dir.glob('*.jpg')), ['one.jpg', 'two.jpg'])
             self.assertFalse(any(jpg_dir.glob('* (1).jpg')))
+
+    def test_work_import_recovers_when_receipt_write_crashes_without_copying_again(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dcim = root / 'card' / 'DCIM'
+            project = root / 'project'
+            dcim.mkdir(parents=True)
+            project.mkdir()
+            source = dcim / 'one.jpg'
+            source.write_bytes(b'original-media')
+            session = 'receipt-crash'
+
+            with mock.patch.object(classify, 'write_import_graph_receipt', side_effect=OSError('simulated receipt crash')):
+                classify.stage_import_and_organize(str(root / 'card'), str(project), direct_project=True, import_session=session)
+            imported = project / 'jpg' / 'one.jpg'
+            self.assertEqual(imported.read_bytes(), b'original-media')
+            self.assertIsNone(classify.load_import_graph_receipt(classify.get_import_staging_dir(str(project), session)))
+
+            with mock.patch.object(classify, 'safe_chunk_copy', side_effect=AssertionError('retry must reuse committed media')):
+                classify.stage_import_and_organize(str(root / 'card'), str(project), direct_project=True, import_session=session)
+            self.assertEqual([path.name for path in (project / 'jpg').glob('*.jpg')], ['one.jpg'])
+            receipt = classify.load_import_graph_receipt(classify.get_import_staging_dir(str(project), session))
+            self.assertEqual(receipt['manifests'][0]['importSessionId'], session)
+
+    def test_empty_session_never_produces_an_uncommittable_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, 'import_session_required'):
+                classify.build_import_graph_manifest(str(root), str(root), 'project', '', [], [], [])
 
     def test_video_preview_only_processes_current_import_paths(self):
         with tempfile.TemporaryDirectory() as temporary:

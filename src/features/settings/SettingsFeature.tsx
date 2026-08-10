@@ -889,6 +889,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     </SettingsPageGroup>
     <SettingsPageGroup title="从 SD 卡导入">
       <SettingsRow title="启动时自动读取 SD 卡" description="应用启动后自动检查已经启用的 SD 卡设备。"><SettingsToggle label="启动时自动读取 SD 卡" checked={draft.smartImport.autoStart} onChange={checked => update('smartImport', { ...draft.smartImport, autoStart: checked })}/></SettingsRow>
+      <SettingsRow title="导入后自动移动项目分类" description="开启后，工作素材成功导入到“待拍摄”项目时，自动将项目移动到“后期中”；关闭后项目保持“待拍摄”。"><SettingsToggle label="导入后自动移动项目分类" checked={draft.smartImport.autoMoveProjectAfterSdImport} onChange={checked => update('smartImport', { ...draft.smartImport, autoMoveProjectAfterSdImport: checked })}/></SettingsRow>
       <SettingsRow title="导入日期范围" description="限制从真实 SD 卡读取的素材拍摄日期。"><select value={draft.smartImport.dateFilter} onChange={event => update('smartImport', { ...draft.smartImport, dateFilter: event.target.value as AppConfig['smartImport']['dateFilter'] })} className="form-input ml-auto max-w-sm"><option value="all">全部素材</option><option value="today">仅今天拍摄的素材</option><option value="today_yesterday">今天和昨天拍摄的素材</option></select></SettingsRow>
       <SettingsRow title="已记录的 SD 卡设备" description="管理设备是否用于导入，以及默认作为工作文件还是花絮。" align="start"><SdDriveHistorySettings value={draft.smartImport} onChange={smartImport => update('smartImport', smartImport)}/></SettingsRow>
     </SettingsPageGroup>

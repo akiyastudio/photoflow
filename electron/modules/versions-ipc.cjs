@@ -450,7 +450,7 @@ const registerVersionIpc = context => {
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       return await versionService.listProgress(workspaceRoot, projectName);
     } catch (error) {
-      return { success: false, error: error.message || String(error), progressFolders: [] };
+      return { success: false, error: error.message || String(error), progressFolders: [], legacySelectionRelationRepairs: [] };
     }
   });
 
@@ -464,71 +464,6 @@ const registerVersionIpc = context => {
       return { ...result, cleanupQueued: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
-    }
-  });
-
-  ipcMain.handle('workspace-selection-baseline-ensure', async (_event, workspacePath, status, projectName) => {
-    try {
-      const workspaceRoot = ensureWorkspace(workspacePath);
-      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
-      const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const definitions = [
-        {
-          mediaKind: 'image',
-          folderName: '图片选片',
-          displayName: '图片选片（原图）',
-          supports: extension => IMAGE_EXTENSIONS.has(extension) || RAW_EXTENSIONS.has(extension),
-        },
-        {
-          mediaKind: 'video',
-          folderName: '视频选片',
-          displayName: '视频选片（原片）',
-          supports: extension => VIDEO_EXTENSIONS.has(extension),
-        },
-      ];
-      const baselines = [];
-      for (const definition of definitions) {
-        const folderPath = path.join(projectPath, definition.folderName);
-        if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) continue;
-        const files = (await fs.promises.readdir(folderPath, { withFileTypes: true }))
-          .filter(entry => entry.isFile())
-          .filter(entry => definition.supports(path.extname(entry.name).toLowerCase()));
-        const registered = await versionService.registerProgress(workspaceRoot, {
-          projectName,
-          mediaKind: definition.mediaKind,
-          versionKey: '0',
-          displayName: definition.displayName,
-          folderPath,
-          trackingEnabled: false,
-          trackingState: 'pending_compare',
-        });
-        const baseline = await versionService.registerBatchBaseline(workspaceRoot, {
-          projectName,
-          folderPath,
-          versionName: definition.displayName,
-        });
-        baselines.push({
-          mediaKind: definition.mediaKind,
-          count: files.length,
-          progressFolder: registered.progressFolder,
-          batch: baseline.batch,
-        });
-      }
-      const imageBaseline = baselines.find(item => item.mediaKind === 'image');
-      const videoBaseline = baselines.find(item => item.mediaKind === 'video');
-      return {
-        success: true,
-        registered: baselines.length > 0,
-        count: baselines.reduce((total, item) => total + item.count, 0),
-        imageCount: imageBaseline?.count || 0,
-        videoCount: videoBaseline?.count || 0,
-        progressFolder: imageBaseline?.progressFolder || videoBaseline?.progressFolder,
-        batch: imageBaseline?.batch || videoBaseline?.batch,
-        baselines,
-      };
-    } catch (error) {
-      writeLog('error', 'Unable to ensure selection baseline', { projectName, error: error.message || String(error) });
-      return { success: false, registered: false, count: 0, error: error.message || String(error) };
     }
   });
 
@@ -612,7 +547,7 @@ const registerVersionIpc = context => {
     }
   });
 
-  ipcMain.handle('workspace-final-version-export', async (_event, workspacePath, status, projectName) => {
+  ipcMain.handle('workspace-final-version-export', async (_event, workspacePath, status, projectName, request = {}) => {
     let folderPath = '';
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
@@ -625,8 +560,13 @@ const registerVersionIpc = context => {
       const imageRoots = (progressResult.progressFolders || [])
         .filter(progress => progress.mediaKind === 'image' && /^\d+$/.test(progress.versionKey))
         .sort((left, right) => Number(left.versionKey) - Number(right.versionKey));
-      const latestRoot = imageRoots.at(-1);
-      const versionKey = String((latestRoot ? Number(latestRoot.versionKey) : 0) + 1);
+      const versionKey = String((imageRoots.at(-1) ? Number(imageRoots.at(-1).versionKey) : 0) + 1);
+      const parentProgressId = String(request.parentProgressId || '');
+      const explicitParent = (progressResult.progressFolders || []).find(progress => progress.id === parentProgressId);
+      if (!explicitParent || explicitParent.mediaKind !== 'image' || explicitParent.folderMissing
+        || explicitParent.nodeRole === 'selection' || explicitParent.relationKind === 'auxiliary') {
+        throw new Error('export_parent_required: 请选择明确的图片主分支父节点');
+      }
       const displayName = `图片后期_${versionKey}_喜爱`;
       folderPath = path.resolve(projectPath, displayName);
       if (!folderPath.startsWith(projectPath + path.sep)) throw new Error('喜爱图片进度文件夹路径无效');
@@ -645,7 +585,7 @@ const registerVersionIpc = context => {
         projectName,
         mediaKind: 'image',
         versionKey,
-        parentProgressId: latestRoot?.id,
+        parentProgressId: explicitParent.id,
         displayName,
         folderPath,
         trackingEnabled: false,
@@ -731,6 +671,249 @@ const registerVersionIpc = context => {
     }
   });
 
+  ipcMain.handle('workspace-progress-register-with-graph', async (_event, workspacePath, status, request = {}) => {
+    let createdDirectory = '';
+    let movedFrom = '';
+    let movedTo = '';
+    let moveRollbackError = null;
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      if (!request || Object.keys(request).some(key => !['projectName', 'progress', 'workflowInputProgressIds'].includes(key))) {
+        throw new Error('progress_graph_payload_invalid: 请求字段无效');
+      }
+      const projectName = String(request.projectName || '').trim();
+      const progress = request.progress && typeof request.progress === 'object' ? request.progress : {};
+      const allowedProgressFields = ['progressId', 'relativePath', 'mediaKind', 'versionKey', 'parentProgressId', 'displayName', 'relationKind', 'trackingEnabled', 'trackingState', 'renameFromParent', 'copyMissingFromParent', 'moveToRoot'];
+      if (Object.keys(progress).some(key => !allowedProgressFields.includes(key))) {
+        throw new Error('progress_graph_payload_invalid: renderer 不能提交节点角色、绝对路径或图边类型');
+      }
+      const workflowInputProgressIds = Array.isArray(request.workflowInputProgressIds)
+        ? request.workflowInputProgressIds.map(value => String(value || '').trim()) : null;
+      if (!projectName || !workflowInputProgressIds || workflowInputProgressIds.some(value => !value)
+        || new Set(workflowInputProgressIds).size !== workflowInputProgressIds.length) {
+        throw new Error('progress_graph_payload_invalid: 项目或工作流输入无效');
+      }
+      const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+      let databaseProgress = {};
+      const progressId = String(progress.progressId || '').trim();
+      const updatesProgress = Object.keys(progress).some(key => key !== 'progressId');
+      let existing = null;
+      if (progressId) {
+        const listed = await versionService.listProgress(workspaceRoot, projectName, true);
+        existing = (listed.progressFolders || []).find(item => item.id === progressId);
+        if (!existing || existing.folderMissing) throw new Error('progress_graph_target_invalid: 目标节点不存在');
+      }
+      if (progressId && !updatesProgress) {
+        databaseProgress = { progressId: existing.id };
+      } else {
+        const displayName = String(progress.displayName || '').trim();
+        const mediaKind = String(progress.mediaKind || '');
+        const versionKey = String(progress.versionKey || '').trim();
+        if (!validProgressFolderName(displayName) || !['image', 'video'].includes(mediaKind) || !versionKey) {
+          throw new Error('progress_graph_payload_invalid: 新进度字段无效');
+        }
+        let folderPath = progress.relativePath !== undefined
+          ? resolveProjectEntry(workspacePath, status, projectName, String(progress.relativePath || ''))
+          : existing?.folderPath ? path.resolve(existing.folderPath) : path.resolve(projectPath, displayName);
+        if (!isInside(projectPath, folderPath)) throw new Error('progress_graph_folder_invalid: 进度目录必须位于当前项目内');
+        if (!fs.existsSync(folderPath)) {
+          if (progress.relativePath !== undefined || existing) throw new Error('progress_graph_folder_invalid: 要登记的文件夹不存在');
+          await fs.promises.mkdir(folderPath);
+          createdDirectory = folderPath;
+        } else if (!fs.statSync(folderPath).isDirectory()) {
+          throw new Error(`同名路径不是文件夹：${displayName}`);
+        }
+        if (progress.moveToRoot && path.dirname(folderPath).toLocaleLowerCase() !== projectPath.toLocaleLowerCase()) {
+          if (fs.lstatSync(folderPath).isSymbolicLink()) throw new Error('快捷方式或链接目录不能移动为版本进度');
+          const targetPath = path.join(projectPath, path.basename(folderPath));
+          if (fs.existsSync(targetPath)) throw new Error(`项目根目录已存在同名文件夹“${path.basename(folderPath)}”`);
+          movedFrom = folderPath;
+          movedTo = targetPath;
+          suppressWorkspaceWatchPath(folderPath);
+          suppressWorkspaceWatchPath(targetPath);
+          await fs.promises.rename(folderPath, targetPath);
+          folderPath = targetPath;
+        }
+        databaseProgress = {
+          progressId: progressId || undefined,
+          mediaKind, versionKey, displayName, folderPath,
+          parentProgressId: progress.parentProgressId ? String(progress.parentProgressId) : undefined,
+          relationKind: progress.relationKind || undefined,
+          trackingEnabled: Boolean(progress.trackingEnabled),
+          trackingState: progress.trackingState || undefined,
+          renameFromParent: Boolean(progress.renameFromParent),
+          copyMissingFromParent: Boolean(progress.copyMissingFromParent),
+        };
+      }
+      const registered = await versionService.registerProgressWithGraph(workspaceRoot, {
+        projectName, progress: databaseProgress, workflowInputProgressIds,
+      });
+      if (!registered?.success || !registered.progressFolder) throw new Error(registered?.error || '进度和工作流关系提交失败');
+      const relativePath = path.relative(projectPath, registered.progressFolder.folderPath).replace(/\\/g, '/');
+      return {
+        ...registered,
+        relativePath,
+        folder: {
+          name: path.basename(registered.progressFolder.folderPath),
+          path: registered.progressFolder.folderPath,
+          relativePath,
+          updatedAt: Date.now(),
+        },
+      };
+    } catch (error) {
+      if (movedFrom && movedTo && fs.existsSync(movedTo) && !fs.existsSync(movedFrom)) {
+        try {
+          await fs.promises.rename(movedTo, movedFrom);
+        } catch (rollbackError) {
+          moveRollbackError = rollbackError;
+          writeLog('error', 'Unable to roll back progress root move after graph registration failure', {
+            source: movedFrom, destination: movedTo, error: rollbackError.message || String(rollbackError),
+          });
+        }
+      }
+      if (createdDirectory && fs.existsSync(createdDirectory)) {
+        try {
+          if ((await fs.promises.readdir(createdDirectory)).length === 0) await fs.promises.rmdir(createdDirectory);
+        } catch (cleanupError) {
+          writeLog('warn', 'Unable to remove empty progress folder after graph rollback', { path: createdDirectory, error: cleanupError.message || String(cleanupError) });
+        }
+      }
+      const message = error.message || String(error);
+      return { success: false, error: moveRollbackError ? `${message}；文件夹回滚失败：${moveRollbackError.message || String(moveRollbackError)}` : message };
+    } finally {
+      if (movedFrom) releaseWorkspaceWatchPath(movedFrom);
+      if (movedTo) releaseWorkspaceWatchPath(movedTo);
+    }
+  });
+
+  ipcMain.handle('workspace-progress-relation-update', async (_event, workspacePath, projectName, request = {}) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      const listed = await versionService.listProgress(workspaceRoot, projectName, true);
+      const projectNodeIds = new Set((listed.progressFolders || []).map(folder => folder.id));
+      const childProgressId = String(request.childProgressId || '');
+      const parentProgressId = request.parentProgressId == null ? null : String(request.parentProgressId);
+      if (!projectNodeIds.has(childProgressId) || parentProgressId && !projectNodeIds.has(parentProgressId)) {
+        throw new Error('relation_project_mismatch: 父子节点不属于当前项目');
+      }
+      return await versionService.updateProgressRelation(workspaceRoot, {
+        childProgressId,
+        parentProgressId,
+        ...(request.expectedUpdatedAt == null ? {} : { expectedUpdatedAt: Number(request.expectedUpdatedAt) }),
+      });
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  const mutateVersionGraphEdge = async (workspacePath, request, mutation) => {
+    const workspaceRoot = ensureWorkspace(workspacePath);
+    if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+    const projectId = String(request?.projectId || '');
+    const sourceProgressId = String(request?.sourceProgressId || '');
+    const targetProgressId = String(request?.targetProgressId || '');
+    const edgeKind = String(request?.edgeKind || '');
+    if (!projectId || !sourceProgressId || !targetProgressId
+      || !['media_companion', 'derived_preview', 'workflow_input'].includes(edgeKind)) {
+      throw new Error('version_graph_edge_payload_invalid: 项目、节点或关系类型无效');
+    }
+    return mutation(workspaceRoot, { projectId, sourceProgressId, targetProgressId, edgeKind });
+  };
+
+  ipcMain.handle('workspace-version-graph-edge-create', async (_event, workspacePath, request = {}) => {
+    try {
+      return await mutateVersionGraphEdge(workspacePath, request, (root, payload) => versionService.createVersionGraphEdge(root, payload));
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-version-graph-edge-delete', async (_event, workspacePath, request = {}) => {
+    try {
+      return await mutateVersionGraphEdge(workspacePath, request, (root, payload) => versionService.deleteVersionGraphEdge(root, payload));
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-version-graph-edge-replace-source', async (_event, workspacePath, request = {}) => {
+    try {
+      const newSourceProgressId = String(request?.newSourceProgressId || '');
+      if (!newSourceProgressId) throw new Error('version_graph_edge_payload_invalid: 新来源节点无效');
+      return await mutateVersionGraphEdge(workspacePath, request, (root, payload) => versionService.replaceVersionGraphEdgeSource(root, {
+        ...payload,
+        newSourceProgressId,
+      }));
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  const normalizeVersionTreeScope = value => {
+    const raw = String(value || '').trim().replace(/\\/g, '/');
+    if (raw.length > 1024 || raw.startsWith('/') || /^[a-zA-Z]:/.test(raw)) throw new Error('version_tree_scope_invalid: scopeKey 必须是项目内相对路径');
+    const parts = raw.split('/').filter(part => part && part !== '.');
+    if (parts.includes('..')) throw new Error('version_tree_scope_invalid: scopeKey 不能包含 ..');
+    return parts.join('/');
+  };
+
+  ipcMain.handle('workspace-version-tree-layout-get', async (_event, workspacePath, projectName, scopeKey = '') => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      return await versionService.getVersionTreeLayout(workspaceRoot, { projectName, scopeKey: normalizeVersionTreeScope(scopeKey) });
+    } catch (error) {
+      return { success: false, error: error.message || String(error), revision: 0, positions: [] };
+    }
+  });
+
+  ipcMain.handle('workspace-version-tree-layout-save', async (_event, workspacePath, projectName, request = {}) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      const scopeKey = normalizeVersionTreeScope(request.scopeKey);
+      const mode = request.mode === 'patch' || request.mode === 'replace' ? request.mode : '';
+      const expectedRevision = request.expectedRevision;
+      const positions = Array.isArray(request.positions) ? request.positions : [];
+      if (!mode || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || positions.length > 1000) throw new Error('version_tree_layout_payload_invalid: 布局请求无效');
+      const listed = await versionService.listProgress(workspaceRoot, projectName, true);
+      const allowedNodeKeys = new Set((listed.progressFolders || []).map(folder => `progress:${folder.id}`));
+      const seen = new Set();
+      const normalizedPositions = positions.map(position => {
+        const nodeKey = String(position?.nodeKey || '');
+        const x = position?.x;
+        const y = position?.y;
+        if (!allowedNodeKeys.has(nodeKey) || seen.has(nodeKey)) throw new Error('version_tree_layout_node_invalid: 节点不属于当前项目');
+        if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y) || Math.abs(x) > 1_000_000 || Math.abs(y) > 1_000_000) throw new Error('version_tree_layout_coordinate_invalid: 坐标无效');
+        seen.add(nodeKey);
+        return { nodeKey, x, y };
+      });
+      return await versionService.saveVersionTreeLayout(workspaceRoot, { projectName, scopeKey, expectedRevision, mode, positions: normalizedPositions });
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-legacy-selection-relation-repair', async (_event, workspacePath, projectName, request = {}) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      const listed = await versionService.listProgress(workspaceRoot, projectName, true);
+      const progressId = String(request.progressId || '');
+      const sourceProgressId = String(request.sourceProgressId || '');
+      const projectNodeIds = new Set((listed.progressFolders || []).map(folder => folder.id));
+      const repairIds = new Set((listed.legacySelectionRelationRepairs || []).map(repair => repair.progressId));
+      if (!repairIds.has(progressId) || !projectNodeIds.has(progressId) || !projectNodeIds.has(sourceProgressId)) {
+        throw new Error('legacy_selection_repair_project_mismatch: 修复节点不属于当前项目');
+      }
+      return await versionService.repairLegacySelectionRelation(workspaceRoot, { progressId, sourceProgressId });
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
   ipcMain.handle('workspace-progress-update', async (_event, workspacePath, status, projectName, request = {}) => {
     const completedMoves = [];
     const stagedMoves = [];
@@ -741,7 +924,7 @@ const registerVersionIpc = context => {
       const listed = await versionService.listProgress(workspaceRoot, projectName);
       const progressFolders = Array.isArray(listed.progressFolders) ? listed.progressFolders : [];
       const current = progressFolders.find(progress => progress.id === request.progressId);
-      if (!current || current.versionKey === '0') throw new Error('要修改的进度不存在或不允许修改');
+      if (!current || current.nodeRole !== 'progress') throw new Error('要修改的进度不存在或角色不允许修改');
       if (request.mediaKind && request.mediaKind !== current.mediaKind) throw new Error('修改进度时不能改变图片或视频类型');
 
       const versionKey = String(request.versionKey || '').trim();
