@@ -31,7 +31,7 @@ import { TrackingConfirmationPanel } from '../versioning/TrackingConfirmationPan
 import { ProgressPairPreview as SharedProgressPairPreview } from '../versioning/ProgressPairPreview';
 import { VersionProgressPanel, type VersionProgressDraft } from '../versioning/VersionProgressPanel';
 import { LegacySelectionRepairNotice } from '../versioning/LegacySelectionRepairNotice';
-import { defaultMainParentId, defaultWorkflowInputIds, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressRelationChangeError, progressTrackingAction, progressTrackingActionLabel, selectableVersionParents, trackingStateLabel, type VersionRelationKind } from '../versioning/versioning-v2-model';
+import { defaultMainParentId, defaultWorkflowInputIds, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressRelationChangeError, progressTrackingAction, progressTrackingActionLabel, selectableVersionParents, trackingStateLabel, versionTreeNodeBadgeLabel, type VersionRelationKind } from '../versioning/versioning-v2-model';
 import { ProgressRelationMutationQueue } from '../versioning/progress-relation-mutation-queue';
 import { metadataFieldLabel, metadataGroupLabel } from '../metadata/metadata-labels';
 import { metadataGroupDependencyKey, previewMetadataFieldsForEntry, reconcileExpandedMetadataGroups } from '../metadata/metadata-pane-model';
@@ -675,6 +675,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const skipNextPathRefreshRef = useRef(false);
   const refreshSequenceRef = useRef(0);
   const currentRelativePathRef = useRef('');
+  const onDirectoryChangeRef = useRef(onDirectoryChange);
+  onDirectoryChangeRef.current = onDirectoryChange;
   const projectPathRef = useRef(project.path);
   const projectLifecycleRef = useRef<ProjectWorkspaceLifecycleIdentity>();
   const directoryEntriesCacheRef = useRef(new Map<string, ProjectFileEntry[]>());
@@ -1539,8 +1541,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     refresh();
   }, [currentRelativePath]);
   useEffect(() => {
-    onDirectoryChange?.(currentRelativePath);
-  }, [currentRelativePath, onDirectoryChange]);
+    onDirectoryChangeRef.current?.(currentRelativePath);
+  }, [currentRelativePath]);
   useEffect(() => {
     setOperationDirectoryPath(currentRelativePath);
   }, [currentRelativePath, recursiveFlatOpen]);
@@ -4662,12 +4664,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     className={`group relative min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) || previewPath === entry.relativePath ? 'bg-blue-50 ring-1 ring-blue-400' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'bg-blue-100 ring-2 ring-blue-500' : ''}`}
   >
     <span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span>
-    {progressFolder && <span className={`absolute right-3 top-3 z-10 rounded-full px-2 py-1 text-[10px] font-bold shadow-sm ${progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' ? 'bg-violet-600 text-white' : progressFolder.nodeRole === 'original' ? 'bg-slate-700 text-white' : 'bg-blue-600 text-white'}`}>{progressFolder.nodeRole === 'original' ? '原始素材' : progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' ? '选片' : `V${progressFolder.versionKey}`}</span>}
+    {progressFolder && <span className={`absolute right-3 top-3 z-10 rounded-full px-2 py-1 text-[10px] font-bold shadow-sm ${progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' || progressFolder.nodeRole === 'workflow' ? 'bg-violet-600 text-white' : progressFolder.nodeRole === 'original' ? 'bg-slate-700 text-white' : 'bg-blue-600 text-white'}`}>{versionTreeNodeBadgeLabel(progressFolder)}</span>}
     {!progressFolder && sourceKind && <span className="absolute right-3 top-3 z-10 rounded-full bg-slate-700 px-2 py-1 text-[10px] font-bold text-white shadow-sm">底片</span>}
     {!progressFolder && entry.name === '团片协作' && <span className="absolute right-3 top-3 z-10 rounded-full bg-violet-600 px-2 py-1 text-[10px] font-bold text-white shadow-sm">协作分支</span>}
     <div className="relative flex aspect-square items-center justify-center">{renderEntryIcon(entry, true)}</div>
     {renderEntryName(entry, true)}
-    <p className={`mt-0.5 truncate text-[10px] ${progressFolder?.trackingState === 'needs_repair' ? 'font-bold text-amber-600' : 'uppercase text-slate-400'}`}>{progressFolder ? progressFolder.nodeRole === 'original' ? '文件夹 · 原始素材' : progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' ? '文件夹 · 附属分支' : `文件夹 · ${versionTreeStatusLabel(progressFolder)}` : sourceKind === 'image' ? '文件夹 · 原始图片素材' : sourceKind === 'video' ? '文件夹 · 原始视频素材' : entry.name === '团片协作' ? '文件夹 · 协作工作区' : entry.kind === 'folder' ? '文件夹' : entry.kind === 'shortcut' ? '快捷方式' : entry.extension.slice(1) || '文件'}</p>
+    <p className={`mt-0.5 truncate text-[10px] ${progressFolder?.trackingState === 'needs_repair' ? 'font-bold text-amber-600' : 'uppercase text-slate-400'}`}>{progressFolder ? progressFolder.nodeRole === 'original' ? '文件夹 · 原始素材' : progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' ? '文件夹 · 附属分支' : progressFolder.nodeRole === 'artifact' && progressFolder.artifactKind === 'preview' ? '文件夹 · 预览产物' : progressFolder.nodeRole === 'workflow' && progressFolder.artifactKind === 'team_workspace' ? '文件夹 · 协作工作区' : `文件夹 · ${versionTreeStatusLabel(progressFolder)}` : sourceKind === 'image' ? '文件夹 · 原始图片素材' : sourceKind === 'video' ? '文件夹 · 原始视频素材' : entry.name === '团片协作' ? '文件夹 · 协作工作区' : entry.kind === 'folder' ? '文件夹' : entry.kind === 'shortcut' ? '快捷方式' : entry.extension.slice(1) || '文件'}</p>
   </div>;
 
   const progressCompareCandidates = progressCompare ? [...progressCompare.matches, ...progressCompare.suggestions] : [];
@@ -5107,6 +5109,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             graphEdges={versionGraphEdges}
             entries={displayedFileEntries}
             structureEntries={fileEntries}
+            selectedRelativePaths={selectedPaths}
             filterActive={Boolean(searchQuery.trim() || fileFilter !== 'all' || ratingFilter !== 'all')}
             activeRelativePath={currentRelativePath}
             gridIconSize={gridIconSize}

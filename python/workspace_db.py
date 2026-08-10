@@ -22,6 +22,9 @@ IMAGE_EXTENSIONS = {
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".crm"}
 SQLITE_BUSY_TIMEOUT_MS = 15_000
 LEGACY_PROGRESS_MIGRATION_KEY = "legacy_progress_folders_migrated"
+LEGACY_MEDIA_WORKFLOW_MIGRATION_KEY = "legacy_media_workflow_graph_migrated_v1"
+SELECTION_MAINLINE_REPAIR_REVISION = "1"
+VERSION_TREE_DEFAULT_LAYOUT_REVISION = "2"
 TARGET_SCHEMA_VERSION = 25
 PROGRESS_NODE_ROLES = ("original", "progress", "selection", "artifact", "workflow")
 PROGRESS_RELATION_KINDS = ("main", "auxiliary")
@@ -1625,6 +1628,25 @@ def connect(root: str, database: str):
         with db:
             _migration_24(db)
             _set_meta(db, "schema_24_graph_revision", "3")
+    # Early V2 builds stored the first ordinary progress structurally below a
+    # selection. The V2 graph model requires the ordinary progress to remain on
+    # the original's main chain and represents selection participation with a
+    # supplemental workflow_input edge. Repair that invalid shape before an
+    # integrity check can reject the database.
+    if _meta_value(db, "selection_mainline_repair_revision") != SELECTION_MAINLINE_REPAIR_REVISION:
+        with db:
+            project_ids = [row[0] for row in db.execute("SELECT id FROM projects WHERE is_deleted=0").fetchall()]
+            for project_id in project_ids:
+                repair_selection_workflow_mainlines(db, project_id)
+            _set_meta(db, "selection_mainline_repair_revision", SELECTION_MAINLINE_REPAIR_REVISION)
+    # Layout revision 2 changes the canonical tree from stacked legacy lanes to
+    # left-to-right media mainlines. Persisted coordinates have no auto/manual
+    # provenance, so invalidate them once and let the revision-safe layout API
+    # reject saves from pages that still hold an older layout revision.
+    if _meta_value(db, "version_tree_default_layout_revision") != VERSION_TREE_DEFAULT_LAYOUT_REVISION:
+        with db:
+            db.execute("DELETE FROM version_tree_layouts")
+            _set_meta(db, "version_tree_default_layout_revision", VERSION_TREE_DEFAULT_LAYOUT_REVISION)
     _set_meta(db, "workspace_root", root)
     if backup_path:
         _set_meta(db, "last_migration_backup", backup_path)
@@ -2330,6 +2352,131 @@ def register_original_baselines(root: str, db, project):
         db.commit()
 
 
+def migrate_legacy_media_workflow_graph_once(root: str, db, project):
+    """Convert only canonical legacy import/team artifacts into explicit graph records.
+
+    This migration never infers main-version relationships.  It is limited to
+    exact legacy import destinations plus team sources already persisted in
+    team_retouch_photos.
+    """
+    migrated = db.execute(
+        "SELECT 1 FROM project_properties WHERE project_id=? AND key=?",
+        (project["id"], LEGACY_MEDIA_WORKFLOW_MIGRATION_KEY),
+    ).fetchone()
+    if migrated is not None:
+        return
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    if not os.path.isdir(project_path):
+        return
+    timestamp = int(time.time() * 1000)
+    directories = {
+        entry.name.casefold(): canonical_path(entry.path)
+        for entry in os.scandir(project_path)
+        if entry.is_dir()
+    }
+
+    def node_for_path(folder_path):
+        if not folder_path:
+            return None
+        return db.execute(
+            "SELECT * FROM progress_folders WHERE project_id=? AND folder_path_key=?",
+            (project["id"], folder_path.casefold()),
+        ).fetchone()
+
+    def insert_artifact(folder_path, display_name, media_kind, version_key, node_role, artifact_kind):
+        existing = node_for_path(folder_path)
+        if existing is not None:
+            return existing
+        progress_id = str(uuid.uuid4())
+        db.execute(
+            """INSERT INTO progress_folders(
+                 id,project_id,media_kind,version_key,parent_progress_id,display_name,folder_path,
+                 folder_path_key,folder_id,node_role,artifact_kind,relation_kind,tracking_enabled,
+                 tracking_state,rename_from_parent,copy_missing_from_parent,created_at,updated_at)
+               VALUES(?,?,?,?,NULL,?,?,?,?,?,?,NULL,0,'disabled',0,0,?,?)""",
+            (progress_id, project["id"], media_kind, version_key, display_name, folder_path,
+             folder_path.casefold(), directory_identity(folder_path), node_role, artifact_kind,
+             timestamp, timestamp),
+        )
+        return db.execute("SELECT * FROM progress_folders WHERE id=?", (progress_id,)).fetchone()
+
+    def add_edge(source, target, edge_kind):
+        if source is None or target is None:
+            return
+        existing = db.execute(
+            """SELECT 1 FROM version_graph_edges WHERE project_id=? AND source_progress_id=?
+               AND target_progress_id=? AND edge_kind=?""",
+            (project["id"], source["id"], target["id"], edge_kind),
+        ).fetchone()
+        if existing is None:
+            db.execute(
+                """INSERT INTO version_graph_edges(
+                     id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (str(uuid.uuid4()), project["id"], source["id"], target["id"], edge_kind, timestamp, timestamp),
+            )
+
+    db.execute("SAVEPOINT legacy_media_workflow_graph")
+    try:
+        raw = node_for_path(directories.get("raw"))
+        jpg = node_for_path(directories.get("jpg"))
+        if raw is not None and jpg is not None and raw["node_role"] == "original" and jpg["node_role"] == "original" \
+                and jpg["artifact_kind"] in (None, "companion"):
+            if jpg["artifact_kind"] is None:
+                db.execute("UPDATE progress_folders SET artifact_kind='companion',updated_at=? WHERE id=?", (timestamp, jpg["id"]))
+                jpg = db.execute("SELECT * FROM progress_folders WHERE id=?", (jpg["id"],)).fetchone()
+            add_edge(raw, jpg, "media_companion")
+
+        mov = node_for_path(directories.get("mov"))
+        preview_path = directories.get("mov_预览")
+        if mov is not None and mov["node_role"] == "original" and preview_path:
+            preview = insert_artifact(
+                preview_path, os.path.basename(preview_path), "video",
+                "legacy-preview-mov", "artifact", "preview",
+            )
+            if preview["node_role"] == "artifact" and preview["artifact_kind"] == "preview":
+                add_edge(mov, preview, "derived_preview")
+
+        team_path = directories.get("团片协作")
+        if team_path:
+            workflow = insert_artifact(
+                team_path, os.path.basename(team_path), "image",
+                "team-workspace", "workflow", "team_workspace",
+            )
+            if workflow["node_role"] == "workflow" and workflow["artifact_kind"] == "team_workspace":
+                source_rows = db.execute(
+                    """SELECT versions.file_path FROM team_retouch_photos team
+                       JOIN versions ON versions.id=team.base_version_id AND versions.is_deleted=0
+                       WHERE team.project_id=?""",
+                    (project["id"],),
+                ).fetchall()
+                candidates = db.execute(
+                    """SELECT * FROM progress_folders WHERE project_id=? AND media_kind='image'
+                       AND node_role IN ('original','progress') AND missing_since IS NULL""",
+                    (project["id"],),
+                ).fetchall()
+                sources = set()
+                for source_row in source_rows:
+                    file_key = canonical_path(source_row["file_path"]).casefold()
+                    matches = [candidate for candidate in candidates if file_key.startswith(candidate["folder_path_key"] + os.sep.casefold())]
+                    if matches:
+                        sources.add(max(matches, key=lambda candidate: len(candidate["folder_path_key"]))["id"])
+                for source_id in sorted(sources):
+                    source = next(candidate for candidate in candidates if candidate["id"] == source_id)
+                    add_edge(source, workflow, "workflow_input")
+
+        db.execute(
+            "INSERT OR REPLACE INTO project_properties(project_id,key,value_json,updated_at) VALUES(?,?,?,?)",
+            (project["id"], LEGACY_MEDIA_WORKFLOW_MIGRATION_KEY, "true", timestamp),
+        )
+        db.execute("RELEASE SAVEPOINT legacy_media_workflow_graph")
+        db.commit()
+    except Exception:
+        db.execute("ROLLBACK TO SAVEPOINT legacy_media_workflow_graph")
+        db.execute("RELEASE SAVEPOINT legacy_media_workflow_graph")
+        raise
+
+
 def repair_legacy_selection_nodes(root: str, db, project):
     """Repair only deterministic legacy selections, recording every ambiguous conflict."""
     project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
@@ -2452,12 +2599,64 @@ def repair_legacy_selection_nodes(root: str, db, project):
                 )
 
 
+def repair_selection_workflow_mainlines(db, project_id: str):
+    """Move legacy selection-owned progress nodes back onto their original mainline.
+
+    The old shape was original -> selection -> progress. The explicit V2 shape
+    is original -> progress (main) plus selection -> progress (workflow_input).
+    This is intentionally role-driven and never infers a relation from folder
+    names or version strings.
+    """
+    timestamp = int(time.time() * 1000)
+    rows = db.execute(
+        """SELECT child.id AS child_id, child.updated_at AS child_updated_at,
+                  selection.id AS selection_id, original.id AS original_id
+           FROM progress_folders child
+           JOIN progress_folders selection ON selection.id=child.parent_progress_id
+           JOIN progress_folders original ON original.id=selection.parent_progress_id
+           WHERE child.project_id=? AND child.node_role='progress' AND child.relation_kind='main'
+             AND selection.project_id=child.project_id AND selection.media_kind=child.media_kind
+             AND selection.node_role='selection' AND selection.relation_kind='auxiliary'
+             AND original.project_id=child.project_id AND original.media_kind=child.media_kind
+             AND original.node_role='original' AND original.missing_since IS NULL""",
+        (project_id,),
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        updated_at = max(timestamp, int(row["child_updated_at"] or 0) + 1)
+        db.execute(
+            "UPDATE progress_folders SET parent_progress_id=?,relation_kind='main',updated_at=? WHERE id=?",
+            (row["original_id"], updated_at, row["child_id"]),
+        )
+        db.execute(
+            """INSERT INTO version_graph_edges(
+                 id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
+               SELECT ?,?,?,?,?,?,?
+               WHERE NOT EXISTS(
+                 SELECT 1 FROM version_graph_edges WHERE project_id=? AND source_progress_id=?
+                   AND target_progress_id=? AND edge_kind='workflow_input'
+               )""",
+            (str(uuid.uuid4()), project_id, row["selection_id"], row["child_id"], "workflow_input",
+             timestamp, timestamp, project_id, row["selection_id"], row["child_id"]),
+        )
+        changed += 1
+    if changed:
+        # A stored coordinate set describes the old topology. Deleting the
+        # layout row also deletes positions and makes stale renderer saves fail
+        # their expectedRevision check instead of restoring the broken layout.
+        db.execute("DELETE FROM version_tree_layouts WHERE project_id=?", (project_id,))
+    return changed
+
+
 def progress_list(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     recover_stale_version_batches(db, project["id"])
     migrate_legacy_progress_folders_once(root, db, project)
     register_original_baselines(root, db, project)
+    migrate_legacy_media_workflow_graph_once(root, db, project)
     repair_legacy_selection_nodes(root, db, project)
+    with db:
+        repair_selection_workflow_mainlines(db, project["id"])
     sync_progress_folder_locations(root, db, project)
     include_missing = bool(payload.get("includeMissing"))
     repair_rows = db.execute(

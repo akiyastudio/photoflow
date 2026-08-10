@@ -12,6 +12,7 @@ type ProjectVersionTreeProps = {
   graphEdges?: VersionGraphEdge[];
   entries: ProjectFileEntry[];
   structureEntries?: ProjectFileEntry[];
+  selectedRelativePaths?: string[];
   filterActive?: boolean;
   activeRelativePath: string;
   gridIconSize: number;
@@ -48,7 +49,7 @@ const parentPath = (value: string) => normalizePath(value).split('/').slice(0, -
 const EMPTY_VERSION_TREE_IDS: string[] = [];
 const EMPTY_VERSION_TREE_EDGES: VersionGraphEdge[] = [];
 
-export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION_TREE_EDGES, entries, structureEntries = entries, filterActive = false, activeRelativePath, gridIconSize, workspacePath, projectName, projectRelativePath, renderEntry, pendingChildId, hoverParentId, mutatingChildIds = EMPTY_VERSION_TREE_IDS, onBeginRelationEdit, onHoverRelationParent, onRequestRelationChange, onRequestSupplementalEdgeDelete, onRequestSupplementalEdgeReconnect, onRequestSupplementalEdgeCreate, onCancelRelationEdit, onNotice, onCanvasControllerChange }: ProjectVersionTreeProps) => {
+export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION_TREE_EDGES, entries, structureEntries = entries, selectedRelativePaths = EMPTY_VERSION_TREE_IDS, filterActive = false, activeRelativePath, gridIconSize, workspacePath, projectName, projectRelativePath, renderEntry, pendingChildId, hoverParentId, mutatingChildIds = EMPTY_VERSION_TREE_IDS, onBeginRelationEdit, onHoverRelationParent, onRequestRelationChange, onRequestSupplementalEdgeDelete, onRequestSupplementalEdgeReconnect, onRequestSupplementalEdgeCreate, onCancelRelationEdit, onNotice, onCanvasControllerChange }: ProjectVersionTreeProps) => {
   const [pointerPoint, setPointerPoint] = useState<{ x: number; y: number } | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState('');
   const [dragState, setDragState] = useState<VersionTreeDragState>(null);
@@ -88,6 +89,8 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   const visibleIds = useMemo(() => new Set(versionItems.map(item => item.folder.id)), [versionItems]);
   const visibleEdges = useMemo(() => graph.edges.filter(edge => visibleIds.has(edge.parentId) && visibleIds.has(edge.childId)), [graph.edges, visibleIds]);
   const trackedEntryPaths = useMemo(() => new Set(versionItems.map(item => normalizePath(item.entry.relativePath))), [versionItems]);
+  const selectedPathSet = useMemo(() => new Set(selectedRelativePaths.map(normalizePath)), [selectedRelativePaths]);
+  const selectedNodeIds = useMemo(() => new Set(versionItems.filter(item => selectedPathSet.has(normalizePath(item.entry.relativePath))).map(item => item.folder.id)), [selectedPathSet, versionItems]);
   const ordinaryEntries = useMemo(() => entries.filter(entry => !trackedEntryPaths.has(normalizePath(entry.relativePath))), [entries, trackedEntryPaths]);
 
   const nodeWidth = Math.max(80, gridIconSize);
@@ -96,7 +99,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   const defaultLayout = useMemo(() => {
     const itemById = new Map(versionItems.map(item => [item.folder.id, item]));
     const forest = layoutVersionTree({
-      nodes: versionItems.map(({ folder }) => ({ id: folder.id, nodeRole: folder.nodeRole, relationKind: folder.relationKind, createdAt: folder.createdAt })),
+      nodes: versionItems.map(({ folder }) => ({ id: folder.id, mediaKind: folder.mediaKind, nodeRole: folder.nodeRole, artifactKind: folder.artifactKind, relationKind: folder.relationKind, createdAt: folder.createdAt })),
       edges: visibleEdges.map(edge => ({ ...edge, id: edge.id || `${edge.parentId}:${edge.childId}:${edge.relationKind}` })),
       nodeWidth, nodeHeight, columnGap, rowGap, auxiliaryGap, rootGap,
     });
@@ -111,7 +114,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   const canvas = useVersionTreeCanvas({
     nodes: canvasNodes,
     workspacePath, projectName, scopeKey: activeRelativePath, nodeWidth, nodeHeight, onNotice,
-    dragStateRef, onDragStateChange: changeDragState,
+    selectedNodeIds, dragStateRef, onDragStateChange: changeDragState,
   });
   useEffect(() => {
     if (!onCanvasControllerChange) return;
@@ -309,7 +312,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   return <div className="relative min-w-0 flex-1 pb-4">
     {graph.cycleNodeIds.length > 0 && <div role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">版本关系需要修复：{graph.cycleNodeIds.join('、')}</div>}
     {relationChoice && <div role="dialog" aria-modal="true" aria-label="选择关系类型" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><section className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-4 shadow-2xl"><h3 className="font-bold text-slate-800">选择关系类型</h3><p className="mt-1 text-xs text-slate-500">两端节点支持多种合法关系，请明确选择本次连线语义。</p><div className="mt-4 grid gap-2">{relationChoice.kinds.map(kind => <button key={kind} type="button" onClick={() => submitNewRelation(relationChoice.sourceId, relationChoice.targetId, kind)} className="rounded-lg border border-slate-200 px-3 py-2 text-left text-sm hover:border-blue-400 hover:bg-blue-50">{versionTreeRelationLabel(kind)}</button>)}</div><button type="button" onClick={() => { setRelationChoice(null); onCancelRelationEdit?.(); }} className="mt-3 w-full rounded px-3 py-2 text-sm text-slate-500 hover:bg-slate-100">取消</button></section></div>}
-    {hasGraphItems && <div ref={canvas.viewportRef} className="overflow-auto"><div data-version-tree-canvas="true" data-drag-state={dragState?.type} onPointerDown={event => { canvas.canvasPointerHandlers.onPointerDown(event); if (!(event.target as Element).closest('[data-version-tree-node],[data-edge-id],button')) cancelRelationSelection(); }} onPointerMove={canvas.canvasPointerHandlers.onPointerMove} onPointerUp={canvas.canvasPointerHandlers.onPointerUp} onPointerCancel={canvas.canvasPointerHandlers.onPointerCancel} className="relative cursor-default" style={{ width: layout.width, height: layout.height, minWidth: '100%', minHeight: 360, touchAction: 'none', backgroundImage: 'radial-gradient(circle, rgb(148 163 184 / 0.38) 1px, transparent 1px)', backgroundSize: '20px 20px' }}>
+    {hasGraphItems && <div ref={canvas.viewportRef} className="overflow-auto"><div data-version-tree-canvas="true" data-drag-state={dragState?.type} onPointerDown={event => { canvas.canvasPointerHandlers.onPointerDown(event); if (!(event.target as Element).closest('[data-version-tree-node],[data-edge-id],button')) cancelRelationSelection(); }} onPointerMove={canvas.canvasPointerHandlers.onPointerMove} onPointerUp={canvas.canvasPointerHandlers.onPointerUp} onPointerCancel={canvas.canvasPointerHandlers.onPointerCancel} className="relative cursor-default" style={{ width: layout.width, height: layout.height, minWidth: '100%', minHeight: 360, touchAction: 'none', backgroundImage: 'radial-gradient(circle, rgb(148 163 184 / 0.05) 1px, transparent 1px)', backgroundSize: '20px 20px' }}>
       <svg aria-label="版本关系连线" className="absolute inset-0 h-full w-full overflow-visible"><defs><marker id={arrowMarkerId} markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M 0 0 L 8 4 L 0 8 z" fill="context-stroke"/></marker></defs>{layout.edges.map(edge => { const presentation = versionTreeEdgePresentation(edge.kind, selectedEdgeId === edge.id); return <g key={edge.id}>
         <path data-edge-id={edge.id} data-relation-kind={edge.kind} role={edge.childId ? 'button' : undefined} tabIndex={edge.childId ? 0 : undefined} aria-label={edge.childId ? `选择${versionTreeRelationLabel(edge.kind)}关系线` : undefined} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.stopPropagation(); selectEdge(edge); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectEdge(edge); } }} d={edge.path} fill="none" stroke="transparent" strokeWidth="14" pointerEvents="stroke" className={edge.childId ? 'cursor-pointer' : undefined}/>
         <path aria-hidden data-relation-kind={edge.kind} d={edge.path} fill="none" stroke={presentation.stroke} strokeWidth={presentation.strokeWidth} strokeDasharray={presentation.strokeDasharray} markerEnd={`url(#${arrowMarkerId})`} pointerEvents="none"/>

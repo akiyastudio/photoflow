@@ -1,6 +1,23 @@
 export type VersionTreeCanvasPosition = { x: number; y: number; manual?: boolean };
 export type VersionTreeCanvasNode = { id: string; x: number; y: number };
 
+export const translateVersionTreeCanvasSelection = (
+  startPositions: ReadonlyMap<string, VersionTreeCanvasPosition>,
+  deltaX: number,
+  deltaY: number,
+) => {
+  const finiteDeltaX = Number.isFinite(deltaX) ? deltaX : 0;
+  const finiteDeltaY = Number.isFinite(deltaY) ? deltaY : 0;
+  const positions = [...startPositions.values()];
+  const clampedDeltaX = Math.max(finiteDeltaX, -(positions.length ? Math.min(...positions.map(position => position.x)) : 0));
+  const clampedDeltaY = Math.max(finiteDeltaY, -(positions.length ? Math.min(...positions.map(position => position.y)) : 0));
+  return new Map([...startPositions].map(([id, position]) => [id, {
+    x: position.x + clampedDeltaX,
+    y: position.y + clampedDeltaY,
+    manual: true,
+  }]));
+};
+
 export const DEFAULT_VERSION_TREE_SPACING = Object.freeze({
   horizontalGap: 64,
   rowGap: 28,

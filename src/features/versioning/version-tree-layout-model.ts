@@ -4,7 +4,9 @@ export type VersionTreeLayoutRelationKind = 'main' | 'auxiliary' | 'media_compan
 
 export type VersionTreeLayoutNode = {
   id: string;
+  mediaKind?: 'image' | 'video';
   nodeRole: 'original' | 'progress' | 'selection' | 'artifact' | 'workflow';
+  artifactKind?: 'companion' | 'preview' | 'team_workspace';
   relationKind?: 'main' | 'auxiliary';
   createdAt: number;
 };
@@ -117,7 +119,13 @@ const layoutVersionTreeDag = (input: VersionTreeLayoutInput): VersionTreeLayoutR
     const id = ready.shift()!;
     orderedIds.push(id);
     for (const edge of outgoing.get(id) || []) {
-      depths.set(edge.childId, Math.max(depths.get(edge.childId) || 0, (depths.get(id) || 0) + 1));
+      const target = nodeById.get(edge.childId);
+      const targetHasStructuralMain = (incoming.get(edge.childId) || []).some(candidate => candidate.relationKind === 'main');
+      const depthStep = edge.relationKind === 'media_companion' || edge.relationKind === 'derived_preview'
+        || edge.relationKind === 'workflow_input' && target?.nodeRole === 'progress' && targetHasStructuralMain
+        ? 0
+        : 1;
+      depths.set(edge.childId, Math.max(depths.get(edge.childId) || 0, (depths.get(id) || 0) + depthStep));
       const next = (indegree.get(edge.childId) || 0) - 1;
       indegree.set(edge.childId, next);
       if (next === 0) { ready.push(edge.childId); ready.sort(compareIds); }
@@ -133,12 +141,21 @@ const layoutVersionTreeDag = (input: VersionTreeLayoutInput): VersionTreeLayoutR
     const node = nodeById.get(id)!;
     const depth = depths.get(id) || 0;
     const parents = incoming.get(id) || [];
+    const supplementalAnchor = [...parents].sort((left, right) => {
+      const leftParent = positioned.get(left.parentId);
+      const rightParent = positioned.get(right.parentId);
+      return (rightParent?.depth || 0) - (leftParent?.depth || 0)
+        || (rightParent?.x || 0) - (leftParent?.x || 0)
+        || compareEdges(left, right);
+    })[0];
     const anchor = parents.find(edge => edge.relationKind === 'main')
       || parents.find(edge => edge.relationKind === 'auxiliary')
-      || parents[0];
+      || supplementalAnchor;
     const parent = anchor ? positioned.get(anchor.parentId) : undefined;
+    const followsParentLane = anchor?.relationKind === 'main'
+      || anchor?.relationKind === 'workflow_input' && node.nodeRole === 'progress';
     let y = parent
-      ? parent.y + (anchor!.relationKind === 'main' || anchor!.relationKind === 'workflow_input' ? 0 : nodeHeight + auxiliaryGap)
+      ? parent.y + (followsParentLane ? 0 : nodeHeight + auxiliaryGap)
       : nextRootY;
     const occupied = occupiedByDepth.get(depth) || [];
     while (occupied.some(candidate => Math.abs(candidate - y) < nodeHeight + rowGap)) y += nodeHeight + rowGap;
@@ -165,4 +182,35 @@ const layoutVersionTreeDag = (input: VersionTreeLayoutInput): VersionTreeLayoutR
   };
 };
 
-export const layoutVersionTree = (input: VersionTreeLayoutInput): VersionTreeLayoutResult => layoutVersionTreeDag(input);
+export const layoutVersionTree = (input: VersionTreeLayoutInput): VersionTreeLayoutResult => {
+  const groups = [
+    input.nodes.filter(node => node.mediaKind === 'image'),
+    input.nodes.filter(node => node.mediaKind === 'video'),
+    input.nodes.filter(node => !node.mediaKind),
+  ].filter(group => group.length > 0);
+  if (groups.length <= 1) return layoutVersionTreeDag(input);
+
+  const nodeGroup = new Map<string, number>();
+  groups.forEach((group, groupIndex) => group.forEach(node => nodeGroup.set(node.id, groupIndex)));
+  const bandGap = Math.max(input.rootGap * 2, Math.round(input.nodeHeight * .75));
+  let offsetY = 0;
+  let width = 0;
+  const nodes: PositionedVersionNode[] = [];
+  const edges: PositionedVersionEdge[] = [];
+  groups.forEach((group, groupIndex) => {
+    const result = layoutVersionTreeDag({
+      ...input,
+      nodes: group,
+      edges: input.edges.filter(edge => nodeGroup.get(edge.parentId) === groupIndex && nodeGroup.get(edge.childId) === groupIndex),
+    });
+    nodes.push(...result.nodes.map(node => ({ ...node, y: node.y + offsetY })));
+    edges.push(...result.edges.map(edge => {
+      const startY = edge.startY + offsetY;
+      const endY = edge.endY + offsetY;
+      return { ...edge, startY, endY, path: versionTreeEdgePath(edge.startX, startY, edge.endX, endY) };
+    }));
+    width = Math.max(width, result.width);
+    offsetY += result.height + bandGap;
+  });
+  return { nodes, edges, width, height: Math.max(0, offsetY - bandGap) };
+};
