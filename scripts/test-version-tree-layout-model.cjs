@@ -128,8 +128,10 @@ const { pathToFileURL } = require('url');
   assert(workflowById.get('team').y > workflowById.get('source-edit').y, 'team workflow must render as a branch below its source lane');
 
   assert.strictEqual(edgeModel.versionTreeEdgePresentation('main').strokeDasharray, undefined, 'main relations must use solid lines');
-  assert.strictEqual(edgeModel.versionTreeEdgePresentation('auxiliary').strokeDasharray, '7 5', 'selection relations must use dashed lines');
-  assert.deepStrictEqual(['main', 'auxiliary', 'media_companion', 'derived_preview', 'workflow_input'].map(edgeModel.versionTreeRelationLabel), ['主分支', '附属分支', '配套素材', '预览产物', '工作流输入']);
+  for (const kind of ['main', 'auxiliary', 'media_companion', 'derived_preview', 'workflow_input']) {
+    assert.strictEqual(edgeModel.versionTreeEdgePresentation(kind).strokeDasharray, undefined, `${kind} relations must use solid lines`);
+  }
+  assert.deepStrictEqual(['main', 'auxiliary', 'media_companion', 'derived_preview', 'workflow_input'].map(edgeModel.versionTreeRelationLabel), ['版本关系', '选片关联', '配套素材', '预览产物', '工作流输入']);
   const relationNode = (id, nodeRole, artifactKind) => ({ id, projectId: 'p', mediaKind: 'image', nodeRole, artifactKind, folderMissing: false });
   assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('raw', 'original'), relationNode('jpg', 'artifact', 'companion')), ['media_companion']);
   assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('raw', 'original'), relationNode('preview', 'artifact', 'preview')), ['derived_preview']);

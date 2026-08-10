@@ -705,45 +705,68 @@ def split_video_by_size(
     output_pattern = os.path.join(temporary_dir, f"{os.path.basename(stem)}_part%03d{extension}")
     committed_segments: list[str] = []
     try:
-        code, stderr = _run_cancellable_process(
-            [
-                get_ffmpeg_exe(),
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-n",
-                "-i",
-                input_path,
-                "-map",
-                "0",
-                "-c",
-                "copy",
-                "-f",
-                "segment",
-                "-segment_time",
-                str(segment_duration),
-                "-reset_timestamps",
-                "1",
-                output_pattern,
-            ],
-            cancel_check,
-        )
-        if cancel_check:
-            cancel_check()
-        temporary_segments = sorted(
-            os.path.join(temporary_dir, name)
-            for name in os.listdir(temporary_dir)
-            if name.startswith(prefix) and name.lower().endswith(extension.lower())
-        )
-        sizes_are_valid = all(
-            os.path.getsize(segment) > 0
-            and (maximum_segment_bytes is None or os.path.getsize(segment) <= maximum_segment_bytes)
-            for segment in temporary_segments
-        )
-        if code != 0 or len(temporary_segments) < 2 or not sizes_are_valid:
+        temporary_segments: list[str] = []
+        last_detail = "未生成完整且符合大小限制的分段"
+        for attempt in range(5):
+            for name in os.listdir(temporary_dir):
+                candidate = os.path.join(temporary_dir, name)
+                if os.path.isfile(candidate):
+                    os.remove(candidate)
+            code, stderr = _run_cancellable_process(
+                [
+                    get_ffmpeg_exe(),
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-n",
+                    "-i",
+                    input_path,
+                    "-map",
+                    "0",
+                    "-c",
+                    "copy",
+                    "-f",
+                    "segment",
+                    "-segment_time",
+                    str(segment_duration),
+                    "-reset_timestamps",
+                    "1",
+                    output_pattern,
+                ],
+                cancel_check,
+            )
+            if cancel_check:
+                cancel_check()
+            temporary_segments = sorted(
+                os.path.join(temporary_dir, name)
+                for name in os.listdir(temporary_dir)
+                if name.startswith(prefix) and name.lower().endswith(extension.lower())
+            )
+            segment_sizes = [os.path.getsize(segment) for segment in temporary_segments]
+            oversized_sizes = [size for size in segment_sizes if maximum_segment_bytes is not None and size > maximum_segment_bytes]
+            sizes_are_valid = all(size > 0 for size in segment_sizes) and not oversized_sizes
+            if code == 0 and len(temporary_segments) >= 2 and sizes_are_valid:
+                break
+
             detail_lines = (stderr or "").strip().splitlines()
-            detail = detail_lines[-1] if detail_lines else "未生成完整且符合大小限制的分段"
-            raise FFmpegTranscodeError(detail)
+            if detail_lines:
+                last_detail = detail_lines[-1]
+            elif oversized_sizes and maximum_segment_bytes:
+                largest_gib = max(oversized_sizes) / (1024 ** 3)
+                limit_gib = maximum_segment_bytes / (1024 ** 3)
+                last_detail = f"关键帧偏移导致最大分段为 {largest_gib:.2f} GiB，超过 {limit_gib:.2f} GiB 限制"
+            if code != 0:
+                raise FFmpegTranscodeError(last_detail)
+            if attempt == 4:
+                raise FFmpegTranscodeError(last_detail)
+
+            # Stream-copy splitting can only cut on keyframes. Leave increasing
+            # headroom when a keyframe lands after the estimated size boundary.
+            if oversized_sizes and maximum_segment_bytes:
+                observed_ratio = max(oversized_sizes) / maximum_segment_bytes
+                segment_duration *= max(0.5, min(0.9, 0.92 / observed_ratio))
+            else:
+                segment_duration *= 0.75
         for temporary_segment in temporary_segments:
             final_segment = os.path.join(source_dir, os.path.basename(temporary_segment))
             if os.path.exists(final_segment):

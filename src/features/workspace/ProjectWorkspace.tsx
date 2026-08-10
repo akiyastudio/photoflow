@@ -375,6 +375,13 @@ type ProgressSetupDraft = {
   existingProgressId?: string;
   preserveFolderName?: boolean;
 };
+type VersionTreeCreateConfirmation = {
+  source: ProgressFolder;
+  target: ProjectFileEntry;
+  nextDraft: ProgressSetupDraft;
+  branchDraft: ProgressSetupDraft;
+};
+type VersionGraphHistoryEntry = { label: string; undo: () => Promise<void>; redo: () => Promise<void> };
 type ProgressCompareConfirmation = {
   sourceMode: 'import' | 'mark';
   progressFolder: ProgressFolder;
@@ -576,6 +583,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const progressFoldersRef = useRef<ProgressFolder[]>([]);
   const relationMutationQueueRef = useRef(new ProgressRelationMutationQueue());
   const relationMutationCountsRef = useRef(new Map<string, number>());
+  const relationUndoStackRef = useRef<VersionGraphHistoryEntry[]>([]);
+  const relationRedoStackRef = useRef<VersionGraphHistoryEntry[]>([]);
+  const [relationHistoryRevision, setRelationHistoryRevision] = useState(0);
   const [relationMutatingChildIds, setRelationMutatingChildIds] = useState<string[]>([]);
   useEffect(() => { progressFoldersRef.current = progressFolders; }, [progressFolders]);
   const cancelRelationEdit = useCallback(() => {
@@ -862,6 +872,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [showImageToolsMenu, setShowImageToolsMenu] = useState(false);
   const [showToolbarOverflowMenu, setShowToolbarOverflowMenu] = useState(false);
   const [progressSetup, setProgressSetup] = useState<ProgressSetupDraft | null>(null);
+  const [versionTreeCreateConfirmation, setVersionTreeCreateConfirmation] = useState<VersionTreeCreateConfirmation | null>(null);
   const [pendingProgressFolders, setPendingProgressFolders] = useState<Array<{ relativePath: string; name: string; mediaKind: 'image' | 'video' }>>([]);
   const [progressImportCompletion, setProgressImportCompletion] = useState('');
   const [progressCompare, setProgressCompare] = useState<ProgressCompareConfirmation | null>(null);
@@ -879,6 +890,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setProgressSetup(null);
   }, []);
   useEscapeLayer(Boolean(progressSetup), closeProgressSetup, !progressSubmitting && !progressTask);
+  useEscapeLayer(Boolean(versionTreeCreateConfirmation), () => setVersionTreeCreateConfirmation(null), !progressSubmitting);
   useEscapeLayer(Boolean(progressCompare), () => { void closeProgressCompare(); }, !progressSubmitting);
   useEscapeLayer(Boolean(progressRepair), () => setProgressRepair(null), !progressRepairBusy);
   useEscapeLayer(Boolean(pendingProgressFolders.length) && !progressSetup, () => setPendingProgressFolders([]));
@@ -1113,6 +1125,43 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     onNotice(`读取版本进度失败：${result.error || '未知错误'}`);
     return [];
   }, [workspacePath, project.name, onNotice]);
+  const pushRelationHistory = (entry: VersionGraphHistoryEntry) => {
+    relationUndoStackRef.current.push(entry);
+    if (relationUndoStackRef.current.length > 80) relationUndoStackRef.current.shift();
+    relationRedoStackRef.current = [];
+    setRelationHistoryRevision(value => value + 1);
+  };
+  const undoVersionGraphAction = async () => {
+    const entry = relationUndoStackRef.current.pop();
+    if (!entry) return;
+    try {
+      await entry.undo();
+      relationRedoStackRef.current.push(entry);
+      onNotice(`已撤销：${entry.label}`);
+    } catch (error) {
+      relationUndoStackRef.current.push(entry);
+      onNotice(`撤销失败：${error instanceof Error ? error.message : String(error)}`, 7000);
+    } finally { setRelationHistoryRevision(value => value + 1); }
+  };
+  const redoVersionGraphAction = async () => {
+    const entry = relationRedoStackRef.current.pop();
+    if (!entry) return;
+    try {
+      await entry.redo();
+      relationUndoStackRef.current.push(entry);
+      onNotice(`已重做：${entry.label}`);
+    } catch (error) {
+      relationRedoStackRef.current.push(entry);
+      onNotice(`重做失败：${error instanceof Error ? error.message : String(error)}`, 7000);
+    } finally { setRelationHistoryRevision(value => value + 1); }
+  };
+  const mutateSupplementalEdge = async (mode: 'create' | 'delete', request: Pick<VersionGraphEdge, 'projectId' | 'sourceProgressId' | 'targetProgressId' | 'edgeKind'>) => {
+    const result = mode === 'create'
+      ? await window.electronAPI.createVersionGraphEdge(workspacePath, request)
+      : await window.electronAPI.deleteVersionGraphEdge(workspacePath, request);
+    if (!result.success) throw new Error(result.error || '无法更新版本图关系');
+    await loadProgressFolders();
+  };
   const repairLegacySelectionRelation = async (progressId: string, sourceProgressId: string) => {
     if (legacySelectionRepairBusyIds.includes(progressId)) return;
     setLegacySelectionRepairBusyIds(current => current.includes(progressId) ? current : [...current, progressId]);
@@ -1132,6 +1181,29 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       setLegacySelectionRepairBusyIds(current => current.filter(id => id !== progressId));
     }
   };
+  const requestSupplementalEdgeCreate = async (sourceProgressId: string, targetProgressId: string, edgeKind: 'media_companion' | 'derived_preview' | 'workflow_input') => {
+    const source = progressFoldersRef.current.find(folder => folder.id === sourceProgressId);
+    const target = progressFoldersRef.current.find(folder => folder.id === targetProgressId);
+    if (!source || !target) { onNotice('关系节点不存在，请刷新后重试'); return; }
+    const relationLabel = edgeKind === 'media_companion' ? '配套素材' : edgeKind === 'derived_preview' ? '预览产物' : '工作流输入';
+    const confirmed = await appDialog.confirm({
+      title: `创建${relationLabel}关系？`,
+      message: `将“${source.displayName}”连接到“${target.displayName}”。这不会创建版本号，也不会移动文件。`,
+      confirmLabel: '创建关系',
+    });
+    if (!confirmed) return;
+    const request = {
+      projectId: target.projectId,
+      sourceProgressId,
+      targetProgressId,
+      edgeKind,
+    };
+    const result = await window.electronAPI.createVersionGraphEdge(workspacePath, request);
+    if (!result.success) { onNotice(`创建${relationLabel}关系失败：${result.error || '未知错误'}`, 7000); return; }
+    await loadProgressFolders();
+    pushRelationHistory({ label: `创建${relationLabel}关系`, undo: () => mutateSupplementalEdge('delete', request), redo: () => mutateSupplementalEdge('create', request) });
+    onNotice(`已创建${relationLabel}关系`);
+  };
   const requestSupplementalEdgeDelete = async (edge: Pick<VersionGraphEdge, 'id' | 'sourceProgressId' | 'targetProgressId' | 'edgeKind'>) => {
     const child = progressFoldersRef.current.find(folder => folder.id === edge.targetProgressId);
     if (!child) { onNotice('关系终点不存在，请刷新后重试'); return; }
@@ -1144,14 +1216,16 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       tone: 'danger',
     });
     if (!confirmed) return;
-    const result = await window.electronAPI.deleteVersionGraphEdge(workspacePath, {
+    const request = {
       projectId: child.projectId,
       sourceProgressId: edge.sourceProgressId,
       targetProgressId: edge.targetProgressId,
       edgeKind: edge.edgeKind,
-    });
+    };
+    const result = await window.electronAPI.deleteVersionGraphEdge(workspacePath, request);
     if (!result.success) { onNotice(`删除补充关系失败：${result.error || '未知错误'}`, 7000); return; }
     await loadProgressFolders();
+    pushRelationHistory({ label: '断开补充关系', undo: () => mutateSupplementalEdge('create', request), redo: () => mutateSupplementalEdge('delete', request) });
     onNotice('补充关系已删除');
   };
   const requestSupplementalEdgeReconnect = async (edge: Pick<VersionGraphEdge, 'id' | 'sourceProgressId' | 'targetProgressId' | 'edgeKind'>, newSourceProgressId: string) => {
@@ -1167,16 +1241,30 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       confirmLabel: '改接关系',
     });
     if (!confirmed) { cancelRelationEdit(); return; }
-    const result = await window.electronAPI.replaceVersionGraphEdgeSource(workspacePath, {
+    const request = {
       projectId: child.projectId,
       sourceProgressId: edge.sourceProgressId,
       targetProgressId: edge.targetProgressId,
       edgeKind: edge.edgeKind,
       newSourceProgressId,
-    });
+    };
+    const result = await window.electronAPI.replaceVersionGraphEdgeSource(workspacePath, request);
     cancelRelationEdit();
     if (!result.success) { onNotice(`改接补充关系失败：${result.error || '未知错误'}`, 7000); return; }
     await loadProgressFolders();
+    pushRelationHistory({
+      label: '改接补充关系',
+      undo: async () => {
+        const reverted = await window.electronAPI.replaceVersionGraphEdgeSource(workspacePath, { ...request, sourceProgressId: newSourceProgressId, newSourceProgressId: edge.sourceProgressId });
+        if (!reverted.success) throw new Error(reverted.error || '无法撤销改接');
+        await loadProgressFolders();
+      },
+      redo: async () => {
+        const repeated = await window.electronAPI.replaceVersionGraphEdgeSource(workspacePath, request);
+        if (!repeated.success) throw new Error(repeated.error || '无法重做改接');
+        await loadProgressFolders();
+      },
+    });
     onNotice('补充关系来源已更新');
   };
   const requestProgressRelationChange = async (childProgressId: string, parentProgressId: string | null) => {
@@ -1198,18 +1286,20 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!confirmed) { cancelRelationEdit(); return; }
     if (parent && (child.nodeRole === 'progress' && (parent.nodeRole === 'selection' || parent.nodeRole === 'workflow')
       || child.nodeRole === 'workflow' && parent.nodeRole === 'progress')) {
-      const result = await window.electronAPI.createVersionGraphEdge(workspacePath, {
+      const edgeRequest = {
         projectId: child.projectId,
         sourceProgressId: parent.id,
         targetProgressId: child.id,
         edgeKind: 'workflow_input',
-      });
+      } as const;
+      const result = await window.electronAPI.createVersionGraphEdge(workspacePath, edgeRequest);
       cancelRelationEdit();
       if (!result.success) {
         onNotice(`添加工作流输入关系失败：${result.error || '未知错误'}`, 7000);
         return;
       }
       await loadProgressFolders();
+      pushRelationHistory({ label: '添加工作流输入', undo: () => mutateSupplementalEdge('delete', edgeRequest), redo: () => mutateSupplementalEdge('create', edgeRequest) });
       onNotice('工作流输入关系已添加');
       return;
     }
@@ -1226,6 +1316,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         if (!latestChild) latestChild = (await loadProgressFolders()).find(folder => folder.id === childProgressId);
         if (!latestChild) throw new Error('要修改的版本节点不存在，请刷新后重试');
         if ((latestChild.parentProgressId || null) === parentProgressId) return;
+        const previousParentProgressId = latestChild.parentProgressId || null;
         const result = await window.electronAPI.updateProgressRelation(workspacePath, project.name, {
           childProgressId,
           parentProgressId,
@@ -1242,6 +1333,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           progressFoldersRef.current = next;
           return next;
         });
+        const applyParent = async (nextParentProgressId: string | null) => {
+          const currentChild = progressFoldersRef.current.find(folder => folder.id === childProgressId);
+          const changed = await window.electronAPI.updateProgressRelation(workspacePath, project.name, { childProgressId, parentProgressId: nextParentProgressId, expectedUpdatedAt: currentChild?.updatedAt });
+          if (!changed.success) throw new Error(changed.error || '无法更新版本关系');
+          await loadProgressFolders();
+        };
+        pushRelationHistory({ label: '修改版本父关系', undo: () => applyParent(previousParentProgressId), redo: () => applyParent(parentProgressId) });
         onNotice('版本关系已更新');
       });
     } catch (error) {
@@ -2067,10 +2165,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       const detailsByPath = new Map(results.flatMap(result => result.success ? result.details : []).map(detail => [detail.relativePath, detail]));
       if (!detailsByPath.size) return;
       setFileEntries(current => {
+        let changed = false;
         const next = current.map(entry => {
           const detail = detailsByPath.get(entry.relativePath);
-          return detail ? { ...entry, size: detail.size, createdAt: detail.createdAt, updatedAt: detail.updatedAt } : entry;
+          if (!detail || entry.size === detail.size && entry.createdAt === detail.createdAt && entry.updatedAt === detail.updatedAt) return entry;
+          changed = true;
+          return { ...entry, size: detail.size, createdAt: detail.createdAt, updatedAt: detail.updatedAt };
         });
+        if (!changed) return current;
         directoryEntriesCacheRef.current.set(directoryPath, next);
         return next;
       });
@@ -2086,10 +2188,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       if (!active || directoryPath !== currentRelativePathRef.current || !result.success || !result.details.length) return;
       const detailsByPath = new Map(result.details.map(detail => [detail.relativePath, detail]));
       setFileEntries(current => {
+        let changed = false;
         const next = current.map(entry => {
           const detail = detailsByPath.get(entry.relativePath);
-          return detail ? { ...entry, size: detail.size, createdAt: detail.createdAt, updatedAt: detail.updatedAt } : entry;
+          if (!detail || entry.size === detail.size && entry.createdAt === detail.createdAt && entry.updatedAt === detail.updatedAt) return entry;
+          changed = true;
+          return { ...entry, size: detail.size, createdAt: detail.createdAt, updatedAt: detail.updatedAt };
         });
+        if (!changed) return current;
         directoryEntriesCacheRef.current.set(directoryPath, next);
         return next;
       });
@@ -2509,6 +2615,44 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       setProgressSetup(current => current === initialDraft ? latestDraft : current);
     });
   };
+  const openNextProgressFromVersionTree = async (source: ProgressFolder, entry: ProjectFileEntry) => {
+    if (entry.kind !== 'folder' || entry.viaShortcut || source.folderMissing || source.nodeRole !== 'progress') {
+      onNotice('请选择项目内的普通文件夹来创建下一版本。');
+      return;
+    }
+    const targetRelativePath = normalizeProjectRelativePath(entry.relativePath);
+    const latestFolders = await loadProgressFolders();
+    const targetPath = entry.path.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase('zh-CN');
+    if (latestFolders.some(folder => folder.folderPath.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase('zh-CN') === targetPath)) {
+      onNotice('该文件夹已经是版本树节点，不能重复创建版本。');
+      return;
+    }
+    const completeDraft = (draft: ProgressSetupDraft): ProgressSetupDraft => ({
+      ...draft,
+      progressName: entry.name,
+      targetRelativePath,
+      trackingEnabled: true,
+      preserveFolderName: true,
+    });
+    const latestSource = latestFolders.find(folder => folder.id === source.id) || source;
+    setVersionTreeCreateConfirmation({
+      source: latestSource,
+      target: entry,
+      nextDraft: completeDraft(makeProgressDraft('mark', source.mediaKind, 'root', source.id, latestFolders)),
+      branchDraft: completeDraft(makeProgressDraft('mark', source.mediaKind, 'branch', source.id, latestFolders)),
+    });
+  };
+  const openEmptyProgressFromVersionTree = async (source: ProgressFolder, branch: boolean) => {
+    if (source.folderMissing || source.nodeRole !== 'progress') {
+      onNotice('只能从有效的版本进度创建下一版本。');
+      return;
+    }
+    const latestFolders = await loadProgressFolders();
+    const latestSource = latestFolders.find(folder => folder.id === source.id);
+    if (!latestSource) { onNotice('来源版本已发生变化，请刷新后重试。'); return; }
+    const draft = makeProgressDraft('create', source.mediaKind, branch ? 'branch' : 'root', source.id, latestFolders);
+    setProgressSetup({ ...draft, trackingEnabled: true });
+  };
   const projectRelativePath = (absolutePath: string) => {
     const normalizedRoot = project.path.replace(/\\/g, '/').replace(/\/$/, '');
     const normalizedPath = absolutePath.replace(/\\/g, '/');
@@ -2550,9 +2694,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       workflowInputProgressIds,
     });
   };
-  const submitProgressSetup = async () => {
-    if (!progressSetup || progressSubmitting || !progressVersionIsValid(progressSetup) || progressNameHasConflict(progressSetup)) return;
-    const draft = progressSetup;
+  const submitProgressSetup = async (requestedDraft?: ProgressSetupDraft) => {
+    const draft = requestedDraft || progressSetup;
+    if (!draft || progressSubmitting || !progressVersionIsValid(draft) || progressNameHasConflict(draft)) return;
     const appendTarget = progressAppendTarget(draft);
     if (appendTarget?.trackingState === 'needs_repair' || appendTarget?.trackingState === 'committing') {
       onNotice(appendTarget.trackingState === 'needs_repair' ? '请先修复当前版本批次，再追加文件。' : '当前版本批次仍在提交，请稍后再追加。');
@@ -2663,7 +2807,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
 
         if (!policy.trackingEnabled || draft.relationKind === 'auxiliary') {
           setProgressTask('');
-          onNotice(`已将“${generatedName}”登记为${draft.relationKind === 'auxiliary' ? '附属分支' : '主分支'}。`);
+          onNotice(`已将“${generatedName}”登记为${draft.relationKind === 'auxiliary' ? '选片辅助节点' : '版本进度'}。`);
           return;
         }
         if (!parentFolder) {
@@ -2815,7 +2959,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   };
   const refreshProgressTracking = async (requestedProgress: ProgressFolder) => {
     if (progressSubmitting || progressTask) return;
-    if (!progressTrackingAction(requestedProgress)) { onNotice('附属分支不参与版本跟踪，不能比较、提交或刷新。'); return; }
+    if (!progressTrackingAction(requestedProgress)) { onNotice('选片、预览产物和协作节点不参与版本跟踪；V1_1 版本分支可正常跟踪。'); return; }
     if (requestedProgress.trackingState === 'needs_repair' && requestedProgress.repairBatchId) { await openProgressRepair(requestedProgress); return; }
     setProgressSubmitting(true);
     try {
@@ -4682,7 +4826,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const canonicalName = ['raw', 'jpg', 'mov'].includes(entry.name.toLocaleLowerCase()) ? entry.name.toLocaleUpperCase() : entry.name;
     const statusLabel = progressFolder
       ? progressFolder.nodeRole === 'original' ? '原始素材'
-        : progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' ? '附属分支'
+        : progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' ? '选片辅助节点'
           : previewArtifact ? '预览产物'
             : workflow ? '协作工作区'
               : versionTreeStatusLabel(progressFolder)
@@ -4700,19 +4844,19 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       data-entry-kind={entry.kind}
       data-entry-path={entry.relativePath}
       onMouseEnter={() => prefetchDirectory(entry)}
-      onClick={event => handleEntryClick(event, entry)}
+      onClick={event => { if (entry.kind === 'folder') { event.stopPropagation(); void openProjectEntry(entry); } else handleEntryClick(event, entry); }}
       onDoubleClick={event => handleEntryDoubleClick(event, entry)}
-      onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }}
+      onKeyDown={event => { if (event.key === 'Enter') { if (entry.kind === 'folder') void openProjectEntry(entry); else handleEntryClick(event, entry); } }}
       onContextMenu={event => openFileMenu(event, entry)}
       title={entry.name}
       className={`group relative min-w-0 cursor-default rounded-lg border p-2 text-left transition ${progressFolder ? 'border-transparent bg-slate-500/[0.025] hover:border-blue-300/60 hover:bg-blue-500/[0.04]' : 'overflow-hidden border-transparent hover:bg-blue-50'} ${selected ? 'border-blue-400/80 bg-blue-500/[0.07] ring-1 ring-blue-400/70 shadow-sm' : ''} ${previewArtifact ? 'border-amber-400/20' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'border-blue-500 bg-blue-100 ring-2 ring-blue-500' : ''}`}
     >
       <span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span>
-      {progressFolder && <span className={`absolute right-3 top-3 z-10 rounded-full px-2 py-1 text-[10px] font-bold shadow-sm ${progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' || workflow ? 'bg-violet-600 text-white' : previewArtifact ? 'bg-amber-500 text-white' : progressFolder.nodeRole === 'original' ? 'bg-slate-700 text-white' : 'bg-blue-600 text-white'}`}>{versionTreeNodeBadgeLabel(progressFolder)}</span>}
+      {progressFolder && (progressFolder.nodeRole === 'progress' ? <button type="button" onPointerDown={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); openMarkProgress(entry); }} title={`编辑 V${progressFolder.versionKey} 进度`} aria-label={`编辑 V${progressFolder.versionKey} 进度`} className="absolute right-3 top-3 z-10 rounded-full bg-blue-600 px-2 py-1 text-[10px] font-bold text-white shadow-sm transition hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-300">{versionTreeNodeBadgeLabel(progressFolder)}</button> : <span className={`absolute right-3 top-3 z-10 rounded-full px-2 py-1 text-[10px] font-bold shadow-sm ${progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' || workflow ? 'bg-violet-600 text-white' : previewArtifact ? 'bg-amber-500 text-white' : 'bg-slate-700 text-white'}`}>{versionTreeNodeBadgeLabel(progressFolder)}</span>)}
       {!progressFolder && sourceKind && <span className="absolute right-3 top-3 z-10 rounded-full bg-slate-700 px-2 py-1 text-[10px] font-bold text-white shadow-sm">底片</span>}
       {!progressFolder && entry.name === '团片协作' && <span className="absolute right-3 top-3 z-10 rounded-full bg-violet-600 px-2 py-1 text-[10px] font-bold text-white shadow-sm">协作分支</span>}
-      {workflow ? <div className="flex aspect-square flex-col items-center justify-center rounded-xl border border-violet-400/25 bg-violet-500/[0.055] px-3 text-center"><UsersRound size={28} className="mb-2 text-violet-500"/><p className="max-w-full truncate text-xs font-bold text-slate-700">{progressFolder.displayName}</p><p className="mt-1 text-[10px] text-slate-400">工作流节点</p></div> : <div className={`relative flex aspect-square items-center justify-center ${previewArtifact ? 'rounded-xl bg-amber-500/[0.035]' : ''}`}>{renderEntryIcon(entry, true)}</div>}
-      {progressFolder ? !workflow && <p className="mt-1 truncate text-xs font-medium text-slate-700" title={entry.name}>{canonicalName}</p> : renderEntryName(entry, true)}
+      <div className={`relative flex aspect-square items-center justify-center ${previewArtifact ? 'rounded-xl bg-amber-500/[0.035]' : ''}`}>{renderEntryIcon(entry, true)}</div>
+      {progressFolder ? <p className="mt-1 truncate text-xs font-medium text-slate-700" title={entry.name}>{canonicalName}</p> : renderEntryName(entry, true)}
       <p className={`mt-0.5 truncate text-[10px] ${progressFolder?.trackingState === 'needs_repair' ? 'font-bold text-amber-600' : 'text-slate-400'}`}><span aria-hidden className="mr-1">●</span>{statusLabel}</p>
     </div>;
   };
@@ -5033,9 +5177,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       {mountedPanels.has('trash') && <ToolModal title={PROJECT_PANEL_TITLES.trash} ownerPageId={pageId} panelKind="trash" open={panel === 'trash'} onClose={() => setPanel(null)}><p className="text-sm text-slate-500">项目“{project.name}”及其全部内容将移入系统回收站。</p><button onClick={moveToTrash} className="mt-4 rounded-lg bg-red-600 px-4 py-2 text-sm font-bold text-white hover:bg-red-500">确认移入回收站</button></ToolModal>}
       {gatherPickerPaths && createPortal(<div role="dialog" aria-modal="true" aria-label="选择灵感汇聚项目" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><section className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="flex items-center justify-between gap-3"><div><h3 className="text-lg font-bold text-slate-900">选择目标项目</h3><p className="mt-1 text-sm text-slate-500">所选灵感将会出现在目录项目下的“策划”文件夹。</p></div><button type="button" disabled={gatheringInspiration} onClick={() => setGatherPickerPaths(null)} title="关闭" className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100"><X size={17}/></button></div><div className="mt-4 max-h-80 space-y-1 overflow-y-auto">{inspirationProjects.map(targetProject => <button key={targetProject.path} type="button" disabled={gatheringInspiration} onClick={() => void gatherInspiration(targetProject, gatherPickerPaths)} className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm hover:bg-blue-50 ${targetProject.path === inspirationTargetProject?.path ? 'bg-blue-50 font-bold text-blue-700' : 'text-slate-700'}`}><Folder size={17} className="shrink-0 text-blue-500"/><span className="min-w-0 flex-1 truncate">{targetProject.name}</span><span className="shrink-0 text-xs text-slate-400">{targetProject.status}</span></button>)}{!inspirationProjects.length && <p className="rounded-lg bg-slate-50 px-3 py-5 text-center text-sm text-slate-500">当前工作目录中没有可用项目。</p>}</div></section></div>, document.body)}
       {progressTask && createPortal(<div role="status" aria-live="polite" className="fixed left-1/2 top-14 z-[390] flex w-[min(92vw,520px)] -translate-x-1/2 items-center gap-3 rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white shadow-2xl"><Loader2 size={18} className="shrink-0 animate-spin text-blue-300"/><span>{progressTask}</span></div>, document.body)}
+      {versionTreeCreateConfirmation && <div role="dialog" aria-modal="true" aria-label="确认创建下一版本" className="fixed inset-0 z-[342] flex items-center justify-center bg-slate-950/50 p-4"><section className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl"><h3 className="text-lg font-bold text-slate-900">创建 V{versionTreeCreateConfirmation.nextDraft.versionKey}</h3><dl className="mt-4 grid grid-cols-[88px_1fr] gap-x-3 gap-y-2 text-sm"><dt className="text-slate-500">父版本</dt><dd className="font-medium text-slate-800">V{versionTreeCreateConfirmation.source.versionKey} · {versionTreeCreateConfirmation.source.displayName}</dd><dt className="text-slate-500">目标文件夹</dt><dd className="break-all font-medium text-slate-800">{versionTreeCreateConfirmation.target.name}</dd><dt className="text-slate-500">跟踪</dt><dd className="text-slate-700">开启（可在高级设置中调整）</dd></dl><p className="mt-4 rounded-lg bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-700">默认创建下一个主线版本 V{versionTreeCreateConfirmation.nextDraft.versionKey}。如果需要从 V{versionTreeCreateConfirmation.source.versionKey} 分出可跟踪版本，可创建 V{versionTreeCreateConfirmation.branchDraft.versionKey}。</p><div className="mt-5 flex flex-wrap justify-end gap-2"><button type="button" disabled={progressSubmitting} onClick={() => setVersionTreeCreateConfirmation(null)} className="dialog-secondary">取消</button><button type="button" disabled={progressSubmitting} onClick={() => { const draft = versionTreeCreateConfirmation.nextDraft; setVersionTreeCreateConfirmation(null); setProgressSetup(draft); }} className="dialog-secondary">高级设置</button><button type="button" disabled={progressSubmitting} onClick={() => { const draft = versionTreeCreateConfirmation.branchDraft; setVersionTreeCreateConfirmation(null); void submitProgressSetup(draft); }} className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700 hover:bg-blue-100">创建分支 V{versionTreeCreateConfirmation.branchDraft.versionKey}</button><button type="button" disabled={progressSubmitting} onClick={() => { const draft = versionTreeCreateConfirmation.nextDraft; setVersionTreeCreateConfirmation(null); void submitProgressSetup(draft); }} className="dialog-primary">创建 V{versionTreeCreateConfirmation.nextDraft.versionKey}</button></div></section></div>}
       {progressSetup && <VersionProgressPanel
         draft={{
-          mode: progressSetup.mode === 'mark' ? 'modify' : progressSetup.mode,
+          mode: progressSetup.mode === 'mark' ? progressSetup.existingProgressId ? 'modify' : 'create-next' : progressSetup.mode,
           sourceRelativePath: progressSetup.targetRelativePath || currentRelativePath,
           displayName: progressSetup.progressName || progressFolders.find(folder => folder.id === progressSetup.existingProgressId)?.displayName || progressSetup.targetRelativePath?.split('/').pop() || buildProgressFolderName(progressSetup.mediaKind, progressSetup.versionKey, ''),
           mediaKind: progressSetup.mediaKind,
@@ -5046,6 +5191,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           copyMissingFromParent: progressSetup.copyMissingFromParent,
           workflowInputProgressIds: progressSetup.workflowInputProgressIds,
           existingProgressId: progressSetup.existingProgressId,
+          versionKey: progressSetup.versionKey,
         }}
         folders={progressFolders}
         state={progressSubmitting ? 'processing' : progressImportCompletion ? 'result' : 'ready'}
@@ -5171,6 +5317,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             onRequestRelationChange={(childProgressId, parentProgressId) => void requestProgressRelationChange(childProgressId, parentProgressId)}
             onRequestSupplementalEdgeDelete={edge => void requestSupplementalEdgeDelete(edge)}
             onRequestSupplementalEdgeReconnect={(edge, newSourceProgressId) => void requestSupplementalEdgeReconnect(edge, newSourceProgressId)}
+            onRequestSupplementalEdgeCreate={(sourceProgressId, targetProgressId, edgeKind) => void requestSupplementalEdgeCreate(sourceProgressId, targetProgressId, edgeKind)}
+            onRequestCreateVersion={(source, entry) => void openNextProgressFromVersionTree(source, entry)}
+            onRequestCreateEmptyVersion={(source, branch) => void openEmptyProgressFromVersionTree(source, branch)}
+            canUndoRelation={relationHistoryRevision >= 0 && relationUndoStackRef.current.length > 0}
+            canRedoRelation={relationHistoryRevision >= 0 && relationRedoStackRef.current.length > 0}
+            onUndoRelation={() => void undoVersionGraphAction()}
+            onRedoRelation={() => void redoVersionGraphAction()}
             onCancelRelationEdit={cancelRelationEdit}
             onNotice={onNotice}
             onCanvasControllerChange={setVersionTreeCanvasController}

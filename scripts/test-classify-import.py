@@ -413,6 +413,39 @@ class ClassifyImportTests(unittest.TestCase):
             self.assertTrue(source.is_file())
             self.assertFalse(any(Path(temporary).glob('.photoflow-split-*')))
 
+    def test_lossless_split_retries_with_more_headroom_when_a_segment_is_oversized(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / 'large.mp4'
+            source.write_bytes(b'0123456789')
+            segment_times = []
+
+            def create_segments(command, _cancel_check):
+                pattern = command[-1]
+                segment_times.append(float(command[command.index('-segment_time') + 1]))
+                if len(segment_times) == 1:
+                    Path(pattern.replace('%03d', '000')).write_bytes(b'12345678901')
+                    Path(pattern.replace('%03d', '001')).write_bytes(b'part')
+                else:
+                    Path(pattern.replace('%03d', '000')).write_bytes(b'first')
+                    Path(pattern.replace('%03d', '001')).write_bytes(b'second')
+                    Path(pattern.replace('%03d', '002')).write_bytes(b'third')
+                return 0, ''
+
+            with mock.patch.object(ffmpeg_transcode, 'probe_duration', return_value=10.0), \
+                    mock.patch.object(ffmpeg_transcode, '_run_cancellable_process', side_effect=create_segments):
+                outputs = ffmpeg_transcode.split_video_by_size(
+                    str(source),
+                    split_threshold_bytes=1,
+                    target_segment_bytes=5,
+                    maximum_segment_bytes=10,
+                    keep_original=True,
+                )
+
+            self.assertEqual(len(segment_times), 2)
+            self.assertLess(segment_times[1], segment_times[0])
+            self.assertEqual([Path(path).name for path in outputs], ['large_part000.mp4', 'large_part001.mp4', 'large_part002.mp4'])
+            self.assertTrue(source.is_file())
+
     def test_sd_broll_uses_project_broll_root_and_split_setting(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

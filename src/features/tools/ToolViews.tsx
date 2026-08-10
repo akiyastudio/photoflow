@@ -176,6 +176,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   const driveTypes = config?.sdDriveTypes || {};
   // 【关键修改】使用 Ref 来做“防抖”锁，防止 SD 卡接触不良导致多次触发 startImport
   const isBusyRef = React.useRef(false);
+  const autoCheckStartedRef = React.useRef(false);
   const importQueueRef = React.useRef<Array<{ path: string; type: 'work' | 'broll' }>>([]);
   const currentDriveRef = React.useRef('');
   const currentDriveTypeRef = React.useRef<'work' | 'broll'>('work');
@@ -633,7 +634,8 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
 
   // 自动检查逻辑
   useEffect(() => {
-    if (active && !directSource && config?.autoStart && !isBusyRef.current) {
+    if (active && !directSource && config?.autoStart && !isBusyRef.current && !autoCheckStartedRef.current) {
+      autoCheckStartedRef.current = true;
       checkSD();
     }
   }, [active, config?.autoStart]);

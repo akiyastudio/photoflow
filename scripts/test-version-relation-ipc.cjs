@@ -142,6 +142,11 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
     projectName: 'Trusted Project', scopeKey: '', expectedRevision: 0, mode: 'patch',
     positions: [{ nodeKey: `progress:${child.id}`, x: 12.5, y: -8 }],
   }, 'layout IPC must pass only the trusted project name, normalized scope, revision, mode, stable node IDs, and finite coordinates');
+  const ordinaryFolderLayout = await layoutSaveHandler(null, workspaceRoot, 'Trusted Project', {
+    scopeKey: '', expectedRevision: 1, mode: 'patch', positions: [{ nodeKey: 'entry:other', x: 30, y: 40 }],
+  });
+  assert.strictEqual(ordinaryFolderLayout.success, true, 'a normalized ordinary-folder node in the current scope must be accepted');
+  assert.strictEqual(layoutSavePayload.positions[0].nodeKey, 'entry:other');
   layoutSavePayload = undefined;
   const foreignLayout = await layoutSaveHandler(null, workspaceRoot, 'Trusted Project', {
     scopeKey: '', expectedRevision: 0, mode: 'patch', positions: [{ nodeKey: 'progress:foreign', x: 0, y: 0 }],
@@ -149,6 +154,11 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   assert.strictEqual(foreignLayout.success, false);
   assert.match(foreignLayout.error, /version_tree_layout_node_invalid/);
   assert.strictEqual(layoutSavePayload, undefined);
+  const crossScopeLayout = await layoutSaveHandler(null, workspaceRoot, 'Trusted Project', {
+    scopeKey: '', expectedRevision: 1, mode: 'patch', positions: [{ nodeKey: 'entry:folder/other', x: 0, y: 0 }],
+  });
+  assert.strictEqual(crossScopeLayout.success, false);
+  assert.match(crossScopeLayout.error, /version_tree_layout_node_invalid/);
   const invalidCoordinate = await layoutSaveHandler(null, workspaceRoot, 'Trusted Project', {
     scopeKey: '', expectedRevision: 0, mode: 'patch', positions: [{ nodeKey: `progress:${child.id}`, x: Infinity, y: 0 }],
   });

@@ -726,7 +726,7 @@ def test_legacy_selection_relation_repair(root: Path) -> None:
 def test_version_tree_layout_persistence(root: Path) -> None:
     workspace = root / "layout-workspace"
     project = workspace / "Project"
-    for name in ("RAW", "P1", "团片协作"):
+    for name in ("RAW", "P1", "团片协作", "Other"):
         (project / name).mkdir(parents=True, exist_ok=True)
     database = root / "layout.sqlite3"
     db = workspace_db.connect(str(workspace), str(database))
@@ -749,6 +749,7 @@ def test_version_tree_layout_persistence(root: Path) -> None:
                 {"nodeKey": f"progress:{raw['id']}", "x": 10.5, "y": 20.25},
                 {"nodeKey": f"progress:{p1['id']}", "x": 250, "y": 30},
                 {"nodeKey": f"progress:{workflow['id']}", "x": 500, "y": 100},
+                {"nodeKey": "entry:other", "x": 20, "y": 400},
             ],
         })
         assert saved["revision"] == 1
@@ -757,13 +758,14 @@ def test_version_tree_layout_persistence(root: Path) -> None:
         assert {(item["nodeKey"], item["x"], item["y"]) for item in loaded["positions"]} == {
             (f"progress:{raw['id']}", 10.5, 20.25), (f"progress:{p1['id']}", 250.0, 30.0),
             (f"progress:{workflow['id']}", 500.0, 100.0),
+            ("entry:other", 20.0, 400.0),
         }
         patched = workspace_db.version_tree_layout_save(db, {
             "projectName": "Project", "scopeKey": "", "expectedRevision": 1, "mode": "patch",
             "positions": [{"nodeKey": f"progress:{p1['id']}", "x": 275, "y": 45}],
         })
         assert patched["revision"] == 2
-        assert len(workspace_db.version_tree_layout_get(db, {"projectName": "Project", "scopeKey": ""})["positions"]) == 3
+        assert len(workspace_db.version_tree_layout_get(db, {"projectName": "Project", "scopeKey": ""})["positions"]) == 4
         replaced = workspace_db.version_tree_layout_save(db, {
             "projectName": "Project", "scopeKey": "", "expectedRevision": 2, "mode": "replace",
             "positions": [{"nodeKey": f"progress:{raw['id']}", "x": 0, "y": 0}],
@@ -789,6 +791,8 @@ def test_version_tree_layout_persistence(root: Path) -> None:
         rejected({"projectName": "Project", "scopeKey": "C:/outside", "expectedRevision": 3, "mode": "patch", "positions": []}, "version_tree_scope_invalid")
         rejected({"projectName": "Project", "scopeKey": "", "expectedRevision": 3, "mode": "patch", "positions": [{"nodeKey": f"progress:{raw['id']}", "x": float("nan"), "y": 0}]}, "version_tree_layout_coordinate_invalid")
         rejected({"projectName": "Project", "scopeKey": "", "expectedRevision": 3, "mode": "patch", "positions": [{"nodeKey": "progress:foreign", "x": 0, "y": 0}]}, "version_tree_layout_node_invalid")
+        rejected({"projectName": "Project", "scopeKey": "", "expectedRevision": 3, "mode": "patch", "positions": [{"nodeKey": "entry:folder/other", "x": 0, "y": 0}]}, "version_tree_layout_node_invalid")
+        rejected({"projectName": "Project", "scopeKey": "folder", "expectedRevision": 0, "mode": "patch", "positions": [{"nodeKey": "entry:../outside", "x": 0, "y": 0}]}, "version_tree_layout_node_invalid")
         rejected({"projectName": "Project", "scopeKey": "", "expectedRevision": 3, "mode": "patch", "positions": [{"nodeKey": f"progress:{raw['id']}", "x": 0, "y": 0}] * 1001}, "version_tree_layout_positions_invalid")
 
         db.execute(

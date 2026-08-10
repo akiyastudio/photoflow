@@ -4,8 +4,9 @@ const { pathToFileURL } = require('url');
 
 (async () => {
   const model = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'versioning', 'versioning-v2-model.ts')).href);
-  assert.deepStrictEqual(Object.keys(model.VERSION_PANEL_DEFINITIONS), ['create', 'import', 'modify', 'confirm']);
+  assert.deepStrictEqual(Object.keys(model.VERSION_PANEL_DEFINITIONS), ['create', 'create-next', 'import', 'modify', 'confirm']);
   assert.deepStrictEqual([...model.VERSION_PANEL_DEFINITIONS.create.states], ['ready', 'processing', 'result', 'failure']);
+  assert.deepStrictEqual([...model.VERSION_PANEL_DEFINITIONS['create-next'].states], ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure']);
   assert.deepStrictEqual([...model.VERSION_PANEL_DEFINITIONS.import.states], ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure']);
   assert.deepStrictEqual([...model.VERSION_PANEL_DEFINITIONS.modify.states], ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure']);
   assert.deepStrictEqual([...model.VERSION_PANEL_DEFINITIONS.confirm.states], ['loading', 'waiting_confirmation', 'committing', 'result', 'failure']);
@@ -19,17 +20,18 @@ const { pathToFileURL } = require('url');
     trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false,
   });
   assert.strictEqual(model.trackingStateLabel({ nodeRole: 'original', trackingState: 'ready' }), '原始素材');
-  assert.strictEqual(model.trackingStateLabel({ nodeRole: 'selection', relationKind: 'auxiliary', trackingState: 'disabled' }), '选片分支');
+  assert.strictEqual(model.trackingStateLabel({ nodeRole: 'selection', relationKind: 'auxiliary', trackingState: 'disabled' }), '选片辅助节点');
   assert.strictEqual(model.trackingStateLabel({ nodeRole: 'progress', trackingState: 'stale' }), '待刷新');
   assert.strictEqual(model.trackingStateLabel({ nodeRole: 'progress', trackingState: 'needs_repair' }), '版本关系需要修复');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'artifact', artifactKind: 'preview', versionKey: 'legacy-preview-mov' }), '预览');
-  assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'workflow', artifactKind: 'team_workspace', versionKey: 'team-workspace' }), '协作分支');
+  assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'workflow', artifactKind: 'team_workspace', versionKey: 'team-workspace' }), '协作');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'progress', versionKey: '2' }), 'V2');
   assert.deepStrictEqual(model.planProgressRootMove('客户/一组/RAW'), { sourceRelativePath: '客户/一组/RAW', targetRelativePath: 'RAW', requiresMove: true });
   assert.strictEqual(model.selectionOutputName('客户/一组/RAW'), '图片选片');
   assert.strictEqual(model.selectionOutputName('客户/一组/MOV'), '视频选片');
 
   const base = { projectId: 'p', mediaKind: 'image', versionKey: '', displayName: '', folderPath: '', missingSince: undefined, trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false, trackingState: 'disabled', lastTrackedAt: undefined, trackingSnapshot: {}, folderSignature: '', tombstone: {}, repairBatchId: undefined, pendingOperationCount: 0, createdAt: 0, updatedAt: 0 };
+  assert.strictEqual(model.progressTrackingAction({ ...base, id: 'branch', nodeRole: 'progress', relationKind: 'main', versionKey: '1_1', trackingEnabled: true, trackingState: 'ready' }), 'refresh', 'V1_1 version branches must retain the full tracking workflow');
   const nodes = [
     { ...base, id: 'root', nodeRole: 'original', relationKind: 'main', folderMissing: false },
     { ...base, id: 'hidden', nodeRole: 'progress', relationKind: 'main', parentProgressId: 'root', folderMissing: true },

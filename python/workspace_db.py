@@ -2770,10 +2770,26 @@ def normalize_version_tree_scope(value) -> str:
 
 def version_tree_project_node_keys(db, project_id: str) -> set[str]:
     keys = {f"progress:{row['id']}" for row in db.execute(
-        "SELECT id FROM progress_folders WHERE project_id=? AND missing_since IS NULL",
+        "SELECT id FROM progress_folders WHERE project_id=?",
         (project_id,),
     ).fetchall()}
     return keys
+
+
+def version_tree_entry_node_belongs_to_scope(node_key: str, scope_key: str) -> bool:
+    if not node_key.startswith("entry:"):
+        return False
+    relative_path = node_key[len("entry:"):]
+    if not relative_path or len(relative_path) > 1024 or "\\" in relative_path:
+        return False
+    try:
+        normalized_path = normalize_version_tree_scope(relative_path)
+    except ValueError:
+        return False
+    if normalized_path != relative_path:
+        return False
+    parent_scope = "/".join(normalized_path.split("/")[:-1])
+    return parent_scope.casefold() == scope_key.casefold()
 
 
 def version_tree_layout_get(db, payload: dict):
@@ -2790,7 +2806,7 @@ def version_tree_layout_get(db, payload: dict):
                WHERE project_id=? AND scope_key=? ORDER BY node_key""",
             (project["id"], scope_key),
         ).fetchall()
-        stale_keys = [row["node_key"] for row in rows if row["node_key"] not in valid_keys]
+        stale_keys = [row["node_key"] for row in rows if row["node_key"] not in valid_keys and not version_tree_entry_node_belongs_to_scope(row["node_key"], scope_key)]
         for node_key in stale_keys:
             db.execute(
                 "DELETE FROM version_tree_node_positions WHERE project_id=? AND scope_key=? AND node_key=?",
@@ -2803,7 +2819,7 @@ def version_tree_layout_get(db, payload: dict):
         "updatedAt": int(layout["updated_at"]) if layout else 0,
         "positions": [
             {"nodeKey": row["node_key"], "x": float(row["x"]), "y": float(row["y"]), "updatedAt": int(row["updated_at"])}
-            for row in rows if row["node_key"] in valid_keys
+            for row in rows if row["node_key"] in valid_keys or version_tree_entry_node_belongs_to_scope(row["node_key"], scope_key)
         ],
     }
 
@@ -2829,7 +2845,7 @@ def version_tree_layout_save(db, payload: dict):
         node_key = str(position.get("nodeKey") or "")
         x = position.get("x")
         y = position.get("y")
-        if node_key not in valid_keys or node_key in seen:
+        if (node_key not in valid_keys and not version_tree_entry_node_belongs_to_scope(node_key, scope_key)) or node_key in seen:
             raise ValueError("version_tree_layout_node_invalid: 节点不属于当前项目")
         if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
             raise ValueError("version_tree_layout_coordinate_invalid: 坐标必须是有限数字")

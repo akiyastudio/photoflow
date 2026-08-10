@@ -813,6 +813,9 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     <SettingsPageGroup title="新建项目">
       <SettingsRow title="新建项目时创建策划文件夹" description="新建项目时创建“策划”文件夹。"><SettingsToggle label="新建项目时创建策划文件夹" checked={draft.createPlanningFolder} onChange={checked => update('createPlanningFolder', checked)}/></SettingsRow>
     </SettingsPageGroup>
+    <SettingsPageGroup title="项目状态">
+      <SettingsRow title="导入后自动移动项目分类" description="开启后，工作素材成功导入到“待拍摄”项目时，自动将项目移动到“后期中”；关闭后项目保持“待拍摄”。"><SettingsToggle label="导入后自动移动项目分类" checked={draft.smartImport.autoMoveProjectAfterSdImport} onChange={checked => update('smartImport', { ...draft.smartImport, autoMoveProjectAfterSdImport: checked })}/></SettingsRow>
+    </SettingsPageGroup>
     <SettingsPageGroup title="项目分类">
       <div className="px-4 py-3.5"><h4 className="text-sm font-bold text-slate-800">分类与顺序</h4><p className="mt-1 text-xs leading-5 text-slate-500">拖动左侧手柄或使用箭头调整顺序。内置分类固定保留；自定义分类为空时可以删除。</p></div>
       {projectCategories.map((name, index) => { const builtIn = (BUILT_IN_PROJECT_STATUSES as readonly string[]).includes(name); return <div key={name} draggable onDragStart={event => { setDraggedProjectCategory(name); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', name); }} onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }} onDrop={event => { event.preventDefault(); reorderProjectCategory(draggedProjectCategory || event.dataTransfer.getData('text/plain'), name); setDraggedProjectCategory(''); }} onDragEnd={() => setDraggedProjectCategory('')} className={`flex min-w-0 items-center gap-3 px-4 py-3 transition ${draggedProjectCategory === name ? 'bg-blue-50 opacity-60' : 'bg-white'}`}>
@@ -888,8 +891,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       <SettingsRow title="RAW 缺少同名 JPG 时自动创建" description="关闭时不会在导入 RAW 文件时额外创建 JPG。"><SettingsToggle label="RAW 缺少同名 JPG 时自动创建" checked={draft.importDefaults.generateJpgFromRaw} onChange={checked => update('importDefaults', { ...draft.importDefaults, generateJpgFromRaw: checked })}/></SettingsRow>
     </SettingsPageGroup>
     <SettingsPageGroup title="从 SD 卡导入">
-      <SettingsRow title="启动时自动读取 SD 卡" description="应用启动后自动检查已经启用的 SD 卡设备。"><SettingsToggle label="启动时自动读取 SD 卡" checked={draft.smartImport.autoStart} onChange={checked => update('smartImport', { ...draft.smartImport, autoStart: checked })}/></SettingsRow>
-      <SettingsRow title="导入后自动移动项目分类" description="开启后，工作素材成功导入到“待拍摄”项目时，自动将项目移动到“后期中”；关闭后项目保持“待拍摄”。"><SettingsToggle label="导入后自动移动项目分类" checked={draft.smartImport.autoMoveProjectAfterSdImport} onChange={checked => update('smartImport', { ...draft.smartImport, autoMoveProjectAfterSdImport: checked })}/></SettingsRow>
+      <SettingsRow title="启动时自动从 SD 卡导入" description="应用启动后自动检查已启用的 SD 卡设备并进入导入流程；默认关闭。"><SettingsToggle label="启动时自动从 SD 卡导入" checked={draft.smartImport.autoStart} onChange={checked => update('smartImport', { ...draft.smartImport, autoStart: checked })}/></SettingsRow>
       <SettingsRow title="导入日期范围" description="限制从真实 SD 卡读取的素材拍摄日期。"><select value={draft.smartImport.dateFilter} onChange={event => update('smartImport', { ...draft.smartImport, dateFilter: event.target.value as AppConfig['smartImport']['dateFilter'] })} className="form-input ml-auto max-w-sm"><option value="all">全部素材</option><option value="today">仅今天拍摄的素材</option><option value="today_yesterday">今天和昨天拍摄的素材</option></select></SettingsRow>
       <SettingsRow title="已记录的 SD 卡设备" description="管理设备是否用于导入，以及默认作为工作文件还是花絮。" align="start"><SdDriveHistorySettings value={draft.smartImport} onChange={smartImport => update('smartImport', smartImport)}/></SettingsRow>
     </SettingsPageGroup>
