@@ -67,7 +67,7 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
       if (!inside(source.projectReal, targetReal)) throw new Error('选片输出快捷方式或重解析目录指向项目外部');
       if (!fs.statSync(targetPath).isDirectory()) throw new Error('output_name_conflict：输出名称已被文件占用');
     }
-    return { outputName, targetPath, targetRelativePath };
+    return { outputName, targetPath, targetRelativePath, recoveryMarkerPath: `${targetPath}.photoflow-selection-pending` };
   };
   const cancelledError = () => Object.assign(new Error('选片任务已取消'), { code: 'TASK_CANCELLED' });
   const ensureActive = job => { if (job?.cancelled) throw cancelledError(); };
@@ -119,12 +119,21 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
     if (sourceNode?.nodeRole === 'selection' || sourceNode?.relationKind === 'auxiliary') throw new Error('selection/auxiliary 节点不能作为新的选片来源');
     const targetNode = nodes.find(node => comparable(node.folderPath) === comparable(target.targetPath));
     const sourceSelections = sourceNode ? nodes.filter(node => node.nodeRole === 'selection' && node.parentProgressId === sourceNode.id) : [];
+    let recoverableEmptyTarget = false;
+    if (!targetNode && fs.existsSync(target.recoveryMarkerPath)) {
+      try {
+        const marker = JSON.parse(fs.readFileSync(target.recoveryMarkerPath, 'utf8'));
+        recoverableEmptyTarget = marker?.sourceFolderRelativePath === source.normalized
+          && marker?.targetFolderRelativePath === target.targetRelativePath
+          && (!fs.existsSync(target.targetPath) || fs.readdirSync(target.targetPath).length === 0);
+      } catch { recoverableEmptyTarget = false; }
+    }
     let outputConflict = '';
-    if (fs.existsSync(target.targetPath) && (!targetNode || !sourceNode || targetNode.nodeRole !== 'selection' || targetNode.parentProgressId !== sourceNode.id)) {
+    if (fs.existsSync(target.targetPath) && !recoverableEmptyTarget && (!targetNode || !sourceNode || targetNode.nodeRole !== 'selection' || targetNode.parentProgressId !== sourceNode.id)) {
       outputConflict = 'output_name_conflict';
     }
     if (sourceSelections.some(node => comparable(node.folderPath) !== comparable(target.targetPath))) outputConflict = 'output_name_conflict';
-    return { nodes, sourceNode, targetNode, outputConflict };
+    return { nodes, sourceNode, targetNode, outputConflict, recoverableEmptyTarget };
   };
   const planFromFiles = async ({ workspaceRoot, projectName, projectRoot, sourceFolderRelativePath, files, keywords = [], missingKeywords = [], unsupportedPaths = [] }) => {
     const source = resolveProjectEntry(projectRoot, sourceFolderRelativePath, { directory: true });
@@ -384,13 +393,34 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
     activeOperations.set(operationId, job);
     const createdFiles = [];
     const createdDirectories = [];
+    let nodesReady = false;
+    let plan;
+    let ownsRecoveryMarker = false;
     try {
-      const plan = await buildPlan(job);
+      plan = await buildPlan(job);
       if (!request.expectedSignature || request.expectedSignature !== plan.signature) throw new Error('预检结果已经过期，请重新预检');
       if (plan.context.outputConflict || plan.conflicts.length) throw new Error('output_name_conflict：选片输出名称或文件目标存在冲突');
+      if (!plan.context.targetNode) {
+        if (!plan.context.recoverableEmptyTarget) {
+          await fs.promises.writeFile(plan.target.recoveryMarkerPath, JSON.stringify({
+            sourceFolderRelativePath: plan.source.normalized,
+            targetFolderRelativePath: plan.target.targetRelativePath,
+          }), { encoding: 'utf8', flag: 'wx' });
+        }
+        ownsRecoveryMarker = true;
+      }
       if (!fs.existsSync(plan.target.targetPath)) {
         await fs.promises.mkdir(plan.target.targetPath, { recursive: false });
         createdDirectories.push(plan.target.targetPath);
+      }
+      // Persist the explicit source -> selection relationship before copying.
+      // If the process stops mid-copy, the next run can resume against a valid
+      // selection node instead of leaving an unregistered output directory.
+      const nodes = await ensureNodes(request, plan);
+      nodesReady = true;
+      if (ownsRecoveryMarker) {
+        await fs.promises.rm(plan.target.recoveryMarkerPath, { force: true });
+        ownsRecoveryMarker = false;
       }
       for (const item of plan.copyItems) {
         if (job.cancelled) throw Object.assign(new Error('选片任务已取消'), { code: 'TASK_CANCELLED' });
@@ -404,7 +434,6 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
         createdFiles.push(item.destination);
       }
       if (job.cancelled) throw Object.assign(new Error('选片任务已取消'), { code: 'TASK_CANCELLED' });
-      const nodes = await ensureNodes(request, plan);
       return {
         ...plan.summary, success: true, operationId, copiedCount: createdFiles.length,
         items: plan.summary.items.map(item => item.status === 'planned' ? { ...item, status: 'copied' } : item),
@@ -412,8 +441,10 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
         selectionNode: nodes.selectionNode,
       };
     } catch (error) {
+      if (ownsRecoveryMarker && plan?.target?.recoveryMarkerPath) await fs.promises.rm(plan.target.recoveryMarkerPath, { force: true }).catch(() => undefined);
       for (const filePath of createdFiles.reverse()) await fs.promises.rm(filePath, { force: true }).catch(() => undefined);
       for (const directory of [...new Set(createdDirectories)].sort((left, right) => right.length - left.length)) {
+        if (nodesReady && path.resolve(directory) === path.resolve(plan?.target?.targetPath || '')) continue;
         await fs.promises.rmdir(directory).catch(() => undefined);
       }
       if (job.cancelled || error?.code === 'TASK_CANCELLED') return { success: false, cancelled: true, operationId, error: '选片任务已取消' };

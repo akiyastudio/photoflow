@@ -91,7 +91,9 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(mediaById.get('raw').x, mediaById.get('jpg').x, 'RAW and its companion JPG must share a source column');
   assert.strictEqual(mediaById.get('mov').x, mediaById.get('mov-preview').x, 'MOV and its preview must share a source column');
   assert(mediaById.get('image-v1').x > mediaById.get('raw').x, 'main progress must advance from left to right');
-  assert(Math.max(...mediaBands.nodes.filter(item => item.mediaKind === 'image').map(item => item.y + base.nodeHeight)) < Math.min(...mediaBands.nodes.filter(item => item.mediaKind === 'video').map(item => item.y)), 'image and video workflows must occupy separate vertical bands');
+  const imageBandBottom = Math.max(...mediaBands.nodes.filter(item => item.mediaKind === 'image').map(item => item.y + base.nodeHeight));
+  const videoBandTop = Math.min(...mediaBands.nodes.filter(item => item.mediaKind === 'video').map(item => item.y));
+  assert.strictEqual(videoBandTop - imageBandBottom, 112, 'image and video workflows must use the stable compact swimlane gap');
   const canonicalVideo = layoutVersionTree({
     ...base,
     nodes: [

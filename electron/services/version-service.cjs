@@ -15,6 +15,7 @@ const createVersionService = ({ repository }) => ({
   listProgress: (root, projectName, includeMissing = false) => repository.listProgress(root, projectName, includeMissing),
   registerProgress: (root, payload) => repository.registerProgress(root, payload),
   registerProgressWithGraph: (root, payload) => repository.registerProgressWithGraph(root, payload),
+  adoptMediaFolder: (root, payload) => repository.adoptMediaFolder(root, payload),
   updateProgressTree: (root, payload) => repository.updateProgressTree(root, payload),
   updateProgressRelation: (root, payload) => repository.updateProgressRelation(root, payload),
   repairLegacySelectionRelation: (root, payload) => repository.repairLegacySelectionRelation(root, payload),

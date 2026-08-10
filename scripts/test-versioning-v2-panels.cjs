@@ -212,7 +212,12 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const rawCanvasNode = allNodes(container).find(node => node.nodeName === 'DIV' && node.attributes.get('data-node-role') === 'original');
   const rawEntryNode = allNodes(rawCanvasNode).find(node => node !== rawCanvasNode && node.nodeName === 'DIV' && node.textContent === 'RAW');
   const canvasNode = allNodes(container).find(node => node.nodeName === 'DIV' && node.attributes.get('data-version-tree-canvas') === 'true');
-  const canvasViewport = canvasNode.parentNode;
+  const canvasViewport = allNodes(container).find(node => node.nodeName === 'DIV' && node.attributes.get('data-version-tree-viewport') === 'true');
+  assert(textContent(container).includes('图片工作流'), 'the mounted graph must expose a visible image swimlane label');
+  assert(allNodes(container).some(node => node.nodeName === 'BUTTON' && node.textContent === '适应窗口'));
+  assert(allNodes(container).some(node => node.nodeName === 'BUTTON' && node.textContent === '100%'));
+  assert.strictEqual(typeof canvasController.fitView, 'function');
+  assert.strictEqual(typeof canvasController.resetZoom, 'function');
   const initialCanvasWidth = parseFloat(canvasNode.style.width);
   const initialMainPath = allNodes(container).find(node => node.nodeName === 'path' && node.attributes.get('data-relation-kind') === 'main' && node.attributes.has('marker-end'))?.attributes.get('d');
   const savesBeforeDragging = layoutRequests.saves.length;

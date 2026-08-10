@@ -102,7 +102,8 @@ export const versionTreeEdgePresentation = (kind: VersionTreeEdgeKind, selected 
         : kind === 'media_companion' ? '#14b8a6'
           : kind === 'derived_preview' ? '#f59e0b'
             : '#94a3b8',
-  strokeWidth: selected ? 3 : 2,
+  strokeWidth: selected ? 3 : kind === 'main' ? 2 : 1.7,
+  opacity: selected ? 1 : kind === 'main' ? .82 : kind === 'auxiliary' ? .72 : .58,
   strokeDasharray: kind === 'auxiliary' || kind === 'workflow_input' ? '7 5'
     : kind === 'team-workspace' || kind === 'media_companion' || kind === 'derived_preview' ? '3 5'
       : undefined,

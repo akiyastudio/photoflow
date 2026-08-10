@@ -20,10 +20,10 @@ export const translateVersionTreeCanvasSelection = (
 
 export const DEFAULT_VERSION_TREE_SPACING = Object.freeze({
   horizontalGap: 64,
-  rowGap: 28,
-  auxiliaryGap: 36,
-  rootGap: 44,
-  padding: 12,
+  rowGap: 24,
+  auxiliaryGap: 44,
+  rootGap: 40,
+  padding: 32,
 });
 
 type ReconcileVersionTreeCanvasInput = {

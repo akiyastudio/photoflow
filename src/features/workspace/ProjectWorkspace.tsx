@@ -2385,7 +2385,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const progressVersionIsValid = (draft: ProgressSetupDraft) => {
     if (progressRelationInspection.needsRepair) return false;
     if (draft.relationKind === 'auxiliary' && !draft.parentProgressId) return false;
-    if (!draft.parentProgressId) return draft.mode === 'mark' && Boolean(draft.existingProgressId);
+    // A blank/manual project must be able to create its first explicit main
+    // root. Subsequent relationships still require a concrete parent ID.
+    if (!draft.parentProgressId) return draft.relationKind === 'main' && draft.relation === 'root';
     const parent = selectableVersionParents(progressFolders, draft).find(folder => folder.id === draft.parentProgressId);
     return Boolean(parent && !progressSubtreeIds(draft.existingProgressId).has(parent.id));
   };
@@ -2529,7 +2531,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     return updated.progressFolder;
   };
   const registerProgressWithWorkflow = async (progress: {
-    relativePath: string;
+    relativePath?: string;
     mediaKind: 'image' | 'video';
     versionKey: string;
     parentProgressId?: string;
@@ -2565,15 +2567,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setProgressSubmitting(true);
     try {
       if (draft.mode === 'create') {
-        const created = await window.electronAPI.createProgressFolder(workspacePath, project.status, project.name, {
-          mediaKind: draft.mediaKind,
-          versionKey: draft.versionKey,
-          displayName: generatedName,
-        });
-        if (!created.success || !created.folder) throw new Error(created.error || '无法创建进度文件夹');
         const policy = normalizeProgressSetupTrackingPolicy(draft.relationKind, draft);
         const registered = await registerProgressWithWorkflow({
-          relativePath: created.folder.relativePath,
           mediaKind: draft.mediaKind,
           versionKey: draft.versionKey,
           parentProgressId: draft.parentProgressId || undefined,
@@ -2582,12 +2577,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           ...policy,
           trackingState: policy.trackingEnabled ? 'pending_compare' : 'disabled',
         }, draft.workflowInputProgressIds);
-        if (!registered.success || !registered.progressFolder) throw new Error(registered.error || '无法保存版本 V2 关系');
+        if (!registered.success || !registered.progressFolder || !registered.folder) throw new Error(registered.error || '无法原子创建进度和版本 V2 关系');
         setProgressSetup(null);
         setProgressFolders(current => current.some(folder => folder.id === registered.progressFolder!.id) ? current.map(folder => folder.id === registered.progressFolder!.id ? registered.progressFolder! : folder) : [...current, registered.progressFolder!]);
         directoryEntriesCacheRef.current.delete('');
         if (!currentRelativePathRef.current) {
-          const folderEntry: ProjectFileEntry = { ...created.folder, kind: 'folder', extension: '', size: 0, createdAt: created.folder.updatedAt };
+          const folderEntry: ProjectFileEntry = { ...registered.folder, kind: 'folder', extension: '', size: 0, createdAt: registered.folder.updatedAt };
           setFileEntries(current => current.some(entry => entry.relativePath === folderEntry.relativePath) ? current : [...current, folderEntry]);
         }
         onNotice(`已创建${draft.mediaKind === 'image' ? '图片' : '视频'}进度“${generatedName}”（版本 V${draft.versionKey}）`);
@@ -4646,31 +4641,81 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   }, [viewMode]);
 
   const versionTreeStatusLabel = (folder: ProgressFolder) => trackingStateLabel(folder);
-  const renderVersionTreeEntry = (entry: ProjectFileEntry, progressFolder?: ProgressFolder, sourceKind?: 'image' | 'video') => <div
-    role="button"
-    tabIndex={0}
-    draggable={false}
-    onDragOver={event => handleEntryDragOver(event, entry)}
-    onDragLeave={event => handleEntryDragLeave(event, entry)}
-    onDrop={event => void handleEntryDrop(event, entry)}
-    data-entry-kind={entry.kind}
-    data-entry-path={entry.relativePath}
-    onMouseEnter={() => prefetchDirectory(entry)}
-    onClick={event => handleEntryClick(event, entry)}
-    onDoubleClick={event => handleEntryDoubleClick(event, entry)}
-    onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }}
-    onContextMenu={event => openFileMenu(event, entry)}
-    title={entry.name}
-    className={`group relative min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) || previewPath === entry.relativePath ? 'bg-blue-50 ring-1 ring-blue-400' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'bg-blue-100 ring-2 ring-blue-500' : ''}`}
-  >
-    <span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span>
-    {progressFolder && <span className={`absolute right-3 top-3 z-10 rounded-full px-2 py-1 text-[10px] font-bold shadow-sm ${progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' || progressFolder.nodeRole === 'workflow' ? 'bg-violet-600 text-white' : progressFolder.nodeRole === 'original' ? 'bg-slate-700 text-white' : 'bg-blue-600 text-white'}`}>{versionTreeNodeBadgeLabel(progressFolder)}</span>}
-    {!progressFolder && sourceKind && <span className="absolute right-3 top-3 z-10 rounded-full bg-slate-700 px-2 py-1 text-[10px] font-bold text-white shadow-sm">底片</span>}
-    {!progressFolder && entry.name === '团片协作' && <span className="absolute right-3 top-3 z-10 rounded-full bg-violet-600 px-2 py-1 text-[10px] font-bold text-white shadow-sm">协作分支</span>}
-    <div className="relative flex aspect-square items-center justify-center">{renderEntryIcon(entry, true)}</div>
-    {renderEntryName(entry, true)}
-    <p className={`mt-0.5 truncate text-[10px] ${progressFolder?.trackingState === 'needs_repair' ? 'font-bold text-amber-600' : 'uppercase text-slate-400'}`}>{progressFolder ? progressFolder.nodeRole === 'original' ? '文件夹 · 原始素材' : progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' ? '文件夹 · 附属分支' : progressFolder.nodeRole === 'artifact' && progressFolder.artifactKind === 'preview' ? '文件夹 · 预览产物' : progressFolder.nodeRole === 'workflow' && progressFolder.artifactKind === 'team_workspace' ? '文件夹 · 协作工作区' : `文件夹 · ${versionTreeStatusLabel(progressFolder)}` : sourceKind === 'image' ? '文件夹 · 原始图片素材' : sourceKind === 'video' ? '文件夹 · 原始视频素材' : entry.name === '团片协作' ? '文件夹 · 协作工作区' : entry.kind === 'folder' ? '文件夹' : entry.kind === 'shortcut' ? '快捷方式' : entry.extension.slice(1) || '文件'}</p>
-  </div>;
+  const adoptVersionTreeFolder = async (entry: ProjectFileEntry, mode: 'original' | 'companion' | 'preview', mediaKind: 'image' | 'video') => {
+    let sourceProgressId: string | undefined;
+    if (mode !== 'original') {
+      const candidates = progressFolders.filter(folder => !folder.folderMissing && folder.mediaKind === mediaKind
+        && (mode === 'companion' ? folder.nodeRole === 'original' : folder.nodeRole === 'original' || folder.nodeRole === 'progress'));
+      if (!candidates.length) {
+        onNotice(mode === 'companion' ? '请先设置一个图片原始素材节点。' : `请先设置一个${mediaKind === 'image' ? '图片' : '视频'}原始素材或主进度节点。`);
+        return;
+      }
+      const selected = await appDialog.choice({
+        title: mode === 'companion' ? '选择配套素材来源' : '选择预览产物来源',
+        message: `“${entry.name}”将连接到哪个来源节点？`,
+        choices: candidates.map(folder => ({ value: folder.id, label: folder.displayName })),
+        defaultValue: candidates[0].id,
+        cancelLabel: '取消',
+        cancelDefault: true,
+      });
+      if (!selected) return;
+      sourceProgressId = selected;
+    }
+    const result = await window.electronAPI.adoptVersionTreeFolder(workspacePath, project.status, {
+      projectName: project.name,
+      relativePath: entry.relativePath,
+      mode,
+      mediaKind,
+      sourceProgressId,
+    });
+    if (!result.success || !result.progressFolder) {
+      onNotice(`纳入版本树失败：${result.error || '未知错误'}`, 5000);
+      return;
+    }
+    await loadProgressFolders();
+    onNotice(mode === 'original' ? `已将“${entry.name}”设为${mediaKind === 'image' ? '图片' : '视频'}原始素材。` : mode === 'companion' ? `已将“${entry.name}”设为配套素材。` : `已将“${entry.name}”设为预览产物。`);
+  };
+  const renderVersionTreeEntry = (entry: ProjectFileEntry, progressFolder?: ProgressFolder, sourceKind?: 'image' | 'video') => {
+    const selected = selectedPaths.includes(entry.relativePath) || previewPath === entry.relativePath;
+    const workflow = progressFolder?.nodeRole === 'workflow' && progressFolder.artifactKind === 'team_workspace';
+    const previewArtifact = progressFolder?.nodeRole === 'artifact' && progressFolder.artifactKind === 'preview';
+    const canonicalName = ['raw', 'jpg', 'mov'].includes(entry.name.toLocaleLowerCase()) ? entry.name.toLocaleUpperCase() : entry.name;
+    const statusLabel = progressFolder
+      ? progressFolder.nodeRole === 'original' ? '原始素材'
+        : progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' ? '附属分支'
+          : previewArtifact ? '预览产物'
+            : workflow ? '协作工作区'
+              : versionTreeStatusLabel(progressFolder)
+      : sourceKind === 'image' ? '原始图片素材'
+        : sourceKind === 'video' ? '原始视频素材'
+          : entry.name === '团片协作' ? '协作工作区'
+            : entry.kind === 'folder' ? '文件夹' : entry.kind === 'shortcut' ? '快捷方式' : entry.extension.slice(1) || '文件';
+    return <div
+      role="button"
+      tabIndex={0}
+      draggable={false}
+      onDragOver={event => handleEntryDragOver(event, entry)}
+      onDragLeave={event => handleEntryDragLeave(event, entry)}
+      onDrop={event => void handleEntryDrop(event, entry)}
+      data-entry-kind={entry.kind}
+      data-entry-path={entry.relativePath}
+      onMouseEnter={() => prefetchDirectory(entry)}
+      onClick={event => handleEntryClick(event, entry)}
+      onDoubleClick={event => handleEntryDoubleClick(event, entry)}
+      onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }}
+      onContextMenu={event => openFileMenu(event, entry)}
+      title={entry.name}
+      className={`group relative min-w-0 cursor-default rounded-lg border p-2 text-left transition ${progressFolder ? 'border-transparent bg-slate-500/[0.025] hover:border-blue-300/60 hover:bg-blue-500/[0.04]' : 'overflow-hidden border-transparent hover:bg-blue-50'} ${selected ? 'border-blue-400/80 bg-blue-500/[0.07] ring-1 ring-blue-400/70 shadow-sm' : ''} ${previewArtifact ? 'border-amber-400/20' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'border-blue-500 bg-blue-100 ring-2 ring-blue-500' : ''}`}
+    >
+      <span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span>
+      {progressFolder && <span className={`absolute right-3 top-3 z-10 rounded-full px-2 py-1 text-[10px] font-bold shadow-sm ${progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' || workflow ? 'bg-violet-600 text-white' : previewArtifact ? 'bg-amber-500 text-white' : progressFolder.nodeRole === 'original' ? 'bg-slate-700 text-white' : 'bg-blue-600 text-white'}`}>{versionTreeNodeBadgeLabel(progressFolder)}</span>}
+      {!progressFolder && sourceKind && <span className="absolute right-3 top-3 z-10 rounded-full bg-slate-700 px-2 py-1 text-[10px] font-bold text-white shadow-sm">底片</span>}
+      {!progressFolder && entry.name === '团片协作' && <span className="absolute right-3 top-3 z-10 rounded-full bg-violet-600 px-2 py-1 text-[10px] font-bold text-white shadow-sm">协作分支</span>}
+      {workflow ? <div className="flex aspect-square flex-col items-center justify-center rounded-xl border border-violet-400/25 bg-violet-500/[0.055] px-3 text-center"><UsersRound size={28} className="mb-2 text-violet-500"/><p className="max-w-full truncate text-xs font-bold text-slate-700">{progressFolder.displayName}</p><p className="mt-1 text-[10px] text-slate-400">工作流节点</p></div> : <div className={`relative flex aspect-square items-center justify-center ${previewArtifact ? 'rounded-xl bg-amber-500/[0.035]' : ''}`}>{renderEntryIcon(entry, true)}</div>}
+      {progressFolder ? !workflow && <p className="mt-1 truncate text-xs font-medium text-slate-700" title={entry.name}>{canonicalName}</p> : renderEntryName(entry, true)}
+      <p className={`mt-0.5 truncate text-[10px] ${progressFolder?.trackingState === 'needs_repair' ? 'font-bold text-amber-600' : 'text-slate-400'}`}><span aria-hidden className="mr-1">●</span>{statusLabel}</p>
+    </div>;
+  };
 
   const progressCompareCandidates = progressCompare ? [...progressCompare.matches, ...progressCompare.suggestions] : [];
   const progressCompareAcceptedReferences = new Set(progressCompareCandidates.filter(match => progressCompare?.acceptedSources.includes(match.source)).map(match => match.reference));
@@ -4733,7 +4778,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       </ViewportContextMenu>, document.body)}
       {fileMenu && createPortal(<ViewportContextMenu x={fileMenu.x} y={fileMenu.y} widthClass="w-52" allowSubmenus>
         {projectWorkflows && fileMenu.entry.kind === 'folder' && !fileMenu.entry.viaShortcut && <><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); onOpenDirectoryPage?.(entry.relativePath); }}><FolderPlus size={14}/>在新页面打开</button><div className="my-1 border-t border-slate-100"/></>}
-        {projectWorkflows && fileMenu.entry.kind === 'folder' && !fileMenuRegisteredProgressFolder && <><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openMarkProgress(entry); }}><GitBranch size={14}/>设为版本进度…</button><div className="my-1 border-t border-slate-100"/></>}
+        {projectWorkflows && fileMenu.entry.kind === 'folder' && !fileMenuRegisteredProgressFolder && <><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openMarkProgress(entry); }}><GitBranch size={14}/>设为版本进度…</button><div className="group/submenu relative"><button type="button" className="project-menu-item w-full"><FolderPlus size={14}/>纳入版本树<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-56 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100"><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void adoptVersionTreeFolder(entry, 'original', 'image'); }}>设为图片原始素材</button><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void adoptVersionTreeFolder(entry, 'original', 'video'); }}>设为视频原始素材</button><div className="my-1 border-t border-slate-100"/><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void adoptVersionTreeFolder(entry, 'companion', 'image'); }}>设为图片配套素材…</button><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void adoptVersionTreeFolder(entry, 'preview', 'image'); }}>设为图片预览产物…</button><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void adoptVersionTreeFolder(entry, 'preview', 'video'); }}>设为视频预览产物…</button></div></div><div className="my-1 border-t border-slate-100"/></>}
         {projectWorkflows && fileMenuRegisteredProgressFolder && <><button disabled={fileMenuRegisteredProgressFolder.trackingState === 'committing' || fileMenuRegisteredProgressFolder.trackingState === 'needs_repair'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openMarkProgress(entry); }}><GitBranch size={14}/>修改进度</button>{progressTrackingAction(fileMenuRegisteredProgressFolder) && <button disabled={progressSubmitting || Boolean(progressTask) || fileMenuRegisteredProgressFolder.trackingState === 'committing'} title="按已持久化策略刷新当前主分支版本跟踪" className="project-menu-item" onClick={() => { const progressFolder = fileMenuRegisteredProgressFolder; setFileMenu(null); void refreshProgressTracking(progressFolder); }}><RefreshCw size={14}/>{progressTrackingRefreshLabel(fileMenuRegisteredProgressFolder)}</button>}<div className="my-1 border-t border-slate-100"/></>}
         {gatherToProject && <><button disabled={fileMenuContainsShortcutContent || gatheringInspiration || !inspirationProjects.length} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); startGatherInspiration(targets); }}><FolderInput size={14}/>增加到项目{inspirationTargetProject ? `“${inspirationTargetProject.name}”` : '…'}</button>{inspirationTargetProject && <button disabled={fileMenuContainsShortcutContent || gatheringInspiration} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); setGatherPickerPaths(targets); }}><ChevronDown size={14}/>选择其他项目…</button>}<div className="my-1 border-t border-slate-100"/></>}
         {projectWorkflows && canSelectFileMenuMedia && <><button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); selectMediaFiles(targets); }}><CheckCircle2 size={14}/>选片</button><div className="my-1 border-t border-slate-100"/></>}
