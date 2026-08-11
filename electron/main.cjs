@@ -13,6 +13,7 @@ const { registerSystemIpc } = require('./modules/system-ipc.cjs');
 const { registerWorkspaceIpc } = require('./modules/workspace-ipc.cjs');
 const { registerFileOperationsIpc } = require('./modules/files-ipc.cjs');
 const { registerMediaIpc } = require('./modules/media-ipc.cjs');
+const { registerMediaRatingIpc } = require('./modules/media-rating-ipc.cjs');
 const { registerVersionIpc } = require('./modules/versions-ipc.cjs');
 const { registerSelectionIpc } = require('./modules/selection-ipc.cjs');
 const { registerAdvancedVideoIpc } = require('./modules/advanced-video-ipc.cjs');
@@ -39,6 +40,9 @@ const { createWorkspaceService } = require('./services/workspace-service.cjs');
 const { createFileSystemService } = require('./services/file-system-service.cjs');
 const { createThumbnailService } = require('./services/thumbnail-service.cjs');
 const { createMediaService } = require('./services/media-service.cjs');
+const { createMediaRatingService } = require('./services/media-rating-service.cjs');
+const { createRawOrientationService } = require('./services/raw-orientation-service.cjs');
+const { createImageThumbnailRuntime } = require('./services/image-thumbnail-runtime.cjs');
 const { createVersionService } = require('./services/version-service.cjs');
 const { createVersionStaleDetectionService } = require('./services/version-stale-detection-service.cjs');
 const { createSelectionService } = require('./services/selection-service.cjs');
@@ -48,7 +52,8 @@ const { createFileRootWatcherService } = require('./services/file-root-watcher-s
 const cloudConfig = require('./cloud-config.cjs');
 const { registerBackgroundTasksIpc } = require('./modules/background-tasks-ipc.cjs');
 const { createElectronSecurity, normalizeBundledPythonTool, normalizeExternalUrl } = require('./security-policy.cjs');
-// Keep user-facing OS labels localized while runtime data stays in a stable, Latin-only directory name.
+// Keep user-facing OS labels localized while runtime data stays in a stable,
+// Latin-only directory name.
 app.setPath('userData', path.join(app.getPath('appData'), 'Photoflow'));
 app.setName('照片流');
 const projectRoot = path.join(__dirname, '..');
@@ -130,7 +135,6 @@ let workspaceReconciliationRunning = false;
 const fileOperationState = { projectFileClipboard: null };
 const activeProjectFileOperations = new Map();
 const mediaMetadataCache = new Map();
-const rawOrientationCache = new Map();
 const approvedMediaCacheDirectories = new Set([path.resolve(path.join(app.getPath('userData'), 'media-cache'))]);
 const renameHistory = [];
 const MAX_UNDO_HISTORY = 50;
@@ -161,8 +165,6 @@ let thumbnailPipeline = null;
 let thumbnailService = null;
 let fileRootWatcherService = null;
 let mediaService = null;
-let thumbnailImageWorkerPool = null;
-let originalImageWorkerPool = null;
 const mediaRuntimeState = {
   activeMediaCacheConfig: { maxSizeGB: 50, directory: '' },
 };
@@ -1119,6 +1121,14 @@ const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bm
 const IMAGE_PREVIEW_CONVERSION_EXTENSIONS = new Set(['.tif', '.tiff', '.heic', '.heif', '.hif']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.crm']);
 const RAW_EXTENSIONS = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
+const mediaRatingService = createMediaRatingService({
+  exiftool, fs, path, imageExtensions: IMAGE_EXTENSIONS, rawExtensions: RAW_EXTENSIONS,
+  releaseWorkspaceWatchPath, suppressWorkspaceWatchPath, versionService, writeLog,
+  onInvalidate: filePath => {
+    const prefix = `${path.resolve(filePath)}|`;
+    for (const key of mediaMetadataCache.keys()) if (key.startsWith(prefix)) mediaMetadataCache.delete(key);
+  },
+});
 selectionService = createSelectionService({
   fs, crypto, copyFileAtomic, versionService,
   imageExtensions: IMAGE_EXTENSIONS, rawExtensions: RAW_EXTENSIONS, videoExtensions: VIDEO_EXTENSIONS,
@@ -1252,7 +1262,7 @@ const decodedImagePreviewPath = async (sourcePath, stat, cacheConfig, kind) => {
   if (isCompleteJpegFile(target)) return target;
   if (fs.existsSync(target)) void fs.promises.unlink(target).catch(() => undefined);
   try {
-    await generateOriginalImagePreviewFile(sourcePath, kind, [{ sizeLabel: `${kind}-preview`, pixels: 0, path: target }]);
+    await imageThumbnailRuntime.generateOriginalImagePreviewFile(sourcePath, kind, [{ sizeLabel: `${kind}-preview`, pixels: 0, path: target }]);
     if (!isCompleteJpegFile(target)) return null;
     trimMediaCache(cacheDir, cacheConfig?.maxSizeGB, [target]);
     return target;
@@ -1399,238 +1409,19 @@ const ensureTrackedVersionThumbnail = async ({ workspaceRoot, photoId, versionId
   }
 };
 
-const EXIF_ORIENTATION_MATRICES = {
-  1: [1, 0, 0, 1],
-  2: [-1, 0, 0, 1],
-  3: [-1, 0, 0, -1],
-  4: [1, 0, 0, -1],
-  5: [0, 1, 1, 0],
-  6: [0, 1, -1, 0],
-  7: [0, -1, -1, 0],
-  8: [0, -1, 1, 0]
-};
-const readExifOrientation = async filePath => {
-  try {
-    const tags = await exiftool.readRaw(filePath, ['-G1', '-Orientation#', '-n', '-api', 'largefilesupport=1']);
-    const candidates = Object.entries(tags).filter(([name, value]) => /(^|:)Orientation$/i.test(name) && Number.isInteger(Number(value)) && Number(value) >= 1 && Number(value) <= 8);
-    const priority = name => /(^|:)IFD0:Orientation$/i.test(name) ? 0 : 1;
-    candidates.sort(([left], [right]) => priority(left) - priority(right));
-    return candidates.length ? Number(candidates[0][1]) : 1;
-  } catch {
-    return 1;
-  }
-};
-const multiplyOrientationMatrices = (left, right) => [
-  left[0] * right[0] + left[2] * right[1],
-  left[1] * right[0] + left[3] * right[1],
-  left[0] * right[2] + left[2] * right[3],
-  left[1] * right[2] + left[3] * right[3]
-];
-const rawOrientationCorrection = async (sourcePath, previewPath, stat) => {
-  const cacheKey = `${sourcePath}|${stat.size}|${stat.mtimeMs}`;
-  const cached = rawOrientationCache.get(cacheKey);
-  if (cached) return cached;
-  const [rawOrientation, embeddedOrientation] = await Promise.all([readExifOrientation(sourcePath), readExifOrientation(previewPath)]);
-  const rawMatrix = EXIF_ORIENTATION_MATRICES[rawOrientation] || EXIF_ORIENTATION_MATRICES[1];
-  const embeddedMatrix = EXIF_ORIENTATION_MATRICES[embeddedOrientation] || EXIF_ORIENTATION_MATRICES[1];
-  // The browser already applies the embedded JPEG orientation. Apply only the
-  // missing difference required by the outer RAW container.
-  const embeddedInverse = [embeddedMatrix[0], embeddedMatrix[2], embeddedMatrix[1], embeddedMatrix[3]];
-  const matrix = multiplyOrientationMatrices(rawMatrix, embeddedInverse).map(value => Object.is(value, -0) ? 0 : value);
-  const result = { matrix, swapsAxes: Math.abs(matrix[1]) === 1 || Math.abs(matrix[2]) === 1, rawOrientation, embeddedOrientation };
-  if (rawOrientationCache.size >= 64) rawOrientationCache.delete(rawOrientationCache.keys().next().value);
-  rawOrientationCache.set(cacheKey, result);
-  return result;
-};
-
-const writeThumbnailJpeg = async (target, image, quality) => {
-  const temporary = `${target}.tmp-${crypto.randomUUID()}`;
-  try {
-    await fs.promises.writeFile(temporary, image.toJPEG(quality));
-    if (await pathExists(target)) await fs.promises.unlink(temporary);
-    else await fs.promises.rename(temporary, target);
-  } finally {
-    if (await pathExists(temporary)) await fs.promises.unlink(temporary);
-  }
-};
-
-class ThumbnailImageWorkerPool {
-  constructor(size) {
-    this.size = size;
-    this.workers = [];
-    this.queue = [];
-    this.nextId = 0;
-    this.stopped = false;
-  }
-
-  run(source, kind, outputs, urgent = false) {
-    if (this.stopped) return Promise.reject(new Error('图片解码服务已经停止'));
-    return new Promise((resolve, reject) => {
-      const job = { id: ++this.nextId, source, kind, outputs, resolve, reject };
-      if (urgent) this.queue.unshift(job);
-      else this.queue.push(job);
-      this.pump();
-    });
-  }
-
-  createWorker() {
-    const { command, args } = getRunConfig('thumbnail_image.py', ['--server']);
-    const child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    const worker = { child, output: '', stderr: '', job: null, timer: null, dead: false };
-    this.workers.push(worker);
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', data => {
-      worker.output += data;
-      const lines = worker.output.split(/\r?\n/);
-      worker.output = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        let response;
-        try { response = JSON.parse(line); } catch { continue; }
-        if (!worker.job || response.id !== worker.job.id) continue;
-        const job = worker.job;
-        worker.job = null;
-        clearTimeout(worker.timer);
-        worker.timer = null;
-        if (response.success) job.resolve(response.generated || []);
-        else job.reject(new Error(response.error || '图片解码失败'));
-        this.pump();
-      }
-    });
-    child.stderr.setEncoding('utf8');
-    child.stderr.on('data', data => { worker.stderr = (worker.stderr + data).slice(-4000); });
-    const finish = error => {
-      if (worker.dead) return;
-      worker.dead = true;
-      clearTimeout(worker.timer);
-      if (worker.job) worker.job.reject(error);
-      worker.job = null;
-      this.workers = this.workers.filter(item => item !== worker);
-      if (!this.stopped) this.pump();
-    };
-    child.on('error', finish);
-    child.on('exit', code => finish(new Error(worker.stderr.trim() || `图片解码服务退出，代码 ${code}`)));
-    return worker;
-  }
-
-  pump() {
-    if (this.stopped) return;
-    while (this.workers.length < this.size && this.queue.length > this.workers.filter(worker => !worker.job && !worker.dead).length) this.createWorker();
-    for (const worker of this.workers) {
-      if (worker.dead || worker.job || !this.queue.length) continue;
-      const job = this.queue.shift();
-      worker.job = job;
-      worker.timer = setTimeout(() => {
-        if (worker.job === job) worker.child.kill();
-      }, 120000);
-      worker.child.stdin.write(`${JSON.stringify({ id: job.id, source: job.source, kind: job.kind, outputs: job.outputs })}\n`, error => {
-        if (error && !worker.dead) worker.child.kill();
-      });
-    }
-  }
-
-  stop() {
-    this.stopped = true;
-    for (const job of this.queue.splice(0)) job.reject(new Error('图片解码服务已经停止'));
-    for (const worker of this.workers) if (!worker.child.killed) worker.child.kill();
-  }
-}
-
-const runImageDecoderWithRawFallback = async (pool, sourcePath, kind, outputs, urgent) => {
-  try {
-    return await pool.run(sourcePath, kind, outputs, urgent);
-  } catch (embeddedError) {
-    if (kind !== 'raw') throw embeddedError;
-    const result = await runPythonJsonAction('raw_decoder.py', ['--source', sourcePath, '--outputs', JSON.stringify(outputs)], 5 * 60 * 1000);
-    if (!result?.success || !Array.isArray(result.generated)) throw new Error(result?.error || '内置 RAW 解码器未能生成预览');
-    return result.generated;
-  }
-};
-
-const generateImageThumbnailFiles = (sourcePath, kind, outputs, urgent = false) => {
-  if (!thumbnailImageWorkerPool) thumbnailImageWorkerPool = new ThumbnailImageWorkerPool(2);
-  return runImageDecoderWithRawFallback(thumbnailImageWorkerPool, sourcePath, kind, outputs, urgent);
-};
-
-const generateOriginalImagePreviewFile = (sourcePath, kind, outputs) => {
-  // Full preview extraction must never wait behind project thumbnail warming.
-  // A dedicated one-worker pool keeps selection latency bounded even while the
-  // background scheduler is decoding hundreds of files.
-  if (!originalImageWorkerPool) originalImageWorkerPool = new ThumbnailImageWorkerPool(1);
-  return runImageDecoderWithRawFallback(originalImageWorkerPool, sourcePath, kind, outputs, true);
-};
-
-const generateVideoCoverSource = (sourcePath, stat, cacheDir, requestedSize) => new Promise((resolve, reject) => {
-  const cacheKey = crypto.createHash('sha256').update(`scheduler-video-cover|v${THUMBNAIL_VERSION}|${requestedSize}|${sourcePath}|${stat.size}|${stat.mtimeMs}`).digest('hex');
-  const toolArgs = ['--source', sourcePath, '--output_dir', cacheDir, '--cache_key', cacheKey, '--size', String(requestedSize)];
-  const { command, args } = getRunConfig('video_preview.py', toolArgs);
-  const child = spawn(command, args, { windowsHide: true });
-  let stdout = '';
-  let stderr = '';
-  const timer = setTimeout(() => child.kill(), 120000);
-  child.stdout.on('data', data => { stdout += data.toString(); });
-  child.stderr.on('data', data => { stderr += data.toString(); });
-  child.on('error', error => { clearTimeout(timer); reject(error); });
-  child.on('close', code => {
-    clearTimeout(timer);
-    try {
-      const payloads = stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line => {
-        try { return JSON.parse(line); } catch { return null; }
-      }).filter(Boolean);
-      const payload = [...payloads].reverse().find(item => Array.isArray(item.frames) && item.frames.length);
-      const errorPayload = [...payloads].reverse().find(item => item?.error);
-      if (code !== 0 || !payload || !fs.existsSync(payload.frames[0])) throw new Error(stderr.trim() || errorPayload?.error || 'FFmpeg 未能生成视频封面');
-      resolve(payload.frames[0]);
-    } catch (error) { reject(error); }
-  });
+const rawOrientationCorrection = createRawOrientationService({ exiftool }).correction;
+const imageThumbnailRuntime = createImageThumbnailRuntime({
+  crypto, fs, nativeImage, spawn, getRunConfig, runPythonJsonAction,
+  getMediaCacheDir, mediaThumbnailCacheFile, copyWindowsShellThumbnail,
+  thumbnailVersion: THUMBNAIL_VERSION,
 });
-
-// Generate only the tiers requested by the scheduler. Windows' provider and
-// Python decoding both run outside Electron's main event loop.
-const generateThumbnailSet = async (sourcePath, stat, kind, cacheConfig, sizes) => {
-  const cacheDir = getMediaCacheDir(cacheConfig);
-  const ordered = [...sizes].sort((left, right) => right.pixels - left.pixels);
-  const targets = new Map(ordered.map(size => [size.label, mediaThumbnailCacheFile(sourcePath, stat, cacheDir, size.pixels, THUMBNAIL_VERSION)]));
-  let missing = ordered.filter(size => !fs.existsSync(targets.get(size.label)));
-  if (!missing.length) return ordered.map(size => ({ sizeLabel: size.label, pixelSize: size.pixels, path: targets.get(size.label) }));
-
-  const largest = missing[0];
-  const largestTarget = targets.get(largest.label);
-  let generatedByShell = await copyWindowsShellThumbnail(sourcePath, largestTarget, largest.pixels, true);
-  if (!generatedByShell) generatedByShell = await copyWindowsShellThumbnail(sourcePath, largestTarget, largest.pixels, false);
-  if (generatedByShell) {
-    missing = missing.slice(1);
-    if (missing.length) {
-      await generateImageThumbnailFiles(largestTarget, 'image', missing.map(size => ({ sizeLabel: size.label, pixels: size.pixels, path: targets.get(size.label) })));
-    }
-  } else if (kind === 'video') {
-    const coverPath = await generateVideoCoverSource(sourcePath, stat, cacheDir, largest.pixels);
-    await generateImageThumbnailFiles(coverPath, 'image', missing.map(size => ({ sizeLabel: size.label, pixels: size.pixels, path: targets.get(size.label) })));
-  } else {
-    try {
-      await generateImageThumbnailFiles(sourcePath, kind === 'raw' ? 'raw' : 'image', missing.map(size => ({ sizeLabel: size.label, pixels: size.pixels, path: targets.get(size.label) })));
-    } catch (decodeError) {
-      // Retain Electron's decoder only as a compatibility fallback for
-      // formats supplied by an installed OS codec but unsupported by Pillow.
-      if (kind === 'raw') throw decodeError;
-      for (const size of missing) {
-        const target = targets.get(size.label);
-        let thumbnail = nativeImage.createEmpty();
-        try { thumbnail = await nativeImage.createThumbnailFromPath(sourcePath, { width: size.pixels, height: size.pixels }); }
-        catch { /* reported below if every requested tier is still absent */ }
-        if (!thumbnail.isEmpty()) await writeThumbnailJpeg(target, thumbnail, size.pixels >= 960 ? 84 : 80);
-      }
-    }
-  }
-  return ordered.filter(size => fs.existsSync(targets.get(size.label))).map(size => ({ sizeLabel: size.label, pixelSize: size.pixels, path: targets.get(size.label) }));
-};
 
 thumbnailPipeline = new ThumbnailPipeline({
   getRunConfig,
   databasePath: path.join(getConfigDir(), 'thumbnail-index.sqlite3'),
   getCacheDir: getMediaCacheDir,
   cacheFilePath: mediaThumbnailCacheFile,
-  generateThumbnailSet,
+  generateThumbnailSet: imageThumbnailRuntime.generateThumbnailSet,
   toPreviewUrl: toMediaUrl,
   trimCache: trimMediaCache,
   notify: update => {
@@ -1915,7 +1706,8 @@ app.whenReady().then(async () => {
   registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
-  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, exiftool, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaMetadataCache, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
+  registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });
+  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
   registerSelectionIpc({ ipcMain, path, fs, selectionService, workspaceCatalogs });
   registerAdvancedVideoIpc({ BrowserWindow, app, crypto, ipcMain, mediaService, path, pluginService, spawn, writeLog });
   const credentialService = createCredentialService({ writeLog });
@@ -1944,8 +1736,7 @@ app.on('before-quit', () => {
   workspaceMaintenanceDatabase.stop();
   mediaDatabase.stop();
   mediaScanDatabase.stop();
-  thumbnailImageWorkerPool?.stop();
-  originalImageWorkerPool?.stop();
+  imageThumbnailRuntime.stop();
   thumbnailService?.stop();
   backgroundTasks.stop();
   eventBus.clear();

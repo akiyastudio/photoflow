@@ -74,7 +74,7 @@ def test_schema_17_upgrade(root: Path) -> None:
     create_schema_17_database(database, workspace)
     db = workspace_db.connect(str(workspace), str(database))
     try:
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
         columns = {row[1] for row in db.execute("PRAGMA table_info(progress_folders)")}
         assert {"node_role", "relation_kind", "rename_from_parent", "copy_missing_from_parent",
                 "last_tracked_at", "tracking_snapshot_json", "folder_signature", "tombstone_json"} <= columns
@@ -109,7 +109,7 @@ def test_schema_17_upgrade(root: Path) -> None:
         db.close()
     reopened = workspace_db.connect(str(workspace), str(database))
     try:
-        assert reopened.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+        assert reopened.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
         assert reopened.execute("SELECT COUNT(*) FROM progress_folders").fetchone()[0] == 3
         assert reopened.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
@@ -141,7 +141,7 @@ def test_schema_17_cycle_repairs(root: Path) -> None:
 
         db = workspace_db.connect(str(workspace), str(database))
         try:
-            assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+            assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
             assert workspace_db._progress_relation_cycles(db) == []
             expected_cycle = sorted(case["cycle"])
             repaired_id = min(expected_cycle)
@@ -196,7 +196,7 @@ def test_schema_19_cycle_repair(root: Path) -> None:
 
     repaired = workspace_db.connect(str(workspace), str(database))
     try:
-        assert repaired.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+        assert repaired.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
         assert workspace_db._progress_relation_cycles(repaired) == []
         latest_log = repaired.execute("SELECT * FROM progress_relation_repair_log ORDER BY id DESC LIMIT 1").fetchone()
         assert latest_log["repaired_progress_id"] == "legacy-main"

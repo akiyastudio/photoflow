@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 
 const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
+const { createMediaRepository } = require('../electron/repositories/media-repository.cjs');
 
 const handlers = new Map();
 const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-version-ipc-'));
@@ -75,6 +76,13 @@ const versionService = {
   releaseTrackingSession: async (_root, sessionId) => ({ success: true, released: true, sessionId }),
   registerProgress: async (_root, request) => ({ success: true, progressFolder: { id: 'registered-node', ...request } }),
 };
+const mediaScanService = {
+  prepareTracking: (root, request) => versionService.prepareTracking(root, request),
+  completeTrackingCommit: async (root, request) => {
+    calls.complete = { root, request };
+    return { success: true, session: { id: request.sessionId, status: 'committed' }, items: [] };
+  },
+};
 
 registerVersionIpc({
   Array,
@@ -99,6 +107,7 @@ registerVersionIpc({
   getProjectPath: () => path.join(workspaceRoot, 'Project'),
   ipcMain: { handle: (channel, listener) => handlers.set(channel, listener) },
   mediaMetadataCache: new Map(),
+  mediaScanService,
   path,
   releaseWorkspaceWatchPath: () => undefined,
   refreshWorkspaceCatalog: async () => undefined,
@@ -120,6 +129,13 @@ registerVersionIpc({
 });
 
 async function main() {
+  let repositoryCall;
+  const repository = createMediaRepository({ call: (...args) => { repositoryCall = args; return Promise.resolve({ success: true }); } });
+  await repository.prepareTracking(workspaceRoot, { progressId: 'timeout-test' });
+  assert.deepStrictEqual(repositoryCall, [workspaceRoot, 'tracking_prepare', { progressId: 'timeout-test' }, 30 * 60 * 1000], 'tracking preparation must use the long folder-snapshot timeout');
+  await repository.completeTrackingCommit(workspaceRoot, { sessionId: 'timeout-test' });
+  assert.deepStrictEqual(repositoryCall, [workspaceRoot, 'tracking_commit_complete', { sessionId: 'timeout-test' }, 30 * 60 * 1000], 'tracking finalization must use the long filesystem-snapshot timeout');
+
   const start = handlers.get('workspace-progress-tracking-start');
   const commit = handlers.get('workspace-progress-tracking-commit');
   assert(start && commit, 'V2 tracking handlers must be registered');
@@ -158,6 +174,10 @@ async function main() {
   assert.deepStrictEqual(calls.commit.request.matches, [
     { reference: 'base.jpg', source: 'new.jpg', target: 'base.jpg' },
   ]);
+  assert.deepStrictEqual(calls.complete, {
+    root: workspaceRoot,
+    request: { sessionId: '11111111-1111-4111-8111-111111111111', batchId: 'batch-id' },
+  }, 'tracking snapshot finalization must use the isolated media-scan database worker');
   assert(!JSON.stringify(calls.commit.request).includes(maliciousPath));
 
   let commitAttempts = 0;

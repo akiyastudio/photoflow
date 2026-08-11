@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -46,6 +47,15 @@ def decide_all(db, workspace: Path, session_id: str) -> None:
             "itemId": item["id"],
             "status": "rejected" if item["status"] == "missing_reference" else "accepted",
         })
+
+
+def complete_without_folder_rescan(db, workspace: Path, session_id: str):
+    original = db_api.folder_media_snapshot
+    db_api.folder_media_snapshot = lambda _path: (_ for _ in ()).throw(AssertionError("tracking commit rescanned a prepared folder"))
+    try:
+        return db_api.tracking_commit_complete(str(workspace), db, {"sessionId": session_id})
+    finally:
+        db_api.folder_media_snapshot = original
 
 
 def test_tracking_engine(root: Path) -> None:
@@ -102,7 +112,7 @@ def test_tracking_engine(root: Path) -> None:
         decide_all(db, workspace, prepared["sessionId"])
         plan = db_api.tracking_commit_plan(str(workspace), db, {"sessionId": prepared["sessionId"]})
         assert plan["progressId"] == progress["id"] and plan["parentProgressId"] == original["id"]
-        db_api.tracking_commit_complete(str(workspace), db, {"sessionId": prepared["sessionId"]})
+        complete_without_folder_rescan(db, workspace, prepared["sessionId"])
 
         # An unchanged refresh does not replay previously confirmed media.
         unchanged = db_api.tracking_prepare(str(workspace), db, {
@@ -111,7 +121,7 @@ def test_tracking_engine(root: Path) -> None:
         assert unchanged["sourceNames"] == [] and unchanged["copyCandidateNames"] == []
         db_api.tracking_store_preview(db, {"sessionId": unchanged["sessionId"], "items": []})
         db_api.tracking_commit_plan(str(workspace), db, {"sessionId": unchanged["sessionId"]})
-        db_api.tracking_commit_complete(str(workspace), db, {"sessionId": unchanged["sessionId"]})
+        complete_without_folder_rescan(db, workspace, unchanged["sessionId"])
 
         # Child changes and newly added parent media are the only next candidates.
         write_media(progress_folder / "delta.jpg", b"delta-v1")
@@ -147,8 +157,9 @@ def test_tracking_engine(root: Path) -> None:
         db_api.tracking_commit_failed(db, {"sessionId": refresh["sessionId"], "error": "simulated failure"})
         retry_plan = db_api.tracking_commit_plan(str(workspace), db, {"sessionId": refresh["sessionId"]})
         assert retry_plan["matches"] == refresh_plan["matches"]
-        write_media(progress_folder / "parent-added.jpg", b"new-parent")
-        db_api.tracking_commit_complete(str(workspace), db, {"sessionId": refresh["sessionId"]})
+        (progress_folder / "delta.jpg").rename(progress_folder / "base.jpg")
+        shutil.copy2(original_folder / "parent-added.jpg", progress_folder / "parent-added.jpg")
+        complete_without_folder_rescan(db, workspace, refresh["sessionId"])
 
         # Direct content changes mark the tracked node stale, including changes
         # discovered after the application was not watching the project.

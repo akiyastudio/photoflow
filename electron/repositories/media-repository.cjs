@@ -33,13 +33,16 @@ const createMediaRepository = client => ({
   retryBatchOperations: (root, batchId) => client.call(root, 'batch_retry_operations', { batchId }),
   detectProgressStale: (root, payload) => client.call(root, 'progress_detect_stale', payload, 60 * 1000),
   createTrackingSession: (root, payload) => client.call(root, 'tracking_session_create', payload),
-  prepareTracking: (root, payload) => client.call(root, 'tracking_prepare', payload, 60 * 1000),
+  prepareTracking: (root, payload) => client.call(root, 'tracking_prepare', payload, 30 * 60 * 1000),
   storeTrackingPreview: (root, payload) => client.call(root, 'tracking_store_preview', payload, 60 * 1000),
   getTrackingSession: (root, payload) => client.call(root, 'tracking_session_get', payload),
   releaseTrackingSession: (root, sessionId) => client.call(root, 'tracking_session_release', { sessionId }),
   decideTrackingItem: (root, payload) => client.call(root, 'tracking_session_decide', payload),
   getTrackingCommitPlan: (root, sessionId) => client.call(root, 'tracking_commit_plan', { sessionId }),
-  completeTrackingCommit: (root, payload) => client.call(root, 'tracking_commit_complete', payload, 60 * 1000),
+  // Legacy in-flight sessions may not have a prepared snapshot and must fall
+  // back to fingerprinting both folders. Keep that compatibility path bounded
+  // as a long disk operation instead of killing the database worker at 60s.
+  completeTrackingCommit: (root, payload) => client.call(root, 'tracking_commit_complete', payload, 30 * 60 * 1000),
   failTrackingCommit: (root, payload) => client.call(root, 'tracking_commit_failed', payload),
   getMainBranchMedia: (root, payload) => client.call(root, 'progress_main_branch_media', payload),
   listTeamPatches: (root, photoId) => client.call(root, 'team_patch_list', { photoId }),

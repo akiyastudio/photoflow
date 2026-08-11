@@ -74,12 +74,14 @@ const canvasModel = loadCommonJs(compile('src/features/versioning/version-tree-c
 const edgeModel = loadCommonJs(compile('src/features/versioning/version-tree-edge-model.ts'));
 const layoutModel = loadCommonJs(compile('src/features/versioning/version-tree-layout-model.ts'), request => request === './version-tree-edge-model.ts' ? edgeModel : require(request));
 const canvasHook = loadCommonJs(compile('src/features/versioning/use-version-tree-canvas.ts'), request => request === './version-tree-canvas-model' ? canvasModel : require(request));
+const workspaceGridModel = loadCommonJs(compile('src/features/workspace/marquee-selection-model.ts'));
 const tree = loadCommonJs(compile('src/components/ProjectVersionTree.tsx'), request => {
   if (request === '../features/versioning/versioning-v2-model') return model;
   if (request === '../features/versioning/version-tree-layout-model') return layoutModel;
   if (request === '../features/versioning/version-tree-canvas-model') return canvasModel;
   if (request === '../features/versioning/version-tree-edge-model') return edgeModel;
   if (request === '../features/versioning/use-version-tree-canvas') return canvasHook;
+  if (request === '../features/workspace/marquee-selection-model') return workspaceGridModel;
   return require(request);
 });
 const legacyRepairNotice = loadCommonJs(compile('src/features/versioning/LegacySelectionRepairNotice.tsx'));
@@ -254,6 +256,9 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   });
   const shelfTops = ['entry:other', 'entry:other b', 'entry:other c'].map(key => allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === key)?.style.top);
   assert.strictEqual(new Set(shelfTops).size, 1, 'ordinary folders in the Other region must prefer one horizontal row');
+  const shelfLefts = ['entry:other', 'entry:other b', 'entry:other c'].map(key => parseFloat(allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === key)?.style.left));
+  assert.strictEqual(shelfLefts[1] - shelfLefts[0], treeProps.gridIconSize + workspaceGridModel.FILE_GRID_GAP, 'ordinary folders must reuse the standard icon-grid gap');
+  assert.strictEqual(shelfLefts[2] - shelfLefts[1], treeProps.gridIconSize + workspaceGridModel.FILE_GRID_GAP, 'every ordinary folder must keep the standard icon-grid pitch');
   await React.act(async () => {
     root.render(React.createElement(tree.ProjectVersionTree, treeProps));
     await Promise.resolve(); await Promise.resolve();
