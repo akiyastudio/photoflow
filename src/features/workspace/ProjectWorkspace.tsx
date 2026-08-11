@@ -344,6 +344,10 @@ const PROJECT_PANEL_TITLES: Record<MountedProjectPanel, string> = {
 };
 type ProjectBrowseMode = 'recent' | 'grid' | 'list' | 'version-tree';
 const isProjectBrowseMode = (value: unknown): value is ProjectBrowseMode => value === 'recent' || value === 'grid' || value === 'list' || value === 'version-tree';
+const DEFAULT_FOLDER_GRID_ICON_SIZE = 132;
+const MIN_FOLDER_GRID_ICON_SIZE = 80;
+const MAX_FOLDER_GRID_ICON_SIZE = 360;
+const normalizeFolderGridIconSize = (value: unknown) => Math.max(MIN_FOLDER_GRID_ICON_SIZE, Math.min(MAX_FOLDER_GRID_ICON_SIZE, Math.round(Number(value) / 4) * 4));
 type ProjectFileFilter = 'all' | 'media' | 'image' | 'video';
 type ProjectRatingFilter = 'all' | 'rated' | '1' | '2' | '3' | '4' | '5';
 const PROJECT_FILE_FILTER_OPTIONS: ReadonlyArray<{ value: ProjectFileFilter; label: string }> = [
@@ -630,8 +634,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const viewMode: 'list' | 'grid' = browseMode === 'list' ? 'list' : 'grid';
   const recursiveFlatOpen = browseMode === 'recent';
   const versionTreeOpen = browseMode === 'version-tree';
-  const [gridIconSize, setGridIconSize] = useState(132);
-  const initialGridThumbnailSize = 132 * Math.min(2, window.devicePixelRatio || 1) <= 320 ? 320 : 640;
+  const [gridIconSize, setGridIconSize] = useState(DEFAULT_FOLDER_GRID_ICON_SIZE);
+  const initialGridThumbnailSize = DEFAULT_FOLDER_GRID_ICON_SIZE * Math.min(2, window.devicePixelRatio || 1) <= 320 ? 320 : 640;
   const [gridThumbnailSize, setGridThumbnailSize] = useState(initialGridThumbnailSize);
   useEffect(() => {
     const physicalSize = gridIconSize * Math.min(2, window.devicePixelRatio || 1);
@@ -972,9 +976,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const teamRetouchInstalled = installedPluginHasCapability(installedComponentIds, 'team-retouch.workspace');
   const teamRetouchAvailable = teamRetouchInstalled || componentsLoading;
   const folderBrowseModeStorageKey = `photoflow:folder-browse-modes:${browserContext.kind}:${workspacePath}|${project.name}`;
+  const folderGridIconSizeStorageKey = `photoflow:folder-grid-icon-sizes:${browserContext.kind}:${workspacePath}|${project.name}`;
   const readFolderBrowseModes = (): Record<string, ProjectBrowseMode> => {
     try {
-      const parsed = JSON.parse(window.localStorage.getItem(folderBrowseModeStorageKey) || '{}') as Record<string, unknown>;
+      const parsed = JSON.parse(window.sessionStorage.getItem(folderBrowseModeStorageKey) || '{}') as Record<string, unknown>;
       return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, ProjectBrowseMode] => isProjectBrowseMode(entry[1])));
     } catch {
       return {};
@@ -984,9 +989,29 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const rememberFolderBrowseMode = (relativePath: string, mode: ProjectBrowseMode) => {
     const normalizedPath = normalizeProjectRelativePath(relativePath).toLocaleLowerCase('zh-CN');
     try {
-      window.localStorage.setItem(folderBrowseModeStorageKey, JSON.stringify({ ...readFolderBrowseModes(), [normalizedPath]: mode }));
+      window.sessionStorage.setItem(folderBrowseModeStorageKey, JSON.stringify({ ...readFolderBrowseModes(), [normalizedPath]: mode }));
     } catch { /* storage unavailable */ }
   };
+  const readFolderGridIconSizes = (): Record<string, number> => {
+    try {
+      const parsed = JSON.parse(window.sessionStorage.getItem(folderGridIconSizeStorageKey) || '{}') as Record<string, unknown>;
+      return Object.fromEntries(Object.entries(parsed).flatMap(([path, value]) => Number.isFinite(Number(value))
+        ? [[path, normalizeFolderGridIconSize(value)] as [string, number]]
+        : []));
+    } catch {
+      return {};
+    }
+  };
+  const gridIconSizeForFolder = (relativePath: string) => readFolderGridIconSizes()[normalizeProjectRelativePath(relativePath).toLocaleLowerCase('zh-CN')] ?? DEFAULT_FOLDER_GRID_ICON_SIZE;
+  const rememberFolderGridIconSize = (relativePath: string, size: number) => {
+    const normalizedPath = normalizeProjectRelativePath(relativePath).toLocaleLowerCase('zh-CN');
+    const normalizedSize = normalizeFolderGridIconSize(size);
+    try {
+      window.sessionStorage.setItem(folderGridIconSizeStorageKey, JSON.stringify({ ...readFolderGridIconSizes(), [normalizedPath]: normalizedSize }));
+    } catch { /* storage unavailable */ }
+    return normalizedSize;
+  };
+  const selectFolderGridIconSize = (size: number) => setGridIconSize(rememberFolderGridIconSize(currentRelativePath, size));
   const progressFolderParentPath = (folder: ProgressFolder) => {
     const normalizedRoot = project.path.replace(/\\/g, '/').replace(/\/$/, '');
     const normalizedFolder = folder.folderPath.replace(/\\/g, '/').replace(/\/$/, '');
@@ -999,19 +1024,23 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const scopePath = normalizeProjectRelativePath(relativePath).toLocaleLowerCase('zh-CN');
     return projectWorkflows && foldersToCheck.some(folder => !folder.folderMissing && progressFolderParentPath(folder) === scopePath);
   };
+  const versionTreeModeAvailableFor = (foldersToCheck = progressFolders, relativePath = currentRelativePath) => {
+    const scopePath = normalizeProjectRelativePath(relativePath);
+    return projectWorkflows && (!scopePath || hasVersionTreeFor(foldersToCheck, scopePath));
+  };
   const browseModeForFolder = (relativePath: string, foldersToCheck = progressFolders): ProjectBrowseMode => {
     const normalizedPath = normalizeProjectRelativePath(relativePath);
     const remembered = storedFolderBrowseMode(normalizedPath);
-    if (remembered === 'version-tree' && !hasVersionTreeFor(foldersToCheck, normalizedPath)) return 'grid';
+    if (remembered === 'version-tree' && !versionTreeModeAvailableFor(foldersToCheck, normalizedPath)) return 'grid';
     if (remembered) return remembered;
     return hasVersionTreeFor(foldersToCheck, normalizedPath) ? 'version-tree' : 'grid';
   };
   const selectFolderBrowseMode = (mode: ProjectBrowseMode) => {
-    if (mode === 'version-tree' && !hasVersionTreeFor()) return;
+    if (mode === 'version-tree' && !versionTreeModeAvailableFor()) return;
     rememberFolderBrowseMode(currentRelativePath, mode);
     setBrowseMode(mode);
   };
-  const projectVersionTreeAvailable = hasVersionTreeFor();
+  const projectVersionTreeAvailable = versionTreeModeAvailableFor();
 
   useEffect(() => {
     if (!gatherToProject || !inspirationTargetWorkspacePath?.trim()) {
@@ -1669,6 +1698,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setResearchTargetHasTxt(false);
     setGatherPickerPaths(null);
     setBrowseMode(browseModeForFolder(lifecycle.relativePath, []));
+    setGridIconSize(gridIconSizeForFolder(lifecycle.relativePath));
     if (currentRelativePath !== lifecycle.relativePath) skipNextPathRefreshRef.current = true;
     setCurrentRelativePath(lifecycle.relativePath);
     if (active) {
@@ -3375,7 +3405,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       event.stopPropagation();
       const target = event.target as Element;
       const blankCanvas = target.closest('[data-version-tree-canvas]') && !target.closest('[data-version-tree-node],[data-edge-id],[data-edge-child-handle],button');
-      if (!blankCanvas || normalizeProjectRelativePath(currentRelativePath) || !hasVersionTreeFor()) return;
+      if (!blankCanvas || normalizeProjectRelativePath(currentRelativePath) || !versionTreeModeAvailableFor()) return;
       filesSurfaceRef.current?.focus({ preventScroll: true });
       window.dispatchEvent(new Event('photoflow-menu-open'));
       setFileMenu(null);
@@ -3403,7 +3433,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const restoreStandardVersionTreeLayout = async () => {
     const controller = versionTreeCanvasControllerRef.current;
     setSurfaceMenu(null);
-    if (!versionTreeOpen || normalizeProjectRelativePath(currentRelativePath) || !hasVersionTreeFor() || !controller) return;
+    if (!versionTreeOpen || normalizeProjectRelativePath(currentRelativePath) || !versionTreeModeAvailableFor() || !controller) return;
     if (controller.hasManualLayout) {
       const confirmed = await appDialog.confirm({
         title: '恢复版本树标准排版？',
@@ -3432,6 +3462,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setSearchOpen(false);
     setSearchQuery('');
     setBrowseMode(browseModeForFolder(normalizedPath));
+    setGridIconSize(gridIconSizeForFolder(normalizedPath));
     setCurrentRelativePath(normalizedPath);
   };
   const navigateToDirectory = (relativePath: string) => {
@@ -3441,7 +3472,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     showDirectory(normalizedPath);
   };
   const showVersionTree = () => {
-    if (!hasVersionTreeFor()) return;
+    if (!versionTreeModeAvailableFor()) return;
     setFinalViewOpen(false);
     setSelectedPaths([]);
     setPreviewPath('');
@@ -4855,13 +4886,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       event.stopPropagation();
       const direction = event.deltaY < 0 ? 1 : -1;
       const intensity = Math.max(8, Math.min(32, Math.abs(event.deltaY) / 3));
-      setGridIconSize(current => Math.max(80, Math.min(360, Math.round((current + direction * intensity) / 4) * 4)));
+      setGridIconSize(current => rememberFolderGridIconSize(currentRelativePathRef.current, current + direction * intensity));
     };
     zoomSurface.addEventListener('wheel', zoomWithWheel, { capture: true, passive: false });
     return () => {
       zoomSurface.removeEventListener('wheel', zoomWithWheel, true);
     };
-  }, [viewMode]);
+  }, [viewMode, folderGridIconSizeStorageKey]);
 
   const versionTreeStatusLabel = (folder: ProgressFolder) => trackingStateLabel(folder);
   const adoptVersionTreeFolder = async (entry: ProjectFileEntry, mode: 'original' | 'companion' | 'preview', mediaKind: 'image' | 'video') => {
@@ -5143,7 +5174,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           <button type="button" onClick={() => selectFolderBrowseMode('grid')} title="图标模式" aria-label="图标模式" aria-pressed={browseMode === 'grid'} className={`rounded-md p-1.5 ${browseMode === 'grid' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><Grid2X2 size={17}/></button>
           <button type="button" onClick={() => selectFolderBrowseMode('list')} title="列表模式" aria-label="列表模式" aria-pressed={browseMode === 'list'} className={`rounded-md p-1.5 ${browseMode === 'list' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><LayoutList size={17}/></button>
           {projectVersionTreeAvailable && <button type="button" onClick={showVersionTree} title="项目版本树" aria-label="项目版本树" aria-pressed={browseMode === 'version-tree'} className={`rounded-md p-1.5 ${browseMode === 'version-tree' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><GitBranch size={17}/></button>}
-          {(browseMode === 'grid' || browseMode === 'version-tree') && <input aria-label="图标大小" title="图标大小" type="range" min="80" max="360" step="4" value={gridIconSize} onChange={event => setGridIconSize(Number(event.target.value))} className="compact-hide-slider ml-2 w-24 accent-blue-600"/>}
+          {(browseMode === 'grid' || browseMode === 'version-tree') && <input aria-label="图标大小" title="图标大小" type="range" min={MIN_FOLDER_GRID_ICON_SIZE} max={MAX_FOLDER_GRID_ICON_SIZE} step="4" value={gridIconSize} onChange={event => selectFolderGridIconSize(Number(event.target.value))} className="compact-hide-slider ml-2 w-24 accent-blue-600"/>}
           <span aria-hidden className="mx-1 h-5 w-px bg-slate-200"/>
           <div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !showSortMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowSortMenu(next); }} title={versionTreeOpen ? '排序版本树中的媒体' : recursiveFlatOpen ? '排序每个文件夹中的文件' : '排序'} aria-label="排序" aria-haspopup="menu" aria-expanded={showSortMenu} className={`rounded-md p-1.5 ${showSortMenu ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><ArrowUpDown size={17}/></button>{showSortMenu && <div className="sort-menu absolute right-0 top-full z-40 mt-1 w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">{([['name', '文件名'], ['date', '修改日期'], ['size', '大小']] as const).map(([field, label]) => <button key={field} type="button" onClick={() => setSortField(field)} className={`project-menu-item ${sortField === field ? 'bg-blue-50 font-bold text-blue-600' : ''}`}>{label}</button>)}<div className="my-1 border-t border-slate-100"/><button type="button" onClick={() => setSortDirection('asc')} className={`project-menu-item ${sortDirection === 'asc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowUp size={14}/><span>递增</span></button><button type="button" onClick={() => setSortDirection('desc')} className={`project-menu-item ${sortDirection === 'desc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowDown size={14}/><span>递减</span></button></div>}</div>
           <div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !searchOpen; window.dispatchEvent(new Event('photoflow-menu-open')); setSearchOpen(next); }} title={versionTreeOpen ? '查找版本树中的文件（Ctrl+F）' : '查找文件（Ctrl+F）'} aria-label="查找文件" aria-expanded={searchOpen} className={`rounded-md p-1.5 ${searchOpen || searchQuery ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><Search size={17}/></button>{searchOpen && <div className="absolute right-0 top-full z-40 mt-1 w-72 rounded-lg border border-slate-200 bg-white p-2 shadow-xl"><div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2"><Search size={15} className="shrink-0 text-slate-400"/><input ref={searchInputRef} autoFocus value={searchQuery} onChange={event => setSearchQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { setSearchOpen(false); setSearchQuery(''); } }} placeholder="输入文件名" className="min-w-0 flex-1 bg-transparent py-2 text-sm text-slate-800 outline-none"/>{searchQuery && <button type="button" onClick={() => setSearchQuery('')} title="清除查找" className="rounded p-0.5 text-slate-400 hover:bg-slate-200"><X size={14}/></button>}</div></div>}</div>
