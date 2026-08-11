@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const { SELECTION_LIMITS, createSelectionService } = require('../electron/services/selection-service.cjs');
 const { registerSelectionIpc } = require('../electron/modules/selection-ipc.cjs');
 
@@ -46,6 +47,15 @@ const expectReject = async (promise, pattern) => {
 };
 
 const run = async () => {
+  const sourceModel = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'tools', 'filename-selection-model.ts')).href);
+  const sourceFolders = [{ name: 'RAW', relativePath: 'RAW' }, { name: 'MOV', relativePath: 'MOV' }, { name: 'JPG', relativePath: 'shoot/day/JPG' }];
+  assert.strictEqual(sourceModel.resolveFilenameSelectionSource(sourceFolders, undefined, 'raw'), 'RAW', '图片来源必须默认匹配 RAW，且不受大小写影响');
+  assert.strictEqual(sourceModel.resolveFilenameSelectionSource(sourceFolders, undefined, 'mov'), 'MOV', '视频来源必须默认匹配 MOV，且不受大小写影响');
+  assert.strictEqual(sourceModel.resolveFilenameSelectionSource(sourceFolders, '', 'raw'), '', '用户必须可以关闭图片或视频中的任一来源');
+  assert.strictEqual(sourceModel.resolveFilenameSelectionSource(sourceFolders, 'shoot\\day\\JPG', 'raw'), 'shoot/day/JPG', '用户选择的完整相对路径必须保留');
+  assert.strictEqual(sourceModel.filenameSelectionOutputName('RAW'), '图片选片');
+  assert.strictEqual(sourceModel.filenameSelectionOutputName('MOV'), '视频选片');
+
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-selection-v2-'));
   const workspaceRoot = path.join(temporaryRoot, 'workspace');
   const projectRoot = path.join(workspaceRoot, 'Project A');
@@ -65,6 +75,8 @@ const run = async () => {
     put(projectRoot, 'RAW/note_1001.txt');
     put(projectRoot, 'shoot/day/JPG/DSC_2002.JPG');
     put(projectRoot, 'MOV/clip_3003.MOV');
+    put(projectRoot, 'Mixed/still_3500.JPG');
+    put(projectRoot, 'Mixed/clip_3500.MOV');
 
     const folders = await service.listSourceFolders(request('RAW'));
     assert(folders.folders.some(folder => folder.relativePath === 'shoot/day/JPG'), '嵌套来源应出现在文件夹列表');
@@ -166,6 +178,16 @@ const run = async () => {
     assert.strictEqual(cancelledScan.cancelled, true);
     assert.strictEqual(cancelledScanReaddirCount, 1, '来源扫描取消后不得继续 readdir');
 
+    const mixedImagePreview = await service.preflightFilename({ ...request('Mixed'), mediaKind: 'image', keywords: '3500' });
+    const mixedVideoPreview = await service.preflightFilename({ ...request('Mixed'), mediaKind: 'video', keywords: '3500' });
+    assert.strictEqual(mixedImagePreview.matchedCount, 1, '图片来源只能匹配图片和 RAW');
+    assert.strictEqual(mixedImagePreview.imageCount, 1);
+    assert.strictEqual(mixedImagePreview.videoCount, 0);
+    assert.strictEqual(mixedVideoPreview.matchedCount, 1, '视频来源只能匹配视频');
+    assert.strictEqual(mixedVideoPreview.imageCount, 0);
+    assert.strictEqual(mixedVideoPreview.videoCount, 1);
+    assert.notStrictEqual(mixedImagePreview.signature, mixedVideoPreview.signature, '媒体类型必须绑定到预检签名');
+
     const scanProgress = [];
     const rootPreview = await service.preflightFilename({ ...request('RAW'), keywords: '1001 9999', operationId: 'progress-scan-001', onProgress: progress => scanProgress.push(progress) });
     assert(scanProgress.some(progress => progress.phase === 'scanning_source' && progress.filesScanned >= 1), '来源扫描必须报告进度');
@@ -178,9 +200,12 @@ const run = async () => {
     assert.strictEqual(rootPreview.unsupportedCount, 1);
     assert(rootPreview.items.some(item => item.status === 'unsupported'));
     assert.deepStrictEqual(rootPreview.missingKeywords, ['9999']);
-    const first = await service.executeFilename({ ...request('RAW'), keywords: '1001 9999', expectedSignature: rootPreview.signature, operationId: 'root-copy-1001' });
+    const rootCopyProgress = [];
+    const first = await service.executeFilename({ ...request('RAW'), keywords: '1001 9999', expectedSignature: rootPreview.signature, operationId: 'root-copy-1001', onProgress: progress => rootCopyProgress.push(progress) });
     assert.strictEqual(first.success, true);
     assert.strictEqual(first.copiedCount, 1);
+    assert(rootCopyProgress.some(progress => progress.phase === 'copying' && progress.fileName === 'IMG_1001.CR3' && progress.fileIndex === 1 && progress.totalFiles === 1), '复制时必须恢复当前文件与数量提示');
+    assert.strictEqual(rootCopyProgress.filter(progress => progress.phase === 'copying').at(-1).progress, 100, '复制提示必须报告真实完成进度');
     assert(first.items.some(item => item.status === 'copied'));
     assert(fs.existsSync(path.join(projectRoot, '图片选片', 'IMG_1001.CR3')));
 

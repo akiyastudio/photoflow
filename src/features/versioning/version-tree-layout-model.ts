@@ -134,12 +134,48 @@ const layoutVersionTreeDag = (input: VersionTreeLayoutInput): VersionTreeLayoutR
   const orderedSet = new Set(orderedIds);
   for (const node of stableNodes) if (!orderedSet.has(node.id)) orderedIds.push(node.id);
 
+  // Pack disconnected trees horizontally. Previously every independent root
+  // started in depth 0 and was pushed downward by auxiliary nodes belonging to
+  // another tree. A missing parent relation could therefore create a very
+  // large, seemingly random vertical gap. Keeping components in distinct depth
+  // ranges preserves the fact that they are disconnected without inventing an
+  // edge between them.
+  const undirected = new Map<string, string[]>();
+  for (const edge of acceptedEdges) {
+    undirected.set(edge.parentId, [...(undirected.get(edge.parentId) || []), edge.childId]);
+    undirected.set(edge.childId, [...(undirected.get(edge.childId) || []), edge.parentId]);
+  }
+  const componentById = new Map<string, number>();
+  const componentIds: string[][] = [];
+  for (const id of orderedIds) {
+    if (componentById.has(id)) continue;
+    const componentIndex = componentIds.length;
+    const members: string[] = [];
+    const pending = [id];
+    while (pending.length) {
+      const current = pending.pop()!;
+      if (componentById.has(current)) continue;
+      componentById.set(current, componentIndex);
+      members.push(current);
+      for (const neighbor of undirected.get(current) || []) if (!componentById.has(neighbor)) pending.push(neighbor);
+    }
+    componentIds.push(members);
+  }
+  const componentDepthOffset = new Map<number, number>();
+  let nextComponentDepth = 0;
+  componentIds.forEach((members, componentIndex) => {
+    componentDepthOffset.set(componentIndex, nextComponentDepth);
+    const maxLocalDepth = members.reduce((maximum, id) => Math.max(maximum, depths.get(id) || 0), 0);
+    nextComponentDepth += maxLocalDepth + 1;
+  });
+
   const positioned = new Map<string, PositionedVersionNode>();
   const occupiedByDepth = new Map<number, number[]>();
-  let nextRootY = 0;
+  const nextRootYByComponent = new Map<number, number>();
   for (const id of orderedIds) {
     const node = nodeById.get(id)!;
-    const depth = depths.get(id) || 0;
+    const componentIndex = componentById.get(id) || 0;
+    const depth = (depths.get(id) || 0) + (componentDepthOffset.get(componentIndex) || 0);
     const parents = incoming.get(id) || [];
     const supplementalAnchor = [...parents].sort((left, right) => {
       const leftParent = positioned.get(left.parentId);
@@ -156,13 +192,13 @@ const layoutVersionTreeDag = (input: VersionTreeLayoutInput): VersionTreeLayoutR
       || anchor?.relationKind === 'workflow_input' && node.nodeRole === 'progress';
     let y = parent
       ? parent.y + (followsParentLane ? 0 : nodeHeight + auxiliaryGap)
-      : nextRootY;
+      : nextRootYByComponent.get(componentIndex) || 0;
     const occupied = occupiedByDepth.get(depth) || [];
     while (occupied.some(candidate => Math.abs(candidate - y) < nodeHeight + rowGap)) y += nodeHeight + rowGap;
     occupied.push(y);
     occupiedByDepth.set(depth, occupied);
     positioned.set(id, { ...node, x: depth * (nodeWidth + columnGap), y, depth, subtreeHeight: nodeHeight });
-    if (!parents.length) nextRootY = Math.max(nextRootY, y + nodeHeight + rootGap);
+    if (!parents.length) nextRootYByComponent.set(componentIndex, Math.max(nextRootYByComponent.get(componentIndex) || 0, y + nodeHeight + rootGap));
   }
   const nodes = stableNodes.map(node => positioned.get(node.id)!).filter(Boolean);
   const edges = acceptedEdges.map(edge => {

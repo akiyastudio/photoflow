@@ -13,8 +13,8 @@ const { pathToFileURL } = require('url');
 
   const roots = layoutVersionTree({ ...base, nodes: ['RAW', 'JPG', 'MOV', 'OTHER'].map((id, index) => node(id, 'original', index)), edges: [] });
   assert.strictEqual(roots.edges.length, 0, 'independent roots must not create inferred edges');
-  const rootBoxes = roots.nodes.map(item => [item.y, item.y + base.nodeHeight]);
-  for (let index = 1; index < rootBoxes.length; index += 1) assert(rootBoxes[index][0] >= rootBoxes[index - 1][1] + base.rootGap);
+  const rootBoxes = roots.nodes.map(item => [item.x, item.x + base.nodeWidth]);
+  for (let index = 1; index < rootBoxes.length; index += 1) assert(rootBoxes[index][0] >= rootBoxes[index - 1][1] + base.columnGap, 'disconnected trees must pack horizontally instead of creating large vertical gaps');
 
   const branch = layoutVersionTree({
     ...base,
@@ -60,6 +60,8 @@ const { pathToFileURL } = require('url');
   const withNewNode = canvas.reconcileVersionTreeCanvasPositions({ nodes: [...branch.nodes, { id: 'new', x: 0, y: 0 }], previous: preserved, nodeWidth: base.nodeWidth, nodeHeight: base.nodeHeight });
   for (const id of preserved.keys()) assert.strictEqual(withNewNode.get(id), preserved.get(id), 'adding a node must not rearrange existing nodes');
   assert(withNewNode.has('new'));
+  const clampedLegacy = canvas.reconcileVersionTreeCanvasPositions({ nodes: branch.nodes, previous: new Map([['RAW', { x: -220, y: -80, manual: true }]]), nodeWidth: base.nodeWidth, nodeHeight: base.nodeHeight });
+  assert.deepStrictEqual(clampedLegacy.get('RAW'), { x: 0, y: 0, manual: true }, 'legacy negative saved coordinates must not clip nodes above or left of the viewport');
   const refreshed = canvas.reconcileVersionTreeCanvasPositions({ nodes: branch.nodes, previous: manual, nodeWidth: base.nodeWidth, nodeHeight: base.nodeHeight, refreshAll: true });
   assert.deepStrictEqual(refreshed.get('RAW'), defaultPositions.get('RAW'), 'explicit refresh must restore the complete default layout');
   const shuffledCanvas = canvas.reconcileVersionTreeCanvasPositions({ nodes: [...branch.nodes].reverse(), nodeWidth: base.nodeWidth, nodeHeight: base.nodeHeight });

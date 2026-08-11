@@ -4,21 +4,17 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const model = require('./versioning-v2-model.cjs');
 
-test('四个面板声明可切换的完整状态集合', () => {
-  assert.deepEqual(Object.keys(model.PANEL_DEFINITIONS), ['create', 'import', 'modify', 'confirm']);
+test('五个面板声明可切换的完整状态集合', () => {
+  assert.deepEqual(Object.keys(model.PANEL_DEFINITIONS), ['create', 'create-next', 'import', 'modify', 'confirm']);
+  assert.deepEqual(model.PANEL_DEFINITIONS['create-next'].states, ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure']);
   assert.deepEqual(model.PANEL_DEFINITIONS.import.states, ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure']);
   assert.deepEqual(model.PANEL_DEFINITIONS.confirm.states, ['loading', 'waiting_confirmation', 'committing', 'result', 'failure']);
 });
 
-test('auxiliary 强制关闭全部跟踪策略，main 保留合法选择', () => {
+test('版本面板只归一跟踪策略，不要求用户选择关系类型', () => {
   const requested = { trackingEnabled: true, renameFromParent: true, copyMissingFromParent: true };
-  assert.deepEqual(model.normalizePolicy('auxiliary', requested), {
-    trackingEnabled: false,
-    renameFromParent: false,
-    copyMissingFromParent: false,
-  });
-  assert.deepEqual(model.normalizePolicy('main', requested), requested);
-  assert.deepEqual(model.normalizePolicy('main', { trackingEnabled: false, renameFromParent: true, copyMissingFromParent: true }), {
+  assert.deepEqual(model.normalizePolicy(requested), requested);
+  assert.deepEqual(model.normalizePolicy({ trackingEnabled: false, renameFromParent: true, copyMissingFromParent: true }), {
     trackingEnabled: false,
     renameFromParent: false,
     copyMissingFromParent: false,
@@ -43,19 +39,21 @@ test('选片输出严格命名、同源复用且不覆盖，异源占用报冲�
   }), { action: 'conflict', code: 'output_name_conflict', outputName: 'RAW_选片', overwrite: false });
 });
 
-test('父版本新增只传播到开启补齐的 main progress，不传播到 auxiliary', () => {
+test('父版本新增传播到开启补齐的 V2/V1_1 版本，不传播到选片节点', () => {
   const policy = { trackingEnabled: true, renameFromParent: false, copyMissingFromParent: true };
   const nodes = [
-    { id: 'parent', role: 'progress', relationKind: 'main', parentNodeId: null, trackingState: 'ready', trackingPolicy: policy },
-    { id: 'main-child', role: 'progress', relationKind: 'main', parentNodeId: 'parent', trackingState: 'ready', trackingPolicy: policy },
-    { id: 'no-copy', role: 'progress', relationKind: 'main', parentNodeId: 'parent', trackingState: 'ready', trackingPolicy: { ...policy, copyMissingFromParent: false } },
-    { id: 'selection', role: 'selection', relationKind: 'auxiliary', parentNodeId: 'parent', trackingState: 'ready', trackingPolicy: policy },
+    { id: 'parent', role: 'progress', versionKey: '1', parentNodeId: null, trackingState: 'ready', trackingPolicy: policy },
+    { id: 'main-child', role: 'progress', versionKey: '2', parentNodeId: 'parent', trackingState: 'ready', trackingPolicy: policy },
+    { id: 'branch-child', role: 'progress', versionKey: '1_1', parentNodeId: 'parent', trackingState: 'ready', trackingPolicy: policy },
+    { id: 'no-copy', role: 'progress', versionKey: '1_2', parentNodeId: 'parent', trackingState: 'ready', trackingPolicy: { ...policy, copyMissingFromParent: false } },
+    { id: 'selection', role: 'selection', parentNodeId: 'parent', trackingState: 'disabled', trackingPolicy: policy },
   ];
   const changed = model.propagateStale(nodes, { nodeId: 'parent', mediaChanged: true, changeKind: 'added' });
   assert.equal(changed.find((node) => node.id === 'parent').trackingState, 'stale');
   assert.equal(changed.find((node) => node.id === 'main-child').trackingState, 'stale');
+  assert.equal(changed.find((node) => node.id === 'branch-child').trackingState, 'stale');
   assert.equal(changed.find((node) => node.id === 'no-copy').trackingState, 'ready');
-  assert.equal(changed.find((node) => node.id === 'selection').trackingState, 'ready');
+  assert.equal(changed.find((node) => node.id === 'selection').trackingState, 'disabled');
 });
 
 test('新素材默认待确认，未处理项会阻止提交', () => {
@@ -78,10 +76,10 @@ test('后台启动协议同时要求 taskId 与 sessionId', () => {
 
 test('被删除主节点的后代投影连接到最近仍存在的主祖先', () => {
   const nodes = [
-    { id: 'root', role: 'original', relationKind: null, parentNodeId: null, deletedAt: null },
-    { id: 'v1', role: 'progress', relationKind: 'main', parentNodeId: 'root', deletedAt: null },
-    { id: 'v2', role: 'progress', relationKind: 'main', parentNodeId: 'v1', deletedAt: '2026-08-09T00:00:00Z' },
-    { id: 'v3', role: 'progress', relationKind: 'main', parentNodeId: 'v2', deletedAt: null },
+    { id: 'root', role: 'original', parentNodeId: null, deletedAt: null },
+    { id: 'v1', role: 'progress', parentNodeId: 'root', deletedAt: null },
+    { id: 'v2', role: 'progress', parentNodeId: 'v1', deletedAt: '2026-08-09T00:00:00Z' },
+    { id: 'v3', role: 'progress', parentNodeId: 'v2', deletedAt: null },
   ];
   assert.equal(model.visibleMainParent(nodes, 'v3'), 'v1');
 });

@@ -6,16 +6,17 @@ type LegacySelectionRepairNoticeProps = {
   folders: ProgressFolder[];
   busyProgressIds?: string[];
   onRepair: (progressId: string, sourceProgressId: string) => void;
+  onKeepIndependent: (progressId: string) => void;
 };
 
-export const LegacySelectionRepairNotice = ({ repairs, folders, busyProgressIds = [], onRepair }: LegacySelectionRepairNoticeProps) => {
+export const LegacySelectionRepairNotice = ({ repairs, folders, busyProgressIds = [], onRepair, onKeepIndependent }: LegacySelectionRepairNoticeProps) => {
   const [selectedSources, setSelectedSources] = useState<Record<string, string>>({});
   const folderById = useMemo(() => new Map(folders.map(folder => [folder.id, folder])), [folders]);
   const busyIds = useMemo(() => new Set(busyProgressIds), [busyProgressIds]);
   if (!repairs.length) return null;
   return <section role="alert" className="m-3 rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-950">
     <h3 className="flex items-center gap-2 text-sm font-bold">旧选片关系待修复</h3>
-    <p className="mt-1 text-xs text-amber-800">请选择真实的原始素材来源。修复只更新数据库关系，不移动、合并或删除物理文件夹。</p>
+    <p className="mt-1 text-xs text-amber-800">请选择真实的原始素材来源；如果该项目确实没有来源，可保留为独立节点。两种操作都不会移动、合并或删除物理文件夹。</p>
     <div className="mt-3 space-y-2">{repairs.map(repair => {
       const legacy = folderById.get(repair.progressId);
       const sourceCandidates = folders.filter(folder => folder.nodeRole === 'original' && !folder.folderMissing && folder.mediaKind === legacy?.mediaKind);
@@ -40,6 +41,7 @@ export const LegacySelectionRepairNotice = ({ repairs, folders, busyProgressIds 
             </select>
           </label>
           <button type="button" disabled={!sourceProgressId || busy} onClick={() => onRepair(repair.progressId, sourceProgressId)} className="rounded bg-amber-700 px-3 py-1 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">{busy ? '修复中…' : '确认修复关系'}</button>
+          <button type="button" disabled={busy} onClick={() => onKeepIndependent(repair.progressId)} title="不连接原始素材，并且不再显示这条旧数据迁移提示" className="rounded border border-amber-300 bg-white px-3 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-40">保留为独立节点</button>
           {!sourceCandidates.length && <span className="text-xs text-red-700">当前项目没有同媒体类型的有效原始素材节点。</span>}
         </div>
       </div>;

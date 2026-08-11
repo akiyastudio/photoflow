@@ -112,12 +112,13 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   for (const mode of ['create', 'import', 'modify']) {
     await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: draft(mode), folders, onChange() {}, onSubmit() {}, onClose() {}, onChooseFolder() {} })));
     const content = textContent(container);
-    assert(content.includes(model.VERSION_PANEL_DEFINITIONS[mode].title), `${mode} panel must mount with its V2 title`);
-    assert(content.includes('版本进度') && content.includes('选片辅助节点') && content.includes('沿用上一版本文件名') && content.includes('补齐缺失媒体'));
-    if (mode !== 'create') assert(content.includes('需要移动到项目根目录'));
+    assert(content.includes('版本跟踪策略') && content.includes('沿用上一版本文件名') && content.includes('补齐缺失媒体'));
+    assert(!content.includes('节点用途') && !content.includes('工作流输入'), `${mode} settings must not expose relation types or collaboration inputs`);
+    if (mode === 'create' || mode === 'import') assert(content.includes('文件夹名称（自动生成）') && content.includes('图片') && content.includes('视频'), `${mode} must share the editable version/name and generated-folder layout`);
+    if (mode === 'import') assert(content.includes('所选文件夹不在项目根目录'));
   }
   await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('modify'), relationKind: 'auxiliary', trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false }, folders, onChange() {}, onSubmit() {}, onClose() {} })));
-  assert(textContent(container).includes('选片辅助节点不参与版本跟踪'));
+  assert(textContent(container).includes('选片、预览和协作节点不参与版本跟踪传播'));
   const tracked = {
     ...folders[0],
     id: 'tracked',
@@ -168,7 +169,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert(parentOptionText.includes('RAW'), 'RAW must be present in the structural parent selector');
   assert(!parentOptionText.includes('generated JPG artifact'), 'generated JPG artifacts must not be structural parent options');
   assert(!parentOptionText.includes('RAW_选片') && !parentOptionText.includes('团片协作节点'), 'selection and workflow nodes must not be structural parent options');
-  assert(textContent(container).includes('工作流输入') && textContent(container).includes('图片选片') && textContent(container).includes('团片协作'), 'selection and collaboration nodes must mount in the workflow input section');
+  assert(!textContent(container).includes('工作流输入'), 'selection and collaboration creation must stay in their own components');
   const entries = [
     { kind: 'folder', name: 'RAW', relativePath: 'RAW', path: 'C:/p/RAW', extension: '', size: 0, createdAt: 1, updatedAt: 1 },
     { kind: 'folder', name: 'Tracked', relativePath: 'Tracked', path: 'C:/p/Tracked', extension: '', size: 0, createdAt: 2, updatedAt: 2 },
@@ -193,6 +194,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     graphEdges: [
       { id: 'preview-edge', projectId: 'p', sourceProgressId: 'raw', targetProgressId: 'generated', edgeKind: 'derived_preview', createdAt: 1, updatedAt: 1 },
       { id: 'companion-edge', projectId: 'p', sourceProgressId: 'raw', targetProgressId: 'camera-jpg', edgeKind: 'media_companion', createdAt: 1, updatedAt: 1 },
+      { id: 'workflow-edge', projectId: 'p', sourceProgressId: 'selection', targetProgressId: 'tracked', edgeKind: 'workflow_input', createdAt: 1, updatedAt: 1 },
     ],
     entries,
     structureEntries: entries,
@@ -218,12 +220,16 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const rawEntryNode = allNodes(rawCanvasNode).find(node => node !== rawCanvasNode && node.nodeName === 'DIV' && node.textContent === 'RAW');
   const canvasNode = allNodes(container).find(node => node.nodeName === 'DIV' && node.attributes.get('data-version-tree-canvas') === 'true');
   const canvasViewport = allNodes(container).find(node => node.nodeName === 'DIV' && node.attributes.get('data-version-tree-viewport') === 'true');
+  assert((canvasViewport.attributes.get('class') || '').includes('h-full') && (canvasViewport.attributes.get('class') || '').includes('overflow-auto'), 'the version-tree viewport must fill and scroll inside the complete file region');
+  assert.strictEqual(canvasNode.style.minWidth, '100%', 'the interactive dotted canvas must fill the viewport instead of shrinking to graph content');
   assert(!textContent(container).includes('图片工作流') && !textContent(container).includes('视频工作流'), 'legacy workflow headings must be removed');
   assert(allNodes(container).some(node => node.attributes.get('aria-label') === '图片区域'), 'the mounted graph must expose a Blender-like image region');
   assert(allNodes(container).some(node => node.attributes.get('aria-label') === '其他区域'), 'ordinary folders must share the version-tree canvas in an other region');
   const imageArea = allNodes(container).find(node => node.attributes.get('aria-label') === '图片区域');
   const otherArea = allNodes(container).find(node => node.attributes.get('aria-label') === '其他区域');
   assert(parseFloat(imageArea.style.top) + parseFloat(imageArea.style.height) <= parseFloat(otherArea.style.top), 'default semantic regions must not overlap');
+  assert(!allNodes(imageArea).some(node => node.nodeName === 'BUTTON') && !/[▶▼]/u.test(textContent(imageArea)), 'semantic frames must be a separate passive layer without disclosure arrows');
+  const imageAreaBeforeDrag = { left: imageArea.style.left, top: imageArea.style.top, width: imageArea.style.width, height: imageArea.style.height };
   assert(!textContent(container).includes('loose.jpg'), 'loose media files must not become canvas nodes');
   assert(!textContent(container).includes('适应窗口') && !textContent(container).includes('100%') && !textContent(container).includes('剪线工具') && !textContent(container).includes('节点视图'), 'the version tree must not add a second top toolbar');
   const miniMap = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('title') === '小地图：点击显示全部');
@@ -232,6 +238,11 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(typeof canvasController.resetZoom, 'function');
   const initialCanvasWidth = parseFloat(canvasNode.style.width);
   const initialMainPath = allNodes(container).find(node => node.nodeName === 'path' && node.attributes.get('data-relation-kind') === 'main' && node.attributes.has('marker-end'))?.attributes.get('d');
+  const initialWorkflowPath = allNodes(container).find(node => node.nodeName === 'path' && node.attributes.get('data-relation-kind') === 'workflow_input' && node.attributes.has('marker-end'))?.attributes.get('d');
+  const arrowMarker = allNodes(container).find(node => node.nodeName === 'marker');
+  assert.strictEqual(arrowMarker?.attributes.get('markerUnits'), 'userSpaceOnUse', 'arrowheads must use fixed canvas units so thin supplemental edges do not float above their target');
+  assert.strictEqual(arrowMarker?.attributes.get('refX'), '8', 'the arrow tip must terminate at the target boundary');
+  assert(initialWorkflowPath?.includes(' C ') && !initialWorkflowPath.includes(' L '), 'vertically arranged workflow relations must use port-aware curves instead of a top rectangular detour');
   const savesBeforeDragging = layoutRequests.saves.length;
   await React.act(async () => {
     dispatch(rawCanvasNode, 'pointerdown', { pointerId: 41, button: 0, clientX: 100, clientY: 100 });
@@ -251,6 +262,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(layoutRequests.saves.length, savesBeforeDragging + 1, 'one completed node drag must issue exactly one patch save');
   assert.strictEqual(entryOpenClicks, 1, 'a completed drag must suppress the following folder click');
   assert(parseFloat(canvasNode.style.width) > initialCanvasWidth, 'moving a node right must expand the canvas bounds');
+  assert.deepStrictEqual({ left: imageArea.style.left, top: imageArea.style.top, width: imageArea.style.width, height: imageArea.style.height }, imageAreaBeforeDrag, 'ordinary node movement must not resize or chase its semantic frame');
   const movedMainPath = allNodes(container).find(node => node.nodeName === 'path' && node.attributes.get('data-relation-kind') === 'main' && node.attributes.has('marker-end'))?.attributes.get('d');
   assert.notStrictEqual(movedMainPath, initialMainPath, 'relation paths must update during local node movement');
   const savedLeft = rawCanvasNode.style.left;
@@ -399,7 +411,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, graphEdges: treeProps.graphEdges.filter(edge => edge.id !== 'companion-edge') })));
   const emptyCompanionInput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === 'Camera JPG 等待输入连接');
   const rawOutput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '从 RAW 拖出连接');
-  const cameraTarget = allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === 'camera-jpg');
+  const cameraTarget = allNodes(container).find(node => node.attributes.get('data-version-progress-id') === 'camera-jpg');
   assert(emptyCompanionInput && rawOutput && cameraTarget, 'disconnecting a companion relation must leave a reconnectable empty input and source output');
   elementAtPoint = cameraTarget;
   await React.act(async () => {
@@ -412,7 +424,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
 
   await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, graphEdges: [] })));
   const previewInput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === 'generated JPG artifact 等待输入连接');
-  const previewTarget = allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === 'generated');
+  const previewTarget = allNodes(container).find(node => node.attributes.get('data-version-progress-id') === 'generated');
   const refreshedRawOutput = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '从 RAW 拖出连接');
   assert(previewInput && previewTarget && refreshedRawOutput, 'disconnecting a preview relation must preserve both legal endpoints');
   elementAtPoint = previewTarget;
@@ -431,7 +443,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   });
   assert.strictEqual(supplementalCreates.length + relationRequests.length, submissionsBeforeIllegal, 'an incompatible source must never create a relation');
 
-  const ambiguousTarget = allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === 'ambiguous-artifact');
+  const ambiguousTarget = allNodes(container).find(node => node.attributes.get('data-version-progress-id') === 'ambiguous-artifact');
   elementAtPoint = ambiguousTarget;
   await React.act(async () => {
     dispatch(refreshedRawOutput, 'pointerdown', { pointerId: 51, button: 0, clientX: 100, clientY: 100 });
@@ -449,19 +461,36 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert(busyPort && (busyPort.attributes.has('disabled') || busyPort.disabled === true), 'busy child relation port must be disabled');
   assert(!allNodes(container).some(node => node.nodeName === 'circle' && node.attributes.get('data-edge-child-handle') === 'free'), 'busy child endpoint must not remain draggable');
 
+  await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, selectedRelativePaths: ['Tracked', 'Other'] })));
+  const selectedOtherNode = allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === 'entry:other');
+  const savesBeforeMixedGroupMove = layoutRequests.saves.length;
+  await React.act(async () => {
+    dispatch(selectedOtherNode, 'pointerdown', { pointerId: 58, button: 0, clientX: 100, clientY: 100 });
+    dispatch(selectedOtherNode, 'pointermove', { pointerId: 58, button: 0, clientX: 180, clientY: 180 });
+    dispatch(selectedOtherNode, 'pointerup', { pointerId: 58, button: 0, clientX: 180, clientY: 180 });
+    await Promise.resolve(); await Promise.resolve();
+  });
+  assert.strictEqual(layoutRequests.saves.length, savesBeforeMixedGroupMove + 1, 'a mixed selection of version and Other folders must save as one group move');
+  assert.deepStrictEqual(new Set(layoutRequests.saves.at(-1).positions.map(position => position.nodeKey)), new Set(['progress:tracked', 'entry:other']), 'Other folders must use the same multi-select movement layer as registered version folders');
+
   const thousandFolders = Array.from({ length: 1000 }, (_value, index) => ({ kind: 'folder', name: `Candidate ${index}`, relativePath: `Candidate ${index}`, path: `C:/p/Candidate ${index}`, extension: '', size: 0, createdAt: 20 + index, updatedAt: 20 + index }));
   await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, entries: [...entries, ...thousandFolders], structureEntries: [...entries, ...thousandFolders], pendingChildId: undefined })));
   const renderedCandidates = allNodes(container).filter(node => String(node.attributes?.get('data-version-output-target-key') || '').startsWith('entry:candidate '));
   assert(renderedCandidates.length > 0 && renderedCandidates.length < 120, 'a thousand candidate folders must be viewport-virtualized instead of mounting one thousand rich nodes');
 
   let repairRequest;
+  let keepIndependentRequest;
   await React.act(async () => root.render(React.createElement(legacyRepairNotice.LegacySelectionRepairNotice, {
     repairs: [{ progressId: 'legacy', projectId: 'p', legacyName: '图片选片', expectedSourceName: 'RAW', reason: 'selection_already_exists', candidateIds: ['selection'] }],
     folders: [folders[0], { ...selection, id: 'selection', parentProgressId: 'raw' }, { ...selection, id: 'legacy', displayName: '图片选片', nodeRole: 'original', parentProgressId: undefined, relationKind: undefined }],
     onRepair: (progressId, sourceProgressId) => { repairRequest = { progressId, sourceProgressId }; },
+    onKeepIndependent: progressId => { keepIndependentRequest = progressId; },
   })));
   assert(textContent(container).includes('已经存在现代选片节点') && textContent(container).includes('不能静默覆盖或删除'), 'coexisting selections must show an explicit warning');
   const repairButton = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.textContent === '确认修复关系');
+  const keepIndependentButton = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.textContent === '保留为独立节点');
+  await React.act(async () => dispatch(keepIndependentButton, 'click'));
+  assert.strictEqual(keepIndependentRequest, 'legacy', 'legacy repair UI must allow an explicit independent-node resolution');
   await React.act(async () => dispatch(repairButton, 'click'));
   assert.deepStrictEqual(repairRequest, { progressId: 'legacy', sourceProgressId: 'raw' }, 'repair UI must submit only project node IDs');
   await React.act(async () => root.unmount());

@@ -35,7 +35,7 @@ const modelFolders = [
   folder('missing', 'C:\\project\\missing', { folderMissing: true }),
 ];
 assert.deepEqual(modelFolders.filter(isTeamProgressCandidate).map(item => item.id), ['main-a', 'main-b']);
-assert.deepEqual(modelFolders.filter(isTeamSourceProgressCandidate).map(item => item.id), ['original', 'main-a', 'main-b']);
+assert.deepEqual(modelFolders.filter(isTeamSourceProgressCandidate).map(item => item.id), ['main-a', 'main-b'], 'original and JPG companion folders must not become team workflow inputs');
 assert.deepEqual(resolveTeamSourceProgressIds([
   'C:\\project\\work-b\\nested\\b.jpg',
   'C:\\project\\work-a\\a.jpg',
@@ -79,15 +79,23 @@ with tempfile.TemporaryDirectory() as root:
 
     inputs = workspace_db.progress_register_with_graph(root, db, {
         'projectName':'Project', 'progress':{'progressId':workflow['id']},
-        'workflowInputProgressIds':[source_one['id'], source_two['id']],
+        'workflowInputProgressIds':[source_two['id']],
     })
-    assert len(inputs['edges']) == 2
+    assert len(inputs['edges']) == 1
     workspace_db.progress_register_with_graph(root, db, {
         'projectName':'Project', 'progress':{'progressId':workflow['id']},
-        'workflowInputProgressIds':[source_one['id'], source_two['id']],
+        'workflowInputProgressIds':[source_two['id']],
     })
     assert db.execute("SELECT COUNT(*) FROM progress_folders WHERE node_role='workflow'").fetchone()[0] == 1
-    assert db.execute("SELECT COUNT(*) FROM version_graph_edges WHERE target_progress_id=?", (workflow['id'],)).fetchone()[0] == 2
+    assert db.execute("SELECT COUNT(*) FROM version_graph_edges WHERE target_progress_id=?", (workflow['id'],)).fetchone()[0] == 1
+    try:
+        workspace_db.progress_register_with_graph(root, db, {
+            'projectName':'Project', 'progress':{'progressId':workflow['id']},
+            'workflowInputProgressIds':[source_one['id']],
+        })
+        raise AssertionError('original/JPG source accepted as a team workflow input')
+    except ValueError as error:
+        assert 'progress_graph_input_invalid' in str(error)
 
     output_one_path = os.path.join(project, 'output-one'); os.makedirs(output_one_path)
     output_one = workspace_db.progress_register_with_graph(root, db, {

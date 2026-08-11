@@ -16,6 +16,10 @@
       title: '新建进度',
       states: Object.freeze(['ready', 'processing', 'result', 'failure']),
     }),
+    'create-next': Object.freeze({
+      title: '创建下一版本',
+      states: Object.freeze(['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure']),
+    }),
     import: Object.freeze({
       title: '导入进度',
       states: Object.freeze(['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure']),
@@ -30,11 +34,8 @@
     }),
   });
 
-  function normalizePolicy(relationKind, policy) {
+  function normalizePolicy(policy) {
     const requested = policy || {};
-    if (relationKind === 'auxiliary') {
-      return { trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false };
-    }
     const trackingEnabled = Boolean(requested.trackingEnabled);
     return {
       trackingEnabled,
@@ -74,7 +75,6 @@
       }
       const parentAddedMedia = event.changeKind === 'added' && node.parentNodeId === event.nodeId;
       const participates = node.role === 'progress'
-        && node.relationKind === 'main'
         && node.trackingState === 'ready'
         && node.trackingPolicy.trackingEnabled
         && node.trackingPolicy.copyMissingFromParent;
@@ -160,7 +160,7 @@
       visited.add(cursor.id);
       const parent = byId.get(cursor.parentNodeId);
       if (!parent) return null;
-      if (!parent.deletedAt && parent.relationKind !== 'auxiliary' && parent.role !== 'selection') return parent.id;
+      if (!parent.deletedAt && (parent.role === 'original' || parent.role === 'progress')) return parent.id;
       cursor = parent;
     }
     return null;

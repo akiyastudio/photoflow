@@ -719,6 +719,16 @@ def test_legacy_selection_relation_repair(root: Path) -> None:
         assert after == before, "failed legacy repair must not leave a partial relationship update"
         assert db.execute("SELECT 1 FROM legacy_selection_relation_repairs WHERE progress_id=?", (second["id"],)).fetchone()
         assert (project / "第二图片选片").is_dir(), "failed repair must not delete the physical folder"
+        kept = workspace_db.progress_legacy_selection_repair(db, {
+            "progressId": second["id"], "action": "keep-independent",
+        })
+        assert kept["keptIndependent"] is True
+        kept_after = tuple(db.execute("SELECT node_role,parent_progress_id,relation_kind,version_key FROM progress_folders WHERE id=?", (second["id"],)).fetchone())
+        assert kept_after == before, "keeping an independent node must not rewrite its role or relationship"
+        assert db.execute("SELECT 1 FROM legacy_selection_relation_repairs WHERE progress_id=?", (second["id"],)).fetchone() is None
+        assert db.execute("SELECT 1 FROM project_properties WHERE project_id=? AND key=?", (raw["projectId"], f"legacy_selection_independent:{second['id']}")).fetchone()
+        assert workspace_db.progress_list(str(workspace), db, {"projectName": "Project"})["legacySelectionRelationRepairs"] == []
+        assert (project / "第二图片选片").is_dir(), "keeping an independent node must preserve the physical folder"
     finally:
         db.close()
 
@@ -812,6 +822,40 @@ def test_version_tree_layout_persistence(root: Path) -> None:
         db.close()
 
 
+def test_legacy_selection_keep_independent_is_durable(root: Path) -> None:
+    workspace = root / "legacy-selection-independent-workspace"
+    project = workspace / "Project"
+    legacy_folder = project / "图片选片"
+    legacy_folder.mkdir(parents=True)
+    database = root / "legacy-selection-independent.sqlite3"
+    db = workspace_db.connect(str(workspace), str(database))
+    now = int(time.time() * 1000)
+    db.execute(
+        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES('legacy-independent-project','Project','后期中','Project',?,?)",
+        (now, now),
+    )
+    db.commit()
+    try:
+        legacy = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "0",
+            "displayName": "图片选片（原图）", "folderPath": str(legacy_folder),
+            "nodeRole": "original", "trackingEnabled": False, "trackingState": "disabled",
+        })["progressFolder"]
+        listed = workspace_db.progress_list(str(workspace), db, {"projectName": "Project"})
+        assert listed["legacySelectionRelationRepairs"][0]["reason"] == "source_missing"
+        kept = workspace_db.progress_legacy_selection_repair(db, {
+            "progressId": legacy["id"], "action": "keep-independent",
+        })
+        assert kept["keptIndependent"] is True
+        reloaded = workspace_db.progress_list(str(workspace), db, {"projectName": "Project"})
+        assert reloaded["legacySelectionRelationRepairs"] == [], "dismissed legacy repair must not be recreated on reload"
+        unchanged = next(folder for folder in reloaded["progressFolders"] if folder["id"] == legacy["id"])
+        assert unchanged["nodeRole"] == "original" and unchanged["parentProgressId"] is None and unchanged["versionKey"] == "0"
+        assert legacy_folder.is_dir(), "independent resolution must never move or delete the legacy folder"
+    finally:
+        db.close()
+
+
 def main() -> None:
     temp_root = Path(tempfile.mkdtemp(prefix="photoflow-versioning-v2-db-"))
     try:
@@ -822,6 +866,7 @@ def main() -> None:
         test_relation_update_transactions(temp_root)
         test_schema_24_supplemental_graph_edges(temp_root)
         test_legacy_selection_relation_repair(temp_root)
+        test_legacy_selection_keep_independent_is_durable(temp_root)
         test_version_tree_layout_persistence(temp_root)
         print("versioning V2 database tests passed")
     finally:

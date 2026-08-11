@@ -164,6 +164,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   repairLegacySelectionRelation: (workspacePath, projectName, request) => ipcRenderer.invoke('workspace-legacy-selection-relation-repair', workspacePath, projectName, {
     progressId: request?.progressId,
     sourceProgressId: request?.sourceProgressId,
+    action: request?.action,
   }),
   commitMediaWorkflowImport: (workspacePath, manifest) => ipcRenderer.invoke('workspace-media-workflow-import-commit', workspacePath, manifest),
   recoverMediaWorkflowImports: workspacePath => ipcRenderer.invoke('workspace-media-workflow-import-recover', workspacePath),

@@ -23,6 +23,7 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".crm"}
 SQLITE_BUSY_TIMEOUT_MS = 15_000
 LEGACY_PROGRESS_MIGRATION_KEY = "legacy_progress_folders_migrated"
 LEGACY_MEDIA_WORKFLOW_MIGRATION_KEY = "legacy_media_workflow_graph_migrated_v1"
+LEGACY_SELECTION_INDEPENDENT_KEY_PREFIX = "legacy_selection_independent:"
 SELECTION_MAINLINE_REPAIR_REVISION = "1"
 VERSION_TREE_DEFAULT_LAYOUT_REVISION = "2"
 TARGET_SCHEMA_VERSION = 25
@@ -1009,7 +1010,7 @@ def _migration_24(db):
               AND (
                 (NEW.edge_kind='media_companion' AND source.node_role='original' AND target.node_role='original' AND target.artifact_kind='companion')
                 OR (NEW.edge_kind='derived_preview' AND source.node_role IN ('original','progress') AND target.node_role='artifact' AND target.artifact_kind='preview')
-                OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress') OR (source.node_role IN ('original','progress') AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
+                OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress') OR (source.node_role='progress' AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
               )
           )
           OR EXISTS(
@@ -1035,7 +1036,7 @@ def _migration_24(db):
               AND (
                 (NEW.edge_kind='media_companion' AND source.node_role='original' AND target.node_role='original' AND target.artifact_kind='companion')
                 OR (NEW.edge_kind='derived_preview' AND source.node_role IN ('original','progress') AND target.node_role='artifact' AND target.artifact_kind='preview')
-                OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress') OR (source.node_role IN ('original','progress') AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
+                OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress') OR (source.node_role='progress' AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
               )
           )
           OR EXISTS(
@@ -1059,7 +1060,7 @@ def _migration_24(db):
               AND NEW.media_kind=target.media_kind AND (
                 (edge.edge_kind='media_companion' AND NEW.node_role='original' AND target.node_role='original' AND target.artifact_kind='companion')
                 OR (edge.edge_kind='derived_preview' AND NEW.node_role IN ('original','progress') AND target.node_role='artifact' AND target.artifact_kind='preview')
-                OR (edge.edge_kind='workflow_input' AND ((NEW.node_role IN ('selection','workflow') AND target.node_role='progress') OR (NEW.node_role IN ('original','progress') AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
+                OR (edge.edge_kind='workflow_input' AND ((NEW.node_role IN ('selection','workflow') AND target.node_role='progress') OR (NEW.node_role='progress' AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
               )
             )
           )
@@ -1070,7 +1071,7 @@ def _migration_24(db):
               AND source.media_kind=NEW.media_kind AND (
                 (edge.edge_kind='media_companion' AND source.node_role='original' AND NEW.node_role='original' AND NEW.artifact_kind='companion')
                 OR (edge.edge_kind='derived_preview' AND source.node_role IN ('original','progress') AND NEW.node_role='artifact' AND NEW.artifact_kind='preview')
-                OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND NEW.node_role='progress') OR (source.node_role IN ('original','progress') AND NEW.node_role='workflow' AND NEW.artifact_kind='team_workspace')))
+                OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND NEW.node_role='progress') OR (source.node_role='progress' AND NEW.node_role='workflow' AND NEW.artifact_kind='team_workspace')))
               )
             )
           )
@@ -1257,7 +1258,7 @@ def _check_integrity(db, force: bool = False):
               AND target.project_id=edge.project_id AND source.media_kind=target.media_kind
               AND ((edge.edge_kind='media_companion' AND source.node_role='original' AND target.node_role='original' AND target.artifact_kind='companion')
                 OR (edge.edge_kind='derived_preview' AND source.node_role IN ('original','progress') AND target.node_role='artifact' AND target.artifact_kind='preview')
-                OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress') OR (source.node_role IN ('original','progress') AND target.node_role='workflow' AND target.artifact_kind='team_workspace'))))
+                OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress') OR (source.node_role='progress' AND target.node_role='workflow' AND target.artifact_kind='team_workspace'))))
           )""",
         "media_import_artifact_slots.owner_kind": """SELECT COUNT(*) FROM media_import_artifact_slots slot
           WHERE NOT EXISTS(SELECT 1 FROM progress_folders progress WHERE progress.id=slot.progress_id
@@ -2469,7 +2470,7 @@ def migrate_legacy_media_workflow_graph_once(root: str, db, project):
                 ).fetchall()
                 candidates = db.execute(
                     """SELECT * FROM progress_folders WHERE project_id=? AND media_kind='image'
-                       AND node_role IN ('original','progress') AND missing_since IS NULL""",
+                       AND node_role='progress' AND missing_since IS NULL""",
                     (project["id"],),
                 ).fetchall()
                 sources = set()
@@ -2561,6 +2562,17 @@ def repair_legacy_selection_nodes(root: str, db, project):
             ).fetchall()
             source_ids = [row["id"] for row in candidates]
             for legacy_node in legacy_nodes:
+                independent_key = f"{LEGACY_SELECTION_INDEPENDENT_KEY_PREFIX}{legacy_node['id']}"
+                kept_independent = db.execute(
+                    "SELECT 1 FROM project_properties WHERE project_id=? AND key=?",
+                    (project["id"], independent_key),
+                ).fetchone()
+                if kept_independent is not None:
+                    db.execute(
+                        "DELETE FROM legacy_selection_relation_repairs WHERE progress_id=?",
+                        (legacy_node["id"],),
+                    )
+                    continue
                 if len(source_ids) != 1:
                     record_repair(
                         legacy_node, legacy_name, definition["source_name"],
@@ -2708,7 +2720,8 @@ def progress_list(root: str, db, payload: dict):
 def progress_legacy_selection_repair(db, payload: dict):
     progress_id = str(payload.get("progressId") or "").strip()
     source_progress_id = str(payload.get("sourceProgressId") or "").strip()
-    if not progress_id or not source_progress_id:
+    action = str(payload.get("action") or "connect").strip()
+    if not progress_id or action not in ("connect", "keep-independent") or action == "connect" and not source_progress_id:
         raise ValueError("legacy_selection_repair_payload_invalid: 修复节点 ID 无效")
     with db:
         repair = db.execute(
@@ -2716,17 +2729,29 @@ def progress_legacy_selection_repair(db, payload: dict):
             (progress_id,),
         ).fetchone()
         legacy = db.execute("SELECT * FROM progress_folders WHERE id=?", (progress_id,)).fetchone()
-        source = db.execute("SELECT * FROM progress_folders WHERE id=?", (source_progress_id,)).fetchone()
         if repair is None or legacy is None:
             raise ValueError("legacy_selection_repair_not_found: 遗留选片修复记录不存在")
-        if source is None or source["project_id"] != repair["project_id"] or legacy["project_id"] != repair["project_id"]:
+        if legacy["project_id"] != repair["project_id"]:
+            raise ValueError("legacy_selection_repair_project_mismatch: 节点不属于当前项目")
+        if legacy["parent_progress_id"] is not None or legacy["version_key"] != "0" or legacy["node_role"] not in ("original", "progress"):
+            raise ValueError("legacy_selection_repair_state_changed: 遗留节点状态已经变化，请刷新后重试")
+        if action == "keep-independent":
+            timestamp = max(int(time.time() * 1000), int(legacy["updated_at"]) + 1)
+            db.execute(
+                """INSERT INTO project_properties(project_id,key,value_json,updated_at) VALUES(?,?,?,?)
+                   ON CONFLICT(project_id,key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at""",
+                (legacy["project_id"], f"{LEGACY_SELECTION_INDEPENDENT_KEY_PREFIX}{progress_id}", "true", timestamp),
+            )
+            db.execute("DELETE FROM legacy_selection_relation_repairs WHERE progress_id=?", (progress_id,))
+            updated = next(row for row in progress_rows(db, legacy["project_id"], True) if row["id"] == progress_id)
+            return {"success": True, "progressFolder": serialize_progress(updated), "keptIndependent": True}
+        source = db.execute("SELECT * FROM progress_folders WHERE id=?", (source_progress_id,)).fetchone()
+        if source is None or source["project_id"] != repair["project_id"]:
             raise ValueError("legacy_selection_repair_project_mismatch: 节点不属于当前项目")
         if source["media_kind"] != legacy["media_kind"]:
             raise ValueError("legacy_selection_repair_media_mismatch: 来源媒体类型不一致")
         if source["node_role"] != "original" or source["parent_progress_id"] is not None or source["missing_since"] is not None:
             raise ValueError("legacy_selection_repair_source_invalid: 来源必须是有效的原始素材节点")
-        if legacy["parent_progress_id"] is not None or legacy["version_key"] != "0" or legacy["node_role"] not in ("original", "progress"):
-            raise ValueError("legacy_selection_repair_state_changed: 遗留节点状态已经变化，请刷新后重试")
         preferred_key = f"selection-{source_progress_id}"
         key_owner = db.execute(
             """SELECT id FROM progress_folders
@@ -3135,8 +3160,8 @@ def progress_register_with_graph(root: str, db, payload: dict):
                     raise ValueError("progress_graph_input_invalid: an input progress does not exist")
                 sources[source_id] = source
             if target["node_role"] == "workflow":
-                if any(source["node_role"] not in ("original", "progress") for source in sources.values()):
-                    raise ValueError("progress_graph_input_invalid: workflow inputs must be original or main progress nodes")
+                if any(source["node_role"] != "progress" for source in sources.values()):
+                    raise ValueError("progress_graph_input_invalid: workflow inputs must be main progress nodes")
             elif target["node_role"] == "progress":
                 if any(source["node_role"] not in ("selection", "workflow") for source in sources.values()):
                     raise ValueError("progress_graph_input_invalid: progress inputs must be selection or workflow nodes")
@@ -3296,7 +3321,7 @@ def _validated_version_graph_edge(db, payload: dict, exclude_edge_id: str | None
         and target["node_role"] == "artifact" and target["artifact_kind"] == "preview"
         or edge_kind == "workflow_input" and (
             source["node_role"] in ("selection", "workflow") and target["node_role"] == "progress"
-            or source["node_role"] in ("original", "progress") and target["node_role"] == "workflow"
+            or source["node_role"] == "progress" and target["node_role"] == "workflow"
             and target["artifact_kind"] == "team_workspace"
         )
     )
@@ -6985,7 +7010,7 @@ def cleanup_media_workflow_graph(root: str, db, session_cutoff: int | None = Non
             and row["target_role"] == "artifact" and row["target_artifact_kind"] == "preview"
             or row["edge_kind"] == "workflow_input" and (
                 row["source_role"] in ("selection", "workflow") and row["target_role"] == "progress"
-                or row["source_role"] in ("original", "progress") and row["target_role"] == "workflow"
+                or row["source_role"] == "progress" and row["target_role"] == "workflow"
                 and row["target_artifact_kind"] == "team_workspace"
             )
         )

@@ -239,6 +239,8 @@ export const projectVisibleVersionGraph = (folders: ProgressFolder[], graphEdges
     const source = byId.get(edge.sourceProgressId);
     const target = byId.get(edge.targetProgressId);
     if (!source || !target || source.folderMissing || target.folderMissing) continue;
+    if (edge.edgeKind === 'workflow_input' && target.nodeRole === 'workflow'
+      && (target.artifactKind !== 'team_workspace' || source.nodeRole !== 'progress')) continue;
     edges.push({ id: edge.id, parentId: edge.sourceProgressId, childId: edge.targetProgressId, relationKind: edge.edgeKind });
   }
   return { folders: visible, edges, cycleNodeIds: [...cycleNodeIds] };

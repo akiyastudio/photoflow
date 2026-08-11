@@ -20,7 +20,6 @@ type ProjectVersionTreeProps = {
   projectName: string;
   projectRelativePath: (absolutePath: string) => string;
   renderEntry: (entry: ProjectFileEntry, progressFolder?: ProgressFolder, sourceKind?: 'image' | 'video') => ReactNode;
-  onOpenMissingProgressMenu?: (folder: ProgressFolder, x: number, y: number) => void;
   pendingChildId?: string;
   hoverParentId?: string;
   mutatingChildIds?: string[];
@@ -51,6 +50,7 @@ export type VersionTreeCanvasController = {
 };
 
 type VersionTreeAreaKind = 'image' | 'video' | 'other';
+type VersionTreeAreaBand = { areaKind: VersionTreeAreaKind; label: string; left: number; right: number; top: number; bottom: number };
 type PositionedItem = { key: string; nodeKey: string; areaKind: VersionTreeAreaKind; folder?: ProgressFolder; entry: ProjectFileEntry; x: number; y: number };
 type LayoutRelation = { id: string; kind: VersionTreeEdgeKind; parentId: string; childId: string; selectable: boolean };
 type DrawnEdge = { id: string; kind: VersionTreeEdgeKind; path: string; parentId?: string; childId?: string; startX: number; startY: number; endX: number; endY: number; menuX: number; menuY: number };
@@ -63,7 +63,7 @@ const afterVersionTreePaint = (callback: () => void) => typeof window.requestAni
   ? window.requestAnimationFrame(callback)
   : globalThis.setTimeout(callback, 0);
 
-export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION_TREE_EDGES, entries, structureEntries = entries, selectedRelativePaths = EMPTY_VERSION_TREE_IDS, filterActive = false, activeRelativePath, gridIconSize, workspacePath, projectName, projectRelativePath, renderEntry, onOpenMissingProgressMenu, pendingChildId, hoverParentId, mutatingChildIds = EMPTY_VERSION_TREE_IDS, onBeginRelationEdit, onHoverRelationParent, onRequestRelationChange, onRequestSupplementalEdgeDelete, onRequestSupplementalEdgeReconnect, onRequestSupplementalEdgeCreate, onRequestCreateVersion, onRequestCreateEmptyVersion, canUndoRelation = false, canRedoRelation = false, onUndoRelation, onRedoRelation, onCancelRelationEdit, onNotice, onCanvasControllerChange }: ProjectVersionTreeProps) => {
+export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION_TREE_EDGES, entries, structureEntries = entries, selectedRelativePaths = EMPTY_VERSION_TREE_IDS, filterActive = false, activeRelativePath, gridIconSize, workspacePath, projectName, projectRelativePath, renderEntry, pendingChildId, hoverParentId, mutatingChildIds = EMPTY_VERSION_TREE_IDS, onBeginRelationEdit, onHoverRelationParent, onRequestRelationChange, onRequestSupplementalEdgeDelete, onRequestSupplementalEdgeReconnect, onRequestSupplementalEdgeCreate, onRequestCreateVersion, onRequestCreateEmptyVersion, canUndoRelation = false, canRedoRelation = false, onUndoRelation, onRedoRelation, onCancelRelationEdit, onNotice, onCanvasControllerChange }: ProjectVersionTreeProps) => {
   const [pointerPoint, setPointerPoint] = useState<{ x: number; y: number } | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState('');
   const [dragState, setDragState] = useState<VersionTreeDragState>(null);
@@ -71,10 +71,10 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   const [createVersionTargetKey, setCreateVersionTargetKey] = useState('');
   const [zoom, setZoom] = useState(1);
   const [selectedNodeKey, setSelectedNodeKey] = useState('');
-  const [collapsedAreas, setCollapsedAreas] = useState<Set<VersionTreeAreaKind>>(new Set());
   const [blankOutputSourceId, setBlankOutputSourceId] = useState('');
   const [viewportBounds, setViewportBounds] = useState({ left: 0, top: 0, width: 1600, height: 1000 });
-  const frameDragRef = useRef<{ areaKind: VersionTreeAreaKind; pointerId: number; element: Element; startX: number; startY: number; dragged: boolean } | null>(null);
+  const [frameLayoutRevision, setFrameLayoutRevision] = useState(0);
+  const [areaBands, setAreaBands] = useState<VersionTreeAreaBand[]>([]);
   const dragStateRef = useRef<VersionTreeDragState>(null);
   const changeDragState = useCallback((next: VersionTreeDragState) => {
     dragStateRef.current = next;
@@ -100,9 +100,6 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
     const createVersionPort = createVersionPortRef.current;
     if (createVersionPort?.element.hasPointerCapture(createVersionPort.pointerId)) createVersionPort.element.releasePointerCapture(createVersionPort.pointerId);
     createVersionPortRef.current = null;
-    const frameDrag = frameDragRef.current;
-    if (frameDrag?.element.hasPointerCapture(frameDrag.pointerId)) frameDrag.element.releasePointerCapture(frameDrag.pointerId);
-    frameDragRef.current = null;
     reconnectEdgeRef.current = null;
     dragStateRef.current = null;
   }, []);
@@ -121,12 +118,13 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   const visibleEdges = useMemo(() => graph.edges.filter(edge => visibleIds.has(edge.parentId) && visibleIds.has(edge.childId)), [graph.edges, visibleIds]);
   const trackedEntryPaths = useMemo(() => new Set(versionItems.map(item => normalizePath(item.entry.relativePath))), [versionItems]);
   const selectedPathSet = useMemo(() => new Set(selectedRelativePaths.map(normalizePath)), [selectedRelativePaths]);
-  const selectedNodeIds = useMemo(() => new Set(versionItems
-    .filter(item => selectedPathSet.has(normalizePath(item.entry.relativePath)))
-    .map(item => item.folder.id)), [selectedPathSet, versionItems]);
   // The canvas represents folders and version relations, not every loose media
   // file in the current directory. This keeps large shoots usable.
   const ordinaryEntries = useMemo(() => entries.filter(entry => entry.kind === 'folder' && !trackedEntryPaths.has(normalizePath(entry.relativePath))), [entries, trackedEntryPaths]);
+  const selectedNodeIds = useMemo(() => new Set([
+    ...versionItems.filter(item => selectedPathSet.has(normalizePath(item.entry.relativePath))).map(item => `entry:${normalizePath(item.entry.relativePath)}`),
+    ...ordinaryEntries.filter(entry => selectedPathSet.has(normalizePath(entry.relativePath))).map(entry => `entry:${normalizePath(entry.relativePath)}`),
+  ]), [ordinaryEntries, selectedPathSet, versionItems]);
 
   const nodeWidth = Math.max(80, Math.round(gridIconSize));
   const nodeHeight = nodeWidth + 52;
@@ -146,7 +144,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
       });
       const mediaNodes = forest.nodes.flatMap(node => {
         const item = itemById.get(node.id);
-        return item ? [{ key: node.id, nodeKey: `progress:${node.id}`, areaKind: mediaKind, ...item, x: node.x, y: node.y + areaTop }] : [];
+        return item ? [{ key: `entry:${normalizePath(item.entry.relativePath)}`, nodeKey: `progress:${node.id}`, areaKind: mediaKind, ...item, x: node.x, y: node.y + areaTop }] : [];
       });
       positioned.push(...mediaNodes);
       relations.push(...forest.edges.map(edge => ({ id: edge.id, kind: edge.relationKind, parentId: edge.parentId, childId: edge.childId, selectable: true })));
@@ -165,7 +163,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
     })));
     return { positioned, relations };
   }, [auxiliaryGap, columnGap, nodeHeight, nodeWidth, ordinaryEntries, rootGap, rowGap, versionItems, visibleEdges]);
-  const canvasNodes = useMemo(() => defaultLayout.positioned.map(item => ({ id: item.key, nodeKey: item.nodeKey, x: item.x, y: item.y })), [defaultLayout]);
+  const canvasNodes = useMemo(() => defaultLayout.positioned.map(item => ({ id: item.key, nodeKey: item.nodeKey, fallbackNodeKeys: item.folder ? [item.key] : undefined, x: item.x, y: item.y })), [defaultLayout]);
   const canvas = useVersionTreeCanvas({
     nodes: canvasNodes,
     workspacePath, projectName, scopeKey: activeRelativePath, nodeWidth, nodeHeight, coordinateScale: zoom, onNotice,
@@ -176,7 +174,8 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
       const position = canvas.positions.get(item.key);
       return position ? [{ ...item, x: canvasPadding + position.x, y: canvasPadding + position.y }] : [];
     });
-    const byId = new Map(positioned.map(item => [item.key, item]));
+    const byId = new Map<string, PositionedItem>();
+    positioned.forEach(item => { byId.set(item.key, item); if (item.folder) byId.set(item.folder.id, item); });
     const edges: DrawnEdge[] = defaultLayout.relations.flatMap(edge => {
       const parent = byId.get(edge.parentId);
       const child = byId.get(edge.childId);
@@ -186,35 +185,42 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
         { x: child.x, y: child.y, width: nodeWidth, height: nodeHeight },
       );
       const directAssociation = edge.kind === 'media_companion' || edge.kind === 'derived_preview';
-      const workflowCorridorY = Math.min(parent.y, child.y) - 18;
-      const path = edge.kind === 'workflow_input'
-        ? `M ${geometry.start.x} ${geometry.start.y} L ${geometry.start.x + 20} ${geometry.start.y} L ${geometry.start.x + 20} ${workflowCorridorY} L ${geometry.end.x - 20} ${workflowCorridorY} L ${geometry.end.x - 20} ${geometry.end.y} L ${geometry.end.x} ${geometry.end.y}`
-        : directAssociation
+      const path = directAssociation
         ? `M ${geometry.start.x} ${geometry.start.y} L ${geometry.end.x} ${geometry.end.y}`
         : geometry.path;
-      return [{ id: edge.id, kind: edge.kind, path, parentId: edge.selectable ? edge.parentId : undefined, childId: edge.selectable ? edge.childId : undefined, startX: geometry.start.x, startY: geometry.start.y, endX: geometry.end.x, endY: geometry.end.y, menuX: geometry.midpoint.x, menuY: edge.kind === 'workflow_input' ? workflowCorridorY : geometry.midpoint.y }];
+      return [{ id: edge.id, kind: edge.kind, path, parentId: edge.selectable ? edge.parentId : undefined, childId: edge.selectable ? edge.childId : undefined, startX: geometry.start.x, startY: geometry.start.y, endX: geometry.end.x, endY: geometry.end.y, menuX: geometry.midpoint.x, menuY: geometry.midpoint.y }];
     });
     const bounds = versionTreeCanvasBounds(canvas.positions, nodeWidth, nodeHeight, canvasPadding);
     return { positioned, edges, width: bounds.width, height: bounds.height };
   }, [canvas.positions, canvasPadding, defaultLayout, nodeHeight, nodeWidth]);
-  const areaBands = useMemo(() => ([['image', '图片'], ['video', '视频'], ['other', '其他']] as const).flatMap(([areaKind, label]) => {
-    const items = layout.positioned.filter(item => item.areaKind === areaKind);
-    if (!items.length) return [];
-    const left = Math.min(...items.map(item => item.x));
-    const right = Math.max(...items.map(item => item.x + nodeWidth));
-    const top = Math.min(...items.map(item => item.y));
-    const bottom = Math.max(...items.map(item => item.y + nodeHeight));
-    return [{ areaKind, label, left, right, top, bottom }];
-  }), [layout.positioned, nodeHeight, nodeWidth]);
+  const areaMembershipKey = layout.positioned.map(item => `${item.areaKind}:${item.key}`).sort().join('|');
+  useEffect(() => {
+    setAreaBands(([['image', '图片'], ['video', '视频'], ['other', '其他']] as const).flatMap(([areaKind, label]) => {
+      const items = layout.positioned.filter(item => item.areaKind === areaKind);
+      if (!items.length) return [];
+      return [{
+        areaKind, label,
+        left: Math.min(...items.map(item => item.x)),
+        right: Math.max(...items.map(item => item.x + nodeWidth)),
+        top: Math.min(...items.map(item => item.y)),
+        bottom: Math.max(...items.map(item => item.y + nodeHeight)),
+      }];
+    }));
+  // Node motion intentionally is not a dependency. Frames update only when
+  // semantic membership changes or the user explicitly refreshes the layout.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [areaMembershipKey, frameLayoutRevision, nodeHeight, nodeWidth]);
+  const framedLayoutWidth = Math.max(layout.width, ...areaBands.map(area => area.right + canvasPadding));
+  const framedLayoutHeight = Math.max(layout.height, ...areaBands.map(area => area.bottom + canvasPadding));
   const fitView = useCallback(() => {
     const viewport = canvas.viewportRef.current;
     if (!viewport) return;
     const measuredWidth = Number(viewport.clientWidth);
     const availableWidth = Number.isFinite(measuredWidth) && measuredWidth > 24 ? measuredWidth - 24 : Math.max(1, layout.width);
-    const nextZoom = Math.max(.45, Math.min(1, availableWidth / Math.max(1, layout.width)));
+    const nextZoom = Math.max(.45, Math.min(1, availableWidth / Math.max(1, framedLayoutWidth)));
     setZoom(nextZoom);
     afterVersionTreePaint(canvas.resetViewport);
-  }, [canvas.resetViewport, canvas.viewportRef, layout.width]);
+  }, [canvas.resetViewport, canvas.viewportRef, framedLayoutWidth]);
   const resetZoom = useCallback(() => {
     setZoom(1);
     afterVersionTreePaint(canvas.resetViewport);
@@ -246,7 +252,10 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   }, [canvas.viewportRef, zoom]);
   const refreshAndFit = useCallback(async () => {
     const refreshed = await canvas.refreshLayout();
-    if (refreshed) afterVersionTreePaint(fitView);
+    if (refreshed) {
+      setFrameLayoutRevision(value => value + 1);
+      afterVersionTreePaint(fitView);
+    }
     return refreshed;
   }, [canvas.refreshLayout, fitView]);
   useEffect(() => {
@@ -447,9 +456,9 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
     } else onCancelRelationEdit?.();
   }
   const activeRelationChildId = pendingChildId || (dragState?.type === 'relation' ? dragState.childProgressId : undefined);
-  const pendingPosition = activeRelationChildId ? layout.positioned.find(item => item.key === activeRelationChildId) : undefined;
+  const pendingPosition = activeRelationChildId ? layout.positioned.find(item => item.folder?.id === activeRelationChildId) : undefined;
   const createVersionSourceId = dragState?.type === 'create-version' ? dragState.sourceProgressId : undefined;
-  const createVersionSourcePosition = createVersionSourceId ? layout.positioned.find(item => item.key === createVersionSourceId) : undefined;
+  const createVersionSourcePosition = createVersionSourceId ? layout.positioned.find(item => item.folder?.id === createVersionSourceId) : undefined;
   const selectedEdge = layout.edges.find(edge => edge.id === selectedEdgeId && edge.childId && edge.parentId);
   const selectedChild = selectedEdge?.childId ? visibleFolderById.get(selectedEdge.childId) : undefined;
   const selectedParent = selectedEdge?.parentId ? visibleFolderById.get(selectedEdge.parentId) : undefined;
@@ -522,17 +531,13 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   };
   const hasGraphItems = layout.positioned.length > 0;
   const renderedItems = layout.positioned.filter(item => item.folder || item.x + nodeWidth >= viewportBounds.left - 500 && item.x <= viewportBounds.left + viewportBounds.width + 500 && item.y + nodeHeight >= viewportBounds.top - 500 && item.y <= viewportBounds.top + viewportBounds.height + 500);
-  return <div className="relative min-w-0 flex-1 pb-4">
+  return <div className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col">
     {graph.cycleNodeIds.length > 0 && <div role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">版本关系需要修复：{graph.cycleNodeIds.join('、')}</div>}
     {relationChoice && <div role="dialog" aria-modal="true" aria-label="选择关系类型" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><section className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-4 shadow-2xl"><h3 className="font-bold text-slate-800">选择关系类型</h3><p className="mt-1 text-xs text-slate-500">两端节点支持多种合法关系，请明确选择本次连线语义。</p><div className="mt-4 grid gap-2">{relationChoice.kinds.map(kind => <button key={kind} type="button" onClick={() => submitNewRelation(relationChoice.sourceId, relationChoice.targetId, kind)} className="rounded-lg border border-slate-200 px-3 py-2 text-left text-sm hover:border-blue-400 hover:bg-blue-50">{versionTreeRelationLabel(kind)}</button>)}</div><button type="button" onClick={() => { setRelationChoice(null); onCancelRelationEdit?.(); }} className="mt-3 w-full rounded px-3 py-2 text-sm text-slate-500 hover:bg-slate-100">取消</button></section></div>}
     {blankOutputSourceId && <div role="dialog" aria-modal="true" aria-label="从输出端创建节点" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/40 p-4"><section className="w-full max-w-xs rounded-xl border border-slate-200 bg-white p-4 shadow-2xl"><h3 className="font-bold text-slate-800">从 V{visibleFolderById.get(blankOutputSourceId)?.versionKey} 创建</h3><p className="mt-1 text-xs text-slate-500">输出线放到空白处时，可直接新建兼容节点。</p><div className="mt-4 grid gap-2"><button type="button" onClick={() => { const source = visibleFolderById.get(blankOutputSourceId); setBlankOutputSourceId(''); if (source) onRequestCreateEmptyVersion?.(source, false); }} className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-left text-sm font-semibold text-blue-700">新建下一版本</button><button type="button" onClick={() => { const source = visibleFolderById.get(blankOutputSourceId); setBlankOutputSourceId(''); if (source) onRequestCreateEmptyVersion?.(source, true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-left text-sm text-slate-700">新建可跟踪版本分支</button></div><button type="button" onClick={() => setBlankOutputSourceId('')} className="mt-3 w-full rounded px-3 py-2 text-sm text-slate-500 hover:bg-slate-100">取消</button></section></div>}
-    {hasGraphItems && <div className="relative"><div ref={canvas.viewportRef} data-version-tree-viewport="true" className="overflow-x-auto overflow-y-visible"><div className="relative" style={{ width: layout.width * zoom, height: Math.max(360, layout.height * zoom), minWidth: '100%' }}><div data-version-tree-canvas="true" data-drag-state={dragState?.type} onPointerDown={event => { canvas.canvasPointerHandlers.onPointerDown(event); if (!(event.target as Element).closest('[data-version-tree-node],[data-edge-id],button')) { cancelRelationSelection(); setSelectedNodeKey(''); } }} onPointerMove={canvas.canvasPointerHandlers.onPointerMove} onPointerUp={canvas.canvasPointerHandlers.onPointerUp} onPointerCancel={canvas.canvasPointerHandlers.onPointerCancel} className="absolute left-0 top-0 cursor-default" style={{ width: layout.width, height: layout.height, minHeight: 360, touchAction: 'none', transform: `scale(${zoom})`, transformOrigin: 'left top', backgroundImage: 'radial-gradient(circle, rgb(148 163 184 / 0.12) 1px, transparent 1px)', backgroundSize: '20px 20px' }}>
-      {areaBands.map(area => <div key={area.areaKind} aria-label={`${area.label}区域`} className={`pointer-events-none absolute z-0 rounded-2xl border ${area.areaKind === 'image' ? 'border-sky-300/30 bg-sky-500/[0.035]' : area.areaKind === 'video' ? 'border-violet-300/30 bg-violet-500/[0.035]' : 'border-slate-300/40 bg-slate-500/[0.035]'}`} style={{ left: area.left - 16, top: area.top - 28, width: area.right - area.left + 32, height: collapsedAreas.has(area.areaKind) ? 38 : area.bottom - area.top + 44 }}><button type="button" className={`pointer-events-auto absolute left-3 top-2 flex items-center gap-2 rounded px-1 text-[10px] font-semibold tracking-[0.16em] hover:bg-white/70 ${area.areaKind === 'image' ? 'text-sky-600/70' : area.areaKind === 'video' ? 'text-violet-600/70' : 'text-slate-600/65'}`} onPointerDown={event => { if (event.button !== 0) return; const keys = layout.positioned.filter(item => item.areaKind === area.areaKind).map(item => item.key); if (!canvas.beginGroupMove(keys)) return; event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); frameDragRef.current = { areaKind: area.areaKind, pointerId: event.pointerId, element: event.currentTarget, startX: event.clientX, startY: event.clientY, dragged: false }; changeDragState({ type: 'frame', areaKey: area.areaKind, pointerId: event.pointerId }); }} onPointerMove={event => { const drag = frameDragRef.current; if (!drag || drag.pointerId !== event.pointerId || drag.areaKind !== area.areaKind) return; const deltaX = (event.clientX - drag.startX) / zoom; const deltaY = (event.clientY - drag.startY) / zoom; if (Math.hypot(deltaX, deltaY) > 5) drag.dragged = true; if (drag.dragged) canvas.previewGroupMove(deltaX, deltaY); }} onPointerUp={event => { const drag = frameDragRef.current; if (!drag || drag.pointerId !== event.pointerId) return; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); frameDragRef.current = null; changeDragState(null); if (drag.dragged) canvas.commitGroupMove(); else { canvas.cancelGroupMove(); setCollapsedAreas(current => { const next = new Set(current); if (next.has(area.areaKind)) next.delete(area.areaKind); else next.add(area.areaKind); return next; }); } }} onPointerCancel={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); frameDragRef.current = null; changeDragState(null); canvas.cancelGroupMove(); }} title="拖动标题整体移动区域；单击折叠/展开">{collapsedAreas.has(area.areaKind) ? '▶' : '▼'} {area.label} · {layout.positioned.filter(item => item.areaKind === area.areaKind).length}</button></div>)}
-      <svg aria-label="版本关系连线" className="absolute inset-0 z-10 h-full w-full overflow-visible"><defs><marker id={arrowMarkerId} markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth"><path d="M 0 0 L 8 4 L 0 8 z" fill="context-stroke"/></marker></defs>{layout.edges.filter(edge => {
-        const parentArea = layout.positioned.find(item => item.key === edge.parentId)?.areaKind;
-        const childArea = layout.positioned.find(item => item.key === edge.childId)?.areaKind;
-        return !(parentArea && collapsedAreas.has(parentArea) || childArea && collapsedAreas.has(childArea));
-      }).map(edge => { const presentation = versionTreeEdgePresentation(edge.kind, selectedEdgeId === edge.id); const directAssociation = edge.kind === 'media_companion' || edge.kind === 'derived_preview'; return <g key={edge.id}>
+      {hasGraphItems && <div className="relative min-h-0 flex-1"><div ref={canvas.viewportRef} data-version-tree-viewport="true" className="h-full min-h-[360px] overflow-auto"><div className="relative min-h-full min-w-full" style={{ width: framedLayoutWidth * zoom, height: Math.max(360, framedLayoutHeight * zoom, viewportBounds.height) }}><div data-version-tree-canvas="true" data-drag-state={dragState?.type} onPointerDown={event => { canvas.canvasPointerHandlers.onPointerDown(event); if (!(event.target as Element).closest('[data-version-tree-node],[data-edge-id],button')) { cancelRelationSelection(); setSelectedNodeKey(''); } }} onPointerMove={canvas.canvasPointerHandlers.onPointerMove} onPointerUp={canvas.canvasPointerHandlers.onPointerUp} onPointerCancel={canvas.canvasPointerHandlers.onPointerCancel} className="absolute left-0 top-0 cursor-default" style={{ width: framedLayoutWidth, height: framedLayoutHeight, minWidth: `${100 / zoom}%`, minHeight: Math.max(360, viewportBounds.height / zoom), touchAction: 'none', transform: `scale(${zoom})`, transformOrigin: 'left top', backgroundImage: 'radial-gradient(circle, rgb(148 163 184 / 0.025) 1px, transparent 1px)', backgroundSize: '20px 20px' }}>
+      {areaBands.map(area => <div key={area.areaKind} aria-label={`${area.label}区域`} className={`pointer-events-none absolute z-0 rounded-2xl border ${area.areaKind === 'image' ? 'border-sky-300/30 bg-sky-500/[0.035]' : area.areaKind === 'video' ? 'border-violet-300/30 bg-violet-500/[0.035]' : 'border-slate-300/40 bg-slate-500/[0.035]'}`} style={{ left: area.left - 16, top: area.top - 28, width: area.right - area.left + 32, height: area.bottom - area.top + 44 }}><span className={`absolute left-3 top-2 px-1 text-[10px] font-semibold tracking-[0.16em] ${area.areaKind === 'image' ? 'text-sky-600/70' : area.areaKind === 'video' ? 'text-violet-600/70' : 'text-slate-600/65'}`}>${area.label} · ${defaultLayout.positioned.filter(item => item.areaKind === area.areaKind).length}</span></div>)}
+      <svg aria-label="版本关系连线" className="absolute inset-0 z-10 h-full w-full overflow-visible"><defs><marker id={arrowMarkerId} markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M 0 0 L 8 4 L 0 8 z" fill="context-stroke"/></marker></defs>{layout.edges.map(edge => { const presentation = versionTreeEdgePresentation(edge.kind, selectedEdgeId === edge.id); const directAssociation = edge.kind === 'media_companion' || edge.kind === 'derived_preview'; return <g key={edge.id}>
         <path data-edge-id={edge.id} data-relation-kind={edge.kind} role={edge.childId ? 'button' : undefined} tabIndex={edge.childId ? 0 : undefined} aria-label={edge.childId ? `选择${versionTreeRelationLabel(edge.kind)}关系线` : undefined} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); selectEdge(edge); }} onClick={event => { event.stopPropagation(); selectEdge(edge); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectEdge(edge); } }} d={edge.path} fill="none" stroke="transparent" strokeWidth="14" pointerEvents="stroke" className={edge.childId ? 'cursor-pointer' : undefined}/>
         <path aria-hidden data-relation-kind={edge.kind} d={edge.path} fill="none" stroke={presentation.stroke} strokeWidth={presentation.strokeWidth} opacity={presentation.opacity} markerEnd={directAssociation ? undefined : `url(#${arrowMarkerId})`} pointerEvents="none"/>
         {selectedEdgeId === edge.id && edge.childId && !mutatingIds.has(edge.childId) && <circle data-edge-child-handle={edge.childId} role="button" tabIndex={0} aria-label={`拖动${versionTreeRelationLabel(edge.kind)}终点以重新连接`} cx={edge.endX} cy={edge.endY} r="7" fill="white" stroke="#2563eb" strokeWidth="2" className="cursor-grab" onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }} onPointerDown={event => { beginRelationDrag(event, edge.childId!, { x: edge.endX, y: edge.endY }, selectedSupplementalEdge); }} onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) updatePointerCandidate(event.clientX, event.clientY, event.currentTarget); }} onPointerUp={event => endRelationDrag(event, edge.childId!)} onPointerCancel={cancelRelationDrag}/>} {null}
@@ -560,16 +565,15 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
               : candidateHovered
                 ? 'bg-emerald-500'
                 : 'bg-blue-600';
-        return <div key={item.key} {...nodeHandlers} data-version-tree-node="true" data-version-output-target-key={createVersionTarget || item.folder ? item.key : undefined} onPointerDownCapture={() => setSelectedNodeKey(item.key)} onFocusCapture={() => setSelectedNodeKey(item.key)} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }} className={`group/version-node absolute z-20 cursor-grab rounded-xl active:cursor-grabbing ${collapsedAreas.has(item.areaKind) ? 'hidden' : ''} ${createVersionTargetKey === item.key ? 'ring-2 ring-emerald-400 ring-offset-2' : ''}`} data-node-role={item.folder?.nodeRole} data-tracking-label={item.folder ? trackingStateLabel(item.folder) : undefined} style={{ left: item.x, top: item.y, width: nodeWidth, minHeight: nodeHeight, touchAction: 'none' }}>
+        return <div key={item.key} {...nodeHandlers} data-version-tree-node="true" data-version-progress-id={item.folder?.id} data-version-output-target-key={createVersionTarget || item.folder ? item.key : undefined} onPointerDownCapture={() => setSelectedNodeKey(item.key)} onFocusCapture={() => setSelectedNodeKey(item.key)} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }} className={`group/version-node absolute z-20 cursor-grab rounded-xl active:cursor-grabbing ${createVersionTargetKey === item.key ? 'ring-2 ring-emerald-400 ring-offset-2' : ''}`} data-node-role={item.folder?.nodeRole} data-tracking-label={item.folder ? trackingStateLabel(item.folder) : undefined} style={{ left: item.x, top: item.y, width: nodeWidth, minHeight: nodeHeight, touchAction: 'none' }}>
         {renderEntry(item.entry, item.folder)}
-        {item.folder?.folderMissing && <button type="button" onClick={event => { event.stopPropagation(); onOpenMissingProgressMenu?.(item.folder!, event.clientX, event.clientY); }} className="absolute inset-0 z-30 flex items-end justify-center rounded-xl border-2 border-dashed border-red-400 bg-white/55 pb-2 text-[10px] font-semibold text-red-600 backdrop-grayscale" title="文件夹已失效，点击修复">文件夹失效 · 点击修复</button>}
         {item.folder && <>
           {canAcceptInput && <button type="button" data-version-tree-port="true" disabled={mutatingIds.has(item.folder.id)} aria-label={hasInputRelation ? `断开 ${item.folder.displayName} 的输入连接` : `${item.folder.displayName} 等待输入连接`} title={mutatingIds.has(item.folder.id) ? '关系正在更新' : hasInputRelation ? '按下只会断开左侧输入连接' : '空输入端：请从来源节点右侧输出端拖入'} onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation(); if (hasInputRelation) removeNodeInput(item.folder!); else onNotice('左侧触点只用于断开已有连接；请从来源节点右侧拖出新线。'); }} onClick={event => { event.preventDefault(); event.stopPropagation(); }} className="absolute -left-2.5 top-1/2 z-20 flex h-5 w-5 -translate-y-1/2 items-center justify-center opacity-0 transition-opacity group-hover/version-node:opacity-100 group-focus-within/version-node:opacity-100 focus:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"><span aria-hidden className={`h-2.5 w-2.5 rounded-full border-2 shadow ${hasInputRelation ? 'border-white bg-red-500' : 'border-slate-400 bg-white'}`}/></button>}
           {canBeParent && <button type="button" data-version-tree-port="true" data-relation-parent-id={item.folder.id} aria-label={`从 ${item.folder.displayName} 拖出连接`} title={activeRelationChildId ? candidateError || '可连接' : item.folder.nodeRole === 'progress' ? '拖到普通文件夹创建下一版本，或拖到兼容节点建立关系' : '从右侧输出端拖到兼容节点'} onPointerDown={event => beginCreateVersionDrag(event, item.folder!.id, { x: item.x + nodeWidth, y: item.y + nodeHeight / 2 })} onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) updateCreateVersionTarget(event.clientX, event.clientY, event.currentTarget); }} onPointerUp={event => endCreateVersionDrag(event, item.folder!.id)} onPointerCancel={cancelCreateVersionDrag} className="absolute -right-2.5 top-1/2 z-20 flex h-5 w-5 -translate-y-1/2 items-center justify-center opacity-0 transition-opacity group-hover/version-node:opacity-100 group-focus-within/version-node:opacity-100 focus:opacity-100"><span aria-hidden className={`h-2.5 w-2.5 rounded-full border-2 border-white shadow ${candidateColor}`}/>{candidateHovered && candidateError && <span role="tooltip" className="pointer-events-none absolute left-5 top-1/2 z-40 -translate-y-1/2 whitespace-nowrap rounded bg-red-600 px-2 py-1 text-[10px] font-medium text-white shadow-lg">{candidateError}</span>}</button>}
         </>}
       </div>; })}
     </div></div></div>
-      <button type="button" onClick={fitView} title="小地图：点击显示全部" className="fixed bottom-4 right-4 z-[120] h-20 w-36 overflow-hidden rounded-lg border border-slate-300 bg-slate-950/75 shadow-lg"><svg viewBox={`0 0 ${Math.max(1, layout.width)} ${Math.max(1, layout.height)}`} className="h-full w-full">{layout.positioned.map(item => <rect key={item.key} x={item.x} y={item.y} width={nodeWidth} height={nodeHeight} rx="8" fill={item.areaKind === 'image' ? '#38bdf8' : item.areaKind === 'video' ? '#8b5cf6' : '#94a3b8'} opacity={selectedNodeKey === item.key ? 1 : .65}/>)}</svg></button>
+      <button type="button" onClick={fitView} title="小地图：点击显示全部" className="fixed bottom-4 right-4 z-[120] h-20 w-36 overflow-hidden rounded-lg border border-slate-300 bg-slate-950/75 shadow-lg"><svg viewBox={`0 0 ${Math.max(1, framedLayoutWidth)} ${Math.max(1, framedLayoutHeight)}`} className="h-full w-full">{layout.positioned.map(item => <rect key={item.key} x={item.x} y={item.y} width={nodeWidth} height={nodeHeight} rx="8" fill={item.areaKind === 'image' ? '#38bdf8' : item.areaKind === 'video' ? '#8b5cf6' : '#94a3b8'} opacity={selectedNodeKey === item.key ? 1 : .65}/>)}</svg></button>
     </div>}
     {filterActive && !hasGraphItems && <p className="py-6 text-center text-xs text-slate-400">没有文件符合当前搜索或筛选条件。</p>}
     {!hasGraphItems && !ordinaryEntries.length && <p className="border-y border-slate-200 py-12 text-center text-sm text-slate-400">当前文件夹为空。</p>}

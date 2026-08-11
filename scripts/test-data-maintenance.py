@@ -97,13 +97,9 @@ def test_media_workflow_graph_cleanup(root: Path) -> None:
         "projectId": "workflow-cleanup-project", "sourceProgressId": progress["id"],
         "targetProgressId": workflow["id"], "edgeKind": "workflow_input",
     })
-    version_graph_edge_create(db, {
-        "projectId": "workflow-cleanup-project", "sourceProgressId": imported["id"],
-        "targetProgressId": workflow["id"], "edgeKind": "workflow_input",
-    })
     preserved = cleanup_media_workflow_graph(str(workspace), db, session_cutoff=0)
     assert preserved["removedEdgeIds"] == []
-    assert db.execute("SELECT COUNT(*) FROM version_graph_edges").fetchone()[0] == 2
+    assert db.execute("SELECT COUNT(*) FROM version_graph_edges").fetchone()[0] == 1
     db.execute(
         """INSERT INTO media_import_graph_sessions(project_id,import_session_id,manifest_json,status,error,created_at,updated_at)
            VALUES(?,?,?,'committed',NULL,1,1)""",

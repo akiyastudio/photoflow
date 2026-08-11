@@ -35,8 +35,8 @@
     .context p { margin:0; color:var(--muted); font-size:11px; }
     .legend { margin-left:auto; display:flex; gap:8px; }
     .pill { padding:4px 8px; border-radius:99px; color:#385271; background:#edf2f7; font-size:9px; font-weight:800; }
-    .pill.main { color:#1757b4; background:#dceaff; }
-    .pill.aux { border:1px dashed #9b70d4; color:#7542ad; background:#f6efff; }
+    .pill.version { color:#1757b4; background:#dceaff; }
+    .pill.support { color:#7542ad; background:#f6efff; }
     .workspace { min-height:calc(100vh - 136px); padding:26px; background-color:#e9eef5; background-image:radial-gradient(#8190a426 1px,transparent 1px); background-size:22px 22px; }
     .state-switcher { max-width:1040px; display:flex; align-items:center; gap:12px; margin:0 auto 12px; padding:10px 12px; border:1px solid #293e5e; border-radius:11px; color:#c5d3e8; background:#13223a; box-shadow:0 8px 24px #14213a21; }
     .state-switcher > b { flex:0 0 auto; color:#89b8ff; font-size:10px; letter-spacing:.06em; }
@@ -76,17 +76,36 @@
     .choice { padding:11px; border:1px solid #d8e0ea; border-radius:9px; color:#536174; background:white; font-size:10px; }
     .choice.active { color:#174e9f; border-color:#77a7ed; background:#eff6ff; box-shadow:inset 0 0 0 1px #cce0ff; }
     .choice b { display:block; margin-bottom:3px; font-size:11px; }
+    .media-picker { display:grid; gap:6px; margin:0; padding:0; border:0; }
+    .media-picker legend { margin-bottom:6px; color:#59677a; font-size:10px; font-weight:800; }
+    .media-buttons { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .media-button { min-height:37px; padding:0 12px; border:1px solid #d5dde8; border-radius:8px; color:#536174; background:white; font-size:10px; font-weight:850; }
+    .media-button.active { color:#174e9f; border-color:#77a7ed; background:#eff6ff; box-shadow:inset 0 0 0 1px #cce0ff; }
     .option { display:flex; align-items:flex-start; gap:9px; min-height:46px; padding:10px 0; border-bottom:1px solid #edf0f4; }
     .option:last-child { border-bottom:0; }
     .option input { margin-top:2px; }
     .option b { display:block; font-size:10px; }
     .option small { display:block; margin-top:3px; color:#8d98a8; font-size:9px; line-height:1.45; }
     .option.disabled { color:#98a2b3; }
-    .tree { display:grid; gap:8px; }
-    .tree-row { display:flex; align-items:center; gap:9px; padding:8px 10px; border:1px solid #dfe5ed; border-radius:8px; font-size:10px; }
-    .tree-edge { width:30px; border-top:2px solid #4e78b8; }
-    .tree-edge.aux { border-top-style:dashed; border-color:#8e64bc; }
-    .tree-row small { margin-left:auto; color:#8d98a8; }
+    .branch-tree { overflow:hidden; border:1px solid #dfe5ed; border-radius:10px; background:white; }
+    .branch-tree-head { display:flex; align-items:center; padding:9px 12px; border-bottom:1px solid #e7ebf1; color:#6d7b8f; background:#f8fafc; font-size:9px; }
+    .branch-tree-head b { color:#334155; font-size:10px; }
+    .branch-tree-head span { margin-left:auto; }
+    .branch-row { min-height:46px; display:grid; grid-template-columns:62px minmax(0,1fr) auto; align-items:center; border-bottom:1px solid #edf0f4; }
+    .branch-row:last-child { border-bottom:0; }
+    .branch-graph { position:relative; align-self:stretch; }
+    .branch-graph::before { content:''; position:absolute; left:22px; top:0; bottom:0; width:2px; background:#5d84bd; }
+    .branch-row:first-of-type .branch-graph::before { top:50%; }
+    .branch-row:last-child .branch-graph::before { bottom:50%; }
+    .branch-row:has(+ .branch-row.fork) .branch-graph::before { bottom:50%; }
+    .branch-dot { position:absolute; z-index:2; left:17px; top:50%; width:12px; height:12px; translate:0 -50%; border:3px solid white; border-radius:50%; background:#2563eb; box-shadow:0 0 0 2px #5d84bd; }
+    .branch-row.fork .branch-graph::before { display:none; }
+    .branch-row.fork .branch-graph::after { content:''; position:absolute; z-index:1; box-sizing:border-box; left:22px; top:-50%; width:23px; height:100%; border-left:2px solid #8b5cf6; border-bottom:2px solid #8b5cf6; border-bottom-left-radius:18px; }
+    .branch-row.fork .branch-dot { left:39px; background:#8b5cf6; box-shadow:0 0 0 2px #8b5cf6; }
+    .branch-info { min-width:0; display:flex; align-items:center; gap:8px; }
+    .branch-info b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:10px; }
+    .branch-path { display:block; margin-top:2px; overflow:hidden; color:#8d98a8; text-overflow:ellipsis; white-space:nowrap; font-size:9px; }
+    .branch-status { padding-right:12px; color:#728096; font-size:9px; }
     .scene { display:grid; gap:14px; }
     .scene-title { display:flex; align-items:flex-start; gap:12px; padding:14px; border:1px solid #d8e4f3; border-radius:11px; background:#f7faff; }
     .scene-title.warning { border-color:#efd28d; background:#fffbea; }
@@ -136,9 +155,9 @@
   <div class="app">
     <header class="titlebar"><div class="mark">P</div><strong>PhotoFlow</strong><span>版本跟踪 V2</span><span class="badge">交互原型 · 非生产界面</span></header>
     <div class="layout">
-      <aside><h1>版本工具面板</h1><p>四个独立面板。选择面板后，使用顶部状态切换器查看完整流程。</p><nav class="nav" id="nav"></nav></aside>
+      <aside><h1>版本工具面板</h1><p>五个独立面板。版本关系由入口、父节点和目标文件夹自动确定，不要求用户选择底层关系类型。</p><nav class="nav" id="nav"></nav></aside>
       <main>
-        <header class="context"><div><small>PROJECT / 26-8-9 夏日街拍</small><h2 id="context-title"></h2><p id="context-description"></p></div><div class="legend"><span class="pill main">实线 · main</span><span class="pill aux">虚线 · auxiliary</span></div></header>
+        <header class="context"><div><small>PROJECT / 26-8-9 夏日街拍</small><h2 id="context-title"></h2><p id="context-description"></p></div><div class="legend"><span class="pill version">版本节点 · 可跟踪</span><span class="pill support">辅助与工作流 · 专用入口</span></div></header>
         <section class="workspace"><div class="state-switcher"><b>PROTOTYPE · 状态预览</b><div class="state-buttons" id="state-buttons"></div></div><div id="panel"></div></section>
       </main>
     </div>
@@ -148,20 +167,22 @@
     'use strict';
     const model = window.VersioningV2Model;
     const descriptions = {
-      create:'在项目根目录创建一个新的主分支进度，或从当前来源建立附属选择分支。',
-      import:'把任意项目内现有文件夹加入版本关系；非根目录 progress 先确认安全移动。',
-      modify:'修改角色、父节点与持久化跟踪策略，并刷新已经变成 stale 的版本。',
+      create:'在项目根目录创建新的版本进度；结构关系根据选定父节点自动建立。选片与协作由各自组件管理。',
+      'create-next':'从版本树把现有文件夹登记为下一版本，默认计算 V2，也可以明确创建 V1_1 版本分支。',
+      import:'把项目内现有文件夹登记为版本进度；非根目录文件夹先确认安全移动。',
+      modify:'修改版本名称、父节点与跟踪策略，并刷新已经变成 stale 的版本。',
       confirm:'按 sessionId 分页确认完整比较结果；新素材必须由用户决定后才能提交。'
     };
     const stateLabels = { ready:'准备', move_confirm:'移动确认', processing:'处理中', waiting_confirmation:'等待确认', result:'结果', failure:'失败', loading:'载入结果', committing:'提交中' };
-    const navMeta = { create:['＋','创建空进度'], import:['⇩','登记已有文件夹'], modify:['✎','策略与刷新'], confirm:['✓','逐项确认图片'] };
+    const navMeta = { create:['＋','创建空进度'], 'create-next':['→','创建下一版本'], import:['⇩','登记已有文件夹'], modify:['✎','设置与刷新'], confirm:['✓','逐项确认图片'] };
     let activePanel = 'create';
     const activeStates = Object.fromEntries(Object.entries(model.PANEL_DEFINITIONS).map(([id,definition]) => [id,definition.states[0]]));
-    let relationKind = 'main';
     let selectedTrackingItemId;
     let comparisonMode = 'side-by-side';
     let comparisonZoom = 1;
     let comparisonSwapped = false;
+    const selectedMediaTypes = { create:'image', import:'image' };
+    const createNaming = { versionKey:'2', name:'精修' };
     let trackingItems = [
       { id:'recognized', sourceName:'DSC_8201.ARW', referenceName:'DSC_8201.ARW', targetName:'DSC_8201.ARW', status:'recognized', confidence:'98%', referencePreviewUrl:'assets/compare-reference.svg', sourcePreviewUrl:'assets/compare-current.svg' },
       { id:'pending', sourceName:'DSC_8299.ARW', referenceName:null, targetName:'DSC_8299.ARW', status:'pending_confirmation', confidence:'61%', referencePreviewUrl:'', sourcePreviewUrl:'assets/compare-current.svg' },
@@ -171,18 +192,17 @@
 
     const button = (label, kind='', disabled=false) => `<button class="button ${kind}" ${disabled?'disabled':''}>${label}</button>`;
     const option = (id,title,help,checked,disabled=false) => `<label class="option ${disabled?'disabled':''}"><input type="checkbox" data-policy="${id}" ${checked?'checked':''} ${disabled?'disabled':''}><span><b>${title}</b><small>${help}</small></span></label>`;
-    const policyCard = () => {
-      const auxiliary = relationKind === 'auxiliary';
-      return `<section class="card"><div class="card-head"><b>主分支跟踪策略</b><span>持久化字段</span></div>${auxiliary?'<div class="callout warning"><b>附属分支不能启用跟踪</b><p>图片跟踪、沿用上一版本文件名和补齐缺失媒体均不可用，保存时三个值强制为 false。</p></div>':''}${option('trackingEnabled','图片跟踪','检测当前文件夹的媒体变化。',!auxiliary,auxiliary)}${option('renameFromParent','沿用上一版本文件名','确认关联后使用父版本媒体文件名。',!auxiliary,auxiliary)}${option('copyMissingFromParent','补齐缺失媒体','父版本新增媒体后，此进度会变成“待刷新”。',!auxiliary,auxiliary)}</section>`;
-    };
-    const relationCard = () => `<section class="card"><div class="card-head"><b>关系类型</b><span>显式 relationKind</span></div><div class="choice-row"><button class="choice ${relationKind==='main'?'active':''}" data-relation="main"><b>主分支 · main</b>版本树使用实线；父节点必须是主分支节点。</button><button class="choice ${relationKind==='auxiliary'?'active':''}" data-relation="auxiliary"><b>附属分支 · auxiliary</b>版本树使用虚线；仅用于 selection。</button></div></section>`;
+    const policyCard = () => `<section class="card"><div class="card-head"><b>版本跟踪策略</b><span>仅版本节点可用</span></div>${option('trackingEnabled','版本跟踪','检测当前文件夹的媒体变化。',true)}${option('renameFromParent','沿用上一版本文件名','确认关联后使用父版本媒体文件名。',false)}${option('copyMissingFromParent','补齐缺失媒体','父版本新增媒体后，此版本会变成“待刷新”。',false)}</section>`;
     const folderField = (path='项目/RAW/调色一版') => `<label class="field">选择任意项目内文件夹<div class="input-row"><input type="text" readonly value="${path}">${button('浏览…')}</div></label>`;
-    const sourceTree = () => `<div class="tree"><div class="tree-row"><span class="tree-edge"></span><b>RAW</b><span class="pill">original</span><small>原始素材</small></div><div class="tree-row"><span class="tree-edge"></span><b>调色 V1</b><span class="pill main">progress</span><small>已跟踪</small></div><div class="tree-row"><span class="tree-edge aux"></span><b>调色 V1_选片</b><span class="pill aux">selection</span><small>未跟踪</small></div></div>`;
+    const mediaTypeField = (panelId) => `<fieldset class="media-picker"><legend>媒体类型</legend><div class="media-buttons"><button type="button" class="media-button ${selectedMediaTypes[panelId]==='image'?'active':''}" data-media-type="image">图片</button><button type="button" class="media-button ${selectedMediaTypes[panelId]==='video'?'active':''}" data-media-type="video">视频</button></div></fieldset>`;
+    const generatedProgressFolderName = () => `${selectedMediaTypes.create==='image'?'图片后期':'视频后期'}_${createNaming.versionKey.trim() || '—'}${createNaming.name.trim()?`_${createNaming.name.trim()}`:''}`;
+    const sourceTree = () => `<section class="branch-tree"><header class="branch-tree-head"><b>当前版本链</b><span>仅显示此链路中已跟踪的文件夹</span></header><div class="branch-row"><span class="branch-graph"><i class="branch-dot"></i></span><span><span class="branch-info"><b>RAW</b><span class="pill">原始素材</span></span><small class="branch-path">项目/RAW</small></span><span class="branch-status">根文件夹</span></div><div class="branch-row"><span class="branch-graph"><i class="branch-dot"></i></span><span><span class="branch-info"><b>图片后期_1</b><span class="pill version">V1</span></span><small class="branch-path">项目/图片后期_1</small></span><span class="branch-status">已跟踪</span></div><div class="branch-row fork"><span class="branch-graph"><i class="branch-dot"></i></span><span><span class="branch-info"><b>图片后期_1_1</b><span class="pill version">V1_1</span></span><small class="branch-path">项目/图片后期_1_1</small></span><span class="branch-status">当前分支 · 已跟踪</span></div></section>`;
 
     function readyBody(panelId) {
-      if (panelId === 'create') return `<div class="stack"><div class="callout"><b>关系由节点 ID 建立</b><p>文件夹名称只用于显示；新的主版本连接到“调色 V1”，不会连接到其选片附属节点。</p></div><div class="grid"><section class="card">${folderField('项目/调色 V1')}<label class="field" style="margin-top:12px">新进度文件夹名<input type="text" value="调色 V2"></label><label class="field" style="margin-top:12px">主分支父节点<select><option>调色 V1 · node_prg_01</option><option>RAW · node_original_01</option></select></label></section>${relationCard()}</div>${policyCard()}<div class="actions"><span class="hint">新建只创建空文件夹；跟踪会启动 compare 任务。</span>${button('取消')}${button('新建并开始比较','primary')}</div></div>`;
-      if (panelId === 'import') return `<div class="stack"><div class="callout warning"><b>所选文件夹不在项目根目录</b><p>标记为 progress 前必须预检并移动到“项目/调色一版”。快捷方式或重解析点指向的外部目录不能移动或覆盖。</p></div><div class="grid"><section class="card">${folderField()}<label class="field" style="margin-top:12px">关系父节点<select><option>RAW · node_original_01</option><option>调色 V1 · node_prg_01</option></select></label></section>${relationCard()}</div>${policyCard()}<div class="actions">${button('取消')}${button('继续并检查移动','primary')}</div></div>`;
-      if (panelId === 'modify') return `<div class="stack"><div class="callout warning"><b>调色 V1 · 待刷新</b><p>当前文件夹内容已变化；父版本也新增 3 张媒体且本节点开启了“补齐缺失媒体”。auxiliary 子节点不会跟随刷新。</p></div><div class="grid"><section class="card"><label class="field">当前节点<select><option>调色 V1 · node_prg_01</option></select></label><label class="field" style="margin-top:12px">主分支父节点<select><option>RAW · node_original_01</option></select></label></section>${relationCard()}</div>${policyCard()}<div class="actions"><span class="hint">策略保存后仍需刷新，才会重新变成“已跟踪”。</span>${button('仅保存设置')}${button('保存并刷新','primary')}</div></div>`;
+      if (panelId === 'create') return `<div class="stack"><div class="callout"><b>版本关系与文件夹名称自动建立</b><p>用户只填写版本号和业务名称；系统按媒体类型生成文件夹名。选片、JPG、mov_预览和团片协作分别由自己的功能创建，不在本面板配置。</p></div><div class="grid"><section class="card">${folderField('项目根目录')}<div class="grid" style="margin-top:12px">${mediaTypeField('create')}<label class="field">版本号<input type="text" data-create-version value="${createNaming.versionKey}" placeholder="例如 2 或 1_1"></label></div><div class="grid" style="margin-top:12px"><label class="field">名称（可选）<input type="text" data-create-name value="${createNaming.name}" placeholder="例如 精修"></label><label class="field">文件夹名称（自动生成）<input type="text" data-generated-name readonly value="${generatedProgressFolderName()}"></label></div><label class="field" style="margin-top:12px">父版本<select><option>V1 · ${selectedMediaTypes.create==='image'?'图片':'视频'}后期_1</option><option>${selectedMediaTypes.create==='image'?'RAW':'MOV'} · 原始素材</option><option>无（仅首个独立版本）</option></select></label></section>${policyCard()}</div><div class="actions"><span class="hint">创建时按“媒体前缀_版本号_名称”生成文件夹；名称为空时只保留媒体前缀和版本号。</span>${button('取消')}${button('新建进度','primary')}</div></div>`;
+      if (panelId === 'create-next') return `<div class="stack"><div class="callout success"><b>默认创建 V2</b><p>从 V1 右侧输出拖到“精修交付”文件夹后，系统刷新当前版本状态并计算版本号。V1_1 是正常可跟踪的版本分支，不是辅助节点。</p></div><div class="grid"><section class="card"><div class="card-head"><b>创建摘要</b><span>拖拽目标</span></div><label class="field">父版本<input type="text" readonly value="V1 · 图片后期_1"></label><label class="field" style="margin-top:12px">目标文件夹<input type="text" readonly value="精修交付"></label><label class="field" style="margin-top:12px">将创建<input type="text" readonly value="V2 · 精修交付"></label></section>${policyCard()}</div><div class="callout"><b>需要分支时明确选择</b><p>“创建 V1_1”只改变版本编号路径；跟踪、比较、补齐和提交能力与 V2 完全一致。</p></div><div class="actions">${button('取消')}${button('高级设置')}${button('创建 V1_1')}${button('创建 V2','primary')}</div></div>`;
+      if (panelId === 'import') return `<div class="stack"><div class="callout warning"><b>所选文件夹不在项目根目录</b><p>登记为版本进度前必须预检并移动到“项目/精修交付”。快捷方式或重解析点指向的外部目录不能移动或覆盖。</p></div><div class="grid"><section class="card">${folderField('项目/客户交付/精修交付')}<div class="grid" style="margin-top:12px">${mediaTypeField('import')}<label class="field">版本编号<input type="text" readonly value="V2（自动计算）"></label></div><label class="field" style="margin-top:12px">父版本<select><option>V1 · ${selectedMediaTypes.import==='image'?'图片':'视频'}后期_1</option><option>${selectedMediaTypes.import==='image'?'RAW':'MOV'} · 原始素材</option></select></label></section>${policyCard()}</div><div class="actions">${button('取消')}${button('继续并检查移动','primary')}</div></div>`;
+      if (panelId === 'modify') return `<div class="stack"><div class="callout warning"><b>V1 · 图片后期_1 · 待刷新</b><p>当前文件夹内容已变化；父版本也新增 3 张媒体且本节点开启了“补齐缺失媒体”。选片和协作节点不参与版本跟踪传播。</p></div><div class="grid"><section class="card"><div class="grid"><label class="field">当前版本<input type="text" readonly value="V1 · 图片后期_1"></label><label class="field">进度名称<input type="text" value="图片后期_1"></label></div><label class="field" style="margin-top:12px">父版本<select><option>RAW · 原始素材</option></select></label></section>${policyCard()}</div><div class="actions"><span class="hint">普通文件重命名不用于版本文件夹；这里会同步更新路径和数据库记录。</span>${button('仅保存设置')}${button('保存并刷新','primary')}</div></div>`;
       return '';
     }
 
@@ -207,7 +227,7 @@
       if (state === 'loading') return scene('','正在读取确认会话','通过 sessionId 分页读取完整结果；任务 metadata 只提供计数与短摘要。',`${progress(38)}${metrics([['sessionId','session_84'],['当前页','2 / 6'],['已读取','200 / 486']])}`,button('缩小到后台'));
       if (state === 'waiting_confirmation') { const gate=model.canCommitConfirmation(trackingItems); return scene('warning','比较完成，等待用户确认','软件判断为新素材的项目默认是 pending_confirmation；仍有待确认或缺失引用时不能提交。',`${metrics([['recognized',trackingItems.filter(i=>i.status==='recognized').length],['pending_confirmation',trackingItems.filter(i=>i.status==='pending_confirmation').length],['missing_reference',trackingItems.filter(i=>i.status==='missing_reference').length]])}${confirmationPreview()}`,`${button('保存并关闭')}${button('确认并提交','primary',!gate.allowed)}`); }
       if (state === 'committing') return scene('','正在提交确认结果','节点状态为 committing；提交按 sessionId 幂等，重复操作不会重复复制或创建关系。',`${progress(81)}${metrics([['已提交','383 / 473'],['已拒绝','11'],['会话','session_84']])}`,button('缩小到后台'));
-      if (state === 'result') return scene('success',panelId==='confirm'?'跟踪结果已提交':'操作完成','主分支节点已更新；已有文件未被覆盖。任务中心仍可打开结果摘要。',`${metrics([['节点状态','已跟踪'],['新增并确认','20'],['跳过已有文件','6']])}${sourceTree()}`,`${button('关闭')}${button(panelId==='modify'?'打开版本树':'继续','primary')}`);
+      if (state === 'result') return scene('success',panelId==='confirm'?'跟踪结果已提交':'操作完成','版本节点及其自动关系已更新；已有文件未被覆盖。任务中心仍可打开结果摘要。',`${metrics([['节点状态','已跟踪'],['新增并确认','20'],['跳过已有文件','6']])}${sourceTree()}`,`${button('关闭')}${button(panelId==='modify'?'打开版本树':'继续','primary')}`);
       return scene('danger','任务失败，可恢复','来源在处理期间被移动。会话结果仍保留，可从任务中心恢复面板或使用同一配置重试。',metrics([['taskId','task_cmp_84'],['sessionId','session_84'],['已写入','0 个文件']]),`${button('关闭')}${button('恢复面板')}${button('重试','primary')}`);
     }
 
@@ -223,11 +243,11 @@
 
     document.addEventListener('click',(event)=>{
       const panelButton = event.target.closest('[data-panel]');
-      if (panelButton) { activePanel=panelButton.dataset.panel; relationKind='main'; render(); return; }
+      if (panelButton) { activePanel=panelButton.dataset.panel; render(); return; }
       const stateButton = event.target.closest('[data-state]');
       if (stateButton) { activeStates[activePanel]=stateButton.dataset.state; render(); return; }
-      const relationButton = event.target.closest('[data-relation]');
-      if (relationButton) { relationKind=relationButton.dataset.relation; render(); return; }
+      const mediaButton = event.target.closest('[data-media-type]');
+      if (mediaButton) { selectedMediaTypes[activePanel]=mediaButton.dataset.mediaType; render(); return; }
       const selectButton = event.target.closest('[data-track-select]');
       if (selectButton) { selectedTrackingItemId=selectButton.dataset.trackSelect; render(); return; }
       const modeButton = event.target.closest('[data-compare-mode]');
@@ -240,6 +260,15 @@
       const decisionButton = event.target.closest('[data-track-decision]');
       if (decisionButton) { const current=selectedTrackingItemId; trackingItems=model.applyTrackingDecision(trackingItems,current,decisionButton.dataset.trackDecision); selectedTrackingItemId=model.nextPendingItemId(trackingItems,current)||current; render(); return; }
       if (event.target.closest('[data-track-relocate]')) { const current=selectedTrackingItemId; trackingItems=trackingItems.map(item=>item.id===current?{...item,referenceName:'DSC_8100.ARW',referencePreviewUrl:'assets/compare-alternate.svg'}:item); trackingItems=model.applyTrackingDecision(trackingItems,current,'accepted','DSC_8100.ARW'); selectedTrackingItemId=model.nextPendingItemId(trackingItems,current)||current; render(); }
+    });
+    document.addEventListener('input',(event)=>{
+      const versionInput = event.target.closest('[data-create-version]');
+      const nameInput = event.target.closest('[data-create-name]');
+      if (!versionInput && !nameInput) return;
+      if (versionInput) createNaming.versionKey=versionInput.value;
+      if (nameInput) createNaming.name=nameInput.value;
+      const preview = document.querySelector('[data-generated-name]');
+      if (preview) preview.value=generatedProgressFolderName();
     });
     render();
   </script>
