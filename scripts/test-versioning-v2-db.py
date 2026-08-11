@@ -488,7 +488,16 @@ def test_relation_update_transactions(root: Path) -> None:
             assert after == before, "failed relation transactions must not leave partial updates"
 
         rejected({"childProgressId": selection["id"], "parentProgressId": None}, "selection_parent_required")
-        rejected({"childProgressId": p1["id"], "parentProgressId": None}, "tracked_detach_forbidden")
+        tracking = workspace_db.tracking_session_create(str(workspace), db, {
+            "projectName": "Project", "progressId": p1["id"], "mode": "refresh",
+        })
+        detached_tracked = workspace_db.progress_relation_update(db, {
+            "childProgressId": p1["id"], "parentProgressId": None,
+        })["progressFolder"]
+        assert detached_tracked.get("parentProgressId") is None
+        assert not detached_tracked["trackingEnabled"] and detached_tracked["trackingState"] == "disabled"
+        assert not detached_tracked["renameFromParent"] and not detached_tracked["copyMissingFromParent"]
+        assert db.execute("SELECT 1 FROM tracking_sessions WHERE id=?", (tracking["sessionId"],)).fetchone() is None
         rejected({"childProgressId": raw["id"], "parentProgressId": jpg["id"]}, "original_parent_forbidden")
         rejected({"childProgressId": p2["id"], "parentProgressId": selection["id"]}, "invalid_parent_role")
         rejected({"childProgressId": p2["id"], "parentProgressId": video_progress["id"]}, "media_kind_mismatch")
@@ -639,6 +648,34 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
                VALUES(?,?,?,?,?,?)""",
             ("foreign-project", raw["id"], "raw", "foreign-slot", now, now),
         ), "project mismatch")
+
+        tracked_progress = workspace_db.progress_register_with_graph(str(workspace), db, {
+            "projectName": "Project",
+            "progress": {
+                "progressId": progress["id"], "mediaKind": "image", "versionKey": "1",
+                "displayName": "Progress", "folderPath": str(project / "Progress"),
+                "parentProgressId": raw["id"], "relationKind": "main",
+                "trackingEnabled": True, "trackingState": "ready",
+                "renameFromParent": True, "copyMissingFromParent": True,
+            },
+            "workflowInputProgressIds": [selection["id"]],
+        })["progressFolder"]
+        tracking = workspace_db.tracking_session_create(str(workspace), db, {
+            "projectName": "Project", "progressId": tracked_progress["id"], "mode": "refresh",
+        })
+        detached_progress = workspace_db.progress_register_with_graph(str(workspace), db, {
+            "projectName": "Project",
+            "progress": {
+                "progressId": progress["id"], "mediaKind": "image", "versionKey": "1",
+                "displayName": "Progress", "folderPath": str(project / "Progress"),
+                "trackingEnabled": False, "trackingState": "disabled",
+                "renameFromParent": False, "copyMissingFromParent": False,
+            },
+            "workflowInputProgressIds": [],
+        })["progressFolder"]
+        assert detached_progress.get("parentProgressId") is None
+        assert not detached_progress["trackingEnabled"] and detached_progress["trackingState"] == "disabled"
+        assert db.execute("SELECT 1 FROM tracking_sessions WHERE id=?", (tracking["sessionId"],)).fetchone() is None
 
         db.execute("DELETE FROM progress_folders WHERE id=?", (mov_preview["id"],))
         db.commit()
@@ -812,7 +849,8 @@ def test_version_tree_layout_persistence(root: Path) -> None:
         db.commit()
         cleaned = workspace_db.version_tree_layout_get(db, {"projectName": "Project", "scopeKey": ""})
         assert all(item["nodeKey"] != "progress:gone" for item in cleaned["positions"])
-        assert db.execute("SELECT 1 FROM version_tree_node_positions WHERE node_key='progress:gone'").fetchone() is None
+        assert db.execute("SELECT 1 FROM version_tree_node_positions WHERE node_key='progress:gone'").fetchone() is not None, \
+            "layout reads must filter stale positions without taking a SQLite writer lock"
 
         db.execute("DELETE FROM projects WHERE id='layout-project'")
         db.commit()

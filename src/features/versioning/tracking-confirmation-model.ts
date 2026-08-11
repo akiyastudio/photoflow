@@ -21,6 +21,9 @@ export type TrackingConfirmationViewState = {
   minimized: boolean;
 };
 
+export const normalizeTrackingSessionNextCursor = (value: number | null | undefined) =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
+
 export const unresolvedTrackingStatus = (status: ProgressTrackingItem['status']) =>
   status === 'pending_confirmation' || status === 'missing_reference';
 
@@ -46,20 +49,21 @@ export const nextPendingTrackingItemId = (items: readonly ProgressTrackingItem[]
 
 export const mergeTrackingSessionPage = (
   state: TrackingConfirmationViewState,
-  page: { session?: ProgressTrackingSession; items: ProgressTrackingItem[]; nextCursor?: number },
+  page: { session?: ProgressTrackingSession; items: ProgressTrackingItem[]; nextCursor?: number | null },
 ) => {
   if (page.session && page.session.id !== state.sessionId) return state;
   const byId = new Map(state.items.map(item => [item.id, item]));
   page.items.forEach(item => byId.set(item.id, item));
   const items = [...byId.values()];
+  const nextCursor = normalizeTrackingSessionNextCursor(page.nextCursor);
   return {
     ...state,
     session: page.session || state.session,
     items,
-    nextCursor: page.nextCursor,
+    nextCursor,
     selectedItemId: state.selectedItemId && byId.has(state.selectedItemId)
       ? state.selectedItemId
-      : page.nextCursor === undefined ? firstTrackingPreviewItemId(items) : undefined,
+      : nextCursor === undefined ? firstTrackingPreviewItemId(items) : undefined,
   };
 };
 

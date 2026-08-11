@@ -25,12 +25,13 @@ import { advanceMarqueeAutoScroll, marqueeAutoScrollDelta } from './marquee-auto
 import { converterTriggerAction } from './project-panel-lifecycle';
 import { resolveProjectWorkspaceLifecycle, type ProjectWorkspaceLifecycleIdentity } from './project-workspace-lifecycle';
 import { applyShortcutPreviewState } from './shortcut-preview-state-model';
+import { fileEntryClickIntent } from './file-entry-interaction-model';
 import { useRecentFilesAutoLoad } from './useRecentFilesAutoLoad';
 import { collectProgressSubtree, inspectProgressRelations } from './progress-tree-model';
 import { TrackingConfirmationPanel } from '../versioning/TrackingConfirmationPanel';
 import { ProgressPairPreview as SharedProgressPairPreview } from '../versioning/ProgressPairPreview';
 import { VersionProgressPanel, type VersionProgressDraft } from '../versioning/VersionProgressPanel';
-import { defaultMainParentId, defaultWorkflowInputIds, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressRelationChangeError, progressTrackingAction, progressTrackingActionLabel, selectableVersionParents, trackingStateLabel, versionTreeNodeBadgeLabel, workflowInputIdsForRelationChange, type VersionRelationKind } from '../versioning/versioning-v2-model';
+import { defaultMainParentId, defaultWorkflowInputIds, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressRelationChangeError, progressTrackingAction, progressTrackingActionLabel, selectableVersionParents, trackingPolicyForRelationChange, trackingStateLabel, versionTreeNodeBadgeLabel, workflowInputIdsForRelationChange, type VersionRelationKind } from '../versioning/versioning-v2-model';
 import { ProgressRelationMutationQueue } from '../versioning/progress-relation-mutation-queue';
 import { metadataFieldLabel, metadataGroupLabel } from '../metadata/metadata-labels';
 import { metadataGroupDependencyKey, previewMetadataFieldsForEntry, reconcileExpandedMetadataGroups } from '../metadata/metadata-pane-model';
@@ -1273,7 +1274,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       title: '确认修改版本关系？',
       message: child.nodeRole === 'selection'
         ? `将“${child.displayName}”的来源改为“${parent?.displayName || '未知节点'}”。只修改版本关系，不会重新复制选片内容。`
-        : parent ? `将“${child.displayName}”连接到“${parent.displayName}”下面。保存后会按新来源重新比较已开启跟踪的版本；不会移动或重命名物理文件夹。` : `将“${child.displayName}”断开为独立根节点。不会移动或重命名物理文件夹。`,
+        : parent ? `将“${child.displayName}”连接到“${parent.displayName}”下面。保存后会按新来源重新比较已开启跟踪的版本；不会移动或重命名物理文件夹。` : `将“${child.displayName}”断开为独立根节点，并自动关闭版本跟踪及其附加策略。不会移动或重命名物理文件夹。`,
       confirmLabel: '修改关系',
     });
     if (!confirmed) { cancelRelationEdit(); return; }
@@ -1309,6 +1310,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         if (!latestChild) latestChild = (await loadProgressFolders()).find(folder => folder.id === childProgressId);
         if (!latestChild) throw new Error('要修改的版本节点不存在，请刷新后重试');
         const previousParentProgressId = latestChild.parentProgressId || null;
+        const previousTrackingPolicy = trackingPolicyForRelationChange(latestChild, previousParentProgressId);
         const previousWorkflowInputProgressIds = versionGraphEdges
           .filter(edge => edge.edgeKind === 'workflow_input' && edge.targetProgressId === childProgressId)
           .map(edge => edge.sourceProgressId);
@@ -1322,6 +1324,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           currentChild: ProgressFolder,
           nextParentProgressId: string | null,
           workflowInputProgressIds: string[],
+          trackingPolicy = trackingPolicyForRelationChange(currentChild, nextParentProgressId),
         ) => window.electronAPI.registerProgressWithGraph(workspacePath, project.status, {
           projectName: project.name,
           progress: {
@@ -1331,13 +1334,20 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             parentProgressId: nextParentProgressId || undefined,
             displayName: currentChild.displayName,
             relationKind: nextParentProgressId ? 'main' : undefined,
-            trackingEnabled: currentChild.trackingEnabled,
-            trackingState: currentChild.trackingEnabled ? 'stale' : 'disabled',
-            renameFromParent: currentChild.renameFromParent,
-            copyMissingFromParent: currentChild.copyMissingFromParent,
+            trackingEnabled: trackingPolicy.trackingEnabled,
+            trackingState: trackingPolicy.trackingState,
+            renameFromParent: trackingPolicy.renameFromParent,
+            copyMissingFromParent: trackingPolicy.copyMissingFromParent,
           },
           workflowInputProgressIds,
         });
+        const detachingProgress = latestChild.nodeRole === 'progress' && parentProgressId === null;
+        if (detachingProgress) {
+          const activeTrackingTask = backgroundTasks.find(task => task.type === 'version-tracking'
+            && task.metadata?.progressId === childProgressId
+            && (task.state === 'queued' || task.state === 'running'));
+          if (activeTrackingTask) await window.electronAPI.cancelBackgroundTask(activeTrackingTask.id);
+        }
         const result = latestChild.nodeRole === 'progress'
           ? await applyProgressGraph(latestChild, parentProgressId, nextWorkflowInputProgressIds)
           : await window.electronAPI.updateProgressRelation(workspacePath, project.name, {
@@ -1368,18 +1378,32 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           progressFoldersRef.current = next;
           return next;
         });
-        const applyParent = async (nextParentProgressId: string | null, workflowInputProgressIds: string[]) => {
+        if (detachingProgress) {
+          const sessionKey = `photoflow:tracking-session:${workspacePath}:${project.name}:${childProgressId}`;
+          const sessionId = window.localStorage.getItem(sessionKey) || '';
+          window.localStorage.removeItem(sessionKey);
+          if (sessionId) dismissTrackingTaskForSession(sessionId);
+          if (trackingConfirmationProgressId === childProgressId) {
+            setTrackingConfirmationProgressId('');
+            setTrackingConfirmationSessionId('');
+          }
+        }
+        const applyParent = async (
+          nextParentProgressId: string | null,
+          workflowInputProgressIds: string[],
+          trackingPolicy?: ReturnType<typeof trackingPolicyForRelationChange>,
+        ) => {
           const currentChild = progressFoldersRef.current.find(folder => folder.id === childProgressId);
           if (!currentChild) throw new Error('要修改的版本节点不存在，请刷新后重试');
           const changed = currentChild.nodeRole === 'progress'
-            ? await applyProgressGraph(currentChild, nextParentProgressId, workflowInputProgressIds)
+            ? await applyProgressGraph(currentChild, nextParentProgressId, workflowInputProgressIds, trackingPolicy)
             : await window.electronAPI.updateProgressRelation(workspacePath, project.name, { childProgressId, parentProgressId: nextParentProgressId, expectedUpdatedAt: currentChild.updatedAt });
           if (!changed.success) throw new Error(changed.error || '无法更新版本关系');
           await loadProgressFolders();
         };
         pushRelationHistory({
           label: '修改版本父关系',
-          undo: () => applyParent(previousParentProgressId, previousWorkflowInputProgressIds),
+          undo: () => applyParent(previousParentProgressId, previousWorkflowInputProgressIds, previousTrackingPolicy),
           redo: () => applyParent(parentProgressId, nextWorkflowInputProgressIds),
         });
         if (updatedFolder.nodeRole === 'progress' && updatedFolder.trackingEnabled && parentProgressId) {
@@ -1396,7 +1420,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             onNotice(`版本关系已更新，${updatedFolder.displayName} 已标记为待刷新；自动重新比较启动失败：${started.error || '未知错误'}`, 8000);
           }
         } else {
-          onNotice('版本关系已更新');
+          onNotice(detachingProgress ? '版本关系已断开，版本跟踪已自动关闭' : '版本关系已更新');
         }
       });
     } catch (error) {
@@ -1446,15 +1470,21 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   useEffect(() => {
     if (!active) return;
     return window.electronAPI.onBackgroundTaskChanged(task => {
-      if (task.type !== 'version-tracking' || task.state !== 'completed') return;
-      const sessionId = typeof task.metadata.sessionId === 'string' ? task.metadata.sessionId : '';
+      if (task.type !== 'version-tracking') return;
       const progressId = typeof task.metadata.progressId === 'string' ? task.metadata.progressId : '';
-      if (!sessionId || !progressId || !progressFolders.some(folder => folder.id === progressId)) return;
+      const progress = progressFoldersRef.current.find(folder => folder.id === progressId);
+      if (!progressId || !progress?.trackingEnabled) {
+        if (task.state === 'completed' || task.state === 'cancelled' || task.state === 'failed') void dismissBackgroundTask(task.id);
+        return;
+      }
+      if (task.state !== 'completed') return;
+      const sessionId = typeof task.metadata.sessionId === 'string' ? task.metadata.sessionId : '';
+      if (!sessionId) return;
       window.localStorage.setItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${progressId}`, sessionId);
       setTrackingConfirmationProgressId(progressId);
       setTrackingConfirmationSessionId(sessionId);
     });
-  }, [active, progressFolders, project.name, workspacePath]);
+  }, [active, dismissBackgroundTask, project.name, workspacePath]);
   const loadFinalVersionSummary = useCallback(async () => {
     const result = await window.electronAPI.getFinalVersionSummary(workspacePath, project.status, project.name);
     if (result.success) {
@@ -4534,6 +4564,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setMetadataPaneAutoOpenSuppressed(false);
     if (nextPinned) setMetadataPaneOpen(true);
   };
+  const syncOpenPanesToSelection = (entry: ProjectFileEntry) => {
+    if (!previewPaneOpen && !metadataPaneOpen) return;
+    const isMedia = entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video';
+    setPreviewPath(entry.relativePath);
+    if (previewPaneOpen) setPreviewMediaPath(isMedia ? entry.relativePath : '');
+    setPreviewTechnicalMetadata({});
+  };
   const openEntryDetails = (entry: ProjectFileEntry) => {
     focusEntry(entry);
     setMetadataPaneAutoOpenSuppressed(false);
@@ -4547,21 +4584,27 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     entryPointerModifiersRef.current = null;
     const range = event.shiftKey || Boolean(pointerModifiers?.range);
     const additive = event.ctrlKey || event.metaKey || Boolean(pointerModifiers?.additive);
-    if (range) {
+    const clickCount = 'detail' in event ? event.detail : 1;
+    const intent = fileEntryClickIntent({ openMode: itemOpenMode, selectionCount: selectedPaths.length, range, additive, clickCount });
+    if (intent === 'ignore-repeat') return;
+    if (intent === 'range-select') {
       selectEntryRange(entry.relativePath, additive);
+      syncOpenPanesToSelection(entry);
       return;
     }
-    if (additive) {
+    if (intent === 'toggle-select') {
       toggleSelected(entry.relativePath);
+      syncOpenPanesToSelection(entry);
       return;
     }
-    if (itemOpenMode === 'single' && entry.kind === 'folder') {
-      void openProjectEntry(entry);
-      return;
-    }
+    if (intent === 'open' && entry.kind === 'folder') { void openProjectEntry(entry); return; }
     focusEntry(entry);
     const isMedia = entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video';
-    if (itemOpenMode === 'double') {
+    if (intent === 'focus') {
+      if (isMedia && previewPaneOpen) {
+        setPreviewMediaPath(entry.relativePath);
+        setPreviewTechnicalMetadata({});
+      }
       if (metadataPanePinned || !metadataPaneAutoOpenSuppressed) setMetadataPaneOpen(true);
       return;
     }
@@ -4894,9 +4937,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       data-entry-kind={entry.kind}
       data-entry-path={entry.relativePath}
       onMouseEnter={() => prefetchDirectory(entry)}
-      onClick={event => { if (entry.kind === 'folder') { event.stopPropagation(); void openProjectEntry(entry); } else handleEntryClick(event, entry); }}
+      onClick={event => handleEntryClick(event, entry)}
       onDoubleClick={event => handleEntryDoubleClick(event, entry)}
-      onKeyDown={event => { if (event.key === 'Enter') { if (entry.kind === 'folder') void openProjectEntry(entry); else handleEntryClick(event, entry); } }}
+      onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }}
       onContextMenu={event => openFileMenu(event, entry)}
       title={entry.name}
       className={`group relative min-w-0 cursor-default rounded-lg border p-2 text-left transition ${progressFolder ? 'border-transparent bg-slate-500/[0.025] hover:border-blue-300/60 hover:bg-blue-500/[0.04]' : 'overflow-hidden border-transparent hover:bg-blue-50'} ${selected ? 'border-blue-400/80 bg-blue-500/[0.07] ring-1 ring-blue-400/70 shadow-sm' : ''} ${previewArtifact ? 'border-amber-400/20' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'border-blue-500 bg-blue-100 ring-2 ring-blue-500' : ''}`}
@@ -5267,7 +5310,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         onSubmit={() => void submitProgressSetup()}
         onClose={closeProgressSetup}
       /></ToolModal>}
-      {trackingConfirmationSessionId && <TrackingConfirmationPanel sessionId={trackingConfirmationSessionId} workspacePath={workspacePath} progressFolders={progressFolders} cacheConfig={mediaCacheConfig} onNotice={onNotice} onClose={() => setTrackingConfirmationSessionId('')} onMinimize={() => setTrackingConfirmationSessionId('')} onCommitted={() => { dismissTrackingTaskForSession(trackingConfirmationSessionId); if (trackingConfirmationProgressId) window.localStorage.removeItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${trackingConfirmationProgressId}`); setTrackingConfirmationSessionId(''); setTrackingConfirmationProgressId(''); void loadProgressFolders().then(() => refresh('')); }} onReleased={() => { dismissTrackingTaskForSession(trackingConfirmationSessionId); if (trackingConfirmationProgressId) window.localStorage.removeItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${trackingConfirmationProgressId}`); setTrackingConfirmationSessionId(''); setTrackingConfirmationProgressId(''); void loadProgressFolders(); }}/>
+      {trackingConfirmationSessionId && <TrackingConfirmationPanel sessionId={trackingConfirmationSessionId} workspacePath={workspacePath} progressFolders={progressFolders} cacheConfig={mediaCacheConfig} onNotice={onNotice} onClose={() => setTrackingConfirmationSessionId('')} onCommitted={() => { dismissTrackingTaskForSession(trackingConfirmationSessionId); if (trackingConfirmationProgressId) window.localStorage.removeItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${trackingConfirmationProgressId}`); setTrackingConfirmationSessionId(''); setTrackingConfirmationProgressId(''); void loadProgressFolders().then(() => refresh('')); }} onReleased={() => { dismissTrackingTaskForSession(trackingConfirmationSessionId); if (trackingConfirmationProgressId) window.localStorage.removeItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${trackingConfirmationProgressId}`); setTrackingConfirmationSessionId(''); setTrackingConfirmationProgressId(''); void loadProgressFolders(); }}/>
       }
       {progressCompare && <div role="dialog" aria-modal="true" aria-label="确认版本关系" className="fixed inset-0 z-[345] flex items-center justify-center bg-slate-950/50 p-4"><div className="flex h-[min(92vh,820px)] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
         <header className="border-b border-slate-200 px-5 py-4"><h3 className="text-lg font-bold text-slate-800">确认版本关系</h3><p className="mt-1 text-xs text-slate-500">“{progressCompare.parentFolder.displayName}” → “{progressCompare.progressFolder.displayName}”</p></header>

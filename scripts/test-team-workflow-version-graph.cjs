@@ -16,7 +16,7 @@ new Function('require', 'module', 'exports', compiledHook)(name => {
   if (name === 'react') return { useCallback: value => value, useEffect: () => undefined, useMemo: factory => factory(), useState: value => [value, () => undefined] };
   throw new Error(`unexpected import: ${name}`);
 }, hookModule, hookModule.exports);
-const { isTeamProgressCandidate, isTeamSourceProgressCandidate, resolveTeamSourceProgressIds } = hookModule.exports;
+const { isTeamProgressCandidate, isTeamSourceProgressCandidate, resolveTeamSourceProgressIds, teamWorkflowSourcePaths } = hookModule.exports;
 
 const folder = (id, folderPath, overrides = {}) => ({
   id, projectId: 'project', mediaKind: 'image', versionKey: id, displayName: id, folderPath,
@@ -41,6 +41,10 @@ assert.deepEqual(resolveTeamSourceProgressIds([
   'C:\\project\\work-a\\a.jpg',
   'C:\\project\\work-b\\second.jpg',
 ], modelFolders), ['main-b', 'main-a'], 'mixed sources must retain every owning main progress without comparing version keys');
+assert.deepEqual(teamWorkflowSourcePaths([
+  { sourcePath: 'C:\\project\\work-a\\cropped.jpg', tasks: [{ id: 'crop' }] },
+  { sourcePath: 'C:\\project\\work-b\\selected-only.jpg', tasks: [] },
+]), ['C:\\project\\work-a\\cropped.jpg'], 'selected photos without an AI crop must not become team workflow inputs');
 assert(hookSource.includes('registerProgressWithGraph'), 'the real team workflow must call the atomic graph API');
 assert(!hookSource.includes('createVersionGraphEdge('), 'the team workflow must not assemble graph edges in renderer code');
 
@@ -166,6 +170,31 @@ with tempfile.TemporaryDirectory() as root:
     except Exception as error:
         assert 'forced team relation failure' in str(error)
     assert db.execute("SELECT COUNT(*) FROM progress_folders WHERE version_key='99'").fetchone()[0] == 0
+
+    source_file = os.path.join(project, 'source-two', 'cropped.jpg')
+    db.execute("INSERT INTO photos(id,project_id,media_type,original_name,display_name,original_file_path,created_at,updated_at) VALUES('team-photo',?,'image','cropped.jpg','cropped.jpg',?,?,?)", (project_id, source_file, now, now))
+    db.execute("INSERT INTO versions(id,photo_id,version_number,version_name,file_path,file_path_key,created_at,updated_at) VALUES('team-version','team-photo',0,'base',?,?,?,?)", (source_file, source_file.casefold(), now, now))
+    db.commit()
+    try:
+        workspace_db.team_project_register_photo(db, {'projectName':'Project','photoId':'team-photo','baseVersionId':'team-version'})
+        raise AssertionError('uncropped photo was registered in the team workflow')
+    except ValueError as error:
+        assert 'actual crop' in str(error) or '实际裁剪任务' in str(error)
+    crop_task = {
+        'id':'team-crop','personIndex':1,'detector':'test',
+        'bbox':{'x':0,'y':0,'width':10,'height':10},
+        'crop':{'x':0,'y':0,'width':10,'height':10},
+        'patchPath':os.path.join(project,'team-crop.png'),
+    }
+    workspace_db.team_patch_replace(db, {'photoId':'team-photo','baseVersionId':'team-version','tasks':[crop_task]})
+    workspace_db.team_project_register_photo(db, {'projectName':'Project','photoId':'team-photo','baseVersionId':'team-version'})
+    assert db.execute("SELECT 1 FROM team_retouch_photos WHERE photo_id='team-photo'").fetchone() is not None
+    workspace_db.team_patch_replace(db, {'photoId':'team-photo','baseVersionId':'team-version','tasks':[]})
+    assert db.execute("SELECT 1 FROM team_retouch_photos WHERE photo_id='team-photo'").fetchone() is None
+    workspace_db.team_patch_replace(db, {'photoId':'team-photo','baseVersionId':'team-version','tasks':[crop_task]})
+    workspace_db.team_project_register_photo(db, {'projectName':'Project','photoId':'team-photo','baseVersionId':'team-version'})
+    workspace_db.team_patch_delete(db, {'taskId':'team-crop'})
+    assert db.execute("SELECT 1 FROM team_retouch_photos WHERE photo_id='team-photo'").fetchone() is None
     db.close()
 print('database graph checks passed')
 `;

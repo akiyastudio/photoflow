@@ -13,6 +13,7 @@ const createVersionService = ({ repository }) => ({
   deleteProjectMissingVersion: (root, versionId) => repository.deleteProjectMissingVersion(root, versionId),
   recordCompare: (root, payload) => repository.recordCompare(root, payload),
   listProgress: (root, projectName, includeMissing = false) => repository.listProgress(root, projectName, includeMissing),
+  snapshotProgress: (root, projectName, includeMissing = false) => repository.snapshotProgress(root, projectName, includeMissing),
   registerProgress: (root, payload) => repository.registerProgress(root, payload),
   registerProgressWithGraph: (root, payload) => repository.registerProgressWithGraph(root, payload),
   adoptMediaFolder: (root, payload) => repository.adoptMediaFolder(root, payload),

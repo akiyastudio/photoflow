@@ -13,6 +13,7 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   let layoutSavePayload;
   let layoutSaveAttempts = 0;
   let layoutLockFailures = 0;
+  let snapshotProgressCalls = 0;
   let edgeReplacePayload;
   let filesystemCalls = 0;
   const failFilesystem = new Proxy({}, { get() { filesystemCalls += 1; throw new Error('relation IPC must not access files'); } });
@@ -26,6 +27,12 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
     workspaceCatalogs: new Map([[workspaceRoot, { projects: [{ name: 'Trusted Project' }] }]]),
     refreshWorkspaceCatalog: async () => { throw new Error('catalog should already be loaded'); },
     versionService: {
+      snapshotProgress: async (_root, projectName, includeMissing) => {
+        assert.strictEqual(projectName, 'Trusted Project');
+        assert.strictEqual(includeMissing, undefined);
+        snapshotProgressCalls += 1;
+        return { success: true, progressFolders: [child, parent], graphEdges: [] };
+      },
       listProgress: async (_root, projectName, includeMissing) => {
         assert.strictEqual(projectName, 'Trusted Project');
         assert.strictEqual(includeMissing, true);
@@ -65,6 +72,12 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
     fs: failFilesystem,
     path: failFilesystem,
   });
+
+  const progressFoldersHandler = handlers.get('workspace-progress-folders');
+  assert(progressFoldersHandler, 'interactive progress reads must be registered');
+  const progressFoldersResult = await progressFoldersHandler(null, workspaceRoot, 'Trusted Project');
+  assert.strictEqual(progressFoldersResult.success, true);
+  assert.strictEqual(snapshotProgressCalls, 1, 'opening the version tree must use the read-only progress snapshot');
 
   const handler = handlers.get('workspace-progress-relation-update');
   assert(handler, 'relation IPC must be registered');

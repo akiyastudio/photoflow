@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, Loader2, Minus, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Loader2, X } from 'lucide-react';
 import type { AppConfig, ProgressFolder, ProgressTrackingItem } from '../../types';
 import { ProgressPairPreview, type ProgressPairPreviewMode } from './ProgressPairPreview';
 import {
@@ -19,7 +19,6 @@ type TrackingConfirmationPanelProps = {
   progressFolders: ProgressFolder[];
   cacheConfig: AppConfig['mediaCache'];
   onClose: () => void;
-  onMinimize: () => void;
   onCommitted: () => void;
   onReleased: () => void;
   onNotice: (message: string) => void;
@@ -30,7 +29,7 @@ const statusLabel: Record<ProgressTrackingItem['status'], string> = {
 };
 const categoryLabel = { recognized: '识别匹配', accepted: '已接受', pending: '待确认新素材', missing: '旧版缺失' } as const;
 
-export const TrackingConfirmationPanel = ({ sessionId, workspacePath, progressFolders, cacheConfig, onClose, onMinimize, onCommitted, onReleased, onNotice }: TrackingConfirmationPanelProps) => {
+export const TrackingConfirmationPanel = ({ sessionId, workspacePath, progressFolders, cacheConfig, onClose, onCommitted, onReleased, onNotice }: TrackingConfirmationPanelProps) => {
   const [view, setView] = useState<TrackingConfirmationViewState>({ sessionId, items: [], minimized: false });
   const [loading, setLoading] = useState(true);
   const [busyItemId, setBusyItemId] = useState('');
@@ -51,7 +50,7 @@ export const TrackingConfirmationPanel = ({ sessionId, workspacePath, progressFo
         if (!result.success || !result.session) throw new Error(result.error || '无法读取跟踪确认会话');
         if (loadSequenceRef.current !== sequence) return;
         loaded = mergeTrackingSessionPage(loaded, result);
-        next = result.nextCursor;
+        next = loaded.nextCursor;
       } while (next !== undefined);
       if (loadSequenceRef.current === sequence) setView(loaded);
     } catch (error) {
@@ -102,7 +101,7 @@ export const TrackingConfirmationPanel = ({ sessionId, workspacePath, progressFo
   const groups = groupTrackingConfirmationItems(view.items);
   return <div role="dialog" aria-modal="true" aria-label="确认跟踪图片" className="fixed inset-0 z-[350] flex items-center justify-center bg-slate-950/55 p-4">
     <div className="tracking-confirmation-dialog">
-      <header className="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4"><div><h3 className="text-lg font-bold text-slate-800">确认跟踪图片</h3><p className="mt-1 text-xs text-slate-500">{parentFolder?.displayName || '上一版本'} → {progressFolder?.displayName || '当前版本'} · {view.items.length} 项，{unresolved} 项待处理</p></div><div className="flex gap-1"><button type="button" onClick={onMinimize} title="缩小到后台" className="rounded p-1.5 text-slate-500 hover:bg-slate-100"><Minus size={17}/></button><button type="button" onClick={onClose} title="保存并关闭" className="rounded p-1.5 text-slate-500 hover:bg-slate-100"><X size={17}/></button></div></header>
+      <header className="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4"><div><h3 className="text-lg font-bold text-slate-800">确认跟踪图片</h3><p className="mt-1 text-xs text-slate-500">{parentFolder?.displayName || '上一版本'} → {progressFolder?.displayName || '当前版本'} · {view.items.length} 项，{unresolved} 项待处理</p></div><button type="button" onClick={onClose} title="保存并关闭" className="rounded p-1.5 text-slate-500 hover:bg-slate-100"><X size={17}/></button></header>
       {view.session?.error && <p className="border-b border-red-200 bg-red-50 px-5 py-2 text-xs text-red-700">会话上次处理失败：{view.session.error}</p>}
       {loading ? <div className="flex flex-1 items-center justify-center gap-2 text-sm text-slate-500"><Loader2 size={20} className="animate-spin"/>正在分页读取会话…</div> : <div className="tracking-confirmation-layout">
         <aside className="tracking-confirmation-list">{groups.map(group => <section key={group.category}>{group.items.length > 0 && <h4 className="sticky top-0 z-10 flex justify-between border-y border-slate-200 bg-slate-50 px-3 py-2 text-[11px] font-bold text-slate-500"><span>{categoryLabel[group.category]}</span><span>{group.items.length}</span></h4>}{group.items.map(item => <button key={item.id} type="button" aria-pressed={item.id === view.selectedItemId} onClick={() => setView(current => ({ ...current, selectedItemId: item.id }))} className={`tracking-confirmation-row ${item.id === view.selectedItemId ? 'is-selected' : ''}`}><span className="min-w-0"><b className="block truncate" title={item.sourceName || item.targetName}>{item.sourceName || item.targetName || '未命名媒体'}</b><small className="mt-1 block truncate text-slate-400">{item.referenceName ? `上一版 · ${item.referenceName}` : '未关联上一版本'}</small></span><span className={`tracking-confirmation-status is-${item.status}`}>{statusLabel[item.status]}</span><small className="col-span-2 text-right text-slate-400">{item.confidence || '—'}</small></button>)}</section>)}</aside>

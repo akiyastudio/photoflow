@@ -529,7 +529,7 @@ export interface ProgressTrackingSessionResult {
   success: boolean;
   session?: ProgressTrackingSession;
   items: ProgressTrackingItem[];
-  nextCursor?: number;
+  nextCursor?: number | null;
   error?: string;
 }
 

@@ -442,7 +442,7 @@ html.dark .titlebar-tab-scroll-button:disabled { color:#374151; }
 .birthday-panel-icon { color:#7c3aed; }
 .birthday-panel-body { border-color:#c4b5fd; }
 html.dark [role="dialog"] { color:#e2e8f0; }
-html.dark .bg-white\/50, html.dark .bg-white\/75, html.dark .bg-white\/80, html.dark .bg-white\/90 { background-color:rgb(9 12 18 / .9); }
+html.dark .bg-white\/50, html.dark .bg-white\/75, html.dark .bg-white\/80, html.dark .bg-white\/90, html.dark .bg-white\/95 { background-color:rgb(9 12 18 / .9); }
 html.dark .border-white\/80 { border-color:#334155; }
 html.dark .bg-slate-50\/50, html.dark .bg-slate-50\/80 { background-color:rgb(3 4 7 / .86); }
 html.dark .bg-slate-200\/85 { background-color:rgb(30 41 59 / .88); }
@@ -826,6 +826,20 @@ html.dark .usage-onboarding__panel { box-shadow:0 30px 90px rgba(0,0,0,.42),0 0 
 .tracking-confirmation-preview-label { position:absolute; top:.5rem; left:.5rem; z-index:2; max-width:calc(100% - 1rem); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; border-radius:.3rem; background:rgb(15 23 42 / .8); padding:.25rem .45rem; color:white; font-size:.68rem; }
 .tracking-confirmation-missing { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; padding:2rem; background:rgb(30 41 59); color:rgb(203 213 225); text-align:center; font-size:.8rem; }
 .tracking-confirmation-decisions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:.5rem; padding-top:.75rem; }
+html.dark .tracking-confirmation-dialog {
+  border-color:rgb(31 41 55);
+  background:rgb(9 12 18);
+  box-shadow:0 25px 50px -12px rgb(0 0 0 / .65);
+}
+html.dark .tracking-confirmation-list { border-color:rgb(31 41 55); background:rgb(3 4 7); }
+html.dark .tracking-confirmation-row { border-color:rgb(31 41 55); color:rgb(226 232 240); }
+html.dark .tracking-confirmation-row:hover { background:rgb(17 24 39); }
+html.dark .tracking-confirmation-row.is-selected { background:rgb(7 26 61); box-shadow:inset 3px 0 rgb(59 130 246); }
+html.dark .tracking-confirmation-status.is-recognized,
+html.dark .tracking-confirmation-status.is-accepted { background:rgb(5 46 43); color:rgb(110 231 183); }
+html.dark .tracking-confirmation-status.is-pending_confirmation { background:rgb(41 27 5); color:rgb(252 211 77); }
+html.dark .tracking-confirmation-status.is-missing_reference { background:rgb(43 11 13); color:rgb(252 165 165); }
+html.dark .tracking-confirmation-status.is-rejected { background:rgb(30 41 59); color:rgb(203 213 225); }
 @media (max-width:800px) {
   .tracking-confirmation-dialog { height:min(96vh,980px); }
   .tracking-confirmation-layout { grid-template-columns:1fr; grid-template-rows:minmax(130px,32%) minmax(0,1fr); }

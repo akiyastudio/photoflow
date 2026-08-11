@@ -38,6 +38,7 @@
     "test:deleted-project-cleanup": "node scripts/test-deleted-project-cleanup.cjs",
     "test:data-maintenance": ".venv\\Scripts\\python.exe scripts\\test-data-maintenance.py",
     "test:database-migrations": ".venv\\Scripts\\python.exe scripts\\test-workspace-db-migrations.py",
+    "test:database-locking": ".venv\\Scripts\\python.exe scripts\\test-database-locking.py && node scripts/test-database-client-lock-retry.cjs",
     "test:architecture": "node scripts/test-architecture.cjs",
     "test:metadata-pane": "node scripts/test-metadata-pane-model.cjs",
     "test:renderer-error-notice": "node scripts/test-renderer-error-notice-model.cjs",
