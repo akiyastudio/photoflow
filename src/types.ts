@@ -1067,6 +1067,7 @@ export interface IElectronAPI {
   chooseProjectImportFiles: () => Promise<{ cancelled?: boolean; paths: string[] }>;
   chooseBrollSourceFiles: () => Promise<{ cancelled?: boolean; paths: string[] }>;
   chooseVideoFiles: () => Promise<{ cancelled?: boolean; paths: string[] }>;
+  chooseVideoFolder: () => Promise<{ cancelled?: boolean; path?: string }>;
   getMediaCacheInfo: (cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path: string; sizeBytes: number; fileCount: number; error?: string }>;
   clearMediaCache: (cacheConfig?: AppConfig['mediaCache'], olderThanDays?: number) => Promise<{ success: boolean; deletedCount?: number; prunedSourceCount?: number; taskId?: string; error?: string }>;
   getStorageUsageOverview: (force?: boolean) => Promise<StorageUsageOverview>;

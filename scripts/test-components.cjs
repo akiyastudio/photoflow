@@ -335,6 +335,13 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
     assert.match(component.version, /^\d{2}\.\d{1,2}\.\d{1,2}\.\d+$/, `${component.id} must use the date revision version format`);
     const template = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'extensions', component.id, 'component.template.json'), 'utf8'));
     assert.strictEqual(template.version, component.version, `${component.id} catalog and package versions must match`);
+    if (component.developmentEntry) {
+      const developmentEntry = path.join(repositoryRoot, ...component.developmentEntry);
+      assert(fs.existsSync(developmentEntry), `${component.id} development entry must exist`);
+      for (const requiredAsset of component.requiredAssets || []) {
+        assert(fs.existsSync(path.join(path.dirname(developmentEntry), ...requiredAsset)), `${component.id} development asset must exist: ${requiredAsset.join('/')}`);
+      }
+    }
   }
 
   const systemIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
@@ -391,6 +398,27 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   const installRoot = userComponentRoot;
   assert.strictEqual(registry.ensureInstallRoot(), installRoot);
   assert.deepStrictEqual(registry.roots, [{ source: 'user', path: installRoot }], 'packaged registry must only scan the user component root');
+
+  writeComponent(
+    path.join(projectRoot, 'extensions', 'video-playback-mpv'),
+    'runtime',
+    PLUGIN_DEFINITIONS['video-playback-mpv'].version,
+    'advanced-video-decoder.exe',
+    'video-playback-mpv',
+  );
+  const developmentRegistry = createComponentRegistry({
+    projectRoot,
+    isPackaged: false,
+    platform: 'win32',
+    arch: 'x64',
+  });
+  assert.deepStrictEqual(developmentRegistry.roots, [
+    { source: 'development', path: path.join(projectRoot, 'extensions') },
+    { source: 'development', path: path.join(projectRoot, 'components') },
+  ], 'development registry must scan extension runtimes before the legacy component root');
+  const developmentVideo = developmentRegistry.resolve('video-playback-mpv');
+  assert.strictEqual(developmentVideo?.source, 'development');
+  assert.strictEqual(developmentVideo?.path, path.join(projectRoot, 'extensions', 'video-playback-mpv', 'runtime'));
 
   assert.strictEqual(registry.resolve('research-tools'), null);
 

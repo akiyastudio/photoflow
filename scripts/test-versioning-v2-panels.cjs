@@ -225,6 +225,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert(!textContent(container).includes('图片工作流') && !textContent(container).includes('视频工作流'), 'legacy workflow headings must be removed');
   assert(allNodes(container).some(node => node.attributes.get('aria-label') === '图片区域'), 'the mounted graph must expose a Blender-like image region');
   assert(allNodes(container).some(node => node.attributes.get('aria-label') === '其他区域'), 'ordinary folders must share the version-tree canvas in an other region');
+  assert(!textContent(container).includes('$图片') && !textContent(container).includes('$其他'), 'semantic region labels must not expose template-expression dollar signs');
   const imageArea = allNodes(container).find(node => node.attributes.get('aria-label') === '图片区域');
   const otherArea = allNodes(container).find(node => node.attributes.get('aria-label') === '其他区域');
   assert(parseFloat(imageArea.style.top) + parseFloat(imageArea.style.height) <= parseFloat(otherArea.style.top), 'default semantic regions must not overlap');
@@ -243,6 +244,34 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(arrowMarker?.attributes.get('markerUnits'), 'userSpaceOnUse', 'arrowheads must use fixed canvas units so thin supplemental edges do not float above their target');
   assert.strictEqual(arrowMarker?.attributes.get('refX'), '8', 'the arrow tip must terminate at the target boundary');
   assert(initialWorkflowPath?.includes(' C ') && !initialWorkflowPath.includes(' L '), 'vertically arranged workflow relations must use port-aware curves instead of a top rectangular detour');
+  const shelfEntries = [...entries,
+    { kind: 'folder', name: 'Other B', relativePath: 'Other B', path: 'C:/p/Other B', extension: '', size: 0, createdAt: 11, updatedAt: 11 },
+    { kind: 'folder', name: 'Other C', relativePath: 'Other C', path: 'C:/p/Other C', extension: '', size: 0, createdAt: 12, updatedAt: 12 },
+  ];
+  await React.act(async () => {
+    root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, entries: shelfEntries, structureEntries: shelfEntries }));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  const shelfTops = ['entry:other', 'entry:other b', 'entry:other c'].map(key => allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === key)?.style.top);
+  assert.strictEqual(new Set(shelfTops).size, 1, 'ordinary folders in the Other region must prefer one horizontal row');
+  await React.act(async () => {
+    root.render(React.createElement(tree.ProjectVersionTree, treeProps));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  const initialFreeNode = allNodes(container).find(node => node.attributes.get('data-version-progress-id') === 'free');
+  const initialFreeLeft = parseFloat(initialFreeNode.style.left);
+  const relinkedFolders = treeProps.progressFolders.map(folder => folder.id === 'free' ? { ...folder, parentProgressId: 'tracked', updatedAt: folder.updatedAt + 1 } : folder);
+  await React.act(async () => {
+    root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, progressFolders: relinkedFolders }));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  const relinkedFreeNode = allNodes(container).find(node => node.attributes.get('data-version-progress-id') === 'free');
+  assert(parseFloat(relinkedFreeNode.style.left) > initialFreeLeft, 'saving a new parent relation must immediately move an automatically positioned child into its new graph column');
+  await React.act(async () => {
+    root.render(React.createElement(tree.ProjectVersionTree, treeProps));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  Object.assign(imageAreaBeforeDrag, { left: imageArea.style.left, top: imageArea.style.top, width: imageArea.style.width, height: imageArea.style.height });
   const savesBeforeDragging = layoutRequests.saves.length;
   await React.act(async () => {
     dispatch(rawCanvasNode, 'pointerdown', { pointerId: 41, button: 0, clientX: 100, clientY: 100 });
@@ -530,7 +559,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(layoutRequests.saves.length, savesBeforeUnmountQueue + 1, 'only the started save may reach IPC while the next save remains queued');
   assert.strictEqual(pageACanvas.attributes.get('data-drag-state'), 'node');
   assert.strictEqual(pageBCanvas.attributes.get('data-drag-state'), 'pan', 'two mounted pages must keep independent drag state');
-  assert(pageANode.hasPointerCapture(63) && pageBCanvas.hasPointerCapture(64) && pageCCreateVersionPort.hasPointerCapture(65), 'node, canvas, and next-version drags must own pointer capture before unmount');
+  assert(!pageANode.hasPointerCapture(63) && pageBCanvas.hasPointerCapture(64) && pageCCreateVersionPort.hasPointerCapture(65), 'an unmoved node must leave pointer ownership with its clickable folder, while active canvas and next-version drags own capture');
   const noticesBeforeUnmount = pageANotices.length + pageBNotices.length;
   await React.act(async () => { pageARoot.unmount(); pageBRoot.unmount(); pageCRoot.unmount(); });
   assert(!pageANode.hasPointerCapture(63) && !pageBCanvas.hasPointerCapture(64) && !pageCCreateVersionPort.hasPointerCapture(65), 'unmount must release node, canvas, and next-version pointer capture');

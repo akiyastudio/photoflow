@@ -19,6 +19,7 @@ assert(toolViews.includes("progressEvent.phase === 'copying'") && toolViews.incl
 const importCompletionModel = read('src/features/tools/import-completion-model.ts');
 const classifyImport = read('python/classify.py');
 const ffmpegTranscode = read('python/ffmpeg_transcode.py');
+const cutVideo = read('python/cut_video.py');
 const componentBuilder = read('scripts/build-components.cjs');
 const rawDecoder = read('python/raw_decoder.py');
 assert(!componentBuilder.includes("'research-tools':") && !componentBuilder.includes("'office-media-extractor':") && !fs.existsSync(path.join(root, 'extensions', 'research-tools')) && !fs.existsSync(path.join(root, 'extensions', 'office-media-extractor')), 'built-in research and Office workers must not retain retired optional-component packaging');
@@ -269,12 +270,14 @@ assert(projectWorkspace.includes("kind: 'files' | 'version-tree-layout'")
 assert(projectWorkspace.includes('ProgressRelationMutationQueue')
   && projectWorkspace.includes('relationMutatingChildIds')
   && projectWorkspace.includes('expectedUpdatedAt: latestChild.updatedAt')
-  && projectWorkspace.includes('relationMutationQueueRef.current.dispose()')
+  && projectWorkspace.includes('const queue = new ProgressRelationMutationQueue()')
+  && projectWorkspace.includes('relationMutationQueueRef.current = queue')
+  && projectWorkspace.includes('queue.dispose()')
   && !projectWorkspace.includes('relationMutationIdRef.current !== mutationId'), 'relation mutations must serialize per child and must not discard successful responses using a global mutation ID');
 assert(versionsIpc.includes("ipcMain.handle('workspace-legacy-selection-relation-repair'")
   && preload.includes('repairLegacySelectionRelation:')
   && types.includes('interface LegacySelectionRelationRepair')
-  && projectWorkspace.includes('<LegacySelectionRepairNotice'), 'unresolved legacy selection repairs must cross the trusted ID-only API boundary and be visible in the version tree');
+  && !projectWorkspace.includes('LegacySelectionRepairNotice'), 'legacy repair support may remain available to trusted callers but its migration prompt must not be mounted in the version tree');
 assert(workspaceDb.includes('TARGET_SCHEMA_VERSION = 25')
   && workspaceDb.includes('CREATE TABLE IF NOT EXISTS version_tree_layouts')
   && workspaceDb.includes('CREATE TABLE IF NOT EXISTS version_tree_node_positions')
@@ -333,7 +336,7 @@ assert(workspaceIpc.includes("ipcMain.handle('workspace-resolve-shortcut'") && w
 assert(projectWorkspace.includes('inspiration-target-button') && projectWorkspace.includes('inspirationTargetProject.name') && projectWorkspace.includes('增加到项目') && projectWorkspace.includes('addInspirationToProject'), 'the inspiration browser must expose its selected target project and project gathering actions');
 assert(inspirationLibrary.includes('增加到项目') && inspirationLibrary.includes('renamingPath === relativePath') && inspirationLibrary.includes("'rename'") && inspirationLibrary.includes("'trash'"), 'the inspiration sidebar must expose inline rename, project gathering, and recycle-bin deletion for folders');
 assert(inspirationLibrary.includes('photoflow:inspiration-collapsed-paths:') && inspirationLibrary.includes('readInspirationCollapsedPaths(rootPath)') && inspirationLibrary.includes('writeInspirationCollapsedPaths(rootPath, next)'), 'the inspiration sidebar must persist collapsed folder paths separately for each inspiration-library root');
-assert(projectWorkspace.includes('截取分镜帧') && projectWorkspace.includes("fileMenu.entry.kind === 'video' || fileMenu.entry.kind === 'folder'") && projectWorkspace.includes("panel === 'research'") && projectWorkspace.includes('researchTargetHasTxt'), 'every file browser must expose contextual storyboard extraction for videos and folders');
+assert(projectWorkspace.includes('截取分镜帧') && projectWorkspace.includes('openResearchForEntries') && projectWorkspace.includes("selectedEntries.every(entry => entry.kind === 'video' || entry.kind === 'folder')") && projectWorkspace.includes("panel === 'research'") && projectWorkspace.includes('researchTargetHasTxt'), 'every file browser must expose contextual storyboard extraction for files, folders, and multi-selection');
 assert(!projectWorkspace.includes('selectedToolSourceAvailability') && !projectWorkspace.includes('fileMenuToolSourceAvailability') && projectWorkspace.includes("entry.kind === 'folder' || entry.kind === 'video'") && projectWorkspace.includes("entry.kind === 'folder' || entry.extension.toLocaleLowerCase() === '.png'"), 'video and PNG tool visibility must use the selected entry types without scanning folder contents');
 assert(projectWorkspace.includes('fileMenuEntries.map(entry => entry.path)') && projectWorkspace.includes('fileMenuHasToolActions && <div'), 'folder PNG conversion must pass the selected paths to the converter and omit the tool separator when no contextual tools are visible');
 assert(!settingsFeature.includes("saving ? '保存中…' : '保存设置'") && settingsFeature.includes("onNotice('已更改设置')"), 'settings must save changes live and report the change through the shared toast');
@@ -348,6 +351,8 @@ assert(projectWorkspace.includes('scopeFileListFilter') && projectWorkspace.incl
 assert(projectWorkspace.includes('scopeRequestSequenceRef.current += 1') && projectWorkspace.includes('cancelScopeSession()') && projectWorkspace.includes("setSelectedPaths([])") && projectWorkspace.includes('replaceScopeCursor'), 'scope changes and page deactivation must cancel stale enumeration, clear its cursor, and reset selection');
 assert(projectWorkspace.includes("converterTriggerAction(panel === 'converter', projectPanelIsRunning('converter'))") && projectWorkspace.includes("triggerAction === 'close'") && projectWorkspace.includes('closePngConverterPanel()'), 'the PNG conversion entry must delegate open, close, and running-task restoration to its lifecycle decision');
 assert(projectWorkspace.includes('showVideoToolsMenu') && projectWorkspace.includes('截取分镜帧') && projectWorkspace.includes('openVideoTranscode') && projectWorkspace.includes("mountedPanels.has('video-transcode')") && projectWorkspace.includes('result.videoPaths') && toolViews.includes('sourcesLoading'), 'the single video-tools toolbar icon must open contextual storyboard/transcode panels and automatically populate indexed selected videos');
+assert(toolViews.includes('chooseVideoFolder') && toolViews.includes("targetPaths.flatMap(path => ['--path', path])") && toolViews.includes("start(targetPaths, '正在扫描视频...')") && projectWorkspace.includes('initialTargetPaths={videoSplitTargets}'), 'storyboard extraction and video splitting must accept folders, one file, or multiple files');
+assert(systemIpc.includes("scriptName === 'cut_video.py'") && cutVideo.includes('parser.add_argument("--cancel_file"') && cutVideo.includes('emit("cancelled"'), 'batch video splitting must remain cancellable through the shared Python task boundary');
 assert(projectWorkspace.includes('findCachedMediaThumbnailPreview') && projectWorkspace.includes("result.state === 'QUEUED'") && projectWorkspace.includes('update.previewUrls?.large || update.previewUrls?.medium || update.previewUrls?.small'), 'the media preview pane must reuse visible thumbnails and keep queued preview work in a loading state');
 const focusEntrySource = projectWorkspace.slice(projectWorkspace.indexOf('const focusEntry'), projectWorkspace.indexOf('const activateMediaPreview'));
 assert(focusEntrySource.indexOf('setSelectedPaths([entry.relativePath])') < focusEntrySource.indexOf('setPreviewPath(entry.relativePath)') && /const activateMediaPreview[\s\S]*?focusEntry\(entry\)/.test(projectWorkspace) && /const openPreviewFromMenu[\s\S]*?focusEntry\(entry\)/.test(projectWorkspace), 'every live media preview entry must share selection-first focus behavior so contextual toolbar actions stay in sync');

@@ -16,6 +16,7 @@ const invokeFeature = (feature, channel, ...args) => {
   trackFeature(feature);
   return ipcRenderer.invoke(channel, ...args);
 };
+const omitUndefined = value => Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 
 contextBridge.exposeInMainWorld('electronAPI', {
   apiContractVersion: 1,
@@ -131,7 +132,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   createProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-create-progress-folder', workspacePath, status, projectName, request),
   registerProgressWithGraph: (workspacePath, status, request) => ipcRenderer.invoke('workspace-progress-register-with-graph', workspacePath, status, {
     projectName: request?.projectName,
-    progress: {
+    progress: omitUndefined({
       progressId: request?.progress?.progressId,
       relativePath: request?.progress?.relativePath,
       mediaKind: request?.progress?.mediaKind,
@@ -144,7 +145,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       renameFromParent: request?.progress?.renameFromParent,
       copyMissingFromParent: request?.progress?.copyMissingFromParent,
       moveToRoot: request?.progress?.moveToRoot,
-    },
+    }),
     workflowInputProgressIds: request?.workflowInputProgressIds,
   }),
   adoptVersionTreeFolder: (workspacePath, status, request) => ipcRenderer.invoke('workspace-progress-adopt-media', workspacePath, status, {
@@ -273,6 +274,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   chooseProjectImportFiles: () => ipcRenderer.invoke('choose-project-import-files'),
   chooseBrollSourceFiles: () => ipcRenderer.invoke('choose-broll-source-files'),
   chooseVideoFiles: () => ipcRenderer.invoke('choose-video-files'),
+  chooseVideoFolder: () => ipcRenderer.invoke('choose-video-folder'),
   getMediaCacheInfo: (cacheConfig) => ipcRenderer.invoke('media-cache-info', cacheConfig),
   clearMediaCache: (cacheConfig, olderThanDays) => ipcRenderer.invoke('media-cache-clear', cacheConfig, olderThanDays),
   getStorageUsageOverview: (force) => ipcRenderer.invoke('storage-usage-overview', force),

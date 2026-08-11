@@ -36,7 +36,10 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
   const installRoot = isPackaged ? path.resolve(userComponentRoot) : path.join(projectRoot, 'components');
   const roots = isPackaged
     ? [{ source: 'user', path: installRoot }]
-    : [{ source: 'development', path: installRoot }];
+    : [
+      { source: 'development', path: path.join(projectRoot, 'extensions') },
+      { source: 'development', path: installRoot },
+    ];
 
   const inspectAt = (definition, root) => {
     const containerRoot = path.join(root.path, definition.id);

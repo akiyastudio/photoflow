@@ -139,7 +139,10 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
   }, [applyPositions, defaultPositions, loadServerLayout]);
 
   useEffect(() => {
-    const previous = new Map(positionsRef.current);
+    // Automatic positions must follow a changed graph layout (for example,
+    // immediately after a new parent relation is saved). Only coordinates the
+    // user actually dragged, or coordinates loaded from storage, are fixed.
+    const previous = new Map([...positionsRef.current].filter(([, position]) => position.manual));
     nodes.forEach(node => {
       const savedKey = [node.nodeKey, ...(node.fallbackNodeKeys || [])].find(nodeKey => serverPositionsRef.current.has(nodeKey) && !appliedServerNodeKeysRef.current.has(nodeKey));
       const saved = savedKey ? serverPositionsRef.current.get(savedKey) : undefined;
@@ -210,7 +213,6 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
         const position = positionsRef.current.get(candidate);
         return position ? [[candidate, position] as const] : [];
       }));
-      event.currentTarget.setPointerCapture(event.pointerId);
       onDragStateChange({ type: 'node', nodeKey: id, pointerId: event.pointerId });
       nodeDragRef.current = { element: event.currentTarget, pointerId: event.pointerId, anchorId: id, ids, startClientX: event.clientX, startClientY: event.clientY, startPositions, before: new Map(positionsRef.current), dragged: false };
     },
@@ -223,7 +225,10 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
       const deltaX = event.ctrlKey ? rawDeltaX : Math.round(rawDeltaX / SNAP_SIZE) * SNAP_SIZE;
       const deltaY = event.ctrlKey ? rawDeltaY : Math.round(rawDeltaY / SNAP_SIZE) * SNAP_SIZE;
       if (!drag.dragged && Math.hypot(deltaX, deltaY) < DRAG_THRESHOLD) return;
-      drag.dragged = true;
+      if (!drag.dragged) {
+        drag.dragged = true;
+        drag.element.setPointerCapture(drag.pointerId);
+      }
       event.preventDefault();
       const moved = translateVersionTreeCanvasSelection(drag.startPositions, deltaX, deltaY);
       const next = new Map(positionsRef.current);
@@ -259,6 +264,12 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
       nodeDragRef.current = null;
       onDragStateChange(null);
       applyPositions(drag.before);
+    },
+    onPointerLeave: (event: ReactPointerEvent<HTMLDivElement>) => {
+      const drag = nodeDragRef.current;
+      if (!drag || drag.dragged || drag.anchorId !== id || drag.pointerId !== event.pointerId) return;
+      nodeDragRef.current = null;
+      onDragStateChange(null);
     },
     onClickCapture: (event: React.MouseEvent<HTMLDivElement>) => {
       if (suppressClickRef.current !== id) return;
