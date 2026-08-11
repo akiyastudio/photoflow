@@ -8,6 +8,7 @@ import os
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,45 @@ def main():
     )
     decoded_probe = json.loads(utf8_probe.stdout.decode("utf-8"))
     assert decoded_probe["message"] == "视频大小 4.86 GB，预计分为 2 段"
+
+    with TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
+        source = root / "variable-bitrate.mp4"
+        source.write_bytes(b"0123456789")
+        segment_times = []
+
+        class FakeProcess:
+            def __init__(self, command):
+                pattern = command[-1]
+                segment_times.append(float(command[command.index("-segment_time") + 1]))
+                sizes = (7, 3) if len(segment_times) == 1 else (5, 5)
+                for index, size in enumerate(sizes):
+                    Path(pattern.replace("%03d", f"{index:03d}")).write_bytes(b"x" * size)
+                self.stdout = ["out_time_us=1000000\n"]
+
+            def wait(self):
+                return 0
+
+            def poll(self):
+                return 0
+
+            def terminate(self):
+                return None
+
+        events = []
+        with mock.patch.object(cut_video, "TARGET_SIZE", 5), \
+                mock.patch.object(cut_video, "MAXIMUM_SIZE", 6), \
+                mock.patch.object(cut_video, "probe_duration", return_value=10.0), \
+                mock.patch.object(cut_video, "get_ffmpeg_exe", return_value="ffmpeg"), \
+                mock.patch.object(cut_video.subprocess, "Popen", side_effect=lambda command, **_kwargs: FakeProcess(command)), \
+                mock.patch.object(cut_video, "emit", side_effect=lambda event_type, message, progress=None, **extra: events.append((event_type, message, progress, extra))):
+            outputs = cut_video.fast_lossless_split(str(source))
+
+        assert len(segment_times) == 2 and segment_times[1] < segment_times[0]
+        assert [Path(path).name for path in outputs] == ["variable-bitrate_part000.mp4", "variable-bitrate_part001.mp4"]
+        assert all(Path(path).stat().st_size <= 6 for path in outputs)
+        assert not any(root.glob(".photoflow-split-*"))
+        assert any(event[0] == "warning" and "超过 3.95 GB" in event[1] for event in events)
 
     with TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)

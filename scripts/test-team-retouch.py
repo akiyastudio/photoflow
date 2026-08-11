@@ -506,10 +506,13 @@ def main():
                       VALUES(?,?,?,?,?,?,?,?)""",
                    ("empty-version", "empty-photo", 0, "原片", str(base_path), str(base_path).casefold() + ":empty", 1, 1))
         db.commit()
-        assert team_project_register_photo(db, {"projectName": "Test", "photoId": "empty-photo", "baseVersionId": "empty-version"})["success"]
+        try:
+            team_project_register_photo(db, {"projectName": "Test", "photoId": "empty-photo", "baseVersionId": "empty-version"})
+            raise AssertionError("photo without an AI crop task was registered")
+        except ValueError as error:
+            assert "尚未产生实际裁剪任务" in str(error)
         workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
-        assert any(photo["photoId"] == "empty-photo" and not photo["tasks"] for photo in workspace["photos"])
-        assert team_project_unregister_photo(db, {"photoId": "empty-photo"})["success"]
+        assert all(photo["photoId"] != "empty-photo" for photo in workspace["photos"])
 
         identity_a = np.zeros((180, 240, 3), dtype=np.uint8)
         identity_b = identity_a.copy()

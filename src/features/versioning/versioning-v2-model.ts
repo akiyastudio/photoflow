@@ -185,6 +185,21 @@ export const workflowInputIdsForRelationChange = (
   return [...new Set([...preservedWorkflowIds, ...matchingSelectionIds])];
 };
 
+export const trackingPolicyForRelationChange = (
+  folder: ProgressFolder,
+  parentProgressId: string | null,
+) => parentProgressId ? {
+  trackingEnabled: folder.trackingEnabled,
+  trackingState: folder.trackingEnabled ? 'stale' as const : 'disabled' as const,
+  renameFromParent: folder.renameFromParent,
+  copyMissingFromParent: folder.copyMissingFromParent,
+} : {
+  trackingEnabled: false,
+  trackingState: 'disabled' as const,
+  renameFromParent: false,
+  copyMissingFromParent: false,
+};
+
 export const progressRelationChangeError = (folders: ProgressFolder[], childId: string, parentId: string | null) => {
   const byId = new Map(folders.map(folder => [folder.id, folder]));
   const child = byId.get(childId);
@@ -193,7 +208,6 @@ export const progressRelationChangeError = (folders: ProgressFolder[], childId: 
   if (child.nodeRole === 'artifact') return '产物节点不使用结构父关系';
   if (parentId === null) {
     if (child.nodeRole === 'selection') return '选片节点不能断开为根节点';
-    if (child.trackingEnabled) return '已开启跟踪的进度不能断开为根节点，请先关闭跟踪';
     return '';
   }
   const parent = byId.get(parentId);

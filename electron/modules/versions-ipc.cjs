@@ -462,7 +462,7 @@ const registerVersionIpc = context => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
-      return await versionService.listProgress(workspaceRoot, projectName);
+      return await versionService.snapshotProgress(workspaceRoot, projectName);
     } catch (error) {
       return { success: false, error: error.message || String(error), progressFolders: [], legacySelectionRelationRepairs: [] };
     }
@@ -1774,7 +1774,6 @@ const registerVersionIpc = context => {
           || bundle.versions?.find(version => version.isCurrent)
           || bundle.versions?.at(-1);
         if (!bundle.photo || !base) throw new Error(`无法登记图片：${path.basename(filePath)}`);
-        await versionService.registerTeamProjectPhoto(workspaceRoot, { projectName, photoId: bundle.photo.id, baseVersionId: base.id });
       }
       return await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
     } catch (error) {
@@ -2895,7 +2894,11 @@ const registerVersionIpc = context => {
       if (request.restoreExcluded) await versionService.clearTeamPersonExclusions(workspaceRoot, {
         projectName, photoId: request.photoId, baseVersionId: request.baseVersionId,
       });
-      await versionService.registerTeamProjectPhoto(workspaceRoot, { projectName, photoId: request.photoId, baseVersionId: request.baseVersionId });
+      if (patchResult.tasks.length) {
+        await versionService.registerTeamProjectPhoto(workspaceRoot, { projectName, photoId: request.photoId, baseVersionId: request.baseVersionId });
+      } else {
+        await versionService.unregisterTeamProjectPhoto(workspaceRoot, { photoId: request.photoId });
+      }
       queueCleanupArtifacts(workspaceRoot, { teamArtifactPaths: patchResult.artifactPaths || [] }, '清理旧人物检测文件');
       writeLog('info', 'Team retouch people detected', { projectName, photoId: request.photoId, baseVersionId: request.baseVersionId, personCount: detected.personCount || patchResult.tasks.length, workTileCount: patchResult.tasks.length, detector: detected.detector });
       return { success: true, photo: bundle.photo, versions: bundle.versions, tasks: patchResult.tasks, excludedPersonCount: request.restoreExcluded ? 0 : listedExclusions.exclusions?.length || 0, detection: { detector: detected.detector, backend: detected.backend || 'cpu', provider: detected.provider || '', requestedMode: detected.requestedMode || requestedMode, advancedBackend: Boolean(detected.advancedBackend), width: detected.width, height: detected.height, personCount: detected.personCount ?? patchResult.tasks.length, workTileEdge: detected.workTileEdge || 4000, needsReviewCount: detected.needsReviewCount || 0, fallbackReason: detected.fallbackReason || '' } };
@@ -2976,7 +2979,11 @@ const registerVersionIpc = context => {
         const patchResult = await versionService.replaceTeamPatches(workspaceRoot, {
           photoId: item.bundle.photo.id, baseVersionId: item.base.id, tasks: result.tasks || [],
         });
-        await versionService.registerTeamProjectPhoto(workspaceRoot, { projectName, photoId: item.bundle.photo.id, baseVersionId: item.base.id });
+        if (patchResult.tasks.length) {
+          await versionService.registerTeamProjectPhoto(workspaceRoot, { projectName, photoId: item.bundle.photo.id, baseVersionId: item.base.id });
+        } else {
+          await versionService.unregisterTeamProjectPhoto(workspaceRoot, { photoId: item.bundle.photo.id });
+        }
         queueCleanupArtifacts(workspaceRoot, { teamArtifactPaths: patchResult.artifactPaths || [] }, '清理旧人物检测文件');
         results.push({
           relativePath: item.relativePath, name: item.name, success: true,

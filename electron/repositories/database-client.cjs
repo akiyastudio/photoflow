@@ -1,5 +1,8 @@
 const { spawn } = require('child_process');
 
+const DATABASE_LOCK_PATTERN = /(?:database|database table) is locked|SQLITE_BUSY/i;
+const DATABASE_LOCK_RETRY_DELAYS_MS = [80, 180, 360, 700, 1400];
+
 class PythonDatabaseClient {
   constructor({ getRunConfig, getDatabasePath, writeLog, defaultTimeoutMs = 30000 }) {
     this.getRunConfig = getRunConfig;
@@ -29,8 +32,26 @@ class PythonDatabaseClient {
           const response = JSON.parse(line);
           const request = this.pending.get(response.id);
           if (!request || request.child !== child) continue;
+          if (!response.success && DATABASE_LOCK_PATTERN.test(response.error || '')
+            && request.lockRetryCount < DATABASE_LOCK_RETRY_DELAYS_MS.length) {
+            const delay = DATABASE_LOCK_RETRY_DELAYS_MS[request.lockRetryCount] + Math.floor(Math.random() * 60);
+            request.lockRetryCount += 1;
+            request.retryTimer = setTimeout(() => {
+              request.retryTimer = null;
+              if (this.pending.get(response.id) !== request || request.child !== child || child.killed) return;
+              child.stdin.write(`${request.serialized}\n`, error => {
+                if (!error) return;
+                if (this.pending.get(response.id) !== request) return;
+                this.pending.delete(response.id);
+                clearTimeout(request.timer);
+                request.reject(error);
+              });
+            }, delay);
+            continue;
+          }
           this.pending.delete(response.id);
           clearTimeout(request.timer);
+          if (request.retryTimer) clearTimeout(request.retryTimer);
           if (response.success) request.resolve(response.result);
           else request.reject(new Error(response.error || '工作区数据库操作失败'));
         } catch (error) {
@@ -47,6 +68,7 @@ class PythonDatabaseClient {
       for (const [id, request] of this.pending.entries()) {
         if (request.child !== child) continue;
         clearTimeout(request.timer);
+        if (request.retryTimer) clearTimeout(request.retryTimer);
         request.reject(error);
         this.pending.delete(id);
       }
@@ -69,15 +91,17 @@ class PythonDatabaseClient {
           if (!child.killed) child.kill();
         }
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer, child });
       const request = { id, root, database: this.getDatabasePath(root), action, payload };
+      const serialized = JSON.stringify(request);
+      this.pending.set(id, { resolve, reject, timer, child, serialized, lockRetryCount: 0, retryTimer: null });
       try {
-        child.stdin.write(`${JSON.stringify(request)}\n`, error => {
+        child.stdin.write(`${serialized}\n`, error => {
           if (!error) return;
           const pending = this.pending.get(id);
           if (!pending || pending.child !== child) return;
           this.pending.delete(id);
           clearTimeout(pending.timer);
+          if (pending.retryTimer) clearTimeout(pending.retryTimer);
           pending.reject(error);
         });
       } catch (error) {
@@ -85,6 +109,7 @@ class PythonDatabaseClient {
         if (!pending) return;
         this.pending.delete(id);
         clearTimeout(pending.timer);
+        if (pending.retryTimer) clearTimeout(pending.retryTimer);
         pending.reject(error);
       }
     });

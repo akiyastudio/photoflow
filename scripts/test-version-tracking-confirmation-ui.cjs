@@ -1,4 +1,5 @@
 const assert = require('assert');
+const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 
@@ -16,8 +17,9 @@ const { pathToFileURL } = require('url');
 
   let state = { sessionId: 'a', items: [], minimized: false };
   state = model.mergeTrackingSessionPage(state, { session: session('a'), items: items.slice(0, 2), nextCursor: 2 });
-  state = model.mergeTrackingSessionPage(state, { session: session('a'), items: items.slice(2) });
+  state = model.mergeTrackingSessionPage(state, { session: session('a'), items: items.slice(2), nextCursor: null });
   assert.deepStrictEqual(state.items.map(item => item.id), ['known', 'missing', 'pending'], 'pagination pages merge without duplicates');
+  assert.strictEqual(state.nextCursor, undefined, 'a Python null cursor terminates pagination instead of reloading the first page forever');
   assert.strictEqual(state.selectedItemId, 'pending', 'default selection waits for all pages and prioritizes pending confirmation');
 
   state = { ...state, selectedItemId: 'pending' };
@@ -50,6 +52,14 @@ const { pathToFileURL } = require('url');
   const isolated = model.mergeTrackingSessionPage(pageA, { session: session('b'), items: [items[2]] });
   assert.deepStrictEqual(isolated.items.map(item => item.id), ['known'], 'pages from two workspaces stay isolated by session');
   assert.deepStrictEqual(pageB.items.map(item => item.id), ['pending']);
+
+  const panelSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'versioning', 'TrackingConfirmationPanel.tsx'), 'utf8');
+  const workspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
+  const appStyles = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'index.css'), 'utf8');
+  assert(!panelSource.includes('缩小到后台') && !panelSource.includes('onMinimize'), 'tracking confirmation no longer exposes a redundant minimize action');
+  assert(!workspaceSource.includes('onMinimize={() => setTrackingConfirmationSessionId'), 'workspace does not pass the removed tracking confirmation minimize callback');
+  assert(appStyles.includes('html.dark .tracking-confirmation-dialog') && appStyles.includes('html.dark .tracking-confirmation-row.is-selected'), 'tracking confirmation has dedicated dark-theme surfaces and selection colors');
+  assert(appStyles.includes('html.dark .bg-white\\/95'), '95% translucent white surfaces are mapped to a dark background');
 
   console.log('version tracking confirmation UI model tests passed');
 })().catch(error => {

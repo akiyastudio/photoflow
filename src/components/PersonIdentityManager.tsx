@@ -7,7 +7,7 @@ import { useAppDialog } from './AppDialogProvider';
 import { useEscapeLayer } from './LayerProvider';
 import { TeamRetouchSteps, type TeamRetouchStep } from './TeamRetouchSteps';
 import { TeamOutputProgressPicker } from './TeamRetouchOutputProgress';
-import { useTeamOutputProgress } from './useTeamOutputProgress';
+import { teamWorkflowSourcePaths, useTeamOutputProgress } from './useTeamOutputProgress';
 import { ensureFaceRecognitionConsent } from '../utils/privacyConsent';
 
 type Props = {
@@ -482,9 +482,9 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
   const workflowOrderLocked = workspace.assignments.some(assignment => assignment.completed || assignment.returnMissing)
     || workspace.photos.some(photo => photo.tasks.some(task => Boolean(task.editedPatchPath) || !['', 'exported'].includes(String(task.status || 'exported'))));
   const workflowReady = Boolean(workspace.workflowGenerated && !workspace.workflowNeedsRegeneration);
-  const outputProgress = useTeamOutputProgress(workspace.photos.map(photo => photo.sourcePath), workspacePath, project, onNotice);
+  const outputProgress = useTeamOutputProgress(teamWorkflowSourcePaths(workspace.photos), workspacePath, project, onNotice);
   useEffect(() => {
-    if (!workspace.workflowNode?.id || !outputProgress.sourceProgressIds.length) return;
+    if (!workspace.workflowNode?.id) return;
     void outputProgress.ensureWorkflowInputs(workspace.workflowNode.id).then(() => onProjectChanged()).catch(error => {
       onNotice(`登记团片来源关系失败：${error instanceof Error ? error.message : String(error)}`);
     });

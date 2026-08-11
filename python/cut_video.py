@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import uuid
 
 from ffmpeg_transcode import probe_duration
@@ -17,6 +16,8 @@ from ffmpeg_utils import get_ffmpeg_exe
 
 
 TARGET_SIZE = int(3.95 * 1024 * 1024 * 1024)
+MAXIMUM_SIZE = TARGET_SIZE
+MAX_SPLIT_ATTEMPTS = 6
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".crm", ".mts", ".m2ts", ".ts"}
 
 
@@ -107,10 +108,18 @@ def fast_lossless_split(
         raise FileNotFoundError(f"找不到文件：{input_file}")
 
     progress_start, progress_end = progress_range
+    last_item_progress = -1.0
 
     def report(message: str, item_progress: float):
+        nonlocal last_item_progress
+        item_progress = max(last_item_progress, max(0.0, min(100.0, item_progress)))
+        last_item_progress = item_progress
         overall = progress_start + (progress_end - progress_start) * max(0.0, min(100.0, item_progress)) / 100.0
         emit("progress", message, overall)
+
+    def check_cancelled():
+        if cancel_file and os.path.isfile(cancel_file):
+            raise SplitCancelled("视频分割已取消")
 
     file_size = os.path.getsize(input_file)
     if file_size <= TARGET_SIZE:
@@ -123,9 +132,9 @@ def fast_lossless_split(
 
     ffmpeg_exe = get_ffmpeg_exe()
     report(f"正在分析视频：{os.path.basename(input_file)}", 2)
+    check_cancelled()
     total_seconds = probe_duration(input_file)
-    part_count = math.ceil(file_size / TARGET_SIZE)
-    segment_duration = total_seconds / part_count
+    segment_duration = total_seconds * (TARGET_SIZE / file_size)
 
     destination = os.path.abspath(output_dir or os.path.dirname(input_file))
     os.makedirs(destination, exist_ok=True)
@@ -133,82 +142,132 @@ def fast_lossless_split(
     if not stem or stem in {".", ".."} or os.path.basename(stem) != stem:
         raise ValueError("输出文件名前缀无效")
     extension = os.path.splitext(input_file)[1]
-    output_pattern = os.path.join(destination, f"{stem}_part%03d{extension}")
-
-    emit("log", f"视频大小 {file_size / 1024**3:.2f} GB，预计分为 {part_count} 段")
-    command = [
-        ffmpeg_exe,
-        "-hide_banner",
-        "-y",
-        "-i", input_file,
-        "-map", "0",
-        "-c", "copy",
-        "-f", "segment",
-        "-segment_time", str(segment_duration),
-        "-reset_timestamps", "1",
-        "-progress", "pipe:1",
-        "-nostats",
-        output_pattern,
-    ]
-    error_output = tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=error_output,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    cancelled = threading.Event()
-
-    def monitor_control():
-        for line in sys.stdin:
-            if line.strip().casefold() != "cancel":
-                continue
-            cancelled.set()
-            process.terminate()
-            return
-
-    threading.Thread(target=monitor_control, daemon=True).start()
-    assert process.stdout is not None
-    last_progress = 5.0
-    for line in process.stdout:
-        if cancel_file and os.path.isfile(cancel_file):
-            cancelled.set()
-            process.terminate()
-            break
-        key, _, value = line.strip().partition("=")
-        if key not in {"out_time_us", "out_time_ms"}:
-            continue
-        try:
-            # Modern ffmpeg reports microseconds for both keys in progress mode.
-            processed_seconds = float(value) / 1_000_000
-        except ValueError:
-            continue
-        progress = min(98.0, 5.0 + processed_seconds / total_seconds * 93.0)
-        if progress - last_progress >= 0.5:
-            last_progress = progress
-            report(f"正在无损分割：{os.path.basename(input_file)}", progress)
-
-    code = process.wait()
-    error_output.seek(0)
-    stderr = error_output.read()
-    error_output.close()
-    if cancelled.is_set():
-        raise SplitCancelled("视频分割已取消")
-    if code != 0:
-        raise RuntimeError(stderr.strip()[-2000:] or f"FFmpeg 分割失败，退出代码 {code}")
-
     prefix = f"{stem}_part"
-    outputs = sorted(
-        os.path.join(destination, name)
-        for name in os.listdir(destination)
-        if name.startswith(prefix) and os.path.splitext(name)[1].lower() == extension.lower()
-    )
-    outputs = [item for item in outputs if os.path.isfile(item) and os.path.getsize(item) > 0]
-    if len(outputs) < 2:
-        raise RuntimeError("视频分割没有生成完整的分段文件")
+    existing_outputs = [
+        name for name in os.listdir(destination)
+        if name.startswith(prefix)
+        and name[len(prefix):-len(extension) if extension else None].isdigit()
+        and os.path.splitext(name)[1].lower() == extension.lower()
+    ]
+    if existing_outputs:
+        raise FileExistsError(f"目标分段文件已经存在：{existing_outputs[0]}")
+
+    estimated_parts = max(2, (file_size + TARGET_SIZE - 1) // TARGET_SIZE)
+    emit("log", f"视频大小 {file_size / 1024**3:.2f} GB，预计分为至少 {estimated_parts} 段")
+    temporary_dir = tempfile.mkdtemp(prefix=".photoflow-split-", dir=destination)
+    output_pattern = os.path.join(temporary_dir, f"{stem}_part%03d{extension}")
+    committed_outputs = []
+    outputs = []
+    try:
+        last_detail = "未生成完整且符合大小限制的分段"
+        for attempt in range(MAX_SPLIT_ATTEMPTS):
+            check_cancelled()
+            for name in os.listdir(temporary_dir):
+                candidate = os.path.join(temporary_dir, name)
+                if os.path.isfile(candidate):
+                    os.remove(candidate)
+            if attempt:
+                emit("warning", f"检测到分段超过 3.95 GB，正在缩短分段并重试（{attempt + 1}/{MAX_SPLIT_ATTEMPTS}）")
+
+            command = [
+                ffmpeg_exe,
+                "-hide_banner",
+                "-n",
+                "-i", input_file,
+                "-map", "0",
+                "-c", "copy",
+                "-f", "segment",
+                "-segment_time", str(segment_duration),
+                "-reset_timestamps", "1",
+                "-progress", "pipe:1",
+                "-nostats",
+                output_pattern,
+            ]
+            error_output = tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=error_output,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            try:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    if cancel_file and os.path.isfile(cancel_file):
+                        process.terminate()
+                        process.wait()
+                        raise SplitCancelled("视频分割已取消")
+                    key, _, value = line.strip().partition("=")
+                    if key not in {"out_time_us", "out_time_ms"}:
+                        continue
+                    try:
+                        processed_seconds = float(value) / 1_000_000
+                    except ValueError:
+                        continue
+                    progress = min(96.0, 5.0 + processed_seconds / total_seconds * 91.0)
+                    if progress - last_item_progress >= 0.5:
+                        report(f"正在无损分割：{os.path.basename(input_file)}", progress)
+                code = process.wait()
+            except BaseException:
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait()
+                raise
+            finally:
+                error_output.seek(0)
+                stderr = error_output.read()
+                error_output.close()
+
+            check_cancelled()
+            temporary_outputs = sorted(
+                os.path.join(temporary_dir, name)
+                for name in os.listdir(temporary_dir)
+                if name.startswith(prefix) and os.path.splitext(name)[1].lower() == extension.lower()
+            )
+            segment_sizes = [os.path.getsize(item) for item in temporary_outputs]
+            oversized_sizes = [size for size in segment_sizes if size > MAXIMUM_SIZE]
+            if code == 0 and len(temporary_outputs) >= 2 and all(size > 0 for size in segment_sizes) and not oversized_sizes:
+                outputs = temporary_outputs
+                break
+
+            detail_lines = (stderr or "").strip().splitlines()
+            if detail_lines:
+                last_detail = detail_lines[-1]
+            elif oversized_sizes:
+                last_detail = f"关键帧偏移导致最大分段为 {max(oversized_sizes) / 1024**3:.2f} GB，超过 3.95 GB 限制"
+            if code != 0:
+                raise RuntimeError(last_detail)
+            if attempt == MAX_SPLIT_ATTEMPTS - 1:
+                raise RuntimeError(last_detail)
+
+            if oversized_sizes:
+                observed_ratio = max(oversized_sizes) / MAXIMUM_SIZE
+                segment_duration *= max(0.35, min(0.85, 0.90 / observed_ratio))
+            else:
+                segment_duration *= 0.7
+
+        if not outputs:
+            raise RuntimeError(last_detail)
+        for temporary_output in outputs:
+            final_output = os.path.join(destination, os.path.basename(temporary_output))
+            if os.path.exists(final_output):
+                raise FileExistsError(f"目标分段文件已经存在：{os.path.basename(final_output)}")
+            os.replace(temporary_output, final_output)
+            committed_outputs.append(final_output)
+        outputs = committed_outputs
+    except BaseException:
+        for output in committed_outputs:
+            try:
+                os.remove(output)
+            except OSError:
+                pass
+        raise
+    finally:
+        shutil.rmtree(temporary_dir, ignore_errors=True)
+
     if emit_completion:
         emit("success", f"视频分割完成，共 {len(outputs)} 段", progress_end, outputs=outputs)
     else:

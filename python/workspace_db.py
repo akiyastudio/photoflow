@@ -1311,14 +1311,30 @@ def connect(root: str, database: str):
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
     }
-    db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-    db.commit()
-    schema_value = _meta_value(db, "schema_version")
+    # Normal commands used to run the complete CREATE TABLE / CREATE INDEX
+    # script below on every connection. Even though those statements are
+    # idempotent, SQLite still needs the schema writer lock, so merely opening
+    # the version tree could collide with a background media scan. A database
+    # whose schema and one-time graph revisions are current can be used
+    # immediately without performing any write.
+    schema_value = _meta_value(db, "schema_version") if "meta" in existing_tables else None
     schema_version = int(schema_value or 0)
     is_fresh = not (existing_tables - {"meta"})
     if schema_version > TARGET_SCHEMA_VERSION:
         db.close()
         raise RuntimeError(f"数据库版本 {schema_version} 高于当前软件支持的 {TARGET_SCHEMA_VERSION}")
+    schema_is_current = (
+        not is_fresh
+        and schema_version == TARGET_SCHEMA_VERSION
+        and _meta_value(db, "schema_24_graph_revision") == "3"
+        and _meta_value(db, "selection_mainline_repair_revision") == SELECTION_MAINLINE_REPAIR_REVISION
+        and _meta_value(db, "version_tree_default_layout_revision") == VERSION_TREE_DEFAULT_LAYOUT_REVISION
+        and _meta_value(db, "workspace_root") == root
+    )
+    if schema_is_current:
+        return db
+    db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    db.commit()
     backup_path = None
     if not is_fresh and schema_version < TARGET_SCHEMA_VERSION:
         backup_path = _backup_before_migration(db, database, schema_version)
@@ -2687,6 +2703,11 @@ def progress_list(root: str, db, payload: dict):
     with db:
         repair_selection_workflow_mainlines(db, project["id"])
     sync_progress_folder_locations(root, db, project)
+    return progress_snapshot(db, payload, project)
+
+
+def progress_snapshot(db, payload: dict, project=None):
+    project = project or project_row(db, payload["projectName"])
     include_missing = bool(payload.get("includeMissing"))
     repair_rows = db.execute(
         """SELECT progress_id,project_id,legacy_name,expected_source_name,reason,
@@ -2821,22 +2842,15 @@ def version_tree_layout_get(db, payload: dict):
     project = project_row(db, payload["projectName"])
     scope_key = normalize_version_tree_scope(payload.get("scopeKey"))
     valid_keys = version_tree_project_node_keys(db, project["id"])
-    with db:
-        layout = db.execute(
-            "SELECT revision,updated_at FROM version_tree_layouts WHERE project_id=? AND scope_key=?",
-            (project["id"], scope_key),
-        ).fetchone()
-        rows = db.execute(
-            """SELECT node_key,x,y,updated_at FROM version_tree_node_positions
-               WHERE project_id=? AND scope_key=? ORDER BY node_key""",
-            (project["id"], scope_key),
-        ).fetchall()
-        stale_keys = [row["node_key"] for row in rows if row["node_key"] not in valid_keys and not version_tree_entry_node_belongs_to_scope(row["node_key"], scope_key)]
-        for node_key in stale_keys:
-            db.execute(
-                "DELETE FROM version_tree_node_positions WHERE project_id=? AND scope_key=? AND node_key=?",
-                (project["id"], scope_key, node_key),
-            )
+    layout = db.execute(
+        "SELECT revision,updated_at FROM version_tree_layouts WHERE project_id=? AND scope_key=?",
+        (project["id"], scope_key),
+    ).fetchone()
+    rows = db.execute(
+        """SELECT node_key,x,y,updated_at FROM version_tree_node_positions
+           WHERE project_id=? AND scope_key=? ORDER BY node_key""",
+        (project["id"], scope_key),
+    ).fetchall()
     return {
         "success": True,
         "scopeKey": scope_key,
@@ -3153,6 +3167,8 @@ def progress_register_with_graph(root: str, db, payload: dict):
                     raise ValueError("progress_graph_target_invalid: target progress does not exist")
 
             target = db.execute("SELECT * FROM progress_folders WHERE id=?", (progress_id,)).fetchone()
+            if target["node_role"] == "progress" and not target["tracking_enabled"]:
+                db.execute("DELETE FROM tracking_sessions WHERE progress_id=?", (progress_id,))
             sources = {}
             for source_id in normalized_inputs:
                 source = db.execute("SELECT * FROM progress_folders WHERE id=?", (source_id,)).fetchone()
@@ -3236,16 +3252,15 @@ def progress_relation_update(db, payload: dict):
             raise ValueError("original_parent_forbidden: 原始素材不能拥有父节点")
         if child["node_role"] not in ("progress", "selection"):
             raise ValueError("child_role_invalid: 子节点角色无效")
-        if child["tracking_state"] in ("pending_compare", "pending_confirm", "committing"):
+        detaching_progress = child["node_role"] == "progress" and parent_id is None
+        if not detaching_progress and child["tracking_state"] in ("pending_compare", "pending_confirm", "committing"):
             raise ValueError("node_busy: 节点正在比较或提交，暂时不能修改关系")
         active_session = db.execute(
             "SELECT 1 FROM tracking_sessions WHERE progress_id=? AND status IN ('comparing','pending_confirm','committing') LIMIT 1",
             (child_id,),
         ).fetchone()
-        if active_session is not None:
+        if active_session is not None and not detaching_progress:
             raise ValueError("node_busy: 节点正在比较或提交，暂时不能修改关系")
-        if child["node_role"] == "progress" and parent_id is None and child["tracking_enabled"]:
-            raise ValueError("tracked_detach_forbidden: 已开启跟踪的进度不能断开为根节点，请先关闭跟踪")
         if child["node_role"] == "selection" and parent_id is None:
             raise ValueError("selection_parent_required: 选片节点必须保留有效来源")
         if parent_id is not None:
@@ -3261,14 +3276,21 @@ def progress_relation_update(db, payload: dict):
             if _version_graph_reaches(db, str(child["project_id"]), child_id, parent_id):
                 raise ValueError("cycle_detected: 结构关系和补充关系不能形成有向环")
         relation_kind = "auxiliary" if child["node_role"] == "selection" else ("main" if parent_id else None)
-        tracking_state = "stale" if child["node_role"] == "progress" and child["tracking_enabled"] else "disabled"
+        tracking_enabled = 0 if detaching_progress else int(child["tracking_enabled"])
+        rename_from_parent = 0 if detaching_progress else int(child["rename_from_parent"])
+        copy_missing_from_parent = 0 if detaching_progress else int(child["copy_missing_from_parent"])
+        tracking_state = "stale" if child["node_role"] == "progress" and tracking_enabled else "disabled"
         timestamp = max(int(time.time() * 1000), int(child["updated_at"]) + 1)
         version_key = f"selection-{parent_id}" if child["node_role"] == "selection" else child["version_key"]
+        if detaching_progress:
+            db.execute("DELETE FROM tracking_sessions WHERE progress_id=?", (child_id,))
         db.execute(
             """UPDATE progress_folders SET parent_progress_id=?,relation_kind=?,version_key=?,
-               tracking_state=?,last_tracked_at=NULL,tracking_snapshot_json='{}',folder_signature=NULL,
+               tracking_enabled=?,tracking_state=?,rename_from_parent=?,copy_missing_from_parent=?,
+               last_tracked_at=NULL,tracking_snapshot_json='{}',folder_signature=NULL,
                updated_at=? WHERE id=?""",
-            (parent_id, relation_kind, version_key, tracking_state, timestamp, child_id),
+            (parent_id, relation_kind, version_key, tracking_enabled, tracking_state,
+             rename_from_parent, copy_missing_from_parent, timestamp, child_id),
         )
     row = next(row for row in progress_rows(db, child["project_id"]) if row["id"] == child_id)
     return {"success": True, "progressFolder": serialize_progress(row)}
@@ -6262,6 +6284,12 @@ def team_project_register_photo(db, payload: dict):
     version = db.execute("SELECT id,photo_id FROM versions WHERE id=? AND is_deleted=0", (payload["baseVersionId"],)).fetchone()
     if photo is None or photo["project_id"] != project["id"] or version is None or version["photo_id"] != photo["id"]:
         raise ValueError("团片协作图片或基础版本不属于当前项目")
+    has_crop_task = db.execute(
+        "SELECT 1 FROM team_patch_tasks WHERE photo_id=? AND base_version_id=? AND is_deleted=0 LIMIT 1",
+        (photo["id"], version["id"]),
+    ).fetchone()
+    if has_crop_task is None:
+        raise ValueError("团片协作图片尚未产生实际裁剪任务，不能登记")
     timestamp = int(time.time() * 1000)
     db.execute(
         """INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)
@@ -6602,6 +6630,11 @@ def team_patch_replace(db, payload: dict):
              str(task.get("reviewReason") or ""),
              task.get("status") or "exported", timestamp, timestamp),
         )
+    if not payload.get("tasks"):
+        db.execute(
+            "DELETE FROM team_retouch_photos WHERE photo_id=? AND base_version_id=?",
+            (payload["photoId"], payload["baseVersionId"]),
+        )
     db.commit()
     result = team_patch_list(db, {"photoId": payload["photoId"]})
     result["artifactPaths"] = unreferenced_team_artifact_paths(db, team_artifact_paths(previous_rows) + assignment_artifacts)
@@ -6625,6 +6658,10 @@ def team_patch_cleanup(db, payload: dict):
     )
     db.execute(
         "DELETE FROM team_person_assignments WHERE photo_id=? AND base_version_id=?",
+        (payload["photoId"], payload["baseVersionId"]),
+    )
+    db.execute(
+        "DELETE FROM team_retouch_photos WHERE photo_id=? AND base_version_id=?",
         (payload["photoId"], payload["baseVersionId"]),
     )
     db.commit()
@@ -6731,6 +6768,15 @@ def team_patch_delete(db, payload: dict):
                 WHERE photo_id=? AND base_version_id=? AND person_index IN ({placeholders})""",
             (row["photo_id"], row["base_version_id"], *person_indices),
         )
+    remaining_task = db.execute(
+        "SELECT 1 FROM team_patch_tasks WHERE photo_id=? AND base_version_id=? AND is_deleted=0 LIMIT 1",
+        (row["photo_id"], row["base_version_id"]),
+    ).fetchone()
+    if remaining_task is None:
+        db.execute(
+            "DELETE FROM team_retouch_photos WHERE photo_id=? AND base_version_id=?",
+            (row["photo_id"], row["base_version_id"]),
+        )
     cleanup_empty_generated_team_identities(db, row["project_id"])
     db.commit()
     result = team_patch_list(db, {"photoId": row["photo_id"]})
@@ -6809,7 +6855,15 @@ def load(root: str, database: str):
     # Schema creation/migration happens only when required. Normal project-list
     # refreshes use a query-only connection and never compete for SQLite's
     # single WAL writer slot.
-    if database_needs_initialization(database):
+    requires_initialization = database_needs_initialization(database)
+    requires_wal = False
+    if not requires_initialization:
+        probe = connect_read_only(database)
+        try:
+            requires_wal = str(probe.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal"
+        finally:
+            probe.close()
+    if requires_initialization or requires_wal:
         initialized = connect(root, database)
         initialized.close()
     db = connect_read_only(database)
@@ -7027,7 +7081,10 @@ def cleanup_media_workflow_graph(root: str, db, session_cutoff: int | None = Non
 
 
 def mutate(root: str, database: str, action: str, payload: dict):
-    db = connect(root, database)
+    # Interactive version-tree and confirmation reads must never compete for
+    # SQLite's writer slot with media scans or tracking commits.
+    read_only_actions = {"progress_snapshot", "tracking_session_get", "version_tree_layout_get"}
+    db = connect_read_only(database) if action in read_only_actions else connect(root, database)
     now = int(time.time() * 1000)
     if action == "catalog_sync":
         try:
@@ -7163,6 +7220,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "progress_list":
         result = progress_list(root, db, payload)
+        db.close()
+        return result
+    elif action == "progress_snapshot":
+        result = progress_snapshot(db, payload)
         db.close()
         return result
     elif action == "progress_register":
@@ -7437,7 +7498,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "archive_project", "unarchive_project", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "missing_projects_list", "purge_missing_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_register", "progress_register_with_graph", "progress_adopt_media", "progress_update_tree", "progress_relation_update", "progress_legacy_selection_repair", "version_graph_edge_create", "version_graph_edge_list", "version_graph_edge_delete", "version_graph_edge_replace_source", "media_workflow_import_commit", "version_tree_layout_get", "version_tree_layout_save", "progress_policy_save", "progress_mark_stale", "progress_mark_ready", "progress_main_branch", "progress_visible_relations", "progress_copy_missing_children", "progress_detect_stale", "tracking_session_create", "tracking_prepare", "tracking_store_preview", "tracking_session_get", "tracking_session_release", "tracking_session_decide", "tracking_commit_plan", "tracking_commit_complete", "tracking_commit_failed", "progress_main_branch_media", "progress_delete_missing", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "media_refresh_metadata_fingerprint", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
+    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "archive_project", "unarchive_project", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "missing_projects_list", "purge_missing_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_snapshot", "progress_register", "progress_register_with_graph", "progress_adopt_media", "progress_update_tree", "progress_relation_update", "progress_legacy_selection_repair", "version_graph_edge_create", "version_graph_edge_list", "version_graph_edge_delete", "version_graph_edge_replace_source", "media_workflow_import_commit", "version_tree_layout_get", "version_tree_layout_save", "progress_policy_save", "progress_mark_stale", "progress_mark_ready", "progress_main_branch", "progress_visible_relations", "progress_copy_missing_children", "progress_detect_stale", "tracking_session_create", "tracking_prepare", "tracking_store_preview", "tracking_session_get", "tracking_session_release", "tracking_session_decide", "tracking_commit_plan", "tracking_commit_complete", "tracking_commit_failed", "progress_main_branch_media", "progress_delete_missing", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "media_refresh_metadata_fingerprint", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")

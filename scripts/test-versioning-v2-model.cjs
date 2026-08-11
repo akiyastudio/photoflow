@@ -50,7 +50,21 @@ const { pathToFileURL } = require('url');
   ]);
   assert.deepStrictEqual(new Set(cyclic.cycleNodeIds), new Set(['a', 'b']));
   assert.strictEqual(model.progressTrackingAction({ ...nodes[2], relationKind: 'auxiliary', nodeRole: 'selection' }), null);
-  assert.match(model.progressRelationChangeError(nodes.map(node => node.id === 'main' ? { ...node, trackingEnabled: true } : node), 'main', null), /关闭跟踪/);
+  const trackedMain = nodes.map(node => node.id === 'main' ? { ...node, trackingEnabled: true, trackingState: 'ready', renameFromParent: true, copyMissingFromParent: true } : node);
+  assert.strictEqual(model.progressRelationChangeError(trackedMain, 'main', null), '');
+  const trackedMainNode = trackedMain.find(node => node.id === 'main');
+  assert.deepStrictEqual(model.trackingPolicyForRelationChange(trackedMainNode, null), {
+    trackingEnabled: false,
+    trackingState: 'disabled',
+    renameFromParent: false,
+    copyMissingFromParent: false,
+  });
+  assert.deepStrictEqual(model.trackingPolicyForRelationChange(trackedMainNode, 'root'), {
+    trackingEnabled: true,
+    trackingState: 'stale',
+    renameFromParent: true,
+    copyMissingFromParent: true,
+  });
   assert.strictEqual(model.progressRelationChangeError(nodes, 'main', null), '');
   assert.match(model.progressRelationChangeError(nodes, 'selection', null), /不能断开为根节点/);
   assert.strictEqual(model.progressRelationChangeError(nodes, 'main', 'selection'), '', 'selection to progress is a valid workflow_input');
@@ -104,6 +118,13 @@ const { pathToFileURL } = require('url');
     model.workflowInputIdsForRelationChange([...semanticNodes, v1], [persistedWorkflowEdge], 'v1', 'v1'),
     ['team-workflow'],
     'connecting to another progress removes selection inputs that belong to the original source',
+  );
+  const videoSelection = { ...base, id: 'video-selection', mediaKind: 'video', nodeRole: 'selection', relationKind: 'auxiliary', parentProgressId: 'mov-semantic', folderMissing: false };
+  const videoV1 = { ...base, id: 'video-v1', mediaKind: 'video', nodeRole: 'progress', relationKind: 'main', folderMissing: false };
+  assert.deepStrictEqual(
+    model.workflowInputIdsForRelationChange([...videoNodes, videoSelection, videoV1], [], 'video-v1', 'mov-semantic'),
+    ['video-selection'],
+    'manually connecting MOV to video V1 atomically adds the matching video-selection input',
   );
   console.log('versioning V2 production model tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { ProgressFolder, WorkspaceProject } from '../types';
+import type { ProgressFolder, TeamProjectPhoto, WorkspaceProject } from '../types';
 
 const normalizePath = (value = '') => value.replace(/\\/g, '/').replace(/\/+$/, '').toLocaleLowerCase();
 
@@ -28,6 +28,11 @@ export const resolveTeamSourceProgressIds = (sourceFilePaths: string[], folders:
   }
   return resolved;
 };
+
+/** Only photos that produced at least one AI crop are real team-workflow inputs. */
+export const teamWorkflowSourcePaths = (photos: TeamProjectPhoto[]) => photos
+  .filter(photo => photo.tasks.length > 0)
+  .map(photo => photo.sourcePath);
 
 export const useTeamOutputProgress = (sourceFilePaths: string | string[], workspacePath: string, project: WorkspaceProject, onNotice: (message: string) => void) => {
   const normalizedSourcePaths = useMemo(
