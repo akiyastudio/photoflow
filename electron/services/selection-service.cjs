@@ -135,7 +135,7 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
     if (sourceSelections.some(node => comparable(node.folderPath) !== comparable(target.targetPath))) outputConflict = 'output_name_conflict';
     return { nodes, sourceNode, targetNode, outputConflict, recoverableEmptyTarget };
   };
-  const planFromFiles = async ({ workspaceRoot, projectName, projectRoot, sourceFolderRelativePath, files, keywords = [], missingKeywords = [], unsupportedPaths = [] }) => {
+  const planFromFiles = async ({ workspaceRoot, projectName, projectRoot, sourceFolderRelativePath, mediaKind: requestedMediaKind, files, keywords = [], missingKeywords = [], unsupportedPaths = [] }) => {
     const source = resolveProjectEntry(projectRoot, sourceFolderRelativePath, { directory: true });
     const target = targetForSource(projectRoot, source);
     const context = await progressContext(workspaceRoot, projectName, source, target);
@@ -187,6 +187,7 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
     }
     const signaturePayload = {
       sourceFolderRelativePath: source.normalized,
+      requestedMediaKind: requestedMediaKind || '',
       targetRelativePath: target.targetRelativePath,
       keywords,
       unsupportedPaths,
@@ -238,10 +239,13 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
     const missingKeywords = [];
     for (const keyword of keywords) {
       const matches = byKeyword.get(keyword) || [];
-      const supported = matches.filter(filePath => mediaKind(filePath));
+      const supported = matches.filter(filePath => {
+        const kind = mediaKind(filePath);
+        return kind && (!request.mediaKind || kind === request.mediaKind);
+      });
       const unsupported = matches.filter(filePath => !mediaKind(filePath));
       unsupportedPaths.push(...unsupported.map(filePath => path.relative(request.projectRoot, filePath).replace(/\\/g, '/')));
-      if (!matches.length) missingKeywords.push(keyword);
+      if (request.mediaKind ? !supported.length : !matches.length) missingKeywords.push(keyword);
       else files.push(...supported);
     }
     return planFromFiles({ ...request, files: [...new Set(files)], keywords, missingKeywords, unsupportedPaths: [...new Set(unsupportedPaths)] });
@@ -422,16 +426,43 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
         await fs.promises.rm(plan.target.recoveryMarkerPath, { force: true });
         ownsRecoveryMarker = false;
       }
-      for (const item of plan.copyItems) {
+      const totalCopyBytes = plan.copyItems.reduce((sum, item) => sum + item.size, 0);
+      let completedCopyBytes = 0;
+      let lastCopyProgressAt = 0;
+      const reportCopyProgress = (item, fileIndex, fileBytesCopied, force = false) => {
+        const now = Date.now();
+        if (!force && now - lastCopyProgressAt < 250) return;
+        lastCopyProgressAt = now;
+        const bytesCopied = Math.min(totalCopyBytes, completedCopyBytes + Math.max(0, Number(fileBytesCopied) || 0));
+        publishProgress(request, {
+          phase: 'copying',
+          fileName: item.name,
+          fileIndex,
+          totalFiles: plan.copyItems.length,
+          fileBytesCopied: Math.min(item.size, Math.max(0, Number(fileBytesCopied) || 0)),
+          fileTotalBytes: item.size,
+          bytesCopied,
+          totalBytes: totalCopyBytes,
+          progress: totalCopyBytes ? Math.min(100, bytesCopied * 100 / totalCopyBytes) : 100,
+        });
+      };
+      for (const [index, item] of plan.copyItems.entries()) {
         if (job.cancelled) throw Object.assign(new Error('选片任务已取消'), { code: 'TASK_CANCELLED' });
+        const fileIndex = index + 1;
+        reportCopyProgress(item, fileIndex, 0, true);
         const destinationDirectory = path.dirname(item.destination);
         if (!fs.existsSync(destinationDirectory)) {
           await fs.promises.mkdir(destinationDirectory, { recursive: true });
           createdDirectories.push(destinationDirectory);
         }
         if (fs.existsSync(item.destination)) throw new Error(`目标文件已存在：${item.destinationRelativePath}`);
-        await copyFileAtomic(item.sourcePath, item.destination, { isCancelled: () => job.cancelled });
+        await copyFileAtomic(item.sourcePath, item.destination, {
+          isCancelled: () => job.cancelled,
+          onProgress: copyProgress => reportCopyProgress(item, fileIndex, copyProgress.bytesCopied),
+        });
         createdFiles.push(item.destination);
+        reportCopyProgress(item, fileIndex, item.size, true);
+        completedCopyBytes += item.size;
       }
       if (job.cancelled) throw Object.assign(new Error('选片任务已取消'), { code: 'TASK_CANCELLED' });
       return {

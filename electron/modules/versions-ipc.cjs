@@ -1,6 +1,20 @@
 const { CANCELLED_CODE: WORKFLOW_CANCELLED_CODE, buildWorkflowPlan, copyWorkflowPlan } = require('../services/team-workflow-generation.cjs');
 
 const workflowGenerationJobs = new Map();
+const isDatabaseLockedError = error => /(?:database|database table) is locked|SQLITE_BUSY/i.test(error?.message || String(error));
+const retryDatabaseLocked = async (operation, attempts = 4) => {
+  let lastError;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isDatabaseLockedError(error) || attempt === attempts - 1) throw error;
+      await new Promise(resolve => setTimeout(resolve, 100 * 2 ** attempt));
+    }
+  }
+  throw lastError;
+};
 
 const registerVersionIpc = context => {
   const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, exiftool, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaMetadataCache, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog } = context;
@@ -921,7 +935,7 @@ const registerVersionIpc = context => {
       const expectedRevision = request.expectedRevision;
       const positions = Array.isArray(request.positions) ? request.positions : [];
       if (!mode || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || positions.length > 1000) throw new Error('version_tree_layout_payload_invalid: 布局请求无效');
-      const listed = await versionService.listProgress(workspaceRoot, projectName, true);
+      const listed = await retryDatabaseLocked(() => versionService.listProgress(workspaceRoot, projectName, true));
       const allowedNodeKeys = new Set((listed.progressFolders || []).map(folder => `progress:${folder.id}`));
       const seen = new Set();
       const normalizedPositions = positions.map(position => {
@@ -933,7 +947,7 @@ const registerVersionIpc = context => {
         seen.add(nodeKey);
         return { nodeKey, x, y };
       });
-      return await versionService.saveVersionTreeLayout(workspaceRoot, { projectName, scopeKey, expectedRevision, mode, positions: normalizedPositions });
+      return await retryDatabaseLocked(() => versionService.saveVersionTreeLayout(workspaceRoot, { projectName, scopeKey, expectedRevision, mode, positions: normalizedPositions }));
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -946,12 +960,15 @@ const registerVersionIpc = context => {
       const listed = await versionService.listProgress(workspaceRoot, projectName, true);
       const progressId = String(request.progressId || '');
       const sourceProgressId = String(request.sourceProgressId || '');
+      const action = request.action === 'keep-independent' ? 'keep-independent' : 'connect';
       const projectNodeIds = new Set((listed.progressFolders || []).map(folder => folder.id));
       const repairIds = new Set((listed.legacySelectionRelationRepairs || []).map(repair => repair.progressId));
-      if (!repairIds.has(progressId) || !projectNodeIds.has(progressId) || !projectNodeIds.has(sourceProgressId)) {
+      if (!repairIds.has(progressId) || !projectNodeIds.has(progressId) || action === 'connect' && !projectNodeIds.has(sourceProgressId)) {
         throw new Error('legacy_selection_repair_project_mismatch: 修复节点不属于当前项目');
       }
-      return await versionService.repairLegacySelectionRelation(workspaceRoot, { progressId, sourceProgressId });
+      return await versionService.repairLegacySelectionRelation(workspaceRoot, action === 'keep-independent'
+        ? { progressId, action }
+        : { progressId, sourceProgressId });
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }

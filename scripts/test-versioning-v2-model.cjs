@@ -65,6 +65,7 @@ const { pathToFileURL } = require('url');
   const semanticEdges = [
     { id: 'companion', projectId: 'p', sourceProgressId: 'raw-semantic', targetProgressId: 'camera-jpg', edgeKind: 'media_companion', createdAt: 0, updatedAt: 0 },
     { id: 'preview', projectId: 'p', sourceProgressId: 'raw-semantic', targetProgressId: 'generated-jpg', edgeKind: 'derived_preview', createdAt: 0, updatedAt: 0 },
+    { id: 'invalid-jpg-team', projectId: 'p', sourceProgressId: 'camera-jpg', targetProgressId: 'team-workflow', edgeKind: 'workflow_input', createdAt: 0, updatedAt: 0 },
   ];
   const semanticGraph = model.projectVisibleVersionGraph(semanticNodes, semanticEdges);
   assert.deepStrictEqual(

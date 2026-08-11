@@ -8,7 +8,7 @@ const compareProgressKeys = (left: string, right: string) => left.localeCompare(
 export const isTeamSourceProgressCandidate = (folder: ProgressFolder) => folder.mediaKind === 'image'
   && !folder.folderMissing
   && folder.relationKind !== 'auxiliary'
-  && (folder.nodeRole === 'original' || folder.nodeRole === 'progress');
+  && folder.nodeRole === 'progress';
 
 export const isTeamProgressCandidate = (folder: ProgressFolder) => isTeamSourceProgressCandidate(folder)
   && folder.nodeRole === 'progress';
@@ -88,7 +88,6 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
   const ensureWorkflowInputs = useCallback(async (workflowProgressId?: string) => {
     if (!workflowProgressId) return;
     const latest = await refresh();
-    if (!latest.sourceProgressIds.length) throw new Error('无法确定团片来源所属的主进度');
     const registered = await window.electronAPI.registerProgressWithGraph(workspacePath, project.status, {
       projectName: project.name,
       progress: { progressId: workflowProgressId },

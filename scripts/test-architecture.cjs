@@ -14,6 +14,8 @@ const preload = read('electron/preload.cjs');
 const app = read('src/App.tsx');
 const titlebarTabOrder = read('src/features/app/useTitlebarTabOrder.ts');
 const toolViews = read('src/features/tools/ToolViews.tsx');
+assert(toolViews.includes('从文件夹选择图片') && toolViews.includes('从文件夹选择视频') && toolViews.includes("resolveFilenameSelectionSource(sourceFolders, config.imageSourceFolderName, 'raw')") && toolViews.includes("resolveFilenameSelectionSource(sourceFolders, config.videoSourceFolderName, 'mov')"), 'filename selection must retain separate image/RAW and video/MOV source selectors with RAW and MOV defaults');
+assert(toolViews.includes("progressEvent.phase === 'copying'") && toolViews.includes('statusMessage={statusMsg}') && toolViews.includes('正在复制${label'), 'filename selection must show the current copied file in the progress status row instead of letting a target log hide it');
 const importCompletionModel = read('src/features/tools/import-completion-model.ts');
 const classifyImport = read('python/classify.py');
 const ffmpegTranscode = read('python/ffmpeg_transcode.py');

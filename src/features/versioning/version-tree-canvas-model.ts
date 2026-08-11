@@ -68,7 +68,11 @@ export const reconcileVersionTreeCanvasPositions = ({
   const nodeIds = new Set(nodes.map(node => node.id));
   const result = new Map<string, VersionTreeCanvasPosition>();
   if (!refreshAll) {
-    for (const [id, position] of previous) if (nodeIds.has(id) && finitePosition(position)) result.set(id, position);
+    for (const [id, position] of previous) if (nodeIds.has(id) && finitePosition(position)) {
+      result.set(id, position.x >= 0 && position.y >= 0
+        ? position
+        : { ...position, x: Math.max(0, position.x), y: Math.max(0, position.y) });
+    }
   }
 
   const occupied = [...result.values()];

@@ -2,12 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MutableRefObject, PointerEvent as ReactPointerEvent } from 'react';
 import { reconcileVersionTreeCanvasPositions, translateVersionTreeCanvasSelection, type VersionTreeCanvasPosition } from './version-tree-canvas-model';
 
-export type VersionTreeCanvasItem = { id: string; nodeKey: string; x: number; y: number };
+export type VersionTreeCanvasItem = { id: string; nodeKey: string; fallbackNodeKeys?: readonly string[]; x: number; y: number };
 export type VersionTreeDragState =
   | { type: 'node'; nodeKey: string; pointerId: number }
   | { type: 'relation'; childProgressId: string; pointerId: number }
   | { type: 'create-version'; sourceProgressId: string; pointerId: number }
-  | { type: 'frame'; areaKey: string; pointerId: number }
   | { type: 'pan'; pointerId: number }
   | null;
 
@@ -65,7 +64,6 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
   const undoStackRef = useRef<LayoutHistoryEntry[]>([]);
   const redoStackRef = useRef<LayoutHistoryEntry[]>([]);
   const [historyRevision, setHistoryRevision] = useState(0);
-  const groupMoveRef = useRef<{ ids: string[]; before: Map<string, VersionTreeCanvasPosition>; start: Map<string, VersionTreeCanvasPosition> } | null>(null);
   positionsRef.current = positions;
 
   const applyPositions = useCallback((next: Map<string, VersionTreeCanvasPosition>) => {
@@ -95,7 +93,7 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
     redoStackRef.current = [];
     setHistoryRevision(value => value + 1);
     const currentNodes = nodesRef.current;
-    const idByNodeKey = new Map(currentNodes.map(node => [node.nodeKey, node.id]));
+    const idByNodeKey = new Map(currentNodes.flatMap(node => [node.nodeKey, ...(node.fallbackNodeKeys || [])].map(nodeKey => [nodeKey, node.id] as const)));
     const saved = new Map<string, VersionTreeCanvasPosition>();
     result.positions.forEach(position => {
       const id = idByNodeKey.get(position.nodeKey);
@@ -143,10 +141,11 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
   useEffect(() => {
     const previous = new Map(positionsRef.current);
     nodes.forEach(node => {
-      const saved = serverPositionsRef.current.get(node.nodeKey);
-      if (saved && !appliedServerNodeKeysRef.current.has(node.nodeKey)) {
+      const savedKey = [node.nodeKey, ...(node.fallbackNodeKeys || [])].find(nodeKey => serverPositionsRef.current.has(nodeKey) && !appliedServerNodeKeysRef.current.has(nodeKey));
+      const saved = savedKey ? serverPositionsRef.current.get(savedKey) : undefined;
+      if (saved && savedKey) {
         previous.set(node.id, saved);
-        appliedServerNodeKeysRef.current.add(node.nodeKey);
+        appliedServerNodeKeysRef.current.add(savedKey);
       }
     });
     applyPositions(reconcileVersionTreeCanvasPositions({ nodes, previous, nodeWidth, nodeHeight }));
@@ -303,49 +302,6 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
     },
   };
 
-  const beginGroupMove = useCallback((ids: string[]) => {
-    if (disposedRef.current || dragStateRef.current) return false;
-    const movableIds = ids.filter(id => positionsRef.current.has(id));
-    if (!movableIds.length) return false;
-    const start = new Map(movableIds.flatMap(id => {
-      const position = positionsRef.current.get(id);
-      return position ? [[id, position] as const] : [];
-    }));
-    groupMoveRef.current = { ids: movableIds, before: new Map(positionsRef.current), start };
-    return true;
-  }, [dragStateRef]);
-
-  const previewGroupMove = useCallback((deltaX: number, deltaY: number) => {
-    const move = groupMoveRef.current;
-    if (!move) return;
-    const snappedX = Math.round(deltaX / SNAP_SIZE) * SNAP_SIZE;
-    const snappedY = Math.round(deltaY / SNAP_SIZE) * SNAP_SIZE;
-    const next = new Map(move.before);
-    translateVersionTreeCanvasSelection(move.start, snappedX, snappedY).forEach((position, id) => next.set(id, position));
-    applyPositions(next);
-  }, [applyPositions]);
-
-  const commitGroupMove = useCallback(() => {
-    const move = groupMoveRef.current;
-    groupMoveRef.current = null;
-    if (!move) return;
-    const after = new Map(positionsRef.current);
-    const changed = new Map(move.ids.flatMap(id => {
-      const position = after.get(id);
-      return position ? [[id, position] as const] : [];
-    }));
-    undoStackRef.current.push({ before: move.before, after });
-    redoStackRef.current = [];
-    setHistoryRevision(value => value + 1);
-    void enqueueSave('patch', changed, move.before);
-  }, [enqueueSave]);
-
-  const cancelGroupMove = useCallback(() => {
-    const move = groupMoveRef.current;
-    groupMoveRef.current = null;
-    if (move) applyPositions(move.before);
-  }, [applyPositions]);
-
   const refreshLayout = useCallback(async () => {
     const before = new Map(positionsRef.current);
     const next = defaultPositions();
@@ -394,5 +350,5 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
   });
 
   void historyRevision;
-  return { positions, viewportRef, nodePointerHandlers, canvasPointerHandlers, beginGroupMove, previewGroupMove, commitGroupMove, cancelGroupMove, refreshLayout, resetViewport, undoLayout, redoLayout, canUndo: undoStackRef.current.length > 0, canRedo: redoStackRef.current.length > 0, hasManualLayout };
+  return { positions, viewportRef, nodePointerHandlers, canvasPointerHandlers, refreshLayout, resetViewport, undoLayout, redoLayout, canUndo: undoStackRef.current.length > 0, canRedo: redoStackRef.current.length > 0, hasManualLayout };
 };

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { FolderInput, ScanSearch, HardDrive, Play, Trash2, AlertCircle, Edit, X, Plus, User, Loader2, RotateCcw, Download, Scissors, Video, ChevronDown, ChevronUp, Crop, CheckCircle2 } from 'lucide-react';
 import { TaskProgress } from '../../components/TaskStatus';
-import type { AppConfig, LogEntry, MediaWorkflowImportManifest, ProjectStatus, WorkspaceProject } from '../../types';
+import type { AppConfig, LogEntry, MediaWorkflowImportManifest, ProjectStatus, SelectionPreflightResult, WorkspaceProject } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
@@ -9,6 +9,7 @@ import { InteractiveCropEditor, type CropRectangle } from '../../components/Inte
 import { ImportSourceControls } from '../../components/ImportSourceControls';
 import { PanelSwitch } from '../../components/PanelSwitch';
 import { appendImportSuccess, type ImportCompletion } from './import-completion-model';
+import { filenameSelectionOutputName, resolveFilenameSelectionSource } from './filename-selection-model';
 
 export type { ImportCompletion } from './import-completion-model';
 
@@ -1742,14 +1743,18 @@ const MatchView = ({
   const [isConfirming, setIsConfirming] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [statusMsg, setStatusMsg] = useState('请选择来源文件夹并输入文件名');
+  const [statusMsg, setStatusMsg] = useState('请确认图片、视频来源并输入文件名');
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const operationIdRef = React.useRef('');
   const folderListingOperationIdRef = React.useRef('');
+  const executionProgressRef = React.useRef({ label: '', start: 40, end: 90 });
   const appDialog = useAppDialog();
-  const selectedRelativePath = config.sourceFolderRelativePath || '';
-  const selectedName = selectedRelativePath.split('/').filter(Boolean).at(-1) || '';
-  const outputFolderName = selectedName ? `${selectedName}_选片` : '';
+  const selectedImageRelativePath = resolveFilenameSelectionSource(sourceFolders, config.imageSourceFolderName, 'raw');
+  const selectedVideoRelativePath = resolveFilenameSelectionSource(sourceFolders, config.videoSourceFolderName, 'mov');
+  const selectedSources = [
+    selectedImageRelativePath ? { mediaKind: 'image' as const, label: '图片', relativePath: selectedImageRelativePath } : null,
+    selectedVideoRelativePath ? { mediaKind: 'video' as const, label: '视频', relativePath: selectedVideoRelativePath } : null,
+  ].filter((source): source is { mediaKind: 'image' | 'video'; label: string; relativePath: string } => Boolean(source));
 
   useEffect(() => {
     let active = true;
@@ -1777,6 +1782,14 @@ const MatchView = ({
       setStatusMsg(`正在扫描来源：${Number(progressEvent.directoriesScanned || 0)} 个目录，${Number(progressEvent.filesScanned || 0)} 个文件`);
       setProgress(current => Math.max(current, 10));
     }
+    if (progressEvent.phase === 'copying') {
+      const { label, start, end } = executionProgressRef.current;
+      const transferProgress = Math.min(100, Math.max(0, Number(progressEvent.progress) || 0));
+      const fileIndex = Number(progressEvent.fileIndex || 0);
+      const totalFiles = Number(progressEvent.totalFiles || 0);
+      setStatusMsg(`正在复制${label ? `${label}：` : '：'}${progressEvent.fileName || '文件'}${totalFiles ? `（${fileIndex}/${totalFiles}）` : ''}`);
+      setProgress(start + (end - start) * transferProgress / 100);
+    }
   }), []);
 
   const loadMoreSourceFolders = async () => {
@@ -1801,41 +1814,47 @@ const MatchView = ({
     await window.electronAPI.cancelSelectionOperation(operationIdRef.current);
   };
   const runTask = async () => {
-    if (!projectPath || !selectedRelativePath || !keywords.trim() || isRunning || isConfirming) return;
+    if (!projectPath || !selectedSources.length || !keywords.trim() || isRunning || isConfirming) return;
     setIsRunning(true);
     setProgress(5);
     setStatusMsg('正在预检来源与目标…');
     setLogs([]);
     try {
       const tokens = keywords.trim().split(/\s+/);
-      const preflightOperationId = crypto.randomUUID();
-      operationIdRef.current = preflightOperationId;
-      const preview = await window.electronAPI.preflightFilenameSelection(projectPath, {
-        sourceFolderRelativePath: selectedRelativePath,
-        keywords: tokens,
-        operationId: preflightOperationId,
-      });
-      if (preview.cancelled) { setStatusMsg('已取消来源扫描'); setProgress(0); return; }
-      if (!preview.success || !preview.signature) throw new Error(preview.error || '选片预检失败');
+      const previews: Array<{ source: typeof selectedSources[number]; preview: SelectionPreflightResult }> = [];
+      for (const [index, source] of selectedSources.entries()) {
+        const preflightOperationId = crypto.randomUUID();
+        operationIdRef.current = preflightOperationId;
+        setStatusMsg(`正在预检${source.label}来源…`);
+        const preview = await window.electronAPI.preflightFilenameSelection(projectPath, {
+          sourceFolderRelativePath: source.relativePath,
+          mediaKind: source.mediaKind,
+          keywords: tokens,
+          operationId: preflightOperationId,
+        });
+        if (preview.cancelled) { setStatusMsg('已取消来源扫描'); setProgress(0); return; }
+        if (!preview.success || !preview.signature) throw new Error(preview.error || `${source.label}选片预检失败`);
+        previews.push({ source, preview });
+        setProgress(10 + Math.round((index + 1) / selectedSources.length * 20));
+        appendLog(`${source.label}来源：${preview.sourceFolderRelativePath}`, 'info');
+        appendLog(`${source.label}目标：${preview.targetFolderRelativePath}`, 'info');
+      }
       operationIdRef.current = '';
       setProgress(30);
-      appendLog(`来源：${preview.sourceFolderRelativePath}`, 'info');
-      appendLog(`目标：${preview.targetFolderRelativePath}`, 'info');
       setIsConfirming(true);
-      const details = [
-        `来源：${preview.sourceFolderRelativePath}`,
-        `目标：${preview.targetFolderRelativePath}`,
-        `匹配 ${Number(preview.matchedCount || 0)} 个；待复制 ${Number(preview.filesToCopy || 0)} 个`,
-        `已存在 ${Number(preview.existingCount || 0)} 个；冲突 ${Number(preview.conflictCount || 0)} 个；未找到 ${Number(preview.missingCount || 0)} 个`,
-        Number(preview.unsupportedCount || 0) ? `不支持 ${Number(preview.unsupportedCount || 0)} 个` : '',
+      const details = previews.flatMap(({ source, preview }) => [
+        `${source.label}：${preview.sourceFolderRelativePath} → ${preview.targetFolderRelativePath}`,
+        `匹配 ${Number(preview.matchedCount || 0)} 个；待复制 ${Number(preview.filesToCopy || 0)} 个；已存在 ${Number(preview.existingCount || 0)} 个；冲突 ${Number(preview.conflictCount || 0)} 个；未找到 ${Number(preview.missingCount || 0)} 个`,
         preview.existingPaths?.length ? `已存在：${preview.existingPaths.slice(0, 8).join('、')}` : '',
         preview.conflictPaths?.length ? `冲突：${preview.conflictPaths.slice(0, 8).join('、')}` : '',
         preview.missingKeywords?.length ? `未找到：${preview.missingKeywords.slice(0, 12).join('、')}` : '',
         preview.unsupportedPaths?.length ? `不支持：${preview.unsupportedPaths.slice(0, 8).join('、')}` : '',
-      ].filter(Boolean).join('\n');
+      ]).filter(Boolean).join('\n');
+      const filesToCopy = previews.reduce((sum, { preview }) => sum + Number(preview.filesToCopy || 0), 0);
+      const outputNames = previews.map(({ preview }) => `“${preview.outputFolderName}”`).join('、');
       const confirmed = await appDialog.confirm({
         title: '确认从文件名选片',
-        message: `输出文件夹为“${preview.outputFolderName}”，本次复制 ${Number(preview.filesToCopy || 0)} 个文件。`,
+        message: `输出文件夹为${outputNames}，本次复制 ${filesToCopy} 个文件。`,
         detail: details,
         confirmLabel: '开始复制',
         cancelLabel: '取消',
@@ -1846,29 +1865,37 @@ const MatchView = ({
         setProgress(0);
         return;
       }
-      if (Number(preview.conflictCount || 0) > 0) throw new Error('存在输出名称或同名目标冲突，请处理后重新预检');
-      const operationId = crypto.randomUUID();
-      operationIdRef.current = operationId;
-      setProgress(45);
-      setStatusMsg('正在复制选片文件…');
-      const result = await window.electronAPI.executeFilenameSelection(projectPath, {
-        sourceFolderRelativePath: selectedRelativePath,
-        keywords: tokens,
-        expectedSignature: preview.signature,
-        operationId,
-      });
-      if (!result.success) {
-        if (result.cancelled) {
-          appendLog('任务已取消，本次创建内容已回滚', 'warning');
-          setStatusMsg('已取消并回滚');
-          setProgress(0);
-          return;
+      if (previews.some(({ preview }) => Number(preview.conflictCount || 0) > 0)) throw new Error('存在输出名称或同名目标冲突，请处理后重新预检');
+      let copiedCount = 0;
+      for (const [index, { source, preview }] of previews.entries()) {
+        const operationId = crypto.randomUUID();
+        operationIdRef.current = operationId;
+        const executionStart = 40 + index / previews.length * 50;
+        const executionEnd = 40 + (index + 1) / previews.length * 50;
+        executionProgressRef.current = { label: source.label, start: executionStart, end: executionEnd };
+        setProgress(executionStart);
+        setStatusMsg(`正在复制${source.label}选片文件…`);
+        const result = await window.electronAPI.executeFilenameSelection(projectPath, {
+          sourceFolderRelativePath: source.relativePath,
+          mediaKind: source.mediaKind,
+          keywords: tokens,
+          expectedSignature: preview.signature!,
+          operationId,
+        });
+        if (!result.success) {
+          if (result.cancelled) {
+            appendLog(`${source.label}任务已取消，当前来源的新增内容已回滚`, 'warning');
+            setStatusMsg(copiedCount ? `已取消；此前已复制 ${copiedCount} 个文件` : '已取消并回滚');
+            setProgress(0);
+            return;
+          }
+          throw new Error(result.error || `${source.label}选片复制失败`);
         }
-        throw new Error(result.error || '选片复制失败');
+        copiedCount += Number(result.copiedCount || 0);
+        appendLog(`${source.label}选片完成，已登记节点：${result.selectionProgressId || ''}`, 'success');
       }
       setProgress(100);
-      setStatusMsg(`选片完成，复制 ${Number(result.copiedCount || 0)} 个文件`);
-      appendLog(`已登记 auxiliary 选片节点：${result.selectionProgressId || ''}`, 'success');
+      setStatusMsg(`选片完成，复制 ${copiedCount} 个文件`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setStatusMsg(message);
@@ -1884,18 +1911,26 @@ const MatchView = ({
   return <div className="w-full space-y-6">
     {!embedded && <h2 className="text-2xl font-bold text-slate-800">选片</h2>}
     <div className={embedded ? 'space-y-6' : 'space-y-6 rounded-xl border border-slate-200 bg-white p-6'}>
-      <label className="block text-sm text-slate-600">来源文件夹
-        <select value={selectedRelativePath} onChange={event => onUpdateConfig({ ...config, sourceFolderRelativePath: event.target.value || undefined })} disabled={isRunning || loadingFolders} className="form-input mt-1">
-          <option value="">请选择项目内文件夹</option>
-          {sourceFolders.map(folder => <option key={folder.relativePath} value={folder.relativePath}>{folder.relativePath}</option>)}
-        </select>
-        <span className="mt-1 block text-xs text-slate-500">完整相对路径：{selectedRelativePath || '未选择'}</span>
-        <span className="mt-1 block text-xs font-bold text-slate-600">实际输出：{outputFolderName || '选择来源后显示'}</span>
-        {sourceFoldersNextCursor && <button type="button" onClick={() => void loadMoreSourceFolders()} disabled={loadingFolders} className="mt-2 text-xs font-bold text-blue-600 hover:text-blue-500 disabled:opacity-50">加载更多文件夹</button>}
-        {sourceFoldersTruncated && !sourceFoldersNextCursor && <span className="mt-2 block text-xs text-amber-700">目录数量或深度已达安全上限，请缩小项目范围。</span>}
-      </label>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label className="text-sm text-slate-600">从文件夹选择图片
+          <select value={selectedImageRelativePath} onChange={event => onUpdateConfig({ ...config, sourceFolderRelativePath: undefined, imageSourceFolderName: event.target.value })} disabled={isRunning || loadingFolders} className="form-input mt-1">
+            <option value="">无</option>
+            {sourceFolders.map(folder => <option key={folder.relativePath} value={folder.relativePath}>{folder.relativePath}</option>)}
+          </select>
+          <span className="mt-1 block text-xs font-bold text-slate-500">选中的图片会存放到“{filenameSelectionOutputName(selectedImageRelativePath) || '图片选片'}”文件夹</span>
+        </label>
+        <label className="text-sm text-slate-600">从文件夹选择视频
+          <select value={selectedVideoRelativePath} onChange={event => onUpdateConfig({ ...config, sourceFolderRelativePath: undefined, videoSourceFolderName: event.target.value })} disabled={isRunning || loadingFolders} className="form-input mt-1">
+            <option value="">无</option>
+            {sourceFolders.map(folder => <option key={folder.relativePath} value={folder.relativePath}>{folder.relativePath}</option>)}
+          </select>
+          <span className="mt-1 block text-xs font-bold text-slate-500">选中的视频会存放到“{filenameSelectionOutputName(selectedVideoRelativePath) || '视频选片'}”文件夹</span>
+        </label>
+      </div>
+      {sourceFoldersNextCursor && <button type="button" onClick={() => void loadMoreSourceFolders()} disabled={loadingFolders} className="text-xs font-bold text-blue-600 hover:text-blue-500 disabled:opacity-50">加载更多文件夹</button>}
+      {sourceFoldersTruncated && !sourceFoldersNextCursor && <span className="block text-xs text-amber-700">目录数量或深度已达安全上限，请缩小项目范围。</span>}
       <div className="space-y-2"><label className="text-xs font-semibold uppercase text-slate-500">文件名</label><textarea value={keywords} onChange={event => setKeywords(event.target.value)} placeholder="输入文件名或末尾编号，以空格分隔" className="h-24 min-h-24 w-full resize-y rounded-lg border border-slate-200 bg-slate-50 p-4 font-mono text-sm text-slate-900 focus:border-blue-500 focus:outline-none"/></div>
-      <TaskProgress logs={logs} progress={progress} isRunning={isRunning} idleMessage={statusMsg} action={<button onClick={isRunning ? () => void cancel() : () => void runTask()} disabled={isCancelling || isConfirming || (!isRunning && (!projectPath || !selectedRelativePath || !keywords.trim()))} className={`flex items-center gap-2 rounded-lg px-8 py-2.5 font-bold transition ${isRunning ? 'bg-red-600 text-white hover:bg-red-500' : isConfirming || !selectedRelativePath || !keywords.trim() ? 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400' : 'bg-blue-600 text-white hover:bg-blue-500'}`}>{isRunning ? (isCancelling ? <Loader2 className="animate-spin" size={18}/> : <X size={18}/>) : <ScanSearch size={18}/>} {isRunning ? (isCancelling ? '正在回滚…' : '取消任务') : isConfirming ? '等待确认' : '开始选片'}</button>}/>
+      <TaskProgress logs={logs} progress={progress} isRunning={isRunning} idleMessage={statusMsg} statusMessage={statusMsg} action={<button onClick={isRunning ? () => void cancel() : () => void runTask()} disabled={isCancelling || isConfirming || (!isRunning && (!projectPath || !selectedSources.length || !keywords.trim()))} className={`flex items-center gap-2 rounded-lg px-8 py-2.5 font-bold transition ${isRunning ? 'bg-red-600 text-white hover:bg-red-500' : isConfirming || !selectedSources.length || !keywords.trim() ? 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400' : 'bg-blue-600 text-white hover:bg-blue-500'}`}>{isRunning ? (isCancelling ? <Loader2 className="animate-spin" size={18}/> : <X size={18}/>) : <ScanSearch size={18}/>} {isRunning ? (isCancelling ? '正在回滚…' : '取消任务') : isConfirming ? '等待确认' : '开始选片'}</button>}/>
     </div>
   </div>;
 };

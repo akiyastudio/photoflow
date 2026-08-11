@@ -11,6 +11,8 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   let repairPayload;
   let layoutGetPayload;
   let layoutSavePayload;
+  let layoutSaveAttempts = 0;
+  let layoutLockFailures = 0;
   let edgeReplacePayload;
   let filesystemCalls = 0;
   const failFilesystem = new Proxy({}, { get() { filesystemCalls += 1; throw new Error('relation IPC must not access files'); } });
@@ -46,6 +48,11 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
       },
       saveVersionTreeLayout: async (root, payload) => {
         assert.strictEqual(root, workspaceRoot);
+        layoutSaveAttempts += 1;
+        if (layoutLockFailures > 0) {
+          layoutLockFailures -= 1;
+          throw new Error('database is locked');
+        }
         layoutSavePayload = payload;
         return { success: true, revision: 1 };
       },
@@ -116,6 +123,13 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   assert.strictEqual(filesystemCalls, 0, 'legacy repair IPC must not inspect or mutate physical files');
 
   repairPayload = undefined;
+  const keepIndependent = await repairHandler(null, workspaceRoot, 'Trusted Project', {
+    progressId: child.id, action: 'keep-independent', sourceProgressId: 'foreign-source', absolutePath: 'C:\\outside',
+  });
+  assert.strictEqual(keepIndependent.success, true);
+  assert.deepStrictEqual(repairPayload, { progressId: child.id, action: 'keep-independent' }, 'keeping a legacy node independent must not require or forward a source node or filesystem path');
+
+  repairPayload = undefined;
   const foreignRepair = await repairHandler(null, workspaceRoot, 'Trusted Project', { progressId: child.id, sourceProgressId: 'foreign-source' });
   assert.strictEqual(foreignRepair.success, false);
   assert.match(foreignRepair.error, /legacy_selection_repair_project_mismatch/);
@@ -142,6 +156,13 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
     projectName: 'Trusted Project', scopeKey: '', expectedRevision: 0, mode: 'patch',
     positions: [{ nodeKey: `progress:${child.id}`, x: 12.5, y: -8 }],
   }, 'layout IPC must pass only the trusted project name, normalized scope, revision, mode, stable node IDs, and finite coordinates');
+  layoutLockFailures = 2;
+  const attemptsBeforeLockedSave = layoutSaveAttempts;
+  const retriedLayout = await layoutSaveHandler(null, workspaceRoot, 'Trusted Project', {
+    scopeKey: '', expectedRevision: 0, mode: 'patch', positions: [{ nodeKey: `progress:${child.id}`, x: 20, y: 30 }],
+  });
+  assert.strictEqual(retriedLayout.success, true, 'temporary database locks must be retried inside the trusted layout-save boundary');
+  assert.strictEqual(layoutSaveAttempts - attemptsBeforeLockedSave, 3, 'layout save must retry until the temporary writer lock clears');
   const ordinaryFolderLayout = await layoutSaveHandler(null, workspaceRoot, 'Trusted Project', {
     scopeKey: '', expectedRevision: 1, mode: 'patch', positions: [{ nodeKey: 'entry:other', x: 30, y: 40 }],
   });
