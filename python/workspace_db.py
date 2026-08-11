@@ -13,6 +13,16 @@ import time
 import uuid
 from pathlib import Path
 
+try:
+    from workspace_db_domains import ALL_ACTIONS, READ_ONLY_ACTIONS
+    from workspace_db_migrations import migration_26
+except ModuleNotFoundError:
+    # Some regression tests load this file directly through importlib instead
+    # of importing it from the Python source directory.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from workspace_db_domains import ALL_ACTIONS, READ_ONLY_ACTIONS
+    from workspace_db_migrations import migration_26
+
 STATUSES = ("未分类", "策划中", "待拍摄", "后期中", "已归档")
 IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff",
@@ -26,7 +36,7 @@ LEGACY_MEDIA_WORKFLOW_MIGRATION_KEY = "legacy_media_workflow_graph_migrated_v1"
 LEGACY_SELECTION_INDEPENDENT_KEY_PREFIX = "legacy_selection_independent:"
 SELECTION_MAINLINE_REPAIR_REVISION = "1"
 VERSION_TREE_DEFAULT_LAYOUT_REVISION = "2"
-TARGET_SCHEMA_VERSION = 25
+TARGET_SCHEMA_VERSION = 26
 PROGRESS_NODE_ROLES = ("original", "progress", "selection", "artifact", "workflow")
 PROGRESS_RELATION_KINDS = ("main", "auxiliary")
 PROGRESS_ARTIFACT_KINDS = ("companion", "preview", "team_workspace")
@@ -1199,6 +1209,10 @@ def _migration_25(db):
                 )
 
 
+def _migration_26(db):
+    migration_26(db, _table_columns)
+
+
 MIGRATIONS = {
     11: _migration_11,
     12: _migration_12,
@@ -1215,6 +1229,7 @@ MIGRATIONS = {
     23: _migration_23,
     24: _migration_24,
     25: _migration_25,
+    26: _migration_26,
 }
 
 
@@ -1628,6 +1643,7 @@ def connect(root: str, database: str):
             _migration_23(db)
             _migration_24(db)
             _migration_25(db)
+            _migration_26(db)
             _set_meta(db, "schema_version", TARGET_SCHEMA_VERSION)
     else:
         for next_version in range(schema_version + 1, TARGET_SCHEMA_VERSION + 1):
@@ -4459,6 +4475,14 @@ def tracking_prepare(root: str, db, payload: dict):
             raise ValueError("跟踪会话不存在或状态无效")
     else:
         session_id = tracking_session_create(root, db, payload)["sessionId"]
+    db.execute(
+        """UPDATE tracking_sessions SET prepared_files_snapshot_json=?,
+           prepared_parent_snapshot_json=?,updated_at=? WHERE id=?""",
+        (json.dumps(current_files, ensure_ascii=False, separators=(",", ":")),
+         json.dumps(current_parent, ensure_ascii=False, separators=(",", ":")),
+         int(time.time() * 1000), session_id),
+    )
+    db.commit()
     return {
         "success": True,
         "sessionId": session_id,
@@ -4772,17 +4796,60 @@ def tracking_commit_plan(root: str, db, payload: dict):
     }
 
 
+def _prepared_tracking_commit_snapshot(db, session):
+    raw_files = session["prepared_files_snapshot_json"]
+    raw_parent = session["prepared_parent_snapshot_json"]
+    if raw_files is None or raw_parent is None:
+        return None
+    try:
+        files = json.loads(raw_files)
+        parent = json.loads(raw_parent)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(files, dict) or not isinstance(parent, dict):
+        return None
+    files = dict(files)
+    rows = db.execute(
+        """SELECT item_kind,source_name,reference_name,target_name,status
+           FROM tracking_session_items WHERE session_id=?
+             AND status IN ('recognized','accepted') ORDER BY created_at,id""",
+        (session["id"],),
+    ).fetchall()
+    for item in rows:
+        if item["item_kind"] == "copy_missing":
+            name = item["reference_name"]
+            if not name or name not in parent:
+                return None
+            files[name] = parent[name]
+            continue
+        if not session["rename_from_parent"] or not item["reference_name"] or not item["source_name"]:
+            continue
+        source_name = item["source_name"]
+        target_name = item["reference_name"]
+        if source_name == target_name:
+            continue
+        if source_name not in files:
+            return None
+        files[target_name] = files.pop(source_name)
+    return {"files": files, "parent": parent}
+
+
 def tracking_commit_complete(root: str, db, payload: dict):
     session_id = str(payload.get("sessionId") or "")
     session = db.execute("SELECT * FROM tracking_sessions WHERE id=?", (session_id,)).fetchone()
+    if session is not None and session["status"] == "committed":
+        return tracking_session_get(db, {"sessionId": session_id, "cursor": 0, "limit": 200})
     if session is None:
         raise ValueError("跟踪会话不存在")
     project_name = db.execute("SELECT name FROM projects WHERE id=?", (session["project_id"],)).fetchone()[0]
     _project, _parent, progress, parent_path, progress_path = _validated_tracking_nodes(root, db, project_name, session["progress_id"])
-    snapshot = {"files": folder_media_snapshot(progress_path), "parent": folder_media_snapshot(parent_path)}
+    snapshot = _prepared_tracking_commit_snapshot(db, session)
+    if snapshot is None:
+        snapshot = {"files": folder_media_snapshot(progress_path), "parent": folder_media_snapshot(parent_path)}
     timestamp = int(time.time() * 1000)
     db.execute(
-        """UPDATE tracking_sessions SET status='committed',committed_batch_id=?,error='',updated_at=? WHERE id=?""",
+        """UPDATE tracking_sessions SET status='committed',committed_batch_id=?,error='',
+           prepared_files_snapshot_json=NULL,prepared_parent_snapshot_json=NULL,updated_at=? WHERE id=?""",
         (payload.get("batchId") or session["committed_batch_id"], timestamp, session_id),
     )
     db.execute(
@@ -7083,8 +7150,7 @@ def cleanup_media_workflow_graph(root: str, db, session_cutoff: int | None = Non
 def mutate(root: str, database: str, action: str, payload: dict):
     # Interactive version-tree and confirmation reads must never compete for
     # SQLite's writer slot with media scans or tracking commits.
-    read_only_actions = {"progress_snapshot", "tracking_session_get", "version_tree_layout_get"}
-    db = connect_read_only(database) if action in read_only_actions else connect(root, database)
+    db = connect_read_only(database) if action in READ_ONLY_ACTIONS else connect(root, database)
     now = int(time.time() * 1000)
     if action == "catalog_sync":
         try:
@@ -7498,7 +7564,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
 
 def run(args_list=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", nargs="?", choices=("init", "catalog_sync", "maintenance_run", "add", "status", "archive_project", "unarchive_project", "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan", "purge_deleted_project", "missing_projects_list", "purge_missing_project", "media_sync_project", "media_get", "media_get_photo", "batch_list", "progress_list", "progress_snapshot", "progress_register", "progress_register_with_graph", "progress_adopt_media", "progress_update_tree", "progress_relation_update", "progress_legacy_selection_repair", "version_graph_edge_create", "version_graph_edge_list", "version_graph_edge_delete", "version_graph_edge_replace_source", "media_workflow_import_commit", "version_tree_layout_get", "version_tree_layout_save", "progress_policy_save", "progress_mark_stale", "progress_mark_ready", "progress_main_branch", "progress_visible_relations", "progress_copy_missing_children", "progress_detect_stale", "tracking_session_create", "tracking_prepare", "tracking_store_preview", "tracking_session_get", "tracking_session_release", "tracking_session_decide", "tracking_commit_plan", "tracking_commit_complete", "tracking_commit_failed", "progress_main_branch_media", "progress_delete_missing", "batch_register_baseline", "batch_commit_compare", "batch_operation_list", "batch_retry_operations", "media_create_version", "media_update_version", "media_refresh_metadata_fingerprint", "final_version_list", "media_set_thumbnail", "media_relocate_version", "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare", "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo", "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete", "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear", "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable"))
+    parser.add_argument("action", nargs="?", choices=ALL_ACTIONS)
     parser.add_argument("--root")
     parser.add_argument("--database")
     parser.add_argument("--payload", default="{}")

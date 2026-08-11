@@ -563,7 +563,7 @@ def test_schema_22_upgrades_to_layout_schema_23(temp_root):
 
     upgraded = workspace_db.connect(workspace_root, database)
     try:
-        assert upgraded.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+        assert upgraded.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
         assert upgraded.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_tree_layouts'").fetchone()
         assert upgraded.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_tree_node_positions'").fetchone()
         backup_path = upgraded.execute("SELECT value FROM meta WHERE key='last_migration_backup'").fetchone()[0]
@@ -572,7 +572,7 @@ def test_schema_22_upgrades_to_layout_schema_23(temp_root):
         upgraded.close()
     reopened = workspace_db.connect(workspace_root, database)
     try:
-        assert reopened.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+        assert reopened.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
         assert reopened.execute("SELECT COUNT(*) FROM version_tree_layouts").fetchone()[0] == 0
     finally:
         reopened.close()
@@ -605,7 +605,7 @@ def test_schema_23_upgrades_to_graph_schema_24(temp_root):
 
     upgraded = workspace_db.connect(workspace_root, database)
     try:
-        assert upgraded.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+        assert upgraded.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
         assert "artifact_kind" in {row[1] for row in upgraded.execute("PRAGMA table_info(progress_folders)")}
         assert upgraded.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_graph_edges'").fetchone()
         edge_foreign_keys = upgraded.execute("PRAGMA foreign_key_list(version_graph_edges)").fetchall()
@@ -667,7 +667,9 @@ def test_schema_24_upgrades_to_import_slots_schema_25(temp_root):
 
     upgraded = workspace_db.connect(workspace_root, database)
     try:
-        assert upgraded.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+        assert upgraded.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
+        tracking_columns = {row[1] for row in upgraded.execute("PRAGMA table_info(tracking_sessions)")}
+        assert {"prepared_files_snapshot_json", "prepared_parent_snapshot_json"} <= tracking_columns
         assert upgraded.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_import_artifact_slots'").fetchone()
         foreign_keys = upgraded.execute("PRAGMA foreign_key_list(media_import_artifact_slots)").fetchall()
         assert any(row[2] == "projects" and row[6] == "CASCADE" for row in foreign_keys)
@@ -697,7 +699,7 @@ def main():
         create_legacy_database(database, project_id, photo_id, version_id)
 
         db = workspace_db.connect(workspace_root, database)
-        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "25"
+        assert db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
         assert db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_tree_layouts'").fetchone()
         assert db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_tree_node_positions'").fetchone()
         assert db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_graph_edges'").fetchone()

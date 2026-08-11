@@ -17,6 +17,7 @@ type UseVersionTreeCanvasInput = {
   scopeKey: string;
   nodeWidth: number;
   nodeHeight: number;
+  collisionHorizontalGap?: number;
   coordinateScale?: number;
   onNotice: (message: string, duration?: number) => void;
   selectedNodeIds?: ReadonlySet<string>;
@@ -41,13 +42,13 @@ type LayoutHistoryEntry = { before: Map<string, VersionTreeCanvasPosition>; afte
 const DRAG_THRESHOLD = 5;
 const SNAP_SIZE = 20;
 
-export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeKey, nodeWidth, nodeHeight, coordinateScale = 1, onNotice, selectedNodeIds = new Set(), dragStateRef, onDragStateChange }: UseVersionTreeCanvasInput) => {
+export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeKey, nodeWidth, nodeHeight, collisionHorizontalGap, coordinateScale = 1, onNotice, selectedNodeIds = new Set(), dragStateRef, onDragStateChange }: UseVersionTreeCanvasInput) => {
   const nodesRef = useRef(nodes);
-  const dimensionsRef = useRef({ nodeWidth, nodeHeight });
+  const dimensionsRef = useRef({ nodeWidth, nodeHeight, collisionHorizontalGap });
   const serverPositionsRef = useRef(new Map<string, VersionTreeCanvasPosition>());
   const appliedServerNodeKeysRef = useRef(new Set<string>());
   nodesRef.current = nodes;
-  dimensionsRef.current = { nodeWidth, nodeHeight };
+  dimensionsRef.current = { nodeWidth, nodeHeight, collisionHorizontalGap };
   const defaultPositions = useCallback(() => new Map(nodesRef.current.map(node => [node.id, { x: node.x, y: node.y }])), []);
   const [positions, setPositions] = useState<Map<string, VersionTreeCanvasPosition>>(defaultPositions);
   const positionsRef = useRef(positions);
@@ -103,7 +104,7 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
       }
     });
     const dimensions = dimensionsRef.current;
-    applyPositions(reconcileVersionTreeCanvasPositions({ nodes: currentNodes, previous: saved, nodeWidth: dimensions.nodeWidth, nodeHeight: dimensions.nodeHeight }));
+    applyPositions(reconcileVersionTreeCanvasPositions({ nodes: currentNodes, previous: saved, nodeWidth: dimensions.nodeWidth, nodeHeight: dimensions.nodeHeight, horizontalGap: dimensions.collisionHorizontalGap }));
     if (viewportRef.current) {
       viewportRef.current.scrollLeft = 0;
       viewportRef.current.scrollTop = 0;
@@ -151,8 +152,8 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
         appliedServerNodeKeysRef.current.add(savedKey);
       }
     });
-    applyPositions(reconcileVersionTreeCanvasPositions({ nodes, previous, nodeWidth, nodeHeight }));
-  }, [applyPositions, nodeHeight, nodeWidth, nodes]);
+    applyPositions(reconcileVersionTreeCanvasPositions({ nodes, previous, nodeWidth, nodeHeight, horizontalGap: collisionHorizontalGap }));
+  }, [applyPositions, collisionHorizontalGap, nodeHeight, nodeWidth, nodes]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => { if (event.code === 'Space' && !(event.target as Element | null)?.closest?.('input,select,textarea')) { spacePressedRef.current = true; event.preventDefault(); } };

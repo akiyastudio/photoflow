@@ -6,6 +6,7 @@ import { DEFAULT_VERSION_TREE_SPACING, versionTreeCanvasBounds } from '../featur
 import { allowedVersionTreeRelationKinds, versionTreeEdgeGeometry, versionTreeEdgePath, versionTreeEdgePresentation, versionTreeRelationLabel, type VersionTreeEdgeKind, type VersionTreeSupplementalEdgeKind } from '../features/versioning/version-tree-edge-model';
 import { useVersionTreeCanvas, type VersionTreeDragState } from '../features/versioning/use-version-tree-canvas';
 import { progressRelationChangeError, projectVisibleVersionGraph, trackingStateLabel } from '../features/versioning/versioning-v2-model';
+import { FILE_GRID_GAP } from '../features/workspace/marquee-selection-model';
 
 type ProjectVersionTreeProps = {
   progressFolders: ProgressFolder[];
@@ -130,6 +131,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   const nodeHeight = nodeWidth + 52;
   const { horizontalGap: defaultColumnGap, rowGap, auxiliaryGap, rootGap, padding: canvasPadding } = DEFAULT_VERSION_TREE_SPACING;
   const columnGap = Math.max(76, defaultColumnGap);
+  const otherColumnGap = FILE_GRID_GAP;
   const defaultLayout = useMemo(() => {
     const itemById = new Map(versionItems.map(item => [item.folder.id, item]));
     const positioned: PositionedItem[] = [];
@@ -152,24 +154,23 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
     }
     const graphBottom = positioned.length ? Math.max(...positioned.map(item => item.y + nodeHeight)) : 0;
     const otherTop = graphBottom ? graphBottom + rootGap + 12 : 0;
-    // Loose folders are easier to scan as a single horizontal shelf. The
-    // canvas already scrolls horizontally, so only wrap when a future layout
-    // explicitly imposes a column limit.
+    // Keep loose folders in a compact horizontal shelf. They do not need the
+    // wider column spacing reserved for relation arrows in the version graph.
     const otherColumns = Math.max(1, ordinaryEntries.length);
     positioned.push(...ordinaryEntries.map((entry, index) => ({
       key: `entry:${normalizePath(entry.relativePath)}`,
       nodeKey: `entry:${normalizePath(entry.relativePath)}`,
       areaKind: 'other' as const,
       entry,
-      x: index % otherColumns * (nodeWidth + columnGap),
+      x: index % otherColumns * (nodeWidth + otherColumnGap),
       y: otherTop + Math.floor(index / otherColumns) * (nodeHeight + rowGap),
     })));
     return { positioned, relations };
-  }, [auxiliaryGap, columnGap, nodeHeight, nodeWidth, ordinaryEntries, rootGap, rowGap, versionItems, visibleEdges]);
+  }, [auxiliaryGap, columnGap, nodeHeight, nodeWidth, ordinaryEntries, otherColumnGap, rootGap, rowGap, versionItems, visibleEdges]);
   const canvasNodes = useMemo(() => defaultLayout.positioned.map(item => ({ id: item.key, nodeKey: item.nodeKey, fallbackNodeKeys: item.folder ? [item.key] : undefined, x: item.x, y: item.y })), [defaultLayout]);
   const canvas = useVersionTreeCanvas({
     nodes: canvasNodes,
-    workspacePath, projectName, scopeKey: activeRelativePath, nodeWidth, nodeHeight, coordinateScale: zoom, onNotice,
+    workspacePath, projectName, scopeKey: activeRelativePath, nodeWidth, nodeHeight, collisionHorizontalGap: otherColumnGap, coordinateScale: zoom, onNotice,
     selectedNodeIds, dragStateRef, onDragStateChange: changeDragState,
   });
   const layout = useMemo(() => {

@@ -110,7 +110,7 @@ Promise.resolve()
     assert(listFilesHandler.includes('assertInside(root') && listFilesHandler.includes('assertExistingInside(root') && listFilesHandler.includes('maximumDirectoriesPerPage = 32') && listFilesHandler.includes('maximumInspectedEntriesPerPage = 1000') && listFilesHandler.includes('Math.min(200'), 'recursive listings must validate scope and enforce per-page work limits');
     assert(listFilesHandler.includes('projectFileListSessionMatches(session, root, scope, filter)'), 'file-list cursors must be bound to project root, scope, query, and file type filter');
     assert(!listFilesHandler.includes('readShortcutLink') && !listFilesHandler.includes('thumbnail') && !listFilesHandler.includes('xmp'), 'plain recursive listings must not follow shortcuts or read media content');
-    assert(projectWorkspace.includes('window.electronAPI.getPathForFile(file)') && toolViews.includes('window.electronAPI.getPathForFile(file)'));
+    assert(projectWorkspace.includes('projectWorkspaceClient.getPathForFile(file)') && toolViews.includes('window.electronAPI.getPathForFile(file)'));
     assert(!projectWorkspace.includes('File & { path?: string }') && !toolViews.includes('File & { path?: string }'));
     assert(systemIpc.includes('validateRendererPythonInvocation(scriptName, args, requestId)'));
     assert(html.includes('Content-Security-Policy'));

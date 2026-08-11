@@ -21,13 +21,17 @@ file workflows.
   A regression test prevents IPC handlers from moving back into this file.
 - `electron/modules`: IPC-facing adapters grouped into system, workspace,
   file-operation, media, version, B-roll, and background-task domains. Public
-  channel names are unchanged.
+  channel names are unchanged. Media rating and version tracking have dedicated
+  registrars so their validation/serialization boundary is independent from
+  the broader version module.
 - `electron/services`: application workflows and reusable infrastructure.
   `WorkspaceService`, `FileSystemService`, `ThumbnailService`, `MediaService`,
-  and `VersionService` form the core domain boundary. The event bus and
+  `MediaRatingService`, and `VersionService` form the core domain boundary. The event bus and
   background task service provide task IDs, progress, cancellation and retry.
   File-transfer planning and the bounded small/large copy scheduler live in the
-  filesystem service rather than the Electron composition root.
+  filesystem service rather than the Electron composition root. Image worker
+  pools, RAW fallback, video-cover generation, EXIF orientation and rating
+  writes are also owned by services rather than `main.cjs` or IPC handlers.
 - `electron/repositories`: the only JavaScript modules that know Python
   database action names. IPC and services call domain methods instead.
 - `electron/plugins`: the optional-plugin catalog and capability mapping.
@@ -37,7 +41,10 @@ file workflows.
   for verified recycle, exact-item restore, and recycle capability probing.
 - `electron/thumbnail-pipeline.cjs`: thumbnail scheduling and cache domain.
 - `electron/component-registry.cjs`: optional packaged component discovery.
-- `python/workspace_db.py`: workspace database worker. New SQL should move
+- `python/workspace_db.py`: the single workspace database worker. Stable action
+  groups live in `workspace_db_domains.py` and schema migrations live in
+  `workspace_db_migrations.py`; this preserves one serialized SQLite writer
+  while allowing domain modules to evolve independently. New SQL should move
   behind domain-specific repository functions rather than IPC handlers.
   It also owns the lightweight persistent undo journal; no deleted media bytes
   are stored in SQLite.
@@ -49,7 +56,9 @@ file workflows.
   runtime. OpenCV-based analysis remains in `python/inspiration_tools.py` so
   the large vision dependencies are not duplicated into the core runtime.
 - `src/features/workspace`: the project browser, preview, metadata, version and
-  team-retouch workspace UI.
+  team-retouch workspace UI. Selection state is isolated in a controller hook,
+  and the feature compiles against the explicit `ProjectWorkspaceApi` preload
+  subset rather than the global bridge. Team-retouch views are lazy chunks.
 - `src/features/tools`: import, birthday, conversion, inspiration, matching and
   video-splitting tools.
 - `src/features/inspiration`: the built-in inspiration-library shell and its
@@ -57,7 +66,8 @@ file workflows.
 - `src/features/settings`, `src/features/plugins`, and
   `src/features/background-tasks`: settings, plugin availability and observable
   background-task UI. `src/App.tsx` is the application shell rather than the
-  previous 4,000-line feature container.
+  previous 4,000-line feature container. Optional UI surfaces and settings are
+  discovered through `plugin-contributions.ts` capability metadata.
 
 ## Stable contracts
 
@@ -81,5 +91,11 @@ the shared `ProjectFileOperationProgress` type.
    library, scene organizer and Office image extractor are bundled core
    capabilities and use a dedicated visual-tools worker.
 
+`npm run check` is the supported local and Windows-CI gate: lint, TypeScript,
+architecture, Electron security, filesystem safety, background tasks, database
+migrations and core file interactions. `npm test` runs the core regression
+subset, while `npm run test:full` enumerates every `test:*` script. The NSIS
+installer behavior test additionally requires electron-builder's NSIS toolchain.
+
 `npm run test:architecture` enforces the important entry-file size, IPC
-registration, repository and plugin capability contracts.
+registration, repository, typed preload and plugin capability contracts.

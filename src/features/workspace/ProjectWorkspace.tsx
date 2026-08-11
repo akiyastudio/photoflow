@@ -6,8 +6,6 @@ import { AdvancedVideoPlayer, videoDirectionalAction, videoDirectionalKeyboardIn
 import { InteractiveCropEditor } from '../../components/InteractiveCropEditor';
 import { ImportSourceControls } from '../../components/ImportSourceControls';
 import type { CropRectangle } from '../../components/InteractiveCropEditor';
-import { TeamRetouchManager } from '../../components/TeamRetouchManager';
-import { PersonIdentityManager } from '../../components/PersonIdentityManager';
 import { ProjectVersionTree, type VersionTreeCanvasController } from '../../components/ProjectVersionTree';
 import type { TeamRetouchStep } from '../../components/TeamRetouchSteps';
 import { useAppDialog } from '../../components/AppDialogProvider';
@@ -35,6 +33,15 @@ import { defaultMainParentId, defaultWorkflowInputIds, normalizeProgressSetupTra
 import { ProgressRelationMutationQueue } from '../versioning/progress-relation-mutation-queue';
 import { metadataFieldLabel, metadataGroupLabel } from '../metadata/metadata-labels';
 import { metadataGroupDependencyKey, previewMetadataFieldsForEntry, reconcileExpandedMetadataGroups } from '../metadata/metadata-pane-model';
+import { projectWorkspaceClient } from '../../platform/project-workspace-client';
+import { useProjectFileSelection } from './useProjectFileSelection';
+import { installedPluginHasCapability } from '../plugins/plugin-contributions';
+
+const LazyTeamRetouchManager = React.lazy(() => import('../../components/TeamRetouchManager').then(module => ({ default: module.TeamRetouchManager })));
+const LazyPersonIdentityManager = React.lazy(() => import('../../components/PersonIdentityManager').then(module => ({ default: module.PersonIdentityManager })));
+const TeamFeatureLoading = () => <div role="status" className="flex h-full min-h-48 items-center justify-center text-sm text-slate-500"><Loader2 size={18} className="mr-2 animate-spin"/>正在加载团片协作…</div>;
+const TeamRetouchManager = (props: React.ComponentProps<typeof LazyTeamRetouchManager>) => <React.Suspense fallback={<TeamFeatureLoading/>}><LazyTeamRetouchManager {...props}/></React.Suspense>;
+const PersonIdentityManager = (props: React.ComponentProps<typeof LazyPersonIdentityManager>) => <React.Suspense fallback={<TeamFeatureLoading/>}><LazyPersonIdentityManager {...props}/></React.Suspense>;
 
 const CONTEXT_MENU_VIEWPORT_MARGIN = 8;
 const FILE_VIRTUAL_OVERSCAN_ROWS = 10;
@@ -186,7 +193,7 @@ const useThumbnailUpdates = (
   const onUpdateRef = useRef(onUpdate);
   onUpdateRef.current = onUpdate;
   const sizeLabel = thumbnailSizeLabel(requestedSize);
-  useEffect(() => window.electronAPI.onThumbnailStateChanged(update => {
+  useEffect(() => projectWorkspaceClient.onThumbnailStateChanged(update => {
     if (update.filePath.toLocaleLowerCase() !== filePath.toLocaleLowerCase()) return;
     onUpdateRef.current(update.state, update.previewUrls?.[sizeLabel]);
   }), [filePath, sizeLabel]);
@@ -238,7 +245,7 @@ const requestCaptureDateTime = (entry: ProjectFileEntry) => {
   const cacheKey = `${entry.path}|${entry.updatedAt}`;
   const cached = captureDateTimeRequestCache.get(cacheKey);
   if (cached) return cached;
-  const request = window.electronAPI.getMediaMetadata(entry.path).then(result => {
+  const request = projectWorkspaceClient.getMediaMetadata(entry.path).then(result => {
     if (!result.success) return undefined;
     return pickCaptureDate(result.fields, 'DateTimeOriginal', 'CreateDate', 'MediaCreateDate', 'TrackCreateDate', 'CreationDate', 'FileModifyDate');
   });
@@ -695,7 +702,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const directoryPrefetchesRef = useRef(new Map<string, Promise<ProjectFileEntry[]>>());
   const shortcutPreviewStatesRef = useRef(new Map<string, Pick<ProjectFileEntry, 'shortcutTargetKind' | 'shortcutBroken'>>());
   const previewRatingCacheRef = useRef(new Map<string, number>());
-  const previewRatingRequestsRef = useRef(new Map<string, ReturnType<typeof window.electronAPI.getMediaRating>>());
+  const previewRatingRequestsRef = useRef(new Map<string, ReturnType<typeof projectWorkspaceClient.getMediaRating>>());
   const selectionDragRef = useRef<{
     pointerId: number;
     pointerStartX: number;
@@ -716,7 +723,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const internalDragPathsRef = useRef<string[]>([]);
   const internalDropHandledRef = useRef(false);
   const renameCommitRef = useRef(false);
-  const selectionAnchorPathRef = useRef('');
+  const selectionResetKey = `${active}|${fileFilter}|${ratingFilter}|${filterScope}|${searchQuery}`;
+  const { anchorPathRef: selectionAnchorPathRef, selectedPaths, setSelectedPaths, selectRange: selectProjectFileRange, toggle: toggleSelected } = useProjectFileSelection(selectionResetKey);
   const entryPointerModifiersRef = useRef<{ path: string; additive: boolean; range: boolean } | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchSequenceRef = useRef(0);
@@ -726,11 +734,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const scopeRequestSequenceRef = useRef(0);
   const recursiveDirectoryRefreshSequenceRef = useRef(new Map<string, number>());
   const clipboardOperationSequenceRef = useRef(0);
-  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
-  useEffect(() => {
-    selectionAnchorPathRef.current = '';
-    setSelectedPaths([]);
-  }, [active, fileFilter, ratingFilter, filterScope, searchQuery]);
   const [cutPaths, setCutPaths] = useState<string[]>([]);
   const [dragTargetPath, setDragTargetPath] = useState('');
   const [recursiveDropTargetPath, setRecursiveDropTargetPath] = useState<string | null>(null);
@@ -936,10 +939,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   }, []);
 
   useEffect(() => {
-    void window.electronAPI.getPhotoshopStatus().then(result => setPhotoshopAvailable(result.available));
+    void projectWorkspaceClient.getPhotoshopStatus().then(result => setPhotoshopAvailable(result.available));
   }, []);
 
-  useEffect(() => window.electronAPI.onProjectFileOperationProgress(progress => {
+  useEffect(() => projectWorkspaceClient.onProjectFileOperationProgress(progress => {
     if (progress.operation !== 'import-progress') return;
     if (progress.projectName && progress.projectName !== project.name) return;
     if (progress.phase === 'complete' || progress.phase === 'cancelled' || progress.phase === 'failed') {
@@ -966,7 +969,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     }
   }, [project.path, projectWorkflows]);
   const officeImageExtractorAvailable = true;
-  const teamRetouchInstalled = installedComponentIds.has('team-retouch');
+  const teamRetouchInstalled = installedPluginHasCapability(installedComponentIds, 'team-retouch.workspace');
   const teamRetouchAvailable = teamRetouchInstalled || componentsLoading;
   const folderBrowseModeStorageKey = `photoflow:folder-browse-modes:${browserContext.kind}:${workspacePath}|${project.name}`;
   const readFolderBrowseModes = (): Record<string, ProjectBrowseMode> => {
@@ -1018,7 +1021,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     }
     let disposed = false;
     const loadProjects = async () => {
-      const result = await window.electronAPI.getWorkspaceProjects(inspirationTargetWorkspacePath);
+      const result = await projectWorkspaceClient.getWorkspaceProjects(inspirationTargetWorkspacePath);
       if (disposed || !result.success) return;
       const projects = result.statuses.flatMap(group => group.projects).filter(candidate => candidate.availability !== 'missing');
       setInspirationProjects(projects);
@@ -1041,7 +1044,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       return Promise.resolve([]);
     }
     if (teamRetouchHistoryRequestRef.current) return teamRetouchHistoryRequestRef.current;
-    const request: Promise<ProjectFileEntry[]> = window.electronAPI.getTeamProjectWorkspace(workspacePath, project.name, project.status).then(result => {
+    const request: Promise<ProjectFileEntry[]> = projectWorkspaceClient.getTeamProjectWorkspace(workspacePath, project.name, project.status).then(result => {
       if (!result.success) throw new Error(result.error || '无法读取团片协作记录');
       if (result.workflowNodeCreated && result.workflowNode) {
         setProgressFolders(current => {
@@ -1097,7 +1100,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
 
   useEffect(() => {
     if (!active) return;
-    const fetchDrives = () => window.electronAPI?.getDrives?.().then(nextDrives => setDrives(current =>
+    const fetchDrives = () => projectWorkspaceClient?.getDrives?.().then(nextDrives => setDrives(current =>
       current.length === nextDrives.length && current.every((drive, index) => drive === nextDrives[index]) ? current : nextDrives
     ));
     fetchDrives();
@@ -1107,14 +1110,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
 
   useEffect(() => {
     if (!active) return;
-    const refreshClipboardStatus = () => window.electronAPI.getProjectFileClipboardStatus().then(result => setClipboardHasFiles(result.success && result.hasFiles));
+    const refreshClipboardStatus = () => projectWorkspaceClient.getProjectFileClipboardStatus().then(result => setClipboardHasFiles(result.success && result.hasFiles));
     void refreshClipboardStatus();
     window.addEventListener('focus', refreshClipboardStatus);
     return () => window.removeEventListener('focus', refreshClipboardStatus);
   }, [active]);
 
   const loadProgressFolders = useCallback(async () => {
-    const result = await window.electronAPI.getProgressFolders(workspacePath, project.name);
+    const result = await projectWorkspaceClient.getProgressFolders(workspacePath, project.name);
     if (result.success) {
       progressFoldersRef.current = result.progressFolders;
       setProgressFolders(result.progressFolders);
@@ -1156,8 +1159,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   };
   const mutateSupplementalEdge = async (mode: 'create' | 'delete', request: Pick<VersionGraphEdge, 'projectId' | 'sourceProgressId' | 'targetProgressId' | 'edgeKind'>) => {
     const result = mode === 'create'
-      ? await window.electronAPI.createVersionGraphEdge(workspacePath, request)
-      : await window.electronAPI.deleteVersionGraphEdge(workspacePath, request);
+      ? await projectWorkspaceClient.createVersionGraphEdge(workspacePath, request)
+      : await projectWorkspaceClient.deleteVersionGraphEdge(workspacePath, request);
     if (!result.success) throw new Error(result.error || '无法更新版本图关系');
     await loadProgressFolders();
   };
@@ -1178,7 +1181,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       targetProgressId,
       edgeKind,
     };
-    const result = await window.electronAPI.createVersionGraphEdge(workspacePath, request);
+    const result = await projectWorkspaceClient.createVersionGraphEdge(workspacePath, request);
     if (!result.success) { onNotice(`创建${relationLabel}关系失败：${result.error || '未知错误'}`, 7000); return; }
     await loadProgressFolders();
     pushRelationHistory({ label: `创建${relationLabel}关系`, undo: () => mutateSupplementalEdge('delete', request), redo: () => mutateSupplementalEdge('create', request) });
@@ -1202,7 +1205,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       targetProgressId: edge.targetProgressId,
       edgeKind: edge.edgeKind,
     };
-    const result = await window.electronAPI.deleteVersionGraphEdge(workspacePath, request);
+    const result = await projectWorkspaceClient.deleteVersionGraphEdge(workspacePath, request);
     if (!result.success) { onNotice(`删除补充关系失败：${result.error || '未知错误'}`, 7000); return; }
     await loadProgressFolders();
     pushRelationHistory({ label: '断开补充关系', undo: () => mutateSupplementalEdge('create', request), redo: () => mutateSupplementalEdge('delete', request) });
@@ -1228,19 +1231,19 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       edgeKind: edge.edgeKind,
       newSourceProgressId,
     };
-    const result = await window.electronAPI.replaceVersionGraphEdgeSource(workspacePath, request);
+    const result = await projectWorkspaceClient.replaceVersionGraphEdgeSource(workspacePath, request);
     cancelRelationEdit();
     if (!result.success) { onNotice(`改接补充关系失败：${result.error || '未知错误'}`, 7000); return; }
     await loadProgressFolders();
     pushRelationHistory({
       label: '改接补充关系',
       undo: async () => {
-        const reverted = await window.electronAPI.replaceVersionGraphEdgeSource(workspacePath, { ...request, sourceProgressId: newSourceProgressId, newSourceProgressId: edge.sourceProgressId });
+        const reverted = await projectWorkspaceClient.replaceVersionGraphEdgeSource(workspacePath, { ...request, sourceProgressId: newSourceProgressId, newSourceProgressId: edge.sourceProgressId });
         if (!reverted.success) throw new Error(reverted.error || '无法撤销改接');
         await loadProgressFolders();
       },
       redo: async () => {
-        const repeated = await window.electronAPI.replaceVersionGraphEdgeSource(workspacePath, request);
+        const repeated = await projectWorkspaceClient.replaceVersionGraphEdgeSource(workspacePath, request);
         if (!repeated.success) throw new Error(repeated.error || '无法重做改接');
         await loadProgressFolders();
       },
@@ -1286,7 +1289,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         targetProgressId: child.id,
         edgeKind: 'workflow_input',
       } as const;
-      const result = await window.electronAPI.createVersionGraphEdge(workspacePath, edgeRequest);
+      const result = await projectWorkspaceClient.createVersionGraphEdge(workspacePath, edgeRequest);
       cancelRelationEdit();
       if (!result.success) {
         onNotice(`添加工作流输入关系失败：${result.error || '未知错误'}`, 7000);
@@ -1325,7 +1328,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           nextParentProgressId: string | null,
           workflowInputProgressIds: string[],
           trackingPolicy = trackingPolicyForRelationChange(currentChild, nextParentProgressId),
-        ) => window.electronAPI.registerProgressWithGraph(workspacePath, project.status, {
+        ) => projectWorkspaceClient.registerProgressWithGraph(workspacePath, project.status, {
           projectName: project.name,
           progress: {
             progressId: currentChild.id,
@@ -1346,11 +1349,11 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           const activeTrackingTask = backgroundTasks.find(task => task.type === 'version-tracking'
             && task.metadata?.progressId === childProgressId
             && (task.state === 'queued' || task.state === 'running'));
-          if (activeTrackingTask) await window.electronAPI.cancelBackgroundTask(activeTrackingTask.id);
+          if (activeTrackingTask) await projectWorkspaceClient.cancelBackgroundTask(activeTrackingTask.id);
         }
         const result = latestChild.nodeRole === 'progress'
           ? await applyProgressGraph(latestChild, parentProgressId, nextWorkflowInputProgressIds)
-          : await window.electronAPI.updateProgressRelation(workspacePath, project.name, {
+          : await projectWorkspaceClient.updateProgressRelation(workspacePath, project.name, {
             childProgressId,
             parentProgressId,
             expectedUpdatedAt: latestChild.updatedAt,
@@ -1397,7 +1400,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           if (!currentChild) throw new Error('要修改的版本节点不存在，请刷新后重试');
           const changed = currentChild.nodeRole === 'progress'
             ? await applyProgressGraph(currentChild, nextParentProgressId, workflowInputProgressIds, trackingPolicy)
-            : await window.electronAPI.updateProgressRelation(workspacePath, project.name, { childProgressId, parentProgressId: nextParentProgressId, expectedUpdatedAt: currentChild.updatedAt });
+            : await projectWorkspaceClient.updateProgressRelation(workspacePath, project.name, { childProgressId, parentProgressId: nextParentProgressId, expectedUpdatedAt: currentChild.updatedAt });
           if (!changed.success) throw new Error(changed.error || '无法更新版本关系');
           await loadProgressFolders();
         };
@@ -1407,7 +1410,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           redo: () => applyParent(parentProgressId, nextWorkflowInputProgressIds),
         });
         if (updatedFolder.nodeRole === 'progress' && updatedFolder.trackingEnabled && parentProgressId) {
-          const started = await window.electronAPI.startProgressTracking(workspacePath, project.name, {
+          const started = await projectWorkspaceClient.startProgressTracking(workspacePath, project.name, {
             progressId: updatedFolder.id,
             mode: 'refresh',
           });
@@ -1469,7 +1472,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   }, [active, progressFolders, workspacePath, project.name]);
   useEffect(() => {
     if (!active) return;
-    return window.electronAPI.onBackgroundTaskChanged(task => {
+    return projectWorkspaceClient.onBackgroundTaskChanged(task => {
       if (task.type !== 'version-tracking') return;
       const progressId = typeof task.metadata.progressId === 'string' ? task.metadata.progressId : '';
       const progress = progressFoldersRef.current.find(folder => folder.id === progressId);
@@ -1486,7 +1489,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     });
   }, [active, dismissBackgroundTask, project.name, workspacePath]);
   const loadFinalVersionSummary = useCallback(async () => {
-    const result = await window.electronAPI.getFinalVersionSummary(workspacePath, project.status, project.name);
+    const result = await projectWorkspaceClient.getFinalVersionSummary(workspacePath, project.status, project.name);
     if (result.success) {
       const summary = { count: result.count, availableCount: result.availableCount, missingCount: result.missingCount };
       setFinalVersionSummary(summary);
@@ -1498,7 +1501,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const loadFinalViewEntries = useCallback(async (showMissingNotice = false) => {
     setFinalViewLoading(true);
     try {
-      const result = await window.electronAPI.browseFinalVersions(workspacePath, project.status, project.name);
+      const result = await projectWorkspaceClient.browseFinalVersions(workspacePath, project.status, project.name);
       if (!result.success) {
         onNotice(`读取喜爱图片失败：${result.error || '未知错误'}`);
         return null;
@@ -1528,8 +1531,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const cachedEntries = directoryEntriesCacheRef.current.get(requestedPath);
     if (cachedEntries && requestedPath === currentRelativePathRef.current && requestedProjectPath === projectPathRef.current) setFileEntries(cachedEntries);
     setDirectoryLoading(!cachedEntries);
-    const contentsPromise = window.electronAPI.getProjectContents(workspacePath, project.status, project.name);
-    const browseResult = await window.electronAPI.browseProjectFiles(workspacePath, project.status, project.name, requestedPath, mediaCacheConfig);
+    const contentsPromise = projectWorkspaceClient.getProjectContents(workspacePath, project.status, project.name);
+    const browseResult = await projectWorkspaceClient.browseProjectFiles(workspacePath, project.status, project.name, requestedPath, mediaCacheConfig);
     if (refreshSequence !== refreshSequenceRef.current || requestedPath !== currentRelativePathRef.current || requestedProjectPath !== projectPathRef.current) return;
     setDirectoryLoading(false);
     if (browseResult.success) {
@@ -1577,7 +1580,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const sequence = (recursiveDirectoryRefreshSequenceRef.current.get(directoryPath) || 0) + 1;
     recursiveDirectoryRefreshSequenceRef.current.set(directoryPath, sequence);
     const requestedProjectPath = project.path;
-    const result = await window.electronAPI.browseProjectFiles(workspacePath, project.status, project.name, directoryPath, mediaCacheConfig);
+    const result = await projectWorkspaceClient.browseProjectFiles(workspacePath, project.status, project.name, directoryPath, mediaCacheConfig);
     if (recursiveDirectoryRefreshSequenceRef.current.get(directoryPath) !== sequence || requestedProjectPath !== projectPathRef.current) return;
     if (!result.success) {
       if (result.missingDirectory && directoryPath) {
@@ -1720,12 +1723,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!active || !watchRootDirectly) return;
     let disposed = false;
     setRootWatchFailed(false);
-    void window.electronAPI.watchFileRoot(workspacePath, project.status, project.name).then(result => {
+    void projectWorkspaceClient.watchFileRoot(workspacePath, project.status, project.name).then(result => {
       if (!disposed) setRootWatchFailed(!result.success);
     });
     return () => {
       disposed = true;
-      void window.electronAPI.unwatchFileRoot(workspacePath, project.status, project.name);
+      void projectWorkspaceClient.unwatchFileRoot(workspacePath, project.status, project.name);
     };
   }, [active, project.name, project.status, watchRootDirectly, workspacePath]);
   useEffect(() => {
@@ -1751,7 +1754,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       : normalizedProjectPath.toLocaleLowerCase().startsWith(`${normalizedWorkspaceRoot}/`)
         ? normalizedProjectPath.slice(normalizedWorkspaceRoot.length + 1)
         : project.name.replace(/\\/g, '/');
-    const unsubscribe = window.electronAPI.onWorkspaceFilesChanged(change => {
+    const unsubscribe = projectWorkspaceClient.onWorkspaceFilesChanged(change => {
       if (change.root && change.root.replace(/\\/g, '/').replace(/\/+$/, '').toLocaleLowerCase() !== normalizedWorkspaceRoot) return;
       if (change.watcherFailed && watchRootDirectly) setRootWatchFailed(true);
       const changedPath = (change.fileName || '').replace(/\\/g, '/');
@@ -1816,7 +1819,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   }, [active, workspacePath, project.path, project.status, project.name, rootRelativeFileEvents, watchRootDirectly, mediaCacheConfig.directory, mediaCacheConfig.maxSizeGB, finalViewOpen, loadFinalViewEntries, projectWorkflows, loadProgressFolders, projectRootScopeSelected, recursiveFlatOpen, refreshRecursiveDirectory]);
   useEffect(() => {
     if (!active) return;
-    const unsubscribe = window.electronAPI.onThumbnailStateChanged(update => {
+    const unsubscribe = projectWorkspaceClient.onThumbnailStateChanged(update => {
       if (update.state !== 'STALE') return;
       const changedPath = update.filePath.replace(/\\/g, '/').toLocaleLowerCase();
       const applySourceRevision = (entries: ProjectFileEntry[]) => {
@@ -1851,7 +1854,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const sequence = searchSequenceRef.current;
     const previousCursor = recentCursorRef.current;
     recentCursorRef.current = '';
-    if (previousCursor) void window.electronAPI.cancelRecentProjectFiles(previousCursor);
+    if (previousCursor) void projectWorkspaceClient.cancelRecentProjectFiles(previousCursor);
     if (!active || !recursiveFlatOpen || finalViewOpen) {
       setSearchEntries([]);
       setSearchLoading(false);
@@ -1872,12 +1875,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     recentLoadInFlightRef.current = false;
     const timer = window.setTimeout(() => {
       const request = query
-        ? window.electronAPI.searchProjectFiles(workspacePath, project.status, project.name, currentRelativePath, query)
-        : window.electronAPI.listRecentProjectFiles(workspacePath, project.status, project.name, currentRelativePath, RECENT_FILES_PAGE_SIZE);
+        ? projectWorkspaceClient.searchProjectFiles(workspacePath, project.status, project.name, currentRelativePath, query)
+        : projectWorkspaceClient.listRecentProjectFiles(workspacePath, project.status, project.name, currentRelativePath, RECENT_FILES_PAGE_SIZE);
       void request.then(result => {
         if (sequence !== searchSequenceRef.current || !active) {
           const staleRecentResult = result as { success: boolean; cursor?: string };
-          if (!query && staleRecentResult.success && staleRecentResult.cursor) void window.electronAPI.cancelRecentProjectFiles(staleRecentResult.cursor);
+          if (!query && staleRecentResult.success && staleRecentResult.cursor) void projectWorkspaceClient.cancelRecentProjectFiles(staleRecentResult.cursor);
           return;
         }
         if (result.success) {
@@ -1907,12 +1910,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setRecentLoadError('');
     const sequence = searchSequenceRef.current;
     try {
-      let result = await window.electronAPI.listRecentProjectFiles(workspacePath, project.status, project.name, currentRelativePath, RECENT_FILES_PAGE_SIZE, recentCursor);
+      let result = await projectWorkspaceClient.listRecentProjectFiles(workspacePath, project.status, project.name, currentRelativePath, RECENT_FILES_PAGE_SIZE, recentCursor);
       if (sequence !== searchSequenceRef.current || !active) return;
       if (!result.success && result.errorCode === RECENT_FILES_SESSION_EXPIRED) {
-        result = await window.electronAPI.listRecentProjectFiles(workspacePath, project.status, project.name, currentRelativePath, RECENT_FILES_PAGE_SIZE);
+        result = await projectWorkspaceClient.listRecentProjectFiles(workspacePath, project.status, project.name, currentRelativePath, RECENT_FILES_PAGE_SIZE);
         if (sequence !== searchSequenceRef.current || !active) {
-          if (result.success && result.cursor) void window.electronAPI.cancelRecentProjectFiles(result.cursor);
+          if (result.success && result.cursor) void projectWorkspaceClient.cancelRecentProjectFiles(result.cursor);
           return;
         }
       }
@@ -1958,7 +1961,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const cancelScopeSession = useCallback(() => {
     const cursor = scopeCursorRef.current;
     replaceScopeCursor('');
-    if (cursor) void window.electronAPI.cancelListProjectFiles(cursor);
+    if (cursor) void projectWorkspaceClient.cancelListProjectFiles(cursor);
   }, [replaceScopeCursor]);
   const changeFilterScope = useCallback((scope: ProjectFilterScope) => {
     if (scope === filterScope) return;
@@ -1988,9 +1991,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       return;
     }
     setScopeLoading(true);
-    void window.electronAPI.listProjectFiles(workspacePath, project.status, project.name, '', FILE_LIST_PAGE_SIZE, undefined, scopeFileListFilter).then(result => {
+    void projectWorkspaceClient.listProjectFiles(workspacePath, project.status, project.name, '', FILE_LIST_PAGE_SIZE, undefined, scopeFileListFilter).then(result => {
       if (sequence !== scopeRequestSequenceRef.current) {
-        if (result.cursor) void window.electronAPI.cancelListProjectFiles(result.cursor);
+        if (result.cursor) void projectWorkspaceClient.cancelListProjectFiles(result.cursor);
         return;
       }
       if (!result.success) {
@@ -2014,9 +2017,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setScopeLoadingMore(true);
     const sequence = scopeRequestSequenceRef.current;
     try {
-      const result = await window.electronAPI.listProjectFiles(workspacePath, project.status, project.name, '', FILE_LIST_PAGE_SIZE, scopeCursor, scopeFileListFilter);
+      const result = await projectWorkspaceClient.listProjectFiles(workspacePath, project.status, project.name, '', FILE_LIST_PAGE_SIZE, scopeCursor, scopeFileListFilter);
       if (sequence !== scopeRequestSequenceRef.current) {
-        if (result.cursor) void window.electronAPI.cancelListProjectFiles(result.cursor);
+        if (result.cursor) void projectWorkspaceClient.cancelListProjectFiles(result.cursor);
         return;
       }
       if (!result.success) {
@@ -2105,7 +2108,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       const collected = { ...cachedRatings };
       for (let offset = 0; offset < pending.length; offset += 200) {
         const batch = pending.slice(offset, offset + 200);
-        const result = await window.electronAPI.getMediaRatings(batch.map(entry => ({ path: entry.path, updatedAt: entry.updatedAt || 0 })));
+        const result = await projectWorkspaceClient.getMediaRatings(batch.map(entry => ({ path: entry.path, updatedAt: entry.updatedAt || 0 })));
         if (sequence !== filterRatingSequenceRef.current) return;
         for (const item of result.results || []) {
           const rating = item.success ? item.rating : 0;
@@ -2231,7 +2234,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     let active = true;
     const directoryPath = currentRelativePath;
     const chunks = Array.from({ length: Math.ceil(missingPaths.length / 500) }, (_value, index) => missingPaths.slice(index * 500, (index + 1) * 500));
-    Promise.all(chunks.map(paths => window.electronAPI.getProjectFileDetails(workspacePath, project.status, project.name, paths))).then(results => {
+    Promise.all(chunks.map(paths => projectWorkspaceClient.getProjectFileDetails(workspacePath, project.status, project.name, paths))).then(results => {
       if (!active || directoryPath !== currentRelativePathRef.current) return;
       const detailsByPath = new Map(results.flatMap(result => result.success ? result.details : []).map(detail => [detail.relativePath, detail]));
       if (!detailsByPath.size) return;
@@ -2255,7 +2258,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!missingDetails.length) return;
     let active = true;
     const directoryPath = currentRelativePath;
-    window.electronAPI.getProjectFileDetails(workspacePath, project.status, project.name, missingDetails).then(result => {
+    projectWorkspaceClient.getProjectFileDetails(workspacePath, project.status, project.name, missingDetails).then(result => {
       if (!active || directoryPath !== currentRelativePathRef.current || !result.success || !result.details.length) return;
       const detailsByPath = new Map(result.details.map(detail => [detail.relativePath, detail]));
       setFileEntries(current => {
@@ -2335,8 +2338,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (pending) return pending;
     const requestedProjectPath = project.path;
     const browseRequest: Promise<{ success: boolean; entries: ProjectFileEntry[]; shortcutTargetKind?: 'folder' | 'file'; shortcutBroken?: boolean }> = entry.kind === 'shortcut'
-      ? window.electronAPI.browseProjectShortcutPreview(workspacePath, project.status, project.name, entry.relativePath).then(result => ({ success: result.success, entries: result.entries, shortcutTargetKind: result.success && result.targetKind ? result.targetKind : undefined, shortcutBroken: !result.success }))
-      : window.electronAPI.browseProjectFiles(workspacePath, project.status, project.name, entry.relativePath, mediaCacheConfig);
+      ? projectWorkspaceClient.browseProjectShortcutPreview(workspacePath, project.status, project.name, entry.relativePath).then(result => ({ success: result.success, entries: result.entries, shortcutTargetKind: result.success && result.targetKind ? result.targetKind : undefined, shortcutBroken: !result.success }))
+      : projectWorkspaceClient.browseProjectFiles(workspacePath, project.status, project.name, entry.relativePath, mediaCacheConfig);
     const request = browseRequest
       .then(result => {
         if (requestedProjectPath !== projectPathRef.current) return [];
@@ -2368,13 +2371,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   };
   const formatFileSize = (size: number) => size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${Math.round(size / 1024)} KB` : size < 1024 * 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(1)} MB` : `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`;
   const openFolder = async (folderName?: string) => {
-    const result = await window.electronAPI.openWorkspaceProject(workspacePath, project.status, project.name, folderName);
+    const result = await projectWorkspaceClient.openWorkspaceProject(workspacePath, project.status, project.name, folderName);
     if (!result.success) onNotice(`打开文件夹失败：${result.error || '未知错误'}`);
   };
   const moveStatus = async (status: WorkspaceProject['status']) => {
     setShowStatusMenu(false);
     if (status === project.status) return;
-    const result = await window.electronAPI.moveWorkspaceProject(workspacePath, project.status, project.name, status);
+    const result = await projectWorkspaceClient.moveWorkspaceProject(workspacePath, project.status, project.name, status);
     if (!result.success || !result.project) { onNotice(`更改状态失败：${result.error || '未知错误'}`); return; }
     onProjectMoved(result.project);
   };
@@ -2384,7 +2387,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setPanelImportResult(null);
     setPanelImportBusy('broll');
     try {
-      const result = await window.electronAPI.importBroll(workspacePath, project.status, project.name, { splitLargeFiles: brollConfig.splitLargeFiles, deleteSourceAfterImport: deleteBrollSources, sourcePaths: brollSourcePaths });
+      const result = await projectWorkspaceClient.importBroll(workspacePath, project.status, project.name, { splitLargeFiles: brollConfig.splitLargeFiles, deleteSourceAfterImport: deleteBrollSources, sourcePaths: brollSourcePaths });
       if (!result.success) { onNotice(`导入花絮失败：${result.error || '未知错误'}`); return; }
       if (result.cancelled) { onNotice('已取消选择花絮文件。'); return; }
       setPanelImportResult({ kind: 'broll', count: result.count || 0, sourceDeleted: deleteBrollSources });
@@ -2399,7 +2402,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     }
   };
   const chooseBrollFiles = async () => {
-    const result = await window.electronAPI.chooseBrollSourceFiles();
+    const result = await projectWorkspaceClient.chooseBrollSourceFiles();
     if (!result.cancelled && result.paths.length) setBrollSourcePaths(result.paths);
   };
   const openFileImport = (targetRelativePath = currentRelativePath) => {
@@ -2411,7 +2414,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setPanel('file-import');
   };
   const chooseFilesToImport = async () => {
-    const result = await window.electronAPI.chooseProjectImportFiles();
+    const result = await projectWorkspaceClient.chooseProjectImportFiles();
     if (!result.cancelled && result.paths.length) setFileImportSourcePaths(result.paths);
   };
   const importFiles = async () => {
@@ -2420,7 +2423,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setPanelImportResult(null);
     setPanelImportBusy('files');
     try {
-      const result = await window.electronAPI.importProjectFiles(workspacePath, project.status, project.name, targetRelativePath, { deleteSourceAfterImport: deleteFileSources, sourcePaths: fileImportSourcePaths });
+      const result = await projectWorkspaceClient.importProjectFiles(workspacePath, project.status, project.name, targetRelativePath, { deleteSourceAfterImport: deleteFileSources, sourcePaths: fileImportSourcePaths });
       if (!result.success) { onNotice(`导入失败：${result.error || '未知错误'}`); return; }
       if (result.cancelled) { onNotice('已取消导入。'); return; }
       setPanelImportResult({ kind: 'files', count: result.count || 0, sourceDeleted: deleteFileSources });
@@ -2444,7 +2447,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setOfficeExtractBusy(true);
     onNotice(`正在从 ${documents.length} 个 Office 文档提取图片…`);
     try {
-      const result = await window.electronAPI.extractOfficeImages(workspacePath, project.status, project.name, documents.map(entry => entry.relativePath));
+      const result = await projectWorkspaceClient.extractOfficeImages(workspacePath, project.status, project.name, documents.map(entry => entry.relativePath));
       if (!result.success) {
         onNotice(`提取图片失败：${result.error || '未知错误'}`, 6000);
         return;
@@ -2464,7 +2467,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     }
   };
   const completeSdImport = async (completion: ImportCompletion) => {
-    const result = await window.electronAPI.finalizeSdImportedProjects(workspacePath, completion.projectNames, {
+    const result = await projectWorkspaceClient.finalizeSdImportedProjects(workspacePath, completion.projectNames, {
       moveProjectAfterImport: importConfig.autoMoveProjectAfterSdImport,
       workProjectNames: completion.workProjectNames,
     });
@@ -2480,7 +2483,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const completeNegativeImport = async () => {
     await refresh();
     if (project.status === '后期中') return;
-    const result = await window.electronAPI.moveWorkspaceProject(workspacePath, project.status, project.name, '后期中');
+    const result = await projectWorkspaceClient.moveWorkspaceProject(workspacePath, project.status, project.name, '后期中');
     if (!result.success || !result.project) { onNotice(`项目状态更新失败：${result.error || '未知错误'}`); return; }
     onNotice('导入完成，项目已移入“后期中”。');
     onProjectMoved(result.project);
@@ -2495,7 +2498,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       if (!answer?.trim()) return;
       folderName = answer.trim();
     }
-    const result = await window.electronAPI.createProjectFolder(workspacePath, project.status, project.name, folderName, normalizedTarget, true);
+    const result = await projectWorkspaceClient.createProjectFolder(workspacePath, project.status, project.name, folderName, normalizedTarget, true);
     if (!result.success) { onNotice(`新建文件夹失败：${result.error || '未知错误'}`); return; }
     directoryEntriesCacheRef.current.delete(normalizedTarget);
     await refresh();
@@ -2513,7 +2516,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (shellNewTypesLoading || shellNewTypesLoaded && !refresh) return;
     setShellNewTypesLoading(true);
     try {
-      const result = await window.electronAPI.getShellNewFileTypes(refresh);
+      const result = await projectWorkspaceClient.getShellNewFileTypes(refresh);
       if (!result.success) { onNotice(`读取 Windows 新建文件类型失败：${result.error || '未知错误'}`); return; }
       setShellNewTypes(result.types);
       setShellNewTypesLoaded(true);
@@ -2530,7 +2533,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const createShellNewFile = async (type: ShellNewFileType, targetRelativePath = currentRelativePath) => {
     setShowCreateMenu(false);
     const normalizedTarget = normalizeProjectRelativePath(targetRelativePath);
-    const result = await window.electronAPI.createProjectShellNewFile(workspacePath, project.status, project.name, normalizedTarget, type.id);
+    const result = await projectWorkspaceClient.createProjectShellNewFile(workspacePath, project.status, project.name, normalizedTarget, type.id);
     if (!result.success || !result.file) { onNotice(`新建${type.label}失败：${result.error || '未知错误'}`); return; }
     directoryEntriesCacheRef.current.delete(normalizedTarget);
     await refresh();
@@ -2739,7 +2742,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       : normalizedPath.split('/').pop() || '';
   };
   const setProgressTrackingState = async (progressFolder: ProgressFolder, trackingState: ProgressFolder['trackingState']) => {
-    const updated = await window.electronAPI.registerProgressFolder(workspacePath, project.status, project.name, {
+    const updated = await projectWorkspaceClient.registerProgressFolder(workspacePath, project.status, project.name, {
       relativePath: projectRelativePath(progressFolder.folderPath),
       mediaKind: progressFolder.mediaKind,
       versionKey: progressFolder.versionKey,
@@ -2766,7 +2769,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     progressId?: string;
     moveToRoot?: boolean;
   }, workflowInputProgressIds: string[]) => {
-    return window.electronAPI.registerProgressWithGraph(workspacePath, project.status, {
+    return projectWorkspaceClient.registerProgressWithGraph(workspacePath, project.status, {
       projectName: project.name,
       progress,
       workflowInputProgressIds,
@@ -2844,7 +2847,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         await Promise.all([loadProgressFolders(), refresh('')]);
         setSelectedPaths([relativePath]);
         if (policy.trackingEnabled && draft.relationKind === 'main' && draft.parentProgressId && policyChanged) {
-          const started = await window.electronAPI.startProgressTracking(workspacePath, project.name, { progressId: registered.progressFolder.id, mode: existingProgress.trackingEnabled ? 'refresh' : 'compare' });
+          const started = await projectWorkspaceClient.startProgressTracking(workspacePath, project.name, { progressId: registered.progressFolder.id, mode: existingProgress.trackingEnabled ? 'refresh' : 'compare' });
           if (!started.success || !started.taskId || !started.sessionId) throw new Error(started.error || '无法启动版本跟踪任务');
           window.localStorage.setItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${registered.progressFolder.id}`, started.sessionId);
           setTrackingConfirmationProgressId(registered.progressFolder.id);
@@ -2890,7 +2893,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         }
         if (!parentFolder) {
           setProgressTask('正在建立首个版本的跟踪记录…');
-          const baseline = await window.electronAPI.registerVersionBaseline(workspacePath, project.status, project.name, targetRelativePath);
+          const baseline = await projectWorkspaceClient.registerVersionBaseline(workspacePath, project.status, project.name, targetRelativePath);
           if (!baseline.success) throw new Error(baseline.error || '无法建立首版跟踪');
           await loadProgressFolders();
           setProgressTask('');
@@ -2898,7 +2901,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           return;
         }
 
-        const started = await window.electronAPI.startProgressTracking(workspacePath, project.name, { progressId: progressFolder.id, mode: 'compare' });
+        const started = await projectWorkspaceClient.startProgressTracking(workspacePath, project.name, { progressId: progressFolder.id, mode: 'compare' });
         if (!started.success || !started.taskId || !started.sessionId) throw new Error(started.error || '无法启动版本跟踪任务');
         window.localStorage.setItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${progressFolder.id}`, started.sessionId);
         setTrackingConfirmationProgressId(progressFolder.id);
@@ -2908,7 +2911,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       }
 
       setProgressTask('');
-      const importOptions: Parameters<typeof window.electronAPI.importProgressFiles>[4] = {
+      const importOptions: Parameters<typeof projectWorkspaceClient.importProgressFiles>[4] = {
         deleteSourceAfterImport: draft.deleteSourceAfterImport,
         mediaKind: draft.mediaKind,
         versionKey: draft.versionKey,
@@ -2917,7 +2920,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         trackingState: trackingEnabled ? 'pending_compare' : 'disabled',
         appendProgressId: appendTarget?.id,
       };
-      let imported = await window.electronAPI.importProgressFiles(workspacePath, project.status, project.name, generatedName, importOptions);
+      let imported = await projectWorkspaceClient.importProgressFiles(workspacePath, project.status, project.name, generatedName, importOptions);
       if (imported.requiresDecision?.kind === 'progress-import-conflict') {
         const decision = imported.requiresDecision;
         const policy = await appDialog.choice({
@@ -2937,7 +2940,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           setProgressSetup(null);
           return;
         }
-        imported = await window.electronAPI.importProgressFiles(workspacePath, project.status, project.name, generatedName, {
+        imported = await projectWorkspaceClient.importProgressFiles(workspacePath, project.status, project.name, generatedName, {
           ...importOptions,
           progressConflictPolicy: policy,
           sourcePaths: decision.sourcePaths,
@@ -2983,7 +2986,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       }
       if (!parentFolder) {
         setProgressTask(appendTarget ? '正在把本次追加文件写入首版跟踪记录…' : '正在建立首个版本的跟踪记录…');
-        const baseline = await window.electronAPI.registerVersionBaseline(workspacePath, project.status, project.name, imported.folder.relativePath);
+        const baseline = await projectWorkspaceClient.registerVersionBaseline(workspacePath, project.status, project.name, imported.folder.relativePath);
         if (!baseline.success) throw new Error(baseline.error || '无法建立首版跟踪');
         await loadProgressFolders();
         setProgressTask('');
@@ -2994,7 +2997,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       }
 
       setProgressSetup(null);
-      const started = await window.electronAPI.startProgressTracking(workspacePath, project.name, { progressId: progressFolder.id, mode: appendTarget ? 'refresh' : 'compare' });
+      const started = await projectWorkspaceClient.startProgressTracking(workspacePath, project.name, { progressId: progressFolder.id, mode: appendTarget ? 'refresh' : 'compare' });
       if (!started.success || !started.taskId || !started.sessionId) throw new Error(started.error || '无法启动版本跟踪任务');
       window.localStorage.setItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${progressFolder.id}`, started.sessionId);
       setTrackingConfirmationProgressId(progressFolder.id);
@@ -3013,7 +3016,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const openProgressRepair = async (progressFolder: ProgressFolder) => {
     if (!progressFolder.repairBatchId) { onNotice('没有找到可修复的版本批次，请刷新版本跟踪。'); return; }
     setProgressTask('正在读取失败的文件操作…');
-    const result = await window.electronAPI.getVersionBatchOperations(workspacePath, progressFolder.repairBatchId);
+    const result = await projectWorkspaceClient.getVersionBatchOperations(workspacePath, progressFolder.repairBatchId);
     setProgressTask('');
     if (!result.success) { onNotice(`读取修复任务失败：${result.error || '未知错误'}`); return; }
     setProgressRepair({ progressFolder, batchId: progressFolder.repairBatchId, operations: result.operations });
@@ -3021,8 +3024,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const retryProgressRepair = async () => {
     if (!progressRepair || progressRepairBusy) return;
     setProgressRepairBusy(true);
-    const retried = await window.electronAPI.retryVersionBatchOperations(workspacePath, progressRepair.batchId);
-    const refreshed = await window.electronAPI.getVersionBatchOperations(workspacePath, progressRepair.batchId);
+    const retried = await projectWorkspaceClient.retryVersionBatchOperations(workspacePath, progressRepair.batchId);
+    const refreshed = await projectWorkspaceClient.getVersionBatchOperations(workspacePath, progressRepair.batchId);
     setProgressRepairBusy(false);
     if (refreshed.success) setProgressRepair(current => current ? { ...current, operations: refreshed.operations } : current);
     await loadProgressFolders();
@@ -3048,7 +3051,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       const relativePath = projectRelativePath(progressFolder.folderPath);
       if (!parentFolder) {
         setProgressTask('正在重新扫描首个版本并更新项目跟踪…');
-        const baseline = await window.electronAPI.registerVersionBaseline(workspacePath, project.status, project.name, relativePath);
+        const baseline = await projectWorkspaceClient.registerVersionBaseline(workspacePath, project.status, project.name, relativePath);
         if (!baseline.success) throw new Error(baseline.error || '无法更新项目跟踪');
         await loadProgressFolders();
         directoryEntriesCacheRef.current.clear();
@@ -3064,7 +3067,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         setTrackingConfirmationSessionId(existingSessionId);
         return;
       }
-      const started = await window.electronAPI.startProgressTracking(workspacePath, project.name, {
+      const started = await projectWorkspaceClient.startProgressTracking(workspacePath, project.name, {
         progressId: progressFolder.id,
         mode: progressFolder.lastTrackedAt || progressFolder.trackingState === 'stale' ? 'refresh' : 'compare',
       });
@@ -3087,7 +3090,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const candidates = [...progressCompare.matches, ...progressCompare.suggestions];
     const acceptedMatches = candidates.filter(match => accepted.has(match.source));
     const acceptedReferences = new Set(acceptedMatches.map(match => match.reference));
-    const result = await window.electronAPI.commitVersionBatch(workspacePath, project.status, project.name, {
+    const result = await projectWorkspaceClient.commitVersionBatch(workspacePath, project.status, project.name, {
       folderA: progressCompare.parentFolder.folderPath,
       folderB: progressCompare.progressFolder.folderPath,
       importKey: crypto.randomUUID(),
@@ -3128,7 +3131,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!progressCompare || progressSubmitting) return;
     setProgressSubmitting(true);
     const relativePath = projectRelativePath(progressCompare.progressFolder.folderPath);
-    const result = await window.electronAPI.registerProgressFolder(workspacePath, project.status, project.name, {
+    const result = await projectWorkspaceClient.registerProgressFolder(workspacePath, project.status, project.name, {
       relativePath,
       mediaKind: progressCompare.progressFolder.mediaKind,
       versionKey: progressCompare.progressFolder.versionKey,
@@ -3156,7 +3159,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     }
   }
   const moveToTrash = async () => {
-    const result = await window.electronAPI.trashWorkspaceProject(workspacePath, project.status, project.name);
+    const result = await projectWorkspaceClient.trashWorkspaceProject(workspacePath, project.status, project.name);
     if (!result.success) {
       if (isRecycleBinFailure(result.error, result.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
       else onNotice(`删除项目失败：${result.error || '未知错误'}`);
@@ -3181,7 +3184,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setConversionCollecting(true);
     setPanel('converter');
     while (sequence === conversionInspectionSequenceRef.current) {
-      const result = await window.electronAPI.inspectProjectToolSources(workspacePath, project.status, project.name, requestedPaths, false, false, true);
+      const result = await projectWorkspaceClient.inspectProjectToolSources(workspacePath, project.status, project.name, requestedPaths, false, false, true);
       if (sequence !== conversionInspectionSequenceRef.current) return;
       if (!result.success) {
         setConversionCollecting(false);
@@ -3210,7 +3213,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       return { success: false, error: '当前图片格式暂不支持裁剪' };
     }
     try {
-      const analysis = await window.electronAPI.extractScreenshotMainImages(workspacePath, project.status, project.name, [entry.relativePath], { analyzeOnly: true });
+      const analysis = await projectWorkspaceClient.extractScreenshotMainImages(workspacePath, project.status, project.name, [entry.relativePath], { analyzeOnly: true });
       const result = analysis.results[0];
       if (!result?.success || !result.crop || !result.originalSize) return { success: false, error: result?.error || analysis.error || '无法识别可裁剪范围' };
       return {
@@ -3225,7 +3228,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   };
   const savePreviewImageCrop = async (entry: ProjectFileEntry, crop: CropRectangle): Promise<{ success: boolean; error?: string }> => {
     try {
-      const extraction = await window.electronAPI.extractScreenshotMainImages(workspacePath, project.status, project.name, [entry.relativePath], { crops: [crop], outputSuffix: '裁剪' });
+      const extraction = await projectWorkspaceClient.extractScreenshotMainImages(workspacePath, project.status, project.name, [entry.relativePath], { crops: [crop], outputSuffix: '裁剪' });
       const result = extraction.results[0];
       if (!result?.success || !result.cropped) return { success: false, error: result?.error || extraction.error || '裁剪失败' };
       directoryEntriesCacheRef.current.clear();
@@ -3238,25 +3241,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   };
-  const toggleSelected = (relativePath: string) => {
-    selectionAnchorPathRef.current = relativePath;
-    setSelectedPaths(current => current.includes(relativePath) ? current.filter(path => path !== relativePath) : [...current, relativePath]);
-  };
   const selectEntryRange = (relativePath: string, additive: boolean) => {
-    const targetIndex = displayedFileEntries.findIndex(entry => entry.relativePath === relativePath);
-    if (targetIndex < 0) return;
-    const storedAnchorPath = selectedPaths.includes(selectionAnchorPathRef.current) ? selectionAnchorPathRef.current : '';
-    const selectedAnchorPath = storedAnchorPath || [...selectedPaths].reverse().find(path => displayedFileEntries.some(entry => entry.relativePath === path)) || '';
-    const anchorIndex = selectedPaths.length ? displayedFileEntries.findIndex(entry => entry.relativePath === selectedAnchorPath) : -1;
-    if (anchorIndex < 0) {
-      selectionAnchorPathRef.current = relativePath;
-      setSelectedPaths(additive ? current => Array.from(new Set([...current, relativePath])) : [relativePath]);
-      return;
-    }
-    const start = Math.min(anchorIndex, targetIndex);
-    const end = Math.max(anchorIndex, targetIndex);
-    const rangePaths = displayedFileEntries.slice(start, end + 1).map(entry => entry.relativePath);
-    setSelectedPaths(additive ? current => Array.from(new Set([...current, ...rangePaths])) : rangePaths);
+    selectProjectFileRange(relativePath, additive, displayedFileEntries);
   };
   const beginInlineRename = (relativePath: string) => {
     const entry = fileEntries.find(candidate => candidate.relativePath === relativePath);
@@ -3281,7 +3267,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!entry || !nextName || nextName === entry.name) { cancelInlineRename(); return; }
     if (isProtectedRenameEntry(entry)) { cancelInlineRename(); onNotice('该文件夹由项目工作流管理，不能普通重命名。'); return; }
     renameCommitRef.current = true;
-    const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, 'rename', [inlineRenamePath], currentRelativePath, nextName);
+    const result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'rename', [inlineRenamePath], currentRelativePath, nextName);
     renameCommitRef.current = false;
     if (!result.success) { onNotice(`重命名失败：${result.error || '未知错误'}`); return; }
     cancelInlineRename();
@@ -3357,7 +3343,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const commitBatchRename = async () => {
     if (!batchRenameNames.length || batchRenameNames.some(name => !name) || selectedPaths.length < 2 || renameCommitRef.current) return;
     renameCommitRef.current = true;
-    const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, 'rename', selectedPaths, currentRelativePath, '批量重命名', { renameNames: batchRenameNames });
+    const result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'rename', selectedPaths, currentRelativePath, '批量重命名', { renameNames: batchRenameNames });
     renameCommitRef.current = false;
     if (!result.success) { onNotice(`批量重命名失败：${result.error || '未知错误'}`); return; }
     const count = selectedPaths.length;
@@ -3487,12 +3473,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const openProjectEntry = async (entry: ProjectFileEntry) => {
     if (entry.kind === 'folder') { navigateToDirectory(entry.relativePath); return; }
     if (entry.viaShortcut) {
-      const linkedResult = await window.electronAPI.openMediaVersion(entry.path);
+      const linkedResult = await projectWorkspaceClient.openMediaVersion(entry.path);
       if (!linkedResult.success) onNotice(`打开快捷方式中的文件失败：${linkedResult.error || '无法打开文件'}`);
       return;
     }
     if (entry.kind === 'shortcut') {
-      const shortcut = await window.electronAPI.resolveProjectShortcut(workspacePath, project.status, project.name, entry.relativePath);
+      const shortcut = await projectWorkspaceClient.resolveProjectShortcut(workspacePath, project.status, project.name, entry.relativePath);
       if (!shortcut.success || !shortcut.target) { onNotice(`打开快捷方式失败：${shortcut.error || '目标不存在'}`, 6000); return; }
       const inspirationRoot = inspirationLibraryRootPath?.trim().replace(/\\/g, '/').replace(/\/+$/g, '') || '';
       const shortcutTarget = shortcut.target.replace(/\\/g, '/').replace(/\/+$/g, '');
@@ -3503,7 +3489,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         return;
       }
     }
-    const result = await window.electronAPI.openProjectEntry(workspacePath, project.status, project.name, entry.relativePath);
+    const result = await projectWorkspaceClient.openProjectEntry(workspacePath, project.status, project.name, entry.relativePath);
     if (!result.success) onNotice(`打开文件失败：${result.error || '无法打开文件'}`);
   };
   const progressFolderForMediaEntry = (entry?: ProjectFileEntry) => {
@@ -3557,7 +3543,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     })) return;
     setFinalExporting(true);
     try {
-      const result = await window.electronAPI.exportFinalVersions(workspacePath, project.status, project.name, { parentProgressId: explicitParent.id });
+      const result = await projectWorkspaceClient.exportFinalVersions(workspacePath, project.status, project.name, { parentProgressId: explicitParent.id });
       if (!result.success || !result.folder) throw new Error(result.error || '无法整理喜爱图片');
       directoryEntriesCacheRef.current.clear();
       await loadProgressFolders();
@@ -3602,7 +3588,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       const combined = new Map<string, ProjectFileEntry>();
       for (const item of [...history, ...teamRetouchEntries, ...validTargets]) combined.set(item.relativePath.toLocaleLowerCase(), item);
       if (validTargets.length) {
-        const registered = await window.electronAPI.registerTeamProjectPhotos(workspacePath, project.status, project.name, validTargets.map(target => target.relativePath));
+        const registered = await projectWorkspaceClient.registerTeamProjectPhotos(workspacePath, project.status, project.name, validTargets.map(target => target.relativePath));
         if (!registered.success) throw new Error(registered.error || '未知错误');
         void loadTeamRetouchHistory().catch(() => undefined);
       }
@@ -3623,7 +3609,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     }
     const imagePaths = entries.filter(entry => entry.kind === 'image' || entry.kind === 'raw').map(entry => entry.relativePath);
     if (!imagePaths.length) return;
-    const result = await window.electronAPI.openProjectEntriesInPhotoshop(workspacePath, project.status, project.name, imagePaths);
+    const result = await projectWorkspaceClient.openProjectEntriesInPhotoshop(workspacePath, project.status, project.name, imagePaths);
     if (!result.success) onNotice(`用 Photoshop 打开失败：${result.error || '无法打开文件'}`);
   };
   const copyEntryPath = async (entry: ProjectFileEntry) => {
@@ -3636,12 +3622,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       }
       return;
     }
-    const result = await window.electronAPI.copyProjectEntryPath(workspacePath, project.status, project.name, entry.relativePath);
+    const result = await projectWorkspaceClient.copyProjectEntryPath(workspacePath, project.status, project.name, entry.relativePath);
     const typeLabel = entry.kind === 'folder' ? '文件夹' : '文件';
     onNotice(result.success ? '成功复制文字' : `复制${typeLabel}地址失败：${result.error || '未知错误'}`);
   };
   const copyCurrentDirectoryPath = async (targetRelativePath = currentRelativePath) => {
-    const result = await window.electronAPI.copyProjectEntryPath(workspacePath, project.status, project.name, targetRelativePath);
+    const result = await projectWorkspaceClient.copyProjectEntryPath(workspacePath, project.status, project.name, targetRelativePath);
     onNotice(result.success ? '成功复制文字' : `复制文件夹地址失败：${result.error || '未知错误'}`);
   };
   const clearPreviewAfterSelectionDrag = (drag: NonNullable<typeof selectionDragRef.current>) => {
@@ -3859,11 +3845,11 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setCutPaths([]);
     setClipboardHasFiles(false);
     onNotice('已取消剪切');
-    const result = await window.electronAPI.cancelProjectFileCut(workspacePath, project.status, project.name, cancelledPaths);
+    const result = await projectWorkspaceClient.cancelProjectFileCut(workspacePath, project.status, project.name, cancelledPaths);
     if (clipboardOperationSequenceRef.current !== cancellationSequence) return;
     setClipboardPending(false);
     if (!result.success) {
-      const status = await window.electronAPI.getProjectFileClipboardStatus();
+      const status = await projectWorkspaceClient.getProjectFileClipboardStatus();
       if (clipboardOperationSequenceRef.current !== cancellationSequence) return;
       setClipboardPending(false);
       setClipboardHasFiles(status.success && status.hasFiles);
@@ -3895,9 +3881,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       setClipboardPending(true);
     }
     const normalizedDestination = normalizeProjectRelativePath(destinationRelativePath);
-    let result: Awaited<ReturnType<typeof window.electronAPI.projectFileOperation>>;
+    let result: Awaited<ReturnType<typeof projectWorkspaceClient.projectFileOperation>>;
     try {
-      result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, operation, targetPaths, normalizedDestination, nextName);
+      result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, operation, targetPaths, normalizedDestination, nextName);
       if (result.requiresDecision?.kind === 'paste-conflict') {
         const policy = await appDialog.choice({
           title: '目标位置已有同名项目',
@@ -3910,7 +3896,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           defaultValue: 'keep-both',
         });
         if (policy !== 'replace' && policy !== 'keep-both') { onNotice('粘贴已取消'); refresh(); return; }
-        result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, operation, targetPaths, normalizedDestination, nextName, { pasteConflictPolicy: policy });
+        result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, operation, targetPaths, normalizedDestination, nextName, { pasteConflictPolicy: policy });
       }
     } catch (error) {
       if (isClipboardSelection && clipboardOperationSequenceRef.current === clipboardOperationSequence) {
@@ -4084,7 +4070,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setPreviewRatingLoading(true);
     let request = previewRatingRequestsRef.current.get(previewRatingCacheKey);
     if (!request) {
-      request = window.electronAPI.getMediaRating(previewEntry.path);
+      request = projectWorkspaceClient.getMediaRating(previewEntry.path);
       previewRatingRequestsRef.current.set(previewRatingCacheKey, request);
       void request.finally(() => previewRatingRequestsRef.current.delete(previewRatingCacheKey)).catch(() => undefined);
     }
@@ -4099,7 +4085,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const updatePreviewRating = async (requestedRating: number) => {
     if (!previewEntry || !previewCanMarkFinal || previewRatingBusy) return;
     setPreviewRatingBusy(true);
-    const result = await window.electronAPI.setMediaRating(workspacePath, previewEntry.path, requestedRating);
+    const result = await projectWorkspaceClient.setMediaRating(workspacePath, previewEntry.path, requestedRating);
     setPreviewRatingBusy(false);
     if (!result.success) {
       onNotice(`更新图片标星失败：${result.error || '未知错误'}`);
@@ -4133,7 +4119,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   };
   const trimPreviewVideo = async (start: number, end: number, saveMode: 'new' | 'replace') => {
     if (!previewEntry || previewEntry.kind !== 'video' || previewEntry.viaShortcut) return { success: false, error: '当前视频不可剪辑' };
-    const result = await window.electronAPI.trimProjectVideo(workspacePath, project.status, project.name, previewEntry.relativePath, { start, end, saveMode });
+    const result = await projectWorkspaceClient.trimProjectVideo(workspacePath, project.status, project.name, previewEntry.relativePath, { start, end, saveMode });
     if (!result.success) {
       onNotice(`视频剪辑失败：${result.error || '未知错误'}`, 7000);
       return result;
@@ -4288,7 +4274,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       return () => { active = false; };
     }
     setPreviewMetadataLoading(true);
-    window.electronAPI.getMediaMetadata(focusedEntry.path).then(result => {
+    projectWorkspaceClient.getMediaMetadata(focusedEntry.path).then(result => {
       if (!active) return;
       if (!result.success) {
         setPreviewMetadataError(result.error || '无法读取完整详细信息');
@@ -4308,7 +4294,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     let active = true;
     setPreviewEntryDetails(null);
     if (!focusedEntry || focusedEntry.viaShortcut) return () => { active = false; };
-    window.electronAPI.getProjectEntryDetails(workspacePath, project.status, project.name, focusedEntry.relativePath).then(result => {
+    projectWorkspaceClient.getProjectEntryDetails(workspacePath, project.status, project.name, focusedEntry.relativePath).then(result => {
       if (active && result.success && result.details) setPreviewEntryDetails(result.details);
     });
     return () => { active = false; };
@@ -4393,7 +4379,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!targetPaths.length) { onNotice('请先选择要汇聚的文件或文件夹'); return; }
     setGatheringInspiration(true);
     try {
-      const result = await window.electronAPI.addInspirationToProject(workspacePath, inspirationTargetWorkspacePath, targetProject.status, targetProject.name, targetPaths);
+      const result = await projectWorkspaceClient.addInspirationToProject(workspacePath, inspirationTargetWorkspacePath, targetProject.status, targetProject.name, targetPaths);
       if (!result.success) { onNotice(`汇聚灵感失败：${result.error || '未知错误'}`, 7000); return; }
       setInspirationTargetProject(targetProject);
       try { window.localStorage.setItem('photoflow:inspiration-target-project', targetProject.path); } catch { /* storage unavailable */ }
@@ -4436,13 +4422,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setPanel('research');
     if (!folderEntries.length) return;
     if (entries.length === 1) {
-      void window.electronAPI.browseProjectFiles(workspacePath, project.status, project.name, entries[0].relativePath, mediaCacheConfig).then(result => {
+      void projectWorkspaceClient.browseProjectFiles(workspacePath, project.status, project.name, entries[0].relativePath, mediaCacheConfig).then(result => {
         if (sequence !== researchInspectionSequenceRef.current) return;
         setResearchTargetHasTxt(Boolean(result.success && result.entries.some(candidate => candidate.extension.toLocaleLowerCase() === '.txt')));
       });
     }
     while (sequence === researchInspectionSequenceRef.current) {
-      const result = await window.electronAPI.inspectProjectToolSources(workspacePath, project.status, project.name, entries.map(entry => entry.relativePath), true);
+      const result = await projectWorkspaceClient.inspectProjectToolSources(workspacePath, project.status, project.name, entries.map(entry => entry.relativePath), true);
       if (sequence !== researchInspectionSequenceRef.current) return;
       if (!result.success) {
         setResearchCollecting(false);
@@ -4473,7 +4459,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setVideoTranscodeCollecting(true);
     setPanel('video-transcode');
     while (sequence === videoTranscodeInspectionSequenceRef.current) {
-      const result = await window.electronAPI.inspectProjectToolSources(workspacePath, project.status, project.name, targetRelativePaths, true);
+      const result = await projectWorkspaceClient.inspectProjectToolSources(workspacePath, project.status, project.name, targetRelativePaths, true);
       if (sequence !== videoTranscodeInspectionSequenceRef.current) return;
       if (!result.success) {
         setVideoTranscodeCollecting(false);
@@ -4498,7 +4484,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const sourceFolders = new Set(targetEntries.map(entry => projectRelativeParentPath(entry.relativePath)));
     if (sourceFolders.size !== 1) { onNotice('一次手动选片只能选择同一来源文件夹中的媒体。'); return; }
     const sourceFolderRelativePath = [...sourceFolders][0] || '';
-    const preflight = await window.electronAPI.preflightManualSelection(project.path, { sourceFolderRelativePath, relativePaths: targetPaths });
+    const preflight = await projectWorkspaceClient.preflightManualSelection(project.path, { sourceFolderRelativePath, relativePaths: targetPaths });
     if (!preflight.success || !preflight.signature) { onNotice(`选片预检失败：${preflight.error || '未知错误'}`); return; }
     const decision = await appDialog.choice({
       title: '确认手动选片',
@@ -4510,7 +4496,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       cancelDefault: true,
     });
     if (decision !== 'execute') return;
-    const result = await window.electronAPI.executeManualSelection(project.path, { sourceFolderRelativePath, relativePaths: targetPaths, expectedSignature: preflight.signature, operationId: crypto.randomUUID() });
+    const result = await projectWorkspaceClient.executeManualSelection(project.path, { sourceFolderRelativePath, relativePaths: targetPaths, expectedSignature: preflight.signature, operationId: crypto.randomUUID() });
     if (!result.success || result.cancelled) { onNotice(`选片失败：${result.error || (result.cancelled ? '已取消并回滚本次创建内容' : '未知错误')}`); return; }
     onNotice(`已向“${result.targetFolderRelativePath || result.outputFolderName || '选片输出'}”追加 ${result.copiedCount || 0} 个媒体；附属节点已登记。`);
     setSelectedPaths([]);
@@ -4665,7 +4651,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     internalDragPathsRef.current = dragPaths;
     internalDropHandledRef.current = false;
     if (!selectedPaths.includes(entry.relativePath)) setSelectedPaths([entry.relativePath]);
-    window.electronAPI.startProjectFileDrag(workspacePath, project.status, project.name, dragPaths);
+    projectWorkspaceClient.startProjectFileDrag(workspacePath, project.status, project.name, dragPaths);
   };
   const finishEntryDrag = () => {
     internalDragPathsRef.current = [];
@@ -4675,7 +4661,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const hasExternalFiles = (event: React.DragEvent<HTMLElement>) => internalDragPathsRef.current.length === 0 && Array.from(event.dataTransfer.types).includes('Files');
   const getExternalFilePaths = (event: React.DragEvent<HTMLElement>) => Array.from(event.dataTransfer.files)
     .map(file => {
-      try { return window.electronAPI.getPathForFile(file); }
+      try { return projectWorkspaceClient.getPathForFile(file); }
       catch { return ''; }
     })
     .filter(Boolean);
@@ -4707,7 +4693,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const operation = internalPaths.length ? 'move' : 'import';
     const paths = internalPaths.length ? internalPaths : externalPaths;
     if (!paths.length) return;
-    const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, operation, paths, targetRelativePath);
+    const result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, operation, paths, targetRelativePath);
     if (result.cancelled) { onNotice('导入已取消'); return; }
     if (!result.success) { onNotice(`${operation === 'move' ? '移动' : '导入'}失败：${result.error || '未知错误'}`); return; }
     if (operation === 'move') setCutPaths(current => current.filter(path => !paths.includes(path)));
@@ -4808,7 +4794,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     window.addEventListener('dragover', acceptInternalFolderDrag, true);
     return () => window.removeEventListener('dragover', acceptInternalFolderDrag, true);
   }, []);
-  useEffect(() => window.electronAPI.onProjectFileDragEnd(result => {
+  useEffect(() => projectWorkspaceClient.onProjectFileDragEnd(result => {
     const dragPaths = result.paths?.length ? result.paths : [...internalDragPathsRef.current];
     internalDragPathsRef.current = [];
     setDragTargetPath('');
@@ -4847,7 +4833,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setSurfaceDropActive(false);
     if (!externalPaths.length) { onNotice('无法读取拖入文件的系统路径，请重新拖入'); return; }
     if (finalViewOpen) { onNotice('喜爱图片浏览是只读视图，不能导入文件'); return; }
-    const result = await window.electronAPI.projectFileOperation(workspacePath, project.status, project.name, 'import', externalPaths, currentRelativePath);
+    const result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'import', externalPaths, currentRelativePath);
     if (result.cancelled) { onNotice('导入已取消'); return; }
     if (!result.success) { onNotice(`导入失败：${result.error || '未知错误'}`); return; }
     onNotice(`已导入 ${result.count} 个项目`);
@@ -4898,7 +4884,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       if (!selected) return;
       sourceProgressId = selected;
     }
-    const result = await window.electronAPI.adoptVersionTreeFolder(workspacePath, project.status, {
+    const result = await projectWorkspaceClient.adoptVersionTreeFolder(workspacePath, project.status, {
       projectName: project.name,
       relativePath: entry.relativePath,
       mode,
@@ -5204,8 +5190,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             active={active && panel === 'negative-import'}
             deleteSourceAfterImport={importDefaults.deleteSourceAfterImport}
             generateJpgFromRaw={importDefaults.generateJpgFromRaw}
-            onChooseSourceFiles={() => void window.electronAPI.chooseImportSourceFiles().then(result => { if (!result.cancelled && result.paths.length) setNegativeSourcePaths(result.paths); })}
-            onChooseSourceFolder={() => void window.electronAPI.chooseWorkspaceDirectory('').then(result => { if (!result.cancelled && result.path) setNegativeSourcePaths([result.path]); })}
+            onChooseSourceFiles={() => void projectWorkspaceClient.chooseImportSourceFiles().then(result => { if (!result.cancelled && result.paths.length) setNegativeSourcePaths(result.paths); })}
+            onChooseSourceFolder={() => void projectWorkspaceClient.chooseWorkspaceDirectory('').then(result => { if (!result.cancelled && result.path) setNegativeSourcePaths([result.path]); })}
             onBusyChange={setNegativeImportBusy}
             onImportConfigChange={onImportConfigChange}
             onImportComplete={() => { void completeNegativeImport(); }}
@@ -5632,7 +5618,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
       : {});
     onTechnicalMetadata({});
     if (!entry) return () => { active = false; };
-    const unsubscribe = window.electronAPI.onThumbnailStateChanged(update => {
+    const unsubscribe = projectWorkspaceClient.onThumbnailStateChanged(update => {
       if (update.filePath.toLocaleLowerCase() !== entry.path.toLocaleLowerCase()) return;
       if (update.state === 'STALE') {
         setLoading(true);
@@ -5652,7 +5638,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
       setLoading(false);
     });
     setLoading(true);
-    requestThumbnail(() => window.electronAPI.getMediaThumbnail(entry.path, entry.kind as 'image' | 'raw' | 'video', cacheConfig, 1600, 0, -1))
+    requestThumbnail(() => projectWorkspaceClient.getMediaThumbnail(entry.path, entry.kind as 'image' | 'raw' | 'video', cacheConfig, 1600, 0, -1))
       .then(result => {
         if (!active) return;
         if (result.success) {
@@ -5669,7 +5655,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
         setLoading(false);
         onTechnicalMetadata({ unavailable: true });
       });
-    return () => { active = false; unsubscribe(); void window.electronAPI.cancelMediaThumbnail(entry.path, 1600); };
+    return () => { active = false; unsubscribe(); void projectWorkspaceClient.cancelMediaThumbnail(entry.path, 1600); };
   }, [entry?.path, entry?.updatedAt, cacheConfig.directory, cacheConfig.maxSizeGB]);
 
   useEffect(() => {
@@ -5684,14 +5670,14 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
     const loadingTimer = window.setTimeout(() => {
       if (active) setOriginalLoading(true);
     }, 180);
-    window.electronAPI.getMediaOriginal(entry.path, entry.kind, cacheConfig).then(result => {
+    projectWorkspaceClient.getMediaOriginal(entry.path, entry.kind, cacheConfig).then(result => {
       if (!active) return;
       if (!result.success || !result.mediaUrl) {
         window.clearTimeout(loadingTimer);
         setOriginalLoading(false);
         setOriginalLoadError(result.error || '原图加载失败，当前显示预览图');
         console.warn('Original image preview failed', result.error || 'unknown error');
-        window.electronAPI.trackTelemetry('media_preview_failed', { media_kind: entry.kind, reason: 'missing_or_unavailable' });
+        projectWorkspaceClient.trackTelemetry('media_preview_failed', { media_kind: entry.kind, reason: 'missing_or_unavailable' });
         return;
       }
       originalImage = new Image();
@@ -5714,7 +5700,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
         setOriginalLoading(false);
         setOriginalLoadError('原图解码失败，当前显示预览图');
         console.warn('Original image decode failed');
-        window.electronAPI.trackTelemetry('media_preview_failed', { media_kind: entry.kind, reason: 'decode_failed' });
+        projectWorkspaceClient.trackTelemetry('media_preview_failed', { media_kind: entry.kind, reason: 'decode_failed' });
       };
       originalImage.src = result.mediaUrl;
     }).catch(error => {
@@ -5723,7 +5709,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
         setOriginalLoading(false);
         setOriginalLoadError('原图加载失败，当前显示预览图');
         console.warn('Original image preview request failed', error instanceof Error ? error.message : String(error));
-        window.electronAPI.trackTelemetry('media_preview_failed', { media_kind: entry.kind, reason: 'request_failed' });
+        projectWorkspaceClient.trackTelemetry('media_preview_failed', { media_kind: entry.kind, reason: 'request_failed' });
       }
     });
     return () => {
@@ -5769,10 +5755,10 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
     if (!fullscreen) return;
     setFullscreenControlsVisible(true);
     fullscreenControlsTimerRef.current = window.setTimeout(() => setFullscreenControlsVisible(false), 1800);
-    void window.electronAPI.setWindowFullscreen(true);
+    void projectWorkspaceClient.setWindowFullscreen(true);
     return () => {
       window.clearTimeout(fullscreenControlsTimerRef.current);
-      void window.electronAPI.setWindowFullscreen(false);
+      void projectWorkspaceClient.setWindowFullscreen(false);
     };
   }, [fullscreen]);
   const revealFullscreenControls = () => {
@@ -5945,7 +5931,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
     setAdvancedPlaybackFailed(true);
     setLoading(Boolean(resource.mediaUrl));
     console.warn('Advanced video decoder failed; falling back to Chromium playback', message);
-    window.electronAPI.trackTelemetry('media_preview_failed', { media_kind: 'video', reason: 'advanced_decoder_fallback' });
+    projectWorkspaceClient.trackTelemetry('media_preview_failed', { media_kind: 'video', reason: 'advanced_decoder_fallback' });
   };
   const previewVideoTrimTime = (requestedTime: number) => {
     const time = Math.max(0, Math.min(videoDuration, requestedTime));
@@ -6273,7 +6259,7 @@ const FolderCoverMedia = ({ entry, cacheConfig, requestedSize, queueOrder }: {
   }, [entry.path, entry.updatedAt, entry.previewUrl]);
   useEffect(() => {
     let active = true;
-    window.electronAPI.getMediaThumbnail(entry.path, entry.kind as 'image' | 'raw' | 'video', cacheConfig, requestedSize, 2, queueOrder)
+    projectWorkspaceClient.getMediaThumbnail(entry.path, entry.kind as 'image' | 'raw' | 'video', cacheConfig, requestedSize, 2, queueOrder)
       .then(result => { if (active && result.previewUrl) setUrl(result.previewUrl); });
     return () => { active = false; };
   }, [entry.path, entry.kind, cacheConfig.directory, cacheConfig.maxSizeGB, requestedSize, queueOrder, retryVersion]);
@@ -6374,7 +6360,7 @@ const SystemFileIcon = ({ filePath, size }: { filePath: string; size: number }) 
     const extension = fileName.includes('.') ? `.${fileName.split('.').pop()?.toLowerCase()}` : fileName.toLowerCase();
     let request = systemFileIconCache.get(extension);
     if (!request) {
-      request = window.electronAPI.getFileIcon(filePath).then(result => result.success ? result.dataUrl : undefined);
+      request = projectWorkspaceClient.getFileIcon(filePath).then(result => result.success ? result.dataUrl : undefined);
       systemFileIconCache.set(extension, request);
     }
     let active = true;
@@ -6407,7 +6393,7 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
   const hoverRatioRef = useRef(0);
   const hoverSeekFrameRef = useRef<number>();
   const previewSourceKeyRef = useRef(`${entry.path}|${entry.updatedAt}`);
-  const thumbnailRequestRef = useRef<{ key: string; promoted: boolean; promise: ReturnType<typeof window.electronAPI.getMediaThumbnail> }>();
+  const thumbnailRequestRef = useRef<{ key: string; promoted: boolean; promise: ReturnType<typeof projectWorkspaceClient.getMediaThumbnail> }>();
   const failedPreviewLoadCountRef = useRef(0);
   useEffect(() => {
     failedPreviewLoadCountRef.current = 0;
@@ -6448,16 +6434,16 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
       return current.promise.then(result => {
         if (priority === 0 && !current.promoted && (result.state === 'QUEUED' || result.state === 'GENERATING')) {
           current.promoted = true;
-          return window.electronAPI.getMediaThumbnail(entry.path, entry.kind as 'image' | 'raw' | 'video', cacheConfig, requestedSize, 0, queueOrder);
+          return projectWorkspaceClient.getMediaThumbnail(entry.path, entry.kind as 'image' | 'raw' | 'video', cacheConfig, requestedSize, 0, queueOrder);
         }
         return result;
       });
     }
-    const promise = window.electronAPI.getMediaThumbnail(entry.path, entry.kind as 'image' | 'raw' | 'video', cacheConfig, requestedSize, priority, queueOrder);
+    const promise = projectWorkspaceClient.getMediaThumbnail(entry.path, entry.kind as 'image' | 'raw' | 'video', cacheConfig, requestedSize, priority, queueOrder);
     thumbnailRequestRef.current = { key, promoted: priority === 0, promise };
     return promise;
   };
-  const captureVideoResource = (result: Awaited<ReturnType<typeof window.electronAPI.getMediaThumbnail>>) => {
+  const captureVideoResource = (result: Awaited<ReturnType<typeof projectWorkspaceClient.getMediaThumbnail>>) => {
     if (entry.kind !== 'video') return;
     if (result.mediaUrl) setVideoUrl(result.mediaUrl);
     if (result.importedVideoWithoutPreview) setVideoUnavailable(true);
@@ -6628,7 +6614,7 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
     let pollTimer: number | undefined;
     const trackSystemPointer = async () => {
       const [cursorPoint, bounds] = await Promise.all([
-        window.electronAPI.getCursorScreenPoint().catch(() => null),
+        projectWorkspaceClient.getCursorScreenPoint().catch(() => null),
         Promise.resolve(container.current?.getBoundingClientRect()),
       ]);
       if (!active) return;

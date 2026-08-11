@@ -28,6 +28,7 @@ import { rendererErrorFingerprint, rendererErrorNoticeSummary, shouldReportRende
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
 import { UsagePreferencesOnboarding, USAGE_PREFERENCES_VERSION } from './features/settings/UsagePreferencesOnboarding';
 import type { SettingsSection } from './features/settings/SettingsFeature';
+import { componentIdForSettingsSection } from './features/plugins/plugin-contributions';
 import { DashboardView, MatchView, VideoSplitView, type ImportCompletion } from './features/tools/ToolViews';
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
 import { BUILT_IN_PROJECT_STATUSES, PROJECT_TOOLBAR_ACTION_IDS, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
@@ -282,11 +283,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (componentsLoading) return;
-    const componentIdBySection: Partial<Record<SettingsSection, string>> = {
-      'team-retouch': 'team-retouch',
-      'video-playback-mpv': 'video-playback-mpv',
-    };
-    const componentId = componentIdBySection[settingsSection];
+    const componentId = componentIdForSettingsSection(settingsSection);
     if (componentId && !installedComponentIds.has(componentId)) setSettingsSection('components');
   }, [componentsLoading, installedComponentIds, settingsSection]);
 
