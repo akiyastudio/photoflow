@@ -644,7 +644,7 @@ const registerSystemIpc = context => {
     const writesImportFiles = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage);
     const tracksImportTask = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage);
     const cancellableClassify = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage);
-    const cancellable = (scriptName === 'catch.py' || scriptName === 'ffmpeg_transcode.py' || cancellableClassify) && /^[a-z0-9-]{8,80}$/i.test(normalizedRequestId);
+    const cancellable = (scriptName === 'catch.py' || scriptName === 'cut_video.py' || scriptName === 'ffmpeg_transcode.py' || cancellableClassify) && /^[a-z0-9-]{8,80}$/i.test(normalizedRequestId);
     const cancelFile = cancellable ? path.join(app.getPath('temp'), `photoflow-cancel-${normalizedRequestId}.flag`) : '';
     let runtimeArgs = cancellable ? [...args, '--cancel_file', cancelFile] : [...args];
     if (scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage)) {
@@ -1089,11 +1089,19 @@ const registerSystemIpc = context => {
 
   ipcMain.handle('choose-video-files', async () => {
     const choice = await dialog.showOpenDialog(mainWindow, {
-      title: '选择要转码的视频',
+      title: '选择视频文件',
       properties: ['openFile', 'multiSelections'],
       filters: [{ name: '视频', extensions: ['mp4', 'mov', 'm4v', 'mkv', 'avi', 'webm', 'crm', 'mts', 'm2ts', 'ts'] }],
     });
     return choice.canceled ? { cancelled: true, paths: [] } : { paths: choice.filePaths };
+  });
+
+  ipcMain.handle('choose-video-folder', async () => {
+    const choice = await dialog.showOpenDialog(mainWindow, {
+      title: '选择包含视频的文件夹',
+      properties: ['openDirectory'],
+    });
+    return choice.canceled ? { cancelled: true } : { path: choice.filePaths[0] };
   });
   
   ipcMain.handle('photoshop-status', async () => {

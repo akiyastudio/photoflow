@@ -95,5 +95,15 @@ const { pathToFileURL } = require('url');
   ], [], 'image'), '', 'ambiguous original sources require an explicit user choice');
   const persistedWorkflowEdge = { id: 'workflow', projectId: 'p', sourceProgressId: 'team-workflow', targetProgressId: 'v1', edgeKind: 'workflow_input', createdAt: 0, updatedAt: 0 };
   assert.deepStrictEqual(model.defaultWorkflowInputIds([...semanticNodes, v1], [persistedWorkflowEdge], 'raw-semantic', 'v1'), ['team-workflow'], 'modify mode reflects persisted workflow_input edges');
+  assert.deepStrictEqual(
+    model.workflowInputIdsForRelationChange([...semanticNodes, v1], [persistedWorkflowEdge], 'v1', 'raw-semantic'),
+    ['team-workflow', 'image-selection'],
+    'manually connecting RAW to V1 atomically preserves workflow inputs and adds the matching selection input',
+  );
+  assert.deepStrictEqual(
+    model.workflowInputIdsForRelationChange([...semanticNodes, v1], [persistedWorkflowEdge], 'v1', 'v1'),
+    ['team-workflow'],
+    'connecting to another progress removes selection inputs that belong to the original source',
+  );
   console.log('versioning V2 production model tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

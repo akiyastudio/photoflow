@@ -1311,7 +1311,7 @@ const sourceFileDetails = (sourcePath: string) => {
   return { name, extension, parent: parts.slice(-2).join(' / ') };
 };
 
-const SelectedToolSourceList = ({ paths, title, itemLabel, description, loading = false }: { paths: string[]; title: string; itemLabel: string; description: string; loading?: boolean }) => (
+const SelectedToolSourceList = ({ paths, title, itemLabel, description, loading = false, disabled = false, onRemove }: { paths: string[]; title: string; itemLabel: string; description: string; loading?: boolean; disabled?: boolean; onRemove?: (path: string) => void }) => (
   <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
     <header className="flex items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3">
       <div className="min-w-0 flex-1">
@@ -1326,6 +1326,7 @@ const SelectedToolSourceList = ({ paths, title, itemLabel, description, loading 
         return <div key={sourcePath} className="flex items-center gap-3 px-4 py-2.5">
           <span className="flex h-8 w-10 shrink-0 items-center justify-center rounded-md bg-blue-50 text-[10px] font-bold text-blue-700">{details.extension}</span>
           <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-slate-700" title={details.name}>{details.name}</span><span className="mt-0.5 block truncate text-[10px] text-slate-400" title={details.parent}>{details.parent || '当前目录'} · 等待</span></span>
+          {onRemove && <button type="button" disabled={disabled || loading} onClick={() => onRemove(sourcePath)} title={`移除 ${details.name}`} className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-40"><X size={14}/></button>}
         </div>;
       })}
     </div> : <div className="flex min-h-24 items-center justify-center px-4 py-5 text-xs text-slate-400">{loading ? '正在建立列表…' : '没有可处理的文件'}</div>}
@@ -1659,17 +1660,41 @@ const ResearchView = ({
   hasTxtFiles?: boolean;
 }) => {
   const { logs, isRunning, progress, statusMsg, start } = usePythonTask('research.py', '准备就绪');
-  const [targetPath, setTargetPath] = useState(initialTargetPath);
+  const initialTargetKey = (initialTargetPaths.length ? initialTargetPaths : initialTargetPath ? [initialTargetPath] : []).join('\n');
+  const [targetPaths, setTargetPaths] = useState<string[]>(() => initialTargetKey.split('\n').filter(Boolean));
   const [organizeData, setOrganizeData] = useState(true);
 
   useEffect(() => {
-    setTargetPath(initialTargetPath);
+    setTargetPaths([...new Set(initialTargetKey.split('\n').filter(Boolean))]);
     setOrganizeData(true);
-  }, [initialTargetPath]);
+  }, [initialTargetKey]);
+
+  const appendTargets = (paths: string[]) => {
+    setTargetPaths(current => [...new Set([...current, ...paths.map(value => value.trim()).filter(Boolean)])].slice(0, 120));
+  };
+  const chooseFiles = async () => {
+    if (isRunning || sourcesLoading) return;
+    const result = await window.electronAPI.chooseVideoFiles();
+    if (!result.cancelled) appendTargets(result.paths);
+  };
+  const chooseFolder = async () => {
+    if (isRunning || sourcesLoading) return;
+    const result = await window.electronAPI.chooseVideoFolder();
+    if (!result.cancelled && result.path) appendTargets([result.path]);
+  };
+  const addDroppedTargets = (event: React.DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (isRunning || sourcesLoading) return;
+    appendTargets(Array.from(event.dataTransfer.files).map(file => {
+      try { return window.electronAPI.getPathForFile(file); }
+      catch { return ''; }
+    }));
+  };
 
   const runAnalysis = () => {
     const args = [
-      '--path', targetPath,
+      ...targetPaths.flatMap(path => ['--path', path]),
       '--sensitivity', config.sensitivity,
       '--min_duration', config.minDuration.toString()
     ];
@@ -1684,7 +1709,12 @@ const ResearchView = ({
         <div className="space-y-2">
           <p className="mt-2 text-gray-600">对视频的分镜执行转场识别，并从每个分镜中挑选清晰的画面导出。</p>
         </div>
-        <SelectedToolSourceList paths={initialTargetPaths} loading={sourcesLoading} title="已选择" itemLabel="视频" description="按分镜识别为每段导出清晰画面"/>
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase text-slate-500">输入范围</p><p className="mt-1 text-xs text-slate-500">可混合添加文件夹、单个视频或多个视频，文件夹会递归扫描。</p></div><div className="flex items-center gap-2"><button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseFolder()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><FolderInput size={14}/>添加文件夹</button><button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseFiles()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><Plus size={14}/>添加视频</button></div></div>
+          <div onDrop={addDroppedTargets} onDragOver={event => { event.preventDefault(); event.stopPropagation(); }} className={!targetPaths.length ? 'rounded-xl border border-dashed border-slate-300 bg-slate-50/70 p-2' : ''}>
+            {targetPaths.length ? <SelectedToolSourceList paths={targetPaths} loading={sourcesLoading} disabled={isRunning} onRemove={path => setTargetPaths(current => current.filter(value => value !== path))} title="已选择" itemLabel="项" description="文件夹与视频将按列表顺序批量处理"/> : <button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseFiles()} className="flex min-h-28 w-full flex-col items-center justify-center gap-2 rounded-lg text-sm text-slate-500 hover:bg-white disabled:opacity-50"><FolderInput size={24} className="text-slate-400"/><span>拖入文件或文件夹，或点击选择视频</span></button>}
+          </div>
+        </section>
         <div className="grid gap-4 md:grid-cols-2">
           <div>
             <label className="form-label">检测灵敏度</label>
@@ -1706,9 +1736,9 @@ const ResearchView = ({
           idleMessage={statusMsg}
           action={<button
                onClick={runAnalysis}
-               disabled={isRunning || sourcesLoading || !targetPath.trim() || !initialTargetPaths.length}
+               disabled={isRunning || sourcesLoading || !targetPaths.length}
                className={`px-6 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
-                 isRunning || sourcesLoading || !initialTargetPaths.length
+                 isRunning || sourcesLoading || !targetPaths.length
                   ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none'
                   : 'bg-blue-600 text-white hover:bg-blue-500 shadow-md shadow-blue-500/20'
                }`}
@@ -2117,40 +2147,41 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
   </div>;
 };
 
-const VideoSplitView = ({ embedded = false, initialTargetPath = '' }: { embedded?: boolean; initialTargetPath?: string }) => {
-  const [videoPath, setVideoPath] = useState(initialTargetPath);
-  const { logs, isRunning, progress, statusMsg, start } = usePythonTask('cut_video.py', '等待输入...');
+const VideoSplitView = ({ embedded = false, initialTargetPath = '', initialTargetPaths = [] }: { embedded?: boolean; initialTargetPath?: string; initialTargetPaths?: string[] }) => {
+  const initialTargetKey = (initialTargetPaths.length ? initialTargetPaths : initialTargetPath ? [initialTargetPath] : []).join('\n');
+  const [targetPaths, setTargetPaths] = useState<string[]>(() => initialTargetKey.split('\n').filter(Boolean));
+  const { logs, isRunning, isCancelling, progress, statusMsg, start, cancel } = usePythonTask('cut_video.py', '等待输入...');
 
   useEffect(() => {
-    if (!isRunning) setVideoPath(initialTargetPath);
-  }, [initialTargetPath, isRunning]);
+    setTargetPaths([...new Set(initialTargetKey.split('\n').filter(Boolean))]);
+  }, [initialTargetKey]);
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+  const appendTargets = (paths: string[]) => {
+    setTargetPaths(current => [...new Set([...current, ...paths.map(value => value.trim()).filter(Boolean)])].slice(0, 120));
   };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      // @ts-ignore
-      const path = e.dataTransfer.files[0].path;
-      if (path) {
-        setVideoPath(path);
-      }
-    }
+  const handleDrop = (event: React.DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (isRunning) return;
+    appendTargets(Array.from(event.dataTransfer.files).map(file => {
+      try { return window.electronAPI.getPathForFile(file); }
+      catch { return ''; }
+    }));
   };
 
   const startSplit = () => {
-    if (!videoPath.trim()) return;
-    start([videoPath], '正在启动处理...');
+    if (!targetPaths.length) return;
+    start(targetPaths, '正在扫描视频...');
   };
-  const chooseVideo = async () => {
+  const chooseVideos = async () => {
     if (isRunning) return;
     const result = await window.electronAPI.chooseVideoFiles();
-    if (!result.cancelled && result.paths.length) setVideoPath(result.paths[0]);
+    if (!result.cancelled) appendTargets(result.paths);
+  };
+  const chooseFolder = async () => {
+    if (isRunning) return;
+    const result = await window.electronAPI.chooseVideoFolder();
+    if (!result.cancelled && result.path) appendTargets([result.path]);
   };
 
   return (
@@ -2166,29 +2197,30 @@ const VideoSplitView = ({ embedded = false, initialTargetPath = '' }: { embedded
           </p>
         </div>
 
-        <div onDrop={handleDrop} onDragOver={handleDragOver}>
-          <SelectedToolSourceList paths={videoPath ? [videoPath] : []} title="已选择" itemLabel="视频" description="原视频保留；分段文件写入原视频所在目录"/>
+        <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase text-slate-500">输入范围</p><p className="mt-1 text-xs text-slate-500">可混合添加文件夹、单个视频或多个视频，文件夹会递归扫描。</p></div><div className="flex items-center gap-2"><button type="button" disabled={isRunning} onClick={() => void chooseFolder()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><FolderInput size={14}/>添加文件夹</button><button type="button" disabled={isRunning} onClick={() => void chooseVideos()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><Plus size={14}/>添加视频</button>{targetPaths.length > 0 && <button type="button" disabled={isRunning} onClick={() => setTargetPaths([])} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 disabled:opacity-50"><Trash2 size={14}/>清空</button>}</div></div>
+        <div onDrop={handleDrop} onDragOver={event => { event.preventDefault(); event.stopPropagation(); }} className={!targetPaths.length ? 'rounded-xl border border-dashed border-slate-300 bg-slate-50/70 p-2' : ''}>
+          {targetPaths.length ? <SelectedToolSourceList paths={targetPaths} disabled={isRunning} onRemove={path => setTargetPaths(current => current.filter(value => value !== path))} title="已选择" itemLabel="项" description="原视频保留；各视频的分段写入其所在目录"/> : <button type="button" disabled={isRunning} onClick={() => void chooseVideos()} className="flex min-h-28 w-full flex-col items-center justify-center gap-2 rounded-lg text-sm text-slate-500 hover:bg-white disabled:opacity-50"><FolderInput size={24} className="text-slate-400"/><span>拖入文件或文件夹，或点击选择视频</span></button>}
         </div>
 
-        <div className="grid gap-3 md:grid-cols-2"><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">分段大小</span><span className="mt-1 block text-sm font-bold text-slate-700">约 3.95 GB（固定）</span></label><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">输出名称</span><span className="mt-1 block truncate font-mono text-sm font-bold text-slate-700">{videoPath ? `${videoPath.split(/[\\/]/).pop()?.replace(/(\.[^.]+)$/u, '_part001$1')}` : '视频名_part001.mp4'}</span></label></div>
+        <div className="grid gap-3 md:grid-cols-2"><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">分段大小</span><span className="mt-1 block text-sm font-bold text-slate-700">约 3.95 GB（固定）</span></label><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">输出名称</span><span className="mt-1 block truncate font-mono text-sm font-bold text-slate-700">{targetPaths.length === 1 ? `${targetPaths[0].split(/[\\/]/).pop()?.replace(/(\.[^.]+)$/u, '_part001$1')}` : targetPaths.length > 1 ? `按 ${targetPaths.length} 个输入分别生成 _part001` : '视频名_part001.mp4'}</span></label></div>
 
         <TaskProgress
           logs={logs}
           progress={progress}
           isRunning={isRunning}
           idleMessage={statusMsg}
-          action={<div className="flex items-center gap-2"><button type="button" disabled={isRunning} onClick={() => void chooseVideo()} className="dialog-secondary px-4 py-2.5 text-sm disabled:opacity-50">重新选择</button><button
-            onClick={startSplit}
-            disabled={!videoPath || isRunning}
+          action={<button
+            onClick={isRunning ? () => void cancel() : startSplit}
+            disabled={!targetPaths.length || isCancelling}
             className={`px-8 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
-              isRunning || !videoPath
+              !targetPaths.length || isCancelling
                 ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none'
-                : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20'
+                : isRunning ? 'bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-500/20' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20'
             }`}
           >
-            {isRunning ? <Loader2 className="animate-spin" size={18} /> : <Scissors size={18} fill="currentColor" />}
-            {isRunning ? '切割中...' : '开始切割'}
-          </button></div>}
+            {isCancelling ? <Loader2 className="animate-spin" size={18}/> : isRunning ? <X size={18}/> : <Scissors size={18} fill="currentColor"/>}
+            {isCancelling ? '正在取消…' : isRunning ? '取消切割' : `开始切割${targetPaths.length > 1 ? `（${targetPaths.length} 项）` : ''}`}
+          </button>}
         />
       </div>
 

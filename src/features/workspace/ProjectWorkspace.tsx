@@ -16,7 +16,7 @@ import { ConverterView, ImportCard, MatchView, ResearchView, ScreenshotMainImage
 import { PROJECT_FILE_BROWSER_CONTEXT } from '../file-browser/browser-context';
 import type { FileBrowserContext } from '../file-browser/browser-context';
 import { normalizeProjectCategoryOrder, PROJECT_TOOLBAR_ACTION_IDS, projectStatusLabel } from '../../types';
-import type { AppConfig, ComponentStatus, LegacySelectionRelationRepair, MediaMetadataField, ProgressFolder, ProjectFileEntry, ProjectFileListFilter, ProjectFileSortField, ProjectFilterScope, ProjectToolbarActionId, ShellNewFileType, ThumbnailState, VersionBatchFileOperation, VersionGraphEdge, WorkspaceProject } from '../../types';
+import type { AppConfig, ComponentStatus, MediaMetadataField, ProgressFolder, ProjectFileEntry, ProjectFileListFilter, ProjectFileSortField, ProjectFilterScope, ProjectToolbarActionId, ShellNewFileType, ThumbnailState, VersionBatchFileOperation, VersionGraphEdge, WorkspaceProject } from '../../types';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
 import { PanelTaskScope, useTaskCenter } from '../background-tasks/TaskCenter';
 import { isPanelTaskRestoreForPage, panelTaskSessionKey, type PanelTaskRestoreDetail } from '../background-tasks/panel-task-session-model';
@@ -30,8 +30,7 @@ import { collectProgressSubtree, inspectProgressRelations } from './progress-tre
 import { TrackingConfirmationPanel } from '../versioning/TrackingConfirmationPanel';
 import { ProgressPairPreview as SharedProgressPairPreview } from '../versioning/ProgressPairPreview';
 import { VersionProgressPanel, type VersionProgressDraft } from '../versioning/VersionProgressPanel';
-import { LegacySelectionRepairNotice } from '../versioning/LegacySelectionRepairNotice';
-import { defaultMainParentId, defaultWorkflowInputIds, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressRelationChangeError, progressTrackingAction, progressTrackingActionLabel, selectableVersionParents, trackingStateLabel, versionTreeNodeBadgeLabel, type VersionRelationKind } from '../versioning/versioning-v2-model';
+import { defaultMainParentId, defaultWorkflowInputIds, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressRelationChangeError, progressTrackingAction, progressTrackingActionLabel, selectableVersionParents, trackingStateLabel, versionTreeNodeBadgeLabel, workflowInputIdsForRelationChange, type VersionRelationKind } from '../versioning/versioning-v2-model';
 import { ProgressRelationMutationQueue } from '../versioning/progress-relation-mutation-queue';
 import { metadataFieldLabel, metadataGroupLabel } from '../metadata/metadata-labels';
 import { metadataGroupDependencyKey, previewMetadataFieldsForEntry, reconcileExpandedMetadataGroups } from '../metadata/metadata-pane-model';
@@ -111,7 +110,7 @@ const TOOL_MODAL_DETAILS: Record<string, { description: string; icon: React.Reac
   match: { description: '按完整文件名预检，确认后再复制。', icon: <FileText size={18}/> },
   research: { description: '识别视频转场并挑选清晰画面。', icon: <Video size={18}/> },
   'video-transcode': { description: '转换视频封装、编码、画质与音频。', icon: <Gauge size={18}/> },
-  'video-split': { description: '将单个大型视频无损切成约 3.95 GB 的连续分段。', icon: <Cut size={18}/> },
+  'video-split': { description: '批量将视频无损切成约 3.95 GB 的连续分段。', icon: <Cut size={18}/> },
   converter: { description: '批量将 PNG 转换为 JPG。', icon: <ImageIcon size={18}/> },
   'screenshot-main-image': { description: '先分析候选范围，确认后再生成主图。', icon: <Crop size={18}/> },
   'office-extract': { description: '从 Office Open XML 文档中提取内嵌图片，并在文档旁生成结果文件夹。', icon: <FileImage size={18}/> },
@@ -577,8 +576,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [folders, setFolders] = useState<Array<{ name: string; path: string; updatedAt: number }>>([]);
   const [progressFolders, setProgressFolders] = useState<ProgressFolder[]>([]);
   const [versionGraphEdges, setVersionGraphEdges] = useState<VersionGraphEdge[]>([]);
-  const [legacySelectionRepairs, setLegacySelectionRepairs] = useState<LegacySelectionRelationRepair[]>([]);
-  const [legacySelectionRepairBusyIds, setLegacySelectionRepairBusyIds] = useState<string[]>([]);
   const [draggingChildId, setDraggingChildId] = useState('');
   const [hoverParentId, setHoverParentId] = useState('');
   const [pendingRelationChange, setPendingRelationChange] = useState<{ childProgressId: string; parentProgressId: string | null } | null>(null);
@@ -835,7 +832,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [videoTranscodeTargets, setVideoTranscodeTargets] = useState<string[]>([]);
   const [videoTranscodeSourceFolders, setVideoTranscodeSourceFolders] = useState<string[]>([]);
   const [videoTranscodeCollecting, setVideoTranscodeCollecting] = useState(false);
-  const [videoSplitTarget, setVideoSplitTarget] = useState('');
+  const [videoSplitTargets, setVideoSplitTargets] = useState<string[]>([]);
   const [officeExtractEntries, setOfficeExtractEntries] = useState<ProjectFileEntry[]>([]);
   const [officeExtractBusy, setOfficeExtractBusy] = useState(false);
   const [officeExtractResult, setOfficeExtractResult] = useState<{ documents: number; images: number; failed: number; outputFolders: string[] } | null>(null);
@@ -1121,7 +1118,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       progressFoldersRef.current = result.progressFolders;
       setProgressFolders(result.progressFolders);
       setVersionGraphEdges(result.graphEdges || []);
-      setLegacySelectionRepairs(result.legacySelectionRelationRepairs || []);
       return result.progressFolders;
     }
     onNotice(`读取版本进度失败：${result.error || '未知错误'}`);
@@ -1163,48 +1159,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       : await window.electronAPI.deleteVersionGraphEdge(workspacePath, request);
     if (!result.success) throw new Error(result.error || '无法更新版本图关系');
     await loadProgressFolders();
-  };
-  const repairLegacySelectionRelation = async (progressId: string, sourceProgressId: string) => {
-    if (legacySelectionRepairBusyIds.includes(progressId)) return;
-    setLegacySelectionRepairBusyIds(current => current.includes(progressId) ? current : [...current, progressId]);
-    try {
-      const result = await window.electronAPI.repairLegacySelectionRelation(workspacePath, project.name, { progressId, sourceProgressId });
-      if (!result.success) {
-        onNotice(`修复旧选片关系失败：${result.error || '未知错误'}`, 7000);
-        await loadProgressFolders();
-        return;
-      }
-      await loadProgressFolders();
-      onNotice('旧选片关系已修复');
-    } catch (error) {
-      onNotice(`修复旧选片关系失败：${error instanceof Error ? error.message : '未知错误'}`, 7000);
-      await loadProgressFolders();
-    } finally {
-      setLegacySelectionRepairBusyIds(current => current.filter(id => id !== progressId));
-    }
-  };
-  const keepLegacySelectionIndependent = async (progressId: string) => {
-    if (legacySelectionRepairBusyIds.includes(progressId)) return;
-    const repair = legacySelectionRepairs.find(item => item.progressId === progressId);
-    if (!repair) return;
-    const confirmed = await appDialog.confirm({
-      title: '保留为独立节点？',
-      message: `“${repair.legacyName}”将保持当前独立状态，不连接 RAW，也不再显示这条旧数据迁移提示。物理文件夹不会移动、合并或删除。`,
-      confirmLabel: '保留为独立节点',
-    });
-    if (!confirmed) return;
-    setLegacySelectionRepairBusyIds(current => current.includes(progressId) ? current : [...current, progressId]);
-    try {
-      const result = await window.electronAPI.repairLegacySelectionRelation(workspacePath, project.name, { progressId, action: 'keep-independent' });
-      if (!result.success) throw new Error(result.error || '未知错误');
-      await loadProgressFolders();
-      onNotice('旧选片节点已保留为独立节点');
-    } catch (error) {
-      onNotice(`保留独立节点失败：${error instanceof Error ? error.message : '未知错误'}`, 7000);
-      await loadProgressFolders();
-    } finally {
-      setLegacySelectionRepairBusyIds(current => current.filter(id => id !== progressId));
-    }
   };
   const requestSupplementalEdgeCreate = async (sourceProgressId: string, targetProgressId: string, edgeKind: 'media_companion' | 'derived_preview' | 'workflow_input') => {
     const source = progressFoldersRef.current.find(folder => folder.id === sourceProgressId);
@@ -1298,14 +1252,28 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!child) { onNotice('要修改的版本节点不存在，请刷新后重试'); return; }
     const relationError = progressRelationChangeError(progressFoldersRef.current, childProgressId, parentProgressId);
     if (relationError) { onNotice(relationError, 5000); cancelRelationEdit(); return; }
-    if ((child.parentProgressId || null) === parentProgressId) { onNotice('版本关系没有变化'); cancelRelationEdit(); return; }
+    const desiredWorkflowInputs = child.nodeRole === 'progress'
+      ? workflowInputIdsForRelationChange(progressFoldersRef.current, versionGraphEdges, childProgressId, parentProgressId)
+      : [];
+    const existingWorkflowInputSet = new Set(versionGraphEdges
+      .filter(edge => edge.edgeKind === 'workflow_input' && edge.targetProgressId === childProgressId)
+      .map(edge => edge.sourceProgressId));
+    const needsWorkflowInputRepair = desiredWorkflowInputs.length !== existingWorkflowInputSet.size
+      || desiredWorkflowInputs.some(id => !existingWorkflowInputSet.has(id));
+    if ((child.parentProgressId || null) === parentProgressId && !needsWorkflowInputRepair) {
+      onNotice(parent
+        ? `“${child.displayName}”已经连接到“${parent.displayName}”；无需重复连接。如需重新比较内容，请刷新该版本的版本跟踪。`
+        : '该节点已经是独立根节点，无需重复断开。', 6000);
+      cancelRelationEdit();
+      return;
+    }
     const request = { childProgressId, parentProgressId };
     setPendingRelationChange(request);
     const confirmed = await appDialog.confirm({
       title: '确认修改版本关系？',
       message: child.nodeRole === 'selection'
         ? `将“${child.displayName}”的来源改为“${parent?.displayName || '未知节点'}”。只修改版本关系，不会重新复制选片内容。`
-        : parent ? `将“${child.displayName}”连接到“${parent.displayName}”下面。不会移动或重命名物理文件夹。` : `将“${child.displayName}”断开为独立根节点。不会移动或重命名物理文件夹。`,
+        : parent ? `将“${child.displayName}”连接到“${parent.displayName}”下面。保存后会按新来源重新比较已开启跟踪的版本；不会移动或重命名物理文件夹。` : `将“${child.displayName}”断开为独立根节点。不会移动或重命名物理文件夹。`,
       confirmLabel: '修改关系',
     });
     if (!confirmed) { cancelRelationEdit(); return; }
@@ -1340,17 +1308,59 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         let latestChild = progressFoldersRef.current.find(folder => folder.id === childProgressId);
         if (!latestChild) latestChild = (await loadProgressFolders()).find(folder => folder.id === childProgressId);
         if (!latestChild) throw new Error('要修改的版本节点不存在，请刷新后重试');
-        if ((latestChild.parentProgressId || null) === parentProgressId) return;
         const previousParentProgressId = latestChild.parentProgressId || null;
-        const result = await window.electronAPI.updateProgressRelation(workspacePath, project.name, {
+        const previousWorkflowInputProgressIds = versionGraphEdges
+          .filter(edge => edge.edgeKind === 'workflow_input' && edge.targetProgressId === childProgressId)
+          .map(edge => edge.sourceProgressId);
+        const nextWorkflowInputProgressIds = workflowInputIdsForRelationChange(
+          progressFoldersRef.current,
+          versionGraphEdges,
           childProgressId,
           parentProgressId,
-          expectedUpdatedAt: latestChild.updatedAt,
+        );
+        const applyProgressGraph = async (
+          currentChild: ProgressFolder,
+          nextParentProgressId: string | null,
+          workflowInputProgressIds: string[],
+        ) => window.electronAPI.registerProgressWithGraph(workspacePath, project.status, {
+          projectName: project.name,
+          progress: {
+            progressId: currentChild.id,
+            mediaKind: currentChild.mediaKind,
+            versionKey: currentChild.versionKey,
+            parentProgressId: nextParentProgressId || undefined,
+            displayName: currentChild.displayName,
+            relationKind: nextParentProgressId ? 'main' : undefined,
+            trackingEnabled: currentChild.trackingEnabled,
+            trackingState: currentChild.trackingEnabled ? 'stale' : 'disabled',
+            renameFromParent: currentChild.renameFromParent,
+            copyMissingFromParent: currentChild.copyMissingFromParent,
+          },
+          workflowInputProgressIds,
         });
+        const result = latestChild.nodeRole === 'progress'
+          ? await applyProgressGraph(latestChild, parentProgressId, nextWorkflowInputProgressIds)
+          : await window.electronAPI.updateProgressRelation(workspacePath, project.name, {
+            childProgressId,
+            parentProgressId,
+            expectedUpdatedAt: latestChild.updatedAt,
+          });
         if (!mutationQueue.isGenerationCurrent(mutationGeneration)) return;
         if (!result.success || !result.progressFolder) {
           if ((result.error || '').includes('stale_update')) await loadProgressFolders();
           throw new Error(result.error || '未知错误');
+        }
+        if (latestChild.nodeRole === 'progress') {
+          const committedEdges: VersionGraphEdge[] = 'edges' in result && Array.isArray(result.edges) ? result.edges : [];
+          const committedWorkflowInputIds = new Set(committedEdges
+            .filter(edge => edge.edgeKind === 'workflow_input' && edge.targetProgressId === childProgressId)
+            .map(edge => edge.sourceProgressId));
+          const graphWasPersisted = (result.progressFolder.parentProgressId || null) === parentProgressId
+            && nextWorkflowInputProgressIds.every(id => committedWorkflowInputIds.has(id));
+          if (!graphWasPersisted) {
+            await loadProgressFolders();
+            throw new Error('关系写入后校验失败，请刷新后重试');
+          }
         }
         const updatedFolder = result.progressFolder;
         setProgressFolders(current => {
@@ -1358,14 +1368,36 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           progressFoldersRef.current = next;
           return next;
         });
-        const applyParent = async (nextParentProgressId: string | null) => {
+        const applyParent = async (nextParentProgressId: string | null, workflowInputProgressIds: string[]) => {
           const currentChild = progressFoldersRef.current.find(folder => folder.id === childProgressId);
-          const changed = await window.electronAPI.updateProgressRelation(workspacePath, project.name, { childProgressId, parentProgressId: nextParentProgressId, expectedUpdatedAt: currentChild?.updatedAt });
+          if (!currentChild) throw new Error('要修改的版本节点不存在，请刷新后重试');
+          const changed = currentChild.nodeRole === 'progress'
+            ? await applyProgressGraph(currentChild, nextParentProgressId, workflowInputProgressIds)
+            : await window.electronAPI.updateProgressRelation(workspacePath, project.name, { childProgressId, parentProgressId: nextParentProgressId, expectedUpdatedAt: currentChild.updatedAt });
           if (!changed.success) throw new Error(changed.error || '无法更新版本关系');
           await loadProgressFolders();
         };
-        pushRelationHistory({ label: '修改版本父关系', undo: () => applyParent(previousParentProgressId), redo: () => applyParent(parentProgressId) });
-        onNotice('版本关系已更新');
+        pushRelationHistory({
+          label: '修改版本父关系',
+          undo: () => applyParent(previousParentProgressId, previousWorkflowInputProgressIds),
+          redo: () => applyParent(parentProgressId, nextWorkflowInputProgressIds),
+        });
+        if (updatedFolder.nodeRole === 'progress' && updatedFolder.trackingEnabled && parentProgressId) {
+          const started = await window.electronAPI.startProgressTracking(workspacePath, project.name, {
+            progressId: updatedFolder.id,
+            mode: 'refresh',
+          });
+          if (started.success && started.sessionId && started.taskId) {
+            window.localStorage.setItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${updatedFolder.id}`, started.sessionId);
+            setTrackingConfirmationProgressId(updatedFolder.id);
+            await loadProgressFolders();
+            onNotice(`版本关系已更新，正在重新比较 ${parent?.displayName || '新来源'} → ${updatedFolder.displayName}；完成后可从任务中心确认。`, 7000);
+          } else {
+            onNotice(`版本关系已更新，${updatedFolder.displayName} 已标记为待刷新；自动重新比较启动失败：${started.error || '未知错误'}`, 8000);
+          }
+        } else {
+          onNotice('版本关系已更新');
+        }
       });
     } catch (error) {
       mutationQueue.runIfCurrent(mutationGeneration, () => {
@@ -1385,10 +1417,17 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       }
     }
   };
-  useEffect(() => () => {
-    relationMutationIdRef.current += 1;
-    relationMutationQueueRef.current.dispose();
-    relationMutationCountsRef.current.clear();
+  useEffect(() => {
+    // React StrictMode intentionally runs an effect setup/cleanup cycle twice
+    // in development. Each setup must therefore own a fresh queue; otherwise
+    // the first cleanup permanently disposes every later relation mutation.
+    const queue = new ProgressRelationMutationQueue();
+    relationMutationQueueRef.current = queue;
+    return () => {
+      relationMutationIdRef.current += 1;
+      queue.dispose();
+      relationMutationCountsRef.current.clear();
+    };
   }, []);
   useEffect(() => {
     const openTrackingConfirmation = (event: Event) => {
@@ -4299,8 +4338,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const canSelectMedia = !finalViewOpen && !selectedContainsShortcutContent && selectedEntries.length > 0 && selectedEntries.length === selectedPaths.length && selectedEntries.every(entry => entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video');
   const selectedScreenshotMainImageEntries = selectedEntries.filter(entry => isScreenshotMainImageEntry(entry) && !entryIsInsideProgressFolder(entry));
   const canExtractScreenshotMainImage = !finalViewOpen && !selectedContainsShortcutContent && selectedScreenshotMainImageEntries.length > 0;
-  const selectedResearchTarget = selectedEntries.length === 1 && selectedPaths.length === 1 && (selectedEntries[0].kind === 'video' || selectedEntries[0].kind === 'folder') ? selectedEntries[0] : null;
-  const selectedVideoSplitTarget = !finalViewOpen && !selectedContainsShortcutContent && selectedEntries.length === 1 && selectedPaths.length === 1 && selectedEntries[0].kind === 'video' ? selectedEntries[0] : null;
+  const selectedResearchTargets = !finalViewOpen && !selectedContainsShortcutContent && selectedEntries.length > 0 && selectedEntries.length === selectedPaths.length && selectedEntries.every(entry => entry.kind === 'video' || entry.kind === 'folder') ? selectedEntries : [];
+  const selectedVideoSplitTargets = selectedResearchTargets;
   const selectedOfficeExtractEntries = !finalViewOpen && !selectedContainsShortcutContent && selectedEntries.length > 0 && selectedEntries.length === selectedPaths.length && selectedEntries.every(isOfficeOpenXmlEntry) ? selectedEntries : [];
   const fileMenuEntrySelected = Boolean(fileMenu && selectedPaths.includes(fileMenu.entry.relativePath));
   const fileMenuTargetPaths = fileMenu
@@ -4354,23 +4393,26 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     window.addEventListener('photoflow:inspiration-add-folder-to-project', addFolder);
     return () => window.removeEventListener('photoflow:inspiration-add-folder-to-project', addFolder);
   }, [gatherToProject, inspirationTargetProject, inspirationProjects.length, gatheringInspiration]);
-  const openResearchForEntry = async (entry: ProjectFileEntry) => {
-    if (entry.kind !== 'video' && entry.kind !== 'folder') return;
+  const openResearchForEntries = async (entries: ProjectFileEntry[]) => {
+    if (!entries.length || entries.some(entry => entry.kind !== 'video' && entry.kind !== 'folder')) return;
     if (projectPanelIsRunning('research')) { setPanel('research'); return; }
     const sequence = ++researchInspectionSequenceRef.current;
-    setResearchTargetPath(entry.path);
-    setResearchTargetPaths(entry.kind === 'video' ? [entry.path] : []);
-    setResearchCollecting(entry.kind === 'folder');
-    setResearchTargetKind(entry.kind === 'folder' ? 'folder' : 'file');
+    const folderEntries = entries.filter(entry => entry.kind === 'folder');
+    setResearchTargetPath(entries.length === 1 ? entries[0].path : '');
+    setResearchTargetPaths(entries.map(entry => entry.path));
+    setResearchCollecting(folderEntries.length > 0);
+    setResearchTargetKind(folderEntries.length > 0 ? 'folder' : 'file');
     setResearchTargetHasTxt(false);
     setPanel('research');
-    if (entry.kind !== 'folder') return;
-    void window.electronAPI.browseProjectFiles(workspacePath, project.status, project.name, entry.relativePath, mediaCacheConfig).then(result => {
-      if (sequence !== researchInspectionSequenceRef.current) return;
-      setResearchTargetHasTxt(Boolean(result.success && result.entries.some(candidate => candidate.extension.toLocaleLowerCase() === '.txt')));
-    });
+    if (!folderEntries.length) return;
+    if (entries.length === 1) {
+      void window.electronAPI.browseProjectFiles(workspacePath, project.status, project.name, entries[0].relativePath, mediaCacheConfig).then(result => {
+        if (sequence !== researchInspectionSequenceRef.current) return;
+        setResearchTargetHasTxt(Boolean(result.success && result.entries.some(candidate => candidate.extension.toLocaleLowerCase() === '.txt')));
+      });
+    }
     while (sequence === researchInspectionSequenceRef.current) {
-      const result = await window.electronAPI.inspectProjectToolSources(workspacePath, project.status, project.name, [entry.relativePath], true);
+      const result = await window.electronAPI.inspectProjectToolSources(workspacePath, project.status, project.name, entries.map(entry => entry.relativePath), true);
       if (sequence !== researchInspectionSequenceRef.current) return;
       if (!result.success) {
         setResearchCollecting(false);
@@ -4378,7 +4420,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         return;
       }
       if (result.indexed) {
-        setResearchTargetPaths(result.videoPaths);
         setResearchCollecting(false);
         if (!result.videoPaths.length) onNotice('所选文件夹中没有视频');
         return;
@@ -4883,10 +4924,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const pngConverterToolbarAvailable = !finalViewOpen && !selectedContainsShortcutContent && selectedEntries.length > 0 && selectedEntries.length === selectedPaths.length
     && selectedEntries.some(entry => entry.kind === 'folder' || entry.extension.toLocaleLowerCase() === '.png');
   const videoToolsToolbarAvailable = !finalViewOpen && !selectedContainsShortcutContent && selectedEntries.length > 0 && selectedEntries.length === selectedPaths.length
-    && selectedEntries.some(entry => entry.kind === 'folder' || entry.kind === 'video');
-  const fileMenuHasVideoTarget = !fileMenuContainsShortcutContent && fileMenuEntries.some(entry => entry.kind === 'folder' || entry.kind === 'video');
+    && selectedEntries.every(entry => entry.kind === 'folder' || entry.kind === 'video');
+  const fileMenuHasVideoTarget = !fileMenuContainsShortcutContent && fileMenuEntries.length > 0 && fileMenuEntries.every(entry => entry.kind === 'folder' || entry.kind === 'video');
   const fileMenuHasPngTarget = !fileMenuContainsShortcutContent && fileMenuEntries.some(entry => entry.kind === 'folder' || entry.extension.toLocaleLowerCase() === '.png');
-  const fileMenuHasVideoSplitTarget = !finalViewOpen && !fileMenuContainsShortcutContent && fileMenuEntries.length === 1 && fileMenuEntries[0]?.kind === 'video';
+  const fileMenuHasVideoSplitTarget = !finalViewOpen && fileMenuHasVideoTarget;
   const fileMenuOfficeEntries = !finalViewOpen && !fileMenuContainsShortcutContent && fileMenuEntries.length > 0 && fileMenuEntries.every(isOfficeOpenXmlEntry) ? fileMenuEntries : [];
   const fileMenuHasToolActions = Boolean(fileMenu && (fileMenuHasVideoTarget || fileMenuHasPngTarget || fileMenuScreenshotMainImageEntries.length || fileMenuOfficeEntries.length));
   const selectedCanSetVersionProgress = Boolean(projectWorkflows && selectedProgressFolder && !selectedRegisteredProgressFolder && !selectedProgressFolder.viaShortcut);
@@ -4895,7 +4936,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const projectToolbarAvailability: Record<ProjectToolbarActionId, boolean> = {
     'filename-selection': true,
     'select-media': canSelectMedia,
-    'video-tools': Boolean(selectedResearchTarget) || videoToolsToolbarAvailable || Boolean(selectedVideoSplitTarget),
+    'video-tools': selectedResearchTargets.length > 0 || videoToolsToolbarAvailable || selectedVideoSplitTargets.length > 0,
     'image-tools': pngConverterToolbarAvailable || canExtractScreenshotMainImage,
     photoshop: photoshopToolbarAvailable,
     'office-extract': selectedOfficeExtractEntries.length > 0,
@@ -4906,7 +4947,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const projectToolbarButtons: Record<ProjectToolbarActionId, React.ReactNode> = {
     'filename-selection': <button onClick={() => togglePanel('match')} title="从文件名选片" aria-label="从文件名选片" className="project-action-button"><FileText size={16}/>从文件名选片</button>,
     'select-media': <button disabled={!canSelectMedia} title={canSelectMedia ? '选片：把所选素材加入图片或视频选片结果' : unavailableProjectToolbarTitle('选片', finalViewOpen ? '喜爱图片为只读' : selectedContainsShortcutContent ? '快捷方式内容为只读' : '需选择选片源素材使用')} aria-label="选片" onClick={() => void selectMediaFiles()} className="project-action-button"><CheckCircle2 size={16}/>选片</button>,
-    'video-tools': <div className="project-toolbar-tool-group relative" onClick={event => event.stopPropagation()}><button type="button" disabled={!projectToolbarAvailability['video-tools']} onClick={() => { const next = !showVideoToolsMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowVideoToolsMenu(next); }} title="视频工具" aria-label="视频工具" aria-haspopup="menu" aria-expanded={showVideoToolsMenu} className={`project-action-button ${showVideoToolsMenu || panel === 'research' || panel === 'video-transcode' || panel === 'video-split' ? 'bg-blue-50 text-blue-600' : ''}`}><Video size={16}/>视频工具<ChevronDown size={13}/></button>{showVideoToolsMenu && <div className="project-toolbar-tool-submenu absolute left-0 top-full z-50 mt-1 w-48 rounded-lg border border-slate-200 bg-white p-1 shadow-xl"><button type="button" disabled={!selectedResearchTarget} title={selectedResearchTarget ? '从所选视频或文件夹中提取代表性画面' : '需单独选择一个视频或文件夹'} onClick={event => { event.stopPropagation(); setShowVideoToolsMenu(false); setShowToolbarOverflowMenu(false); if (selectedResearchTarget) void openResearchForEntry(selectedResearchTarget); }} className="project-menu-item"><Video size={14}/>截取分镜帧</button><button type="button" disabled={!videoToolsToolbarAvailable} onClick={event => { event.stopPropagation(); setShowVideoToolsMenu(false); setShowToolbarOverflowMenu(false); void openVideoTranscode(); }} className="project-menu-item"><Gauge size={14}/>视频转码</button><button type="button" disabled={!selectedVideoSplitTarget} title={selectedVideoSplitTarget ? '将所选视频无损切成约 3.95 GB 的连续分段' : '需单独选择一个视频'} onClick={event => { event.stopPropagation(); setShowVideoToolsMenu(false); setShowToolbarOverflowMenu(false); if (!selectedVideoSplitTarget) { onNotice('请单独选择一个视频'); return; } setVideoSplitTarget(selectedVideoSplitTarget.path); setPanel('video-split'); }} className="project-menu-item"><Cut size={14}/>视频切割</button></div>}</div>,
+    'video-tools': <div className="project-toolbar-tool-group relative" onClick={event => event.stopPropagation()}><button type="button" disabled={!projectToolbarAvailability['video-tools']} onClick={() => { const next = !showVideoToolsMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowVideoToolsMenu(next); }} title="视频工具" aria-label="视频工具" aria-haspopup="menu" aria-expanded={showVideoToolsMenu} className={`project-action-button ${showVideoToolsMenu || panel === 'research' || panel === 'video-transcode' || panel === 'video-split' ? 'bg-blue-50 text-blue-600' : ''}`}><Video size={16}/>视频工具<ChevronDown size={13}/></button>{showVideoToolsMenu && <div className="project-toolbar-tool-submenu absolute left-0 top-full z-50 mt-1 w-48 rounded-lg border border-slate-200 bg-white p-1 shadow-xl"><button type="button" disabled={!selectedResearchTargets.length} title={selectedResearchTargets.length ? `从所选 ${selectedResearchTargets.length} 个视频或文件夹中提取代表性画面` : '请选择视频或文件夹'} onClick={event => { event.stopPropagation(); setShowVideoToolsMenu(false); setShowToolbarOverflowMenu(false); if (selectedResearchTargets.length) void openResearchForEntries(selectedResearchTargets); }} className="project-menu-item"><Video size={14}/>截取分镜帧</button><button type="button" disabled={!videoToolsToolbarAvailable} onClick={event => { event.stopPropagation(); setShowVideoToolsMenu(false); setShowToolbarOverflowMenu(false); void openVideoTranscode(); }} className="project-menu-item"><Gauge size={14}/>视频转码</button><button type="button" disabled={!selectedVideoSplitTargets.length} title={selectedVideoSplitTargets.length ? `将所选 ${selectedVideoSplitTargets.length} 个视频或文件夹中的视频无损切成约 3.95 GB 的连续分段` : '请选择视频或文件夹'} onClick={event => { event.stopPropagation(); setShowVideoToolsMenu(false); setShowToolbarOverflowMenu(false); if (!selectedVideoSplitTargets.length) { onNotice('请先选择视频或文件夹'); return; } setVideoSplitTargets(selectedVideoSplitTargets.map(entry => entry.path)); setPanel('video-split'); }} className="project-menu-item"><Cut size={14}/>视频切割</button></div>}</div>,
     'image-tools': <div className="project-toolbar-tool-group relative" onClick={event => event.stopPropagation()}><button type="button" disabled={!projectToolbarAvailability['image-tools']} onClick={() => { const next = !showImageToolsMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowImageToolsMenu(next); }} title="图片工具" aria-label="图片工具" aria-haspopup="menu" aria-expanded={showImageToolsMenu} className={`project-action-button ${showImageToolsMenu || panel === 'converter' || panel === 'screenshot-main-image' ? 'bg-blue-50 text-blue-600' : ''}`}><ImageIcon size={16}/>图片工具<ChevronDown size={13}/></button>{showImageToolsMenu && <div className="project-toolbar-tool-submenu absolute left-0 top-full z-50 mt-1 w-52 rounded-lg border border-slate-200 bg-white p-1 shadow-xl"><button type="button" disabled={!pngConverterToolbarAvailable} onClick={event => { event.stopPropagation(); setShowImageToolsMenu(false); setShowToolbarOverflowMenu(false); void openPngConverter(selectedEntries.map(entry => entry.path)); }} title={pngConverterToolbarAvailable ? selectedEntries.length > 1 ? `PNG 转 JPG：转换所选 ${selectedEntries.length} 个文件或文件夹中的 PNG` : 'PNG 转 JPG：转换所选文件或文件夹中的 PNG' : unavailableProjectToolbarTitle('PNG 转 JPG', finalViewOpen ? '喜爱图片为只读' : selectedContainsShortcutContent ? '快捷方式内容为只读' : '请选择 PNG 文件或文件夹')} className="project-menu-item"><ImageIcon size={14}/>PNG 转 JPG</button><button type="button" disabled={!canExtractScreenshotMainImage} onClick={event => { event.stopPropagation(); setShowImageToolsMenu(false); setShowToolbarOverflowMenu(false); if (!selectedScreenshotMainImageEntries.length) { onNotice('请先选择要提取主图的截图'); return; } openScreenshotMainImage(selectedScreenshotMainImageEntries); }} title={canExtractScreenshotMainImage ? selectedScreenshotMainImageEntries.length > 1 ? `提取截图主图：批量识别并裁出所选 ${selectedScreenshotMainImageEntries.length} 张截图中的主要图片区域` : '提取截图主图：识别并裁出所选截图中的主要图片区域' : unavailableProjectToolbarTitle('提取截图主图', finalViewOpen ? '喜爱图片为只读' : selectedContainsShortcutContent ? '快捷方式内容为只读' : '需选择截图图片使用')} className="project-menu-item"><Crop size={14}/>提取截图主图{selectedScreenshotMainImageEntries.length > 1 ? `（${selectedScreenshotMainImageEntries.length} 张）` : ''}</button></div>}</div>,
     photoshop: <button disabled={!photoshopToolbarAvailable} onClick={() => void openProjectEntriesInPhotoshop(selectedEntries)} title={photoshopToolbarAvailable ? selectedEntries.length > 1 ? `在 PS 中打开：把所选 ${selectedEntries.length} 个图片、RAW 或 Photoshop 文档发送到 Photoshop` : '在 PS 中打开：把所选图片、RAW 或 PSD/PSB 发送到 Photoshop' : unavailableProjectToolbarTitle('在 PS 中打开', !photoshopAvailable ? '未检测到 Photoshop' : selectedContainsShortcutContent ? '快捷方式内容暂不支持' : '需选择图片、RAW 或 PSD/PSB 使用')} aria-label="在 Photoshop 中打开所选图片、RAW 或 Photoshop 文档" className="project-action-button"><PhotoshopIcon size={16}/>在 PS 中打开{selectedEntries.length > 1 && photoshopToolbarAvailable ? `（${selectedEntries.length} 个）` : ''}</button>,
     'office-extract': <button type="button" disabled={!selectedOfficeExtractEntries.length} onClick={() => openOfficeImageExtractor(selectedOfficeExtractEntries)} aria-pressed={panel === 'office-extract'} title={selectedOfficeExtractEntries.length ? `从所选 ${selectedOfficeExtractEntries.length} 个 Office 文档提取图片` : '请选择 Office 文档'} className={`project-action-button ${panel === 'office-extract' ? 'bg-blue-50 text-blue-600' : ''}`}><FileImage size={16}/>提取 Office 图片</button>,
@@ -4953,7 +4994,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         {projectWorkflows && canSelectFileMenuMedia && <><button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); selectMediaFiles(targets); }}><CheckCircle2 size={14}/>选片</button><div className="my-1 border-t border-slate-100"/></>}
         {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openPreviewFromMenu(entry); }}><PanelLeftOpen size={14}/>预览</button>}
         {fileMenu.entry.kind !== 'folder' && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openProjectEntry(entry); }}><ExternalLink size={14}/>{fileMenu.entry.kind === 'shortcut' ? '打开快捷方式' : '用默认方式打开'}</button>}
-        {fileMenuHasVideoTarget && <div className="group/submenu relative"><button type="button" className="project-menu-item w-full"><Video size={14}/>视频工具<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-52 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100">{!fileMenuContainsShortcutContent && (fileMenu.entry.kind === 'video' || fileMenu.entry.kind === 'folder') && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openResearchForEntry(entry); }}><Video size={14}/>截取分镜帧</button>}<button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); void openVideoTranscode(targets); }}><Gauge size={14}/>视频转码</button><button disabled={!fileMenuHasVideoSplitTarget} title={fileMenuHasVideoSplitTarget ? '将所选视频无损切成约 3.95 GB 的连续分段' : '需单独选择一个视频'} className="project-menu-item" onClick={() => { const target = fileMenuEntries[0]; setFileMenu(null); if (!target) return; setVideoSplitTarget(target.path); setPanel('video-split'); }}><Cut size={14}/>视频切割</button></div></div>}
+        {fileMenuHasVideoTarget && <div className="group/submenu relative"><button type="button" className="project-menu-item w-full"><Video size={14}/>视频工具<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-52 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100"><button className="project-menu-item" onClick={() => { const entries = fileMenuEntries; setFileMenu(null); void openResearchForEntries(entries); }}><Video size={14}/>截取分镜帧</button><button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); void openVideoTranscode(targets); }}><Gauge size={14}/>视频转码</button><button disabled={!fileMenuHasVideoSplitTarget} title={fileMenuHasVideoSplitTarget ? `将所选 ${fileMenuEntries.length} 个视频或文件夹中的视频无损切成约 3.95 GB 的连续分段` : '请选择视频或文件夹'} className="project-menu-item" onClick={() => { const targets = fileMenuEntries.map(entry => entry.path); setFileMenu(null); if (!targets.length) return; setVideoSplitTargets(targets); setPanel('video-split'); }}><Cut size={14}/>视频切割</button></div></div>}
         {(fileMenuHasPngTarget || fileMenuScreenshotMainImageEntries.length > 0) && <div className="group/submenu relative"><button type="button" className="project-menu-item w-full"><ImageIcon size={14}/>图片工具<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-52 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100">{fileMenuHasPngTarget && <button className="project-menu-item" onClick={() => { const targets = fileMenuEntries.map(entry => entry.path); setFileMenu(null); void openPngConverter(targets); }}><ImageIcon size={14}/>PNG 转 JPG</button>}<button disabled={!fileMenuScreenshotMainImageEntries.length} title={fileMenuScreenshotMainImageEntries.length ? fileMenuScreenshotMainImageEntries.length > 1 ? `批量提取 ${fileMenuScreenshotMainImageEntries.length} 张截图中的主图` : '提取截图中的主图' : '需选择截图图片使用'} className="project-menu-item" onClick={() => { const entries = fileMenuScreenshotMainImageEntries; setFileMenu(null); openScreenshotMainImage(entries); }}><Crop size={14}/>提取截图主图{fileMenuScreenshotMainImageEntries.length > 1 ? `（${fileMenuScreenshotMainImageEntries.length} 张）` : ''}</button></div></div>}
         {officeImageExtractorAvailable && fileMenuOfficeEntries.length > 0 && <button className="project-menu-item" onClick={() => { const entries = fileMenuOfficeEntries; setFileMenu(null); openOfficeImageExtractor(entries); }}><FileImage size={14}/>提取 Office 图片{fileMenuOfficeEntries.length > 1 ? `（${fileMenuOfficeEntries.length} 个文档）` : ''}</button>}
         {photoshopAvailable && isPhotoshopOpenEntry(fileMenu.entry) && <button disabled={fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件暂不支持直接发送到 Photoshop' : undefined} className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(isPhotoshopOpenEntry) : [fileMenu.entry]; setFileMenu(null); void openProjectEntriesInPhotoshop(entries); }}><PhotoshopIcon size={14}/>用 Photoshop 打开{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(isPhotoshopOpenEntry).length > 1 ? `（${selectedEntries.filter(isPhotoshopOpenEntry).length} 个）` : ''}</button>}
@@ -5189,7 +5230,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       {mountedPanels.has('match') && <ToolModal title={PROJECT_PANEL_TITLES.match} ownerPageId={pageId} panelKind="match" open={panel === 'match'} onClose={() => setPanel(null)}><MatchView embedded config={matchConfig} projectPath={project.path} folderOptions={folders} onUpdateConfig={onMatchConfigChange}/></ToolModal>}
       {mountedPanels.has('research') && <ToolModal title={PROJECT_PANEL_TITLES.research} ownerPageId={pageId} panelKind="research" open={panel === 'research'} onClose={() => { researchInspectionSequenceRef.current += 1; setResearchCollecting(false); setPanel(null); }}><ResearchView embedded initialTargetPath={researchTargetPath} initialTargetPaths={researchTargetPaths} sourcesLoading={researchCollecting} targetKind={researchTargetKind} hasTxtFiles={researchTargetHasTxt} config={researchConfig} onUpdateConfig={onResearchConfigChange}/></ToolModal>}
       {mountedPanels.has('video-transcode') && <ToolModal title={PROJECT_PANEL_TITLES['video-transcode']} ownerPageId={pageId} panelKind="video-transcode" open={panel === 'video-transcode'} onClose={() => { videoTranscodeInspectionSequenceRef.current += 1; setVideoTranscodeCollecting(false); setPanel(null); }}><VideoTranscodeView embedded initialTargetPaths={videoTranscodeTargets} initialSourceFolders={videoTranscodeSourceFolders} sourcesLoading={videoTranscodeCollecting}/></ToolModal>}
-      {mountedPanels.has('video-split') && <ToolModal title={PROJECT_PANEL_TITLES['video-split']} ownerPageId={pageId} panelKind="video-split" open={panel === 'video-split'} onClose={() => setPanel(null)}><VideoSplitView embedded initialTargetPath={videoSplitTarget}/></ToolModal>}
+      {mountedPanels.has('video-split') && <ToolModal title={PROJECT_PANEL_TITLES['video-split']} ownerPageId={pageId} panelKind="video-split" open={panel === 'video-split'} onClose={() => setPanel(null)}><VideoSplitView embedded initialTargetPaths={videoSplitTargets}/></ToolModal>}
       {mountedPanels.has('office-extract') && <ToolModal title={PROJECT_PANEL_TITLES['office-extract']} ownerPageId={pageId} panelKind="office-extract" open={panel === 'office-extract'} busy={officeExtractBusy} onClose={() => setPanel(null)}>
         {officeExtractResult ? <div className="flex min-h-64 flex-col items-center justify-center rounded-xl border border-emerald-200 bg-emerald-50/70 px-6 py-10 text-center"><CheckCircle2 size={42} className="text-emerald-600"/><p className="mt-4 text-lg font-bold text-slate-800">图片提取完成</p><p className="mt-2 text-sm text-slate-600">已处理 {officeExtractResult.documents} 个文档，提取 {officeExtractResult.images} 张图片{officeExtractResult.failed ? `，${officeExtractResult.failed} 个文档失败` : ''}。</p>{officeExtractResult.outputFolders.length > 0 && <p className="mt-2 max-w-2xl break-all text-xs leading-5 text-slate-500">{officeExtractResult.outputFolders.join('；')}</p>}<button type="button" onClick={() => { setOfficeExtractResult(null); setOfficeExtractEntries([]); setPanel(null); }} className="dialog-primary mt-6">关闭</button></div> : <div className="space-y-4">
           <section className="overflow-hidden rounded-xl border border-slate-200 bg-white"><header className="flex items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3"><FileImage size={18} className="text-blue-600"/><div className="min-w-0 flex-1"><p className="text-sm font-bold text-slate-800">已选择 {officeExtractEntries.length} 个 Office 文档</p><p className="mt-0.5 text-xs text-slate-500">支持 Word、PowerPoint 与 Excel 的 Open XML 文件</p></div><span className="rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-500">{officeExtractEntries.length} 个文件</span></header><div className="max-h-52 divide-y divide-slate-100 overflow-y-auto">{officeExtractEntries.map(entry => <div key={entry.relativePath} className="flex items-center gap-3 px-4 py-2.5"><span className="flex h-8 w-10 shrink-0 items-center justify-center rounded-md bg-blue-50 text-[10px] font-bold text-blue-700">{entry.extension.slice(1).toUpperCase()}</span><span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-700">{entry.name}</span><span className="text-[10px] font-bold text-slate-400">{officeExtractBusy ? '处理中' : '等待'}</span></div>)}</div></section>
@@ -5306,7 +5347,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
 
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         {versionTreeOpen ? <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={event => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-entry-path]'); target?.focus({ preventScroll: true }); if (target?.dataset.entryPath) entryPointerModifiersRef.current = { path: target.dataset.entryPath, additive: event.ctrlKey || event.metaKey, range: event.shiftKey }; }} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} style={{ marginInline: -FILE_SURFACE_HORIZONTAL_PADDING }} className={`relative min-h-0 flex-1 select-none overflow-hidden outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
-          <LegacySelectionRepairNotice repairs={legacySelectionRepairs} folders={progressFolders} busyProgressIds={legacySelectionRepairBusyIds} onRepair={(progressId, sourceProgressId) => void repairLegacySelectionRelation(progressId, sourceProgressId)} onKeepIndependent={progressId => void keepLegacySelectionIndependent(progressId)}/>
           {progressRelationInspection.needsRepair ? <div role="alert" className="m-4 rounded-xl border border-amber-300 bg-amber-50 p-5 text-amber-900"><div className="flex items-center gap-2 font-bold"><AlertTriangle size={18}/>版本关系需要修复</div><p className="mt-2 text-sm">检测到循环关系，已停止版本树遍历，避免应用崩溃。</p><p className="mt-2 break-all font-mono text-xs text-amber-700">节点 ID：{progressRelationInspection.cycleNodeIds.join('、')}</p></div> : <ProjectVersionTree
             progressFolders={progressFolders}
             graphEdges={versionGraphEdges}

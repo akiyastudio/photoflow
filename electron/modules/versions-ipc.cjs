@@ -711,7 +711,7 @@ const registerVersionIpc = context => {
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
       let databaseProgress = {};
       const progressId = String(progress.progressId || '').trim();
-      const updatesProgress = Object.keys(progress).some(key => key !== 'progressId');
+      const updatesProgress = Object.entries(progress).some(([key, value]) => key !== 'progressId' && value !== undefined);
       let existing = null;
       if (progressId) {
         const listed = await versionService.listProgress(workspaceRoot, projectName, true);

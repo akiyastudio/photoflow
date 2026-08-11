@@ -161,6 +161,30 @@ export const defaultWorkflowInputIds = (
   return selections.length === 1 ? [selections[0].id] : [];
 };
 
+/** Build the workflow-input side of a manual structural relation change. */
+export const workflowInputIdsForRelationChange = (
+  folders: ProgressFolder[],
+  graphEdges: VersionGraphEdge[],
+  childProgressId: string,
+  parentProgressId: string | null,
+) => {
+  const byId = new Map(folders.map(folder => [folder.id, folder]));
+  const existingInputIds = graphEdges
+    .filter(edge => edge.edgeKind === 'workflow_input' && edge.targetProgressId === childProgressId)
+    .map(edge => edge.sourceProgressId);
+  const preservedWorkflowIds = existingInputIds.filter(id => byId.get(id)?.nodeRole === 'workflow');
+  const parent = parentProgressId ? byId.get(parentProgressId) : undefined;
+  const matchingSelectionIds = parent?.nodeRole === 'original'
+    ? folders
+      .filter(folder => !folder.folderMissing
+        && folder.nodeRole === 'selection'
+        && folder.mediaKind === parent.mediaKind
+        && folder.parentProgressId === parent.id)
+      .map(folder => folder.id)
+    : [];
+  return [...new Set([...preservedWorkflowIds, ...matchingSelectionIds])];
+};
+
 export const progressRelationChangeError = (folders: ProgressFolder[], childId: string, parentId: string | null) => {
   const byId = new Map(folders.map(folder => [folder.id, folder]));
   const child = byId.get(childId);

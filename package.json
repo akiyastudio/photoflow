@@ -70,6 +70,7 @@
     "test:raw-decoder": ".venv\\Scripts\\python.exe scripts\\test-raw-decoder.py",
     "test:office-media": ".venv\\Scripts\\python.exe scripts\\test-office-media-extractor.py",
     "test:research": ".venv\\Scripts\\python.exe scripts\\test-research.py",
+    "test:video-split": ".venv\\Scripts\\python.exe scripts\\test-cut-video.py",
     "test:screenshot-main-image": ".venv\\Scripts\\python.exe scripts\\test-screenshot-main-image.py",
     "test:inspiration-gather": "node scripts/test-inspiration-gather.cjs",
     "test:team-retouch": ".venv\\Scripts\\python.exe scripts\\test-team-retouch.py",

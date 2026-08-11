@@ -99,6 +99,33 @@ def main():
         assert analyzed_paths == [str(selected_video)]
 
     with TemporaryDirectory() as temporary_directory:
+        root_directory = Path(temporary_directory)
+        nested_directory = root_directory / "nested"
+        nested_directory.mkdir()
+        first_video = root_directory / "first.mp4"
+        second_video = nested_directory / "second.mov"
+        video_header = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2"
+        first_video.write_bytes(video_header)
+        second_video.write_bytes(video_header)
+        analyzed_paths = []
+        cleanup_paths = []
+        original_analyze_video = research_module.analyze_video
+        original_deduplication = research_module.process_images_deduplication
+        research_module.analyze_video = lambda video_path, _sensitivity, _min_duration: analyzed_paths.append(video_path) or []
+        research_module.process_images_deduplication = lambda directory: cleanup_paths.append(directory)
+        try:
+            research_module.run([
+                "--path", str(root_directory),
+                "--path", str(second_video),
+                "--sensitivity", "standard",
+            ])
+        finally:
+            research_module.analyze_video = original_analyze_video
+            research_module.process_images_deduplication = original_deduplication
+        assert analyzed_paths == [str(first_video), str(second_video)], "folders must be recursive and overlapping inputs must be de-duplicated"
+        assert cleanup_paths == [root_directory, nested_directory]
+
+    with TemporaryDirectory() as temporary_directory:
         target_directory = Path(temporary_directory)
         valid_video = target_directory / "valid.mp4"
         fake_javascript = target_directory / "script.mp4"

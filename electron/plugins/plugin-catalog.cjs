@@ -7,7 +7,7 @@ const PLUGIN_DEFINITIONS = Object.freeze({
     name: '团片协作',
     description: 'AI识别人后规划可合并的工作图，支持人物标记、确定性任务重建并自动合回原尺寸。',
     capabilities: ['team-retouch.detect', 'team-retouch.identify', 'team-retouch.merge'],
-    developmentEntry: ['components', 'team-retouch', 'team_retouch.py'],
+    developmentEntry: ['extensions', 'team-retouch', 'team_retouch.py'],
     requiredAssets: [['models', 'rtmdet-ins_m_640x640.onnx']],
   },
   'video-playback-mpv': {

@@ -439,29 +439,61 @@ def move_txt_files(directory):
     log_info(f"已将 {len(txt_files)} 个 TXT 文件移至 data 文件夹")
 
 
+def collect_video_inputs(raw_paths):
+    """Expand selected files/folders into a stable, de-duplicated video list."""
+    videos = []
+    selected_directories = []
+    seen_videos = set()
+    seen_directories = set()
+    missing_paths = []
+    unsupported_paths = []
+
+    for raw_path in raw_paths:
+        target = Path(raw_path)
+        if not target.exists():
+            missing_paths.append(target)
+            continue
+        if target.is_file():
+            if target.suffix.lower() not in VIDEO_EXTENSIONS:
+                unsupported_paths.append(target)
+                continue
+            candidates = [target]
+        elif target.is_dir():
+            directory_key = os.path.normcase(os.path.abspath(target))
+            if directory_key not in seen_directories:
+                seen_directories.add(directory_key)
+                selected_directories.append(target)
+            candidates = sorted(
+                (path for path in target.rglob("*") if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS),
+                key=lambda path: os.path.normcase(str(path)),
+            )
+        else:
+            unsupported_paths.append(target)
+            continue
+        for candidate in candidates:
+            key = os.path.normcase(os.path.abspath(candidate))
+            if key in seen_videos:
+                continue
+            seen_videos.add(key)
+            videos.append(candidate)
+    return videos, selected_directories, missing_paths, unsupported_paths
+
+
 def run(args_list):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--path", required=True, help="目标工作目录")
+    parser.add_argument("--path", action="append", required=True, help="目标视频或文件夹，可重复传入")
     parser.add_argument("--sensitivity", choices=("low", "standard", "high"), help="转场检测灵敏度")
     parser.add_argument("--threshold", type=float, help=argparse.SUPPRESS)
     parser.add_argument("--min_duration", type=float, default=0.2, help="最短镜头时长（秒）")
     parser.add_argument("--organize-data", action="store_true", help="把目录中的 TXT 文件移入 data 文件夹")
     args = parser.parse_args(args_list)
-    target = Path(args.path)
-    if not target.exists():
-        log_error(f"路径不存在：{target}")
-        return
-    if target.is_file():
-        if target.suffix.lower() not in VIDEO_EXTENSIONS:
-            log_error(f"不是支持的视频文件：{target}")
-            return
-        videos = [target]
-        working_directory = target.parent
-    elif target.is_dir():
-        videos = [path for path in target.iterdir() if path.suffix.lower() in VIDEO_EXTENSIONS]
-        working_directory = target
-    else:
-        log_error(f"无法读取路径：{target}")
+    videos, selected_directories, missing_paths, unsupported_paths = collect_video_inputs(args.path)
+    for target in missing_paths:
+        log_warning(f"路径不存在，已跳过：{target}")
+    for target in unsupported_paths:
+        log_warning(f"不是支持的视频文件或文件夹，已跳过：{target}")
+    if not videos and not selected_directories:
+        log_error("没有可处理的视频或文件夹")
         return
     log_progress("扫描视频文件…", 0)
     sensitivity = args.sensitivity or normalize_sensitivity(args.threshold)
@@ -478,13 +510,28 @@ def run(args_list):
                 processed_videos += 1
         log_progress(f"处理视频：{index}/{len(videos)}", int(index / max(1, len(videos)) * 90))
     if not videos:
-        log_info("目录中未找到视频文件，跳过分镜识别")
-    # A single-video request is used by the file browser's “提取分镜帧” action.
-    # It must not reorganize unrelated images or text files in that directory.
-    if target.is_dir():
-        process_images_deduplication(working_directory)
-        if args.organize_data:
-            move_txt_files(working_directory)
+        log_info("所选文件夹中未找到视频文件，跳过分镜识别")
+    # Direct file selections must not reorganize unrelated sibling files. Folder
+    # selections retain the legacy cleanup behavior for every directory in which
+    # a selected-folder video produced frames.
+    cleanup_directories = []
+    seen_cleanup_directories = set()
+    for video in videos:
+        parent = video.parent
+        if not any(parent == selected or selected in parent.parents for selected in selected_directories):
+            continue
+        key = os.path.normcase(os.path.abspath(parent))
+        if key in seen_cleanup_directories:
+            continue
+        seen_cleanup_directories.add(key)
+        cleanup_directories.append(parent)
+    if selected_directories and not cleanup_directories:
+        cleanup_directories = selected_directories
+    for directory in cleanup_directories:
+        process_images_deduplication(directory)
+    if args.organize_data:
+        for directory in selected_directories:
+            move_txt_files(directory)
     if skipped_videos:
         preview_names = "、".join(f"“{name}”" for name in skipped_videos[:5])
         remaining = len(skipped_videos) - min(5, len(skipped_videos))

@@ -82,7 +82,7 @@ const run = async () => {
 
   const playerSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'components', 'AdvancedVideoPlayer.tsx'), 'utf8');
   const workspaceSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
-  const decoderSource = require('fs').readFileSync(path.join(__dirname, '..', 'components', 'video-playback-mpv', 'AdvancedVideoDecoder.cs'), 'utf8');
+  const decoderSource = require('fs').readFileSync(path.join(__dirname, '..', 'extensions', 'video-playback-mpv', 'AdvancedVideoDecoder.cs'), 'utf8');
   assert(decoderSource.includes('SetOption("gpu-api", "d3d11")') && decoderSource.includes('SetOption("hwdec", "auto-safe")'), 'advanced video playback must prefer safe D3D11 hardware decoding with automatic CPU fallback');
   assert(playerSource.includes('onClick={togglePlayback}') && decoderSource.includes('OnMouseClick'), 'clicking the video surface must toggle playback in both renderer and native surfaces');
   assert(!playerSource.includes("key === 'BrowserBack'") && !playerSource.includes("key === 'MediaTrackPrevious'") && !decoderSource.includes('key == Keys.BrowserBack') && !decoderSource.includes('Keys.MediaPreviousTrack'), 'browser and media navigation keys must not be repurposed as player controls');

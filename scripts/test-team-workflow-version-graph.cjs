@@ -219,7 +219,8 @@ registerVersionIpc({
       repositoryPayload = payload;
       if (failCommit === 'nonempty') fs.writeFileSync(path.join(payload.progress.folderPath, 'preserve.txt'), 'created during failed operation');
       if (failCommit) throw new Error('simulated graph failure');
-      return { success: true, progressFolder: { id: 'output', folderPath: payload.progress.folderPath } };
+      const existingPath = listedProgressFolders.find(folder => folder.id === payload.progress.progressId)?.folderPath;
+      return { success: true, progressFolder: { id: payload.progress.progressId || 'output', folderPath: payload.progress.folderPath || existingPath || projectPath } };
     },
   },
   writeLog: () => undefined,
@@ -239,6 +240,10 @@ assert.equal(typeof atomicHandler, 'function');
   const bridgeInvocation = await bridgedApi.registerProgressWithGraph(ipcRoot, 'active', bridgeRequest);
   assert.equal(bridgeInvocation[0], 'workspace-progress-register-with-graph');
   assert.deepEqual(bridgeInvocation[3], bridgeRequest, 'preload must preserve every trusted progress policy field while rejecting absolute paths at the main-process boundary');
+  const idOnlyBridgeInvocation = await bridgedApi.registerProgressWithGraph(ipcRoot, 'active', {
+    projectName: 'Project', progress: { progressId: 'workflow' }, workflowInputProgressIds: ['source'],
+  });
+  assert.deepEqual(idOnlyBridgeInvocation[3].progress, { progressId: 'workflow' }, 'preload must omit undefined optional fields so an ID-only relation update is not mistaken for new progress creation');
 
   const request = { projectName: 'Project', progress: { mediaKind: 'image', versionKey: '3', displayName: 'output-three', parentProgressId: 'source' }, workflowInputProgressIds: ['workflow'] };
   let result = await atomicHandler(null, ipcRoot, 'active', request);
@@ -274,6 +279,14 @@ assert.equal(typeof atomicHandler, 'function');
   assert.equal(repositoryPayload.progress.renameFromParent, true);
   assert.equal(repositoryPayload.progress.copyMissingFromParent, true);
   assert.equal(result.relativePath, 'nested/existing');
+  listedProgressFolders = [{ id: 'workflow', folderPath: adoptedPath, folderMissing: false }];
+  result = await atomicHandler(null, ipcRoot, 'active', {
+    projectName: 'Project',
+    progress: { progressId: 'workflow', mediaKind: undefined, versionKey: undefined, displayName: undefined },
+    workflowInputProgressIds: ['source'],
+  });
+  assert.equal(result.success, true, result.error);
+  assert.deepEqual(repositoryPayload.progress, { progressId: 'workflow' }, 'main must treat undefined optional fields as absent during an ID-only relation update');
   const moveSource = path.join(projectPath, 'nested', 'move-me');
   fs.mkdirSync(moveSource, { recursive: true });
   listedProgressFolders = [{ id: 'move-existing', folderPath: moveSource, folderMissing: false }];
