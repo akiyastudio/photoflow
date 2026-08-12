@@ -137,15 +137,16 @@ const ToolModal = ({ title, ownerPageId, panelKind, open, busy = false, onClose,
   const effectiveBusy = busy || task?.state === 'running';
   useEscapeLayer(open, onClose, true);
 
+  const reportBusyAsPanelTask = !panelKind.startsWith('version-');
   useEffect(() => {
-    if (busy) {
+    if (busy && reportBusyAsPanelTask) {
       manualBusyRef.current = true;
       if (task?.state !== 'running') reportPanelTask({ key: taskKey, ownerPageId, panelKind, title }, { state: 'running', progress: task?.progress || 0, message: task?.message || '任务正在运行…', logs: task?.logs || [] });
     } else if (manualBusyRef.current) {
       manualBusyRef.current = false;
       dismissPanelTask(taskKey);
     }
-  }, [busy, dismissPanelTask, ownerPageId, panelKind, reportPanelTask, task, taskKey, title]);
+  }, [busy, dismissPanelTask, ownerPageId, panelKind, reportBusyAsPanelTask, reportPanelTask, task, taskKey, title]);
 
   const detail = TOOL_MODAL_DETAILS[panelKind];
   return createPortal(<div aria-hidden={!open} className={open ? 'tool-panel-backdrop fixed inset-x-0 bottom-0 top-10 z-[360] flex items-center justify-center p-4' : 'hidden'} onMouseDown={event => { if (event.target === event.currentTarget && !effectiveBusy) onClose(); }}><PanelTaskScope ownerPageId={ownerPageId} panelKind={panelKind} title={title}><section role="dialog" aria-modal="true" aria-label={title} className="tool-panel-window flex max-h-[90vh] w-full max-w-[960px] flex-col overflow-hidden border bg-white"><header className="tool-panel-header flex shrink-0 items-center gap-3 border-b border-slate-200 px-5"><span className="tool-panel-title-icon flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[10px] bg-blue-50 text-blue-600">{detail?.icon}</span><div className="min-w-0 flex-1"><h3 className="truncate text-[15px] font-bold text-slate-800">{title}</h3>{detail?.description && <p className="mt-0.5 truncate text-[10px] text-slate-400">{detail.description}</p>}</div><button type="button" onClick={onClose} aria-label={effectiveBusy ? '收起到后台' : '关闭'} title={effectiveBusy ? '收起到后台，任务会继续运行' : '关闭'} className={`rounded-md text-slate-500 hover:bg-slate-100 ${effectiveBusy ? 'inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-bold' : 'p-1.5'}`}>{effectiveBusy ? <><Minimize2 size={15}/>收起到后台</> : <X size={18}/>}</button></header><div className="tool-panel-body min-h-0 flex-1 overflow-y-auto p-[22px]">{children}</div></section></PanelTaskScope></div>, document.body);
@@ -891,6 +892,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [activeProgressCompareItemKey, setActiveProgressCompareItemKey] = useState('');
   const [progressTask, setProgressTask] = useState('');
   const [progressSubmitting, setProgressSubmitting] = useState(false);
+  const progressSubmittingRef = useRef(false);
   const progressImportOperationIdRef = useRef('');
   const [progressRepair, setProgressRepair] = useState<{ progressFolder: ProgressFolder; batchId: string; operations: VersionBatchFileOperation[] } | null>(null);
   const [progressRepairBusy, setProgressRepairBusy] = useState(false);
@@ -2608,6 +2610,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const resolvedProgressFolderName = (draft: ProgressSetupDraft) => {
     const appendTarget = progressAppendTarget(draft);
     if (appendTarget) return appendTarget.displayName;
+    if (draft.existingProgressId) return buildProgressFolderName(draft.mediaKind, draft.versionKey, draft.progressName);
     if (draft.preserveFolderName) return draft.targetRelativePath?.split('/').pop() || draft.progressName.trim() || buildProgressFolderName(draft.mediaKind, draft.versionKey, '');
     return buildProgressFolderName(draft.mediaKind, draft.versionKey, draft.progressName);
   };
@@ -2807,7 +2810,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   };
   const submitProgressSetup = async (requestedDraft?: ProgressSetupDraft) => {
     const draft = requestedDraft || progressSetup;
-    if (!draft || progressSubmitting || !progressVersionIsValid(draft) || progressNameHasConflict(draft)) return;
+    if (!draft || progressSubmittingRef.current || !progressVersionIsValid(draft) || progressNameHasConflict(draft)) return;
     const appendTarget = progressAppendTarget(draft);
     if (appendTarget?.trackingState === 'needs_repair' || appendTarget?.trackingState === 'committing') {
       onNotice(appendTarget.trackingState === 'needs_repair' ? '请先修复当前版本批次，再追加文件。' : '当前版本批次仍在提交，请稍后再追加。');
@@ -2819,6 +2822,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       ? progressFolders.find(folder => folder.id === appendTarget.parentProgressId && !folder.folderMissing)
       : progressComparisonParent(draft);
     progressImportOperationIdRef.current = '';
+    progressSubmittingRef.current = true;
     setProgressSubmitting(true);
     try {
       if (draft.mode === 'create') {
@@ -2850,15 +2854,27 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         const existingProgress = progressFolders.find(folder => folder.id === draft.existingProgressId);
         if (!existingProgress) throw new Error('没有找到要修改的版本节点');
         let relativePath = projectRelativePath(existingProgress.folderPath);
-        const moveToRoot = draft.relationKind === 'main' && relativePath.includes('/');
-        if (moveToRoot) setProgressTask('正在安全移动文件夹到项目根目录…');
+        if (draft.relationKind === 'main' && relativePath.includes('/')) setProgressTask('正在安全移动文件夹到项目根目录…');
         const policy = normalizeProgressSetupTrackingPolicy(draft.relationKind, draft);
         const policyChanged = existingProgress.trackingEnabled !== policy.trackingEnabled
           || existingProgress.renameFromParent !== policy.renameFromParent
           || existingProgress.copyMissingFromParent !== policy.copyMissingFromParent
           || existingProgress.parentProgressId !== (draft.parentProgressId || undefined)
           || (existingProgress.relationKind || 'main') !== draft.relationKind;
+        const renamed = await projectWorkspaceClient.updateProgressFolder(workspacePath, project.status, project.name, {
+          progressId: existingProgress.id,
+          mediaKind: draft.mediaKind,
+          versionKey: draft.versionKey,
+          parentProgressId: draft.parentProgressId || undefined,
+          displayName: generatedName,
+          trackingEnabled: policy.trackingEnabled,
+          trackingState: policy.trackingEnabled && policyChanged ? 'pending_compare' : policy.trackingEnabled ? existingProgress.trackingState : 'disabled',
+          preserveFolderPath: false,
+        });
+        if (!renamed.success || !renamed.progressFolder) throw new Error(renamed.error || '无法修改版本文件夹名称或分支');
+        relativePath = renamed.folder?.relativePath || projectRelativePath(renamed.progressFolder.folderPath) || relativePath;
         const registered = await registerProgressWithWorkflow({
+          progressId: renamed.progressFolder.id,
           relativePath,
           mediaKind: draft.mediaKind,
           versionKey: draft.versionKey,
@@ -2866,12 +2882,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           displayName: generatedName,
           relationKind: draft.relationKind,
           ...policy,
-          trackingState: policy.trackingEnabled && policyChanged ? 'pending_compare' : policy.trackingEnabled ? existingProgress.trackingState : 'disabled',
-          progressId: existingProgress.id,
-          moveToRoot,
+          trackingState: policy.trackingEnabled && policyChanged ? 'pending_compare' : policy.trackingEnabled ? renamed.progressFolder.trackingState : 'disabled',
         }, draft.workflowInputProgressIds);
-        if (!registered.success || !registered.progressFolder) throw new Error(registered.error || '无法保存版本 V2 设置');
-        relativePath = registered.relativePath || relativePath;
+        if (!registered.success || !registered.progressFolder) throw new Error(registered.error || '版本文件夹已修改，但无法保存版本跟踪策略');
         setProgressSetup(null);
         directoryEntriesCacheRef.current.clear();
         await Promise.all([loadProgressFolders(), refresh('')]);
@@ -3038,6 +3051,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       const action = draft.mode === 'create' ? '创建' : draft.mode === 'import' ? '导入' : draft.existingProgressId ? '修改' : '标记';
       onNotice(`${action}版本进度失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
+      progressSubmittingRef.current = false;
       setProgressSubmitting(false);
     }
   };

@@ -20,6 +20,6 @@ export type ProjectWorkspaceApiKey =
   | 'registerVersionBaseline' | 'replaceVersionGraphEdgeSource' | 'resolveProjectShortcut'
   | 'retryVersionBatchOperations' | 'searchProjectFiles' | 'setMediaRating' | 'setWindowFullscreen'
   | 'startProgressTracking' | 'startProjectFileDrag' | 'trackTelemetry' | 'trashWorkspaceProject'
-  | 'trimProjectVideo' | 'unwatchFileRoot' | 'updateProgressRelation' | 'watchFileRoot';
+  | 'trimProjectVideo' | 'unwatchFileRoot' | 'updateProgressFolder' | 'updateProgressRelation' | 'watchFileRoot';
 
 export type ProjectWorkspaceApi = Pick<IElectronAPI, ProjectWorkspaceApiKey>;
