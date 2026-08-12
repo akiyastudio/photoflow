@@ -244,7 +244,16 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const initialWorkflowPath = allNodes(container).find(node => node.nodeName === 'path' && node.attributes.get('data-relation-kind') === 'workflow_input' && node.attributes.has('marker-end'))?.attributes.get('d');
   const arrowMarker = allNodes(container).find(node => node.nodeName === 'marker');
   assert.strictEqual(arrowMarker?.attributes.get('markerUnits'), 'userSpaceOnUse', 'arrowheads must use fixed canvas units so thin supplemental edges do not float above their target');
-  assert.strictEqual(arrowMarker?.attributes.get('refX'), '8', 'the arrow tip must terminate at the target boundary');
+  assert.strictEqual(arrowMarker?.attributes.get('refX'), '0', 'the relation line must join the rear of the arrowhead instead of running through to its tip');
+  const imageAreaResizeHandle = allNodes(container).find(node => node.attributes.get('aria-label') === '调整图片区域大小');
+  assert(imageAreaResizeHandle, 'image and video semantic frames must expose pointer resize handles');
+  const imageAreaWidthBeforeResize = parseFloat(imageArea.style.width);
+  await React.act(async () => {
+    dispatch(imageAreaResizeHandle, 'pointerdown', { pointerId: 40, button: 0, clientX: 600, clientY: 600 });
+    dispatch(imageAreaResizeHandle, 'pointermove', { pointerId: 40, button: 0, clientX: 680, clientY: 660 });
+    dispatch(imageAreaResizeHandle, 'pointerup', { pointerId: 40, button: 0, clientX: 680, clientY: 660 });
+  });
+  assert(parseFloat(imageArea.style.width) > imageAreaWidthBeforeResize, 'dragging a semantic-frame corner must resize the frame');
   assert(initialWorkflowPath?.includes(' C ') && !initialWorkflowPath.includes(' L '), 'vertically arranged workflow relations must use port-aware curves instead of a top rectangular detour');
   const shelfEntries = [...entries,
     { kind: 'folder', name: 'Other B', relativePath: 'Other B', path: 'C:/p/Other B', extension: '', size: 0, createdAt: 11, updatedAt: 11 },

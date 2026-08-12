@@ -744,6 +744,17 @@ html.dark .usage-onboarding__panel { box-shadow:0 30px 90px rgba(0,0,0,.42),0 0 
   box-shadow:0 4px 12px rgb(15 23 42 / .12);
   transition:top .2s ease;
 }
+html.dark .file-transfer-toast {
+  border-color:#27466f;
+  background:#0b1729;
+  box-shadow:0 12px 30px rgb(0 0 0 / .45);
+}
+html.dark .file-transfer-toast .text-blue-800 { color:#dbeafe; }
+html.dark .file-transfer-toast .text-blue-700,
+html.dark .file-transfer-toast .text-blue-600 { color:#93c5fd; }
+html.dark .file-transfer-toast .bg-blue-100 { background:#17243a; }
+html.dark .file-transfer-toast .bg-white\/70 { background:rgb(15 23 42 / .82); }
+html.dark .file-transfer-toast-overflow { border-color:#27466f; background:#0b1729; color:#93c5fd; }
 
 .shortcut-folder-cover { position:relative; display:inline-flex; align-items:center; justify-content:center; }
 .shortcut-folder-cover.is-broken { color:#94a3b8; }
