@@ -76,6 +76,11 @@ const project = (overrides = {}) => ({
   assert.strictEqual(inspirationState.activePageId, 'inspiration-weddings');
   inspirationState = model.updateBrowserPagePath(inspirationState, 'inspiration-weddings', 'weddings/detail');
   assert.strictEqual(inspirationState.pages.find(page => page.id === 'inspiration-portraits').currentRelativePath, 'portraits', 'one inspiration page navigation must not affect siblings');
+  let pinnedNavigatedState = model.selectInspirationPath(model.EMPTY_WORKSPACE_TABS, 'C:/inspiration', '', 'pinned-navigated-root');
+  pinnedNavigatedState = model.updateBrowserPagePath(pinnedNavigatedState, 'pinned-navigated-root', 'weddings');
+  const ensuredPinnedState = model.ensureInspirationRootPage(pinnedNavigatedState, 'C:/inspiration', 'must-not-be-created');
+  assert.strictEqual(ensuredPinnedState.pages.length, 1, 'navigating a pinned inspiration tab must not cause a replacement root tab to be auto-created');
+  assert.strictEqual(ensuredPinnedState.pages[0].currentRelativePath, 'weddings');
   inspirationState = model.replaceInspirationRootPages(inspirationState, 'D:/new-inspiration', true, 'new-root');
   assert.strictEqual(inspirationState.pages.length, 1, 'changing roots must remove every page that points at the old root');
   assert.strictEqual(inspirationState.pages[0].inspirationRootPath, 'D:/new-inspiration');

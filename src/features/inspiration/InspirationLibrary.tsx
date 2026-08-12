@@ -34,6 +34,7 @@ export const InspirationLibraryNavigator = ({
   targetWorkspacePath,
   currentRelativePath,
   onNavigate,
+  onOpenInNewTab,
   onOpenSettings,
   onNotice,
 }: {
@@ -42,6 +43,7 @@ export const InspirationLibraryNavigator = ({
   targetWorkspacePath: string;
   currentRelativePath: string;
   onNavigate: (relativePath: string) => void;
+  onOpenInNewTab: (relativePath: string) => void;
   onOpenSettings: () => void;
   onNotice: (message: string, duration?: number) => void;
 }) => {
@@ -253,11 +255,11 @@ export const InspirationLibraryNavigator = ({
     const renaming = renamingPath === relativePath;
     return <div key={relativePath || '__root__'} onContextMenu={event => { if (!folder) return; event.preventDefault(); window.dispatchEvent(new Event('photoflow-menu-open')); setFolderMenu({ folder, x: event.clientX, y: event.clientY }); }} className={`group flex min-w-0 items-center rounded-lg ${selected ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'} ${busyPath === relativePath ? 'opacity-55' : ''}`} style={{ paddingLeft: 5 + depth * 14 }}>
       <button type="button" disabled={!hasChildren} onClick={() => toggleCollapsed(relativePath)} aria-label={`${collapsed ? '展开' : '收起'} ${label}`} className="flex h-8 w-6 shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-200 disabled:invisible">{collapsed ? <ChevronRight size={14}/> : <ChevronDown size={14}/>}</button>
-      {renaming && folder ? <form className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pr-2" onSubmit={event => { event.preventDefault(); void commitRename(folder); }}><Folder size={16} className="shrink-0 text-blue-500"/><input autoFocus value={renameValue} onChange={event => setRenameValue(event.target.value)} onFocus={event => event.currentTarget.select()} onBlur={() => void commitRename(folder)} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setRenamingPath(''); } }} disabled={busyPath === relativePath} aria-label={`重命名 ${label}`} className="min-w-0 flex-1 rounded border border-blue-400 bg-white px-1.5 py-0.5 text-sm text-slate-800 outline-none ring-2 ring-blue-100"/></form> : <button type="button" onClick={() => onNavigate(relativePath)} title={label} className={`flex min-w-0 flex-1 items-center gap-2 py-2 pr-2 text-left text-sm ${selected ? 'font-bold' : ''}`}><Folder size={16} className="shrink-0 text-blue-500"/><span className="truncate">{label}</span></button>}
+      {renaming && folder ? <form className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pr-2" onSubmit={event => { event.preventDefault(); void commitRename(folder); }}><Folder size={16} className="shrink-0 text-blue-500"/><input autoFocus value={renameValue} onChange={event => setRenameValue(event.target.value)} onFocus={event => event.currentTarget.select()} onBlur={() => void commitRename(folder)} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setRenamingPath(''); } }} disabled={busyPath === relativePath} aria-label={`重命名 ${label}`} className="min-w-0 flex-1 rounded border border-blue-400 bg-white px-1.5 py-0.5 text-sm text-slate-800 outline-none ring-2 ring-blue-100"/></form> : <button type="button" draggable={Boolean(relativePath)} onDragStart={event => { if (!relativePath) return; event.dataTransfer.effectAllowed = 'copy'; event.dataTransfer.setData('application/x-photoflow-folder-tab', JSON.stringify({ kind: 'inspiration', relativePath })); event.dataTransfer.setData('text/plain', label); window.dispatchEvent(new Event('photoflow:folder-tab-drag-start')); }} onDragEnd={() => window.dispatchEvent(new Event('photoflow:folder-tab-drag-end'))} onClick={() => onNavigate(relativePath)} title={relativePath ? `${label}（可拖到顶部标签栏）` : label} className={`flex min-w-0 flex-1 items-center gap-2 py-2 pr-2 text-left text-sm ${selected ? 'font-bold' : ''}`}><Folder size={16} className="shrink-0 text-blue-500"/><span className="truncate">{label}</span></button>}
     </div>;
   };
   return <nav aria-label="灵感库导航" className="flex min-h-0 flex-1 flex-col border-r border-slate-200 bg-white">
-    {folderMenu && createPortal(<div className="fixed inset-0 z-[420]" onPointerDown={() => setFolderMenu(null)} onContextMenu={event => { event.preventDefault(); setFolderMenu(null); }}><div role="menu" aria-label={`${folderMenu.folder.name} 文件夹菜单`} onPointerDown={event => event.stopPropagation()} className="project-context-menu fixed w-60 rounded-lg border border-slate-200 bg-white p-1.5 shadow-2xl" style={{ left: Math.min(folderMenu.x, Math.max(8, window.innerWidth - 248)), top: Math.min(folderMenu.y, Math.max(8, window.innerHeight - 220)) }}><button type="button" className="project-menu-item" onClick={() => void createChildFolder(folderMenu.folder)}><FolderPlus size={14}/>新建文件夹</button><div className="my-1 border-t border-slate-100"/><button type="button" className="project-menu-item" onClick={() => startRename(folderMenu.folder)}><Edit size={14}/>重命名</button><button type="button" disabled={!targetProjectsAvailable} className="project-menu-item" onClick={() => addFolderToProject(folderMenu.folder)}><FolderInput size={14}/>增加到项目{targetProject ? `“${targetProject.name}”` : '…'}</button>{targetProject && <button type="button" className="project-menu-item" onClick={() => addFolderToProject(folderMenu.folder, true)}><ChevronDown size={14}/>选择其他项目…</button>}<div className="my-1 border-t border-slate-100"/><button type="button" className="project-menu-item project-menu-danger" onClick={() => void deleteFolder(folderMenu.folder)}><Trash2 size={14}/>删除文件夹</button></div></div>, document.body)}
+    {folderMenu && createPortal(<div className="fixed inset-0 z-[420]" onPointerDown={() => setFolderMenu(null)} onContextMenu={event => { event.preventDefault(); setFolderMenu(null); }}><div role="menu" aria-label={`${folderMenu.folder.name} 文件夹菜单`} onPointerDown={event => event.stopPropagation()} className="project-context-menu fixed w-60 rounded-lg border border-slate-200 bg-white p-1.5 shadow-2xl" style={{ left: Math.min(folderMenu.x, Math.max(8, window.innerWidth - 248)), top: Math.min(folderMenu.y, Math.max(8, window.innerHeight - 250)) }}><button type="button" className="project-menu-item" onClick={() => { const path = folderMenu.folder.relativePath; setFolderMenu(null); onOpenInNewTab(path); }}><FolderPlus size={14}/>在新标签页打开</button><div className="my-1 border-t border-slate-100"/><button type="button" className="project-menu-item" onClick={() => void createChildFolder(folderMenu.folder)}><FolderPlus size={14}/>新建文件夹</button><div className="my-1 border-t border-slate-100"/><button type="button" className="project-menu-item" onClick={() => startRename(folderMenu.folder)}><Edit size={14}/>重命名</button><button type="button" disabled={!targetProjectsAvailable} className="project-menu-item" onClick={() => addFolderToProject(folderMenu.folder)}><FolderInput size={14}/>增加到项目{targetProject ? `“${targetProject.name}”` : '…'}</button>{targetProject && <button type="button" className="project-menu-item" onClick={() => addFolderToProject(folderMenu.folder, true)}><ChevronDown size={14}/>选择其他项目…</button>}<div className="my-1 border-t border-slate-100"/><button type="button" className="project-menu-item project-menu-danger" onClick={() => void deleteFolder(folderMenu.folder)}><Trash2 size={14}/>删除文件夹</button></div></div>, document.body)}
     <div className="flex items-center gap-2 px-4 pb-3 pt-5 text-sm font-bold text-slate-800"><Lightbulb size={18} className="text-amber-500"/><span className="min-w-0 flex-1 truncate">灵感库</span></div>
     <div className="inspiration-navigator-scroll min-h-0 flex-1 space-y-1 overflow-y-auto px-3">
       {rootPath ? <div className="space-y-0.5">{treeRow('灵感库文件夹', '', 0, folders.length > 0)}{loading && !folders.length ? <p className="flex items-center gap-2 px-3 py-3 text-xs text-slate-400"><Loader2 size={14} className="animate-spin"/>正在读取目录…</p> : visibleFolders.map(folder => treeRow(folder.name, folder.relativePath, folder.depth + 1, parentPaths.has(folder.relativePath))) }{treeError && <p className="px-3 py-2 text-xs leading-5 text-amber-600">{treeError}</p>}</div> : <p className="px-3 py-4 text-xs leading-5 text-slate-400">首次进入灵感库时请选择文件夹。</p>}
@@ -275,6 +277,8 @@ export const InspirationLibraryPage = ({
   componentsLoading,
   onUpdateConfig,
   onDirectoryChange,
+  navigationRequest,
+  onOpenDirectoryPage,
   onNotice,
 }: {
   pageId: string;
@@ -285,6 +289,8 @@ export const InspirationLibraryPage = ({
   componentsLoading: boolean;
   onUpdateConfig: (config: AppConfig) => void | boolean | Promise<void | boolean>;
   onDirectoryChange: (pageId: string, relativePath: string) => void;
+  navigationRequest?: { path: string; id: number };
+  onOpenDirectoryPage: (relativePath: string) => void;
   onNotice: (message: string, duration?: number) => void;
 }) => {
   const rootPath = config.inspirationLibrary.rootPath.trim();
@@ -331,7 +337,9 @@ export const InspirationLibraryPage = ({
     activeView="project"
     browserContext={INSPIRATION_FILE_BROWSER_CONTEXT}
     initialRelativePath={initialRelativePath}
+    navigationRequest={navigationRequest}
     onDirectoryChange={handleDirectoryChange}
+    onOpenDirectoryPage={onOpenDirectoryPage}
     project={project}
     workspacePath={rootPath}
     inspirationTargetWorkspacePath={config.workspacePath}

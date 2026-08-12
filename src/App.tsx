@@ -20,6 +20,7 @@ import { AppErrorBoundary } from './features/app/AppErrorBoundary';
 import { BackupHomeCard, StartupWindowFrame, UpdateModal, WindowControls } from './features/app/AppChrome';
 import { inspirationTabId, projectTabId, useTitlebarTabOrder, workspaceToolTabId } from './features/app/useTitlebarTabOrder';
 import { useWorkspaceTabs } from './features/app/useWorkspaceTabs';
+import { useFolderTabNavigation } from './features/app/useFolderTabNavigation';
 import { browserPageActivation } from './features/app/workspace-tab-model';
 import { BackgroundTaskIndicator } from './features/background-tasks/BackgroundTaskIndicator';
 import { useTaskCenter } from './features/background-tasks/TaskCenter';
@@ -291,27 +292,27 @@ const App: React.FC = () => {
     window.localStorage.setItem('photoflow:sidebar-width', String(Math.round(sidebarWidth)));
   }, [sidebarWidth]);
 
-  useEffect(() => {
-    window.localStorage.setItem('photoflow:sidebar-collapsed', String(sidebarCollapsed));
-  }, [sidebarCollapsed]);
-
-  const previousInspirationRootRef = useRef<string>();
+  useEffect(() => { window.localStorage.setItem('photoflow:sidebar-collapsed', String(sidebarCollapsed)); }, [sidebarCollapsed]);
+  const previousInspirationRootRef = useRef<string>(); const previousInspirationPinnedRef = useRef<boolean>();
   useEffect(() => {
     if (!configLoaded || !config) return;
     const rootPath = config.inspirationLibrary.rootPath.trim();
-    if (previousInspirationRootRef.current === rootPath) {
-      if (config.pinInspirationLibrary) ensureInspirationRoot(rootPath);
+    const rootChanged = previousInspirationRootRef.current !== rootPath;
+    const pinChanged = previousInspirationPinnedRef.current !== config.pinInspirationLibrary;
+    previousInspirationRootRef.current = rootPath;
+    previousInspirationPinnedRef.current = config.pinInspirationLibrary;
+    if (!rootChanged) {
+      if (pinChanged && config.pinInspirationLibrary) ensureInspirationRoot(rootPath);
       return;
     }
     const activeWasInspiration = projectPages.some(page => page.id === activePageId && page.kind === 'inspiration');
-    previousInspirationRootRef.current = rootPath;
     resetInspirationPages(rootPath, config.pinInspirationLibrary);
     if (activeWasInspiration) { setSelectedProject(null); setActiveTab(config.pinInspirationLibrary ? 'inspiration' : 'home'); }
   }, [activePageId, config, configLoaded, ensureInspirationRoot, projectPages, resetInspirationPages]);
 
   const titlebarPages = useMemo(() => ({
     inspiration: projectPages.filter(page => page.kind === 'inspiration').map(page => ({ id: page.id, currentRelativePath: page.currentRelativePath })),
-    pinnedInspirationPageId: config?.pinInspirationLibrary ? projectPages.find(page => page.kind === 'inspiration' && page.currentRelativePath === '')?.id : undefined,
+    pinnedInspirationPageId: config?.pinInspirationLibrary ? projectPages.find(page => page.kind === 'inspiration' && page.initialRelativePath === '')?.id : undefined,
     projects: projectPages.filter(page => page.project).map(page => ({ id: page.id, projectPath: page.project!.path })),
   }), [config?.pinInspirationLibrary, projectPages]);
   const titlebarTabDragProps = useTitlebarTabOrder({
@@ -826,12 +827,12 @@ const App: React.FC = () => {
     else if (nextPage?.project) { setSelectedProject(nextPage.project); setProjectDestination(nextPage.project.path); setActiveTab('project'); }
     else showHomeTab();
   };
-  const navigateInspiration = (path: string) => {
-    if (!config) return;
-    requestInspirationPath(config.inspirationLibrary.rootPath.trim(), path);
+  const activateInspiration = () => {
     setSelectedProject(null);
+    setProjectDestination(null);
     setActiveTab('inspiration');
   };
+  const { navigationRequests: browserNavigationRequests, openInNewTab: openInspirationDirectoryPage, navigateCurrent: navigateInspiration, dropActive: folderTabDropActive, sourceDragActive: folderTabSourceDragActive, dropProps: folderTabDropProps } = useFolderTabNavigation({ rootPath: config?.inspirationLibrary.rootPath.trim() || '', pages: projectPages, activePageId, createPage, requestInspirationPath, activateInspiration, openProjectInNewTab: project => openProjectDirectoryPage(project, '') });
   const openSettingsTab = () => {
     setSettingsTabOpen(true);
     setActiveTab('settings');
@@ -938,13 +939,13 @@ const App: React.FC = () => {
             <span className="truncate text-sm font-bold text-slate-800">照片流</span>
           </div>
         </div>
-        <div className="flex min-w-0 flex-1">
+        <div {...folderTabDropProps} data-folder-tab-drop-zone="true" aria-label="标签栏" className={`relative flex min-w-0 flex-1 transition-colors ${folderTabDropActive ? 'bg-blue-50 ring-1 ring-inset ring-blue-400' : ''}`}>
           {titlebarTabScroll.overflow && <button type="button" aria-label="向左滚动标签" title="向左滚动标签" disabled={!titlebarTabScroll.canScrollLeft} onClick={() => scrollTitlebarTabs(-1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronLeft size={15}/></button>}
           <div ref={titlebarTabsRef} onWheel={handleTitlebarTabWheel} aria-label="已打开的窗口" className="titlebar-tabs-scroll scrollbar-hide flex min-w-0 shrink items-end gap-0 overflow-x-auto px-2 pt-1.5">
             <button type="button" {...titlebarTabDragProps('home')} data-active-tab={activeTab === 'home'} onClick={showHomeTab} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[92px] max-w-[180px] items-center gap-2 rounded-t-lg border px-3 text-xs font-medium transition ${activeTab === 'home' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
               <Home size={14} className="shrink-0"/><span className="truncate">主页</span>
             </button>
-            {projectPages.filter(page => page.kind === 'inspiration').map(page => { const folderName = page.currentRelativePath.split('/').filter(Boolean).pop(); const label = page.currentRelativePath ? `灵感库 · ${folderName || page.currentRelativePath}` : '灵感库'; const pinnedRoot = config.pinInspirationLibrary && page.currentRelativePath === ''; const isActive = activePageId === page.id && activeTab === 'inspiration'; return <div key={page.id} {...titlebarTabDragProps(inspirationTabId(page.id))} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[112px] max-w-[210px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={() => { activatePage(page.id); setSelectedProject(null); setActiveTab('inspiration'); }} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Lightbulb size={14} className="shrink-0"/><span className="truncate">{label}</span></button>{pinnedRoot ? <span aria-label="灵感库已固定" title="灵感库已固定" className="mr-2 text-blue-500"><Pin size={12}/></span> : <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${label}`} title={`关闭 ${label}`} onClick={() => closeInspirationTab(page.id)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>}</div>; })}
+            {projectPages.filter(page => page.kind === 'inspiration').map(page => { const folderName = page.currentRelativePath.split('/').filter(Boolean).pop(); const label = page.currentRelativePath ? `灵感库 · ${folderName || page.currentRelativePath}` : '灵感库'; const pinnedRoot = config.pinInspirationLibrary && page.initialRelativePath === ''; const isActive = activePageId === page.id && activeTab === 'inspiration'; return <div key={page.id} {...titlebarTabDragProps(inspirationTabId(page.id))} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[112px] max-w-[210px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={() => { activatePage(page.id); setSelectedProject(null); setActiveTab('inspiration'); }} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Lightbulb size={14} className="shrink-0"/><span className="truncate">{label}</span></button>{pinnedRoot ? <span aria-label="灵感库已固定" title="灵感库已固定" className="mr-2 text-blue-500"><Pin size={12}/></span> : <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${label}`} title={`关闭 ${label}`} onClick={() => closeInspirationTab(page.id)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>}</div>; })}
             {projectPages.filter(page => page.project).map(page => { const project = page.project!; const folderName = page.currentRelativePath.split('/').filter(Boolean).pop(); const label = page.initialRelativePath ? `${project.name} · ${folderName || page.initialRelativePath}` : project.name; return <React.Fragment key={page.id}>
               <div {...titlebarTabDragProps(projectTabId(page.id))} title={label} data-active-tab={activePageId === page.id && activeTab === 'project'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[120px] max-w-[220px] items-center rounded-t-lg border text-xs font-medium transition ${activePageId === page.id && activeTab === 'project' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
                 <button type="button" onClick={() => activateProjectPage(page.id)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Folder size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{label}</span></button>
@@ -963,7 +964,7 @@ const App: React.FC = () => {
             {settingsTabOpen && <div {...titlebarTabDragProps('settings')} data-active-tab={activeTab === 'settings'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[108px] max-w-[180px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'settings' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={openSettingsTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Settings size={14} className="shrink-0"/><span className="truncate">设置</span></button><button type="button" data-tab-drag-ignore="true" aria-label="关闭设置" title="关闭设置" onClick={closeSettingsTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}
           </div>
           {titlebarTabScroll.overflow && <button type="button" aria-label="向右滚动标签" title="向右滚动标签" disabled={!titlebarTabScroll.canScrollRight} onClick={() => scrollTitlebarTabs(1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronRight size={15}/></button>}
-          <div aria-label="拖动窗口" className="app-window-drag-region min-w-8 flex-1"/>
+          <div aria-label={folderTabSourceDragActive ? '标签栏空白区域' : '拖动窗口'} className={`${folderTabSourceDragActive ? 'app-titlebar-control' : 'app-window-drag-region'} min-w-8 flex-1`}/>
         </div>
         <BackgroundTaskIndicator ownerPageIds={openPageIds}/>
         <WindowControls/>
@@ -973,7 +974,7 @@ const App: React.FC = () => {
       {/* Sidebar */}
       <aside style={{ width: sidebarCollapsed ? 0 : renderedSidebarWidth }} className="relative z-30 flex min-w-0 shrink-0 flex-col overflow-hidden bg-white transition-[width] duration-200">
         {activeTab === 'settings' && <SettingsNavigator activeSection={settingsSection} components={components} onSelect={section => { setSettingsSection(section); if (section === 'backup' || section === 'storage') setBackupProjectFocus(null); }}/>}
-        {projectPages.some(page => page.kind === 'inspiration') && <div className={activeTab === 'inspiration' ? 'contents' : 'hidden'}><InspirationLibraryNavigator active={activeTab === 'inspiration'} rootPath={config.inspirationLibrary.rootPath} targetWorkspacePath={config.workspacePath} currentRelativePath={projectPages.find(page => page.id === activePageId && page.kind === 'inspiration')?.currentRelativePath || ''} onNavigate={navigateInspiration} onOpenSettings={openSettingsTab} onNotice={showNotice}/></div>}
+        {projectPages.some(page => page.kind === 'inspiration') && <div className={activeTab === 'inspiration' ? 'contents' : 'hidden'}><InspirationLibraryNavigator active={activeTab === 'inspiration'} rootPath={config.inspirationLibrary.rootPath} targetWorkspacePath={config.workspacePath} currentRelativePath={projectPages.find(page => page.id === activePageId && page.kind === 'inspiration')?.currentRelativePath || ''} onNavigate={navigateInspiration} onOpenInNewTab={openInspirationDirectoryPage} onOpenSettings={openSettingsTab} onNotice={showNotice}/></div>}
         {activeTab !== 'settings' && activeTab !== 'inspiration' && <><ProjectNavigator
           workspacePath={config.workspacePath}
           workspacePaths={config.workspacePaths}
@@ -1027,7 +1028,7 @@ const App: React.FC = () => {
                 </div>;
           return <div key={card} className={draggedHomeCard === card ? 'opacity-40' : undefined}>{content}</div>;
         })}</div>
-        {projectPages.filter(page => page.kind === 'inspiration').map(page => { const active = activeTab === 'inspiration' && activePageId === page.id; return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage pageId={page.id} active={active} initialRelativePath={page.initialRelativePath} config={config} components={components} componentsLoading={componentsLoading} onUpdateConfig={handleConfigUpdate} onDirectoryChange={updatePagePath} onNotice={showNotice}/></div>; })}
+        {projectPages.filter(page => page.kind === 'inspiration').map(page => { const active = activeTab === 'inspiration' && activePageId === page.id; return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage pageId={page.id} active={active} initialRelativePath={page.initialRelativePath} navigationRequest={browserNavigationRequests[page.id]} config={config} components={components} componentsLoading={componentsLoading} onUpdateConfig={handleConfigUpdate} onDirectoryChange={updatePagePath} onOpenDirectoryPage={openInspirationDirectoryPage} onNotice={showNotice}/></div>; })}
         {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} backupProjectFocus={backupProjectFocus} onClearBackupProjectFocus={() => setBackupProjectFocus(null)} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={refreshComponents} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} getDefaultSettings={getDefaultSettings} onNotice={showNotice}/>}
         {projectPages.filter(page => page.project).map(page => { const project = page.project!;
           const active = activeTab.startsWith('project') && activePageId === page.id;

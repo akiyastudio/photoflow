@@ -15,6 +15,9 @@ const latePreviewRoot = path.join(temporaryRoot, 'late-preview');
 fs.mkdirSync(path.join(sourceRoot, '参考目录'), { recursive: true });
 fs.mkdirSync(targetRoot, { recursive: true });
 fs.writeFileSync(path.join(sourceRoot, '参考目录', '说明.txt'), 'folder target');
+const referenceDirectoryTimes = fs.statSync(path.join(sourceRoot, '参考目录'));
+fs.mkdirSync(path.join(sourceRoot, '参考目录', '二级目录'), { recursive: true });
+fs.writeFileSync(path.join(sourceRoot, '参考目录', '二级目录', '深层灵感.jpg'), 'nested inspiration');
 fs.writeFileSync(path.join(sourceRoot, '画面.jpg'), 'image payload');
 fs.writeFileSync(path.join(sourceRoot, '.photoflow-workspace-id'), 'inspiration-workspace-id');
 
@@ -106,6 +109,14 @@ registerWorkspaceIpc({
     const browseResult = await browseFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__');
     assert.strictEqual(browseResult.success, true, browseResult.error);
     assert(!browseResult.entries.some(entry => entry.name === '.photoflow-workspace-id'), 'the inspiration library must hide its workspace identity marker');
+    const searchFiles = handlers.get('workspace-search-files');
+    assert(searchFiles, 'search-files IPC handler was not registered');
+    const searchResult = await searchFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__', '', '深层灵感');
+    assert.strictEqual(searchResult.success, true, searchResult.error);
+    assert(searchResult.entries.some(entry => entry.relativePath.replace(/\\/g, '/') === '参考目录/二级目录/深层灵感.jpg'), 'inspiration search must recurse through every descendant folder');
+    fs.unlinkSync(path.join(sourceRoot, '参考目录', '二级目录', '深层灵感.jpg'));
+    fs.rmdirSync(path.join(sourceRoot, '参考目录', '二级目录'));
+    fs.utimesSync(path.join(sourceRoot, '参考目录'), referenceDirectoryTimes.atime, referenceDirectoryTimes.mtime);
     const gather = handlers.get('workspace-add-inspiration-to-project');
     assert(gather, 'inspiration gather IPC handler was not registered');
     const result = await gather({}, sourceRoot, temporaryRoot, '策划中', '项目', ['参考目录', '画面.jpg']);

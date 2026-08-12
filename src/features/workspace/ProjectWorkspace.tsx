@@ -933,6 +933,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [finalExporting, setFinalExporting] = useState(false);
   const [finalExportParentId, setFinalExportParentId] = useState('');
   const [finalViewOpen, setFinalViewOpen] = useState(false);
+  const currentFolderRecursiveSearchActive = Boolean(searchQuery.trim()) && filterScope === 'current-folder' && !versionTreeOpen && !finalViewOpen;
   const [, setFinalViewLoading] = useState(false);
   const [finalViewEntries, setFinalViewEntries] = useState<ProjectFileEntry[]>([]);
   const [previewRating, setPreviewRating] = useState(0);
@@ -1600,7 +1601,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     else onNotice(`${inspirationMode ? '读取灵感库' : '读取项目'}失败：${result.error || '无法读取文件夹'}`);
   };
   const refreshRecursiveDirectory = useCallback(async (relativeDirectoryPath: string) => {
-    if (!recursiveFlatOpen) return;
+    if (!recursiveFlatOpen && !currentFolderRecursiveSearchActive) return;
     if (searchQuery.trim()) {
       setRecentRefreshToken(current => current + 1);
       return;
@@ -1633,7 +1634,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       return [...entriesByPath.values()];
     });
     directoryEntriesCacheRef.current.set(directoryPath, result.entries);
-  }, [mediaCacheConfig, project.name, project.path, project.status, recursiveFlatOpen, searchQuery, workspacePath]);
+  }, [currentFolderRecursiveSearchActive, mediaCacheConfig, project.name, project.path, project.status, recursiveFlatOpen, searchQuery, workspacePath]);
   const scheduleDirectoryRefresh = (directoryPaths: string[] = [currentRelativePathRef.current]) => {
     for (const directoryPath of directoryPaths) {
       const normalized = normalizeProjectRelativePath(directoryPath);
@@ -1646,7 +1647,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       const directories = [...pendingDirectoryRefreshesRef.current];
       pendingDirectoryRefreshesRef.current.clear();
       if (projectRootScopeSelected) setScopeRefreshToken(current => current + 1);
-      else if (recursiveFlatOpen) {
+      else if (recursiveFlatOpen || currentFolderRecursiveSearchActive) {
         for (const directory of directories) void refreshRecursiveDirectory(directory);
       } else {
         const currentPath = normalizeProjectRelativePath(currentRelativePathRef.current);
@@ -1769,11 +1770,11 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     // low-frequency fallback without making polling the normal code path.
     const interval = window.setInterval(() => {
       if (projectRootScopeSelected) setScopeRefreshToken(current => current + 1);
-      else if (recursiveFlatOpen) setRecentRefreshToken(current => current + 1);
+      else if (recursiveFlatOpen || currentFolderRecursiveSearchActive) setRecentRefreshToken(current => current + 1);
       else void refresh(currentRelativePathRef.current);
     }, 2500);
     return () => window.clearInterval(interval);
-  }, [active, project.path, projectRootScopeSelected, recursiveFlatOpen, rootWatchFailed, watchRootDirectly, workspacePath]);
+  }, [active, currentFolderRecursiveSearchActive, project.path, projectRootScopeSelected, recursiveFlatOpen, rootWatchFailed, watchRootDirectly, workspacePath]);
   useEffect(() => {
     if (!active) return;
     let timer: number | undefined;
@@ -1808,7 +1809,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           timer = window.setTimeout(() => setScopeRefreshToken(current => current + 1), 350);
           return;
         }
-        if (recursiveFlatOpen) {
+        if (recursiveFlatOpen || currentFolderRecursiveSearchActive) {
           const normalizedChangedPath = normalizeProjectRelativePath(projectRelativePath);
           const affectsRecursiveScope = !currentPath
             || normalizedChangedPath === currentPath
@@ -1848,7 +1849,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       window.clearTimeout(progressFolderTimer);
       unsubscribe();
     };
-  }, [active, workspacePath, project.path, project.status, project.name, rootRelativeFileEvents, watchRootDirectly, mediaCacheConfig.directory, mediaCacheConfig.maxSizeGB, finalViewOpen, loadFinalViewEntries, projectWorkflows, loadProgressFolders, projectRootScopeSelected, recursiveFlatOpen, refreshRecursiveDirectory]);
+  }, [active, workspacePath, project.path, project.status, project.name, rootRelativeFileEvents, watchRootDirectly, mediaCacheConfig.directory, mediaCacheConfig.maxSizeGB, currentFolderRecursiveSearchActive, finalViewOpen, loadFinalViewEntries, projectWorkflows, loadProgressFolders, projectRootScopeSelected, recursiveFlatOpen, refreshRecursiveDirectory]);
   useEffect(() => {
     if (!active) return;
     const unsubscribe = projectWorkspaceClient.onThumbnailStateChanged(update => {
@@ -1887,7 +1888,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const previousCursor = recentCursorRef.current;
     recentCursorRef.current = '';
     if (previousCursor) void projectWorkspaceClient.cancelRecentProjectFiles(previousCursor);
-    if (!active || !recursiveFlatOpen || finalViewOpen) {
+    if (!active || !(recursiveFlatOpen || currentFolderRecursiveSearchActive) || finalViewOpen) {
       setSearchEntries([]);
       setSearchLoading(false);
       setSearchError('');
@@ -1934,7 +1935,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       });
     }, 220);
     return () => window.clearTimeout(timer);
-  }, [active, searchQuery, recursiveFlatOpen, currentRelativePath, finalViewOpen, workspacePath, project.status, project.name, recentRefreshToken]);
+  }, [active, searchQuery, recursiveFlatOpen, currentFolderRecursiveSearchActive, currentRelativePath, finalViewOpen, workspacePath, project.status, project.name, recentRefreshToken]);
   const loadMoreRecentFiles = useCallback(async () => {
     if (!active || !recursiveFlatOpen || searchQuery.trim() || finalViewOpen || !recentHasMore || !recentCursor || recentLoadInFlightRef.current) return;
     recentLoadInFlightRef.current = true;
@@ -2105,9 +2106,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     return () => { window.removeEventListener('click', closeMenus); window.removeEventListener('photoflow-menu-open', closeMenus); };
   }, []);
 
-  const recursiveSearchActive = (recursiveFlatOpen || projectRootFilterActive) && !finalViewOpen;
-  const groupedResultsActive = (recursiveFlatOpen || projectRootFilterActive) && !finalViewOpen;
-  const activeFileEntries = projectRootFilterActive ? scopeEntries : recursiveFlatOpen ? searchEntries : finalViewOpen ? finalViewEntries : fileEntries;
+  const recursiveSearchActive = (recursiveFlatOpen || currentFolderRecursiveSearchActive || projectRootFilterActive) && !finalViewOpen;
+  const groupedResultsActive = (recursiveFlatOpen || currentFolderRecursiveSearchActive || projectRootFilterActive) && !finalViewOpen;
+  const activeFileEntries = projectRootFilterActive ? scopeEntries : recursiveFlatOpen || currentFolderRecursiveSearchActive ? searchEntries : finalViewOpen ? finalViewEntries : fileEntries;
   useEffect(() => {
     filterRatingSequenceRef.current += 1;
     const sequence = filterRatingSequenceRef.current;
@@ -2214,6 +2215,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const renderedFileEntries = displayedFileEntries.slice(virtualWindow.start, virtualWindow.end);
   const pathSegments = currentRelativePath.split(/[\\/]/).filter(Boolean);
   const browserRootLabel = inspirationMode ? browserContext.title : project.name;
+  const recursiveScopeLabel = currentRelativePath ? '当前文件夹及其子文件夹' : inspirationMode ? '整个灵感库' : '整个项目';
   const breadcrumbs = pathSegments.map((label, index) => ({ label, relativePath: pathSegments.slice(0, index + 1).join('/') }));
   useEffect(() => { setVirtualWindow({ start: 0, end: 120, top: 0, bottom: 0, rowHeight: 0, columns: 1 }); }, [browseMode, currentRelativePath, fileFilter, filterScope, ratingFilter, finalViewOpen, sortField, sortDirection, searchQuery]);
   useEffect(() => {
@@ -4696,6 +4698,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     internalDragPathsRef.current = dragPaths;
     internalDropHandledRef.current = false;
     if (!selectedPaths.includes(entry.relativePath)) setSelectedPaths([entry.relativePath]);
+    const draggedEntry = dragPaths.length === 1 ? activeFileEntries.find(candidate => normalizeProjectRelativePath(candidate.relativePath) === normalizeProjectRelativePath(dragPaths[0])) : undefined;
+    if (draggedEntry?.kind === 'folder' && !draggedEntry.viaShortcut) window.dispatchEvent(new Event('photoflow:folder-tab-drag-start'));
     projectWorkspaceClient.startProjectFileDrag(workspacePath, project.status, project.name, dragPaths);
   };
   const finishEntryDrag = () => {
@@ -4840,6 +4844,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     return () => window.removeEventListener('dragover', acceptInternalFolderDrag, true);
   }, []);
   useEffect(() => projectWorkspaceClient.onProjectFileDragEnd(result => {
+    window.dispatchEvent(new Event('photoflow:folder-tab-drag-end'));
     const dragPaths = result.paths?.length ? result.paths : [...internalDragPathsRef.current];
     internalDragPathsRef.current = [];
     setDragTargetPath('');
@@ -4851,6 +4856,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     }
     if (!result.insideWindow || !dragPaths.length) return;
     const element = document.elementFromPoint(result.clientX, result.clientY);
+    const titlebarDropZone = element?.closest<HTMLElement>('[data-folder-tab-drop-zone="true"]');
+    if (titlebarDropZone && dragPaths.length === 1) {
+      const draggedEntry = activeFileEntries.find(entry => normalizeProjectRelativePath(entry.relativePath) === normalizeProjectRelativePath(dragPaths[0]));
+      if (draggedEntry?.kind === 'folder' && !draggedEntry.viaShortcut && onOpenDirectoryPage) onOpenDirectoryPage(draggedEntry.relativePath);
+      return;
+    }
     const folderTarget = element?.closest<HTMLElement>('[data-entry-kind="folder"][data-entry-path]');
     const recursiveTarget = folderTarget ? null : recursiveDropTargetFromElement(element);
     const targetRelativePath = folderTarget?.dataset.entryPath ?? recursiveTarget?.relativePath;
@@ -4859,7 +4870,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!movablePaths.length) return;
     const targetName = folderTarget?.title || recursiveTarget?.label || targetRelativePath.split(/[\\/]/).pop() || '项目根目录';
     void performDirectoryDrop(movablePaths, [], targetRelativePath, targetName);
-  }), [workspacePath, project.status, project.name, recursiveFlatOpen]);
+  }), [activeFileEntries, onOpenDirectoryPage, workspacePath, project.status, project.name, recursiveFlatOpen]);
   const handleSurfaceDragOver = (event: React.DragEvent<HTMLDivElement>) => {
     if (!hasExternalFiles(event)) return;
     event.preventDefault();
@@ -5061,7 +5072,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         <footer className="flex items-center justify-between gap-3 border-t border-slate-200 bg-slate-50 px-5 py-4"><p className="text-xs text-slate-500">以后也可以右键文件夹，选择“设为版本进度”。</p><button type="button" onClick={() => setPendingProgressFolders([])} className="dialog-secondary">暂不设置</button></footer>
       </div></div>}
       {fileMenu && createPortal(<ViewportContextMenu x={fileMenu.x} y={fileMenu.y} widthClass="w-52" allowSubmenus>
-        {projectWorkflows && fileMenu.entry.kind === 'folder' && !fileMenu.entry.viaShortcut && <><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); onOpenDirectoryPage?.(entry.relativePath); }}><FolderPlus size={14}/>在新页面打开</button><div className="my-1 border-t border-slate-100"/></>}
+        {fileMenu.entry.kind === 'folder' && !fileMenu.entry.viaShortcut && onOpenDirectoryPage && <><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); onOpenDirectoryPage(entry.relativePath); }}><FolderPlus size={14}/>在新标签页打开</button><div className="my-1 border-t border-slate-100"/></>}
         {projectWorkflows && fileMenu.entry.kind === 'folder' && !fileMenuVersionTreeFolder && <><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openMarkProgress(entry); }}><GitBranch size={14}/>设为版本进度…</button><div className="group/submenu relative"><button type="button" className="project-menu-item w-full"><FolderPlus size={14}/>纳入版本树<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-56 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100"><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void adoptVersionTreeFolder(entry, 'original', 'image'); }}>设为图片原始素材</button><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void adoptVersionTreeFolder(entry, 'original', 'video'); }}>设为视频原始素材</button><div className="my-1 border-t border-slate-100"/><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void adoptVersionTreeFolder(entry, 'companion', 'image'); }}>设为图片配套素材…</button><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void adoptVersionTreeFolder(entry, 'preview', 'image'); }}>设为图片预览产物…</button><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void adoptVersionTreeFolder(entry, 'preview', 'video'); }}>设为视频预览产物…</button></div></div><div className="my-1 border-t border-slate-100"/></>}
         {projectWorkflows && fileMenuRegisteredProgressFolder && <><button disabled={fileMenuRegisteredProgressFolder.trackingState === 'committing' || fileMenuRegisteredProgressFolder.trackingState === 'needs_repair'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openMarkProgress(entry); }}><GitBranch size={14}/>修改进度</button>{progressTrackingAction(fileMenuRegisteredProgressFolder) && <button disabled={progressSubmitting || Boolean(progressTask) || fileMenuRegisteredProgressFolder.trackingState === 'committing'} title="按已持久化策略刷新当前主分支版本跟踪" className="project-menu-item" onClick={() => { const progressFolder = fileMenuRegisteredProgressFolder; setFileMenu(null); void refreshProgressTracking(progressFolder); }}><RefreshCw size={14}/>{progressTrackingRefreshLabel(fileMenuRegisteredProgressFolder)}</button>}<div className="my-1 border-t border-slate-100"/></>}
         {gatherToProject && <><button disabled={fileMenuContainsShortcutContent || gatheringInspiration || !inspirationProjects.length} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); startGatherInspiration(targets); }}><FolderInput size={14}/>增加到项目{inspirationTargetProject ? `“${inspirationTargetProject.name}”` : '…'}</button>{inspirationTargetProject && <button disabled={fileMenuContainsShortcutContent || gatheringInspiration} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); setGatherPickerPaths(targets); }}><ChevronDown size={14}/>选择其他项目…</button>}<div className="my-1 border-t border-slate-100"/></>}
@@ -5454,12 +5465,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             onCanvasControllerChange={setVersionTreeCanvasController}
           />}
         </div> : <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={event => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-entry-path]'); target?.focus({ preventScroll: true }); if (target?.dataset.entryPath) entryPointerModifiersRef.current = { path: target.dataset.entryPath, additive: event.ctrlKey || event.metaKey, range: event.shiftKey }; }} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} style={{ marginInline: -FILE_SURFACE_HORIZONTAL_PADDING, paddingInline: FILE_SURFACE_HORIZONTAL_PADDING }} className={`relative min-h-[220px] flex-1 select-none outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
-          {groupedResultsActive && (groupedLoading ? <p className="py-12 text-center text-sm text-slate-400"><Loader2 size={17} className="mr-2 inline animate-spin"/>{projectRootFilterActive ? '正在分页读取全部文件…' : searchQuery.trim() ? `正在搜索${currentRelativePath ? '当前文件夹及其子文件夹' : '整个项目'}…` : '正在读取最近文件…'}</p> : groupedError ? <p className="py-8 text-center text-sm text-red-600">读取文件失败：{groupedError}</p> : searchResultGroups.length ? <div className="pb-4">
-            <p className="px-1 text-xs text-slate-500">{projectRootFilterActive ? `已分页加载${browserContext.title}中的 ${displayedFileEntries.length} 个文件` : searchQuery.trim() ? `在${currentRelativePath ? `“${currentRelativePath}”及其子文件夹` : '整个项目'}中找到 ${displayedFileEntries.length} 个文件` : `已加载${currentRelativePath ? `“${currentRelativePath}”及其子文件夹` : '整个项目'}最近修改的 ${displayedFileEntries.length} 个文件`}</p>
+          {groupedResultsActive && (groupedLoading ? <p className="py-12 text-center text-sm text-slate-400"><Loader2 size={17} className="mr-2 inline animate-spin"/>{projectRootFilterActive ? '正在分页读取全部文件…' : searchQuery.trim() ? `正在搜索${recursiveScopeLabel}…` : '正在读取最近文件…'}</p> : groupedError ? <p className="py-8 text-center text-sm text-red-600">读取文件失败：{groupedError}</p> : searchResultGroups.length ? <div className="pb-4">
+            <p className="px-1 text-xs text-slate-500">{projectRootFilterActive ? `已分页加载${browserContext.title}中的 ${displayedFileEntries.length} 个文件` : searchQuery.trim() ? `在${currentRelativePath ? `“${currentRelativePath}”及其子文件夹` : recursiveScopeLabel}中找到 ${displayedFileEntries.length} 个文件` : `已加载${currentRelativePath ? `“${currentRelativePath}”及其子文件夹` : recursiveScopeLabel}最近修改的 ${displayedFileEntries.length} 个文件`}</p>
             {searchResultGroups.map(([folderPath, entries], groupIndex) => { const viaShortcut = entries.some(entry => entry.viaShortcut); const folderLabel = viaShortcut ? folderPath.replace(/\.lnk(?=\/|$)/gi, '') : folderPath; const targetLabel = folderLabel || project.name; const normalizedFolderPath = normalizeProjectRelativePath(folderPath); return <section key={folderPath || '__root__'} data-recursive-folder-path={normalizedFolderPath} data-recursive-folder-label={targetLabel} data-recursive-folder-readonly={viaShortcut ? 'true' : 'false'} onContextMenu={event => { if (viaShortcut) { event.preventDefault(); event.stopPropagation(); onNotice('快捷方式指向的外部文件夹是只读浏览区域'); } else openSurfaceMenu(event, normalizedFolderPath, targetLabel); }} onDragOver={event => handleRecursiveFolderDragOver(event, normalizedFolderPath, viaShortcut)} onDragLeave={event => handleRecursiveFolderDragLeave(event, normalizedFolderPath)} onDrop={event => void handleRecursiveFolderDrop(event, normalizedFolderPath, targetLabel, viaShortcut)} className={`${groupIndex ? 'mt-5 border-t border-slate-200 pt-4' : 'pt-3'} rounded-lg transition ${recursiveDropTargetPath === normalizedFolderPath ? 'bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}><header className="mb-2 flex min-w-0 items-center gap-2 px-1"><Folder size={16} className="shrink-0 text-blue-500"/>{viaShortcut ? <span title={`${folderLabel}（快捷方式）`} className="min-w-0 truncate text-sm font-bold text-slate-700">{folderLabel || '快捷方式'} <span className="font-normal text-slate-400">（快捷方式）</span></span> : <button type="button" onClick={() => { setSearchQuery(''); navigateToDirectory(folderPath); }} title={`打开 ${folderPath || project.name}`} className="min-w-0 truncate text-sm font-bold text-slate-700 hover:text-blue-600">{folderPath || '项目根目录'}</button>}<span className="shrink-0 text-xs text-slate-400">{entries.length} 个</span></header><div className="grid w-full content-start" style={{ gap: FILE_GRID_GAP, gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${gridIconSize}px), 1fr))` }}>{entries.map(entry => <div key={`${entry.relativePath}|${entry.path}`} role="button" tabIndex={0} draggable={!entry.viaShortcut} onDragStart={event => startEntryDrag(event, entry)} data-entry-kind={entry.kind} data-entry-path={entry.relativePath} onClick={event => handleEntryClick(event, entry)} onDoubleClick={event => handleEntryDoubleClick(event, entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.relativePath} className={`group relative min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) || previewPath === entry.relativePath ? 'bg-blue-50 ring-1 ring-blue-400' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''}`}><span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span><div className="relative flex aspect-square items-center justify-center">{renderEntryIcon(entry, true)}</div><p className="mt-2 truncate text-xs font-medium text-slate-700">{getEntryDisplayName(entry)}</p><p className="mt-0.5 text-[10px] uppercase text-slate-400">{entry.kind === 'shortcut' ? '快捷方式' : entry.kind === 'raw' ? `RAW · ${entry.extension.slice(1)}` : entry.kind === 'video' ? `视频 · ${entry.extension.slice(1)}` : entry.extension.slice(1) || '文件'}</p></div>)}</div></section>; })}
             {(!searchQuery.trim() || projectRootFilterActive) && <p className={`py-6 text-center text-xs ${groupedLoadError ? 'text-red-500' : 'text-slate-400'}`}>{groupedLoadError ? `继续加载失败：${groupedLoadError}` : groupedLoadingMore ? <><Loader2 size={14} className="mr-1.5 inline animate-spin"/>正在继续加载…</> : groupedHasMore ? '继续向下滚动以加载更多文件' : '已显示当前范围内的全部文件'}</p>}
-          </div> : <p className="py-12 text-center text-sm text-slate-400">{projectRootFilterActive ? `${browserContext.title}中没有符合筛选条件的${filteredFileTypeLabel}。` : searchQuery.trim() ? `没有在${currentRelativePath ? '当前文件夹及其子文件夹' : '整个项目'}中找到包含“${searchQuery}”且符合筛选条件的文件。` : `当前范围内没有可显示的最近${filteredFileTypeLabel}。`}</p>)}
-          {!groupedResultsActive && searchQuery.trim() && searchLoading && <p className="py-12 text-center text-sm text-slate-400"><Loader2 size={17} className="mr-2 inline animate-spin"/>正在搜索{currentRelativePath ? '当前文件夹及其子文件夹' : '整个项目'}…</p>}
+          </div> : <p className="py-12 text-center text-sm text-slate-400">{projectRootFilterActive ? `${browserContext.title}中没有符合筛选条件的${filteredFileTypeLabel}。` : searchQuery.trim() ? `没有在${recursiveScopeLabel}中找到包含“${searchQuery}”且符合筛选条件的文件。` : `当前范围内没有可显示的最近${filteredFileTypeLabel}。`}</p>)}
+          {!groupedResultsActive && searchQuery.trim() && searchLoading && <p className="py-12 text-center text-sm text-slate-400"><Loader2 size={17} className="mr-2 inline animate-spin"/>正在搜索{recursiveScopeLabel}…</p>}
           {!groupedResultsActive && searchQuery.trim() && searchError && <p className="py-8 text-center text-sm text-red-600">搜索失败：{searchError}</p>}
           <div className={groupedResultsActive || Boolean(searchQuery.trim() && (searchLoading || searchError)) ? 'hidden' : undefined}>
           {directoryLoading ? <div role="status" aria-live="polite" className="flex min-h-[220px] items-center justify-center border-y border-slate-200 text-sm text-slate-500"><Loader2 size={18} className="mr-2 animate-spin"/>加载中…</div> : displayedFileEntries.length ? viewMode === 'list' ? <div className="min-w-[620px] border-y border-slate-200 text-sm">
