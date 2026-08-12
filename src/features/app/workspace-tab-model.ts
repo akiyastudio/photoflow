@@ -102,7 +102,7 @@ export const selectInspirationPath = (state: WorkspaceTabsState, rootPath: strin
 };
 
 export const ensureInspirationRootPage = (state: WorkspaceTabsState, rootPath: string, newPageId: string): WorkspaceTabsState => {
-  if (state.pages.some(page => page.kind === 'inspiration' && page.inspirationRootPath === rootPath && page.currentRelativePath === '')) return state;
+  if (state.pages.some(page => page.kind === 'inspiration' && page.inspirationRootPath === rootPath && page.initialRelativePath === '')) return state;
   const activePageId = state.activePageId;
   const withRoot = selectInspirationPath(state, rootPath, '', newPageId);
   return activePageId ? { ...withRoot, activePageId } : withRoot;

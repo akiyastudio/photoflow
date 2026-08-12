@@ -74,6 +74,8 @@ const canvasModel = loadCommonJs(compile('src/features/versioning/version-tree-c
 const edgeModel = loadCommonJs(compile('src/features/versioning/version-tree-edge-model.ts'));
 const layoutModel = loadCommonJs(compile('src/features/versioning/version-tree-layout-model.ts'), request => request === './version-tree-edge-model.ts' ? edgeModel : require(request));
 const canvasHook = loadCommonJs(compile('src/features/versioning/use-version-tree-canvas.ts'), request => request === './version-tree-canvas-model' ? canvasModel : require(request));
+const canvasHookSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/features/versioning/use-version-tree-canvas.ts'), 'utf8');
+assert(canvasHookSource.includes('sameCanvasPositions(positionsRef.current, next)'), 'version-tree layout reconciliation must skip identical maps to prevent effect update loops');
 const workspaceGridModel = loadCommonJs(compile('src/features/workspace/marquee-selection-model.ts'));
 const tree = loadCommonJs(compile('src/components/ProjectVersionTree.tsx'), request => {
   if (request === '../features/versioning/versioning-v2-model') return model;
@@ -246,7 +248,9 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(arrowMarker?.attributes.get('markerUnits'), 'userSpaceOnUse', 'arrowheads must use fixed canvas units so thin supplemental edges do not float above their target');
   assert.strictEqual(arrowMarker?.attributes.get('refX'), '0', 'the relation line must join the rear of the arrowhead instead of running through to its tip');
   const imageAreaResizeHandle = allNodes(container).find(node => node.attributes.get('aria-label') === '调整图片区域大小');
-  assert(imageAreaResizeHandle, 'image and video semantic frames must expose pointer resize handles');
+  const otherAreaResizeHandle = allNodes(container).find(node => node.attributes.get('aria-label') === '调整其他区域大小');
+  assert(imageAreaResizeHandle && otherAreaResizeHandle, 'image, video, and other semantic frames must expose pointer resize handles');
+  assert((imageAreaResizeHandle.attributes.get('class') || '').includes('cursor-nwse-resize') && !(imageAreaResizeHandle.attributes.get('class') || '').includes('border-') && !(imageAreaResizeHandle.attributes.get('class') || '').includes('hover:bg-'), 'frame corner handles must stay invisible while exposing the resize cursor');
   const imageAreaWidthBeforeResize = parseFloat(imageArea.style.width);
   await React.act(async () => {
     dispatch(imageAreaResizeHandle, 'pointerdown', { pointerId: 40, button: 0, clientX: 600, clientY: 600 });
@@ -254,6 +258,13 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     dispatch(imageAreaResizeHandle, 'pointerup', { pointerId: 40, button: 0, clientX: 680, clientY: 660 });
   });
   assert(parseFloat(imageArea.style.width) > imageAreaWidthBeforeResize, 'dragging a semantic-frame corner must resize the frame');
+  const otherAreaWidthBeforeResize = parseFloat(otherArea.style.width);
+  await React.act(async () => {
+    dispatch(otherAreaResizeHandle, 'pointerdown', { pointerId: 41, button: 0, clientX: 700, clientY: 700 });
+    dispatch(otherAreaResizeHandle, 'pointermove', { pointerId: 41, button: 0, clientX: 760, clientY: 740 });
+    dispatch(otherAreaResizeHandle, 'pointerup', { pointerId: 41, button: 0, clientX: 760, clientY: 740 });
+  });
+  assert(parseFloat(otherArea.style.width) > otherAreaWidthBeforeResize, 'the other semantic frame must use the same resize interaction as image and video frames');
   assert(initialWorkflowPath?.includes(' C ') && !initialWorkflowPath.includes(' L '), 'vertically arranged workflow relations must use port-aware curves instead of a top rectangular detour');
   const shelfEntries = [...entries,
     { kind: 'folder', name: 'Other B', relativePath: 'Other B', path: 'C:/p/Other B', extension: '', size: 0, createdAt: 11, updatedAt: 11 },

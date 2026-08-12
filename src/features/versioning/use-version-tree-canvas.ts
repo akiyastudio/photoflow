@@ -42,6 +42,16 @@ type LayoutHistoryEntry = { before: Map<string, VersionTreeCanvasPosition>; afte
 const DRAG_THRESHOLD = 5;
 const SNAP_SIZE = 20;
 
+const sameCanvasPositions = (
+  left: ReadonlyMap<string, VersionTreeCanvasPosition>,
+  right: ReadonlyMap<string, VersionTreeCanvasPosition>,
+) => left.size === right.size && [...left].every(([id, position]) => {
+  const candidate = right.get(id);
+  return candidate?.x === position.x
+    && candidate.y === position.y
+    && Boolean(candidate.manual) === Boolean(position.manual);
+});
+
 export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeKey, nodeWidth, nodeHeight, collisionHorizontalGap, coordinateScale = 1, onNotice, selectedNodeIds = new Set(), dragStateRef, onDragStateChange }: UseVersionTreeCanvasInput) => {
   const nodesRef = useRef(nodes);
   const dimensionsRef = useRef({ nodeWidth, nodeHeight, collisionHorizontalGap });
@@ -69,6 +79,7 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
 
   const applyPositions = useCallback((next: Map<string, VersionTreeCanvasPosition>) => {
     if (disposedRef.current) return;
+    if (sameCanvasPositions(positionsRef.current, next)) return;
     positionsRef.current = next;
     setPositions(next);
   }, []);
