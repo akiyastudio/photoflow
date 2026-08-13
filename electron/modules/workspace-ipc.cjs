@@ -1,6 +1,7 @@
 const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = require('../services/protected-project-folder.cjs');
 const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
 const { createTeamWorkflowArtifactService } = require('../services/team-workflow-artifact-service.cjs');
+const { replaceVideoFileWithRollback } = require('../services/video-trim-commit-service.cjs');
 
 const PROJECT_FILE_LIST_QUERY_MAX_LENGTH = 160;
 const IMPORT_STAGING_ROOT_NAME = '_PhotoFlow_Safety_Temp';
@@ -87,7 +88,7 @@ const registerWorkspaceIpc = context => {
     return normalized.endsWith('.photoflow-part')
       || normalized === '_photoflow_safety_temp'
       || normalized.startsWith('.') && normalized.includes('.photoflow-transcode')
-      || /^\.photoflow-(?:import-|paste|replace|split-|undo|team-workflow-)/i.test(normalized);
+      || /^\.photoflow-(?:import-|paste|replace|split-|trim-|undo|team-workflow-)/i.test(normalized);
   };
   const officeOpenXmlExtensions = new Set([
     '.docx', '.docm', '.dotx', '.dotm',
@@ -1878,7 +1879,7 @@ const registerWorkspaceIpc = context => {
       const parsed = path.parse(sourcePath);
       const projectRoot = path.resolve(getProjectPath(workspacePath, status, projectName));
       const generatedPath = saveMode === 'replace'
-        ? path.join(parsed.dir, `.${parsed.name}.${crypto.randomUUID()}.photoflow-trim${parsed.ext}`)
+        ? path.join(parsed.dir, `.photoflow-trim-output-${crypto.randomUUID()}${parsed.ext}`)
         : uniqueDestination(parsed.dir, `${parsed.name}_剪辑${parsed.ext}`);
       let safeOutput = '';
       try {
@@ -1886,16 +1887,8 @@ const registerWorkspaceIpc = context => {
         if (!result?.success || !fs.existsSync(generatedPath)) throw new Error(result?.error || '视频剪辑失败');
         const safeGenerated = assertInside(projectRoot, generatedPath, '视频剪辑输出路径');
         if (saveMode === 'replace') {
-          for (let attempt = 0; ; attempt += 1) {
-            try {
-              await fs.promises.rename(safeGenerated, sourcePath);
-              break;
-            } catch (error) {
-              const fileStillOpen = ['EBUSY', 'EACCES', 'EPERM'].includes(String(error?.code || ''));
-              if (!fileStillOpen || attempt >= 20) throw error;
-              await new Promise(resolve => setTimeout(resolve, 100));
-            }
-          }
+          const commit = await replaceVideoFileWithRollback({ crypto, fs, path, sourcePath, replacementPath: safeGenerated });
+          if (!commit.backupRemoved) writeLog('warn', 'Unable to remove committed video trim backup', { projectName, backupPath: commit.backupPath });
           safeOutput = sourcePath;
         } else safeOutput = safeGenerated;
       } finally {
@@ -1909,6 +1902,23 @@ const registerWorkspaceIpc = context => {
       return { success: true, outputPath: safeOutput, relativePath: path.relative(projectRoot, safeOutput).replace(/\\/g, '/'), duration: end - start, replaced: saveMode === 'replace' };
     } catch (error) {
       writeLog('warn', 'Video trim failed', { projectName, relativePath, error: error.message || String(error) });
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-video-timeline-frames', async (_event, workspacePath, status, projectName, relativePath, times = []) => {
+    try {
+      const sourcePath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
+      const stat = await fs.promises.stat(sourcePath);
+      if (!stat.isFile() || !VIDEO_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) throw new Error('请选择项目中的视频文件');
+      const safeTimes = (Array.isArray(times) ? times : []).slice(0, 16).map(Number);
+      if (!safeTimes.length || safeTimes.some(time => !Number.isFinite(time) || time < 0)) throw new Error('视频时间轴位置无效');
+      const result = await runPythonJsonAction('cut_video.py', [sourcePath, '--timeline-frames', safeTimes.join(',')], 2 * 60 * 1000);
+      return result?.success && Array.isArray(result.frames)
+        ? { success: true, frames: result.frames }
+        : { success: false, error: result?.error || '无法生成视频时间轴画面' };
+    } catch (error) {
+      writeLog('warn', 'Video timeline frame extraction failed', { projectName, relativePath, error: error.message || String(error) });
       return { success: false, error: error.message || String(error) };
     }
   });

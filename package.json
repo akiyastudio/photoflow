@@ -77,6 +77,8 @@
     "test:office-media": ".venv\\Scripts\\python.exe scripts\\test-office-media-extractor.py",
     "test:research": ".venv\\Scripts\\python.exe scripts\\test-research.py",
     "test:video-split": ".venv\\Scripts\\python.exe scripts\\test-cut-video.py",
+    "test:video-trim": "node scripts/test-video-trim-commit.cjs",
+    "test:video-trim-real": ".venv\\Scripts\\python.exe scripts\\test-video-trim-real.py",
     "test:screenshot-main-image": ".venv\\Scripts\\python.exe scripts\\test-screenshot-main-image.py",
     "test:inspiration-gather": "node scripts/test-inspiration-gather.cjs",
     "test:team-retouch": ".venv\\Scripts\\python.exe scripts\\test-team-retouch.py",

@@ -2709,6 +2709,36 @@ def repair_selection_workflow_mainlines(db, project_id: str):
     return changed
 
 
+def ensure_selection_workflow_inputs(db, project_id: str):
+    """Keep the derived selection input paired with every original -> progress edge."""
+    timestamp = int(time.time() * 1000)
+    before = db.total_changes
+    db.execute(
+        """INSERT INTO version_graph_edges(
+             id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
+           SELECT lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-4'||
+                  substr(lower(hex(randomblob(2))),2)||'-'||
+                  substr('89ab',abs(random()) % 4 + 1,1)||substr(lower(hex(randomblob(2))),2)||'-'||
+                  lower(hex(randomblob(6))),
+                  child.project_id,selection.id,child.id,'workflow_input',?,?
+           FROM progress_folders child
+           JOIN progress_folders original ON original.id=child.parent_progress_id
+           JOIN progress_folders selection ON selection.parent_progress_id=original.id
+             AND selection.project_id=child.project_id AND selection.media_kind=child.media_kind
+           WHERE child.project_id=? AND child.node_role='progress' AND child.relation_kind='main'
+             AND child.missing_since IS NULL AND original.node_role='original'
+             AND original.missing_since IS NULL AND selection.node_role='selection'
+             AND selection.relation_kind='auxiliary' AND selection.missing_since IS NULL
+             AND NOT EXISTS(
+               SELECT 1 FROM version_graph_edges edge WHERE edge.project_id=child.project_id
+                 AND edge.source_progress_id=selection.id AND edge.target_progress_id=child.id
+                 AND edge.edge_kind='workflow_input'
+             )""",
+        (timestamp, timestamp, project_id),
+    )
+    return db.total_changes - before
+
+
 def progress_list(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     recover_stale_version_batches(db, project["id"])
@@ -2718,6 +2748,7 @@ def progress_list(root: str, db, payload: dict):
     repair_legacy_selection_nodes(root, db, project)
     with db:
         repair_selection_workflow_mainlines(db, project["id"])
+        ensure_selection_workflow_inputs(db, project["id"])
     sync_progress_folder_locations(root, db, project)
     return progress_snapshot(db, payload, project)
 
@@ -3413,13 +3444,14 @@ def version_graph_edge_delete(db, payload: dict):
     if not project_id or not source_id or not target_id or edge_kind not in VERSION_GRAPH_EDGE_KINDS:
         raise ValueError("version_graph_edge_payload_invalid: 项目、节点或关系类型无效")
     with db:
-        changed = db.execute(
+        db.execute(
             """DELETE FROM version_graph_edges WHERE project_id=? AND source_progress_id=?
                AND target_progress_id=? AND edge_kind=?""",
             (project_id, source_id, target_id, edge_kind),
-        ).rowcount
-    if not changed:
-        raise ValueError("version_graph_edge_not_found: 补充关系不存在")
+        )
+    # Deleting a relation is intentionally idempotent. The renderer can briefly
+    # hold an edge that has already been removed by cascade cleanup or another
+    # graph refresh; the desired state is already satisfied in that case.
     return {"success": True}
 
 
@@ -4878,6 +4910,7 @@ def tracking_commit_complete(root: str, db, payload: dict):
         (timestamp, json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
          hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode("utf-8")).hexdigest(), timestamp, progress["id"]),
     )
+    ensure_selection_workflow_inputs(db, str(session["project_id"]))
     db.commit()
     return tracking_session_get(db, {"sessionId": session_id, "cursor": 0, "limit": 200})
 

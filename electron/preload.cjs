@@ -100,6 +100,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   extractOfficeImages: (workspacePath, status, name, relativePaths) => invokeFeature('office_media_extract', 'workspace-extract-office-images', workspacePath, status, name, relativePaths),
   extractScreenshotMainImages: (workspacePath, status, name, relativePaths, options) => invokeFeature('screenshot_main_image', 'workspace-extract-screenshot-main-images', workspacePath, status, name, relativePaths, options),
   trimProjectVideo: (workspacePath, status, name, relativePath, request) => invokeFeature('video_trim', 'workspace-trim-video', workspacePath, status, name, relativePath, request),
+  getProjectVideoTimelineFrames: (workspacePath, status, name, relativePath, times) => invokeFeature('video_trim', 'workspace-video-timeline-frames', workspacePath, status, name, relativePath, times),
   onScreenshotMainImageProgress: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-screenshot-main-image-progress', subscription); return () => ipcRenderer.removeListener('workspace-screenshot-main-image-progress', subscription); },
   getProjectFileDetails: (workspacePath, status, name, relativePaths) => ipcRenderer.invoke('workspace-file-details', workspacePath, status, name, relativePaths),
   getProjectEntryDetails: (workspacePath, status, name, relativePath) => ipcRenderer.invoke('workspace-entry-details', workspacePath, status, name, relativePath),

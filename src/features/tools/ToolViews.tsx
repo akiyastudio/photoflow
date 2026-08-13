@@ -162,7 +162,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
   return { logs, isRunning, isCancelling, progress, statusMsg, preview, clearPreview: () => setPreview(null), start, cancel };
 };
 
-const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspacePath, workspaceProjects, active = true, directSource = false, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitVideosOnImport = false, transcodeVideosOnImport = false, splitBrollVideosOnImport = false, transcodeBrollVideosOnImport = false, transcodeSettings, onChooseSourceFiles, onChooseSourceFolder, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspacePath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitVideosOnImport?: boolean, transcodeVideosOnImport?: boolean, splitBrollVideosOnImport?: boolean, transcodeBrollVideosOnImport?: boolean, transcodeSettings?: VideoTranscodeSettings, onChooseSourceFiles?: () => void, onChooseSourceFolder?: () => void, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (result: ImportCompletion) => void | Promise<void>, completedActionLabel?: string, onCompletedAction?: () => void }) => {
+const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspacePath, workspaceProjects, active = true, directSource = false, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitVideosOnImport = false, transcodeVideosOnImport = false, splitBrollVideosOnImport = false, transcodeBrollVideosOnImport = false, transcodeSettings, onChooseSourceFiles, onChooseSourceFolder, onDropSourcePaths, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspacePath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitVideosOnImport?: boolean, transcodeVideosOnImport?: boolean, splitBrollVideosOnImport?: boolean, transcodeBrollVideosOnImport?: boolean, transcodeSettings?: VideoTranscodeSettings, onChooseSourceFiles?: () => void, onChooseSourceFolder?: () => void, onDropSourcePaths?: (paths: string[]) => void, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (result: ImportCompletion) => void | Promise<void>, completedActionLabel?: string, onCompletedAction?: () => void }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'completed'>('idle');
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("等待连接...");
@@ -199,7 +199,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   const drivePickerRef = React.useRef<HTMLDivElement>(null);
   const currentImportSessionRef = React.useRef('');
   const continueAfterDriveFailureRef = React.useRef<(drive: string, message: string, requestId?: string) => void>(() => undefined);
-  const continueRoutedImportRef = React.useRef<(routes: Record<string, string>) => void>(() => undefined);
+  const continueRoutedImportRef = React.useRef<(routes: Record<string, string>, routingDecision?: any) => void | Promise<void>>(() => undefined);
   const startImportRef = React.useRef<(sdPath?: string, type?: 'work' | 'broll') => void>(() => undefined);
   const startBatchRef = React.useRef<() => void>(() => undefined);
   const onImportCompleteRef = React.useRef(onImportComplete);
@@ -499,11 +499,13 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
               if (currentImportSessionKeyRef.current && currentImportSessionRef.current) persistImportSession(currentImportSessionKeyRef.current, currentImportSessionRef.current, true);
             }
             const automaticRoutes = event.data.automaticRoutes || {};
+            const routingDecision = { ...event.data, routes: automaticRoutes };
             if (!event.data.requiresChoice) {
-              continueRoutedImportRef.current(automaticRoutes);
+              setDecisionData(routingDecision);
+              void continueRoutedImportRef.current(automaticRoutes, routingDecision);
             } else {
               setStatus('decision');
-              setDecisionData({ ...event.data, routes: automaticRoutes });
+              setDecisionData(routingDecision);
               setStatusMsg(event.message);
             }
           } else if (event.data?.need_split) {
@@ -669,7 +671,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
     }, 30000);
   };
 
-  const runActualImport = (routes: Record<string, string> = {}) => {
+  const runActualImport = async (routes: Record<string, string> = {}, routingDecision?: any) => {
     const type = currentDriveTypeRef.current;
     const usesProjectRouting = workspaceProjects !== undefined;
     const resolvedDestinationPath = usesProjectRouting ? destinationPath : type === 'broll' ? brollDestinationPath : destinationPath;
@@ -679,11 +681,34 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
       isBusyRef.current = false;
       return;
     }
+    let resolvedRoutes = routes;
+    if (usesProjectRouting && Object.keys(routes).length) {
+      try {
+        const result = await window.electronAPI.getWorkspaceProjects(resolvedDestinationPath);
+        if (!result.success) throw new Error(result.error || '无法刷新项目列表');
+        const currentProjects = result.statuses.flatMap(group => group.projects).filter(project => project.availability !== 'missing');
+        resolvedRoutes = Object.fromEntries(Object.entries(routes).map(([groupId, projectIdentity]) => {
+          const legacyProject = (workspaceProjects || []).find(project => project.path === projectIdentity);
+          const legacyPathName = /[\\/]/.test(projectIdentity) ? projectIdentity.replace(/[\\/]+$/, '').split(/[\\/]/).pop()?.toLocaleLowerCase('zh-CN') : '';
+          const currentProject = currentProjects.find(project => project.id === projectIdentity
+            || project.path === projectIdentity
+            || legacyProject?.id === project.id
+            || Boolean(legacyPathName && project.name.toLocaleLowerCase('zh-CN') === legacyPathName));
+          if (!currentProject) throw new Error(`分组 ${groupId} 的目标项目已移动或删除`);
+          return [groupId, currentProject.path];
+        }));
+      } catch (error) {
+        setStatus('decision');
+        setDecisionData((current: any) => ({ ...(current || routingDecision || { kind: 'project_routing', groups: [] }), routes: {} }));
+        setStatusMsg(`${error instanceof Error ? error.message : String(error)}，请重新选择目标项目。`);
+        return;
+      }
+    }
     setStatus('processing');
     setProgress(0);
     setDecisionData(null);
     const args = ['--sd_path', currentDriveRef.current || selectedDrives[0] || config?.sdPath || '', '--dest_path', resolvedDestinationPath];
-    if (Object.keys(routes).length) args.push('--project_routes', JSON.stringify(routes));
+    if (Object.keys(resolvedRoutes).length) args.push('--project_routes', JSON.stringify(resolvedRoutes));
     if (!usesProjectRouting) args.push('--direct_project');
     const shouldSplitVideos = type === 'broll' ? splitBrollVideosOnImport : splitVideosOnImport;
     const shouldTranscodeVideos = type === 'broll' ? transcodeBrollVideosOnImport : transcodeVideosOnImport;
@@ -731,7 +756,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
       setStatusMsg('正在导入素材…');
       runCmd('plan', ['--sd_path', sdPath, '--dest_path', resolvedDestinationPath, '--import_type', type, '--projects_json', JSON.stringify(workspaceProjects)]);
     } else {
-      runActualImport();
+      void runActualImport();
     }
   };
   startImportRef.current = startImport;
@@ -799,7 +824,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
       setStatusMsg('请为每个拍摄时间段选择项目。');
       return;
     }
-    runActualImport(routes);
+    void runActualImport(routes);
   };
 
   // --- 渲染逻辑 (UI 部分) ---
@@ -842,10 +867,11 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
 
     if (directSource && status === 'idle') return <ImportSourceControls
       selectionTitle="选择一个或多个底片文件，或选择底片文件夹"
-      selectionDescription="文件与文件夹是两个独立的选择入口"
+      selectionDescription="可直接拖入文件或文件夹，也可使用下方选择入口"
       selectedCount={selectedDrives.length}
       onChooseFiles={() => onChooseSourceFiles?.()}
       onChooseFolder={onChooseSourceFolder ? () => onChooseSourceFolder() : undefined}
+      onDropPaths={onDropSourcePaths}
       deleteSourceAfterImport={shouldDeleteSourceAfterImport}
       onDeleteSourceAfterImportChange={setShouldDeleteSourceAfterImport}
       deleteSourceDescription="全部文件复制并验证成功后删除源文件；关闭则保留。"
@@ -964,9 +990,13 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
                 <p className="mb-4 text-sm text-slate-500">请为各拍摄时段选择目标项目；可选择同一项目。</p>
                 {decisionData.stagingComplete && currentDriveRef.current && !drives.includes(currentDriveRef.current) && <p className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">设备已断开，仍可继续分类；本次不会删除卡内源文件。</p>}
                 <div className="mb-5 max-h-72 space-y-3 overflow-y-auto pr-1">{decisionData.groups.map((group: any) => {
-                  const suggested = new Set<string>(group.suggestedProjectPaths || []);
-                  const orderedProjects = [...(workspaceProjects || [])].sort((left, right) => Number(suggested.has(right.path)) - Number(suggested.has(left.path)));
-                  return <label key={group.id} className="block rounded-lg border border-slate-200 bg-white p-3"><span className="block text-sm font-bold text-slate-700">{group.date} · {group.startTime}–{group.endTime} · {group.count} 个文件</span><select value={decisionData.routes?.[group.id] || ''} onChange={event => setDecisionData((current: any) => ({ ...current, routes: { ...(current?.routes || {}), [group.id]: event.target.value } }))} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"><option value="">请选择目标项目…</option>{orderedProjects.map(project => <option key={project.path} value={project.path}>{suggested.has(project.path) ? '建议 · ' : ''}{project.name} · {project.status}</option>)}</select></label>;
+                  const suggestedIds = new Set<string>(group.suggestedProjectIds || []);
+                  const suggestedPaths = new Set<string>(group.suggestedProjectPaths || []);
+                  const isSuggested = (project: WorkspaceProject) => suggestedIds.has(project.id) || suggestedPaths.has(project.path);
+                  const orderedProjects = [...(workspaceProjects || [])].sort((left, right) => Number(isSuggested(right)) - Number(isSuggested(left)));
+                  const selectedIdentity = decisionData.routes?.[group.id] || '';
+                  const selectedProjectId = orderedProjects.find(project => project.id === selectedIdentity || project.path === selectedIdentity)?.id || selectedIdentity;
+                  return <label key={group.id} className="block rounded-lg border border-slate-200 bg-white p-3"><span className="block text-sm font-bold text-slate-700">{group.date} · {group.startTime}–{group.endTime} · {group.count} 个文件</span><select value={selectedProjectId} onChange={event => setDecisionData((current: any) => ({ ...current, routes: { ...(current?.routes || {}), [group.id]: event.target.value } }))} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"><option value="">请选择目标项目…</option>{orderedProjects.map(project => <option key={project.id} value={project.id}>{isSuggested(project) ? '建议 · ' : ''}{project.name} · {project.status}</option>)}</select></label>;
                 })}</div>
                 <button onClick={confirmProjectRoutes} className="w-full rounded-lg bg-blue-600 py-2 text-sm font-bold text-white hover:bg-blue-500">确认归属并开始导入</button>
               </> : <><p className="text-slate-500 text-sm mb-6">
@@ -1296,12 +1326,12 @@ const HomePanel = ({ title, initiallyOpen = false, tone, children, ...dragProps 
     window.localStorage.setItem(storageKey, String(open));
   }, [open, storageKey]);
   const isBirthday = tone === 'birthday';
-  return <section className={`rounded-xl overflow-hidden ${isBirthday ? 'birthday-panel' : 'border border-slate-200 bg-white'}`}>
-    <button {...dragProps} onClick={() => setOpen(value => !value)} aria-expanded={open} className={`flex w-full items-center justify-between px-5 py-4 text-left ${dragProps.draggable ? 'cursor-grab active:cursor-grabbing' : ''} ${isBirthday ? 'birthday-panel-header' : ''}`}>
+  return <section className={`rounded-xl ${open ? 'overflow-visible' : 'overflow-hidden'} ${isBirthday ? 'birthday-panel' : 'border border-slate-200 bg-white'}`}>
+    <button {...dragProps} onClick={() => setOpen(value => !value)} aria-expanded={open} className={`flex w-full items-center justify-between px-5 py-4 text-left ${open ? 'rounded-t-[11px]' : ''} ${dragProps.draggable ? 'cursor-grab active:cursor-grabbing' : ''} ${isBirthday ? 'birthday-panel-header' : ''}`}>
       <span className={`text-base font-bold ${isBirthday ? 'birthday-panel-title' : 'text-slate-800'}`}>{title}</span>
       <span className={isBirthday ? 'birthday-panel-icon' : 'text-slate-400'}>{open ? <ChevronUp size={18}/> : <ChevronDown size={18}/>}</span>
     </button>
-    <div hidden={!open} className={`border-t p-5 ${open ? 'animate-in slide-in-from-top-1 duration-200' : ''} ${isBirthday ? 'birthday-panel-body' : 'border-slate-100'}`}>
+    <div hidden={!open} className={`rounded-b-[11px] border-t p-5 ${open ? 'animate-in slide-in-from-top-1 duration-200' : ''} ${isBirthday ? 'birthday-panel-body' : 'border-slate-100'}`}>
       {children}
     </div>
   </section>;
