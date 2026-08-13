@@ -259,31 +259,26 @@ const IdentityChoiceCard = ({ identity, representative, count, cacheConfig, disa
   onSelect: () => void;
 }) => (
   <div
-    role="button"
-    tabIndex={disabled ? -1 : 0}
-    aria-disabled={disabled}
-    aria-label={"选择人物身份“" + identity.name + "”"}
-    onClick={event => {
-      if (disabled || (event.target instanceof Element && event.target.closest('button, a, input, select, textarea'))) return;
-      onSelect();
-    }}
-    onKeyDown={event => {
-      if (disabled || event.target !== event.currentTarget) return;
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        onSelect();
-      }
-    }}
-    className={"group overflow-hidden rounded-xl border border-slate-200 bg-white transition hover:border-blue-400 hover:shadow-md focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 " + (disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer')}
+    className={"group relative overflow-hidden rounded-xl border border-slate-200 bg-white transition hover:border-blue-400 hover:shadow-md focus-within:ring-2 focus-within:ring-blue-500 " + (disabled ? 'opacity-50' : '')}
   >
     {representative
       ? <IdentitySubjectThumb subject={representative} cacheConfig={cacheConfig} compact/>
       : <div className="flex aspect-[4/3] items-center justify-center bg-slate-100 text-slate-400"><UserRound/></div>}
-    <div className="flex w-full items-center gap-2 border-t border-slate-100 p-3 text-left transition group-hover:bg-blue-50">
+    <div className="pointer-events-none flex w-full items-center gap-2 border-t border-slate-100 p-3 text-left transition group-hover:bg-blue-50">
       <span className="h-2.5 w-2.5 rounded-full" style={{ background: identity.color }}/>
       <span className="min-w-0 flex-1 truncate text-sm font-bold text-slate-800">{identity.name}</span>
       <span className="text-[10px] text-slate-400">{count} 张</span>
     </div>
+    <button
+      type="button"
+      disabled={disabled}
+      aria-label={`选择人物身份“${identity.name}”`}
+      title={`选择“${identity.name}”`}
+      onClick={onSelect}
+      className="absolute inset-0 z-10 cursor-pointer rounded-xl focus:outline-none disabled:cursor-not-allowed"
+    >
+      <span className="sr-only">选择人物身份“{identity.name}”</span>
+    </button>
   </div>
 );
 

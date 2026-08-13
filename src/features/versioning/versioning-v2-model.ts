@@ -17,6 +17,20 @@ export const normalizeVersionPath = (value: string) => value.replace(/\\/g, '/')
 
 export const isUserVersionKey = (value: string) => /^\d+(?:_\d+)*$/.test(value);
 
+export const versionKindForParent = (
+  versionKey: string | undefined,
+  parent?: Pick<ProgressFolder, 'nodeRole' | 'versionKey'>,
+): 'main' | 'branch' => {
+  if (!versionKey || !isUserVersionKey(versionKey)) return 'main';
+  const parentKey = parent?.nodeRole === 'progress' && isUserVersionKey(parent.versionKey) ? parent.versionKey : '';
+  if (!parentKey) return versionKey.includes('_') ? 'branch' : 'main';
+  const versionParts = versionKey.split('_');
+  const parentParts = parentKey.split('_');
+  return versionParts.length === parentParts.length + 1 && versionKey.startsWith(`${parentKey}_`)
+    ? 'branch'
+    : 'main';
+};
+
 export const nextVersionKeys = (
   folders: ProgressFolder[],
   mediaKind: ProgressFolder['mediaKind'],
@@ -28,13 +42,28 @@ export const nextVersionKeys = (
     && folder.nodeRole === 'progress'
     && folder.relationKind !== 'auxiliary'
     && isUserVersionKey(folder.versionKey));
-  const main = String(versions.reduce((highest, folder) => folder.versionKey.includes('_') ? highest : Math.max(highest, Number(folder.versionKey)), 0) + 1);
+  const parentKey = parent?.nodeRole === 'progress' && isUserVersionKey(parent.versionKey) ? parent.versionKey : '';
+  const nextAtDepth = (base: string) => {
+    const baseParts = base ? base.split('_') : [];
+    const prefix = baseParts.length > 1 ? `${baseParts.slice(0, -1).join('_')}_` : '';
+    const depth = baseParts.length || 1;
+    return versions.reduce((highest, folder) => {
+      const parts = folder.versionKey.split('_');
+      if (parts.length !== depth || (prefix && !folder.versionKey.startsWith(prefix))) return highest;
+      return Math.max(highest, Number(parts.at(-1)) || 0);
+    }, 0) + 1;
+  };
+  // A main successor stays on its parent's visible line. Thus V2 advances to
+  // V3, while V1_1 advances to V1_2 instead of jumping back to global V3.
+  const main = parentKey.includes('_')
+    ? `${parentKey.split('_').slice(0, -1).join('_')}_${nextAtDepth(parentKey)}`
+    : String(nextAtDepth(parentKey));
   if (!parent) return { main, branch: '' };
   // Original/artifact nodes use internal keys such as `import-<hash>`. Those
   // keys identify database nodes and must never leak into a user version name.
   // A branch directly below an original source starts at the first visible
   // version line, while a branch below V2/V2_1 keeps that visible prefix.
-  const branchBase = parent.nodeRole === 'progress' && isUserVersionKey(parent.versionKey) ? parent.versionKey : '1';
+  const branchBase = parentKey || '1';
   const prefix = `${branchBase}_`;
   const parentDepth = branchBase.split('_').length;
   const child = versions.reduce((highest, folder) => {

@@ -19,7 +19,7 @@ ENGINE = ROOT / "extensions" / "team-retouch" / "team_retouch.py"
 sys.path.insert(0, str(ENGINE.parent))
 sys.path.insert(0, str(ROOT / "python"))
 
-from team_retouch import bounded_planning_box, box_coverage_by_crop, centered_work_crop, emit_progress, excluded_detection_indices, face_shoulder_planning_box, identify_people, load_mask, mask_bounds, match_returned_batch, matches_exclusion, maximize_assignment, plan_work_tiles, rebuild_without_person, reposition_crop_to_avoid_bystanders, restore_patches, save_mask, spatially_order_people  # noqa: E402
+from team_retouch import bounded_planning_box, box_coverage_by_crop, centered_work_crop, emit_progress, excluded_detection_indices, face_shoulder_planning_box, fuse_boxes, identify_people, load_mask, mask_bounds, match_returned_batch, matches_exclusion, maximize_assignment, plan_work_tiles, rebuild_without_person, reposition_crop_to_avoid_bystanders, restore_patches, save_mask, spatially_order_people  # noqa: E402
 from identity_engine import constrained_clusters, ranked_similarity_pairs  # noqa: E402
 from patch_merge import safe_exif_bytes, save_tiff  # noqa: E402
 from workspace_db import connect, team_identity_assign, team_identity_complete, team_identity_confirm_group, team_identity_save, team_patch_delete, team_patch_replace, team_patch_update, team_person_exclusion_add, team_person_exclusion_clear, team_person_exclusion_list, team_project_register_photo, team_project_unregister_photo, team_project_workspace  # noqa: E402
@@ -35,6 +35,59 @@ def main():
     assert not matches_exclusion([10, 10, 60, 100], [120, 10, 170, 100])
     overlapping_people = [{"box": [10, 10, 60, 100]}, {"box": [20, 10, 70, 100]}]
     assert excluded_detection_indices(overlapping_people, [[10, 10, 60, 100]]) == {0}
+
+    # PairDETR may emit two body queries anchored to the same face. Keep one
+    # person even when their body rectangles differ too much for ordinary NMS.
+    fused_duplicates = fuse_boxes(
+        [{"box": [100, 100, 210, 520], "score": 0.91, "mask": None}],
+        [
+            {"box_xyxy": [96, 92, 212, 520], "face_box_xyxy": [130, 105, 174, 160], "pair_score": 0.93},
+            {"box_xyxy": [128, 100, 238, 518], "face_box_xyxy": [132, 106, 176, 161], "pair_score": 0.76},
+        ],
+    )
+    assert len(fused_duplicates) == 1
+    assert fused_duplicates[0]["source"] == "pairdetr-matched"
+
+    # Broad body boxes from two genuinely occluded people must survive when
+    # their independently detected faces are spatially distinct.
+    fused_occluded_people = fuse_boxes(
+        [
+            {"box": [100, 100, 245, 520], "score": 0.91, "mask": None},
+            {"box": [155, 100, 300, 520], "score": 0.90, "mask": None},
+        ],
+        [
+            {"box_xyxy": [98, 95, 248, 520], "face_box_xyxy": [112, 105, 152, 158], "pair_score": 0.92},
+            {"box_xyxy": [152, 94, 302, 520], "face_box_xyxy": [238, 106, 278, 159], "pair_score": 0.91},
+        ],
+    )
+    assert len(fused_occluded_people) == 2
+
+    # RTMDet duplicates are removed only when their instance masks also agree.
+    duplicate_mask = np.zeros((80, 120), dtype=bool)
+    duplicate_mask[8:74, 24:72] = True
+    shifted_duplicate_mask = np.zeros_like(duplicate_mask)
+    shifted_duplicate_mask[9:75, 25:73] = True
+    fused_rtmdet_duplicates = fuse_boxes(
+        [
+            {"box": [100, 100, 230, 520], "score": 0.92, "mask": duplicate_mask},
+            {"box": [112, 102, 238, 518], "score": 0.74, "mask": shifted_duplicate_mask},
+        ],
+        [],
+    )
+    assert len(fused_rtmdet_duplicates) == 1
+
+    distinct_left_mask = np.zeros((80, 120), dtype=bool)
+    distinct_left_mask[8:74, 18:53] = True
+    distinct_right_mask = np.zeros((80, 120), dtype=bool)
+    distinct_right_mask[8:74, 58:93] = True
+    fused_mask_separated_people = fuse_boxes(
+        [
+            {"box": [100, 100, 245, 520], "score": 0.92, "mask": distinct_left_mask},
+            {"box": [155, 100, 300, 520], "score": 0.91, "mask": distinct_right_mask},
+        ],
+        [],
+    )
+    assert len(fused_mask_separated_people) == 2
 
     with tempfile.TemporaryDirectory(prefix="photoflow-team-retouch-test-") as directory:
         test_root = Path(directory)
