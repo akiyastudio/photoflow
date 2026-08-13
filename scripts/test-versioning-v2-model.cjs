@@ -34,9 +34,17 @@ const { pathToFileURL } = require('url');
   const importedRaw = { ...base, id: 'raw-import', nodeRole: 'original', relationKind: 'main', mediaKind: 'image', versionKey: 'import-d7439bee24773bcbfa2d0a97', folderMissing: false };
   const v1Branch = { ...base, id: 'v1-branch', nodeRole: 'progress', relationKind: 'main', mediaKind: 'image', versionKey: '1_1', parentProgressId: importedRaw.id, folderMissing: false };
   assert.strictEqual(model.isUserVersionKey(importedRaw.versionKey), false, 'import hashes are internal node keys, not user version numbers');
+  assert.strictEqual(model.versionKindForParent('1', importedRaw), 'main');
+  assert.strictEqual(model.versionKindForParent('1_1', importedRaw), 'branch');
+  assert.strictEqual(model.versionKindForParent('1_2', v1Branch), 'main', 'V1_2 is the main continuation of V1_1');
+  assert.strictEqual(model.versionKindForParent('1_1_1', v1Branch), 'branch', 'V1_1_1 is a child branch of V1_1');
   assert.deepStrictEqual(model.nextVersionKeys([importedRaw], 'image', importedRaw), { main: '1', branch: '1_1' }, 'a branch under an imported RAW source must start at V1_1');
   assert.deepStrictEqual(model.nextVersionKeys([importedRaw, v1Branch], 'image', importedRaw), { main: '1', branch: '1_2' }, 'sibling branches under RAW must increment only the visible child number');
   assert.deepStrictEqual(model.nextVersionKeys([importedRaw, { ...v1Branch, id: 'v2', versionKey: '2' }], 'image', { ...v1Branch, id: 'v2', versionKey: '2' }), { main: '3', branch: '2_1' });
+  const v1BranchNext = { ...v1Branch, id: 'v1-branch-next', versionKey: '1_2', parentProgressId: v1Branch.id };
+  assert.deepStrictEqual(model.nextVersionKeys([importedRaw, v1Branch], 'image', v1Branch), { main: '1_2', branch: '1_1_1' }, 'the main successor of V1_1 must remain on the V1 branch line');
+  assert.deepStrictEqual(model.nextVersionKeys([importedRaw, v1Branch, v1BranchNext], 'image', v1Branch), { main: '1_3', branch: '1_1_1' }, 'a branch-line main successor must skip an occupied sibling number');
+  assert.deepStrictEqual(model.nextVersionKeys([importedRaw, v1Branch, v1BranchNext], 'image', v1BranchNext), { main: '1_3', branch: '1_2_1' }, 'a continued branch version must support creating its own child branch');
   assert.strictEqual(model.progressTrackingAction({ ...base, id: 'branch', nodeRole: 'progress', relationKind: 'main', versionKey: '1_1', trackingEnabled: true, trackingState: 'ready' }), 'refresh', 'V1_1 version branches must retain the full tracking workflow');
   assert.strictEqual(model.progressTrackingAction({ ...base, id: 'untracked', nodeRole: 'progress', relationKind: 'main', trackingEnabled: false, trackingState: 'disabled' }), null, 'an untracked node must not offer a refresh action');
   const nodes = [

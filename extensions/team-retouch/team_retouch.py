@@ -193,6 +193,98 @@ def box_iou(left, right):
     return intersection / union if union else 0.0
 
 
+def box_overlap_over_smaller(left, right):
+    """Return intersection over the smaller box, useful for nested detections."""
+    x1, y1 = max(left[0], right[0]), max(left[1], right[1])
+    x2, y2 = min(left[2], right[2]), min(left[3], right[3])
+    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    left_area = max(0.0, left[2] - left[0]) * max(0.0, left[3] - left[1])
+    right_area = max(0.0, right[2] - right[0]) * max(0.0, right[3] - right[1])
+    smaller_area = min(left_area, right_area)
+    return intersection / smaller_area if smaller_area else 0.0
+
+
+def normalized_box_center_distance(left, right):
+    left_center = ((left[0] + left[2]) / 2, (left[1] + left[3]) / 2)
+    right_center = ((right[0] + right[2]) / 2, (right[1] + right[3]) / 2)
+    left_diagonal = math.hypot(left[2] - left[0], left[3] - left[1])
+    right_diagonal = math.hypot(right[2] - right[0], right[3] - right[1])
+    return math.hypot(left_center[0] - right_center[0], left_center[1] - right_center[1]) / max(1.0, min(left_diagonal, right_diagonal))
+
+
+def same_face_detection(left, right):
+    """Detect two PairDETR results anchored to the same face.
+
+    Body boxes legitimately overlap in crowds, so face evidence is deliberately
+    required unless the body boxes are almost identical.
+    """
+    left_face = left.get("face_box_xyxy") or left.get("faceBox")
+    right_face = right.get("face_box_xyxy") or right.get("faceBox")
+    if not left_face or not right_face:
+        return False
+    overlap = box_iou(left_face, right_face)
+    containment = box_overlap_over_smaller(left_face, right_face)
+    center_distance = normalized_box_center_distance(left_face, right_face)
+    return overlap >= 0.38 or containment >= 0.68 or (containment >= 0.45 and center_distance <= 0.22)
+
+
+def duplicate_person_detection(left, right, left_box_key="box", right_box_key="box"):
+    left_box, right_box = left[left_box_key], right[right_box_key]
+    overlap = box_iou(left_box, right_box)
+    containment = box_overlap_over_smaller(left_box, right_box)
+    center_distance = normalized_box_center_distance(left_box, right_box)
+    if same_face_detection(left, right):
+        return overlap >= 0.10 or containment >= 0.38
+    # Body-only detections need much stronger geometry. This preserves two
+    # genuinely occluded people whose broad body boxes happen to intersect.
+    return overlap >= 0.84 or (containment >= 0.92 and center_distance <= 0.16)
+
+
+def mask_overlap_scores(left, right):
+    left_mask, right_mask = left.get("mask"), right.get("mask")
+    if left_mask is None or right_mask is None:
+        return 0.0, 0.0
+    left_mask, right_mask = np.asarray(left_mask) > 0, np.asarray(right_mask) > 0
+    if left_mask.shape != right_mask.shape or not left_mask.size:
+        return 0.0, 0.0
+    intersection = int(np.logical_and(left_mask, right_mask).sum())
+    left_area, right_area = int(left_mask.sum()), int(right_mask.sum())
+    union = left_area + right_area - intersection
+    smaller_area = min(left_area, right_area)
+    return (
+        intersection / union if union else 0.0,
+        intersection / smaller_area if smaller_area else 0.0,
+    )
+
+
+def suppress_rtmdet_duplicates(rtmdet):
+    """Use instance masks to remove duplicate RTMDet boxes safely in crowds."""
+    kept = []
+    for original_index, item in sorted(enumerate(rtmdet), key=lambda value: float(value[1].get("score", 0)), reverse=True):
+        duplicate = False
+        for _kept_index, existing in kept:
+            mask_iou, mask_containment = mask_overlap_scores(item, existing)
+            body_iou = box_iou(item["box"], existing["box"])
+            body_containment = box_overlap_over_smaller(item["box"], existing["box"])
+            if ((mask_iou >= 0.58 or mask_containment >= 0.82)
+                    and (body_iou >= 0.20 or body_containment >= 0.52)):
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append((original_index, item))
+    return kept
+
+
+def suppress_pair_duplicates(pair_boxes):
+    """Collapse duplicate PairDETR queries without ordinary crowd-damaging NMS."""
+    kept = []
+    for pair in sorted(pair_boxes, key=lambda item: float(item.get("pair_score", 0)), reverse=True):
+        if any(duplicate_person_detection(pair, existing, "box_xyxy", "box_xyxy") for existing in kept):
+            continue
+        kept.append(pair)
+    return kept
+
+
 def exclusion_xyxy(value):
     if not isinstance(value, dict):
         return None
@@ -244,14 +336,26 @@ def excluded_detection_indices(items, exclusions):
 
 
 def fuse_boxes(rtmdet, pair_boxes):
+    rtmdet_with_indices = suppress_rtmdet_duplicates(rtmdet)
+    pair_boxes = suppress_pair_duplicates(pair_boxes)
     candidates = []
-    for rtmdet_index, baseline in enumerate(rtmdet):
+    for rtmdet_slot, (_original_index, baseline) in enumerate(rtmdet_with_indices):
         for pair_index, pair in enumerate(pair_boxes):
             overlap = box_iou(baseline["box"], pair["box_xyxy"])
-            if overlap >= PAIR_MATCH_IOU:
-                candidates.append((overlap, rtmdet_index, pair_index))
+            containment = box_overlap_over_smaller(baseline["box"], pair["box_xyxy"])
+            center_distance = normalized_box_center_distance(baseline["box"], pair["box_xyxy"])
+            if overlap >= PAIR_MATCH_IOU or (containment >= 0.48 and center_distance <= 0.34):
+                size_similarity = min(
+                    max(1.0, (baseline["box"][2] - baseline["box"][0]) * (baseline["box"][3] - baseline["box"][1])),
+                    max(1.0, (pair["box_xyxy"][2] - pair["box_xyxy"][0]) * (pair["box_xyxy"][3] - pair["box_xyxy"][1])),
+                ) / max(
+                    max(1.0, (baseline["box"][2] - baseline["box"][0]) * (baseline["box"][3] - baseline["box"][1])),
+                    max(1.0, (pair["box_xyxy"][2] - pair["box_xyxy"][0]) * (pair["box_xyxy"][3] - pair["box_xyxy"][1])),
+                )
+                score = 0.55 * overlap + 0.24 * containment + 0.13 * max(0.0, 1.0 - center_distance) + 0.08 * size_similarity
+                candidates.append((score, overlap, rtmdet_slot, pair_index))
     matched_rtmdet, matched_pair, matches = set(), set(), {}
-    for overlap, rtmdet_index, pair_index in sorted(candidates, reverse=True):
+    for _score, overlap, rtmdet_index, pair_index in sorted(candidates, reverse=True):
         if rtmdet_index in matched_rtmdet or pair_index in matched_pair:
             continue
         matched_rtmdet.add(rtmdet_index)
@@ -259,21 +363,21 @@ def fuse_boxes(rtmdet, pair_boxes):
         matches[rtmdet_index] = (pair_index, overlap)
 
     fused = []
-    for rtmdet_index, baseline in enumerate(rtmdet):
-        if rtmdet_index in matches:
-            pair_index, overlap = matches[rtmdet_index]
+    for rtmdet_slot, (original_index, baseline) in enumerate(rtmdet_with_indices):
+        if rtmdet_slot in matches:
+            pair_index, overlap = matches[rtmdet_slot]
             pair = pair_boxes[pair_index]
             fused.append({
                 "box": pair["box_xyxy"], "score": pair["pair_score"],
                 "faceBox": pair.get("face_box_xyxy"),
-                "source": "pairdetr-matched", "rtmdetIndex": rtmdet_index,
+                "source": "pairdetr-matched", "rtmdetIndex": original_index,
                 "matchIou": overlap,
             })
         else:
             fused.append({
                 "box": baseline["box"], "score": baseline["score"],
-                "faceBox": None,
-                "source": "rtmdet-fallback", "rtmdetIndex": rtmdet_index,
+                "faceBox": None, "source": "rtmdet-fallback",
+                "rtmdetIndex": original_index,
                 "matchIou": 0.0,
             })
     for pair_index, pair in enumerate(pair_boxes):
@@ -283,8 +387,13 @@ def fuse_boxes(rtmdet, pair_boxes):
                 "faceBox": pair.get("face_box_xyxy"),
                 "source": "pairdetr-extra", "rtmdetIndex": None, "matchIou": 0.0,
             })
-    fused.sort(key=lambda item: ((item["box"][1] + item["box"][3]) / 2, (item["box"][0] + item["box"][2]) / 2))
-    return fused
+    deduplicated = []
+    for item in fused:
+        if any(duplicate_person_detection(item, existing) for existing in deduplicated):
+            continue
+        deduplicated.append(item)
+    deduplicated.sort(key=lambda item: ((item["box"][1] + item["box"][3]) / 2, (item["box"][0] + item["box"][2]) / 2))
+    return deduplicated
 
 
 def fill_mask_holes(mask):

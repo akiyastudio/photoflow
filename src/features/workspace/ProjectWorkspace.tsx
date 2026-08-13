@@ -29,7 +29,7 @@ import { collectProgressSubtree, inspectProgressRelations } from './progress-tre
 import { TrackingConfirmationPanel } from '../versioning/TrackingConfirmationPanel';
 import { ProgressPairPreview as SharedProgressPairPreview, type ProgressPairPreviewMode } from '../versioning/ProgressPairPreview';
 import { VersionProgressPanel, type VersionProgressDraft } from '../versioning/VersionProgressPanel';
-import { defaultMainParentId, defaultWorkflowInputIds, isUserVersionKey, nextVersionKeys, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressRelationChangeError, progressTrackingAction, progressTrackingActionLabel, selectableVersionParents, trackingPolicyForRelationChange, trackingStateLabel, versionTreeNodeBadgeLabel, workflowInputIdsForRelationChange, type VersionRelationKind } from '../versioning/versioning-v2-model';
+import { defaultMainParentId, defaultWorkflowInputIds, isUserVersionKey, nextVersionKeys, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressRelationChangeError, progressTrackingAction, progressTrackingActionLabel, selectableVersionParents, trackingPolicyForRelationChange, trackingStateLabel, versionKindForParent, versionTreeNodeBadgeLabel, workflowInputIdsForRelationChange, type VersionRelationKind } from '../versioning/versioning-v2-model';
 import { ProgressRelationMutationQueue } from '../versioning/progress-relation-mutation-queue';
 import { metadataFieldLabel, metadataGroupLabel } from '../metadata/metadata-labels';
 import { metadataGroupDependencyKey, previewMetadataFieldsForEntry, reconcileExpandedMetadataGroups } from '../metadata/metadata-pane-model';
@@ -390,6 +390,7 @@ type ProgressSetupDraft = {
   targetRelativePath?: string;
   existingProgressId?: string;
   preserveFolderName?: boolean;
+  contextLocked?: boolean;
 };
 type VersionGraphHistoryEntry = { label: string; undo: () => Promise<void>; redo: () => Promise<void> };
 type ProgressCompareConfirmation = {
@@ -2662,7 +2663,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       return {
         mode: 'mark',
         mediaKind: registered.mediaKind,
-        relation: normalizedVersionKey.includes('_') ? 'branch' : 'root',
+        relation: versionKindForParent(normalizedVersionKey, registeredParent) === 'branch' ? 'branch' : 'root',
         relationKind: registered.relationKind || 'main',
         parentProgressId: registered.parentProgressId || '',
         versionKey: normalizedVersionKey,
@@ -2739,8 +2740,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     });
     const latestSource = latestFolders.find(folder => folder.id === source.id) || source;
     const nextDraft = completeDraft(makeProgressDraft('mark', latestSource.mediaKind, 'root', latestSource.id, latestFolders));
-    onNotice(`正在把“${entry.name}”自动登记为 V${nextDraft.versionKey} 并连接到 V${latestSource.versionKey}…`);
-    await submitProgressSetup(nextDraft);
+    setProgressSetup({ ...nextDraft, contextLocked: true });
   };
   const openEmptyProgressFromVersionTree = async (source: ProgressFolder, branch: boolean) => {
     if (source.folderMissing || source.nodeRole !== 'progress') {
@@ -2751,7 +2751,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const latestSource = latestFolders.find(folder => folder.id === source.id);
     if (!latestSource) { onNotice('来源版本已发生变化，请刷新后重试。'); return; }
     const draft = makeProgressDraft('create', source.mediaKind, branch ? 'branch' : 'root', source.id, latestFolders);
-    setProgressSetup({ ...draft, trackingEnabled: true });
+    setProgressSetup({ ...draft, trackingEnabled: true, contextLocked: true });
   };
   const projectRelativePath = useCallback((absolutePath: string) => {
     const normalizedRoot = project.path.replace(/\\/g, '/').replace(/\/$/, '');
@@ -5038,12 +5038,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const versionProgressPanelMode: VersionProgressDraft['mode'] | null = progressSetup
     ? progressSetup.mode === 'mark' ? progressSetup.existingProgressId ? 'modify' : 'create' : progressSetup.mode
     : null;
-  const versionProgressPanelTitle = progressSetup?.mode === 'mark' && !progressSetup.existingProgressId ? '标记版本进度'
+  const versionProgressPanelTitle = progressSetup?.contextLocked ? '创建下一版本'
+    : progressSetup?.mode === 'mark' && !progressSetup.existingProgressId ? '标记版本进度'
     : versionProgressPanelMode === 'create' ? '新建进度'
       : versionProgressPanelMode === 'import' ? '导入进度'
         : '修改进度';
   const versionProgressDraft: VersionProgressDraft | null = progressSetup && versionProgressPanelMode ? {
-    mode: versionProgressPanelMode,
+    mode: progressSetup.contextLocked ? 'create-next' : versionProgressPanelMode,
     sourceRelativePath: progressSetup.targetRelativePath || currentRelativePath,
     displayName: progressSetup.progressName,
     mediaKind: progressSetup.mediaKind,
@@ -5056,6 +5057,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     existingProgressId: progressSetup.existingProgressId,
     versionKey: progressSetup.versionKey,
     versionKind: progressSetup.relation === 'branch' ? 'branch' : 'main',
+    contextLocked: progressSetup.contextLocked,
+    targetFolderLocked: Boolean(progressSetup.preserveFolderName),
   } : null;
 
   return (
@@ -5337,7 +5340,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         message={progressImportCompletion}
         onChange={(draft: VersionProgressDraft) => {
           const policy = normalizeTrackingPolicy('main', draft);
-          const relation: ProgressSetupDraft['relation'] = (draft.versionKind || (draft.versionKey?.includes('_') ? 'branch' : 'main')) === 'branch' ? 'branch' : 'root';
+          const draftParent = progressFolders.find(folder => folder.id === draft.parentProgressId);
+          const relation: ProgressSetupDraft['relation'] = (draft.versionKind || versionKindForParent(draft.versionKey, draftParent)) === 'branch' ? 'branch' : 'root';
           setProgressSetup(current => current ? {
             ...current,
             mediaKind: draft.mediaKind,
