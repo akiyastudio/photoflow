@@ -96,6 +96,16 @@ const { pathToFileURL } = require('url');
   const imageBandBottom = Math.max(...mediaBands.nodes.filter(item => item.mediaKind === 'image').map(item => item.y + base.nodeHeight));
   const videoBandTop = Math.min(...mediaBands.nodes.filter(item => item.mediaKind === 'video').map(item => item.y));
   assert.strictEqual(videoBandTop - imageBandBottom, 112, 'image and video workflows must use the stable compact swimlane gap');
+  assert.deepStrictEqual(
+    canvas.versionTreeAreaSize({ width: 900, height: 600 }, { width: 420, height: 260 }, { width: 120, height: 80 }),
+    { width: 420, height: 260 },
+    'an explicitly resized area must be allowed to shrink below its initial natural size',
+  );
+  assert.deepStrictEqual(
+    canvas.versionTreeAreaSize({ width: 900, height: 600 }, { width: 40, height: 30 }, { width: 120, height: 80 }),
+    { width: 120, height: 80 },
+    'an area must not shrink below one node',
+  );
   const canonicalVideo = layoutVersionTree({
     ...base,
     nodes: [

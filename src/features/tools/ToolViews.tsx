@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { FolderInput, ScanSearch, HardDrive, Play, Trash2, AlertCircle, Edit, X, Plus, User, Loader2, RotateCcw, Download, Scissors, Video, ChevronDown, ChevronUp, Crop, CheckCircle2 } from 'lucide-react';
 import { TaskProgress } from '../../components/TaskStatus';
-import type { AppConfig, LogEntry, MediaWorkflowImportManifest, ProjectStatus, SelectionPreflightResult, WorkspaceProject } from '../../types';
+import type { AppConfig, LogEntry, MediaWorkflowImportManifest, ProjectStatus, SelectionPreflightResult, VideoTranscodeSettings, WorkspaceProject } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
@@ -162,7 +162,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
   return { logs, isRunning, isCancelling, progress, statusMsg, preview, clearPreview: () => setPreview(null), start, cancel };
 };
 
-const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspacePath, workspaceProjects, active = true, directSource = false, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitLargeBrollFiles = false, onChooseSourceFiles, onChooseSourceFolder, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspacePath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitLargeBrollFiles?: boolean, onChooseSourceFiles?: () => void, onChooseSourceFolder?: () => void, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (result: ImportCompletion) => void | Promise<void>, completedActionLabel?: string, onCompletedAction?: () => void }) => {
+const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspacePath, workspaceProjects, active = true, directSource = false, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitVideosOnImport = false, transcodeVideosOnImport = false, splitBrollVideosOnImport = false, transcodeBrollVideosOnImport = false, transcodeSettings, onChooseSourceFiles, onChooseSourceFolder, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspacePath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitVideosOnImport?: boolean, transcodeVideosOnImport?: boolean, splitBrollVideosOnImport?: boolean, transcodeBrollVideosOnImport?: boolean, transcodeSettings?: VideoTranscodeSettings, onChooseSourceFiles?: () => void, onChooseSourceFolder?: () => void, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (result: ImportCompletion) => void | Promise<void>, completedActionLabel?: string, onCompletedAction?: () => void }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'completed'>('idle');
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("等待连接...");
@@ -203,6 +203,8 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   const startImportRef = React.useRef<(sdPath?: string, type?: 'work' | 'broll') => void>(() => undefined);
   const startBatchRef = React.useRef<() => void>(() => undefined);
   const onImportCompleteRef = React.useRef(onImportComplete);
+  const onBusyChangeRef = React.useRef(onBusyChange);
+  onBusyChangeRef.current = onBusyChange;
   const pendingImportGraphsStorageKey = 'photoflow:pending-import-graphs:v1';
   const commitImportGraphs = React.useCallback(async (manifests: MediaWorkflowImportManifest[]) => {
     if (!manifests.length) return;
@@ -354,9 +356,9 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   }, [active, deleteSourceAfterImport]);
   useEffect(() => {
     const busy = status === 'ready_to_import' || status === 'importing' || status === 'decision' || status === 'processing';
-    onBusyChange?.(busy);
-    return () => onBusyChange?.(false);
-  }, [status, onBusyChange]);
+    onBusyChangeRef.current?.(busy);
+  }, [status]);
+  useEffect(() => () => onBusyChangeRef.current?.(false), []);
   useEffect(() => {
     if (directSource || !isBusyRef.current || stagingCompleteRef.current) return;
     const currentDrive = currentDriveRef.current;
@@ -683,9 +685,10 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
     const args = ['--sd_path', currentDriveRef.current || selectedDrives[0] || config?.sdPath || '', '--dest_path', resolvedDestinationPath];
     if (Object.keys(routes).length) args.push('--project_routes', JSON.stringify(routes));
     if (!usesProjectRouting) args.push('--direct_project');
-    if (type === 'work' && config?.generateVideoPreview) args.push('--generate_video_preview', '--video_preview_quality', config.videoPreviewQuality);
-    if (type === 'work' && config?.splitLargeFiles) args.push('--split_large_files');
-    if (type === 'broll' && splitLargeBrollFiles) args.push('--split_large_files');
+    const shouldSplitVideos = type === 'broll' ? splitBrollVideosOnImport : splitVideosOnImport;
+    const shouldTranscodeVideos = type === 'broll' ? transcodeBrollVideosOnImport : transcodeVideosOnImport;
+    if (shouldSplitVideos) args.push('--split_import_videos');
+    if (shouldTranscodeVideos && transcodeSettings) args.push('--transcode_import_videos', '--transcode_settings', JSON.stringify(transcodeSettings));
     runCmd(type === 'broll' ? 'broll' : 'import', args);
   };
   continueRoutedImportRef.current = runActualImport;
@@ -777,12 +780,10 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
       }
       args.push('--sd_path', currentDriveRef.current || selectedDrives[0] || config.sdPath);
       args.push('--dest_path', resolvedDestinationPath);
-      if (currentDriveTypeRef.current === 'work' && config.generateVideoPreview) {
-        args.push('--generate_video_preview', '--video_preview_quality', config.videoPreviewQuality);
-      }
-      if ((currentDriveTypeRef.current === 'work' && config.splitLargeFiles) || (currentDriveTypeRef.current === 'broll' && splitLargeBrollFiles)) {
-        args.push('--split_large_files');
-      }
+      const shouldSplitVideos = currentDriveTypeRef.current === 'broll' ? splitBrollVideosOnImport : splitVideosOnImport;
+      const shouldTranscodeVideos = currentDriveTypeRef.current === 'broll' ? transcodeBrollVideosOnImport : transcodeVideosOnImport;
+      if (shouldSplitVideos) args.push('--split_import_videos');
+      if (shouldTranscodeVideos && transcodeSettings) args.push('--transcode_import_videos', '--transcode_settings', JSON.stringify(transcodeSettings));
       // 添加用户决定的参数
       args.push('--should_split', split ? 'true' : 'false');
     }
@@ -847,7 +848,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
       onChooseFolder={onChooseSourceFolder ? () => onChooseSourceFolder() : undefined}
       deleteSourceAfterImport={shouldDeleteSourceAfterImport}
       onDeleteSourceAfterImportChange={setShouldDeleteSourceAfterImport}
-      deleteSourceDescription="初始值来自设置。只有全部文件复制并校验成功后才会删除所选底片；关闭则保留源文件。"
+      deleteSourceDescription="全部文件复制并验证成功后删除源文件；关闭则保留。"
       startDisabled={!canStartImport}
       onStart={startBatchImport}
     />;
@@ -881,7 +882,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
         </div>
       </div>
       {status === 'idle' && <>
-        <PanelSwitch title="导入后删除源文件" description={`初始值来自设置。只有全部文件复制并校验成功后才会删除${directSource ? '所选底片' : '所选 SD 卡中的媒体'}；关闭则保留源文件。`} checked={shouldDeleteSourceAfterImport} onChange={setShouldDeleteSourceAfterImport}/>
+        <PanelSwitch title="导入后删除源文件" description={`全部文件复制并验证成功后删除${directSource ? '所选底片' : 'SD 卡媒体'}；关闭则保留。`} checked={shouldDeleteSourceAfterImport} onChange={setShouldDeleteSourceAfterImport}/>
       </>}
       </div>
     );
@@ -960,8 +961,8 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
                 需确认操作
               </h4>
               {decisionData.kind === 'project_routing' ? <>
-                <p className="mb-4 text-sm text-slate-500">没有唯一的精确日期项目，或同一天存在多个项目。系统已根据拍摄时间间隙识别出独立拍摄时段，请确认每一段的归属；多个时段可以选择同一个项目。</p>
-                {decisionData.stagingComplete && currentDriveRef.current && !drives.includes(currentDriveRef.current) && <p className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">源设备已断开，但素材已完整导入到本地，可以继续分类；卡内源文件将无法在本次操作中自动删除。</p>}
+                <p className="mb-4 text-sm text-slate-500">请为各拍摄时段选择目标项目；可选择同一项目。</p>
+                {decisionData.stagingComplete && currentDriveRef.current && !drives.includes(currentDriveRef.current) && <p className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">设备已断开，仍可继续分类；本次不会删除卡内源文件。</p>}
                 <div className="mb-5 max-h-72 space-y-3 overflow-y-auto pr-1">{decisionData.groups.map((group: any) => {
                   const suggested = new Set<string>(group.suggestedProjectPaths || []);
                   const orderedProjects = [...(workspaceProjects || [])].sort((left, right) => Number(suggested.has(right.path)) - Number(suggested.has(left.path)));
@@ -969,20 +970,20 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
                 })}</div>
                 <button onClick={confirmProjectRoutes} className="w-full rounded-lg bg-blue-600 py-2 text-sm font-bold text-white hover:bg-blue-500">确认归属并开始导入</button>
               </> : <><p className="text-slate-500 text-sm mb-6">
-                系统根据拍摄时间间隙识别出多个拍摄时段，是否需要拆分成不同文件夹？
+                检测到多个拍摄时段，是否分别保存？
               </p>
               <div className="flex gap-3">
                 <button
                     onClick={() => handleDecision(true)}
                     className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-slate-800 py-2 rounded-lg text-sm transition-colors"
                 >
-                    是，拆分文件夹
+                    分别保存
                 </button>
                 <button
                     onClick={() => handleDecision(false)}
                     className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-900 py-2 rounded-lg text-sm transition-colors"
                 >
-                    否，合并在一起
+                    合并保存
                 </button>
               </div></>}
               <button type="button" onClick={() => void cancelImport()} className="mt-3 w-full rounded-lg border border-slate-200 bg-white py-2 text-sm font-bold text-slate-600 hover:bg-slate-100">取消本次导入</button>
@@ -1110,6 +1111,7 @@ const DashboardView = ({
   config,
   importDefaults,
   brollConfig,
+  videoTools,
   projectDestination,
   projectName,
   onImportConfigChange,
@@ -1121,6 +1123,7 @@ const DashboardView = ({
   config: AppConfig['smartImport'];
   importDefaults: AppConfig['importDefaults'];
   brollConfig: AppConfig['brollImport'];
+  videoTools: AppConfig['videoTools'];
   projectDestination?: string | null;
   projectName?: string;
   onImportConfigChange: (config: AppConfig['smartImport']) => void;
@@ -1233,7 +1236,7 @@ const DashboardView = ({
 
       {section !== 'birthday' && <HomePanel title="从 SD 卡导入" initiallyOpen {...dragProps}>
         <div className="flex flex-col gap-6">
-          <ImportCard config={config} drives={drives} workspacePath={workspacePath} destinationPath={projectDestination ?? workspacePath} brollDestinationPath={projectDestination} workspaceProjects={projectDestination ? undefined : workspaceProjects} deleteSourceAfterImport={importDefaults.deleteSourceAfterImport} generateJpgFromRaw={importDefaults.generateJpgFromRaw} splitLargeBrollFiles={brollConfig.splitLargeFiles} onImportConfigChange={onImportConfigChange} onImportComplete={projectDestination ? undefined : result => { void onImportComplete?.(result); }} completedActionLabel="刷新卡片" />
+          <ImportCard config={config} drives={drives} workspacePath={workspacePath} destinationPath={projectDestination ?? workspacePath} brollDestinationPath={projectDestination} workspaceProjects={projectDestination ? undefined : workspaceProjects} deleteSourceAfterImport={importDefaults.deleteSourceAfterImport} generateJpgFromRaw={importDefaults.generateJpgFromRaw} splitVideosOnImport={importDefaults.splitVideosOnImport} transcodeVideosOnImport={importDefaults.transcodeVideosOnImport} splitBrollVideosOnImport={brollConfig.splitVideosOnImport} transcodeBrollVideosOnImport={brollConfig.transcodeVideosOnImport} transcodeSettings={videoTools.transcode} onImportConfigChange={onImportConfigChange} onImportComplete={projectDestination ? undefined : result => { void onImportComplete?.(result); }} completedActionLabel="刷新卡片" />
         </div>
       </HomePanel>}
       {section !== 'import' && <HomePanel title="角色生日" initiallyOpen tone="birthday" {...dragProps}>
@@ -1263,7 +1266,7 @@ const DashboardView = ({
                 </div>
               ) : (
                 <div className="flex flex-col items-center justify-center h-40 text-indigo-400/60 text-sm italic">
-                  <p>近期没有角色过生日哦。</p>
+                  <p>近期没有角色生日。</p>
                 </div>
               )}
           </div>
@@ -1357,7 +1360,7 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
         <p className="flex items-center gap-1 text-xs text-slate-600"><AlertCircle size={12}/>{deleteOriginal ? '转换并验证成功后，原始 PNG 会移入回收站' : '转换后保留原始 PNG'}</p>
 
         <div className="flex items-center justify-between gap-4 rounded-lg bg-slate-50 p-3 border border-slate-200">
-          <label className="text-sm font-medium text-slate-700">导出JPG 画质</label>
+          <label className="text-sm font-medium text-slate-700">JPG 画质</label>
           <select value={quality} onChange={event => setQuality(Number(event.target.value))} className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 focus:outline-none focus:border-blue-500">
             <option value={100}>最高（100）</option>
             <option value={95}>高（95）</option>
@@ -1365,7 +1368,7 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
             <option value={75}>节省空间（75）</option>
           </select>
         </div>
-        <PanelSwitch title="转换成功后删除原始 PNG" description="默认开启。只有对应 JPG 写入并验证成功后，原始 PNG 才会移入系统回收站。" checked={deleteOriginal} disabled={isRunning} onChange={setDeleteOriginal}/>
+        <PanelSwitch title="转换成功后删除原始 PNG" description="JPG 生成并验证成功后，将原 PNG 移入回收站。" checked={deleteOriginal} disabled={isRunning} onChange={setDeleteOriginal}/>
         {/* Progress & Actions */}
         <TaskProgress
           logs={logs}
@@ -1599,7 +1602,7 @@ const ScreenshotMainImageView = ({
     {!embedded && <h2 className="text-2xl font-bold text-slate-800">{cropMode ? '裁剪图片' : '提取截图主图'}</h2>}
     <div className={embedded ? 'space-y-5' : 'space-y-5 rounded-xl border border-slate-200 bg-white p-6'}>
       <div className="space-y-2">
-        <p className="text-sm leading-6 text-slate-600">{cropMode ? '先识别可裁剪边缘，再用磁吸边缘的裁剪框确认范围。输出使用原始像素与最高质量编码，并保留原文件。' : '先生成主图候选框，再处理确认后的范围。低置信结果会重点提示并允许拖动调整，确认前不会生成文件或处理原图。'}</p>
+        <p className="text-sm leading-6 text-slate-600">{cropMode ? '自动识别边缘，确认范围后以原始像素保存；保留原文件。' : '自动识别主图范围；不确定的结果需要手动确认。'}</p>
         <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white text-blue-600 shadow-sm"><Crop size={18}/></span>
           <div className="min-w-0">
@@ -1607,7 +1610,7 @@ const ScreenshotMainImageView = ({
             <p className="mt-0.5 truncate text-xs text-slate-500" title={targetPaths.length === 1 ? firstTargetName : undefined}>{targetPaths.length === 1 ? firstTargetName : '将按同一版式批量识别主图区域'}</p>
           </div>
         </div>
-        <p className="flex items-center gap-1 text-xs text-slate-500"><AlertCircle size={12}/>{cropMode ? '裁剪结果保存在原图旁，原文件不会被覆盖。' : '主图保存在原图旁；黄色项目需要确认，绿色项目可直接批量生成。'}</p>
+        <p className="flex items-center gap-1 text-xs text-slate-500"><AlertCircle size={12}/>{cropMode ? '裁剪结果保存在原图旁，原文件不会被覆盖。' : '主图保存在原图旁；黄色需确认，绿色可直接生成。'}</p>
         {!cropMode && <PanelSwitch title="保留原图" description="默认关闭；关闭时仅把成功裁剪的原图移入系统回收站，跳过或失败的图片保持不变。" checked={preserveOriginal} disabled={isRunning} onChange={setPreserveOriginal}/>}
       </div>
 
@@ -1707,10 +1710,10 @@ const ResearchView = ({
       {!embedded && <h2 className="text-2xl font-bold text-slate-800">提取分镜帧</h2>}
       <div className={embedded ? 'space-y-6' : 'bg-white border border-slate-200 rounded-xl p-6 space-y-6'}>
         <div className="space-y-2">
-          <p className="mt-2 text-gray-600">对视频的分镜执行转场识别，并从每个分镜中挑选清晰的画面导出。</p>
+          <p className="mt-2 text-gray-600">识别视频转场，并从每个分镜导出清晰画面。</p>
         </div>
         <section className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase text-slate-500">输入范围</p><p className="mt-1 text-xs text-slate-500">可混合添加文件夹、单个视频或多个视频，文件夹会递归扫描。</p></div><div className="flex items-center gap-2"><button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseFolder()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><FolderInput size={14}/>添加文件夹</button><button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseFiles()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><Plus size={14}/>添加视频</button></div></div>
+          <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase text-slate-500">输入范围</p><p className="mt-1 text-xs text-slate-500">可添加视频或文件夹；文件夹会扫描子目录。</p></div><div className="flex items-center gap-2"><button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseFolder()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><FolderInput size={14}/>添加文件夹</button><button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseFiles()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><Plus size={14}/>添加视频</button></div></div>
           <div onDrop={addDroppedTargets} onDragOver={event => { event.preventDefault(); event.stopPropagation(); }} className={!targetPaths.length ? 'rounded-xl border border-dashed border-slate-300 bg-slate-50/70 p-2' : ''}>
             {targetPaths.length ? <SelectedToolSourceList paths={targetPaths} loading={sourcesLoading} disabled={isRunning} onRemove={path => setTargetPaths(current => current.filter(value => value !== path))} title="已选择" itemLabel="项" description="文件夹与视频将按列表顺序批量处理"/> : <button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseFiles()} className="flex min-h-28 w-full flex-col items-center justify-center gap-2 rounded-lg text-sm text-slate-500 hover:bg-white disabled:opacity-50"><FolderInput size={24} className="text-slate-400"/><span>拖入文件或文件夹，或点击选择视频</span></button>}
           </div>
@@ -1970,6 +1973,9 @@ type VideoTranscodeViewProps = {
   initialTargetPaths?: string[];
   initialSourceFolders?: string[];
   sourcesLoading?: boolean;
+  initialSettings?: VideoTranscodeSettings;
+  onSettingsChange?: (settings: VideoTranscodeSettings) => void;
+  settingsOnly?: boolean;
 };
 
 const normalizedWindowsPath = (value: string) => value.replace(/\//g, '\\').replace(/\\+$/g, '');
@@ -1988,19 +1994,20 @@ const videoPathIsInside = (value: string, folder: string) => {
   return normalizedValue === normalizedFolder || normalizedValue.startsWith(`${normalizedFolder}\\`);
 };
 
-const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initialSourceFolders = [], sourcesLoading = false }: VideoTranscodeViewProps) => {
+const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initialSourceFolders = [], sourcesLoading = false, initialSettings, onSettingsChange, settingsOnly = false }: VideoTranscodeViewProps) => {
   const initialTargetKey = initialTargetPaths.join('\n');
   const initialSourceFolderKey = initialSourceFolders.join('\n');
   const [pathsText, setPathsText] = useState(initialTargetKey);
   const [sourceFolders, setSourceFolders] = useState(() => [...new Set(initialSourceFolders.filter(Boolean))]);
   const [expandedVideoGroups, setExpandedVideoGroups] = useState<Set<string>>(() => new Set());
-  const [container, setContainer] = useState<'mp4' | 'mov' | 'mkv'>('mp4');
-  const [videoMode, setVideoMode] = useState<'h264' | 'h265' | 'copy'>('h264');
-  const [quality, setQuality] = useState<'high' | 'balanced' | 'small'>('balanced');
-  const [resolution, setResolution] = useState<'original' | '2160p' | '1080p' | '720p'>('original');
-  const [frameRate, setFrameRate] = useState<'original' | '24' | '25' | '30' | '50' | '60'>('original');
-  const [audioMode, setAudioMode] = useState<'copy' | 'aac' | 'remove'>('aac');
+  const [container, setContainer] = useState<VideoTranscodeSettings['container']>(initialSettings?.container ?? 'mp4');
+  const [videoMode, setVideoMode] = useState<VideoTranscodeSettings['videoMode']>(initialSettings?.videoMode ?? 'h264');
+  const [quality, setQuality] = useState<VideoTranscodeSettings['quality']>(initialSettings?.quality ?? 'balanced');
+  const [resolution, setResolution] = useState<VideoTranscodeSettings['resolution']>(initialSettings?.resolution ?? 'original');
+  const [frameRate, setFrameRate] = useState<VideoTranscodeSettings['frameRate']>(initialSettings?.frameRate ?? 'original');
+  const [audioMode, setAudioMode] = useState<VideoTranscodeSettings['audioMode']>(initialSettings?.audioMode ?? 'aac');
   const [outputMode, setOutputMode] = useState<'new' | 'replace'>('new');
+  const onSettingsChangeRef = React.useRef(onSettingsChange);
   const { logs, isRunning, isCancelling, progress, statusMsg, start, cancel } = usePythonTask('ffmpeg_transcode.py', '等待选择视频');
   const paths = useMemo(() => [...new Set(pathsText.split(/\r?\n/).map(value => value.trim().replace(/^"|"$/g, '')).filter(Boolean))], [pathsText]);
   const activeSourceFolders = useMemo(() => sourceFolders.filter(folder => paths.some(path => videoPathIsInside(path, folder))), [paths, sourceFolders]);
@@ -2040,6 +2047,19 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
     setSourceFolders([...new Set(initialSourceFolderKey.split('\n').filter(Boolean))]);
     setExpandedVideoGroups(new Set());
   }, [initialSourceFolderKey]);
+  useEffect(() => {
+    if (!initialSettings) return;
+    setContainer(initialSettings.container);
+    setVideoMode(initialSettings.videoMode);
+    setQuality(initialSettings.quality);
+    setResolution(initialSettings.resolution);
+    setFrameRate(initialSettings.frameRate);
+    setAudioMode(initialSettings.audioMode);
+  }, [initialSettings]);
+  useEffect(() => { onSettingsChangeRef.current = onSettingsChange; }, [onSettingsChange]);
+  useEffect(() => {
+    onSettingsChangeRef.current?.({ container, videoMode, quality, resolution, frameRate, audioMode });
+  }, [audioMode, container, frameRate, quality, resolution, videoMode]);
 
   useEffect(() => {
     if (videoMode !== 'copy') return;
@@ -2091,10 +2111,10 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
   };
 
   return <div className={embedded ? 'w-full space-y-6' : 'mx-auto w-full max-w-5xl space-y-6'}>
-    {!embedded && <div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><Video size={25}/>视频转码</h2><p className="mt-1 text-sm text-slate-500">支持封装转换、H.264 兼容转码和更省空间的 H.265 硬件转码。</p></div>}
+    {!embedded && <div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><Video size={25}/>视频转码</h2><p className="mt-1 text-sm text-slate-500">支持更换封装、H.264 和 H.265 转码。</p></div>}
     <div className={embedded ? 'space-y-6' : 'space-y-6 rounded-xl border border-slate-200 bg-white p-6'}>
       {sourcesLoading && <div role="status" className="flex items-center gap-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-700"><Loader2 size={16} className="animate-spin"/>项目媒体索引正在建立，完成后会自动加入所选文件或文件夹中的视频。</div>}
-      <section className="space-y-3">
+      {!settingsOnly && <section className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div><p className="text-xs font-semibold uppercase text-slate-500">已选择 {paths.length} 个视频</p><p className="mt-1 text-xs text-slate-500">按文件夹分组，批量任务按列表顺序处理。</p></div>
           <div className="flex items-center gap-2">
@@ -2127,27 +2147,26 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
         </div>
         {activeSourceFolders.length > 0 && <p className="rounded-md bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-700">来自 {activeSourceFolders.length} 个所选文件夹的视频将输出到原文件夹旁的新“_转码”文件夹，并保留子目录结构。</p>}
         <details className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-          <summary className="cursor-pointer text-xs font-bold text-slate-600">高级 · 批量粘贴路径</summary>
+          <summary className="cursor-pointer text-xs font-bold text-slate-600">批量粘贴路径</summary>
           <textarea value={pathsText} disabled={isRunning || sourcesLoading} onChange={event => setPathsText(event.target.value)} placeholder="每行粘贴一个视频的绝对路径" className="mt-2 h-28 w-full resize-y rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 font-mono text-xs text-slate-900 outline-none transition focus:border-blue-500 disabled:opacity-60"/>
         </details>
-      </section>
+      </section>}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         <label className="text-xs font-bold text-slate-600">输出封装<select value={container} disabled={isRunning} onChange={event => setContainer(event.target.value as typeof container)} className="form-input mt-1"><option value="mp4">MP4</option><option value="mov">MOV</option><option value="mkv">MKV</option></select></label>
-        <label className="text-xs font-bold text-slate-600">视频处理<select value={videoMode} disabled={isRunning} onChange={event => setVideoMode(event.target.value as typeof videoMode)} className="form-input mt-1"><option value="h264">H.264 · 兼容性优先</option><option value="h265">H.265 · 节省空间</option><option value="copy">只更换封装（不重新编码）</option></select></label>
+        <label className="text-xs font-bold text-slate-600">视频处理<select value={videoMode} disabled={isRunning} onChange={event => setVideoMode(event.target.value as typeof videoMode)} className="form-input mt-1"><option value="h264">H.264 · 兼容性优先</option><option value="h265">H.265 · 节省空间</option><option value="copy">仅更换封装</option></select></label>
         <label className="text-xs font-bold text-slate-600">画质<select value={quality} disabled={isRunning || videoMode === 'copy'} onChange={event => setQuality(event.target.value as typeof quality)} className="form-input mt-1 disabled:opacity-50"><option value="high">高质量</option><option value="balanced">平衡</option><option value="small">更小文件</option></select></label>
-        <label className="text-xs font-bold text-slate-600">分辨率<select value={resolution} disabled={isRunning || videoMode === 'copy'} onChange={event => setResolution(event.target.value as typeof resolution)} className="form-input mt-1 disabled:opacity-50"><option value="original">保持原分辨率</option><option value="2160p">最长边限制到 4K</option><option value="1080p">最长边限制到 1080p</option><option value="720p">最长边限制到 720p</option></select></label>
+        <label className="text-xs font-bold text-slate-600">分辨率<select value={resolution} disabled={isRunning || videoMode === 'copy'} onChange={event => setResolution(event.target.value as typeof resolution)} className="form-input mt-1 disabled:opacity-50"><option value="original">保持原分辨率</option><option value="2160p">最长边 4K</option><option value="1080p">最长边 1080p</option><option value="720p">最长边 720p</option></select></label>
         <label className="text-xs font-bold text-slate-600">帧率<select value={frameRate} disabled={isRunning || videoMode === 'copy'} onChange={event => setFrameRate(event.target.value as typeof frameRate)} className="form-input mt-1 disabled:opacity-50"><option value="original">保持原帧率</option>{['24', '25', '30', '50', '60'].map(value => <option key={value} value={value}>{value} fps</option>)}</select></label>
         <label className="text-xs font-bold text-slate-600">音频<select value={audioMode} disabled={isRunning} onChange={event => setAudioMode(event.target.value as typeof audioMode)} className="form-input mt-1"><option value="copy">保留原音频编码</option><option value="aac">转换为 AAC · 192 kbps</option><option value="remove">移除音频</option></select></label>
       </div>
-      <div className="grid gap-3 md:grid-cols-2"><label className={`rounded-lg border p-3 text-sm ${outputMode === 'new' ? 'border-blue-400 bg-blue-50' : 'border-slate-200'}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="new" checked={outputMode === 'new'} disabled={isRunning} onChange={() => setOutputMode('new')} className="mt-0.5"/><span><b className="block text-slate-800">另存为新视频</b><span className="mt-1 block text-xs leading-5 text-slate-500">{activeSourceFolders.length ? '文件夹任务输出到原文件夹旁的新“_转码”目录。' : '保存在原视频旁边，文件名增加“_转码”。发生重名时自动编号。'}</span></span></span></label><label className={`rounded-lg border p-3 text-sm ${outputMode === 'replace' ? 'border-red-400 bg-red-50' : 'border-slate-200'} ${paths.length !== 1 || activeSourceFolders.length ? 'opacity-50' : ''}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="replace" checked={outputMode === 'replace'} disabled={isRunning || paths.length !== 1 || Boolean(activeSourceFolders.length)} onChange={() => setOutputMode('replace')} className="mt-0.5"/><span><b className="block text-slate-800">替换原视频</b><span className="mt-1 block text-xs leading-5 text-red-600">仅限直接选择的单个文件且封装不变。验证成功后原子替换，无法在软件内撤销。</span></span></span></label></div>
-      {videoMode === 'h264' && <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">H.264 兼容模式会自动选择可用的 GPU 编码器，并在任务日志中显示实际编码器；GPU 不可用时回退 CPU。输出为 8-bit yuv420p，HDR、10-bit 或 BT.2020 素材建议先用“只更换封装”。</div>}
-      {videoMode === 'h265' && <div className="rounded-lg bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">H.265 通常能以相近画质生成更小的文件，但老旧设备兼容性低于 H.264。此模式依次尝试 NVIDIA、Intel、AMD 和 Windows 硬件编码器，均不可用时回退 libx265 CPU 编码；输出为 8-bit yuv420p，不保留 HDR 或 10-bit。</div>}
-      <TaskProgress logs={logs} progress={progress} isRunning={isRunning} idleMessage={sourcesLoading ? '正在读取后台媒体索引…' : statusMsg} statusMessage={sourcesLoading ? '正在读取后台媒体索引…' : statusMsg} action={<button type="button" onClick={isRunning ? () => void cancel() : startTranscode} disabled={isCancelling || sourcesLoading || (!isRunning && !paths.length)} className={`flex items-center gap-2 rounded-lg px-6 py-2.5 font-bold transition ${isRunning ? 'bg-red-600 text-white hover:bg-red-500' : paths.length && !sourcesLoading ? 'bg-blue-600 text-white hover:bg-blue-500' : 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400'}`}>{isRunning ? isCancelling ? <Loader2 size={17} className="animate-spin"/> : <X size={17}/> : sourcesLoading ? <Loader2 size={17} className="animate-spin"/> : <Play size={17} fill="currentColor"/>}{isRunning ? isCancelling ? '正在取消…' : '取消转码' : sourcesLoading ? '正在建立索引' : '开始转码'}</button>}/>
-    </div>
+      {!settingsOnly && <div className="grid gap-3 md:grid-cols-2"><label className={`rounded-lg border p-3 text-sm ${outputMode === 'new' ? 'border-blue-400 bg-blue-50' : 'border-slate-200'}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="new" checked={outputMode === 'new'} disabled={isRunning} onChange={() => setOutputMode('new')} className="mt-0.5"/><span><b className="block text-slate-800">另存为新视频</b><span className="mt-1 block text-xs leading-5 text-slate-500">{activeSourceFolders.length ? '文件夹任务输出到原文件夹旁的新“_转码”目录。' : '保存在原视频旁边，文件名增加“_转码”。发生重名时自动编号。'}</span></span></span></label><label className={`rounded-lg border p-3 text-sm ${outputMode === 'replace' ? 'border-red-400 bg-red-50' : 'border-slate-200'} ${paths.length !== 1 || activeSourceFolders.length ? 'opacity-50' : ''}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="replace" checked={outputMode === 'replace'} disabled={isRunning || paths.length !== 1 || Boolean(activeSourceFolders.length)} onChange={() => setOutputMode('replace')} className="mt-0.5"/><span><b className="block text-slate-800">替换原视频</b><span className="mt-1 block text-xs leading-5 text-red-600">仅限直接选择的单个文件且封装不变。验证成功后原子替换，无法在软件内撤销。</span></span></span></label></div>}
+      {videoMode === 'h264' && <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">H.264 兼容性更好；不保留 HDR 或 10-bit。可用时自动使用显卡。</div>}
+      {videoMode === 'h265' && <div className="rounded-lg bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">H.265 文件更小，但兼容性较低；不保留 HDR 或 10-bit。可用时自动使用显卡。</div>}
+      {!settingsOnly && <TaskProgress logs={logs} progress={progress} isRunning={isRunning} idleMessage={sourcesLoading ? '正在读取后台媒体索引…' : statusMsg} statusMessage={sourcesLoading ? '正在读取后台媒体索引…' : statusMsg} action={<button type="button" onClick={isRunning ? () => void cancel() : startTranscode} disabled={isCancelling || sourcesLoading || (!isRunning && !paths.length)} className={`flex items-center gap-2 rounded-lg px-6 py-2.5 font-bold transition ${isRunning ? 'bg-red-600 text-white hover:bg-red-500' : paths.length && !sourcesLoading ? 'bg-blue-600 text-white hover:bg-blue-500' : 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400'}`}>{isRunning ? isCancelling ? <Loader2 size={17} className="animate-spin"/> : <X size={17}/> : sourcesLoading ? <Loader2 size={17} className="animate-spin"/> : <Play size={17} fill="currentColor"/>}{isRunning ? isCancelling ? '正在取消…' : '取消转码' : sourcesLoading ? '正在建立索引' : '开始转码'}</button>}/>}</div>
   </div>;
 };
 
-const VideoSplitView = ({ embedded = false, initialTargetPath = '', initialTargetPaths = [] }: { embedded?: boolean; initialTargetPath?: string; initialTargetPaths?: string[] }) => {
+const VideoSplitView = ({ embedded = false, initialTargetPath = '', initialTargetPaths = [], settingsOnly = false }: { embedded?: boolean; initialTargetPath?: string; initialTargetPaths?: string[]; settingsOnly?: boolean }) => {
   const initialTargetKey = (initialTargetPaths.length ? initialTargetPaths : initialTargetPath ? [initialTargetPath] : []).join('\n');
   const [targetPaths, setTargetPaths] = useState<string[]>(() => initialTargetKey.split('\n').filter(Boolean));
   const { logs, isRunning, isCancelling, progress, statusMsg, start, cancel } = usePythonTask('cut_video.py', '等待输入...');
@@ -2197,14 +2216,14 @@ const VideoSplitView = ({ embedded = false, initialTargetPath = '', initialTarge
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase text-slate-500">输入范围</p><p className="mt-1 text-xs text-slate-500">可混合添加文件夹、单个视频或多个视频，文件夹会递归扫描。</p></div><div className="flex items-center gap-2"><button type="button" disabled={isRunning} onClick={() => void chooseFolder()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><FolderInput size={14}/>添加文件夹</button><button type="button" disabled={isRunning} onClick={() => void chooseVideos()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><Plus size={14}/>添加视频</button>{targetPaths.length > 0 && <button type="button" disabled={isRunning} onClick={() => setTargetPaths([])} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 disabled:opacity-50"><Trash2 size={14}/>清空</button>}</div></div>
+        {!settingsOnly && <><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase text-slate-500">输入范围</p><p className="mt-1 text-xs text-slate-500">可添加视频或文件夹；文件夹会扫描子目录。</p></div><div className="flex items-center gap-2"><button type="button" disabled={isRunning} onClick={() => void chooseFolder()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><FolderInput size={14}/>添加文件夹</button><button type="button" disabled={isRunning} onClick={() => void chooseVideos()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><Plus size={14}/>添加视频</button>{targetPaths.length > 0 && <button type="button" disabled={isRunning} onClick={() => setTargetPaths([])} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 disabled:opacity-50"><Trash2 size={14}/>清空</button>}</div></div>
         <div onDrop={handleDrop} onDragOver={event => { event.preventDefault(); event.stopPropagation(); }} className={!targetPaths.length ? 'rounded-xl border border-dashed border-slate-300 bg-slate-50/70 p-2' : ''}>
           {targetPaths.length ? <SelectedToolSourceList paths={targetPaths} disabled={isRunning} onRemove={path => setTargetPaths(current => current.filter(value => value !== path))} title="已选择" itemLabel="项" description="原视频保留；各视频的分段写入其所在目录"/> : <button type="button" disabled={isRunning} onClick={() => void chooseVideos()} className="flex min-h-28 w-full flex-col items-center justify-center gap-2 rounded-lg text-sm text-slate-500 hover:bg-white disabled:opacity-50"><FolderInput size={24} className="text-slate-400"/><span>拖入文件或文件夹，或点击选择视频</span></button>}
-        </div>
+        </div></>}
 
         <div className="grid gap-3 md:grid-cols-2"><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">分段大小</span><span className="mt-1 block text-sm font-bold text-slate-700">约 3.95 GB（固定）</span></label><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">输出名称</span><span className="mt-1 block truncate font-mono text-sm font-bold text-slate-700">{targetPaths.length === 1 ? `${targetPaths[0].split(/[\\/]/).pop()?.replace(/(\.[^.]+)$/u, '_part001$1')}` : targetPaths.length > 1 ? `按 ${targetPaths.length} 个输入分别生成 _part001` : '视频名_part001.mp4'}</span></label></div>
 
-        <TaskProgress
+        {!settingsOnly && <TaskProgress
           logs={logs}
           progress={progress}
           isRunning={isRunning}
@@ -2221,7 +2240,7 @@ const VideoSplitView = ({ embedded = false, initialTargetPath = '', initialTarge
             {isCancelling ? <Loader2 className="animate-spin" size={18}/> : isRunning ? <X size={18}/> : <Scissors size={18} fill="currentColor"/>}
             {isCancelling ? '正在取消…' : isRunning ? '取消切割' : `开始切割${targetPaths.length > 1 ? `（${targetPaths.length} 项）` : ''}`}
           </button>}
-        />
+        />}
       </div>
 
     </div>

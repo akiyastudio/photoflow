@@ -5,8 +5,8 @@ const readline = require('readline/promises');
 const { stdin, stdout } = require('process');
 
 const repositoryRoot = path.resolve(__dirname, '..');
-const releaseRoot = path.join(repositoryRoot, 'release');
-const outputRoot = path.join(repositoryRoot, 'output');
+const releaseRoot = path.join(repositoryRoot, 'artifacts', 'installers');
+const outputRoot = path.join(repositoryRoot, 'artifacts', 'cloudbase');
 const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
 
 const parseArguments = values => {
@@ -49,6 +49,26 @@ const findInstaller = version => {
   return candidates[0].path;
 };
 
+const findPreviousDownloadUrl = () => {
+  if (!fs.existsSync(outputRoot)) return '';
+  const candidates = fs.readdirSync(outputRoot)
+    .filter(name => /^app-release-.*\.json$/i.test(name))
+    .map(name => {
+      const filePath = path.join(outputRoot, name);
+      try {
+        const record = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        const downloadUrl = String(record.downloadUrl || '').trim();
+        if (new URL(downloadUrl).protocol !== 'https:') return undefined;
+        return { downloadUrl, publishedAt: Date.parse(record.publishedAt) || fs.statSync(filePath).mtimeMs };
+      } catch {
+        return undefined;
+      }
+    })
+    .filter(Boolean)
+    .sort((left, right) => right.publishedAt - left.publishedAt);
+  return candidates[0]?.downloadUrl || '';
+};
+
 const run = async () => {
   const args = parseArguments(process.argv.slice(2));
   const version = String(args.version || packageJson.version || '').trim();
@@ -61,8 +81,8 @@ const run = async () => {
   try {
     const installerPath = path.resolve(args.installer || findInstaller(version));
     if (!fs.statSync(installerPath).isFile()) throw new Error(`安装包不存在：${installerPath}`);
-    let downloadUrl = String(args.url || '').trim();
-    if (!downloadUrl) downloadUrl = (await terminal.question('请输入新版本的 HTTPS 下载/分享链接：')).trim();
+    const downloadUrl = String(args.url || findPreviousDownloadUrl()).trim();
+    if (!downloadUrl) throw new Error('没有找到可沿用的 HTTPS 下载链接；请首次运行时使用 --url 指定');
     let parsedUrl;
     try { parsedUrl = new URL(downloadUrl); } catch { throw new Error('下载链接格式无效'); }
     if (parsedUrl.protocol !== 'https:') throw new Error('下载链接必须使用 HTTPS');

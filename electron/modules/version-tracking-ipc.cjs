@@ -70,6 +70,21 @@ const registerVersionTrackingIpc = context => {
     return stored;
   };
 
+  const queueFingerprintMaintenance = (workspaceRoot, projectName, resourcePath) => {
+    if (!backgroundTasks?.run || !trackingScanService?.syncProject) return;
+    setTimeout(() => void backgroundTasks.run({
+      type: 'version-fingerprint-maintenance',
+      title: '完善版本文件校验信息',
+      dedupeKey: `version-fingerprint-maintenance:${workspaceRoot}:${projectName}`,
+      concurrencyGroup: 'disk-io',
+      concurrencyLimit: 3,
+      concurrencyWriteLimit: 2,
+      resourceAccess: 'read',
+      cancellable: false,
+      resources: resourcePath ? [resourcePath] : [],
+    }, () => trackingScanService.syncProject(workspaceRoot, projectName)).catch(() => undefined), 250);
+  };
+
   ipcMain.handle('workspace-progress-tracking-start', async (_event, workspacePath, projectName, request = {}) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
@@ -77,16 +92,36 @@ const registerVersionTrackingIpc = context => {
       const progressId = String(request.progressId || '');
       const mode = request.mode === 'refresh' ? 'refresh' : 'compare';
       if (!/^[0-9a-z-]{8,128}$/i.test(progressId)) throw new Error('progressId 无效');
+      let created = await versionService.createTrackingSession(workspaceRoot, { projectName, progressId, mode });
+      if (created.reused) {
+        const activeTask = backgroundTasks?.list?.().find(task => task.type === 'version-tracking'
+          && task.metadata?.sessionId === created.sessionId
+          && (task.state === 'queued' || task.state === 'running'));
+        if (activeTask) {
+          return { success: true, taskId: activeTask.id, sessionId: created.sessionId, sessionStatus: created.sessionStatus, resumed: true };
+        }
+        if (created.sessionStatus === 'pending_confirm' || created.sessionStatus === 'committing' || created.sessionStatus === 'failed') {
+          return { success: true, sessionId: created.sessionId, sessionStatus: created.sessionStatus, resumed: true };
+        }
+        // A comparing row without a live in-memory task was left by an app
+        // restart or interrupted worker. Release it and start a clean scan.
+        await versionService.releaseTrackingSession(workspaceRoot, created.sessionId);
+        created = await versionService.createTrackingSession(workspaceRoot, { projectName, progressId, mode });
+      }
       const taskId = crypto.randomUUID();
-      const created = await versionService.createTrackingSession(workspaceRoot, { projectName, progressId, mode });
       const handle = backgroundTasks?.create?.({
         id: taskId,
         type: 'version-tracking',
         title: mode === 'refresh' ? '刷新版本跟踪' : '比较版本跟踪',
+        message: '等待其他文件操作完成，之后自动开始版本比较',
+        runningMessage: '正在准备版本比较',
         cancellable: true,
         resources: [created.parentFolderPath, created.progressFolderPath],
         concurrencyGroup: 'disk-io',
-        concurrencyLimit: 2,
+        concurrencyLimit: 3,
+        concurrencyWriteLimit: 2,
+        resourceAccess: 'read',
+        dedupeKey: `version-tracking:${workspaceRoot}:${progressId}`,
         metadata: {
           sessionId: created.sessionId, progressId: created.progressId,
           processedCount: 0, totalCount: 0,
@@ -116,7 +151,7 @@ const registerVersionTrackingIpc = context => {
           }
         }
       })(), 0);
-      return { success: true, taskId, sessionId: created.sessionId };
+      return { success: true, taskId, sessionId: created.sessionId, sessionStatus: 'comparing', resumed: false };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -206,6 +241,7 @@ const registerVersionTrackingIpc = context => {
         return { ...result, success: false, sessionId, retryable: true, items: [] };
       }
       const completed = await trackingScanService.completeTrackingCommit(workspaceRoot, { sessionId, batchId: result.batch?.id });
+      queueFingerprintMaintenance(workspaceRoot, plan.projectName, plan.progressFolderPath);
       return { ...completed, batch: result.batch, renamedCount: result.renamedCount || 0 };
     } catch (error) {
       await Promise.all(copiedPaths.map(filePath => fs.promises.rm(filePath, { force: true }).catch(() => undefined)));

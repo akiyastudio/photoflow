@@ -90,6 +90,29 @@ def test_tracking_engine(root: Path) -> None:
             parent_id=original["id"],
         )
 
+        # Preparing a branch without parent-copy policy must not hash or scan
+        # every parent RAW merely to find changed child files.
+        no_parent_scan_folder = project / "No parent scan child"
+        no_parent_scan_folder.mkdir()
+        write_media(no_parent_scan_folder / "working.jpg", b"working-v1")
+        no_parent_scan = register(
+            db, workspace, no_parent_scan_folder, version_key="fast", node_role="progress",
+            parent_id=original["id"], tracking=True,
+        )
+        original_snapshot = db_api.folder_media_snapshot
+        scanned_paths = []
+        db_api.folder_media_snapshot = lambda folder_path: (scanned_paths.append(Path(folder_path)), original_snapshot(folder_path))[1]
+        try:
+            fast_prepared = db_api.tracking_prepare(str(workspace), db, {
+                "projectName": "Project", "progressId": no_parent_scan["id"], "mode": "compare",
+            })
+            assert scanned_paths == [no_parent_scan_folder]
+        finally:
+            db_api.folder_media_snapshot = original_snapshot
+        db_api.tracking_session_release(db, {"sessionId": fast_prepared["sessionId"]})
+        db.execute("DELETE FROM progress_folders WHERE id=?", (no_parent_scan["id"],))
+        db.commit()
+
         # Arbitrary folder names are irrelevant: IDs and the explicit main edge drive comparison.
         prepared = db_api.tracking_prepare(str(workspace), db, {
             "projectName": "Project", "progressId": progress["id"], "mode": "compare",
@@ -209,13 +232,12 @@ def test_tracking_engine(root: Path) -> None:
         disposable = db_api.tracking_session_create(str(workspace), db, {
             "projectName": "Project", "progressId": progress["id"], "mode": "refresh",
         })
-        try:
-            db_api.tracking_session_create(str(workspace), db, {
-                "projectName": "Project", "progressId": progress["id"], "mode": "refresh",
-            })
-            raise AssertionError("a progress node must not have two active tracking sessions")
-        except ValueError as error:
-            assert disposable["sessionId"] in str(error)
+        duplicate = db_api.tracking_session_create(str(workspace), db, {
+            "projectName": "Project", "progressId": progress["id"], "mode": "refresh",
+        })
+        assert duplicate["sessionId"] == disposable["sessionId"]
+        assert duplicate["reused"] is True
+        assert duplicate["sessionStatus"] == "comparing"
         active_count = db.execute(
             """SELECT COUNT(*) FROM tracking_sessions WHERE progress_id=?
                AND status IN ('comparing','pending_confirm','committing','failed')""",
@@ -233,10 +255,20 @@ def test_tracking_engine(root: Path) -> None:
             raise AssertionError("a failed compare without preview items must not commit an empty result")
         except ValueError as error:
             assert "重新比较" in str(error)
-        released = db_api.tracking_session_release(db, {"sessionId": disposable["sessionId"]})
-        assert released["released"] is True
+        retry = db_api.tracking_session_create(str(workspace), db, {
+            "projectName": "Project", "progressId": progress["id"], "mode": "refresh",
+        })
+        assert retry["sessionId"] != disposable["sessionId"], "an empty failed compare must be replaced automatically"
+        assert retry["reused"] is False
         try:
             db_api.tracking_session_get(db, {"sessionId": disposable["sessionId"]})
+            raise AssertionError("the terminal failed session must not remain after automatic retry")
+        except ValueError:
+            pass
+        released = db_api.tracking_session_release(db, {"sessionId": retry["sessionId"]})
+        assert released["released"] is True
+        try:
+            db_api.tracking_session_get(db, {"sessionId": retry["sessionId"]})
             raise AssertionError("released sessions must not remain readable")
         except ValueError:
             pass
@@ -286,9 +318,29 @@ def test_tracking_engine(root: Path) -> None:
         history = db_api.progress_main_branch_media(db, {"progressId": progress["id"]})
         assert history["branchProgressIds"] == [original["id"], progress["id"], no_copy["id"]]
         assert all(entry["progressId"] != selection["id"] for entry in history["entries"])
+        progress_entry = next(entry for entry in history["entries"] if entry["progressId"] == progress["id"])
+        assert progress_entry["version"]["displayVersionKey"] == "edit"
         by_photo = db_api.progress_main_branch_media(db, {"photoId": history["entries"][0]["photoId"]})
         assert by_photo["progressId"] in (original["id"], progress["id"])
         assert by_photo["entries"] and all(entry["photoId"] == history["entries"][0]["photoId"] for entry in by_photo["entries"])
+
+        # Committed batches retain the old source path after a folder rename.
+        # The stable filesystem folder ID must keep those versions discoverable.
+        renamed_progress_folder = project / "Renamed edit folder"
+        progress_folder.rename(renamed_progress_folder)
+        db_api.sync_progress_folder_locations(str(workspace), db, db_api.project_row(db, "Project"))
+        renamed_progress = db_api._progress_row_by_id(db, progress["id"])
+        progress_batch = db.execute(
+            "SELECT * FROM version_batches WHERE project_id=? AND source_folder_id=? ORDER BY sequence DESC LIMIT 1",
+            (renamed_progress["project_id"], renamed_progress["folder_id"]),
+        ).fetchone()
+        assert progress_batch is not None
+        assert progress_batch["source_folder_path_key"] != renamed_progress["folder_path_key"]
+        renamed_history = db_api.progress_main_branch_media(db, {"progressId": progress["id"]})
+        renamed_entry = next(entry for entry in renamed_history["entries"] if entry["progressId"] == progress["id"])
+        assert renamed_entry["version"]["id"] == progress_entry["version"]["id"]
+        resolved_after_rename = db_api.progress_main_branch_media(db, {"photoId": renamed_entry["photoId"]})
+        assert resolved_after_rename["progressId"] == progress["id"]
         first_path = Path(history["entries"][0]["version"]["filePath"])
         first_path.unlink()
         missing_history = db_api.progress_main_branch_media(db, {"progressId": progress["id"]})

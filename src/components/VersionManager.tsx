@@ -4,6 +4,8 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Clock3,
   Copy,
   ExternalLink,
@@ -25,6 +27,7 @@ import { RECYCLE_BIN_FAILURE_DIALOG } from '../utils/recycleBinFailure';
 import { AdvancedVideoPlayer } from './AdvancedVideoPlayer';
 import { metadataFieldLabel, metadataGroupLabel } from '../features/metadata/metadata-labels';
 import { mainBranchPhotoSummaries, mainBranchVersionsForPhoto, paginateMainBranchPhotos, type MainBranchPhotoSummary } from '../features/versioning/version-manager-model';
+import { ImageComparisonView, type ImageComparisonMode } from './ImageComparisonView';
 
 type VersionManagerProps = {
   entry: ProjectFileEntry;
@@ -83,12 +86,20 @@ const loadVersionResource = (version: MediaVersion, cacheConfig: AppConfig['medi
   const pending = versionResourceRequests.get(key);
   if (pending) return pending;
   const kind = mediaKind(version.filePath);
-  const request = window.electronAPI.getMediaThumbnail(version.filePath, kind, cacheConfig, 1600, 0, -1).then(async result => {
+  const request = (kind === 'raw'
+    ? window.electronAPI.getMediaOriginal(version.filePath, kind, cacheConfig).then(result => ({
+      success: result.success,
+      previewUrl: result.mediaUrl,
+      orientation: result.orientation,
+      error: result.error,
+    }))
+    : window.electronAPI.getMediaThumbnail(version.filePath, kind, cacheConfig, 1600, 0, -1)
+  ).then(async result => {
     if (!result.success) return {};
     let url = result.previewUrl;
-    let orientationMatrix: number[] | undefined;
-    let orientationSwapsAxes: boolean | undefined;
-    if (kind !== 'video') {
+    let orientationMatrix = 'orientation' in result ? result.orientation?.matrix : undefined;
+    let orientationSwapsAxes = 'orientation' in result ? result.orientation?.swapsAxes : undefined;
+    if (kind === 'image') {
       const original = await window.electronAPI.getMediaOriginal(version.filePath, kind, cacheConfig);
       if (original.success && original.mediaUrl) {
         url = original.mediaUrl;
@@ -96,7 +107,7 @@ const loadVersionResource = (version: MediaVersion, cacheConfig: AppConfig['medi
         orientationSwapsAxes = original.orientation?.swapsAxes;
       }
     }
-    const resource = { url, videoUrl: result.mediaUrl, orientationMatrix, orientationSwapsAxes };
+    const resource = { url, videoUrl: 'mediaUrl' in result ? result.mediaUrl : undefined, orientationMatrix, orientationSwapsAxes };
     if (versionResourceCache.size >= 80) versionResourceCache.delete(versionResourceCache.keys().next().value as string);
     versionResourceCache.set(key, resource);
     return resource;
@@ -216,15 +227,7 @@ const CompareView = ({ left, right, cacheConfig, workspacePath, photoId, onClose
   onClose: () => void;
   initialMode?: 'side-by-side' | 'split' | 'overlay' | 'blink' | 'difference';
 }) => {
-  const [mode, setMode] = useState<'side-by-side' | 'split' | 'overlay' | 'blink' | 'difference'>(initialMode);
-  const [split, setSplit] = useState(50);
-  const [opacity, setOpacity] = useState(50);
-  const [blinkRight, setBlinkRight] = useState(false);
-  const [zoom, setZoom] = useState(1);
-  const [rotation, setRotation] = useState(0);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [coordinates, setCoordinates] = useState({ x: 0, y: 0 });
-  const dragRef = useRef<{ pointerId: number; startX: number; startY: number; panX: number; panY: number } | null>(null);
+  const [mode, setMode] = useState<ImageComparisonMode>(initialMode);
   const videoComparison = mediaKind(left.filePath) === 'video' || mediaKind(right.filePath) === 'video';
   useEffect(() => {
     if (videoComparison && mode !== 'side-by-side') setMode('side-by-side');
@@ -232,35 +235,17 @@ const CompareView = ({ left, right, cacheConfig, workspacePath, photoId, onClose
   useEffect(() => {
     void window.electronAPI.recordMediaVersionCompare(workspacePath, { photoId, leftVersionId: left.id, rightVersionId: right.id, compareMode: mode });
   }, [mode, left.id, right.id, photoId, workspacePath]);
-  useEffect(() => {
-    if (mode !== 'blink') return;
-    const timer = window.setInterval(() => setBlinkRight(value => !value), 550);
-    return () => window.clearInterval(timer);
-  }, [mode]);
-  const layerClass = 'absolute inset-0 h-full w-full';
-  const viewStyle: React.CSSProperties = {
-    transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom}) rotate(${rotation}deg)`,
-    transformOrigin: 'center',
-    transition: dragRef.current ? 'none' : 'transform 120ms ease-out',
-  };
-  const resetView = () => { setZoom(1); setRotation(0); setPan({ x: 0, y: 0 }); };
-  return <div className="flex h-full min-h-[520px] flex-col overflow-hidden bg-slate-950 text-white">
-    <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-2 border-b border-white/10 px-4 py-2"><div className="mr-3 min-w-0"><h3 className="font-bold">版本对比</h3><p className="truncate text-xs text-slate-400">{visibleVersionLabel(left)} {visibleVersionName(left)} ↔ {visibleVersionLabel(right)} {visibleVersionName(right)}</p></div>{([['side-by-side', '并排'], ['split', '滑动分割'], ['overlay', '透明叠加'], ['blink', '闪烁'], ['difference', '差异']] as const).map(([value, label]) => <button key={value} onClick={() => setMode(value)} className={`rounded-md px-3 py-1.5 text-xs font-bold ${mode === value ? 'bg-blue-600 text-white' : 'bg-white/10 text-slate-300 hover:bg-white/15'}`}>{label}</button>)}<div className="ml-auto flex items-center gap-2"><button onClick={() => setRotation(value => (value + 90) % 360)} className="rounded-md bg-white/10 px-2.5 py-1.5 text-xs font-bold hover:bg-white/15">旋转 {rotation}°</button><button onClick={resetView} className="rounded-md bg-white/10 px-2.5 py-1.5 text-xs font-bold hover:bg-white/15">重置视图</button><span className="text-xs text-slate-400">缩放</span><input type="range" min="1" max="4" step="0.1" value={zoom} onChange={event => setZoom(Number(event.target.value))}/><button onClick={onClose} className="rounded p-2 hover:bg-white/10"><X size={18}/></button></div></header>
-    {(mode === 'split' || mode === 'overlay') && <div className="flex shrink-0 items-center gap-3 border-b border-white/10 px-4 py-2 text-xs text-slate-300"><span>{mode === 'split' ? '分割位置' : '右侧透明度'}</span><input className="w-64" type="range" min="0" max="100" value={mode === 'split' ? split : opacity} onChange={event => mode === 'split' ? setSplit(Number(event.target.value)) : setOpacity(Number(event.target.value))}/><span className="font-mono">{mode === 'split' ? split : opacity}%</span></div>}
-    <main className="relative min-h-0 flex-1 cursor-grab overflow-hidden bg-black active:cursor-grabbing" onWheel={event => { event.preventDefault(); setZoom(value => Math.max(1, Math.min(4, Number((value * (event.deltaY < 0 ? 1.15 : 1 / 1.15)).toFixed(2))))); }} onDoubleClick={resetView} onPointerDown={event => { if (event.button !== 0) return; event.currentTarget.setPointerCapture(event.pointerId); dragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, panX: pan.x, panY: pan.y }; }} onPointerMove={event => { const rect = event.currentTarget.getBoundingClientRect(); setCoordinates({ x: Math.round(event.clientX - rect.left), y: Math.round(event.clientY - rect.top) }); const drag = dragRef.current; if (drag?.pointerId === event.pointerId) setPan({ x: drag.panX + event.clientX - drag.startX, y: drag.panY + event.clientY - drag.startY }); }} onPointerUp={event => { if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null; }} onPointerCancel={() => { dragRef.current = null; }}>
-      <div className="relative h-full min-h-[420px] w-full">
-        {mode === 'side-by-side' ? <div className="grid h-full grid-cols-2 gap-px bg-white/15"><div className="relative min-w-0"><VersionResource version={left} cacheConfig={cacheConfig} contentStyle={viewStyle} className="h-full w-full"/><span className="absolute left-3 top-3 rounded bg-black/70 px-2 py-1 text-xs">A · {visibleVersionLabel(left)}</span></div><div className="relative min-w-0"><VersionResource version={right} cacheConfig={cacheConfig} contentStyle={viewStyle} className="h-full w-full"/><span className="absolute left-3 top-3 rounded bg-black/70 px-2 py-1 text-xs">B · {visibleVersionLabel(right)}</span></div></div> : <>
-          <VersionResource version={left} cacheConfig={cacheConfig} contentStyle={viewStyle} className={layerClass}/>
-          {mode === 'split' && <div className={layerClass} style={{ clipPath: `inset(0 0 0 ${split}%)` }}><VersionResource version={right} cacheConfig={cacheConfig} contentStyle={viewStyle} className="h-full w-full"/></div>}
-          {mode === 'split' && <span className="absolute bottom-0 top-0 z-10 w-px bg-white shadow" style={{ left: `${split}%` }}/>} 
-          {mode === 'overlay' && <div className={layerClass} style={{ opacity: opacity / 100 }}><VersionResource version={right} cacheConfig={cacheConfig} contentStyle={viewStyle} className="h-full w-full"/></div>}
-          {mode === 'blink' && blinkRight && <VersionResource version={right} cacheConfig={cacheConfig} contentStyle={viewStyle} className={layerClass}/>} 
-          {mode === 'difference' && <div className={`${layerClass} mix-blend-difference`}><VersionResource version={right} cacheConfig={cacheConfig} contentStyle={viewStyle} className="h-full w-full"/></div>}
-        </>}
-      </div>
-      <span className="pointer-events-none absolute bottom-3 right-3 rounded bg-black/65 px-2 py-1 font-mono text-[11px] text-slate-300">x {coordinates.x} · y {coordinates.y} · {Math.round(zoom * 100)}%</span>
-    </main>
-  </div>;
+  return <ImageComparisonView
+    left={{ label: `${visibleVersionLabel(left)} ${visibleVersionName(left)}`, content: <VersionResource version={left} cacheConfig={cacheConfig} className="absolute inset-0 h-full w-full"/> }}
+    right={{ label: `${visibleVersionLabel(right)} ${visibleVersionName(right)}`, content: <VersionResource version={right} cacheConfig={cacheConfig} className="absolute inset-0 h-full w-full"/> }}
+    mode={mode}
+    onModeChange={setMode}
+    comparisonKey={`${left.id}|${right.id}`}
+    className="h-full min-h-[520px]"
+    leading={<><h3 className="font-bold">版本对比</h3><p className="truncate text-xs text-slate-400">{visibleVersionLabel(left)} {visibleVersionName(left)} ↔ {visibleVersionLabel(right)} {visibleVersionName(right)}</p></>}
+    trailing={<button type="button" onClick={onClose} className="rounded p-2 hover:bg-white/10"><X size={18}/></button>}
+    unavailable={videoComparison}
+  />;
 };
 
 const SingleVersionView = ({ version, cacheConfig, busy, onClose, onNotice, onEditNote, onMakeCurrent, onRelocate, onDelete }: {
@@ -277,6 +262,7 @@ const SingleVersionView = ({ version, cacheConfig, busy, onClose, onNotice, onEd
   const [metadataFields, setMetadataFields] = useState<MediaMetadataField[]>([]);
   const [metadataLoading, setMetadataLoading] = useState(false);
   const [metadataError, setMetadataError] = useState('');
+  const [openMetadataGroups, setOpenMetadataGroups] = useState<Set<string>>(() => new Set());
   const [fullscreen, setFullscreen] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -351,7 +337,7 @@ const SingleVersionView = ({ version, cacheConfig, busy, onClose, onNotice, onEd
   return <div className="flex h-full min-h-0 min-w-0 flex-1">
     {fullscreen ? createPortal(preview, document.body) : preview}
     <div role="separator" aria-label="调整预览区和详细信息区宽度" aria-orientation="vertical" aria-valuemin={260} aria-valuemax={560} aria-valuenow={Math.round(metadataWidth)} tabIndex={0} title="左右拖动调整详细信息宽度" onDoubleClick={() => setMetadataWidth(340)} onKeyDown={event => { if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return; event.preventDefault(); setMetadataWidth(width => Math.max(260, Math.min(560, width + (event.key === 'ArrowLeft' ? 20 : -20)))); }} onPointerDown={event => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); metadataResizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: metadataWidth }; }} onPointerMove={event => { const resize = metadataResizeRef.current; if (resize?.pointerId === event.pointerId) setMetadataWidth(Math.max(260, Math.min(560, resize.startWidth - event.clientX + resize.startX))); }} onPointerUp={event => { if (metadataResizeRef.current?.pointerId === event.pointerId) metadataResizeRef.current = null; }} onPointerCancel={() => { metadataResizeRef.current = null; }} className="column-resize-handle"/>
-    <aside style={{ width: metadataWidth }} className="flex min-h-0 shrink-0 flex-col bg-white">
+    <aside style={{ width: metadataWidth }} className="pointer-events-auto flex min-h-0 shrink-0 select-auto flex-col bg-white">
       <header className="flex min-h-14 shrink-0 items-center justify-between gap-2 border-b border-slate-200 px-4"><div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wider text-slate-400">详细信息</p><p className="truncate text-sm font-semibold text-slate-700">{visibleVersionName(version)}</p></div><div ref={actionsRef} className="relative"><button type="button" onClick={() => setActionsOpen(open => !open)} aria-label="版本操作" title="版本操作" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><MoreHorizontal size={18}/></button>{actionsOpen && <div className="absolute right-0 top-full z-30 mt-1 w-48 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-xl"><button type="button" onClick={() => { setActionsOpen(false); onEditNote(); }} className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"><Pencil size={14}/>编辑版本说明</button>{!version.isCurrent && <button type="button" disabled={busy || version.fileMissing} onClick={() => { setActionsOpen(false); onMakeCurrent(); }} className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40"><CheckCircle2 size={14}/>设为当前工作版本</button>}<div className="my-1 border-t border-slate-200"/>{version.fileMissing && <button type="button" disabled={busy} onClick={() => { setActionsOpen(false); onRelocate(); }} className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-40"><FolderSearch size={14}/>重新定位文件</button>}<button type="button" onClick={async () => { setActionsOpen(false); try { await navigator.clipboard.writeText(version.filePath); onNotice('成功复制文字'); } catch { onNotice('复制文件地址失败'); } }} className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"><Copy size={14}/>复制文件地址</button>{version.versionNumber > 0 && !version.fileMissing && <button type="button" disabled={busy} onClick={() => { setActionsOpen(false); onDelete(); }} className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-40"><Trash2 size={14}/>删除版本记录</button>}</div>}</div></header>
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
         <section className="border-b border-slate-200 pb-2"><h4 className="py-2 text-xs font-bold text-slate-700">版本信息</h4><dl>
@@ -364,7 +350,7 @@ const SingleVersionView = ({ version, cacheConfig, busy, onClose, onNotice, onEd
         </dl></section>
         <div className="flex items-center justify-between border-b border-slate-200 py-2"><span className="text-[11px] text-slate-400">{metadataLoading ? '正在读取媒体元数据…' : `${metadataFields.length} 个媒体字段`}</span></div>
         {metadataError && <p className="my-2 rounded-md border border-red-200 bg-red-50 px-2.5 py-2 text-xs text-red-600">{metadataError}</p>}
-        {Array.from(groupedMetadata.entries()).map(([group, fields]) => <details key={group} className="border-b border-slate-200"><summary className="cursor-pointer py-2.5 text-xs font-bold text-slate-700">{metadataGroupLabel(group)}<span className="ml-2 text-[10px] font-normal text-slate-400">{fields.length}</span></summary><dl className="pb-2">{fields.map((field, index) => <div key={`${field.name}:${index}`} className="grid grid-cols-[82px_minmax(0,1fr)] gap-3 border-b border-slate-100 py-2 last:border-0"><dt title={field.name} className="break-words text-[11px] text-slate-400">{metadataFieldLabel(field.name)}</dt><dd className="select-text break-words text-xs leading-5 text-slate-700">{field.value}</dd></div>)}</dl></details>)}
+        {Array.from(groupedMetadata.entries()).map(([group, fields], groupIndex) => { const open = openMetadataGroups.has(group); const regionId = `version-metadata-group-${groupIndex}`; return <section key={group} className="border-b border-slate-200"><button type="button" aria-expanded={open} aria-controls={regionId} onClick={() => setOpenMetadataGroups(current => { const next = new Set(current); if (next.has(group)) next.delete(group); else next.add(group); return next; })} className="flex w-full cursor-pointer items-center py-2.5 text-left text-xs font-bold text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-400">{open ? <ChevronDown size={13} className="mr-1 shrink-0"/> : <ChevronRight size={13} className="mr-1 shrink-0"/>}{metadataGroupLabel(group)}<span className="ml-2 text-[10px] font-normal text-slate-400">{fields.length}</span></button>{open && <dl id={regionId} className="pb-2">{fields.map((field, index) => <div key={`${field.name}:${index}`} className="grid grid-cols-[82px_minmax(0,1fr)] gap-3 border-b border-slate-100 py-2 last:border-0"><dt title={field.name} className="break-words text-[11px] text-slate-400">{metadataFieldLabel(field.name)}</dt><dd className="select-text break-words text-xs leading-5 text-slate-700">{field.value}</dd></div>)}</dl>}</section>; })}
       </div>
     </aside>
   </div>;
@@ -383,6 +369,7 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
   const [branchPhotoPage, setBranchPhotoPage] = useState(0);
   const [branchPhotoLoading, setBranchPhotoLoading] = useState(false);
   const [activePhotoId, setActivePhotoId] = useState('');
+  const branchPhotoRequestRef = useRef(0);
   useEscapeLayer(Boolean(editing), () => setEditing(null), !busy);
   const initialCompareAppliedRef = useRef('');
   const [editNote, setEditNote] = useState('');
@@ -428,8 +415,11 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
 
   const loadBranchPhoto = async (photoId: string, fallback?: TrackedPhoto, summaries = branchPhotos) => {
     if (!progressId || !photoId) return false;
+    const requestId = ++branchPhotoRequestRef.current;
+    setCompareIds([]);
     setBranchPhotoLoading(true);
     const result = await window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId, photoId });
+    if (requestId !== branchPhotoRequestRef.current) return false;
     setBranchPhotoLoading(false);
     if (!result.success) { onNotice(`读取主分支版本失败：${result.error || '未知错误'}`); return false; }
     const versions = mainBranchVersionsForPhoto(result.entries, photoId);
@@ -605,21 +595,25 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
     if (result.cancelled) return;
     if (!result.success) { onNotice(`重新定位失败：${result.error || '未知错误'}`); return; }
     if (!result.photo || !await loadBranchPhoto(result.photo.id, result.photo)) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
-    onNotice(result.versions.find(item => item.id === version.id)?.contentChanged ? '版本已重新定位；因内容指纹不同，已标记内容变化' : '版本文件已重新定位');
+    onNotice(result.versions.find(item => item.id === version.id)?.contentChanged ? '已重新定位，但文件内容与原记录不同。' : '版本文件已重新定位');
   };
   const toggleCompare = (id: string) => setCompareIds(current => current.includes(id) ? current.filter(value => value !== id) : [...(current.length >= 2 ? current.slice(1) : current), id]);
+  const previewVersion = (id: string) => {
+    setCompareIds([]);
+    setSelectedId(id);
+  };
 
-  return <div className="fixed inset-x-0 bottom-0 top-10 z-[300] flex flex-col bg-slate-50">
+  return <div className="version-manager-surface fixed inset-x-0 bottom-0 top-10 z-[300] flex flex-col bg-slate-50">
     {loading ? <div className="flex flex-1 items-center justify-center gap-3 text-slate-500"><Loader2 size={20} className="animate-spin"/>正在扫描文件身份并建立版本记录…</div> : <div ref={layoutRef} className="relative flex min-h-0 flex-1">
       <aside style={{ width: treeWidth }} className="shrink-0 overflow-y-auto bg-white">
         <header className="sticky top-0 z-10 border-b border-slate-200 bg-white px-4 py-3"><div className="flex items-start gap-2"><GitBranch size={18} className="mt-0.5 shrink-0 text-blue-600"/><div className="min-w-0 flex-1"><h2 className="truncate text-sm font-bold text-slate-800">版本管理 · {bundle.photo?.displayName || entry.name}</h2><p className="mt-1 truncate text-[11px] text-slate-500" title={bundle.photo?.id}>Photo ID：<span className="font-mono">{bundle.photo?.id || '正在建立追踪…'}</span></p></div><button onClick={onClose} title="关闭版本管理" aria-label="关闭版本管理" className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100"><X size={17}/></button></div></header>
-        <div className="flex items-start gap-2 border-b border-slate-200 bg-slate-50 px-4 py-2 text-[11px] leading-5 text-slate-600"><AlertTriangle size={14} className="mt-0.5 shrink-0 text-slate-400"/><span>版本管理记录文件路径与版本关系，不保存历史文件副本；原地覆盖或永久删除的旧内容无法通过本功能恢复。</span></div>
-        {missingVersionCount > 0 && <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[11px] font-medium leading-5 text-amber-800"><AlertTriangle size={14} className="mt-0.5 shrink-0"/><span>{missingVersionCount} 个版本文件已被删除或移动，可选择对应版本重新定位或删除记录。</span></div>}
-        {branchPhotos.length > 1 && <section className="border-b border-slate-200 bg-slate-50/70 p-3"><div className="mb-2 flex items-center justify-between"><span className="text-xs font-bold text-slate-600">主分支图片</span><span className="text-[10px] text-slate-400">{branchPhotoPagination.total} 张</span></div><div className="max-h-48 space-y-1 overflow-y-auto">{branchPhotoPagination.items.map(photo => <button key={photo.photoId} type="button" disabled={branchPhotoLoading} aria-pressed={activePhotoId === photo.photoId} onClick={() => void loadBranchPhoto(photo.photoId)} className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs ${activePhotoId === photo.photoId ? 'bg-blue-100 font-bold text-blue-700' : 'text-slate-600 hover:bg-white'}`}><span className={`h-2 w-2 shrink-0 rounded-full ${photo.missing ? 'bg-red-400' : 'bg-emerald-400'}`}/><span className="min-w-0 flex-1 truncate" title={photo.originalName}>{photo.originalName}</span><span className="shrink-0 text-[10px] text-slate-400">{photo.versionCount} 版</span></button>)}</div>{branchPhotoPagination.pageCount > 1 && <div className="mt-2 flex items-center justify-between"><button type="button" disabled={branchPhotoPagination.currentPage === 0 || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => Math.max(0, page - 1))} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">上一页</button><span className="text-[10px] text-slate-400">{branchPhotoPagination.currentPage + 1} / {branchPhotoPagination.pageCount}</span><button type="button" disabled={branchPhotoPagination.currentPage + 1 >= branchPhotoPagination.pageCount || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => page + 1)} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">下一页</button></div>}</section>}
+        <div className="flex items-start gap-2 border-b border-slate-200 bg-slate-50 px-4 py-2 text-[11px] leading-5 text-slate-600"><AlertTriangle size={14} className="mt-0.5 shrink-0 text-slate-400"/><span>版本管理不保存文件副本。被覆盖或永久删除的内容无法恢复。</span></div>
+        {missingVersionCount > 0 && <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[11px] font-medium leading-5 text-amber-800"><AlertTriangle size={14} className="mt-0.5 shrink-0"/><span>{missingVersionCount} 个版本文件不可用，请重新定位或删除记录。</span></div>}
+        {branchPhotos.length > 1 && <section className="border-b border-slate-200 bg-slate-50/70 p-3"><div className="mb-2 flex items-center justify-between"><span className="text-xs font-bold text-slate-600">主分支图片</span><span className="text-[10px] text-slate-400">{branchPhotoPagination.total} 张</span></div><div className="max-h-48 space-y-1 overflow-y-auto">{branchPhotoPagination.items.map(photo => <button key={photo.photoId} type="button" aria-pressed={activePhotoId === photo.photoId} onClick={() => void loadBranchPhoto(photo.photoId)} className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs ${activePhotoId === photo.photoId ? 'bg-blue-100 font-bold text-blue-700' : 'text-slate-600 hover:bg-white'}`}><span className={`h-2 w-2 shrink-0 rounded-full ${photo.missing ? 'bg-red-400' : 'bg-emerald-400'}`}/><span className="min-w-0 flex-1 truncate" title={photo.originalName}>{photo.originalName}</span><span className="shrink-0 text-[10px] text-slate-400">{photo.versionCount} 版</span></button>)}</div>{branchPhotoPagination.pageCount > 1 && <div className="mt-2 flex items-center justify-between"><button type="button" disabled={branchPhotoPagination.currentPage === 0 || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => Math.max(0, page - 1))} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">上一页</button><span className="text-[10px] text-slate-400">{branchPhotoPagination.currentPage + 1} / {branchPhotoPagination.pageCount}</span><button type="button" disabled={branchPhotoPagination.currentPage + 1 >= branchPhotoPagination.pageCount || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => page + 1)} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">下一页</button></div>}</section>}
         <div className="p-3"><div className="mb-2 flex items-center justify-between px-2"><span className="text-xs font-bold uppercase tracking-wider text-slate-400">版本树</span><span className="text-xs text-slate-400">{bundle.versions.length} 个版本</span></div>
-        <div className="space-y-2">{bundle.versions.map(version => <div key={version.id} role="button" tabIndex={0} onClick={() => setSelectedId(version.id)} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedId(version.id); } }} className={`relative w-full cursor-pointer rounded-xl border p-3 text-left transition ${selectedId === version.id ? 'border-blue-400 bg-blue-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'}`} style={{ paddingLeft: 12 + (depths.get(version.id) || 0) * 14 }}>
+        <div className="space-y-2">{bundle.versions.map(version => <div key={version.id} className={`relative w-full rounded-xl border p-3 text-left transition ${selectedId === version.id ? 'border-blue-400 bg-blue-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'}`} style={{ paddingLeft: 12 + (depths.get(version.id) || 0) * 14 }}><button type="button" aria-label={`预览 ${visibleVersionLabel(version)} ${visibleVersionName(version)}`} onClick={() => previewVersion(version.id)} className="absolute inset-0 z-0 cursor-pointer rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"/>
           {(depths.get(version.id) || 0) > 0 && <span className="absolute bottom-1/2 top-0 w-px bg-slate-200" style={{ left: 8 + (depths.get(version.id) || 0) * 14 }}/>} 
-          <div className="flex items-start gap-3"><VersionResource version={version} cacheConfig={cacheConfig} videoPlayback={false} className="h-16 w-20 shrink-0 rounded-md"/><div className="min-w-0 flex-1"><div className="flex items-center gap-1.5"><span className="font-mono text-xs font-bold text-blue-600">{visibleVersionLabel(version)}</span><span className="truncate text-sm font-bold text-slate-800">{visibleVersionName(version)}</span>{version.isCurrent && <span title="当前版本" className="rounded-full bg-blue-600 p-0.5 text-white"><Check size={10}/></span>}</div><p className="mt-1 flex items-center gap-1 text-[11px] text-slate-400"><Clock3 size={11}/>{new Date(version.createdAt).toLocaleString()}</p>{version.note && <p title={version.note} className="mt-1 line-clamp-2 break-words text-[11px] leading-4 text-slate-500">{version.note}</p>}{version.fileMissing && <div className="mt-1 flex flex-wrap items-center gap-2"><span className="text-[11px] font-bold text-red-500">文件丢失</span>{version.versionNumber > 0 && <button type="button" disabled={busy} onClick={event => { event.stopPropagation(); void deleteVersion(version); }} className="inline-flex items-center gap-1 rounded border border-red-200 bg-white px-2 py-0.5 text-[10px] font-bold text-red-600 hover:bg-red-50 disabled:opacity-40"><Trash2 size={11}/>删除版本</button>}</div>}{version.contentChanged && <p className="mt-1 text-[11px] font-bold text-amber-600">文件曾被外部修改</p>}</div><input disabled={version.fileMissing} title={version.fileMissing ? '请先重新定位文件' : '选择进行对比'} aria-label={`选择 ${visibleVersionLabel(version)} 进行对比`} type="checkbox" checked={compareIds.includes(version.id)} onClick={event => event.stopPropagation()} onChange={() => toggleCompare(version.id)} className="mt-1 accent-blue-600 disabled:opacity-40"/></div>
+          <div className="pointer-events-none relative z-10 flex items-start gap-3"><VersionResource version={version} cacheConfig={cacheConfig} videoPlayback={false} className="h-16 w-20 shrink-0 rounded-md"/><div className="min-w-0 flex-1"><div className="flex items-center gap-1.5"><span className="font-mono text-xs font-bold text-blue-600">{visibleVersionLabel(version)}</span><span className="truncate text-sm font-bold text-slate-800">{visibleVersionName(version)}</span>{version.isCurrent && <span title="当前版本" className="rounded-full bg-blue-600 p-0.5 text-white"><Check size={10}/></span>}</div><p className="mt-1 flex items-center gap-1 text-[11px] text-slate-400"><Clock3 size={11}/>{new Date(version.createdAt).toLocaleString()}</p>{version.note && <p title={version.note} className="mt-1 line-clamp-2 break-words text-[11px] leading-4 text-slate-500">{version.note}</p>}{version.fileMissing && <div className="mt-1 flex flex-wrap items-center gap-2"><span className="text-[11px] font-bold text-red-500">文件丢失</span>{version.versionNumber > 0 && <button type="button" disabled={busy} onClick={event => { event.stopPropagation(); void deleteVersion(version); }} className="pointer-events-auto inline-flex items-center gap-1 rounded border border-red-200 bg-white px-2 py-0.5 text-[10px] font-bold text-red-600 hover:bg-red-50 disabled:opacity-40"><Trash2 size={11}/>删除版本</button>}</div>}{version.contentChanged && <p className="mt-1 text-[11px] font-bold text-amber-600">文件曾被外部修改</p>}</div><input disabled={version.fileMissing} title={version.fileMissing ? '请先重新定位文件' : '选择进行对比'} aria-label={`选择 ${visibleVersionLabel(version)} 进行对比`} type="checkbox" checked={compareIds.includes(version.id)} onClick={event => event.stopPropagation()} onChange={() => toggleCompare(version.id)} className="pointer-events-auto mt-1 accent-blue-600 disabled:opacity-40"/></div>
         </div>)}</div></div>
       </aside>
       <div
@@ -656,6 +650,6 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
       <main className="flex min-w-0 flex-1 overflow-hidden">{selected ? <SingleVersionView version={selected} cacheConfig={cacheConfig} busy={busy} onClose={onClose} onNotice={onNotice} onEditNote={() => { setEditing(selected); setEditNote(selected.note); }} onMakeCurrent={() => void updateVersion({ versionId: selected.id, makeCurrent: true }, '已切换当前版本')} onRelocate={() => void relocateVersion(selected)} onDelete={() => void deleteVersion(selected)}/> : <div className="flex h-full flex-1 items-center justify-center text-slate-400">请选择一个版本</div>}</main>
       {bundle.photo && compareVersions.length === 2 && <div className="absolute inset-y-0 right-0 z-20 bg-slate-950" style={{ left: treeWidth + 1 }}><CompareView left={compareVersions[0]} right={compareVersions[1]} cacheConfig={cacheConfig} workspacePath={workspacePath} photoId={bundle.photo.id} initialMode={initialCompareMode} onClose={() => setCompareIds([])}/></div>}
     </div>}
-    {editing && <div className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><div role="dialog" aria-modal="true" aria-label={`编辑版本说明 ${visibleVersionLabel(editing)}`} className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><header className="flex items-center justify-between"><h3 className="font-bold text-slate-800">编辑版本说明 · {visibleVersionLabel(editing)}</h3><button onClick={() => setEditing(null)}><X size={18}/></button></header><label className="form-label">版本说明</label><textarea autoFocus rows={5} value={editNote} onChange={event => setEditNote(event.target.value)} placeholder="记录本次进度的修改内容" className="form-input resize-none"/><p className="mt-3 text-xs text-slate-500">版本名称由进度规则生成，不在这里修改。</p><footer className="mt-5 flex justify-end gap-2"><button onClick={() => setEditing(null)} className="dialog-secondary">取消</button><button disabled={busy} onClick={() => void updateVersion({ versionId: editing.id, note: editNote }, '版本说明已更新')} className="dialog-primary">保存</button></footer></div></div>}
+    {editing && <div className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><div role="dialog" aria-modal="true" aria-label={`编辑版本说明 ${visibleVersionLabel(editing)}`} className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><header className="flex items-center justify-between"><h3 className="font-bold text-slate-800">编辑版本说明 · {visibleVersionLabel(editing)}</h3><button onClick={() => setEditing(null)}><X size={18}/></button></header><label className="form-label">版本说明</label><textarea autoFocus rows={5} value={editNote} onChange={event => setEditNote(event.target.value)} placeholder="记录本次进度的修改内容" className="form-input resize-none"/><p className="mt-3 text-xs text-slate-500">版本名称由进度规则生成。</p><footer className="mt-5 flex justify-end gap-2"><button onClick={() => setEditing(null)} className="dialog-secondary">取消</button><button disabled={busy} onClick={() => void updateVersion({ versionId: editing.id, note: editNote }, '版本说明已更新')} className="dialog-primary">保存</button></footer></div></div>}
   </div>;
 };

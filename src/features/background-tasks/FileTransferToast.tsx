@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Clock3, Loader2, Minimize2 } from 'lucide-react';
 import type { BackgroundTask } from '../../types';
 import { useTaskCenter } from './TaskCenter';
@@ -22,7 +22,10 @@ export const FileTransferToastItem = ({ task, onMinimize }: { task: BackgroundTa
   const totalBytes = Number(metadata.totalBytes || 0);
   const progress = Math.max(0, Math.min(100, task.progress || 0));
   const queued = task.state === 'queued';
-  const message = queued ? '等待磁盘任务名额' : task.message || '正在准备文件传输…';
+  const versionTracking = task.type === 'version-tracking';
+  const message = queued
+    ? '等待其他文件操作完成'
+    : task.message || (versionTracking ? '正在准备版本比较…' : '正在准备文件传输…');
   const details = [
     totalFiles > 0 ? `${filesCopied}/${totalFiles} ${countUnit}` : '',
     totalBytes > 0 ? `${formatBytes(bytesCopied)}/${formatBytes(totalBytes)}` : '',
@@ -34,7 +37,7 @@ export const FileTransferToastItem = ({ task, onMinimize }: { task: BackgroundTa
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-3 text-xs"><span className="truncate font-bold text-blue-800">{message}</span>{!queued && <span className="shrink-0 font-mono font-bold tabular-nums text-blue-700">{Math.round(progress)}%</span>}</div>
         {!queued && <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-600 transition-[width] duration-150" style={{ width: `${Math.max(2, progress)}%` }}/></div>}
-        <p className="mt-1 line-clamp-1 text-[11px] tabular-nums text-blue-600">{queued ? task.title : details || '文件准备完成后会自动显示；可以继续使用软件。'}</p>
+        <p className="mt-1 line-clamp-1 text-[11px] tabular-nums text-blue-600">{queued ? versionTracking ? '完成后自动开始版本比较' : '当前文件操作完成后自动开始' : details || (versionTracking ? '比较完成后可确认版本匹配' : '文件准备完成后会自动显示；可以继续使用软件。')}</p>
       </div>
       <button type="button" onClick={() => onMinimize(task.id)} aria-label="收起到任务中心" title="收起到任务中心，任务会继续运行" className="inline-flex shrink-0 items-center gap-1 rounded-md border border-blue-200 bg-white/70 px-2 py-1.5 text-xs font-bold text-blue-700 transition hover:border-blue-300 hover:bg-blue-100"><Minimize2 size={14}/><span>后台</span></button>
       {task.cancellable && <button type="button" onClick={() => void window.electronAPI.cancelBackgroundTask(task.id)} className="shrink-0 rounded-md px-2.5 py-1.5 text-xs font-bold text-red-600 hover:bg-red-50">取消</button>}
@@ -44,9 +47,24 @@ export const FileTransferToastItem = ({ task, onMinimize }: { task: BackgroundTa
 
 export const FileTransferToast = ({ stackRef }: { stackRef: React.RefObject<HTMLDivElement | null> }) => {
   const { backgroundTasks, isTaskToastMinimized, minimizeTaskToast } = useTaskCenter();
+  const [clock, setClock] = useState(() => Date.now());
   const previousPositionsRef = useRef(new Map<string, number>());
   const minimizedTaskIds = new Set(backgroundTasks.filter(task => isTaskToastMinimized(task.id)).map(task => task.id));
-  const { visible: visibleTasks, overflowCount } = selectProjectFileTaskToasts(backgroundTasks, minimizedTaskIds);
+  const { visible: visibleTasks, overflowCount } = selectProjectFileTaskToasts(backgroundTasks, minimizedTaskIds, 4, clock);
+
+  useEffect(() => {
+    const currentTime = Date.now();
+    const nextDue = backgroundTasks
+      .filter(task => task.state === 'queued' && !isTaskToastMinimized(task.id))
+      .map(task => task.createdAt + 700)
+      .filter(due => due > currentTime)
+      .sort((left, right) => left - right)[0];
+    if (!nextDue) return;
+    const timer = window.setTimeout(() => setClock(Date.now()), nextDue - currentTime + 10);
+    return () => window.clearTimeout(timer);
+  }, [backgroundTasks, isTaskToastMinimized]);
+
+  useEffect(() => { setClock(Date.now()); }, [backgroundTasks]);
 
   useLayoutEffect(() => {
     const stack = stackRef.current;

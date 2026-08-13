@@ -18,6 +18,7 @@ const calls = {};
 const versionService = {
   createTrackingSession: async (root, request) => {
     calls.created = { root, request };
+    if (calls.createTrackingResponses?.length) return calls.createTrackingResponses.shift();
     return {
       sessionId: '11111111-1111-4111-8111-111111111111',
       progressId: request.progressId,
@@ -73,7 +74,10 @@ const versionService = {
     items: [],
   }),
   failTrackingCommit: async () => ({ success: true }),
-  releaseTrackingSession: async (_root, sessionId) => ({ success: true, released: true, sessionId }),
+  releaseTrackingSession: async (_root, sessionId) => {
+    (calls.releasedSessions ||= []).push(sessionId);
+    return { success: true, released: true, sessionId };
+  },
   registerProgress: async (_root, request) => ({ success: true, progressFolder: { id: 'registered-node', ...request } }),
 };
 const mediaScanService = {
@@ -96,7 +100,10 @@ registerVersionIpc({
   Set,
   String,
   VIDEO_EXTENSIONS: new Set(),
-  backgroundTasks: null,
+  backgroundTasks: {
+    create: () => undefined,
+    list: () => calls.activeTasks || [],
+  },
   copyFileAtomic: async () => undefined,
   crypto,
   ensureWorkspace: value => {
@@ -157,6 +164,40 @@ async function main() {
   assert(calls.pythonArgs.includes(trustedParent) && calls.pythonArgs.includes(trustedProgress));
   assert(!calls.pythonArgs.includes(maliciousPath), 'renderer paths must never reach the compare tool');
   assert.strictEqual(calls.preview.request.items[0].status, 'pending_confirmation');
+
+  calls.createTrackingResponses = [{
+    sessionId: '22222222-2222-4222-8222-222222222222', progressId: 'progress-node-id',
+    parentProgressId: 'parent-progress-id', mode: 'refresh', sessionStatus: 'pending_confirm', reused: true,
+    parentFolderPath: trustedParent, progressFolderPath: trustedProgress,
+  }];
+  const resumedConfirmation = await start({}, workspaceRoot, 'Project', { progressId: 'progress-node-id', mode: 'refresh' });
+  assert.deepStrictEqual(resumedConfirmation, {
+    success: true, sessionId: '22222222-2222-4222-8222-222222222222', sessionStatus: 'pending_confirm', resumed: true,
+  }, 'a pending confirmation must be resumed instead of creating a second session');
+
+  calls.createTrackingResponses = [{
+    sessionId: '33333333-3333-4333-8333-333333333333', progressId: 'progress-node-id',
+    parentProgressId: 'parent-progress-id', mode: 'refresh', sessionStatus: 'comparing', reused: true,
+    parentFolderPath: trustedParent, progressFolderPath: trustedProgress,
+  }];
+  calls.activeTasks = [{ id: 'active-tracking-task', type: 'version-tracking', state: 'running', metadata: { sessionId: '33333333-3333-4333-8333-333333333333' } }];
+  const resumedRunning = await start({}, workspaceRoot, 'Project', { progressId: 'progress-node-id', mode: 'refresh' });
+  assert.strictEqual(resumedRunning.taskId, 'active-tracking-task', 'a live compare task must be reused');
+  assert.strictEqual(resumedRunning.sessionId, '33333333-3333-4333-8333-333333333333');
+  calls.activeTasks = [];
+
+  calls.createTrackingResponses = [{
+    sessionId: '44444444-4444-4444-8444-444444444444', progressId: 'progress-node-id',
+    parentProgressId: 'parent-progress-id', mode: 'refresh', sessionStatus: 'comparing', reused: true,
+    parentFolderPath: trustedParent, progressFolderPath: trustedProgress,
+  }, {
+    sessionId: '55555555-5555-4555-8555-555555555555', progressId: 'progress-node-id',
+    parentProgressId: 'parent-progress-id', mode: 'refresh', sessionStatus: 'comparing', reused: false,
+    parentFolderPath: trustedParent, progressFolderPath: trustedProgress,
+  }];
+  const restartedOrphan = await start({}, workspaceRoot, 'Project', { progressId: 'progress-node-id', mode: 'refresh' });
+  assert.strictEqual(restartedOrphan.sessionId, '55555555-5555-4555-8555-555555555555', 'an orphaned comparing row must be replaced');
+  assert(calls.releasedSessions.includes('44444444-4444-4444-8444-444444444444'));
 
   const release = handlers.get('workspace-progress-tracking-session-release');
   const released = await release({}, workspaceRoot, { sessionId: started.sessionId });

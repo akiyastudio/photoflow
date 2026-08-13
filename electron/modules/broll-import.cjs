@@ -89,6 +89,57 @@ const runSplitter = async ({ getRunConfig, source, outputDirectory, outputStem, 
   });
 };
 
+const runTranscoder = async ({ getRunConfig, source, settings, onProgress, isCancelled }) => new Promise((resolve, reject) => {
+  const args = [
+    source,
+    '--container', settings?.container || 'mp4',
+    '--video-mode', settings?.videoMode || 'h264',
+    '--quality', settings?.quality || 'balanced',
+    '--resolution', settings?.resolution || 'original',
+    '--frame-rate', settings?.frameRate || 'original',
+    '--audio-mode', settings?.audioMode || 'aac',
+    '--output-mode', 'new',
+  ];
+  const runConfig = getRunConfig('ffmpeg_transcode.py', args);
+  const child = spawn(runConfig.command, runConfig.args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  let output = '';
+  let reportedError = '';
+  const consumeLine = line => {
+    if (!line.trim()) return;
+    try {
+      const payload = JSON.parse(line);
+      if (payload.type === 'error') reportedError = payload.message || '视频转码失败';
+      if (Number.isFinite(Number(payload.progress))) onProgress(Number(payload.progress), payload.message || '正在转码视频');
+      if (payload.type === 'success' && Array.isArray(payload.outputs)) output = payload.outputs[0] || '';
+    } catch { /* diagnostics are retained in stderr */ }
+  };
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', data => {
+    stdout += data;
+    const lines = stdout.split(/\r?\n/);
+    stdout = lines.pop() || '';
+    lines.forEach(consumeLine);
+  });
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', data => { stderr = (stderr + data).slice(-8000); });
+  child.on('error', reject);
+  let cancellationSent = false;
+  const cancellationTimer = setInterval(() => {
+    if (!isCancelled() || cancellationSent) return;
+    cancellationSent = true;
+    child.stdin.write('cancel\n', error => { if (error && !child.killed) child.kill(); });
+  }, 200);
+  child.on('close', code => {
+    clearInterval(cancellationTimer);
+    if (stdout.trim()) consumeLine(stdout);
+    if (isCancelled()) return reject(Object.assign(new Error('文件操作已取消'), { code: CANCELLED_CODE }));
+    if (code !== 0 || reportedError || !output || !fs.existsSync(output)) return reject(new Error(reportedError || stderr.trim() || '视频转码未生成有效文件'));
+    resolve(output);
+  });
+});
+
 const registerBrollImportIpc = ({
   ipcMain,
   dialog,
@@ -122,7 +173,9 @@ const registerBrollImportIpc = ({
     try {
       const deleteSourceAfterImport = options?.deleteSourceAfterImport === true;
       const preserveOriginal = !deleteSourceAfterImport;
-      const splitLargeFiles = Boolean(options?.splitLargeFiles);
+      const splitLargeFiles = Boolean(options?.splitVideosOnImport ?? options?.splitLargeFiles);
+      const transcodeVideos = Boolean(options?.transcodeVideosOnImport);
+      const transcodeSettings = options?.transcodeSettings || {};
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
       let sourcePaths = Array.isArray(options?.sourcePaths) ? options.sourcePaths.map(source => String(source)) : [];
       if (!sourcePaths.length) {
@@ -152,8 +205,9 @@ const registerBrollImportIpc = ({
         backgroundTasks, event, operationId, operation: 'import-broll', title: `导入花絮 · ${projectName}`,
         projectName,
         resources: [destinationDir, ...sources.map(source => source.path)],
-        concurrencyGroup: splitLargeFiles ? 'heavy-media' : 'disk-io',
-        concurrencyLimit: splitLargeFiles ? 1 : 2,
+        concurrencyGroup: splitLargeFiles || transcodeVideos ? 'heavy-media' : 'disk-io',
+        concurrencyLimit: splitLargeFiles || transcodeVideos ? 1 : 3,
+        concurrencyWriteLimit: splitLargeFiles || transcodeVideos ? 1 : 2,
         cancelledCode: CANCELLED_CODE,
       });
       job = task.job;
@@ -167,6 +221,7 @@ const registerBrollImportIpc = ({
       let completedBytes = 0;
       let completedFiles = 0;
       let splitCount = 0;
+      let transcodeCount = 0;
       let lastPublishedAt = 0;
       const report = (item, itemBytes, phase = 'copying', detail) => {
         const now = Date.now();
@@ -188,6 +243,7 @@ const registerBrollImportIpc = ({
         if (job.cancelled) throw Object.assign(new Error('文件操作已取消'), { code: CANCELLED_CODE });
         let targetPath = uniqueDestination(destinationDir, path.basename(item.path), reserved);
         const shouldSplit = splitLargeFiles && BROLL_VIDEO_EXTENSIONS.has(item.extension) && item.stat.size > FOUR_GB;
+        let importedVideoPaths = [];
         if (shouldSplit) {
           while ((await fs.promises.readdir(destinationDir)).some(name => name.startsWith(`${path.parse(targetPath).name}_part`) && path.extname(name).toLowerCase() === item.extension)) {
             targetPath = uniqueDestination(destinationDir, path.basename(item.path), reserved);
@@ -203,6 +259,7 @@ const registerBrollImportIpc = ({
             onProgress: (progress, message) => report(item, item.stat.size * Math.max(0, Math.min(100, progress)) / 100, 'splitting', message),
           });
           createdPaths.push(...outputs);
+          importedVideoPaths = outputs;
           splitCount += 1;
           if (!preserveOriginal) sourcesToTrash.push(item.path);
         } else if (preserveOriginal) {
@@ -211,13 +268,28 @@ const registerBrollImportIpc = ({
             onProgress: progress => report(item, progress.bytesCopied),
           });
           createdPaths.push(targetPath);
+          if (BROLL_VIDEO_EXTENSIONS.has(item.extension)) importedVideoPaths = [targetPath];
         } else {
           const moved = await moveFileAtomic(item.path, targetPath, {
             isCancelled: () => job.cancelled,
             onProgress: progress => report(item, progress.bytesCopied),
           });
           moves.push({ source: item.path, destination: targetPath });
+          if (BROLL_VIDEO_EXTENSIONS.has(item.extension)) importedVideoPaths = [targetPath];
           if (moved.copied) writeLog('info', 'B-roll crossed filesystems and was copied atomically before source removal', { source: item.path, destination: targetPath });
+        }
+        if (transcodeVideos) {
+          for (const videoPath of importedVideoPaths) {
+            const output = await runTranscoder({
+              getRunConfig,
+              source: videoPath,
+              settings: transcodeSettings,
+              isCancelled: () => job.cancelled,
+              onProgress: (progress, message) => report(item, item.stat.size * Math.max(0, Math.min(100, progress)) / 100, 'transcoding', message),
+            });
+            createdPaths.push(output);
+            transcodeCount += 1;
+          }
         }
         completedBytes += item.stat.size;
         completedFiles += 1;
@@ -246,14 +318,14 @@ const registerBrollImportIpc = ({
       const warning = warningParts.join('；');
       publish({ phase: 'complete', progress: 100, currentName: '花絮导入完成', bytesCopied: totalBytes, totalBytes, filesCopied: sources.length, totalFiles: sources.length });
       task.complete('花絮导入完成');
-      writeLog('info', 'B-roll imported', { projectPath, count: sources.length, splitCount, clearedCount, totalBytes, warning });
+      writeLog('info', 'B-roll imported', { projectPath, count: sources.length, splitCount, transcodeCount, clearedCount, totalBytes, warning });
       const telemetry = getTelemetry?.();
       telemetry?.track('photos_imported', {
         count_bucket: telemetry.countBucket(sources.length),
         source: 'broll',
         media_kind: 'mixed',
       });
-      return { success: true, operationId, count: sources.length, splitCount, clearedCount, warning: warning || undefined };
+      return { success: true, operationId, count: sources.length, splitCount, transcodeCount, clearedCount, warning: warning || undefined };
     } catch (error) {
       for (const move of [...moves].reverse()) {
         try {

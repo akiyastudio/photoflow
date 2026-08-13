@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { ProgressFolder, ProjectFileEntry, VersionGraphEdge } from '../types';
 import { layoutVersionTree } from '../features/versioning/version-tree-layout-model';
-import { DEFAULT_VERSION_TREE_SPACING, versionTreeCanvasBounds } from '../features/versioning/version-tree-canvas-model';
+import { DEFAULT_VERSION_TREE_SPACING, versionTreeAreaSize, versionTreeCanvasBounds } from '../features/versioning/version-tree-canvas-model';
 import { allowedVersionTreeRelationKinds, versionTreeEdgeGeometry, versionTreeEdgePath, versionTreeEdgePresentation, versionTreeRelationLabel, type VersionTreeEdgeKind, type VersionTreeSupplementalEdgeKind } from '../features/versioning/version-tree-edge-model';
 import { useVersionTreeCanvas, type VersionTreeDragState } from '../features/versioning/use-version-tree-canvas';
 import { progressRelationChangeError, projectVisibleVersionGraph, trackingStateLabel } from '../features/versioning/versioning-v2-model';
@@ -214,13 +214,17 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
     }), [canvasPadding, defaultLayout.positioned, nodeHeight, nodeWidth]);
   const areaBands = useMemo(() => naturalAreaBands.map(area => {
     const custom = areaBandSizes[area.areaKind];
-    if (!custom) return area;
+    const size = versionTreeAreaSize(
+      { width: area.right - area.left, height: area.bottom - area.top },
+      custom,
+      { width: nodeWidth, height: nodeHeight },
+    );
     return {
       ...area,
-      right: area.left + Math.max(area.right - area.left, custom.width),
-      bottom: area.top + Math.max(area.bottom - area.top, custom.height),
+      right: area.left + size.width,
+      bottom: area.top + size.height,
     };
-  }), [areaBandSizes, naturalAreaBands]);
+  }), [areaBandSizes, naturalAreaBands, nodeHeight, nodeWidth]);
   const beginAreaResize = (event: ReactPointerEvent<HTMLSpanElement>, area: VersionTreeAreaBand, axis: 'x' | 'y' | 'both') => {
     event.preventDefault();
     event.stopPropagation();

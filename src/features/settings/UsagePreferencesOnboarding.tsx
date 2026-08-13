@@ -78,19 +78,19 @@ export const UsagePreferencesOnboarding = ({ config, onSave }: { config: AppConf
       <header className="usage-onboarding__header">
         <div className="usage-onboarding__brand">
           <img src="./app-logo.svg" className="brand-logo usage-onboarding__logo" alt=""/>
-          <div><p className="usage-onboarding__eyebrow">照片流 · 初始偏好</p><h1>让软件先适应你的习惯</h1></div>
+          <div><p className="usage-onboarding__eyebrow">照片流 · 初始偏好</p><h1>设置常用操作习惯</h1></div>
         </div>
         <div className="usage-onboarding__header-bottom">
-          <p>用一分钟完成设置。之后仍可随时在设置中更改，不会影响已有文件。</p>
+          <p>完成初始设置，之后可随时修改。</p>
           <div className="usage-onboarding__progress" aria-label={`已完成 ${completedCount} 项，共 3 项`}><span>{completedCount} / 3</span><div>{[0, 1, 2].map(index => <i key={index} className={index < completedCount ? 'is-complete' : ''}/>)}</div></div>
         </div>
       </header>
 
       <div className="usage-onboarding__body">
-        <PreferenceSection number="1" label="文件浏览" title="你习惯怎样打开文件？" description="这个选择同时应用于文件夹、图片、视频和普通文件。" complete={openModeComplete}>
+        <PreferenceSection number="1" label="文件浏览" title="你习惯怎样打开文件？" description="此设置适用于所有文件。" complete={openModeComplete}>
           <div role="radiogroup" aria-label="打开文件和文件夹的方式" className="usage-preference-grid">
-            <Choice selected={openMode === 'single'} title="单击打开" description="操作更直接，点一下就进入文件夹或预览媒体。" onClick={() => setOpenMode('single')}><MousePointerClick size={19}/></Choice>
-            <Choice selected={openMode === 'double'} title="双击打开" description="单击只选中并显示信息，双击才执行打开。" onClick={() => setOpenMode('double')}><MousePointerClick size={19}/></Choice>
+            <Choice selected={openMode === 'single'} title="单击打开" description="单击打开文件夹或预览媒体。" onClick={() => setOpenMode('single')}><MousePointerClick size={19}/></Choice>
+            <Choice selected={openMode === 'double'} title="双击打开" description="单击选择，双击打开。" onClick={() => setOpenMode('double')}><MousePointerClick size={19}/></Choice>
           </div>
         </PreferenceSection>
 

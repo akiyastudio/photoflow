@@ -7,6 +7,14 @@ export interface LogEntry {
 export type ToolType = 'home' | 'inspiration' | 'project' | 'project-version' | 'project-team' | 'settings' | 'dashboard' | 'match' | 'video_split';
 
 export type Theme = 'light' | 'dark' | 'system';
+export type VideoTranscodeSettings = {
+  container: 'mp4' | 'mov' | 'mkv';
+  videoMode: 'h264' | 'h265' | 'copy';
+  quality: 'high' | 'balanced' | 'small';
+  resolution: 'original' | '2160p' | '1080p' | '720p';
+  frameRate: 'original' | '24' | '25' | '30' | '50' | '60';
+  audioMode: 'copy' | 'aac' | 'remove';
+};
 export type HomeCardId = 'birthday' | 'import' | 'inspiration';
 export const PROJECT_TOOLBAR_ACTION_IDS = [
   'filename-selection', 'select-media', 'photoshop', 'video-tools', 'image-tools',
@@ -249,6 +257,11 @@ export interface AppConfig {
   importDefaults: {
     deleteSourceAfterImport: boolean;
     generateJpgFromRaw: boolean;
+    splitVideosOnImport: boolean;
+    transcodeVideosOnImport: boolean;
+  };
+  videoTools: {
+    transcode: VideoTranscodeSettings;
   };
   smartImport: {
     autoStart: boolean;
@@ -265,7 +278,10 @@ export interface AppConfig {
     dateFilter: 'all' | 'today' | 'today_yesterday';
   };
   brollImport: {
-    splitLargeFiles: boolean;
+    splitVideosOnImport: boolean;
+    transcodeVideosOnImport: boolean;
+    /** legacy config field */
+    splitLargeFiles?: boolean;
   };
   inspirationLibrary: InspirationLibrarySettings;
   /** Compatibility mirror for versions before componentSettings. */
@@ -679,6 +695,7 @@ export interface TeamIdentityWorkspace {
   workflowGenerated?: boolean;
   workflowNeedsRegeneration?: boolean;
   workflowAvailableKeys?: string[];
+  workflowAvailableSubjectKeys?: string[];
   workflowSettings?: {
     preferredIdentityOrder?: string[];
     preferredIdentityId?: string;
@@ -984,7 +1001,7 @@ export interface IElectronAPI {
   registerVersionBaseline: (workspacePath: string, status: ProjectStatus, projectName: string, relativePath: string) => Promise<{ success: boolean; batch?: VersionBatch; error?: string }>;
   compareVersionFolders: (workspacePath: string, status: ProjectStatus, projectName: string, referenceRelativePath: string, sourceRelativePath: string, sourceNames?: string[]) => Promise<{ success: boolean; matches: Array<{ source: string; reference: string; target: string; confidence: string; distance: number }>; suggestions: Array<{ source: string; reference: string; target: string; confidence: string; distance: number }>; unmatched: string[]; unmatchedReference: string[]; error?: string }>;
   commitVersionBatch: (workspacePath: string, status: ProjectStatus, projectName: string, request: { folderA: string; folderB: string; importKey: string; displayName?: string; renameSources?: boolean; copyMissingReferences?: string[]; reconcileExisting?: boolean; incrementalSources?: string[]; matches: Array<{ reference: string; source: string; target?: string; distance: number; confidence: string }> }) => Promise<{ success: boolean; alreadyCommitted?: boolean; reconciled?: boolean; repairRequired?: boolean; operationCount?: number; referenceBatch?: VersionBatch; batch?: VersionBatch; renamedCount?: number; renameErrors?: Array<{ operationId?: string; source: string; target: string; error: string }>; copiedMissingCount?: number; copyMissingErrors?: Array<{ name: string; error: string }>; error?: string }>;
-  startProgressTracking: (workspacePath: string, projectName: string, request: { progressId: string; mode: 'compare' | 'refresh' }) => Promise<{ success: boolean; taskId?: string; sessionId?: string; error?: string }>;
+  startProgressTracking: (workspacePath: string, projectName: string, request: { progressId: string; mode: 'compare' | 'refresh' }) => Promise<{ success: boolean; taskId?: string; sessionId?: string; sessionStatus?: ProgressTrackingSession['status']; resumed?: boolean; error?: string }>;
   getProgressTrackingSession: (workspacePath: string, request: { sessionId: string; cursor?: number; limit?: number }) => Promise<ProgressTrackingSessionResult>;
   releaseProgressTrackingSession: (workspacePath: string, request: { sessionId: string }) => Promise<{ success: boolean; released: boolean; sessionId?: string; error?: string }>;
   decideProgressTrackingItem: (workspacePath: string, request: { sessionId: string; itemId: string; status: 'accepted' | 'rejected'; referenceName?: string }) => Promise<{ success: boolean; item?: ProgressTrackingItem; error?: string }>;
@@ -1104,7 +1121,7 @@ export interface IElectronAPI {
   getFileIcon: (filePath: string) => Promise<{ success: boolean; dataUrl?: string; error?: string }>;
   importProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, options: { deleteSourceAfterImport: boolean; sourcePaths?: string[] }) => Promise<{ success: boolean; operationId?: string; cancelled?: boolean; count?: number; error?: string }>;
   importProgressFiles: (workspacePath: string, status: ProjectStatus, name: string, folderName: string, options: { deleteSourceAfterImport: boolean; mediaKind: 'image' | 'video'; versionKey: string; parentProgressId?: string; trackingEnabled: boolean; trackingState?: ProgressFolder['trackingState']; appendProgressId?: string; progressConflictPolicy?: 'skip' | 'keep-both'; sourcePaths?: string[] }) => Promise<{ success: boolean; operationId?: string; cancelled?: boolean; appended?: boolean; count?: number; skippedCount?: number; skippedNames?: string[]; importedPaths?: string[]; progressFolder?: ProgressFolder; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; requiresDecision?: { kind: 'progress-import-conflict'; names: string[]; conflictCount: number; sourcePaths: string[]; message: string; detail: string }; error?: string }>;
-  importBroll: (workspacePath: string, status: ProjectStatus, name: string, options: { splitLargeFiles: boolean; deleteSourceAfterImport: boolean; sourcePaths?: string[] }) => Promise<{ success: boolean; operationId?: string; cancelled?: boolean; count?: number; splitCount?: number; clearedCount?: number; warning?: string; error?: string}>;
+  importBroll: (workspacePath: string, status: ProjectStatus, name: string, options: { splitVideosOnImport: boolean; transcodeVideosOnImport: boolean; transcodeSettings: VideoTranscodeSettings; deleteSourceAfterImport: boolean; sourcePaths?: string[] }) => Promise<{ success: boolean; operationId?: string; cancelled?: boolean; count?: number; splitCount?: number; transcodeCount?: number; clearedCount?: number; warning?: string; error?: string}>;
 }
 
 declare global {

@@ -54,11 +54,16 @@ const sameCanvasPositions = (
 
 export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeKey, nodeWidth, nodeHeight, collisionHorizontalGap, coordinateScale = 1, onNotice, selectedNodeIds = new Set(), dragStateRef, onDragStateChange }: UseVersionTreeCanvasInput) => {
   const nodesRef = useRef(nodes);
+  const onNoticeRef = useRef(onNotice);
+  const selectedNodeIdsRef = useRef(selectedNodeIds);
   const dimensionsRef = useRef({ nodeWidth, nodeHeight, collisionHorizontalGap });
   const serverPositionsRef = useRef(new Map<string, VersionTreeCanvasPosition>());
   const appliedServerNodeKeysRef = useRef(new Set<string>());
   nodesRef.current = nodes;
+  onNoticeRef.current = onNotice;
+  selectedNodeIdsRef.current = selectedNodeIds;
   dimensionsRef.current = { nodeWidth, nodeHeight, collisionHorizontalGap };
+  const nodeLayoutKey = JSON.stringify(nodes.map(node => [node.id, node.nodeKey, node.fallbackNodeKeys || [], node.x, node.y]));
   const defaultPositions = useCallback(() => new Map(nodesRef.current.map(node => [node.id, { x: node.x, y: node.y }])), []);
   const [positions, setPositions] = useState<Map<string, VersionTreeCanvasPosition>>(defaultPositions);
   const positionsRef = useRef(positions);
@@ -95,7 +100,7 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
     }));
     if (disposedRef.current || generation !== generationRef.current || sequence !== loadSequenceRef.current) return;
     if (!result.success) {
-      onNotice(`读取版本树布局失败：${result.error || '未知错误'}`, 5000);
+      onNoticeRef.current(`读取版本树布局失败：${result.error || '未知错误'}`, 5000);
       return;
     }
     revisionRef.current = result.revision;
@@ -120,7 +125,7 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
       viewportRef.current.scrollLeft = 0;
       viewportRef.current.scrollTop = 0;
     }
-  }, [applyPositions, onNotice, projectName, scopeKey, workspacePath]);
+  }, [applyPositions, projectName, scopeKey, workspacePath]);
 
   useEffect(() => {
     disposedRef.current = false;
@@ -154,8 +159,9 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
     // Automatic positions must follow a changed graph layout (for example,
     // immediately after a new parent relation is saved). Only coordinates the
     // user actually dragged, or coordinates loaded from storage, are fixed.
+    const currentNodes = nodesRef.current;
     const previous = new Map([...positionsRef.current].filter(([, position]) => position.manual));
-    nodes.forEach(node => {
+    currentNodes.forEach(node => {
       const savedKey = [node.nodeKey, ...(node.fallbackNodeKeys || [])].find(nodeKey => serverPositionsRef.current.has(nodeKey) && !appliedServerNodeKeysRef.current.has(nodeKey));
       const saved = savedKey ? serverPositionsRef.current.get(savedKey) : undefined;
       if (saved && savedKey) {
@@ -163,8 +169,8 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
         appliedServerNodeKeysRef.current.add(savedKey);
       }
     });
-    applyPositions(reconcileVersionTreeCanvasPositions({ nodes, previous, nodeWidth, nodeHeight, horizontalGap: collisionHorizontalGap }));
-  }, [applyPositions, collisionHorizontalGap, nodeHeight, nodeWidth, nodes]);
+    applyPositions(reconcileVersionTreeCanvasPositions({ nodes: currentNodes, previous, nodeWidth, nodeHeight, horizontalGap: collisionHorizontalGap }));
+  }, [applyPositions, collisionHorizontalGap, nodeHeight, nodeLayoutKey, nodeWidth]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => { if (event.code === 'Space' && !(event.target as Element | null)?.closest?.('input,select,textarea')) { spacePressedRef.current = true; event.preventDefault(); } };
@@ -179,7 +185,7 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
   const enqueueSave = useCallback((mode: 'patch' | 'replace', savedPositions: Map<string, VersionTreeCanvasPosition>, before: Map<string, VersionTreeCanvasPosition>, applyOnSuccess?: Map<string, VersionTreeCanvasPosition>) => {
     if (disposedRef.current) return Promise.resolve(false);
     const generation = generationRef.current;
-    const nodeById = new Map(nodes.map(node => [node.id, node]));
+    const nodeById = new Map(nodesRef.current.map(node => [node.id, node]));
     const operation = saveQueueRef.current.then(async () => {
       if (disposedRef.current || generation !== generationRef.current) return false;
       const payload = [...savedPositions].flatMap(([id, position]) => {
@@ -205,21 +211,22 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
         return true;
       }
       if (!applyOnSuccess) applyPositions(before);
-      onNotice(`保存版本树布局失败：${result.error || '未知错误'}`, 5000);
+      onNoticeRef.current(`保存版本树布局失败：${result.error || '未知错误'}`, 5000);
       if (!applyOnSuccess) await loadServerLayout(generation);
       return false;
     });
     saveQueueRef.current = operation.then(() => undefined);
     return operation;
-  }, [applyPositions, loadServerLayout, nodes, onNotice, projectName, scopeKey, workspacePath]);
+  }, [applyPositions, loadServerLayout, projectName, scopeKey, workspacePath]);
 
   const nodePointerHandlers = useCallback((id: string) => ({
     onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => {
       if (disposedRef.current || dragStateRef.current || event.button !== 0 || (event.target as Element).closest('button,input,select,textarea,[data-version-tree-port]')) return;
       const startPosition = positionsRef.current.get(id);
       if (!startPosition) return;
-      const ids = selectedNodeIds.has(id) && selectedNodeIds.size > 1
-        ? [...selectedNodeIds].filter(candidate => positionsRef.current.has(candidate))
+      const currentSelectedNodeIds = selectedNodeIdsRef.current;
+      const ids = currentSelectedNodeIds.has(id) && currentSelectedNodeIds.size > 1
+        ? [...currentSelectedNodeIds].filter(candidate => positionsRef.current.has(candidate))
         : [id];
       const startPositions = new Map(ids.flatMap(candidate => {
         const position = positionsRef.current.get(candidate);
@@ -289,7 +296,7 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
       event.preventDefault();
       event.stopPropagation();
     },
-  }), [applyPositions, coordinateScale, dragStateRef, enqueueSave, onDragStateChange, selectedNodeIds]);
+  }), [applyPositions, coordinateScale, dragStateRef, enqueueSave, onDragStateChange]);
 
   const canvasPointerHandlers = {
     onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => {

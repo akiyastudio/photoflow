@@ -31,7 +31,14 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(model.selectionOutputName('客户/一组/MOV'), '视频选片');
 
   const base = { projectId: 'p', mediaKind: 'image', versionKey: '', displayName: '', folderPath: '', missingSince: undefined, trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false, trackingState: 'disabled', lastTrackedAt: undefined, trackingSnapshot: {}, folderSignature: '', tombstone: {}, repairBatchId: undefined, pendingOperationCount: 0, createdAt: 0, updatedAt: 0 };
+  const importedRaw = { ...base, id: 'raw-import', nodeRole: 'original', relationKind: 'main', mediaKind: 'image', versionKey: 'import-d7439bee24773bcbfa2d0a97', folderMissing: false };
+  const v1Branch = { ...base, id: 'v1-branch', nodeRole: 'progress', relationKind: 'main', mediaKind: 'image', versionKey: '1_1', parentProgressId: importedRaw.id, folderMissing: false };
+  assert.strictEqual(model.isUserVersionKey(importedRaw.versionKey), false, 'import hashes are internal node keys, not user version numbers');
+  assert.deepStrictEqual(model.nextVersionKeys([importedRaw], 'image', importedRaw), { main: '1', branch: '1_1' }, 'a branch under an imported RAW source must start at V1_1');
+  assert.deepStrictEqual(model.nextVersionKeys([importedRaw, v1Branch], 'image', importedRaw), { main: '1', branch: '1_2' }, 'sibling branches under RAW must increment only the visible child number');
+  assert.deepStrictEqual(model.nextVersionKeys([importedRaw, { ...v1Branch, id: 'v2', versionKey: '2' }], 'image', { ...v1Branch, id: 'v2', versionKey: '2' }), { main: '3', branch: '2_1' });
   assert.strictEqual(model.progressTrackingAction({ ...base, id: 'branch', nodeRole: 'progress', relationKind: 'main', versionKey: '1_1', trackingEnabled: true, trackingState: 'ready' }), 'refresh', 'V1_1 version branches must retain the full tracking workflow');
+  assert.strictEqual(model.progressTrackingAction({ ...base, id: 'untracked', nodeRole: 'progress', relationKind: 'main', trackingEnabled: false, trackingState: 'disabled' }), null, 'an untracked node must not offer a refresh action');
   const nodes = [
     { ...base, id: 'root', nodeRole: 'original', relationKind: 'main', folderMissing: false },
     { ...base, id: 'hidden', nodeRole: 'progress', relationKind: 'main', parentProgressId: 'root', folderMissing: true },
