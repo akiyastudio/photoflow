@@ -1105,7 +1105,10 @@ def stage_plan_import(sd_path, dest_path, projects_json, import_type='work', spl
         exact = [project for project in projects if project.get('projectDate', {}).get('year') == year and project.get('projectDate', {}).get('month') == month and project.get('projectDate', {}).get('day') == day]
         month_only = [project for project in projects if project.get('projectDate', {}).get('year') == year and project.get('projectDate', {}).get('month') == month and not project.get('projectDate', {}).get('day')]
         if len(exact) == 1:
-            automatic_routes[group['id']] = exact[0].get('path', '')
+            # Project paths include the mutable category directory. Keep the
+            # stable catalog identity in the plan and let the renderer resolve
+            # its current path immediately before committing staged files.
+            automatic_routes[group['id']] = exact[0].get('id') or exact[0].get('path', '')
         else:
             requires_choice = True
         payload_groups.append({
@@ -1113,6 +1116,8 @@ def stage_plan_import(sd_path, dest_path, projects_json, import_type='work', spl
         } | {
             'exactProjectPaths': [project.get('path', '') for project in exact],
             'suggestedProjectPaths': [project.get('path', '') for project in (exact or month_only)],
+            'exactProjectIds': [project.get('id', '') for project in exact if project.get('id')],
+            'suggestedProjectIds': [project.get('id', '') for project in (exact or month_only) if project.get('id')],
         })
     ask_user(
         '检测到需要确认的项目归属' if requires_choice else '已按项目拍摄日期确定导入位置',

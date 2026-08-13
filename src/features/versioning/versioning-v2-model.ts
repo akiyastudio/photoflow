@@ -205,20 +205,21 @@ export const defaultWorkflowInputIds = (
   parentProgressId: string,
   existingProgressId?: string,
 ) => {
-  if (existingProgressId) return graphEdges
+  const persistedInputIds = existingProgressId ? graphEdges
     .filter(edge => edge.edgeKind === 'workflow_input' && edge.targetProgressId === existingProgressId)
-    .map(edge => edge.sourceProgressId);
+    .map(edge => edge.sourceProgressId) : [];
   const parent = folders.find(folder => folder.id === parentProgressId);
-  if (!parent || parent.nodeRole !== 'original' || parent.folderMissing) return [];
+  if (!parent || parent.nodeRole !== 'original' || parent.folderMissing) return persistedInputIds;
+  const selections = folders.filter(folder => !folder.folderMissing
+    && folder.nodeRole === 'selection'
+    && folder.mediaKind === parent.mediaKind
+    && folder.parentProgressId === parent.id);
+  if (existingProgressId) return [...new Set([...persistedInputIds, ...selections.map(folder => folder.id)])];
   const hasMainProgress = folders.some(folder => !folder.folderMissing
     && folder.nodeRole === 'progress'
     && folder.relationKind !== 'auxiliary'
     && folder.parentProgressId === parent.id);
   if (hasMainProgress) return [];
-  const selections = folders.filter(folder => !folder.folderMissing
-    && folder.nodeRole === 'selection'
-    && folder.mediaKind === parent.mediaKind
-    && folder.parentProgressId === parent.id);
   return selections.length === 1 ? [selections[0].id] : [];
 };
 

@@ -123,7 +123,7 @@ const { pathToFileURL } = require('url');
     { ...semanticNodes[0], id: 'other-original' },
   ], [], 'image'), '', 'ambiguous original sources require an explicit user choice');
   const persistedWorkflowEdge = { id: 'workflow', projectId: 'p', sourceProgressId: 'team-workflow', targetProgressId: 'v1', edgeKind: 'workflow_input', createdAt: 0, updatedAt: 0 };
-  assert.deepStrictEqual(model.defaultWorkflowInputIds([...semanticNodes, v1], [persistedWorkflowEdge], 'raw-semantic', 'v1'), ['team-workflow'], 'modify mode reflects persisted workflow_input edges');
+  assert.deepStrictEqual(model.defaultWorkflowInputIds([...semanticNodes, v1], [persistedWorkflowEdge], 'raw-semantic', 'v1'), ['team-workflow', 'image-selection'], 'modify mode preserves persisted workflow inputs and restores the selection input derived from the original parent');
   assert.deepStrictEqual(
     model.workflowInputIdsForRelationChange([...semanticNodes, v1], [persistedWorkflowEdge], 'v1', 'raw-semantic'),
     ['team-workflow', 'image-selection'],
@@ -133,6 +133,14 @@ const { pathToFileURL } = require('url');
     model.workflowInputIdsForRelationChange([...semanticNodes, v1], [persistedWorkflowEdge], 'v1', 'v1'),
     ['team-workflow'],
     'connecting to another progress removes selection inputs that belong to the original source',
+  );
+  assert.deepStrictEqual(
+    model.workflowInputIdsForRelationChange([...semanticNodes, v1], [
+      persistedWorkflowEdge,
+      { id: 'selection-input', projectId: 'p', sourceProgressId: 'image-selection', targetProgressId: 'v1', edgeKind: 'workflow_input', createdAt: 0, updatedAt: 0 },
+    ], 'v1', null),
+    ['team-workflow'],
+    'disconnecting original material removes its derived selection input while preserving manually attached workflow inputs',
   );
   const videoSelection = { ...base, id: 'video-selection', mediaKind: 'video', nodeRole: 'selection', relationKind: 'auxiliary', parentProgressId: 'mov-semantic', folderMissing: false };
   const videoV1 = { ...base, id: 'video-v1', mediaKind: 'video', nodeRole: 'progress', relationKind: 'main', folderMissing: false };

@@ -3,7 +3,8 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 
 (async () => {
-  const { fileEntryClickIntent } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
+  const { directoryEntryToSelectOnReturn, fileEntryClickIntent } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
+  const { availableFolderAlphabetKeys, folderAlphabetKey } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'folder-alphabet-filter-model.ts')).href);
   const intent = overrides => fileEntryClickIntent({
     openMode: 'single',
     selectionCount: 0,
@@ -19,6 +20,19 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(intent({ additive: true }), 'toggle-select', 'Ctrl/Cmd click toggles selection without opening');
   assert.strictEqual(intent({ range: true, selectionCount: 2 }), 'range-select', 'Shift click retains range selection precedence');
   assert.strictEqual(intent({ selectionCount: 2, clickCount: 2 }), 'ignore-repeat', 'the second click in a double click must not undo the first selection change');
+
+  assert.strictEqual(directoryEntryToSelectOnReturn('客户/婚礼/精修', '客户/婚礼'), '客户/婚礼/精修', 'returning one level selects the folder that was just left');
+  assert.strictEqual(directoryEntryToSelectOnReturn('客户/婚礼/精修', '客户'), '客户/婚礼', 'returning through a breadcrumb selects the direct child leading to the previous directory');
+  assert.strictEqual(directoryEntryToSelectOnReturn('客户/婚礼', ''), '客户', 'returning to the root selects the top-level folder that was just left');
+  assert.strictEqual(directoryEntryToSelectOnReturn('客户', '客户/婚礼'), '', 'entering a child directory does not request a return selection');
+  assert.strictEqual(directoryEntryToSelectOnReturn('客户/婚礼', '归档'), '', 'navigating to an unrelated directory does not request a return selection');
+
+  assert.strictEqual(folderAlphabetKey('Alice'), 'A', 'Latin folder names use their first letter');
+  assert.strictEqual(folderAlphabetKey('崩坏'), 'B', 'Chinese folder names use their pinyin initial');
+  assert.strictEqual(folderAlphabetKey('初音未来'), 'C', 'Chinese pinyin grouping covers later initials');
+  assert.strictEqual(folderAlphabetKey('原神'), 'Y', 'Chinese pinyin grouping reaches the end of the alphabet');
+  assert.strictEqual(folderAlphabetKey('  123'), '#', 'numeric and symbolic folder names share the fallback group');
+  assert.deepStrictEqual(availableFolderAlphabetKeys(['原神', 'Alice', '崩坏', '123']), ['A', 'B', 'Y', '#']);
 
   console.log('File entry interaction model tests passed');
 })().catch(error => {

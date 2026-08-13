@@ -8,7 +8,7 @@ export type ProjectWorkspaceApiKey =
   | 'createProjectFolder' | 'createProjectShellNewFile' | 'createVersionGraphEdge' | 'deleteVersionGraphEdge'
   | 'executeManualSelection' | 'exportFinalVersions' | 'extractOfficeImages' | 'extractScreenshotMainImages'
   | 'finalizeSdImportedProjects' | 'getCursorScreenPoint' | 'getFileIcon' | 'getFinalVersionSummary'
-  | 'getDrives' | 'getMediaMetadata' | 'getMediaOriginal' | 'getMediaRating' | 'getMediaRatings' | 'getMediaThumbnail'
+  | 'getDrives' | 'getMediaMetadata' | 'getMediaOriginal' | 'getMediaRating' | 'getMediaRatings' | 'getMediaThumbnail' | 'getProjectVideoTimelineFrames'
   | 'getPathForFile' | 'getPhotoshopStatus' | 'getProgressFolders' | 'getProjectContents'
   | 'getProjectEntryDetails' | 'getProjectFileClipboardStatus' | 'getProjectFileDetails' | 'getShellNewFileTypes'
   | 'getTeamProjectWorkspace' | 'getVersionBatchOperations' | 'getWorkspaceProjects' | 'importBroll'

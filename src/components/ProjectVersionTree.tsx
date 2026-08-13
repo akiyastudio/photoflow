@@ -457,8 +457,8 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
       return;
     }
     if (!targetItem.folder) {
-      if (source.nodeRole === 'progress' && targetItem.entry.kind === 'folder') onRequestCreateVersion?.(source, targetItem.entry);
-      else onNotice('只有版本进度可以向普通文件夹创建下一版本', 4000);
+      if ((source.nodeRole === 'original' || source.nodeRole === 'progress') && targetItem.entry.kind === 'folder') onRequestCreateVersion?.(source, targetItem.entry);
+      else onNotice('只有原始素材或版本进度可以向普通文件夹创建下一版本', 4000);
       return;
     }
     const kinds = validRelationKinds(source.id, targetItem.folder.id);

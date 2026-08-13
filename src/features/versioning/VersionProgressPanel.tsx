@@ -96,6 +96,7 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
     ? draft.versionKey!
     : versionKind === 'branch' ? suggestions.branch : suggestions.main;
   const resolvedVersionLabel = `V${resolvedVersionKey || '—'}`;
+  const parentVersionLabel = parent?.nodeRole === 'original' ? '原始素材' : parent ? `V${parent.versionKey}` : '';
   const parentLabel = parent ? `${parent.nodeRole === 'original' ? '原始素材' : `V${parent.versionKey}`} · ${parent.displayName}` : parentSelectionRequired ? '请选择父版本' : '无父版本';
   const outputFolderName = draft.targetFolderLocked ? targetName : generatedFolderName({ ...draft, versionKey: resolvedVersionKey });
   const locationLabel = draft.targetFolderLocked ? `使用现有文件夹“${targetName}”` : '项目根目录';
@@ -104,10 +105,10 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
     <legend className="text-xs font-semibold text-slate-600">创建方式</legend>
     <div className="mt-2 grid gap-2 sm:grid-cols-2">
       <button type="button" aria-pressed={versionKind === 'main'} onClick={() => setVersionKind('main')} className={`rounded-xl border px-3 py-3 text-left transition ${versionKind === 'main' ? 'border-blue-500 bg-blue-50 text-blue-800 ring-1 ring-blue-200' : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300 hover:bg-blue-50/40'}`}>
-        <b className="block text-sm">继续当前分支</b><span className="mt-1 block text-xs font-semibold tabular-nums">V{parent.versionKey} → V{suggestions.main}</span>
+        <b className="block text-sm">{parent.nodeRole === 'original' ? '创建主版本' : '继续当前分支'}</b><span className="mt-1 block text-xs font-semibold tabular-nums">{parentVersionLabel} → V{suggestions.main}</span>
       </button>
       <button type="button" aria-pressed={versionKind === 'branch'} onClick={() => setVersionKind('branch')} className={`rounded-xl border px-3 py-3 text-left transition ${versionKind === 'branch' ? 'border-violet-500 bg-violet-50 text-violet-800 ring-1 ring-violet-200' : 'border-slate-200 bg-white text-slate-600 hover:border-violet-300 hover:bg-violet-50/40'}`}>
-        <b className="block text-sm">创建子分支</b><span className="mt-1 block text-xs font-semibold tabular-nums">V{parent.versionKey} → V{suggestions.branch}</span>
+        <b className="block text-sm">创建子分支</b><span className="mt-1 block text-xs font-semibold tabular-nums">{parentVersionLabel} → V{suggestions.branch}</span>
       </button>
     </div>
   </fieldset> : parentSelectionRequired
@@ -132,14 +133,14 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
         {versionKindControl}
         {!draft.targetFolderLocked && <label className="block text-xs font-semibold text-slate-600">名称（可选）<input className={fieldClass} value={draft.displayName} placeholder="例如 精修" onChange={event => update({ displayName: event.target.value })}/></label>}
         <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold text-blue-600">{draft.mode === 'modify' ? '修改后' : '将创建'}</p><p className="mt-1 text-base font-bold text-slate-900">{resolvedVersionLabel} · {outputFolderName}</p></div><span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-blue-700 shadow-sm">{versionKind === 'branch' ? '子分支' : parent ? '继续当前分支' : '首个版本'}</span></div>
+          <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold text-blue-600">{draft.mode === 'modify' ? '修改后' : '将创建'}</p><p className="mt-1 text-base font-bold text-slate-900">{resolvedVersionLabel} · {outputFolderName}</p></div><span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-blue-700 shadow-sm">{versionKind === 'branch' ? '子分支' : parent?.nodeRole === 'original' ? '主版本' : parent ? '继续当前分支' : '首个版本'}</span></div>
           <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2"><div><dt className="text-slate-400">父版本</dt><dd className="mt-0.5 font-semibold text-slate-700">{parentLabel}</dd></div><div><dt className="text-slate-400">位置</dt><dd className="mt-0.5 font-semibold text-slate-700">{locationLabel}</dd></div></dl>
         </div>
       </div>
     </Card>
     <Card title="版本跟踪">
       <label className={`flex gap-3 ${restrictedNode ? 'opacity-50' : ''}`}><input type="checkbox" className="mt-0.5" checked={policy.trackingEnabled} disabled={restrictedNode} onChange={event => updatePolicy({ trackingEnabled: event.target.checked })}/><span><b className="block text-sm text-slate-700">启用版本跟踪</b><small className="mt-0.5 block text-xs leading-5 text-slate-400">检测当前文件夹的媒体变化，并在需要时确认图片对应关系。</small></span></label>
-      <div className={`mt-3 border-t border-slate-100 pt-3 ${!policy.trackingEnabled || restrictedNode ? 'opacity-50' : ''}`}><div className="divide-y divide-slate-100">{([['renameFromParent', '沿用上一版本文件名', '确认关联后使用父版本媒体文件名。'], ['copyMissingFromParent', '补齐缺失媒体', '父版本新增媒体后，此版本会变成“待刷新”。']] as const).map(([key, title, help]) => <label key={key} className="flex gap-3 py-3 first:pt-0 last:pb-0"><input type="checkbox" className="mt-0.5" checked={policy[key]} disabled={!policy.trackingEnabled || restrictedNode} onChange={event => updatePolicy({ [key]: event.target.checked })}/><span><b className="block text-sm text-slate-700">{title}</b><small className="mt-0.5 block text-xs leading-5 text-slate-400">{help}</small></span></label>)}</div></div>
+      <div className={`mt-3 border-t border-slate-100 pt-3 ${!policy.trackingEnabled || restrictedNode ? 'opacity-50' : ''}`}><div>{([['renameFromParent', '沿用上一版本文件名', '确认关联后使用父版本媒体文件名。'], ['copyMissingFromParent', '补齐缺失媒体', '父版本新增媒体后，此版本会变成“待刷新”。']] as const).map(([key, title, help], index) => <label key={key} className={`flex gap-3 py-3 first:pt-0 last:pb-0 ${index ? 'border-t border-slate-100' : ''}`}><input type="checkbox" className="mt-0.5" checked={policy[key]} disabled={!policy.trackingEnabled || restrictedNode} onChange={event => updatePolicy({ [key]: event.target.checked })}/><span><b className="block text-sm text-slate-700">{title}</b><small className="mt-0.5 block text-xs leading-5 text-slate-400">{help}</small></span></label>)}</div></div>
     </Card>
     </div>
     <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 pt-4"><span className="mr-auto max-w-xl text-xs leading-5 text-slate-400">版本号和文件夹名由父版本、创建方式及名称自动生成。</span><button type="button" disabled={busy} onClick={onClose} className="dialog-secondary">取消</button><button type="button" disabled={busy || !resolvedVersionKey || parentSelectionRequired} onClick={onSubmit} className="dialog-primary inline-flex items-center gap-2">{busy && <Loader2 size={15} className="animate-spin"/>}{requiresMove ? '继续并检查移动' : `${modeAction} ${resolvedVersionLabel}`}</button></div>

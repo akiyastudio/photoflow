@@ -218,6 +218,7 @@ export interface AppConfig {
   projectCategoryOrder: string[];
   defaultFolderSort: ProjectFileSortField;
   itemOpenMode: 'single' | 'double';
+  folderAlphabetFilterEnabled: boolean;
   favoriteDisplayMode: 'stars' | 'binary';
   usagePreferencesVersion: number;
   projectToolbar: ProjectToolbarSettings;
@@ -958,6 +959,7 @@ export interface IElectronAPI {
     error?: string;
   }>;
   trimProjectVideo: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, request: { start: number; end: number; saveMode: 'new' | 'replace' }) => Promise<{ success: boolean; outputPath?: string; relativePath?: string; duration?: number; replaced?: boolean; error?: string }>;
+  getProjectVideoTimelineFrames: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, times: number[]) => Promise<{ success: boolean; frames?: string[]; error?: string }>;
   onScreenshotMainImageProgress: (callback: (progress: { requestId: string; phase: 'extracting' | 'complete' | 'failed' | string; progress: number; processedCount?: number; totalCount?: number; currentName?: string; message: string }) => void) => () => void;
   getProjectFileDetails: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<{ success: boolean; details: Array<{ relativePath: string; size: number; createdAt: number; updatedAt: number }>; error?: string }>;
   getProjectEntryDetails: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; details?: { size: number; createdAt: number; updatedAt: number; fileCount: number; folderCount: number }; error?: string }>;

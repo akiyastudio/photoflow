@@ -85,6 +85,14 @@ const canvasHookSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/feat
 const projectWorkspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/features/workspace/ProjectWorkspace.tsx'), 'utf8');
 assert(canvasHookSource.includes('sameCanvasPositions(positionsRef.current, next)'), 'version-tree layout reconciliation must skip identical maps to prevent effect update loops');
 assert(projectWorkspaceSource.includes("progressSetup.existingProgressId ? 'modify' : 'create'"), 'newly marked folders must use the complete editable version panel');
+assert(projectWorkspaceSource.includes("(source.nodeRole !== 'original' && source.nodeRole !== 'progress')"), 'drag-to-create must accept both original material and version progress as structural parents');
+assert(projectWorkspaceSource.includes('void submitProgressSetup({ ...nextDraft, contextLocked: true, openEditorAfterCreate: true })'), 'dragging a version line to an ordinary folder must submit directly before opening the created node editor');
+assert(projectWorkspaceSource.includes("targetRelativePath,\n      trackingEnabled: false,\n      preserveFolderName: true"), 'drag-to-create must register the version relationship without starting tracking before the user enables it');
+assert(projectWorkspaceSource.includes('const openCreatedProgressEditor = () =>') && projectWorkspaceSource.includes('existingProgressId: progressFolder.id'), 'a successful drag-to-create must reopen the registered node in modify mode rather than asking for creation confirmation');
+assert(projectWorkspaceSource.includes('committedWorkflowInputIds.size === nextWorkflowInputProgressIds.length'), 'structural relation updates must verify obsolete derived selection inputs were removed');
+assert(projectWorkspaceSource.includes("edge.edgeKind !== 'workflow_input' || edge.targetProgressId !== childProgressId"), 'the renderer must immediately replace a child version\'s workflow inputs after its structural parent changes');
+assert(!projectWorkspaceSource.includes('workflowInputProgressIds: [],'), 'editing a version must never erase its derived selection input');
+assert(projectWorkspaceSource.includes('workflowInputIdsForRelationChange(progressFolders, versionGraphEdges, current.existingProgressId'), 'editing a version must recompute its workflow inputs from the selected structural parent');
 const workspaceGridModel = loadCommonJs(compile('src/features/workspace/marquee-selection-model.ts'));
 const tree = loadCommonJs(compile('src/components/ProjectVersionTree.tsx'), request => {
   if (request === '../features/versioning/versioning-v2-model') return model;
@@ -116,7 +124,7 @@ const dispatch = (target, type, extra = {}) => {
   }
   return event;
 };
-const folders = [{ id: 'raw', projectId: 'p', mediaKind: 'image', versionKey: 'legacy', displayName: 'RAW', folderPath: 'C:/p/RAW', folderMissing: false, nodeRole: 'original', relationKind: 'main', trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false, trackingState: 'disabled', trackingSnapshot: {}, tombstone: {}, createdAt: 1, updatedAt: 1 }];
+const folders = [{ id: 'raw', projectId: 'p', mediaKind: 'image', versionKey: 'import-d7439bee24773bcbfa2d0a97', displayName: 'RAW', folderPath: 'C:/p/RAW', folderMissing: false, nodeRole: 'original', relationKind: 'main', trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false, trackingState: 'disabled', trackingSnapshot: {}, tombstone: {}, createdAt: 1, updatedAt: 1 }];
 const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mode === 'create' ? '新进度' : 'RAW', mediaKind: 'image', relationKind: 'main', parentProgressId: 'raw', trackingEnabled: true, renameFromParent: true, copyMissingFromParent: true, workflowInputProgressIds: ['selection'] });
 
 (async () => {
@@ -125,7 +133,9 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   for (const mode of ['create', 'import', 'modify']) {
     await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: draft(mode), folders, onChange() {}, onSubmit() {}, onClose() {}, onChooseFolder() {} })));
     const content = textContent(container);
-    assert(content.includes('版本跟踪') && content.includes('高级跟踪设置') && content.includes('沿用上一版本文件名') && content.includes('补齐缺失媒体'));
+    assert(content.includes('版本跟踪') && content.includes('沿用上一版本文件名') && content.includes('补齐缺失媒体'));
+    assert(!content.includes('高级跟踪设置') && !allNodes(container).some(node => node.nodeName === 'DETAILS'), 'tracking policy options must stay visible without a redundant disclosure section');
+    assert(content.includes('原始素材 → V1') && !content.includes('import-'), 'internal original-node version keys must never leak into the version creation UI');
     assert(!content.includes('节点用途') && !content.includes('工作流输入'), `${mode} settings must not expose relation types or collaboration inputs`);
     if (mode === 'create' || mode === 'import') assert(content.includes('将创建') && content.includes('图片') && content.includes('视频') && content.includes('项目根目录'), `${mode} must share the derived version/name summary`);
     if (mode === 'import') assert(content.includes('导入来源稍后选择') && content.includes('所选文件夹将移动到项目根目录'));

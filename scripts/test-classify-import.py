@@ -790,6 +790,7 @@ class ClassifyImportTests(unittest.TestCase):
             os.utime(source, (captured_at, captured_at))
             session = 'staged-disconnect'
             projects = [{
+                'id': 'project-stable-id',
                 'name': project.name,
                 'path': str(project),
                 'projectDate': {'year': 2026, 'month': 8, 'day': 1, 'precision': 'day'},
@@ -799,6 +800,10 @@ class ClassifyImportTests(unittest.TestCase):
                 classify.stage_plan_import(str(root / 'card'), str(root), json.dumps(projects), import_session=session)
             routes = ask_user.call_args.args[1]['automaticRoutes']
             self.assertTrue(routes)
+            self.assertEqual(set(routes.values()), {'project-stable-id'})
+            # The renderer resolves stable IDs to the latest catalog paths
+            # immediately before committing the already-staged files.
+            routes = {group_id: str(project) for group_id in routes}
             staged = classify.load_staged_import(str(root), session)
             self.assertTrue(staged)
             self.assertEqual(len(staged['timedFiles']), 1)

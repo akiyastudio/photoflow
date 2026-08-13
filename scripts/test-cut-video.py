@@ -74,6 +74,34 @@ def main():
 
     with TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)
+        chinese_directory = root / "中文项目" / "待剪辑视频"
+        chinese_directory.mkdir(parents=True)
+        chinese_source = chinese_directory / "角色生日 录像.mp4"
+        chinese_output = chinese_directory / "角色生日 录像_剪辑.mp4"
+        chinese_source.write_bytes(b"source video")
+
+        def fake_trim_run(command, **_kwargs):
+            assert command.index("-ss") > command.index("-i")
+            assert "-c:v" in command and "libx264" in command
+            assert "-c" not in command or command[command.index("-c") + 1] != "copy"
+            Path(command[-1]).write_bytes(b"trimmed video")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        probe_values = iter([13.0, 9.25])
+        with mock.patch.object(cut_video, "probe_duration", side_effect=lambda *_args: next(probe_values)), \
+                mock.patch.object(cut_video, "get_ffmpeg_exe", return_value="ffmpeg"), \
+                mock.patch.object(cut_video.subprocess, "run", side_effect=fake_trim_run):
+            trim_result = cut_video.trim_video_losslessly(
+                str(chinese_source), 1.25, 10.5, str(chinese_output),
+            )
+        assert trim_result["success"] is True
+        assert Path(trim_result["output"]) == chinese_output
+        assert chinese_output.read_bytes() == b"trimmed video"
+        assert not any(chinese_directory.glob("*.photoflow-part.mp4"))
+        assert trim_result["exactTranscodeUsed"] is True
+
+    with TemporaryDirectory() as temporary_directory:
+        root = Path(temporary_directory)
         nested = root / "nested"
         nested.mkdir()
         first = root / "first.mp4"

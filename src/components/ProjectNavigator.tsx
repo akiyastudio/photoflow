@@ -142,6 +142,8 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   }, [expanded]);
   const [error, setError] = useState('');
   const [menu, setMenu] = useState<{ project: WorkspaceProject; x: number; y: number } | null>(null);
+  const [draggedProject, setDraggedProject] = useState<WorkspaceProject | null>(null);
+  const [dragTargetStatus, setDragTargetStatus] = useState<ProjectStatus | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [showCreateMenu, setShowCreateMenu] = useState(false);
   const [choosingExistingProject, setChoosingExistingProject] = useState(false);
@@ -470,6 +472,26 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     setExpanded(current => ({ ...current, [status]: true }));
     refresh();
   };
+  const dragProjectOverStatus = (event: React.DragEvent, status: ProjectStatus) => {
+    if (!draggedProject || draggedProject.status === status) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = 'move';
+    if (dragTargetStatus !== status) setDragTargetStatus(status);
+  };
+  const leaveProjectStatus = (event: React.DragEvent<HTMLElement>, status: ProjectStatus) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    if (dragTargetStatus === status) setDragTargetStatus(null);
+  };
+  const dropProjectOnStatus = (event: React.DragEvent, status: ProjectStatus) => {
+    if (!draggedProject || draggedProject.status === status) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const project = draggedProject;
+    setDraggedProject(null);
+    setDragTargetStatus(null);
+    void move(project, status);
+  };
   const moveBack = async (project: WorkspaceProject, statusAfter: Exclude<ProjectStatus, '已归档'> = '后期中') => {
     if (!await appDialog.confirm({ title: `将“${project.name}”移回工作盘？`, message: `项目将从归档盘移回原工作区位置，并更改为“${projectStatusLabel(statusAfter)}”。`, confirmLabel: '移回工作盘' })) return;
     const result = await window.electronAPI.moveArchivedProjectBack(workspaceFor(project), project.name, statusAfter);
@@ -515,9 +537,9 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       {statuses.filter(status => status !== '未分类' || (groups.find(group => group.status === status)?.projects.length || 0) > 0).map(status => {
         const projects = (groups.find(group => group.status === status)?.projects || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
         const isOpen = expanded[status];
-        return <section key={status} className="border-t border-slate-200 py-2 first:border-t-0">
+        return <section key={status} onDragEnter={event => dragProjectOverStatus(event, status)} onDragOver={event => dragProjectOverStatus(event, status)} onDragLeave={event => leaveProjectStatus(event, status)} onDrop={event => dropProjectOnStatus(event, status)} className={`border-t py-2 first:border-t-0 transition ${dragTargetStatus === status ? 'rounded-lg border-blue-400 bg-blue-50 ring-2 ring-inset ring-blue-400' : 'border-slate-200'}`}>
           <button type="button" onClick={() => setExpanded(current => ({ ...current, [status]: !current[status] }))} className="flex w-full items-center gap-1.5 rounded-md px-2 py-2 text-left text-xs font-bold tracking-wide text-slate-500 hover:bg-slate-100 hover:text-slate-800">{isOpen ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span>{projectStatusLabel(status)}</span><span className="ml-auto font-mono text-[10px] text-slate-400">{projects.length}</span></button>
-          {isOpen && <div className="mt-1 space-y-1">{projects.map(project => { const unavailable = project.availability === 'missing'; return <div key={project.path} onContextMenu={event => { event.preventDefault(); window.dispatchEvent(new Event('photoflow-menu-open')); setMenu({ project, x: event.clientX, y: event.clientY }); }} className={`project-row group flex items-center gap-1 rounded-lg text-sm transition ${unavailable ? 'bg-amber-50 text-amber-700' : selectedProject?.path === project.path ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'}`}><button draggable={!unavailable} onDragStart={event => { event.dataTransfer.effectAllowed = 'copy'; event.dataTransfer.setData('application/x-photoflow-folder-tab', JSON.stringify({ kind: 'project', project })); event.dataTransfer.setData('text/plain', project.name); window.dispatchEvent(new Event('photoflow:folder-tab-drag-start')); }} onDragEnd={() => window.dispatchEvent(new Event('photoflow:folder-tab-drag-end'))} title={unavailable ? `${project.name}（${project.archived ? '归档盘未连接' : '文件夹不可用，数据已保留'}）` : `${project.name}（可拖到标签栏新建标签）`} disabled={unavailable} onClick={() => onSelectProject(project)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left disabled:cursor-not-allowed"><Folder size={15} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{project.name}</span>{project.archived && !unavailable && <HardDrive size={13} className="shrink-0 opacity-60"/>}{unavailable && <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">{project.archived ? '归档盘离线' : '离线'}</span>}</button><button type="button" aria-label="打开项目文件夹" title={unavailable ? '项目文件夹不可用' : '打开项目文件夹'} disabled={unavailable} onClick={() => openProject(project)} className="project-open-button mr-1 rounded p-1.5 disabled:cursor-not-allowed disabled:opacity-40"><FolderOpen size={15}/></button></div>; })}{!projects.length && <p className="px-7 py-1 text-xs text-slate-400">暂无项目</p>}</div>}
+          {isOpen && <div className="mt-1 space-y-1">{projects.map(project => { const unavailable = project.availability === 'missing'; return <div key={project.path} onContextMenu={event => { event.preventDefault(); window.dispatchEvent(new Event('photoflow-menu-open')); setMenu({ project, x: event.clientX, y: event.clientY }); }} className={`project-row group flex items-center gap-1 rounded-lg text-sm transition ${draggedProject?.path === project.path ? 'opacity-50' : ''} ${unavailable ? 'bg-amber-50 text-amber-700' : selectedProject?.path === project.path ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'}`}><button draggable={!unavailable} onDragStart={event => { setDraggedProject(project); event.dataTransfer.effectAllowed = 'copyMove'; event.dataTransfer.setData('application/x-photoflow-folder-tab', JSON.stringify({ kind: 'project', project })); event.dataTransfer.setData('application/x-photoflow-project', project.path); event.dataTransfer.setData('text/plain', project.name); window.dispatchEvent(new Event('photoflow:folder-tab-drag-start')); }} onDragEnd={() => { setDraggedProject(null); setDragTargetStatus(null); window.dispatchEvent(new Event('photoflow:folder-tab-drag-end')); }} title={unavailable ? `${project.name}（${project.archived ? '归档盘未连接' : '文件夹不可用，数据已保留'}）` : `${project.name}（拖到其他分类可更改分类；拖到标签栏可新建标签）`} disabled={unavailable} onClick={() => onSelectProject(project)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left disabled:cursor-not-allowed"><Folder size={15} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{project.name}</span>{project.archived && !unavailable && <HardDrive size={13} className="shrink-0 opacity-60"/>}{unavailable && <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">{project.archived ? '归档盘离线' : '离线'}</span>}</button><button type="button" aria-label="打开项目文件夹" title={unavailable ? '项目文件夹不可用' : '打开项目文件夹'} disabled={unavailable} onClick={() => openProject(project)} className="project-open-button mr-1 rounded p-1.5 disabled:cursor-not-allowed disabled:opacity-40"><FolderOpen size={15}/></button></div>; })}{!projects.length && <p className="px-7 py-1 text-xs text-slate-400">暂无项目</p>}</div>}
         </section>;
       })}
       {error && <p className="mt-2 px-2 text-xs text-red-500">{error}</p>}

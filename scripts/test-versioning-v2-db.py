@@ -660,6 +660,11 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
             },
             "workflowInputProgressIds": [selection["id"]],
         })["progressFolder"]
+        assert db.execute(
+            """SELECT 1 FROM version_graph_edges WHERE source_progress_id=?
+               AND target_progress_id=? AND edge_kind='workflow_input'""",
+            (selection["id"], tracked_progress["id"]),
+        ).fetchone() is not None, "connecting original material to V1 must create the matching selection input"
         tracking = workspace_db.tracking_session_create(str(workspace), db, {
             "projectName": "Project", "progressId": tracked_progress["id"], "mode": "refresh",
         })
@@ -675,6 +680,11 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
         })["progressFolder"]
         assert detached_progress.get("parentProgressId") is None
         assert not detached_progress["trackingEnabled"] and detached_progress["trackingState"] == "disabled"
+        assert db.execute(
+            """SELECT 1 FROM version_graph_edges WHERE source_progress_id=?
+               AND target_progress_id=? AND edge_kind='workflow_input'""",
+            (selection["id"], detached_progress["id"]),
+        ).fetchone() is None, "disconnecting the original-material parent must remove its derived selection input"
         assert db.execute("SELECT 1 FROM tracking_sessions WHERE id=?", (tracking["sessionId"],)).fetchone() is None
 
         db.execute("DELETE FROM progress_folders WHERE id=?", (mov_preview["id"],))
@@ -686,6 +696,11 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
             "targetProgressId": camera_jpg["id"], "edgeKind": "media_companion",
         })
         assert db.execute("SELECT 1 FROM version_graph_edges WHERE id=?", (companion["id"],)).fetchone() is None
+        repeated_delete = workspace_db.version_graph_edge_delete(db, {
+            "projectId": "graph-project", "sourceProgressId": raw["id"],
+            "targetProgressId": camera_jpg["id"], "edgeKind": "media_companion",
+        })
+        assert repeated_delete["success"], "deleting an already absent supplemental edge must be idempotent"
     finally:
         db.close()
 
