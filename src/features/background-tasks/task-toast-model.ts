@@ -8,8 +8,10 @@ export const compareProjectFileTasks = (left: BackgroundTask, right: BackgroundT
   return left.createdAt - right.createdAt;
 };
 
-export const selectProjectFileTaskToasts = (tasks: BackgroundTask[], minimizedTaskIds: ReadonlySet<string>, limit = 4) => {
-  const eligible = tasks.filter(task => isActiveProjectFileTask(task) && !minimizedTaskIds.has(task.id)).sort(compareProjectFileTasks);
+export const selectProjectFileTaskToasts = (tasks: BackgroundTask[], minimizedTaskIds: ReadonlySet<string>, limit = 4, now = Date.now(), queuedDelayMs = 700) => {
+  const eligible = tasks.filter(task => isActiveProjectFileTask(task)
+    && !minimizedTaskIds.has(task.id)
+    && (task.state !== 'queued' || now - task.createdAt >= queuedDelayMs)).sort(compareProjectFileTasks);
   return { visible: eligible.slice(0, limit), overflowCount: Math.max(0, eligible.length - limit) };
 };
 

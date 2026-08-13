@@ -39,9 +39,16 @@ class TestNode extends TestEventTarget {
     return null;
   }
 }
-const layoutRequests = { loads: 0, saves: [], failNextSave: false, revision: 0, positions: [], holdSaves: false, saveReleases: [] };
+const layoutRequests = { loads: 0, saves: [], failLoadBudget: 0, failNextSave: false, revision: 0, positions: [], holdSaves: false, saveReleases: [] };
 const testWindow = Object.assign(new TestEventTarget(), { HTMLElement: TestNode, HTMLIFrameElement: class {}, Node: TestNode, getSelection: () => null, electronAPI: {
-  async getVersionTreeLayout() { layoutRequests.loads += 1; return { success: true, revision: layoutRequests.revision, positions: layoutRequests.positions }; },
+  async getVersionTreeLayout() {
+    layoutRequests.loads += 1;
+    if (layoutRequests.failLoadBudget > 0) {
+      layoutRequests.failLoadBudget -= 1;
+      return { success: false, error: 'simulated layout load failure' };
+    }
+    return { success: true, revision: layoutRequests.revision, positions: layoutRequests.positions };
+  },
   async saveVersionTreeLayout(_workspacePath, _projectName, request) {
     layoutRequests.saves.push(request);
     if (layoutRequests.holdSaves) await new Promise(resolve => layoutRequests.saveReleases.push(resolve));
@@ -75,7 +82,9 @@ const edgeModel = loadCommonJs(compile('src/features/versioning/version-tree-edg
 const layoutModel = loadCommonJs(compile('src/features/versioning/version-tree-layout-model.ts'), request => request === './version-tree-edge-model.ts' ? edgeModel : require(request));
 const canvasHook = loadCommonJs(compile('src/features/versioning/use-version-tree-canvas.ts'), request => request === './version-tree-canvas-model' ? canvasModel : require(request));
 const canvasHookSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/features/versioning/use-version-tree-canvas.ts'), 'utf8');
+const projectWorkspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/features/workspace/ProjectWorkspace.tsx'), 'utf8');
 assert(canvasHookSource.includes('sameCanvasPositions(positionsRef.current, next)'), 'version-tree layout reconciliation must skip identical maps to prevent effect update loops');
+assert(projectWorkspaceSource.includes("progressSetup.existingProgressId ? 'modify' : 'create'"), 'newly marked folders must use the complete editable version panel');
 const workspaceGridModel = loadCommonJs(compile('src/features/workspace/marquee-selection-model.ts'));
 const tree = loadCommonJs(compile('src/components/ProjectVersionTree.tsx'), request => {
   if (request === '../features/versioning/versioning-v2-model') return model;
@@ -121,6 +130,20 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     if (mode === 'create' || mode === 'import') assert(content.includes('文件夹名称（自动生成）') && content.includes('图片') && content.includes('视频'), `${mode} must share the editable version/name and generated-folder layout`);
     if (mode === 'import') assert(content.includes('所选文件夹不在项目根目录'));
   }
+  const v2Parent = { ...folders[0], id: 'v2', nodeRole: 'progress', versionKey: '2', parentProgressId: 'raw' };
+  const createNextChanges = [];
+  await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('create-next'), parentProgressId: 'v2', versionKey: '3', versionKind: 'main' }, folders: [...folders, v2Parent], onChange(next) { createNextChanges.push(next); }, onSubmit() {}, onClose() {} })));
+  assert(textContent(container).includes('创建类型') && textContent(container).includes('主版本') && textContent(container).includes('子分支'), 'create-next panel must expose an explicit main/branch choice');
+  const branchButton = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.textContent === '子分支');
+  await React.act(async () => dispatch(branchButton, 'click'));
+  assert.strictEqual(createNextChanges.at(-1).versionKind, 'branch');
+  assert.strictEqual(createNextChanges.at(-1).versionKey, '2_1', 'branch choice must generate the next child number instead of asking the user to type underscore syntax');
+  assert(allNodes(container).some(node => node.nodeName === 'INPUT' && node.attributes.has('readonly')), 'generated version number must be read-only');
+  const rawBranchChanges = [];
+  await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('modify'), parentProgressId: 'raw', versionKey: 'import-d7439bee24773bcbfa2d0a97', versionKind: 'main' }, folders, onChange(next) { rawBranchChanges.push(next); }, onSubmit() {}, onClose() {} })));
+  const rawBranchButton = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.textContent === '子分支');
+  await React.act(async () => dispatch(rawBranchButton, 'click'));
+  assert.strictEqual(rawBranchChanges.at(-1).versionKey, '1_1', 'an imported RAW internal key must never leak into a visible branch name');
   await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('modify'), relationKind: 'auxiliary', trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false }, folders, onChange() {}, onSubmit() {}, onClose() {} })));
   assert(textContent(container).includes('选片、预览和协作节点不参与版本跟踪传播'));
   const tracked = {
@@ -220,6 +243,31 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     onCanvasControllerChange(controller) { canvasController = controller; },
   };
   await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, treeProps)));
+  const feedbackContainer = new TestNode(1, 'DIV', testDocument);
+  const feedbackRoot = createRoot(feedbackContainer);
+  let feedbackRenders = 0;
+  const FeedbackHarness = () => {
+    const [, setNoticeRevision] = React.useState(0);
+    feedbackRenders += 1;
+    return React.createElement(tree.ProjectVersionTree, {
+      ...treeProps,
+      projectName: 'Effect feedback regression',
+      onNotice() { setNoticeRevision(value => value + 1); },
+      onCanvasControllerChange() {},
+    });
+  };
+  const loadsBeforeFeedback = layoutRequests.loads;
+  layoutRequests.failLoadBudget = 8;
+  await React.act(async () => {
+    feedbackRoot.render(React.createElement(FeedbackHarness));
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  assert.strictEqual(layoutRequests.loads - loadsBeforeFeedback, 1, 'layout load failure feedback must not retrigger the load effect when the parent recreates onNotice');
+  assert(feedbackRenders <= 2, 'layout failure feedback must settle after the single parent state update instead of reaching maximum update depth');
+  await React.act(async () => feedbackRoot.unmount());
+  layoutRequests.failLoadBudget = 0;
   const rawCanvasNode = allNodes(container).find(node => node.nodeName === 'DIV' && node.attributes.get('data-node-role') === 'original');
   const rawEntryNode = allNodes(rawCanvasNode).find(node => node !== rawCanvasNode && node.nodeName === 'DIV' && node.textContent === 'RAW');
   const canvasNode = allNodes(container).find(node => node.nodeName === 'DIV' && node.attributes.get('data-version-tree-canvas') === 'true');

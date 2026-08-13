@@ -21,11 +21,12 @@ export const useTopToastStack = () => {
     const cleanMessage = message.trim() || '发生未知错误';
     const isFailure = /失败|错误|异常|无法/.test(cleanMessage);
     const now = Date.now();
-    if (!isFailure && lastNoticeRef.current.message === cleanMessage && now - lastNoticeRef.current.shownAt < 800) return;
+    if (!isFailure && lastNoticeRef.current.message === cleanMessage && now - lastNoticeRef.current.shownAt < 800) return () => undefined;
     lastNoticeRef.current = { message: cleanMessage, shownAt: now };
     const id = ++sequenceRef.current;
     setNotices(current => enqueueTopToastNotice(current, { id, message: cleanMessage, persistent: isFailure, count: 1 }));
     if (!isFailure) timersRef.current.set(id, window.setTimeout(() => dismissNotice(id), duration));
+    return () => dismissNotice(id);
   }, [dismissNotice]);
 
   useEffect(() => () => {

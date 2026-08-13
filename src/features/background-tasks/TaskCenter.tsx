@@ -69,10 +69,11 @@ export const TaskCenterProvider = ({ children }: { children: React.ReactNode }) 
   const reportPanelTask = useCallback((identity: Pick<PanelTaskSnapshot, 'key' | 'ownerPageId' | 'panelKind' | 'title'>, report: PanelTaskReport) => {
     setPanelTasks(current => {
       const previous = current[identity.key];
-      if (previous && previous.state === report.state && previous.progress === report.progress && previous.message === report.message && sameLogs(previous.logs, report.logs)) return current;
+      const progress = previous?.state === 'running' && report.state === 'running' ? Math.max(previous.progress, report.progress) : report.progress;
+      if (previous && previous.state === report.state && previous.progress === progress && previous.message === report.message && sameLogs(previous.logs, report.logs)) return current;
       return {
         ...current,
-        [identity.key]: { ...identity, ...report, updatedAt: Date.now() },
+        [identity.key]: { ...identity, ...report, progress, updatedAt: Date.now() },
       };
     });
   }, []);

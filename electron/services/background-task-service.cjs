@@ -14,10 +14,13 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   const canReserve = waiter => {
     const group = waiter.group || '';
     if (group) {
-      const activeInGroup = [...reservations.values()].filter(item => item.group === group).length;
-      if (activeInGroup >= waiter.limit) return false;
+      const activeInGroup = [...reservations.values()].filter(item => item.group === group);
+      if (activeInGroup.length >= waiter.limit) return false;
+      if (waiter.access === 'write' && activeInGroup.filter(item => item.access === 'write').length >= waiter.writeLimit) return false;
     }
-    return ![...reservations.values()].some(active => waiter.resources.some(left => active.resources.some(right => resourcesConflict(left, right))));
+    return ![...reservations.values()].some(active => (
+      waiter.access === 'write' || active.access === 'write'
+    ) && waiter.resources.some(left => active.resources.some(right => resourcesConflict(left, right))));
   };
   const drainResourceWaiters = () => {
     for (let index = 0; index < resourceWaiters.length;) {
@@ -29,13 +32,14 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       }
       if (!canReserve(waiter)) { index += 1; continue; }
       resourceWaiters.splice(index, 1);
-      reservations.set(waiter.id, { group: waiter.group, resources: waiter.resources });
+      reservations.set(waiter.id, { group: waiter.group, resources: waiter.resources, access: waiter.access });
       waiter.resolve();
     }
   };
   const acquireResources = (task, definition) => {
     const resources = [...new Set((definition.resources || []).map(normalizeResource).filter(Boolean))];
     const group = String(definition.concurrencyGroup || '');
+    const access = definition.resourceAccess === 'read' ? 'read' : 'write';
     if (!resources.length && !group) return Promise.resolve();
     return new Promise((resolve, reject) => {
       const waiter = {
@@ -43,6 +47,8 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
         resources,
         group,
         limit: Math.max(1, Number(definition.concurrencyLimit) || 1),
+        writeLimit: Math.max(1, Number(definition.concurrencyWriteLimit) || Number(definition.concurrencyLimit) || 1),
+        access,
         signal: task.controller.signal,
         resolve,
         reject,
@@ -114,7 +120,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       report: (progress, message = task.message, metadata) => {
         if (task.controller.signal.aborted) return;
         update(task, {
-          progress: Math.max(0, Math.min(100, Number(progress) || 0)),
+          progress: Math.max(task.progress, Math.max(0, Math.min(100, Number(progress) || 0))),
           message,
           ...(metadata ? { metadata: { ...task.metadata, ...metadata } } : {}),
         });

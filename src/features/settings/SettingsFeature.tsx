@@ -5,6 +5,7 @@ import type { AppConfig, BackupSpaceStatus, BackupStatus, ComponentStatus, Legal
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { FORMAL_MODEL_LICENSES } from '../../licenses/modelLicenses';
 import { THIRD_PARTY_SOFTWARE_LICENSES } from '../../licenses/softwareLicenses';
+import { VideoSplitView, VideoTranscodeView } from '../tools/ToolViews';
 
 const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
@@ -217,7 +218,7 @@ const offerPackageCleanup = async ({ appDialog, kind, componentId, label, packag
 
 const IdentityModelSettings = ({ component }: { component?: ComponentStatus }) => {
   const ready = Boolean(component?.installed && component.identityAvailable && component.faceBackend === 'adaface-ir18' && component.bodyBackend === 'osnet-x1');
-  return <SettingsRow title="人物身份识别" description="YuNet、AdaFace IR-18 与 OSNet x1.0；用于跨照片确认同一人物，模型随基础组件安装。" align="start"><div className="ml-auto max-w-md text-right"><p className={`text-xs font-bold ${ready ? 'text-emerald-600' : 'text-amber-600'}`}>{ready ? '可用' : '需要更新组件'}</p><p className="mt-1 text-xs leading-5 text-slate-500">CPU 可运行，Intel、AMD、NVIDIA 显卡可使用 DirectML 加速。</p>{component?.identityError && <p className="mt-2 break-all text-xs leading-5 text-amber-600">{component.identityError}</p>}</div></SettingsRow>;
+  return <SettingsRow title="人物身份识别" description="用于跨照片识别同一人物。" align="start"><div className="ml-auto max-w-md text-right"><p className={`text-xs font-bold ${ready ? 'text-emerald-600' : 'text-amber-600'}`}>{ready ? '可用' : '需要更新组件'}</p><p className="mt-1 text-xs leading-5 text-slate-500">支持 CPU；可用显卡会自动加速。</p>{component?.identityError && <p className="mt-2 break-all text-xs leading-5 text-amber-600">{component.identityError}</p>}</div></SettingsRow>;
 };
 
 const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { component?: ComponentStatus; onRefresh: () => void | Promise<void>; onNotice: (message: string, duration?: number) => void }) => {
@@ -280,12 +281,12 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
   const needsRepair = component?.advancedState === 'repair-needed';
   return <>
     <SettingsPageGroup title="识别引擎">
-      <SettingsRow title="组件目录" description="基础组件、身份识别模型和检测增强包统一放在这里；ZIP 无需解压。"><div className="flex min-w-0 gap-2"><input readOnly value={component?.packagePath || '等待读取组件目录'} className="form-input min-w-0 flex-1 font-mono text-xs"/><button type="button" onClick={() => void openComponentFolder()} className="dialog-secondary inline-flex shrink-0 items-center gap-2"><FolderOpen size={14}/>打开</button><button type="button" onClick={() => void onRefresh()} disabled={Boolean(busy)} className="dialog-secondary inline-flex shrink-0 items-center gap-2"><RotateCcw size={14} className={busy ? 'animate-spin' : ''}/>检测</button></div></SettingsRow>
-      <SettingsRow title="基础人物检测" description="RTMDet；负责普通人物检测、裁图和基础实例分割，高级版不可用时仍可继续工作。" align="start"><div className="ml-auto max-w-md text-right"><p className={`text-xs font-bold ${baseAvailable ? 'text-emerald-600' : 'text-red-600'}`}>{baseAvailable ? '可用' : '不可用'}</p><p className="mt-1 text-xs leading-5 text-slate-500">{component?.provider ? `当前运行：${component.provider}` : component?.runtimeError || '等待组件状态'} · 占用 {formatStorageSize(component?.sizeBytes)}</p></div></SettingsRow>
+      <SettingsRow title="组件目录" description="将组件 ZIP 放入此目录，无需解压。"><div className="flex min-w-0 gap-2"><input readOnly value={component?.packagePath || '等待读取组件目录'} className="form-input min-w-0 flex-1 font-mono text-xs"/><button type="button" onClick={() => void openComponentFolder()} className="dialog-secondary inline-flex shrink-0 items-center gap-2"><FolderOpen size={14}/>打开</button><button type="button" onClick={() => void onRefresh()} disabled={Boolean(busy)} className="dialog-secondary inline-flex shrink-0 items-center gap-2"><RotateCcw size={14} className={busy ? 'animate-spin' : ''}/>检测</button></div></SettingsRow>
+      <SettingsRow title="基础人物检测" description="提供基础人物检测、裁图和分割。" align="start"><div className="ml-auto max-w-md text-right"><p className={`text-xs font-bold ${baseAvailable ? 'text-emerald-600' : 'text-red-600'}`}>{baseAvailable ? '可用' : '不可用'}</p><p className="mt-1 text-xs leading-5 text-slate-500">{component?.provider ? `当前运行：${component.provider}` : component?.runtimeError || '等待组件状态'} · 占用 {formatStorageSize(component?.sizeBytes)}</p></div></SettingsRow>
       <IdentityModelSettings component={component}/>
     </SettingsPageGroup>
     <SettingsPageGroup title="人物检测增强版">
-      <SettingsRow title="PairDETR + SAM 2.1" description="改善多人密集、相互遮挡、脸与身体对应及精细分割；不影响基础版和身份识别。" align="start"><div className="ml-auto max-w-lg"><p className={`text-right text-xs font-bold ${advancedReady ? 'text-emerald-600' : needsRepair ? 'text-amber-600' : 'text-slate-500'}`}>{advancedReady ? '可用' : needsRepair ? '需要修复' : '未安装'}</p><div className="mt-2 flex flex-wrap justify-end gap-2">{advancedReady ? <><button type="button" onClick={() => void install(true)} disabled={Boolean(busy)} className="dialog-secondary inline-flex items-center gap-2"><Wrench size={14}/>修复</button><button type="button" onClick={() => void uninstall()} disabled={Boolean(busy)} className="rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">卸载</button></> : needsRepair ? <button type="button" onClick={() => void install(true)} disabled={Boolean(busy)} className="dialog-primary inline-flex items-center gap-2"><Wrench size={14}/>修复增强包</button> : <button type="button" onClick={() => void install(false)} disabled={Boolean(busy) || !baseAvailable} className="dialog-primary disabled:opacity-45">安装增强版</button>}</div></div></SettingsRow>
+      <SettingsRow title="PairDETR + SAM 2.1" description="改善多人、遮挡和精细分割效果。" align="start"><div className="ml-auto max-w-lg"><p className={`text-right text-xs font-bold ${advancedReady ? 'text-emerald-600' : needsRepair ? 'text-amber-600' : 'text-slate-500'}`}>{advancedReady ? '可用' : needsRepair ? '需要修复' : '未安装'}</p><div className="mt-2 flex flex-wrap justify-end gap-2">{advancedReady ? <><button type="button" onClick={() => void install(true)} disabled={Boolean(busy)} className="dialog-secondary inline-flex items-center gap-2"><Wrench size={14}/>修复</button><button type="button" onClick={() => void uninstall()} disabled={Boolean(busy)} className="rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">卸载</button></> : needsRepair ? <button type="button" onClick={() => void install(true)} disabled={Boolean(busy)} className="dialog-primary inline-flex items-center gap-2"><Wrench size={14}/>修复增强包</button> : <button type="button" onClick={() => void install(false)} disabled={Boolean(busy) || !baseAvailable} className="dialog-primary disabled:opacity-45">安装增强版</button>}</div></div></SettingsRow>
       <SettingsRow title="安装条件" description="Windows x64、WSL 2、支持 WSL CUDA 的 NVIDIA 显卡与驱动，以及至少 35 GB 可用空间。"><button type="button" title="检查 WSL 2、NVIDIA 显卡与驱动、目标磁盘空间" onClick={() => void checkRequirements()} disabled={Boolean(busy) || !baseAvailable} className="dialog-secondary ml-auto block w-fit disabled:opacity-45">检查安装条件</button></SettingsRow>
       <SettingsRow title="运行环境与占用" description="建议至少 8 GB 显存和 16 GB 系统内存；这些是性能建议，不作为安装门槛。"><div className="ml-auto text-right text-xs leading-5 text-slate-500"><p>{component?.advancedProvider ? `当前运行：${component.advancedProvider}` : '当前运行：未安装'}</p><p>当前占用：{component?.advancedSizeBytes ? formatStorageSize(component.advancedSizeBytes) : '0 MB'}{component?.advancedFreeBytes ? ` · 目标磁盘剩余 ${formatStorageSize(component.advancedFreeBytes)}` : ''}</p></div></SettingsRow>
       {component?.advancedError && !advancedReady && <SettingsRow title="增强版状态" description="检测到需要处理的问题。" align="start"><p className="ml-auto max-w-lg break-all text-right text-xs leading-5 text-amber-600">{component.advancedError}</p></SettingsRow>}
@@ -401,8 +402,8 @@ const PROJECT_TOOLBAR_ITEMS: Record<ProjectToolbarActionId, { label: string; des
   'select-media': { label: '选片', description: '把当前选择的图片或视频加入选片结果', icon: <CheckCircle2 size={17}/> },
   'video-tools': { label: '视频工具', description: '截取分镜帧、视频转码和视频切割', icon: <Video size={17}/> },
   'image-tools': { label: '图片工具', description: 'PNG 转 JPG 和提取截图主图', icon: <ImageIcon size={17}/> },
-  photoshop: { label: '在 PS 中打开', description: '把所选图片、RAW 或 PSD/PSB 发送到 Photoshop', icon: <span className="flex h-[17px] w-[17px] items-center justify-center rounded border border-blue-400 text-[9px] font-bold text-blue-600">Ps</span> },
-  'office-extract': { label: '提取 Office 图片', description: '提取 Word、PowerPoint 与 Excel 内嵌图片', icon: <FileImage size={17}/> },
+  photoshop: { label: '用 Photoshop 打开', description: '用 Photoshop 打开所选图片、RAW 或 PSD/PSB', icon: <span className="flex h-[17px] w-[17px] items-center justify-center rounded border border-blue-400 text-[9px] font-bold text-blue-600">Ps</span> },
+  'office-extract': { label: '提取文档图片', description: '提取 Word、PowerPoint 和 Excel 中的图片', icon: <FileImage size={17}/> },
   'version-management': { label: '版本管理', description: '管理素材版本或标记进度文件夹', icon: <GitBranch size={17}/> },
   'team-retouch': { label: '团片协作', description: '打开项目的团片协作工作区', icon: <UsersRound size={17}/> },
 };
@@ -431,7 +432,7 @@ const ProjectToolbarSettingsEditor = ({ value, onChange }: { value: AppConfig['p
   });
   return <div className="settings-group-card mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white">
     <label className="flex cursor-pointer items-center gap-3 border-b border-slate-200 px-4 py-3.5">
-      <span className="min-w-0 flex-1"><span className="block text-sm font-bold text-slate-700">仅显示当前可用的功能图标</span><span className="mt-1 block text-xs leading-5 text-slate-500">关闭时保留不可用功能的灰色图标和说明；开启后只显示当前可用功能。</span></span>
+      <span className="min-w-0 flex-1"><span className="block text-sm font-bold text-slate-700">仅显示当前可用的功能图标</span><span className="mt-1 block text-xs leading-5 text-slate-500">开启后只显示可用功能。</span></span>
       <input type="checkbox" checked={value.onlyShowAvailable} onChange={event => onChange({ ...value, onlyShowAvailable: event.target.checked })}/>
     </label>
     {value.order.map((id, index) => {
@@ -518,6 +519,13 @@ const SettingsToggle = ({ checked, onChange, disabled, label }: { checked: boole
   <span className="sr-only">{label}</span><input type="checkbox" checked={checked} disabled={disabled} onChange={event => onChange?.(event.target.checked)} className="h-4 w-4 accent-blue-600"/>
 </label>;
 
+const SettingsPanel = ({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) => <div className="fixed inset-0 z-[500] flex items-center justify-center bg-slate-950/40 p-6" role="dialog" aria-modal="true" aria-label={title} onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+  <section className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+    <header className="flex items-center justify-between border-b border-slate-200 px-5 py-4"><h3 className="text-base font-bold text-slate-800">{title}</h3><button type="button" onClick={onClose} aria-label="关闭" className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X size={18}/></button></header>
+    <div className="min-h-0 overflow-y-auto p-5">{children}</div>
+  </section>
+</div>;
+
 const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectFocus, config, components, componentInstallPath, componentsLoading, onRefreshComponents, onComponentsChanged, onSave, getDefaultSettings, onNotice }: { activeSection: SettingsSection; backupProjectFocus?: WorkspaceProject | null; onClearBackupProjectFocus?: () => void; config: AppConfig; components: ComponentStatus[]; componentInstallPath: string; componentsLoading: boolean; onRefreshComponents: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onSave: (config: AppConfig) => boolean | Promise<boolean>; getDefaultSettings: () => AppConfig | Promise<AppConfig>; onNotice: (message: string, duration?: number) => void }) => {
   const appDialog = useAppDialog();
   const [draft, setDraft] = useState(config);
@@ -532,6 +540,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const [newProjectCategory, setNewProjectCategory] = useState('');
   const [projectCategoryError, setProjectCategoryError] = useState('');
   const [addingProjectCategory, setAddingProjectCategory] = useState(false);
+  const [importVideoPanel, setImportVideoPanel] = useState<'split' | 'transcode' | null>(null);
   const [draggedProjectCategory, setDraggedProjectCategory] = useState('');
   const [restoreProjects, setRestoreProjects] = useState<Record<string, string>>({});
   const pendingSaveRef = useRef<AppConfig | null>(null);
@@ -800,11 +809,11 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       <SettingsRow title="显示角色生日" description="在首页显示角色生日提醒。"><SettingsToggle label="显示角色生日" checked={draft.birthdayEnabled} onChange={checked => update('birthdayEnabled', checked)}/></SettingsRow>
     </SettingsPageGroup>
     <SettingsPageGroup title="文件浏览">
-      <SettingsRow title="打开文件与文件夹" description="应用于文件夹、图片、视频和普通文件；已有选择时，单击继续选择，已打开的预览与详细信息会同步到刚点击的项目。"><select value={draft.itemOpenMode} onChange={event => update('itemOpenMode', event.target.value as AppConfig['itemOpenMode'])} className="form-input ml-auto max-w-sm"><option value="single">单击打开（默认）</option><option value="double">双击打开</option></select></SettingsRow>
+      <SettingsRow title="打开文件与文件夹" description="选择文件时同步更新预览和详细信息。"><select value={draft.itemOpenMode} onChange={event => update('itemOpenMode', event.target.value as AppConfig['itemOpenMode'])} className="form-input ml-auto max-w-sm"><option value="single">单击打开（默认）</option><option value="double">双击打开</option></select></SettingsRow>
       <SettingsRow title="图片评分显示" description="两种界面都直接读写图片自身的 XMP 星级；喜欢模式会把任意星级视为喜欢，点喜欢时写入五星。"><select value={draft.favoriteDisplayMode} onChange={event => update('favoriteDisplayMode', event.target.value as AppConfig['favoriteDisplayMode'])} className="form-input ml-auto max-w-sm"><option value="binary">喜欢 / 不喜欢</option><option value="stars">一星到五星</option></select></SettingsRow>
       <SettingsRow title="文件夹默认排序方式" description=""><select value={draft.defaultFolderSort} onChange={event => update('defaultFolderSort', event.target.value as AppConfig['defaultFolderSort'])} className="form-input ml-auto max-w-sm"><option value="date">修改日期（最新优先）</option><option value="name">文件名（A–Z）</option><option value="size">大小（从大到小）</option></select></SettingsRow>
     </SettingsPageGroup>
-    <section><h3 className="text-sm font-bold text-slate-800">项目工具栏</h3><p className="mt-1 text-xs leading-5 text-slate-500">调整项目文件浏览器中工作流按钮的显示状态、可用性策略和排列顺序。</p><ProjectToolbarSettingsEditor value={draft.projectToolbar} onChange={projectToolbar => update('projectToolbar', projectToolbar)}/></section>
+    <section><h3 className="text-sm font-bold text-slate-800">项目工具栏</h3><p className="mt-1 text-xs leading-5 text-slate-500">设置项目工具栏按钮及顺序。</p><ProjectToolbarSettingsEditor value={draft.projectToolbar} onChange={projectToolbar => update('projectToolbar', projectToolbar)}/></section>
     <SettingsPageGroup title="设置">
       <SettingsRow title="恢复默认设置" description="保留当前工作目录，将其他全部应用设置恢复为初始值。"><button type="button" onClick={() => void restoreDefaults()} className="dialog-secondary ml-auto flex w-fit items-center gap-2"><RotateCcw size={15}/>恢复默认设置</button></SettingsRow>
     </SettingsPageGroup>
@@ -833,7 +842,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
         <StorageVolumeOverview sourceSignature={[...normalizeWorkspacePaths(draft.workspacePath, draft.workspacePaths), inspirationLibrarySettings.rootPath, draft.archive.targetPath, draft.backup.targetPath, draft.mediaCache.directory].join('\u0000')}/>
       </SettingsPageGroup>
       <SettingsPageGroup title="工作目录">
-      <SettingsRow title="项目工作目录" description="可以同时读取多个磁盘中的项目。默认写入目录用于新建项目、导入项目和 SD 卡导入；打开已有项目后，操作会自动使用它所属的磁盘。" align="start"><WorkspaceFoldersPicker primary={draft.workspacePath} values={draft.workspacePaths} onChange={(workspacePath, workspacePaths) => commitSettings({ ...draft, workspacePath, workspacePaths })}/></SettingsRow>
+      <SettingsRow title="项目工作目录" description="可读取多个磁盘。默认目录用于新建和导入项目；已有项目使用其所在磁盘。" align="start"><WorkspaceFoldersPicker primary={draft.workspacePath} values={draft.workspacePaths} onChange={(workspacePath, workspacePaths) => commitSettings({ ...draft, workspacePath, workspacePaths })}/></SettingsRow>
       <SettingsRow title="灵感库目录" description="选择后立即保存，并纳入磁盘占用统计。"><WorkspaceFolderPicker value={inspirationLibrarySettings.rootPath} onChange={rootPath => void updateInspirationLibraryRoot(rootPath)}/></SettingsRow>
       <SettingsRow title="使用独立项目归档盘" description={draft.archive.enabled ? (archiveStatus.state === 'connected' ? '归档盘已连接。' : archiveStatus.state === 'offline' ? '归档盘当前离线。' : '请选择归档盘。') : '将“已归档”项目迁移到其他存储盘。'}><SettingsToggle label="使用独立项目归档盘" checked={draft.archive.enabled} onChange={checked => { if (checked && !draft.archive.targetPath) void chooseArchiveTarget(); else update('archive', { ...draft.archive, enabled: checked }); }}/></SettingsRow>
       <SettingsRow title="项目归档盘位置" description={archiveStatus.freeBytes !== undefined ? `剩余 ${formatStorageSize(archiveStatus.freeBytes)} / ${formatStorageSize(archiveStatus.totalBytes)}` : '选择用于保存已归档项目的位置。'}><fieldset disabled={!draft.archive.enabled} className="flex min-w-0 gap-2 disabled:opacity-50"><input readOnly value={draft.archive.targetPath} placeholder="尚未选择归档盘" className="form-input min-w-0 flex-1"/><button type="button" onClick={() => void chooseArchiveTarget()} className="dialog-secondary shrink-0">选择</button><button type="button" onClick={() => void window.electronAPI.openArchiveTarget()} disabled={!draft.archive.targetPath} className="dialog-secondary shrink-0 disabled:opacity-45">打开</button></fieldset></SettingsRow>
@@ -851,7 +860,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       </>}
       <SettingsRow title="立即备份" description={backupStatus.latestAt ? `上次成功：${new Date(backupStatus.latestAt).toLocaleString()} · ${backupStatus.snapshotCount || 0} 个快照` : '立即为当前工作区创建备份。'}><button type="button" onClick={() => void runBackup()} disabled={!draft.backup.enabled || !draft.backup.targetPath || backupAction === 'run'} className="dialog-primary ml-auto flex w-fit items-center gap-2 disabled:opacity-45">{backupAction === 'run' ? <Loader2 size={15} className="animate-spin"/> : <ShieldCheck size={15}/>}立即备份</button></SettingsRow>
       <SettingsRow title="历史策略" description="选择保留全部历史快照或只保留最新状态。"><select value={draft.backup.mode} onChange={event => update('backup', { ...draft.backup, mode: event.target.value as AppConfig['backup']['mode'] })} className="form-input ml-auto max-w-sm"><option value="history">保留全部历史快照</option><option value="latest">仅保留最新快照</option></select></SettingsRow>
-      {draft.backup.mode === 'history' && <SettingsRow title="历史快照保留" description="历史快照会自动按近期每日、长期每周和每月的方式保留，无需手动管理。"><p className="text-sm text-slate-500">最近 7 天每日一份 · 最近 4 周每周一份 · 最近 12 个月每月一份</p></SettingsRow>}
+      {draft.backup.mode === 'history' && <SettingsRow title="历史快照保留" description="快照按日、周、月自动保留。"><p className="text-sm text-slate-500">最近 7 天每日一份 · 最近 4 周每周一份 · 最近 12 个月每月一份</p></SettingsRow>}
       <SettingsRow title="每天自动备份" description="每天首次启动时检查，24 小时内已有成功快照则跳过。"><SettingsToggle label="每天自动备份" checked={draft.backup.automaticDaily} onChange={checked => update('backup', { ...draft.backup, automaticDaily: checked })}/></SettingsRow>
       <SettingsRow title="导入完成后自动备份" description="导入任务成功后备份当前工作区，并发触发会自动合并。"><SettingsToggle label="导入完成后自动备份" checked={draft.backup.afterImport} onChange={checked => update('backup', { ...draft.backup, afterImport: checked })}/></SettingsRow>
       <SettingsRow title="清理过期备份" description="删除保留策略之外的旧快照，并回收只有这些快照使用的文件。不会删除工作区原文件、归档项目或仍保留的快照。"><div className="ml-auto w-fit text-right"><p className="text-sm font-bold text-slate-700">{backupSpace.success ? `预计删除 ${backupSpace.expiredSnapshotCount || 0} 个过期快照，释放约 ${formatStorageSize(backupSpace.estimatedReclaimableBytes)}` : '连接备份位置后显示预计结果'}</p>{backupSpace.success && <p className="mt-1 text-xs text-slate-400">实际占用 {formatStorageSize(backupSpace.actualBytes)} · 内容去重已自动启用，已节省 {formatStorageSize(backupSpace.deduplicatedBytes)}</p>}<button type="button" onClick={() => void cleanupBackup()} disabled={!backupSpace.success || Boolean(backupAction)} className="dialog-secondary mt-3 text-xs disabled:opacity-45">清理过期备份</button></div></SettingsRow>
@@ -871,33 +880,35 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     {activeSection === 'team-retouch' && <>
     <SettingsPageGroup title="处理偏好">
       <SettingsRow title="优先使用 GPU" description="显卡不支持或运行失败时，基础人物检测会自动回退 CPU。"><SettingsToggle label="优先使用 GPU" checked={teamRetouchSettings.useGpu} onChange={checked => updateTeamRetouchSettings({ ...teamRetouchSettings, useGpu: checked })}/></SettingsRow>
-      <SettingsRow title="裁剪方式" description="人物超过 4000 像素时选择保持尺寸或扩大裁剪。如果选择扩大裁剪，很可能会导致单个裁剪图片超过4000像素而无法全像素被手机修图软件导出。"><select value={teamRetouchSettings.oversizeCropMode} onChange={event => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: event.target.value as AppConfig['personDetection']['oversizeCropMode'] })} className="form-input ml-auto max-w-sm"><option value="face-centered">保持 4000 像素</option><option value="expand">扩大裁剪，保留完整人物</option></select></SettingsRow>
+      <SettingsRow title="裁剪方式" description="人物超过 4000 像素时，可限制尺寸或保留完整人物；后者可能超出手机修图软件限制。"><select value={teamRetouchSettings.oversizeCropMode} onChange={event => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: event.target.value as AppConfig['personDetection']['oversizeCropMode'] })} className="form-input ml-auto max-w-sm"><option value="face-centered">保持 4000 像素</option><option value="expand">扩大裁剪，保留完整人物</option></select></SettingsRow>
     </SettingsPageGroup>
     <TeamRetouchEngineSettings component={teamRetouchComponent} onRefresh={onRefreshComponents} onNotice={onNotice}/>
     </>}
     {activeSection === 'video-playback-mpv' && <>
     <SettingsPageGroup title="视频浏览">
-      <SettingsRow title="左右方向键行为" description="播放器播放/暂停键左右两侧的后退、前进按钮会自动执行相反操作，确保切换视频和快进快退均可使用。"><select value={advancedVideoSettings.arrowKeyAction} onChange={event => updateAdvancedVideoSettings({ arrowKeyAction: event.target.value as 'seek' | 'navigate' })} className="form-input ml-auto max-w-sm"><option value="seek">快退 / 快进 5 秒（默认）</option><option value="navigate">切换上一个 / 下一个视频</option></select></SettingsRow>
+      <SettingsRow title="左右方向键行为" description="设置左右方向键用于快进快退或切换视频。"><select value={advancedVideoSettings.arrowKeyAction} onChange={event => updateAdvancedVideoSettings({ arrowKeyAction: event.target.value as 'seek' | 'navigate' })} className="form-input ml-auto max-w-sm"><option value="seek">快退 / 快进 5 秒（默认）</option><option value="navigate">切换上一个 / 下一个视频</option></select></SettingsRow>
     </SettingsPageGroup>
     </>}
     {activeSection === 'import' && <>
-    <SettingsPageGroup title="导入">
+    <SettingsPageGroup title="导入行为">
+      <SettingsRow title="RAW 缺 JPG 时自动创建" description="RAW 缺少同名 JPG 时自动生成。"><SettingsToggle label="RAW 缺 JPG 时自动创建" checked={draft.importDefaults.generateJpgFromRaw} onChange={checked => update('importDefaults', { ...draft.importDefaults, generateJpgFromRaw: checked })}/></SettingsRow>
       <SettingsRow title="导入后默认删除源文件" description="关闭时保留源文件，每个导入面板仍可单独决定本次行为。"><SettingsToggle label="导入后默认删除源文件" checked={draft.importDefaults.deleteSourceAfterImport} onChange={checked => update('importDefaults', { ...draft.importDefaults, deleteSourceAfterImport: checked })}/></SettingsRow>
     </SettingsPageGroup>
-    <SettingsPageGroup title="导入底片">
-      <SettingsRow title="自动分割大型视频" description="视频超过 4GB 时自动分割，兼容 FAT32 和部分云盘限制。"><SettingsToggle label="自动分割大型视频" checked={draft.smartImport.splitLargeFiles} onChange={checked => update('smartImport', { ...draft.smartImport, splitLargeFiles: checked })}/></SettingsRow>
-      <SettingsRow title="生成视频预览" description="为导入到 mov 的大型视频生成 H.264 快速播放文件。"><SettingsToggle label="生成视频预览" checked={draft.smartImport.generateVideoPreview} onChange={checked => update('smartImport', { ...draft.smartImport, generateVideoPreview: checked })}/></SettingsRow>
-      <SettingsRow title="视频预览质量" description="选择预览画质、生成速度和文件大小。"><select disabled={!draft.smartImport.generateVideoPreview} value={draft.smartImport.videoPreviewQuality} onChange={event => update('smartImport', { ...draft.smartImport, videoPreviewQuality: event.target.value as AppConfig['smartImport']['videoPreviewQuality'] })} className="form-input ml-auto max-w-sm disabled:opacity-50"><option value="medium">中（默认 · 约 4 Mbps）</option><option value="high">高（约 10 Mbps）</option></select></SettingsRow>
-      <SettingsRow title="RAW 缺少同名 JPG 时自动创建" description="关闭时不会在导入 RAW 文件时额外创建 JPG。"><SettingsToggle label="RAW 缺少同名 JPG 时自动创建" checked={draft.importDefaults.generateJpgFromRaw} onChange={checked => update('importDefaults', { ...draft.importDefaults, generateJpgFromRaw: checked })}/></SettingsRow>
+    <SettingsPageGroup title="导入工作文件">
+      <SettingsRow title="导入工作文件时执行视频切割" description="仅处理导入的工作视频；开启时使用视频切割面板的规则。"><div className="flex items-center justify-end gap-3"><button type="button" className="dialog-secondary px-3 py-1.5 text-xs" onClick={() => setImportVideoPanel('split')}>打开视频切割面板</button><SettingsToggle label="导入工作文件时执行视频切割" checked={draft.importDefaults.splitVideosOnImport} onChange={checked => { update('importDefaults', { ...draft.importDefaults, splitVideosOnImport: checked }); if (checked) setImportVideoPanel('split'); }}/></div></SettingsRow>
+      <SettingsRow title="导入工作文件时执行视频转码" description="仅处理导入的工作视频；开启时使用视频转码面板保存的参数。"><div className="flex items-center justify-end gap-3"><button type="button" className="dialog-secondary px-3 py-1.5 text-xs" onClick={() => setImportVideoPanel('transcode')}>打开视频转码面板</button><SettingsToggle label="导入工作文件时执行视频转码" checked={draft.importDefaults.transcodeVideosOnImport} onChange={checked => { update('importDefaults', { ...draft.importDefaults, transcodeVideosOnImport: checked }); if (checked) setImportVideoPanel('transcode'); }}/></div></SettingsRow>
+    </SettingsPageGroup>
+    <SettingsPageGroup title="导入花絮">
+      <SettingsRow title="导入花絮时执行视频切割" description="仅处理导入的花絮视频；使用同一个视频切割面板规则。"><div className="flex items-center justify-end gap-3"><button type="button" className="dialog-secondary px-3 py-1.5 text-xs" onClick={() => setImportVideoPanel('split')}>打开视频切割面板</button><SettingsToggle label="导入花絮时执行视频切割" checked={draft.brollImport.splitVideosOnImport} onChange={checked => { update('brollImport', { ...draft.brollImport, splitVideosOnImport: checked }); if (checked) setImportVideoPanel('split'); }}/></div></SettingsRow>
+      <SettingsRow title="导入花絮时执行视频转码" description="仅处理导入的花絮视频；使用同一个视频转码面板参数。"><div className="flex items-center justify-end gap-3"><button type="button" className="dialog-secondary px-3 py-1.5 text-xs" onClick={() => setImportVideoPanel('transcode')}>打开视频转码面板</button><SettingsToggle label="导入花絮时执行视频转码" checked={draft.brollImport.transcodeVideosOnImport} onChange={checked => { update('brollImport', { ...draft.brollImport, transcodeVideosOnImport: checked }); if (checked) setImportVideoPanel('transcode'); }}/></div></SettingsRow>
     </SettingsPageGroup>
     <SettingsPageGroup title="从 SD 卡导入">
-      <SettingsRow title="启动时自动从 SD 卡导入" description="应用启动后自动检查已启用的 SD 卡设备并进入导入流程；默认关闭。"><SettingsToggle label="启动时自动从 SD 卡导入" checked={draft.smartImport.autoStart} onChange={checked => update('smartImport', { ...draft.smartImport, autoStart: checked })}/></SettingsRow>
+      <SettingsRow title="启动时自动从 SD 卡导入" description="启动时检查已启用的 SD 卡并打开导入。"><SettingsToggle label="启动时自动从 SD 卡导入" checked={draft.smartImport.autoStart} onChange={checked => update('smartImport', { ...draft.smartImport, autoStart: checked })}/></SettingsRow>
       <SettingsRow title="导入日期范围" description="限制从真实 SD 卡读取的素材拍摄日期。"><select value={draft.smartImport.dateFilter} onChange={event => update('smartImport', { ...draft.smartImport, dateFilter: event.target.value as AppConfig['smartImport']['dateFilter'] })} className="form-input ml-auto max-w-sm"><option value="all">全部素材</option><option value="today">仅今天拍摄的素材</option><option value="today_yesterday">今天和昨天拍摄的素材</option></select></SettingsRow>
       <SettingsRow title="已记录的 SD 卡设备" description="管理设备是否用于导入，以及默认作为工作文件还是花絮。" align="start"><SdDriveHistorySettings value={draft.smartImport} onChange={smartImport => update('smartImport', smartImport)}/></SettingsRow>
     </SettingsPageGroup>
-    <SettingsPageGroup title="花絮导入">
-      <SettingsRow title="自动分割大型花絮视频" description="花絮视频超过 4GB 时自动分割。"><SettingsToggle label="自动分割大型花絮视频" checked={draft.brollImport.splitLargeFiles} onChange={checked => update('brollImport', { ...draft.brollImport, splitLargeFiles: checked })}/></SettingsRow>
-    </SettingsPageGroup>
+    {importVideoPanel === 'split' && <SettingsPanel title="视频切割设置" onClose={() => setImportVideoPanel(null)}><VideoSplitView embedded settingsOnly/></SettingsPanel>}
+    {importVideoPanel === 'transcode' && <SettingsPanel title="视频转码设置" onClose={() => setImportVideoPanel(null)}><VideoTranscodeView embedded settingsOnly initialSettings={draft.videoTools.transcode} onSettingsChange={transcode => update('videoTools', { ...draft.videoTools, transcode })}/></SettingsPanel>}
     </>}
     {activeSection === 'about' && <AboutSettings/>}
     {activeSection === 'feedback' && <FeedbackSettings onNotice={onNotice}/>}
@@ -921,7 +932,7 @@ const FeedbackSettings = ({ onNotice }: { onNotice: (message: string, duration?:
     onNotice('感谢反馈，已成功发送');
   };
   return <SettingsPageGroup title="问题和建议">
-    <div className="px-4 py-3.5"><div><h4 className="text-sm font-bold text-slate-800">反馈内容</h4><p className="mt-1 text-xs leading-5 text-slate-500">请描述问题、复现步骤或希望增加的功能；不要填写密码、密钥和私人文件路径。</p></div><textarea value={message} maxLength={4000} rows={9} onChange={event => setMessage(event.target.value)} placeholder="例如：我在……操作后遇到了……；希望能够……" className="mt-3 w-full resize-y rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"/><div className="mt-2 flex items-center justify-between gap-4"><span className={`text-xs ${message.length >= 3900 ? 'text-amber-600' : 'text-slate-400'}`}>{message.length}/4000</span><button type="button" onClick={() => void submit()} disabled={trimmed.length < 2 || submitting} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{submitting ? <Loader2 size={14} className="animate-spin"/> : <Send size={14}/>} {submitting ? '正在发送…' : '发送'}</button></div></div>
+    <div className="px-4 py-3.5"><div><h4 className="text-sm font-bold text-slate-800">反馈内容</h4><p className="mt-1 text-xs leading-5 text-slate-500">请描述问题或建议，不要填写密码、密钥或私人路径。</p></div><textarea value={message} maxLength={4000} rows={9} onChange={event => setMessage(event.target.value)} placeholder="例如：我在……操作后遇到了……；希望能够……" className="mt-3 w-full resize-y rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"/><div className="mt-2 flex items-center justify-between gap-4"><span className={`text-xs ${message.length >= 3900 ? 'text-amber-600' : 'text-slate-400'}`}>{message.length}/4000</span><button type="button" onClick={() => void submit()} disabled={trimmed.length < 2 || submitting} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{submitting ? <Loader2 size={14} className="animate-spin"/> : <Send size={14}/>} {submitting ? '正在发送…' : '发送'}</button></div></div>
     <SettingsRow title="随反馈附带的信息" description="软件版本、操作系统类型和匿名安装标识；不会自动上传照片、项目文件或日志。"><span className="ml-auto block w-fit text-xs font-bold text-slate-500">仅诊断信息</span></SettingsRow>
   </SettingsPageGroup>;
 };
@@ -1076,7 +1087,7 @@ const InterfaceCacheSettings = ({ onNotice }: { onNotice: (message: string, dura
   const clear = async () => {
     if (busy || !await appDialog.confirm({
       title: '确定清理界面缓存吗？',
-      message: '软件会自动管理这部分缓存，通常只需在释放磁盘空间时清理。',
+      message: '缓存会自动管理，仅在需要释放空间时清理。',
       confirmLabel: '清理缓存',
       tone: 'danger',
     })) return;
@@ -1090,7 +1101,7 @@ const InterfaceCacheSettings = ({ onNotice }: { onNotice: (message: string, dura
       setBusy(false);
     }
   };
-  return <SettingsRow title="界面缓存" description="软件会自动清理和容量淘汰，通常只需在释放空间或界面资源异常时手动清理。"><button type="button" disabled={busy} onClick={() => void clear()} className="dialog-secondary ml-auto flex w-fit items-center gap-2 disabled:opacity-50"><Trash2 size={14}/>{busy ? '正在清理…' : '清理界面缓存'}</button></SettingsRow>;
+  return <SettingsRow title="界面缓存" description="通常无需清理；释放空间或界面异常时可手动清理。"><button type="button" disabled={busy} onClick={() => void clear()} className="dialog-secondary ml-auto flex w-fit items-center gap-2 disabled:opacity-50"><Trash2 size={14}/>{busy ? '正在清理…' : '清理界面缓存'}</button></SettingsRow>;
 };
 
 export { WorkspaceSetupPage, SettingsNavigator, SettingsPage };

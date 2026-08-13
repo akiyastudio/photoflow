@@ -65,10 +65,14 @@ const pasteTask = makeTask('paste', 'paste', 'running', 5);
 assert(isActiveProjectFileTask(moveTask) && isActiveProjectFileTask(trashTask), 'move and trash project-file operations must be eligible for progress toasts');
 assert(!isActiveProjectFileTask(makeTask('done', 'move', 'completed', 1)), 'terminal file tasks must leave the toast stack');
 assert.deepStrictEqual(selectProjectFileTaskToasts([trashTask, moveTask, pasteTask], new Set()).visible.map(task => task.id), ['paste', 'move', 'trash'], 'running tasks must precede queued tasks and use creation order within a state');
+assert.deepStrictEqual(selectProjectFileTaskToasts([{ ...trashTask, createdAt: 9_600 }], new Set(), 4, 10_000).visible, [], 'short queued waits must not flash a scheduler toast');
+assert.deepStrictEqual(selectProjectFileTaskToasts([{ ...trashTask, createdAt: 9_000 }], new Set(), 4, 10_000).visible.map(task => task.id), ['trash'], 'a real queued wait must become visible after the grace period');
 const copiedFilesMarkup = renderToStaticMarkup(React.createElement(FileTransferToastItem, { task: { ...pasteTask, metadata: { operation: 'paste', filesCopied: 3, totalFiles: 10 } }, onMinimize: () => {} }));
 assert(copiedFilesMarkup.includes('3/10 文件'), 'copy-style task metadata must render its actual file count with the file unit');
 const processedItemsMarkup = renderToStaticMarkup(React.createElement(FileTransferToastItem, { task: { ...moveTask, metadata: { operation: 'move', processedCount: 3, totalCount: 10 } }, onMinimize: () => {} }));
 assert(processedItemsMarkup.includes('3/10 项'), 'move and trash metadata must render its actual processed item count with the generic item unit');
+const queuedTrackingMarkup = renderToStaticMarkup(React.createElement(FileTransferToastItem, { task: { ...trashTask, type: 'version-tracking', title: '比较版本跟踪', message: '等待其他文件操作完成，之后自动开始版本比较' }, onMinimize: () => {} }));
+assert(queuedTrackingMarkup.includes('等待其他文件操作完成') && queuedTrackingMarkup.includes('完成后自动开始版本比较') && !queuedTrackingMarkup.includes('磁盘任务名额'), 'queued tracking must explain the wait without exposing scheduler terminology');
 
 let minimized = setTaskToastMinimized(new Set(), moveTask.id, true);
 assert(minimized.has('move') && !minimized.has('trash'), 'minimizing one toast must not affect another task');
@@ -98,6 +102,7 @@ assert(!notices.some(notice => notice.id === 13), 'timer expiry must remove only
 const nextToastId = notices[1].id;
 notices = removeTopToastNotice(notices, notices[0].id);
 assert.strictEqual(notices[0].id, nextToastId, 'after the leading toast is dismissed, the following toast must move into its stack position');
+assert(topToastStack.includes('return () => dismissNotice(id)'), 'callers must be able to dismiss a completed loading notice immediately');
 
 const triggerTarget = {};
 const panelTarget = {};

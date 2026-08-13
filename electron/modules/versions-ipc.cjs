@@ -18,8 +18,7 @@ const retryDatabaseLocked = async (operation, attempts = 4) => {
 };
 
 const registerVersionIpc = context => {
-  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog } = context;
-  const trackingScanService = mediaScanService || versionService;
+  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog } = context;
   const listRatedProjectMedia = projectPath => mediaRatingService.listProject(projectPath);
   const teamDataDirectory = (workspaceRoot, photoId, baseVersionId) => path.join(getWorkspaceDataRoot(workspaceRoot), 'team-retouch', photoId, baseVersionId);
   const deliveryName = (photo, basePath) => path.parse(photo?.originalName || photo?.displayName || basePath).name;
@@ -941,9 +940,30 @@ const registerVersionIpc = context => {
         replacementProgressId: replacementTarget ? current.id : undefined,
         updates: databaseUpdates,
       });
-      await versionService.syncProject(workspaceRoot, projectName).catch(error => {
-        writeLog('warn', 'Progress tree updated but media rescan failed', { projectName, error: error.message || String(error) });
-      });
+      // Updating/renaming the progress tree is already atomic. A full project
+      // media rescan is read-only filesystem maintenance and can touch thousands
+      // of files. Do not reserve the whole project path for it: that would block
+      // a focused version comparison on a child folder until the entire scan
+      // finishes. The isolated scan worker/database make both operations safe to
+      // run concurrently, while the shared disk group still limits total load.
+      if (backgroundTasks?.run && mediaScanService?.syncProject) setTimeout(() => void backgroundTasks.run({
+        type: 'version-media-rescan',
+        title: '更新版本媒体索引',
+        dedupeKey: `version-media-rescan:${workspaceRoot}:${projectName}`,
+        concurrencyGroup: 'disk-io',
+        concurrencyLimit: 3,
+        concurrencyWriteLimit: 2,
+        resourceAccess: 'read',
+        cancellable: false,
+        resources: [projectPath],
+      }, async task => {
+        task.report(5, '正在扫描项目媒体文件');
+        const result = await mediaScanService.syncProject(workspaceRoot, projectName);
+        task.report(95, '正在完成版本媒体索引');
+        return result;
+      }).catch(error => {
+        writeLog('warn', 'Deferred progress-tree media rescan failed', { projectName, error: error.message || String(error) });
+      }), 250);
       const updatedFolderPath = updates.find(update => update.id === current.id)?.folderPath || current.folderPath;
       return {
         ...updated,
@@ -1358,14 +1378,18 @@ const registerVersionIpc = context => {
         JSON.stringify(generatedOrder) !== JSON.stringify(preferredIdentityOrder)
         || JSON.stringify(generatedSameWeekIdentityIds) !== JSON.stringify(sameWeekIdentityIds)
       ));
-      const workflowAvailableKeys = workflowGenerated
+      const availableWorkflowItems = workflowGenerated
         ? (workflowManifest.groups || []).flatMap(group => (group.items || []).filter(item => {
           if (!item.available || !item.relativePath) return false;
           const itemPath = path.resolve(workflowTarget.outputDirectory, item.relativePath);
           return isInside(workflowTarget.outputDirectory, itemPath) && fs.existsSync(itemPath);
-        }).map(item => `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`))
+        }))
         : [];
-      return { ...workspace, workflowGenerated, workflowNeedsRegeneration, workflowAvailableKeys, workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds } };
+      const workflowAvailableKeys = availableWorkflowItems.map(item => `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`);
+      // Photos can be re-registered while retaining the same base version. Generated
+      // workflows still contain the previous photo ID, so expose a stable key as well.
+      const workflowAvailableSubjectKeys = availableWorkflowItems.map(item => `${item.baseVersionId}:${Number(item.personIndex)}`);
+      return { ...workspace, workflowGenerated, workflowNeedsRegeneration, workflowAvailableKeys, workflowAvailableSubjectKeys, workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds } };
     } catch (error) {
       writeLog('error', 'Unable to load team retouch project workspace', {
         projectName: String(projectName || ''),

@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
+import workspace_db as workspace_db_module  # noqa: E402
 from thumbnail_db import ThumbnailDatabase  # noqa: E402
 from workspace_db import (  # noqa: E402
     batch_commit_compare,
@@ -284,6 +285,10 @@ def test_incremental_progress_append_preserves_existing_items(root: Path) -> Non
     )
     db.commit()
     try:
+        original_full_fingerprint = workspace_db_module.full_fingerprint
+        workspace_db_module.full_fingerprint = lambda _path: (_ for _ in ()).throw(
+            AssertionError("interactive batch commit must not calculate full-file hashes")
+        )
         batch_register_baseline(str(workspace), db, {
             "projectName": "Project", "folderPath": str(baseline_folder),
         })
@@ -308,6 +313,7 @@ def test_incremental_progress_append_preserves_existing_items(root: Path) -> Non
         item_names = {row["source_name"] for row in db.execute("SELECT source_name FROM batch_items WHERE batch_id=?", (batch_id,))}
         assert item_names == {"one.jpg", "two.jpg", "three.jpg"}
     finally:
+        workspace_db_module.full_fingerprint = original_full_fingerprint
         db.close()
 
 

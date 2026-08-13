@@ -4411,12 +4411,26 @@ def tracking_session_create(root: str, db, payload: dict):
         root, db, str(payload.get("projectName") or ""), progress_id,
     )
     active = db.execute(
-        """SELECT id FROM tracking_sessions WHERE progress_id=?
+        """SELECT * FROM tracking_sessions WHERE progress_id=?
            AND status IN ('comparing','pending_confirm','committing','failed') LIMIT 1""",
         (progress["id"],),
     ).fetchone()
     if active is not None:
-        raise ValueError(f"progress already has an active tracking session: {active['id']}")
+        failed_item_count = db.execute(
+            "SELECT COUNT(*) FROM tracking_session_items WHERE session_id=?", (active["id"],)
+        ).fetchone()[0] if active["status"] == "failed" else 0
+        if active["status"] == "failed" and not active["committed_batch_id"] and not failed_item_count:
+            # A failed compare is terminal. Keeping it behind the one-active-session
+            # index makes every later refresh fail forever, so discard it before
+            # creating the retry session. The progress node remains stale/repairable.
+            tracking_session_release(db, {"sessionId": active["id"]})
+        else:
+            return {
+                "success": True, "sessionId": active["id"], "progressId": progress["id"],
+                "parentProgressId": active["parent_progress_id"], "mode": active["mode"],
+                "sessionStatus": active["status"], "reused": True,
+                "parentFolderPath": parent_path, "progressFolderPath": progress_path,
+            }
     timestamp = int(time.time() * 1000)
     session_id = str(payload.get("sessionId") or uuid.uuid4())
     db.execute(
@@ -4435,6 +4449,7 @@ def tracking_session_create(root: str, db, payload: dict):
     return {
         "success": True, "sessionId": session_id, "progressId": progress["id"],
         "parentProgressId": parent["id"], "mode": mode,
+        "sessionStatus": "comparing", "reused": False,
         "parentFolderPath": parent_path, "progressFolderPath": progress_path,
     }
 
@@ -4447,9 +4462,14 @@ def tracking_prepare(root: str, db, payload: dict):
     project, parent, progress, parent_path, progress_path = _validated_tracking_nodes(
         root, db, str(payload.get("projectName") or ""), progress_id,
     )
-    current_files = folder_media_snapshot(progress_path)
-    current_parent = folder_media_snapshot(parent_path)
     previous_files, previous_parent = _tracking_snapshot_parts(progress)
+    current_files = folder_media_snapshot(progress_path)
+    # The parent snapshot only drives "copy missing from parent" detection.
+    # Hashing every RAW in a large parent folder can read hundreds of MB before
+    # comparison even begins, so preserve the previous snapshot when that
+    # policy is disabled. rename.py still reads the parent files it actually
+    # needs for visual matching.
+    current_parent = folder_media_snapshot(parent_path) if progress["copy_missing_from_parent"] else previous_parent
     if mode == "refresh" and previous_files:
         source_names = sorted(
             name for name, signature in current_files.items()
@@ -4742,7 +4762,7 @@ def tracking_commit_plan(root: str, db, payload: dict):
         raise ValueError("跟踪会话不存在")
     if session["status"] == "committed":
         return {"success": True, "alreadyCommitted": True, "sessionId": session_id, "batchId": session["committed_batch_id"]}
-    if session["status"] not in ("pending_confirm", "failed"):
+    if session["status"] not in ("pending_confirm", "failed", "committing"):
         raise ValueError("跟踪会话当前不能提交")
     if session["status"] == "failed" and not session["committed_batch_id"]:
         item_count = db.execute(
@@ -4901,7 +4921,12 @@ def progress_main_branch_media(db, payload: dict):
                JOIN version_batches batches ON batches.id=items.batch_id
                JOIN progress_folders progress
                  ON progress.project_id=batches.project_id
-                AND progress.folder_path_key=batches.source_folder_path_key
+                AND (
+                  (progress.folder_id IS NOT NULL AND batches.source_folder_id IS NOT NULL
+                   AND progress.folder_id=batches.source_folder_id)
+                  OR ((progress.folder_id IS NULL OR batches.source_folder_id IS NULL)
+                      AND progress.folder_path_key=batches.source_folder_path_key)
+                )
                WHERE versions.photo_id=? AND versions.is_deleted=0
                  AND progress.node_role IN ('original','progress')
                  AND (progress.relation_kind IS NULL OR progress.relation_kind='main')
@@ -4946,7 +4971,12 @@ def progress_main_branch_media(db, payload: dict):
     entries = []
     seen_versions = set()
     for branch_index, node in enumerate(ordered_nodes):
-        parameters = [node["project_id"], node["folder_path_key"]]
+        # A progress folder may be renamed after its batch was committed. The
+        # filesystem folder identity survives that rename, while the historical
+        # batch intentionally retains the path that was current at commit time.
+        # Prefer the stable identity and use the path only for legacy rows that
+        # do not have an identity on one side.
+        parameters = [node["project_id"], node["folder_id"], node["folder_path_key"]]
         photo_filter = ""
         if photo_id:
             photo_filter = " AND versions.photo_id=?"
@@ -4957,16 +4987,23 @@ def progress_main_branch_media(db, payload: dict):
                 JOIN batch_items items ON items.batch_id=batches.id
                 JOIN versions ON versions.id=items.version_id
                 JOIN photos ON photos.id=versions.photo_id
-                WHERE batches.project_id=? AND batches.source_folder_path_key=?
+                WHERE batches.project_id=? AND (
+                  (? IS NOT NULL AND batches.source_folder_id IS NOT NULL
+                   AND batches.source_folder_id=?)
+                  OR ((? IS NULL OR batches.source_folder_id IS NULL)
+                      AND batches.source_folder_path_key=?)
+                )
                   AND versions.is_deleted=0{photo_filter}
                 ORDER BY batches.sequence,items.created_at,items.id""",
-            parameters,
+            [parameters[0], parameters[1], parameters[1], parameters[1], parameters[2], *parameters[3:]],
         ).fetchall()
         for version in versions:
             if version["id"] in seen_versions:
                 continue
             seen_versions.add(version["id"])
             serialized = serialize_version(version)
+            if node["node_role"] == "progress":
+                serialized["displayVersionKey"] = node["version_key"]
             serialized["fileMissing"] = serialized["fileMissing"] or not os.path.isfile(version["file_path"])
             entries.append({
                 "branchIndex": branch_index,
@@ -5131,7 +5168,9 @@ def ensure_reference_batch(root: str, db, project, folder_path: str):
             version = ensure_source_version(db, project, file_path, pending_hashes)
             register_batch_item(db, batch["id"], version, file_path, "baseline")
             db.commit()
-            backfill_full_fingerprints(db, pending_hashes)
+            # Baseline registration only needs stable IDs and quick
+            # fingerprints. Full hashes are maintenance metadata and are filled
+            # by the isolated media scan after the interactive operation.
         stale_items = db.execute(
             "SELECT id,source_path_key FROM batch_items WHERE batch_id=?",
             (batch["id"],),
@@ -5439,9 +5478,10 @@ def apply_pending_batch_operations(db, batch_id: str):
                 "SELECT full_hash FROM file_records WHERE owner_type='version' AND owner_id=?",
                 (item["version_id"],),
             ).fetchone()
+            # Renaming inside the tracked folder preserves the file identity;
+            # a full-file hash is unnecessary for this operation and is filled
+            # lazily if a future cross-volume recovery actually needs it.
             authoritative_hash = existing_record["full_hash"] if existing_record is not None else None
-            if not authoritative_hash:
-                authoritative_hash = full_fingerprint(target_path)
             timestamp = int(time.time() * 1000)
             db.execute(
                 """UPDATE batch_items SET source_name=?,source_path=?,source_path_key=?,source_file_id=?,updated_at=?
@@ -5527,14 +5567,10 @@ def batch_commit_compare(root: str, db, payload: dict):
 
     reference_batch = ensure_reference_batch(root, db, project, folder_a)
     pending_hashes = []
-    # Register and hash returned files one by one before the relationship
-    # transaction starts. Later batch writes can then reuse cached hashes and
-    # never hold SQLite's writer slot while reading a large RAW/video file.
-    for source_path in folder_media_files(folder_b):
-        preflight_hashes = []
-        ensure_source_version(db, project, source_path, preflight_hashes)
-        db.commit()
-        backfill_full_fingerprints(db, preflight_hashes)
+    # Relationship commits use stable file IDs plus quick fingerprints. Full
+    # SHA-256 fingerprints are intentionally lazy: synchronously reading every
+    # large JPG/video here does not affect the already-confirmed relationship
+    # and used to dominate the confirmation wait time.
     import_key = str(payload.get("importKey") or uuid.uuid4())
     batch = db.execute("SELECT * FROM version_batches WHERE import_key=?", (import_key,)).fetchone()
     if batch is None and payload.get("reconcileExisting"):
@@ -5617,7 +5653,6 @@ def batch_commit_compare(root: str, db, payload: dict):
             if not payload.get("renameSources"):
                 set_progress_tracking_state_for_folder(db, project["id"], folder_b, "ready")
             db.commit()
-            backfill_full_fingerprints(db, pending_hashes)
             rename_result = apply_pending_batch_operations(db, batch["id"]) if payload.get("renameSources") else {"renamedCount": 0, "renameErrors": [], "repairRequired": False, "operationCount": 0}
             return {
                 "success": True,
@@ -5706,7 +5741,6 @@ def batch_commit_compare(root: str, db, payload: dict):
         if not payload.get("renameSources"):
             set_progress_tracking_state_for_folder(db, project["id"], folder_b, "ready")
         db.commit()
-        backfill_full_fingerprints(db, pending_hashes)
         rename_result = apply_pending_batch_operations(db, batch["id"]) if payload.get("renameSources") else {"renamedCount": 0, "renameErrors": [], "repairRequired": False, "operationCount": 0}
         return {
             "success": True,

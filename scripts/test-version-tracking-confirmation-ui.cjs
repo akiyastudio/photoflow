@@ -60,8 +60,9 @@ const { pathToFileURL } = require('url');
   assert(!workspaceSource.includes('onMinimize={() => setTrackingConfirmationSessionId'), 'workspace does not pass the removed tracking confirmation minimize callback');
   assert(appStyles.includes('html.dark .tracking-confirmation-dialog') && appStyles.includes('html.dark .tracking-confirmation-row.is-selected'), 'tracking confirmation has dedicated dark-theme surfaces and selection colors');
   assert(appStyles.includes('html.dark .bg-white\\/95'), '95% translucent white surfaces are mapped to a dark background');
-  assert(panelSource.includes('不是同一张') && panelSource.includes('是同一张'), 'tracking decisions use image-relationship wording');
-  assert(panelSource.includes("commitUnavailable ? '有待确认图片' : '确认并提交'"), 'the unavailable commit action explains that images still need confirmation');
+  assert(panelSource.includes('标记不关联') && panelSource.includes("hasReferenceCandidate ? '不是同一张' : '标记不关联'"), 'items without a previous-version candidate use the explicit unlinked action');
+  assert(panelSource.includes('不是同一张') && panelSource.includes('是同一张'), 'items with a reference candidate keep image-relationship wording');
+  assert(panelSource.includes("commitUnavailable ? '有待确认图片' : '提交结果'"), 'the unavailable commit action explains that images still need confirmation');
 
   console.log('version tracking confirmation UI model tests passed');
 })().catch(error => {

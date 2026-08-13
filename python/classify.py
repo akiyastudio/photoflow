@@ -22,6 +22,7 @@ from ffmpeg_transcode import (
     normalize_video_preview_quality,
     probe_creation_time_values,
     split_video_by_size,
+    transcode_video,
     transcode_video_preview,
 )
 from thumbnail_image import _embedded_jpeg
@@ -1396,6 +1397,41 @@ def split_large_videos(target_folder, on_split=None, source_paths=None):
         except FFmpegTranscodeError as error:
             emit('warning', f'视频分割失败，已保留原文件 {file_name}：{error}')
     return split_count
+
+
+def transcode_imported_videos(target_folder, settings, on_transcoded=None, source_paths=None):
+    """Apply the shared video-transcode panel settings to this import batch."""
+    source_dir = os.path.join(target_folder, 'mov')
+    candidates = [
+        os.path.abspath(file_path) for file_path in (source_paths or [])
+        if os.path.isfile(file_path)
+        and os.path.dirname(os.path.abspath(file_path)) == os.path.abspath(source_dir)
+        and os.path.splitext(file_path)[1].lower() in VIDEO_EXTENSIONS
+    ]
+    succeeded = 0
+    outputs = []
+    for input_path in candidates:
+        ensure_not_cancelled()
+        try:
+            output_path = transcode_video(
+                input_path,
+                container=settings.get('container', 'mp4'),
+                video_mode=settings.get('videoMode', 'h264'),
+                quality=settings.get('quality', 'balanced'),
+                resolution=settings.get('resolution', 'original'),
+                frame_rate=settings.get('frameRate', 'original'),
+                audio_mode=settings.get('audioMode', 'aac'),
+                output_mode='new',
+                on_log=log_info,
+                cancel_check=ensure_not_cancelled,
+            )
+            succeeded += 1
+            outputs.append(output_path)
+            if on_transcoded:
+                on_transcoded(output_path)
+        except (FFmpegTranscodeError, OSError, ValueError) as error:
+            emit('warning', f'视频转码失败，已保留原文件 {os.path.basename(input_path)}：{error}')
+    return succeeded, len(candidates), outputs
 # --- 3. 核心导入流程 ---
 def split_broll_video(input_path, keep_original=False):
     """Losslessly split one imported B-roll video and return its new segments."""
@@ -1418,7 +1454,7 @@ def split_broll_video(input_path, keep_original=False):
     return segments
 
 
-def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, should_split=None, generate_video_preview=False, split_large_files=False, project_routes=None, direct_project=False, video_preview_quality='medium', direct_source=False, source_paths=None, delete_source=False, generate_jpg_from_raw=False, import_session='', date_filter='all'):
+def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, should_split=None, generate_video_preview=False, split_large_files=False, project_routes=None, direct_project=False, video_preview_quality='medium', direct_source=False, source_paths=None, delete_source=False, generate_jpg_from_raw=False, import_session='', date_filter='all', split_import_videos=False, transcode_import_videos=False, transcode_settings=None):
     # 记录原始文件列表，用于最后的清理
     original_sd_files = []
     success_imported_count = 0
@@ -1567,7 +1603,7 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                 log_info(f"RAW 转 JPG 完成：{generated_jpg_count}/{raw_without_jpg_count} 个文件已保存到 jpg 文件夹")
         for target_index, target_folder in enumerate(processed_target_list):
             ensure_not_cancelled()
-            if split_large_files:
+            if split_large_files or split_import_videos:
                 def record_split_output(input_path, segment_paths):
                     imported_output_paths.discard(input_path)
                     imported_output_paths.update(segment_paths)
@@ -1584,6 +1620,16 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                 )
                 if split_count:
                     log_info(f'大文件分割完成：共处理 {split_count} 个视频')
+            if transcode_import_videos:
+                transcode_count, video_count, transcode_outputs = transcode_imported_videos(
+                    target_folder,
+                    transcode_settings or {},
+                    on_transcoded=lambda output_path: imported_output_paths.add(output_path),
+                    source_paths=imported_paths_by_target.get(target_folder, []),
+                )
+                imported_paths_by_target.setdefault(target_folder, []).extend(transcode_outputs)
+                if video_count:
+                    log_info(f'视频转码完成：{transcode_count}/{video_count} 个文件')
             if generate_video_preview:
                 def record_generated_preview(generated_path, target=target_folder):
                     imported_output_paths.add(generated_path)
@@ -1655,7 +1701,7 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
         # 异常情况下保留临时文件夹和 SD 卡文件，确保数据不丢
         gc.collect()
 
-def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=False, source_paths=None, delete_source=False, split_large_files=False, import_session='', date_filter='all'):
+def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=False, source_paths=None, delete_source=False, split_large_files=False, import_session='', date_filter='all', split_import_videos=False, transcode_import_videos=False, transcode_settings=None):
     """Promote staged media into each selected project's B-roll folder."""
     created_files = []
     created_broll_folders = []
@@ -1700,7 +1746,7 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                 os.makedirs(broll_folder, exist_ok=False)
                 created_broll_folders.append(broll_folder)
             source_size = os.path.getsize(source)
-            will_split = split_large_files and os.path.splitext(source)[1].lower() in VIDEO_EXTENSIONS and source_size > FOUR_GB
+            will_split = (split_large_files or split_import_videos) and os.path.splitext(source)[1].lower() in VIDEO_EXTENSIONS and source_size > FOUR_GB
             if will_split:
                 ensure_import_disk_space(project_path, source_size, '花絮视频分割')
             destination = unique_broll_destination(broll_folder, os.path.basename(source), will_split)
@@ -1747,6 +1793,7 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
             created_files.append(destination)
             if moved_from_staging:
                 moved_staged_files[destination] = source
+            post_process_video_paths = [destination]
             if will_split:
                 log_progress(
                     f"正在分割花絮大视频：{os.path.basename(destination)}",
@@ -1758,6 +1805,27 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                     created_files.remove(destination)
                     created_files.extend(segments)
                     split_originals.append(destination)
+                    post_process_video_paths = segments
+            if transcode_import_videos:
+                for video_path in post_process_video_paths:
+                    if os.path.splitext(video_path)[1].lower() not in VIDEO_EXTENSIONS:
+                        continue
+                    try:
+                        output_path = transcode_video(
+                            video_path,
+                            container=(transcode_settings or {}).get('container', 'mp4'),
+                            video_mode=(transcode_settings or {}).get('videoMode', 'h264'),
+                            quality=(transcode_settings or {}).get('quality', 'balanced'),
+                            resolution=(transcode_settings or {}).get('resolution', 'original'),
+                            frame_rate=(transcode_settings or {}).get('frameRate', 'original'),
+                            audio_mode=(transcode_settings or {}).get('audioMode', 'aac'),
+                            output_mode='new',
+                            on_log=log_info,
+                            cancel_check=ensure_not_cancelled,
+                        )
+                        created_files.append(output_path)
+                    except (FFmpegTranscodeError, OSError, ValueError) as error:
+                        emit('warning', f'花絮视频转码失败，已保留原文件 {os.path.basename(video_path)}：{error}')
             completed_bytes += source_size
             publish_broll_progress(0, True)
 
@@ -1864,6 +1932,9 @@ def run(args_list):
     parser.add_argument("--generate_video_preview", action="store_true")
     parser.add_argument("--video_preview_quality", choices=tuple(VIDEO_PREVIEW_QUALITY_PROFILES), default="medium")
     parser.add_argument("--split_large_files", action="store_true")
+    parser.add_argument("--split_import_videos", action="store_true")
+    parser.add_argument("--transcode_import_videos", action="store_true")
+    parser.add_argument("--transcode_settings", default="{}")
     parser.add_argument("--projects_json", default="[]")
     parser.add_argument("--project_routes", default="{}")
     parser.add_argument("--import_type", choices=("work", "broll"), default="work")
@@ -1896,9 +1967,9 @@ def run(args_list):
         elif args.stage == 'plan':
             stage_plan_import(args.sd_path, args.dest_path, args.projects_json, args.import_type, args.time_gap, args.direct_source, source_paths, args.import_session, args.date_filter)
         elif args.stage == 'import':
-            stage_import_and_organize(args.sd_path, args.dest_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files, json.loads(args.project_routes or '{}'), args.direct_project, args.video_preview_quality, args.direct_source, source_paths, args.delete_source, args.generate_jpg_from_raw, args.import_session, args.date_filter)
+            stage_import_and_organize(args.sd_path, args.dest_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files, json.loads(args.project_routes or '{}'), args.direct_project, args.video_preview_quality, args.direct_source, source_paths, args.delete_source, args.generate_jpg_from_raw, args.import_session, args.date_filter, args.split_import_videos, args.transcode_import_videos, json.loads(args.transcode_settings or '{}'))
         elif args.stage == 'broll':
-            stage_import_broll(args.sd_path, args.dest_path, json.loads(args.project_routes or '{}'), args.direct_source, source_paths, args.delete_source, args.split_large_files, args.import_session, args.date_filter)
+            stage_import_broll(args.sd_path, args.dest_path, json.loads(args.project_routes or '{}'), args.direct_source, source_paths, args.delete_source, args.split_large_files, args.import_session, args.date_filter, args.split_import_videos, args.transcode_import_videos, json.loads(args.transcode_settings or '{}'))
         elif args.stage == 'discard':
             discard_import_session(args.dest_path, args.import_session)
     except ImportCancelled:

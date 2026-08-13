@@ -26,6 +26,17 @@ export const DEFAULT_VERSION_TREE_SPACING = Object.freeze({
   padding: 32,
 });
 
+export const versionTreeAreaSize = (
+  natural: { width: number; height: number },
+  custom: { width: number; height: number } | undefined,
+  minimum: { width: number; height: number },
+) => custom
+  ? {
+    width: Math.max(minimum.width, custom.width),
+    height: Math.max(minimum.height, custom.height),
+  }
+  : natural;
+
 type ReconcileVersionTreeCanvasInput = {
   nodes: readonly VersionTreeCanvasNode[];
   previous?: ReadonlyMap<string, VersionTreeCanvasPosition>;

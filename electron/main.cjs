@@ -869,6 +869,17 @@ const mediaScanDatabase = new PythonDatabaseClient({
 });
 const mediaScanRepository = createMediaRepository(mediaScanDatabase);
 const mediaScanService = createVersionService({ repository: mediaScanRepository });
+// Version comparisons can run alongside a full media-index scan. Give them a
+// separate database worker so the scheduler's read concurrency is real rather
+// than two UI tasks queued inside one synchronous Python server process.
+const trackingScanDatabase = new PythonDatabaseClient({
+  getRunConfig,
+  getDatabasePath: getWorkspaceDatabasePath,
+  writeLog,
+  defaultTimeoutMs: 30 * 60 * 1000,
+});
+const trackingScanRepository = createMediaRepository(trackingScanDatabase);
+const trackingScanService = createVersionService({ repository: trackingScanRepository });
 const workspaceService = createWorkspaceService({
   repository: workspaceRepository,
   catalogs: workspaceCatalogs,
@@ -1707,7 +1718,7 @@ app.whenReady().then(async () => {
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });
-  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
+  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
   registerSelectionIpc({ ipcMain, path, fs, selectionService, workspaceCatalogs });
   registerAdvancedVideoIpc({ BrowserWindow, app, crypto, ipcMain, mediaService, path, pluginService, spawn, writeLog });
   const credentialService = createCredentialService({ writeLog });
@@ -1736,6 +1747,7 @@ app.on('before-quit', () => {
   workspaceMaintenanceDatabase.stop();
   mediaDatabase.stop();
   mediaScanDatabase.stop();
+  trackingScanDatabase.stop();
   imageThumbnailRuntime.stop();
   thumbnailService?.stop();
   backgroundTasks.stop();

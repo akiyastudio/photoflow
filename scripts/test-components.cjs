@@ -140,9 +140,9 @@ try {
   assert(teamRetouchEngine.includes('people = spatially_order_people(people)') && teamRetouchEngine.includes('def bounded_planning_box'), 'crowd numbering must be left-to-right and leaked masks must not control spatial grouping');
 
   const settingsFeature = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
-  assert(settingsFeature.includes('基础人物检测') && settingsFeature.includes('RTMDet'), 'settings must describe the basic person-detection engine');
+  assert(settingsFeature.includes('基础人物检测') && settingsFeature.includes('提供基础人物检测、裁图和分割。'), 'settings must describe the basic person-detection component');
   assert(settingsFeature.includes('PairDETR + SAM 2.1'), 'settings must describe the enhanced person-detection engine');
-  assert(settingsFeature.includes('基础组件、身份识别模型和检测增强包统一放在这里') && settingsFeature.includes('ZIP 无需解压'), 'settings must explain which models and add-ons are included in the component');
+  assert(settingsFeature.includes('将组件 ZIP 放入此目录，无需解压。') && settingsFeature.includes('人物检测增强版'), 'settings must explain where component packages and add-ons are managed');
   assert(settingsFeature.includes('支持 WSL CUDA 的 NVIDIA 显卡与驱动') && settingsFeature.includes('至少 35 GB 可用空间'), 'settings must disclose hard requirements for enhanced person detection');
   assert(settingsFeature.includes('至少 8 GB 显存和 16 GB 系统内存') && settingsFeature.includes('不作为安装门槛'), 'settings must distinguish performance recommendations from enforced requirements');
   assert(!settingsFeature.includes('AdaFace 来源') && !settingsFeature.includes('OSNet 来源'), 'model sources must live in open-source licenses instead of the install panel');
@@ -151,13 +151,13 @@ try {
   assert(!settingsFeature.includes('统一组件安装包目录') && !settingsFeature.includes('高级安装包目录'), 'settings must not expose separate team-retouch package locations');
   assert.strictEqual((settingsFeature.match(/title="优先使用 GPU"/g) || []).length, 1, 'GPU preference must appear once');
   assert(settingsFeature.indexOf('title="优先使用 GPU"') < settingsFeature.indexOf('<TeamRetouchEngineSettings'), 'GPU preference must be the first team-retouch setting');
-  assert(settingsFeature.includes('人物超过 4000 像素时选择保持尺寸或扩大裁剪'), '4000-pixel guidance must live with the oversize crop setting');
+  assert(settingsFeature.includes('人物超过 4000 像素时，可限制尺寸或保留完整人物'), '4000-pixel guidance must live with the oversize crop setting');
 const teamRetouchManager = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'TeamRetouchManager.tsx'), 'utf8');
 assert.match(teamRetouchManager, /dimension \/ scale/, '团片协作原图标记应使用代理图缩放比例反推原图尺寸');
 assert(teamRetouchManager.includes('人物 {member.personIndex}'), '工作图预览应直接标出人物编号');
 assert(teamRetouchManager.includes('InteractiveCropEditor'), '工作图范围应支持可视化拖动和缩放');
 assert(teamRetouchManager.includes("cropEditor ? 'overflow-visible' : 'overflow-hidden'"), '范围编辑弹窗打开时不应被图片卡片裁切');
-  assert(teamRetouchManager.includes('默认使用高级模型 · PairDETR + SAM 2.1') && teamRetouchManager.includes('当前使用基础模型 · RTMDet'), 'team-retouch workspace must disclose the automatically selected recognition model');
+  assert(teamRetouchManager.includes('当前使用高级人物检测') && teamRetouchManager.includes('当前使用基础人物检测'), 'team-retouch workspace must disclose the automatically selected recognition mode');
   assert(!teamRetouchManager.includes('aria-label="识别模式"') && !settingsFeature.includes('team-retouch-backend-mode') && !settingsFeature.includes('默认识别模式'), 'automatic recognition must not expose a redundant mode setting');
   assert(!teamRetouchManager.includes('aria-label="基础版本"') && teamRetouchManager.includes('bundle.photo?.currentVersionId'), 'team-retouch must use the current version without exposing a redundant base-version selector');
   assert(!teamRetouchManager.includes('合成保存到'), 'recognition must not expose final merge output settings');
@@ -181,6 +181,8 @@ assert(teamRetouchManager.includes('openNextUnmarkedIdentity') && teamRetouchMan
 assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity candidate selection must prevent duplicate assignments from the same photo');
   const personIdentityManager = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'PersonIdentityManager.tsx'), 'utf8');
   assert(personIdentityManager.includes('className="workflow-task-card p-3"') && !personIdentityManager.includes('last:border-0'), 'every workflow task card, including the final card, must retain its full outline');
+  assert(personIdentityManager.includes('workflowAvailableSubjectKeys') && personIdentityManager.includes('`${item.photo.baseVersionId}:${item.personIndex}`'), 'generated workflow availability must survive photo re-registration by using a stable base-version subject key');
+  assert(personIdentityManager.includes("['协作流程重新生成']"), 'a missing generated work image must never render as an empty waiting status');
   const teamOutputProgress = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'TeamRetouchOutputProgress.tsx'), 'utf8');
   const useTeamOutputProgress = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'useTeamOutputProgress.ts'), 'utf8');
   const teamRetouchSteps = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'TeamRetouchSteps.tsx'), 'utf8');
@@ -225,7 +227,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   const markProgressSource = projectWorkspace.slice(projectWorkspace.indexOf('const openMarkProgress'), projectWorkspace.indexOf('useEffect(() => {', projectWorkspace.indexOf('const openMarkProgress')));
   assert(markProgressSource.indexOf('setProgressSetup(initialDraft)') < markProgressSource.indexOf('void loadProgressFolders().then'), 'mark-progress must open from cached data before refreshing progress folders');
   assert(markProgressSource.includes('current === initialDraft ? latestDraft : current'), 'background progress refresh must not overwrite a mark-progress draft after the user edits it');
-  assert(projectWorkspace.includes('设为版本进度…') && projectWorkspace.includes('moveToRoot') && projectWorkspace.includes('registered.relativePath || relativePath'), 'the component must expose version adoption and consume the backend-confirmed root move; executable IPC/DB tests cover rollback and V0-free registration');
+  assert(projectWorkspace.includes('纳入版本管理…') && projectWorkspace.includes('moveToRoot') && projectWorkspace.includes('registered.relativePath || targetRelativePath'), 'the component must expose version adoption and consume the backend-confirmed root move; executable IPC/DB tests cover rollback and V0-free registration');
   const projectNavigator = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'ProjectNavigator.tsx'), 'utf8');
   assert(projectNavigator.includes('<FolderInput size={15}/>导入项目') && projectNavigator.includes('importExistingProject') && projectNavigator.includes('photoflow:imported-project-tracking:'), 'the split project-create action must import existing projects and continue into tracking onboarding');
   const fileTransferToast = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'background-tasks', 'FileTransferToast.tsx'), 'utf8');
@@ -233,7 +235,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   const indexCss = fs.readFileSync(path.join(repositoryRoot, 'src', 'index.css'), 'utf8');
   const topToastStack = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'app', 'useTopToastStack.tsx'), 'utf8');
   assert(projectNavigator.includes('cancelExistingProjectImport') && projectNavigator.includes('cancelBackgroundTask(existingProjectImportTask.id)') && indexCss.includes('z-index:510'), 'existing-project imports must remain cancellable from both the modal and the transfer toast above its backdrop');
-  assert(fileTransferToast.includes('aria-label="收起到任务中心"') && fileTransferToast.includes('onMinimize(task.id)') && fileTransferToast.includes('isTaskToastMinimized(task.id)') && fileTransferToast.includes('selectProjectFileTaskToasts(backgroundTasks, minimizedTaskIds)'), 'each active file-transfer toast must minimize without cancelling and stay hidden until restored');
+  assert(fileTransferToast.includes('aria-label="收起到任务中心"') && fileTransferToast.includes('onMinimize(task.id)') && fileTransferToast.includes('isTaskToastMinimized(task.id)') && fileTransferToast.includes('selectProjectFileTaskToasts(backgroundTasks, minimizedTaskIds, 4, clock)'), 'each active file-transfer toast must minimize without cancelling and stay hidden until restored');
   assert(fileTransferToast.includes('selectProjectFileTaskToasts') && taskToastModel.includes("task.type === 'project-file-operation'") && !taskToastModel.includes("operation === 'paste'"), 'all active project file operations must use one task-type based toast eligibility rule');
   assert(taskToastModel.includes("left.state === 'running' ? -1 : 1") && taskToastModel.includes('left.createdAt - right.createdAt') && taskToastModel.includes('eligible.slice(0, limit)') && fileTransferToast.includes('还有 {overflowCount} 个任务'), 'the transfer toast model must prioritize running tasks, preserve creation order, and cap visible cards');
   assert(indexCss.includes('.top-toast-stack') && indexCss.includes('display:flex') && indexCss.includes('gap:.75rem') && indexCss.includes('.app-notice-toast') && fileTransferToast.includes('previousTop - top') && fileTransferToast.includes('element.animate(') && !fileTransferToast.includes('style={{ top:') && !fileTransferToast.includes('className="fixed'), 'ordinary notices and file tasks must share one gap-based top stack and animate actual layout movement without per-card positioning');
@@ -258,11 +260,11 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(projectWorkspace.includes("projectWorkspaceClient.listProjectFiles(workspacePath, project.status, project.name, '', FILE_LIST_PAGE_SIZE") && projectWorkspace.includes('projectWorkspaceClient.cancelListProjectFiles'), 'project-root filtering must use the typed, cancellable paginated file-list API');
   assert(appSource.includes('photoflow:components-cache') && appSource.includes('componentsLoading={componentsLoading}'), 'installed component state must be restored before opening a project');
   assert(projectWorkspace.includes('teamRetouchInstalled || componentsLoading'), 'the team-retouch toolbar entry must render immediately while component status is refreshing');
-  assert(personIdentityManager.includes('批量导入返图并识别'), 'workflow must expose batch returned-image recognition');
+  assert(personIdentityManager.includes('导入并匹配返图'), 'workflow must expose batch returned-image recognition');
   assert(personIdentityManager.includes('<TeamOutputProgressPicker'), 'only the workflow step must choose the final merge destination');
   assert(teamOutputProgress.includes('controller.progressOptions') && teamOutputProgress.includes('disabled={option.disabled}'), 'the merge destination picker must display every progress version and disable invalid targets');
   assert(personIdentityManager.includes('teamWorkflowSourcePaths(workspace.photos)') && useTeamOutputProgress.includes(".filter(photo => photo.tasks.length > 0)") && useTeamOutputProgress.includes('.map(photo => photo.sourcePath)'), 'the merge destination boundary must include every source version that actually entered the team workflow');
-  assert(personIdentityManager.includes('合成已完成图片'), 'workflow must perform final image merging');
+  assert(personIdentityManager.includes('合成已完成照片'), 'workflow must perform final image merging');
   assert(personIdentityManager.includes('generateTeamWorkflow'), 'workflow must generate its project-local week and identity folders');
   assert(personIdentityManager.includes('打开任务文件夹'), 'generated workflow groups must open their persistent project folders');
   assert(personIdentityManager.includes('删除并重新生成'), 'workflow regeneration must require destructive confirmation');
@@ -274,8 +276,8 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(personIdentityManager.includes('workflowNeedsRegeneration') && personIdentityManager.includes('const workflowReady = Boolean'), 'workflow execution must pause after reordering until its folders are regenerated');
   assert(!personIdentityManager.includes('无需修图') && !personIdentityManager.includes('setTeamWorkflowNoRetouch'), 'workflow tasks must always be generated before the user decides whether to upload a return');
   assert(personIdentityManager.includes('}上传</button>') && personIdentityManager.includes('删除返图') && personIdentityManager.includes('撤销不用修'), 'workflow task actions must expose compact upload and reversible no-retouch states');
-  assert(personIdentityManager.includes('标记本周不用修') && personIdentityManager.includes('markWeekNoRetouch'), 'each workflow person lane must scope bulk no-retouch completion to the displayed week');
-  assert(personIdentityManager.includes('WorkflowReturnReviewDialog') && personIdentityManager.includes("['side-by-side', '并排']") && personIdentityManager.includes('确认匹配并完成'), 'workflow batch returns must provide visual photo comparison and in-place confirmation');
+  assert(personIdentityManager.includes('本周均不用修') && personIdentityManager.includes('markWeekNoRetouch'), 'each workflow person lane must scope bulk no-retouch completion to the displayed week');
+  assert(personIdentityManager.includes('WorkflowReturnReviewDialog') && personIdentityManager.includes('<ImageComparisonView') && personIdentityManager.includes('确认匹配并完成'), 'workflow batch returns must reuse the shared visual photo comparison and support in-place confirmation');
   const workflowReturnDialog = personIdentityManager.slice(personIdentityManager.indexOf('const WorkflowReturnReviewDialog'), personIdentityManager.indexOf('type WorkflowItem'));
   assert(!workflowReturnDialog.includes('event.target === event.currentTarget') && workflowReturnDialog.includes('点击四周不会关闭'), 'the returned-image review dialog must never discard progress when its backdrop is clicked');
   assert(personIdentityManager.includes('getTeamWorkflowReturnReview') && personIdentityManager.includes('继续处理未确认返图') && personIdentityManager.includes('暂存并退出') && personIdentityManager.includes('放弃本批次'), 'unfinished returned-image reviews must persist and expose explicit resume, suspend, and discard actions');
@@ -285,6 +287,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   const visualIdentityPicker = personIdentityManager.slice(personIdentityManager.indexOf('const handlePick'), personIdentityManager.indexOf("window.addEventListener('photoflow-team-person-pick'"));
   assert(!visualIdentityPicker.includes("tab !== 'people'") && visualIdentityPicker.includes("tab === 'workflow'") && visualIdentityPicker.indexOf('setAssigningSubject(subject)') < visualIdentityPicker.indexOf('getTeamIdentitySimilarities'), 'workflow thumbnails must open the visual identity picker immediately while protecting completed tasks');
   const versionsIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
+  assert(versionsIpc.includes('workflowAvailableSubjectKeys') && versionsIpc.includes('`${item.baseVersionId}:${Number(item.personIndex)}`'), 'the workspace backend must expose stable availability keys for generated workflow subjects');
   const mediaRatingIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'media-rating-ipc.cjs'), 'utf8');
   assert(mediaRatingIpc.includes("ipcMain.handle('workspace-media-rating-read-batch'") && mediaRatingIpc.includes('Math.min(6, entries.length)') && mediaRatingIpc.includes('requestedEntries.slice(0, 200)'), 'batch rating reads must be finite and use bounded HDD concurrency');
   assert(projectWorkspace.includes('getMediaRatings(batch.map') && projectWorkspace.includes('offset += 200') && projectWorkspace.includes('filterRatingSequenceRef.current') && projectWorkspace.includes('已检查 {filterRatingsCheckedCount} 个文件'), 'rating filters must read only enumerated batches, invalidate stale results, and expose progress');
@@ -357,7 +360,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(systemIpc.includes('packageSizeBytes'), 'successful installers must report the actual package size for cleanup confirmation');
   assert(systemIpc.includes("const teamRetouchRoot"), 'all team-retouch packages must share one component directory');
   assert(systemIpc.includes("path.join(teamRetouchRoot(), 'advanced')") && !systemIpc.includes("path.join(teamRetouchRoot(), 'identity-models')"), 'only the optional detection engine may retain a team-retouch add-on directory');
-  assert(settingsFeature.includes('YuNet、AdaFace IR-18 与 OSNet x1.0') && !settingsFeature.includes('SFace') && !settingsFeature.includes('OSNet x0.25'), 'settings must expose the single enhanced cross-photo identity engine');
+  assert(settingsFeature.includes('人物身份识别') && settingsFeature.includes('用于跨照片识别同一人物。') && !settingsFeature.includes('SFace') && !settingsFeature.includes('OSNet x0.25'), 'settings must expose the cross-photo identity capability without redundant model details');
   assert(!settingsFeature.includes('实验人物识别模型 · 用户自备'), 'settings must not require end users to compile identity models');
 
   assert(componentBuilder.includes("'.cache', 'model-lab', 'adaface', 'adaface_ir18_webface4m.onnx") && componentBuilder.includes("'.cache', 'model-lab', 'osnet', 'osnet_x1_0_msmt17.onnx"), 'team-retouch component must contain both enhanced identity ONNX models');

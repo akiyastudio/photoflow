@@ -10,10 +10,41 @@ export const VERSION_PANEL_DEFINITIONS: Record<VersionPanelKind, { title: string
   'create-next': { title: '创建下一版本', states: ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure'] },
   import: { title: '导入进度', states: ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure'] },
   modify: { title: '修改进度', states: ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure'] },
-  confirm: { title: '确认跟踪图片', states: ['loading', 'waiting_confirmation', 'committing', 'result', 'failure'] },
+  confirm: { title: '确认版本匹配', states: ['loading', 'waiting_confirmation', 'committing', 'result', 'failure'] },
 };
 
 export const normalizeVersionPath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+
+export const isUserVersionKey = (value: string) => /^\d+(?:_\d+)*$/.test(value);
+
+export const nextVersionKeys = (
+  folders: ProgressFolder[],
+  mediaKind: ProgressFolder['mediaKind'],
+  parent?: ProgressFolder,
+  excludeProgressId = '',
+) => {
+  const versions = folders.filter(folder => folder.id !== excludeProgressId
+    && folder.mediaKind === mediaKind
+    && folder.nodeRole === 'progress'
+    && folder.relationKind !== 'auxiliary'
+    && isUserVersionKey(folder.versionKey));
+  const main = String(versions.reduce((highest, folder) => folder.versionKey.includes('_') ? highest : Math.max(highest, Number(folder.versionKey)), 0) + 1);
+  if (!parent) return { main, branch: '' };
+  // Original/artifact nodes use internal keys such as `import-<hash>`. Those
+  // keys identify database nodes and must never leak into a user version name.
+  // A branch directly below an original source starts at the first visible
+  // version line, while a branch below V2/V2_1 keeps that visible prefix.
+  const branchBase = parent.nodeRole === 'progress' && isUserVersionKey(parent.versionKey) ? parent.versionKey : '1';
+  const prefix = `${branchBase}_`;
+  const parentDepth = branchBase.split('_').length;
+  const child = versions.reduce((highest, folder) => {
+    const parts = folder.versionKey.split('_');
+    return folder.versionKey.startsWith(prefix) && parts.length === parentDepth + 1
+      ? Math.max(highest, Number(parts.at(-1)) || 0)
+      : highest;
+  }, 0) + 1;
+  return { main, branch: `${branchBase}_${child}` };
+};
 
 export const normalizeTrackingPolicy = (relationKind: VersionRelationKind, requested: Partial<VersionTrackingPolicy>): VersionTrackingPolicy => {
   if (relationKind === 'auxiliary') return { trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false };
@@ -62,6 +93,7 @@ export const versionTreeNodeBadgeLabel = (folder: Pick<ProgressFolder, 'nodeRole
 export const progressTrackingAction = (folder: ProgressFolder): 'refresh' | 'resume' | 'repair' | null => {
   if (folder.folderMissing || folder.nodeRole !== 'progress' || folder.relationKind === 'auxiliary') return null;
   if (folder.trackingState === 'needs_repair') return 'repair';
+  if (!folder.trackingEnabled || folder.trackingState === 'disabled') return null;
   if (folder.trackingState === 'pending_compare' || folder.trackingState === 'pending_confirm' || folder.trackingState === 'committing') return 'resume';
   return 'refresh';
 };

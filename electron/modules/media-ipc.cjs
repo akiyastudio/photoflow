@@ -81,14 +81,11 @@ const registerMediaIpc = context => {
       const stat = await fs.promises.stat(sourcePath);
       const previewPath = await rawPreviewPath(sourcePath, stat, cacheConfig);
       if (!previewPath) throw new Error('RAW 文件无法生成预览；请检查文件是否损坏或属于当前支持的 RAW 格式');
-      let orientationTimer;
-      const orientation = await Promise.race([
-        rawOrientationCorrection(sourcePath, previewPath, stat),
-        new Promise(resolve => {
-          orientationTimer = setTimeout(() => resolve({ matrix: [1, 0, 0, 1], swapsAxes: false, rawOrientation: 1, embeddedOrientation: 1 }), 3000);
-        })
-      ]);
-      clearTimeout(orientationTimer);
+      // Never replace a slow EXIF read with the identity matrix. The first
+      // ExifTool invocation and large RAW containers can legitimately take
+      // longer than three seconds; returning identity in that case permanently
+      // cached a sideways preview in renderer resource caches.
+      const orientation = await rawOrientationCorrection(sourcePath, previewPath, stat);
       return { success: true, mediaUrl: mediaService.toUrl(previewPath, true), original: false, orientation };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
