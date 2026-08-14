@@ -6,6 +6,7 @@ const { replaceVideoFileWithRollback } = require('../services/video-trim-commit-
 const PROJECT_FILE_LIST_QUERY_MAX_LENGTH = 160;
 const IMPORT_STAGING_ROOT_NAME = '_PhotoFlow_Safety_Temp';
 const IMPORT_GRAPH_RECEIPT_NAME = '.photoflow-import-graph-receipt.json';
+const MANAGED_EXTERNAL_FOLDER_PREFIX = 'PhotoFlow 外链文件夹：';
 const validImportSessionId = value => /^[a-zA-Z0-9_-]{1,128}$/.test(String(value || ''));
 const normalizeProjectFileListFilter = value => {
   const allowedKinds = new Set(['file', 'image', 'raw', 'video', 'shortcut']);
@@ -105,7 +106,7 @@ const registerWorkspaceIpc = context => {
   };
   const isInternalFileOperationEntry = name => {
     const normalized = name.toLowerCase();
-    return normalized.endsWith('.photoflow-part')
+    return normalized.includes('.photoflow-part')
       || normalized === '_photoflow_safety_temp'
       || normalized.startsWith('.') && normalized.includes('.photoflow-transcode')
       || /^\.photoflow-(?:import-|paste|replace|split-|trim-|undo|team-workflow-)/i.test(normalized);
@@ -546,13 +547,11 @@ const registerWorkspaceIpc = context => {
     const publish = payload => task?.publish(payload);
     try {
       const mode = String(options.mode || '');
-      if (!['copy', 'move', 'link'].includes(mode)) throw new Error('无效的项目导入方式，请重新选择');
-      const inspection = mode === 'link'
-        ? await cachedExistingProjectInspection(options.inspectionToken, sourcePath) || await inspectExistingProject(sourcePath)
-        : await inspectExistingProject(sourcePath);
+      if (!['copy', 'move'].includes(mode)) throw new Error('导入项目只支持复制并接管或剪切并接管');
+      const inspection = await cachedExistingProjectInspection(options.inspectionToken, sourcePath) || await inspectExistingProject(sourcePath);
       const projectName = cleanProjectName(String(options.name || inspection.name || ''));
       if (!projectName) throw new Error('项目名称不能为空');
-      const selectedWorkspace = await selectWorkspaceForWrite(workspacePath, options?.workspacePaths, mode === 'link' ? 0 : inspection.totalBytes);
+      const selectedWorkspace = await selectWorkspaceForWrite(workspacePath, options?.workspacePaths, inspection.totalBytes);
       const root = selectedWorkspace.root;
       const catalog = workspaceCatalogs.get(root) || await refreshWorkspaceCatalog(root);
       if (catalog.byName.has(projectName.toLocaleLowerCase())) throw new Error('同名项目已存在');
@@ -560,23 +559,6 @@ const registerWorkspaceIpc = context => {
       if (fs.existsSync(projectPath)) throw new Error('同名项目已存在');
       if (projectPath === inspection.sourcePath || projectPath.startsWith(`${inspection.sourcePath}${path.sep}`)) throw new Error('不能把项目导入到它自身内部');
       stagedPath = path.join(path.dirname(projectPath), `.photoflow-import-project-${operationId}`);
-      if (mode === 'link') {
-        await fs.promises.mkdir(projectPath, { recursive: false });
-        const shortcutPath = path.join(projectPath, `${inspection.name}.lnk`);
-        if (!shell.writeShortcutLink(shortcutPath, { target: inspection.sourcePath, cwd: inspection.sourcePath, description: `PhotoFlow 外链文件夹：${inspection.name}` })) throw new Error('无法创建项目外链快捷方式');
-        const managedEntries = await fs.promises.readdir(projectPath);
-        if (managedEntries.length !== 1 || path.resolve(projectPath, managedEntries[0]).toLocaleLowerCase() !== path.resolve(shortcutPath).toLocaleLowerCase()) {
-          throw new Error('外链项目目录校验失败：工作目录中出现了快捷方式以外的内容');
-        }
-        const updatedCatalog = await mutateWorkspaceCatalog(root, 'addProject', { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath), extra: { importedAt: Date.now(), importedFrom: inspection.sourcePath, externalLink: true } });
-        catalogAdded = true;
-        const projectId = updatedCatalog.byName.get(projectName.toLocaleLowerCase())?.id;
-        if (!projectId) throw new Error('项目数据库身份写入失败');
-        const project = { id: projectId, name: projectName, path: projectPath, workspacePath: root, status: '策划中', updatedAt: Date.now() };
-        await pushUndoOperation({ kind: 'remove-created', paths: [projectPath], label: '导入外链项目' }).catch(() => undefined);
-        mainWindow?.webContents.send('workspace-projects-changed', { root, reason: 'project-imported' });
-        return { success: true, operationId, project, workspacePath: root, storageSwitched: selectedWorkspace.switched, sourceRetained: true, linked: true, candidates: inspection.candidates };
-      }
       task = createProjectFileTask({
         backgroundTasks, event, operationId, operation: 'import-project', title: `接管项目 · ${projectName}`,
         projectName, resources: [inspection.sourcePath, path.dirname(projectPath)], cancelledCode: CANCELLED_CODE,
@@ -641,7 +623,6 @@ const registerWorkspaceIpc = context => {
     }
   };
   ipcMain.handle('workspace-import-existing-project', importExistingProjectHandler);
-  ipcMain.handle('workspace-import-existing-project-link', (event, workspacePath, sourcePath, options = {}) => importExistingProjectHandler(event, workspacePath, sourcePath, { ...options, mode: 'link' }));
   
   ipcMain.handle('workspace-rename-project', async (_event, workspacePath, status, projectName, dateOrNextName, nextName) => {
     let source = '';
@@ -1193,16 +1174,65 @@ const registerWorkspaceIpc = context => {
       return { success: false, error: error.message || String(error) };
     }
   });
+
+  const resolveManagedExternalScope = async (root, relativePath) => {
+    const normalizedRelativePath = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    const pathSegments = normalizedRelativePath ? normalizedRelativePath.split('/') : [];
+    if (pathSegments.some(segment => !segment || segment === '.' || segment === '..')) throw new Error('外链路径无效');
+    const externalLinkIndex = pathSegments.findIndex(segment => path.extname(segment).toLowerCase() === '.lnk');
+    if (externalLinkIndex < 0) return null;
+    const shortcutRelativePath = pathSegments.slice(0, externalLinkIndex + 1).join(path.sep);
+    const shortcutPath = assertExistingInside(root, assertInside(root, path.resolve(root, shortcutRelativePath), '外链路径'), '外链路径');
+    const shortcutDetails = shell.readShortcutLink(shortcutPath);
+    if (!String(shortcutDetails?.description || '').startsWith(MANAGED_EXTERNAL_FOLDER_PREFIX)) throw new Error('所选项目不是 PhotoFlow 外链');
+    const targetRoot = path.resolve(String(shortcutDetails?.target || ''));
+    const targetStat = await fs.promises.stat(targetRoot);
+    if (!targetStat.isDirectory()) throw new Error('外链文件夹不存在');
+    const candidate = path.resolve(targetRoot, ...pathSegments.slice(externalLinkIndex + 1));
+    const targetRelative = path.relative(targetRoot, candidate);
+    if (targetRelative === '..' || targetRelative.startsWith(`..${path.sep}`) || path.isAbsolute(targetRelative)) throw new Error('外链路径超出目标文件夹');
+    const [currentPath, realTargetRoot] = await Promise.all([fs.promises.realpath(candidate), fs.promises.realpath(targetRoot)]);
+    const realRelative = path.relative(realTargetRoot, currentPath);
+    if (realRelative === '..' || realRelative.startsWith(`..${path.sep}`) || path.isAbsolute(realRelative)) throw new Error('外链路径超出目标文件夹');
+    return { currentPath, mediaRoot: realTargetRoot, normalizedRelativePath };
+  };
   
   ipcMain.handle('workspace-browse-files', async (_event, workspacePath, status, projectName, relativePath = '', cacheConfig = {}) => {
     try {
       const projectPath = getProjectPath(workspacePath, status, projectName);
       const root = path.resolve(projectPath);
-      const requestedPath = assertInside(root, path.resolve(root, relativePath || '.'), '文件夹路径', true);
-      const currentPath = assertExistingInside(root, requestedPath, '文件夹路径', true);
+      const normalizedRelativePath = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+      const pathSegments = normalizedRelativePath ? normalizedRelativePath.split('/') : [];
+      if (pathSegments.some(segment => !segment || segment === '.' || segment === '..')) throw new Error('文件夹路径无效');
+      const externalLinkIndex = pathSegments.findIndex(segment => path.extname(segment).toLowerCase() === '.lnk');
+      let currentPath;
+      let mediaRoot = root;
+      let viaExternalLink = false;
+      if (externalLinkIndex >= 0) {
+        const shortcutRelativePath = pathSegments.slice(0, externalLinkIndex + 1).join(path.sep);
+        const shortcutPath = assertExistingInside(root, assertInside(root, path.resolve(root, shortcutRelativePath), '外链路径'), '外链路径');
+        const shortcutDetails = shell.readShortcutLink(shortcutPath);
+        if (!String(shortcutDetails?.description || '').startsWith(MANAGED_EXTERNAL_FOLDER_PREFIX)) throw new Error('所选项目不是 PhotoFlow 外链');
+        const targetRoot = path.resolve(String(shortcutDetails?.target || ''));
+        const targetStat = await fs.promises.stat(targetRoot);
+        if (!targetStat.isDirectory()) throw new Error('外链文件夹不存在');
+        const childSegments = pathSegments.slice(externalLinkIndex + 1);
+        currentPath = path.resolve(targetRoot, ...childSegments);
+        const targetRelative = path.relative(targetRoot, currentPath);
+        if (targetRelative === '..' || targetRelative.startsWith(`..${path.sep}`) || path.isAbsolute(targetRelative)) throw new Error('外链路径超出目标文件夹');
+        currentPath = await fs.promises.realpath(currentPath);
+        const realTargetRoot = await fs.promises.realpath(targetRoot);
+        const realRelative = path.relative(realTargetRoot, currentPath);
+        if (realRelative === '..' || realRelative.startsWith(`..${path.sep}`) || path.isAbsolute(realRelative)) throw new Error('外链路径超出目标文件夹');
+        mediaRoot = realTargetRoot;
+        viaExternalLink = true;
+      } else {
+        const requestedPath = assertInside(root, path.resolve(root, normalizedRelativePath || '.'), '文件夹路径', true);
+        currentPath = assertExistingInside(root, requestedPath, '文件夹路径', true);
+      }
       const currentStat = await fs.promises.stat(currentPath);
       if (!currentStat.isDirectory()) throw new Error('文件夹不存在');
-      mediaService.grantRoot(root);
+      mediaService.grantRoot(mediaRoot);
       mediaRuntimeState.activeMediaCacheConfig = { maxSizeGB: normalizeMediaCacheSizeGB(cacheConfig?.maxSizeGB), directory: cacheConfig?.directory || '' };
       const directoryEntries = await fs.promises.readdir(currentPath, { withFileTypes: true });
       const entries = directoryEntries
@@ -1211,15 +1241,23 @@ const registerWorkspaceIpc = context => {
           const entryPath = path.join(currentPath, entry.name);
           const extension = entry.isDirectory() ? '' : path.extname(entry.name).toLowerCase();
           const kind = entry.isDirectory() ? 'folder' : extension === '.lnk' ? 'shortcut' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
-          return { name: entry.name, path: entryPath, relativePath: path.relative(root, entryPath), kind, extension, size: -1, createdAt: 0, updatedAt: 0 };
+          let externalLink = false;
+          if (!viaExternalLink && kind === 'shortcut') {
+            try { externalLink = String(shell.readShortcutLink(entryPath)?.description || '').startsWith(MANAGED_EXTERNAL_FOLDER_PREFIX); }
+            catch { /* a broken or ordinary shortcut remains a regular shortcut */ }
+          }
+          const virtualRelativePath = viaExternalLink
+            ? [normalizedRelativePath, entry.name].filter(Boolean).join('/')
+            : path.relative(root, entryPath);
+          return { name: entry.name, path: entryPath, relativePath: virtualRelativePath, kind, extension, size: -1, createdAt: 0, updatedAt: 0, ...(externalLink ? { externalLink: true } : {}), ...(viaExternalLink ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) };
         })
         .sort((a, b) => (a.kind === 'folder' ? 0 : 1) - (b.kind === 'folder' ? 0 : 1) || a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
       // Index only the directory the user opened. Whole-project thumbnail and
       // version scans on every restored project tab made application startup
       // recursively read all source media; watcher events and explicit tools
       // already request the broader reconciliation when it is actually needed.
-      void thumbnailService.indexDirectory(root, currentPath, entries, mediaRuntimeState.activeMediaCacheConfig);
-      return { success: true, path: path.relative(root, currentPath), entries };
+      void thumbnailService.indexDirectory(mediaRoot, currentPath, entries, mediaRuntimeState.activeMediaCacheConfig);
+      return { success: true, path: normalizedRelativePath, entries, viaExternalLink };
     } catch (error) {
       writeLog('warn', 'Unable to browse project directory', { projectName, relativePath, error: error.message || String(error) });
       return { success: false, missingDirectory: error?.code === 'ENOENT' || error?.code === 'ENOTDIR', error: error.message || String(error), entries: [] };
@@ -1425,12 +1463,16 @@ const registerWorkspaceIpc = context => {
   ipcMain.handle('workspace-search-files', async (_event, workspacePath, status, projectName, scopeRelativePath = '', query = '') => {
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const requestedScope = assertInside(root, path.resolve(root, scopeRelativePath || '.'), '搜索范围', true);
-      const scope = assertExistingInside(root, requestedScope, '搜索范围', true);
+      const externalScope = await resolveManagedExternalScope(root, scopeRelativePath);
+      const requestedScope = externalScope ? externalScope.currentPath : assertInside(root, path.resolve(root, scopeRelativePath || '.'), '搜索范围', true);
+      const scope = externalScope ? requestedScope : assertExistingInside(root, requestedScope, '搜索范围', true);
       const scopeStat = await fs.promises.stat(scope);
       if (!scopeStat.isDirectory()) throw new Error('搜索范围不是文件夹');
-      mediaService.grantRoot(root);
+      mediaService.grantRoot(externalScope?.mediaRoot || root);
       const needle = String(query || '').trim().toLocaleLowerCase('zh-CN');
+      const virtualPathFor = childPath => externalScope
+        ? [externalScope.normalizedRelativePath, path.relative(scope, childPath).replace(/\\/g, '/')].filter(Boolean).join('/')
+        : path.relative(root, childPath);
 
       const entries = [];
       const pending = [scope];
@@ -1449,18 +1491,18 @@ const registerWorkspaceIpc = context => {
           if (child.isDirectory()) {
             pending.push(childPath);
             if (!needle || child.name.toLocaleLowerCase('zh-CN').includes(needle)) {
-              entries.push({ name: child.name, path: childPath, relativePath: path.relative(root, childPath), kind: 'folder', extension: '', size: -1, createdAt: 0, updatedAt: 0 });
+              entries.push({ name: child.name, path: childPath, relativePath: virtualPathFor(childPath), kind: 'folder', extension: '', size: -1, createdAt: 0, updatedAt: 0, ...(externalScope ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) });
             }
             continue;
           }
           if (!child.isFile() || needle && !child.name.toLocaleLowerCase('zh-CN').includes(needle)) continue;
           const extension = path.extname(child.name).toLowerCase();
           const kind = extension === '.lnk' ? 'shortcut' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
-          entries.push({ name: child.name, path: childPath, relativePath: path.relative(root, childPath), kind, extension, size: -1, createdAt: 0, updatedAt: 0 });
+          entries.push({ name: child.name, path: childPath, relativePath: virtualPathFor(childPath), kind, extension, size: -1, createdAt: 0, updatedAt: 0, ...(externalScope ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) });
         }
       }
       entries.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'zh-CN', { numeric: true, sensitivity: 'base' }));
-      return { success: true, scope: path.relative(root, scope), entries };
+      return { success: true, scope: externalScope?.normalizedRelativePath || path.relative(root, scope), entries, viaExternalLink: Boolean(externalScope) };
     } catch (error) {
       writeLog('warn', 'Unable to search project files', { projectName, scopeRelativePath, error: error.message || String(error) });
       return { success: false, entries: [], error: error.message || String(error) };
@@ -1470,10 +1512,12 @@ const registerWorkspaceIpc = context => {
   ipcMain.handle('workspace-list-files', async (_event, workspacePath, status, projectName, scopeRelativePath = '', requestedPageSize = 120, requestedCursor = '', requestedFilter = {}) => {
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const requestedScope = assertInside(root, path.resolve(root, scopeRelativePath || '.'), '文件枚举范围', true);
-      const scope = assertExistingInside(root, requestedScope, '文件枚举范围', true);
+      const externalScope = await resolveManagedExternalScope(root, scopeRelativePath);
+      const requestedScope = externalScope ? externalScope.currentPath : assertInside(root, path.resolve(root, scopeRelativePath || '.'), '文件枚举范围', true);
+      const scope = externalScope ? requestedScope : assertExistingInside(root, requestedScope, '文件枚举范围', true);
       const scopeStat = await fs.promises.stat(scope);
       if (!scopeStat.isDirectory()) throw new Error('文件枚举范围不是文件夹');
+      if (externalScope) mediaService.grantRoot(externalScope.mediaRoot);
       const pageSize = Math.min(200, Math.max(1, Number(requestedPageSize) || 120));
       const filter = normalizeProjectFileListFilter(requestedFilter);
       pruneFileListSessions();
@@ -1544,16 +1588,20 @@ const registerWorkspaceIpc = context => {
           const extension = path.extname(child.name).toLowerCase();
           const kind = extension === '.lnk' ? 'shortcut' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
           if (!projectFileListEntryMatchesFilter(child.name, kind, extension, session.filter)) continue;
-          const relativePath = path.relative(root, childPath).replace(/\\/g, '/');
-          const parentRelativePath = path.relative(root, current.directory).replace(/\\/g, '/');
-          entries.push({ name: child.name, path: childPath, relativePath, parentRelativePath, parentName: path.basename(current.directory), kind, extension, size: stat.size, createdAt: stat.birthtimeMs || stat.ctimeMs || 0, updatedAt: stat.mtimeMs || 0 });
+          const relativePath = externalScope
+            ? [externalScope.normalizedRelativePath, path.relative(scope, childPath).replace(/\\/g, '/')].filter(Boolean).join('/')
+            : path.relative(root, childPath).replace(/\\/g, '/');
+          const parentRelativePath = externalScope
+            ? [externalScope.normalizedRelativePath, path.relative(scope, current.directory).replace(/\\/g, '/')].filter(Boolean).join('/')
+            : path.relative(root, current.directory).replace(/\\/g, '/');
+          entries.push({ name: child.name, path: childPath, relativePath, parentRelativePath, parentName: path.basename(current.directory), kind, extension, size: stat.size, createdAt: stat.birthtimeMs || stat.ctimeMs || 0, updatedAt: stat.mtimeMs || 0, ...(externalScope ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) });
         }
         if (offset < visibleChildren.length) session.pending.unshift({ directory: current.directory, offset });
       }
       if (session.cancelled) throw Object.assign(new Error('文件枚举已取消'), { code: fileListCancelledCode });
       const hasMore = session.pending.length > 0;
       if (!hasMore) fileListSessions.delete(cursor);
-      return { success: true, scope: path.relative(root, scope).replace(/\\/g, '/'), entries, cursor: hasMore ? cursor : undefined, hasMore, truncated: hasMore, scannedDirectories: session.scannedDirectories, inspectedEntries: session.inspectedEntries };
+      return { success: true, scope: externalScope?.normalizedRelativePath || path.relative(root, scope).replace(/\\/g, '/'), entries, cursor: hasMore ? cursor : undefined, hasMore, truncated: hasMore, scannedDirectories: session.scannedDirectories, inspectedEntries: session.inspectedEntries, viaExternalLink: Boolean(externalScope) };
     } catch (error) {
       writeLog('warn', 'Unable to list project files', { projectName, scopeRelativePath, error: error.message || String(error) });
       return { success: false, entries: [], error: error.message || String(error), errorCode: error?.code === fileListCancelledCode || error?.code === fileListSessionExpiredCode ? error.code : undefined };
@@ -1573,11 +1621,12 @@ const registerWorkspaceIpc = context => {
   ipcMain.handle('workspace-recent-files', async (_event, workspacePath, status, projectName, scopeRelativePath = '', requestedLimit = 120, requestedCursor = '') => {
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const requestedScope = assertInside(root, path.resolve(root, scopeRelativePath || '.'), '最近文件范围', true);
-      const scope = assertExistingInside(root, requestedScope, '最近文件范围', true);
+      const externalScope = await resolveManagedExternalScope(root, scopeRelativePath);
+      const requestedScope = externalScope ? externalScope.currentPath : assertInside(root, path.resolve(root, scopeRelativePath || '.'), '最近文件范围', true);
+      const scope = externalScope ? requestedScope : assertExistingInside(root, requestedScope, '最近文件范围', true);
       const scopeStat = await fs.promises.stat(scope);
       if (!scopeStat.isDirectory()) throw new Error('最近文件范围不是文件夹');
-      mediaService.grantRoot(root);
+      mediaService.grantRoot(externalScope?.mediaRoot || root);
       const pageSize = Math.min(240, Math.max(1, Number(requestedLimit) || 120));
       pruneRecentFileSessions();
       let cursor = String(requestedCursor || '');
@@ -1595,7 +1644,7 @@ const registerWorkspaceIpc = context => {
         session = {
           root,
           scope,
-          pending: [{ directory: scope, priority: Number.MAX_SAFE_INTEGER, offset: 0, virtualPath: path.relative(root, scope).replace(/\\/g, '/'), viaShortcut: false }],
+          pending: [{ directory: scope, priority: Number.MAX_SAFE_INTEGER, offset: 0, virtualPath: externalScope?.normalizedRelativePath || path.relative(root, scope).replace(/\\/g, '/'), viaShortcut: Boolean(externalScope), viaExternalLink: Boolean(externalScope) }],
           visitedDirectories: new Set([path.resolve(scope).toLowerCase()]),
           candidates: [],
           scannedDirectories: 0,
@@ -1656,14 +1705,19 @@ const registerWorkspaceIpc = context => {
               const directoryKey = path.resolve(item.childPath).toLowerCase();
               if (!session.visitedDirectories.has(directoryKey)) {
                 session.visitedDirectories.add(directoryKey);
-                session.pending.push({ directory: item.childPath, priority: item.stat.mtimeMs || item.stat.birthtimeMs || 0, offset: 0, virtualPath: virtualRelativePath, viaShortcut: current.viaShortcut });
+                session.pending.push({ directory: item.childPath, priority: item.stat.mtimeMs || item.stat.birthtimeMs || 0, offset: 0, virtualPath: virtualRelativePath, viaShortcut: current.viaShortcut, viaExternalLink: current.viaExternalLink });
               }
               continue;
             }
             if (!item.stat.isFile()) continue;
             const extension = path.extname(item.child.name).toLowerCase();
             const kind = extension === '.lnk' ? 'shortcut' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
-            session.candidates.push({ name: item.child.name, path: item.childPath, relativePath: virtualRelativePath, kind, extension, size: item.stat.size, createdAt: item.stat.birthtimeMs || item.stat.ctimeMs || 0, updatedAt: item.stat.mtimeMs || 0, viaShortcut: Boolean(current.viaShortcut) });
+            let externalLink = false;
+            if (extension === '.lnk') {
+              try { externalLink = String(shell.readShortcutLink(item.childPath)?.description || '').startsWith(MANAGED_EXTERNAL_FOLDER_PREFIX); }
+              catch { /* an invalid shortcut remains a regular shortcut candidate */ }
+            }
+            session.candidates.push({ name: item.child.name, path: item.childPath, relativePath: virtualRelativePath, kind, extension, size: item.stat.size, createdAt: item.stat.birthtimeMs || item.stat.ctimeMs || 0, updatedAt: item.stat.mtimeMs || 0, viaShortcut: Boolean(current.viaShortcut), viaExternalLink: Boolean(current.viaExternalLink), ...(externalLink ? { externalLink: true } : {}) });
             if (extension === '.lnk' && process.platform === 'win32') {
               try {
                 const details = shell.readShortcutLink(item.childPath);
@@ -1674,7 +1728,7 @@ const registerWorkspaceIpc = context => {
                 if (!targetStat.isDirectory() || session.visitedDirectories.has(directoryKey)) continue;
                 session.visitedDirectories.add(directoryKey);
                 mediaService.grantRoot(target);
-                session.pending.push({ directory: target, priority: targetStat.mtimeMs || targetStat.birthtimeMs || item.stat.mtimeMs || 0, offset: 0, virtualPath: virtualRelativePath, viaShortcut: true });
+                session.pending.push({ directory: target, priority: targetStat.mtimeMs || targetStat.birthtimeMs || item.stat.mtimeMs || 0, offset: 0, virtualPath: virtualRelativePath, viaShortcut: true, viaExternalLink: externalLink });
               } catch (error) {
                 writeLog('warn', 'Unable to follow a recent-files folder shortcut', { shortcut: item.childPath, error: error.message || String(error) });
               }
@@ -1804,7 +1858,8 @@ const registerWorkspaceIpc = context => {
   ipcMain.handle('workspace-entry-details', async (_event, workspacePath, status, projectName, relativePath) => {
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const target = assertExistingInside(root, assertInside(root, path.resolve(root, relativePath), '文件路径', true), '文件路径', true);
+      const externalEntry = await resolveManagedExternalScope(root, relativePath);
+      const target = externalEntry?.currentPath || assertExistingInside(root, assertInside(root, path.resolve(root, relativePath), '文件路径', true), '文件路径', true);
       const stat = await fs.promises.stat(target);
       let size = stat.isFile() ? stat.size : 0;
       let fileCount = stat.isFile() ? 1 : 0;
@@ -1930,7 +1985,9 @@ const registerWorkspaceIpc = context => {
   
   ipcMain.handle('workspace-open-entry', async (_event, workspacePath, status, projectName, relativePath) => {
     try {
-      const target = resolveProjectEntry(workspacePath, status, projectName, relativePath);
+      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const externalEntry = await resolveManagedExternalScope(root, relativePath);
+      const target = externalEntry?.currentPath || resolveProjectEntry(workspacePath, status, projectName, relativePath);
       const error = await shell.openPath(target);
       return { success: !error, error };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
@@ -2098,7 +2155,8 @@ const registerWorkspaceIpc = context => {
       if (!executable) throw new Error('未检测到 Photoshop');
       const paths = Array.isArray(relativePaths) ? relativePaths : [relativePaths];
       if (!paths.length) throw new Error('没有选择要打开的文件');
-      const targets = paths.map(relativePath => resolveProjectEntry(workspacePath, status, projectName, relativePath));
+      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const targets = await Promise.all(paths.map(async relativePath => (await resolveManagedExternalScope(root, relativePath))?.currentPath || resolveProjectEntry(workspacePath, status, projectName, relativePath)));
       if (targets.some(target => !fs.statSync(target).isFile())) throw new Error('只能用 Photoshop 打开文件');
       return await new Promise(resolve => {
         const child = spawn(executable, targets, { detached: true, stdio: 'ignore', windowsHide: false });
@@ -2113,7 +2171,9 @@ const registerWorkspaceIpc = context => {
   
   ipcMain.handle('workspace-copy-entry-path', async (_event, workspacePath, status, projectName, relativePath) => {
     try {
-      const target = resolveProjectEntry(workspacePath, status, projectName, relativePath);
+      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const externalEntry = await resolveManagedExternalScope(root, relativePath);
+      const target = externalEntry?.currentPath || resolveProjectEntry(workspacePath, status, projectName, relativePath);
       clipboard.writeText(target);
       return { success: true };
     } catch (error) { return { success: false, error: error.message || String(error) }; }

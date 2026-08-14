@@ -177,7 +177,7 @@ const workspaceWatchSuppressions = new Map();
 const mediaTrackingTimers = new Map();
 const isInternalWorkspaceChange = fileName => String(fileName || '')
   .split(/[\\/]/)
-  .some(segment => { const normalized = segment.toLowerCase(); return normalized.endsWith('.photoflow-part')
+  .some(segment => { const normalized = segment.toLowerCase(); return normalized.includes('.photoflow-part')
     || ['.photoflow-workspace-id', '_photoflow_safety_temp'].includes(normalized)
     || normalized.startsWith('.') && normalized.includes('.photoflow-transcode')
     || /^\.photoflow-(?:import-|paste|replace|split-|undo|team-workflow-)/i.test(normalized); });

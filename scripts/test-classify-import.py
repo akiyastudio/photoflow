@@ -891,6 +891,106 @@ class ClassifyImportTests(unittest.TestCase):
             self.assertEqual(sorted(path.name for path in jpg_dir.glob('*.jpg')), ['one.jpg', 'two.jpg'])
             self.assertFalse(any(jpg_dir.glob('* (1).jpg')))
 
+    def test_work_import_checkpoints_manifest_a_constant_number_of_times(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dcim = root / 'card' / 'DCIM'
+            project = root / 'project'
+            dcim.mkdir(parents=True)
+            project.mkdir()
+            for index in range(120):
+                (dcim / f'photo-{index:03d}.jpg').write_bytes(f'image-{index}'.encode())
+            session = 'bounded-checkpoints'
+            classify.stage_media_to_safety_temp(str(root / 'card'), str(project), import_session=session)
+
+            output = io.StringIO()
+            real_write = classify._write_staging_manifest
+            with contextlib.redirect_stdout(output), mock.patch.object(classify, '_write_staging_manifest', wraps=real_write) as manifest_writes:
+                classify.stage_import_and_organize(
+                    str(root / 'card'),
+                    str(project),
+                    direct_project=True,
+                    import_session=session,
+                )
+
+            self.assertEqual(manifest_writes.call_count, 2)
+            events = [json.loads(line) for line in output.getvalue().splitlines() if line.strip().startswith('{')]
+            organizing = [event for event in events if event.get('data', {}).get('phase') == 'organizing']
+            self.assertTrue(organizing)
+            self.assertEqual(organizing[-1]['data']['filesProcessed'], 120)
+            self.assertEqual(len(list((project / 'jpg').glob('*.jpg'))), 120)
+
+    def test_work_import_recovers_from_crash_after_batch_plan_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dcim = root / 'card' / 'DCIM'
+            project = root / 'project'
+            dcim.mkdir(parents=True)
+            project.mkdir()
+            for name in ('one.jpg', 'two.jpg', 'three.jpg'):
+                (dcim / name).write_bytes(name.encode())
+            session = 'batch-plan-crash'
+            classify.stage_media_to_safety_temp(str(root / 'card'), str(project), import_session=session)
+
+            real_promote = classify.promote_staged_file
+            promote_count = 0
+
+            def fail_on_second_promote(source, destination, on_progress=None, allow_atomic_move=True):
+                nonlocal promote_count
+                promote_count += 1
+                if promote_count == 2:
+                    raise OSError('simulated crash after the first promotion')
+                return real_promote(source, destination, on_progress, allow_atomic_move)
+
+            with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(classify, 'promote_staged_file', side_effect=fail_on_second_promote):
+                classify.stage_import_and_organize(
+                    str(root / 'card'),
+                    str(project),
+                    direct_project=True,
+                    import_session=session,
+                )
+
+            with open(classify._staging_manifest_path(classify.get_import_staging_dir(str(project), session)), 'r', encoding='utf-8') as manifest_file:
+                manifest = json.load(manifest_file)
+            self.assertTrue(all(entry.get('pendingDestination') for entry in manifest['files']))
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                classify.stage_import_and_organize(
+                    str(root / 'card'),
+                    str(project),
+                    direct_project=True,
+                    import_session=session,
+                )
+
+            self.assertEqual(sorted(path.name for path in (project / 'jpg').glob('*.jpg')), ['one.jpg', 'three.jpg', 'two.jpg'])
+            self.assertFalse(any((project / 'jpg').glob('* (1).jpg')))
+
+    def test_work_import_reserves_duplicate_source_names_before_moving(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first_source = root / 'first'
+            second_source = root / 'second'
+            project = root / 'project'
+            first_source.mkdir()
+            second_source.mkdir()
+            project.mkdir()
+            (first_source / 'photo.jpg').write_bytes(b'first')
+            (second_source / 'photo.jpg').write_bytes(b'second')
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                classify.stage_import_and_organize(
+                    str(first_source),
+                    str(project),
+                    direct_project=True,
+                    direct_source=True,
+                    source_paths=[str(first_source), str(second_source)],
+                    import_session='duplicate-source-names',
+                )
+
+            imported = sorted((project / 'jpg').glob('*.jpg'))
+            self.assertEqual([path.name for path in imported], ['photo (1).jpg', 'photo.jpg'])
+            self.assertEqual({path.read_bytes() for path in imported}, {b'first', b'second'})
+
     def test_work_import_recovers_when_receipt_write_crashes_without_copying_again(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
