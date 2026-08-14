@@ -4787,6 +4787,15 @@ def tracking_session_decide(root: str, db, payload: dict):
     return {"success": True, "item": serialize_tracking_item(db.execute("SELECT * FROM tracking_session_items WHERE id=?", (item_id,)).fetchone())}
 
 
+def _rename_target_preserving_source_extension(source_name: str, reference_name: str) -> str:
+    """Reuse only the parent's filename stem; the current media keeps its format."""
+    source_name = _valid_tracking_file_name(source_name)
+    reference_name = _valid_tracking_file_name(reference_name)
+    reference_stem = os.path.splitext(reference_name)[0]
+    source_extension = os.path.splitext(source_name)[1]
+    return _valid_tracking_file_name(f"{reference_stem}{source_extension}")
+
+
 def tracking_commit_plan(root: str, db, payload: dict):
     session_id = str(payload.get("sessionId") or "")
     session = db.execute("SELECT * FROM tracking_sessions WHERE id=?", (session_id,)).fetchone()
@@ -4826,7 +4835,8 @@ def tracking_commit_plan(root: str, db, payload: dict):
         elif item["reference_name"] and item["source_name"]:
             matches.append({
                 "reference": item["reference_name"], "source": item["source_name"],
-                "target": item["reference_name"] if session["rename_from_parent"] else (item["target_name"] or item["source_name"]),
+                "target": (_rename_target_preserving_source_extension(item["source_name"], item["reference_name"])
+                           if session["rename_from_parent"] else (item["target_name"] or item["source_name"])),
                 "distance": item["distance"] if item["distance"] is not None else 0,
                 "confidence": item["confidence"],
             })
@@ -4877,7 +4887,7 @@ def _prepared_tracking_commit_snapshot(db, session):
         if not session["rename_from_parent"] or not item["reference_name"] or not item["source_name"]:
             continue
         source_name = item["source_name"]
-        target_name = item["reference_name"]
+        target_name = _rename_target_preserving_source_extension(source_name, item["reference_name"])
         if source_name == target_name:
             continue
         if source_name not in files:
@@ -5439,6 +5449,8 @@ def plan_confirmed_batch_renames(db, batch_id: str, folder_path: str, matches: l
     for match in matches:
         source_name = str(match.get("source") or "")
         target_name = str(match.get("target") or "")
+        if target_name:
+            target_name = _rename_target_preserving_source_extension(source_name, target_name)
         if not target_name or target_name == source_name:
             continue
         source_path = safe_folder_file(folder_path, source_name)

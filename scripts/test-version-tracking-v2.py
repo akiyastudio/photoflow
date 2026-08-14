@@ -174,6 +174,7 @@ def test_tracking_engine(root: Path) -> None:
         refresh_plan = db_api.tracking_commit_plan(str(workspace), db, {"sessionId": refresh["sessionId"]})
         assert refresh_plan["renameFromParent"] and refresh_plan["copyMissingFromParent"]
         assert refresh_plan["matches"][0]["target"] == "base.jpg"
+        assert db_api._rename_target_preserving_source_extension("retouched.png", "base.ARW") == "base.png"
         assert refresh_plan["copyReferences"] == ["parent-added.jpg"]
 
         # A failed commit is retryable without losing decisions or accepting new paths.

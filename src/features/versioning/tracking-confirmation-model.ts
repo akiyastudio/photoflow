@@ -32,6 +32,9 @@ export const firstTrackingPreviewItemId = (items: readonly ProgressTrackingItem[
   || items.find(item => item.status === 'missing_reference')?.id
   || items[0]?.id;
 
+export const firstUnresolvedTrackingItemId = (items: readonly ProgressTrackingItem[]) =>
+  items.find(item => unresolvedTrackingStatus(item.status))?.id;
+
 export const adjacentTrackingPreviewItemId = (items: readonly ProgressTrackingItem[], selectedId: string | undefined, direction: -1 | 1) => {
   if (!items.length) return undefined;
   const current = items.findIndex(item => item.id === selectedId);

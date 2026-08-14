@@ -172,6 +172,7 @@ const registerBrollImportIpc = ({
     const moves = [];
     try {
       const deleteSourceAfterImport = options?.deleteSourceAfterImport === true;
+      const linkOnly = options?.linkOnly === true;
       const preserveOriginal = !deleteSourceAfterImport;
       const splitLargeFiles = Boolean(options?.splitVideosOnImport ?? options?.splitLargeFiles);
       const transcodeVideos = Boolean(options?.transcodeVideosOnImport);
@@ -191,6 +192,19 @@ const registerBrollImportIpc = ({
 
       const destinationDir = assertInside(projectPath, path.join(projectPath, '花絮'), '花絮目录');
       await fs.promises.mkdir(destinationDir, { recursive: true });
+      if (linkOnly) {
+        const reserved = new Set();
+        for (const selected of sourcePaths) {
+          const source = path.resolve(selected);
+          const stat = await fs.promises.stat(source);
+          if (!stat.isFile() && !stat.isDirectory()) throw new Error(`不支持创建外链：${path.basename(source)}`);
+          const shortcutPath = uniqueDestination(destinationDir, `${path.basename(source)}.lnk`, reserved);
+          if (!shell.writeShortcutLink(shortcutPath, { target: source, cwd: stat.isDirectory() ? source : path.dirname(source), description: `${stat.isDirectory() ? 'PhotoFlow 外链文件夹' : 'PhotoFlow 外链文件'}：${path.basename(source)}` })) throw new Error(`无法创建外链：${path.basename(source)}`);
+          createdPaths.push(shortcutPath);
+        }
+        if (createdPaths.length) await pushUndoOperation({ kind: 'remove-created', paths: createdPaths, label: '导入花絮外链' });
+        return { success: true, operationId, count: createdPaths.length, splitCount: 0, transcodeCount: 0, clearedCount: 0, linked: true };
+      }
       const sources = [];
       for (const selected of sourcePaths) {
         const info = await assertRegularFile(selected);

@@ -162,7 +162,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
   return { logs, isRunning, isCancelling, progress, statusMsg, preview, clearPreview: () => setPreview(null), start, cancel };
 };
 
-const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspacePath, workspaceProjects, active = true, directSource = false, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitVideosOnImport = false, transcodeVideosOnImport = false, splitBrollVideosOnImport = false, transcodeBrollVideosOnImport = false, transcodeSettings, onChooseSourceFiles, onChooseSourceFolder, onDropSourcePaths, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspacePath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitVideosOnImport?: boolean, transcodeVideosOnImport?: boolean, splitBrollVideosOnImport?: boolean, transcodeBrollVideosOnImport?: boolean, transcodeSettings?: VideoTranscodeSettings, onChooseSourceFiles?: () => void, onChooseSourceFolder?: () => void, onDropSourcePaths?: (paths: string[]) => void, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (result: ImportCompletion) => void | Promise<void>, completedActionLabel?: string, onCompletedAction?: () => void }) => {
+const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath, workspacePath, workspaceProjects, active = true, directSource = false, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitVideosOnImport = false, transcodeVideosOnImport = false, splitBrollVideosOnImport = false, transcodeBrollVideosOnImport = false, transcodeSettings, onChooseSourceFiles, onChooseSourceFolder, onDropSourcePaths, onLinkOnlyImport, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], destinationPath?: string | null, brollDestinationPath?: string | null, workspacePath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitVideosOnImport?: boolean, transcodeVideosOnImport?: boolean, splitBrollVideosOnImport?: boolean, transcodeBrollVideosOnImport?: boolean, transcodeSettings?: VideoTranscodeSettings, onChooseSourceFiles?: () => void, onChooseSourceFolder?: () => void, onDropSourcePaths?: (paths: string[]) => void, onLinkOnlyImport?: (paths: string[]) => void | Promise<void>, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (result: ImportCompletion) => void | Promise<void>, completedActionLabel?: string, onCompletedAction?: () => void }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'completed'>('idle');
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("等待连接...");
@@ -172,6 +172,7 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
   const [completedProjectNames, setCompletedProjectNames] = useState<string[]>([]);
   const [isCancellingImport, setIsCancellingImport] = useState(false);
   const [shouldDeleteSourceAfterImport, setShouldDeleteSourceAfterImport] = useState(deleteSourceAfterImport);
+  const [linkOnly, setLinkOnly] = useState(false);
   const [drivePickerOpen, setDrivePickerOpen] = useState(false);
   const selectedDrives = config?.sdPaths?.length ? config.sdPaths : config?.sdPath ? [config.sdPath] : [];
   const driveTypes = config?.sdDriveTypes || {};
@@ -872,11 +873,30 @@ const ImportCard = ({ config, drives = [], destinationPath, brollDestinationPath
       onChooseFiles={() => onChooseSourceFiles?.()}
       onChooseFolder={onChooseSourceFolder ? () => onChooseSourceFolder() : undefined}
       onDropPaths={onDropSourcePaths}
+      linkOnly={linkOnly}
+      onLinkOnlyChange={value => { setLinkOnly(value); if (value) setShouldDeleteSourceAfterImport(false); }}
       deleteSourceAfterImport={shouldDeleteSourceAfterImport}
       onDeleteSourceAfterImportChange={setShouldDeleteSourceAfterImport}
       deleteSourceDescription="全部文件复制并验证成功后删除源文件；关闭则保留。"
       startDisabled={!canStartImport}
-      onStart={startBatchImport}
+      onStart={() => {
+        if (!linkOnly || !onLinkOnlyImport) { startBatchImport(); return; }
+        isBusyRef.current = true;
+        onBusyChange?.(true);
+        setStatus('importing');
+        setStatusMsg('正在创建外链…');
+        void Promise.resolve(onLinkOnlyImport(selectedDrives)).then(() => {
+          isBusyRef.current = false;
+          onBusyChange?.(false);
+          setStatus('completed');
+          setStatusMsg('外链已导入');
+        }).catch(error => {
+          isBusyRef.current = false;
+          onBusyChange?.(false);
+          setStatus('idle');
+          setStatusMsg(error instanceof Error ? error.message : String(error));
+        });
+      }}
     />;
 
     return (
