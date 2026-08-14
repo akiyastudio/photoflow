@@ -17,6 +17,30 @@ const BROLL_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.tif', '.ti
 const BROLL_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.m4v', '.mkv']);
 const FOUR_GB = 4 * 1024 * 1024 * 1024;
 
+const expandBrollSourcePaths = async selectedPaths => {
+  const discovered = new Set();
+  const visit = async (selectedPath, fromDirectory = false) => {
+    const resolved = path.resolve(selectedPath);
+    const stat = await fs.promises.lstat(resolved);
+    if (stat.isDirectory()) {
+      const entries = await fs.promises.readdir(resolved, { withFileTypes: true });
+      for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+        if (entry.isDirectory()) await visit(path.join(resolved, entry.name), true);
+        else if (entry.isFile() && BROLL_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) discovered.add(path.join(resolved, entry.name));
+      }
+      return;
+    }
+    if (!stat.isFile()) throw new Error(`不支持导入此文件类型：${path.basename(resolved)}`);
+    if (!BROLL_EXTENSIONS.has(path.extname(resolved).toLowerCase())) {
+      if (fromDirectory) return;
+      throw new Error(`不支持的花絮文件格式：${path.basename(resolved)}`);
+    }
+    discovered.add(resolved);
+  };
+  for (const selectedPath of selectedPaths) await visit(selectedPath);
+  return [...discovered];
+};
+
 const runSplitter = async ({ getRunConfig, source, outputDirectory, outputStem, extension, onProgress, isCancelled }) => {
   const prefix = `${outputStem}_part`;
   const listOutputs = async () => (await fs.promises.readdir(outputDirectory))
@@ -188,7 +212,7 @@ const registerBrollImportIpc = ({
         if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, count: 0, splitCount: 0, clearedCount: 0 };
         sourcePaths = choice.filePaths;
       }
-      if (sourcePaths.length > 500) throw new Error('一次最多导入 500 个花絮文件');
+      if (sourcePaths.length > 500) throw new Error('一次最多导入 500 个花絮文件或文件夹');
 
       const destinationDir = assertInside(projectPath, path.join(projectPath, '花絮'), '花絮目录');
       await fs.promises.mkdir(destinationDir, { recursive: true });
@@ -205,6 +229,9 @@ const registerBrollImportIpc = ({
         if (createdPaths.length) await pushUndoOperation({ kind: 'remove-created', paths: createdPaths, label: '导入花絮外链' });
         return { success: true, operationId, count: createdPaths.length, splitCount: 0, transcodeCount: 0, clearedCount: 0, linked: true };
       }
+      sourcePaths = await expandBrollSourcePaths(sourcePaths);
+      if (!sourcePaths.length) throw new Error('所选文件夹中没有可导入的花絮媒体文件');
+      if (sourcePaths.length > 500) throw new Error('一次最多导入 500 个花絮文件');
       const sources = [];
       for (const selected of sourcePaths) {
         const info = await assertRegularFile(selected);

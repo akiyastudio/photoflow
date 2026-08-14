@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { registerFileOperationsIpc } = require('../electron/modules/files-ipc.cjs');
 const { registerWorkspaceIpc } = require('../electron/modules/workspace-ipc.cjs');
+const { registerBrollImportIpc } = require('../electron/modules/broll-import.cjs');
 const { addUndoIdentities, assertUndoIdentity, capturePathIdentity, samePathIdentity } = require('../electron/services/file-identity-service.cjs');
 const {
   CANCELLED_CODE,
@@ -573,20 +574,57 @@ const run = async () => {
     fs.writeFileSync(path.join(importSource, 'JPG', 'IMG_0001.JPG'), 'proxy');
     fs.writeFileSync(path.join(importSource, '图片后期_2', 'IMG_0001.jpg'), 'edited');
     let importedCatalogEntry = null;
+    let importCopyPlanCalls = 0;
+    let importInspectionReadCalls = 0;
+    let externallyOpenedPath = '';
+    let progressRegistrationPath = '';
+    let failProgressRelocation = false;
+    let failShortcutRemoval = false;
+    let materializedProgressFolders = [];
+    const importFs = {
+      ...fs,
+      promises: {
+        ...fs.promises,
+        readdir: async (...args) => { importInspectionReadCalls += 1; return fs.promises.readdir(...args); },
+        rm: async (target, options) => {
+          if (failShortcutRemoval && path.extname(String(target)).toLowerCase() === '.lnk') throw Object.assign(new Error('simulated shortcut lock'), { code: 'EPERM' });
+          return fs.promises.rm(target, options);
+        },
+      },
+    };
+    const importShell = {
+      writeShortcutLink: (shortcutPath, details) => {
+        fs.writeFileSync(shortcutPath, JSON.stringify(details));
+        return true;
+      },
+      readShortcutLink: shortcutPath => JSON.parse(fs.readFileSync(shortcutPath, 'utf8')),
+      openPath: async target => { externallyOpenedPath = target; return ''; },
+    };
     registerWorkspaceIpc({
       Array, Boolean, Date, Error, Math, Object, Promise, Set, String, undefined, crypto,
-      ipcMain: { handle: (name, handler) => importProjectHandlers.set(name, handler) }, fs, path,
+      ipcMain: { handle: (name, handler) => importProjectHandlers.set(name, handler) }, fs: importFs, path,
       CANCELLED_CODE, WORKSPACE_STATUSES: ['策划中'], HIDDEN_SYSTEM_ENTRY_NAMES: new Set(),
       IMAGE_EXTENSIONS: new Set(['.jpg', '.jpeg']), RAW_EXTENSIONS: new Set(['.cr3']), VIDEO_EXTENSIONS: new Set(['.mov']),
       cleanProjectName: value => String(value).trim(), ensureWorkspace: () => importWorkspaceRoot,
       getProjectPath: (_workspacePath, status, name) => path.join(importWorkspaceRoot, status, name),
+      resolveProjectEntry: (_workspacePath, status, name, relativePath) => path.join(importWorkspaceRoot, status, name, relativePath),
       getWorkspaceDataRoot: () => path.join(importWorkspaceRoot, '.data'),
       workspaceCatalogs: new Map([[importWorkspaceRoot, { byName: new Map(), projects: [] }]]),
       mutateWorkspaceCatalog: async (_root, _operation, entry) => {
         importedCatalogEntry = entry;
         return { byName: new Map([[entry.name.toLocaleLowerCase(), { id: 'imported-project-id', name: entry.name }]]), projects: [] };
       },
-      activeProjectFileOperations: new Map(), assertDiskSpace, collectCopyPlan, copyPlannedFiles, removeCopiedSources, throwIfCancelled,
+      activeProjectFileOperations: new Map(), assertDiskSpace, assertInside, assertExistingInside, uniqueDestination, movePathAtomic,
+      collectCopyPlan: async (...args) => { importCopyPlanCalls += 1; return collectCopyPlan(...args); },
+      copyPlannedFiles, removeCopiedSources, throwIfCancelled, shell: importShell,
+      versionService: {
+        listProgress: async () => ({ progressFolders: materializedProgressFolders }),
+        registerProgress: async (_workspaceRoot, request) => {
+          if (failProgressRelocation) return { success: false, error: 'simulated progress relocation failure' };
+          progressRegistrationPath = request.folderPath;
+          return { success: true, progressFolder: { ...request, id: request.progressId || 'progress-id' } };
+        },
+      },
       pushUndoOperation: async () => undefined, writeLog: () => undefined, mainWindow: null,
     });
     const importedProject = await importProjectHandlers.get('workspace-import-existing-project')(
@@ -599,6 +637,213 @@ const run = async () => {
     assert.strictEqual(importedCatalogEntry.name, '接管测试');
     assert.strictEqual(importedProject.candidates[0].name, 'RAW', 'RAW should be proposed as the adoption baseline');
     assert(!importedProject.candidates.some(candidate => candidate.name === 'JPG'), 'a companion JPG folder should be treated as a RAW proxy instead of a second progress');
+    const externallyOpenedFolder = await importProjectHandlers.get('workspace-open-entry')(
+      null, importWorkspaceRoot, '策划中', '接管测试', 'RAW',
+    );
+    assert.strictEqual(externallyOpenedFolder.success, true, externallyOpenedFolder.error);
+    assert.strictEqual(externallyOpenedPath, path.join(importWorkspaceRoot, '策划中', '接管测试', 'RAW'), 'folder details external-open must delegate to the system shell');
+
+    const linkSource = path.join(root, 'outside-linked-project');
+    fs.mkdirSync(path.join(linkSource, 'RAW'), { recursive: true });
+    fs.writeFileSync(path.join(linkSource, 'RAW', 'LINK_0001.CR3'), 'linked-raw');
+    const inspectedLinkProject = await importProjectHandlers.get('workspace-inspect-existing-project')(null, linkSource);
+    assert.strictEqual(inspectedLinkProject.success, true, inspectedLinkProject.error);
+    assert(inspectedLinkProject.inspectionToken, 'link inspection must return a reusable server-side token');
+    const inspectionReadsBeforeLink = importInspectionReadCalls;
+    const copyPlanCallsBeforeLink = importCopyPlanCalls;
+    const linkedProject = await importProjectHandlers.get('workspace-import-existing-project-link')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      importWorkspaceRoot, linkSource, { name: 'linked-project', mode: 'copy', operationId: '12345678-1234-4123-8123-123456789abc', inspectionToken: inspectedLinkProject.inspectionToken },
+    );
+    assert.strictEqual(linkedProject.success, true, linkedProject.error);
+    assert.strictEqual(linkedProject.linked, true);
+    assert.strictEqual(importCopyPlanCalls, copyPlanCallsBeforeLink, 'link import must not build or execute a file-copy plan');
+    assert.strictEqual(importInspectionReadCalls, inspectionReadsBeforeLink + 1, 'link import may verify its one-entry managed directory but must not rescan the external source');
+    assert.strictEqual(fs.readFileSync(path.join(linkSource, 'RAW', 'LINK_0001.CR3'), 'utf8'), 'linked-raw');
+    const linkedProjectPath = path.join(importWorkspaceRoot, '策划中', 'linked-project');
+    assert.deepStrictEqual(fs.readdirSync(linkedProjectPath), ['outside-linked-project.lnk'], 'managed link project must contain only the shortcut');
+    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(linkedProjectPath, 'outside-linked-project.lnk'), 'utf8')).target, linkSource);
+
+    const fileLinkProjectName = 'file-link-project';
+    const fileLinkProjectPath = path.join(importWorkspaceRoot, '策划中', fileLinkProjectName);
+    const linkedFolderSource = path.join(root, 'linked-folder-source');
+    const linkedFileSource = path.join(root, 'linked-file-source.jpg');
+    fs.mkdirSync(fileLinkProjectPath, { recursive: true });
+    fs.mkdirSync(linkedFolderSource, { recursive: true });
+    fs.writeFileSync(path.join(linkedFolderSource, 'inside.jpg'), 'inside');
+    fs.writeFileSync(linkedFileSource, 'linked-file');
+    const linkedFiles = await importProjectHandlers.get('workspace-import-files')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, '', { linkOnly: true, deleteSourceAfterImport: false, sourcePaths: [linkedFolderSource, linkedFileSource] },
+    );
+    assert.strictEqual(linkedFiles.success, true, linkedFiles.error);
+    assert.strictEqual(linkedFiles.linked, true);
+    assert.strictEqual(fs.readFileSync(path.join(linkedFolderSource, 'inside.jpg'), 'utf8'), 'inside');
+    assert.strictEqual(fs.readFileSync(linkedFileSource, 'utf8'), 'linked-file');
+    assert.deepStrictEqual(fs.readdirSync(fileLinkProjectPath).sort(), ['linked-file-source.jpg.lnk', 'linked-folder-source.lnk']);
+
+    const copiedFolderSource = path.join(root, 'copied-folder-source');
+    fs.mkdirSync(path.join(copiedFolderSource, 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(copiedFolderSource, 'nested', 'inside.txt'), 'folder-copy');
+    const copiedFolder = await importProjectHandlers.get('workspace-import-files')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      importWorkspaceRoot, '策划中', fileLinkProjectName, '', { deleteSourceAfterImport: false, sourcePaths: [copiedFolderSource] },
+    );
+    assert.strictEqual(copiedFolder.success, true, copiedFolder.error);
+    assert.strictEqual(fs.readFileSync(path.join(copiedFolderSource, 'nested', 'inside.txt'), 'utf8'), 'folder-copy', 'copying an imported folder must preserve its source');
+    assert.strictEqual(fs.readFileSync(path.join(fileLinkProjectPath, 'copied-folder-source', 'nested', 'inside.txt'), 'utf8'), 'folder-copy', 'normal file import must preserve a dropped folder tree');
+
+    const progressLinkSource = path.join(root, 'progress-link-source');
+    fs.mkdirSync(progressLinkSource, { recursive: true });
+    fs.writeFileSync(path.join(progressLinkSource, 'progress.jpg'), 'progress');
+    const linkedProgress = await importProjectHandlers.get('workspace-import-progress-files')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, 'linked-progress', {
+        linkOnly: true, deleteSourceAfterImport: false, sourcePaths: [progressLinkSource], mediaKind: 'image', versionKey: '1', trackingEnabled: true, trackingState: 'pending_compare',
+      },
+    );
+    assert.strictEqual(linkedProgress.success, true, linkedProgress.error);
+    assert.strictEqual(fs.readFileSync(path.join(progressLinkSource, 'progress.jpg'), 'utf8'), 'progress');
+    assert.strictEqual(fs.existsSync(path.join(fileLinkProjectPath, 'linked-progress.lnk')), true);
+    assert.strictEqual(progressRegistrationPath, progressLinkSource, 'linked progress must register the external target without copying it');
+
+    const brollHandlers = new Map();
+    const brollProjectName = 'broll-link-project';
+    const brollProjectPath = path.join(importWorkspaceRoot, '策划中', brollProjectName);
+    const brollSource = path.join(root, 'linked-broll.mov');
+    fs.mkdirSync(brollProjectPath, { recursive: true });
+    fs.writeFileSync(brollSource, 'broll');
+    registerBrollImportIpc({
+      ipcMain: { handle: (name, handler) => brollHandlers.set(name, handler) },
+      dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) }, shell: importShell,
+      recycleBinService: {}, getMainWindow: () => null,
+      getProjectPath: () => brollProjectPath, getRunConfig: () => { throw new Error('link import must not start media workers'); },
+      writeLog: () => undefined, pushUndoOperation: async () => undefined, activeOperations: new Map(), backgroundTasks: null, getTelemetry: () => null,
+    });
+    const linkedBroll = await brollHandlers.get('workspace-import-broll')(
+      null, importWorkspaceRoot, '策划中', brollProjectName, { linkOnly: true, deleteSourceAfterImport: false, sourcePaths: [brollSource] },
+    );
+    assert.strictEqual(linkedBroll.success, true, linkedBroll.error);
+    assert.strictEqual(linkedBroll.linked, true);
+    assert.strictEqual(fs.readFileSync(brollSource, 'utf8'), 'broll');
+    assert.strictEqual(fs.existsSync(path.join(brollProjectPath, '花絮', 'linked-broll.mov.lnk')), true);
+
+    const brollFolderSource = path.join(root, 'broll-folder-source');
+    fs.mkdirSync(path.join(brollFolderSource, 'nested'), { recursive: true });
+    fs.writeFileSync(path.join(brollFolderSource, 'nested', 'folder-broll.jpg'), 'folder-broll');
+    fs.writeFileSync(path.join(brollFolderSource, 'nested', 'ignore.txt'), 'ignore');
+    const importedBrollFolder = await brollHandlers.get('workspace-import-broll')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      importWorkspaceRoot, '策划中', brollProjectName, { deleteSourceAfterImport: false, sourcePaths: [brollFolderSource] },
+    );
+    assert.strictEqual(importedBrollFolder.success, true, importedBrollFolder.error);
+    assert.strictEqual(fs.readFileSync(path.join(brollProjectPath, '花絮', 'folder-broll.jpg'), 'utf8'), 'folder-broll', 'b-roll import must recursively accept a dropped folder');
+    assert.strictEqual(fs.existsSync(path.join(brollProjectPath, '花絮', 'ignore.txt')), false, 'b-roll folder import must ignore unsupported files');
+
+    const materializeProjectName = 'materialize-project';
+    const materializeProjectPath = path.join(importWorkspaceRoot, '策划中', materializeProjectName);
+    const materializeSource = path.join(root, 'materialize-source');
+    fs.mkdirSync(materializeProjectPath, { recursive: true });
+    fs.mkdirSync(materializeSource, { recursive: true });
+    fs.writeFileSync(path.join(materializeSource, 'tracked.jpg'), 'tracked');
+    const materializeShortcut = path.join(materializeProjectPath, 'external-folder.lnk');
+    importShell.writeShortcutLink(materializeShortcut, { target: materializeSource, cwd: materializeSource, description: 'PhotoFlow 外链文件夹：external-folder' });
+    materializedProgressFolders = [{ id: 'external-progress', mediaKind: 'image', versionKey: '1', displayName: 'external-progress', folderPath: materializeSource, trackingEnabled: true, trackingState: 'pending_compare', nodeRole: 'progress', relationKind: 'main', renameFromParent: false, copyMissingFromParent: false }];
+    const materialized = await importProjectHandlers.get('workspace-materialize-external-links')(
+      null, importWorkspaceRoot, '策划中', materializeProjectName, ['external-folder.lnk'],
+    );
+    assert.strictEqual(materialized.success, true, materialized.error);
+    const materializedDestination = path.join(materializeProjectPath, 'external-folder');
+    assert.strictEqual(fs.existsSync(materializeSource), false);
+    assert.strictEqual(fs.readFileSync(path.join(materializedDestination, 'tracked.jpg'), 'utf8'), 'tracked');
+    assert.strictEqual(fs.existsSync(materializeShortcut), false);
+    assert.strictEqual(progressRegistrationPath, materializedDestination, 'materializing a tracked external folder must relocate its database path');
+
+    const rollbackSource = path.join(root, 'materialize-rollback-source');
+    fs.mkdirSync(rollbackSource, { recursive: true });
+    fs.writeFileSync(path.join(rollbackSource, 'rollback.jpg'), 'rollback');
+    const rollbackShortcut = path.join(materializeProjectPath, 'rollback-folder.lnk');
+    importShell.writeShortcutLink(rollbackShortcut, { target: rollbackSource, cwd: rollbackSource, description: 'PhotoFlow 外链文件夹：rollback-folder' });
+    materializedProgressFolders = [{ ...materializedProgressFolders[0], id: 'rollback-progress', folderPath: rollbackSource }];
+    failProgressRelocation = true;
+    const rolledBackMaterialization = await importProjectHandlers.get('workspace-materialize-external-links')(
+      null, importWorkspaceRoot, '策划中', materializeProjectName, ['rollback-folder.lnk'],
+    );
+    failProgressRelocation = false;
+    assert.strictEqual(rolledBackMaterialization.success, false, 'database relocation failure must fail the materialization');
+    assert.strictEqual(fs.readFileSync(path.join(rollbackSource, 'rollback.jpg'), 'utf8'), 'rollback');
+    assert.strictEqual(fs.existsSync(rollbackShortcut), true, 'failed materialization must restore the shortcut');
+
+    const lockedShortcutSource = path.join(root, 'materialize-locked-shortcut-source');
+    fs.mkdirSync(lockedShortcutSource, { recursive: true });
+    fs.writeFileSync(path.join(lockedShortcutSource, 'locked.jpg'), 'locked');
+    const lockedShortcut = path.join(materializeProjectPath, 'locked-folder.lnk');
+    importShell.writeShortcutLink(lockedShortcut, { target: lockedShortcutSource, cwd: lockedShortcutSource, description: 'PhotoFlow 外链文件夹：locked-folder' });
+    materializedProgressFolders = [];
+    failShortcutRemoval = true;
+    const lockedShortcutMaterialization = await importProjectHandlers.get('workspace-materialize-external-links')(
+      null, importWorkspaceRoot, '策划中', materializeProjectName, ['locked-folder.lnk'],
+    );
+    failShortcutRemoval = false;
+    assert.strictEqual(lockedShortcutMaterialization.success, false, 'shortcut removal failure must fail the materialization');
+    assert.strictEqual(fs.readFileSync(path.join(lockedShortcutSource, 'locked.jpg'), 'utf8'), 'locked', 'a post-move shortcut failure must move the folder back');
+    assert.strictEqual(fs.existsSync(lockedShortcut), true, 'a post-move shortcut failure must retain the original shortcut');
+
+    const failoverHandlers = new Map();
+    const fullWorkspace = path.join(root, 'full-workspace');
+    const healthyWorkspace = path.join(root, 'healthy-workspace');
+    fs.mkdirSync(fullWorkspace, { recursive: true });
+    fs.mkdirSync(healthyWorkspace, { recursive: true });
+    fs.mkdirSync(path.join(fullWorkspace, '策划中'), { recursive: true });
+    fs.mkdirSync(path.join(healthyWorkspace, '策划中'), { recursive: true });
+    let healthyWorkspaceFull = false;
+    const failoverFs = {
+      ...fs,
+      promises: {
+        ...fs.promises,
+        statfs: async directory => path.resolve(directory) === path.resolve(fullWorkspace) || healthyWorkspaceFull
+          ? { bavail: 1, bsize: 4096 }
+          : { bavail: 1024 * 1024, bsize: 4096 },
+      },
+    };
+    const failoverCatalogs = new Map([
+      [fullWorkspace, { byName: new Map(), projects: [] }],
+      [healthyWorkspace, { byName: new Map(), projects: [] }],
+    ]);
+    let createdWorkspaceRoot = '';
+    registerWorkspaceIpc({
+      Array, Boolean, Date, Error, Math, Object, Promise, Set, String, undefined, crypto,
+      ipcMain: { handle: (name, handler) => failoverHandlers.set(name, handler) }, fs: failoverFs, path,
+      CANCELLED_CODE, WORKSPACE_STATUSES: ['策划中'], HIDDEN_SYSTEM_ENTRY_NAMES: new Set(),
+      IMAGE_EXTENSIONS: new Set(['.jpg']), RAW_EXTENSIONS: new Set(['.cr3']), VIDEO_EXTENSIONS: new Set(['.mov']),
+      cleanProjectName: value => String(value).trim(),
+      ensureWorkspace: candidate => path.resolve(candidate),
+      getProjectPath: (workspaceRoot, status, name) => path.join(workspaceRoot, status, name),
+      getWorkspaceDataRoot: workspaceRoot => path.join(workspaceRoot, '.data'),
+      workspaceCatalogs: failoverCatalogs,
+      refreshWorkspaceCatalog: async workspaceRoot => failoverCatalogs.get(workspaceRoot),
+      mutateWorkspaceCatalog: async (workspaceRoot, _operation, entry) => {
+        createdWorkspaceRoot = workspaceRoot;
+        return { byName: new Map([[entry.name.toLocaleLowerCase(), { id: 'failover-project-id', name: entry.name }]]), projects: [] };
+      },
+      pushUndoOperation: async () => undefined, writeLog: () => undefined, telemetryService: { track: () => undefined },
+    });
+    const failoverProject = await failoverHandlers.get('workspace-create-project')(
+      null, fullWorkspace, null, 'failover-project', { workspacePaths: [fullWorkspace, healthyWorkspace], createPlanningFolder: false },
+    );
+    assert.strictEqual(failoverProject.success, true, failoverProject.error);
+    assert.strictEqual(failoverProject.storageSwitched, true);
+    assert.strictEqual(createdWorkspaceRoot, healthyWorkspace);
+    assert.strictEqual(failoverProject.project.workspacePath, healthyWorkspace);
+    const fullOnlyProject = await failoverHandlers.get('workspace-create-project')(
+      null, fullWorkspace, null, 'full-only-project', { workspacePaths: [fullWorkspace], createPlanningFolder: false },
+    );
+    assert.strictEqual(fullOnlyProject.success, false, 'a full single workspace must reject project creation');
+    assert.match(fullOnlyProject.error, /添加新的项目工作目录/);
+    healthyWorkspaceFull = true;
+    const allFullProject = await failoverHandlers.get('workspace-create-project')(
+      null, fullWorkspace, null, 'all-full-project', { workspacePaths: [fullWorkspace, healthyWorkspace], createPlanningFolder: false },
+    );
+    assert.strictEqual(allFullProject.success, false, 'project creation must stop when every configured workspace is full');
+    assert.match(allFullProject.error, /设置 → 存储/);
 
     const concurrencyHandlers = new Map();
     const activeOperations = new Map();

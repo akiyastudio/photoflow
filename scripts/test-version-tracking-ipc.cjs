@@ -135,6 +135,7 @@ registerVersionIpc({
     onEvent?.(progressEvent);
     return [progressEvent, { type: 'preview', data: { matches: [], suggestions: [], unmatched: ['new.jpg'] } }];
   },
+  shell: { readShortcutLink: shortcutPath => JSON.parse(fs.readFileSync(shortcutPath, 'utf8')) },
   suppressWorkspaceWatchPath: () => undefined,
   undefined,
   versionService,
@@ -261,6 +262,23 @@ async function main() {
   assert.match(auxiliary.error, /auxiliary/);
 
   const register = handlers.get('workspace-progress-register');
+  const externalProgressPath = path.join(workspaceRoot, 'external-progress');
+  const externalShortcutPath = path.join(workspaceRoot, 'Project', 'external-progress.lnk');
+  fs.mkdirSync(externalProgressPath, { recursive: true });
+  fs.writeFileSync(externalShortcutPath, JSON.stringify({ target: externalProgressPath, description: 'PhotoFlow 外链文件夹：external-progress' }));
+  let externalRegistrationRequest;
+  versionService.registerProgress = async (_root, request) => {
+    externalRegistrationRequest = request;
+    return { success: true, progressFolder: { id: 'external-node', ...request } };
+  };
+  const externalRegistration = await register({}, workspaceRoot, 'active', 'Project', {
+    relativePath: 'external-progress.lnk', mediaKind: 'image', versionKey: '1',
+    displayName: 'external-progress', nodeRole: 'progress', relationKind: 'main', trackingEnabled: true,
+  });
+  assert.strictEqual(externalRegistration.success, true, externalRegistration.error);
+  assert.strictEqual(externalRegistration.relativePath, 'external-progress.lnk');
+  assert.strictEqual(externalRegistrationRequest.folderPath, externalProgressPath, 'external progress tracking must persist the shortcut target path');
+
   const failedNested = path.join(workspaceRoot, 'Project', 'nested', 'Rollback me');
   fs.mkdirSync(failedNested, { recursive: true });
   versionService.registerProgress = async () => { throw new Error('simulated database failure'); };
