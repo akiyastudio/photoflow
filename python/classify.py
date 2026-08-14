@@ -648,36 +648,62 @@ def save_staged_capture_times(staged_import, timed_files):
             raise IOError('拍摄时间缓存与暂存文件不一致')
         entry['captureTimestamp'] = capture_times[matching_path]
     _write_staging_manifest(staging_dir, manifest)
+    for entry in staged_import.get('entries') or []:
+        candidates = [entry.get('staged'), entry.get('committedDestination'), entry.get('pendingDestination'), *(entry.get('outputPaths') or [])]
+        matching_path = next((
+            os.path.normcase(os.path.abspath(str(value)))
+            for value in candidates
+            if value and os.path.normcase(os.path.abspath(str(value))) in capture_times
+        ), '')
+        if matching_path:
+            entry['captureTimestamp'] = capture_times[matching_path]
     staged_import['timedFiles'] = [
         (file_path, capture_times[os.path.normcase(os.path.abspath(file_path))])
         for file_path in staged_import['stagedFiles']
     ]
 
 
-def update_staged_entry(staged_import, staged_path, patch):
-    staging_dir = staged_import['stagingDir']
-    manifest_path = _staging_manifest_path(staging_dir)
-    with open(manifest_path, 'r', encoding='utf-8') as manifest_file:
-        manifest = json.load(manifest_file)
-    entries = manifest.get('files') if isinstance(manifest, dict) else None
-    normalized_staged = os.path.normcase(os.path.abspath(staged_path))
-    target = next((entry for entry in entries or [] if os.path.normcase(os.path.abspath(str(entry.get('staged') or ''))) == normalized_staged), None)
-    if target is None:
-        raise IOError(f'暂存清单中找不到文件：{os.path.basename(staged_path)}')
+def patch_staged_entry_fields(target, patch):
+    """Apply staging state changes directly to one already-resolved entry."""
     for key, value in patch.items():
         if value is None:
             target.pop(key, None)
         else:
             target[key] = value
+    return target
+
+
+def patch_staged_entry(staged_import, staged_path, patch):
+    """Resolve and update one in-memory staging entry without a manifest rewrite."""
+    normalized_staged = os.path.normcase(os.path.abspath(staged_path))
+    target = next((
+        entry for entry in staged_import.get('entries') or []
+        if os.path.normcase(os.path.abspath(str(entry.get('staged') or ''))) == normalized_staged
+    ), None)
+    if target is None:
+        raise IOError(f'暂存清单中找不到文件：{os.path.basename(staged_path)}')
+    return patch_staged_entry_fields(target, patch)
+
+
+def checkpoint_staged_import(staged_import):
+    """Atomically persist the current in-memory entries in one durable checkpoint."""
+    staging_dir = staged_import['stagingDir']
+    manifest_path = _staging_manifest_path(staging_dir)
+    with open(manifest_path, 'r', encoding='utf-8') as manifest_file:
+        manifest = json.load(manifest_file)
+    if not isinstance(manifest, dict) or not isinstance(manifest.get('files'), list):
+        raise IOError('暂存清单格式无效')
+    manifest['files'] = [
+        {key: value for key, value in entry.items() if key != 'localPath'}
+        for entry in staged_import.get('entries') or []
+    ]
     _write_staging_manifest(staging_dir, manifest)
-    for entry in staged_import.get('entries') or []:
-        if os.path.normcase(os.path.abspath(str(entry.get('staged') or ''))) == normalized_staged:
-            for key, value in patch.items():
-                if value is None:
-                    entry.pop(key, None)
-                else:
-                    entry[key] = value
-            break
+
+
+def update_staged_entry(staged_import, staged_path, patch):
+    """Durably update one entry for infrequent post-processing operations."""
+    patch_staged_entry(staged_import, staged_path, patch)
+    checkpoint_staged_import(staged_import)
 
 
 def staged_entry_for_local_path(staged_import, local_path):
@@ -1145,6 +1171,20 @@ def unique_destination(directory, file_name):
         index += 1
 
 
+def reserve_unique_destination(directory, file_name, reserved_paths):
+    """Reserve a collision-free destination across disk state and the current import plan."""
+    stem, extension = os.path.splitext(file_name)
+    index = 0
+    while True:
+        candidate_name = file_name if index == 0 else f"{stem} ({index}){extension}"
+        candidate = os.path.abspath(os.path.join(directory, candidate_name))
+        key = os.path.normcase(candidate)
+        if key not in reserved_paths and not os.path.exists(candidate):
+            reserved_paths.add(key)
+            return candidate
+        index += 1
+
+
 def unique_broll_destination(directory, file_name, will_split=False):
     stem, extension = os.path.splitext(file_name)
     index = 0
@@ -1512,6 +1552,14 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
         processed_targets = set()
         imported_paths_by_target = {}
         imported_output_paths = set()
+        organized_items = []
+        entries_by_local_path = {}
+        for entry in staged_import.get('entries') or []:
+            candidates = [entry.get('localPath'), entry.get('staged'), entry.get('committedDestination'), entry.get('pendingDestination'), *(entry.get('outputPaths') or [])]
+            for candidate in candidates:
+                if candidate:
+                    entries_by_local_path[os.path.normcase(os.path.abspath(str(candidate)))] = entry
+
         for idx, group_record in enumerate(groups):
             ensure_not_cancelled()
             group = group_record['files'] if isinstance(group_record, dict) else group_record
@@ -1533,42 +1581,97 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
             os.makedirs(target_folder, exist_ok=True)
             if date_str not in created_projects:
                 created_projects.append(date_str)
-            
+
             for f_path, _ in group:
                 ensure_not_cancelled()
-                entry = staged_entry_for_local_path(staged_import, f_path)
+                entry = entries_by_local_path.get(os.path.normcase(os.path.abspath(f_path)))
                 if entry is None:
                     raise IOError(f'暂存清单缺少文件：{os.path.basename(f_path)}')
-                committed_outputs = [os.path.abspath(value) for value in entry.get('outputPaths', []) if os.path.isfile(value)]
-                committed_destination = os.path.abspath(str(entry.get('committedDestination') or '')) if entry.get('committedDestination') else ''
-                if committed_outputs:
-                    imported_paths = committed_outputs
-                elif committed_destination and os.path.isfile(committed_destination):
-                    imported_paths = [committed_destination]
-                else:
-                    destination_dir = classified_destination_directory(target_folder, os.path.basename(f_path))
-                    os.makedirs(destination_dir, exist_ok=True)
-                    pending_destination = str(entry.get('pendingDestination') or '')
-                    if pending_destination and os.path.dirname(os.path.abspath(pending_destination)) == os.path.abspath(destination_dir) and not os.path.exists(pending_destination):
-                        destination = os.path.abspath(pending_destination)
-                    else:
-                        destination = unique_destination(destination_dir, os.path.basename(f_path))
-                        update_staged_entry(staged_import, entry['staged'], {'pendingDestination': destination})
-                    promote_staged_file(f_path, destination)
-                    update_staged_entry(staged_import, entry['staged'], {'committedDestination': destination, 'pendingDestination': None})
-                    imported_paths = [destination]
-                if any(os.path.commonpath((os.path.abspath(target_folder), path)) != os.path.abspath(target_folder) for path in imported_paths):
-                    raise ValueError(f'已提交文件与当前项目归属不一致：{os.path.basename(entry["source"])}')
-                imported_paths_by_target.setdefault(target_folder, []).extend(imported_paths)
-                imported_output_paths.update(imported_paths)
-                success_imported_count += 1
+                organized_items.append({'sourcePath': f_path, 'entry': entry, 'targetFolder': target_folder})
             processed_targets.add(target_folder)
 
-            log_progress(
-                f"正在整理并分类文件：{idx + 1}/{len(groups)}",
-                75 + int(((idx + 1) / max(1, len(groups))) * 15),
-                {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": success_imported_count, "totalFiles": len(original_sd_files)},
-            )
+        # Persist every intended destination before the first filesystem mutation.
+        # A retry can then distinguish already-promoted files from files that are
+        # still in staging without rewriting and fsyncing the full manifest twice
+        # for every item.
+        reserved_destinations = set()
+        has_planned_moves = False
+        for item in organized_items:
+            ensure_not_cancelled()
+            entry = item['entry']
+            target_folder = item['targetFolder']
+            committed_outputs = [os.path.abspath(value) for value in entry.get('outputPaths', []) if os.path.isfile(value)]
+            committed_destination = os.path.abspath(str(entry.get('committedDestination') or '')) if entry.get('committedDestination') else ''
+            if committed_outputs:
+                item['importedPaths'] = committed_outputs
+                continue
+            if committed_destination and os.path.isfile(committed_destination):
+                item['importedPaths'] = [committed_destination]
+                continue
+
+            original_name = os.path.basename(str(entry.get('source') or item['sourcePath']))
+            destination_dir = classified_destination_directory(target_folder, original_name)
+            os.makedirs(destination_dir, exist_ok=True)
+            pending_destination = os.path.abspath(str(entry.get('pendingDestination') or '')) if entry.get('pendingDestination') else ''
+            pending_key = os.path.normcase(pending_destination) if pending_destination else ''
+            if pending_destination \
+                    and os.path.dirname(pending_destination) == os.path.abspath(destination_dir) \
+                    and pending_key not in reserved_destinations \
+                    and not os.path.exists(pending_destination):
+                destination = pending_destination
+                reserved_destinations.add(pending_key)
+            else:
+                destination = reserve_unique_destination(destination_dir, original_name, reserved_destinations)
+            patch_staged_entry_fields(entry, {
+                'pendingDestination': destination,
+                'committedDestination': None,
+            })
+            item['destination'] = destination
+            has_planned_moves = True
+
+        if has_planned_moves:
+            checkpoint_staged_import(staged_import)
+
+        last_organize_progress_at = 0.0
+        for item_index, item in enumerate(organized_items, start=1):
+            ensure_not_cancelled()
+            entry = item['entry']
+            target_folder = item['targetFolder']
+            imported_paths = item.get('importedPaths')
+            if imported_paths is None:
+                destination = item['destination']
+                promote_staged_file(item['sourcePath'], destination)
+                patch_staged_entry_fields(entry, {
+                    'committedDestination': destination,
+                    'pendingDestination': None,
+                    'localPath': destination,
+                })
+                imported_paths = [destination]
+
+            if any(os.path.commonpath((os.path.abspath(target_folder), path)) != os.path.abspath(target_folder) for path in imported_paths):
+                raise ValueError(f'已提交文件与当前项目归属不一致：{os.path.basename(entry["source"])}')
+            imported_paths_by_target.setdefault(target_folder, []).extend(imported_paths)
+            imported_output_paths.update(imported_paths)
+            success_imported_count += 1
+
+            now = time.monotonic()
+            if item_index == 1 or item_index == len(organized_items) or now - last_organize_progress_at >= 0.1:
+                last_organize_progress_at = now
+                log_progress(
+                    f"正在整理并分类文件：{os.path.basename(entry['source'])}（{item_index}/{len(organized_items)}）",
+                    75 + int((item_index / max(1, len(organized_items))) * 15),
+                    {
+                        "bytesCopied": total_bytes,
+                        "totalBytes": total_bytes,
+                        "filesCopied": success_imported_count,
+                        "totalFiles": len(original_sd_files),
+                        "filesProcessed": item_index,
+                        "phase": "organizing",
+                    },
+                )
+
+        if has_planned_moves:
+            checkpoint_staged_import(staged_import)
 
         processed_target_list = list(processed_targets)
         generated_jpg_count = 0

@@ -27,6 +27,7 @@ const readDirectories = [];
 const watchedRoots = [];
 const releasedRoots = [];
 const grantedRoots = [];
+const shortcutDescriptions = new Map();
 const mediaAccessService = createMediaAccessService({ getWorkspaceRoots: () => [targetRoot] });
 const handlerFs = {
   ...fs,
@@ -86,8 +87,8 @@ registerWorkspaceIpc({
   thumbnailService: { indexDirectory: async () => false, scanProject: async () => undefined },
   scheduleMediaTrackingScan: () => undefined,
   shell: {
-    writeShortcutLink: (shortcutPath, options) => { fs.writeFileSync(shortcutPath, options.target); return true; },
-    readShortcutLink: shortcutPath => ({ target: fs.readFileSync(shortcutPath, 'utf8') }),
+    writeShortcutLink: (shortcutPath, options) => { fs.writeFileSync(shortcutPath, options.target); shortcutDescriptions.set(path.resolve(shortcutPath), options.description || ''); return true; },
+    readShortcutLink: shortcutPath => ({ target: fs.readFileSync(shortcutPath, 'utf8'), description: shortcutDescriptions.get(path.resolve(shortcutPath)) || '' }),
   },
   pushUndoOperation: async operation => undoOperations.push(operation),
   mainWindow: { webContents: { send: () => undefined } },
@@ -109,6 +110,31 @@ registerWorkspaceIpc({
     const browseResult = await browseFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__');
     assert.strictEqual(browseResult.success, true, browseResult.error);
     assert(!browseResult.entries.some(entry => entry.name === '.photoflow-workspace-id'), 'the inspiration library must hide its workspace identity marker');
+    const managedExternalTarget = path.join(sourceRoot, '参考目录');
+    const managedExternalShortcut = path.join(targetRoot, '外部素材.lnk');
+    fs.writeFileSync(managedExternalShortcut, managedExternalTarget);
+    shortcutDescriptions.set(path.resolve(managedExternalShortcut), 'PhotoFlow 外链文件夹：参考目录');
+    const projectRootBrowse = await browseFiles({}, temporaryRoot, '策划中', '项目');
+    const managedExternalEntry = projectRootBrowse.entries.find(entry => entry.name === '外部素材.lnk');
+    assert.strictEqual(managedExternalEntry?.externalLink, true, 'managed folder links must be identified as external links in the project root');
+    const externalRootBrowse = await browseFiles({}, temporaryRoot, '策划中', '项目', '外部素材.lnk');
+    assert.strictEqual(externalRootBrowse.success, true, externalRootBrowse.error);
+    assert.strictEqual(externalRootBrowse.viaExternalLink, true);
+    assert(externalRootBrowse.entries.some(entry => entry.relativePath.replace(/\\/g, '/') === '外部素材.lnk/说明.txt' && entry.path === path.join(managedExternalTarget, '说明.txt') && entry.viaExternalLink === true), 'managed external links must browse inside the app with virtual project paths and physical external file paths');
+    const nestedExternalBrowse = await browseFiles({}, temporaryRoot, '策划中', '项目', '外部素材.lnk/二级目录');
+    assert.strictEqual(nestedExternalBrowse.success, true, nestedExternalBrowse.error);
+    assert(nestedExternalBrowse.entries.some(entry => entry.name === '深层灵感.jpg'), 'managed external-link browsing must support nested folders');
+    const externalSearch = await handlers.get('workspace-search-files')({}, temporaryRoot, '策划中', '项目', '外部素材.lnk', '深层灵感');
+    assert.strictEqual(externalSearch.success, true, externalSearch.error);
+    assert(externalSearch.entries.some(entry => entry.relativePath.replace(/\\/g, '/') === '外部素材.lnk/二级目录/深层灵感.jpg' && entry.viaExternalLink === true), 'search must stay inside and return virtual paths for a managed external folder');
+    const externalList = await handlers.get('workspace-list-files')({}, temporaryRoot, '策划中', '项目', '外部素材.lnk', 20, '', { kinds: ['image'] });
+    assert.strictEqual(externalList.success, true, externalList.error);
+    assert(externalList.entries.some(entry => entry.name === '深层灵感.jpg' && entry.viaExternalLink === true), 'recursive filtered listing must work inside a managed external folder');
+    const externalRecent = await handlers.get('workspace-recent-files')({}, temporaryRoot, '策划中', '项目', '外部素材.lnk', 20);
+    assert.strictEqual(externalRecent.success, true, externalRecent.error);
+    assert(externalRecent.entries.some(entry => entry.name === '深层灵感.jpg' && entry.viaExternalLink === true), 'recent recursive browsing must work from a managed external-folder scope');
+    fs.rmSync(managedExternalShortcut, { force: true });
+    shortcutDescriptions.delete(path.resolve(managedExternalShortcut));
     const searchFiles = handlers.get('workspace-search-files');
     assert(searchFiles, 'search-files IPC handler was not registered');
     const searchResult = await searchFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__', '', '深层灵感');
@@ -235,10 +261,10 @@ registerWorkspaceIpc({
     assert.deepStrictEqual(readDirectories, [path.resolve(sourceRoot), path.resolve(sourceRoot, '参考目录')], 'the next recent page must continue its directory cursor without rescanning the root');
     if (process.platform === 'win32') {
       readDirectories.length = 0;
-      const shortcutRecentResult = await recentFiles({}, temporaryRoot, '策划中', '项目', '', 10);
+      const shortcutRecentResult = await recentFiles({}, temporaryRoot, '策划中', '项目', '', 50);
       assert.strictEqual(shortcutRecentResult.success, true, shortcutRecentResult.error);
-      const linkedEntry = shortcutRecentResult.entries.find(entry => entry.relativePath.replace(/\\/g, '/') === '策划/参考目录.lnk/说明.txt');
-      assert(linkedEntry, 'recent recursive browsing must include files reached through a folder shortcut');
+      const linkedEntry = shortcutRecentResult.entries.find(entry => entry.path === path.join(sourceRoot, '参考目录', '说明.txt'));
+      assert(linkedEntry, `recent recursive browsing must include files reached through a folder link: ${JSON.stringify(shortcutRecentResult.entries.map(entry => entry.relativePath))}`);
       assert.strictEqual(linkedEntry.path, path.join(sourceRoot, '参考目录', '说明.txt'));
       assert.strictEqual(linkedEntry.viaShortcut, true);
       assert(readDirectories.includes(path.resolve(sourceRoot, '参考目录')), 'recent recursive browsing must read the shortcut target directory');

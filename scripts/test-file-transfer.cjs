@@ -648,21 +648,17 @@ const run = async () => {
     fs.writeFileSync(path.join(linkSource, 'RAW', 'LINK_0001.CR3'), 'linked-raw');
     const inspectedLinkProject = await importProjectHandlers.get('workspace-inspect-existing-project')(null, linkSource);
     assert.strictEqual(inspectedLinkProject.success, true, inspectedLinkProject.error);
-    assert(inspectedLinkProject.inspectionToken, 'link inspection must return a reusable server-side token');
-    const inspectionReadsBeforeLink = importInspectionReadCalls;
-    const copyPlanCallsBeforeLink = importCopyPlanCalls;
-    const linkedProject = await importProjectHandlers.get('workspace-import-existing-project-link')(
+    assert(inspectedLinkProject.inspectionToken, 'project inspection must return a reusable server-side token');
+    assert.strictEqual(importProjectHandlers.has('workspace-import-existing-project-link'), false, 'project import must not expose a dedicated link-only IPC');
+    const forcedLinkProject = await importProjectHandlers.get('workspace-import-existing-project')(
       { sender: { isDestroyed: () => false, send: () => {} } },
-      importWorkspaceRoot, linkSource, { name: 'linked-project', mode: 'copy', operationId: '12345678-1234-4123-8123-123456789abc', inspectionToken: inspectedLinkProject.inspectionToken },
+      importWorkspaceRoot, linkSource, { name: 'forced-linked-project', mode: 'link', operationId: '12345678-1234-4123-8123-123456789abc', inspectionToken: inspectedLinkProject.inspectionToken },
     );
-    assert.strictEqual(linkedProject.success, true, linkedProject.error);
-    assert.strictEqual(linkedProject.linked, true);
-    assert.strictEqual(importCopyPlanCalls, copyPlanCallsBeforeLink, 'link import must not build or execute a file-copy plan');
-    assert.strictEqual(importInspectionReadCalls, inspectionReadsBeforeLink + 1, 'link import may verify its one-entry managed directory but must not rescan the external source');
+    assert.strictEqual(forcedLinkProject.success, false, 'forcing project link mode through IPC must be rejected');
+    assert.match(forcedLinkProject.error, /只支持复制并接管或剪切并接管/);
     assert.strictEqual(fs.readFileSync(path.join(linkSource, 'RAW', 'LINK_0001.CR3'), 'utf8'), 'linked-raw');
     const linkedProjectPath = path.join(importWorkspaceRoot, '策划中', 'linked-project');
-    assert.deepStrictEqual(fs.readdirSync(linkedProjectPath), ['outside-linked-project.lnk'], 'managed link project must contain only the shortcut');
-    assert.strictEqual(JSON.parse(fs.readFileSync(path.join(linkedProjectPath, 'outside-linked-project.lnk'), 'utf8')).target, linkSource);
+    assert.strictEqual(fs.existsSync(linkedProjectPath), false, 'rejected link mode must not create a project');
 
     const fileLinkProjectName = 'file-link-project';
     const fileLinkProjectPath = path.join(importWorkspaceRoot, '策划中', fileLinkProjectName);

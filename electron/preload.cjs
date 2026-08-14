@@ -71,7 +71,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   chooseExistingProject: () => ipcRenderer.invoke('workspace-choose-existing-project'),
   inspectExistingProject: (sourcePath) => ipcRenderer.invoke('workspace-inspect-existing-project', sourcePath),
   importExistingProject: (workspacePath, sourcePath, options) => ipcRenderer.invoke('workspace-import-existing-project', workspacePath, sourcePath, options),
-  importExistingProjectLink: (workspacePath, sourcePath, options) => ipcRenderer.invoke('workspace-import-existing-project-link', workspacePath, sourcePath, options),
   renameWorkspaceProject: (workspacePath, status, name, date, nextName) => ipcRenderer.invoke('workspace-rename-project', workspacePath, status, name, date, nextName),
   renameProjectFolder: (workspacePath, status, name, folderName, nextName) => ipcRenderer.invoke('workspace-rename-project-folder', workspacePath, status, name, folderName, nextName),
   createProjectFolder: (workspacePath, status, name, folderName, relativePath, makeUnique) => ipcRenderer.invoke('workspace-create-project-folder', workspacePath, status, name, folderName, relativePath, makeUnique),

@@ -345,6 +345,10 @@ export interface ProjectFileEntry {
   rating?: number;
   /** Entry discovered by following a folder shortcut in recursive mode. */
   viaShortcut?: boolean;
+  /** PhotoFlow-managed folder link shown as an in-app virtual folder. */
+  externalLink?: boolean;
+  /** Entry whose physical path is inside a PhotoFlow-managed external folder. */
+  viaExternalLink?: boolean;
   /** External shortcut previews never grant mutation capabilities. */
   readOnly?: boolean;
   shortcutTargetKind?: 'folder' | 'file';
@@ -920,8 +924,7 @@ export interface IElectronAPI {
   createWorkspaceProject: (workspacePath: string, date: ProjectDate | null, name: string, options?: { createPlanningFolder?: boolean; workspacePaths?: string[] }) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   chooseExistingProject: () => Promise<{ success: boolean; cancelled?: boolean; sourcePath?: string; inspectionToken?: string; name?: string; fileCount?: number; folderCount?: number; totalBytes?: number; truncated?: boolean; candidates?: Array<{ relativePath: string; name: string; imageCount: number; rawCount: number; videoCount: number; fileCount: number; mediaKind: 'image' | 'video'; suggestedRole: 'baseline' | 'progress' }>; error?: string }>;
   inspectExistingProject: (sourcePath: string) => Promise<{ success: boolean; sourcePath?: string; inspectionToken?: string; name?: string; fileCount?: number; folderCount?: number; totalBytes?: number; truncated?: boolean; candidates?: Array<{ relativePath: string; name: string; imageCount: number; rawCount: number; videoCount: number; fileCount: number; mediaKind: 'image' | 'video'; suggestedRole: 'baseline' | 'progress' }>; error?: string }>;
-  importExistingProject: (workspacePath: string, sourcePath: string, options: { name: string; mode: 'copy' | 'move' | 'link'; operationId?: string; inspectionToken?: string; workspacePaths?: string[] }) => Promise<{ success: boolean; cancelled?: boolean; operationId?: string; project?: WorkspaceProject; sourceRetained?: boolean; linked?: boolean; candidates?: Array<{ relativePath: string; name: string; imageCount: number; rawCount: number; videoCount: number; fileCount: number; mediaKind: 'image' | 'video'; suggestedRole: 'baseline' | 'progress' }>; error?: string }>;
-  importExistingProjectLink: (workspacePath: string, sourcePath: string, options: { name: string; operationId?: string; inspectionToken?: string; workspacePaths?: string[] }) => Promise<{ success: boolean; cancelled?: boolean; operationId?: string; project?: WorkspaceProject; sourceRetained?: boolean; linked?: boolean; candidates?: Array<{ relativePath: string; name: string; imageCount: number; rawCount: number; videoCount: number; fileCount: number; mediaKind: 'image' | 'video'; suggestedRole: 'baseline' | 'progress' }>; error?: string }>;
+  importExistingProject: (workspacePath: string, sourcePath: string, options: { name: string; mode: 'copy' | 'move'; operationId?: string; inspectionToken?: string; workspacePaths?: string[] }) => Promise<{ success: boolean; cancelled?: boolean; operationId?: string; project?: WorkspaceProject; sourceRetained?: boolean; candidates?: Array<{ relativePath: string; name: string; imageCount: number; rawCount: number; videoCount: number; fileCount: number; mediaKind: 'image' | 'video'; suggestedRole: 'baseline' | 'progress' }>; error?: string }>;
   renameWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, date: ProjectDate | null, nextName: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   renameProjectFolder: (workspacePath: string, status: ProjectStatus, name: string, folderName: string, nextName: string) => Promise<{ success: boolean; folder?: { name: string; path: string; updatedAt: number }; error?: string }> ;
   createProjectFolder: (workspacePath: string, status: ProjectStatus, name: string, folderName: string, relativePath?: string, makeUnique?: boolean) => Promise<{ success: boolean; folder?: { name: string; path: string; relativePath?: string; updatedAt: number }; error?: string }> ;
