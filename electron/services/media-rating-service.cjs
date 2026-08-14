@@ -31,11 +31,15 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
   };
   const write = async (workspaceRoot, filePath, value) => {
     const rating = normalize(value);
-    suppressWorkspaceWatchPath(filePath);
+    // ExifTool rewrites in place through these sibling files. Suppress all
+    // three exact paths so their transient create/rename/delete events do not
+    // make the renderer reload an otherwise unchanged directory.
+    const suppressedPaths = [filePath, `${filePath}_exiftool_tmp`, `${filePath}_original`];
+    suppressedPaths.forEach(suppressedPath => suppressWorkspaceWatchPath(suppressedPath));
     try {
       await exiftool.write(filePath, { 'XMP:Rating': rating }, { writeArgs: ['-overwrite_original', '-P'] });
     } finally {
-      releaseWorkspaceWatchPath(filePath);
+      suppressedPaths.forEach(suppressedPath => releaseWorkspaceWatchPath(suppressedPath));
     }
     invalidate(filePath);
     // ExifTool has already durably written the requested value. Fingerprint

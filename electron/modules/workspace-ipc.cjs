@@ -347,10 +347,30 @@ const registerWorkspaceIpc = context => {
     }, 1000);
   };
 
+  const existingProjectInspectionCache = new Map();
+  const cacheExistingProjectInspection = inspection => {
+    const token = crypto.randomUUID();
+    const now = Date.now();
+    for (const [key, value] of existingProjectInspectionCache) {
+      if (value.expiresAt <= now || existingProjectInspectionCache.size >= 32) existingProjectInspectionCache.delete(key);
+    }
+    existingProjectInspectionCache.set(token, { inspection, expiresAt: now + 10 * 60 * 1000 });
+    return token;
+  };
+  const cachedExistingProjectInspection = async (token, sourcePath) => {
+    const cached = existingProjectInspectionCache.get(String(token || ''));
+    if (!cached || cached.expiresAt <= Date.now()) return null;
+    const requestedSource = path.resolve(sourcePath);
+    if (path.resolve(cached.inspection.sourcePath).toLocaleLowerCase() !== requestedSource.toLocaleLowerCase()) return null;
+    const sourceStat = await fs.promises.stat(requestedSource).catch(() => null);
+    if (!sourceStat?.isDirectory()) return null;
+    existingProjectInspectionCache.delete(String(token));
+    return cached.inspection;
+  };
+
   ipcMain.handle('workspace-cleanup-deleted-projects', async (_event, workspacePath) => {
     try {
-      const selectedWorkspace = await selectWorkspaceForWrite(workspacePath, options?.workspacePaths, 0);
-      const root = selectedWorkspace.root;
+      const root = ensureWorkspace(workspacePath);
       await reconcileWorkspaceCatalog(root);
       const result = await workspaceRepository.listDeletedProjects(root);
       const outcomes = [];
@@ -420,7 +440,8 @@ const registerWorkspaceIpc = context => {
       const namePart = cleanProjectName(name || '');
       const projectName = [datePart, namePart].filter(Boolean).join(' ');
       if (!projectName) throw new Error('请至少填写日期或名称');
-      const root = ensureWorkspace(workspacePath);
+      const selectedWorkspace = await selectWorkspaceForWrite(workspacePath, options?.workspacePaths, 0);
+      const root = selectedWorkspace.root;
       const catalog = workspaceCatalogs.get(root) || await refreshWorkspaceCatalog(root);
       if (catalog.byName.has(projectName.toLocaleLowerCase())) throw new Error('同名项目已存在');
       const projectPath = getProjectPath(root, '策划中', projectName);
@@ -451,6 +472,7 @@ const registerWorkspaceIpc = context => {
     while (queue.length) {
       const current = queue.shift();
       const entries = await fs.promises.readdir(current.directory, { withFileTypes: true });
+      const filesToStat = [];
       for (const entry of entries) {
         if (fileCount + folderCount >= 100000) { truncated = true; queue.length = 0; break; }
         const entryPath = path.join(current.directory, entry.name);
@@ -463,8 +485,7 @@ const registerWorkspaceIpc = context => {
         }
         if (!entry.isFile()) continue;
         fileCount += 1;
-        const stat = await fs.promises.stat(entryPath);
-        totalBytes += stat.size;
+        filesToStat.push(entryPath);
         const candidate = topLevel.get(topLevelName);
         if (!candidate) continue;
         candidate.fileCount += 1;
@@ -473,6 +494,14 @@ const registerWorkspaceIpc = context => {
         else if (IMAGE_EXTENSIONS.has(extension)) candidate.imageCount += 1;
         else if (VIDEO_EXTENSIONS.has(extension)) candidate.videoCount += 1;
       }
+      let nextFileIndex = 0;
+      await Promise.all(Array.from({ length: Math.min(16, filesToStat.length) }, async () => {
+        while (nextFileIndex < filesToStat.length) {
+          const entryPath = filesToStat[nextFileIndex++];
+          const stat = await fs.promises.stat(entryPath);
+          totalBytes += stat.size;
+        }
+      }));
     }
     const baselinePattern = /(raw|jpg|原片|原图|底片|选片|素材|original)/iu;
     const progressPattern = /(修图|后期|精修|调色|成片|交付|final|版本|\bv\s*\d+)/iu;
@@ -490,19 +519,25 @@ const registerWorkspaceIpc = context => {
     try {
       const choice = await dialog.showOpenDialog(mainWindow, { title: '选择已有项目文件夹', properties: ['openDirectory'] });
       if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true };
-      return { success: true, ...(await inspectExistingProject(choice.filePaths[0])) };
+      const inspection = await inspectExistingProject(choice.filePaths[0]);
+      return { success: true, ...inspection, inspectionToken: cacheExistingProjectInspection(inspection) };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
   });
 
   ipcMain.handle('workspace-inspect-existing-project', async (_event, sourcePath) => {
-    try { return { success: true, ...(await inspectExistingProject(sourcePath)) }; }
+    try {
+      const inspection = await inspectExistingProject(sourcePath);
+      return { success: true, ...inspection, inspectionToken: cacheExistingProjectInspection(inspection) };
+    }
     catch (error) { return { success: false, error: error.message || String(error) }; }
   });
 
-  ipcMain.handle('workspace-import-existing-project', async (event, workspacePath, sourcePath, options = {}) => {
-    const operationId = crypto.randomUUID();
+  const importExistingProjectHandler = async (event, workspacePath, sourcePath, options = {}) => {
+    const requestedOperationId = String(options.operationId || '');
+    const operationId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestedOperationId)
+      ? requestedOperationId : crypto.randomUUID();
     let task = null;
     let job = { cancelled: false, finishing: false };
     let stagedPath = '';
@@ -510,10 +545,13 @@ const registerWorkspaceIpc = context => {
     let catalogAdded = false;
     const publish = payload => task?.publish(payload);
     try {
-      const inspection = await inspectExistingProject(sourcePath);
+      const mode = String(options.mode || '');
+      if (!['copy', 'move', 'link'].includes(mode)) throw new Error('无效的项目导入方式，请重新选择');
+      const inspection = mode === 'link'
+        ? await cachedExistingProjectInspection(options.inspectionToken, sourcePath) || await inspectExistingProject(sourcePath)
+        : await inspectExistingProject(sourcePath);
       const projectName = cleanProjectName(String(options.name || inspection.name || ''));
       if (!projectName) throw new Error('项目名称不能为空');
-      const mode = options.mode === 'move' ? 'move' : options.mode === 'link' ? 'link' : 'copy';
       const selectedWorkspace = await selectWorkspaceForWrite(workspacePath, options?.workspacePaths, mode === 'link' ? 0 : inspection.totalBytes);
       const root = selectedWorkspace.root;
       const catalog = workspaceCatalogs.get(root) || await refreshWorkspaceCatalog(root);
@@ -522,6 +560,23 @@ const registerWorkspaceIpc = context => {
       if (fs.existsSync(projectPath)) throw new Error('同名项目已存在');
       if (projectPath === inspection.sourcePath || projectPath.startsWith(`${inspection.sourcePath}${path.sep}`)) throw new Error('不能把项目导入到它自身内部');
       stagedPath = path.join(path.dirname(projectPath), `.photoflow-import-project-${operationId}`);
+      if (mode === 'link') {
+        await fs.promises.mkdir(projectPath, { recursive: false });
+        const shortcutPath = path.join(projectPath, `${inspection.name}.lnk`);
+        if (!shell.writeShortcutLink(shortcutPath, { target: inspection.sourcePath, cwd: inspection.sourcePath, description: `PhotoFlow 外链文件夹：${inspection.name}` })) throw new Error('无法创建项目外链快捷方式');
+        const managedEntries = await fs.promises.readdir(projectPath);
+        if (managedEntries.length !== 1 || path.resolve(projectPath, managedEntries[0]).toLocaleLowerCase() !== path.resolve(shortcutPath).toLocaleLowerCase()) {
+          throw new Error('外链项目目录校验失败：工作目录中出现了快捷方式以外的内容');
+        }
+        const updatedCatalog = await mutateWorkspaceCatalog(root, 'addProject', { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath), extra: { importedAt: Date.now(), importedFrom: inspection.sourcePath, externalLink: true } });
+        catalogAdded = true;
+        const projectId = updatedCatalog.byName.get(projectName.toLocaleLowerCase())?.id;
+        if (!projectId) throw new Error('项目数据库身份写入失败');
+        const project = { id: projectId, name: projectName, path: projectPath, workspacePath: root, status: '策划中', updatedAt: Date.now() };
+        await pushUndoOperation({ kind: 'remove-created', paths: [projectPath], label: '导入外链项目' }).catch(() => undefined);
+        mainWindow?.webContents.send('workspace-projects-changed', { root, reason: 'project-imported' });
+        return { success: true, operationId, project, workspacePath: root, storageSwitched: selectedWorkspace.switched, sourceRetained: true, linked: true, candidates: inspection.candidates };
+      }
       task = createProjectFileTask({
         backgroundTasks, event, operationId, operation: 'import-project', title: `接管项目 · ${projectName}`,
         projectName, resources: [inspection.sourcePath, path.dirname(projectPath)], cancelledCode: CANCELLED_CODE,
@@ -530,21 +585,6 @@ const registerWorkspaceIpc = context => {
       job.cancel = task.cancel;
       activeProjectFileOperations.set(operationId, job);
       await task.start();
-      if (mode === 'link') {
-        await fs.promises.mkdir(projectPath, { recursive: false });
-        const shortcutPath = path.join(projectPath, `${inspection.name}.lnk`);
-        if (!shell.writeShortcutLink(shortcutPath, { target: inspection.sourcePath, cwd: inspection.sourcePath, description: `PhotoFlow 外链文件夹：${inspection.name}` })) throw new Error('无法创建项目外链快捷方式');
-        const updatedCatalog = await mutateWorkspaceCatalog(root, 'addProject', { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath), extra: { importedAt: Date.now(), importedFrom: inspection.sourcePath, externalLink: true } });
-        catalogAdded = true;
-        const projectId = updatedCatalog.byName.get(projectName.toLocaleLowerCase())?.id;
-        if (!projectId) throw new Error('项目数据库身份写入失败');
-        const project = { id: projectId, name: projectName, path: projectPath, workspacePath: root, status: '策划中', updatedAt: Date.now() };
-        await pushUndoOperation({ kind: 'remove-created', paths: [projectPath], label: '导入外链项目' }).catch(() => undefined);
-        publish({ phase: 'complete', progress: 100, currentName: '项目外链接入完成', bytesCopied: 0, totalBytes: 0, filesCopied: 1, totalFiles: 1 });
-        task.complete('项目外链接入完成');
-        mainWindow?.webContents.send('workspace-projects-changed', { root, reason: 'project-imported' });
-        return { success: true, operationId, project, workspacePath: root, storageSwitched: selectedWorkspace.switched, sourceRetained: true, linked: true, candidates: inspection.candidates };
-      }
       const plan = [];
       publish({ phase: 'scanning', progress: 0, currentName: '正在扫描已有项目', bytesCopied: 0, totalBytes: inspection.totalBytes, filesCopied: 0, totalFiles: inspection.fileCount });
       await collectCopyPlan(inspection.sourcePath, stagedPath, plan, { isCancelled: () => job.cancelled });
@@ -599,7 +639,9 @@ const registerWorkspaceIpc = context => {
     } finally {
       activeProjectFileOperations.delete(operationId);
     }
-  });
+  };
+  ipcMain.handle('workspace-import-existing-project', importExistingProjectHandler);
+  ipcMain.handle('workspace-import-existing-project-link', (event, workspacePath, sourcePath, options = {}) => importExistingProjectHandler(event, workspacePath, sourcePath, { ...options, mode: 'link' }));
   
   ipcMain.handle('workspace-rename-project', async (_event, workspacePath, status, projectName, dateOrNextName, nextName) => {
     let source = '';
@@ -1260,8 +1302,8 @@ const registerWorkspaceIpc = context => {
       await assertDiskSpace(root, plan.reduce((sum, item) => sum + item.bytes, 0));
       for (const item of plan) {
         await movePathAtomic(item.source, item.destination);
-        await fs.promises.rm(item.shortcutPath, { force: true });
         moved.push(item);
+        await fs.promises.rm(item.shortcutPath, { force: true });
         for (const progress of item.affectedProgress) {
           const relative = path.relative(item.source, path.resolve(progress.folderPath));
           const relocatedPath = relative ? path.join(item.destination, relative) : item.destination;
@@ -1283,7 +1325,6 @@ const registerWorkspaceIpc = context => {
           if (!updated?.success) throw new Error(updated?.error || `无法更新版本目录：${progress.displayName}`);
         }
       }
-      await pushUndoOperation({ kind: 'external-move', moves: moved.map(item => ({ source: item.source, destination: item.destination })) }).catch(() => undefined);
       mainWindow?.webContents.send('workspace-files-changed', { root, fileName: '', eventType: 'rename' });
       return { success: true, count: moved.length, items: moved };
     } catch (error) {
@@ -2121,7 +2162,26 @@ const registerWorkspaceIpc = context => {
         if (createdTargets.length) await pushUndoOperation({ kind: 'remove-created', paths: createdTargets, label: '导入外链' });
         return { success: true, operationId, count: createdTargets.length, linked: true };
       }
-      const sourceInfos = await Promise.all(sourcePaths.map(source => assertRegularFile(source)));
+      const reserved = new Set();
+      const sourceInfos = [];
+      const transferPlan = [];
+      for (const source of sourcePaths) {
+        const sourcePath = path.resolve(source);
+        const stat = await fs.promises.lstat(sourcePath);
+        if (!stat.isFile() && !stat.isDirectory()) throw new Error(`不支持导入此文件类型：${path.basename(sourcePath)}`);
+        const destination = uniqueDestination(destinationDir, path.basename(sourcePath), reserved, stat.isDirectory());
+        const itemPlan = [];
+        await collectCopyPlan(sourcePath, destination, itemPlan, { isCancelled: () => job.cancelled });
+        transferPlan.push(...itemPlan);
+        sourceInfos.push({
+          path: sourcePath,
+          stat,
+          destination,
+          plan: itemPlan,
+          size: itemPlan.reduce((sum, entry) => sum + (entry.kind === 'file' ? entry.size : 0), 0),
+          fileCount: itemPlan.filter(entry => entry.kind === 'file').length,
+        });
+      }
       task = createProjectFileTask({
         backgroundTasks, event, operationId, operation: 'import-files', title: `导入文件 · ${projectName}`,
         projectName, resources: [destinationDir, ...sourceInfos.map(source => source.path)], cancelledCode: CANCELLED_CODE,
@@ -2130,35 +2190,59 @@ const registerWorkspaceIpc = context => {
       job.cancel = task.cancel;
       activeProjectFileOperations.set(operationId, job);
       await task.start();
-      const totalBytes = sourceInfos.reduce((sum, source) => sum + source.stat.size, 0);
+      const totalBytes = sourceInfos.reduce((sum, source) => sum + source.size, 0);
+      const totalFiles = sourceInfos.reduce((sum, source) => sum + source.fileCount, 0);
       let completedBytes = 0;
       let completedFiles = 0;
       let lastPublishedAt = 0;
-      publish({ phase: 'scanning', progress: 0, bytesCopied: 0, totalBytes, filesCopied: 0, totalFiles: sourceInfos.length });
-      const report = (sourceInfo, itemBytes) => {
+      publish({ phase: 'scanning', progress: 0, bytesCopied: 0, totalBytes, filesCopied: 0, totalFiles });
+      const report = currentName => {
         const now = Date.now();
-        if (now - lastPublishedAt < 80 && itemBytes < sourceInfo.stat.size) return;
+        if (now - lastPublishedAt < 80 && completedBytes < totalBytes) return;
         lastPublishedAt = now;
-        const bytesCopied = Math.min(totalBytes, completedBytes + itemBytes);
-        publish({ phase: preserveOriginal ? 'copying' : 'moving', progress: totalBytes ? Math.min(99, Math.round(bytesCopied / totalBytes * 100)) : 0, currentName: path.basename(sourceInfo.path), bytesCopied, totalBytes, filesCopied: completedFiles, totalFiles: sourceInfos.length });
+        publish({ phase: preserveOriginal ? 'copying' : 'moving', progress: totalBytes ? Math.min(99, Math.round(completedBytes / totalBytes * 100)) : 0, currentName, bytesCopied: completedBytes, totalBytes, filesCopied: completedFiles, totalFiles });
       };
-      const reserved = new Set();
-      for (const sourceInfo of sourceInfos) {
-        if (job.cancelled) throw Object.assign(new Error('文件操作已取消'), { code: CANCELLED_CODE });
-        const destination = uniqueDestination(destinationDir, path.basename(sourceInfo.path), reserved);
-        if (preserveOriginal) {
-          await copyFileAtomic(sourceInfo.path, destination, { isCancelled: () => job.cancelled, onProgress: progress => report(sourceInfo, progress.bytesCopied) });
-          createdTargets.push(destination);
-        } else {
-          await moveFileAtomic(sourceInfo.path, destination, { isCancelled: () => job.cancelled, onProgress: progress => report(sourceInfo, progress.bytesCopied) });
-          moves.push({ source: sourceInfo.path, destination });
+      if (preserveOriginal) {
+        await assertDiskSpace(destinationDir, totalBytes);
+        createdTargets.push(...sourceInfos.map(source => source.destination));
+        await copyPlannedFiles(transferPlan, {
+          destinationRoot: destinationDir,
+          diskSpaceChecked: true,
+          isCancelled: () => job.cancelled,
+          onProgress: ({ entry, bytesDelta, fileCompleted }) => {
+            completedBytes = Math.min(totalBytes, completedBytes + Math.max(0, bytesDelta || 0));
+            if (fileCompleted) completedFiles += 1;
+            report(path.basename(entry.source));
+          },
+        });
+      } else {
+        for (const sourceInfo of sourceInfos) {
+          if (job.cancelled) throw Object.assign(new Error('文件操作已取消'), { code: CANCELLED_CODE });
+          let itemBytes = 0;
+          let itemFiles = 0;
+          await movePathAtomic(sourceInfo.path, sourceInfo.destination, {
+            isCancelled: () => job.cancelled,
+            onProgress: progress => {
+              const bytesDelta = Number.isFinite(progress?.bytesDelta)
+                ? Math.max(0, progress.bytesDelta)
+                : Math.max(0, Number(progress?.bytesCopied || 0) - itemBytes);
+              itemBytes += bytesDelta;
+              completedBytes = Math.min(totalBytes, completedBytes + bytesDelta);
+              if (progress?.fileCompleted) {
+                itemFiles += 1;
+                completedFiles += 1;
+              }
+              report(path.basename(progress?.entry?.source || sourceInfo.path));
+            },
+          });
+          moves.push({ source: sourceInfo.path, destination: sourceInfo.destination });
+          completedBytes = Math.min(totalBytes, completedBytes + Math.max(0, sourceInfo.size - itemBytes));
+          completedFiles += Math.max(0, sourceInfo.fileCount - itemFiles);
+          report(path.basename(sourceInfo.path));
         }
-        completedBytes += sourceInfo.stat.size;
-        completedFiles += 1;
-        report(sourceInfo, sourceInfo.stat.size);
       }
       job.finishing = true;
-      publish({ phase: 'finishing', progress: 99, currentName: '正在完成文件导入', bytesCopied: totalBytes, totalBytes, filesCopied: sourceInfos.length, totalFiles: sourceInfos.length });
+      publish({ phase: 'finishing', progress: 99, currentName: '正在完成文件导入', bytesCopied: totalBytes, totalBytes, filesCopied: totalFiles, totalFiles });
       if (preserveOriginal && createdTargets.length) await pushUndoOperation({ kind: 'remove-created', paths: createdTargets, label: '导入' });
       if (!preserveOriginal && moves.length) await pushUndoOperation({ kind: 'external-move', moves });
       writeLog('info', 'Files imported into current project directory', { projectName, relativePath, count: sourcePaths.length, preserveOriginal });
@@ -2167,18 +2251,18 @@ const registerWorkspaceIpc = context => {
         source: 'project_files',
         preserve_original: preserveOriginal,
       });
-      publish({ phase: 'complete', progress: 100, currentName: '文件导入完成', bytesCopied: totalBytes, totalBytes, filesCopied: sourceInfos.length, totalFiles: sourceInfos.length });
+      publish({ phase: 'complete', progress: 100, currentName: '文件导入完成', bytesCopied: totalBytes, totalBytes, filesCopied: totalFiles, totalFiles });
       task.complete('文件导入完成');
       return { success: true, operationId, count: sourcePaths.length };
     } catch (error) {
       for (const move of [...moves].reverse()) {
         try {
-          if (fs.existsSync(move.destination) && !fs.existsSync(move.source)) await moveFileAtomic(move.destination, move.source);
+          if (fs.existsSync(move.destination) && !fs.existsSync(move.source)) await movePathAtomic(move.destination, move.source);
         } catch (rollbackError) {
           writeLog('error', 'Unable to roll back project file import', { move, error: rollbackError.message || String(rollbackError) });
         }
       }
-      for (const target of createdTargets) await fs.promises.rm(target, { force: true }).catch(() => undefined);
+      for (const target of createdTargets) await fs.promises.rm(target, { recursive: true, force: true }).catch(() => undefined);
       const cancelled = error?.code === CANCELLED_CODE;
       publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, error: error.message || String(error) });
       if (cancelled) task?.cancelled();
@@ -2265,6 +2349,7 @@ const registerWorkspaceIpc = context => {
         return {
           success: true,
           operationId,
+          linked: true,
           count: 1,
           importedPaths: [source],
           progressFolder: registered.progressFolder,
