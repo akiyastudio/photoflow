@@ -597,11 +597,13 @@ pluginService = createPluginService({ app, projectRoot, registry: componentRegis
 const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, onMessage) =>
   runJsonCommand(getRunConfig(scriptName, args), scriptName, timeoutMs, onMessage);
 
-const runPythonEventAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, signal) => new Promise((resolve, reject) => {
+const runPythonEventAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, signal, onEvent) => new Promise((resolve, reject) => {
   const run = getRunConfig(scriptName, args);
   const child = spawn(run.command, run.args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
+  let eventBuffer = '';
+  const events = [];
   let finished = false;
   let abortListener = null;
   const settle = callback => value => {
@@ -615,14 +617,25 @@ const runPythonEventAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, sign
   const fail = settle(reject);
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
-  child.stdout.on('data', data => { stdout = (stdout + data).slice(-16 * 1024 * 1024); });
+  child.stdout.on('data', data => {
+    stdout = (stdout + data).slice(-16 * 1024 * 1024);
+    const lines = (eventBuffer + data).split(/\r?\n/);
+    eventBuffer = lines.pop() || '';
+    for (const line of lines) {
+      try {
+        const event = JSON.parse(line);
+        events.push(event);
+        onEvent?.(event);
+      } catch { /* keep non-protocol output in stdout for final diagnostics */ }
+    }
+  });
   child.stderr.on('data', data => { stderr = (stderr + data).slice(-16000); });
   child.on('error', fail);
   child.on('close', code => {
     if (code !== 0) return fail(new Error(stderr.trim() || `${scriptName} 处理失败（代码 ${code}）`));
-    const events = stdout.split(/\r?\n/).map(line => {
-      try { return JSON.parse(line); } catch { return null; }
-    }).filter(Boolean);
+    if (eventBuffer.trim()) {
+      try { const event = JSON.parse(eventBuffer); events.push(event); onEvent?.(event); } catch { /* ignore trailing non-protocol output */ }
+    }
     const errorEvent = events.find(event => event.type === 'error');
     if (errorEvent) return fail(new Error(errorEvent.message || `${scriptName} 处理失败`));
     succeed(events);
@@ -854,7 +867,32 @@ const mediaDatabase = new PythonDatabaseClient({
   writeLog,
   defaultTimeoutMs: 30 * 60 * 1000,
 });
-const mediaRepository = createMediaRepository(mediaDatabase);
+// Keep small user-driven mutations away from the worker that also performs
+// project synchronization and commit planning.  The Python server processes
+// one request at a time, so a dedicated worker prevents clicks such as
+// tracking/team confirmations from waiting behind an unrelated long request.
+const mediaInteractionDatabase = new PythonDatabaseClient({
+  getRunConfig,
+  getDatabasePath: getWorkspaceDatabasePath,
+  writeLog,
+  defaultTimeoutMs: 60 * 1000,
+});
+const mediaBackgroundRepository = createMediaRepository(mediaDatabase);
+const mediaInteractionRepository = createMediaRepository(mediaInteractionDatabase);
+const mediaRepository = {
+  ...mediaBackgroundRepository,
+  getTrackingSession: mediaInteractionRepository.getTrackingSession,
+  releaseTrackingSession: mediaInteractionRepository.releaseTrackingSession,
+  decideTrackingItem: mediaInteractionRepository.decideTrackingItem,
+  getTeamProjectWorkspace: mediaInteractionRepository.getTeamProjectWorkspace,
+  saveTeamIdentity: mediaInteractionRepository.saveTeamIdentity,
+  assignTeamIdentity: mediaInteractionRepository.assignTeamIdentity,
+  confirmTeamIdentityGroup: mediaInteractionRepository.confirmTeamIdentityGroup,
+  completeTeamIdentity: mediaInteractionRepository.completeTeamIdentity,
+  deleteTeamIdentity: mediaInteractionRepository.deleteTeamIdentity,
+  updateTeamPatch: mediaInteractionRepository.updateTeamPatch,
+  deleteTeamPatch: mediaInteractionRepository.deleteTeamPatch,
+};
 const versionService = createVersionService({ repository: mediaRepository });
 let selectionService = null;
 const versionStaleDetectionService = createVersionStaleDetectionService({ versionService, writeLog });
@@ -1746,6 +1784,7 @@ app.on('before-quit', () => {
   workspaceDatabase.stop();
   workspaceMaintenanceDatabase.stop();
   mediaDatabase.stop();
+  mediaInteractionDatabase.stop();
   mediaScanDatabase.stop();
   trackingScanDatabase.stop();
   imageThumbnailRuntime.stop();

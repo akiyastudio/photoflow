@@ -36,7 +36,7 @@ export const FileTransferToastItem = ({ task, onMinimize }: { task: BackgroundTa
       {queued ? <Clock3 size={16} className="shrink-0 text-blue-600"/> : <Loader2 size={16} className="shrink-0 animate-spin text-blue-600"/>}
       <div className="min-w-0 flex-1">
         <div className="flex items-center justify-between gap-3 text-xs"><span className="truncate font-bold text-blue-800">{message}</span>{!queued && <span className="shrink-0 font-mono font-bold tabular-nums text-blue-700">{Math.round(progress)}%</span>}</div>
-        {!queued && <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-600 transition-[width] duration-150" style={{ width: `${Math.max(2, progress)}%` }}/></div>}
+        {!queued && <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-600 transition-[width] duration-150" style={{ width: `${progress > 0 ? Math.max(2, progress) : 0}%` }}/></div>}
         <p className="mt-1 line-clamp-1 text-[11px] tabular-nums text-blue-600">{queued ? versionTracking ? '完成后自动开始版本比较' : '当前文件操作完成后自动开始' : details || (versionTracking ? '比较完成后可确认版本匹配' : '文件准备完成后会自动显示；可以继续使用软件。')}</p>
       </div>
       <button type="button" onClick={() => onMinimize(task.id)} aria-label="收起到任务中心" title="收起到任务中心，任务会继续运行" className="inline-flex shrink-0 items-center gap-1 rounded-md border border-blue-200 bg-white/70 px-2 py-1.5 text-xs font-bold text-blue-700 transition hover:border-blue-300 hover:bg-blue-100"><Minimize2 size={14}/><span>后台</span></button>

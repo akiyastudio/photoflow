@@ -480,8 +480,17 @@ const registerVersionIpc = context => {
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
       let folderPath = resolveProjectEntry(workspacePath, status, projectName, request.relativePath);
+      let shortcutRelativePath = '';
+      if (path.extname(folderPath).toLowerCase() === '.lnk' && fs.statSync(folderPath).isFile()) {
+        const details = shell.readShortcutLink(folderPath);
+        if (!String(details?.description || '').startsWith('PhotoFlow 外链文件夹：')) throw new Error('只有由 PhotoFlow 创建的文件夹外链可以纳入版本管理');
+        const target = path.resolve(String(details?.target || ''));
+        if (!(await fs.promises.stat(target).catch(() => null))?.isDirectory()) throw new Error('外链文件夹当前不可用');
+        shortcutRelativePath = path.relative(projectPath, folderPath).replace(/\\/g, '/');
+        folderPath = target;
+      }
       if (!fs.statSync(folderPath).isDirectory()) throw new Error('版本进度文件夹不存在');
-      if (request.moveToRoot && path.dirname(folderPath).toLocaleLowerCase() !== projectPath.toLocaleLowerCase()) {
+      if (request.moveToRoot && !shortcutRelativePath && path.dirname(folderPath).toLocaleLowerCase() !== projectPath.toLocaleLowerCase()) {
         if (fs.lstatSync(folderPath).isSymbolicLink()) throw new Error('快捷方式或链接目录不能移动为版本进度');
         const targetPath = path.join(projectPath, path.basename(folderPath));
         if (fs.existsSync(targetPath)) throw new Error(`项目根目录已存在同名文件夹“${path.basename(folderPath)}”`);
@@ -510,7 +519,7 @@ const registerVersionIpc = context => {
       if (!registered?.success || !registered.progressFolder) throw new Error(registered?.error || '无法登记版本进度');
       return {
         ...registered,
-        relativePath: path.relative(projectPath, folderPath).replace(/\\/g, '/'),
+        relativePath: shortcutRelativePath || path.relative(projectPath, folderPath).replace(/\\/g, '/'),
       };
     } catch (error) {
       if (movedFrom && movedTo && fs.existsSync(movedTo) && !fs.existsSync(movedFrom)) {
@@ -576,7 +585,16 @@ const registerVersionIpc = context => {
         let folderPath = progress.relativePath !== undefined
           ? resolveProjectEntry(workspacePath, status, projectName, String(progress.relativePath || ''))
           : existing?.folderPath ? path.resolve(existing.folderPath) : path.resolve(projectPath, displayName);
-        if (!isInside(projectPath, folderPath)) throw new Error('progress_graph_folder_invalid: 进度目录必须位于当前项目内');
+        let shortcutRelativePath = '';
+        if (progress.relativePath !== undefined && path.extname(folderPath).toLowerCase() === '.lnk' && fs.existsSync(folderPath) && fs.statSync(folderPath).isFile()) {
+          const details = shell.readShortcutLink(folderPath);
+          if (!String(details?.description || '').startsWith('PhotoFlow 外链文件夹：')) throw new Error('progress_graph_folder_invalid: 只有由 PhotoFlow 创建的文件夹外链可以纳入版本管理');
+          const target = path.resolve(String(details?.target || ''));
+          if (!(await fs.promises.stat(target).catch(() => null))?.isDirectory()) throw new Error('progress_graph_folder_invalid: 外链文件夹当前不可用');
+          shortcutRelativePath = String(progress.relativePath || '').replace(/\\/g, '/');
+          folderPath = target;
+        }
+        if (!shortcutRelativePath && !isInside(projectPath, folderPath)) throw new Error('progress_graph_folder_invalid: 进度目录必须位于当前项目内');
         if (!fs.existsSync(folderPath)) {
           if (progress.relativePath !== undefined || existing) throw new Error('progress_graph_folder_invalid: 要登记的文件夹不存在');
           await fs.promises.mkdir(folderPath);
@@ -584,7 +602,7 @@ const registerVersionIpc = context => {
         } else if (!fs.statSync(folderPath).isDirectory()) {
           throw new Error(`同名路径不是文件夹：${displayName}`);
         }
-        if (progress.moveToRoot && path.dirname(folderPath).toLocaleLowerCase() !== projectPath.toLocaleLowerCase()) {
+        if (progress.moveToRoot && !shortcutRelativePath && path.dirname(folderPath).toLocaleLowerCase() !== projectPath.toLocaleLowerCase()) {
           if (fs.lstatSync(folderPath).isSymbolicLink()) throw new Error('快捷方式或链接目录不能移动为版本进度');
           const targetPath = path.join(projectPath, path.basename(folderPath));
           if (fs.existsSync(targetPath)) throw new Error(`项目根目录已存在同名文件夹“${path.basename(folderPath)}”`);
@@ -605,12 +623,15 @@ const registerVersionIpc = context => {
           renameFromParent: Boolean(progress.renameFromParent),
           copyMissingFromParent: Boolean(progress.copyMissingFromParent),
         };
+        databaseProgress.shortcutRelativePath = shortcutRelativePath;
       }
+      const shortcutRelativePath = String(databaseProgress.shortcutRelativePath || '');
+      delete databaseProgress.shortcutRelativePath;
       const registered = await versionService.registerProgressWithGraph(workspaceRoot, {
         projectName, progress: databaseProgress, workflowInputProgressIds,
       });
       if (!registered?.success || !registered.progressFolder) throw new Error(registered?.error || '进度和工作流关系提交失败');
-      const relativePath = path.relative(projectPath, registered.progressFolder.folderPath).replace(/\\/g, '/');
+      const relativePath = shortcutRelativePath || path.relative(projectPath, registered.progressFolder.folderPath).replace(/\\/g, '/');
       return {
         ...registered,
         relativePath,
@@ -1005,16 +1026,24 @@ const registerVersionIpc = context => {
     }
   });
 
-  registerVersionTrackingIpc({ backgroundTasks, copyFileAtomic, crypto, ensureWorkspace, fs, ipcMain, path, refreshWorkspaceCatalog, runPythonEventAction, trackingScanService, versionService, workspaceCatalogs });
+  registerVersionTrackingIpc({ backgroundTasks, copyFileAtomic, crypto, ensureWorkspace, fs, getWorkspaceDataRoot, ipcMain, path, refreshWorkspaceCatalog, runPythonEventAction, trackingScanService, versionService, workspaceCatalogs, writeLog });
   
   ipcMain.handle('workspace-version-compare-preview', async (_event, workspacePath, status, projectName, referenceRelativePath, sourceRelativePath, sourceNames) => {
+    let sourceManifestPath = '';
     try {
       const folderA = resolveProjectEntry(workspacePath, status, projectName, referenceRelativePath);
       const folderB = resolveProjectEntry(workspacePath, status, projectName, sourceRelativePath);
       if (!fs.statSync(folderA).isDirectory() || !fs.statSync(folderB).isDirectory()) throw new Error('版本对比必须选择两个文件夹');
       if (folderA.toLocaleLowerCase() === folderB.toLocaleLowerCase()) throw new Error('上一版本和新版本不能是同一个文件夹');
       const selectedSourceNames = Array.isArray(sourceNames) ? [...new Set(sourceNames.map(value => String(value || '')).filter(value => value && path.basename(value) === value))] : [];
-      const events = await runPythonEventAction('rename.py', ['--folder_a', folderA, '--folder_b', folderB, '--preview', ...(selectedSourceNames.length ? ['--source_files', JSON.stringify(selectedSourceNames)] : [])], 60 * 60 * 1000);
+      if (selectedSourceNames.length) {
+        const trackingDataDirectory = path.join(getWorkspaceDataRoot(workspacePath), 'version-tracking');
+        fs.mkdirSync(trackingDataDirectory, { recursive: true });
+        sourceManifestPath = path.join(trackingDataDirectory, `${crypto.randomUUID()}-sources.json`);
+        fs.writeFileSync(sourceManifestPath, JSON.stringify(selectedSourceNames), 'utf8');
+      }
+      writeLog('info', 'Comparing progress version folders', { projectName, folderA, folderB, selectedSourceCount: selectedSourceNames.length });
+      const events = await runPythonEventAction('rename.py', ['--folder_a', folderA, '--folder_b', folderB, '--preview', ...(sourceManifestPath ? ['--source_files_file', sourceManifestPath] : [])], 60 * 60 * 1000);
       const preview = events.find(event => event.type === 'preview');
       if (!preview) throw new Error('版本对比没有返回匹配结果');
       return {
@@ -1027,6 +1056,10 @@ const registerVersionIpc = context => {
     } catch (error) {
       writeLog('error', 'Unable to compare progress version folders', { projectName, referenceRelativePath, sourceRelativePath, error: error.message || String(error) });
       return { success: false, error: error.message || String(error), matches: [], suggestions: [], unmatched: [], unmatchedReference: [] };
+    } finally {
+      if (sourceManifestPath) {
+        try { fs.unlinkSync(sourceManifestPath); } catch {}
+      }
     }
   });
   

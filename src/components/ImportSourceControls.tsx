@@ -14,6 +14,8 @@ type ImportSourceControlsProps = {
   deleteSourceAfterImport: boolean;
   onDeleteSourceAfterImportChange: (value: boolean) => void;
   deleteSourceDescription: string;
+  linkOnly?: boolean;
+  onLinkOnlyChange?: (value: boolean) => void;
   statusText?: string;
   startLabel?: string;
   busyLabel?: string;
@@ -34,6 +36,8 @@ export const ImportSourceControls = ({
   deleteSourceAfterImport,
   onDeleteSourceAfterImportChange,
   deleteSourceDescription,
+  linkOnly = false,
+  onLinkOnlyChange,
   statusText,
   startLabel = '开始导入',
   busyLabel = '正在导入…',
@@ -84,7 +88,8 @@ export const ImportSourceControls = ({
     </div>
   </div>
 
-  <PanelSwitch title="导入后删除源文件" description={deleteSourceDescription} checked={deleteSourceAfterImport} disabled={busy} onChange={onDeleteSourceAfterImportChange}/>
+  {onLinkOnlyChange && <PanelSwitch title="只导入外链" description="不复制或移动原文件，只在项目内创建快捷方式；外部位置离线时内容会暂时不可用。" checked={linkOnly} disabled={busy} onChange={onLinkOnlyChange}/>}
+  <PanelSwitch title="导入后删除源文件" description={linkOnly ? '外链模式不会复制或删除任何源文件。' : deleteSourceDescription} checked={deleteSourceAfterImport} disabled={busy || linkOnly} onChange={onDeleteSourceAfterImportChange}/>
 
   <div className="flex items-center gap-3 border-t border-slate-200 pt-4">
     <span className="mr-auto text-xs text-slate-400">{statusText || (selectedCount ? `已选择 ${selectedCount} 个来源` : '尚未选择来源')}</span>

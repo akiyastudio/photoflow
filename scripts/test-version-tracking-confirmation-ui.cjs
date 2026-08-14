@@ -30,6 +30,7 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(state.items.find(item => item.id === 'missing').referenceName, 'relocated.jpg', 'relocation updates the persisted relationship name');
   assert.strictEqual(model.canCommitTrackingSession(state.items), true, 'commit opens only after every item is resolved');
   assert.strictEqual(model.canCommitTrackingSession(items), false, 'unresolved items gate commit');
+  assert.strictEqual(model.firstUnresolvedTrackingItemId(items), 'missing', 'the pending action selects the first unresolved row in list order');
 
   const missingPaths = model.resolveTrackingComparisonPaths(items[2], 'C:\\parent', 'C:\\current');
   assert.strictEqual(missingPaths.referenceMissing, true, 'new media renders the missing-reference placeholder');
@@ -62,7 +63,7 @@ const { pathToFileURL } = require('url');
   assert(appStyles.includes('html.dark .bg-white\\/95'), '95% translucent white surfaces are mapped to a dark background');
   assert(panelSource.includes('标记不关联') && panelSource.includes("hasReferenceCandidate ? '不是同一张' : '标记不关联'"), 'items without a previous-version candidate use the explicit unlinked action');
   assert(panelSource.includes('不是同一张') && panelSource.includes('是同一张'), 'items with a reference candidate keep image-relationship wording');
-  assert(panelSource.includes("commitUnavailable ? '有待确认图片' : '提交结果'"), 'the unavailable commit action explains that images still need confirmation');
+  assert(panelSource.includes('onClick={revealPending}') && panelSource.includes('data-tracking-item-id={item.id}'), 'the pending action reveals and scrolls to the first unresolved image');
 
   console.log('version tracking confirmation UI model tests passed');
 })().catch(error => {

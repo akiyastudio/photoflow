@@ -38,12 +38,12 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
       releaseWorkspaceWatchPath(filePath);
     }
     invalidate(filePath);
-    try {
-      await versionService.refreshMetadataFingerprint(workspaceRoot, { filePath });
-    } catch (error) {
+    // ExifTool has already durably written the requested value. Fingerprint
+    // maintenance is bookkeeping and must not extend an interactive click.
+    void versionService.refreshMetadataFingerprint(workspaceRoot, { filePath }).catch(error => {
       writeLog('warn', 'Unable to refresh tracked fingerprint after metadata rating write', { filePath, error: error.message || String(error) });
-    }
-    return read(filePath);
+    });
+    return rating;
   };
   const listProject = async projectPath => {
     const candidates = [];

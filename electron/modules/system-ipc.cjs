@@ -35,6 +35,20 @@ const normalizeProjectCategoryOrder = (value, customCategories) => {
   }
   return result;
 };
+const normalizeProgressNamePresets = value => {
+  const source = Array.isArray(value) ? value : ['调色后', '修脸后', '完成版'];
+  const result = [];
+  const seen = new Set();
+  for (const item of source) {
+    const name = String(item || '').trim().replace(/\s+/g, ' ');
+    const key = name.toLocaleLowerCase();
+    const invalid = [...name].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
+    if (!name || name.length > 24 || invalid || seen.has(key)) continue;
+    seen.add(key); result.push(name);
+    if (result.length >= 50) break;
+  }
+  return result;
+};
 
 const registerSystemIpc = context => {
   const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
@@ -950,6 +964,7 @@ const registerSystemIpc = context => {
         workspacePaths,
         customProjectCategories,
         projectCategoryOrder: normalizeProjectCategoryOrder(config?.projectCategoryOrder, customProjectCategories),
+        progressNamePresets: normalizeProgressNamePresets(config?.progressNamePresets),
         telemetry: {
           enabled: privacyService.hasCoreConsent(),
           crashReports: privacyService.hasCoreConsent(),

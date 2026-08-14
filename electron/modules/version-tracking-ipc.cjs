@@ -1,5 +1,5 @@
 const registerVersionTrackingIpc = context => {
-  const { backgroundTasks, copyFileAtomic, crypto, ensureWorkspace, fs, ipcMain, path, refreshWorkspaceCatalog, runPythonEventAction, trackingScanService, versionService, workspaceCatalogs } = context;
+  const { backgroundTasks, copyFileAtomic, crypto, ensureWorkspace, fs, getWorkspaceDataRoot = root => root, ipcMain, path, refreshWorkspaceCatalog, runPythonEventAction, trackingScanService, versionService, workspaceCatalogs, writeLog = () => undefined } = context;
   const trackingPreviewItems = (prepared, preview = {}) => {
     const pendingSources = new Set((prepared.sourceNames || []).map(String));
     const items = [];
@@ -39,18 +39,46 @@ const registerVersionTrackingIpc = context => {
   const executeTrackingCompare = async (workspaceRoot, prepared, task) => {
     task?.throwIfCancelled?.();
     const totalCount = (prepared.sourceNames?.length || 0) + (prepared.copyCandidateNames?.length || 0) + (prepared.removedNames?.length || 0);
-    task?.report(5, '正在准备版本媒体', {
+    task?.report(0, '正在读取版本媒体', {
       sessionId: prepared.sessionId, progressId: prepared.progressId,
       processedCount: 0, totalCount,
     });
-    task?.report(10, '正在读取版本媒体');
+    writeLog('info', 'Version tracking compare started', {
+      sessionId: prepared.sessionId, progressId: prepared.progressId, mode: prepared.mode,
+      parentFolderPath: prepared.parentFolderPath, progressFolderPath: prepared.progressFolderPath,
+      sourceCount: prepared.sourceNames?.length || 0, removedCount: prepared.removedNames?.length || 0,
+      copyCandidateCount: prepared.copyCandidateNames?.length || 0,
+    });
     let preview = { matches: [], suggestions: [], unmatched: [], unmatchedReference: [] };
     if (prepared.sourceNames?.length) {
-      const events = await runPythonEventAction('rename.py', [
-        '--folder_a', prepared.parentFolderPath,
-        '--folder_b', prepared.progressFolderPath,
-        '--preview', '--source_files', JSON.stringify(prepared.sourceNames),
-      ], 60 * 60 * 1000, task?.signal);
+      const trackingDataDirectory = path.join(getWorkspaceDataRoot(workspaceRoot), 'version-tracking');
+      const sourceManifestPath = path.join(trackingDataDirectory, `${prepared.sessionId}-sources.json`);
+      await fs.promises.mkdir(trackingDataDirectory, { recursive: true });
+      await fs.promises.writeFile(sourceManifestPath, JSON.stringify(prepared.sourceNames), 'utf8');
+      const onWorkerEvent = event => {
+        if (event.type === 'progress' && Number.isFinite(event.progress)) {
+          const workerProgress = Math.max(0, Math.min(100, Number(event.progress)));
+          task?.report(workerProgress * 0.8, event.message || '正在比较版本媒体', {
+            sessionId: prepared.sessionId, progressId: prepared.progressId,
+            processedCount: totalCount > 0 ? Math.min(totalCount, Math.round(totalCount * workerProgress / 100)) : 0,
+            totalCount,
+          });
+        } else if (event.type === 'log' || event.type === 'warning') {
+          writeLog(event.type === 'warning' ? 'warn' : 'info', 'Version tracking worker event', {
+            sessionId: prepared.sessionId, progressId: prepared.progressId, message: event.message || '',
+          });
+        }
+      };
+      let events;
+      try {
+        events = await runPythonEventAction('rename.py', [
+          '--folder_a', prepared.parentFolderPath,
+          '--folder_b', prepared.progressFolderPath,
+          '--preview', '--source_files_file', sourceManifestPath,
+        ], 60 * 60 * 1000, task?.signal, onWorkerEvent);
+      } finally {
+        await fs.promises.rm(sourceManifestPath, { force: true }).catch(() => undefined);
+      }
       task?.throwIfCancelled();
       const previewEvent = events.find(event => event.type === 'preview');
       if (!previewEvent) throw new Error('版本对比没有返回匹配结果');
@@ -67,6 +95,10 @@ const registerVersionTrackingIpc = context => {
       processedCount: totalCount, totalCount,
     });
     task?.report(100, '等待确认跟踪图片');
+    writeLog('info', 'Version tracking compare completed', {
+      sessionId: prepared.sessionId, progressId: prepared.progressId, totalCount,
+      itemCount: Array.isArray(stored?.items) ? stored.items.length : undefined,
+    });
     return stored;
   };
 
@@ -146,6 +178,10 @@ const registerVersionTrackingIpc = context => {
             await versionService.releaseTrackingSession(workspaceRoot, created.sessionId).catch(() => undefined);
             handle?.cancelled?.();
           } else {
+            writeLog('error', 'Version tracking compare failed', {
+              projectName, progressId, sessionId: created.sessionId,
+              error: error?.message || String(error), stack: error?.stack,
+            });
             await versionService.failTrackingCommit(workspaceRoot, { sessionId: created.sessionId, error: error?.message || String(error) }).catch(() => undefined);
             handle?.fail?.(error);
           }

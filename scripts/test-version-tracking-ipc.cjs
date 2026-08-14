@@ -14,6 +14,7 @@ const trustedProgress = path.join(workspaceRoot, 'Project', 'edit');
 fs.mkdirSync(trustedParent, { recursive: true });
 fs.mkdirSync(trustedProgress, { recursive: true });
 const calls = {};
+const taskReports = [];
 
 const versionService = {
   createTrackingSession: async (root, request) => {
@@ -101,7 +102,10 @@ registerVersionIpc({
   String,
   VIDEO_EXTENSIONS: new Set(),
   backgroundTasks: {
-    create: () => undefined,
+    create: () => ({
+      context: { signal: new AbortController().signal, report: (...args) => taskReports.push(args), throwIfCancelled: () => undefined },
+      waitForStart: async () => undefined, complete: () => undefined, fail: () => undefined, cancelled: () => undefined,
+    }),
     list: () => calls.activeTasks || [],
   },
   copyFileAtomic: async () => undefined,
@@ -111,6 +115,7 @@ registerVersionIpc({
     return workspaceRoot;
   },
   fs,
+  getWorkspaceDataRoot: root => path.join(root, '.photoflow-test-data'),
   getProjectPath: () => path.join(workspaceRoot, 'Project'),
   ipcMain: { handle: (channel, listener) => handlers.set(channel, listener) },
   mediaMetadataCache: new Map(),
@@ -124,9 +129,11 @@ registerVersionIpc({
     assert(resolved.startsWith(`${projectPath}${path.sep}`));
     return resolved;
   },
-  runPythonEventAction: async (_script, args) => {
+  runPythonEventAction: async (_script, args, _timeout, _signal, onEvent) => {
     calls.pythonArgs = args;
-    return [{ type: 'preview', data: { matches: [], suggestions: [], unmatched: ['new.jpg'] } }];
+    const progressEvent = { type: 'progress', progress: 50, message: 'matching' };
+    onEvent?.(progressEvent);
+    return [progressEvent, { type: 'preview', data: { matches: [], suggestions: [], unmatched: ['new.jpg'] } }];
   },
   suppressWorkspaceWatchPath: () => undefined,
   undefined,
@@ -156,12 +163,15 @@ async function main() {
     parentProgressId: 'renderer-parent-attack',
   });
   assert.strictEqual(started.success, true);
-  await new Promise(resolve => setTimeout(resolve, 10));
+  for (let attempt = 0; attempt < 50 && !calls.preview; attempt += 1) await new Promise(resolve => setTimeout(resolve, 5));
   assert.deepStrictEqual(calls.prepare.request, {
     projectName: 'Project', progressId: 'progress-node-id', mode: 'refresh',
     sessionId: '11111111-1111-4111-8111-111111111111',
   });
   assert(calls.pythonArgs.includes(trustedParent) && calls.pythonArgs.includes(trustedProgress));
+  assert(calls.pythonArgs.includes('--source_files_file'), 'large source lists must use a manifest instead of the Windows command line');
+  assert(taskReports.some(([progress, message, metadata]) => progress === 0 && message === '正在读取版本媒体' && metadata.processedCount === 0), 'reading must begin at a truthful zero percent');
+  assert(taskReports.some(([progress, message, metadata]) => progress === 40 && message === 'matching' && metadata.processedCount === 1), 'streamed worker progress must update the background task before completion');
   assert(!calls.pythonArgs.includes(maliciousPath), 'renderer paths must never reach the compare tool');
   assert.strictEqual(calls.preview.request.items[0].status, 'pending_confirmation');
 

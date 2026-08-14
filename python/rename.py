@@ -420,6 +420,7 @@ def run(args_list):
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--move_unmatched", action="store_true")
     parser.add_argument("--source_files", default="")
+    parser.add_argument("--source_files_file", default="")
     args = parser.parse_args(args_list)
 
     # 清理路径
@@ -431,7 +432,11 @@ def run(args_list):
         return
 
     try:
-        source_files = json.loads(args.source_files) if args.source_files else None
+        if args.source_files_file:
+            with open(args.source_files_file, "r", encoding="utf-8") as source_file:
+                source_files = json.load(source_file)
+        else:
+            source_files = json.loads(args.source_files) if args.source_files else None
         if process_folders(fa, fb, args.threshold, args.copy_unmatched, args.preview, args.move_unmatched, source_files):
             emit('success', "所有任务结束")
     except Exception as e:

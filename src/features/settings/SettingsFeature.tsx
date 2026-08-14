@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Folder, FolderOpen, HardDrive, Palette, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, Loader2, Wrench, ExternalLink, AtSign, GripVertical, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, ShieldCheck, MessageSquareText, Send, LockKeyhole, Plus, X, FileImage } from 'lucide-react';
-import { BUILT_IN_PROJECT_STATUSES, PROJECT_TOOLBAR_ACTION_IDS, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from '../../types';
+import { Folder, FolderOpen, HardDrive, Palette, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, Loader2, Wrench, ExternalLink, AtSign, GripVertical, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, ShieldCheck, MessageSquareText, Send, LockKeyhole, Plus, X, FileImage, Pencil } from 'lucide-react';
+import { BUILT_IN_PROJECT_STATUSES, PROJECT_TOOLBAR_ACTION_IDS, normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from '../../types';
 import type { AppConfig, BackupSpaceStatus, BackupStatus, ComponentStatus, LegalDocumentId, PrivacyConsentState, ProjectToolbarActionId, StorageUsageOverview, WorkspaceProject } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { FORMAL_MODEL_LICENSES } from '../../licenses/modelLicenses';
@@ -290,7 +290,7 @@ const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { compone
       <SettingsRow title="安装条件" description="Windows x64、WSL 2、支持 WSL CUDA 的 NVIDIA 显卡与驱动，以及至少 35 GB 可用空间。"><button type="button" title="检查 WSL 2、NVIDIA 显卡与驱动、目标磁盘空间" onClick={() => void checkRequirements()} disabled={Boolean(busy) || !baseAvailable} className="dialog-secondary ml-auto block w-fit disabled:opacity-45">检查安装条件</button></SettingsRow>
       <SettingsRow title="运行环境与占用" description="建议至少 8 GB 显存和 16 GB 系统内存；这些是性能建议，不作为安装门槛。"><div className="ml-auto text-right text-xs leading-5 text-slate-500"><p>{component?.advancedProvider ? `当前运行：${component.advancedProvider}` : '当前运行：未安装'}</p><p>当前占用：{component?.advancedSizeBytes ? formatStorageSize(component.advancedSizeBytes) : '0 MB'}{component?.advancedFreeBytes ? ` · 目标磁盘剩余 ${formatStorageSize(component.advancedFreeBytes)}` : ''}</p></div></SettingsRow>
       {component?.advancedError && !advancedReady && <SettingsRow title="增强版状态" description="检测到需要处理的问题。" align="start"><p className="ml-auto max-w-lg break-all text-right text-xs leading-5 text-amber-600">{component.advancedError}</p></SettingsRow>}
-      {busy && <SettingsRow title="正在处理" description={progress.message || '正在处理人物检测增强版'}><div className="ml-auto w-full max-w-md" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.progress}><div className="flex justify-end text-xs font-bold text-blue-600">{Math.round(progress.progress)}%</div><div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-blue-600 transition-[width]" style={{ width: `${Math.max(2, progress.progress)}%` }}/></div></div></SettingsRow>}
+      {busy && <SettingsRow title="正在处理" description={progress.message || '正在处理人物检测增强版'}><div className="ml-auto w-full max-w-md" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.progress}><div className="flex justify-end text-xs font-bold text-blue-600">{Math.round(progress.progress)}%</div><div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-blue-600 transition-[width]" style={{ width: `${progress.progress > 0 ? Math.max(2, progress.progress) : 0}%` }}/></div></div></SettingsRow>}
     </SettingsPageGroup>
   </>;
 };
@@ -542,6 +542,12 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const [addingProjectCategory, setAddingProjectCategory] = useState(false);
   const [importVideoPanel, setImportVideoPanel] = useState<'split' | 'transcode' | null>(null);
   const [draggedProjectCategory, setDraggedProjectCategory] = useState('');
+  const [newProgressNamePreset, setNewProgressNamePreset] = useState('');
+  const [progressNamePresetError, setProgressNamePresetError] = useState('');
+  const [addingProgressNamePreset, setAddingProgressNamePreset] = useState(false);
+  const [draggedProgressNamePreset, setDraggedProgressNamePreset] = useState('');
+  const [editingProgressNamePreset, setEditingProgressNamePreset] = useState('');
+  const [editingProgressNamePresetValue, setEditingProgressNamePresetValue] = useState('');
   const [restoreProjects, setRestoreProjects] = useState<Record<string, string>>({});
   const pendingSaveRef = useRef<AppConfig | null>(null);
   const savingRef = useRef(false);
@@ -624,6 +630,41 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     const index = projectCategories.indexOf(name);
     const target = projectCategories[index + offset];
     if (target) reorderProjectCategory(name, target);
+  };
+  const progressNamePresets = normalizeProgressNamePresets(draft.progressNamePresets);
+  const validateProgressNamePreset = (value: string, previousName = '') => {
+    const name = value.trim().replace(/\s+/g, ' ');
+    if (!name) return { name, error: '请输入预设名称' };
+    if (name.length > 24) return { name, error: '预设名称不能超过 24 个字符' };
+    if ([...name].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) return { name, error: '预设名称包含无效字符' };
+    if (progressNamePresets.some(item => item !== previousName && item.toLocaleLowerCase() === name.toLocaleLowerCase())) return { name, error: '已经存在同名预设' };
+    return { name, error: '' };
+  };
+  const addProgressNamePreset = () => {
+    const { name, error } = validateProgressNamePreset(newProgressNamePreset);
+    if (error) { setProgressNamePresetError(error); return; }
+    if (progressNamePresets.length >= 50) { setProgressNamePresetError('最多可以创建 50 个预设'); return; }
+    update('progressNamePresets', [...progressNamePresets, name]);
+    setNewProgressNamePreset(''); setProgressNamePresetError(''); setAddingProgressNamePreset(false);
+  };
+  const removeProgressNamePreset = (name: string) => update('progressNamePresets', progressNamePresets.filter(item => item !== name));
+  const saveProgressNamePreset = () => {
+    const { name, error } = validateProgressNamePreset(editingProgressNamePresetValue, editingProgressNamePreset);
+    if (error) { setProgressNamePresetError(error); return; }
+    update('progressNamePresets', progressNamePresets.map(item => item === editingProgressNamePreset ? name : item));
+    setEditingProgressNamePreset(''); setEditingProgressNamePresetValue(''); setProgressNamePresetError('');
+  };
+  const reorderProgressNamePreset = (source: string, target: string) => {
+    if (!source || source === target) return;
+    const next = [...progressNamePresets];
+    const sourceIndex = next.indexOf(source); const targetIndex = next.indexOf(target);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    next.splice(sourceIndex, 1); next.splice(targetIndex, 0, source);
+    update('progressNamePresets', next);
+  };
+  const moveProgressNamePreset = (name: string, offset: -1 | 1) => {
+    const target = progressNamePresets[progressNamePresets.indexOf(name) + offset];
+    if (target) reorderProgressNamePreset(name, target);
   };
   const refreshBackup = useCallback(async () => {
     if (!draft.workspacePath) return;
@@ -819,6 +860,11 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       <SettingsRow title="恢复默认设置" description="保留当前工作目录，将其他全部应用设置恢复为初始值。"><button type="button" onClick={() => void restoreDefaults()} className="dialog-secondary ml-auto flex w-fit items-center gap-2"><RotateCcw size={15}/>恢复默认设置</button></SettingsRow>
     </SettingsPageGroup>
     </>}
+    {activeSection === 'project' && <SettingsPageGroup title="进度名称预设">
+      <div className="px-4 py-3.5"><h4 className="text-sm font-bold text-slate-800">预设与顺序</h4><p className="mt-1 text-xs leading-5 text-slate-500">修改进度时点击预设即可直接填入名称。可拖动、排序、新增或删除。</p></div>
+      {progressNamePresets.map((name, index) => editingProgressNamePreset === name ? <form key={name} className="flex items-start gap-2 bg-blue-50 px-4 py-3" onSubmit={event => { event.preventDefault(); saveProgressNamePreset(); }}><Pencil size={17} className="mt-2.5 shrink-0 text-blue-600"/><div className="min-w-0 flex-1"><input autoFocus value={editingProgressNamePresetValue} maxLength={24} onChange={event => { setEditingProgressNamePresetValue(event.target.value); setProgressNamePresetError(''); }} className="form-input"/>{progressNamePresetError && <p className="mt-1.5 text-xs text-red-500">{progressNamePresetError}</p>}</div><button type="submit" className="dialog-primary shrink-0">保存</button><button type="button" onClick={() => { setEditingProgressNamePreset(''); setEditingProgressNamePresetValue(''); setProgressNamePresetError(''); }} title="取消" className="rounded-md p-2.5 text-slate-400 hover:bg-slate-200"><X size={16}/></button></form> : <div key={name} draggable onDragStart={event => { setDraggedProgressNamePreset(name); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', name); }} onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }} onDrop={event => { event.preventDefault(); reorderProgressNamePreset(draggedProgressNamePreset || event.dataTransfer.getData('text/plain'), name); setDraggedProgressNamePreset(''); }} onDragEnd={() => setDraggedProgressNamePreset('')} className={`flex min-w-0 items-center gap-3 px-4 py-3 transition ${draggedProgressNamePreset === name ? 'bg-blue-50 opacity-60' : 'bg-white'}`}><span title="拖动排序" className="cursor-grab text-slate-400 active:cursor-grabbing"><GripVertical size={17}/></span><span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600"><GitBranch size={16}/></span><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-slate-800">{name}</p><p className="mt-0.5 text-xs text-slate-400">点击后填充到进度名称</p></div><div className="flex shrink-0 items-center gap-1"><button type="button" disabled={index === 0} onClick={() => moveProgressNamePreset(name, -1)} title="上移" className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-25"><ChevronUp size={15}/></button><button type="button" disabled={index === progressNamePresets.length - 1} onClick={() => moveProgressNamePreset(name, 1)} title="下移" className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:opacity-25"><ChevronDown size={15}/></button><button type="button" onClick={() => { setEditingProgressNamePreset(name); setEditingProgressNamePresetValue(name); setProgressNamePresetError(''); }} title="修改预设" className="ml-1 rounded-md p-2 text-slate-400 hover:bg-blue-50 hover:text-blue-600"><Pencil size={15}/></button><button type="button" onClick={() => removeProgressNamePreset(name)} title="删除预设" className="rounded-md p-2 text-slate-400 hover:bg-red-50 hover:text-red-500"><Trash2 size={15}/></button></div></div>)}
+      {addingProgressNamePreset ? <form className="flex items-start gap-2 bg-slate-50 px-4 py-3" onSubmit={event => { event.preventDefault(); addProgressNamePreset(); }}><Plus size={17} className="mt-2.5 shrink-0 text-blue-600"/><div className="min-w-0 flex-1"><input autoFocus value={newProgressNamePreset} maxLength={24} onChange={event => { setNewProgressNamePreset(event.target.value); setProgressNamePresetError(''); }} placeholder="输入新预设名称" className="form-input"/>{progressNamePresetError && <p className="mt-1.5 text-xs text-red-500">{progressNamePresetError}</p>}</div><button type="submit" className="dialog-primary shrink-0">添加</button><button type="button" onClick={() => { setAddingProgressNamePreset(false); setNewProgressNamePreset(''); setProgressNamePresetError(''); }} title="取消" className="rounded-md p-2.5 text-slate-400 hover:bg-slate-200"><X size={16}/></button></form> : <button type="button" onClick={() => setAddingProgressNamePreset(true)} className="flex w-full items-center gap-3 bg-slate-50 px-4 py-3 text-left text-sm font-bold text-blue-600 hover:bg-blue-50"><span className="flex h-8 w-8 items-center justify-center rounded-lg border border-dashed border-blue-300 bg-white"><Plus size={17}/></span>新增预设</button>}
+    </SettingsPageGroup>}
     {activeSection === 'project' && <>
     <SettingsPageGroup title="新建项目">
       <SettingsRow title="新建项目时创建策划文件夹" description="新建项目时创建“策划”文件夹。"><SettingsToggle label="新建项目时创建策划文件夹" checked={draft.createPlanningFolder} onChange={checked => update('createPlanningFolder', checked)}/></SettingsRow>

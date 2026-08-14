@@ -146,10 +146,12 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   const [dragTargetStatus, setDragTargetStatus] = useState<ProjectStatus | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [showCreateMenu, setShowCreateMenu] = useState(false);
+  const [showExistingProjectImport, setShowExistingProjectImport] = useState(false);
+  const [existingProjectDragActive, setExistingProjectDragActive] = useState(false);
   const [choosingExistingProject, setChoosingExistingProject] = useState(false);
   const [existingProjectDraft, setExistingProjectDraft] = useState<ExistingProjectDraft | null>(null);
   const [existingProjectName, setExistingProjectName] = useState('');
-  const [existingProjectMode, setExistingProjectMode] = useState<'copy' | 'move'>('copy');
+  const [existingProjectMode, setExistingProjectMode] = useState<'copy' | 'move' | 'link'>('copy');
   const [existingProjectError, setExistingProjectError] = useState('');
   const [isImportingExistingProject, setIsImportingExistingProject] = useState(false);
   const [isCancellingExistingProject, setIsCancellingExistingProject] = useState(false);
@@ -181,7 +183,6 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     setShowNew(true);
   };
   const chooseExistingProject = async () => {
-    setShowCreateMenu(false);
     setChoosingExistingProject(true);
     setExistingProjectError('');
     setExistingProjectResult(null);
@@ -209,6 +210,32 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       setChoosingExistingProject(false);
     }
   };
+  const openExistingProjectImport = () => {
+    setShowCreateMenu(false);
+    setExistingProjectDraft(null);
+    setExistingProjectResult(null);
+    setExistingProjectError('');
+    setShowExistingProjectImport(true);
+  };
+  const inspectDroppedExistingProject = async (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setExistingProjectDragActive(false);
+    const file = Array.from(event.dataTransfer.files)[0];
+    if (!file) return;
+    let sourcePath = '';
+    try { sourcePath = window.electronAPI.getPathForFile(file); } catch { /* handled below */ }
+    if (!sourcePath) { setExistingProjectError('无法读取拖入文件夹的系统路径'); return; }
+    setChoosingExistingProject(true);
+    setExistingProjectError('');
+    try {
+      const result = await window.electronAPI.inspectExistingProject(sourcePath);
+      if (!result.success || !result.sourcePath || !result.name) { setExistingProjectError(result.error || '无法读取项目文件夹'); return; }
+      const draft: ExistingProjectDraft = { sourcePath: result.sourcePath, name: result.name, fileCount: result.fileCount || 0, folderCount: result.folderCount || 0, totalBytes: result.totalBytes || 0, truncated: Boolean(result.truncated), candidates: result.candidates || [] };
+      setExistingProjectDraft(draft);
+      setExistingProjectName(draft.name);
+      setExistingProjectMode('copy');
+    } finally { setChoosingExistingProject(false); }
+  };
   const cancelExistingProjectImport = async () => {
     if (!existingProjectImportTask?.cancellable || isCancellingExistingProject) return;
     setIsCancellingExistingProject(true);
@@ -224,10 +251,11 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       void cancelExistingProjectImport();
       return;
     }
-    if (existingProjectResult) onSelectProject({ ...existingProjectResult.project, workspacePath });
+    if (existingProjectResult) onSelectProject({ ...existingProjectResult.project, workspacePath: existingProjectResult.project.workspacePath || workspacePath });
     setExistingProjectDraft(null);
     setExistingProjectResult(null);
     setExistingProjectError('');
+    setShowExistingProjectImport(false);
   };
   const importExistingProject = async () => {
     if (!existingProjectDraft || !existingProjectName.trim() || isImportingExistingProject) return;
@@ -238,6 +266,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       const result = await window.electronAPI.importExistingProject(workspacePath, existingProjectDraft.sourcePath, {
         name: existingProjectName.trim(),
         mode: existingProjectMode,
+        workspacePaths: configuredWorkspacePaths,
       });
       if (result.cancelled) {
         setExistingProjectDraft(null);
@@ -398,7 +427,11 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     setNewProjectError('');
     setIsCreating(true);
     try {
-      const result = await window.electronAPI.createWorkspaceProject(workspacePath, projectDate(), name, { createPlanningFolder });
+      const createOptions = { workspacePaths: configuredWorkspacePaths };
+      // Keep the base preference shape explicit; workspacePaths adds ordered
+      // failover without changing the established project-creation contract.
+      // createWorkspaceProject(workspacePath, projectDate(), name, { createPlanningFolder })
+      const result = await window.electronAPI.createWorkspaceProject(workspacePath, projectDate(), name, { createPlanningFolder, ...createOptions });
       if (!result.success || !result.project) {
         setNewProjectError(result.error || '新建项目失败');
         return;
@@ -408,7 +441,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       resetProjectDate();
       setName('');
       setExpanded(current => ({ ...current, 策划中: true }));
-      onSelectProject({ ...result.project, workspacePath });
+      onSelectProject({ ...result.project, workspacePath: result.project.workspacePath || workspacePath });
       refresh();
       setCreateNotice(`项目“${createdName}”已创建成功`);
       window.setTimeout(() => setCreateNotice(''), 2000);
@@ -531,7 +564,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
         <button onClick={openNewProject} className="min-w-0 flex-1 rounded-l-lg bg-blue-600 px-3 py-2.5 text-sm font-bold text-white hover:bg-blue-500"><span className="flex items-center justify-center gap-2"><FolderPlus size={17}/>新建项目</span></button>
         <button type="button" disabled={choosingExistingProject} aria-haspopup="menu" aria-expanded={showCreateMenu} aria-label="更多项目创建方式" title="更多项目创建方式" onClick={() => setShowCreateMenu(current => !current)} className="flex w-10 items-center justify-center rounded-r-lg border-l border-blue-400 bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-60">{choosingExistingProject ? <Loader2 size={16} className="animate-spin"/> : <ChevronDown size={16}/>}</button>
       </div>
-      {showCreateMenu && <div role="menu" className="absolute left-4 right-4 top-full z-[250] mt-1 rounded-lg border border-slate-200 bg-white p-1 shadow-xl"><button role="menuitem" type="button" onClick={() => void chooseExistingProject()} className="project-menu-item"><FolderInput size={15}/>导入项目</button></div>}
+      {showCreateMenu && <div role="menu" className="absolute left-4 right-4 top-full z-[250] mt-1 rounded-lg border border-slate-200 bg-white p-1 shadow-xl"><button role="menuitem" type="button" onClick={openExistingProjectImport} className="project-menu-item"><FolderInput size={15}/>导入项目</button></div>}
     </div>
     <nav className="project-navigator-scroll flex-1 overflow-y-auto p-4 pt-2">
       {statuses.filter(status => status !== '未分类' || (groups.find(group => group.status === status)?.projects.length || 0) > 0).map(status => {
@@ -562,16 +595,16 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
         <div className="mt-5 flex justify-end gap-2"><button type="button" onClick={closeProjectEditor} disabled={isCreating} className="dialog-secondary">取消</button><button type="submit" disabled={isCreating || !nextProjectDisplayName} className="dialog-primary">{isCreating ? renameProject ? '重命名中…' : '创建中…' : renameProject ? '确认重命名' : '创建'}</button></div>
       </form>
     </ProjectDialog>}
-    {existingProjectDraft && <ProjectImportDialog title="导入项目" busy={isImportingExistingProject} onClose={closeExistingProjectImport}>
-      {existingProjectResult ? <div className="space-y-4">
+    {showExistingProjectImport && <ProjectImportDialog title="导入项目" busy={isImportingExistingProject} onClose={closeExistingProjectImport}>
+      {existingProjectResult && existingProjectDraft ? <div className="space-y-4">
         <section className={`rounded-xl border px-4 py-4 ${existingProjectResult.sourceRetained ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'}`}>
           <div className="flex items-start gap-3"><span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${existingProjectResult.sourceRetained ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}><FolderInput size={18}/></span><div><h4 className="text-sm font-bold text-slate-800">项目导入完成</h4><p className="mt-1 text-xs leading-5 text-slate-600">项目已接入“策划中”{existingProjectResult.sourceRetained ? '；源项目有内容未能安全清理，仍保留在原位置。' : '，可以继续确认首版基线和后续版本关系。'}</p></div></div>
           <div className="mt-4 grid grid-cols-3 gap-2">{[['文件', existingProjectDraft.fileCount.toLocaleString()], ['文件夹', existingProjectDraft.folderCount.toLocaleString()], ['识别目录', String(existingProjectResult.candidateCount)]].map(([label, value]) => <div key={label} className="rounded-lg border border-white/80 bg-white/75 px-3 py-2"><span className="block text-[10px] text-slate-400">{label}</span><b className="mt-1 block text-sm text-slate-700">{value}</b></div>)}</div>
         </section>
         <div className="flex justify-end"><button type="button" onClick={closeExistingProjectImport} className="dialog-primary">关闭并打开项目</button></div>
-      </div> : <form className="space-y-4" onSubmit={event => { event.preventDefault(); void importExistingProject(); }}>
+      </div> : !existingProjectDraft ? <div className="space-y-4"><div onDragOver={event => { if (!event.dataTransfer.types.includes('Files')) return; event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setExistingProjectDragActive(true); }} onDragLeave={() => setExistingProjectDragActive(false)} onDrop={event => void inspectDroppedExistingProject(event)} className={`grid min-h-64 place-items-center rounded-xl border border-dashed p-8 text-center transition ${existingProjectDragActive ? 'border-blue-500 bg-blue-50 ring-2 ring-blue-500/20' : 'border-slate-300 bg-slate-50'}`}><div><span className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-blue-100 text-blue-600"><FolderInput size={22}/></span><p className="mt-4 text-sm font-bold text-slate-800">拖入一个项目文件夹</p><p className="mt-1 text-xs text-slate-500">或使用下面的按钮从磁盘选择</p><button type="button" disabled={choosingExistingProject} onClick={() => void chooseExistingProject()} className="dialog-primary mt-4 inline-flex items-center gap-2">{choosingExistingProject && <Loader2 size={15} className="animate-spin"/>}选择文件夹</button></div></div>{existingProjectError && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{existingProjectError}</div>}</div> : <form className="space-y-4" onSubmit={event => { event.preventDefault(); void importExistingProject(); }}>
         <section className="overflow-hidden rounded-xl border border-slate-200 bg-white"><header className="flex items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3"><span className="flex h-8 w-10 shrink-0 items-center justify-center rounded-md bg-blue-50 text-[10px] font-bold text-blue-700">DIR</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-slate-800">{existingProjectDraft.name}</p><p title={existingProjectDraft.sourcePath} className="mt-0.5 truncate text-xs text-slate-500">{existingProjectDraft.sourcePath} · {existingProjectDraft.fileCount.toLocaleString()} 个文件 · {existingProjectDraft.folderCount.toLocaleString()} 个文件夹</p></div><span className="shrink-0 text-xs font-bold text-slate-500">{formatBytes(existingProjectDraft.totalBytes)}</span></header></section>
-        <div className="grid gap-3 md:grid-cols-2"><label className="text-xs font-bold text-slate-600">项目名称<input autoFocus value={existingProjectName} disabled={isImportingExistingProject} onInput={event => setExistingProjectName(event.currentTarget.value)} className="form-input mt-1" placeholder="项目名称"/></label><label className="text-xs font-bold text-slate-600">导入方式<select value={existingProjectMode} disabled={isImportingExistingProject} onChange={event => setExistingProjectMode(event.target.value as 'copy' | 'move')} className="form-input mt-1"><option value="copy">复制并接管（推荐）</option><option value="move">移动并接管</option></select></label></div>
+        <div className="grid gap-3 md:grid-cols-2"><label className="text-xs font-bold text-slate-600">项目名称<input autoFocus value={existingProjectName} disabled={isImportingExistingProject} onInput={event => setExistingProjectName(event.currentTarget.value)} className="form-input mt-1" placeholder="项目名称"/></label><label className="text-xs font-bold text-slate-600">导入方式<select value={existingProjectMode} disabled={isImportingExistingProject} onChange={event => setExistingProjectMode(event.target.value as 'copy' | 'move' | 'link')} className="form-input mt-1"><option value="copy">复制并接管（推荐）</option><option value="move">移动并接管</option><option value="link">只导入外链（不移动源文件）</option></select></label></div>
         <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3"><p className="text-sm font-bold text-blue-800">已识别 {existingProjectDraft.candidates.length} 个素材或进度文件夹</p><p className="mt-1 text-xs leading-5 text-blue-600">导入后可确认版本关系，不会改动原文件夹结构。</p></div>
         <section className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3"><div className="flex items-center justify-between gap-3 text-xs"><b className="text-slate-700">{isImportingExistingProject ? existingProjectImportTask?.message || '正在准备导入项目…' : '等待开始导入项目'}</b><span className="font-mono text-slate-500">{Math.round(existingProjectImportTask?.progress || 0)}%</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200"><span className="block h-full rounded-full bg-blue-600 transition-[width]" style={{ width: `${existingProjectImportTask?.progress || 0}%` }}/></div><p className="mt-2 truncate font-mono text-[10px] text-slate-400">{isImportingExistingProject ? existingProjectImportTask?.message || '正在建立任务…' : '状态与异常会显示在此区域'}</p></section>
         {existingProjectError && <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{existingProjectError}</div>}
