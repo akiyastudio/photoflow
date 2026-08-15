@@ -286,6 +286,7 @@ export interface AppConfig {
     sdPath: string;
     sdPaths: string[];
     sdDriveTypes: Record<string, 'work' | 'broll'>;
+    sdDeviceIds: Record<string, string>;
     destPath: string;
     backupEnabled: boolean;
     backupPath: string;
@@ -314,6 +315,14 @@ export interface AppConfig {
   };
   /** Built-in storyboard analysis settings. */
   research: ResearchSettings;
+}
+
+export interface StorageDevice {
+  id: string;
+  mountPath: string;
+  label: string;
+  removable: boolean;
+  driveType: number;
 }
 
 export interface PrivacyConsentState {
@@ -347,6 +356,11 @@ export interface ProjectFileEntry {
   viaShortcut?: boolean;
   /** PhotoFlow-managed folder link shown as an in-app virtual folder. */
   externalLink?: boolean;
+  /** Physical target of a PhotoFlow-managed external folder root. */
+  externalLinkTarget?: string;
+  externalLinkTargetKind?: 'folder' | 'file';
+  /** Managed external target is currently unavailable without removing the project reference. */
+  externalLinkOffline?: boolean;
   /** Entry whose physical path is inside a PhotoFlow-managed external folder. */
   viaExternalLink?: boolean;
   /** External shortcut previews never grant mutation capabilities. */
@@ -910,6 +924,7 @@ export interface IElectronAPI {
   installTeamRetouchAdvanced: (options?: { repair?: boolean }) => Promise<{ success: boolean; cancelled?: boolean; restartRequired?: boolean; packageSizeBytes?: number; error?: string }>;
   uninstallTeamRetouchAdvanced: () => Promise<{ success: boolean; error?: string }>;
   onTeamRetouchAdvancedProgress: (callback: (value: { phase: string; progress?: number; message: string }) => void) => () => void;
+  getStorageDevices: () => Promise<StorageDevice[]>;
   getDrives: () => Promise<string[]>;
   setTheme: (theme: Theme) => Promise<void>;
   minimizeWindow: () => void;
@@ -919,7 +934,7 @@ export interface IElectronAPI {
   setWindowFullscreen: (enabled: boolean) => Promise<boolean>;
   onWindowMaximizedChange: (callback: (maximized: boolean) => void) => () => void;
   getWorkspaceProjects: (workspacePath: string) => Promise<{ success: boolean; root?: string; statuses: WorkspaceStatusGroup[]; error?: string }> ;
-  onWorkspaceFilesChanged: (callback: (change: { root: string; fileName: string; eventType?: 'rename' | 'change'; reconciled?: boolean; watcherFailed?: boolean }) => void) => () => void;
+  onWorkspaceFilesChanged: (callback: (change: { root: string; fileName: string; eventType?: 'rename' | 'change'; reconciled?: boolean; watcherFailed?: boolean; viaExternalLink?: boolean }) => void) => () => void;
   onWorkspaceProjectsChanged: (callback: (change: { root: string }) => void) => () => void;
   createWorkspaceProject: (workspacePath: string, date: ProjectDate | null, name: string, options?: { createPlanningFolder?: boolean; workspacePaths?: string[] }) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   chooseExistingProject: () => Promise<{ success: boolean; cancelled?: boolean; sourcePath?: string; inspectionToken?: string; name?: string; fileCount?: number; folderCount?: number; totalBytes?: number; truncated?: boolean; candidates?: Array<{ relativePath: string; name: string; imageCount: number; rawCount: number; videoCount: number; fileCount: number; mediaKind: 'image' | 'video'; suggestedRole: 'baseline' | 'progress' }>; error?: string }>;
@@ -937,19 +952,20 @@ export interface IElectronAPI {
   cleanupDeletedWorkspaceProjects: (workspacePath: string) => Promise<{ success: boolean; checkedCount: number; cleanedCount: number; outcomes: Array<{ projectId: string; name: string; cleaned: boolean; status: 'in_recycle_bin' | 'missing' | 'restored' | 'unknown'; removedArtifactCount?: number }>; error?: string }>;
 
   getProjectContents: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; folders: Array<{ name: string; path: string; updatedAt: number }>;error?: string }> ;
-  watchFileRoot: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; root?: string; error?: string }>;
+  watchFileRoot: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; root?: string; watchedRoots?: number; offlineLinks?: number; error?: string }>;
   unwatchFileRoot: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; error?: string }>;
-  browseProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath?: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path?: string; entries: ProjectFileEntry[]; missingDirectory?: boolean; error?: string }>;
+  browseProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath?: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path?: string; entries: ProjectFileEntry[]; viaExternalLink?: boolean; externalLinkOffline?: boolean; missingDirectory?: boolean; error?: string }>;
   inspectProjectToolSources: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], collectVideos?: boolean, collectDirectPng?: boolean, collectRecursivePng?: boolean) => Promise<{ success: boolean; indexed: boolean; hasVideo: boolean; hasPng: boolean; videoPaths: string[]; pngPaths: string[]; folderPaths: string[]; error?: string }>;
   resolveProjectShortcut: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; target?: string; targetKind?: 'folder' | 'file'; error?: string }>;
   materializeProjectExternalLinks: (workspacePath: string, status: ProjectStatus, name: string, relativePaths?: string[]) => Promise<{ success: boolean; count: number; items?: Array<{ shortcutPath: string; source: string; destination: string }>; error?: string }>;
+  relinkProjectExternalFolder: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; cancelled?: boolean; relativePath?: string; target?: string; updatedProgressCount?: number; error?: string }>;
   browseProjectShortcutPreview: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; targetKind: 'folder' | 'file' | null; entries: ProjectFileEntry[]; truncated?: boolean; errorCode?: 'SHORTCUT_INVALID' | 'SHORTCUT_LOOP' | 'SHORTCUT_TARGET_MISSING' | 'SHORTCUT_TARGET_OFFLINE' | 'SHORTCUT_ACCESS_DENIED' | 'SHORTCUT_UNSUPPORTED'; error?: string }>;
   searchProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, scopeRelativePath: string, query: string) => Promise<{ success: boolean; scope?: string; entries: ProjectFileEntry[]; error?: string }>;
   listProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, scopeRelativePath?: string, pageSize?: number, cursor?: string, filter?: ProjectFileListFilter) => Promise<ProjectFileListResult>;
   cancelListProjectFiles: (cursor: string) => Promise<{ success: boolean; errorCode?: 'FILE_LIST_SESSION_EXPIRED'; error?: string }>;
   listRecentProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, scopeRelativePath: string, limit?: number, cursor?: string) => Promise<{ success: boolean; scope?: string; entries: ProjectFileEntry[]; cursor?: string; hasMore?: boolean; truncated?: boolean; scannedDirectories?: number; error?: string; errorCode?: 'RECENT_FILES_SESSION_EXPIRED' }>;
   cancelRecentProjectFiles: (cursor: string) => Promise<{ success: boolean; errorCode?: 'RECENT_FILES_SESSION_EXPIRED'; error?: string }>;
-  listWorkspaceFolders: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; folders: Array<{ name: string; relativePath: string; parentRelativePath: string; depth: number }>; truncated?: boolean; error?: string }>;
+  listWorkspaceFolders: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; folders: Array<{ name: string; relativePath: string; parentRelativePath: string; depth: number; externalLink?: boolean; externalLinkOffline?: boolean; viaExternalLink?: boolean }>; truncated?: boolean; error?: string }>;
   addInspirationToProject: (inspirationRoot: string, targetWorkspacePath: string, targetStatus: ProjectStatus, targetProjectName: string, relativePaths: string[]) => Promise<{ success: boolean; count?: number; fileCount?: number; shortcutCount?: number; planningFolder?: string; error?: string }>;
   extractOfficeImages: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<{ success: boolean; documentCount?: number; successfulCount?: number; failedCount?: number; imageCount?: number; results: Array<{ document: string; documentName: string; success: boolean; count: number; totalBytes?: number; outputFolder?: string; files?: string[]; message?: string; error?: string }>; error?: string }>;
   extractScreenshotMainImages: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], options?: { requestId?: string; analyzeOnly?: boolean; crops?: Array<{ x: number; y: number; width: number; height: number }>; outputSuffix?: '主图' | '裁剪' }) => Promise<{
@@ -980,7 +996,9 @@ export interface IElectronAPI {
     }>;
     error?: string;
   }>;
-  trimProjectVideo: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, request: { start: number; end: number; saveMode: 'new' | 'replace' }) => Promise<{ success: boolean; outputPath?: string; relativePath?: string; duration?: number; replaced?: boolean; error?: string }>;
+  trimProjectVideo: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, request: { start: number; end: number; saveMode: 'new' | 'replace'; operationId: string; sourceDuration: number }) => Promise<{ success: boolean; started?: boolean; operationId?: string; outputPath?: string; relativePath?: string; duration?: number; replaced?: boolean; cancelled?: boolean; error?: string }>;
+  cancelProjectVideoTrim: (operationId: string) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
+  onProjectVideoTrimProgress: (callback: (progress: { operationId: string; phase: 'preparing' | 'encoding' | 'verifying' | 'saving' | 'finalizing' | 'complete' | 'cancelled' | 'failed' | string; progress: number; message: string }) => void) => () => void;
   getProjectVideoTimelineFrames: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, times: number[]) => Promise<{ success: boolean; frames?: string[]; error?: string }>;
   onScreenshotMainImageProgress: (callback: (progress: { requestId: string; phase: 'extracting' | 'complete' | 'failed' | string; progress: number; processedCount?: number; totalCount?: number; currentName?: string; message: string }) => void) => () => void;
   getProjectFileDetails: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<{ success: boolean; details: Array<{ relativePath: string; size: number; createdAt: number; updatedAt: number }>; error?: string }>;
@@ -1021,6 +1039,7 @@ export interface IElectronAPI {
   replaceVersionGraphEdgeSource: (workspacePath: string, request: Pick<VersionGraphEdge, 'projectId' | 'sourceProgressId' | 'targetProgressId' | 'edgeKind'> & { newSourceProgressId: string }) => Promise<{ success: boolean; edge?: VersionGraphEdge; error?: string }>;
   getVersionTreeLayout: (workspacePath: string, projectName: string, scopeKey: string) => Promise<VersionTreeLayoutResult>;
   saveVersionTreeLayout: (workspacePath: string, projectName: string, request: { scopeKey: string; expectedRevision: number; mode: 'patch' | 'replace'; positions: VersionTreeLayoutPosition[] }) => Promise<{ success: boolean; scopeKey?: string; revision?: number; updatedAt?: number; error?: string }>;
+  unregisterProgressFolder: (workspacePath: string, projectName: string, progressId: string) => Promise<{ success: boolean; progressId?: string; versionKey?: string; relativePath?: string; reparentedProgressCount?: number; error?: string }>;
   deleteMissingProgressFolder: (workspacePath: string, projectName: string, progressId: string) => Promise<{ success: boolean; progressId?: string; versionKey?: string; deletedVersionCount?: number; deletedBatchCount?: number; reparentedProgressCount?: number; removedArtifactCount?: number; error?: string }>;
   registerVersionBaseline: (workspacePath: string, status: ProjectStatus, projectName: string, relativePath: string) => Promise<{ success: boolean; batch?: VersionBatch; error?: string }>;
   compareVersionFolders: (workspacePath: string, status: ProjectStatus, projectName: string, referenceRelativePath: string, sourceRelativePath: string, sourceNames?: string[]) => Promise<{ success: boolean; matches: Array<{ source: string; reference: string; target: string; confidence: string; distance: number }>; suggestions: Array<{ source: string; reference: string; target: string; confidence: string; distance: number }>; unmatched: string[]; unmatchedReference: string[]; error?: string }>;
@@ -1143,7 +1162,7 @@ export interface IElectronAPI {
   openProjectEntriesInPhotoshop: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<{ success: boolean; count?: number; error?: string }>;
   copyProjectEntryPath: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; error?: string }>;
   getFileIcon: (filePath: string) => Promise<{ success: boolean; dataUrl?: string; error?: string }>;
-  importProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, options: { deleteSourceAfterImport: boolean; linkOnly?: boolean; sourcePaths?: string[] }) => Promise<{ success: boolean; operationId?: string; cancelled?: boolean; linked?: boolean; count?: number; error?: string }>;
+  importProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, options: { deleteSourceAfterImport: boolean; linkOnly?: boolean; sourcePaths?: string[]; adoptAsOriginal?: boolean; mediaKind?: 'image' | 'video' }) => Promise<{ success: boolean; operationId?: string; cancelled?: boolean; linked?: boolean; count?: number; items?: Array<{ relativePath: string; sourcePath: string; kind: 'file' | 'folder' }>; error?: string }>;
   importProgressFiles: (workspacePath: string, status: ProjectStatus, name: string, folderName: string, options: { deleteSourceAfterImport: boolean; linkOnly?: boolean; mediaKind: 'image' | 'video'; versionKey: string; parentProgressId?: string; trackingEnabled: boolean; trackingState?: ProgressFolder['trackingState']; appendProgressId?: string; progressConflictPolicy?: 'skip' | 'keep-both'; sourcePaths?: string[] }) => Promise<{ success: boolean; operationId?: string; cancelled?: boolean; linked?: boolean; appended?: boolean; count?: number; skippedCount?: number; skippedNames?: string[]; importedPaths?: string[]; progressFolder?: ProgressFolder; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; requiresDecision?: { kind: 'progress-import-conflict'; names: string[]; conflictCount: number; sourcePaths: string[]; message: string; detail: string }; error?: string }>;
   importBroll: (workspacePath: string, status: ProjectStatus, name: string, options: { splitVideosOnImport: boolean; transcodeVideosOnImport: boolean; transcodeSettings: VideoTranscodeSettings; deleteSourceAfterImport: boolean; linkOnly?: boolean; sourcePaths?: string[] }) => Promise<{ success: boolean; operationId?: string; cancelled?: boolean; linked?: boolean; count?: number; splitCount?: number; transcodeCount?: number; clearedCount?: number; warning?: string; error?: string}>;
 }

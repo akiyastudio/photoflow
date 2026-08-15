@@ -17,6 +17,9 @@ from ffmpeg_transcode import build_video_preview_command  # noqa: E402
 from PIL import Image  # noqa: E402
 
 
+assert not classify._is_import_volume_root(str(ROOT)), 'an ordinary application directory must not be detected as an SD-card volume root'
+
+
 for quality, expected in {
     'medium': ('4M', '5M', '128k', 'medium'),
     'high': ('10M', '12M', '192k', 'medium'),

@@ -44,7 +44,13 @@ def emit(event_type: str, message: str, progress: float | None = None, **extra):
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
-def trim_video_exactly(input_file: str, start_seconds: float, end_seconds: float, output_file: str):
+def trim_video_exactly(
+    input_file: str,
+    start_seconds: float,
+    end_seconds: float,
+    output_file: str,
+    cancel_file: str | None = None,
+):
     """Decode from the requested start and encode exactly the selected interval."""
     input_file = os.path.abspath(input_file)
     output_file = os.path.abspath(output_file)
@@ -75,21 +81,59 @@ def trim_video_exactly(input_file: str, start_seconds: float, end_seconds: float
         "-ss", f"{start_seconds:.6f}", "-t", f"{requested_duration:.6f}",
         "-map", "0:v:0?", "-map", "0:a?", "-map_metadata", "0", "-map_chapters", "0",
         "-c:v", "libx264", "-preset", "medium", "-crf", "16",
-        "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart", temporary,
+        "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart",
+        "-progress", "pipe:1", "-nostats", temporary,
     ]
+    process = None
     try:
-        completed = subprocess.run(
-            command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", check=False,
+        if cancel_file and os.path.isfile(cancel_file):
+            raise SplitCancelled("视频导出已取消")
+        emit("progress", "正在准备视频…", 2, phase="preparing")
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
         )
-        if completed.returncode != 0 or not os.path.isfile(temporary) or os.path.getsize(temporary) <= 0:
-            raise RuntimeError(completed.stderr.strip()[-2000:] or "FFmpeg 未能生成精确剪辑结果")
+        last_progress = 2.0
+        for raw_line in process.stdout or []:
+            if cancel_file and os.path.isfile(cancel_file):
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+                raise SplitCancelled("视频导出已取消")
+            key, separator, value = raw_line.strip().partition("=")
+            if not separator or key not in {"out_time_us", "out_time_ms"}:
+                continue
+            try:
+                processed_seconds = max(0.0, float(value) / 1_000_000.0)
+            except ValueError:
+                continue
+            progress = min(92.0, 5.0 + processed_seconds / requested_duration * 87.0)
+            if progress - last_progress >= 0.5:
+                last_progress = progress
+                emit("progress", "正在导出视频…", progress, phase="encoding")
+        return_code = process.wait()
+        error_output = (process.stderr.read() if process.stderr else "").strip()
+        if cancel_file and os.path.isfile(cancel_file):
+            raise SplitCancelled("视频导出已取消")
+        if return_code != 0 or not os.path.isfile(temporary) or os.path.getsize(temporary) <= 0:
+            raise RuntimeError(error_output[-2000:] or "FFmpeg 未能生成精确剪辑结果")
+        emit("progress", "正在校验导出结果…", 95, phase="verifying")
         output_duration = probe_duration(temporary)
         duration_tolerance = max(0.12, min(0.35, requested_duration * 0.03))
         if abs(output_duration - requested_duration) > duration_tolerance:
             raise RuntimeError(f"剪辑结果时长异常：期望 {requested_duration:.2f} 秒，实际 {output_duration:.2f} 秒")
+        emit("progress", "正在保存视频…", 98, phase="saving")
         os.replace(temporary, output_file)
     finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
         try:
             os.remove(temporary)
         except FileNotFoundError:
@@ -380,6 +424,7 @@ def run(args_list=None):
                 args.trim_start,
                 args.trim_end,
                 args.output_path,
+                args.cancel_file or None,
             )
             return 0
         videos, skipped = collect_video_inputs(args.video_path)

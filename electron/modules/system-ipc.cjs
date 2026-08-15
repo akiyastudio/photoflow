@@ -1,4 +1,5 @@
 const { validateRendererPythonInvocation } = require('../security-policy.cjs');
+const { listStorageDevices } = require('../services/storage-device-service.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
 
@@ -1056,25 +1057,23 @@ const registerSystemIpc = context => {
     }
   });
   
-  ipcMain.handle('getDrives', async () => {
-    const drives = [];
+  ipcMain.handle('getStorageDevices', async () => {
     try {
-      if (process.platform === 'win32') {
-        // Windows: 遍历 A-Z 盘符
-        const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-        for (let i = 0; i < letters.length; i++) {
-          const drive = letters[i] + ':/';
-          if (fs.existsSync(drive)) drives.push(drive);
-        }
-      } else if (process.platform === 'darwin') {
-        // Mac: 读取 /Volumes 挂载目录
-        const volumes = await fs.promises.readdir('/Volumes');
-        volumes.forEach(v => drives.push('/Volumes/' + v));
-      }
+      return await listStorageDevices(process.platform);
+    } catch (error) {
+      console.error('Error getting storage devices:', error);
+      return [];
+    }
+  });
+
+  // Kept for older renderer bundles during staged upgrades.
+  ipcMain.handle('getDrives', async () => {
+    try {
+      return (await listStorageDevices(process.platform)).map(device => device.mountPath);
     } catch (error) {
       console.error('Error getting drives:', error);
+      return [];
     }
-    return drives;
   });
   
   ipcMain.handle('choose-workspace-directory', async (_event, currentPath = '') => {

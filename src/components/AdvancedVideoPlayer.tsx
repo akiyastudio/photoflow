@@ -60,6 +60,15 @@ const initialState = (): AdvancedVideoState => ({
   duration: 0,
 });
 
+const hasVisibleExternalModal = (surface: HTMLElement | null) => {
+  if (!surface) return false;
+  return [...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')].some(dialog => {
+    if (dialog.contains(surface) || dialog.hidden || dialog.getAttribute('aria-hidden') === 'true') return false;
+    const style = window.getComputedStyle(dialog);
+    return style.display !== 'none' && style.visibility !== 'hidden' && dialog.getClientRects().length > 0;
+  });
+};
+
 const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onContextMenuAt, onPointerActivity, topRightOverlayHole = 0, onEscape, bottomControls, editorSeekRequest, onPlaybackState, keyboardSettings = { arrowKeyAction: 'seek' } }: AdvancedVideoPlayerProps) => {
   const navigate = onNavigate || (() => undefined);
   const showNavigation = Boolean(onNavigate);
@@ -89,7 +98,30 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
   const [capturing, setCapturing] = useState(false);
   const [captureNotice, setCaptureNotice] = useState<{ text: string; error?: boolean } | null>(null);
   const [controlPanel, setControlPanel] = useState<'speed' | 'volume' | null>(null);
+  const [coveredByModal, setCoveredByModal] = useState(false);
   const [state, setState] = useState<AdvancedVideoState>(initialState);
+
+  useEffect(() => {
+    let frame = 0;
+    const inspect = () => {
+      frame = 0;
+      setCoveredByModal(current => {
+        const next = hasVisibleExternalModal(surfaceRef.current);
+        return current === next ? current : next;
+      });
+    };
+    const schedule = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(inspect);
+    };
+    inspect();
+    const observer = new MutationObserver(schedule);
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-hidden', 'aria-modal', 'class', 'hidden', 'role', 'style'] });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -197,7 +229,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
       width: Math.round(cornerSize * scale),
       height: Math.round(cornerSize * scale),
     } : undefined;
-    const visible = !nativeContextMenuOpenRef.current && document.visibilityState === 'visible' && rect.width > 1 && rect.height > 1
+    const visible = !coveredByModal && !nativeContextMenuOpenRef.current && document.visibilityState === 'visible' && rect.width > 1 && rect.height > 1
       && rect.right > 0 && rect.bottom > 0 && rect.left < window.innerWidth && rect.top < window.innerHeight;
     window.electronAPI.setAdvancedVideoBounds(sessionRef.current, {
       x: Math.round(rect.left * scale),
@@ -208,7 +240,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
       overlayHole,
       cornerOverlayHole,
     });
-  }, [topRightOverlayHole]);
+  }, [coveredByModal, topRightOverlayHole]);
 
   useEffect(() => {
     if (!sessionId) return;

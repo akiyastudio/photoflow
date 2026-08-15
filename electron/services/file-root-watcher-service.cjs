@@ -18,22 +18,34 @@ const createFileRootWatcherService = ({
     const relative = path.relative(parent, candidate);
     return !relative || (!relative.startsWith('..') && !path.isAbsolute(relative));
   };
-  const publish = (root, changedEntries) => {
+  const publish = (state, changedEntries) => {
     const mainWindow = getMainWindow();
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    for (const [changedName, eventType] of changedEntries) {
-      mainWindow.webContents.send('workspace-files-changed', { root, fileName: changedName, eventType });
+    for (const binding of state.bindings.values()) {
+      for (const [changedName, eventType] of changedEntries) {
+        if (binding.fileNameFilter && comparable(path.join(state.root, changedName)) !== binding.fileNameFilter) continue;
+        const fileName = [binding.virtualPrefix, binding.virtualFileName || changedName].filter(Boolean).join('/').replace(/\\/g, '/');
+        mainWindow.webContents.send('workspace-files-changed', { root: binding.publishRoot, fileName, eventType, viaExternalLink: Boolean(binding.virtualPrefix || binding.virtualFileName) });
+      }
     }
   };
-  const acquire = rootPath => {
+  const acquire = (rootPath, options = {}) => {
     const root = path.resolve(rootPath);
     const key = comparable(root);
+    const publishRoot = path.resolve(options.publishRoot || root);
+    const virtualPrefix = String(options.virtualPrefix || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    const fileNameFilter = options.fileNameFilter ? comparable(options.fileNameFilter) : '';
+    const virtualFileName = String(options.virtualFileName || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    const bindingKey = `${comparable(publishRoot)}\0${virtualPrefix.toLocaleLowerCase()}\0${fileNameFilter}\0${virtualFileName.toLocaleLowerCase()}`;
     const existing = watchers.get(key);
     if (existing) {
       existing.references += 1;
+      const binding = existing.bindings.get(bindingKey) || { publishRoot, virtualPrefix, fileNameFilter, virtualFileName, references: 0 };
+      binding.references += 1;
+      existing.bindings.set(bindingKey, binding);
       return { success: true, root };
     }
-    const state = { root, references: 1, watcher: null, timer: null, changes: new Map() };
+    const state = { root, references: 1, watcher: null, timer: null, changes: new Map(), bindings: new Map([[bindingKey, { publishRoot, virtualPrefix, fileNameFilter, virtualFileName, references: 1 }]]) };
     try {
       state.watcher = fs.watch(root, { recursive: process.platform !== 'linux' }, (eventType, fileName) => {
         if (!fileName || isInternalChange(fileName) || isSuppressedChange(root, fileName)) return;
@@ -52,7 +64,7 @@ const createFileRootWatcherService = ({
               writeLog('warn', 'Unable to update file-root thumbnails', { root, error: error.message || String(error) });
             });
           }
-          publish(root, changedEntries);
+          publish(state, changedEntries);
         }, 200);
       });
       state.watcher.on('error', error => {
@@ -61,7 +73,9 @@ const createFileRootWatcherService = ({
         state.watcher?.close();
         watchers.delete(key);
         const mainWindow = getMainWindow();
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('workspace-files-changed', { root, fileName: '', eventType: 'rename', watcherFailed: true });
+        if (mainWindow && !mainWindow.isDestroyed()) for (const binding of state.bindings.values()) {
+          mainWindow.webContents.send('workspace-files-changed', { root: binding.publishRoot, fileName: binding.virtualPrefix, eventType: 'rename', watcherFailed: true, viaExternalLink: Boolean(binding.virtualPrefix) });
+        }
       });
       watchers.set(key, state);
       return { success: true, root };
@@ -70,10 +84,20 @@ const createFileRootWatcherService = ({
       return { success: false, root, error: error.message || String(error) };
     }
   };
-  const release = rootPath => {
+  const release = (rootPath, options = {}) => {
     const key = comparable(rootPath);
     const state = watchers.get(key);
     if (!state) return;
+    const publishRoot = path.resolve(options.publishRoot || rootPath);
+    const virtualPrefix = String(options.virtualPrefix || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    const fileNameFilter = options.fileNameFilter ? comparable(options.fileNameFilter) : '';
+    const virtualFileName = String(options.virtualFileName || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    const bindingKey = `${comparable(publishRoot)}\0${virtualPrefix.toLocaleLowerCase()}\0${fileNameFilter}\0${virtualFileName.toLocaleLowerCase()}`;
+    const binding = state.bindings.get(bindingKey);
+    if (binding) {
+      binding.references -= 1;
+      if (binding.references <= 0) state.bindings.delete(bindingKey);
+    }
     state.references -= 1;
     if (state.references > 0) return;
     if (state.timer) clearTimeout(state.timer);

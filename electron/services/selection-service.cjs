@@ -23,7 +23,7 @@ const parseSelectionKeywords = values => {
   return [...new Set(matches.map(token => token.match(/(\d{3,})(?:\.[A-Za-z0-9]+)?$/)?.[1] || '').filter(Boolean))];
 };
 
-const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, imageExtensions, rawExtensions, videoExtensions }) => {
+const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, projectVirtualPaths, imageExtensions, rawExtensions, videoExtensions }) => {
   const activeOperations = new Map();
   const folderListingCursors = new Map();
   const folderListingOperations = new Map();
@@ -40,28 +40,33 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
   };
   const resolveProjectEntry = (projectRoot, relativePath, { directory = false } = {}) => {
     const normalized = normalizeRelativePath(relativePath);
-    const projectReal = fs.realpathSync.native(projectRoot);
-    const candidate = path.resolve(projectRoot, ...normalized.split('/'));
-    if (!inside(projectRoot, candidate)) throw new Error('选择路径超出项目范围');
+    const resolution = projectVirtualPaths?.resolve(projectRoot, normalized, { externalRootMode: 'target' });
+    const candidate = resolution?.physicalPath || path.resolve(projectRoot, ...normalized.split('/'));
+    const projectReal = resolution?.viaExternalLink ? resolution.externalTargetRoot : fs.realpathSync.native(projectRoot);
+    if (!resolution && !inside(projectRoot, candidate)) throw new Error('选择路径超出项目范围');
     if (!fs.existsSync(candidate)) throw new Error(`项目内路径不存在：${normalized}`);
     const real = fs.realpathSync.native(candidate);
-    if (!inside(projectReal, real)) throw new Error('快捷方式或重解析目录指向项目外部');
+    if (!inside(projectReal, real, true)) throw new Error('快捷方式或重解析目录指向项目外部或外链允许范围外部');
     const stat = fs.statSync(candidate);
     if (directory ? !stat.isDirectory() : !stat.isFile()) throw new Error(directory ? '来源必须是项目内文件夹' : '选择项必须是媒体文件');
-    return { normalized, path: candidate, real, projectReal };
+    return { normalized, path: candidate, real, projectReal, resolution };
   };
   const targetForSource = (projectRoot, source) => {
-    const sourceName = path.basename(source.path);
+    const sourceName = source.resolution?.externalDisplayName || path.basename(source.path);
     const normalizedSourceName = sourceName.toLocaleLowerCase();
     const outputName = normalizedSourceName === 'raw'
       ? '图片选片'
       : normalizedSourceName === 'mov'
         ? '视频选片'
         : `${sourceName}_选片`;
-    const targetPath = path.join(path.dirname(source.path), outputName);
+    // A linked source may be the root of its external sandbox, so a sibling
+    // output beside the physical target would be invisible and outside that
+    // sandbox. Materialize selection output in the project root instead.
+    const targetPath = source.resolution?.viaExternalLink ? path.join(projectRoot, outputName) : path.join(path.dirname(source.path), outputName);
     const targetRelativePath = path.relative(projectRoot, targetPath).replace(/\\/g, '/');
     const parentReal = fs.realpathSync.native(path.dirname(targetPath));
-    if (!inside(source.projectReal, parentReal, true)) throw new Error('输出位置的父目录指向项目外部');
+    const outputRoot = source.resolution?.viaExternalLink ? fs.realpathSync.native(projectRoot) : source.projectReal;
+    if (!inside(outputRoot, parentReal, true)) throw new Error('输出位置的父目录指向项目外部');
     if (fs.existsSync(targetPath)) {
       const targetReal = fs.realpathSync.native(targetPath);
       if (!inside(source.projectReal, targetReal)) throw new Error('选片输出快捷方式或重解析目录指向项目外部');
@@ -144,7 +149,9 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
     for (const filePath of files) {
       const kind = mediaKind(filePath);
       if (!kind) continue;
-      const sourceRelativePath = path.relative(projectRoot, filePath).replace(/\\/g, '/');
+      const sourceRelativePath = source.resolution?.viaExternalLink
+        ? projectVirtualPaths.toVirtualPath(projectRoot, filePath, source.resolution)
+        : path.relative(projectRoot, filePath).replace(/\\/g, '/');
       const relativeInsideSource = path.relative(source.path, filePath);
       if (!inside(source.path, filePath)) throw new Error(`媒体不属于来源文件夹：${sourceRelativePath}`);
       const destination = path.join(target.targetPath, relativeInsideSource);
@@ -153,7 +160,7 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
         sourceRelativePath,
         relativeInsideSource: relativeInsideSource.replace(/\\/g, '/'),
         destination,
-        destinationRelativePath: path.relative(projectRoot, destination).replace(/\\/g, '/'),
+        destinationRelativePath: [target.targetRelativePath, relativeInsideSource.replace(/\\/g, '/')].filter(Boolean).join('/'),
         name: path.basename(filePath), kind,
         size: fs.statSync(filePath).size,
         modifiedAt: fs.statSync(filePath).mtimeMs,
@@ -244,7 +251,9 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, im
         return kind && (!request.mediaKind || kind === request.mediaKind);
       });
       const unsupported = matches.filter(filePath => !mediaKind(filePath));
-      unsupportedPaths.push(...unsupported.map(filePath => path.relative(request.projectRoot, filePath).replace(/\\/g, '/')));
+      unsupportedPaths.push(...unsupported.map(filePath => source.resolution?.viaExternalLink
+        ? projectVirtualPaths.toVirtualPath(request.projectRoot, filePath, source.resolution)
+        : path.relative(request.projectRoot, filePath).replace(/\\/g, '/')));
       if (request.mediaKind ? !supported.length : !matches.length) missingKeywords.push(keyword);
       else files.push(...supported);
     }

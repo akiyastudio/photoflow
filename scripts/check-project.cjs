@@ -10,9 +10,11 @@ const steps = [
     ['typecheck', ['run', 'typecheck']],
   ] : []),
   ['architecture', ['run', 'test:architecture']],
+  ['SD startup import', ['run', 'test:sd-startup-import']],
   ['file entry interaction', ['run', 'test:file-entry-interaction']],
   ['Electron security', ['run', 'test:electron-security']],
   ['filesystem safety', ['run', 'test:filesystem-safety']],
+  ['project virtual paths', ['run', 'test:project-virtual-path']],
   ['background tasks', ['run', 'test:background-tasks']],
   ['database migrations', ['run', 'test:database-migrations']],
 ];

@@ -422,7 +422,7 @@ def test_v2_node_operations(root: Path) -> None:
 def test_relation_update_transactions(root: Path) -> None:
     workspace = root / "relation-workspace"
     project = workspace / "Project"
-    for name in ("RAW", "JPG", "MOV", "P1", "P2", "Selection", "VideoProgress"):
+    for name in ("RAW", "JPG", "MOV", "P1", "P2", "P3", "Selection", "VideoProgress"):
         (project / name).mkdir(parents=True, exist_ok=True)
     database = root / "relations.sqlite3"
     db = workspace_db.connect(str(workspace), str(database))
@@ -506,6 +506,27 @@ def test_relation_update_transactions(root: Path) -> None:
         workspace_db.progress_relation_update(db, {"childProgressId": p2["id"], "parentProgressId": p1["id"], "expectedUpdatedAt": current_p2["updatedAt"]})
         rejected({"childProgressId": p1["id"], "parentProgressId": p2["id"]}, "cycle_detected")
         rejected({"childProgressId": p1["id"], "parentProgressId": raw["id"], "expectedUpdatedAt": p1["updatedAt"]}, "stale_update")
+        p3 = register(
+            db, workspace, mediaKind="image", versionKey="p3", displayName="P3", folderPath=str(project / "P3"),
+            nodeRole="progress", relationKind="main", parentProgressId=p2["id"], trackingEnabled=False, trackingState="disabled",
+        )
+        saved_layout = workspace_db.version_tree_layout_save(db, {
+            "projectName": "Project", "scopeKey": "", "expectedRevision": 0, "mode": "patch",
+            "positions": [{"nodeKey": f"progress:{p2['id']}", "x": 120, "y": 240}],
+        })
+        assert saved_layout["revision"] == 1
+        unregistered = workspace_db.progress_unregister(str(workspace), db, {
+            "projectName": "Project", "progressId": p2["id"],
+        })
+        assert unregistered["success"] and unregistered["reparentedProgressCount"] == 1
+        assert db.execute("SELECT 1 FROM progress_folders WHERE id=?", (p2["id"],)).fetchone() is None
+        assert db.execute("SELECT parent_progress_id FROM progress_folders WHERE id=?", (p3["id"],)).fetchone()[0] == p1["id"]
+        assert (project / "P2").is_dir(), "unregistering a version must never delete its physical folder"
+        migrated_layout = workspace_db.version_tree_layout_get(db, {"projectName": "Project", "scopeKey": ""})
+        assert migrated_layout["revision"] == 2, "unregister must advance layout revision instead of resetting it to zero"
+        assert len(migrated_layout["positions"]) == 1
+        assert migrated_layout["positions"][0]["nodeKey"] == "entry:P2"
+        assert migrated_layout["positions"][0]["x"] == 120.0 and migrated_layout["positions"][0]["y"] == 240.0
     finally:
         db.close()
 

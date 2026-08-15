@@ -3,12 +3,29 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { startDetachedBackgroundOperation } = require('../electron/services/detached-background-operation.cjs');
 const { replaceVideoFileWithRollback } = require('../electron/services/video-trim-commit-service.cjs');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-video-trim-'));
 
 const run = async () => {
   try {
+    let releaseBackgroundWorker;
+    const backgroundWorkerGate = new Promise(resolve => { releaseBackgroundWorker = resolve; });
+    let backgroundWorkerCompleted = false;
+    const acknowledgement = startDetachedBackgroundOperation({
+      operationId: '中文文件-后台裁剪',
+      worker: async () => {
+        await backgroundWorkerGate;
+        backgroundWorkerCompleted = true;
+      },
+    });
+    assert.deepStrictEqual(acknowledgement, { success: true, started: true, operationId: '中文文件-后台裁剪' });
+    assert.strictEqual(backgroundWorkerCompleted, false, 'starting a trim must not await the background worker');
+    releaseBackgroundWorker();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(backgroundWorkerCompleted, true, 'the detached worker must continue after the start call returns');
+
     const chineseDirectory = path.join(root, '中文项目', '待剪辑视频');
     fs.mkdirSync(chineseDirectory, { recursive: true });
     const source = path.join(chineseDirectory, '角色生日 录像.mp4');

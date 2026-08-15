@@ -26,6 +26,7 @@ const createVersionService = ({ repository }) => ({
   replaceVersionGraphEdgeSource: (root, payload) => repository.replaceVersionGraphEdgeSource(root, payload),
   getVersionTreeLayout: (root, payload) => repository.getVersionTreeLayout(root, payload),
   saveVersionTreeLayout: (root, payload) => repository.saveVersionTreeLayout(root, payload),
+  unregisterProgress: (root, payload) => repository.unregisterProgress(root, payload),
   deleteMissingProgress: (root, payload) => repository.deleteMissingProgress(root, payload),
   registerBatchBaseline: (root, payload) => repository.registerBatchBaseline(root, payload),
   commitBatchCompare: (root, payload) => repository.commitBatchCompare(root, payload),

@@ -26,6 +26,9 @@ const main = async () => {
   monotonic.context.report(60, 'phase one');
   monotonic.context.report(40, 'phase two');
   assert.equal(service.get('monotonic').progress, 60, 'background task progress must never move backwards between phases');
+  monotonic.context.setCancellable(false);
+  assert.equal(service.get('monotonic').cancellable, false, 'a running task must be able to disable cancellation before its atomic commit phase');
+  assert.equal(service.cancel('monotonic'), false, 'a task in its atomic commit phase must reject cancellation');
   monotonic.complete();
   const definition = (id, resource, { limit = 3, writeLimit = 2, access = 'write' } = {}) => ({
     id,

@@ -2,7 +2,27 @@ const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = require('
 const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
 
 const registerFileOperationsIpc = context => {
-  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const resolveVirtual = (root, relativePath, options = {}) => projectVirtualPaths
+    ? projectVirtualPaths.resolve(root, relativePath, options)
+    : (() => {
+      const physicalPath = path.resolve(root, relativePath || '.');
+      const relative = path.relative(root, physicalPath);
+      if (relative && (relative.startsWith('..') || path.isAbsolute(relative))) throw new Error('项目路径无效');
+      return { projectRoot: root, virtualPath: String(relativePath || '').replace(/\\/g, '/'), physicalPath, mediaRoot: root, viaExternalLink: false, isExternalLinkRoot: false };
+    })();
+  const pathInside = (parent, candidate) => {
+    const relative = path.relative(path.resolve(parent), path.resolve(candidate));
+    return !relative || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  };
+  const virtualPathFor = (root, physicalPath, hints = []) => {
+    for (const hint of hints) {
+      if (!hint?.viaExternalLink) continue;
+      if (hint.shortcutPath && path.resolve(physicalPath) === path.resolve(hint.shortcutPath)) return hint.shortcutVirtualPath || hint.virtualPath;
+      if (hint.externalTargetRoot && pathInside(hint.externalTargetRoot, physicalPath)) return projectVirtualPaths.toVirtualPath(root, physicalPath, hint);
+    }
+    return path.relative(root, physicalPath).replace(/\\/g, '/');
+  };
   const clipboardPathKey = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
   const clearClipboardIfSnapshotCurrent = async snapshot => {
     if (snapshot?.operation !== 'cut' || !snapshot.sources?.length) return false;
@@ -36,10 +56,10 @@ const registerFileOperationsIpc = context => {
       const requested = Array.isArray(relativePaths) ? relativePaths.slice(0, 500) : [];
       const details = (await Promise.all(requested.map(async relativePath => {
         try {
-          const filePath = assertInside(root, path.resolve(root, relativePath), '文件路径', true);
-          const safePath = assertExistingInside(root, filePath, '文件路径', true);
+          const resolved = resolveVirtual(root, relativePath, { externalRootMode: 'target' });
+          const safePath = resolved.physicalPath;
           const stat = await fs.promises.stat(safePath);
-          return { relativePath: path.relative(root, safePath), size: stat.size, createdAt: stat.birthtimeMs || stat.ctimeMs, updatedAt: stat.mtimeMs };
+          return { relativePath: resolved.virtualPath, size: stat.size, createdAt: stat.birthtimeMs || stat.ctimeMs, updatedAt: stat.mtimeMs };
         } catch { return null; }
       }))).filter(Boolean);
       return { success: true, details };
@@ -61,12 +81,11 @@ const registerFileOperationsIpc = context => {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
       const sources = Array.from(new Set(relativePaths.map(relativePath => {
         if (typeof relativePath !== 'string' || !relativePath) throw new Error('无效的文件路径');
-        const source = path.resolve(root, relativePath);
-        if (source === root || !source.startsWith(root + path.sep)) throw new Error('文件不在当前项目中');
+        const source = resolveVirtual(root, relativePath, { externalRootMode: 'target' }).physicalPath;
         if (!fs.existsSync(source)) throw new Error(`文件不存在：${path.basename(source)}`);
         return source;
       })));
-      validatedRelativePaths = sources.map(source => path.relative(root, source));
+      validatedRelativePaths = relativePaths.map(relativePath => String(relativePath).replace(/\\/g, '/'));
   
       let icon = nativeImage.createEmpty();
       try {
@@ -121,7 +140,7 @@ const registerFileOperationsIpc = context => {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
       const sources = Array.from(new Set(relativePaths.map(relativePath => {
         if (typeof relativePath !== 'string' || !relativePath) throw new Error('无效的剪切路径');
-        return assertInside(root, path.resolve(root, relativePath), '剪切路径', true);
+        return resolveVirtual(root, relativePath, { externalRootMode: 'link' }).physicalPath;
       })));
       if (!sources.length) return { success: true, cleared: false, hasFiles: false };
       if (process.platform === 'win32') {
@@ -147,16 +166,14 @@ const registerFileOperationsIpc = context => {
     const responseContext = { operationId: '', affectedDirectories: [] };
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const projectLinkHints = projectVirtualPaths?.listManagedExternalLinks(root) || [];
       if (new Set(['import', 'move', 'paste', 'trash', 'select', 'rename']).has(operation)) {
         cancelMediaTrackingScan?.(ensureWorkspace(workspacePath), projectName);
         suppressWorkspaceWatchPath?.(root);
         suppressedProjectRoot = root;
       }
-      const resolveInsideProject = relativePath => {
-        const target = path.resolve(root, relativePath || '.');
-        if (target !== root && !target.startsWith(root + path.sep)) throw new Error('无效的文件路径');
-        return target;
-      };
+      const resolveSource = relativePath => resolveVirtual(root, relativePath, { externalRootMode: 'link' });
+      const resolveDestination = relativePath => resolveVirtual(root, relativePath, { externalRootMode: 'target' });
       if (operation === 'import') {
         const operationId = crypto.randomUUID();
         let job = { cancelled: false, finishing: false };
@@ -164,7 +181,8 @@ const registerFileOperationsIpc = context => {
         const publish = payload => task?.publish(payload);
         const createdTargets = [];
         if (!Array.isArray(relativePaths) || !relativePaths.length || relativePaths.length > 500) throw new Error('没有可导入的文件');
-        const destinationDir = resolveInsideProject(targetRelativePath);
+        const destinationResolution = resolveDestination(targetRelativePath);
+        const destinationDir = destinationResolution.physicalPath;
         if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
         const sources = Array.from(new Set(relativePaths.map(source => {
           if (typeof source !== 'string' || !path.isAbsolute(source)) throw new Error('无效的外部文件路径');
@@ -243,7 +261,7 @@ const registerFileOperationsIpc = context => {
             operationId,
             createdItems: importPlan.map(item => ({
               name: path.basename(item.destination),
-              relativePath: path.relative(root, item.destination).replace(/\\/g, '/'),
+              relativePath: virtualPathFor(root, item.destination, [destinationResolution]),
               isDirectory: item.isDirectory,
             })),
           };
@@ -259,13 +277,16 @@ const registerFileOperationsIpc = context => {
           activeProjectFileOperations.delete(operationId);
         }
       }
-      const sources = relativePaths.map(resolveInsideProject);
+      const sourceResolutions = relativePaths.map(resolveSource);
+      const sources = sourceResolutions.map(item => item.physicalPath);
       if (operation === 'move') {
         const operationId = crypto.randomUUID();
         responseContext.operationId = operationId;
         if (!sources.length) throw new Error('没有可移动的文件');
-        const destinationDir = resolveInsideProject(targetRelativePath);
+        const destinationResolution = resolveDestination(targetRelativePath);
+        const destinationDir = destinationResolution.physicalPath;
         if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
+        if (destinationResolution.viaExternalLink && sourceResolutions.some(item => item.isExternalLinkRoot)) throw new Error('不能把项目外链根引用移动到另一个外链的内容中');
         const reservedDestinations = new Set();
         const movePlan = sources.map(source => {
           if (!fs.existsSync(source)) throw new Error(`文件不存在：${path.basename(source)}`);
@@ -283,8 +304,8 @@ const registerFileOperationsIpc = context => {
           return { source, destination };
         });
         const affectedDirectories = Array.from(new Set([
-          path.relative(root, destinationDir).replace(/\\/g, '/'),
-          ...movePlan.map(entry => path.relative(root, path.dirname(entry.source)).replace(/\\/g, '/')),
+          destinationResolution.virtualPath,
+          ...sourceResolutions.map(item => path.posix.dirname(item.virtualPath) === '.' ? '' : path.posix.dirname(item.virtualPath)),
         ]));
         responseContext.affectedDirectories = affectedDirectories;
         const task = createProjectFileTask({
@@ -328,8 +349,8 @@ const registerFileOperationsIpc = context => {
             operationId,
             affectedDirectories,
             movedItems: moved.map(entry => ({
-              sourceRelativePath: path.relative(root, entry.source).replace(/\\/g, '/'),
-              destinationRelativePath: path.relative(root, entry.destination).replace(/\\/g, '/'),
+              sourceRelativePath: virtualPathFor(root, entry.source, [...sourceResolutions, ...projectLinkHints]),
+              destinationRelativePath: virtualPathFor(root, entry.destination, [destinationResolution]),
               copied: entry.copied,
             })),
           };
@@ -377,10 +398,11 @@ const registerFileOperationsIpc = context => {
         const publish = payload => task?.publish(payload);
         publish({ phase: 'scanning', progress: 0, currentName: '', bytesCopied: 0, totalBytes: 0 });
         try {
-          const requestedDestination = resolveInsideProject(targetRelativePath);
+          const destinationResolution = resolveDestination(targetRelativePath);
+          const requestedDestination = destinationResolution.physicalPath;
           if (!fs.existsSync(requestedDestination) || !fs.statSync(requestedDestination).isDirectory()) throw new Error('目标文件夹不存在');
-          const destinationDir = assertExistingInside(root, requestedDestination, '粘贴目标文件夹', true);
-          affectedDirectories = [path.relative(root, destinationDir).replace(/\\/g, '/')];
+          const destinationDir = requestedDestination;
+          affectedDirectories = [destinationResolution.virtualPath];
           responseContext.affectedDirectories = affectedDirectories;
           let clipboardSnapshot = null;
           let fileClipboardError = null;
@@ -439,7 +461,7 @@ const registerFileOperationsIpc = context => {
                 count: 1,
                 operationId,
                 affectedDirectories,
-                createdItems: [{ name: path.basename(destination), relativePath: path.relative(root, destination).replace(/\\/g, '/') }],
+                createdItems: [{ name: path.basename(destination), relativePath: virtualPathFor(root, destination, [destinationResolution]) }],
               };
             }
             if (fileClipboardError) {
@@ -458,9 +480,12 @@ const registerFileOperationsIpc = context => {
             seenSources.add(key);
             uniqueSources.push(source);
           }
+          if (destinationResolution.viaExternalLink && uniqueSources.some(source => path.extname(source).toLowerCase() === '.lnk' && projectVirtualPaths?.readManagedExternalLink?.(source))) {
+            throw new Error('不能把项目外链根引用粘贴到另一个外链的内容中');
+          }
           affectedDirectories = Array.from(new Set([
             ...affectedDirectories,
-            ...(clipboardSnapshot.operation === 'cut' ? uniqueSources.map(source => path.relative(root, path.dirname(source)).replace(/\\/g, '/')) : []),
+            ...(clipboardSnapshot.operation === 'cut' ? uniqueSources.map(source => virtualPathFor(root, path.dirname(source), projectLinkHints)) : []),
           ]));
           responseContext.affectedDirectories = affectedDirectories;
           task = createProjectFileTask({
@@ -623,7 +648,7 @@ const registerFileOperationsIpc = context => {
             publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied: 0, totalBytes: 0, filesCopied: count, totalFiles: count, count });
             task.complete('文件移动完成');
             writeLog('info', 'Project files moved by same-volume rename', { projectName, targetRelativePath, count, operationId });
-            return { success: true, cancelled: false, errorCode: undefined, count, operationId, affectedDirectories, consumedCutClipboard: true, movedItems: topLevelTargets.map(item => ({ sourceRelativePath: path.relative(root, item.source).replace(/\\/g, '/'), destinationRelativePath: path.relative(root, item.destination).replace(/\\/g, '/') })), replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
+            return { success: true, cancelled: false, errorCode: undefined, count, operationId, affectedDirectories, consumedCutClipboard: true, movedItems: topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })), replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
           }
 
           const totalBytes = plan.reduce((sum, entry) => sum + entry.size, 0);
@@ -696,7 +721,7 @@ const registerFileOperationsIpc = context => {
           publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied, totalBytes, filesCopied, totalFiles, count });
           task.complete('文件粘贴完成');
           writeLog('info', 'Project files pasted', { projectName, targetRelativePath, count, operationId, ...transferStats });
-          return { success: true, cancelled: false, errorCode: undefined, count, operationId, affectedDirectories, consumedCutClipboard: clipboardSnapshot.operation === 'cut', createdItems: clipboardSnapshot.operation === 'copy' ? topLevelTargets.map(item => ({ name: path.basename(item.destination), relativePath: path.relative(root, item.destination).replace(/\\/g, '/'), isDirectory: item.isDirectory })) : undefined, movedItems: clipboardSnapshot.operation === 'cut' ? topLevelTargets.map(item => ({ sourceRelativePath: path.relative(root, item.source).replace(/\\/g, '/'), destinationRelativePath: path.relative(root, item.destination).replace(/\\/g, '/') })) : undefined, replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
+          return { success: true, cancelled: false, errorCode: undefined, count, operationId, affectedDirectories, consumedCutClipboard: clipboardSnapshot.operation === 'cut', createdItems: clipboardSnapshot.operation === 'copy' ? topLevelTargets.map(item => ({ name: path.basename(item.destination), relativePath: virtualPathFor(root, item.destination, [destinationResolution]), isDirectory: item.isDirectory })) : undefined, movedItems: clipboardSnapshot.operation === 'cut' ? topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })) : undefined, replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
         } catch (error) {
           // Once cut finalization starts, keeping the completed copies is the only
           // data-safe fallback if removing a source fails partway through.
@@ -742,7 +767,11 @@ const registerFileOperationsIpc = context => {
       if (operation === 'trash') {
         const existingSources = sources.filter(source => fs.existsSync(source));
         const operationId = crypto.randomUUID();
-        const affectedDirectories = Array.from(new Set(existingSources.map(source => path.relative(root, path.dirname(source)).replace(/\\/g, '/'))));
+        const affectedDirectories = Array.from(new Set(existingSources.map(source => {
+          const virtual = virtualPathFor(root, source, [...sourceResolutions, ...projectLinkHints]);
+          const parent = path.posix.dirname(virtual);
+          return parent === '.' ? '' : parent;
+        })));
         responseContext.operationId = operationId;
         responseContext.affectedDirectories = affectedDirectories;
         const startedAt = Date.now();
@@ -842,7 +871,11 @@ const registerFileOperationsIpc = context => {
       if (operation === 'rename') {
         const operationId = crypto.randomUUID();
         responseContext.operationId = operationId;
-        responseContext.affectedDirectories = Array.from(new Set(sources.map(source => path.relative(root, path.dirname(source)).replace(/\\/g, '/'))));
+        responseContext.affectedDirectories = Array.from(new Set(sources.map(source => {
+          const virtual = virtualPathFor(root, source, [...sourceResolutions, ...projectLinkHints]);
+          const parent = path.posix.dirname(virtual);
+          return parent === '.' ? '' : parent;
+        })));
         if (!sources.length || !nextName.trim()) throw new Error('请选择文件并输入新名称');
         if (sources.some(source => isProtectedProjectFolderPath({ fs, path, projectRoot: root, candidate: source }))) {
           throw new Error('该文件夹由项目工作流管理，不能使用普通重命名；进度文件夹请使用“修改进度”');
@@ -851,7 +884,8 @@ const registerFileOperationsIpc = context => {
         const explicitNames = Array.isArray(options.renameNames) && options.renameNames.length === sources.length ? options.renameNames.map(name => String(name).trim()) : null;
         const destinations = sources.map((source, index) => {
           const extension = path.extname(source);
-          const fileName = explicitNames ? explicitNames[index] : sources.length === 1 ? baseName : `${baseName}_${String(index + 1).padStart(2, '0')}${extension}`;
+          let fileName = explicitNames ? explicitNames[index] : sources.length === 1 ? baseName : `${baseName}_${String(index + 1).padStart(2, '0')}${extension}`;
+          if (sourceResolutions[index]?.isExternalLinkRoot && path.extname(fileName).toLowerCase() !== '.lnk') fileName += '.lnk';
           if (!fileName || path.basename(fileName) !== fileName || /[<>:"/\\|?*\x00-\x1f]/.test(fileName) || /[. ]$/.test(fileName)) throw new Error(`无效的文件名：${fileName || '空文件名'}`);
           return path.join(path.dirname(source), fileName);
         });
@@ -862,8 +896,10 @@ const registerFileOperationsIpc = context => {
         const normalizedDestinations = destinations.map(destination => path.resolve(destination).toLocaleLowerCase());
         if (new Set(normalizedDestinations).size !== normalizedDestinations.length) throw new Error('生成的新文件名存在重复');
         const normalizedSources = new Set(sources.map(source => path.resolve(source).toLocaleLowerCase()));
-        for (const destination of destinations) {
-          if (path.resolve(destination) === root || !path.resolve(destination).startsWith(root + path.sep)) throw new Error('无效的文件名');
+        for (const [index, destination] of destinations.entries()) {
+          const resolution = sourceResolutions[index];
+          const allowedRoot = resolution?.viaExternalLink && !resolution.isExternalLinkRoot ? resolution.externalTargetRoot : root;
+          if (!pathInside(allowedRoot, destination) || path.resolve(destination) === path.resolve(allowedRoot)) throw new Error('无效的文件名');
           if (fs.existsSync(destination) && !normalizedSources.has(path.resolve(destination).toLocaleLowerCase())) throw new Error(`目标名称已被占用：${path.basename(destination)}`);
         }
         const moves = sources.map((source, index) => ({ source, destination: destinations[index] })).filter(move => path.resolve(move.source) !== path.resolve(move.destination));
@@ -896,7 +932,14 @@ const registerFileOperationsIpc = context => {
           count: sources.length,
           operationId,
           affectedDirectories: responseContext.affectedDirectories,
-          movedItems: moves.map(move => ({ sourceRelativePath: path.relative(root, move.source).replace(/\\/g, '/'), destinationRelativePath: path.relative(root, move.destination).replace(/\\/g, '/') })),
+          movedItems: moves.map(move => {
+            const hint = sourceResolutions[sources.findIndex(source => path.resolve(source) === path.resolve(move.source))];
+            const sourceRelativePath = virtualPathFor(root, move.source, [hint, ...projectLinkHints]);
+            const destinationRelativePath = hint?.isExternalLinkRoot
+              ? [path.posix.dirname(hint.virtualPath), path.basename(move.destination, '.lnk') + '.lnk'].filter(part => part && part !== '.').join('/')
+              : virtualPathFor(root, move.destination, [hint, ...projectLinkHints]);
+            return { sourceRelativePath, destinationRelativePath };
+          }),
         };
       }
       throw new Error('不支持的文件操作');
