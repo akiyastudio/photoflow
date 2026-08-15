@@ -1,7 +1,7 @@
 import { Loader2 } from 'lucide-react';
 import type { ProgressFolder } from '../../types';
-import { ImportSourceControls } from '../../components/ImportSourceControls';
-import { isUserVersionKey, nextVersionKeys, normalizeTrackingPolicy, planProgressRootMove, selectableVersionParents, versionKindForParent, type VersionPanelState, type VersionRelationKind } from './versioning-v2-model';
+import { ImportSourceControls, type ImportMaterialKind } from '../../components/ImportSourceControls';
+import { isUserVersionKey, nextVersionKeys, normalizeTrackingPolicy, planProgressRootMove, selectableVersionParents, versionKeyMatchesParentKind, versionKeyWithFinalIndex, versionKindForParent, type VersionPanelState, type VersionRelationKind } from './versioning-v2-model';
 
 export type VersionProgressDraft = {
   mode: 'create' | 'create-next' | 'import' | 'modify';
@@ -35,6 +35,9 @@ type VersionProgressPanelProps = {
   onChange: (draft: VersionProgressDraft) => void;
   onChooseFiles?: () => void;
   onChooseFolder?: () => void;
+  importStep?: 'source' | 'settings';
+  onImportStepChange?: (step: 'source' | 'settings') => void;
+  onImportKindChange?: (kind: ImportMaterialKind, sourcePaths: string[]) => void;
   onSubmit: () => void;
   onClose: () => void;
 };
@@ -53,7 +56,7 @@ const Callout = ({ tone = 'info', title, children }: { tone?: 'info' | 'success'
 };
 const Card = ({ title, meta, children }: { title?: string; meta?: string; children: React.ReactNode }) => <section className="rounded-xl border border-slate-200 bg-white p-4">{(title || meta) && <div className="mb-3 flex items-center justify-between gap-3"><b className="text-sm text-slate-800">{title}</b>{meta && <span className="text-[11px] text-slate-400">{meta}</span>}</div>}{children}</section>;
 
-export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress, message, error, namePresets = [], onChange, onChooseFiles, onChooseFolder, onSubmit, onClose }: VersionProgressPanelProps) => {
+export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress, message, error, namePresets = [], onChange, onChooseFiles, onChooseFolder, importStep = 'source', onImportStepChange, onImportKindChange, onSubmit, onClose }: VersionProgressPanelProps) => {
   const restrictedNode = draft.relationKind === 'auxiliary';
   const policy = normalizeTrackingPolicy(draft.relationKind, draft);
   const parents = selectableVersionParents(folders, { ...draft, relationKind: 'main' });
@@ -67,6 +70,24 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
   const versionLabel = `V${draft.versionKey || '—'}`;
   const suggestions = nextVersionKeys(folders, draft.mediaKind, parent, draft.existingProgressId);
   const versionKind = draft.versionKind || versionKindForParent(draft.versionKey, parent);
+  const suggestedVersionKey = versionKind === 'branch' ? suggestions.branch : suggestions.main;
+  const suggestedParts = suggestedVersionKey.split('_');
+  const versionPrefix = suggestedParts.length > 1 ? `${suggestedParts.slice(0, -1).join('_')}_` : '';
+  const normalizedVersionKey = (draft.versionKey || '').trim();
+  const versionIndex = normalizedVersionKey.split('_').at(-1) || '';
+  const versionIndexValid = /^[1-9]\d*$/.test(versionIndex);
+  const versionFormatValid = versionIndexValid && isUserVersionKey(normalizedVersionKey);
+  const versionStructureValid = versionFormatValid && versionKeyMatchesParentKind(normalizedVersionKey, parent, versionKind);
+  const versionConflict = versionFormatValid && draft.mode !== 'import' && folders.some(folder => folder.id !== draft.existingProgressId
+    && !folder.folderMissing && folder.nodeRole === 'progress' && folder.mediaKind === draft.mediaKind && folder.versionKey === normalizedVersionKey);
+  const versionError = !versionFormatValid
+    ? '请输入大于 0 的版本序号。'
+    : !versionStructureValid
+      ? versionKind === 'branch' ? '子分支版本号必须以父版本号开头，例如 V1_2 → V1_2_1。' : '延续版本必须与父版本处于同一分支层级。'
+      : versionConflict ? `版本 V${normalizedVersionKey} 已存在。` : '';
+  const setCustomVersionIndex = (value: string) => {
+    update({ versionKey: versionKeyWithFinalIndex(suggestedVersionKey, value) });
+  };
   const setVersionKind = (nextKind: 'main' | 'branch') => {
     const suggestedKey = nextKind === 'branch' ? suggestions.branch : suggestions.main;
     if (nextKind === versionKind && isUserVersionKey(draft.versionKey || '')
@@ -99,9 +120,7 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
   };
   const canCreateWithoutParent = parents.length === 0;
   const parentSelectionRequired = !parent && !canCreateWithoutParent;
-  const resolvedVersionKey = draft.mode === 'modify' && isUserVersionKey(draft.versionKey || '')
-    ? draft.versionKey!
-    : versionKind === 'branch' ? suggestions.branch : suggestions.main;
+  const resolvedVersionKey = versionStructureValid ? normalizedVersionKey : '';
   const resolvedVersionLabel = `V${resolvedVersionKey || '—'}`;
   const parentVersionLabel = parent?.nodeRole === 'original' ? '原始素材' : parent ? `V${parent.versionKey}` : '';
   const parentLabel = parent ? `${parent.nodeRole === 'original' ? '原始素材' : `V${parent.versionKey}`} · ${parent.displayName}` : parentSelectionRequired ? '请选择父版本' : '无父版本';
@@ -127,23 +146,31 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
     return <div className="space-y-4"><Callout tone={state === 'failure' ? 'danger' : state === 'result' ? 'success' : 'info'} title={stateLabel[state] || state}>{error || message || (busy ? '版本任务正在后台执行；收起面板不会中断任务。' : '版本节点及其自动关系已更新。')}</Callout>{busy && <Card><div className="flex items-center justify-between text-xs font-semibold text-slate-600"><span className="truncate">{progress?.currentName || '正在准备版本任务…'}</span><span className="ml-3 tabular-nums text-blue-600">{Math.round(progressValue)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${progressValue > 0 ? Math.max(2, progressValue) : 0}%` }}/></div><p className="mt-2 text-xs text-slate-500">{progress?.processedCount || 0} / {progress?.totalCount || '—'}{progress?.currentName ? ` · ${progress.currentName}` : ''}</p></Card>}<div className="flex justify-end"><button type="button" disabled={busy} onClick={onClose} className="dialog-primary">关闭</button></div></div>;
   }
 
+  if (draft.mode === 'import' && importStep === 'source') {
+    return <div className="space-y-4">
+      <Callout title="先选择需要导入的来源">选择文件或文件夹并确认导入方式后，再进入进度版本设置。</Callout>
+      <ImportSourceControls
+        selectionTitle="选择或拖入进度文件/文件夹"
+        selectionDescription="可直接拖入多个文件或文件夹"
+        selectedCount={draft.sourcePaths?.length || 0}
+        onChooseFiles={onChooseFiles || onSubmit}
+        onChooseFolder={onChooseFolder}
+        onDropPaths={paths => update({ sourcePaths: paths })}
+        importKind="progress"
+        onImportKindChange={kind => onImportKindChange?.(kind, draft.sourcePaths || [])}
+        deleteSourceAfterImport={draft.deleteSourceAfterImport === true}
+        onDeleteSourceAfterImportChange={value => update({ deleteSourceAfterImport: value })}
+        deleteSourceDescription="复制并验证成功后删除源文件；关闭则保留"
+        linkOnly={draft.linkOnly === true}
+        onLinkOnlyChange={value => update({ linkOnly: value, deleteSourceAfterImport: value ? false : draft.deleteSourceAfterImport })}
+        startLabel="下一步：设置进度"
+        onStart={() => onImportStepChange?.('settings')}
+      />
+    </div>;
+  }
+
   return <div className="space-y-4">
-    {draft.mode === 'import' && <Callout title="导入来源稍后选择">确认版本关系后再选择文件或文件夹，取消选择不会创建空进度。</Callout>}
-    {draft.mode === 'import' && <ImportSourceControls
-      selectionTitle="选择或拖入进度文件/文件夹"
-      selectionDescription="可直接拖入多个文件或文件夹；未预选时，开始导入后仍会打开系统选择器"
-      selectedCount={draft.sourcePaths?.length || 0}
-      onChooseFiles={onChooseFiles || onSubmit}
-      onChooseFolder={onChooseFolder}
-      onDropPaths={paths => update({ sourcePaths: paths })}
-      deleteSourceAfterImport={draft.deleteSourceAfterImport === true}
-      onDeleteSourceAfterImportChange={value => update({ deleteSourceAfterImport: value })}
-      deleteSourceDescription="复制并验证成功后删除源文件；关闭则保留"
-      linkOnly={draft.linkOnly === true}
-      onLinkOnlyChange={value => update({ linkOnly: value, deleteSourceAfterImport: value ? false : draft.deleteSourceAfterImport })}
-      startLabel="使用这些来源"
-      onStart={onSubmit}
-    />}
+    {draft.mode === 'import' && <Card title="导入来源" meta={`${draft.sourcePaths?.length || 0} 个`}><div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs leading-5 text-slate-500">已确认来源；{draft.linkOnly ? '将以外链方式使用，不复制源文件。' : draft.deleteSourceAfterImport ? '导入验证成功后将删除源文件。' : '将复制到项目内并保留源文件。'}</p><button type="button" onClick={() => onImportStepChange?.('source')} className="dialog-secondary">返回重新选择</button></div></Card>}
     {draft.mode === 'import' && requiresMove && <Callout tone="warning" title="所选文件夹将移动到项目根目录">登记前会预检并移动到“{movePlan.targetRelativePath}”。快捷方式或外部目录不能移动或覆盖。</Callout>}
     {draft.mode === 'modify' && <Callout tone="warning" title={`修改 ${versionLabel}`}>保存时会同步更新版本关系、文件夹名称和数据库记录。</Callout>}
     {restrictedNode && <Callout tone="warning" title="辅助节点不参与版本跟踪">选片、预览和协作节点不参与版本跟踪传播。</Callout>}
@@ -156,6 +183,10 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
         </div>
         {!draft.contextLocked && draft.mode !== 'modify' && <fieldset><legend className="text-xs font-semibold text-slate-600">媒体类型</legend><div className="mt-2 grid grid-cols-2 gap-2"><button type="button" aria-pressed={draft.mediaKind === 'image'} onClick={() => setMediaKind('image')} className={`h-10 rounded-lg border text-sm font-semibold ${draft.mediaKind === 'image' ? 'border-blue-500 bg-blue-50 text-blue-700 ring-1 ring-blue-200' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>图片</button><button type="button" aria-pressed={draft.mediaKind === 'video'} onClick={() => setMediaKind('video')} className={`h-10 rounded-lg border text-sm font-semibold ${draft.mediaKind === 'video' ? 'border-blue-500 bg-blue-50 text-blue-700 ring-1 ring-blue-200' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>视频</button></div></fieldset>}
         {versionKindControl}
+        <label className="block text-xs font-semibold text-slate-600">版本序号
+          <span className={`mt-1 flex h-10 overflow-hidden rounded-lg border bg-white transition focus-within:ring-2 ${versionError ? 'border-red-400 focus-within:border-red-500 focus-within:ring-red-100' : 'border-slate-300 focus-within:border-blue-500 focus-within:ring-blue-100'}`}><span className="flex items-center border-r border-slate-200 bg-slate-50 px-3 text-sm font-bold tabular-nums text-slate-500">V{versionPrefix}</span><input aria-label="版本序号" className="min-w-0 flex-1 px-3 text-sm font-semibold tabular-nums text-slate-800 outline-none" value={versionIndex} inputMode="numeric" pattern="[0-9]*" placeholder={suggestedParts.at(-1) || '1'} onChange={event => setCustomVersionIndex(event.target.value)}/></span>
+          {versionError ? <span className="mt-1.5 block text-xs font-normal text-red-500">{versionError}</span> : <span className="mt-1.5 block text-xs font-normal text-slate-400">只需填写最后一段数字；系统会自动补全为 V{normalizedVersionKey}。</span>}
+        </label>
         {!draft.targetFolderLocked && <label className="block text-xs font-semibold text-slate-600">名称（可选）<input className={fieldClass} value={draft.displayName} placeholder="例如 精修" onChange={event => update({ displayName: event.target.value })}/>{namePresets.length > 0 && <span className="mt-2 flex flex-wrap gap-2">{namePresets.map(name => <button key={name} type="button" onClick={() => update({ displayName: name })} className="rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700 transition hover:border-blue-400 hover:bg-blue-100">{name}</button>)}</span>}</label>}
         <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-4">
           <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold text-blue-600">{draft.mode === 'modify' ? '修改后' : '将创建'}</p><p className="mt-1 text-base font-bold text-slate-900">{resolvedVersionLabel} · {outputFolderName}</p></div><span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-blue-700 shadow-sm">{versionKind === 'branch' ? '子分支' : parent?.nodeRole === 'original' ? '主版本' : parent ? '继续当前分支' : '首个版本'}</span></div>
@@ -168,6 +199,6 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
       <div className={`mt-3 border-t border-slate-100 pt-3 ${!policy.trackingEnabled || restrictedNode ? 'opacity-50' : ''}`}><div>{([['renameFromParent', '沿用上一版本文件名', '确认关联后使用父版本媒体文件名。'], ['copyMissingFromParent', '补齐缺失媒体', '父版本新增媒体后，此版本会变成“待刷新”。']] as const).map(([key, title, help], index) => <label key={key} className={`flex gap-3 py-3 first:pt-0 last:pb-0 ${index ? 'border-t border-slate-100' : ''}`}><input type="checkbox" className="mt-0.5" checked={policy[key]} disabled={!policy.trackingEnabled || restrictedNode} onChange={event => updatePolicy({ [key]: event.target.checked })}/><span><b className="block text-sm text-slate-700">{title}</b><small className="mt-0.5 block text-xs leading-5 text-slate-400">{help}</small></span></label>)}</div></div>
     </Card>
     </div>
-    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 pt-4"><span className="mr-auto max-w-xl text-xs leading-5 text-slate-400">版本号和文件夹名由父版本、创建方式及名称自动生成。</span><button type="button" disabled={busy} onClick={onClose} className="dialog-secondary">取消</button>{draft.mode !== 'import' && <button type="button" disabled={busy || !resolvedVersionKey || parentSelectionRequired} onClick={onSubmit} className="dialog-primary inline-flex items-center gap-2">{busy && <Loader2 size={15} className="animate-spin"/>}{requiresMove ? '继续并检查移动' : `${modeAction} ${resolvedVersionLabel}`}</button>}</div>
+    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-slate-200 pt-4"><span className="mr-auto max-w-xl text-xs leading-5 text-slate-400">版本前缀由父版本和创建方式生成，只需调整最后一段数字；文件夹名会同步更新。</span><button type="button" disabled={busy} onClick={onClose} className="dialog-secondary">取消</button><button type="button" disabled={busy || Boolean(versionError) || !resolvedVersionKey || parentSelectionRequired || (draft.mode === 'import' && !draft.sourcePaths?.length)} onClick={onSubmit} className="dialog-primary inline-flex items-center gap-2">{busy && <Loader2 size={15} className="animate-spin"/>}{requiresMove ? '继续并检查移动' : `${modeAction} ${resolvedVersionLabel}`}</button></div>
   </div>;
 };

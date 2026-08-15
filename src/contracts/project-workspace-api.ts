@@ -16,10 +16,10 @@ export type ProjectWorkspaceApiKey =
   | 'listRecentProjectFiles' | 'moveWorkspaceProject' | 'onBackgroundTaskChanged' | 'onProjectFileDragEnd'
   | 'onProjectFileOperationProgress' | 'onThumbnailStateChanged' | 'onWorkspaceFilesChanged' | 'openMediaVersion'
   | 'openProjectEntriesInPhotoshop' | 'openProjectEntry' | 'openWorkspaceProject' | 'preflightManualSelection' | 'materializeProjectExternalLinks'
-  | 'projectFileOperation' | 'registerProgressFolder' | 'registerProgressWithGraph' | 'registerTeamProjectPhotos'
+  | 'projectFileOperation' | 'registerProgressFolder' | 'registerProgressWithGraph' | 'registerTeamProjectPhotos' | 'relinkProjectExternalFolder'
   | 'registerVersionBaseline' | 'replaceVersionGraphEdgeSource' | 'resolveProjectShortcut'
   | 'retryVersionBatchOperations' | 'searchProjectFiles' | 'setMediaRating' | 'setWindowFullscreen'
   | 'startProgressTracking' | 'startProjectFileDrag' | 'trackTelemetry' | 'trashWorkspaceProject'
-  | 'trimProjectVideo' | 'unwatchFileRoot' | 'updateProgressFolder' | 'updateProgressRelation' | 'watchFileRoot';
+  | 'cancelProjectVideoTrim' | 'onProjectVideoTrimProgress' | 'trimProjectVideo' | 'unregisterProgressFolder' | 'unwatchFileRoot' | 'updateProgressFolder' | 'updateProgressRelation' | 'watchFileRoot';
 
 export type ProjectWorkspaceApi = Pick<IElectronAPI, ProjectWorkspaceApiKey>;

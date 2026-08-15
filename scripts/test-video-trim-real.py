@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import hashlib
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -77,6 +78,36 @@ def main():
         source_early_end_frame = frame_bytes(ffmpeg, source, 4.0)
         assert mean_absolute_difference(source_selected_end_frame, output_last_frame) < mean_absolute_difference(source_early_end_frame, output_last_frame)
         assert source.is_file() and probe_duration(str(source)) >= 5.9
+
+        cancelled_output = directory / "角色生日 录像_取消导出.mp4"
+        cancel_file = directory / "取消导出.cancel"
+        cancelled_process = subprocess.Popen(
+            [
+                sys.executable,
+                str(ROOT / "python" / "cut_video.py"),
+                str(source),
+                "--trim-start", "0.5",
+                "--trim-end", "5.5",
+                "--output-path", str(cancelled_output),
+                "--cancel_file", str(cancel_file),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        cancelled_events = []
+        for line in cancelled_process.stdout or []:
+            event = json.loads(line)
+            cancelled_events.append(event)
+            if event.get("phase") == "encoding" and not cancel_file.exists():
+                cancel_file.write_text("cancel", encoding="utf-8")
+        cancelled_process.wait(timeout=15)
+        assert cancelled_process.returncode != 0
+        assert any(event.get("type") == "cancelled" for event in cancelled_events)
+        assert not cancelled_output.exists()
+        assert not any(directory.glob("*.photoflow-part.mp4"))
         print(f"Real Unicode video trim passed: {output.name}, {output_duration:.2f}s")
 
 

@@ -1,6 +1,8 @@
 import { useState } from 'react';
-import { FileInput, FolderInput, Loader2, Plus } from 'lucide-react';
+import { Aperture, FileInput, Files, FolderInput, GitBranch, Loader2, Plus, Video } from 'lucide-react';
 import { PanelSwitch } from './PanelSwitch';
+
+export type ImportMaterialKind = 'original' | 'progress' | 'broll' | 'files';
 
 type ImportSourceControlsProps = {
   selectionTitle: string;
@@ -16,6 +18,8 @@ type ImportSourceControlsProps = {
   deleteSourceDescription: string;
   linkOnly?: boolean;
   onLinkOnlyChange?: (value: boolean) => void;
+  importKind?: ImportMaterialKind;
+  onImportKindChange?: (kind: ImportMaterialKind) => void;
   statusText?: string;
   startLabel?: string;
   busyLabel?: string;
@@ -38,6 +42,8 @@ export const ImportSourceControls = ({
   deleteSourceDescription,
   linkOnly = false,
   onLinkOnlyChange,
+  importKind,
+  onImportKindChange,
   statusText,
   startLabel = '开始导入',
   busyLabel = '正在导入…',
@@ -69,6 +75,13 @@ export const ImportSourceControls = ({
     if (paths.length) onDropPaths([...new Set(paths)]);
   };
 
+  const importKinds: Array<{ kind: ImportMaterialKind; label: string; icon: React.ReactNode }> = [
+    { kind: 'original', label: '原始素材', icon: <Aperture size={16}/> },
+    { kind: 'progress', label: '进度', icon: <GitBranch size={16}/> },
+    { kind: 'broll', label: '花絮', icon: <Video size={16}/> },
+    { kind: 'files', label: '其他文件', icon: <Files size={16}/> },
+  ];
+
   return <div className="space-y-4">
   <div
     onDragEnter={acceptDrop}
@@ -88,8 +101,33 @@ export const ImportSourceControls = ({
     </div>
   </div>
 
-  {onLinkOnlyChange && <PanelSwitch title="只导入外链" description="不复制或移动原文件，只在项目内创建快捷方式；外部位置离线时内容会暂时不可用。" checked={linkOnly} disabled={busy} onChange={onLinkOnlyChange}/>}
-  <PanelSwitch title="导入后删除源文件" description={linkOnly ? '外链模式不会复制或删除任何源文件。' : deleteSourceDescription} checked={deleteSourceAfterImport} disabled={busy || linkOnly} onChange={onDeleteSourceAfterImportChange}/>
+  {importKind && onImportKindChange && <fieldset>
+    <legend className="mb-2 text-xs font-semibold text-slate-600">导入的内容</legend>
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      {importKinds.map(item => <button
+        key={item.kind}
+        type="button"
+        aria-pressed={importKind === item.kind}
+        disabled={busy}
+        onClick={() => onImportKindChange(item.kind)}
+        className={`flex min-h-10 items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${importKind === item.kind ? 'border-blue-500 bg-blue-50 text-blue-700 ring-1 ring-blue-100' : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300 hover:bg-blue-50/40'}`}
+      >{item.icon}{item.label}</button>)}
+    </div>
+  </fieldset>}
+
+  {onLinkOnlyChange ? <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+    <PanelSwitch className="!rounded-none !border-0" title="只导入外链" description="不复制或移动原文件，只在项目内创建外链引用；外部位置离线时内容会暂时不可用。" checked={linkOnly} disabled={busy} onChange={onLinkOnlyChange}/>
+    <div className="mx-4 border-t border-slate-200"/>
+    <PanelSwitch className="!rounded-none !border-0" title="导入后删除源文件" description={linkOnly ? '外链模式不会复制或删除任何源文件。' : deleteSourceDescription} checked={deleteSourceAfterImport} disabled={busy || linkOnly} onChange={onDeleteSourceAfterImportChange}/>
+  </div> : (
+    <PanelSwitch
+      title="导入后删除源文件"
+      description={deleteSourceDescription}
+      checked={deleteSourceAfterImport}
+      disabled={busy}
+      onChange={onDeleteSourceAfterImportChange}
+    />
+  )}
 
   <div className="flex items-center gap-3 border-t border-slate-200 pt-4">
     <span className="mr-auto text-xs text-slate-400">{statusText || (selectedCount ? `已选择 ${selectedCount} 个来源` : '尚未选择来源')}</span>

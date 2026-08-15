@@ -185,19 +185,42 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
   const enqueueSave = useCallback((mode: 'patch' | 'replace', savedPositions: Map<string, VersionTreeCanvasPosition>, before: Map<string, VersionTreeCanvasPosition>, applyOnSuccess?: Map<string, VersionTreeCanvasPosition>) => {
     if (disposedRef.current) return Promise.resolve(false);
     const generation = generationRef.current;
-    const nodeById = new Map(nodesRef.current.map(node => [node.id, node]));
     const operation = saveQueueRef.current.then(async () => {
       if (disposedRef.current || generation !== generationRef.current) return false;
-      const payload = [...savedPositions].flatMap(([id, position]) => {
-        const node = nodeById.get(id);
-        return node ? [{ nodeKey: node.nodeKey, x: position.x, y: position.y }] : [];
-      });
-      const result = await window.electronAPI.saveVersionTreeLayout(workspacePath, projectName, {
+      const buildPayload = () => {
+        const nodeById = new Map(nodesRef.current.map(node => [node.id, node]));
+        return [...savedPositions].flatMap(([id, position]) => {
+          const node = nodeById.get(id);
+          return node ? [{ nodeKey: node.nodeKey, x: position.x, y: position.y }] : [];
+        });
+      };
+      let payload = buildPayload();
+      let result = await window.electronAPI.saveVersionTreeLayout(workspacePath, projectName, {
         scopeKey,
         expectedRevision: revisionRef.current,
         mode,
         positions: payload,
       }).catch(error => ({ success: false, error: error instanceof Error ? error.message : String(error) }));
+      if (!result.success && String(result.error || '').startsWith('stale_layout:')) {
+        const latest = await window.electronAPI.getVersionTreeLayout(workspacePath, projectName, scopeKey).catch(error => ({
+          success: false,
+          revision: revisionRef.current,
+          positions: [],
+          error: error instanceof Error ? error.message : String(error),
+        }));
+        if (disposedRef.current || generation !== generationRef.current) return false;
+        if (latest.success) {
+          revisionRef.current = latest.revision;
+          payload = buildPayload();
+          if (!payload.length && savedPositions.size) return true;
+          result = await window.electronAPI.saveVersionTreeLayout(workspacePath, projectName, {
+            scopeKey,
+            expectedRevision: revisionRef.current,
+            mode,
+            positions: payload,
+          }).catch(error => ({ success: false, error: error instanceof Error ? error.message : String(error) }));
+        }
+      }
       if (disposedRef.current || generation !== generationRef.current) return false;
       if (result.success) {
         revisionRef.current = 'revision' in result && result.revision !== undefined ? result.revision : revisionRef.current + 1;

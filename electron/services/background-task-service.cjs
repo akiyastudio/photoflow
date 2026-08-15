@@ -125,6 +125,10 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
           ...(metadata ? { metadata: { ...task.metadata, ...metadata } } : {}),
         });
       },
+      setCancellable: cancellable => {
+        if (task.controller.signal.aborted || TERMINAL_STATES.has(task.state)) return;
+        update(task, { cancellable: Boolean(cancellable) });
+      },
       throwIfCancelled: () => {
         if (task.controller.signal.aborted) {
           const error = new Error('任务已取消');

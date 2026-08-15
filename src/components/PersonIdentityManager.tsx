@@ -1,4 +1,5 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, CheckCircle2, FolderOutput, GripVertical, Image as ImageIcon, Loader2, Trash2, Upload, UserRound, UsersRound, Wand2, X } from 'lucide-react';
 import type { AppConfig, TeamIdentity, TeamIdentityWorkspace, TeamPatchReturnBatchResult, TeamPatchReturnMatch, TeamPatchTask, TeamPersonAssignment, TeamProjectPhoto, TeamWorkflowGenerationProgress, ThumbnailState, WorkspaceProject } from '../types';
@@ -392,6 +393,8 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
   const [similarities, setSimilarities] = useState<NonNullable<TeamIdentityWorkspace['similarities']>>([]);
   const [showAllSubjects, setShowAllSubjects] = useState(false);
   const [draggedWorkflowIdentityId, setDraggedWorkflowIdentityId] = useState('');
+  const [workflowDragTargetId, setWorkflowDragTargetId] = useState('');
+  const workflowOrderDragRef = useRef<{ pointerId: number; sourceIdentityId: string; startX: number; startY: number; moved: boolean } | null>(null);
   const peopleScrollRef = useRef<HTMLElement>(null);
   const pendingPeopleScrollAnchorRef = useRef<{ key: string; top: number; scrollTop: number } | null>(null);
   const load = async (showLoading = true) => {
@@ -682,6 +685,52 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
     const [moved] = nextOrder.splice(sourceIndex, 1);
     nextOrder.splice(targetIndex, 0, moved);
     await savePreferredIdentityOrder(nextOrder, sameWeekIdentityIds, '开工顺序已保存。请重新生成协作流程。');
+  };
+  const workflowIdentityAtPoint = (clientX: number, clientY: number) => document
+    .elementFromPoint(clientX, clientY)
+    ?.closest<HTMLElement>('[data-workflow-identity-id]')
+    ?.dataset.workflowIdentityId || '';
+  const startWorkflowIdentityPointerDrag = (event: ReactPointerEvent<HTMLButtonElement>, sourceIdentityId: string) => {
+    if (workflowOrderLocked || busy || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    workflowOrderDragRef.current = {
+      pointerId: event.pointerId,
+      sourceIdentityId,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+    };
+    setDraggedWorkflowIdentityId(sourceIdentityId);
+    setWorkflowDragTargetId('');
+  };
+  const moveWorkflowIdentityPointerDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const drag = workflowOrderDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    if (!drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 4) return;
+    drag.moved = true;
+    const targetIdentityId = workflowIdentityAtPoint(event.clientX, event.clientY);
+    setWorkflowDragTargetId(targetIdentityId === drag.sourceIdentityId ? '' : targetIdentityId);
+  };
+  const finishWorkflowIdentityPointerDrag = (event: ReactPointerEvent<HTMLButtonElement>, cancelled = false) => {
+    const drag = workflowOrderDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const targetIdentityId = !cancelled && drag.moved ? workflowIdentityAtPoint(event.clientX, event.clientY) : '';
+    workflowOrderDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    setDraggedWorkflowIdentityId('');
+    setWorkflowDragTargetId('');
+    if (targetIdentityId && targetIdentityId !== drag.sourceIdentityId) void movePreferredIdentity(drag.sourceIdentityId, targetIdentityId);
+  };
+  const moveWorkflowIdentityWithKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>, identityId: string, index: number) => {
+    if (workflowOrderLocked || busy || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+    const targetIndex = event.key === 'ArrowLeft' ? index - 1 : index + 1;
+    const targetIdentity = preferredWorkflowIdentities[targetIndex];
+    if (!targetIdentity) return;
+    event.preventDefault();
+    void movePreferredIdentity(identityId, targetIdentity.id);
   };
   const toggleSameWeekIdentity = async (identityId: string) => {
     if (!preferredIdentityOrder.slice(1).includes(identityId)) return;
@@ -1009,7 +1058,34 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
         <label title={workflowOrderLocked ? '已有任务返图或完成，开工顺序已锁定' : workspace.workflowNeedsRegeneration ? '排期已调整，请重新生成协作流程' : workspace.workflowGenerated ? '仍可调整优先顺序；修改后需要重新生成协作流程' : '加入多个人物后，可在下方拖拽调整优先顺序'} className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-600"><span>优先队列</span><select value="" disabled={Boolean(busy) || workflowOrderLocked || !availableWorkflowIdentities.length} onChange={event => void addPreferredIdentity(event.target.value)} className="max-w-44 bg-transparent text-xs font-medium text-slate-700 outline-none disabled:cursor-not-allowed disabled:text-slate-400"><option value="">{preferredIdentityOrder.length ? `已排序 ${preferredIdentityOrder.length} 人 · 添加人物` : '自动排期 · 添加人物'}</option>{availableWorkflowIdentities.map(identity => <option key={identity.id} value={identity.id}>{identity.name}</option>)}</select>{busy === 'workflow-settings' && <Loader2 size={13} className="animate-spin"/>}</label>
         {workflowOrderLocked ? <span className="text-[11px] text-amber-600">已有返图或完成，顺序已锁定</span> : workspace.workflowNeedsRegeneration ? <span className="text-[11px] font-bold text-amber-600">排期已调整 · 请重新生成</span> : workspace.workflowGenerated ? <span className="text-[11px] text-blue-600">流程已生成 · 仍可调整顺序</span> : null}<TeamOutputProgressPicker controller={outputProgress} disabled={Boolean(busy)}/><button disabled={!workflowGroups.size || Boolean(busy) || workflowGenerating} onClick={() => void generateWorkflow()} className="dialog-secondary ml-auto inline-flex items-center gap-2">{workflowGenerating ? <Loader2 size={15} className="animate-spin"/> : <FolderOutput size={15}/>} {workflowGenerating ? `生成中 ${Math.round(workflowGeneration.progress)}%` : workspace.workflowGenerated ? '重新生成协作流程' : '生成协作流程'}</button>{workflowReturnResult?.reviewSessionId && !workflowReturnReviewOpen && <button disabled={Boolean(busy)} onClick={() => setWorkflowReturnReviewOpen(true)} className="dialog-secondary inline-flex items-center gap-2"><CheckCircle2 size={15}/>继续处理未确认返图（{pendingWorkflowReturnReviewCount}）</button>}<button disabled={!workflowReady || !readyWorkflowItems.length || Boolean(busy) || Boolean(workflowReturnResult?.reviewSessionId)} title={workflowReturnResult?.reviewSessionId ? '请先继续处理或放弃当前未确认返图批次' : undefined} onClick={() => void receiveWorkflowBatch(readyWorkflowItems)} className="dialog-primary inline-flex items-center gap-2">{busy === 'workflow-return' ? <Loader2 size={15} className="animate-spin"/> : <Upload size={15}/>}导入并匹配返图</button><button disabled={!mergeablePhotos.length || Boolean(busy)} onClick={() => void mergeCompletedPhotos()} className="dialog-primary inline-flex items-center gap-2">{busy === 'merge-workflow' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}合成已完成照片（{mergeablePhotos.length}）</button>
       </div>
-      {!!preferredWorkflowIdentities.length && <div className="flex min-h-12 flex-wrap items-center gap-2 border-b border-violet-100 bg-violet-50/70 px-5 py-2"><span className="mr-1 text-xs font-bold text-violet-800">拖拽开工顺序</span>{preferredWorkflowIdentities.map((identity, index) => <div key={identity.id} className="contents">{index > 0 && <button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void toggleSameWeekIdentity(identity.id)} title={sameWeekIdentityIds.includes(identity.id) ? `“${identity.name}”与前一人物同周开始，点击改为下一周` : `“${identity.name}”在前一人物之后开始，点击改为同周`} className={`rounded-full border px-2 py-1 text-xs font-black transition disabled:opacity-40 ${sameWeekIdentityIds.includes(identity.id) ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-violet-200 bg-white text-violet-500'}`}>{sameWeekIdentityIds.includes(identity.id) ? '＋' : '→'}</button>}<div draggable={!workflowOrderLocked && !busy} onDragStart={event => { setDraggedWorkflowIdentityId(identity.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', identity.id); }} onDragOver={event => { if (!workflowOrderLocked && !busy) { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; } }} onDrop={event => { event.preventDefault(); const sourceIdentityId = draggedWorkflowIdentityId || event.dataTransfer.getData('text/plain'); setDraggedWorkflowIdentityId(''); void movePreferredIdentity(sourceIdentityId, identity.id); }} onDragEnd={() => setDraggedWorkflowIdentityId('')} className={`inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-white py-1 pl-1.5 pr-2 text-xs font-bold text-violet-800 shadow-sm ${draggedWorkflowIdentityId === identity.id ? 'opacity-40' : ''} ${workflowOrderLocked || busy ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'}`}><GripVertical size={13} className="text-violet-400"/><span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-violet-100 px-1 text-[10px] text-violet-700">{index + 1}</span><span className="max-w-32 truncate">{identity.name}</span><button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void removePreferredIdentity(identity.id)} title={`将“${identity.name}”交回自动排期`} className="ml-0.5 rounded-full p-0.5 text-violet-400 hover:bg-violet-100 hover:text-violet-700 disabled:opacity-40"><X size={12}/></button></div></div>)}<span className="text-[11px] text-violet-600">点击 ＋/→ 切换同周或下一周；其他人物自动排期。</span><button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void savePreferredIdentityOrder([], [], '已恢复自动排期。请重新生成协作流程。')} className="ml-auto text-xs font-bold text-violet-700 hover:text-violet-900 disabled:opacity-40">全部恢复自动</button></div>}
+      {!!preferredWorkflowIdentities.length && <div className="flex min-h-12 flex-wrap items-center gap-2 border-b border-violet-100 bg-violet-50/70 px-5 py-2">
+        <span className="mr-1 text-xs font-bold text-violet-800">拖拽开工顺序</span>
+        {preferredWorkflowIdentities.map((identity, index) => <div key={identity.id} className="contents">
+          {index > 0 && <button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void toggleSameWeekIdentity(identity.id)} title={sameWeekIdentityIds.includes(identity.id) ? `“${identity.name}”与前一人物同周开始，点击改为下一周` : `“${identity.name}”在前一人物之后开始，点击改为同周`} className={`rounded-full border px-2 py-1 text-xs font-black transition disabled:opacity-40 ${sameWeekIdentityIds.includes(identity.id) ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-violet-200 bg-white text-violet-500'}`}>{sameWeekIdentityIds.includes(identity.id) ? '＋' : '→'}</button>}
+          <div
+            data-workflow-identity-id={identity.id}
+            className={`inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-white py-1 pl-1 pr-2 text-xs font-bold text-violet-800 shadow-sm transition ${draggedWorkflowIdentityId === identity.id ? 'opacity-45' : ''} ${workflowDragTargetId === identity.id ? 'ring-2 ring-violet-400 ring-offset-1' : ''}`}
+          >
+            <button
+              type="button"
+              disabled={workflowOrderLocked || Boolean(busy)}
+              aria-label={`拖动调整“${identity.name}”的开工顺序`}
+              title="按住拖到另一人物；也可用左右方向键调整"
+              onPointerDown={event => startWorkflowIdentityPointerDrag(event, identity.id)}
+              onPointerMove={moveWorkflowIdentityPointerDrag}
+              onPointerUp={event => finishWorkflowIdentityPointerDrag(event)}
+              onPointerCancel={event => finishWorkflowIdentityPointerDrag(event, true)}
+              onKeyDown={event => moveWorkflowIdentityWithKeyboard(event, identity.id, index)}
+              className="touch-none select-none rounded-full p-0.5 text-violet-400 hover:bg-violet-100 hover:text-violet-700 disabled:cursor-default disabled:opacity-40 enabled:cursor-grab enabled:active:cursor-grabbing"
+            ><GripVertical size={14}/></button>
+            <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-violet-100 px-1 text-[10px] text-violet-700">{index + 1}</span>
+            <span className="max-w-32 truncate">{identity.name}</span>
+            <button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void removePreferredIdentity(identity.id)} title={`将“${identity.name}”交回自动排期`} className="ml-0.5 rounded-full p-0.5 text-violet-400 hover:bg-violet-100 hover:text-violet-700 disabled:opacity-40"><X size={12}/></button>
+          </div>
+        </div>)}
+        <span className="text-[11px] text-violet-600">按住六点拖到另一人物；点击 ＋/→ 切换同周或下一周；其他人物自动排期。</span>
+        <button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void savePreferredIdentityOrder([], [], '已恢复自动排期。请重新生成协作流程。')} className="ml-auto text-xs font-bold text-violet-700 hover:text-violet-900 disabled:opacity-40">全部恢复自动</button>
+      </div>}
     </>}
     {workflowGenerating && workflowGeneration && <div className="border-b border-blue-100 bg-blue-50 px-5 py-3">
       <div className="flex items-center gap-4 text-xs">

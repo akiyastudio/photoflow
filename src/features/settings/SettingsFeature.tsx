@@ -476,8 +476,10 @@ const SdDriveHistorySettings = ({ value, onChange }: { value: AppConfig['smartIm
   const remove = (path: string) => {
     const sdPaths = selectedPaths.filter(item => item !== path);
     const sdDriveTypes = { ...value.sdDriveTypes };
+    const sdDeviceIds = { ...(value.sdDeviceIds || {}) };
     delete sdDriveTypes[path];
-    onChange({ ...value, sdPath: sdPaths[0] || '', sdPaths, sdDriveTypes });
+    delete sdDeviceIds[path];
+    onChange({ ...value, sdPath: sdPaths[0] || '', sdPaths, sdDriveTypes, sdDeviceIds });
   };
   const clear = async () => {
     if (!historyPaths.length || !await appDialog.confirm({
@@ -487,7 +489,7 @@ const SdDriveHistorySettings = ({ value, onChange }: { value: AppConfig['smartIm
       cancelLabel: '取消',
       tone: 'danger',
     })) return;
-    onChange({ ...value, sdPath: '', sdPaths: [], sdDriveTypes: {} });
+    onChange({ ...value, sdPath: '', sdPaths: [], sdDriveTypes: {}, sdDeviceIds: {} });
   };
   return <div className="settings-group-card overflow-hidden rounded-xl border border-slate-200 bg-white">
     {historyPaths.length ? <div className="divide-y divide-slate-200">{historyPaths.map(path => {
@@ -950,7 +952,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       <SettingsRow title="导入花絮时执行视频转码" description="仅处理导入的花絮视频；使用同一个视频转码面板参数。"><div className="flex items-center justify-end gap-3"><button type="button" className="dialog-secondary px-3 py-1.5 text-xs" onClick={() => setImportVideoPanel('transcode')}>打开视频转码面板</button><SettingsToggle label="导入花絮时执行视频转码" checked={draft.brollImport.transcodeVideosOnImport} onChange={checked => { update('brollImport', { ...draft.brollImport, transcodeVideosOnImport: checked }); if (checked) setImportVideoPanel('transcode'); }}/></div></SettingsRow>
     </SettingsPageGroup>
     <SettingsPageGroup title="从 SD 卡导入">
-      <SettingsRow title="启动时自动从 SD 卡导入" description="启动时检查已启用的 SD 卡并打开导入。"><SettingsToggle label="启动时自动从 SD 卡导入" checked={draft.smartImport.autoStart} onChange={checked => update('smartImport', { ...draft.smartImport, autoStart: checked })}/></SettingsRow>
+      <SettingsRow title="启动时自动从 SD 卡导入" description="应用完成启动后，检查所有已启用且已连接的 SD 卡并自动开始批量导入。"><SettingsToggle label="启动时自动从 SD 卡导入" checked={draft.smartImport.autoStart} onChange={checked => update('smartImport', { ...draft.smartImport, autoStart: checked })}/></SettingsRow>
       <SettingsRow title="导入日期范围" description="限制从真实 SD 卡读取的素材拍摄日期。"><select value={draft.smartImport.dateFilter} onChange={event => update('smartImport', { ...draft.smartImport, dateFilter: event.target.value as AppConfig['smartImport']['dateFilter'] })} className="form-input ml-auto max-w-sm"><option value="all">全部素材</option><option value="today">仅今天拍摄的素材</option><option value="today_yesterday">今天和昨天拍摄的素材</option></select></SettingsRow>
       <SettingsRow title="已记录的 SD 卡设备" description="管理设备是否用于导入，以及默认作为工作文件还是花絮。" align="start"><SdDriveHistorySettings value={draft.smartImport} onChange={smartImport => update('smartImport', smartImport)}/></SettingsRow>
     </SettingsPageGroup>

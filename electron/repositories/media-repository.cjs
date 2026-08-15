@@ -26,6 +26,7 @@ const createMediaRepository = client => ({
   replaceVersionGraphEdgeSource: (root, payload) => client.call(root, 'version_graph_edge_replace_source', payload),
   getVersionTreeLayout: (root, payload) => client.call(root, 'version_tree_layout_get', payload),
   saveVersionTreeLayout: (root, payload) => client.call(root, 'version_tree_layout_save', payload),
+  unregisterProgress: (root, payload) => client.call(root, 'progress_unregister', payload),
   deleteMissingProgress: (root, payload) => client.call(root, 'progress_delete_missing', payload),
   registerBatchBaseline: (root, payload) => client.call(root, 'batch_register_baseline', payload),
   commitBatchCompare: (root, payload) => client.call(root, 'batch_commit_compare', payload),

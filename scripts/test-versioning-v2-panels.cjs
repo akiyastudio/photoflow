@@ -39,7 +39,7 @@ class TestNode extends TestEventTarget {
     return null;
   }
 }
-const layoutRequests = { loads: 0, saves: [], failLoadBudget: 0, failNextSave: false, revision: 0, positions: [], holdSaves: false, saveReleases: [] };
+const layoutRequests = { loads: 0, saves: [], failLoadBudget: 0, failNextSave: false, staleNextSave: false, revision: 0, positions: [], holdSaves: false, saveReleases: [] };
 const testWindow = Object.assign(new TestEventTarget(), { HTMLElement: TestNode, HTMLIFrameElement: class {}, Node: TestNode, getSelection: () => null, electronAPI: {
   async getVersionTreeLayout() {
     layoutRequests.loads += 1;
@@ -52,6 +52,7 @@ const testWindow = Object.assign(new TestEventTarget(), { HTMLElement: TestNode,
   async saveVersionTreeLayout(_workspacePath, _projectName, request) {
     layoutRequests.saves.push(request);
     if (layoutRequests.holdSaves) await new Promise(resolve => layoutRequests.saveReleases.push(resolve));
+    if (layoutRequests.staleNextSave) { layoutRequests.staleNextSave = false; layoutRequests.revision += 1; return { success: false, error: `stale_layout: 布局已更新（当前 revision=${layoutRequests.revision}）` }; }
     if (layoutRequests.failNextSave) { layoutRequests.failNextSave = false; return { success: false, error: 'simulated layout failure' }; }
     layoutRequests.revision += 1;
     if (request.mode === 'replace') layoutRequests.positions = request.positions;
@@ -76,7 +77,9 @@ global.window = testWindow; global.document = testDocument; global.navigator = {
 const compile = relativePath => ts.transpileModule(fs.readFileSync(path.resolve(__dirname, '..', relativePath), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
 const loadCommonJs = (source, localRequire = require) => { const module = { exports: {} }; new Function('module', 'exports', 'require', source)(module, module.exports, localRequire); return module.exports; };
 const model = loadCommonJs(compile('src/features/versioning/versioning-v2-model.ts'));
-const panel = loadCommonJs(compile('src/features/versioning/VersionProgressPanel.tsx'), request => request === './versioning-v2-model' ? model : require(request));
+const panelSwitch = loadCommonJs(compile('src/components/PanelSwitch.tsx'));
+const importSourceControls = loadCommonJs(compile('src/components/ImportSourceControls.tsx'), request => request === './PanelSwitch' ? panelSwitch : require(request));
+const panel = loadCommonJs(compile('src/features/versioning/VersionProgressPanel.tsx'), request => request === './versioning-v2-model' ? model : request === '../../components/ImportSourceControls' ? importSourceControls : require(request));
 const canvasModel = loadCommonJs(compile('src/features/versioning/version-tree-canvas-model.ts'));
 const edgeModel = loadCommonJs(compile('src/features/versioning/version-tree-edge-model.ts'));
 const layoutModel = loadCommonJs(compile('src/features/versioning/version-tree-layout-model.ts'), request => request === './version-tree-edge-model.ts' ? edgeModel : require(request));
@@ -86,13 +89,16 @@ const projectWorkspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'sr
 assert(canvasHookSource.includes('sameCanvasPositions(positionsRef.current, next)'), 'version-tree layout reconciliation must skip identical maps to prevent effect update loops');
 assert(projectWorkspaceSource.includes("progressSetup.existingProgressId ? 'modify' : 'create'"), 'newly marked folders must use the complete editable version panel');
 assert(projectWorkspaceSource.includes("(source.nodeRole !== 'original' && source.nodeRole !== 'progress')"), 'drag-to-create must accept both original material and version progress as structural parents');
-assert(projectWorkspaceSource.includes('void submitProgressSetup({ ...nextDraft, contextLocked: true, openEditorAfterCreate: true })'), 'dragging a version line to an ordinary folder must submit directly before opening the created node editor');
-assert(projectWorkspaceSource.includes("targetRelativePath,\n      trackingEnabled: false,\n      preserveFolderName: true"), 'drag-to-create must register the version relationship without starting tracking before the user enables it');
-assert(projectWorkspaceSource.includes('const openCreatedProgressEditor = () =>') && projectWorkspaceSource.includes('existingProgressId: progressFolder.id'), 'a successful drag-to-create must reopen the registered node in modify mode rather than asking for creation confirmation');
+assert(projectWorkspaceSource.includes("setProgressSetup({ ...nextDraft, contextLocked: true })"), 'dragging a version line to an ordinary or managed external folder must open the locked progress settings panel');
+assert(projectWorkspaceSource.includes("targetRelativePath,\n      trackingEnabled: false,\n      preserveFolderName: true"), 'drag-to-create must prefill tracking as disabled before the user submits the mark-progress panel');
+assert(projectWorkspaceSource.includes('projectWorkspaceClient.unregisterProgressFolder(workspacePath, project.name, childProgressId)'), 'removing a structural version relation must unregister the folder instead of retaining a detached version node');
 assert(projectWorkspaceSource.includes('committedWorkflowInputIds.size === nextWorkflowInputProgressIds.length'), 'structural relation updates must verify obsolete derived selection inputs were removed');
 assert(projectWorkspaceSource.includes("edge.edgeKind !== 'workflow_input' || edge.targetProgressId !== childProgressId"), 'the renderer must immediately replace a child version\'s workflow inputs after its structural parent changes');
 assert(!projectWorkspaceSource.includes('workflowInputProgressIds: [],'), 'editing a version must never erase its derived selection input');
 assert(projectWorkspaceSource.includes('workflowInputIdsForRelationChange(progressFolders, versionGraphEdges, current.existingProgressId'), 'editing a version must recompute its workflow inputs from the selected structural parent');
+assert(projectWorkspaceSource.includes("progressFolders.filter(folder => folder.nodeRole === 'progress' && !folder.parentProgressId") && projectWorkspaceSource.includes('unregisterProgressFolder'), 'detached progress records must be cleaned up instead of lingering as unusable version nodes');
+assert(!projectWorkspaceSource.includes('relationReconnect: true'), 'removed detached records must not retain the obsolete reconnect intake path');
+assert(projectWorkspaceSource.includes("progressSetup?.mode === 'mark' && !progressSetup.existingProgressId ? '标记版本进度'"), 'connecting an ordinary folder must open the mark-progress panel before persistence');
 const workspaceGridModel = loadCommonJs(compile('src/features/workspace/marquee-selection-model.ts'));
 const tree = loadCommonJs(compile('src/components/ProjectVersionTree.tsx'), request => {
   if (request === '../features/versioning/versioning-v2-model') return model;
@@ -125,21 +131,32 @@ const dispatch = (target, type, extra = {}) => {
   return event;
 };
 const folders = [{ id: 'raw', projectId: 'p', mediaKind: 'image', versionKey: 'import-d7439bee24773bcbfa2d0a97', displayName: 'RAW', folderPath: 'C:/p/RAW', folderMissing: false, nodeRole: 'original', relationKind: 'main', trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false, trackingState: 'disabled', trackingSnapshot: {}, tombstone: {}, createdAt: 1, updatedAt: 1 }];
-const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mode === 'create' ? '新进度' : 'RAW', mediaKind: 'image', relationKind: 'main', parentProgressId: 'raw', trackingEnabled: true, renameFromParent: true, copyMissingFromParent: true, workflowInputProgressIds: ['selection'] });
+const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mode === 'create' ? '新进度' : 'RAW', mediaKind: 'image', relationKind: 'main', parentProgressId: 'raw', versionKey: '1', versionKind: 'main', trackingEnabled: true, renameFromParent: true, copyMissingFromParent: true, workflowInputProgressIds: ['selection'] });
 
 (async () => {
   const container = new TestNode(1, 'DIV', testDocument);
   const root = createRoot(container);
-  for (const mode of ['create', 'import', 'modify']) {
+  for (const mode of ['create', 'modify']) {
     await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: draft(mode), folders, onChange() {}, onSubmit() {}, onClose() {}, onChooseFolder() {} })));
     const content = textContent(container);
     assert(content.includes('版本跟踪') && content.includes('沿用上一版本文件名') && content.includes('补齐缺失媒体'));
     assert(!content.includes('高级跟踪设置') && !allNodes(container).some(node => node.nodeName === 'DETAILS'), 'tracking policy options must stay visible without a redundant disclosure section');
     assert(content.includes('原始素材 → V1') && !content.includes('import-'), 'internal original-node version keys must never leak into the version creation UI');
     assert(!content.includes('节点用途') && !content.includes('工作流输入'), `${mode} settings must not expose relation types or collaboration inputs`);
-    if (mode === 'create' || mode === 'import') assert(content.includes('将创建') && content.includes('图片') && content.includes('视频') && content.includes('项目根目录'), `${mode} must share the derived version/name summary`);
-    if (mode === 'import') assert(content.includes('导入来源稍后选择') && content.includes('所选文件夹将移动到项目根目录'));
+    if (mode === 'create') assert(content.includes('将创建') && content.includes('图片') && content.includes('视频') && content.includes('项目根目录'), `${mode} must show the derived version/name summary`);
   }
+  const importChanges = [];
+  await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('import'), sourcePaths: ['C:/source'] }, folders, importStep: 'source', onImportStepChange(step) { importChanges.push(step); }, onChange() {}, onSubmit() {}, onClose() {}, onChooseFolder() {} })));
+  const sourceContent = textContent(container);
+  assert(sourceContent.includes('先选择需要导入的来源') && sourceContent.includes('下一步：设置进度'), 'import must begin with a dedicated source-selection panel');
+  assert(!sourceContent.includes('版本跟踪') && !sourceContent.includes('创建版本'), 'source selection must not be merged with version settings');
+  const nextButton = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('下一步：设置进度'));
+  await React.act(async () => dispatch(nextButton, 'click'));
+  assert.strictEqual(importChanges.at(-1), 'settings');
+  await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('import'), sourcePaths: ['C:/source'] }, folders, importStep: 'settings', onImportStepChange(step) { importChanges.push(step); }, onChange() {}, onSubmit() {}, onClose() {}, onChooseFolder() {} })));
+  const importSettingsContent = textContent(container);
+  assert(importSettingsContent.includes('版本跟踪') && importSettingsContent.includes('创建版本') && importSettingsContent.includes('返回重新选择'), 'the second import step must show version settings and a route back to source selection');
+  assert(!importSettingsContent.includes('选择或拖入进度文件/文件夹'), 'the source picker must not remain embedded in the version settings panel');
   const v2Parent = { ...folders[0], id: 'v2', nodeRole: 'progress', versionKey: '2', parentProgressId: 'raw' };
   const createNextChanges = [];
   await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('create-next'), parentProgressId: 'v2', versionKey: '3', versionKind: 'main' }, folders: [...folders, v2Parent], onChange(next) { createNextChanges.push(next); }, onSubmit() {}, onClose() {} })));
@@ -165,6 +182,13 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const nestedMainButton = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('继续当前分支'));
   await React.act(async () => dispatch(nestedMainButton, 'click'));
   assert.strictEqual(branchMainChanges.at(-1).versionKey, '1_2', 'switching back to main must restore the branch-line successor');
+  await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: branchMainChanges.at(-1), folders: [...folders, v2Parent, v1BranchParent], onChange(next) { branchMainChanges.push(next); }, onSubmit() {}, onClose() {} })));
+  const mainVersionIndex = allNodes(container).find(node => node.nodeName === 'INPUT' && node.attributes.get('aria-label') === '版本序号');
+  assert(mainVersionIndex, 'the panel must expose a numeric-only final version segment');
+  assert.strictEqual(mainVersionIndex.value, '2', 'the input must contain only the final segment while V1_ remains system-generated');
+  await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...branchMainChanges.at(-1), versionKind: 'branch', versionKey: '1_1_1' }, folders: [...folders, v2Parent, v1BranchParent], onChange() {}, onSubmit() {}, onClose() {} })));
+  const branchVersionIndex = allNodes(container).find(node => node.nodeName === 'INPUT' && node.attributes.get('aria-label') === '版本序号');
+  assert.strictEqual(branchVersionIndex.value, '1', 'a child branch input must expose only its final number while V1_1_ remains system-generated');
   await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...branchMainChanges.at(-1), mode: 'create' }, folders: [...folders, v2Parent, v1BranchParent], onChange(next) { branchMainChanges.push(next); }, onSubmit() {}, onClose() {} })));
   const createNextParentSelect = allNodes(container).find(node => node.nodeName === 'SELECT');
   createNextParentSelect.value = 'v2';
@@ -177,6 +201,13 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const emptyMediaDraft = { ...draft('create'), mediaKind: 'video', parentProgressId: '', versionKey: '1', versionKind: 'main' };
   await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: emptyMediaDraft, folders, onChange() {}, onSubmit() {}, onClose() {} })));
   assert(textContent(container).includes('无父版本（建立首个版本）') && textContent(container).includes('将创建首个版本 V1'), 'only an empty media graph may create a parentless first version');
+  await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: draft('create'), folders, onChange() {}, onSubmit() {}, onClose() {} })));
+  const rawMainVersionIndex = allNodes(container).find(node => node.nodeName === 'INPUT' && node.attributes.get('aria-label') === '版本序号');
+  assert.strictEqual(rawMainVersionIndex.value, '1', 'a main version under original material must expose only its numeric index without an internal prefix');
+  const duplicateV17 = { ...v2Parent, id: 'v1-7', versionKey: '1_7', parentProgressId: 'v1-1' };
+  await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('create-next'), parentProgressId: 'v1-1', versionKey: '1_7', versionKind: 'main' }, folders: [...folders, v2Parent, v1BranchParent, duplicateV17], onChange() {}, onSubmit() {}, onClose() {} })));
+  const duplicateSubmit = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.has('disabled'));
+  assert(textContent(container).includes('版本 V1_7 已存在') && duplicateSubmit, 'a custom final number must not create a duplicate version key');
   const rawBranchChanges = [];
   await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('modify'), parentProgressId: 'raw', versionKey: 'import-d7439bee24773bcbfa2d0a97', versionKind: 'main' }, folders, onChange(next) { rawBranchChanges.push(next); }, onSubmit() {}, onClose() {} })));
   const rawBranchButton = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('创建子分支'));
@@ -268,7 +299,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     workspacePath: 'C:/workspace',
     projectName: 'Project',
     projectRelativePath: value => value.split('/').pop(),
-    renderEntry: entry => React.createElement('div', { onClick() { entryOpenClicks += 1; } }, entry.name),
+    renderEntry: (entry, _folder, sourceKind) => React.createElement('div', { 'data-source-kind': sourceKind, onClick() { entryOpenClicks += 1; } }, entry.name),
     pendingChildId: 'tracked',
     onBeginRelationEdit() {},
     onHoverRelationParent() {},
@@ -355,6 +386,8 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const shelfEntries = [...entries,
     { kind: 'folder', name: 'Other B', relativePath: 'Other B', path: 'C:/p/Other B', extension: '', size: 0, createdAt: 11, updatedAt: 11 },
     { kind: 'folder', name: 'Other C', relativePath: 'Other C', path: 'C:/p/Other C', extension: '', size: 0, createdAt: 12, updatedAt: 12 },
+    { kind: 'shortcut', name: 'External RAW.lnk', relativePath: 'External RAW.lnk', path: 'C:/p/External RAW.lnk', extension: '.lnk', size: 0, createdAt: 13, updatedAt: 13, externalLink: true, externalLinkTarget: 'D:/shoot/RAW' },
+    { kind: 'shortcut', name: 'raw.lnk', relativePath: 'raw.lnk', path: 'C:/p/raw.lnk', extension: '.lnk', size: 0, createdAt: 14, updatedAt: 14, externalLink: true, externalLinkTarget: 'E:/legacy/raw' },
   ];
   await React.act(async () => {
     root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, entries: shelfEntries, structureEntries: shelfEntries }));
@@ -365,6 +398,17 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const shelfLefts = ['entry:other', 'entry:other b', 'entry:other c'].map(key => parseFloat(allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === key)?.style.left));
   assert.strictEqual(shelfLefts[1] - shelfLefts[0], treeProps.gridIconSize + workspaceGridModel.FILE_GRID_GAP, 'ordinary folders must reuse the standard icon-grid gap');
   assert.strictEqual(shelfLefts[2] - shelfLefts[1], treeProps.gridIconSize + workspaceGridModel.FILE_GRID_GAP, 'every ordinary folder must keep the standard icon-grid pitch');
+  assert(allNodes(container).some(node => node.attributes.get('data-version-output-target-key') === 'entry:external raw.lnk'), 'an untracked managed external folder must appear as a regular folder node in the version tree');
+  const inferredLegacyOriginal = allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === 'entry:raw.lnk');
+  assert(inferredLegacyOriginal && allNodes(inferredLegacyOriginal).some(node => node.attributes.get('data-source-kind') === 'image'), 'an existing canonical RAW external link without historical role metadata must be inferred into the image original-material area instead of Other');
+  const externalProgress = { ...freeProgress, id: 'external-progress', displayName: 'External RAW', folderPath: 'D:/shoot/RAW', nodeRole: 'original', versionKey: 'original-external', createdAt: 13, updatedAt: 13 };
+  await React.act(async () => {
+    root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, entries: shelfEntries, structureEntries: shelfEntries, progressFolders: [...treeProps.progressFolders, externalProgress] }));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  const externalProgressNode = allNodes(container).find(node => node.attributes.get('data-version-progress-id') === 'external-progress');
+  assert(externalProgressNode && externalProgressNode.textContent.includes('External RAW.lnk'), 'a managed external folder must remain visible after it is registered as a version node');
+  assert.strictEqual(externalProgressNode.attributes.get('data-node-role'), 'original', 'a linked original-material folder must render as an original node instead of remaining an ordinary Other entry');
   await React.act(async () => {
     root.render(React.createElement(tree.ProjectVersionTree, treeProps));
     await Promise.resolve(); await Promise.resolve();
@@ -405,8 +449,21 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.deepStrictEqual({ left: imageArea.style.left, top: imageArea.style.top, width: imageArea.style.width, height: imageArea.style.height }, imageAreaBeforeDrag, 'ordinary node movement must not resize or chase its semantic frame');
   const movedMainPath = allNodes(container).find(node => node.nodeName === 'path' && node.attributes.get('data-relation-kind') === 'main' && node.attributes.has('marker-end'))?.attributes.get('d');
   assert.notStrictEqual(movedMainPath, initialMainPath, 'relation paths must update during local node movement');
-  const savedLeft = rawCanvasNode.style.left;
-  const savedTop = rawCanvasNode.style.top;
+  let savedLeft = rawCanvasNode.style.left;
+  let savedTop = rawCanvasNode.style.top;
+  const savesBeforeStaleRetry = layoutRequests.saves.length;
+  const noticesBeforeStaleRetry = layoutNotices.length;
+  layoutRequests.staleNextSave = true;
+  await React.act(async () => {
+    dispatch(rawCanvasNode, 'pointerdown', { pointerId: 420, button: 0, clientX: 700, clientY: 600 });
+    dispatch(rawCanvasNode, 'pointermove', { pointerId: 420, button: 0, clientX: 720, clientY: 620 });
+    dispatch(rawCanvasNode, 'pointerup', { pointerId: 420, button: 0, clientX: 720, clientY: 620 });
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  });
+  assert.strictEqual(layoutRequests.saves.length, savesBeforeStaleRetry + 2, 'stale layout saves must reload the revision and retry exactly once');
+  assert.strictEqual(layoutNotices.length, noticesBeforeStaleRetry, 'a recovered stale layout save must not show an error notice');
+  savedLeft = rawCanvasNode.style.left;
+  savedTop = rawCanvasNode.style.top;
   const loadsBeforeFailure = layoutRequests.loads;
   layoutRequests.failNextSave = true;
   await React.act(async () => {

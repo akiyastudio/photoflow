@@ -6,6 +6,7 @@ import sys
 import json
 import os
 import subprocess
+import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -80,17 +81,34 @@ def main():
         chinese_output = chinese_directory / "角色生日 录像_剪辑.mp4"
         chinese_source.write_bytes(b"source video")
 
-        def fake_trim_run(command, **_kwargs):
-            assert command.index("-ss") > command.index("-i")
-            assert "-c:v" in command and "libx264" in command
-            assert "-c" not in command or command[command.index("-c") + 1] != "copy"
-            Path(command[-1]).write_bytes(b"trimmed video")
-            return subprocess.CompletedProcess(command, 0, "", "")
+        captured_trim_commands = []
+
+        class FakeTrimProcess:
+            def __init__(self, command):
+                captured_trim_commands.append(command)
+                assert command.index("-ss") > command.index("-i")
+                assert "-c:v" in command and "libx264" in command
+                assert "-c" not in command or command[command.index("-c") + 1] != "copy"
+                Path(command[-1]).write_bytes(b"trimmed video")
+                self.stdout = ["out_time_us=9250000\n"]
+                self.stderr = io.StringIO("")
+
+            def wait(self, timeout=None):
+                return 0
+
+            def poll(self):
+                return 0
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                return None
 
         probe_values = iter([13.0, 9.25])
         with mock.patch.object(cut_video, "probe_duration", side_effect=lambda *_args: next(probe_values)), \
                 mock.patch.object(cut_video, "get_ffmpeg_exe", return_value="ffmpeg"), \
-                mock.patch.object(cut_video.subprocess, "run", side_effect=fake_trim_run):
+                mock.patch.object(cut_video.subprocess, "Popen", side_effect=lambda command, **_kwargs: FakeTrimProcess(command)):
             trim_result = cut_video.trim_video_losslessly(
                 str(chinese_source), 1.25, 10.5, str(chinese_output),
             )
@@ -98,6 +116,7 @@ def main():
         assert Path(trim_result["output"]) == chinese_output
         assert chinese_output.read_bytes() == b"trimmed video"
         assert not any(chinese_directory.glob("*.photoflow-part.mp4"))
+        assert captured_trim_commands
         assert trim_result["exactTranscodeUsed"] is True
 
     with TemporaryDirectory() as temporary_directory:

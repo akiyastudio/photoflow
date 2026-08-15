@@ -617,6 +617,8 @@ const run = async () => {
       activeProjectFileOperations: new Map(), assertDiskSpace, assertInside, assertExistingInside, uniqueDestination, movePathAtomic,
       collectCopyPlan: async (...args) => { importCopyPlanCalls += 1; return collectCopyPlan(...args); },
       copyPlannedFiles, removeCopiedSources, throwIfCancelled, shell: importShell,
+      mediaRuntimeState: {}, mediaService: { grantRoot: () => undefined }, normalizeMediaCacheSizeGB: value => value || 1,
+      thumbnailService: { indexDirectory: () => undefined },
       versionService: {
         listProgress: async () => ({ progressFolders: materializedProgressFolders }),
         registerProgress: async (_workspaceRoot, request) => {
@@ -673,8 +675,27 @@ const run = async () => {
     );
     assert.strictEqual(linkedFiles.success, true, linkedFiles.error);
     assert.strictEqual(linkedFiles.linked, true);
+    assert.deepStrictEqual(linkedFiles.items.map(item => ({ relativePath: item.relativePath, kind: item.kind })), [
+      { relativePath: 'linked-folder-source.lnk', kind: 'folder' },
+      { relativePath: 'linked-file-source.jpg.lnk', kind: 'file' },
+    ], 'link-only imports must return the exact managed entries so semantic import flows can register their version-tree roles');
+    assert.deepStrictEqual(linkedFiles.items.map(item => ({ relativePath: item.relativePath, kind: item.kind })), [
+      { relativePath: 'linked-folder-source.lnk', kind: 'folder' },
+      { relativePath: 'linked-file-source.jpg.lnk', kind: 'file' },
+    ], 'link-only imports must return the exact managed entries so semantic import flows can register their version-tree roles');
     assert.strictEqual(fs.readFileSync(path.join(linkedFolderSource, 'inside.jpg'), 'utf8'), 'inside');
     assert.strictEqual(fs.readFileSync(linkedFileSource, 'utf8'), 'linked-file');
+    const linkedProjectRoot = await importProjectHandlers.get('workspace-browse-files')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, '', {},
+    );
+    assert.strictEqual(linkedProjectRoot.success, true, linkedProjectRoot.error);
+    const managedExternalFolder = linkedProjectRoot.entries.find(entry => entry.externalLink);
+    assert.strictEqual(managedExternalFolder.externalLinkTarget, linkedFolderSource, 'managed external roots must expose their validated target for version-tree identity matching');
+    const browsedManagedExternalFolder = await importProjectHandlers.get('workspace-browse-files')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, managedExternalFolder.relativePath, {},
+    );
+    assert.strictEqual(browsedManagedExternalFolder.success, true, browsedManagedExternalFolder.error);
+    assert(browsedManagedExternalFolder.entries.some(entry => entry.name === 'inside.jpg' && entry.viaExternalLink), 'managed external folders must browse through the normal in-app folder route');
     assert.deepStrictEqual(fs.readdirSync(fileLinkProjectPath).sort(), ['linked-file-source.jpg.lnk', 'linked-folder-source.lnk']);
 
     const copiedFolderSource = path.join(root, 'copied-folder-source');

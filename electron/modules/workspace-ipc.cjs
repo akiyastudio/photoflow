@@ -1,12 +1,15 @@
 const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = require('../services/protected-project-folder.cjs');
 const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
 const { createTeamWorkflowArtifactService } = require('../services/team-workflow-artifact-service.cjs');
+const { startDetachedBackgroundOperation } = require('../services/detached-background-operation.cjs');
 const { replaceVideoFileWithRollback } = require('../services/video-trim-commit-service.cjs');
+const { createProjectVirtualPathService } = require('../services/project-virtual-path-service.cjs');
 
 const PROJECT_FILE_LIST_QUERY_MAX_LENGTH = 160;
 const IMPORT_STAGING_ROOT_NAME = '_PhotoFlow_Safety_Temp';
 const IMPORT_GRAPH_RECEIPT_NAME = '.photoflow-import-graph-receipt.json';
 const MANAGED_EXTERNAL_FOLDER_PREFIX = 'PhotoFlow 外链文件夹：';
+const MANAGED_EXTERNAL_FILE_PREFIX = 'PhotoFlow 外链文件：';
 const validImportSessionId = value => /^[a-zA-Z0-9_-]{1,128}$/.test(String(value || ''));
 const normalizeProjectFileListFilter = value => {
   const allowedKinds = new Set(['file', 'image', 'raw', 'video', 'shortcut']);
@@ -22,7 +25,15 @@ const projectFileListEntryMatchesFilter = (name, kind, extension, filter) => (!f
   && (!filter.extensions.length || filter.extensions.includes(extension));
 
 const registerWorkspaceIpc = context => {
-  const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, pushUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
+  const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
+  const virtualPaths = projectVirtualPaths || (shell?.readShortcutLink ? createProjectVirtualPathService({ shell }) : {
+    resolve: (root, relativePath) => {
+      const physicalPath = assertInside(root, path.resolve(root, relativePath || '.'), '项目路径', true);
+      if (!fs.existsSync(physicalPath)) throw new Error('文件或文件夹不存在');
+      return { projectRoot: root, virtualPath: String(relativePath || '').replace(/\\/g, '/'), physicalPath, mediaRoot: root, viaExternalLink: false, isExternalLinkRoot: false };
+    },
+    listManagedExternalLinks: () => [],
+  });
   const teamWorkflowArtifacts = createTeamWorkflowArtifactService({ crypto, fs, getWorkspaceDataRoot, path, writeLog });
   const workspaceCandidates = (primary, requested = []) => [primary, ...(Array.isArray(requested) ? requested : [])]
     .map(value => String(value || '').trim()).filter((value, index, values) => value
@@ -120,6 +131,7 @@ const registerWorkspaceIpc = context => {
   const missingProjectRetentionMs = 30 * 24 * 60 * 60 * 1000;
   const recentFilesSessionExpiredCode = 'RECENT_FILES_SESSION_EXPIRED';
   const recentFileSessions = new Map();
+  const activeVideoTrimOperations = new Map();
   const fileListSessionExpiredCode = 'FILE_LIST_SESSION_EXPIRED';
   const fileListCancelledCode = 'FILE_LIST_CANCELLED';
   const fileListSessions = new Map();
@@ -127,6 +139,44 @@ const registerWorkspaceIpc = context => {
   const progressImportConflictCache = new Map();
   const workspaceMaintenanceScheduledAt = new Map();
   const workspaceMaintenanceCooldownMs = 24 * 60 * 60 * 1000;
+  const watchedProjectFileRoots = new Map();
+  const watchedProjectFileRootKey = (workspaceRoot, status, projectName) => `${path.resolve(workspaceRoot).toLocaleLowerCase()}\0${String(status)}\0${String(projectName).toLocaleLowerCase()}`;
+  const attachManagedExternalWatcher = (workspacePath, status, projectName, projectRoot, shortcutVirtualPath, targetRoot) => {
+    const publishRoot = path.resolve(ensureWorkspace(workspacePath));
+    const key = watchedProjectFileRootKey(publishRoot, status, projectName);
+    const bindings = watchedProjectFileRoots.get(key);
+    if (!bindings) return;
+    const projectPrefix = path.relative(publishRoot, projectRoot).replace(/\\/g, '/');
+    const resolvedTarget = path.resolve(targetRoot);
+    const targetIsFile = fs.existsSync(resolvedTarget) && fs.statSync(resolvedTarget).isFile();
+    const binding = targetIsFile
+      ? { root: path.dirname(resolvedTarget), options: { publishRoot, virtualPrefix: projectPrefix, fileNameFilter: resolvedTarget, virtualFileName: shortcutVirtualPath } }
+      : { root: resolvedTarget, options: { publishRoot, virtualPrefix: [projectPrefix, shortcutVirtualPath].filter(Boolean).join('/') } };
+    if (bindings.some(current => path.resolve(current.root).toLocaleLowerCase() === path.resolve(binding.root).toLocaleLowerCase()
+      && String(current.options.virtualPrefix).toLocaleLowerCase() === String(binding.options.virtualPrefix).toLocaleLowerCase()
+      && String(current.options.fileNameFilter || '').toLocaleLowerCase() === String(binding.options.fileNameFilter || '').toLocaleLowerCase()
+      && String(current.options.virtualFileName || '').toLocaleLowerCase() === String(binding.options.virtualFileName || '').toLocaleLowerCase())) return;
+    const result = acquireFileRootWatcher(binding.root, binding.options);
+    if (result.success) bindings.push(binding);
+  };
+  const detachManagedExternalWatcher = (workspacePath, status, projectName, shortcutVirtualPath) => {
+    const publishRoot = path.resolve(ensureWorkspace(workspacePath));
+    const key = watchedProjectFileRootKey(publishRoot, status, projectName);
+    const bindings = watchedProjectFileRoots.get(key);
+    if (!bindings) return;
+    const projectRoot = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const projectPrefix = path.relative(publishRoot, projectRoot).replace(/\\/g, '/');
+    const expectedPrefix = [projectPrefix, String(shortcutVirtualPath || '').replace(/\\/g, '/')].filter(Boolean).join('/').toLocaleLowerCase();
+    for (let index = bindings.length - 1; index >= 0; index -= 1) {
+      const binding = bindings[index];
+      const bindingVirtualPath = binding.options.virtualFileName
+        ? [binding.options.virtualPrefix, binding.options.virtualFileName].filter(Boolean).join('/').toLocaleLowerCase()
+        : binding.options.virtualPrefix.toLocaleLowerCase();
+      if (bindingVirtualPath !== expectedPrefix) continue;
+      releaseFileRootWatcher(binding.root, binding.options);
+      bindings.splice(index, 1);
+    }
+  };
   const transientRenameErrorCodes = new Set(['EACCES', 'EBUSY', 'EPERM']);
   const renamePathWithRetry = async (source, destination) => {
     const retryDelays = [0, 80, 180, 360, 700];
@@ -684,8 +734,9 @@ const registerWorkspaceIpc = context => {
       const cleanedName = cleanProjectName(folderName || '');
       if (!cleanedName) throw new Error('文件夹名称不能为空');
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const parentPath = path.resolve(projectPath, relativePath || '.');
-      if (parentPath !== projectPath && !parentPath.startsWith(projectPath + path.sep)) throw new Error('无效的文件夹位置');
+      const parentResolution = virtualPaths.resolve(projectPath, relativePath, { externalRootMode: 'target' });
+      const parentPath = parentResolution.physicalPath;
+      if (!fs.existsSync(parentPath) || !fs.statSync(parentPath).isDirectory()) throw new Error('无效的文件夹位置');
       let actualName = cleanedName;
       let folderPath = path.resolve(parentPath, actualName);
       if (!folderPath.startsWith(parentPath + path.sep)) throw new Error('无效的文件夹名称');
@@ -698,7 +749,7 @@ const registerWorkspaceIpc = context => {
       } else if (fs.existsSync(folderPath)) throw new Error('同名文件夹已存在');
       fs.mkdirSync(folderPath);
       await pushUndoOperation({ kind: 'remove-created', paths: [folderPath], label: '新建文件夹' });
-      return { success: true, folder: { name: actualName, path: folderPath, relativePath: path.relative(projectPath, folderPath), updatedAt: Date.now() } };
+      return { success: true, folder: { name: actualName, path: folderPath, relativePath: [parentResolution.virtualPath, actualName].filter(Boolean).join('/'), updatedAt: Date.now() } };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -715,12 +766,12 @@ const registerWorkspaceIpc = context => {
   ipcMain.handle('workspace-create-shell-new-file', async (_event, workspacePath, status, projectName, relativePath, typeId) => {
     try {
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const requestedParent = path.resolve(projectPath, relativePath || '.');
-      const parentPath = assertExistingInside(projectPath, requestedParent, '新建文件位置', true);
+      const parentResolution = virtualPaths.resolve(projectPath, relativePath, { externalRootMode: 'target' });
+      const parentPath = parentResolution.physicalPath;
       if (!(await fs.promises.stat(parentPath)).isDirectory()) throw new Error('新建文件位置不是文件夹');
       const created = await shellNewService.create(typeId, parentPath, uniqueDestination);
       await pushUndoOperation({ kind: 'remove-created', paths: [created.path], label: '新建文件' });
-      return { success: true, file: { ...created, relativePath: path.relative(projectPath, created.path), updatedAt: Date.now() } };
+      return { success: true, file: { ...created, relativePath: [parentResolution.virtualPath, path.basename(created.path)].filter(Boolean).join('/'), updatedAt: Date.now() } };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -1156,8 +1207,29 @@ const registerWorkspaceIpc = context => {
   ipcMain.handle('workspace-watch-file-root', async (_event, workspacePath, status, projectName) => {
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const publishRoot = path.resolve(ensureWorkspace(workspacePath));
+      const projectPrefix = path.relative(publishRoot, root).replace(/\\/g, '/');
+      const key = watchedProjectFileRootKey(publishRoot, status, projectName);
+      const previousBindings = watchedProjectFileRoots.get(key) || [];
+      for (const binding of previousBindings) releaseFileRootWatcher(binding.root, binding.options);
+      watchedProjectFileRoots.delete(key);
       mediaService.grantRoot(root);
-      return acquireFileRootWatcher(root);
+      const bindings = [{ root, options: { publishRoot, virtualPrefix: projectPrefix } }];
+      const managedLinks = virtualPaths.listManagedExternalLinks(root);
+      for (const link of managedLinks) {
+        if (link.offline) continue;
+        mediaService.grantRoot(link.externalTargetRoot);
+        if (link.externalTargetKind === 'file') bindings.push({ root: path.dirname(link.externalTargetRoot), options: { publishRoot, virtualPrefix: projectPrefix, fileNameFilter: link.externalTargetRoot, virtualFileName: link.shortcutVirtualPath } });
+        else bindings.push({ root: link.externalTargetRoot, options: { publishRoot, virtualPrefix: [projectPrefix, link.shortcutVirtualPath].filter(Boolean).join('/') } });
+      }
+      const acquired = [];
+      for (const binding of bindings) {
+        const result = acquireFileRootWatcher(binding.root, binding.options);
+        if (!result.success) continue;
+        acquired.push(binding);
+      }
+      watchedProjectFileRoots.set(key, acquired);
+      return acquired.length ? { success: true, root: publishRoot, watchedRoots: acquired.length, offlineLinks: managedLinks.filter(link => link.offline).length } : { success: false, error: '无法监听项目文件夹', offlineLinks: managedLinks.filter(link => link.offline).length };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -1168,7 +1240,11 @@ const registerWorkspaceIpc = context => {
       let root;
       try { root = path.resolve(getProjectPath(workspacePath, status, projectName)); }
       catch { root = path.resolve(String(workspacePath || '')); }
-      releaseFileRootWatcher(root);
+      const publishRoot = path.resolve(ensureWorkspace(workspacePath));
+      const key = watchedProjectFileRootKey(publishRoot, status, projectName);
+      const bindings = watchedProjectFileRoots.get(key) || [{ root, options: { publishRoot, virtualPrefix: path.relative(publishRoot, root).replace(/\\/g, '/') } }];
+      for (const binding of bindings) releaseFileRootWatcher(binding.root, binding.options);
+      watchedProjectFileRoots.delete(key);
       return { success: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
@@ -1176,25 +1252,9 @@ const registerWorkspaceIpc = context => {
   });
 
   const resolveManagedExternalScope = async (root, relativePath) => {
-    const normalizedRelativePath = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-    const pathSegments = normalizedRelativePath ? normalizedRelativePath.split('/') : [];
-    if (pathSegments.some(segment => !segment || segment === '.' || segment === '..')) throw new Error('外链路径无效');
-    const externalLinkIndex = pathSegments.findIndex(segment => path.extname(segment).toLowerCase() === '.lnk');
-    if (externalLinkIndex < 0) return null;
-    const shortcutRelativePath = pathSegments.slice(0, externalLinkIndex + 1).join(path.sep);
-    const shortcutPath = assertExistingInside(root, assertInside(root, path.resolve(root, shortcutRelativePath), '外链路径'), '外链路径');
-    const shortcutDetails = shell.readShortcutLink(shortcutPath);
-    if (!String(shortcutDetails?.description || '').startsWith(MANAGED_EXTERNAL_FOLDER_PREFIX)) throw new Error('所选项目不是 PhotoFlow 外链');
-    const targetRoot = path.resolve(String(shortcutDetails?.target || ''));
-    const targetStat = await fs.promises.stat(targetRoot);
-    if (!targetStat.isDirectory()) throw new Error('外链文件夹不存在');
-    const candidate = path.resolve(targetRoot, ...pathSegments.slice(externalLinkIndex + 1));
-    const targetRelative = path.relative(targetRoot, candidate);
-    if (targetRelative === '..' || targetRelative.startsWith(`..${path.sep}`) || path.isAbsolute(targetRelative)) throw new Error('外链路径超出目标文件夹');
-    const [currentPath, realTargetRoot] = await Promise.all([fs.promises.realpath(candidate), fs.promises.realpath(targetRoot)]);
-    const realRelative = path.relative(realTargetRoot, currentPath);
-    if (realRelative === '..' || realRelative.startsWith(`..${path.sep}`) || path.isAbsolute(realRelative)) throw new Error('外链路径超出目标文件夹');
-    return { currentPath, mediaRoot: realTargetRoot, normalizedRelativePath };
+    const resolution = virtualPaths.resolve(root, relativePath, { externalRootMode: 'target' });
+    if (!resolution.viaExternalLink) return null;
+    return { ...resolution, currentPath: resolution.physicalPath, normalizedRelativePath: resolution.virtualPath };
   };
   
   ipcMain.handle('workspace-browse-files', async (_event, workspacePath, status, projectName, relativePath = '', cacheConfig = {}) => {
@@ -1239,19 +1299,38 @@ const registerWorkspaceIpc = context => {
         .filter(entry => !entry.isSymbolicLink() && !HIDDEN_SYSTEM_ENTRY_NAMES.has(entry.name.toLowerCase()) && !isInternalFileOperationEntry(entry.name))
         .map(entry => {
           const entryPath = path.join(currentPath, entry.name);
-          const extension = entry.isDirectory() ? '' : path.extname(entry.name).toLowerCase();
-          const kind = entry.isDirectory() ? 'folder' : extension === '.lnk' ? 'shortcut' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
+          let displayPath = entryPath;
+          let extension = entry.isDirectory() ? '' : path.extname(entry.name).toLowerCase();
+          let kind = entry.isDirectory() ? 'folder' : extension === '.lnk' ? 'shortcut' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
           let externalLink = false;
+          let externalLinkTarget = '';
+          let externalLinkTargetKind = '';
           if (!viaExternalLink && kind === 'shortcut') {
-            try { externalLink = String(shell.readShortcutLink(entryPath)?.description || '').startsWith(MANAGED_EXTERNAL_FOLDER_PREFIX); }
+            try {
+              const shortcut = shell.readShortcutLink(entryPath);
+              const description = String(shortcut?.description || '');
+              externalLink = description.startsWith(MANAGED_EXTERNAL_FOLDER_PREFIX) || description.startsWith(MANAGED_EXTERNAL_FILE_PREFIX);
+              if (externalLink) {
+                externalLinkTarget = path.resolve(String(shortcut?.target || ''));
+                if (fs.existsSync(externalLinkTarget)) {
+                  externalLinkTargetKind = fs.statSync(externalLinkTarget).isDirectory() ? 'folder' : 'file';
+                  if (externalLinkTargetKind === 'file') {
+                    displayPath = fs.realpathSync(externalLinkTarget);
+                    mediaService.grantPath(displayPath);
+                    extension = path.extname(externalLinkTarget).toLowerCase();
+                    kind = IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
+                  }
+                } else externalLinkTargetKind = description.startsWith(MANAGED_EXTERNAL_FILE_PREFIX) ? 'file' : 'folder';
+              }
+            }
             catch { /* a broken or ordinary shortcut remains a regular shortcut */ }
           }
           const virtualRelativePath = viaExternalLink
             ? [normalizedRelativePath, entry.name].filter(Boolean).join('/')
             : path.relative(root, entryPath);
-          return { name: entry.name, path: entryPath, relativePath: virtualRelativePath, kind, extension, size: -1, createdAt: 0, updatedAt: 0, ...(externalLink ? { externalLink: true } : {}), ...(viaExternalLink ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) };
+          return { name: entry.name, path: displayPath, relativePath: virtualRelativePath, kind, extension, size: -1, createdAt: 0, updatedAt: 0, ...(externalLink ? { externalLink: true, externalLinkTarget, externalLinkTargetKind, externalLinkOffline: !fs.existsSync(externalLinkTarget), shortcutBroken: !fs.existsSync(externalLinkTarget), viaShortcut: true, viaExternalLink: true, readOnly: false } : {}), ...(viaExternalLink ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) };
         })
-        .sort((a, b) => (a.kind === 'folder' ? 0 : 1) - (b.kind === 'folder' ? 0 : 1) || a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+        .sort((a, b) => (a.kind === 'folder' || a.externalLink && a.externalLinkTargetKind !== 'file' ? 0 : 1) - (b.kind === 'folder' || b.externalLink && b.externalLinkTargetKind !== 'file' ? 0 : 1) || a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
       // Index only the directory the user opened. Whole-project thumbnail and
       // version scans on every restored project tab made application startup
       // recursively read all source media; watcher events and explicit tools
@@ -1260,7 +1339,8 @@ const registerWorkspaceIpc = context => {
       return { success: true, path: normalizedRelativePath, entries, viaExternalLink };
     } catch (error) {
       writeLog('warn', 'Unable to browse project directory', { projectName, relativePath, error: error.message || String(error) });
-      return { success: false, missingDirectory: error?.code === 'ENOENT' || error?.code === 'ENOTDIR', error: error.message || String(error), entries: [] };
+      const externalLinkOffline = error?.code === 'EXTERNAL_LINK_OFFLINE' || /(?:^|[\\/])[^\\/]+\.lnk(?:[\\/]|$)/i.test(String(relativePath || '')) && (error?.code === 'ENOENT' || error?.code === 'ENOTDIR');
+      return { success: false, missingDirectory: !externalLinkOffline && (error?.code === 'ENOENT' || error?.code === 'ENOTDIR'), externalLinkOffline, error: externalLinkOffline ? '外链目标当前离线或不存在' : error.message || String(error), entries: [] };
     }
   });
 
@@ -1271,15 +1351,18 @@ const registerWorkspaceIpc = context => {
         .filter(value => typeof value === 'string' && value.length <= 32768))];
       if (!requestedPaths.length) return { success: true, indexed: true, hasVideo: false, hasPng: false, videoPaths: [], pngPaths: [], folderPaths: [] };
       if (requestedPaths.length > 4096) throw new Error('一次最多处理 4096 个所选文件或文件夹');
-      const targets = requestedPaths.map(relativePath => assertInside(root, path.resolve(root, relativePath), '工具来源路径', true));
+      const resolutions = requestedPaths.map(relativePath => virtualPaths.resolve(root, relativePath, { externalRootMode: 'target' }));
+      const targets = resolutions.map(item => item.physicalPath);
       const folderPaths = [];
       for (const target of targets) {
         try {
           if ((await fs.promises.stat(target)).isDirectory()) folderPaths.push(target);
         } catch { /* inspectToolSources reports missing source details */ }
       }
-      const result = await thumbnailService.inspectToolSources(root, targets, collectVideos, collectDirectPng, collectRecursivePng);
-      if (!result.indexed) void thumbnailService.scanProject(root, mediaRuntimeState.activeMediaCacheConfig);
+      const inspectionRoot = resolutions.length === 1 && resolutions[0].viaExternalLink ? resolutions[0].mediaRoot : root;
+      mediaService.grantRoot(inspectionRoot);
+      const result = await thumbnailService.inspectToolSources(inspectionRoot, targets, collectVideos, collectDirectPng, collectRecursivePng);
+      if (!result.indexed && !resolutions.some(item => item.viaExternalLink)) void thumbnailService.scanProject(root, mediaRuntimeState.activeMediaCacheConfig);
       return { success: true, ...result, folderPaths };
     } catch (error) {
       writeLog('warn', 'Unable to read project tool-source index', { projectName, error: error.message || String(error) });
@@ -1322,17 +1405,18 @@ const registerWorkspaceIpc = context => {
       for (const shortcutPath of candidates) {
         if (path.extname(shortcutPath).toLowerCase() !== '.lnk') continue;
         const details = shell.readShortcutLink(shortcutPath);
-        if (!String(details?.description || '').startsWith('PhotoFlow 外链文件夹：')) continue;
+        const description = String(details?.description || '');
+        if (!description.startsWith(MANAGED_EXTERNAL_FOLDER_PREFIX) && !description.startsWith(MANAGED_EXTERNAL_FILE_PREFIX)) continue;
         const source = path.resolve(String(details.target || ''));
         const stat = await fs.promises.stat(source).catch(() => null);
-        if (!stat?.isDirectory()) throw new Error(`外链文件夹不可用：${path.basename(shortcutPath, '.lnk')}`);
-        const destination = uniqueDestination(path.dirname(shortcutPath), path.basename(shortcutPath, '.lnk') || path.basename(source), new Set(), true);
+        if (!stat || !stat.isDirectory() && !stat.isFile()) throw new Error(`外链不可用：${path.basename(shortcutPath, '.lnk')}`);
+        const destination = uniqueDestination(path.dirname(shortcutPath), path.basename(shortcutPath, '.lnk') || path.basename(source), new Set(), stat.isDirectory());
         const copyPlan = [];
         await collectCopyPlan(source, destination, copyPlan);
-        const affectedProgress = progressFolders.filter(progress => {
+        const affectedProgress = stat.isDirectory() ? progressFolders.filter(progress => {
           const relative = path.relative(source, path.resolve(progress.folderPath));
           return !relative || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
-        });
+        }) : [];
         const crossesVolume = path.parse(source).root.toLocaleLowerCase() !== path.parse(destination).root.toLocaleLowerCase();
         plan.push({ shortcutPath, source, destination, bytes: crossesVolume ? copyPlan.reduce((sum, item) => sum + item.size, 0) : 0, description: details.description, affectedProgress });
       }
@@ -1363,6 +1447,7 @@ const registerWorkspaceIpc = context => {
           if (!updated?.success) throw new Error(updated?.error || `无法更新版本目录：${progress.displayName}`);
         }
       }
+      for (const item of moved) detachManagedExternalWatcher(workspacePath, status, projectName, path.relative(root, item.shortcutPath).replace(/\\/g, '/'));
       mainWindow?.webContents.send('workspace-files-changed', { root, fileName: '', eventType: 'rename' });
       return { success: true, count: moved.length, items: moved };
     } catch (error) {
@@ -1390,6 +1475,81 @@ const registerWorkspaceIpc = context => {
         } catch (rollbackError) { writeLog('error', 'Unable to roll back external-link materialization', { item, error: rollbackError.message || String(rollbackError) }); }
       }
       return { success: false, count: 0, items: [], error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-relink-external-folder', async (_event, workspacePath, status, projectName, relativePath, requestedTarget = '') => {
+    const workspaceRoot = ensureWorkspace(workspacePath);
+    const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const updatedProgress = [];
+    let resolution;
+    let nextTarget = '';
+    try {
+      resolution = virtualPaths.resolve(root, relativePath, { externalRootMode: 'link' });
+      if (!resolution.isExternalLinkRoot || !resolution.shortcutPath) throw new Error('只能重新定位 PhotoFlow 外链根文件夹');
+      const targetKind = resolution.externalTargetKind === 'file' ? 'file' : 'folder';
+      if (requestedTarget) nextTarget = path.resolve(String(requestedTarget));
+      else {
+        const choice = await dialog.showOpenDialog(mainWindow, { title: `重新定位外链“${resolution.externalDisplayName}”`, properties: [targetKind === 'file' ? 'openFile' : 'openDirectory'] });
+        if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true };
+        nextTarget = path.resolve(choice.filePaths[0]);
+      }
+      const targetStat = await fs.promises.stat(nextTarget).catch(() => null);
+      if (!targetStat || (targetKind === 'file' ? !targetStat.isFile() : !targetStat.isDirectory())) throw new Error(`新的外链目标不是可用${targetKind === 'file' ? '文件' : '文件夹'}`);
+      const oldTarget = path.resolve(resolution.externalTargetRoot);
+      const progressFolders = (await versionService.listProgress(workspaceRoot, projectName, true)).progressFolders || [];
+      const affectedProgress = targetKind === 'folder' ? progressFolders.filter(progress => {
+        const relative = path.relative(oldTarget, path.resolve(progress.folderPath));
+        return !relative || (!relative.startsWith('..') && !path.isAbsolute(relative));
+      }) : [];
+      for (const progress of affectedProgress) {
+        const relative = path.relative(oldTarget, path.resolve(progress.folderPath));
+        const folderPath = relative ? path.join(nextTarget, relative) : nextTarget;
+        const updated = await versionService.registerProgress(workspaceRoot, {
+          projectName, progressId: progress.id, mediaKind: progress.mediaKind, versionKey: progress.versionKey,
+          parentProgressId: progress.parentProgressId, displayName: progress.displayName, folderPath,
+          trackingEnabled: progress.trackingEnabled, trackingState: progress.trackingState,
+          nodeRole: progress.nodeRole, relationKind: progress.relationKind,
+          renameFromParent: progress.renameFromParent, copyMissingFromParent: progress.copyMissingFromParent,
+        });
+        if (!updated?.success) throw new Error(updated?.error || `无法更新版本节点：${progress.displayName}`);
+        updatedProgress.push(progress);
+      }
+      const pendingShortcut = path.join(path.dirname(resolution.shortcutPath), `.photoflow-relink-${crypto.randomUUID()}.lnk`);
+      const backupShortcut = path.join(path.dirname(resolution.shortcutPath), `.photoflow-relink-backup-${crypto.randomUUID()}.lnk`);
+      try {
+        const descriptionPrefix = targetKind === 'file' ? MANAGED_EXTERNAL_FILE_PREFIX : MANAGED_EXTERNAL_FOLDER_PREFIX;
+        if (!shell.writeShortcutLink(pendingShortcut, { target: nextTarget, cwd: targetKind === 'file' ? path.dirname(nextTarget) : nextTarget, description: `${descriptionPrefix}${resolution.externalDisplayName}` })) throw new Error('无法创建新的外链引用');
+        await fs.promises.rename(resolution.shortcutPath, backupShortcut);
+        try {
+          await fs.promises.rename(pendingShortcut, resolution.shortcutPath);
+          await fs.promises.rm(backupShortcut, { force: true }).catch(cleanupError => writeLog('warn', 'Unable to remove relink backup shortcut', { backupShortcut, error: cleanupError.message || String(cleanupError) }));
+        } catch (error) {
+          if (!fs.existsSync(resolution.shortcutPath) && fs.existsSync(backupShortcut)) await fs.promises.rename(backupShortcut, resolution.shortcutPath).catch(() => undefined);
+          throw error;
+        }
+      } finally {
+        await fs.promises.rm(pendingShortcut, { force: true }).catch(() => undefined);
+      }
+      try {
+        detachManagedExternalWatcher(workspacePath, status, projectName, resolution.shortcutVirtualPath);
+        attachManagedExternalWatcher(workspacePath, status, projectName, root, resolution.shortcutVirtualPath, nextTarget);
+      } catch (watchError) {
+        writeLog('warn', 'Unable to refresh external watcher after relink', { relativePath, error: watchError.message || String(watchError) });
+      }
+      mainWindow?.webContents.send('workspace-files-changed', { root: workspaceRoot, fileName: path.relative(workspaceRoot, resolution.shortcutPath).replace(/\\/g, '/'), eventType: 'rename' });
+      return { success: true, relativePath: resolution.shortcutVirtualPath, target: nextTarget, updatedProgressCount: updatedProgress.length };
+    } catch (error) {
+      if (resolution && updatedProgress.length) for (const progress of [...updatedProgress].reverse()) {
+        await versionService.registerProgress(workspaceRoot, {
+          projectName, progressId: progress.id, mediaKind: progress.mediaKind, versionKey: progress.versionKey,
+          parentProgressId: progress.parentProgressId, displayName: progress.displayName, folderPath: progress.folderPath,
+          trackingEnabled: progress.trackingEnabled, trackingState: progress.trackingState,
+          nodeRole: progress.nodeRole, relationKind: progress.relationKind,
+          renameFromParent: progress.renameFromParent, copyMissingFromParent: progress.copyMissingFromParent,
+        }).catch(rollbackError => writeLog('error', 'Unable to roll back external relink version path', { progressId: progress.id, error: rollbackError.message || String(rollbackError) }));
+      }
+      return { success: false, error: error.message || String(error) };
     }
   });
 
@@ -1470,14 +1630,27 @@ const registerWorkspaceIpc = context => {
       if (!scopeStat.isDirectory()) throw new Error('搜索范围不是文件夹');
       mediaService.grantRoot(externalScope?.mediaRoot || root);
       const needle = String(query || '').trim().toLocaleLowerCase('zh-CN');
-      const virtualPathFor = childPath => externalScope
-        ? [externalScope.normalizedRelativePath, path.relative(scope, childPath).replace(/\\/g, '/')].filter(Boolean).join('/')
-        : path.relative(root, childPath);
-
       const entries = [];
-      const pending = [scope];
+      const pending = [{ directory: scope, virtualPath: externalScope?.normalizedRelativePath || path.relative(root, scope).replace(/\\/g, '/'), viaExternalLink: Boolean(externalScope) }];
+      const managedShortcutPaths = new Set();
+      if (!externalScope) for (const link of virtualPaths.listManagedExternalLinks(root)) {
+        if (link.offline || !path.relative(scope, link.shortcutPath) || path.relative(scope, link.shortcutPath).startsWith('..')) continue;
+        managedShortcutPaths.add(path.resolve(link.shortcutPath).toLocaleLowerCase());
+        if (link.externalTargetKind === 'file') {
+          mediaService.grantPath(link.externalTargetRoot);
+          const stat = await fs.promises.stat(link.externalTargetRoot);
+          const extension = path.extname(link.externalTargetRoot).toLowerCase();
+          const kind = IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
+          const name = path.basename(link.shortcutPath);
+          if (!needle || name.toLocaleLowerCase('zh-CN').includes(needle) || path.basename(link.externalTargetRoot).toLocaleLowerCase('zh-CN').includes(needle)) entries.push({ name, path: link.externalTargetRoot, relativePath: link.shortcutVirtualPath, kind, extension, size: stat.size, createdAt: stat.birthtimeMs || stat.ctimeMs || 0, updatedAt: stat.mtimeMs || 0, externalLink: true, externalLinkTarget: link.externalTargetRoot, externalLinkTargetKind: 'file', viaShortcut: true, viaExternalLink: true, readOnly: false });
+        } else {
+          mediaService.grantRoot(link.externalTargetRoot);
+          pending.push({ directory: link.externalTargetRoot, virtualPath: link.shortcutVirtualPath, viaExternalLink: true });
+        }
+      }
       while (pending.length) {
-        const directory = pending.pop();
+        const current = pending.pop();
+        const directory = current.directory;
         let children;
         try {
           children = await fs.promises.readdir(directory, { withFileTypes: true });
@@ -1488,17 +1661,18 @@ const registerWorkspaceIpc = context => {
         for (const child of children) {
           if (child.isSymbolicLink() || HIDDEN_SYSTEM_ENTRY_NAMES.has(child.name.toLowerCase()) || isInternalFileOperationEntry(child.name)) continue;
           const childPath = path.join(directory, child.name);
+          if (managedShortcutPaths.has(path.resolve(childPath).toLocaleLowerCase())) continue;
           if (child.isDirectory()) {
-            pending.push(childPath);
+            pending.push({ directory: childPath, virtualPath: [current.virtualPath, child.name].filter(Boolean).join('/'), viaExternalLink: current.viaExternalLink });
             if (!needle || child.name.toLocaleLowerCase('zh-CN').includes(needle)) {
-              entries.push({ name: child.name, path: childPath, relativePath: virtualPathFor(childPath), kind: 'folder', extension: '', size: -1, createdAt: 0, updatedAt: 0, ...(externalScope ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) });
+              entries.push({ name: child.name, path: childPath, relativePath: [current.virtualPath, child.name].filter(Boolean).join('/'), kind: 'folder', extension: '', size: -1, createdAt: 0, updatedAt: 0, ...(current.viaExternalLink ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) });
             }
             continue;
           }
           if (!child.isFile() || needle && !child.name.toLocaleLowerCase('zh-CN').includes(needle)) continue;
           const extension = path.extname(child.name).toLowerCase();
           const kind = extension === '.lnk' ? 'shortcut' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
-          entries.push({ name: child.name, path: childPath, relativePath: virtualPathFor(childPath), kind, extension, size: -1, createdAt: 0, updatedAt: 0, ...(externalScope ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) });
+          entries.push({ name: child.name, path: childPath, relativePath: [current.virtualPath, child.name].filter(Boolean).join('/'), kind, extension, size: -1, createdAt: 0, updatedAt: 0, ...(current.viaExternalLink ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) });
         }
       }
       entries.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'zh-CN', { numeric: true, sensitivity: 'base' }));
@@ -1539,11 +1713,25 @@ const registerWorkspaceIpc = context => {
           scope,
           filterSignature: filter.signature,
           filter,
-          pending: [{ directory: scope, offset: 0 }],
+          pending: [{ directory: scope, offset: 0, virtualPath: externalScope?.normalizedRelativePath || path.relative(root, scope).replace(/\\/g, '/'), viaExternalLink: Boolean(externalScope) }],
+          externalFiles: [],
+          managedShortcutPaths: new Set(),
           scannedDirectories: 0,
           inspectedEntries: 0,
           touchedAt: Date.now(),
         };
+        if (!externalScope) for (const link of virtualPaths.listManagedExternalLinks(root)) {
+          const relativeLink = path.relative(scope, link.shortcutPath);
+          if (link.offline || !relativeLink || relativeLink.startsWith('..') || path.isAbsolute(relativeLink)) continue;
+          session.managedShortcutPaths.add(path.resolve(link.shortcutPath).toLocaleLowerCase());
+          if (link.externalTargetKind === 'file') {
+            mediaService.grantPath(link.externalTargetRoot);
+            session.externalFiles.push(link);
+          } else {
+            mediaService.grantRoot(link.externalTargetRoot);
+            session.pending.push({ directory: link.externalTargetRoot, offset: 0, virtualPath: link.shortcutVirtualPath, viaExternalLink: true });
+          }
+        }
         fileListSessions.set(cursor, session);
       }
       session.touchedAt = Date.now();
@@ -1552,6 +1740,16 @@ const registerWorkspaceIpc = context => {
       let pageScannedDirectories = 0;
       let pageInspectedEntries = 0;
       const entries = [];
+      while (session.externalFiles?.length && entries.length < pageSize) {
+        const link = session.externalFiles.shift();
+        const stat = await fs.promises.stat(link.externalTargetRoot).catch(() => null);
+        if (!stat?.isFile()) continue;
+        const extension = path.extname(link.externalTargetRoot).toLowerCase();
+        const kind = IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
+        const name = path.basename(link.shortcutPath);
+        if (!projectFileListEntryMatchesFilter(name, kind, extension, session.filter) && !projectFileListEntryMatchesFilter(path.basename(link.externalTargetRoot), kind, extension, session.filter)) continue;
+        entries.push({ name, path: link.externalTargetRoot, relativePath: link.shortcutVirtualPath, parentRelativePath: path.posix.dirname(link.shortcutVirtualPath) === '.' ? '' : path.posix.dirname(link.shortcutVirtualPath), parentName: path.basename(path.dirname(link.shortcutPath)), kind, extension, size: stat.size, createdAt: stat.birthtimeMs || stat.ctimeMs || 0, updatedAt: stat.mtimeMs || 0, externalLink: true, externalLinkTarget: link.externalTargetRoot, externalLinkTargetKind: 'file', viaShortcut: true, viaExternalLink: true, readOnly: false });
+      }
       while (session.pending.length && entries.length < pageSize && pageScannedDirectories < maximumDirectoriesPerPage && pageInspectedEntries < maximumInspectedEntriesPerPage) {
         if (session.cancelled) throw Object.assign(new Error('文件枚举已取消'), { code: fileListCancelledCode });
         const current = session.pending.shift();
@@ -1571,6 +1769,7 @@ const registerWorkspaceIpc = context => {
         for (; offset < visibleChildren.length && entries.length < pageSize && pageInspectedEntries < maximumInspectedEntriesPerPage; offset += 1) {
           const child = visibleChildren[offset];
           const childPath = path.join(current.directory, child.name);
+          if (session.managedShortcutPaths?.has(path.resolve(childPath).toLocaleLowerCase())) continue;
           pageInspectedEntries += 1;
           session.inspectedEntries += 1;
           let stat;
@@ -1581,25 +1780,21 @@ const registerWorkspaceIpc = context => {
           }
           if (session.cancelled) throw Object.assign(new Error('文件枚举已取消'), { code: fileListCancelledCode });
           if (stat.isDirectory()) {
-            session.pending.push({ directory: childPath, offset: 0 });
+            session.pending.push({ directory: childPath, offset: 0, virtualPath: [current.virtualPath, child.name].filter(Boolean).join('/'), viaExternalLink: current.viaExternalLink });
             continue;
           }
           if (!stat.isFile()) continue;
           const extension = path.extname(child.name).toLowerCase();
           const kind = extension === '.lnk' ? 'shortcut' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
           if (!projectFileListEntryMatchesFilter(child.name, kind, extension, session.filter)) continue;
-          const relativePath = externalScope
-            ? [externalScope.normalizedRelativePath, path.relative(scope, childPath).replace(/\\/g, '/')].filter(Boolean).join('/')
-            : path.relative(root, childPath).replace(/\\/g, '/');
-          const parentRelativePath = externalScope
-            ? [externalScope.normalizedRelativePath, path.relative(scope, current.directory).replace(/\\/g, '/')].filter(Boolean).join('/')
-            : path.relative(root, current.directory).replace(/\\/g, '/');
-          entries.push({ name: child.name, path: childPath, relativePath, parentRelativePath, parentName: path.basename(current.directory), kind, extension, size: stat.size, createdAt: stat.birthtimeMs || stat.ctimeMs || 0, updatedAt: stat.mtimeMs || 0, ...(externalScope ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) });
+          const relativePath = [current.virtualPath, child.name].filter(Boolean).join('/');
+          const parentRelativePath = current.virtualPath;
+          entries.push({ name: child.name, path: childPath, relativePath, parentRelativePath, parentName: path.basename(current.directory), kind, extension, size: stat.size, createdAt: stat.birthtimeMs || stat.ctimeMs || 0, updatedAt: stat.mtimeMs || 0, ...(current.viaExternalLink ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) });
         }
-        if (offset < visibleChildren.length) session.pending.unshift({ directory: current.directory, offset });
+        if (offset < visibleChildren.length) session.pending.unshift({ ...current, offset });
       }
       if (session.cancelled) throw Object.assign(new Error('文件枚举已取消'), { code: fileListCancelledCode });
-      const hasMore = session.pending.length > 0;
+      const hasMore = session.pending.length > 0 || Boolean(session.externalFiles?.length);
       if (!hasMore) fileListSessions.delete(cursor);
       return { success: true, scope: externalScope?.normalizedRelativePath || path.relative(root, scope).replace(/\\/g, '/'), entries, cursor: hasMore ? cursor : undefined, hasMore, truncated: hasMore, scannedDirectories: session.scannedDirectories, inspectedEntries: session.inspectedEntries, viaExternalLink: Boolean(externalScope) };
     } catch (error) {
@@ -1710,17 +1905,31 @@ const registerWorkspaceIpc = context => {
               continue;
             }
             if (!item.stat.isFile()) continue;
-            const extension = path.extname(item.child.name).toLowerCase();
-            const kind = extension === '.lnk' ? 'shortcut' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
+            let extension = path.extname(item.child.name).toLowerCase();
+            let kind = extension === '.lnk' ? 'shortcut' : IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
             let externalLink = false;
+            let shortcutDetails = null;
             if (extension === '.lnk') {
-              try { externalLink = String(shell.readShortcutLink(item.childPath)?.description || '').startsWith(MANAGED_EXTERNAL_FOLDER_PREFIX); }
+              try {
+                shortcutDetails = shell.readShortcutLink(item.childPath);
+                const description = String(shortcutDetails?.description || '');
+                externalLink = description.startsWith(MANAGED_EXTERNAL_FOLDER_PREFIX) || description.startsWith(MANAGED_EXTERNAL_FILE_PREFIX);
+                const externalTarget = shortcutDetails?.target ? path.resolve(String(shortcutDetails.target)) : '';
+                const externalStat = externalLink && externalTarget ? await fs.promises.stat(externalTarget).catch(() => null) : null;
+                if (externalStat?.isFile()) {
+                  extension = path.extname(externalTarget).toLowerCase();
+                  kind = IMAGE_EXTENSIONS.has(extension) ? 'image' : VIDEO_EXTENSIONS.has(extension) ? 'video' : RAW_EXTENSIONS.has(extension) ? 'raw' : 'file';
+                  mediaService.grantPath(externalTarget);
+                  session.candidates.push({ name: item.child.name, path: externalTarget, relativePath: virtualRelativePath, kind, extension, size: externalStat.size, createdAt: externalStat.birthtimeMs || externalStat.ctimeMs || 0, updatedAt: externalStat.mtimeMs || 0, viaShortcut: true, viaExternalLink: true, readOnly: false, externalLink: true, externalLinkTarget: externalTarget, externalLinkTargetKind: 'file' });
+                  continue;
+                }
+              }
               catch { /* an invalid shortcut remains a regular shortcut candidate */ }
             }
             session.candidates.push({ name: item.child.name, path: item.childPath, relativePath: virtualRelativePath, kind, extension, size: item.stat.size, createdAt: item.stat.birthtimeMs || item.stat.ctimeMs || 0, updatedAt: item.stat.mtimeMs || 0, viaShortcut: Boolean(current.viaShortcut), viaExternalLink: Boolean(current.viaExternalLink), ...(externalLink ? { externalLink: true } : {}) });
             if (extension === '.lnk' && process.platform === 'win32') {
               try {
-                const details = shell.readShortcutLink(item.childPath);
+                const details = shortcutDetails || shell.readShortcutLink(item.childPath);
                 const target = details?.target ? path.resolve(String(details.target)) : '';
                 if (!target) continue;
                 const targetStat = await fs.promises.stat(target);
@@ -1781,6 +1990,13 @@ const registerWorkspaceIpc = context => {
       const folders = [];
       const pending = [{ directory: root, relativePath: '', depth: 0 }];
       const maximumFolders = 20000;
+      for (const link of virtualPaths.listManagedExternalLinks(root)) {
+        if (link.externalTargetKind === 'file') continue;
+        const parentRelativePath = path.posix.dirname(link.shortcutVirtualPath);
+        const depth = Math.max(0, link.shortcutVirtualPath.split('/').length - 1);
+        folders.push({ name: link.externalDisplayName, relativePath: link.shortcutVirtualPath, parentRelativePath: parentRelativePath === '.' ? '' : parentRelativePath, depth, externalLink: true, externalLinkOffline: link.offline });
+        if (!link.offline) pending.push({ directory: link.externalTargetRoot, relativePath: link.shortcutVirtualPath, depth: depth + 1, viaExternalLink: true });
+      }
       while (pending.length) {
         const current = pending.pop();
         let children;
@@ -1795,15 +2011,15 @@ const registerWorkspaceIpc = context => {
           .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
         for (const child of directories) {
           const childPath = path.join(current.directory, child.name);
-          const relativePath = path.relative(root, childPath).replace(/\\/g, '/');
-          folders.push({ name: child.name, relativePath, parentRelativePath: current.relativePath, depth: current.depth });
+          const relativePath = [current.relativePath, child.name].filter(Boolean).join('/');
+          folders.push({ name: child.name, relativePath, parentRelativePath: current.relativePath, depth: current.depth, ...(current.viaExternalLink ? { viaExternalLink: true } : {}) });
           if (folders.length >= maximumFolders) break;
         }
         if (folders.length >= maximumFolders) break;
         for (let index = directories.length - 1; index >= 0; index -= 1) {
           const child = directories[index];
           const childPath = path.join(current.directory, child.name);
-          pending.push({ directory: childPath, relativePath: path.relative(root, childPath).replace(/\\/g, '/'), depth: current.depth + 1 });
+          pending.push({ directory: childPath, relativePath: [current.relativePath, child.name].filter(Boolean).join('/'), depth: current.depth + 1, viaExternalLink: current.viaExternalLink });
         }
       }
       folders.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'zh-CN', { numeric: true, sensitivity: 'base' }));
@@ -2092,8 +2308,21 @@ const registerWorkspaceIpc = context => {
     }
   });
 
-  ipcMain.handle('workspace-trim-video', async (_event, workspacePath, status, projectName, relativePath, request = {}) => {
+  ipcMain.handle('workspace-trim-video', async (event, workspacePath, status, projectName, relativePath, request = {}) => {
+    const requestedOperationId = String(request.operationId || '');
+    const operationId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requestedOperationId)
+      ? requestedOperationId
+      : crypto.randomUUID();
+    let operation = null;
+    let taskHandle = null;
+    const publish = payload => {
+      if (!event.sender.isDestroyed()) event.sender.send('workspace-video-trim-progress', { operationId, ...payload });
+      if (taskHandle && !taskHandle.deduplicated && !taskHandle.isFinished()) {
+        taskHandle.context.report(payload.progress, payload.message, { phase: payload.phase });
+      }
+    };
     try {
+      if (activeVideoTrimOperations.has(operationId)) throw new Error('该视频导出任务已在运行');
       const sourcePath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
       const stat = await fs.promises.stat(sourcePath);
       const extension = path.extname(sourcePath).toLowerCase();
@@ -2104,32 +2333,116 @@ const registerWorkspaceIpc = context => {
       const saveMode = request.saveMode === 'replace' ? 'replace' : 'new';
       const parsed = path.parse(sourcePath);
       const projectRoot = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const sourceRelativePath = path.relative(projectRoot, sourcePath).replace(/\\/g, '/');
+      const requestedSourceDuration = Number(request.sourceDuration);
+      const sourceDuration = Number.isFinite(requestedSourceDuration) && requestedSourceDuration >= end ? requestedSourceDuration : end;
       const generatedPath = saveMode === 'replace'
         ? path.join(parsed.dir, `.photoflow-trim-output-${crypto.randomUUID()}${parsed.ext}`)
         : uniqueDestination(parsed.dir, `${parsed.name}_剪辑${parsed.ext}`);
-      let safeOutput = '';
-      try {
-        const result = await runPythonJsonAction('cut_video.py', [sourcePath, '--trim-start', String(start), '--trim-end', String(end), '--output-path', generatedPath], 60 * 60 * 1000);
-        if (!result?.success || !fs.existsSync(generatedPath)) throw new Error(result?.error || '视频剪辑失败');
-        const safeGenerated = assertInside(projectRoot, generatedPath, '视频剪辑输出路径');
-        if (saveMode === 'replace') {
-          const commit = await replaceVideoFileWithRollback({ crypto, fs, path, sourcePath, replacementPath: safeGenerated });
-          if (!commit.backupRemoved) writeLog('warn', 'Unable to remove committed video trim backup', { projectName, backupPath: commit.backupPath });
-          safeOutput = sourcePath;
-        } else safeOutput = safeGenerated;
-      } finally {
-        if (saveMode === 'replace' && fs.existsSync(generatedPath)) await fs.promises.unlink(generatedPath).catch(() => undefined);
-      }
-      void thumbnailService.syncChangedPaths(projectRoot, [safeOutput], mediaRuntimeState.activeMediaCacheConfig).catch(error => {
-        writeLog('warn', 'Unable to queue trimmed-video thumbnail', { projectName, error: error.message || String(error) });
+      const cancelDirectory = path.join(app.getPath('temp'), 'photoflow-video-trim');
+      const cancelFile = path.join(cancelDirectory, `${operationId}.cancel`);
+      await fs.promises.mkdir(cancelDirectory, { recursive: true });
+      await fs.promises.unlink(cancelFile).catch(() => undefined);
+      taskHandle = backgroundTasks.create({
+        id: operationId,
+        type: 'video-trim',
+        title: `裁剪视频 · ${parsed.base}`,
+        cancellable: true,
+        resources: [sourcePath],
+        metadata: { operationId, workspacePath: path.resolve(workspacePath), projectStatus: status, projectName, sourcePath, sourceRelativePath, saveMode, start, end, sourceDuration },
       });
-      const workspaceRoot = path.resolve(resolveWorkspaceRoot(workspacePath));
-      mainWindow?.webContents.send('workspace-files-changed', { root: workspaceRoot, fileName: path.relative(workspaceRoot, safeOutput), eventType: saveMode === 'replace' ? 'change' : 'rename' });
-      return { success: true, outputPath: safeOutput, relativePath: path.relative(projectRoot, safeOutput).replace(/\\/g, '/'), duration: end - start, replaced: saveMode === 'replace' };
+      if (taskHandle.deduplicated) throw new Error('该视频导出任务已在运行');
+      operation = { cancelFile, cancelled: false, cancellable: true, taskHandle };
+      activeVideoTrimOperations.set(operationId, operation);
+      taskHandle.context.signal.addEventListener('abort', () => {
+        if (!operation?.cancellable) return;
+        operation.cancelled = true;
+        void fs.promises.writeFile(cancelFile, 'cancel', 'utf8').catch(() => undefined);
+      }, { once: true });
+      const runInBackground = async () => {
+        try {
+          await taskHandle.waitForStart();
+          taskHandle.context.throwIfCancelled();
+          publish({ phase: 'preparing', progress: 0, message: '正在准备视频…' });
+          let safeOutput = '';
+          try {
+            const result = await runPythonJsonAction(
+              'cut_video.py',
+              [sourcePath, '--trim-start', String(start), '--trim-end', String(end), '--output-path', generatedPath, '--cancel_file', cancelFile],
+              60 * 60 * 1000,
+              message => {
+                if (message?.type !== 'progress') return;
+                if (message.phase === 'saving') {
+                  operation.cancellable = false;
+                  taskHandle.context.setCancellable(false);
+                }
+                publish({
+                  phase: String(message.phase || 'encoding'),
+                  progress: Math.max(0, Math.min(99, Number(message.progress) || 0)),
+                  message: String(message.message || '正在导出视频…'),
+                });
+              },
+            );
+            if (!result?.success || !fs.existsSync(generatedPath)) throw new Error(result?.error || '视频剪辑失败');
+            operation.cancellable = false;
+            taskHandle.context.setCancellable(false);
+            publish({ phase: 'finalizing', progress: 99, message: '正在完成保存…' });
+            const safeGenerated = assertInside(projectRoot, generatedPath, '视频剪辑输出路径');
+            if (saveMode === 'replace') {
+              const commit = await replaceVideoFileWithRollback({ crypto, fs, path, sourcePath, replacementPath: safeGenerated });
+              if (!commit.backupRemoved) writeLog('warn', 'Unable to remove committed video trim backup', { projectName, backupPath: commit.backupPath });
+              safeOutput = sourcePath;
+            } else safeOutput = safeGenerated;
+          } finally {
+            if (saveMode === 'replace' && fs.existsSync(generatedPath)) await fs.promises.unlink(generatedPath).catch(() => undefined);
+          }
+          void thumbnailService.syncChangedPaths(projectRoot, [safeOutput], mediaRuntimeState.activeMediaCacheConfig).catch(error => {
+            writeLog('warn', 'Unable to queue trimmed-video thumbnail', { projectName, error: error.message || String(error) });
+          });
+          const workspaceRoot = path.resolve(resolveWorkspaceRoot(workspacePath));
+          mainWindow?.webContents.send('workspace-files-changed', { root: workspaceRoot, fileName: path.relative(workspaceRoot, safeOutput), eventType: saveMode === 'replace' ? 'change' : 'rename' });
+          const completedResult = { outputPath: safeOutput, relativePath: path.relative(projectRoot, safeOutput).replace(/\\/g, '/'), duration: end - start, replaced: saveMode === 'replace' };
+          publish({ phase: 'complete', progress: 100, message: '视频导出完成' });
+          taskHandle.context.report(100, '视频导出完成', { phase: 'complete', result: completedResult });
+          taskHandle.complete('视频导出完成');
+        } catch (error) {
+          const cancelled = Boolean(operation?.cancelled || taskHandle?.context.signal.aborted || error?.code === 'TASK_CANCELLED');
+          publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, message: cancelled ? '视频导出已取消' : `视频导出失败：${error.message || String(error)}` });
+          if (taskHandle && !taskHandle.deduplicated && !taskHandle.isFinished()) {
+            if (cancelled) taskHandle.cancelled();
+            else taskHandle.fail(error);
+          }
+          writeLog('warn', 'Video trim failed', { projectName, relativePath, error: error.message || String(error) });
+        } finally {
+          activeVideoTrimOperations.delete(operationId);
+          if (operation?.cancelFile) await fs.promises.unlink(operation.cancelFile).catch(() => undefined);
+        }
+      };
+      return startDetachedBackgroundOperation({
+        operationId,
+        worker: runInBackground,
+        onUnexpectedError: error => writeLog('error', 'Detached video trim worker failed unexpectedly', { projectName, relativePath, error: error.message || String(error) }),
+      });
     } catch (error) {
+      const cancelled = Boolean(operation?.cancelled || taskHandle?.context.signal.aborted || error?.code === 'TASK_CANCELLED');
+      publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, message: cancelled ? '视频导出已取消' : `视频导出失败：${error.message || String(error)}` });
+      if (taskHandle && !taskHandle.deduplicated && !taskHandle.isFinished()) {
+        if (cancelled) taskHandle.cancelled();
+        else taskHandle.fail(error);
+      }
       writeLog('warn', 'Video trim failed', { projectName, relativePath, error: error.message || String(error) });
-      return { success: false, error: error.message || String(error) };
+      return { success: false, operationId, cancelled, error: cancelled ? '视频导出已取消' : error.message || String(error) };
     }
+  });
+
+  ipcMain.handle('workspace-cancel-video-trim', async (_event, operationIdValue) => {
+    const operationId = String(operationIdValue || '');
+    const operation = activeVideoTrimOperations.get(operationId);
+    if (!operation || !operation.cancellable) return { success: true, cancelled: false };
+    operation.cancelled = true;
+    backgroundTasks.cancel(operationId);
+    await fs.promises.writeFile(operation.cancelFile, 'cancel', 'utf8');
+    return { success: true, cancelled: true };
   });
 
   ipcMain.handle('workspace-video-timeline-frames', async (_event, workspacePath, status, projectName, relativePath, times = []) => {
@@ -2195,12 +2508,16 @@ const registerWorkspaceIpc = context => {
     const publish = payload => task?.publish(payload);
     const moves = [];
     const createdTargets = [];
+    const adoptedProgressIds = [];
+    let importWorkspaceRoot = '';
     try {
       const deleteSourceAfterImport = options?.deleteSourceAfterImport === true;
       const linkOnly = options?.linkOnly === true;
       const preserveOriginal = !deleteSourceAfterImport;
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const destinationDir = assertInside(projectPath, path.resolve(projectPath, relativePath || '.'), '导入位置', true);
+      importWorkspaceRoot = ensureWorkspace(workspacePath);
+      const destinationResolution = virtualPaths.resolve(projectPath, relativePath, { externalRootMode: 'target' });
+      const destinationDir = destinationResolution.physicalPath;
       if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('当前文件夹不存在');
       let sourcePaths = Array.isArray(options?.sourcePaths) ? options.sourcePaths.map(source => String(source)) : [];
       if (!sourcePaths.length) {
@@ -2211,6 +2528,7 @@ const registerWorkspaceIpc = context => {
       if (sourcePaths.length > 500) throw new Error('一次最多导入 500 个文件');
       if (linkOnly) {
         const reserved = new Set();
+        const linkedItems = [];
         for (const source of sourcePaths) {
           const sourcePath = path.resolve(source);
           const stat = await fs.promises.stat(sourcePath);
@@ -2218,9 +2536,22 @@ const registerWorkspaceIpc = context => {
           const shortcutPath = uniqueDestination(destinationDir, `${path.basename(sourcePath)}.lnk`, reserved);
           if (!shell.writeShortcutLink(shortcutPath, { target: sourcePath, cwd: stat.isDirectory() ? sourcePath : path.dirname(sourcePath), description: `${stat.isDirectory() ? 'PhotoFlow 外链文件夹' : 'PhotoFlow 外链文件'}：${path.basename(sourcePath)}` })) throw new Error(`无法创建外链：${path.basename(sourcePath)}`);
           createdTargets.push(shortcutPath);
+          linkedItems.push({ relativePath: [destinationResolution.virtualPath, path.basename(shortcutPath)].filter(Boolean).join('/'), sourcePath, kind: stat.isDirectory() ? 'folder' : 'file' });
+        }
+        if (options?.adoptAsOriginal === true) {
+          const mediaKind = options?.mediaKind === 'video' ? 'video' : 'image';
+          for (const item of linkedItems.filter(item => item.kind === 'folder')) {
+            const adopted = await versionService.adoptMediaFolder(importWorkspaceRoot, { projectName, folderPath: item.sourcePath, mode: 'original', mediaKind });
+            if (!adopted?.success) throw new Error(adopted?.error || `无法登记原始素材外链：${path.basename(item.sourcePath)}`);
+            const progressId = adopted.progressFolder?.id || adopted.progressId;
+            if (progressId) adoptedProgressIds.push(progressId);
+          }
         }
         if (createdTargets.length) await pushUndoOperation({ kind: 'remove-created', paths: createdTargets, label: '导入外链' });
-        return { success: true, operationId, count: createdTargets.length, linked: true };
+        for (const item of linkedItems) {
+          attachManagedExternalWatcher(workspacePath, status, projectName, projectPath, item.relativePath, item.sourcePath);
+        }
+        return { success: true, operationId, count: createdTargets.length, linked: true, items: linkedItems };
       }
       const reserved = new Set();
       const sourceInfos = [];
@@ -2315,6 +2646,9 @@ const registerWorkspaceIpc = context => {
       task.complete('文件导入完成');
       return { success: true, operationId, count: sourcePaths.length };
     } catch (error) {
+      for (const progressId of [...adoptedProgressIds].reverse()) {
+        await versionService.unregisterProgress(importWorkspaceRoot, { projectName, progressId }).catch(rollbackError => writeLog('error', 'Unable to roll back adopted external original', { progressId, error: rollbackError.message || String(rollbackError) }));
+      }
       for (const move of [...moves].reverse()) {
         try {
           if (fs.existsSync(move.destination) && !fs.existsSync(move.source)) await movePathAtomic(move.destination, move.source);

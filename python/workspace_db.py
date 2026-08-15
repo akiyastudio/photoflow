@@ -4240,6 +4240,80 @@ def cleanup_progress_tombstones(root: str, db, cutoff: int | None = None):
     }
 
 
+def progress_unregister(root: str, db, payload: dict):
+    """Remove version semantics from an existing folder without touching its files."""
+    project = project_row(db, payload["projectName"])
+    sync_progress_folder_locations(root, db, project)
+    progress_id = str(payload.get("progressId") or "")
+    progress = db.execute(
+        "SELECT * FROM progress_folders WHERE id=? AND project_id=?",
+        (progress_id, project["id"]),
+    ).fetchone()
+    if progress is None:
+        raise ValueError("要取消登记的版本进度不存在")
+    if progress["node_role"] != "progress":
+        raise ValueError("只有普通版本进度可以取消登记")
+    if not os.path.isdir(progress["folder_path"]):
+        raise ValueError("版本文件夹已经不存在，请使用失效版本清理")
+
+    replacement_parent_id = progress["parent_progress_id"]
+    children = db.execute(
+        "SELECT id,node_role FROM progress_folders WHERE project_id=? AND parent_progress_id=?",
+        (project["id"], progress_id),
+    ).fetchall()
+    if children and not replacement_parent_id:
+        raise ValueError("该版本仍有下游节点，请先为下游节点选择有效父版本")
+
+    project_path = os.path.join(os.path.abspath(root), project["relative_path"])
+    relative_path = os.path.relpath(progress["folder_path"], project_path).replace("\\", "/")
+    old_layout_key = f"progress:{progress_id}"
+    ordinary_layout_key = f"entry:{relative_path}"
+    timestamp = int(time.time() * 1000)
+    with db:
+        db.execute(
+            "DELETE FROM tracking_sessions WHERE progress_id=? OR parent_progress_id=?",
+            (progress_id, progress_id),
+        )
+        reparented_progress_count = db.execute(
+            """UPDATE progress_folders SET parent_progress_id=?,
+               relation_kind=CASE WHEN node_role='selection' THEN 'auxiliary' ELSE 'main' END,
+               tracking_state=CASE WHEN node_role='progress' AND tracking_enabled=1 THEN 'stale' ELSE tracking_state END,
+               tracking_snapshot_json=CASE WHEN node_role='progress' THEN '{}' ELSE tracking_snapshot_json END,
+               last_tracked_at=CASE WHEN node_role='progress' THEN NULL ELSE last_tracked_at END,
+               updated_at=? WHERE project_id=? AND parent_progress_id=?""",
+            (replacement_parent_id, timestamp, project["id"], progress_id),
+        ).rowcount
+        db.execute(
+            "DELETE FROM version_graph_edges WHERE source_progress_id=? OR target_progress_id=?",
+            (progress_id, progress_id),
+        )
+        db.execute("DELETE FROM progress_folders WHERE id=?", (progress_id,))
+        ensure_selection_workflow_inputs(db, project["id"])
+        affected_scopes = [row["scope_key"] for row in db.execute(
+            "SELECT scope_key FROM version_tree_node_positions WHERE project_id=? AND node_key=?",
+            (project["id"], old_layout_key),
+        ).fetchall()]
+        db.execute(
+            """UPDATE version_tree_node_positions SET node_key=?,updated_at=?
+               WHERE project_id=? AND node_key=?""",
+            (ordinary_layout_key, timestamp, project["id"], old_layout_key),
+        )
+        if affected_scopes:
+            placeholders = ",".join("?" for _ in affected_scopes)
+            db.execute(
+                f"""UPDATE version_tree_layouts SET revision=revision+1,updated_at=?
+                    WHERE project_id=? AND scope_key IN ({placeholders})""",
+                (timestamp, project["id"], *affected_scopes),
+            )
+    return {
+        "success": True,
+        "progressId": progress_id,
+        "versionKey": progress["version_key"],
+        "relativePath": relative_path,
+        "reparentedProgressCount": reparented_progress_count,
+    }
+
+
 def progress_delete_missing(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     sync_progress_folder_locations(root, db, project)
@@ -7489,6 +7563,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "progress_main_branch_media":
         result = progress_main_branch_media(db, payload)
+        db.close()
+        return result
+    elif action == "progress_unregister":
+        result = progress_unregister(root, db, payload)
         db.close()
         return result
     elif action == "progress_delete_missing":

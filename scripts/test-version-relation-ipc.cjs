@@ -15,6 +15,7 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   let layoutLockFailures = 0;
   let snapshotProgressCalls = 0;
   let edgeReplacePayload;
+  let unregisterPayload;
   let filesystemCalls = 0;
   const failFilesystem = new Proxy({}, { get() { filesystemCalls += 1; throw new Error('relation IPC must not access files'); } });
   registerVersionIpc({
@@ -42,6 +43,11 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
         assert.strictEqual(root, workspaceRoot);
         repositoryPayload = payload;
         return { success: true, progressFolder: { ...child, parentProgressId: parent.id } };
+      },
+      unregisterProgress: async (root, payload) => {
+        assert.strictEqual(root, workspaceRoot);
+        unregisterPayload = payload;
+        return { success: true, progressId: payload.progressId };
       },
       repairLegacySelectionRelation: async (root, payload) => {
         assert.strictEqual(root, workspaceRoot);
@@ -78,6 +84,12 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   const progressFoldersResult = await progressFoldersHandler(null, workspaceRoot, 'Trusted Project');
   assert.strictEqual(progressFoldersResult.success, true);
   assert.strictEqual(snapshotProgressCalls, 1, 'opening the version tree must use the read-only progress snapshot');
+
+  const unregisterHandler = handlers.get('workspace-progress-unregister');
+  assert(unregisterHandler, 'progress unregister IPC must be registered');
+  const unregisterResult = await unregisterHandler(null, workspaceRoot, 'Trusted Project', child.id);
+  assert.strictEqual(unregisterResult.success, true);
+  assert.deepStrictEqual(unregisterPayload, { projectName: 'Trusted Project', progressId: child.id }, 'unregister must pass only the trusted project name and progress ID');
 
   const handler = handlers.get('workspace-progress-relation-update');
   assert(handler, 'relation IPC must be registered');
@@ -213,7 +225,11 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
       if (path.isAbsolute(relativePath) || relativePath.includes('..')) throw new Error('项目路径越界');
       return path.join('C:\\trusted-project', ...relativePath.split('/'));
     },
-    fs: { statSync: () => ({ isDirectory: () => true }) },
+    fs: {
+      statSync: filePath => ({ isDirectory: () => path.extname(filePath).toLowerCase() !== '.lnk', isFile: () => path.extname(filePath).toLowerCase() === '.lnk' }),
+      promises: { stat: async () => ({ isDirectory: () => true }) },
+    },
+    shell: { readShortcutLink: shortcutPath => ({ target: 'D:\\external-originals', description: `PhotoFlow 外链文件夹：${path.basename(shortcutPath, '.lnk')}` }) },
     versionService: {
       listProgress: async () => ({ progressFolders: [parent] }),
       adoptMediaFolder: async (root, payload) => { assert.strictEqual(root, workspaceRoot); adoptionPayload = payload; return { success: true, progressFolder: { id: 'adopted' } }; },
@@ -235,6 +251,14 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
     projectName: 'Trusted Project', folderPath: path.join('C:\\trusted-project', 'manual', 'source'),
     mode: 'preview', mediaKind: 'image', sourceProgressId: parent.id,
   }, 'repository must receive only the main-process-resolved path and derived adoption fields');
+  adoptionPayload = undefined;
+  const adoptedExternalOriginal = await adoptionHandler(null, workspaceRoot, '后期中', {
+    projectName: 'Trusted Project', relativePath: 'RAW.lnk', mode: 'original', mediaKind: 'image',
+  });
+  assert.strictEqual(adoptedExternalOriginal.success, true, adoptedExternalOriginal.error);
+  assert.deepStrictEqual(adoptionPayload, {
+    projectName: 'Trusted Project', folderPath: path.resolve('D:\\external-originals'), mode: 'original', mediaKind: 'image',
+  }, 'a managed external folder imported as original material must register its resolved target as an original version-tree node');
   adoptionPayload = undefined;
   const injectedAdoption = await adoptionHandler(null, workspaceRoot, '后期中', {
     projectName: 'Trusted Project', relativePath: 'manual/source', mode: 'preview', mediaKind: 'image',

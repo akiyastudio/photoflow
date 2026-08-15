@@ -17,6 +17,13 @@ export const normalizeVersionPath = (value: string) => value.replace(/\\/g, '/')
 
 export const isUserVersionKey = (value: string) => /^\d+(?:_\d+)*$/.test(value);
 
+export const versionKeyWithFinalIndex = (suggestedVersionKey: string, value: string) => {
+  const digits = value.replace(/\D/g, '').replace(/^0+(?=\d)/, '');
+  const parts = suggestedVersionKey.split('_');
+  const prefix = parts.length > 1 ? `${parts.slice(0, -1).join('_')}_` : '';
+  return `${prefix}${digits}`;
+};
+
 export const versionKindForParent = (
   versionKey: string | undefined,
   parent?: Pick<ProgressFolder, 'nodeRole' | 'versionKey'>,
@@ -29,6 +36,25 @@ export const versionKindForParent = (
   return versionParts.length === parentParts.length + 1 && versionKey.startsWith(`${parentKey}_`)
     ? 'branch'
     : 'main';
+};
+
+export const versionKeyMatchesParentKind = (
+  versionKey: string | undefined,
+  parent: Pick<ProgressFolder, 'nodeRole' | 'versionKey'> | undefined,
+  versionKind: 'main' | 'branch',
+) => {
+  if (!versionKey || !isUserVersionKey(versionKey)) return false;
+  const parts = versionKey.split('_');
+  if (!parent) return versionKind === 'main' && parts.length === 1;
+  if (parent.nodeRole !== 'progress' || !isUserVersionKey(parent.versionKey)) {
+    return versionKind === 'branch' ? parts.length === 2 : parts.length === 1;
+  }
+  const parentParts = parent.versionKey.split('_');
+  if (versionKind === 'branch') {
+    return parts.length === parentParts.length + 1 && versionKey.startsWith(`${parent.versionKey}_`);
+  }
+  if (parts.length !== parentParts.length) return false;
+  return parentParts.length === 1 || parts.slice(0, -1).join('_') === parentParts.slice(0, -1).join('_');
 };
 
 export const nextVersionKeys = (

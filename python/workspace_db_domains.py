@@ -17,7 +17,7 @@ PROGRESS_ACTIONS = (
     "version_graph_edge_create", "version_graph_edge_list", "version_graph_edge_delete", "version_graph_edge_replace_source",
     "version_tree_layout_get", "version_tree_layout_save", "progress_policy_save", "progress_mark_stale",
     "progress_mark_ready", "progress_main_branch", "progress_visible_relations", "progress_copy_missing_children",
-    "progress_detect_stale", "progress_main_branch_media", "progress_delete_missing", "batch_register_baseline",
+    "progress_detect_stale", "progress_main_branch_media", "progress_unregister", "progress_delete_missing", "batch_register_baseline",
     "batch_commit_compare", "batch_operation_list", "batch_retry_operations",
 )
 TRACKING_ACTIONS = (

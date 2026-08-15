@@ -18,7 +18,7 @@ const retryDatabaseLocked = async (operation, attempts = 4) => {
 };
 
 const registerVersionIpc = context => {
-  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog } = context;
+  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
   const listRatedProjectMedia = projectPath => mediaRatingService.listProject(projectPath);
   const teamDataDirectory = (workspaceRoot, photoId, baseVersionId) => path.join(getWorkspaceDataRoot(workspaceRoot), 'team-retouch', photoId, baseVersionId);
   const deliveryName = (photo, basePath) => path.parse(photo?.originalName || photo?.displayName || basePath).name;
@@ -407,6 +407,19 @@ const registerVersionIpc = context => {
     }
   });
 
+  ipcMain.handle('workspace-progress-unregister', async (_event, workspacePath, projectName, progressId) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      const listed = await versionService.listProgress(workspaceRoot, projectName, true);
+      const progress = (listed.progressFolders || []).find(folder => folder.id === String(progressId || ''));
+      if (!progress || progress.nodeRole !== 'progress') throw new Error('要取消登记的版本进度不存在或角色不允许');
+      return await versionService.unregisterProgress(workspaceRoot, { projectName, progressId: progress.id });
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
   ipcMain.handle('workspace-final-version-export', async (_event, workspacePath, status, projectName, request = {}) => {
     let folderPath = '';
     try {
@@ -685,7 +698,14 @@ const registerVersionIpc = context => {
         || !['original', 'companion', 'preview'].includes(mode) || !['image', 'video'].includes(mediaKind)) {
         throw new Error('media_adopt_payload_invalid: 项目内相对路径和素材类型必填');
       }
-      const folderPath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
+      let folderPath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
+      if (path.extname(folderPath).toLowerCase() === '.lnk' && fs.statSync(folderPath).isFile()) {
+        const details = shell.readShortcutLink(folderPath);
+        if (!String(details?.description || '').startsWith('PhotoFlow 外链文件夹：')) throw new Error('media_adopt_folder_invalid: 只有由 PhotoFlow 创建的文件夹外链可以纳入版本树');
+        const target = path.resolve(String(details?.target || ''));
+        if (!(await fs.promises.stat(target).catch(() => null))?.isDirectory()) throw new Error('media_adopt_folder_invalid: 外链文件夹当前不可用');
+        folderPath = target;
+      }
       if (!fs.statSync(folderPath).isDirectory()) throw new Error('media_adopt_folder_invalid: 目标必须是文件夹');
       const listed = await versionService.listProgress(workspaceRoot, projectName, true);
       if (sourceProgressId && !(listed.progressFolders || []).some(folder => folder.id === sourceProgressId && !folder.folderMissing)) {

@@ -1,4 +1,4 @@
-const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExtensions, releaseWorkspaceWatchPath, suppressWorkspaceWatchPath, versionService, writeLog, onInvalidate = () => undefined }) => {
+const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExtensions, releaseWorkspaceWatchPath, suppressWorkspaceWatchPath, versionService, projectVirtualPaths, writeLog, onInvalidate = () => undefined }) => {
   const cache = new Map();
   const normalize = value => Math.max(0, Math.min(5, Math.round(Number(value) || 0)));
   const fromTags = tags => {
@@ -51,18 +51,31 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
   };
   const listProject = async projectPath => {
     const candidates = [];
-    const directories = [projectPath];
+    const directories = [{ path: projectPath, virtualPath: '', viaExternalLink: false }];
+    for (const link of projectVirtualPaths?.listManagedExternalLinks(projectPath) || []) {
+      if (link.offline) continue;
+      if (link.externalTargetKind === 'file') {
+        const extension = path.extname(link.externalTargetRoot).toLowerCase();
+        if (imageExtensions.has(extension) || rawExtensions.has(extension)) candidates.push({ filePath: link.externalTargetRoot, extension, virtualPath: link.shortcutVirtualPath, viaExternalLink: true });
+      } else directories.push({ path: link.externalTargetRoot, virtualPath: link.shortcutVirtualPath, viaExternalLink: true });
+    }
+    const visited = new Set();
     while (directories.length) {
       const directory = directories.pop();
-      for (const entry of await fs.promises.readdir(directory, { withFileTypes: true })) {
-        const filePath = path.join(directory, entry.name);
+      const realDirectory = await fs.promises.realpath(directory.path);
+      const directoryKey = process.platform === 'win32' ? realDirectory.toLocaleLowerCase() : realDirectory;
+      if (visited.has(directoryKey)) continue;
+      visited.add(directoryKey);
+      for (const entry of await fs.promises.readdir(realDirectory, { withFileTypes: true })) {
+        const filePath = path.join(realDirectory, entry.name);
+        const virtualPath = [directory.virtualPath, entry.name].filter(Boolean).join('/');
         if (entry.isDirectory()) {
-          if (!entry.name.startsWith('.photoflow-') && !/^图片后期_\d+(?:_\d+)*_喜爱$/u.test(entry.name)) directories.push(filePath);
+          if (!entry.name.startsWith('.photoflow-') && !/^图片后期_\d+(?:_\d+)*_喜爱$/u.test(entry.name)) directories.push({ path: filePath, virtualPath, viaExternalLink: directory.viaExternalLink });
           continue;
         }
         if (!entry.isFile()) continue;
         const extension = path.extname(entry.name).toLowerCase();
-        if (imageExtensions.has(extension) || rawExtensions.has(extension)) candidates.push({ filePath, extension });
+        if (imageExtensions.has(extension) || rawExtensions.has(extension)) candidates.push({ filePath, extension, virtualPath, viaExternalLink: directory.viaExternalLink });
       }
     }
     const entries = [];
@@ -74,7 +87,7 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
           const rating = await read(candidate.filePath);
           if (!rating) continue;
           const stat = await fs.promises.stat(candidate.filePath);
-          entries.push({ name: path.basename(candidate.filePath), path: candidate.filePath, relativePath: path.relative(projectPath, candidate.filePath).replace(/\\/g, '/'), kind: imageExtensions.has(candidate.extension) ? 'image' : 'raw', extension: candidate.extension, size: stat.size, createdAt: stat.birthtimeMs || stat.ctimeMs, updatedAt: stat.mtimeMs, rating });
+          entries.push({ name: path.basename(candidate.filePath), path: candidate.filePath, relativePath: candidate.virtualPath, kind: imageExtensions.has(candidate.extension) ? 'image' : 'raw', extension: candidate.extension, size: stat.size, createdAt: stat.birthtimeMs || stat.ctimeMs, updatedAt: stat.mtimeMs, rating, ...(candidate.viaExternalLink ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) });
         } catch (error) {
           writeLog('warn', 'Unable to inspect media rating', { filePath: candidate.filePath, error: error.message || String(error) });
         }

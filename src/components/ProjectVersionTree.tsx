@@ -53,12 +53,20 @@ export type VersionTreeCanvasController = {
 type VersionTreeAreaKind = 'image' | 'video' | 'other';
 type VersionTreeAreaBand = { areaKind: VersionTreeAreaKind; label: string; left: number; right: number; top: number; bottom: number };
 type VersionTreeAreaSize = { width: number; height: number };
-type PositionedItem = { key: string; nodeKey: string; areaKind: VersionTreeAreaKind; folder?: ProgressFolder; entry: ProjectFileEntry; x: number; y: number };
+type PositionedItem = { key: string; nodeKey: string; areaKind: VersionTreeAreaKind; folder?: ProgressFolder; sourceKind?: 'image' | 'video'; entry: ProjectFileEntry; x: number; y: number };
 type LayoutRelation = { id: string; kind: VersionTreeEdgeKind; parentId: string; childId: string; selectable: boolean };
 type DrawnEdge = { id: string; kind: VersionTreeEdgeKind; path: string; parentId?: string; childId?: string; startX: number; startY: number; endX: number; endY: number; menuX: number; menuY: number };
 
 const normalizePath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLocaleLowerCase('zh-CN');
 const parentPath = (value: string) => normalizePath(value).split('/').slice(0, -1).join('/');
+const inferredExternalOriginalKind = (entry: ProjectFileEntry): 'image' | 'video' | undefined => {
+  if (!entry.externalLink || entry.externalLinkTargetKind === 'file') return undefined;
+  const name = entry.name.replace(/\.lnk$/i, '').trim().toLocaleLowerCase('zh-CN');
+  if (/^(raw|jpg|原片|原图|底片|原始素材)$/iu.test(name)) return 'image';
+  if (/^(mov|视频原片|原始视频)$/iu.test(name)) return 'video';
+  return undefined;
+};
+const isVersionFolderEntry = (entry: ProjectFileEntry) => entry.kind === 'folder' || entry.externalLink === true && entry.externalLinkTargetKind !== 'file';
 const EMPTY_VERSION_TREE_IDS: string[] = [];
 const EMPTY_VERSION_TREE_EDGES: VersionGraphEdge[] = [];
 const afterVersionTreePaint = (callback: () => void) => typeof window.requestAnimationFrame === 'function'
@@ -111,21 +119,24 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   const scopePath = normalizePath(activeRelativePath);
   const graph = useMemo(() => projectVisibleVersionGraph(progressFolders, graphEdges), [graphEdges, progressFolders]);
   const entryByPath = useMemo(() => new Map(structureEntries.map(entry => [normalizePath(entry.relativePath), entry])), [structureEntries]);
+  const externalEntryByTarget = useMemo(() => new Map(structureEntries
+    .filter(entry => entry.externalLink && entry.externalLinkTarget)
+    .map(entry => [normalizePath(entry.externalLinkTarget!), entry])), [structureEntries]);
   const versionItems = useMemo(() => graph.folders.flatMap(folder => {
     const relativePath = projectRelativePath(folder.folderPath);
-    const foundEntry = entryByPath.get(normalizePath(relativePath));
+    const foundEntry = externalEntryByTarget.get(normalizePath(folder.folderPath)) || entryByPath.get(normalizePath(relativePath));
     const entry: ProjectFileEntry | undefined = foundEntry || folder.folderMissing ? foundEntry || {
       kind: 'folder', name: folder.displayName, path: folder.folderPath, relativePath, extension: '', size: 0, createdAt: folder.createdAt, updatedAt: folder.updatedAt,
     } : undefined;
     return entry && parentPath(relativePath) === scopePath ? [{ folder, entry }] : [];
-  }), [entryByPath, graph.folders, projectRelativePath, scopePath]);
+  }), [entryByPath, externalEntryByTarget, graph.folders, projectRelativePath, scopePath]);
   const visibleIds = useMemo(() => new Set(versionItems.map(item => item.folder.id)), [versionItems]);
   const visibleEdges = useMemo(() => graph.edges.filter(edge => visibleIds.has(edge.parentId) && visibleIds.has(edge.childId)), [graph.edges, visibleIds]);
   const trackedEntryPaths = useMemo(() => new Set(versionItems.map(item => normalizePath(item.entry.relativePath))), [versionItems]);
   const selectedPathSet = useMemo(() => new Set(selectedRelativePaths.map(normalizePath)), [selectedRelativePaths]);
   // The canvas represents folders and version relations, not every loose media
   // file in the current directory. This keeps large shoots usable.
-  const ordinaryEntries = useMemo(() => entries.filter(entry => entry.kind === 'folder' && !trackedEntryPaths.has(normalizePath(entry.relativePath))), [entries, trackedEntryPaths]);
+  const ordinaryEntries = useMemo(() => entries.filter(entry => isVersionFolderEntry(entry) && !trackedEntryPaths.has(normalizePath(entry.relativePath))), [entries, trackedEntryPaths]);
   const selectedNodeIds = useMemo(() => new Set([
     ...versionItems.filter(item => selectedPathSet.has(normalizePath(item.entry.relativePath))).map(item => `entry:${normalizePath(item.entry.relativePath)}`),
     ...ordinaryEntries.filter(entry => selectedPathSet.has(normalizePath(entry.relativePath))).map(entry => `entry:${normalizePath(entry.relativePath)}`),
@@ -152,16 +163,29 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
         const item = itemById.get(node.id);
         return item ? [{ key: `entry:${normalizePath(item.entry.relativePath)}`, nodeKey: `progress:${node.id}`, areaKind: mediaKind, ...item, x: node.x, y: node.y + areaTop }] : [];
       });
-      positioned.push(...mediaNodes);
+      const inferredOriginalNodes = ordinaryEntries
+        .filter(entry => inferredExternalOriginalKind(entry) === mediaKind)
+        .map((entry, index) => ({
+          key: `entry:${normalizePath(entry.relativePath)}`,
+          nodeKey: `entry:${normalizePath(entry.relativePath)}`,
+          areaKind: mediaKind,
+          sourceKind: mediaKind,
+          entry,
+          x: index * (nodeWidth + otherColumnGap),
+          y: mediaNodes.length ? Math.max(...mediaNodes.map(item => item.y + nodeHeight)) + rowGap : areaTop,
+        }));
+      positioned.push(...mediaNodes, ...inferredOriginalNodes);
       relations.push(...forest.edges.map(edge => ({ id: edge.id, kind: edge.relationKind, parentId: edge.parentId, childId: edge.childId, selectable: true })));
-      if (mediaNodes.length) areaTop = Math.max(...mediaNodes.map(item => item.y + nodeHeight)) + rootGap + 12;
+      const areaNodes = [...mediaNodes, ...inferredOriginalNodes];
+      if (areaNodes.length) areaTop = Math.max(...areaNodes.map(item => item.y + nodeHeight)) + rootGap + 12;
     }
     const graphBottom = positioned.length ? Math.max(...positioned.map(item => item.y + nodeHeight)) : 0;
     const otherTop = graphBottom ? graphBottom + rootGap + 12 : 0;
     // Keep loose folders in a compact horizontal shelf. They do not need the
     // wider column spacing reserved for relation arrows in the version graph.
-    const otherColumns = Math.max(1, ordinaryEntries.length);
-    positioned.push(...ordinaryEntries.map((entry, index) => ({
+    const otherEntries = ordinaryEntries.filter(entry => !inferredExternalOriginalKind(entry));
+    const otherColumns = Math.max(1, otherEntries.length);
+    positioned.push(...otherEntries.map((entry, index) => ({
       key: `entry:${normalizePath(entry.relativePath)}`,
       nodeKey: `entry:${normalizePath(entry.relativePath)}`,
       areaKind: 'other' as const,
@@ -457,7 +481,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
       return;
     }
     if (!targetItem.folder) {
-      if ((source.nodeRole === 'original' || source.nodeRole === 'progress') && targetItem.entry.kind === 'folder') onRequestCreateVersion?.(source, targetItem.entry);
+      if ((source.nodeRole === 'original' || source.nodeRole === 'progress') && isVersionFolderEntry(targetItem.entry)) onRequestCreateVersion?.(source, targetItem.entry);
       else onNotice('只有原始素材或版本进度可以向普通文件夹创建下一版本', 4000);
       return;
     }
@@ -599,7 +623,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
         const canBeParent = Boolean(item.folder && !item.folder.folderMissing && ['original', 'progress', 'selection', 'workflow'].includes(item.folder.nodeRole));
         const hasInputRelation = Boolean(item.folder && layout.edges.some(edge => edge.childId === item.folder!.id && edge.parentId));
         const canAcceptInput = Boolean(item.folder && (item.folder.nodeRole !== 'original' || item.folder.artifactKind));
-        const createVersionTarget = !item.folder && item.entry.kind === 'folder' && !item.entry.viaShortcut;
+        const createVersionTarget = !item.folder && isVersionFolderEntry(item.entry) && (!item.entry.viaShortcut || item.entry.viaExternalLink);
         const candidateError = item.folder && activeRelationChildId ? relationError(activeRelationChildId, item.folder.id) : '';
         const candidateHovered = Boolean(item.folder && activeRelationChildId && hoverParentId === item.folder.id);
         const candidateColor = !activeRelationChildId
@@ -612,7 +636,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
                 ? 'bg-emerald-500'
                 : 'bg-blue-600';
         return <div key={item.key} {...nodeHandlers} data-version-tree-node="true" data-version-progress-id={item.folder?.id} data-version-output-target-key={createVersionTarget || item.folder ? item.key : undefined} onPointerDownCapture={() => setSelectedNodeKey(item.key)} onFocusCapture={() => setSelectedNodeKey(item.key)} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }} className={`group/version-node absolute z-20 cursor-grab rounded-xl active:cursor-grabbing ${createVersionTargetKey === item.key ? 'ring-2 ring-emerald-400 ring-offset-2' : ''}`} data-node-role={item.folder?.nodeRole} data-tracking-label={item.folder ? trackingStateLabel(item.folder) : undefined} style={{ left: item.x, top: item.y, width: nodeWidth, minHeight: nodeHeight, touchAction: 'none' }}>
-        {renderEntry(item.entry, item.folder)}
+        {renderEntry(item.entry, item.folder, item.sourceKind)}
         {item.folder && <>
           {canAcceptInput && <button type="button" data-version-tree-port="true" disabled={mutatingIds.has(item.folder.id)} aria-label={hasInputRelation ? `断开 ${item.folder.displayName} 的输入连接` : `${item.folder.displayName} 等待输入连接`} title={mutatingIds.has(item.folder.id) ? '关系正在更新' : hasInputRelation ? '按下只会断开左侧输入连接' : '空输入端：请从来源节点右侧输出端拖入'} onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation(); if (hasInputRelation) removeNodeInput(item.folder!); else onNotice('左侧触点只用于断开已有连接；请从来源节点右侧拖出新线。'); }} onClick={event => { event.preventDefault(); event.stopPropagation(); }} className="absolute -left-2.5 top-1/2 z-20 flex h-5 w-5 -translate-y-1/2 items-center justify-center opacity-0 transition-opacity group-hover/version-node:opacity-100 group-focus-within/version-node:opacity-100 focus:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"><span aria-hidden className={`h-2.5 w-2.5 rounded-full border-2 shadow ${hasInputRelation ? 'border-white bg-red-500' : 'border-slate-400 bg-white'}`}/></button>}
           {canBeParent && <button type="button" data-version-tree-port="true" data-relation-parent-id={item.folder.id} aria-label={`从 ${item.folder.displayName} 拖出连接`} title={activeRelationChildId ? candidateError || '可连接' : item.folder.nodeRole === 'progress' ? '拖到普通文件夹创建下一版本，或拖到兼容节点建立关系' : '从右侧输出端拖到兼容节点'} onPointerDown={event => beginCreateVersionDrag(event, item.folder!.id, { x: item.x + nodeWidth, y: item.y + nodeHeight / 2 })} onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) updateCreateVersionTarget(event.clientX, event.clientY, event.currentTarget); }} onPointerUp={event => endCreateVersionDrag(event, item.folder!.id)} onPointerCancel={cancelCreateVersionDrag} className="absolute -right-2.5 top-1/2 z-20 flex h-5 w-5 -translate-y-1/2 items-center justify-center opacity-0 transition-opacity group-hover/version-node:opacity-100 group-focus-within/version-node:opacity-100 focus:opacity-100"><span aria-hidden className={`h-2.5 w-2.5 rounded-full border-2 border-white shadow ${candidateColor}`}/>{candidateHovered && candidateError && <span role="tooltip" className="pointer-events-none absolute left-5 top-1/2 z-40 -translate-y-1/2 whitespace-nowrap rounded bg-red-600 px-2 py-1 text-[10px] font-medium text-white shadow-lg">{candidateError}</span>}</button>}

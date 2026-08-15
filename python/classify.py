@@ -411,6 +411,16 @@ def _source_volume_identity(source_path):
         return ''
 
 
+def _is_import_volume_root(source_path):
+    absolute_path = os.path.abspath(source_path)
+    if os.name == 'nt':
+        drive, tail = os.path.splitdrive(absolute_path)
+        return bool(drive) and os.path.normpath(tail) == os.path.normpath(os.sep)
+    if sys.platform == 'darwin':
+        return os.path.dirname(absolute_path.rstrip(os.sep)) == '/Volumes'
+    return False
+
+
 def _source_sample_fingerprint(file_path, size=None):
     file_size = os.path.getsize(file_path) if size is None else int(size)
     digest = hashlib.sha256()
@@ -2071,7 +2081,8 @@ def run(args_list):
 
     try:
         if args.stage == 'check':
-            log_status("SD Card Detected" if os.path.exists(args.sd_path) else "No Device", {"connected": os.path.exists(args.sd_path), "path": args.sd_path})
+            connected = os.path.isdir(args.sd_path) and _is_import_volume_root(args.sd_path)
+            log_status("SD Card Detected" if connected else "No Device", {"connected": connected, "path": args.sd_path})
         elif args.stage == 'plan':
             stage_plan_import(args.sd_path, args.dest_path, args.projects_json, args.import_type, args.time_gap, args.direct_source, source_paths, args.import_session, args.date_filter)
         elif args.stage == 'import':
