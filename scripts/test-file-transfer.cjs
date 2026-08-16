@@ -6,6 +6,7 @@ const path = require('path');
 const { registerFileOperationsIpc } = require('../electron/modules/files-ipc.cjs');
 const { registerWorkspaceIpc } = require('../electron/modules/workspace-ipc.cjs');
 const { registerBrollImportIpc } = require('../electron/modules/broll-import.cjs');
+const { createProjectVirtualPathService } = require('../electron/services/project-virtual-path-service.cjs');
 const { addUndoIdentities, assertUndoIdentity, capturePathIdentity, samePathIdentity } = require('../electron/services/file-identity-service.cjs');
 const {
   CANCELLED_CODE,
@@ -580,7 +581,14 @@ const run = async () => {
     let progressRegistrationPath = '';
     let failProgressRelocation = false;
     let failShortcutRemoval = false;
+    let failExternalAdoptionRollback = false;
+    let failImportUndoOperation = false;
+    let failManagedLinkRevoke = false;
+    let managedWatcherAcquisitions = 0;
     let materializedProgressFolders = [];
+    const importUndoOperations = [];
+    const revertedExternalAdoptions = [];
+    const unregisteredExternalProgress = [];
     const importFs = {
       ...fs,
       promises: {
@@ -600,6 +608,15 @@ const run = async () => {
       readShortcutLink: shortcutPath => JSON.parse(fs.readFileSync(shortcutPath, 'utf8')),
       openPath: async target => { externallyOpenedPath = target; return ''; },
     };
+    const importProjectVirtualPaths = createProjectVirtualPathService({
+      shell: importShell,
+      registryPath: path.join(root, 'managed-external-links.json'),
+    });
+    const revokeImportedManagedLinks = importProjectVirtualPaths.revokeManagedExternalLinkIds;
+    importProjectVirtualPaths.revokeManagedExternalLinkIds = linkIds => {
+      if (failManagedLinkRevoke) throw new Error('simulated managed-link registry write failure');
+      return revokeImportedManagedLinks(linkIds);
+    };
     registerWorkspaceIpc({
       Array, Boolean, Date, Error, Math, Object, Promise, Set, String, undefined, crypto,
       ipcMain: { handle: (name, handler) => importProjectHandlers.set(name, handler) }, fs: importFs, path,
@@ -617,17 +634,34 @@ const run = async () => {
       activeProjectFileOperations: new Map(), assertDiskSpace, assertInside, assertExistingInside, uniqueDestination, movePathAtomic,
       collectCopyPlan: async (...args) => { importCopyPlanCalls += 1; return collectCopyPlan(...args); },
       copyPlannedFiles, removeCopiedSources, throwIfCancelled, shell: importShell,
+      projectVirtualPaths: importProjectVirtualPaths,
+      acquireFileRootWatcher: () => { managedWatcherAcquisitions += 1; return { success: true }; },
+      releaseFileRootWatcher: () => undefined,
       mediaRuntimeState: {}, mediaService: { grantRoot: () => undefined }, normalizeMediaCacheSizeGB: value => value || 1,
       thumbnailService: { indexDirectory: () => undefined },
       versionService: {
         listProgress: async () => ({ progressFolders: materializedProgressFolders }),
+        adoptMediaFolder: async (_workspaceRoot, request) => ({ success: true, created: true, progressFolder: { id: `adopted-${path.basename(request.folderPath)}` } }),
+        revertExternalAdoptions: async (_workspaceRoot, request) => {
+          revertedExternalAdoptions.push(request);
+          if (failExternalAdoptionRollback) throw new Error('simulated external adoption rollback failure');
+          return { success: true, removedProgressIds: request.progressIds };
+        },
+        unregisterProgress: async (_workspaceRoot, request) => { unregisteredExternalProgress.push(request); return { success: true }; },
         registerProgress: async (_workspaceRoot, request) => {
           if (failProgressRelocation) return { success: false, error: 'simulated progress relocation failure' };
           progressRegistrationPath = request.folderPath;
           return { success: true, progressFolder: { ...request, id: request.progressId || 'progress-id' } };
         },
       },
-      pushUndoOperation: async () => undefined, writeLog: () => undefined, mainWindow: null,
+      renameHistory: importUndoOperations,
+      assertUndoIdentity: async (_operation, target) => {
+        if (!fs.existsSync(target)) throw Object.assign(new Error('missing undo target'), { code: 'UNDO_IDENTITY_MISMATCH' });
+      },
+      pushUndoOperation: async operation => {
+        if (failImportUndoOperation) throw new Error('simulated undo persistence failure');
+        importUndoOperations.push(operation);
+      }, writeLog: () => undefined, mainWindow: null,
     });
     const importedProject = await importProjectHandlers.get('workspace-import-existing-project')(
       { sender: { isDestroyed: () => false, send: () => {} } },
@@ -698,6 +732,98 @@ const run = async () => {
     assert(browsedManagedExternalFolder.entries.some(entry => entry.name === 'inside.jpg' && entry.viaExternalLink), 'managed external folders must browse through the normal in-app folder route');
     assert.deepStrictEqual(fs.readdirSync(fileLinkProjectPath).sort(), ['linked-file-source.jpg.lnk', 'linked-folder-source.lnk']);
 
+    const managedRootGuardHandlers = new Map();
+    registerFileOperationsIpc({
+      Array, Boolean, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => managedRootGuardHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: () => fileLinkProjectPath, ensureWorkspace: () => importWorkspaceRoot,
+      projectVirtualPaths: importProjectVirtualPaths, activeProjectFileOperations: new Map(),
+      versionService: { listProgress: async () => ({ success: true, progressFolders: [{ externalLinkRelativePath: 'linked-folder-source.lnk' }] }) },
+      pushUndoOperation: async () => undefined, writeLog: () => undefined,
+    });
+    const requestedMetadataPath = process.platform === 'win32'
+      ? 'linked-folder-source.lnk\\inside.jpg'
+      : 'linked-folder-source.lnk/inside.jpg';
+    const externalFileDetails = await managedRootGuardHandlers.get('workspace-file-details')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, [requestedMetadataPath],
+    );
+    assert.strictEqual(externalFileDetails.success, true, externalFileDetails.error);
+    assert.strictEqual(externalFileDetails.details.length, 1);
+    assert.strictEqual(externalFileDetails.details[0].relativePath, requestedMetadataPath,
+      'file-detail responses must preserve the requested path identity so Windows metadata hydration can match browse entries');
+    assert.strictEqual(externalFileDetails.details[0].size, 6);
+    const blockedTrackedMove = await managedRootGuardHandlers.get('workspace-file-operation')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, 'move', ['linked-folder-source.lnk'], '',
+    );
+    assert.strictEqual(blockedTrackedMove.success, false);
+    assert.match(blockedTrackedMove.error, /已纳入版本树的外链不能使用普通移动或重命名/);
+    const blockedTrackedRename = await managedRootGuardHandlers.get('workspace-file-operation')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, 'rename', ['linked-folder-source.lnk'], '', 'renamed-link',
+    );
+    assert.strictEqual(blockedTrackedRename.success, false);
+    assert.match(blockedTrackedRename.error, /已纳入版本树的外链不能使用普通移动或重命名/);
+    const blockedManagedCopy = await managedRootGuardHandlers.get('workspace-file-operation')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, 'copy', ['linked-folder-source.lnk'], '',
+    );
+    assert.strictEqual(blockedManagedCopy.success, false);
+    assert.match(blockedManagedCopy.error, /外链根不能通过普通复制或剪切/);
+
+    const preservedAdoptionSource = path.join(root, 'preserved-adoption-source');
+    const preservedAdoptionShortcut = path.join(fileLinkProjectPath, 'preserved-adoption-source.lnk');
+    fs.mkdirSync(preservedAdoptionSource, { recursive: true });
+    fs.writeFileSync(path.join(preservedAdoptionSource, 'preserved.jpg'), 'preserved');
+    failImportUndoOperation = true;
+    failExternalAdoptionRollback = true;
+    const failedAdoptionRollback = await importProjectHandlers.get('workspace-import-files')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, '', {
+        linkOnly: true, deleteSourceAfterImport: false, sourcePaths: [preservedAdoptionSource], adoptAsOriginal: true, mediaKind: 'image',
+      },
+    );
+    failImportUndoOperation = false;
+    failExternalAdoptionRollback = false;
+    assert.strictEqual(failedAdoptionRollback.success, false, 'the original import failure must still be reported');
+    assert.strictEqual(failedAdoptionRollback.recoveryRequired, true, 'a failed database rollback must advertise recovery state');
+    assert.match(failedAdoptionRollback.error, /已保留外链以便恢复/);
+    assert.strictEqual(fs.existsSync(preservedAdoptionShortcut), true, 'a link still referenced by the database must be preserved');
+    assert(importProjectVirtualPaths.readManagedExternalLink(preservedAdoptionShortcut), 'the preserved shortcut must retain its managed identity');
+
+    const retryableUndoSource = path.join(root, 'retryable-undo-source');
+    fs.mkdirSync(retryableUndoSource, { recursive: true });
+    const retryableUndoImport = await importProjectHandlers.get('workspace-import-files')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, '', {
+        linkOnly: true, deleteSourceAfterImport: false, sourcePaths: [retryableUndoSource],
+      },
+    );
+    assert.strictEqual(retryableUndoImport.success, true, retryableUndoImport.error);
+    const retryableUndoShortcut = path.join(fileLinkProjectPath, 'retryable-undo-source.lnk');
+    assert.deepStrictEqual(importUndoOperations.at(-1).managedExternalWatcher, {
+      workspacePath: importWorkspaceRoot, status: '策划中', projectName: fileLinkProjectName,
+    });
+    const watcherAcquisitionsBeforeUndo = managedWatcherAcquisitions;
+    failManagedLinkRevoke = true;
+    const firstUndoAttempt = await importProjectHandlers.get('workspace-undo-rename')(null, '');
+    assert.strictEqual(firstUndoAttempt.success, false, 'a registry failure must be reported without losing the undo operation');
+    assert.strictEqual(fs.existsSync(retryableUndoShortcut), false, 'the shortcut removal may already have committed before the registry failure');
+    failManagedLinkRevoke = false;
+    const retriedUndo = await importProjectHandlers.get('workspace-undo-rename')(null, '');
+    assert.strictEqual(retriedUndo.success, true, retriedUndo.error);
+    assert(managedWatcherAcquisitions > watcherAcquisitionsBeforeUndo, 'undoing an external link must rebuild the project watcher bindings');
+
+    const adoptedFolderSource = path.join(root, 'adopted-external-original');
+    fs.mkdirSync(adoptedFolderSource, { recursive: true });
+    fs.writeFileSync(path.join(adoptedFolderSource, 'original.jpg'), 'original');
+    const adoptedLink = await importProjectHandlers.get('workspace-import-files')(
+      null, importWorkspaceRoot, path.basename(path.dirname(fileLinkProjectPath)), fileLinkProjectName, '', {
+        linkOnly: true, deleteSourceAfterImport: false, sourcePaths: [adoptedFolderSource], adoptAsOriginal: true, mediaKind: 'image',
+      },
+    );
+    assert.strictEqual(adoptedLink.success, true, adoptedLink.error);
+    assert.deepStrictEqual(importUndoOperations.at(-1).externalAdoptionUndo.progressIds, ['adopted-adopted-external-original']);
+    const undoneAdoptedLink = await importProjectHandlers.get('workspace-undo-rename')(null, '');
+    assert.strictEqual(undoneAdoptedLink.success, true, undoneAdoptedLink.error);
+    assert.deepStrictEqual(revertedExternalAdoptions.at(-1), { projectName: fileLinkProjectName, progressIds: ['adopted-adopted-external-original'] });
+    assert.strictEqual(fs.existsSync(path.join(fileLinkProjectPath, 'adopted-external-original.lnk')), false);
+
     const copiedFolderSource = path.join(root, 'copied-folder-source');
     fs.mkdirSync(path.join(copiedFolderSource, 'nested'), { recursive: true });
     fs.writeFileSync(path.join(copiedFolderSource, 'nested', 'inside.txt'), 'folder-copy');
@@ -721,6 +847,10 @@ const run = async () => {
     assert.strictEqual(fs.readFileSync(path.join(progressLinkSource, 'progress.jpg'), 'utf8'), 'progress');
     assert.strictEqual(fs.existsSync(path.join(fileLinkProjectPath, 'linked-progress.lnk')), true);
     assert.strictEqual(progressRegistrationPath, progressLinkSource, 'linked progress must register the external target without copying it');
+    const undoneLinkedProgress = await importProjectHandlers.get('workspace-undo-rename')(null, '');
+    assert.strictEqual(undoneLinkedProgress.success, true, undoneLinkedProgress.error);
+    assert.deepStrictEqual(unregisteredExternalProgress.at(-1), { projectName: fileLinkProjectName, progressId: 'progress-id', allowMissing: true });
+    assert.strictEqual(fs.existsSync(path.join(fileLinkProjectPath, 'linked-progress.lnk')), false);
 
     const brollHandlers = new Map();
     const brollProjectName = 'broll-link-project';
@@ -731,6 +861,7 @@ const run = async () => {
     registerBrollImportIpc({
       ipcMain: { handle: (name, handler) => brollHandlers.set(name, handler) },
       dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) }, shell: importShell,
+      projectVirtualPaths: importProjectVirtualPaths,
       recycleBinService: {}, getMainWindow: () => null,
       getProjectPath: () => brollProjectPath, getRunConfig: () => { throw new Error('link import must not start media workers'); },
       writeLog: () => undefined, pushUndoOperation: async () => undefined, activeOperations: new Map(), backgroundTasks: null, getTelemetry: () => null,
@@ -762,8 +893,8 @@ const run = async () => {
     fs.mkdirSync(materializeSource, { recursive: true });
     fs.writeFileSync(path.join(materializeSource, 'tracked.jpg'), 'tracked');
     const materializeShortcut = path.join(materializeProjectPath, 'external-folder.lnk');
-    importShell.writeShortcutLink(materializeShortcut, { target: materializeSource, cwd: materializeSource, description: 'PhotoFlow 外链文件夹：external-folder' });
-    materializedProgressFolders = [{ id: 'external-progress', mediaKind: 'image', versionKey: '1', displayName: 'external-progress', folderPath: materializeSource, trackingEnabled: true, trackingState: 'pending_compare', nodeRole: 'progress', relationKind: 'main', renameFromParent: false, copyMissingFromParent: false }];
+    importProjectVirtualPaths.createManagedExternalLink(materializeShortcut, { target: materializeSource, kind: 'folder', displayName: 'external-folder' });
+    materializedProgressFolders = [{ id: 'external-progress', mediaKind: 'image', versionKey: '1', displayName: 'external-progress', folderPath: materializeSource, externalLinkRelativePath: 'external-folder.lnk', trackingEnabled: true, trackingState: 'pending_compare', nodeRole: 'progress', relationKind: 'main', renameFromParent: false, copyMissingFromParent: false }];
     const materialized = await importProjectHandlers.get('workspace-materialize-external-links')(
       null, importWorkspaceRoot, '策划中', materializeProjectName, ['external-folder.lnk'],
     );
@@ -778,8 +909,8 @@ const run = async () => {
     fs.mkdirSync(rollbackSource, { recursive: true });
     fs.writeFileSync(path.join(rollbackSource, 'rollback.jpg'), 'rollback');
     const rollbackShortcut = path.join(materializeProjectPath, 'rollback-folder.lnk');
-    importShell.writeShortcutLink(rollbackShortcut, { target: rollbackSource, cwd: rollbackSource, description: 'PhotoFlow 外链文件夹：rollback-folder' });
-    materializedProgressFolders = [{ ...materializedProgressFolders[0], id: 'rollback-progress', folderPath: rollbackSource }];
+    importProjectVirtualPaths.createManagedExternalLink(rollbackShortcut, { target: rollbackSource, kind: 'folder', displayName: 'rollback-folder' });
+    materializedProgressFolders = [{ ...materializedProgressFolders[0], id: 'rollback-progress', folderPath: rollbackSource, externalLinkRelativePath: 'rollback-folder.lnk' }];
     failProgressRelocation = true;
     const rolledBackMaterialization = await importProjectHandlers.get('workspace-materialize-external-links')(
       null, importWorkspaceRoot, '策划中', materializeProjectName, ['rollback-folder.lnk'],
@@ -793,7 +924,7 @@ const run = async () => {
     fs.mkdirSync(lockedShortcutSource, { recursive: true });
     fs.writeFileSync(path.join(lockedShortcutSource, 'locked.jpg'), 'locked');
     const lockedShortcut = path.join(materializeProjectPath, 'locked-folder.lnk');
-    importShell.writeShortcutLink(lockedShortcut, { target: lockedShortcutSource, cwd: lockedShortcutSource, description: 'PhotoFlow 外链文件夹：locked-folder' });
+    importProjectVirtualPaths.createManagedExternalLink(lockedShortcut, { target: lockedShortcutSource, kind: 'folder', displayName: 'locked-folder' });
     materializedProgressFolders = [];
     failShortcutRemoval = true;
     const lockedShortcutMaterialization = await importProjectHandlers.get('workspace-materialize-external-links')(

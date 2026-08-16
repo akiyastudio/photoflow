@@ -1,9 +1,15 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+let recycleProcessSequence = 0;
 
-const runJson = (command, args, timeoutMs = 120000, stdin = '') => new Promise((resolve, reject) => {
-  const child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+const runJson = (command, args, timeoutMs = 120000, stdin = '', processSupervisor = null) => new Promise((resolve, reject) => {
+  const child = processSupervisor
+    ? processSupervisor.launch({
+      id: `csharp:recycle-bin:${++recycleProcessSequence}`,
+      kind: 'csharp-helper', command, args, options: { stdio: ['pipe', 'pipe', 'pipe'] }, ephemeral: true,
+    }).child
+    : spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   let settled = false;
@@ -41,7 +47,7 @@ const runJson = (command, args, timeoutMs = 120000, stdin = '') => new Promise((
   }, timeoutMs);
 });
 
-const createRecycleBinService = ({ app, shell, projectRoot }) => {
+const createRecycleBinService = ({ app, shell, projectRoot, processSupervisor = null }) => {
   const executable = () => app.isPackaged
     ? path.join(process.resourcesPath, 'recycle-bin-service.exe')
     : path.join(projectRoot, 'electron', 'bin', 'recycle-bin-service.exe');
@@ -51,7 +57,7 @@ const createRecycleBinService = ({ app, shell, projectRoot }) => {
   const trash = async filePath => {
     const resolved = path.resolve(filePath);
     if (nativeAvailable()) {
-      return runJson(executable(), ['trash', '--path', resolved]);
+      return runJson(executable(), ['trash', '--path', resolved], 120000, '', processSupervisor);
     }
     if (process.platform === 'win32') {
       const error = new Error('Windows 回收站服务未安装，已取消删除以避免无法撤销');
@@ -67,7 +73,7 @@ const createRecycleBinService = ({ app, shell, projectRoot }) => {
     if (!resolvedPaths.length) return { success: true, items: [] };
     if (nativeAvailable()) {
       const timeoutMs = Math.min(15 * 60 * 1000, 120000 + resolvedPaths.length * 2000);
-      return runJson(executable(), ['trash-many'], timeoutMs, JSON.stringify(resolvedPaths));
+      return runJson(executable(), ['trash-many'], timeoutMs, JSON.stringify(resolvedPaths), processSupervisor);
     }
     if (process.platform === 'win32') {
       const error = new Error('Windows 回收站服务未安装，已取消删除以避免无法撤销');
@@ -88,12 +94,12 @@ const createRecycleBinService = ({ app, shell, projectRoot }) => {
       error.code = 'MANUAL_RESTORE_REQUIRED';
       throw error;
     }
-    return runJson(executable(), ['restore', '--pidl', recyclePidl, '--target', path.resolve(originalPath)]);
+    return runJson(executable(), ['restore', '--pidl', recyclePidl, '--target', path.resolve(originalPath)], 120000, '', processSupervisor);
   };
 
   const probe = async recyclePidl => {
     if (!recyclePidl || !nativeAvailable()) return { success: true, exists: false };
-    return runJson(executable(), ['probe', '--pidl', recyclePidl], 15000);
+    return runJson(executable(), ['probe', '--pidl', recyclePidl], 15000, '', processSupervisor);
   };
 
   return { trash, trashMany, restore, probe, nativeAvailable };

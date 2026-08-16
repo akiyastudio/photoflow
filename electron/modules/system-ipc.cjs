@@ -52,7 +52,12 @@ const normalizeProgressNamePresets = value => {
 };
 
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
+  ipcMain.handle('domain-health-status', () => ({
+    success: true,
+    domains: domainHealthService?.status?.() || [],
+    commands: domainCommandJournal?.status?.().filter(command => command.status !== 'completed') || [],
+  }));
   const activePythonTasks = new Map();
   const rememberPythonTask = (requestId, invocationId, task) => {
     const requests = activePythonTasks.get(requestId) || new Map();
@@ -488,6 +493,7 @@ const registerSystemIpc = context => {
         if (!requiredRelative || requiredRelative.startsWith('..') || path.isAbsolute(requiredRelative)) throw new Error(`组件必需文件路径无效：${relativeFile}`);
         if (!(await fs.promises.stat(sourceFile).catch(() => null))?.isFile()) throw new Error(`组件必需文件不存在：${relativeFile}`);
       }
+      await pluginService.verifyComponentDirectoryAsync(componentId, componentRoot, true);
 
       const installRoot = pluginService.ensureInstallRoot();
       const container = path.join(installRoot, String(componentId));
@@ -790,7 +796,11 @@ const registerSystemIpc = context => {
   
     try {
       // 注意：windowsHide: true 可以隐藏弹出的黑框
-      const pyProcess = spawn(command, spawnArgs, { windowsHide: true });
+      const managedProcess = processSupervisor?.launch({
+        id: `python:renderer-tool:${invocationId}`,
+        kind: 'python-job', command, args: spawnArgs, options: {}, ephemeral: true,
+      });
+      const pyProcess = managedProcess?.child || spawn(command, spawnArgs, { windowsHide: true });
       if (cancellable) rememberPythonTask(normalizedRequestId, invocationId, { process: pyProcess, cancelFile, backgroundTaskId });
       let stdoutBuffer = '';
       let importFailed = false;
@@ -801,6 +811,7 @@ const registerSystemIpc = context => {
         if (!trimmed) return;
         try {
           const jsonMsg = JSON.parse(trimmed);
+          managedProcess?.markHealthy({ protocol: 'renderer-python-events' });
           mainWindow.webContents.send('python-event', { ...jsonMsg, scriptName, requestId });
           if (jsonMsg.type === 'success' && Array.isArray(jsonMsg.data?.importedPaths)) {
             for (const importedPath of jsonMsg.data.importedPaths) {
@@ -1062,14 +1073,14 @@ const registerSystemIpc = context => {
       return await listStorageDevices(process.platform);
     } catch (error) {
       console.error('Error getting storage devices:', error);
-      return [];
+      throw error;
     }
   });
 
   // Kept for older renderer bundles during staged upgrades.
   ipcMain.handle('getDrives', async () => {
     try {
-      return (await listStorageDevices(process.platform)).map(device => device.mountPath);
+      return (await listStorageDevices(process.platform)).devices.map(device => device.mountPath);
     } catch (error) {
       console.error('Error getting drives:', error);
       return [];

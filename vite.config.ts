@@ -11,6 +11,21 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(packageVersion),
   },
   base: './', 
+  server: {
+    watch: {
+      // The repository also contains generated media runtimes and build caches.
+      // Watching them can create hundreds of thousands of Windows file handles
+      // even though none of them are renderer inputs.
+      ignored: [
+        '**/.cache/**',
+        '**/.tmp/**',
+        '**/.venv/**',
+        '**/artifacts/**',
+        '**/components/**',
+        '**/media-runtime/**',
+      ],
+    },
+  },
   build: {
     outDir: 'artifacts/web',
     emptyOutDir: true,

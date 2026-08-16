@@ -69,7 +69,7 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, pr
     if (!inside(outputRoot, parentReal, true)) throw new Error('输出位置的父目录指向项目外部');
     if (fs.existsSync(targetPath)) {
       const targetReal = fs.realpathSync.native(targetPath);
-      if (!inside(source.projectReal, targetReal)) throw new Error('选片输出快捷方式或重解析目录指向项目外部');
+      if (!inside(outputRoot, targetReal)) throw new Error('选片输出快捷方式或重解析目录指向允许范围外部');
       if (!fs.statSync(targetPath).isDirectory()) throw new Error('output_name_conflict：输出名称已被文件占用');
     }
     return { outputName, targetPath, targetRelativePath, recoveryMarkerPath: `${targetPath}.photoflow-selection-pending` };
@@ -377,6 +377,7 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, pr
         versionKey: `source-${crypto.createHash('sha256').update(plan.source.normalized.toLocaleLowerCase()).digest('hex').slice(0, 20)}`,
         displayName: sourceDisplayName,
         folderPath: plan.source.path,
+        externalLinkRelativePath: plan.source.resolution?.viaExternalLink ? plan.source.normalized : undefined,
         nodeRole: 'original', relationKind: null, parentProgressId: null,
         trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false, trackingState: 'disabled',
       })).progressFolder;

@@ -5,6 +5,8 @@ const path = require('path');
 const root = path.resolve(__dirname, '..');
 const shared = fs.readFileSync(path.join(root, 'src', 'components', 'ImageComparisonView.tsx'), 'utf8');
 const versionManager = fs.readFileSync(path.join(root, 'src', 'components', 'VersionManager.tsx'), 'utf8');
+const advancedVideoPlayer = fs.readFileSync(path.join(root, 'src', 'components', 'AdvancedVideoPlayer.tsx'), 'utf8');
+const projectWorkspace = fs.readFileSync(path.join(root, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
 const returnReview = fs.readFileSync(path.join(root, 'src', 'components', 'PersonIdentityManager.tsx'), 'utf8');
 const trackingPreview = fs.readFileSync(path.join(root, 'src', 'features', 'versioning', 'ProgressPairPreview.tsx'), 'utf8');
 
@@ -14,6 +16,12 @@ for (const mode of ['side-by-side', 'split', 'overlay', 'blink', 'difference']) 
 assert(shared.includes('aria-label="拖动图片分割线"') && shared.includes('onPointerMove={event => { if (splitDragRef.current === event.pointerId) updateSplit(event.clientX); }}'), 'split comparison must drag the divider directly over stationary images');
 assert(shared.includes("mode === 'blink'") && shared.includes('visibility: blinkRight') && shared.includes('700'), 'blink mode must visibly alternate layers and identify the active side');
 assert(shared.includes('旋转 {rotation}°') && shared.includes('重置') && shared.includes('图片缩放') && shared.includes('交换 A/B'), 'all shared comparison controls must be present');
+assert(shared.includes("item.interactive ? 'pointer-events-auto' : 'pointer-events-none'"), 'interactive video comparison content must keep its playback controls clickable');
+assert(versionManager.includes("interactive: active && mediaKind(left.filePath) === 'video'") && versionManager.includes("interactive: active && mediaKind(right.filePath) === 'video'"), 'active version video comparisons must opt into interactive content');
+assert(versionManager.includes('videoPlayback={active}'), 'inactive version tabs must unmount their advanced-video sessions');
+assert(projectWorkspace.includes("previewPaneOpen && active && activeView === 'project'") && projectWorkspace.includes("setVersionEntry(null); onCloseToolTab('version')"), 'tool overlays and closed version tabs must release underlying video previews');
+assert(advancedVideoPlayer.includes('visiblePlayers.length > 1') && advancedVideoPlayer.includes('playerRootRef.current?.contains(document.activeElement)'), 'multiple advanced players must scope global arrow keys to the focused player');
+assert(versionManager.includes('compareVersions.length === 2 ? null : selected ? <SingleVersionView'), 'the hidden single-version player must unmount while two versions are being compared');
 for (const [name, source] of [['version manager', versionManager], ['return review', returnReview], ['tracking preview', trackingPreview]]) {
   assert(source.includes('ImageComparisonView'), `${name} must use the shared comparison view`);
 }

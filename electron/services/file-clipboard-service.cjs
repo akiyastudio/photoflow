@@ -1,9 +1,15 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+let clipboardProcessSequence = 0;
 
-const runJson = (command, args, stdin = '', timeoutMs = 12000) => new Promise((resolve, reject) => {
-  const child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+const runJson = (command, args, stdin = '', timeoutMs = 12000, processSupervisor = null) => new Promise((resolve, reject) => {
+  const child = processSupervisor
+    ? processSupervisor.launch({
+      id: `csharp:file-clipboard:${++clipboardProcessSequence}`,
+      kind: 'csharp-helper', command, args, options: { stdio: ['pipe', 'pipe', 'pipe'] }, ephemeral: true,
+    }).child
+    : spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   let settled = false;
@@ -38,7 +44,7 @@ const runJson = (command, args, stdin = '', timeoutMs = 12000) => new Promise((r
   }, timeoutMs);
 });
 
-const createFileClipboardService = ({ app, projectRoot }) => {
+const createFileClipboardService = ({ app, projectRoot, processSupervisor = null }) => {
   const executable = () => app.isPackaged
     ? path.join(process.resourcesPath, 'file-clipboard-service.exe')
     : path.join(projectRoot, 'electron', 'bin', 'file-clipboard-service.exe');
@@ -57,16 +63,16 @@ const createFileClipboardService = ({ app, projectRoot }) => {
   };
   const write = async (sources, operation) => {
     if (!ensureAvailable()) return { success: true, written: false, sources: [...sources], operation, sequence: 0 };
-    return queueMutation(() => runJson(executable(), ['write'], JSON.stringify({ sources, operation })));
+    return queueMutation(() => runJson(executable(), ['write'], JSON.stringify({ sources, operation }), 12000, processSupervisor));
   };
   const read = async () => {
     if (!ensureAvailable()) return null;
     await mutationQueue.catch(() => undefined);
-    return runJson(executable(), ['read']);
+    return runJson(executable(), ['read'], '', 12000, processSupervisor);
   };
   const clearIfCurrent = async snapshot => {
     if (!ensureAvailable()) return { success: true, cleared: false, sources: [], operation: 'copy', sequence: 0 };
-    return queueMutation(() => runJson(executable(), ['clear-if-current'], JSON.stringify({ sequence: snapshot.sequence, sources: snapshot.sources })));
+    return queueMutation(() => runJson(executable(), ['clear-if-current'], JSON.stringify({ sequence: snapshot.sequence, sources: snapshot.sources }), 12000, processSupervisor));
   };
   return { write, read, clearIfCurrent, executable, nativeAvailable: () => process.platform === 'win32' && fs.existsSync(executable()) };
 };

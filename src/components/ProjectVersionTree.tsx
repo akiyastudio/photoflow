@@ -123,7 +123,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
     .filter(entry => entry.externalLink && entry.externalLinkTarget)
     .map(entry => [normalizePath(entry.externalLinkTarget!), entry])), [structureEntries]);
   const versionItems = useMemo(() => graph.folders.flatMap(folder => {
-    const relativePath = projectRelativePath(folder.folderPath);
+    const relativePath = normalizePath(folder.externalLinkRelativePath || projectRelativePath(folder.folderPath));
     const foundEntry = externalEntryByTarget.get(normalizePath(folder.folderPath)) || entryByPath.get(normalizePath(relativePath));
     const entry: ProjectFileEntry | undefined = foundEntry || folder.folderMissing ? foundEntry || {
       kind: 'folder', name: folder.displayName, path: folder.folderPath, relativePath, extension: '', size: 0, createdAt: folder.createdAt, updatedAt: folder.updatedAt,

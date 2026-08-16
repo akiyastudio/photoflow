@@ -32,6 +32,9 @@ file workflows.
   filesystem service rather than the Electron composition root. Image worker
   pools, RAW fallback, video-cover generation, EXIF orientation and rating
   writes are also owned by services rather than `main.cjs` or IPC handlers.
+  `ProcessSupervisor` owns child-process lifecycle, health state, bounded
+  restart policy and structured lifecycle logging for Python workers, native
+  C# helpers and optional component sessions.
 - `electron/repositories`: the only JavaScript modules that know Python
   database action names. IPC and services call domain methods instead.
 - `electron/plugins`: the optional-plugin catalog and capability mapping.
@@ -41,13 +44,17 @@ file workflows.
   for verified recycle, exact-item restore, and recycle capability probing.
 - `electron/thumbnail-pipeline.cjs`: thumbnail scheduling and cache domain.
 - `electron/component-registry.cjs`: optional packaged component discovery.
-- `python/workspace_db.py`: the single workspace database worker. Stable action
+- `python/workspace_db.py`: the catalog/media/version worker. Stable action
   groups live in `workspace_db_domains.py` and schema migrations live in
-  `workspace_db_migrations.py`; this preserves one serialized SQLite writer
-  while allowing domain modules to evolve independently. New SQL should move
-  behind domain-specific repository functions rather than IPC handlers.
-  It also owns the lightweight persistent undo journal; no deleted media bytes
-  are stored in SQLite.
+  `workspace_db_migrations.py`. Team-retouch tables are attached from their
+  owned database for compatibility while callers migrate to a dedicated
+  repository; the main database no longer contains those tables.
+- `python/operations_db.py`: the file-operations journal worker. It owns the
+  persistent undo journal and imports legacy `undo_records` once. Deleted media
+  bytes are never stored in SQLite.
+- `python/team_retouch_storage.py`: the physical team-retouch schema, legacy
+  extraction, and attached-store adapter. Snapshot and restore commands live in
+  `team_retouch_db.py`.
 - `python/tools.py`: source entry point for the shared packaged runtime,
   published as `PhotoFlowImportWorker` (`PhotoFlowImportWorker.exe` on Windows),
   for lightweight Python commands, the thumbnail image server, the built-in
@@ -75,6 +82,20 @@ Existing preload and IPC method names are compatibility contracts. Internal
 modules may be replaced without changing renderer behaviour. Long-running file
 operations report progress through `workspace-file-operation-progress` and use
 the shared `ProjectFileOperationProgress` type.
+
+New cross-domain work follows the ownership, stable-identity, project-content
+mutation and versioned-event rules in [DOMAIN_BOUNDARIES.md](DOMAIN_BOUNDARIES.md).
+The current direct writers listed there are an explicit migration baseline and
+must shrink rather than grow.
+
+Source-package dependency direction and composition-file size budgets are
+enforced by [SOURCE_BOUNDARIES.md](SOURCE_BOUNDARIES.md).
+
+Physical database ownership, migration and recovery rules are documented in
+[STORAGE_ISOLATION.md](STORAGE_ISOLATION.md).
+
+Child-process ownership and recovery policy are documented in
+[PROCESS_SUPERVISION.md](PROCESS_SUPERVISION.md).
 
 ## Completed migration stages
 

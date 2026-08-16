@@ -15,15 +15,18 @@ try {
   fs.mkdirSync(externalRoot);
   fs.mkdirSync(path.join(externalRoot, 'nested'));
   fs.writeFileSync(path.join(externalRoot, 'nested', 'photo.jpg'), 'photo');
-  fs.writeFileSync(path.join(projectRoot, 'RAW.lnk'), JSON.stringify({ target: externalRoot, description: `${MANAGED_EXTERNAL_FOLDER_PREFIX}RAW` }));
   const externalFile = path.join(temporaryRoot, 'linked-photo.jpg');
   fs.writeFileSync(externalFile, 'linked-photo');
-  fs.writeFileSync(path.join(projectRoot, 'linked-photo.jpg.lnk'), JSON.stringify({ target: externalFile, description: `${MANAGED_EXTERNAL_FILE_PREFIX}linked-photo.jpg` }));
   fs.writeFileSync(path.join(projectRoot, 'ordinary.lnk'), JSON.stringify({ target: externalRoot, description: 'ordinary shortcut' }));
+  fs.writeFileSync(path.join(projectRoot, 'spoofed.lnk'), JSON.stringify({ target: externalRoot, description: `${MANAGED_EXTERNAL_FOLDER_PREFIX}spoofed` }));
 
-  const shell = { readShortcutLink: shortcutPath => JSON.parse(fs.readFileSync(shortcutPath, 'utf8')) };
-  const service = createProjectVirtualPathService({ shell });
-
+  const shell = {
+    readShortcutLink: shortcutPath => JSON.parse(fs.readFileSync(shortcutPath, 'utf8')),
+    writeShortcutLink: (shortcutPath, details) => { fs.writeFileSync(shortcutPath, JSON.stringify(details)); return true; },
+  };
+  const service = createProjectVirtualPathService({ shell, registryPath: path.join(temporaryRoot, 'managed-links.json') });
+  service.createManagedExternalLink(path.join(projectRoot, 'RAW.lnk'), { target: externalRoot, kind: 'folder', displayName: 'RAW' });
+  service.createManagedExternalLink(path.join(projectRoot, 'linked-photo.jpg.lnk'), { target: externalFile, kind: 'file', displayName: 'linked-photo.jpg' });
   const rootAsLink = service.resolve(projectRoot, 'RAW.lnk', { externalRootMode: 'link' });
   assert.strictEqual(rootAsLink.physicalPath, path.join(projectRoot, 'RAW.lnk'));
   assert.strictEqual(rootAsLink.isExternalLinkRoot, true);
@@ -62,6 +65,31 @@ try {
 
   assert.throws(() => service.resolve(projectRoot, 'RAW.lnk/../outside.jpg'), /项目路径无效/);
   assert.throws(() => service.resolve(projectRoot, 'ordinary.lnk', { externalRootMode: 'target' }), /不是 PhotoFlow 外链/);
+  assert.throws(() => service.resolve(projectRoot, 'spoofed.lnk', { externalRootMode: 'target' }), /不是 PhotoFlow 外链/, 'a copied description without a registered identity must not gain external write authority');
+
+  const outsideJunctionTarget = path.join(temporaryRoot, 'junction-outside');
+  fs.mkdirSync(outsideJunctionTarget);
+  fs.writeFileSync(path.join(outsideJunctionTarget, 'escape.jpg'), 'escape');
+  const junctionPath = path.join(projectRoot, 'junction');
+  try {
+    fs.symlinkSync(outsideJunctionTarget, junctionPath, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.throws(() => service.resolve(projectRoot, 'junction/escape.jpg'), /重解析点|项目目录/, 'ordinary project paths must not escape through a junction');
+  } catch (error) {
+    if (!['EPERM', 'EACCES', 'UNKNOWN'].includes(error?.code)) throw error;
+  }
+
+  const externalShortcutOutside = path.join(outsideJunctionTarget, 'escape-link.lnk');
+  service.createManagedExternalLink(externalShortcutOutside, { target: externalRoot, kind: 'folder', displayName: 'escape-link' });
+  try {
+    assert.throws(
+      () => service.resolve(projectRoot, 'junction/escape-link.lnk', { externalRootMode: 'link' }),
+      /重解析点|项目目录/,
+      'managed external shortcuts must not escape through a junction',
+    );
+    assert.strictEqual(fs.existsSync(externalShortcutOutside), true, 'a rejected external shortcut must remain untouched outside the project');
+  } catch (error) {
+    if (!['EPERM', 'EACCES', 'UNKNOWN'].includes(error?.code)) throw error;
+  }
 
   const listed = service.listManagedExternalLinks(projectRoot);
   assert.deepStrictEqual(listed.map(item => item.shortcutVirtualPath).sort(), ['RAW.lnk', 'linked-photo.jpg.lnk']);

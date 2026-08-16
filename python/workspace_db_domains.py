@@ -13,7 +13,7 @@ MEDIA_ACTIONS = (
 )
 PROGRESS_ACTIONS = (
     "batch_list", "progress_list", "progress_snapshot", "progress_register", "progress_register_with_graph",
-    "progress_adopt_media", "progress_update_tree", "progress_relation_update", "progress_legacy_selection_repair",
+    "progress_adopt_media", "progress_revert_external_adoptions", "progress_update_tree", "progress_relation_update", "progress_legacy_selection_repair",
     "version_graph_edge_create", "version_graph_edge_list", "version_graph_edge_delete", "version_graph_edge_replace_source",
     "version_tree_layout_get", "version_tree_layout_save", "progress_policy_save", "progress_mark_stale",
     "progress_mark_ready", "progress_main_branch", "progress_visible_relations", "progress_copy_missing_children",
@@ -29,7 +29,7 @@ TEAM_ACTIONS = (
     "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo",
     "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete",
     "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear",
-    "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup",
+    "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "team_project_purge",
 )
 UNDO_ACTIONS = ("undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable")
 

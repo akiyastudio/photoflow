@@ -30,6 +30,7 @@ import { mainBranchPhotoSummaries, mainBranchVersionsForPhoto, paginateMainBranc
 import { ImageComparisonView, type ImageComparisonMode } from './ImageComparisonView';
 
 type VersionManagerProps = {
+  active?: boolean;
   entry: ProjectFileEntry;
   workspacePath: string;
   project: WorkspaceProject;
@@ -218,7 +219,8 @@ const VersionResource = ({ version, cacheConfig, className = '', contentStyle, v
   </div>;
 };
 
-const CompareView = ({ left, right, cacheConfig, workspacePath, photoId, onClose, initialMode = 'side-by-side' }: {
+const CompareView = ({ active, left, right, cacheConfig, workspacePath, photoId, onClose, initialMode = 'side-by-side' }: {
+  active: boolean;
   left: MediaVersion;
   right: MediaVersion;
   cacheConfig: AppConfig['mediaCache'];
@@ -236,8 +238,8 @@ const CompareView = ({ left, right, cacheConfig, workspacePath, photoId, onClose
     void window.electronAPI.recordMediaVersionCompare(workspacePath, { photoId, leftVersionId: left.id, rightVersionId: right.id, compareMode: mode });
   }, [mode, left.id, right.id, photoId, workspacePath]);
   return <ImageComparisonView
-    left={{ label: `${visibleVersionLabel(left)} ${visibleVersionName(left)}`, content: <VersionResource version={left} cacheConfig={cacheConfig} className="absolute inset-0 h-full w-full"/> }}
-    right={{ label: `${visibleVersionLabel(right)} ${visibleVersionName(right)}`, content: <VersionResource version={right} cacheConfig={cacheConfig} className="absolute inset-0 h-full w-full"/> }}
+    left={{ label: `${visibleVersionLabel(left)} ${visibleVersionName(left)}`, interactive: active && mediaKind(left.filePath) === 'video', content: <VersionResource version={left} cacheConfig={cacheConfig} videoPlayback={active} className="absolute inset-0 h-full w-full"/> }}
+    right={{ label: `${visibleVersionLabel(right)} ${visibleVersionName(right)}`, interactive: active && mediaKind(right.filePath) === 'video', content: <VersionResource version={right} cacheConfig={cacheConfig} videoPlayback={active} className="absolute inset-0 h-full w-full"/> }}
     mode={mode}
     onModeChange={setMode}
     comparisonKey={`${left.id}|${right.id}`}
@@ -248,7 +250,8 @@ const CompareView = ({ left, right, cacheConfig, workspacePath, photoId, onClose
   />;
 };
 
-const SingleVersionView = ({ version, cacheConfig, busy, onClose, onNotice, onEditNote, onMakeCurrent, onRelocate, onDelete }: {
+const SingleVersionView = ({ active, version, cacheConfig, busy, onClose, onNotice, onEditNote, onMakeCurrent, onRelocate, onDelete }: {
+  active: boolean;
   version: MediaVersion;
   cacheConfig: AppConfig['mediaCache'];
   busy: boolean;
@@ -329,7 +332,7 @@ const SingleVersionView = ({ version, cacheConfig, busy, onClose, onNotice, onEd
       onPointerUp={event => { if (dragRef.current?.pointerId === event.pointerId) { dragRef.current = null; setDragging(false); } }}
       onPointerCancel={() => { dragRef.current = null; setDragging(false); }}
     >
-      <VersionResource version={version} cacheConfig={cacheConfig} contentStyle={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: 'center', transition: dragging ? 'none' : 'transform 100ms ease-out' }} className="h-full w-full"/>
+      <VersionResource version={version} cacheConfig={cacheConfig} videoPlayback={active} contentStyle={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: 'center', transition: dragging ? 'none' : 'transform 100ms ease-out' }} className="h-full w-full"/>
       {mediaKind(version.filePath) !== 'video' && !version.fileMissing && <button type="button" onClick={resetView} title="恢复适合窗口" className="absolute bottom-4 right-4 rounded-md bg-slate-900/75 px-2 py-1 font-mono text-[11px] text-slate-200 shadow-lg">{Math.round(zoom * 100)}%</button>}
     </div>
   </section>;
@@ -356,7 +359,7 @@ const SingleVersionView = ({ version, cacheConfig, busy, onClose, onNotice, onEd
   </div>;
 };
 
-export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onClose, onNotice, onVersionStateChanged, progressVersionKey = '', progressId = '', initialCompareIds = [], initialCompareMode = 'side-by-side' }: VersionManagerProps) => {
+export const VersionManager = ({ active = true, entry, workspacePath, project, cacheConfig, onClose, onNotice, onVersionStateChanged, progressVersionKey = '', progressId = '', initialCompareIds = [], initialCompareMode = 'side-by-side' }: VersionManagerProps) => {
   const appDialog = useAppDialog();
   const initialCompareKey = initialCompareIds.join('|');
   const [bundle, setBundle] = useState<MediaVersionBundle>({ success: true, versions: [] });
@@ -370,6 +373,7 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
   const [branchPhotoLoading, setBranchPhotoLoading] = useState(false);
   const [activePhotoId, setActivePhotoId] = useState('');
   const branchPhotoRequestRef = useRef(0);
+  const loadRequestRef = useRef(0);
   useEscapeLayer(Boolean(editing), () => setEditing(null), !busy);
   const initialCompareAppliedRef = useRef('');
   const [editNote, setEditNote] = useState('');
@@ -429,9 +433,22 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
   };
 
   const load = async () => {
+    const requestId = ++loadRequestRef.current;
+    branchPhotoRequestRef.current += 1;
+    setBranchPhotoLoading(false);
     setLoading(true);
     const result = await window.electronAPI.getMediaVersions(workspacePath, project.status, project.name, entry.relativePath);
-    if (!result.success) { setLoading(false); onNotice(`读取版本失败：${result.error || '未知错误'}`); return; }
+    if (requestId !== loadRequestRef.current) return;
+    if (!result.success) {
+      setLoading(false);
+      setBundle({ ...result, versions: [] });
+      setBranchPhotos([]);
+      setActivePhotoId('');
+      setSelectedId('');
+      setCompareIds([]);
+      onNotice(`读取版本失败：${result.error || '未知错误'}`);
+      return;
+    }
     let visibleVersions = normalizeVisibleVersionBundle(result, entry.path, progressVersionKey).versions;
     let summaries: MainBranchPhotoSummary[] = [];
     if (progressId && result.photo?.id) {
@@ -439,6 +456,7 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
         window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId, photoId: result.photo.id }),
         window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId }),
       ]);
+      if (requestId !== loadRequestRef.current) return;
       if (fullBranch.success) {
         summaries = mainBranchPhotoSummaries(fullBranch.entries);
         setBranchPhotos(summaries);
@@ -455,6 +473,7 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
     } else {
       setBranchPhotos([]);
     }
+    if (requestId !== loadRequestRef.current) return;
     setLoading(false);
     if (result.photo) applyBranchPhoto(result.photo.id, visibleVersions, result.photo, summaries);
     else setBundle({ ...result, versions: visibleVersions });
@@ -467,7 +486,13 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
       initialCompareAppliedRef.current = compareKey;
     }
   };
-  useEffect(() => { void load(); }, [entry.path, entry.updatedAt, initialCompareKey, progressId]);
+  useEffect(() => {
+    void load();
+    return () => {
+      loadRequestRef.current += 1;
+      branchPhotoRequestRef.current += 1;
+    };
+  }, [entry.path, entry.updatedAt, workspacePath, project.status, project.name, initialCompareKey, progressId, progressVersionKey]);
 
   const branchPhotoPagination = useMemo(() => paginateMainBranchPhotos(branchPhotos, branchPhotoPage), [branchPhotos, branchPhotoPage]);
 
@@ -647,8 +672,8 @@ export const VersionManager = ({ entry, workspacePath, project, cacheConfig, onC
         onPointerCancel={() => { resizeRef.current = null; }}
         className="column-resize-handle"
       />
-      <main className="flex min-w-0 flex-1 overflow-hidden">{selected ? <SingleVersionView version={selected} cacheConfig={cacheConfig} busy={busy} onClose={onClose} onNotice={onNotice} onEditNote={() => { setEditing(selected); setEditNote(selected.note); }} onMakeCurrent={() => void updateVersion({ versionId: selected.id, makeCurrent: true }, '已切换当前版本')} onRelocate={() => void relocateVersion(selected)} onDelete={() => void deleteVersion(selected)}/> : <div className="flex h-full flex-1 items-center justify-center text-slate-400">请选择一个版本</div>}</main>
-      {bundle.photo && compareVersions.length === 2 && <div className="absolute inset-y-0 right-0 z-20 bg-slate-950" style={{ left: treeWidth + 1 }}><CompareView left={compareVersions[0]} right={compareVersions[1]} cacheConfig={cacheConfig} workspacePath={workspacePath} photoId={bundle.photo.id} initialMode={initialCompareMode} onClose={() => setCompareIds([])}/></div>}
+      <main className="flex min-w-0 flex-1 overflow-hidden">{compareVersions.length === 2 ? null : selected ? <SingleVersionView active={active} version={selected} cacheConfig={cacheConfig} busy={busy} onClose={onClose} onNotice={onNotice} onEditNote={() => { setEditing(selected); setEditNote(selected.note); }} onMakeCurrent={() => void updateVersion({ versionId: selected.id, makeCurrent: true }, '已切换当前版本')} onRelocate={() => void relocateVersion(selected)} onDelete={() => void deleteVersion(selected)}/> : <div className="flex h-full flex-1 items-center justify-center text-slate-400">请选择一个版本</div>}</main>
+      {bundle.photo && compareVersions.length === 2 && <div className="absolute inset-y-0 right-0 z-20 bg-slate-950" style={{ left: treeWidth + 1 }}><CompareView active={active} left={compareVersions[0]} right={compareVersions[1]} cacheConfig={cacheConfig} workspacePath={workspacePath} photoId={bundle.photo.id} initialMode={initialCompareMode} onClose={() => setCompareIds([])}/></div>}
     </div>}
     {editing && <div className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><div role="dialog" aria-modal="true" aria-label={`编辑版本说明 ${visibleVersionLabel(editing)}`} className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><header className="flex items-center justify-between"><h3 className="font-bold text-slate-800">编辑版本说明 · {visibleVersionLabel(editing)}</h3><button onClick={() => setEditing(null)}><X size={18}/></button></header><label className="form-label">版本说明</label><textarea autoFocus rows={5} value={editNote} onChange={event => setEditNote(event.target.value)} placeholder="记录本次进度的修改内容" className="form-input resize-none"/><p className="mt-3 text-xs text-slate-500">版本名称由进度规则生成。</p><footer className="mt-5 flex justify-end gap-2"><button onClick={() => setEditing(null)} className="dialog-secondary">取消</button><button disabled={busy} onClick={() => void updateVersion({ versionId: editing.id, note: editNote }, '版本说明已更新')} className="dialog-primary">保存</button></footer></div></div>}
   </div>;

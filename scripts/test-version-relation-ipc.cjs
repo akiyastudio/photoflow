@@ -27,6 +27,15 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
     },
     workspaceCatalogs: new Map([[workspaceRoot, { projects: [{ name: 'Trusted Project' }] }]]),
     refreshWorkspaceCatalog: async () => { throw new Error('catalog should already be loaded'); },
+    getProjectPath: () => 'C:\\trusted-project',
+    projectVirtualPaths: {
+      resolve: (_root, relativePath) => {
+        if (path.isAbsolute(relativePath) || String(relativePath).includes('..')) throw new Error('项目路径越界');
+        return relativePath === 'RAW.lnk'
+          ? { physicalPath: path.resolve('D:\\external-originals'), virtualPath: 'RAW.lnk', viaExternalLink: true, externalTargetKind: 'folder' }
+          : { physicalPath: path.join('C:\\trusted-project', ...String(relativePath).split('/')), virtualPath: String(relativePath), viaExternalLink: false };
+      },
+    },
     versionService: {
       snapshotProgress: async (_root, projectName, includeMissing) => {
         assert.strictEqual(projectName, 'Trusted Project');
@@ -220,6 +229,15 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
     ensureWorkspace: value => { assert.strictEqual(value, workspaceRoot); return workspaceRoot; },
     workspaceCatalogs: new Map([[workspaceRoot, { projects: [{ name: 'Trusted Project' }] }]]),
     refreshWorkspaceCatalog: async () => { throw new Error('catalog should already be loaded'); },
+    getProjectPath: () => 'C:\\trusted-project',
+    projectVirtualPaths: {
+      resolve: (_root, relativePath) => {
+        if (path.isAbsolute(relativePath) || String(relativePath).includes('..')) throw new Error('项目路径越界');
+        return relativePath === 'RAW.lnk'
+          ? { physicalPath: path.resolve('D:\\external-originals'), virtualPath: 'RAW.lnk', viaExternalLink: true, externalTargetKind: 'folder' }
+          : { physicalPath: path.join('C:\\trusted-project', ...String(relativePath).split('/')), virtualPath: String(relativePath), viaExternalLink: false };
+      },
+    },
     resolveProjectEntry: (_workspace, _status, projectName, relativePath) => {
       assert.strictEqual(projectName, 'Trusted Project');
       if (path.isAbsolute(relativePath) || relativePath.includes('..')) throw new Error('项目路径越界');
@@ -257,7 +275,7 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   });
   assert.strictEqual(adoptedExternalOriginal.success, true, adoptedExternalOriginal.error);
   assert.deepStrictEqual(adoptionPayload, {
-    projectName: 'Trusted Project', folderPath: path.resolve('D:\\external-originals'), mode: 'original', mediaKind: 'image',
+    projectName: 'Trusted Project', folderPath: path.resolve('D:\\external-originals'), externalLinkRelativePath: 'RAW.lnk', mode: 'original', mediaKind: 'image',
   }, 'a managed external folder imported as original material must register its resolved target as an original version-tree node');
   adoptionPayload = undefined;
   const injectedAdoption = await adoptionHandler(null, workspaceRoot, '后期中', {

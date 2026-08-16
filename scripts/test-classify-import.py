@@ -560,7 +560,17 @@ class ClassifyImportTests(unittest.TestCase):
             source.write_bytes(b'local-copy')
             destination_folder.mkdir()
 
-            with mock.patch.object(classify.os, 'replace', side_effect=OSError(errno.EXDEV, 'cross-device link')), \
+            real_move = classify._move_file_no_replace
+            move_attempt = 0
+
+            def fail_first_move(source_path, destination_path):
+                nonlocal move_attempt
+                move_attempt += 1
+                if move_attempt == 1:
+                    raise OSError(errno.EXDEV, 'cross-device link')
+                return real_move(source_path, destination_path)
+
+            with mock.patch.object(classify, '_move_file_no_replace', side_effect=fail_first_move), \
                     mock.patch.object(classify, 'safe_chunk_copy', wraps=classify.safe_chunk_copy) as copy_file:
                 moved = classify.promote_staged_file(str(source), str(destination))
 
@@ -935,12 +945,12 @@ class ClassifyImportTests(unittest.TestCase):
             real_promote = classify.promote_staged_file
             promote_count = 0
 
-            def fail_on_second_promote(source, destination, on_progress=None, allow_atomic_move=True):
+            def fail_on_second_promote(source, destination, on_progress=None, allow_atomic_move=True, temporary_path=None):
                 nonlocal promote_count
                 promote_count += 1
                 if promote_count == 2:
                     raise OSError('simulated crash after the first promotion')
-                return real_promote(source, destination, on_progress, allow_atomic_move)
+                return real_promote(source, destination, on_progress, allow_atomic_move, temporary_path)
 
             with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(classify, 'promote_staged_file', side_effect=fail_on_second_promote):
                 classify.stage_import_and_organize(
@@ -990,6 +1000,111 @@ class ClassifyImportTests(unittest.TestCase):
             imported = sorted((project / 'jpg').glob('*.jpg'))
             self.assertEqual([path.name for path in imported], ['photo (1).jpg', 'photo.jpg'])
             self.assertEqual({path.read_bytes() for path in imported}, {b'first', b'second'})
+
+    def test_work_import_never_accepts_same_size_foreign_pending_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dcim = root / 'card' / 'DCIM'
+            project = root / 'project'
+            dcim.mkdir(parents=True)
+            project.mkdir()
+            source = dcim / 'one.jpg'
+            source.write_bytes(b'AAAA')
+            session = 'same-size-foreign-target'
+            classify.stage_media_to_safety_temp(str(root / 'card'), str(project), import_session=session)
+
+            with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(classify, 'promote_staged_file', side_effect=OSError('stop after plan')):
+                classify.stage_import_and_organize(str(root / 'card'), str(project), direct_project=True, import_session=session)
+            manifest_path = classify._staging_manifest_path(classify.get_import_staging_dir(str(project), session))
+            with open(manifest_path, 'r', encoding='utf-8') as manifest_file:
+                pending = Path(json.load(manifest_file)['files'][0]['pendingDestination'])
+            pending.write_bytes(b'BBBB')
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                classify.stage_import_and_organize(
+                    str(root / 'card'),
+                    str(project),
+                    direct_project=True,
+                    import_session=session,
+                    delete_source=True,
+                )
+
+            self.assertEqual(pending.read_bytes(), b'BBBB')
+            self.assertEqual((project / 'jpg' / 'one (1).jpg').read_bytes(), b'AAAA')
+            self.assertFalse(source.exists())
+
+    def test_work_import_never_accepts_same_size_foreign_committed_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dcim = root / 'card' / 'DCIM'
+            project = root / 'project'
+            dcim.mkdir(parents=True)
+            project.mkdir()
+            source = dcim / 'one.jpg'
+            source.write_bytes(b'AAAA')
+            session = 'same-size-foreign-commit'
+            classify.stage_media_to_safety_temp(str(root / 'card'), str(project), import_session=session)
+
+            with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(classify, 'promote_staged_file', side_effect=OSError('stop after plan')):
+                classify.stage_import_and_organize(str(root / 'card'), str(project), direct_project=True, import_session=session)
+            manifest_path = classify._staging_manifest_path(classify.get_import_staging_dir(str(project), session))
+            with open(manifest_path, 'r', encoding='utf-8') as manifest_file:
+                manifest = json.load(manifest_file)
+            committed = Path(manifest['files'][0].pop('pendingDestination'))
+            manifest['files'][0]['committedDestination'] = str(committed)
+            committed.write_bytes(b'BBBB')
+            with open(manifest_path, 'w', encoding='utf-8') as manifest_file:
+                json.dump(manifest, manifest_file)
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                classify.stage_import_and_organize(
+                    str(root / 'card'),
+                    str(project),
+                    direct_project=True,
+                    import_session=session,
+                    delete_source=True,
+                )
+
+            self.assertEqual(committed.read_bytes(), b'BBBB')
+            self.assertEqual((project / 'jpg' / 'one (1).jpg').read_bytes(), b'AAAA')
+            self.assertFalse(source.exists())
+
+    def test_work_import_recovers_partial_part_file_without_exposing_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dcim = root / 'card' / 'DCIM'
+            project = root / 'project'
+            dcim.mkdir(parents=True)
+            project.mkdir()
+            (dcim / 'one.jpg').write_bytes(b'ORIGINAL')
+            session = 'partial-part-file'
+            classify.stage_media_to_safety_temp(str(root / 'card'), str(project), import_session=session)
+
+            def leave_partial_part(source, destination, on_progress=None, allow_atomic_move=True, temporary_path=None):
+                Path(temporary_path).write_bytes(b'PART')
+                raise SystemExit('simulated hard stop')
+
+            with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()), \
+                    mock.patch.object(classify, 'promote_staged_file', side_effect=leave_partial_part):
+                classify.stage_import_and_organize(
+                    str(root / 'card'),
+                    str(project),
+                    direct_project=True,
+                    import_session=session,
+                )
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                classify.stage_import_and_organize(
+                    str(root / 'card'),
+                    str(project),
+                    direct_project=True,
+                    import_session=session,
+                )
+
+            imported = list((project / 'jpg').glob('*.jpg'))
+            self.assertEqual([path.name for path in imported], ['one.jpg'])
+            self.assertEqual(imported[0].read_bytes(), b'ORIGINAL')
+            self.assertFalse(any((project / 'jpg').glob('*.photoflow-part-*')))
 
     def test_work_import_recovers_when_receipt_write_crashes_without_copying_again(self):
         with tempfile.TemporaryDirectory() as temporary:

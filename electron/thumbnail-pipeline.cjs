@@ -32,12 +32,17 @@ const isThumbnailSizeSufficient = (width, height, requestedSize) => {
   return longestEdge >= Math.ceil(requested * 0.75);
 };
 
+let thumbnailDatabaseSequence = 0;
+
 class ThumbnailDatabaseClient {
-  constructor({ getRunConfig, databasePath, log, serviceArgs = [] }) {
+  constructor({ getRunConfig, databasePath, log, serviceArgs = [], processSupervisor = null }) {
     this.getRunConfig = getRunConfig;
     this.databasePath = databasePath;
     this.log = log;
     this.serviceArgs = serviceArgs;
+    this.processSupervisor = processSupervisor;
+    this.processId = `python:thumbnail-database:${++thumbnailDatabaseSequence}`;
+    this.managedProcess = null;
     this.process = null;
     this.nextId = 0;
     this.pending = new Map();
@@ -46,8 +51,31 @@ class ThumbnailDatabaseClient {
 
   ensureProcess() {
     if (this.process && !this.process.killed) return this.process;
+    if (this.managedProcess && !this.managedProcess.released) {
+      if (this.managedProcess.child && !this.managedProcess.child.killed) return this.managedProcess.child;
+      if (this.managedProcess.state === 'restarting') return this.managedProcess.start();
+      this.managedProcess.release();
+      this.managedProcess = null;
+    }
     const run = this.getRunConfig('thumbnail_db.py', ['--server', '--db', this.databasePath, ...this.serviceArgs]);
+    if (this.processSupervisor) {
+      this.managedProcess = this.processSupervisor.launch({
+        id: this.processId,
+        kind: 'python-worker',
+        command: run.command,
+        args: run.args,
+        options: { stdio: ['pipe', 'pipe', 'pipe'] },
+        restart: { enabled: true, maxRestarts: 3, windowMs: 60000, backoffMs: [100, 400, 1200] },
+        onSpawn: (child, managed) => this.attachProcess(child, managed),
+      });
+      return this.managedProcess.child;
+    }
     const child = spawn(run.command, run.args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    this.attachProcess(child, null);
+    return child;
+  }
+
+  attachProcess(child, managedProcess) {
     this.process = child;
     let output = '';
     child.stdout.setEncoding('utf8');
@@ -59,6 +87,7 @@ class ThumbnailDatabaseClient {
         if (!line.trim()) continue;
         try {
           const response = JSON.parse(line);
+          managedProcess?.markHealthy({ protocol: 'json-lines' });
           const request = this.pending.get(response.id);
           if (!request || request.child !== child) continue;
           this.pending.delete(response.id);
@@ -88,7 +117,6 @@ class ThumbnailDatabaseClient {
     };
     child.on('error', error => finish(error));
     child.on('exit', code => finish(new Error(this.terminationReasons.get(child) || stderr.trim() || `Thumbnail database service exited with code ${code}`)));
-    return child;
   }
 
   call(op, args = {}, timeoutMs = 30000) {
@@ -104,7 +132,10 @@ class ThumbnailDatabaseClient {
         if (this.process === child) {
           this.terminationReasons.set(child, `Thumbnail database service recycled after ${op} timed out`);
           this.process = null;
-          if (!child.killed) child.kill();
+          if (this.managedProcess?.child === child) {
+            this.managedProcess.stop(`request-timeout:${op}`);
+            this.managedProcess = null;
+          } else if (!child.killed) child.kill();
         }
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, child });
@@ -130,7 +161,10 @@ class ThumbnailDatabaseClient {
   stop() {
     const child = this.process;
     this.process = null;
-    if (child && !child.killed) child.kill();
+    if (this.managedProcess) {
+      this.managedProcess.stop('thumbnail-database-stop');
+      this.managedProcess = null;
+    } else if (child && !child.killed) child.kill();
   }
 }
 
@@ -185,8 +219,8 @@ class MemoryThumbnailCache {
 class ThumbnailPipeline {
   constructor({ getRunConfig, databasePath, getCacheDir, cacheFilePath, generateThumbnailSet,
     toPreviewUrl, trimCache, notify, log, concurrency = 2, maxBackgroundTasks = 1000,
-    sourceStabilityDelayMs = 350, sourceStabilityProbeMs = 100 }) {
-    this.databaseConfig = { getRunConfig, databasePath, log };
+    sourceStabilityDelayMs = 350, sourceStabilityProbeMs = 100, processSupervisor = null }) {
+    this.databaseConfig = { getRunConfig, databasePath, log, processSupervisor };
     this.database = new ThumbnailDatabaseClient(this.databaseConfig);
     this.getCacheDir = getCacheDir;
     this.cacheFilePath = cacheFilePath;

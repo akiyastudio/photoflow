@@ -22,7 +22,7 @@ npm run build:advanced-video-release
 输出文件：
 
 ```text
-artifacts/installers/PhotoFlow-video-playback-mpv-26.8.3.1-win32-x64.zip
+artifacts/installers/PhotoFlow-video-playback-mpv-26.8.16.1-win32-x64.zip
 ```
 
 ## 仅使用已有运行时打包

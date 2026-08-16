@@ -9,6 +9,8 @@ const { pathToFileURL } = require('url');
   assert(source.includes("kind === 'raw'\n    ? window.electronAPI.getMediaOriginal"), 'RAW version previews must obtain the rendered source and orientation from the same IPC result');
   assert(source.includes('aria-expanded={open}') && source.includes('openMetadataGroups'), 'version metadata groups must use explicit controlled buttons');
   assert(source.includes('const branchPhotoRequestRef = useRef(0)') && !source.includes('disabled={branchPhotoLoading} aria-pressed={activePhotoId'), 'branch photos must remain clickable while another photo request is pending');
+  assert(source.includes('const loadRequestRef = useRef(0)') && source.includes('requestId !== loadRequestRef.current'), 'stale version-load responses must not overwrite a newer entry');
+  assert(source.includes("setBundle({ ...result, versions: [] })") && source.includes("setSelectedId('')") && source.includes("setCompareIds([])"), 'a failed version load must clear the prior entry instead of leaving stale media visible');
   assert(source.includes('className="absolute inset-0 z-0 cursor-pointer rounded-xl'), 'each version card must expose a real full-card preview button');
   assert(mediaIpcSource.includes('const orientation = await rawOrientationCorrection(sourcePath, previewPath, stat);') && !mediaIpcSource.includes('orientationTimer = setTimeout'), 'slow RAW orientation reads must not silently fall back to an incorrect identity transform');
   const model = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'versioning', 'version-manager-model.ts')).href);

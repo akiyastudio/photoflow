@@ -2,7 +2,7 @@ const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = require('
 const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
 
 const registerFileOperationsIpc = context => {
-  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
   const resolveVirtual = (root, relativePath, options = {}) => projectVirtualPaths
     ? projectVirtualPaths.resolve(root, relativePath, options)
     : (() => {
@@ -24,6 +24,33 @@ const registerFileOperationsIpc = context => {
     return path.relative(root, physicalPath).replace(/\\/g, '/');
   };
   const clipboardPathKey = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
+  const normalizedVirtualPath = value => String(value || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLocaleLowerCase('zh-CN');
+  const trackedExternalRoots = async (workspacePath, projectName, resolutions) => {
+    const roots = resolutions.filter(resolution => resolution?.isExternalLinkRoot);
+    if (!roots.length || !versionService?.listProgress) return [];
+    const listed = await versionService.listProgress(ensureWorkspace(workspacePath), projectName, true);
+    if (!listed?.success) throw new Error(listed?.error || '无法读取外链版本登记');
+    const routes = (listed.progressFolders || []).map(folder => normalizedVirtualPath(folder.externalLinkRelativePath)).filter(Boolean);
+    return roots.filter(root => {
+      const route = normalizedVirtualPath(root.shortcutVirtualPath || root.virtualPath);
+      return routes.some(candidate => candidate === route || candidate.startsWith(`${route}/`));
+    });
+  };
+  const assertManagedExternalRootOperation = async (workspacePath, projectName, resolutions, operation) => {
+    const externalRoots = resolutions.filter(resolution => resolution?.isExternalLinkRoot);
+    if (!externalRoots.length) return;
+    if (operation === 'copy' || operation === 'cut') {
+      throw new Error('外链根不能通过普通复制或剪切操作处理；可以打开外链后复制其中的内容，或使用“移动外链到项目内”');
+    }
+    if (operation === 'move' || operation === 'rename') {
+      const tracked = await trackedExternalRoots(workspacePath, projectName, externalRoots);
+      if (tracked.length) throw new Error('已纳入版本树的外链不能使用普通移动或重命名；请使用版本管理功能，或先“移动外链到项目内”');
+    }
+  };
+  const refreshExternalWatchers = async (workspacePath, status, projectName, resolutions) => {
+    if (!resolutions.some(resolution => resolution?.isExternalLinkRoot) || !refreshManagedExternalWatchers) return;
+    await refreshManagedExternalWatchers(workspacePath, status, projectName);
+  };
   const clearClipboardIfSnapshotCurrent = async snapshot => {
     if (snapshot?.operation !== 'cut' || !snapshot.sources?.length) return false;
     if (process.platform === 'win32') {
@@ -59,7 +86,11 @@ const registerFileOperationsIpc = context => {
           const resolved = resolveVirtual(root, relativePath, { externalRootMode: 'target' });
           const safePath = resolved.physicalPath;
           const stat = await fs.promises.stat(safePath);
-          return { relativePath: resolved.virtualPath, size: stat.size, createdAt: stat.birthtimeMs || stat.ctimeMs, updatedAt: stat.mtimeMs };
+          // Keep the caller's path spelling as the response identity. On Windows,
+          // browse results may contain backslashes while the virtual-path resolver
+          // canonicalizes them to forward slashes. Returning the canonical path
+          // makes the renderer's metadata map miss the entry that requested it.
+          return { relativePath, size: stat.size, createdAt: stat.birthtimeMs || stat.ctimeMs, updatedAt: stat.mtimeMs };
         } catch { return null; }
       }))).filter(Boolean);
       return { success: true, details };
@@ -283,6 +314,7 @@ const registerFileOperationsIpc = context => {
         const operationId = crypto.randomUUID();
         responseContext.operationId = operationId;
         if (!sources.length) throw new Error('没有可移动的文件');
+        await assertManagedExternalRootOperation(workspacePath, projectName, sourceResolutions, 'move');
         const destinationResolution = resolveDestination(targetRelativePath);
         const destinationDir = destinationResolution.physicalPath;
         if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
@@ -338,6 +370,7 @@ const registerFileOperationsIpc = context => {
           }
           job.finishing = true;
           if (moved.length) await pushUndoOperation({ kind: 'move', moves: moved });
+          await refreshExternalWatchers(workspacePath, status, projectName, sourceResolutions);
           task.publish({ phase: 'complete', progress: 100, currentName: '', processedCount: moved.length, totalCount: movePlan.length });
           task.complete('文件移动完成');
           writeLog('info', 'Project files moved by internal drag', { projectName, targetRelativePath, count: moved.length, operationId });
@@ -371,6 +404,7 @@ const registerFileOperationsIpc = context => {
         }
       }
       if (operation === 'copy' || operation === 'cut') {
+        await assertManagedExternalRootOperation(workspacePath, projectName, sourceResolutions, operation);
         if (!sources.length) throw new Error('未选择文件');
         fileOperationState.projectFileClipboard = process.platform === 'win32' ? null : { operation, sources };
         let clipboardWrite;
@@ -480,8 +514,8 @@ const registerFileOperationsIpc = context => {
             seenSources.add(key);
             uniqueSources.push(source);
           }
-          if (destinationResolution.viaExternalLink && uniqueSources.some(source => path.extname(source).toLowerCase() === '.lnk' && projectVirtualPaths?.readManagedExternalLink?.(source))) {
-            throw new Error('不能把项目外链根引用粘贴到另一个外链的内容中');
+          if (uniqueSources.some(source => path.extname(source).toLowerCase() === '.lnk' && projectVirtualPaths?.readManagedExternalLink?.(source))) {
+            throw new Error('不能通过普通粘贴复制或移动外链根；请在项目中重新导入外链，或使用“移动外链到项目内”');
           }
           affectedDirectories = Array.from(new Set([
             ...affectedDirectories,
@@ -841,6 +875,7 @@ const registerFileOperationsIpc = context => {
             }
           }
           await persistTrashUndo();
+          await refreshExternalWatchers(workspacePath, status, projectName, sourceResolutions);
           publish({ phase: 'complete', progress: 100, currentName: '', processedCount, totalCount });
           task.complete('文件已移入回收站');
           writeLog('info', 'Project files moved to trash', { projectName, count: processedCount, operationId, batch: useBatchTrash, durationMs: Date.now() - startedAt });
@@ -877,6 +912,7 @@ const registerFileOperationsIpc = context => {
           return parent === '.' ? '' : parent;
         })));
         if (!sources.length || !nextName.trim()) throw new Error('请选择文件并输入新名称');
+        await assertManagedExternalRootOperation(workspacePath, projectName, sourceResolutions, 'rename');
         if (sources.some(source => isProtectedProjectFolderPath({ fs, path, projectRoot: root, candidate: source }))) {
           throw new Error('该文件夹由项目工作流管理，不能使用普通重命名；进度文件夹请使用“修改进度”');
         }
@@ -925,6 +961,7 @@ const registerFileOperationsIpc = context => {
         }
         writeLog('info', 'Project files renamed', { projectName, count: sources.length });
         if (moves.length) await pushUndoOperation({ kind: 'files', moves });
+        await refreshExternalWatchers(workspacePath, status, projectName, sourceResolutions);
         return {
           success: true,
           cancelled: false,

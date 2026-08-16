@@ -12,10 +12,11 @@ const PLUGIN_DEFINITIONS = Object.freeze({
   },
   'video-playback-mpv': {
     id: 'video-playback-mpv',
-    version: '26.8.3.1',
+    version: '26.8.16.1',
     name: '高级视频解码',
     description: '使用独立 libmpv 进程、硬件解码和预读缓存播放相机原始视频。',
     capabilities: ['video-playback.advanced'],
+    integrityManifest: 'video-playback-mpv-integrity.json',
   },
 });
 

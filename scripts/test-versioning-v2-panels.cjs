@@ -476,6 +476,23 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert(layoutRequests.loads > loadsBeforeFailure, 'save failure must reload the server layout');
   assert.strictEqual(rawCanvasNode.style.left, savedLeft, 'save failure must restore the previous X position');
   assert.strictEqual(rawCanvasNode.style.top, savedTop, 'save failure must restore the previous Y position');
+  const savesBeforeQueuedFailure = layoutRequests.saves.length;
+  layoutRequests.holdSaves = true;
+  layoutRequests.failNextSave = true;
+  await React.act(async () => {
+    dispatch(rawCanvasNode, 'pointerdown', { pointerId: 431, button: 0, clientX: 700, clientY: 600 });
+    dispatch(rawCanvasNode, 'pointermove', { pointerId: 431, button: 0, clientX: 740, clientY: 640 });
+    dispatch(rawCanvasNode, 'pointerup', { pointerId: 431, button: 0, clientX: 740, clientY: 640 });
+    await Promise.resolve(); await Promise.resolve();
+    dispatch(rawCanvasNode, 'pointerdown', { pointerId: 432, button: 0, clientX: 740, clientY: 640 });
+    dispatch(rawCanvasNode, 'pointermove', { pointerId: 432, button: 0, clientX: 780, clientY: 680 });
+    dispatch(rawCanvasNode, 'pointerup', { pointerId: 432, button: 0, clientX: 780, clientY: 680 });
+  });
+  assert.strictEqual(layoutRequests.saves.length, savesBeforeQueuedFailure + 1, 'the second layout write must remain queued while the first write is in flight');
+  layoutRequests.holdSaves = false;
+  layoutRequests.saveReleases.splice(0).forEach(release => release());
+  await React.act(async () => { await new Promise(resolve => setImmediate(resolve)); await new Promise(resolve => setImmediate(resolve)); });
+  assert.strictEqual(layoutRequests.saves.length, savesBeforeQueuedFailure + 1, 'a failed layout write must cancel later optimistic writes from the same UI epoch');
   canvasViewport.scrollLeft = 80; canvasViewport.scrollTop = 60;
   await React.act(async () => {
     dispatch(canvasNode, 'pointerdown', { pointerId: 44, button: 1, clientX: 200, clientY: 200 });
@@ -494,6 +511,15 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(canvasViewport.scrollLeft, 160, 'Space plus left-button drag must pan the canvas');
   assert.strictEqual(canvasViewport.scrollTop, 160, 'Space plus left-button drag must pan vertically');
   assert(canvasController?.hasManualLayout, 'moving a node must mark the current layout as manual');
+  const savesBeforeStaleRefresh = layoutRequests.saves.length;
+  const loadsBeforeStaleRefresh = layoutRequests.loads;
+  layoutRequests.staleNextSave = true;
+  let staleRefreshResult;
+  await React.act(async () => { staleRefreshResult = await canvasController.refreshLayout(); });
+  assert.strictEqual(staleRefreshResult, false, 'a stale atomic replacement must not overwrite a concurrent layout');
+  assert.strictEqual(layoutRequests.saves.length, savesBeforeStaleRefresh + 1, 'a stale replacement must not retry against the newer revision');
+  assert(layoutRequests.loads > loadsBeforeStaleRefresh, 'a stale replacement must load the winning server layout and revision');
+  canvasViewport.scrollLeft = 160; canvasViewport.scrollTop = 160;
   const beforeFailedRefreshLeft = rawCanvasNode.style.left;
   const beforeFailedRefreshTop = rawCanvasNode.style.top;
   const loadsBeforeFailedRefresh = layoutRequests.loads;

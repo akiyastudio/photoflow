@@ -1,5 +1,5 @@
 const createVersionService = ({ repository }) => ({
-  syncProject: (root, projectName) => repository.syncProject(root, projectName),
+  syncProject: (root, projectName, externalRoots = []) => repository.syncProject(root, projectName, externalRoots),
   setThumbnail: (root, payload) => repository.setThumbnail(root, payload),
   getMedia: (root, payload) => repository.getMedia(root, payload),
   getPhoto: (root, photoId) => repository.getPhoto(root, photoId),
@@ -17,6 +17,7 @@ const createVersionService = ({ repository }) => ({
   registerProgress: (root, payload) => repository.registerProgress(root, payload),
   registerProgressWithGraph: (root, payload) => repository.registerProgressWithGraph(root, payload),
   adoptMediaFolder: (root, payload) => repository.adoptMediaFolder(root, payload),
+  revertExternalAdoptions: (root, payload) => repository.revertExternalAdoptions(root, payload),
   updateProgressTree: (root, payload) => repository.updateProgressTree(root, payload),
   updateProgressRelation: (root, payload) => repository.updateProgressRelation(root, payload),
   repairLegacySelectionRelation: (root, payload) => repository.repairLegacySelectionRelation(root, payload),

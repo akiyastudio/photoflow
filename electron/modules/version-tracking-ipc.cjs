@@ -1,5 +1,7 @@
 const registerVersionTrackingIpc = context => {
   const { backgroundTasks, copyFileAtomic, crypto, ensureWorkspace, fs, getWorkspaceDataRoot = root => root, ipcMain, path, refreshWorkspaceCatalog, runPythonEventAction, trackingScanService, versionService, workspaceCatalogs, writeLog = () => undefined } = context;
+  const trackingCommitJobs = new Map();
+  const trackingCommitKey = (workspaceRoot, sessionId) => `${process.platform === 'win32' ? path.resolve(workspaceRoot).toLowerCase() : path.resolve(workspaceRoot)}\0${sessionId}`;
   const trackingPreviewItems = (prepared, preview = {}) => {
     const pendingSources = new Set((prepared.sourceNames || []).map(String));
     const items = [];
@@ -211,6 +213,9 @@ const registerVersionTrackingIpc = context => {
       const workspaceRoot = ensureWorkspace(workspacePath);
       const sessionId = String(request.sessionId || '');
       if (!/^[0-9a-f-]{36}$/i.test(sessionId)) throw new Error('sessionId 无效');
+      if (trackingCommitJobs.has(trackingCommitKey(workspaceRoot, sessionId))) {
+        return { success: false, released: false, sessionId, error: '跟踪结果正在提交，暂时不能放弃会话' };
+      }
       return await versionService.releaseTrackingSession(workspaceRoot, sessionId);
     } catch (error) {
       return { success: false, released: false, error: error.message || String(error) };
@@ -230,13 +235,9 @@ const registerVersionTrackingIpc = context => {
     }
   });
 
-  ipcMain.handle('workspace-progress-tracking-commit', async (_event, workspacePath, request = {}) => {
+  const runTrackingCommit = async (workspaceRoot, sessionId) => {
     const copiedPaths = [];
-    let workspaceRoot = '';
-    const sessionId = String(request.sessionId || '');
     try {
-      workspaceRoot = ensureWorkspace(workspacePath);
-      if (!/^[0-9a-f-]{36}$/i.test(sessionId)) throw new Error('sessionId 无效');
       const plan = await versionService.getTrackingCommitPlan(workspaceRoot, sessionId);
       if (plan.alreadyCommitted) return await versionService.getTrackingSession(workspaceRoot, { sessionId, cursor: 0, limit: 200 });
       if (plan.repairBatchId) {
@@ -285,6 +286,26 @@ const registerVersionTrackingIpc = context => {
         sessionId, batchId: error.batchId, error: error.message || String(error),
       }).catch(() => undefined);
       return { success: false, sessionId, retryable: true, items: [], error: error.message || String(error) };
+    }
+  };
+
+  ipcMain.handle('workspace-progress-tracking-commit', async (_event, workspacePath, request = {}) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const sessionId = String(request.sessionId || '');
+      if (!/^[0-9a-f-]{36}$/i.test(sessionId)) throw new Error('sessionId 无效');
+      const key = trackingCommitKey(workspaceRoot, sessionId);
+      const running = trackingCommitJobs.get(key);
+      if (running) return await running;
+      const job = runTrackingCommit(workspaceRoot, sessionId);
+      trackingCommitJobs.set(key, job);
+      try {
+        return await job;
+      } finally {
+        if (trackingCommitJobs.get(key) === job) trackingCommitJobs.delete(key);
+      }
+    } catch (error) {
+      return { success: false, sessionId: String(request.sessionId || ''), retryable: true, items: [], error: error.message || String(error) };
     }
   });
 

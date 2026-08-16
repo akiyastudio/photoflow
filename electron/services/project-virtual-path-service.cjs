@@ -3,6 +3,7 @@ const path = require('path');
 
 const MANAGED_EXTERNAL_FOLDER_PREFIX = 'PhotoFlow 外链文件夹：';
 const MANAGED_EXTERNAL_FILE_PREFIX = 'PhotoFlow 外链文件：';
+const MANAGED_EXTERNAL_ID_MARKER = ' | PhotoFlow-ID:';
 
 const normalizeVirtualPath = value => {
   const normalized = String(value || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
@@ -18,7 +19,41 @@ const isInsideOrEqual = (parent, candidate) => {
   return !relative || (!relative.startsWith('..') && !path.isAbsolute(relative));
 };
 
-const readManagedExternalLink = (shell, shortcutPath) => {
+const createProjectVirtualPathService = ({ shell, registryPath = '', crypto = require('crypto') }) => {
+  if (!shell?.readShortcutLink) throw new Error('外链路径服务缺少快捷方式读取能力');
+  const registryFile = registryPath ? path.resolve(registryPath) : '';
+  let registryCache = null;
+  let registryMtimeMs = 0;
+  const loadRegistry = () => {
+    const currentMtimeMs = registryFile ? fs.statSync(registryFile, { throwIfNoEntry: false })?.mtimeMs || 0 : 0;
+    if (registryCache && currentMtimeMs === registryMtimeMs) return registryCache;
+    if (!registryFile) return (registryCache = { version: 1, links: {} });
+    try {
+      const parsed = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
+      registryCache = parsed?.version === 1 && parsed.links && typeof parsed.links === 'object' ? parsed : { version: 1, links: {} };
+    } catch { registryCache = { version: 1, links: {} }; }
+    registryMtimeMs = currentMtimeMs;
+    return registryCache;
+  };
+  const saveRegistry = () => {
+    if (!registryFile) return;
+    fs.mkdirSync(path.dirname(registryFile), { recursive: true });
+    const temporary = `${registryFile}.tmp-${process.pid}-${crypto.randomUUID()}`;
+    const backup = `${registryFile}.backup-${process.pid}-${crypto.randomUUID()}`;
+    fs.writeFileSync(temporary, JSON.stringify(loadRegistry()), { encoding: 'utf8', flag: 'wx' });
+    try {
+      if (fs.existsSync(registryFile)) fs.renameSync(registryFile, backup);
+      fs.renameSync(temporary, registryFile);
+      registryMtimeMs = fs.statSync(registryFile).mtimeMs;
+      fs.rmSync(backup, { force: true });
+    } catch (error) {
+      if (!fs.existsSync(registryFile) && fs.existsSync(backup)) fs.renameSync(backup, registryFile);
+      throw error;
+    } finally { fs.rmSync(temporary, { force: true }); fs.rmSync(backup, { force: true }); }
+  };
+  const targetKey = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
+
+  const readManagedExternalLink = shortcutPath => {
   if (path.extname(shortcutPath).toLowerCase() !== '.lnk') return null;
   let details;
   try { details = shell.readShortcutLink(shortcutPath); }
@@ -27,13 +62,85 @@ const readManagedExternalLink = (shell, shortcutPath) => {
   const targetKindHint = description.startsWith(MANAGED_EXTERNAL_FOLDER_PREFIX) ? 'folder'
     : description.startsWith(MANAGED_EXTERNAL_FILE_PREFIX) ? 'file' : '';
   if (!targetKindHint) return null;
+  const markerIndex = description.lastIndexOf(MANAGED_EXTERNAL_ID_MARKER);
+  const linkId = markerIndex >= 0 ? description.slice(markerIndex + MANAGED_EXTERNAL_ID_MARKER.length).trim() : '';
+  const registered = linkId && loadRegistry().links[linkId];
+  if (!registered || registered.kind !== targetKindHint) return null;
   const target = String(details?.target || '').trim();
   if (!target || !path.isAbsolute(target)) throw new Error('外链目标路径无效');
-  return { ...details, target: path.resolve(target), targetKindHint };
-};
+  if (targetKey(registered.target) !== targetKey(target)) return null;
+  return { ...details, target: path.resolve(target), targetKindHint, linkId };
+  };
 
-const createProjectVirtualPathService = ({ shell }) => {
-  if (!shell?.readShortcutLink) throw new Error('外链路径服务缺少快捷方式读取能力');
+  const createManagedExternalLink = (shortcutPath, { target, kind, displayName }) => {
+    return createManagedExternalLinksBatch([{ shortcutPath, target, kind, displayName }])[0];
+  };
+
+  const createManagedExternalLinksBatch = requests => {
+    if (!Array.isArray(requests) || !requests.length) return [];
+    const registry = loadRegistry();
+    const planned = [];
+    const destinations = new Set();
+    for (const request of requests) {
+      const targetKind = request?.kind === 'folder' ? 'folder' : request?.kind === 'file' ? 'file' : '';
+      const rawTarget = String(request?.target || '').trim();
+      const destination = path.resolve(String(request?.shortcutPath || ''));
+      if (!targetKind || !rawTarget || !path.isAbsolute(rawTarget)) throw new Error('外链目标无效');
+      if (path.extname(destination).toLowerCase() !== '.lnk') throw new Error('外链快捷方式路径无效');
+      const destinationKey = targetKey(destination);
+      if (destinations.has(destinationKey) || fs.existsSync(destination)) throw new Error(`外链目标名称已被占用：${path.basename(destination)}`);
+      destinations.add(destinationKey);
+      const resolvedTarget = path.resolve(rawTarget);
+      const linkId = crypto.randomUUID();
+      const prefix = targetKind === 'folder' ? MANAGED_EXTERNAL_FOLDER_PREFIX : MANAGED_EXTERNAL_FILE_PREFIX;
+      const description = `${prefix}${String(request?.displayName || path.basename(resolvedTarget))}${MANAGED_EXTERNAL_ID_MARKER}${linkId}`;
+      const temporary = path.join(path.dirname(destination), `.photoflow-link-${crypto.randomUUID()}.lnk`);
+      planned.push({ shortcutPath: destination, temporary, target: resolvedTarget, kind: targetKind, linkId, description });
+    }
+    const committed = [];
+    try {
+      for (const item of planned) {
+        fs.mkdirSync(path.dirname(item.shortcutPath), { recursive: true });
+        if (!shell.writeShortcutLink(item.temporary, {
+          target: item.target,
+          cwd: item.kind === 'folder' ? item.target : path.dirname(item.target),
+          description: item.description,
+        })) throw new Error(`无法创建外链：${path.basename(item.target)}`);
+      }
+      for (const item of planned) {
+        fs.renameSync(item.temporary, item.shortcutPath);
+        committed.push(item);
+        registry.links[item.linkId] = { target: item.target, kind: item.kind, createdAt: Date.now() };
+      }
+      saveRegistry();
+      return planned.map(({ temporary: _temporary, ...item }) => item);
+    } catch (error) {
+      for (const item of planned) {
+        fs.rmSync(item.temporary, { force: true });
+        fs.rmSync(item.shortcutPath, { force: true });
+        delete registry.links[item.linkId];
+      }
+      throw error;
+    }
+  };
+
+  const revokeManagedExternalLinkIds = linkIds => {
+    const registry = loadRegistry();
+    const uniqueIds = [...new Set((Array.isArray(linkIds) ? linkIds : []).map(value => String(value || '').trim()).filter(Boolean))];
+    const removed = [];
+    for (const linkId of uniqueIds) {
+      if (!registry.links[linkId]) continue;
+      removed.push([linkId, registry.links[linkId]]);
+      delete registry.links[linkId];
+    }
+    if (!removed.length) return 0;
+    try { saveRegistry(); }
+    catch (error) {
+      for (const [linkId, entry] of removed) registry.links[linkId] = entry;
+      throw error;
+    }
+    return removed.length;
+  };
 
   const resolve = (projectRoot, virtualPath = '', options = {}) => {
     const root = path.resolve(projectRoot);
@@ -44,15 +151,20 @@ const createProjectVirtualPathService = ({ shell }) => {
     const externalRootMode = options.externalRootMode === 'link' ? 'link' : 'target';
 
     if (externalLinkIndex < 0) {
-      const physicalPath = path.resolve(root, ...segments);
-      if (!isInsideOrEqual(root, physicalPath)) throw new Error('项目路径超出项目目录');
-      if (mustExist && !fs.existsSync(physicalPath)) throw Object.assign(new Error('文件或文件夹不存在'), { code: 'ENOENT' });
-      if (allowMissingLeaf && !fs.existsSync(physicalPath)) {
-        const parent = path.dirname(physicalPath);
+      const requestedPath = path.resolve(root, ...segments);
+      if (!isInsideOrEqual(root, requestedPath)) throw new Error('项目路径超出项目目录');
+      if (mustExist && !fs.existsSync(requestedPath)) throw Object.assign(new Error('文件或文件夹不存在'), { code: 'ENOENT' });
+      const realRoot = fs.realpathSync(root);
+      let physicalPath = requestedPath;
+      if (fs.existsSync(requestedPath)) {
+        physicalPath = fs.realpathSync(requestedPath);
+        if (!isInsideOrEqual(realRoot, physicalPath)) throw new Error('项目内容通过重解析点跳出了项目目录');
+      } else if (allowMissingLeaf) {
+        const parent = path.dirname(requestedPath);
         if (!fs.existsSync(parent)) throw Object.assign(new Error('目标文件夹不存在'), { code: 'ENOENT' });
-        const realRoot = fs.realpathSync(root);
         const realParent = fs.realpathSync(parent);
         if (!isInsideOrEqual(realRoot, realParent)) throw new Error('项目路径超出项目目录');
+        physicalPath = path.join(realParent, path.basename(requestedPath));
       }
       return {
         projectRoot: root,
@@ -68,10 +180,14 @@ const createProjectVirtualPathService = ({ shell }) => {
 
     const shortcutSegments = segments.slice(0, externalLinkIndex + 1);
     const shortcutVirtualPath = shortcutSegments.join('/');
-    const shortcutPath = path.resolve(root, ...shortcutSegments);
-    if (!isInsideOrEqual(root, shortcutPath)) throw new Error('外链路径超出项目目录');
-    if (!fs.existsSync(shortcutPath)) throw Object.assign(new Error('外链不存在'), { code: 'ENOENT' });
-    const link = readManagedExternalLink(shell, shortcutPath);
+    const requestedShortcutPath = path.resolve(root, ...shortcutSegments);
+    if (!isInsideOrEqual(root, requestedShortcutPath)) throw new Error('外链路径超出项目目录');
+    if (!fs.existsSync(requestedShortcutPath)) throw Object.assign(new Error('外链不存在'), { code: 'ENOENT' });
+    const realRoot = fs.realpathSync(root);
+    const shortcutPath = fs.realpathSync(requestedShortcutPath);
+    if (!isInsideOrEqual(realRoot, shortcutPath)) throw new Error('外链快捷方式通过重解析点跳出了项目目录');
+    if (!fs.statSync(shortcutPath).isFile()) throw new Error('外链快捷方式不是文件');
+    const link = readManagedExternalLink(shortcutPath);
     if (!link) throw new Error('所选项目不是 PhotoFlow 外链');
     const isExternalLinkRoot = externalLinkIndex === segments.length - 1;
     if (isExternalLinkRoot && externalRootMode === 'link') {
@@ -84,6 +200,7 @@ const createProjectVirtualPathService = ({ shell }) => {
         shortcutVirtualPath,
         externalTargetRoot: link.target,
         externalTargetKind: link.targetKindHint,
+        linkId: link.linkId,
         externalDisplayName: path.basename(shortcutPath, path.extname(shortcutPath)),
         viaExternalLink: true,
         isExternalLinkRoot: true,
@@ -102,6 +219,7 @@ const createProjectVirtualPathService = ({ shell }) => {
       return {
         projectRoot: root, virtualPath: normalized, physicalPath: realTargetRoot, mediaRoot: path.dirname(realTargetRoot),
         shortcutPath, shortcutVirtualPath, externalTargetRoot: realTargetRoot, externalTargetKind: 'file',
+        linkId: link.linkId,
         externalDisplayName: path.basename(shortcutPath, path.extname(shortcutPath)), viaExternalLink: true,
         isExternalLinkRoot: true, writable: true, offline: false,
       };
@@ -132,6 +250,7 @@ const createProjectVirtualPathService = ({ shell }) => {
       shortcutVirtualPath,
       externalTargetRoot: realTargetRoot,
       externalTargetKind: 'folder',
+      linkId: link.linkId,
       externalDisplayName: path.basename(shortcutPath, path.extname(shortcutPath)),
       viaExternalLink: true,
       isExternalLinkRoot,
@@ -171,7 +290,7 @@ const createProjectVirtualPathService = ({ shell }) => {
           continue;
         }
         if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.lnk') continue;
-        const link = readManagedExternalLink(shell, entryPath);
+        const link = readManagedExternalLink(entryPath);
         if (!link) continue;
         let externalTargetKind = link.targetKindHint;
         if (fs.existsSync(link.target)) externalTargetKind = fs.statSync(link.target).isDirectory() ? 'folder' : 'file';
@@ -181,6 +300,7 @@ const createProjectVirtualPathService = ({ shell }) => {
           externalTargetRoot: link.target,
           externalDisplayName: path.basename(entry.name, path.extname(entry.name)),
           externalTargetKind,
+          linkId: link.linkId,
           viaExternalLink: true,
           offline: !fs.existsSync(link.target),
         });
@@ -189,14 +309,17 @@ const createProjectVirtualPathService = ({ shell }) => {
     return links;
   };
 
-  return { resolve, toVirtualPath, listManagedExternalLinks, readManagedExternalLink: shortcutPath => readManagedExternalLink(shell, shortcutPath) };
+  return {
+    resolve, toVirtualPath, listManagedExternalLinks, readManagedExternalLink,
+    createManagedExternalLink, createManagedExternalLinksBatch, revokeManagedExternalLinkIds,
+  };
 };
 
 module.exports = {
+  MANAGED_EXTERNAL_ID_MARKER,
   MANAGED_EXTERNAL_FOLDER_PREFIX,
   MANAGED_EXTERNAL_FILE_PREFIX,
   createProjectVirtualPathService,
   isInsideOrEqual,
   normalizeVirtualPath,
-  readManagedExternalLink,
 };

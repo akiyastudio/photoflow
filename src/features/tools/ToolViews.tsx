@@ -10,7 +10,10 @@ import { ImportSourceControls, type ImportMaterialKind } from '../../components/
 import { PanelSwitch } from '../../components/PanelSwitch';
 import { appendImportSuccess, type ImportCompletion } from './import-completion-model';
 import { filenameSelectionOutputName, resolveFilenameSelectionSource } from './filename-selection-model';
-import { reconcileConfiguredSdDevices, resolveConfiguredSdDevices } from './sd-startup-import-model';
+import { configuredSdDriveTypes, configuredSdSelectionPaths, isTrustedSdImportDevice, normalizeConfiguredSdDeviceRecords, reconcileConfiguredSdDevices, resolveConfiguredSdDevices, syncLegacySdMirrors, upsertConfiguredSdDevice } from './sd-startup-import-model';
+import { decideStartupSdAutoImport, handledStartupRequestAfterBatchStart, shouldDeleteSourceForImportBatch, type StartupSdAutoImportRequest } from './startup-sd-auto-import-model';
+import { isFreshStorageDeviceInventory, shouldPollStorageDeviceInventory } from './storage-device-inventory-model';
+import { useStorageDeviceInventory } from './use-storage-device-inventory';
 
 export type { ImportCompletion } from './import-completion-model';
 
@@ -163,7 +166,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
   return { logs, isRunning, isCancelling, progress, statusMsg, preview, clearPreview: () => setPreview(null), start, cancel };
 };
 
-const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath, brollDestinationPath, workspacePath, workspaceProjects, active = true, directSource = false, startupAutoImportRequest = 0, startupAutoImportReady = false, startupAutoImportSelections = [], importKind, onImportKindChange, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitVideosOnImport = false, transcodeVideosOnImport = false, splitBrollVideosOnImport = false, transcodeBrollVideosOnImport = false, transcodeSettings, onChooseSourceFiles, onChooseSourceFolder, onDropSourcePaths, onLinkOnlyImport, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], storageDevices?: StorageDevice[], destinationPath?: string | null, brollDestinationPath?: string | null, workspacePath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, startupAutoImportRequest?: number, startupAutoImportReady?: boolean, startupAutoImportSelections?: Array<{ path: string; type: 'work' | 'broll' }>, importKind?: ImportMaterialKind, onImportKindChange?: (kind: ImportMaterialKind, sourcePaths: string[]) => void, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitVideosOnImport?: boolean, transcodeVideosOnImport?: boolean, splitBrollVideosOnImport?: boolean, transcodeBrollVideosOnImport?: boolean, transcodeSettings?: VideoTranscodeSettings, onChooseSourceFiles?: () => void, onChooseSourceFolder?: () => void, onDropSourcePaths?: (paths: string[]) => void, onLinkOnlyImport?: (paths: string[]) => void | Promise<void>, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (result: ImportCompletion) => void | Promise<void>, completedActionLabel?: string, onCompletedAction?: () => void }) => {
+const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath, brollDestinationPath, workspacePath, workspaceProjects, active = true, directSource = false, startupAutoImportRequest = null, startupAutoImportReady = false, startupAutoImportError = null, startupAutoImportSelections = [], importKind, onImportKindChange, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitVideosOnImport = false, transcodeVideosOnImport = false, splitBrollVideosOnImport = false, transcodeBrollVideosOnImport = false, transcodeSettings, onChooseSourceFiles, onChooseSourceFolder, onDropSourcePaths, onLinkOnlyImport, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], storageDevices?: StorageDevice[], destinationPath?: string | null, brollDestinationPath?: string | null, workspacePath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, startupAutoImportRequest?: StartupSdAutoImportRequest | null, startupAutoImportReady?: boolean, startupAutoImportError?: string | null, startupAutoImportSelections?: Array<{ path: string; type: 'work' | 'broll' }>, importKind?: ImportMaterialKind, onImportKindChange?: (kind: ImportMaterialKind, sourcePaths: string[]) => void, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitVideosOnImport?: boolean, transcodeVideosOnImport?: boolean, splitBrollVideosOnImport?: boolean, transcodeBrollVideosOnImport?: boolean, transcodeSettings?: VideoTranscodeSettings, onChooseSourceFiles?: () => void, onChooseSourceFolder?: () => void, onDropSourcePaths?: (paths: string[]) => void, onLinkOnlyImport?: (paths: string[]) => void | Promise<void>, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (result: ImportCompletion) => void | Promise<void>, completedActionLabel?: string, onCompletedAction?: () => void }) => {
   const [status, setStatus] = useState<'idle' | 'checking' | 'ready_to_import' | 'importing' | 'decision' | 'processing' | 'completed'>('idle');
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState("等待连接...");
@@ -175,8 +178,8 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
   const [shouldDeleteSourceAfterImport, setShouldDeleteSourceAfterImport] = useState(deleteSourceAfterImport);
   const [linkOnly, setLinkOnly] = useState(false);
   const [drivePickerOpen, setDrivePickerOpen] = useState(false);
-  const selectedDrives = config?.sdPaths?.length ? config.sdPaths : config?.sdPath ? [config.sdPath] : [];
-  const driveTypes = config?.sdDriveTypes || {};
+  const selectedDrives = config ? (directSource ? (config.sdPaths?.length ? config.sdPaths : config.sdPath ? [config.sdPath] : []) : configuredSdSelectionPaths(config, storageDevices)) : [];
+  const driveTypes = config ? configuredSdDriveTypes(config, storageDevices) : {};
   // 【关键修改】使用 Ref 来做“防抖”锁，防止 SD 卡接触不良导致多次触发 startImport
   const isBusyRef = React.useRef(false);
   const handledStartupAutoImportRef = React.useRef(0);
@@ -198,12 +201,13 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
   const driveImportSessionsRef = React.useRef(new Map<string, string>());
   const currentImportSessionKeyRef = React.useRef('');
   const retryDrivePathsRef = React.useRef<string[]>([]);
+  const importBatchModeRef = React.useRef<'manual' | 'startup'>('manual');
   const drivePickerRef = React.useRef<HTMLDivElement>(null);
   const currentImportSessionRef = React.useRef('');
   const continueAfterDriveFailureRef = React.useRef<(drive: string, message: string, requestId?: string) => void>(() => undefined);
   const continueRoutedImportRef = React.useRef<(routes: Record<string, string>, routingDecision?: any) => void | Promise<void>>(() => undefined);
   const startImportRef = React.useRef<(sdPath?: string, type?: 'work' | 'broll') => void>(() => undefined);
-  const startBatchRef = React.useRef<(requested?: Array<{ path: string; type: 'work' | 'broll' }>) => void>(() => undefined);
+  const startBatchRef = React.useRef<(requested?: Array<{ path: string; type: 'work' | 'broll' }>, mode?: 'manual' | 'startup') => boolean>(() => false);
   const onImportCompleteRef = React.useRef(onImportComplete);
   const onBusyChangeRef = React.useRef(onBusyChange);
   onBusyChangeRef.current = onBusyChange;
@@ -378,13 +382,31 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
   const toggleDrive = (sdPath: string) => {
     if (!config || !onImportConfigChange) return;
     retryDrivePathsRef.current = [];
-    const sdPaths = selectedDrives.includes(sdPath) ? selectedDrives.filter(path => path !== sdPath) : [...selectedDrives, sdPath];
-    const deviceId = storageDevices.find(device => device.mountPath === sdPath)?.id;
-    onImportConfigChange({ ...config, sdPath: sdPaths[0] || '', sdPaths, sdDriveTypes: { ...driveTypes, [sdPath]: driveTypes[sdPath] || 'work' }, sdDeviceIds: deviceId ? { ...(config.sdDeviceIds || {}), [sdPath]: deviceId } : (config.sdDeviceIds || {}) });
+    const removing = selectedDrives.includes(sdPath);
+    const device = storageDevices.find(candidate => candidate.mountPath === sdPath);
+    if (device && isTrustedSdImportDevice(device)) {
+      const records = normalizeConfiguredSdDeviceRecords(config.sdDevices);
+      const matchingRecord = records.find(record => record.deviceId === device.id);
+      if (removing && matchingRecord?.enabled && matchingRecord.confirmedAt > 0) {
+        onImportConfigChange(syncLegacySdMirrors(config, records.map(record => record.deviceId === device.id ? { ...record, enabled: false } : record)));
+      } else {
+        onImportConfigChange(upsertConfiguredSdDevice(config, device, driveTypes[sdPath] || 'work', Date.now()));
+      }
+      return;
+    }
+    const sdDeviceIds = { ...(config.sdDeviceIds || {}) };
+    const sdPaths = removing ? selectedDrives.filter(path => path !== sdPath) : [...selectedDrives, sdPath];
+    if (removing) delete sdDeviceIds[sdPath];
+    onImportConfigChange({ ...config, sdPath: sdPaths[0] || '', sdPaths, sdDriveTypes: { ...driveTypes, [sdPath]: driveTypes[sdPath] || 'work' }, sdDeviceIds });
   };
   const setDriveType = (sdPath: string, type: 'work' | 'broll') => {
     if (!config || !onImportConfigChange) return;
-    onImportConfigChange({ ...config, sdDriveTypes: { ...driveTypes, [sdPath]: type } });
+    const device = storageDevices.find(candidate => candidate.mountPath === sdPath);
+    const records = normalizeConfiguredSdDeviceRecords(config.sdDevices);
+    const nextRecords = records.map(record => (
+      (device ? record.deviceId === device.id : record.lastMountPath === sdPath) ? { ...record, type } : record
+    ));
+    onImportConfigChange(syncLegacySdMirrors({ ...config, sdDriveTypes: { ...driveTypes, [sdPath]: type } }, nextRecords));
   };
 
   const runCmd = (stage: string, args: string[] = []) => {
@@ -393,7 +415,8 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     const dateFilterArgs = !directSource && ['plan', 'import', 'broll'].includes(stage) && config?.dateFilter && config.dateFilter !== 'all'
       ? ['--date_filter', config.dateFilter]
       : [];
-    if(window.electronAPI) window.electronAPI.runScript('classify.py', ['--stage', stage, ...args, ...sessionArgs, ...dateFilterArgs, ...(directSource ? ['--direct_source', '--source_paths', JSON.stringify(selectedDrives)] : []), ...(shouldDeleteSourceAfterImport ? ['--delete_source'] : []), ...(generateJpgFromRaw ? ['--generate_jpg_from_raw'] : [])], importRequestIdRef.current);
+    const deleteSource = shouldDeleteSourceForImportBatch(shouldDeleteSourceAfterImport, importBatchModeRef.current);
+    if(window.electronAPI) window.electronAPI.runScript('classify.py', ['--stage', stage, ...args, ...sessionArgs, ...dateFilterArgs, ...(directSource ? ['--direct_source', '--source_paths', JSON.stringify(selectedDrives)] : []), ...(deleteSource ? ['--delete_source'] : []), ...(generateJpgFromRaw ? ['--generate_jpg_from_raw'] : [])], importRequestIdRef.current);
   };
 
   const cancelImport = async () => {
@@ -731,8 +754,8 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
   };
   startImportRef.current = startImport;
 
-  const startBatchImport = (requestedSelections?: Array<{ path: string; type: 'work' | 'broll' }>) => {
-    if (isBusyRef.current) return;
+  const startBatchImport = (requestedSelections?: Array<{ path: string; type: 'work' | 'broll' }>, mode: 'manual' | 'startup' = 'manual') => {
+    if (isBusyRef.current) return false;
     const requested = requestedSelections?.length
       ? requestedSelections
       : (retryDrivePathsRef.current.length
@@ -741,8 +764,13 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     const connected = requested.filter(item => drives.includes(item.path) || hasPersistedImportSession(item.path, item.type));
     if (!connected.length) {
       setStatusMsg(retryDrivePathsRef.current.length ? `等待 ${retryDrivePathsRef.current.join('、')} 重新接入后续传` : '所选 SD 卡均未连接');
-      return;
+      return false;
     }
+    handledStartupAutoImportRef.current = handledStartupRequestAfterBatchStart(
+      startupAutoImportRequest,
+      handledStartupAutoImportRef.current,
+      mode,
+    );
     retryDrivePathsRef.current = [];
     const queue = directSource
       ? [{ path: connected[0].path, type: 'work' as const }]
@@ -757,21 +785,53 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     skippedDrivesRef.current = [];
     cancelRequestedRef.current = false;
     stagingCompleteRef.current = false;
+    importBatchModeRef.current = mode;
     setIsCancellingImport(false);
     currentDriveRef.current = '';
     startImport(queue[0].path, queue[0].type);
+    return true;
   };
   startBatchRef.current = startBatchImport;
 
   useEffect(() => {
-    if (!active || directSource || !startupAutoImportRequest || !startupAutoImportReady || handledStartupAutoImportRef.current === startupAutoImportRequest || isBusyRef.current) return;
-    handledStartupAutoImportRef.current = startupAutoImportRequest;
-    if (!startupAutoImportSelections.length) {
-      setStatusMsg('启动时未检测到已启用的 SD 卡');
+    const decision = decideStartupSdAutoImport({
+      active,
+      directSource,
+      request: startupAutoImportRequest,
+      handledRequest: handledStartupAutoImportRef.current,
+      ready: startupAutoImportReady,
+      busy: isBusyRef.current,
+      selectionCount: startupAutoImportSelections.length,
+      now: Date.now(),
+    });
+    if (decision === 'wait') {
+      if (startupAutoImportError) setStatusMsg(`启动自动导入正在重试：${startupAutoImportError}`);
       return;
     }
-    startBatchRef.current(startupAutoImportSelections);
-  }, [active, directSource, startupAutoImportReady, startupAutoImportRequest, startupAutoImportSelections]);
+    if (decision === 'wait-for-device') {
+      if (!selectedDrives.length) {
+        setStatusMsg('启动自动导入尚未配置 SD 卡；请先从盘符列表选择设备');
+        return;
+      }
+      const needsEnrollment = selectedDrives.some(path => {
+        const connectedDevice = storageDevices.find(device => device.mountPath === path);
+        const record = connectedDevice && normalizeConfiguredSdDeviceRecords(config?.sdDevices).find(item => item.deviceId === connectedDevice.id);
+        return Boolean(connectedDevice && isTrustedSdImportDevice(connectedDevice) && (!record || record.confirmedAt <= 0 || !record.enabled));
+      });
+      setStatusMsg(needsEnrollment ? '已有 SD 卡配置需要重新确认设备身份；请打开盘符列表并点击对应卡片' : '正在等待已启用的 SD 卡接入…');
+      return;
+    }
+    if (decision === 'expired') {
+      handledStartupAutoImportRef.current = startupAutoImportRequest?.id || 0;
+      setStatusMsg('启动自动导入等待已结束；之后插入的 SD 卡需要手动导入');
+      return;
+    }
+    if (decision !== 'start') return;
+    if (startBatchRef.current(startupAutoImportSelections, 'startup')) {
+      handledStartupAutoImportRef.current = startupAutoImportRequest?.id || 0;
+      setStatusMsg('启动自动导入已开始；本次将保留 SD 卡源文件');
+    }
+  }, [active, config?.sdDevices, directSource, selectedDrives, startupAutoImportError, startupAutoImportReady, startupAutoImportRequest, startupAutoImportSelections, storageDevices]);
 
   const handleDecision = (split: boolean) => {
     setStatus('processing');
@@ -821,7 +881,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     // 动态判断显示的副标题
     let displayMsg = statusMsg;
     if (status === 'idle') {
-      if (statusMsg.startsWith('Error:') || statusMsg.includes('已断开')) {
+      if (statusMsg.startsWith('Error:') || statusMsg.includes('已断开') || statusMsg.startsWith('启动自动导入') || statusMsg.startsWith('正在等待已启用') || statusMsg.startsWith('已有 SD 卡配置')) {
         displayMsg = statusMsg;
       } else if (directSource) {
         displayMsg = selectedDrives.length
@@ -1142,7 +1202,7 @@ const DashboardView = ({
   workspacePath,
   section = 'all',
   active = true,
-  startupAutoImportRequest = 0,
+  startupAutoImportRequest = null,
   config,
   importDefaults,
   brollConfig,
@@ -1156,7 +1216,7 @@ const DashboardView = ({
   workspacePath: string;
   section?: 'all' | 'import' | 'birthday';
   active?: boolean;
-  startupAutoImportRequest?: number;
+  startupAutoImportRequest?: StartupSdAutoImportRequest | null;
   config: AppConfig['smartImport'];
   importDefaults: AppConfig['importDefaults'];
   brollConfig: AppConfig['brollImport'];
@@ -1171,58 +1231,76 @@ const DashboardView = ({
   const [upcomingBirthdays, setUpcomingBirthdays] = useState<{name: string, date: string, sortKey: number}[]>([]);
   const [loading, setLoading] = useState(true);
   const [showManager, setShowManager] = useState(false);
-  const [storageDevices, setStorageDevices] = useState<StorageDevice[]>([]);
-  const [storageDevicesLoaded, setStorageDevicesLoaded] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
   const [workspaceProjects, setWorkspaceProjects] = useState<WorkspaceProject[]>([]);
   const [workspaceProjectsLoaded, setWorkspaceProjectsLoaded] = useState(Boolean(projectDestination));
+  const [workspaceProjectsError, setWorkspaceProjectsError] = useState<string | null>(null);
+  const [importPanelOpen, setImportPanelOpen] = useState(true);
+  const storageInventory = useStorageDeviceInventory(shouldPollStorageDeviceInventory({
+    section,
+    active,
+    busy: importBusy,
+    panelOpen: importPanelOpen,
+    startupRequest: startupAutoImportRequest,
+  }));
+  const storageDevices = useMemo(() => storageInventory.devices.filter(device => device.eligibleForSdImport), [storageInventory.devices]);
+  const storageInventoryFresh = isFreshStorageDeviceInventory(storageInventory, Date.now());
   const drives = useMemo(() => storageDevices.map(device => device.mountPath), [storageDevices]);
   const startupAutoImportSelections = useMemo(() => resolveConfiguredSdDevices(config, storageDevices).map(device => ({ path: device.mountPath, type: device.type })), [config, storageDevices]);
 
-  // 挂载时获取系统盘符
   useEffect(() => {
-    const fetchDrives = async () => {
-      if (!window.electronAPI?.getStorageDevices) return;
-      const devices = await window.electronAPI.getStorageDevices();
-      setStorageDevices(previous => JSON.stringify(previous) === JSON.stringify(devices) ? previous : devices);
-      setStorageDevicesLoaded(true);
-    };
-
-    fetchDrives(); // 首次立刻执行获取
-
-    // 每 3 秒钟在后台静默检查一次新插入的设备
-    const intervalId = setInterval(fetchDrives, 3000);
-
-    // 组件卸载时清理定时器
-    return () => clearInterval(intervalId);
-  }, []);
-
-  useEffect(() => {
-    if (!storageDevicesLoaded) return;
+    if (storageInventory.status !== 'ready') return;
     const reconciled = reconcileConfiguredSdDevices(config, storageDevices);
     if (reconciled !== config) onImportConfigChange(reconciled);
-  }, [config, onImportConfigChange, storageDevices, storageDevicesLoaded]);
+  }, [config, onImportConfigChange, storageDevices, storageInventory.status]);
 
   useEffect(() => {
+    if (section === 'birthday' || (!active && !importBusy)) return;
     if (projectDestination || !workspacePath) {
       setWorkspaceProjectsLoaded(Boolean(projectDestination));
+      setWorkspaceProjectsError(workspacePath ? null : '未设置工作区目录');
       return;
     }
     let mounted = true;
-    const loadProjects = async () => {
-      const result = await window.electronAPI.getWorkspaceProjects(workspacePath);
-      if (!mounted) return;
-      if (!result.success) {
-        setWorkspaceProjectsLoaded(false);
-        return;
-      }
-      const projects = result.statuses.flatMap(group => group.projects);
-      setWorkspaceProjects(projects);
-      setWorkspaceProjectsLoaded(true);
+    let projectLoadRunning = false;
+    let retryTimer: number | undefined;
+    const scheduleRetry = () => {
+      if (!mounted || retryTimer !== undefined) return;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = undefined;
+        void loadProjects();
+      }, 2500);
     };
+    async function loadProjects() {
+      if (projectLoadRunning) return;
+      projectLoadRunning = true;
+      try {
+        const result = await window.electronAPI.getWorkspaceProjects(workspacePath);
+        if (!mounted) return;
+        if (!result.success) throw new Error(result.error || '无法读取工作区项目');
+        if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+        retryTimer = undefined;
+        const projects = result.statuses.flatMap(group => group.projects);
+        setWorkspaceProjects(projects);
+        setWorkspaceProjectsLoaded(true);
+        setWorkspaceProjectsError(null);
+      } catch (error) {
+        if (!mounted) return;
+        setWorkspaceProjectsLoaded(false);
+        setWorkspaceProjectsError(error instanceof Error ? error.message : String(error));
+        scheduleRetry();
+      } finally {
+        projectLoadRunning = false;
+      }
+    }
     void loadProjects();
     const unsubscribe = window.electronAPI.onWorkspaceProjectsChanged(() => { void loadProjects(); });
-    return () => { mounted = false; unsubscribe(); };
-  }, [projectDestination, workspacePath]);
+    return () => {
+      mounted = false;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      unsubscribe();
+    };
+  }, [active, importBusy, projectDestination, section, workspacePath]);
 
   // 解析 "M月.D日" 格式
   const parseBirthday = (dateStr: string) => {
@@ -1270,8 +1348,8 @@ const DashboardView = ({
   };
 
   useEffect(() => {
-    fetchBirthdays();
-  }, []);
+    if (section !== 'import') fetchBirthdays();
+  }, [section]);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
@@ -1283,9 +1361,9 @@ const DashboardView = ({
         />
       )}
 
-      {section !== 'birthday' && <HomePanel title="从 SD 卡导入" initiallyOpen {...dragProps}>
+      {section !== 'birthday' && <HomePanel title="从 SD 卡导入" initiallyOpen onOpenChange={setImportPanelOpen} {...dragProps}>
         <div className="flex flex-col gap-6">
-          <ImportCard config={config} drives={drives} storageDevices={storageDevices} workspacePath={workspacePath} destinationPath={projectDestination ?? workspacePath} brollDestinationPath={projectDestination} workspaceProjects={projectDestination ? undefined : workspaceProjects} active={active} startupAutoImportRequest={startupAutoImportRequest} startupAutoImportReady={storageDevicesLoaded && (Boolean(projectDestination) || workspaceProjectsLoaded)} startupAutoImportSelections={startupAutoImportSelections} deleteSourceAfterImport={importDefaults.deleteSourceAfterImport} generateJpgFromRaw={importDefaults.generateJpgFromRaw} splitVideosOnImport={importDefaults.splitVideosOnImport} transcodeVideosOnImport={importDefaults.transcodeVideosOnImport} splitBrollVideosOnImport={brollConfig.splitVideosOnImport} transcodeBrollVideosOnImport={brollConfig.transcodeVideosOnImport} transcodeSettings={videoTools.transcode} onImportConfigChange={onImportConfigChange} onImportComplete={projectDestination ? undefined : result => { void onImportComplete?.(result); }} completedActionLabel="刷新卡片" />
+          <ImportCard config={config} drives={drives} storageDevices={storageDevices} workspacePath={workspacePath} destinationPath={projectDestination ?? workspacePath} brollDestinationPath={projectDestination} workspaceProjects={projectDestination ? undefined : workspaceProjects} active={active} startupAutoImportRequest={startupAutoImportRequest} startupAutoImportReady={storageInventoryFresh && (Boolean(projectDestination) || workspaceProjectsLoaded)} startupAutoImportError={storageInventory.error || workspaceProjectsError} startupAutoImportSelections={startupAutoImportSelections} deleteSourceAfterImport={importDefaults.deleteSourceAfterImport} generateJpgFromRaw={importDefaults.generateJpgFromRaw} splitVideosOnImport={importDefaults.splitVideosOnImport} transcodeVideosOnImport={importDefaults.transcodeVideosOnImport} splitBrollVideosOnImport={brollConfig.splitVideosOnImport} transcodeBrollVideosOnImport={brollConfig.transcodeVideosOnImport} transcodeSettings={videoTools.transcode} onBusyChange={setImportBusy} onImportConfigChange={onImportConfigChange} onImportComplete={projectDestination ? undefined : result => { void onImportComplete?.(result); }} completedActionLabel="刷新卡片" />
         </div>
       </HomePanel>}
       {section !== 'import' && <HomePanel title="角色生日" initiallyOpen tone="birthday" {...dragProps}>
@@ -1334,7 +1412,7 @@ const DashboardView = ({
   );
 };
 
-const HomePanel = ({ title, initiallyOpen = false, tone, children, ...dragProps }: { title: string; initiallyOpen?: boolean; tone?: 'birthday'; children: React.ReactNode } & HomePanelDragProps) => {
+const HomePanel = ({ title, initiallyOpen = false, tone, children, onOpenChange, ...dragProps }: { title: string; initiallyOpen?: boolean; tone?: 'birthday'; children: React.ReactNode; onOpenChange?: (open: boolean) => void } & HomePanelDragProps) => {
   const [open, setOpen] = useState(initiallyOpen);
   const storageKey = `photoflow:home-panel:${title}`;
   useEffect(() => {
@@ -1344,6 +1422,7 @@ const HomePanel = ({ title, initiallyOpen = false, tone, children, ...dragProps 
   useEffect(() => {
     window.localStorage.setItem(storageKey, String(open));
   }, [open, storageKey]);
+  useEffect(() => onOpenChange?.(open), [onOpenChange, open]);
   const isBirthday = tone === 'birthday';
   return <section className={`rounded-xl ${open ? 'overflow-visible' : 'overflow-hidden'} ${isBirthday ? 'birthday-panel' : 'border border-slate-200 bg-white'}`}>
     <button {...dragProps} onClick={() => setOpen(value => !value)} aria-expanded={open} className={`flex w-full items-center justify-between px-5 py-4 text-left ${open ? 'rounded-t-[11px]' : ''} ${dragProps.draggable ? 'cursor-grab active:cursor-grabbing' : ''} ${isBirthday ? 'birthday-panel-header' : ''}`}>

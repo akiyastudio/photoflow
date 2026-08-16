@@ -14,14 +14,18 @@ import uuid
 from pathlib import Path
 
 try:
-    from workspace_db_domains import ALL_ACTIONS, READ_ONLY_ACTIONS
-    from workspace_db_migrations import migration_26
+    from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS
+    from team_retouch_storage import attach_and_migrate as attach_team_retouch_storage
+    from workspace_domain_storage import attach_and_migrate as attach_workspace_domain_storage
+    from workspace_db_migrations import migration_26, migration_27
 except ModuleNotFoundError:
     # Some regression tests load this file directly through importlib instead
     # of importing it from the Python source directory.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from workspace_db_domains import ALL_ACTIONS, READ_ONLY_ACTIONS
-    from workspace_db_migrations import migration_26
+    from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS
+    from team_retouch_storage import attach_and_migrate as attach_team_retouch_storage
+    from workspace_domain_storage import attach_and_migrate as attach_workspace_domain_storage
+    from workspace_db_migrations import migration_26, migration_27
 
 STATUSES = ("未分类", "策划中", "待拍摄", "后期中", "已归档")
 IMAGE_EXTENSIONS = {
@@ -36,7 +40,7 @@ LEGACY_MEDIA_WORKFLOW_MIGRATION_KEY = "legacy_media_workflow_graph_migrated_v1"
 LEGACY_SELECTION_INDEPENDENT_KEY_PREFIX = "legacy_selection_independent:"
 SELECTION_MAINLINE_REPAIR_REVISION = "1"
 VERSION_TREE_DEFAULT_LAYOUT_REVISION = "2"
-TARGET_SCHEMA_VERSION = 26
+TARGET_SCHEMA_VERSION = 27
 PROGRESS_NODE_ROLES = ("original", "progress", "selection", "artifact", "workflow")
 PROGRESS_RELATION_KINDS = ("main", "auxiliary")
 PROGRESS_ARTIFACT_KINDS = ("companion", "preview", "team_workspace")
@@ -1213,6 +1217,10 @@ def _migration_26(db):
     migration_26(db, _table_columns)
 
 
+def _migration_27(db):
+    migration_27(db, _table_columns)
+
+
 MIGRATIONS = {
     11: _migration_11,
     12: _migration_12,
@@ -1230,6 +1238,7 @@ MIGRATIONS = {
     24: _migration_24,
     25: _migration_25,
     26: _migration_26,
+    27: _migration_27,
 }
 
 
@@ -1239,7 +1248,12 @@ def _check_integrity(db, force: bool = False):
     if not force and now - last_check < INTEGRITY_CHECK_INTERVAL_MS:
         return
     quick_check = [row[0] for row in db.execute("PRAGMA quick_check").fetchall()]
-    foreign_key_errors = db.execute("PRAGMA foreign_key_check").fetchall()
+    attached_databases = {row[1] for row in db.execute("PRAGMA database_list").fetchall()}
+    team_attached = "team_retouch" in attached_databases
+    team_quick_check = [row[0] for row in db.execute("PRAGMA team_retouch.quick_check").fetchall()] if team_attached else ["not-attached"]
+    foreign_key_errors = [*db.execute("PRAGMA foreign_key_check").fetchall()]
+    if team_attached:
+        foreign_key_errors.extend(db.execute("PRAGMA team_retouch.foreign_key_check").fetchall())
     business_checks = {
         "photos.current_version": """SELECT COUNT(*) FROM photos WHERE current_version_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM versions WHERE versions.id=photos.current_version_id AND versions.photo_id=photos.id AND versions.is_deleted=0)""",
         "versions.parent": """SELECT COUNT(*) FROM versions child WHERE parent_version_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM versions parent WHERE parent.id=child.parent_version_id AND parent.photo_id=child.photo_id)""",
@@ -1285,10 +1299,15 @@ def _check_integrity(db, force: bool = False):
               OR (slot.import_slot='video_preview' AND progress.media_kind='video' AND progress.node_role='artifact' AND progress.artifact_kind='preview')
             ))""",
         "batch_items.owner": """SELECT COUNT(*) FROM batch_items item WHERE NOT EXISTS(SELECT 1 FROM version_batches batch JOIN photos ON photos.project_id=batch.project_id JOIN versions ON versions.photo_id=photos.id WHERE batch.id=item.batch_id AND photos.id=item.photo_id AND versions.id=item.version_id)""",
-        "team_retouch_photos.owner": """SELECT COUNT(*) FROM team_retouch_photos item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id)""",
-        "team_person_assignments.owner": """SELECT COUNT(*) FROM team_person_assignments item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id) OR (item.identity_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM team_person_identities identity WHERE identity.id=item.identity_id AND identity.project_id=item.project_id))""",
-        "team_person_exclusions.owner": """SELECT COUNT(*) FROM team_person_exclusions item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id)""",
     }
+    if team_attached:
+        business_checks.update({
+            "team_patch_tasks.owner": """SELECT COUNT(*) FROM team_patch_tasks item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.id=item.photo_id AND versions.id=item.base_version_id) OR (item.merged_version_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM versions WHERE versions.id=item.merged_version_id))""",
+            "team_retouch_photos.owner": """SELECT COUNT(*) FROM team_retouch_photos item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id)""",
+            "team_person_identities.owner": """SELECT COUNT(*) FROM team_person_identities item WHERE NOT EXISTS(SELECT 1 FROM projects WHERE projects.id=item.project_id)""",
+            "team_person_assignments.owner": """SELECT COUNT(*) FROM team_person_assignments item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id) OR (item.identity_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM team_person_identities identity WHERE identity.id=item.identity_id AND identity.project_id=item.project_id))""",
+            "team_person_exclusions.owner": """SELECT COUNT(*) FROM team_person_exclusions item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id)""",
+        })
     business_errors = {name: db.execute(query).fetchone()[0] for name, query in business_checks.items()}
     progress_cycles = _progress_relation_cycles(db)
     if progress_cycles:
@@ -1297,16 +1316,16 @@ def _check_integrity(db, force: bool = False):
     if version_graph_cycle_nodes:
         business_errors["version_graph_edges.cycle"] = len(version_graph_cycle_nodes)
     business_errors = {name: count for name, count in business_errors.items() if count}
-    if quick_check != ["ok"] or foreign_key_errors or business_errors:
+    if quick_check != ["ok"] or team_attached and team_quick_check != ["ok"] or foreign_key_errors or business_errors:
         raise RuntimeError(
-            f"数据库完整性检查失败：quick_check={quick_check[:3]}，foreign_key_errors={len(foreign_key_errors)}，business_errors={business_errors}"
+            f"数据库完整性检查失败：quick_check={quick_check[:3]}，team_quick_check={team_quick_check[:3]}，foreign_key_errors={len(foreign_key_errors)}，business_errors={business_errors}"
         )
     _set_meta(db, "last_integrity_check_at", now)
     _set_meta(db, "last_integrity_check_result", "ok")
     db.commit()
 
 
-def connect(root: str, database: str):
+def connect(root: str, database: str, include_domains: bool | None = None, include_team: bool = False):
     root = os.path.abspath(root)
     database = os.path.abspath(database)
     os.makedirs(os.path.dirname(database), exist_ok=True)
@@ -1346,7 +1365,16 @@ def connect(root: str, database: str):
         and _meta_value(db, "version_tree_default_layout_revision") == VERSION_TREE_DEFAULT_LAYOUT_REVISION
         and _meta_value(db, "workspace_root") == root
     )
+    attach_domains = bool(
+        include_team
+        or include_domains is True
+        or include_domains is None and "meta" in existing_tables and _meta_value(db, "domain_storage_revision")
+    )
     if schema_is_current:
+        if attach_domains:
+            attach_workspace_domain_storage(db, database)
+        if include_team:
+            attach_team_retouch_storage(db, database)
         return db
     db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     db.commit()
@@ -1463,6 +1491,7 @@ def connect(root: str, database: str):
             folder_path TEXT NOT NULL,
             folder_path_key TEXT NOT NULL,
             folder_id TEXT,
+            external_link_relative_path TEXT,
             node_role TEXT NOT NULL DEFAULT 'progress',
             artifact_kind TEXT,
             relation_kind TEXT,
@@ -1644,6 +1673,7 @@ def connect(root: str, database: str):
             _migration_24(db)
             _migration_25(db)
             _migration_26(db)
+            _migration_27(db)
             _set_meta(db, "schema_version", TARGET_SCHEMA_VERSION)
     else:
         for next_version in range(schema_version + 1, TARGET_SCHEMA_VERSION + 1):
@@ -1680,6 +1710,10 @@ def connect(root: str, database: str):
         with db:
             db.execute("DELETE FROM version_tree_layouts")
             _set_meta(db, "version_tree_default_layout_revision", VERSION_TREE_DEFAULT_LAYOUT_REVISION)
+    if include_domains is True or include_team:
+        attach_workspace_domain_storage(db, database)
+    if include_team:
+        attach_team_retouch_storage(db, database)
     _set_meta(db, "workspace_root", root)
     if backup_path:
         _set_meta(db, "last_migration_backup", backup_path)
@@ -1741,6 +1775,22 @@ def is_project_descendant(candidate_path: str, project_path: str) -> bool:
         return os.path.commonpath((candidate, project)).casefold() == project.casefold()
     except ValueError:
         return False
+
+
+def normalize_external_link_relative_path(value) -> str | None:
+    """Validate an Electron-authorized virtual path without accepting an absolute path."""
+    if value in (None, ""):
+        return None
+    normalized = str(value).replace("\\", "/").strip("/")
+    if not normalized or len(normalized) > 2048 or os.path.isabs(normalized):
+        raise ValueError("external_link_path_invalid: 外链虚拟路径无效")
+    segments = normalized.split("/")
+    if any(not segment or segment in (".", "..") or "\0" in segment for segment in segments):
+        raise ValueError("external_link_path_invalid: 外链虚拟路径包含越界片段")
+    link_indexes = [index for index, segment in enumerate(segments) if segment.casefold().endswith(".lnk")]
+    if len(link_indexes) != 1:
+        raise ValueError("external_link_path_invalid: 外链虚拟路径必须包含一个受管外链")
+    return "/".join(segments)
 
 
 def media_type(path: str):
@@ -2102,31 +2152,82 @@ def media_sync_project(root: str, db, payload: dict):
     db.commit()
     seen_paths = set()
     created_or_updated = 0
-    for directory, _directory_names, file_names in os.walk(project_path):
-        for name in file_names:
-            file_path = os.path.join(directory, name)
-            if not media_type(file_path):
-                continue
-            pending_hashes = []
+    scan_roots = [(project_path, "folder")]
+    external_roots = payload.get("externalRoots") or []
+    if not isinstance(external_roots, list) or len(external_roots) > 2048:
+        raise ValueError("external_media_roots_invalid: 外链媒体根目录无效")
+    for item in external_roots:
+        if not isinstance(item, dict):
+            raise ValueError("external_media_root_invalid: 外链媒体根目录无效")
+        raw_candidate = str(item.get("path") or "").strip()
+        candidate = canonical_path(raw_candidate) if raw_candidate else ""
+        kind = str(item.get("kind") or "")
+        if not candidate or not os.path.isabs(candidate) or kind not in ("folder", "file"):
+            raise ValueError("external_media_root_invalid: 外链媒体根目录无效")
+        if kind == "folder" and os.path.isdir(candidate) or kind == "file" and os.path.isfile(candidate):
+            scan_roots.append((candidate, kind))
+    deduplicated_roots = []
+    root_keys = set()
+    for candidate, kind in scan_roots:
+        key = canonical_path(candidate).casefold()
+        if key in root_keys:
+            continue
+        root_keys.add(key)
+        deduplicated_roots.append((candidate, kind))
+
+    def scan_file(file_path: str):
+        nonlocal created_or_updated
+        path_key = canonical_path(file_path).casefold()
+        if path_key in seen_paths or not media_type(file_path):
+            return
+        pending_hashes = []
+        try:
+            if sync_media_file(db, project, file_path, pending_hashes):
+                seen_paths.add(path_key)
+                created_or_updated += 1
+        except (FileNotFoundError, PermissionError, OSError):
+            return
+        db.commit()
+        backfill_full_fingerprints(db, pending_hashes)
+
+    for scan_root, scan_kind in deduplicated_roots:
+        if scan_kind == "file":
+            scan_file(scan_root)
+            continue
+        real_scan_root = os.path.realpath(scan_root)
+        def inside_scan_root(candidate):
             try:
-                if sync_media_file(db, project, file_path, pending_hashes):
-                    seen_paths.add(canonical_path(file_path).casefold())
-                    created_or_updated += 1
-            except (FileNotFoundError, PermissionError, OSError):
+                return os.path.commonpath((os.path.realpath(candidate), real_scan_root)).casefold() == real_scan_root.casefold()
+            except ValueError:
+                return False
+        for directory, directory_names, file_names in os.walk(scan_root):
+            directory_names[:] = [name for name in directory_names if inside_scan_root(os.path.join(directory, name))]
+            if not inside_scan_root(directory):
                 continue
-            # Fingerprinting the next media file can be slow. Release SQLite's
-            # single WAL writer slot before doing that work so project status
-            # changes and other interactive writes stay responsive.
-            db.commit()
-            backfill_full_fingerprints(db, pending_hashes)
+            for name in file_names:
+                scan_file(os.path.join(directory, name))
     timestamp = int(time.time() * 1000)
     version_rows = db.execute(
         """SELECT versions.id, versions.file_path, versions.file_path_key FROM versions
            JOIN photos ON photos.id=versions.photo_id
            WHERE photos.project_id=? AND versions.is_deleted=0""", (project["id"],)
     ).fetchall()
+    authorized_file_keys = {
+        canonical_path(os.path.realpath(scan_root)).casefold()
+        for scan_root, scan_kind in deduplicated_roots if scan_kind == "file"
+    }
+    authorized_folder_roots = [
+        canonical_path(os.path.realpath(scan_root))
+        for scan_root, scan_kind in deduplicated_roots if scan_kind == "folder"
+    ]
     for row in version_rows:
-        if row["file_path_key"] not in seen_paths and not os.path.isfile(row["file_path"]):
+        row_path = canonical_path(os.path.realpath(row["file_path"]))
+        is_authorized = row_path.casefold() in authorized_file_keys \
+            or any(is_project_descendant(row_path, scan_root) for scan_root in authorized_folder_roots)
+        if row["file_path_key"] not in seen_paths and (
+            not os.path.isfile(row["file_path"])
+            or not is_authorized
+        ):
             db.execute("UPDATE versions SET file_missing=1, updated_at=? WHERE id=?", (timestamp, row["id"]))
             db.execute("UPDATE file_records SET missing=1, updated_at=? WHERE owner_type='version' AND owner_id=?", (timestamp, row["id"]))
     db.commit()
@@ -2185,6 +2286,7 @@ def serialize_progress(row):
         "versionKey": row["version_key"], "parentProgressId": row["parent_progress_id"],
         "parentVersionKey": row["parent_version_key"], "displayName": row["display_name"],
         "folderPath": row["folder_path"], "folderMissing": folder_missing,
+        "externalLinkRelativePath": row["external_link_relative_path"] if "external_link_relative_path" in row.keys() else None,
         "missingSince": missing_since if folder_missing else None,
         "nodeRole": row["node_role"] if "node_role" in row.keys() else "progress",
         "artifactKind": row["artifact_kind"] if "artifact_kind" in row.keys() else None,
@@ -2229,8 +2331,9 @@ def progress_rows(db, project_id: str, include_missing: bool = True):
 def sync_progress_folder_locations(root: str, db, project, commit: bool = True):
     project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
     existing = progress_rows(db, project["id"])
-    by_identity = {row["folder_id"]: row for row in existing if row["folder_id"]}
-    by_path = {row["folder_path_key"]: row for row in existing}
+    local_existing = [row for row in existing if not row["external_link_relative_path"]]
+    by_identity = {row["folder_id"]: row for row in local_existing if row["folder_id"]}
+    by_path = {row["folder_path_key"]: row for row in local_existing}
     timestamp = int(time.time() * 1000)
     if not os.path.isdir(project_path):
         return
@@ -2238,7 +2341,7 @@ def sync_progress_folder_locations(root: str, db, project, commit: bool = True):
     # nested nodes. This remains bounded by the number of graph nodes and never
     # turns progress refresh into a recursive project-wide scan.
     scan_directories = {project_path}
-    for row in existing:
+    for row in local_existing:
         parent_directory = canonical_path(os.path.dirname(row["folder_path"]))
         if is_project_descendant(parent_directory, project_path) and os.path.isdir(parent_directory):
             scan_directories.add(parent_directory)
@@ -2283,16 +2386,24 @@ def sync_progress_folder_locations(root: str, db, project, commit: bool = True):
                 (relative_path_key, timestamp, project["id"], tracked["id"]),
             )
     for row in progress_rows(db, project["id"]):
-        if os.path.isdir(row["folder_path"]):
+        external_route = normalize_external_link_relative_path(row["external_link_relative_path"])
+        external_segments = external_route.split("/") if external_route else []
+        shortcut_index = next((index for index, segment in enumerate(external_segments) if segment.casefold().endswith(".lnk")), -1)
+        external_shortcut_segments = external_segments[:shortcut_index + 1] if shortcut_index >= 0 else external_segments
+        external_link_path = canonical_path(os.path.join(project_path, *external_shortcut_segments)) if external_shortcut_segments else None
+        folder_available = os.path.isdir(row["folder_path"]) and (not external_link_path or os.path.isfile(external_link_path))
+        if folder_available:
             if row["missing_since"] is not None:
                 db.execute(
                     "UPDATE progress_folders SET missing_since=NULL,tombstone_json='{}',updated_at=? WHERE id=?",
                     (timestamp, row["id"]),
                 )
         elif row["missing_since"] is None:
+            missing_path = external_link_path or row["folder_path"]
+            missing_reason = "external_link_missing" if external_link_path and not os.path.isfile(external_link_path) else "folder_missing"
             db.execute(
                 "UPDATE progress_folders SET missing_since=?,tombstone_json=?,updated_at=? WHERE id=?",
-                (timestamp, json.dumps({"reason": "folder_missing", "path": row["folder_path"]}, ensure_ascii=False), timestamp, row["id"]),
+                (timestamp, json.dumps({"reason": missing_reason, "path": missing_path}, ensure_ascii=False), timestamp, row["id"]),
             )
     if commit:
         db.commit()
@@ -3019,7 +3130,8 @@ def progress_register(root: str, db, payload: dict, commit: bool = True, sync_lo
         raise ValueError("无效的版本编号")
     project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
     folder_path = canonical_path(payload["folderPath"])
-    if not is_project_descendant(folder_path, project_path) or not os.path.isdir(folder_path):
+    external_link_relative_path = normalize_external_link_relative_path(payload.get("externalLinkRelativePath"))
+    if (not external_link_relative_path and not is_project_descendant(folder_path, project_path)) or not os.path.isdir(folder_path):
         raise ValueError("版本进度必须是项目内的文件夹")
     node_role = str(payload.get("nodeRole") or "progress")
     if node_role not in PROGRESS_NODE_ROLES:
@@ -3120,21 +3232,68 @@ def progress_register(root: str, db, payload: dict, commit: bool = True, sync_lo
         tracking_state = "disabled"
     if not tracking_enabled and (rename_from_parent or copy_missing_from_parent):
         raise ValueError("未开启跟踪时不能保存沿用文件名或补齐策略")
-    snapshot = payload.get("trackingSnapshot") or {}
-    if not isinstance(snapshot, (dict, list)):
-        raise ValueError("无效的跟踪快照")
-    snapshot_json = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
-    folder_signature = str(payload.get("folderSignature") or "") or None
-    last_tracked_at = int(payload.get("lastTrackedAt") or timestamp) if tracking_state == "ready" else None
+    tracking_context_changed = bool(existing) and (
+        existing["folder_path_key"] != folder_path.casefold()
+        or (existing["external_link_relative_path"] or None) != external_link_relative_path
+        or (existing["parent_progress_id"] or None) != parent_id
+        or existing["media_kind"] != media_kind
+        or existing["node_role"] != node_role
+        or (existing["relation_kind"] or None) != relation_kind
+        or bool(existing["tracking_enabled"]) != tracking_enabled
+        or bool(existing["rename_from_parent"]) != rename_from_parent
+        or bool(existing["copy_missing_from_parent"]) != copy_missing_from_parent
+    )
+    parent_context_changed = bool(existing) and (
+        existing["folder_path_key"] != folder_path.casefold()
+        or (existing["external_link_relative_path"] or None) != external_link_relative_path
+        or existing["media_kind"] != media_kind
+        or existing["node_role"] != node_role
+    )
+    if existing and (tracking_context_changed or parent_context_changed):
+        predicates = []
+        parameters = []
+        if tracking_context_changed:
+            predicates.append("progress_id=?")
+            parameters.append(existing["id"])
+        if parent_context_changed:
+            predicates.append("parent_progress_id=?")
+            parameters.append(existing["id"])
+        active_session = db.execute(
+            f"""SELECT id,status FROM tracking_sessions WHERE ({' OR '.join(predicates)})
+                 AND status IN ('comparing','pending_confirm','committing','failed') LIMIT 1""",
+            parameters,
+        ).fetchone()
+        if active_session is not None:
+            raise ValueError("node_busy: 节点正在比较、确认或提交，暂时不能修改来源、目录或跟踪策略")
+    if existing and tracking_context_changed and tracking_enabled:
+        tracking_state = "stale"
+    if existing and "trackingSnapshot" not in payload and not tracking_context_changed and tracking_enabled:
+        snapshot_json = existing["tracking_snapshot_json"] or "{}"
+    else:
+        snapshot = payload.get("trackingSnapshot") or {}
+        if not isinstance(snapshot, (dict, list)):
+            raise ValueError("无效的跟踪快照")
+        snapshot_json = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+    if not tracking_enabled or tracking_context_changed:
+        folder_signature = None
+        last_tracked_at = None
+    else:
+        folder_signature = (str(payload.get("folderSignature") or "") or None) if "folderSignature" in payload else (existing["folder_signature"] if existing else None)
+        if "lastTrackedAt" in payload:
+            last_tracked_at = int(payload.get("lastTrackedAt") or 0) or None
+        elif existing:
+            last_tracked_at = existing["last_tracked_at"]
+        else:
+            last_tracked_at = timestamp if tracking_state == "ready" else None
     values = (
         parent_id, display_name, folder_path, folder_path.casefold(), directory_identity(folder_path),
-        node_role, artifact_kind, relation_kind, int(tracking_enabled), tracking_state, int(rename_from_parent),
+        external_link_relative_path, node_role, artifact_kind, relation_kind, int(tracking_enabled), tracking_state, int(rename_from_parent),
         int(copy_missing_from_parent), last_tracked_at, snapshot_json, folder_signature, timestamp,
     )
     if existing:
         db.execute(
             """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,display_name=?,folder_path=?,folder_path_key=?,
-               folder_id=?,node_role=?,artifact_kind=?,relation_kind=?,tracking_enabled=?,tracking_state=?,rename_from_parent=?,
+               folder_id=?,external_link_relative_path=?,node_role=?,artifact_kind=?,relation_kind=?,tracking_enabled=?,tracking_state=?,rename_from_parent=?,
                copy_missing_from_parent=?,last_tracked_at=?,tracking_snapshot_json=?,folder_signature=?,
                missing_since=NULL,tombstone_json='{}',updated_at=? WHERE id=?""",
             (media_kind, version_key, *values, existing["id"]),
@@ -3144,10 +3303,10 @@ def progress_register(root: str, db, payload: dict, commit: bool = True, sync_lo
         progress_id = str(uuid.uuid4())
         db.execute(
             """INSERT INTO progress_folders(id,project_id,media_kind,version_key,parent_progress_id,
-               display_name,folder_path,folder_path_key,folder_id,node_role,artifact_kind,relation_kind,tracking_enabled,
+               display_name,folder_path,folder_path_key,folder_id,external_link_relative_path,node_role,artifact_kind,relation_kind,tracking_enabled,
                tracking_state,rename_from_parent,copy_missing_from_parent,last_tracked_at,tracking_snapshot_json,
                folder_signature,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (progress_id, project["id"], media_kind, version_key, *values[:-1], timestamp, timestamp),
         )
     if commit:
@@ -3167,7 +3326,7 @@ def progress_register_with_graph(root: str, db, payload: dict):
         raise ValueError("progress_graph_payload_invalid: project, progress or workflow inputs are invalid")
     allowed_progress_fields = {
         "progressId", "mediaKind", "versionKey", "parentProgressId", "displayName", "folderPath",
-        "relationKind", "trackingEnabled", "trackingState", "renameFromParent", "copyMissingFromParent",
+        "externalLinkRelativePath", "relationKind", "trackingEnabled", "trackingState", "renameFromParent", "copyMissingFromParent",
     }
     if set(progress_payload) - allowed_progress_fields or "nodeRole" in progress_payload or "edgeKind" in progress_payload:
         raise ValueError("progress_graph_payload_invalid: renderer cannot assign node roles, paths or edge kinds")
@@ -3196,6 +3355,7 @@ def progress_register_with_graph(root: str, db, payload: dict):
                     "parentProgressId": progress_payload.get("parentProgressId"),
                     "displayName": progress_payload["displayName"],
                     "folderPath": progress_payload["folderPath"],
+                    "externalLinkRelativePath": progress_payload.get("externalLinkRelativePath"),
                     "nodeRole": "progress",
                     "relationKind": progress_payload.get("relationKind") or ("main" if progress_payload.get("parentProgressId") else None),
                     "trackingEnabled": bool(progress_payload.get("trackingEnabled")),
@@ -3770,7 +3930,7 @@ def progress_adopt_media(root: str, db, payload: dict):
     path. Electron resolves the project-relative path and this function derives
     the only legal role/edge shape from ``mode``.
     """
-    allowed = {"projectName", "folderPath", "mode", "mediaKind", "sourceProgressId"}
+    allowed = {"projectName", "folderPath", "externalLinkRelativePath", "mode", "mediaKind", "sourceProgressId"}
     if not isinstance(payload, dict) or set(payload) - allowed:
         raise ValueError("media_adopt_payload_invalid: 请求字段无效")
     project_name = str(payload.get("projectName") or "").strip()
@@ -3786,7 +3946,8 @@ def progress_adopt_media(root: str, db, payload: dict):
     project = project_row(db, project_name)
     project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
     folder_path = canonical_path(payload.get("folderPath") or "")
-    if not is_project_descendant(folder_path, project_path) or not os.path.isdir(folder_path):
+    external_link_relative_path = normalize_external_link_relative_path(payload.get("externalLinkRelativePath"))
+    if (not external_link_relative_path and not is_project_descendant(folder_path, project_path)) or not os.path.isdir(folder_path):
         raise ValueError("media_adopt_folder_invalid: 只能接管项目内现有文件夹")
     existing = db.execute(
         "SELECT * FROM progress_folders WHERE project_id=? AND folder_path_key=?",
@@ -3808,6 +3969,17 @@ def progress_adopt_media(root: str, db, payload: dict):
     target_role = "original" if mode in ("original", "companion") else "artifact"
     artifact_kind = "companion" if mode == "companion" else "preview" if mode == "preview" else None
     edge_kind = "media_companion" if mode == "companion" else "derived_preview" if mode == "preview" else None
+    if existing is not None and external_link_relative_path:
+        same_external_adoption = mode == "original" \
+            and existing["node_role"] == "original" \
+            and existing["media_kind"] == media_kind \
+            and existing["artifact_kind"] is None \
+            and existing["parent_progress_id"] is None \
+            and existing["external_link_relative_path"] == external_link_relative_path
+        if not same_external_adoption:
+            raise ValueError("media_adopt_external_conflict: 该外部文件夹已经通过其他路径纳入版本管理，请使用重新定位")
+        row = next(row for row in progress_rows(db, project["id"]) if row["id"] == existing["id"])
+        return {"success": True, "progressFolder": serialize_progress(row), "edge": None, "created": False}
     timestamp = int(time.time() * 1000)
     with db:
         if existing is not None:
@@ -3844,10 +4016,11 @@ def progress_adopt_media(root: str, db, payload: dict):
             "progressId": existing["id"] if existing is not None else None,
             "mediaKind": media_kind,
             "versionKey": existing["version_key"] if existing is not None else "adopt-" + hashlib.sha256(
-                os.path.relpath(folder_path, project_path).replace("\\", "/").casefold().encode("utf-8")
+                (external_link_relative_path or os.path.relpath(folder_path, project_path).replace("\\", "/")).casefold().encode("utf-8")
             ).hexdigest()[:24],
             "displayName": existing["display_name"] if existing is not None else os.path.basename(folder_path),
             "folderPath": folder_path,
+            "externalLinkRelativePath": external_link_relative_path,
             "nodeRole": target_role,
             "artifactKind": artifact_kind,
             "trackingEnabled": False,
@@ -3881,7 +4054,63 @@ def progress_adopt_media(root: str, db, payload: dict):
         "success": True,
         "progressFolder": serialize_progress(row),
         "edge": serialize_version_graph_edge(edge) if edge is not None else None,
+        "created": existing is None,
     }
+
+
+def progress_revert_external_adoptions(db, payload: dict):
+    """Atomically remove newly-created external original nodes during import rollback or undo."""
+    if not isinstance(payload, dict) or set(payload) - {"projectName", "progressIds"}:
+        raise ValueError("external_adoption_revert_payload_invalid: 撤销外链接管请求无效")
+    project = project_row(db, str(payload.get("projectName") or "").strip())
+    progress_ids = [str(value or "").strip() for value in payload.get("progressIds") or []]
+    if not progress_ids or len(progress_ids) > 500 or any(not value for value in progress_ids) or len(set(progress_ids)) != len(progress_ids):
+        raise ValueError("external_adoption_revert_payload_invalid: 撤销外链接管节点无效")
+    placeholders = ",".join("?" for _ in progress_ids)
+    rows = db.execute(
+        f"SELECT * FROM progress_folders WHERE project_id=? AND id IN ({placeholders})",
+        (project["id"], *progress_ids),
+    ).fetchall()
+    for row in rows:
+        if row["node_role"] != "original" or not row["external_link_relative_path"]:
+            raise ValueError("external_adoption_revert_role_invalid: 只能撤销本次创建的外链原片节点")
+        child = db.execute(
+            "SELECT 1 FROM progress_folders WHERE project_id=? AND parent_progress_id=? LIMIT 1",
+            (project["id"], row["id"]),
+        ).fetchone()
+        relation = db.execute(
+            "SELECT 1 FROM version_graph_edges WHERE source_progress_id=? OR target_progress_id=? LIMIT 1",
+            (row["id"], row["id"]),
+        ).fetchone()
+        import_slot = db.execute(
+            "SELECT 1 FROM media_import_artifact_slots WHERE project_id=? AND progress_id=? LIMIT 1",
+            (project["id"], row["id"]),
+        ).fetchone()
+        if child or relation or import_slot:
+            raise ValueError("external_adoption_revert_in_use: 外链原片节点已有下游关系，无法安全撤销")
+    timestamp = int(time.time() * 1000)
+    node_keys = [f"progress:{progress_id}" for progress_id in progress_ids]
+    node_placeholders = ",".join("?" for _ in node_keys)
+    with db:
+        affected_scopes = [row["scope_key"] for row in db.execute(
+            f"SELECT DISTINCT scope_key FROM version_tree_node_positions WHERE project_id=? AND node_key IN ({node_placeholders})",
+            (project["id"], *node_keys),
+        ).fetchall()]
+        db.execute(
+            f"DELETE FROM version_tree_node_positions WHERE project_id=? AND node_key IN ({node_placeholders})",
+            (project["id"], *node_keys),
+        )
+        db.execute(
+            f"DELETE FROM progress_folders WHERE project_id=? AND id IN ({placeholders})",
+            (project["id"], *progress_ids),
+        )
+        if affected_scopes:
+            scope_placeholders = ",".join("?" for _ in affected_scopes)
+            db.execute(
+                f"UPDATE version_tree_layouts SET revision=revision+1,updated_at=? WHERE project_id=? AND scope_key IN ({scope_placeholders})",
+                (timestamp, project["id"], *affected_scopes),
+            )
+    return {"success": True, "removedProgressIds": progress_ids}
 
 
 def progress_update_tree(root: str, db, payload: dict):
@@ -3945,7 +4174,9 @@ def progress_update_tree(root: str, db, payload: dict):
         if not display_name:
             raise ValueError("进度名称不能为空")
         folder_path = canonical_path(update.get("folderPath") or "")
-        if not is_project_descendant(folder_path, project_path) or not os.path.isdir(folder_path):
+        external_link_relative_path = row["external_link_relative_path"]
+        is_unchanged_external = bool(external_link_relative_path) and folder_path.casefold() == row["folder_path_key"]
+        if (not is_unchanged_external and not is_project_descendant(folder_path, project_path)) or not os.path.isdir(folder_path):
             raise ValueError("版本进度必须是项目内的文件夹")
         parent_id = update.get("parentProgressId") or None
         if parent_id:
@@ -3976,7 +4207,7 @@ def progress_update_tree(root: str, db, payload: dict):
         tracking_enabled = int(update.get("trackingEnabled", row["tracking_enabled"]))
         if tracking_state == "disabled":
             tracking_enabled = 0
-        normalized.append((progress_id, media_kind, version_key, parent_id, display_name, folder_path, tracking_enabled, tracking_state))
+        normalized.append((progress_id, media_kind, version_key, parent_id, display_name, folder_path, external_link_relative_path, tracking_enabled, tracking_state))
 
     for row in rows.values():
         if row["id"] in update_ids:
@@ -3992,18 +4223,18 @@ def progress_update_tree(root: str, db, payload: dict):
     try:
         # Unique(project, kind, version) requires temporary values so swaps and
         # prefix remaps can be committed as one transaction.
-        for index, (progress_id, _media_kind, _version_key, _parent_id, _display_name, _folder_path, _tracking_enabled, _tracking_state) in enumerate(normalized):
+        for index, (progress_id, _media_kind, _version_key, _parent_id, _display_name, _folder_path, _external_link_relative_path, _tracking_enabled, _tracking_state) in enumerate(normalized):
             db.execute(
                 "UPDATE progress_folders SET version_key=?,updated_at=? WHERE id=?",
                 (f"__progress_update_{index}_{uuid.uuid4().hex}", timestamp, progress_id),
             )
-        for progress_id, media_kind, version_key, parent_id, display_name, folder_path, tracking_enabled, tracking_state in normalized:
+        for progress_id, media_kind, version_key, parent_id, display_name, folder_path, external_link_relative_path, tracking_enabled, tracking_state in normalized:
             db.execute(
                 """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,
                    relation_kind=CASE WHEN ? IS NULL THEN NULL ELSE 'main' END,display_name=?,
-                   folder_path=?,folder_path_key=?,folder_id=?,tracking_enabled=?,tracking_state=?,missing_since=NULL,updated_at=? WHERE id=?""",
+                   folder_path=?,folder_path_key=?,folder_id=?,external_link_relative_path=?,tracking_enabled=?,tracking_state=?,missing_since=NULL,updated_at=? WHERE id=?""",
                 (media_kind, version_key, parent_id, parent_id, display_name, folder_path, folder_path.casefold(),
-                 directory_identity(folder_path), tracking_enabled, tracking_state, timestamp, progress_id),
+                 directory_identity(folder_path), external_link_relative_path, tracking_enabled, tracking_state, timestamp, progress_id),
             )
         if replacement_id:
             # The physical directory identity moved to the recovered progress.
@@ -4231,7 +4462,6 @@ def cleanup_progress_tombstones(root: str, db, cutoff: int | None = None):
             reparented += 1
         db.execute("DELETE FROM progress_folders WHERE id=?", (candidate["id"],))
         removed.append(candidate["id"])
-    db.commit()
     return {
         "removedProgressIds": removed,
         "removedSelectionMetadataIds": removed_selection_metadata,
@@ -4250,6 +4480,8 @@ def progress_unregister(root: str, db, payload: dict):
         (progress_id, project["id"]),
     ).fetchone()
     if progress is None:
+        if payload.get("allowMissing") is True:
+            return {"success": True, "progressId": progress_id, "alreadyRemoved": True}
         raise ValueError("要取消登记的版本进度不存在")
     if progress["node_role"] != "progress":
         raise ValueError("只有普通版本进度可以取消登记")
@@ -4265,7 +4497,7 @@ def progress_unregister(root: str, db, payload: dict):
         raise ValueError("该版本仍有下游节点，请先为下游节点选择有效父版本")
 
     project_path = os.path.join(os.path.abspath(root), project["relative_path"])
-    relative_path = os.path.relpath(progress["folder_path"], project_path).replace("\\", "/")
+    relative_path = progress["external_link_relative_path"] or os.path.relpath(progress["folder_path"], project_path).replace("\\", "/")
     old_layout_key = f"progress:{progress_id}"
     ordinary_layout_key = f"entry:{relative_path}"
     timestamp = int(time.time() * 1000)
@@ -4497,12 +4729,14 @@ def _validated_tracking_nodes(root: str, db, project_name: str, progress_id: str
         real_path = canonical_path(os.path.realpath(folder_path))
         if not os.path.isdir(folder_path) or not os.path.isdir(real_path) or node["missing_since"] is not None:
             raise ValueError(f"版本节点文件夹不存在：{node['display_name']}")
-        try:
-            inside = os.path.commonpath((project_real, real_path)).casefold() == project_real.casefold()
-        except ValueError:
-            inside = False
-        if not inside or real_path.casefold() == project_real.casefold():
-            raise ValueError("版本节点目录越出项目范围")
+        external_route = normalize_external_link_relative_path(node["external_link_relative_path"])
+        if not external_route:
+            try:
+                inside = os.path.commonpath((project_real, real_path)).casefold() == project_real.casefold()
+            except ValueError:
+                inside = False
+            if not inside or real_path.casefold() == project_real.casefold():
+                raise ValueError("版本节点目录越出项目范围")
         return real_path
 
     return project, parent, progress, validated_folder(parent), validated_folder(progress)
@@ -4767,14 +5001,18 @@ def progress_detect_stale(root: str, db, payload: dict):
     by_id = {row["id"]: row for row in rows}
     snapshot_cache = {}
 
-    def path_touched(folder_path):
+    def path_touched(node):
         if full_scan:
             return True
-        folder_key = canonical_path(folder_path).casefold()
+        folder_keys = {canonical_path(node["folder_path"]).casefold()}
+        external_route = normalize_external_link_relative_path(node["external_link_relative_path"])
+        if external_route:
+            folder_keys.add(canonical_path(os.path.join(project_path, external_route)).casefold())
         for changed_path in changed_paths:
             changed_key = changed_path.casefold()
-            if changed_key == folder_key or changed_key.startswith(folder_key + os.sep) or folder_key.startswith(changed_key + os.sep):
-                return True
+            for folder_key in folder_keys:
+                if changed_key == folder_key or changed_key.startswith(folder_key + os.sep) or folder_key.startswith(changed_key + os.sep):
+                    return True
         return False
 
     def current_snapshot(node):
@@ -4789,7 +5027,7 @@ def progress_detect_stale(root: str, db, payload: dict):
     for node in rows:
         if (node["node_role"] != "progress" or node["relation_kind"] != "main"
                 or not node["tracking_enabled"] or node["tracking_state"] != "ready"
-                or node["missing_since"] is not None or not path_touched(node["folder_path"])):
+                or node["missing_since"] is not None or not path_touched(node)):
             continue
         previous_files, _previous_parent = _tracking_snapshot_parts(node)
         current_files = current_snapshot(node)
@@ -4804,7 +5042,7 @@ def progress_detect_stale(root: str, db, payload: dict):
             continue
         parent = by_id.get(child["parent_progress_id"])
         if (parent is None or parent["node_role"] == "selection" or parent["relation_kind"] == "auxiliary"
-                or parent["missing_since"] is not None or not path_touched(parent["folder_path"])):
+                or parent["missing_since"] is not None or not path_touched(parent)):
             continue
         _previous_files, previous_parent = _tracking_snapshot_parts(child)
         current_parent = current_snapshot(parent)
@@ -4841,6 +5079,8 @@ def tracking_session_decide(root: str, db, payload: dict):
     ).fetchone()
     if session is None or item is None or session["status"] not in ("pending_confirm", "failed"):
         raise ValueError("跟踪确认项目不存在或会话状态无效")
+    if item["item_kind"] == "missing" and decision == "accepted":
+        raise ValueError("当前版本中已缺失的媒体只能确认缺失，不能匹配为现有文件")
     reference_name = item["reference_name"]
     if payload.get("referenceName"):
         reference_name = _valid_tracking_file_name(payload["referenceName"])
@@ -4904,6 +5144,12 @@ def tracking_commit_plan(root: str, db, payload: dict):
     incremental = []
     copies = []
     for item in rows:
+        if item["item_kind"] == "missing":
+            # Older builds allowed a removed current file to be accepted. There
+            # is no source file to import, so treat that legacy decision as an
+            # acknowledgement of the deletion instead of creating an invalid
+            # batch source.
+            continue
         if item["item_kind"] == "copy_missing":
             copies.append(item["reference_name"])
         elif item["reference_name"] and item["source_name"]:
@@ -5004,6 +5250,8 @@ def tracking_commit_failed(db, payload: dict):
     session = db.execute("SELECT * FROM tracking_sessions WHERE id=?", (session_id,)).fetchone()
     if session is None:
         raise ValueError("跟踪会话不存在")
+    if session["status"] == "committed":
+        return {"success": True, "sessionId": session_id, "retryable": False, "alreadyCommitted": True}
     timestamp = int(time.time() * 1000)
     error = str(payload.get("error") or "提交失败")[:2000]
     failed_while_comparing = session["status"] == "comparing"
@@ -6143,6 +6391,9 @@ def delete_version_rows(db, rows) -> dict:
     ).fetchall()
     team_candidates = team_artifact_paths(task_rows)
     db.execute(f"DELETE FROM team_patch_tasks WHERE base_version_id IN ({placeholders})", version_ids)
+    db.execute(f"DELETE FROM team_person_assignments WHERE base_version_id IN ({placeholders})", version_ids)
+    db.execute(f"DELETE FROM team_person_exclusions WHERE base_version_id IN ({placeholders})", version_ids)
+    db.execute(f"DELETE FROM team_retouch_photos WHERE base_version_id IN ({placeholders})", version_ids)
     db.execute(
         f"""UPDATE team_patch_tasks SET merged_version_id=NULL,
               status=CASE WHEN edited_patch_path IS NOT NULL THEN 'uploaded' ELSE 'exported' END,
@@ -7084,8 +7335,16 @@ def load(root: str, database: str):
         finally:
             probe.close()
     if requires_initialization or requires_wal:
-        initialized = connect(root, database)
-        initialized.close()
+        initialized = connect(root, database, include_domains=False)
+        try:
+            # Preserve eager creation/migration for a healthy installation, but
+            # never make catalog startup depend on the optional team store.
+            try:
+                attach_team_retouch_storage(initialized, database)
+            except (OSError, sqlite3.Error, RuntimeError, ValueError):
+                pass
+        finally:
+            initialized.close()
     db = connect_read_only(database)
     try:
         return catalog_snapshot(db, database)
@@ -7093,11 +7352,26 @@ def load(root: str, database: str):
         db.close()
 
 
-def deleted_projects_list(db):
+def _operation_undo_records(db, payload=None):
+    external = (payload or {}).get("undoRecords")
+    if external is None:
+        return [dict(record) for record in db.execute(
+            "SELECT * FROM undo_records WHERE kind IN ('trash','project-cleanup') ORDER BY created_at DESC"
+        ).fetchall()]
+    records = []
+    for value in external if isinstance(external, list) else []:
+        if not isinstance(value, dict):
+            continue
+        record = dict(value)
+        if "payload_json" not in record:
+            record["payload_json"] = json.dumps(record.get("payload") or {}, ensure_ascii=False)
+        records.append(record)
+    return sorted(records, key=lambda record: int(record.get("created_at") or 0), reverse=True)
+
+
+def deleted_projects_list(db, payload=None):
     records_by_name = {}
-    for record in db.execute(
-        "SELECT * FROM undo_records WHERE kind IN ('trash','project-cleanup') ORDER BY created_at DESC"
-    ).fetchall():
+    for record in _operation_undo_records(db, payload):
         try:
             payload = json.loads(record["payload_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -7139,7 +7413,7 @@ def deleted_projects_list(db):
     return {"success": True, "projects": projects}
 
 
-def project_cleanup_plan(db, project):
+def project_cleanup_plan(db, project, payload=None):
     project_id = project["id"]
     photo_rows = db.execute("SELECT id,original_file_path FROM photos WHERE project_id=?", (project_id,)).fetchall()
     photo_ids = [row["id"] for row in photo_rows]
@@ -7152,23 +7426,12 @@ def project_cleanup_plan(db, project):
     source_paths = [row["original_file_path"] for row in photo_rows if row["original_file_path"]]
     source_paths.extend(row["file_path"] for row in version_rows if row["file_path"])
     artifact_paths = [row["thumbnail_path"] for row in version_rows if row["thumbnail_path"]]
-    if photo_ids:
-        placeholders = ",".join("?" for _ in photo_ids)
-        patch_rows = db.execute(
-            f"""SELECT patch_path,mask_path,edited_patch_path FROM team_patch_tasks
-                WHERE photo_id IN ({placeholders})""",
-            photo_ids,
-        ).fetchall()
-        for row in patch_rows:
-            artifact_paths.extend(value for value in (row["patch_path"], row["mask_path"], row["edited_patch_path"]) if value)
     if version_ids:
         placeholders = ",".join("?" for _ in version_ids)
         db.execute(f"DELETE FROM file_records WHERE owner_type='version' AND owner_id IN ({placeholders})", version_ids)
 
     removed_undo_ids = []
-    for record in db.execute(
-        "SELECT id,payload_json FROM undo_records WHERE kind IN ('trash','project-cleanup')"
-    ).fetchall():
+    for record in _operation_undo_records(db, payload):
         try:
             record_payload = json.loads(record["payload_json"] or "{}")
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -7184,7 +7447,39 @@ def project_cleanup_plan(db, project):
         "sourcePaths": list(dict.fromkeys(source_paths)),
         "artifactPaths": list(dict.fromkeys(artifact_paths)),
         "removedUndoIds": removed_undo_ids,
+        "teamCleanup": {"projectId": project_id, "photoIds": photo_ids},
     }
+
+
+def delete_team_project_rows(db, project_id: str):
+    photo_ids = [row[0] for row in db.execute("SELECT id FROM photos WHERE project_id=?", (project_id,)).fetchall()]
+    if photo_ids:
+        placeholders = ",".join("?" for _ in photo_ids)
+        db.execute(f"DELETE FROM team_patch_tasks WHERE photo_id IN ({placeholders})", photo_ids)
+    db.execute("DELETE FROM team_person_exclusions WHERE project_id=?", (project_id,))
+    db.execute("DELETE FROM team_person_assignments WHERE project_id=?", (project_id,))
+    db.execute("DELETE FROM team_retouch_photos WHERE project_id=?", (project_id,))
+    db.execute("DELETE FROM team_person_identities WHERE project_id=?", (project_id,))
+
+
+def team_project_purge(db, payload: dict):
+    project_id = str(payload.get("projectId") or "")
+    photo_ids = [str(value) for value in payload.get("photoIds", []) if value]
+    artifact_rows = []
+    if photo_ids:
+        placeholders = ",".join("?" for _ in photo_ids)
+        artifact_rows = db.execute(
+            f"""SELECT patch_path,mask_path,edited_patch_path,members_json FROM team_patch_tasks
+                WHERE photo_id IN ({placeholders})""", photo_ids
+        ).fetchall()
+        db.execute(f"DELETE FROM team_patch_tasks WHERE photo_id IN ({placeholders})", photo_ids)
+    if project_id:
+        db.execute("DELETE FROM team_person_exclusions WHERE project_id=?", (project_id,))
+        db.execute("DELETE FROM team_person_assignments WHERE project_id=?", (project_id,))
+        db.execute("DELETE FROM team_retouch_photos WHERE project_id=?", (project_id,))
+        db.execute("DELETE FROM team_person_identities WHERE project_id=?", (project_id,))
+    db.commit()
+    return {"success": True, "artifactPaths": unreferenced_team_artifact_paths(db, team_artifact_paths(artifact_rows))}
 
 
 def deleted_project_cleanup_plan(db, payload: dict):
@@ -7192,19 +7487,24 @@ def deleted_project_cleanup_plan(db, payload: dict):
     project = db.execute("SELECT * FROM projects WHERE id=? AND is_deleted=1", (project_id,)).fetchone()
     if project is None:
         raise ValueError("已删除项目记录不存在")
-    return project_cleanup_plan(db, project)
+    return project_cleanup_plan(db, project, payload)
 
 
 def purge_deleted_project(db, payload: dict):
     result = deleted_project_cleanup_plan(db, payload)
     project_id = str(payload.get("projectId") or "")
     removed_undo_ids = result["removedUndoIds"]
-    if removed_undo_ids:
+    if removed_undo_ids and "undoRecords" not in payload:
         placeholders = ",".join("?" for _ in removed_undo_ids)
         db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", removed_undo_ids)
 
+    db.commit()
+    db.execute("PRAGMA foreign_keys=OFF")
+    db.execute("DELETE FROM project_properties WHERE project_id=?", (project_id,))
+    db.execute("DELETE FROM project_tags WHERE project_id=?", (project_id,))
     db.execute("DELETE FROM projects WHERE id=? AND is_deleted=1", (project_id,))
     db.commit()
+    db.execute("PRAGMA foreign_keys=ON")
     return result
 
 
@@ -7219,13 +7519,18 @@ def purge_missing_project(root: str, db, payload: dict):
     project_path = os.path.abspath(os.path.join(root, project["relative_path"]))
     if os.path.exists(project_path):
         raise ValueError("项目文件夹仍然存在，不能只移除软件记录")
-    result = project_cleanup_plan(db, project)
+    result = project_cleanup_plan(db, project, payload)
     removed_undo_ids = result["removedUndoIds"]
-    if removed_undo_ids:
+    if removed_undo_ids and "undoRecords" not in payload:
         placeholders = ",".join("?" for _ in removed_undo_ids)
         db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", removed_undo_ids)
+    db.commit()
+    db.execute("PRAGMA foreign_keys=OFF")
+    db.execute("DELETE FROM project_properties WHERE project_id=?", (project["id"],))
+    db.execute("DELETE FROM project_tags WHERE project_id=?", (project["id"],))
     db.execute("DELETE FROM projects WHERE id=? AND is_deleted=0 AND availability='missing'", (project["id"],))
     db.commit()
+    db.execute("PRAGMA foreign_keys=ON")
     return result
 
 
@@ -7300,10 +7605,49 @@ def cleanup_media_workflow_graph(root: str, db, session_cutoff: int | None = Non
             "removedImportSlotMappingCount": removed_slot_mappings}
 
 
+def reconcile_cross_domain_references(db) -> dict:
+    """Remove stale stable-ID projections without cross-store foreign keys."""
+    removed_file_records = db.execute(
+        """DELETE FROM file_records WHERE owner_type='version' AND NOT EXISTS(
+             SELECT 1 FROM versions WHERE versions.id=file_records.owner_id
+           )"""
+    ).rowcount
+    removed_batch_items = db.execute(
+        """DELETE FROM batch_items WHERE NOT EXISTS(
+             SELECT 1 FROM versions WHERE versions.id=batch_items.version_id
+           ) OR NOT EXISTS(
+             SELECT 1 FROM photos WHERE photos.id=batch_items.photo_id
+           )"""
+    ).rowcount
+    removed_compare_history = db.execute(
+        """DELETE FROM version_compare_history WHERE NOT EXISTS(
+             SELECT 1 FROM photos WHERE photos.id=version_compare_history.photo_id
+           ) OR NOT EXISTS(
+             SELECT 1 FROM versions WHERE versions.id=version_compare_history.left_version_id
+           ) OR NOT EXISTS(
+             SELECT 1 FROM versions WHERE versions.id=version_compare_history.right_version_id
+           )"""
+    ).rowcount
+    return {
+        "removedFileRecords": removed_file_records,
+        "removedBatchItems": removed_batch_items,
+        "removedCompareHistory": removed_compare_history,
+    }
+
+
 def mutate(root: str, database: str, action: str, payload: dict):
     # Interactive version-tree and confirmation reads must never compete for
     # SQLite's writer slot with media scans or tracking commits.
-    db = connect_read_only(database) if action in READ_ONLY_ACTIONS else connect(root, database)
+    # Team-retouch is attached only inside its dedicated worker/action set. A
+    # corrupt or unavailable team store must never prevent catalog, media or
+    # versioning connections from opening.
+    domain_actions = set(MEDIA_ACTIONS) | set(PROGRESS_ACTIONS) | set(TRACKING_ACTIONS) | {
+        "maintenance_run", "deleted_projects_list", "deleted_project_cleanup_plan",
+        "purge_deleted_project", "purge_missing_project",
+    }
+    needs_team = action in TEAM_ACTIONS
+    needs_domains = needs_team or action in domain_actions
+    db = connect(root, database, include_domains=needs_domains, include_team=needs_team)
     now = int(time.time() * 1000)
     if action == "catalog_sync":
         try:
@@ -7314,18 +7658,33 @@ def mutate(root: str, database: str, action: str, payload: dict):
     if action == "maintenance_run":
         try:
             graph_cleanup = cleanup_media_workflow_graph(root, db, payload.get("importSessionCutoff"))
+            cross_domain_cleanup = reconcile_cross_domain_references(db)
+            db.commit()
             _check_integrity(db)
             _automatic_backup_if_due(db, database)
             progress_cleanup = cleanup_progress_tombstones(root, db, payload.get("progressTombstoneCutoff"))
+            # Cross-store foreign keys are deliberately not used. Reconcile
+            # graph edges after tombstone deletion instead of relying on an
+            # SQLite cascade that would couple the stores again.
+            graph_cleanup_after_progress = cleanup_media_workflow_graph(root, db, payload.get("importSessionCutoff"))
+            graph_cleanup["removedEdgeIds"] = list(dict.fromkeys([
+                *(graph_cleanup.get("removedEdgeIds") or []),
+                *(graph_cleanup_after_progress.get("removedEdgeIds") or []),
+            ]))
+            graph_cleanup["removedImportSessionCount"] = int(graph_cleanup.get("removedImportSessionCount") or 0) + int(graph_cleanup_after_progress.get("removedImportSessionCount") or 0)
+            graph_cleanup["removedImportSlotMappingCount"] = int(graph_cleanup.get("removedImportSlotMappingCount") or 0) + int(graph_cleanup_after_progress.get("removedImportSlotMappingCount") or 0)
             tracking_cleanup = cleanup_tracking_sessions(db, payload.get("trackingSessionCutoff"))
             _check_integrity(db, force=True)
-            return {"success": True, "progressTombstones": progress_cleanup, "trackingSessions": tracking_cleanup, "mediaWorkflowGraph": graph_cleanup}
+            return {"success": True, "progressTombstones": progress_cleanup, "trackingSessions": tracking_cleanup, "mediaWorkflowGraph": graph_cleanup, "crossDomainReferences": cross_domain_cleanup}
         finally:
             db.close()
     if action == "add":
         if not valid_project_status(payload["status"]):
             raise ValueError("无效的项目状态")
         project_path = os.path.join(os.path.abspath(root), payload["relativePath"])
+        retired = db.execute("SELECT id FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],)).fetchone()
+        if retired is not None:
+            delete_team_project_rows(db, retired["id"])
         db.execute("DELETE FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],))
         db.execute(
             "INSERT INTO projects(id,name,status,relative_path,filesystem_id,created_at,updated_at,extra_json) VALUES(?,?,?,?,?,?,?,?)",
@@ -7398,7 +7757,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
             (next_name, payload.get("status") or "未分类", relative_path, filesystem_id, now, payload["name"]),
         )
     elif action == "deleted_projects_list":
-        result = deleted_projects_list(db)
+        result = deleted_projects_list(db, payload)
         db.close()
         return result
     elif action == "deleted_project_cleanup_plan":
@@ -7487,6 +7846,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "progress_adopt_media":
         result = progress_adopt_media(root, db, payload)
+        db.close()
+        return result
+    elif action == "progress_revert_external_adoptions":
+        result = progress_revert_external_adoptions(db, payload)
         db.close()
         return result
     elif action == "version_tree_layout_get":
@@ -7687,6 +8050,8 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "team_patch_cleanup":
         result = team_patch_cleanup(db, payload)
+    elif action == "team_project_purge":
+        result = team_project_purge(db, payload)
         db.close()
         return result
     elif action == "undo_record_add":

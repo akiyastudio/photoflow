@@ -4,6 +4,7 @@ const os = require('os');
 const path = require('path');
 const ts = require('typescript');
 const { createComponentRegistry } = require('../electron/component-registry.cjs');
+const { createComponentIntegrityManifest } = require('../electron/component-integrity.cjs');
 const { PLUGIN_DEFINITIONS } = require('../electron/plugins/plugin-catalog.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-components-test-'));
@@ -28,6 +29,7 @@ const writeComponent = (root, id, version, entrypoint = `${id}.exe`, manifestId 
   return directory;
 };
 
+const run = async () => {
 try {
   const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
   const releaseCommand = packageJson.scripts['electron:build'];
@@ -98,6 +100,7 @@ try {
   const componentSystemIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
   assert(componentSystemIpc.includes('resolvePreparedPackage(pluginService.installRoot'), 'component installation must scan the shared components root');
   assert(componentSystemIpc.includes('allowedRoot = pluginService.installRoot'), 'component package cleanup must remain confined to the shared components root');
+  assert(componentSystemIpc.includes('await pluginService.verifyComponentDirectoryAsync(componentId, componentRoot, true)'), 'native components must be integrity checked asynchronously before installation');
   const settingsSource = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
   assert(settingsSource.includes("kind: 'component'") && settingsSource.includes('删除已使用的安装包吗？'), 'component UI must offer optional package cleanup after installation');
 
@@ -308,6 +311,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   const pluginService = fs.readFileSync(path.join(repositoryRoot, 'electron', 'services', 'plugin-service.cjs'), 'utf8');
   assert(!versionsIpc.includes('runWarmJson') && (versionsIpc.match(/pluginService\.runJson\(\s*'team-retouch'/g) || []).length >= 4, 'every team-retouch operation must start an isolated component process');
   assert(!pluginService.includes('warmWorkers') && !pluginService.includes('stopWarm'), 'the plugin service must not retain a page-level warm model process');
+  assert(pluginService.includes('registry.inspect(pluginId, { verifyIntegrity: false })'), 'component status queries must defer native payload hashing to the asynchronous detailed refresh');
   assert(!teamRetouchManager.includes('closeTeamRetouchRuntime'), 'the team-retouch page must not manage a persistent model process');
   assert(teamRetouchManager.includes('bundleFromWorkspacePhoto') && teamRetouchManager.includes('initialPhoto={initialPhoto}'), 'team-retouch cards must reuse the project workspace load instead of requesting every photo on mount');
   assert(!teamRetouchManager.includes('entries.map(async entry => { const result = await window.electronAPI.getTeamPatches'), 'team-retouch page opening must not perform one workspace query per photo');
@@ -398,13 +402,60 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
 
   assert.strictEqual(registry.list().length, Object.keys(PLUGIN_DEFINITIONS).length);
   const advancedVideoManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'extensions', 'video-playback-mpv', 'component.template.json'), 'utf8'));
-  assert.strictEqual(PLUGIN_DEFINITIONS['video-playback-mpv'].version, '26.8.3.1', 'the app must accept the latest published advanced-video component');
+  assert.strictEqual(PLUGIN_DEFINITIONS['video-playback-mpv'].version, '26.8.16.1', 'the app must accept the latest published advanced-video component');
   assert.strictEqual(advancedVideoManifest.version, PLUGIN_DEFINITIONS['video-playback-mpv'].version, 'the advanced-video manifest and app compatibility pin must stay aligned');
   assert.strictEqual(registry.resolve('team-retouch'), null);
   assert.strictEqual(registry.resolve('office-media-extractor'), null);
   const installRoot = userComponentRoot;
   assert.strictEqual(registry.ensureInstallRoot(), installRoot);
   assert.deepStrictEqual(registry.roots, [{ source: 'user', path: installRoot }], 'packaged registry must only scan the user component root');
+
+  const integrityComponent = writeComponent(
+    installRoot,
+    'video-playback-mpv',
+    PLUGIN_DEFINITIONS['video-playback-mpv'].version,
+    'advanced-video-decoder.exe',
+  );
+  fs.writeFileSync(path.join(integrityComponent, 'libmpv-2.dll'), 'test libmpv');
+  fs.writeFileSync(path.join(integrityComponent, 'runtime-manifest.json'), '{}');
+  const testIntegrity = createComponentIntegrityManifest(
+    integrityComponent,
+    'video-playback-mpv',
+    PLUGIN_DEFINITIONS['video-playback-mpv'].version,
+  );
+  fs.writeFileSync(path.join(integrityComponent, 'component-integrity.json'), JSON.stringify(testIntegrity));
+  const integrityRegistry = createComponentRegistry({
+    projectRoot,
+    userComponentRoot,
+    isPackaged: true,
+    platform: 'win32',
+    arch: 'x64',
+    integrityManifests: { 'video-playback-mpv': testIntegrity },
+  });
+  const originalReadFileSync = fs.readFileSync;
+  fs.readFileSync = (filePath, ...args) => {
+    if (path.resolve(String(filePath)) === path.resolve(integrityComponent, 'libmpv-2.dll')) {
+      throw new Error('async integrity verification performed a synchronous payload read');
+    }
+    return originalReadFileSync(filePath, ...args);
+  };
+  try {
+    assert.strictEqual(integrityRegistry.inspect('video-playback-mpv', { verifyIntegrity: false })?.installed, true);
+    assert.strictEqual(integrityRegistry.resolve('video-playback-mpv')?.installed, true);
+    assert.strictEqual((await integrityRegistry.resolveAsync('video-playback-mpv', { verifyIntegrity: true }))?.installed, true);
+  } finally {
+    fs.readFileSync = originalReadFileSync;
+  }
+  fs.writeFileSync(path.join(integrityComponent, 'undeclared-helper.exe'), 'rogue executable');
+  const undeclaredExecutable = (await integrityRegistry.listWithSizes()).find(component => component.id === 'video-playback-mpv');
+  assert.strictEqual(undeclaredExecutable.installed, false);
+  assert.match(undeclaredExecutable.error, /未声明的可执行文件/);
+  fs.rmSync(path.join(integrityComponent, 'undeclared-helper.exe'));
+  fs.writeFileSync(path.join(integrityComponent, 'libmpv-2.dll'), 'tampered libmpv');
+  const tampered = (await integrityRegistry.listWithSizes()).find(component => component.id === 'video-playback-mpv');
+  assert.strictEqual(tampered.installed, false);
+  assert.match(tampered.error, /大小不匹配|SHA-256 不匹配/);
+  fs.rmSync(integrityComponent, { recursive: true, force: true });
 
   writeComponent(
     path.join(projectRoot, 'extensions', 'video-playback-mpv'),
@@ -459,3 +510,9 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
 }
 
 require('child_process').execFileSync(process.execPath, [path.join(__dirname, 'test-recent-files-active-pagination.cjs')], { stdio: 'inherit' });
+};
+
+run().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

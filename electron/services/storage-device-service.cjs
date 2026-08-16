@@ -2,6 +2,9 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
+const PROCESS_TIMEOUT_MS = 5000;
+const errorMessage = error => error instanceof Error ? error.message : String(error);
+
 const normalizeMountPath = (value, platform = process.platform) => {
   const source = String(value || '').trim();
   if (!source) return '';
@@ -28,6 +31,8 @@ const parseWindowsLogicalDisks = output => {
       label: String(row?.VolumeName || row?.VolumeLabel || '').trim(),
       removable: driveType === 2,
       driveType,
+      identityStable: Boolean(serial),
+      ...(typeof row?.HasSupportedMedia === 'boolean' ? { hasSupportedMedia: row.HasSupportedMedia } : {}),
     }];
   });
 };
@@ -35,79 +40,190 @@ const parseWindowsLogicalDisks = output => {
 const parseWindowsVolOutput = (output, mountPath) => {
   const normalizedPath = normalizeMountPath(mountPath, 'win32');
   if (!normalizedPath) return null;
-  const serial = String(output || '').match(/\b([0-9A-F]{4}-[0-9A-F]{4})\b/i)?.[1]?.toUpperCase() || '';
+  const parsedSerial = String(output || '').match(/\b([0-9A-F]{4}-[0-9A-F]{4})\b/i)?.[1]?.toUpperCase() || '';
+  const serial = parsedSerial === '0000-0000' ? '' : parsedSerial;
   return {
     id: serial ? `win-volume:${serial}` : `win-path:${normalizedPath.toUpperCase()}`,
     mountPath: normalizedPath,
     label: '',
     removable: false,
     driveType: 0,
+    identityStable: Boolean(serial),
+  };
+};
+
+const parseWindowsMountvolOutput = (output, mountPath) => {
+  const normalizedPath = normalizeMountPath(mountPath, 'win32');
+  if (!normalizedPath) return null;
+  const volumeGuid = String(output || '').match(/Volume\{([0-9A-F-]+)\}/i)?.[1]?.toUpperCase() || '';
+  return {
+    id: volumeGuid ? `win-volume-guid:${volumeGuid}` : `win-path:${normalizedPath.toUpperCase()}`,
+    mountPath: normalizedPath,
+    identityStable: Boolean(volumeGuid),
   };
 };
 
 const collectProcessOutput = (command, args, options = {}) => new Promise((resolve, reject) => {
-  const child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], ...options });
+  const { timeoutMs = PROCESS_TIMEOUT_MS, ...spawnOptions } = options;
+  const child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], ...spawnOptions });
   let stdout = '';
   let stderr = '';
+  let settled = false;
+  const finish = (callback, value) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timeoutId);
+    callback(value);
+  };
+  const timeoutId = setTimeout(() => {
+    child.kill();
+    finish(reject, new Error(`${command} timed out after ${timeoutMs}ms`));
+  }, timeoutMs);
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   child.stdout.on('data', chunk => { stdout += chunk; });
   child.stderr.on('data', chunk => { stderr += chunk; });
-  child.once('error', reject);
+  child.once('error', error => finish(reject, error));
   child.once('close', code => {
-    if (code === 0) resolve(stdout);
-    else reject(new Error(stderr.trim() || `${command} exited with code ${code}`));
+    if (code === 0) finish(resolve, stdout);
+    else finish(reject, new Error(stderr.trim() || `${command} exited with code ${code}`));
   });
 });
 
+const MEDIA_ROOT_PROBE_TIMEOUT_MS = 1500;
+const hasSupportedMediaRoot = async (mountPath, platform = process.platform) => {
+  if (platform !== 'darwin') return false;
+  const results = await Promise.all(['DCIM', 'PRIVATE'].map(async folderName => {
+    try {
+      await collectProcessOutput('/bin/test', ['-d', path.join(mountPath, folderName)], { timeoutMs: MEDIA_ROOT_PROBE_TIMEOUT_MS });
+      return true;
+    } catch { return false; }
+  }));
+  return results.some(Boolean);
+};
+
+const finalizeStorageDevice = async (device, platform = process.platform) => {
+  const hasSupportedMedia = device.removable === true && (typeof device.hasSupportedMedia === 'boolean'
+    ? device.hasSupportedMedia
+    : await hasSupportedMediaRoot(device.mountPath, platform));
+  return {
+    ...device,
+    hasSupportedMedia,
+    eligibleForSdImport: device.removable === true && hasSupportedMedia,
+  };
+};
+
 const listWindowsStorageDevices = async () => {
-  const command = '[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); @([System.IO.DriveInfo]::GetDrives() | Select-Object Name,DriveType,VolumeLabel) | ConvertTo-Json -Compress';
+  const command = `[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()
+$items = foreach ($drive in [System.IO.DriveInfo]::GetDrives()) {
+  $driveType = [int]$drive.DriveType
+  if ($driveType -ne 2) { continue }
+  $label = ''
+  $hasSupportedMedia = $false
+  try {
+    if ($drive.IsReady) {
+      $label = $drive.VolumeLabel
+      $hasSupportedMedia = (Test-Path -LiteralPath (Join-Path $drive.Name 'DCIM') -PathType Container) -or (Test-Path -LiteralPath (Join-Path $drive.Name 'PRIVATE') -PathType Container)
+    }
+  } catch {}
+  [PSCustomObject]@{ Name = $drive.Name; DriveType = $driveType; VolumeLabel = $label; HasSupportedMedia = $hasSupportedMedia }
+}
+@($items) | ConvertTo-Json -Compress`;
   let devices;
   try {
     const output = await collectProcessOutput('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command]);
-    devices = parseWindowsLogicalDisks(output).filter(device => fs.existsSync(device.mountPath));
-  } catch {
-    const mountPaths = [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'].map(letter => `${letter}:/`).filter(mountPath => fs.existsSync(mountPath));
-    devices = mountPaths.map(mountPath => parseWindowsVolOutput('', mountPath)).filter(Boolean);
+    devices = parseWindowsLogicalDisks(output);
+  } catch (error) {
+    return { devices: [], complete: false, error: `无法判断 Windows 存储设备类型：${errorMessage(error)}` };
   }
-  return Promise.all(devices.map(async device => {
+  const removableDevices = devices.filter(device => device.removable === true);
+  const identifiedDevices = await Promise.all(removableDevices.map(async device => {
+    try {
+      const output = await collectProcessOutput('cmd.exe', ['/d', '/s', '/c', 'mountvol', device.mountPath.slice(0, 2), '/L']);
+      const identified = parseWindowsMountvolOutput(output, device.mountPath);
+      if (identified.identityStable) return { ...device, id: identified.id, identityStable: true };
+    } catch { /* fall back to the filesystem serial below */ }
     try {
       const output = await collectProcessOutput('cmd.exe', ['/d', '/s', '/c', 'vol', device.mountPath.slice(0, 2)]);
       const identified = parseWindowsVolOutput(output, device.mountPath);
-      return { ...device, id: identified.id };
+      return { ...device, id: identified.id, identityStable: identified.identityStable };
     } catch { return device; }
   }));
+  return { devices: await Promise.all(identifiedDevices.map(device => finalizeStorageDevice(device, 'win32'))), complete: true };
+};
+
+const readPlistValue = (output, key, valueTag) => {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return String(output || '').match(new RegExp(`<key>\\s*${escapedKey}\\s*</key>\\s*<${valueTag}>([\\s\\S]*?)</${valueTag}>`, 'i'))?.[1]?.trim() || '';
+};
+
+const readPlistBoolean = (output, key) => {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const value = String(output || '').match(new RegExp(`<key>\\s*${escapedKey}\\s*</key>\\s*<(true|false)\\s*/>`, 'i'))?.[1];
+  return value === undefined ? undefined : value.toLowerCase() === 'true';
+};
+
+const parseDiskutilInfoPlist = (output, mountPath) => {
+  const volumeUuid = readPlistValue(output, 'VolumeUUID', 'string');
+  const mediaUuid = readPlistValue(output, 'MediaUUID', 'string');
+  const diskUuid = readPlistValue(output, 'DiskUUID', 'string');
+  const stableId = volumeUuid || mediaUuid || diskUuid;
+  const removableMedia = readPlistBoolean(output, 'RemovableMedia');
+  const legacyRemovable = readPlistBoolean(output, 'Removable');
+  return {
+    id: stableId ? `darwin-volume:${stableId.toUpperCase()}` : `darwin-path:${mountPath}`,
+    identityStable: Boolean(stableId),
+    removable: removableMedia === true || legacyRemovable === true,
+  };
+};
+
+const summarizeDarwinStorageDeviceResults = results => {
+  const devices = results.flatMap(result => result.device ? [result.device] : []);
+  const errors = results.flatMap(result => result.error ? [result.error] : []);
+  const recognizedCount = results.filter(result => result.recognized === true).length;
+  if (errors.length && recognizedCount === 0) {
+    return { devices, complete: false, error: `无法识别 macOS 存储设备：${errors.join('；')}` };
+  }
+  return { devices, complete: true };
 };
 
 const listDarwinStorageDevices = async () => {
   const entries = await fs.promises.readdir('/Volumes', { withFileTypes: true });
-  const devices = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+  const candidates = entries.filter(entry => entry.isDirectory() || entry.isSymbolicLink());
+  const results = await Promise.all(candidates.map(async entry => {
     const mountPath = path.join('/Volumes', entry.name);
     try {
-      const stats = await fs.promises.stat(mountPath, { bigint: true });
-      devices.push({
-        id: `darwin-volume:${stats.dev.toString()}:${entry.name}`,
+      const output = await collectProcessOutput('/usr/sbin/diskutil', ['info', '-plist', mountPath]);
+      const identity = parseDiskutilInfoPlist(output, mountPath);
+      if (!identity.removable) return { recognized: true };
+      const device = await finalizeStorageDevice({
+        id: identity.id,
         mountPath,
         label: entry.name,
-        removable: true,
-        driveType: 2,
-      });
-    } catch { /* volume disappeared during enumeration */ }
-  }
-  return devices;
+        removable: identity.removable,
+        driveType: identity.removable ? 2 : 3,
+        identityStable: identity.identityStable,
+      }, 'darwin');
+      return { recognized: true, device };
+    } catch (error) {
+      return { recognized: false, error: `${mountPath}: ${errorMessage(error)}` };
+    }
+  }));
+  return summarizeDarwinStorageDeviceResults(results);
 };
 
 const listStorageDevices = async (platform = process.platform) => {
   if (platform === 'win32') return listWindowsStorageDevices();
   if (platform === 'darwin') return listDarwinStorageDevices();
-  return [];
+  return { devices: [], complete: false, error: `当前平台不支持 SD 设备枚举：${platform}` };
 };
 
 module.exports = {
   listStorageDevices,
   normalizeMountPath,
+  parseDiskutilInfoPlist,
   parseWindowsLogicalDisks,
+  parseWindowsMountvolOutput,
   parseWindowsVolOutput,
+  summarizeDarwinStorageDeviceResults,
 };

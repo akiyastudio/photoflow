@@ -1,5 +1,41 @@
-const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExtensions, releaseWorkspaceWatchPath, suppressWorkspaceWatchPath, versionService, projectVirtualPaths, writeLog, onInvalidate = () => undefined }) => {
+const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExtensions, releaseWorkspaceWatchPath, suppressWorkspaceWatchPath, versionService, projectVirtualPaths, writeLog, pendingRatingsPath = '', onInvalidate = () => undefined }) => {
   const cache = new Map();
+  const pendingFile = pendingRatingsPath ? path.resolve(pendingRatingsPath) : '';
+  const pathKey = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
+  const pendingRatings = new Map();
+  const optimisticRatings = new Map();
+  const activeWrites = new Set();
+  let writeSequence = 0;
+  if (pendingFile) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+      for (const item of Array.isArray(parsed?.items) ? parsed.items : []) {
+        if (!item?.filePath || !item?.workspaceRoot) continue;
+        const key = pathKey(item.filePath);
+        const entry = { ...item, filePath: path.resolve(item.filePath), workspaceRoot: path.resolve(item.workspaceRoot) };
+        pendingRatings.set(key, entry);
+        optimisticRatings.set(key, Number(item.rating) || 0);
+      }
+    } catch { /* a missing or invalid outbox starts empty */ }
+  }
+  const savePendingRatings = () => {
+    if (!pendingFile) return;
+    fs.mkdirSync(path.dirname(pendingFile), { recursive: true });
+    const temporary = `${pendingFile}.tmp-${process.pid}-${Date.now()}-${++writeSequence}`;
+    const backup = `${pendingFile}.backup-${process.pid}-${Date.now()}-${++writeSequence}`;
+    fs.writeFileSync(temporary, JSON.stringify({ version: 1, items: [...pendingRatings.values()] }), { encoding: 'utf8', flag: 'wx' });
+    try {
+      if (fs.existsSync(pendingFile)) fs.renameSync(pendingFile, backup);
+      fs.renameSync(temporary, pendingFile);
+      fs.rmSync(backup, { force: true });
+    } catch (error) {
+      if (!fs.existsSync(pendingFile) && fs.existsSync(backup)) fs.renameSync(backup, pendingFile);
+      throw error;
+    } finally {
+      fs.rmSync(temporary, { force: true });
+      fs.rmSync(backup, { force: true });
+    }
+  };
   const normalize = value => Math.max(0, Math.min(5, Math.round(Number(value) || 0)));
   const fromTags = tags => {
     const entries = Object.entries(tags || {});
@@ -14,6 +50,8 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     return 5;
   };
   const read = async (filePath, knownUpdatedAt) => {
+    const optimistic = optimisticRatings.get(pathKey(filePath));
+    if (optimistic !== undefined) return optimistic;
     const stat = await fs.promises.stat(filePath);
     const updatedAt = Number(knownUpdatedAt) || stat.mtimeMs;
     const cacheKey = `${path.resolve(filePath)}|${updatedAt}`;
@@ -29,24 +67,66 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     for (const key of cache.keys()) if (key.startsWith(prefix)) cache.delete(key);
     onInvalidate(filePath);
   };
+  const drainRating = key => {
+    if (activeWrites.has(key)) return;
+    activeWrites.add(key);
+    void (async () => {
+      let retry = false;
+      try {
+        while (pendingRatings.has(key)) {
+          const item = pendingRatings.get(key);
+          const suppressedPaths = [item.filePath, `${item.filePath}_exiftool_tmp`, `${item.filePath}_original`];
+          suppressedPaths.forEach(suppressedPath => suppressWorkspaceWatchPath(suppressedPath));
+          try {
+            await exiftool.write(item.filePath, { 'XMP:Rating': item.rating }, { writeArgs: ['-overwrite_original', '-P'] });
+          } finally {
+            suppressedPaths.forEach(suppressedPath => releaseWorkspaceWatchPath(suppressedPath));
+          }
+          const current = pendingRatings.get(key);
+          if (current?.token !== item.token) continue;
+          pendingRatings.delete(key);
+          optimisticRatings.delete(key);
+          try { savePendingRatings(); }
+          catch (error) {
+            pendingRatings.set(key, item);
+            optimisticRatings.set(key, item.rating);
+            throw error;
+          }
+          invalidate(item.filePath);
+          void versionService.refreshMetadataFingerprint(item.workspaceRoot, { filePath: item.filePath }).catch(error => {
+            writeLog('warn', 'Unable to refresh tracked fingerprint after metadata rating write', { filePath: item.filePath, error: error.message || String(error) });
+          });
+        }
+      } catch (error) {
+        retry = true;
+        writeLog('warn', 'Media rating metadata write remains queued for retry', { filePath: pendingRatings.get(key)?.filePath, error: error.message || String(error) });
+      } finally {
+        activeWrites.delete(key);
+        if (retry && pendingRatings.has(key)) {
+          const timer = setTimeout(() => drainRating(key), 30000);
+          timer.unref?.();
+        }
+        else if (pendingRatings.has(key)) drainRating(key);
+      }
+    })();
+  };
   const write = async (workspaceRoot, filePath, value) => {
     const rating = normalize(value);
-    // ExifTool rewrites in place through these sibling files. Suppress all
-    // three exact paths so their transient create/rename/delete events do not
-    // make the renderer reload an otherwise unchanged directory.
-    const suppressedPaths = [filePath, `${filePath}_exiftool_tmp`, `${filePath}_original`];
-    suppressedPaths.forEach(suppressedPath => suppressWorkspaceWatchPath(suppressedPath));
-    try {
-      await exiftool.write(filePath, { 'XMP:Rating': rating }, { writeArgs: ['-overwrite_original', '-P'] });
-    } finally {
-      suppressedPaths.forEach(suppressedPath => releaseWorkspaceWatchPath(suppressedPath));
+    const resolvedFilePath = path.resolve(filePath);
+    const key = pathKey(resolvedFilePath);
+    const token = `${Date.now()}-${++writeSequence}`;
+    const previousPending = pendingRatings.get(key);
+    const previousOptimistic = optimisticRatings.get(key);
+    pendingRatings.set(key, { workspaceRoot: path.resolve(workspaceRoot), filePath: resolvedFilePath, rating, token, updatedAt: Date.now() });
+    optimisticRatings.set(key, rating);
+    try { savePendingRatings(); }
+    catch (error) {
+      if (previousPending) pendingRatings.set(key, previousPending); else pendingRatings.delete(key);
+      if (previousOptimistic !== undefined) optimisticRatings.set(key, previousOptimistic); else optimisticRatings.delete(key);
+      throw error;
     }
     invalidate(filePath);
-    // ExifTool has already durably written the requested value. Fingerprint
-    // maintenance is bookkeeping and must not extend an interactive click.
-    void versionService.refreshMetadataFingerprint(workspaceRoot, { filePath }).catch(error => {
-      writeLog('warn', 'Unable to refresh tracked fingerprint after metadata rating write', { filePath, error: error.message || String(error) });
-    });
+    drainRating(key);
     return rating;
   };
   const listProject = async projectPath => {
@@ -96,6 +176,10 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     await Promise.all(workers);
     return entries.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'zh-CN', { numeric: true, sensitivity: 'base' }));
   };
+  for (const key of pendingRatings.keys()) {
+    const timer = setTimeout(() => drainRating(key), 0);
+    timer.unref?.();
+  }
   return { invalidate, listProject, normalize, read, write };
 };
 

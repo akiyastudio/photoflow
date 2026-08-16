@@ -6,6 +6,7 @@ import { useAppDialog } from '../../components/AppDialogProvider';
 import { FORMAL_MODEL_LICENSES } from '../../licenses/modelLicenses';
 import { THIRD_PARTY_SOFTWARE_LICENSES } from '../../licenses/softwareLicenses';
 import { VideoSplitView, VideoTranscodeView } from '../tools/ToolViews';
+import { normalizeConfiguredSdDeviceRecords, removeConfiguredSdDevice, syncLegacySdMirrors } from '../tools/sd-startup-import-model';
 
 const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
@@ -452,13 +453,15 @@ const ProjectToolbarSettingsEditor = ({ value, onChange }: { value: AppConfig['p
 
 const SdDriveHistorySettings = ({ value, onChange }: { value: AppConfig['smartImport']; onChange: (value: AppConfig['smartImport']) => void }) => {
   const appDialog = useAppDialog();
+  const records = normalizeConfiguredSdDeviceRecords(value.sdDevices);
   const selectedPaths = [...new Set(value.sdPaths?.length ? value.sdPaths : value.sdPath ? [value.sdPath] : [])];
-  const historyPaths = [...new Set([
-    ...selectedPaths,
-    ...(value.sdPath ? [value.sdPath] : []),
-    ...Object.keys(value.sdDriveTypes || {}),
-  ].map(path => path.trim()).filter(Boolean))];
-  const setEnabled = (path: string, enabled: boolean) => {
+  const recordIds = new Set(records.map(record => record.deviceId));
+  const legacyPaths = [...new Set([...selectedPaths, ...Object.keys(value.sdDriveTypes || {})])].filter(path => !value.sdDeviceIds?.[path] || !recordIds.has(value.sdDeviceIds[path]));
+  const entryCount = records.length + legacyPaths.length;
+  const setRecordEnabled = (deviceId: string, enabled: boolean) => onChange(syncLegacySdMirrors(value, records.map(record => record.deviceId === deviceId ? { ...record, enabled } : record)));
+  const setRecordType = (deviceId: string, type: 'work' | 'broll') => onChange(syncLegacySdMirrors(value, records.map(record => record.deviceId === deviceId ? { ...record, type } : record)));
+  const removeRecord = (deviceId: string) => onChange(removeConfiguredSdDevice(value, deviceId));
+  const setLegacyEnabled = (path: string, enabled: boolean) => {
     const sdPaths = enabled
       ? [...new Set([...selectedPaths, path])]
       : selectedPaths.filter(item => item !== path);
@@ -469,11 +472,11 @@ const SdDriveHistorySettings = ({ value, onChange }: { value: AppConfig['smartIm
       sdDriveTypes: { ...value.sdDriveTypes, [path]: value.sdDriveTypes[path] || 'work' },
     });
   };
-  const setType = (path: string, type: 'work' | 'broll') => onChange({
+  const setLegacyType = (path: string, type: 'work' | 'broll') => onChange({
     ...value,
     sdDriveTypes: { ...value.sdDriveTypes, [path]: type },
   });
-  const remove = (path: string) => {
+  const removeLegacy = (path: string) => {
     const sdPaths = selectedPaths.filter(item => item !== path);
     const sdDriveTypes = { ...value.sdDriveTypes };
     const sdDeviceIds = { ...(value.sdDeviceIds || {}) };
@@ -482,28 +485,34 @@ const SdDriveHistorySettings = ({ value, onChange }: { value: AppConfig['smartIm
     onChange({ ...value, sdPath: sdPaths[0] || '', sdPaths, sdDriveTypes, sdDeviceIds });
   };
   const clear = async () => {
-    if (!historyPaths.length || !await appDialog.confirm({
+    if (!entryCount || !await appDialog.confirm({
       title: '清空全部 SD 卡历史吗？',
       message: '将删除所有已记录的设备路径和导入类型。以后再次连接时仍可重新选择。',
       confirmLabel: '清空历史',
       cancelLabel: '取消',
       tone: 'danger',
     })) return;
-    onChange({ ...value, sdPath: '', sdPaths: [], sdDriveTypes: {}, sdDeviceIds: {} });
+    onChange({ ...value, sdPath: '', sdPaths: [], sdDriveTypes: {}, sdDeviceIds: {}, sdDevices: [] });
   };
   return <div className="settings-group-card overflow-hidden rounded-xl border border-slate-200 bg-white">
-    {historyPaths.length ? <div className="divide-y divide-slate-200">{historyPaths.map(path => {
+    {entryCount ? <div className="divide-y divide-slate-200">
+      {records.map(record => <div key={record.deviceId} className="grid gap-3 px-4 py-3.5 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-center">
+        <div className="min-w-0"><p title={record.lastMountPath} className="truncate font-mono text-sm font-bold text-slate-700">{record.lastMountPath}</p><p className={`mt-1 text-xs ${record.enabled && record.confirmedAt > 0 ? 'text-emerald-600' : 'text-amber-600'}`}>{record.confirmedAt <= 0 ? '需要在导入面板重新确认设备身份' : record.enabled ? '已启用，按设备身份自动匹配' : '仅保留历史，不会自动读取'}</p></div>
+        <div className="flex flex-wrap items-center gap-3"><label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-600"><input type="checkbox" checked={record.enabled} onChange={event => setRecordEnabled(record.deviceId, event.target.checked)}/>启用</label><select aria-label={`${record.lastMountPath} 默认导入类型`} value={record.type} onChange={event => setRecordType(record.deviceId, event.target.value as 'work' | 'broll')} className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-600"><option value="work">工作文件</option><option value="broll">花絮</option></select></div>
+        <button type="button" onClick={() => removeRecord(record.deviceId)} aria-label={`删除 ${record.lastMountPath} 的历史记录`} title="删除历史记录" className="inline-flex w-fit items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-2 text-xs font-bold text-red-600 hover:bg-red-50"><Trash2 size={13}/>删除</button>
+      </div>)}
+      {legacyPaths.map(path => {
       const enabled = selectedPaths.includes(path);
       return <div key={path} className="grid gap-3 px-4 py-3.5 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-center">
-        <div className="min-w-0"><p title={path} className="truncate font-mono text-sm font-bold text-slate-700">{path}</p><p className={`mt-1 text-xs ${enabled ? 'text-emerald-600' : 'text-slate-400'}`}>{enabled ? '已启用，连接后可用于导入' : '仅保留历史，不会自动读取'}</p></div>
+        <div className="min-w-0"><p title={path} className="truncate font-mono text-sm font-bold text-slate-700">{path}</p><p className="mt-1 text-xs text-amber-600">旧盘符记录，需要连接设备后重新确认</p></div>
         <div className="flex flex-wrap items-center gap-3">
-          <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-600"><input type="checkbox" checked={enabled} onChange={event => setEnabled(path, event.target.checked)}/>启用</label>
-          <select aria-label={`${path} 默认导入类型`} value={value.sdDriveTypes[path] || 'work'} onChange={event => setType(path, event.target.value as 'work' | 'broll')} className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-600"><option value="work">工作文件</option><option value="broll">花絮</option></select>
+          <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-600"><input type="checkbox" checked={enabled} onChange={event => setLegacyEnabled(path, event.target.checked)}/>启用</label>
+          <select aria-label={`${path} 默认导入类型`} value={value.sdDriveTypes[path] || 'work'} onChange={event => setLegacyType(path, event.target.value as 'work' | 'broll')} className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-600"><option value="work">工作文件</option><option value="broll">花絮</option></select>
         </div>
-        <button type="button" onClick={() => remove(path)} aria-label={`删除 ${path} 的历史记录`} title="删除历史记录" className="inline-flex w-fit items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-2 text-xs font-bold text-red-600 hover:bg-red-50"><Trash2 size={13}/>删除</button>
+        <button type="button" onClick={() => removeLegacy(path)} aria-label={`删除 ${path} 的历史记录`} title="删除历史记录" className="inline-flex w-fit items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-2 text-xs font-bold text-red-600 hover:bg-red-50"><Trash2 size={13}/>删除</button>
       </div>;
     })}</div> : <div className="px-4 py-8 text-center"><HardDrive size={26} className="mx-auto text-slate-300"/><p className="mt-3 text-sm font-medium text-slate-500">还没有记录过 SD 卡设备</p><p className="mt-1 text-xs text-slate-400">在导入模块中选择设备后会自动出现在这里。</p></div>}
-    {historyPaths.length > 0 && <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-4 py-3"><span className="text-xs text-slate-400">共记录 {historyPaths.length} 个设备，更改会立即保存。</span><button type="button" onClick={() => void clear()} className="text-xs font-bold text-red-600 hover:text-red-700">清空全部历史</button></div>}
+    {entryCount > 0 && <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-4 py-3"><span className="text-xs text-slate-400">共记录 {entryCount} 个设备，更改会立即保存。</span><button type="button" onClick={() => void clear()} className="text-xs font-bold text-red-600 hover:text-red-700">清空全部历史</button></div>}
   </div>;
 };
 
@@ -952,7 +961,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       <SettingsRow title="导入花絮时执行视频转码" description="仅处理导入的花絮视频；使用同一个视频转码面板参数。"><div className="flex items-center justify-end gap-3"><button type="button" className="dialog-secondary px-3 py-1.5 text-xs" onClick={() => setImportVideoPanel('transcode')}>打开视频转码面板</button><SettingsToggle label="导入花絮时执行视频转码" checked={draft.brollImport.transcodeVideosOnImport} onChange={checked => { update('brollImport', { ...draft.brollImport, transcodeVideosOnImport: checked }); if (checked) setImportVideoPanel('transcode'); }}/></div></SettingsRow>
     </SettingsPageGroup>
     <SettingsPageGroup title="从 SD 卡导入">
-      <SettingsRow title="启动时自动从 SD 卡导入" description="应用完成启动后，检查所有已启用且已连接的 SD 卡并自动开始批量导入。"><SettingsToggle label="启动时自动从 SD 卡导入" checked={draft.smartImport.autoStart} onChange={checked => update('smartImport', { ...draft.smartImport, autoStart: checked })}/></SettingsRow>
+      <SettingsRow title="启动时自动从 SD 卡导入" description="应用完成启动后，检查已确认身份且包含相机媒体目录的可移动 SD 卡；无人值守导入始终保留卡内源文件。"><SettingsToggle label="启动时自动从 SD 卡导入" checked={draft.smartImport.autoStart} onChange={checked => update('smartImport', { ...draft.smartImport, autoStart: checked })}/></SettingsRow>
       <SettingsRow title="导入日期范围" description="限制从真实 SD 卡读取的素材拍摄日期。"><select value={draft.smartImport.dateFilter} onChange={event => update('smartImport', { ...draft.smartImport, dateFilter: event.target.value as AppConfig['smartImport']['dateFilter'] })} className="form-input ml-auto max-w-sm"><option value="all">全部素材</option><option value="today">仅今天拍摄的素材</option><option value="today_yesterday">今天和昨天拍摄的素材</option></select></SettingsRow>
       <SettingsRow title="已记录的 SD 卡设备" description="管理设备是否用于导入，以及默认作为工作文件还是花絮。" align="start"><SdDriveHistorySettings value={draft.smartImport} onChange={smartImport => update('smartImport', smartImport)}/></SettingsRow>
     </SettingsPageGroup>

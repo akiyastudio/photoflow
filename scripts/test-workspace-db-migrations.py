@@ -765,6 +765,8 @@ def main():
 
         db.execute("SAVEPOINT cascade_test")
         db.execute("DELETE FROM versions WHERE id=?", (version_id,))
+        assert db.execute("SELECT COUNT(*) FROM file_records WHERE owner_id=?", (version_id,)).fetchone()[0] == 1
+        workspace_db.reconcile_cross_domain_references(db)
         assert db.execute("SELECT COUNT(*) FROM file_records WHERE owner_id=?", (version_id,)).fetchone()[0] == 0
         db.execute("ROLLBACK TO cascade_test")
         db.execute("RELEASE cascade_test")

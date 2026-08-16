@@ -34,6 +34,7 @@ env/
 
 # Local build tools, downloaded models, compiler caches, and stale cleanup remnants
 /.cache/
+/.tmp/
 
 # Electron 和 前端构建文件 (常规建议一起加上)
 node_modules/
@@ -45,6 +46,7 @@ electron/bin/
 media-runtime/vendor/
 /extensions/video-playback-mpv/runtime/
 /extensions/video-playback-mpv/vendor/
+/extensions/video-playback-mpv/runtime.backup-*/
 
 # 系统文件
 .DS_Store
