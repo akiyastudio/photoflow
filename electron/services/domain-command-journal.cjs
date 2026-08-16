@@ -65,7 +65,7 @@ const createDomainCommandJournal = ({ filePath, writeLog = () => undefined, now 
             writeLog('error', 'Domain command moved to dead letter', { commandId: record.commandId, target: record.target, type: record.type, attempts: record.attempts, error: record.error });
           } else {
             record.status = 'pending';
-            record.nextAttemptAt = now() + (backoffMs[Math.min(record.attempts - 1, backoffMs.length - 1)] || 30000);
+            record.nextAttemptAt = now() + (backoffMs[Math.min(record.attempts - 1, backoffMs.length - 1)] ?? 30000);
             writeLog('warn', 'Domain command retry scheduled', { commandId: record.commandId, target: record.target, type: record.type, attempts: record.attempts, error: record.error });
           }
         }
@@ -128,4 +128,3 @@ const createDomainCommandJournal = ({ filePath, writeLog = () => undefined, now 
 };
 
 module.exports = { createDomainCommandJournal };
-

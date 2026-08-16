@@ -33,6 +33,12 @@ main.cjs -> IPC registrars -> services -> repositories/workers
                          \-> contracts
 ```
 
+The composition root imports business capabilities through
+`electron/domains/<domain>/public.cjs`. Renderer consumers of versioning use
+`src/features/versioning/public.ts`; direct imports of versioning internals are
+rejected by the boundary test. The same public-entry rule is the baseline for
+new domain packages.
+
 - Contracts do not import implementations.
 - Repositories do not import services or IPC modules.
 - Services do not import IPC modules or the composition root.

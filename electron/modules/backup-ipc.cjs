@@ -1,6 +1,11 @@
 const path = require('path');
 
 const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain, getMainWindow, shell, writeLog }) => {
+  const assertDomain = value => {
+    const domain = String(value || '');
+    if (!['media', 'versioning', 'operations', 'team-retouch'].includes(domain)) throw new Error('不支持的业务域');
+    return domain;
+  };
   ipcMain.handle('backup-choose-target', async (_event, currentPath = '') => {
     const result = await dialog.showOpenDialog(getMainWindow(), {
       title: '选择 PhotoFlow 备份位置',
@@ -94,6 +99,26 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain, 
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
+  });
+
+  ipcMain.handle('backup-domain-verify', async (_event, workspacePath, domain) => {
+    try { return await backupService.verifyDomain(workspacePath, assertDomain(domain)); }
+    catch (error) { return { success: false, error: error.message || String(error) }; }
+  });
+
+  ipcMain.handle('backup-domain-run', async (_event, workspacePath, domain) => {
+    try { return { success: true, ...await backupService.runDomainBackup(workspacePath, assertDomain(domain)) }; }
+    catch (error) { return { success: false, error: error.message || String(error) }; }
+  });
+
+  ipcMain.handle('backup-domain-restore', async (_event, workspacePath, snapshotId, domain) => {
+    try { return { success: true, ...await backupService.restoreDomain(workspacePath, snapshotId, assertDomain(domain)) }; }
+    catch (error) { writeLog('error', 'Domain restore failed', error); return { success: false, error: error.message || String(error) }; }
+  });
+
+  ipcMain.handle('backup-domain-reset', async (_event, workspacePath, domain) => {
+    try { return { success: true, ...await backupService.resetDomain(workspacePath, assertDomain(domain)) }; }
+    catch (error) { writeLog('error', 'Domain reset failed', error); return { success: false, error: error.message || String(error) }; }
   });
 
   ipcMain.handle('backup-restore-workspace', async (_event, workspacePath, snapshotId) => {

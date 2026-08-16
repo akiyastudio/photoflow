@@ -1170,6 +1170,10 @@ export interface IElectronAPI {
   runBackup: (workspacePath: string, reason?: 'manual' | 'daily' | 'after-import') => Promise<{ success: boolean; queued?: boolean; error?: string }>;
   runBackupIfDue: (workspacePath: string) => Promise<{ success: boolean; skipped?: boolean; error?: string }>;
   verifyBackup: (workspacePath: string, snapshotId: string) => Promise<{ success: boolean; queued?: boolean; error?: string }>;
+  verifyDomainStorage: (workspacePath: string, domain: 'media' | 'versioning' | 'operations' | 'team-retouch') => Promise<{ success: boolean; state?: string; schemaVersion?: number; error?: string }>;
+  runDomainBackup: (workspacePath: string, domain: 'media' | 'versioning' | 'operations' | 'team-retouch') => Promise<{ success: boolean; path?: string; error?: string }>;
+  restoreDomainBackup: (workspacePath: string, snapshotId: string, domain: 'media' | 'versioning' | 'operations' | 'team-retouch') => Promise<{ success: boolean; error?: string }>;
+  resetDomainStorage: (workspacePath: string, domain: 'media' | 'operations' | 'team-retouch') => Promise<{ success: boolean; quarantine?: string; requiresReindex?: boolean; error?: string }>;
   restoreBackupWorkspace: (workspacePath: string, snapshotId: string) => Promise<{ success: boolean; cancelled?: boolean; workspacePath?: string; error?: string }>;
   restoreBackupProject: (workspacePath: string, snapshotId: string, projectId: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }>;
   openBackupTarget: () => Promise<{ success: boolean; error?: string }>;

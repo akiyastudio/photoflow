@@ -58,8 +58,12 @@ def connect(path: str, *, readonly: bool = False) -> sqlite3.Connection:
     return db
 
 
-def snapshot(source: str, destination: str) -> dict:
+def snapshot(source: str, destination: str, media: str = "") -> dict:
     source_db = connect(source, readonly=True)
+    if media and os.path.isfile(media) and "photos" not in {
+        row[0] for row in source_db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }:
+        source_db.execute("ATTACH DATABASE ? AS media", (os.path.abspath(media),))
     destination = os.path.abspath(destination)
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     if os.path.exists(destination):
@@ -71,10 +75,10 @@ def snapshot(source: str, destination: str) -> dict:
         if check != "ok":
             raise RuntimeError(f"数据库快照完整性检查失败：{check}")
         projects = []
-        for row in target_db.execute(
+        for row in source_db.execute(
             "SELECT id,name,status,relative_path,extra_json FROM projects WHERE is_deleted=0 ORDER BY name"
         ):
-            photo_ids = [item[0] for item in target_db.execute(
+            photo_ids = [item[0] for item in source_db.execute(
                 "SELECT id FROM photos WHERE project_id=? AND is_deleted=0", (row["id"],)
             )]
             name_hash = hashlib.sha256(row["name"].encode("utf-8")).hexdigest()
@@ -300,6 +304,7 @@ def main(argv=None):
     snapshot_parser = subparsers.add_parser("snapshot")
     snapshot_parser.add_argument("--source", required=True)
     snapshot_parser.add_argument("--destination", required=True)
+    snapshot_parser.add_argument("--media", default="")
     workspace_parser = subparsers.add_parser("restore-workspace")
     workspace_parser.add_argument("--source", required=True)
     workspace_parser.add_argument("--destination", required=True)
@@ -320,7 +325,7 @@ def main(argv=None):
     project_parser.add_argument("--materialized-archive-project-ids", default="[]")
     args = parser.parse_args(argv)
     if args.command == "snapshot":
-        result = snapshot(args.source, args.destination)
+        result = snapshot(args.source, args.destination, args.media)
     elif args.command == "restore-workspace":
         result = restore_workspace(args.source, args.destination, args.old_root, args.new_root, args.old_data_root, args.new_data_root, json.loads(args.materialized_archive_project_ids))
     else:

@@ -26,10 +26,10 @@ const { createShellNewService } = require('./services/shell-new-service.cjs');
 const { createMediaAccessService } = require('./services/media-access-service.cjs');
 const { createMediaFileResponse } = require('./services/media-response-service.cjs');
 const { PythonDatabaseClient } = require('./repositories/database-client.cjs');
-const { createWorkspaceRepository } = require('./repositories/workspace-repository.cjs');
-const { createOperationsRepository } = require('./repositories/operations-repository.cjs');
-const { createMediaRepository } = require('./repositories/media-repository.cjs');
-const { createTeamRetouchRepository } = require('./repositories/team-retouch-repository.cjs');
+const { createWorkspaceRepository } = require('./domains/workspace/public.cjs');
+const { createOperationsRepository } = require('./domains/file-operations/public.cjs');
+const { createMediaRepository } = require('./domains/media/public.cjs');
+const { createTeamRetouchRepository } = require('./domains/team-retouch/public.cjs');
 const { createEventBus } = require('./services/event-bus.cjs');
 const { createDomainCommandJournal } = require('./services/domain-command-journal.cjs');
 const { createDomainHealthService } = require('./services/domain-health-service.cjs');
@@ -41,14 +41,14 @@ const { createCredentialService } = require('./services/credential-service.cjs')
 const { createStorageUsageService } = require('./services/storage-usage-service.cjs');
 const { cleanupRetiredCaptureTimeCache } = require('./services/retired-cache-service.cjs');
 const { createPluginService } = require('./services/plugin-service.cjs');
-const { createWorkspaceService } = require('./services/workspace-service.cjs');
+const { createWorkspaceService } = require('./domains/workspace/public.cjs');
 const { createFileSystemService } = require('./services/file-system-service.cjs');
 const { createThumbnailService } = require('./services/thumbnail-service.cjs');
 const { createMediaService } = require('./services/media-service.cjs');
 const { createMediaRatingService } = require('./services/media-rating-service.cjs');
 const { createRawOrientationService } = require('./services/raw-orientation-service.cjs');
 const { createImageThumbnailRuntime } = require('./services/image-thumbnail-runtime.cjs');
-const { createVersionService } = require('./services/version-service.cjs');
+const { createVersionService } = require('./domains/versioning/public.cjs');
 const { createVersionStaleDetectionService } = require('./services/version-stale-detection-service.cjs');
 const { createSelectionService } = require('./services/selection-service.cjs');
 const { createTelemetryService } = require('./services/telemetry-service.cjs');
@@ -892,6 +892,16 @@ const getWorkspaceTeamRetouchDatabasePath = root => path.join(
   getWorkspaceDataRoot(root),
   'databases',
   'team-retouch.sqlite3',
+);
+const getWorkspaceMediaDatabasePath = root => path.join(
+  getWorkspaceDataRoot(root),
+  'databases',
+  'media.sqlite3',
+);
+const getWorkspaceVersioningDatabasePath = root => path.join(
+  getWorkspaceDataRoot(root),
+  'databases',
+  'versioning.sqlite3',
 );
 
 const getTrackedVersionThumbnailPath = (workspaceRoot, photoId, versionId) => {
@@ -1905,7 +1915,14 @@ app.whenReady().then(async () => {
   registerSelectionIpc({ ipcMain, path, fs, selectionService, workspaceCatalogs });
   registerAdvancedVideoIpc({ BrowserWindow, app, crypto, ipcMain, mediaService, path, pluginService, processSupervisor, spawn, writeLog });
   const credentialService = createCredentialService({ writeLog });
-  const backupService = createBackupService({ app, backgroundTasks, credentialService, getConfigPath, getUserBirthdaysPath, getManagedExternalLinkRegistryPath: () => managedExternalLinkRegistryPath, getManagedExternalLinks: projectRoot => projectVirtualPaths.listManagedExternalLinks(projectRoot), getWorkspaceDatabasePath, getWorkspaceOperationsDatabasePath, getWorkspaceTeamRetouchDatabasePath, getWorkspaceDataRoot, readSavedConfig, runPythonJsonAction, shell, writeLog });
+  const prepareDomainRecovery = async domain => {
+    const clients = domain === 'operations' ? [operationsDatabase]
+      : domain === 'team-retouch' ? [teamRetouchDatabase]
+        : [mediaDatabase, mediaInteractionDatabase, mediaScanDatabase, trackingScanDatabase, teamRetouchDatabase];
+    await Promise.all(clients.map(client => client.suspend()));
+    return () => clients.forEach(client => client.resume());
+  };
+  const backupService = createBackupService({ app, backgroundTasks, credentialService, getConfigPath, getUserBirthdaysPath, getManagedExternalLinkRegistryPath: () => managedExternalLinkRegistryPath, getManagedExternalLinks: projectRoot => projectVirtualPaths.listManagedExternalLinks(projectRoot), getWorkspaceDatabasePath, getWorkspaceOperationsDatabasePath, getWorkspaceTeamRetouchDatabasePath, getWorkspaceMediaDatabasePath, getWorkspaceVersioningDatabasePath, getWorkspaceDataRoot, prepareDomainRecovery, readSavedConfig, runPythonJsonAction, shell, writeLog });
   registerBackupIpc({ backupService, credentialService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
   const archiveService = createArchiveService({ backgroundTasks, movePathAtomic, readSavedConfig, workspaceRepository, writeLog });
   registerArchiveIpc({ archiveService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });

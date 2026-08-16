@@ -1,11 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { ProgressFolder, ProjectFileEntry, VersionGraphEdge } from '../types';
-import { layoutVersionTree } from '../features/versioning/version-tree-layout-model';
-import { DEFAULT_VERSION_TREE_SPACING, versionTreeAreaSize, versionTreeCanvasBounds } from '../features/versioning/version-tree-canvas-model';
-import { allowedVersionTreeRelationKinds, versionTreeEdgeGeometry, versionTreeEdgePath, versionTreeEdgePresentation, versionTreeRelationLabel, type VersionTreeEdgeKind, type VersionTreeSupplementalEdgeKind } from '../features/versioning/version-tree-edge-model';
-import { useVersionTreeCanvas, type VersionTreeDragState } from '../features/versioning/use-version-tree-canvas';
-import { progressRelationChangeError, projectVisibleVersionGraph, trackingStateLabel } from '../features/versioning/versioning-v2-model';
+import { layoutVersionTree, DEFAULT_VERSION_TREE_SPACING, versionTreeAreaSize, versionTreeCanvasBounds, allowedVersionTreeRelationKinds, versionTreeEdgeGeometry, versionTreeEdgePath, versionTreeEdgePresentation, versionTreeRelationLabel, type VersionTreeEdgeKind, type VersionTreeSupplementalEdgeKind, useVersionTreeCanvas, type VersionTreeDragState, progressRelationChangeError, projectVisibleVersionGraph, trackingStateLabel } from '../features/versioning/public';
 import { FILE_GRID_GAP } from '../features/workspace/marquee-selection-model';
 
 type ProjectVersionTreeProps = {
