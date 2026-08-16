@@ -37,17 +37,21 @@ def database_path_for_workspace_database(workspace_database: str, domain: str) -
 def _connect_domain(path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     db = sqlite3.connect(path, timeout=30)
-    db.execute("PRAGMA busy_timeout=30000")
-    if str(db.execute("PRAGMA journal_mode").fetchone()[0]).casefold() != "wal":
-        db.execute("PRAGMA journal_mode=WAL")
-    db.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
-    db.execute(
-        "INSERT INTO meta(key,value) VALUES('schema_version',?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (str(SCHEMA_VERSION),),
-    )
-    db.commit()
-    return db
+    try:
+        db.execute("PRAGMA busy_timeout=30000")
+        if str(db.execute("PRAGMA journal_mode").fetchone()[0]).casefold() != "wal":
+            db.execute("PRAGMA journal_mode=WAL")
+        db.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        db.execute(
+            "INSERT INTO meta(key,value) VALUES('schema_version',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(SCHEMA_VERSION),),
+        )
+        db.commit()
+        return db
+    except Exception:
+        db.close()
+        raise
 
 
 def _strip_cross_store_references(sql: str) -> str:

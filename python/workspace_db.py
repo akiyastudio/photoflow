@@ -1371,10 +1371,14 @@ def connect(root: str, database: str, include_domains: bool | None = None, inclu
         or include_domains is None and "meta" in existing_tables and _meta_value(db, "domain_storage_revision")
     )
     if schema_is_current:
-        if attach_domains:
-            attach_workspace_domain_storage(db, database)
-        if include_team:
-            attach_team_retouch_storage(db, database)
+        try:
+            if attach_domains:
+                attach_workspace_domain_storage(db, database)
+            if include_team:
+                attach_team_retouch_storage(db, database)
+        except Exception:
+            db.close()
+            raise
         return db
     db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     db.commit()
@@ -1710,10 +1714,14 @@ def connect(root: str, database: str, include_domains: bool | None = None, inclu
         with db:
             db.execute("DELETE FROM version_tree_layouts")
             _set_meta(db, "version_tree_default_layout_revision", VERSION_TREE_DEFAULT_LAYOUT_REVISION)
-    if include_domains is True or include_team:
-        attach_workspace_domain_storage(db, database)
-    if include_team:
-        attach_team_retouch_storage(db, database)
+    try:
+        if include_domains is True or include_team:
+            attach_workspace_domain_storage(db, database)
+        if include_team:
+            attach_team_retouch_storage(db, database)
+    except Exception:
+        db.close()
+        raise
     _set_meta(db, "workspace_root", root)
     if backup_path:
         _set_meta(db, "last_migration_backup", backup_path)
@@ -7502,8 +7510,13 @@ def purge_deleted_project(db, payload: dict):
     db.execute("PRAGMA foreign_keys=OFF")
     db.execute("DELETE FROM project_properties WHERE project_id=?", (project_id,))
     db.execute("DELETE FROM project_tags WHERE project_id=?", (project_id,))
+    db.commit()
+    db.execute("PRAGMA foreign_keys=OFF")
+    db.execute("DELETE FROM project_properties WHERE project_id=?", (project_id,))
+    db.execute("DELETE FROM project_tags WHERE project_id=?", (project_id,))
     db.execute("DELETE FROM projects WHERE id=? AND is_deleted=1", (project_id,))
     db.commit()
+    db.execute("PRAGMA foreign_keys=ON")
     db.execute("PRAGMA foreign_keys=ON")
     return result
 
@@ -7528,8 +7541,13 @@ def purge_missing_project(root: str, db, payload: dict):
     db.execute("PRAGMA foreign_keys=OFF")
     db.execute("DELETE FROM project_properties WHERE project_id=?", (project["id"],))
     db.execute("DELETE FROM project_tags WHERE project_id=?", (project["id"],))
+    db.commit()
+    db.execute("PRAGMA foreign_keys=OFF")
+    db.execute("DELETE FROM project_properties WHERE project_id=?", (project["id"],))
+    db.execute("DELETE FROM project_tags WHERE project_id=?", (project["id"],))
     db.execute("DELETE FROM projects WHERE id=? AND is_deleted=0 AND availability='missing'", (project["id"],))
     db.commit()
+    db.execute("PRAGMA foreign_keys=ON")
     db.execute("PRAGMA foreign_keys=ON")
     return result
 
@@ -7603,6 +7621,36 @@ def cleanup_media_workflow_graph(root: str, db, session_cutoff: int | None = Non
     db.commit()
     return {"removedEdgeIds": removed_edges, "removedImportSessionCount": removed_sessions,
             "removedImportSlotMappingCount": removed_slot_mappings}
+
+
+def reconcile_cross_domain_references(db) -> dict:
+    """Remove stale stable-ID projections without cross-store foreign keys."""
+    removed_file_records = db.execute(
+        """DELETE FROM file_records WHERE owner_type='version' AND NOT EXISTS(
+             SELECT 1 FROM versions WHERE versions.id=file_records.owner_id
+           )"""
+    ).rowcount
+    removed_batch_items = db.execute(
+        """DELETE FROM batch_items WHERE NOT EXISTS(
+             SELECT 1 FROM versions WHERE versions.id=batch_items.version_id
+           ) OR NOT EXISTS(
+             SELECT 1 FROM photos WHERE photos.id=batch_items.photo_id
+           )"""
+    ).rowcount
+    removed_compare_history = db.execute(
+        """DELETE FROM version_compare_history WHERE NOT EXISTS(
+             SELECT 1 FROM photos WHERE photos.id=version_compare_history.photo_id
+           ) OR NOT EXISTS(
+             SELECT 1 FROM versions WHERE versions.id=version_compare_history.left_version_id
+           ) OR NOT EXISTS(
+             SELECT 1 FROM versions WHERE versions.id=version_compare_history.right_version_id
+           )"""
+    ).rowcount
+    return {
+        "removedFileRecords": removed_file_records,
+        "removedBatchItems": removed_batch_items,
+        "removedCompareHistory": removed_compare_history,
+    }
 
 
 def reconcile_cross_domain_references(db) -> dict:

@@ -54,8 +54,11 @@ const createBackupService = context => {
     getWorkspaceDatabasePath,
     getWorkspaceOperationsDatabasePath,
     getWorkspaceTeamRetouchDatabasePath,
+    getWorkspaceMediaDatabasePath,
+    getWorkspaceVersioningDatabasePath,
     getWorkspaceDataRoot,
     credentialService,
+    prepareDomainRecovery,
     readSavedConfig,
     runPythonJsonAction,
     shell,
@@ -436,8 +439,29 @@ const createBackupService = context => {
       await fs.promises.mkdir(stage, { recursive: true });
       const databaseSnapshot = path.join(stage, 'workspace.sqlite3');
       const liveDatabasePath = path.resolve(getWorkspaceDatabasePath(root));
+      const liveMediaDatabasePath = getWorkspaceMediaDatabasePath?.(root);
+      const liveVersioningDatabasePath = getWorkspaceVersioningDatabasePath?.(root);
+      let mediaSnapshot = null;
+      let mediaDatabaseInfo = null;
+      if (liveMediaDatabasePath && await exists(liveMediaDatabasePath)) {
+        mediaSnapshot = path.join(stage, 'media.sqlite3');
+        mediaDatabaseInfo = await runPythonJsonAction('domain_recovery.py', [
+          'snapshot', '--domain', 'media', '--source', liveMediaDatabasePath, '--destination', mediaSnapshot,
+        ], 30 * 60 * 1000);
+      }
+      let versioningSnapshot = null;
+      let versioningDatabaseInfo = null;
+      if (liveVersioningDatabasePath && await exists(liveVersioningDatabasePath)) {
+        versioningSnapshot = path.join(stage, 'versioning.sqlite3');
+        versioningDatabaseInfo = await runPythonJsonAction('domain_recovery.py', [
+          'snapshot', '--domain', 'versioning', '--source', liveVersioningDatabasePath, '--destination', versioningSnapshot,
+        ], 30 * 60 * 1000);
+      }
       task.report(1, '正在创建数据库快照');
-      const databaseInfo = await runPythonJsonAction('backup_db.py', ['snapshot', '--source', liveDatabasePath, '--destination', databaseSnapshot], 30 * 60 * 1000);
+      const databaseInfo = await runPythonJsonAction('backup_db.py', [
+        'snapshot', '--source', liveDatabasePath, '--destination', databaseSnapshot,
+        ...(liveMediaDatabasePath && await exists(liveMediaDatabasePath) ? ['--media', liveMediaDatabasePath] : []),
+      ], 30 * 60 * 1000);
       const liveOperationsDatabasePath = getWorkspaceOperationsDatabasePath?.(root);
       let operationsSnapshot = null;
       let operationsDatabaseInfo = null;
@@ -479,6 +503,8 @@ const createBackupService = context => {
       const teamRetouchDatabaseRelative = liveTeamRetouchDatabasePath
         ? normalizeKey(path.relative(workspaceDataRoot, liveTeamRetouchDatabasePath))
         : '';
+      const mediaDatabaseRelative = liveMediaDatabasePath ? normalizeKey(path.relative(workspaceDataRoot, liveMediaDatabasePath)) : '';
+      const versioningDatabaseRelative = liveVersioningDatabasePath ? normalizeKey(path.relative(workspaceDataRoot, liveVersioningDatabasePath)) : '';
       const workspaceDataFiles = await collectFiles(workspaceDataRoot, 'workspace-data', (relative, item) => {
         const normalized = normalizeKey(relative);
         const first = normalized.split('/')[0];
@@ -491,7 +517,13 @@ const createBackupService = context => {
           || normalized === `${operationsDatabaseRelative}-shm`
           || normalized === teamRetouchDatabaseRelative
           || normalized === `${teamRetouchDatabaseRelative}-wal`
-          || normalized === `${teamRetouchDatabaseRelative}-shm`;
+          || normalized === `${teamRetouchDatabaseRelative}-shm`
+          || normalized === mediaDatabaseRelative
+          || normalized === `${mediaDatabaseRelative}-wal`
+          || normalized === `${mediaDatabaseRelative}-shm`
+          || normalized === versioningDatabaseRelative
+          || normalized === `${versioningDatabaseRelative}-wal`
+          || normalized === `${versioningDatabaseRelative}-shm`;
       });
       const appFiles = [];
       for (const [relative, absolute] of [['photoflow_config.json', getConfigPath()], ['birthdays.json', getUserBirthdaysPath()]]) {
@@ -524,6 +556,8 @@ const createBackupService = context => {
         ...workspaceDataFiles,
         ...appFiles,
         { scope: 'database', relative: 'workspace.sqlite3', absolute: databaseSnapshot },
+        ...(mediaSnapshot ? [{ scope: 'domain-database', relative: 'media.sqlite3', absolute: mediaSnapshot, schemaVersion: mediaDatabaseInfo?.schemaVersion || 0 }] : []),
+        ...(versioningSnapshot ? [{ scope: 'domain-database', relative: 'versioning.sqlite3', absolute: versioningSnapshot, schemaVersion: versioningDatabaseInfo?.schemaVersion || 0 }] : []),
         ...(operationsSnapshot ? [{
           scope: 'domain-database',
           relative: 'operations.sqlite3',
@@ -809,6 +843,18 @@ const createBackupService = context => {
           '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
         ], 30 * 60 * 1000);
       }
+      for (const [domain, getter] of [['media', getWorkspaceMediaDatabasePath], ['versioning', getWorkspaceVersioningDatabasePath]]) {
+        const entry = manifest.files.find(item => item.scope === 'domain-database' && item.path === `${domain}.sqlite3`);
+        if (!entry || !getter) continue;
+        const portable = path.join(destination, `.photoflow-${domain}-restore.sqlite3`);
+        await materialize(target, entry, portable, task);
+        await runPythonJsonAction('domain_recovery.py', [
+          'restore-workspace', '--domain', domain, '--source', portable, '--destination', getter(destination),
+          '--old-root', manifest.workspace.root, '--new-root', destination,
+          '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
+        ], 30 * 60 * 1000);
+        await fs.promises.rm(portable, { force: true });
+      }
       const databaseSource = objectPath(target, manifest.database.hash);
       await runPythonJsonAction('backup_db.py', [
         'restore-workspace', '--source', databaseSource, '--destination', getWorkspaceDatabasePath(destination),
@@ -889,6 +935,26 @@ const createBackupService = context => {
         '--target-relative-path', project.relativePath, '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
         '--materialized-archive-project-ids', JSON.stringify(manifest.materializedArchiveProjectIds || []),
       ], 30 * 60 * 1000);
+      const mediaEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'media.sqlite3');
+      const versioningEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'versioning.sqlite3');
+      if (mediaEntry && getWorkspaceMediaDatabasePath) {
+        await runPythonJsonAction('domain_recovery.py', [
+          'restore-project', '--domain', 'media', '--source', objectPath(target, mediaEntry.hash),
+          '--destination', getWorkspaceMediaDatabasePath(root), '--project-id', project.id,
+          ...(versioningEntry ? ['--peer-source', objectPath(target, versioningEntry.hash)] : []),
+          '--old-root', manifest.workspace.root, '--new-root', root,
+          '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
+        ], 30 * 60 * 1000);
+      }
+      if (versioningEntry && mediaEntry && getWorkspaceVersioningDatabasePath) {
+        await runPythonJsonAction('domain_recovery.py', [
+          'restore-project', '--domain', 'versioning', '--source', objectPath(target, versioningEntry.hash),
+          '--destination', getWorkspaceVersioningDatabasePath(root), '--project-id', project.id,
+          '--peer-source', objectPath(target, mediaEntry.hash),
+          '--old-root', manifest.workspace.root, '--new-root', root,
+          '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
+        ], 30 * 60 * 1000);
+      }
       const teamRetouchEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'team-retouch.sqlite3');
       if (teamRetouchEntry && getWorkspaceTeamRetouchDatabasePath) {
         await runPythonJsonAction('team_retouch_db.py', [
@@ -945,7 +1011,68 @@ const createBackupService = context => {
     return runBackup(workspaceRoot, 'daily');
   };
 
-  return { approveTarget, isApprovedTarget, runBackup, runIfDue, status, restoreWorkspace, restoreProject, verify, testConnection, spaceStatus, cleanup };
+  const domainPath = (workspaceRoot, domain) => ({
+    media: getWorkspaceMediaDatabasePath,
+    versioning: getWorkspaceVersioningDatabasePath,
+    operations: getWorkspaceOperationsDatabasePath,
+    'team-retouch': getWorkspaceTeamRetouchDatabasePath,
+  })[domain]?.(path.resolve(workspaceRoot));
+
+  const verifyDomain = async (workspaceRoot, domain) => {
+    const database = domainPath(workspaceRoot, domain);
+    if (!database) throw new Error(`不支持的业务域：${domain}`);
+    return runPythonJsonAction('domain_recovery.py', ['verify', '--domain', domain, '--destination', database], 10 * 60 * 1000);
+  };
+
+  const runDomainBackup = async (workspaceRoot, domain) => {
+    const root = path.resolve(workspaceRoot);
+    const database = domainPath(root, domain);
+    if (!database) throw new Error(`不支持的业务域：${domain}`);
+    const destination = path.join(getWorkspaceDataRoot(root), 'domain-backups', domain, `${Date.now()}.sqlite3`);
+    const result = await runPythonJsonAction('domain_recovery.py', [
+      'snapshot', '--domain', domain, '--source', database, '--destination', destination,
+    ], 30 * 60 * 1000);
+    return { ...result, domain, path: destination };
+  };
+
+  const restoreDomain = async (workspaceRoot, snapshot, domain) => {
+    const root = path.resolve(workspaceRoot);
+    const database = domainPath(root, domain);
+    if (!database) throw new Error(`不支持的业务域：${domain}`);
+    const config = readSavedConfig();
+    const target = String(config?.backup?.targetPath || '').trim();
+    if (!isApprovedTarget(target)) throw new Error('备份位置未经授权');
+    const manifest = await manifestFor(target, snapshot);
+    const entry = manifest.files.find(item => item.scope === 'domain-database' && item.path === `${domain}.sqlite3`);
+    if (!entry) throw new Error(`该快照不包含 ${domain} 业务域`);
+    const portable = path.join(getWorkspaceDataRoot(root), 'domain-restore', `${domain}-${crypto.randomUUID()}.sqlite3`);
+    await materialize(target, entry, portable, { throwIfCancelled: () => undefined });
+    const resume = await prepareDomainRecovery?.(domain);
+    try {
+      return await runPythonJsonAction('domain_recovery.py', [
+        'restore-workspace', '--domain', domain, '--source', portable, '--destination', database,
+        '--old-root', manifest.workspace.root, '--new-root', root,
+        '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', getWorkspaceDataRoot(root),
+      ], 30 * 60 * 1000);
+    } finally {
+      await fs.promises.rm(portable, { force: true }).catch(() => undefined);
+      resume?.();
+    }
+  };
+
+  const resetDomain = async (workspaceRoot, domain) => {
+    if (domain === 'versioning') throw new Error('版本域不能直接重置，请从快照恢复');
+    const database = domainPath(workspaceRoot, domain);
+    if (!database) throw new Error(`不支持的业务域：${domain}`);
+    const resume = await prepareDomainRecovery?.(domain);
+    try {
+      return await runPythonJsonAction('domain_recovery.py', ['reset', '--domain', domain, '--destination', database], 30 * 60 * 1000);
+    } finally {
+      resume?.();
+    }
+  };
+
+  return { approveTarget, isApprovedTarget, runBackup, runDomainBackup, runIfDue, status, restoreWorkspace, restoreProject, restoreDomain, resetDomain, verify, verifyDomain, testConnection, spaceStatus, cleanup };
 };
 
 module.exports = { createBackupService, STORE_DIRECTORY };

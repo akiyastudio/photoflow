@@ -36,6 +36,8 @@ const prepareWorkspace = async (temporaryRoot, name, id) => {
   const database = path.join(temporaryRoot, 'workspace-data', `${id}.sqlite3`);
   const operationsDatabase = path.join(dataRoot, 'databases', 'operations.sqlite3');
   const teamRetouchDatabase = path.join(dataRoot, 'databases', 'team-retouch.sqlite3');
+  const mediaDatabase = path.join(dataRoot, 'databases', 'media.sqlite3');
+  const versioningDatabase = path.join(dataRoot, 'databases', 'versioning.sqlite3');
   await fs.promises.mkdir(project, { recursive: true });
   await fs.promises.mkdir(dataRoot, { recursive: true });
   await fs.promises.mkdir(path.join(dataRoot, 'team-retouch'), { recursive: true });
@@ -43,10 +45,11 @@ const prepareWorkspace = async (temporaryRoot, name, id) => {
   await fs.promises.writeFile(path.join(project, '原片.jpg'), `photo-${id}`, 'utf8');
   await fs.promises.writeFile(path.join(dataRoot, 'team-retouch', 'shared.json'), `internal-${id}`, 'utf8');
   await runPython('workspace_db.py', ['catalog_sync', '--root', root, '--database', database, '--payload', '{}']);
+  await runPython('workspace_db.py', ['team_patch_list', '--root', root, '--database', database, '--payload', JSON.stringify({ photoId: 'missing' })]);
   await runPython('operations_db.py', ['undo_record_add', '--database', operationsDatabase, '--payload', JSON.stringify({
     id: `${id}-undo`, kind: 'trash', payload: { items: [] }, legacyDatabase: database,
   })]);
-  return { root, project, dataRoot, database, operationsDatabase, teamRetouchDatabase };
+  return { root, project, dataRoot, database, operationsDatabase, teamRetouchDatabase, mediaDatabase, versioningDatabase };
 };
 
 const main = async () => {
@@ -87,6 +90,8 @@ const main = async () => {
       getWorkspaceDatabasePath: () => currentWorkspace.database,
       getWorkspaceOperationsDatabasePath: () => currentWorkspace.operationsDatabase,
       getWorkspaceTeamRetouchDatabasePath: () => currentWorkspace.teamRetouchDatabase,
+      getWorkspaceMediaDatabasePath: () => currentWorkspace.mediaDatabase,
+      getWorkspaceVersioningDatabasePath: () => currentWorkspace.versioningDatabase,
       getWorkspaceDataRoot: () => currentWorkspace.dataRoot,
       readSavedConfig: () => config,
       runPythonJsonAction: runPython,
@@ -98,6 +103,8 @@ const main = async () => {
     assert.strictEqual(firstRun.task.state, 'completed');
     assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'operations.sqlite3'), 'operations database must use a consistent online snapshot');
     assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'team-retouch.sqlite3'), 'team-retouch database must use a consistent online snapshot');
+    assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'media.sqlite3'), 'media database must use a consistent online snapshot');
+    assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'versioning.sqlite3'), 'versioning database must use a consistent online snapshot');
     assert.strictEqual((await service.status(first.root)).snapshotCount, 1);
     await service.verify(first.root, firstRun.result.id);
 
