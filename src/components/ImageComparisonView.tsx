@@ -5,6 +5,7 @@ export type ImageComparisonMode = 'side-by-side' | 'split' | 'overlay' | 'blink'
 type ComparisonItem = {
   label: string;
   content: React.ReactNode;
+  interactive?: boolean;
 };
 
 type ImageComparisonViewProps = {
@@ -72,7 +73,7 @@ export const ImageComparisonView = ({ left, right, mode, onModeChange, swapped =
     setSplit(clamp((clientX - rect.left) / rect.width * 100, 0, 100));
   };
   const transform = `translate(${pan.x}px, ${pan.y}px) scale(${zoom}) rotate(${rotation}deg)`;
-  const renderContent = (item: ComparisonItem) => <div className="pointer-events-none absolute inset-0" style={{ transform, transformOrigin: 'center', transition: panDragRef.current ? 'none' : 'transform 100ms ease-out' }}>{item.content}</div>;
+  const renderContent = (item: ComparisonItem) => <div className={`${item.interactive ? 'pointer-events-auto' : 'pointer-events-none'} absolute inset-0`} style={{ transform: unavailable ? 'none' : transform, transformOrigin: 'center', transition: panDragRef.current ? 'none' : 'transform 100ms ease-out' }}>{item.content}</div>;
   const renderLabel = (item: ComparisonItem, side: 'A' | 'B') => <span className="pointer-events-none absolute left-3 top-3 z-20 max-w-[calc(100%-1.5rem)] truncate rounded bg-black/70 px-2 py-1 text-xs text-white">{side} · {item.label}</span>;
 
   return <section className={`flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-950 text-white ${className}`}>
@@ -83,10 +84,10 @@ export const ImageComparisonView = ({ left, right, mode, onModeChange, swapped =
         <button type="button" disabled={unavailable} onClick={() => onSwappedChange ? onSwappedChange(!swapped) : setInternalSwapped(current => !current)} className="rounded-md bg-white/10 px-3 py-1.5 text-xs font-bold text-slate-300 hover:bg-white/15 disabled:opacity-35">交换 A/B</button>
       </div>
       <div className="ml-auto flex flex-wrap items-center gap-2">
-        <button type="button" onClick={() => setRotation(current => (current + 90) % 360)} className="rounded-md bg-white/10 px-2.5 py-1.5 text-xs font-bold hover:bg-white/15">旋转 {rotation}°</button>
-        <button type="button" onClick={resetView} className="rounded-md bg-white/10 px-2.5 py-1.5 text-xs font-bold hover:bg-white/15">重置</button>
+        <button type="button" disabled={unavailable} onClick={() => setRotation(current => (current + 90) % 360)} className="rounded-md bg-white/10 px-2.5 py-1.5 text-xs font-bold hover:bg-white/15 disabled:opacity-35">旋转 {rotation}°</button>
+        <button type="button" disabled={unavailable} onClick={resetView} className="rounded-md bg-white/10 px-2.5 py-1.5 text-xs font-bold hover:bg-white/15 disabled:opacity-35">重置</button>
         <span className="text-xs text-slate-400">缩放</span>
-        <input aria-label="图片缩放" type="range" min="1" max="5" step="0.1" value={zoom} onChange={event => setZoom(Number(event.currentTarget.value))}/>
+        <input disabled={unavailable} aria-label="图片缩放" type="range" min="1" max="5" step="0.1" value={zoom} onChange={event => setZoom(Number(event.currentTarget.value))}/>
         <span className="w-10 text-right font-mono text-[11px] text-slate-400">{Math.round(zoom * 100)}%</span>
         {trailing}
       </div>
@@ -94,9 +95,9 @@ export const ImageComparisonView = ({ left, right, mode, onModeChange, swapped =
     {mode === 'overlay' && !unavailable && <div className="flex shrink-0 items-center gap-3 border-b border-white/10 px-4 py-2 text-xs text-slate-300"><span>B 图透明度</span><input className="w-64" aria-label="B 图透明度" type="range" min="0" max="100" value={opacity} onChange={event => setOpacity(Number(event.currentTarget.value))}/><span className="font-mono">{opacity}%</span></div>}
     <div
       ref={stageRef}
-      onWheel={event => { event.preventDefault(); setZoom(current => clamp(Number((current * (event.deltaY < 0 ? 1.15 : 1 / 1.15)).toFixed(2)), 1, 5)); }}
-      onDoubleClick={resetView}
-      onPointerDown={event => { if (event.button !== 0 || zoom <= 1) return; event.currentTarget.setPointerCapture(event.pointerId); panDragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, panX: pan.x, panY: pan.y }; }}
+      onWheel={event => { if (unavailable) return; event.preventDefault(); setZoom(current => clamp(Number((current * (event.deltaY < 0 ? 1.15 : 1 / 1.15)).toFixed(2)), 1, 5)); }}
+      onDoubleClick={() => { if (!unavailable) resetView(); }}
+      onPointerDown={event => { if (unavailable || event.button !== 0 || zoom <= 1) return; event.currentTarget.setPointerCapture(event.pointerId); panDragRef.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, panX: pan.x, panY: pan.y }; }}
       onPointerMove={event => { const drag = panDragRef.current; if (drag?.pointerId === event.pointerId) setPan({ x: drag.panX + event.clientX - drag.startX, y: drag.panY + event.clientY - drag.startY }); }}
       onPointerUp={event => { if (panDragRef.current?.pointerId === event.pointerId) panDragRef.current = null; }}
       onPointerCancel={() => { panDragRef.current = null; splitDragRef.current = null; }}

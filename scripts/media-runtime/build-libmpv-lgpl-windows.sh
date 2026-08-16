@@ -24,6 +24,9 @@ fi
 mpv_ref="$(node -p "require('./media-runtime.lock.json').mpv.ref")"
 mpv_repo="$(node -p "require('./media-runtime.lock.json').mpv.repository")"
 mpv_commit="$(node -p "require('./media-runtime.lock.json').mpv.commit")"
+bootstrap_source_archive="${PHOTOFLOW_MPV_BOOTSTRAP_SOURCE_ARCHIVE:-}"
+bootstrap_license_archive="${PHOTOFLOW_MPV_BOOTSTRAP_LICENSE_ARCHIVE:-}"
+bootstrap_manifest="${PHOTOFLOW_MPV_BOOTSTRAP_MANIFEST:-}"
 
 source_root="$(realpath -m "$source_root")"
 build_root="$(realpath -m "$build_root")"
@@ -53,10 +56,26 @@ test -f "$dependency_licenses" || { echo "Missing dependency license archive: $d
 if [[ "${PHOTOFLOW_MPV_RESUME:-0}" != 1 ]]; then
   rm -rf "$source_root" "$build_root" "$output_root"
 fi
-if [[ ! -d "$source_root/.git" ]]; then
+if [[ -n "$bootstrap_source_archive" && ! -d "$source_root" ]]; then
+  bootstrap_source_archive="$(realpath "$bootstrap_source_archive")"
+  bootstrap_license_archive="$(realpath "${bootstrap_license_archive:?Set PHOTOFLOW_MPV_BOOTSTRAP_LICENSE_ARCHIVE with the bootstrap source archive}")"
+  bootstrap_manifest="$(realpath "${bootstrap_manifest:?Set PHOTOFLOW_MPV_BOOTSTRAP_MANIFEST with the bootstrap archives}")"
+  node "$repo_root/scripts/media-runtime/verify-bootstrap-archives.cjs" \
+    "$bootstrap_manifest" "$bootstrap_source_archive" "$bootstrap_license_archive"
+  bootstrap_extract_root="$build_root-bootstrap-source"
+  rm -rf "$bootstrap_extract_root"
+  mkdir -p "$bootstrap_extract_root" "$source_root"
+  bsdtar -xf "$bootstrap_source_archive" -C "$bootstrap_extract_root"
+  test -f "$bootstrap_extract_root/mpv/MPV_VERSION" || { echo 'Bootstrap archive is missing mpv source' >&2; exit 1; }
+  cp -a "$bootstrap_extract_root/mpv/." "$source_root/"
+fi
+if [[ -z "$bootstrap_source_archive" && ! -d "$source_root/.git" ]]; then
   git clone --branch "$mpv_ref" --depth 1 "$mpv_repo" "$source_root"
 fi
-actual_mpv_commit="$(git -C "$source_root" rev-parse HEAD)"
+actual_mpv_commit="$mpv_commit"
+if [[ -z "$bootstrap_source_archive" ]]; then
+  actual_mpv_commit="$(git -C "$source_root" rev-parse HEAD)"
+fi
 [[ "$actual_mpv_commit" == "$mpv_commit"* ]] || { echo "mpv tag resolved to unexpected commit: $actual_mpv_commit" >&2; exit 1; }
 mkdir -p "$build_root" "$output_root"
 
@@ -120,10 +139,17 @@ printf '%s\n' "$actual_mpv_commit" > "$output_root/mpv-commit.txt"
 
 compliance_root="$build_root/compliance"
 mkdir -p "$compliance_root/source/mpv" "$compliance_root/source/build-materials" "$compliance_root/licenses"
-git -C "$source_root" archive HEAD | tar -x -C "$compliance_root/source/mpv"
+if [[ -n "$bootstrap_source_archive" ]]; then
+  cp -a "$source_root/." "$compliance_root/source/mpv/"
+else
+  git -C "$source_root" archive HEAD | tar -x -C "$compliance_root/source/mpv"
+fi
 cp "$dependency_sources" "$compliance_root/source/dependency-corresponding-source.zip"
 cp "$repo_root/scripts/media-runtime/build-libmpv-lgpl-windows.sh" "$compliance_root/source/build-materials/build-libmpv-lgpl-windows.sh"
 cp "$repo_root/scripts/media-runtime/build-libmpv-dependencies-windows.sh" "$compliance_root/source/build-materials/build-libmpv-dependencies-windows.sh"
+cp "$repo_root/scripts/media-runtime/verify-bootstrap-archives.cjs" "$compliance_root/source/build-materials/verify-bootstrap-archives.cjs"
+mkdir -p "$compliance_root/source/build-materials/patches"
+cp "$repo_root/scripts/media-runtime/patches/"*.patch "$compliance_root/source/build-materials/patches/"
 cp "$output_root/meson-configure.txt" "$compliance_root/source/build-materials/meson-configure.txt"
 cp "$output_root/mpv-meson-options.txt" "$compliance_root/source/build-materials/mpv-meson-options.txt"
 cp "$output_root/linked-ffmpeg-buildconf.txt" "$compliance_root/source/build-materials/linked-ffmpeg-buildconf.txt"

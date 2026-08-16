@@ -32,183 +32,27 @@ import type { SettingsSection } from './features/settings/SettingsFeature';
 import { componentIdForSettingsSection } from './features/plugins/plugin-contributions';
 import { DashboardView, MatchView, VideoSplitView, type ImportCompletion } from './features/tools/ToolViews';
 import { useStartupSdAutoImport } from './features/tools/use-startup-sd-auto-import';
+import { normalizeSavedSdDeviceRecords } from './features/tools/sd-startup-import-model';
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
-import { BUILT_IN_PROJECT_STATUSES, DEFAULT_PROGRESS_NAME_PRESETS, PROJECT_TOOLBAR_ACTION_IDS, normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
-import type { AppConfig, BackupStatus, ComponentStatus, HomeCardId, ProjectToolbarActionId, ToolType, WorkspaceProject } from './types';
-const DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'inspiration'];
-const RESERVED_PROJECT_CATEGORIES = new Set<string>(['未分类', ...BUILT_IN_PROJECT_STATUSES]);
-const normalizeProjectCategories = (value: unknown) => {
-  const result: string[] = [];
-  const seen = new Set<string>();
-  for (const item of Array.isArray(value) ? value : []) {
-    const name = String(item || '').trim().replace(/\s+/g, ' ');
-    const key = name.toLocaleLowerCase();
-    const hasControlCharacter = [...name].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
-    if (!name || name.length > 24 || hasControlCharacter || RESERVED_PROJECT_CATEGORIES.has(name) || seen.has(key)) continue;
-    seen.add(key);
-    result.push(name);
-    if (result.length >= 50) break;
-  }
-  return result;
-};
+import { normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
+import type { AppConfig, BackupStatus, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
+import { ColumnResizeHandle } from './features/app/AppShellLayout';
+import { clampNumber, readStoredNumber } from './features/app/app-shell-layout-model';
+import {
+  DEFAULT_CONFIG,
+  DEFAULT_HOME_ORDER,
+  IMAGE_SELECTION_FOLDER_NAME,
+  VIDEO_SELECTION_FOLDER_NAME,
+  isMac,
+  localDateKey,
+  normalizeHomeOrder,
+  normalizeMediaCacheSize,
+  normalizeProjectCategories,
+  normalizeProjectToolbar,
+  normalizeVideoPreviewQuality,
+} from './features/app/app-config';
 type WorkspaceToolKind = 'version' | 'team';
 type WorkspaceToolTab = { ownerPageId: string; projectId: string; projectPath: string; kind: WorkspaceToolKind; label: string; busy: boolean };
-const localDateKey = () => {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-};
-const normalizeHomeOrder = (value: unknown): HomeCardId[] => {
-  const valid = new Set<HomeCardId>(DEFAULT_HOME_ORDER);
-  const migrated = Array.isArray(value) ? value : [];
-  const ordered = migrated.filter((card): card is HomeCardId => valid.has(card as HomeCardId));
-  return [...new Set([...ordered, ...DEFAULT_HOME_ORDER])];
-};
-const normalizeProjectToolbar = (value: unknown): AppConfig['projectToolbar'] => {
-  const source = value && typeof value === 'object' ? value as Partial<AppConfig['projectToolbar']> : {};
-  const valid = new Set<ProjectToolbarActionId>(PROJECT_TOOLBAR_ACTION_IDS);
-  const migrateToolbarId = (id: unknown): ProjectToolbarActionId | undefined => {
-    if (valid.has(id as ProjectToolbarActionId)) return id as ProjectToolbarActionId;
-    if (id === 'storyboard' || id === 'video-transcode' || id === 'video-split') return 'video-tools';
-    if (id === 'png-converter' || id === 'screenshot-main-image') return 'image-tools';
-    return undefined;
-  };
-  const order = Array.isArray(source.order) ? source.order.map(migrateToolbarId).filter((id): id is ProjectToolbarActionId => Boolean(id)) : [];
-  const hidden = Array.isArray(source.hidden) ? source.hidden.filter((id): id is ProjectToolbarActionId => valid.has(id as ProjectToolbarActionId)) : [];
-  return {
-    order: [...new Set([...order, ...PROJECT_TOOLBAR_ACTION_IDS])],
-    hidden: [...new Set(hidden)],
-    onlyShowAvailable: source.onlyShowAvailable === true,
-  };
-};
-const IMAGE_SELECTION_FOLDER_NAME = '', VIDEO_SELECTION_FOLDER_NAME = ''; // legacy config fields only
-const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.max(0, number) : fallback;
-};
-const normalizeVideoPreviewQuality = (value: unknown): AppConfig['smartImport']['videoPreviewQuality'] => value === 'high' ? value : 'medium';
-
-const clampNumber = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, value));
-const readStoredNumber = (key: string, fallback: number) => {
-  try {
-    const value = Number(window.localStorage.getItem(key));
-    return Number.isFinite(value) && value > 0 ? value : fallback;
-  } catch {
-    return fallback;
-  }
-};
-
-const ColumnResizeHandle = ({ onDrag, label }: { onDrag: (deltaX: number) => void; label: string }) => {
-  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    let previousX = event.clientX;
-    const previousCursor = document.body.style.cursor;
-    const previousUserSelect = document.body.style.userSelect;
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-    const move = (moveEvent: PointerEvent) => {
-      const deltaX = moveEvent.clientX - previousX;
-      previousX = moveEvent.clientX;
-      onDrag(deltaX);
-    };
-    const finish = () => {
-      document.body.style.cursor = previousCursor;
-      document.body.style.userSelect = previousUserSelect;
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', finish);
-      window.removeEventListener('pointercancel', finish);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', finish);
-    window.addEventListener('pointercancel', finish);
-  };
-  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
-    event.preventDefault();
-    onDrag(event.key === 'ArrowLeft' ? -16 : 16);
-  };
-  return <div role="separator" aria-orientation="vertical" aria-label={label} tabIndex={0} onPointerDown={onPointerDown} onKeyDown={onKeyDown} className="column-resize-handle"/>;
-};
-const isMac = window.navigator.userAgent.includes('Mac');
-
-const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
-  theme: 'system',
-  telemetry: {
-    enabled: false,
-    crashReports: false,
-  },
-  workspacePath: '',
-  workspacePaths: [],
-  autoCleanupDeletedProjectData: true,
-  createPlanningFolder: true,
-  customProjectCategories: [],
-  projectCategoryOrder: [...BUILT_IN_PROJECT_STATUSES],
-  progressNamePresets: [...DEFAULT_PROGRESS_NAME_PRESETS],
-  defaultFolderSort: 'date',
-  itemOpenMode: 'single',
-  folderAlphabetFilterEnabled: true,
-  favoriteDisplayMode: 'binary',
-  usagePreferencesVersion: 0,
-  projectToolbar: normalizeProjectToolbar(undefined),
-  homeOrder: DEFAULT_HOME_ORDER,
-  birthdayEnabled: true,
-  pinInspirationLibrary: false,
-  componentSettings: {
-    'team-retouch': { useGpu: true, oversizeCropMode: 'face-centered' },
-    'video-playback-mpv': { arrowKeyAction: 'seek' }
-  },
-  mediaCache: {
-    maxSizeGB: 50,
-    directory: '',
-    autoCleanup30Days: false
-  },
-  backup: {
-    enabled: false,
-    targetType: 'local',
-    targetPath: '',
-    mode: 'history',
-    automaticDaily: true,
-    afterImport: true,
-    retention: { daily: 7, weekly: 4, monthly: 12 },
-    nas: { credentialRef: '', limitEnabled: false, bandwidthLimitMBps: 20, limitStart: '09:00', limitEnd: '18:00' }
-  },
-  archive: { enabled: false, targetPath: '' },
-  importDefaults: { deleteSourceAfterImport: true, generateJpgFromRaw: true, splitVideosOnImport: false, transcodeVideosOnImport: false },
-  videoTools: { transcode: { container: 'mp4', videoMode: 'h264', quality: 'balanced', resolution: 'original', frameRate: 'original', audioMode: 'aac' } },
-  smartImport: {
-    autoStart: false,
-    autoMoveProjectAfterSdImport: true,
-    sdPath: '',
-    sdPaths: [],
-    sdDriveTypes: {}, sdDeviceIds: {},
-    destPath: `${userPath}/Desktop`,
-    backupEnabled: false,
-    generateVideoPreview: false,
-    videoPreviewQuality: 'medium',
-    splitLargeFiles: false,
-    dateFilter: 'all',
-    backupPath: isMac ? `${userPath}/Pictures/Backup` : "D:/Backup"
-  },
-  brollImport: { splitVideosOnImport: false, transcodeVideosOnImport: false },
-  inspirationLibrary: {
-    rootPath: ''
-  },
-  personDetection: {
-    useGpu: true,
-    oversizeCropMode: 'face-centered'
-  },
-  smartMatch: {
-    imageDestFolderName: '',
-    videoDestFolderName: '',
-    imageSourceFolderName: 'raw',
-    videoSourceFolderName: 'mov'
-  },
-  research: {
-    sensitivity: 'standard',
-    minDuration: 0.2
-  }
-});
-
 interface PythonEvent {
   type: 'log' | 'error' | 'progress' | 'status' | 'ask_user' | 'success' | 'warning' | 'preview';
   message: string;
@@ -217,16 +61,13 @@ interface PythonEvent {
   scriptName?: string;
   requestId?: string;
 }
-
 // --- 主组件 ---
-
 const App: React.FC = () => {
   const appDialog = useAppDialog();
   const [activeTab, setActiveTab] = useState<ToolType>('home');
   const [settingsTabOpen, setSettingsTabOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
   const [showWorkspaceSetup, setShowWorkspaceSetup] = useState(false);
-
   const [config, setConfig] = useState<AppConfig | null>(null); const [startupSdAutoStart, setStartupSdAutoStart] = useState(false);
   const [configLoaded, setConfigLoaded] = useState(false);
   const [privacyStateLoaded, setPrivacyStateLoaded] = useState(false);
@@ -498,6 +339,7 @@ const App: React.FC = () => {
             const configuredImageSource = fileConfig.smartMatch?.imageSourceFolderName;
             const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;
             const savedSdPaths = (Array.isArray(fileConfig.smartImport?.sdPaths) && fileConfig.smartImport.sdPaths.length ? fileConfig.smartImport.sdPaths : fileConfig.smartImport?.sdPath ? [fileConfig.smartImport.sdPath] : []).map((drive: string) => isMac ? drive : drive.replace(/\\/g, '/').replace(/\/DCIM\/?$/i, '/'));
+            const savedSdDevices = normalizeSavedSdDeviceRecords(fileConfig.smartImport?.sdDevices, savedSdPaths, fileConfig.smartImport?.sdDeviceIds, fileConfig.smartImport?.sdDriveTypes);
             const componentSettings: AppConfig['componentSettings'] = { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings, 'video-playback-mpv': advancedVideoSettings };
             delete componentSettings['research-tools'];
             delete componentSettings['office-media-extractor'];
@@ -509,7 +351,7 @@ const App: React.FC = () => {
             delete legacyConfig.fileImport;
             const customProjectCategories = normalizeProjectCategories(fileConfig.customProjectCategories);
             const configuredWorkspacePaths = normalizeWorkspacePaths(fileConfig.workspacePath, fileConfig.workspacePaths);
-            let normalizedConfig = { ...legacyConfig, theme: fileConfig.theme ?? 'system', telemetry: { enabled: fileConfig.telemetry?.enabled === true, crashReports: fileConfig.telemetry?.crashReports === true }, workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, customProjectCategories, projectCategoryOrder: normalizeProjectCategoryOrder(fileConfig.projectCategoryOrder, customProjectCategories), defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', itemOpenMode: fileConfig.itemOpenMode === 'double' || legacyFolderOpenMode === 'double' ? 'double' : 'single', favoriteDisplayMode: fileConfig.favoriteDisplayMode === 'stars' ? 'stars' : 'binary', usagePreferencesVersion: Number(fileConfig.usagePreferencesVersion) || 0, projectToolbar: normalizeProjectToolbar(fileConfig.projectToolbar), homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, pinInspirationLibrary: fileConfig.pinInspirationLibrary === true, componentSettings, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, backup: { enabled: fileConfig.backup?.enabled === true, targetType: fileConfig.backup?.targetType === 'nas' || (fileConfig.backup?.targetType === undefined && fileConfig.backup?.targetPath?.startsWith('\\\\')) ? 'nas' : 'local', targetPath: fileConfig.backup?.targetPath ?? '', mode: fileConfig.backup?.mode === 'latest' ? 'latest' : 'history', automaticDaily: fileConfig.backup?.automaticDaily ?? true, afterImport: fileConfig.backup?.afterImport ?? true, retention: { daily: Math.max(1, Number(fileConfig.backup?.retention?.daily) || 7), weekly: Math.max(0, Number(fileConfig.backup?.retention?.weekly) || 4), monthly: Math.max(0, Number(fileConfig.backup?.retention?.monthly) || 12) }, nas: { credentialRef: fileConfig.backup?.nas?.credentialRef ?? '', limitEnabled: fileConfig.backup?.nas?.limitEnabled === true, bandwidthLimitMBps: Math.max(1, Number(fileConfig.backup?.nas?.bandwidthLimitMBps) || 20), limitStart: fileConfig.backup?.nas?.limitStart || '09:00', limitEnd: fileConfig.backup?.nas?.limitEnd || '18:00' } }, archive: { enabled: fileConfig.archive?.enabled === true, targetPath: fileConfig.archive?.targetPath ?? '' }, importDefaults: { deleteSourceAfterImport: fileConfig.importDefaults?.deleteSourceAfterImport ?? !(legacyFileImport?.preserveOriginal ?? false), generateJpgFromRaw: fileConfig.importDefaults?.generateJpgFromRaw ?? true, splitVideosOnImport: fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.smartImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, videoTools: { transcode: { container: fileConfig.videoTools?.transcode?.container ?? 'mp4', videoMode: fileConfig.videoTools?.transcode?.videoMode ?? 'h264', quality: fileConfig.videoTools?.transcode?.quality ?? 'balanced', resolution: fileConfig.videoTools?.transcode?.resolution ?? 'original', frameRate: fileConfig.videoTools?.transcode?.frameRate ?? 'original', audioMode: fileConfig.videoTools?.transcode?.audioMode ?? 'aac' } }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, sdDeviceIds: fileConfig.smartImport?.sdDeviceIds ?? {}, backupEnabled: false, generateVideoPreview: false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: false, dateFilter: fileConfig.smartImport?.dateFilter === 'today' || fileConfig.smartImport?.dateFilter === 'today_yesterday' ? fileConfig.smartImport.dateFilter : 'all' }, brollImport: { splitVideosOnImport: fileConfig.brollImport?.splitVideosOnImport ?? fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.brollImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.brollImport?.transcodeVideosOnImport ?? fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, inspirationLibrary, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: configuredImageSource === undefined || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: configuredVideoSource === undefined || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
+            let normalizedConfig = { ...legacyConfig, theme: fileConfig.theme ?? 'system', telemetry: { enabled: fileConfig.telemetry?.enabled === true, crashReports: fileConfig.telemetry?.crashReports === true }, workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, customProjectCategories, projectCategoryOrder: normalizeProjectCategoryOrder(fileConfig.projectCategoryOrder, customProjectCategories), defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', itemOpenMode: fileConfig.itemOpenMode === 'double' || legacyFolderOpenMode === 'double' ? 'double' : 'single', favoriteDisplayMode: fileConfig.favoriteDisplayMode === 'stars' ? 'stars' : 'binary', usagePreferencesVersion: Number(fileConfig.usagePreferencesVersion) || 0, projectToolbar: normalizeProjectToolbar(fileConfig.projectToolbar), homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, pinInspirationLibrary: fileConfig.pinInspirationLibrary === true, componentSettings, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, backup: { enabled: fileConfig.backup?.enabled === true, targetType: fileConfig.backup?.targetType === 'nas' || (fileConfig.backup?.targetType === undefined && fileConfig.backup?.targetPath?.startsWith('\\\\')) ? 'nas' : 'local', targetPath: fileConfig.backup?.targetPath ?? '', mode: fileConfig.backup?.mode === 'latest' ? 'latest' : 'history', automaticDaily: fileConfig.backup?.automaticDaily ?? true, afterImport: fileConfig.backup?.afterImport ?? true, retention: { daily: Math.max(1, Number(fileConfig.backup?.retention?.daily) || 7), weekly: Math.max(0, Number(fileConfig.backup?.retention?.weekly) || 4), monthly: Math.max(0, Number(fileConfig.backup?.retention?.monthly) || 12) }, nas: { credentialRef: fileConfig.backup?.nas?.credentialRef ?? '', limitEnabled: fileConfig.backup?.nas?.limitEnabled === true, bandwidthLimitMBps: Math.max(1, Number(fileConfig.backup?.nas?.bandwidthLimitMBps) || 20), limitStart: fileConfig.backup?.nas?.limitStart || '09:00', limitEnd: fileConfig.backup?.nas?.limitEnd || '18:00' } }, archive: { enabled: fileConfig.archive?.enabled === true, targetPath: fileConfig.archive?.targetPath ?? '' }, importDefaults: { deleteSourceAfterImport: fileConfig.importDefaults?.deleteSourceAfterImport ?? !(legacyFileImport?.preserveOriginal ?? false), generateJpgFromRaw: fileConfig.importDefaults?.generateJpgFromRaw ?? true, splitVideosOnImport: fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.smartImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, videoTools: { transcode: { container: fileConfig.videoTools?.transcode?.container ?? 'mp4', videoMode: fileConfig.videoTools?.transcode?.videoMode ?? 'h264', quality: fileConfig.videoTools?.transcode?.quality ?? 'balanced', resolution: fileConfig.videoTools?.transcode?.resolution ?? 'original', frameRate: fileConfig.videoTools?.transcode?.frameRate ?? 'original', audioMode: fileConfig.videoTools?.transcode?.audioMode ?? 'aac' } }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, sdDeviceIds: fileConfig.smartImport?.sdDeviceIds ?? {}, sdDevices: savedSdDevices, backupEnabled: false, generateVideoPreview: false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: false, dateFilter: fileConfig.smartImport?.dateFilter === 'today' || fileConfig.smartImport?.dateFilter === 'today_yesterday' ? fileConfig.smartImport.dateFilter : 'all' }, brollImport: { splitVideosOnImport: fileConfig.brollImport?.splitVideosOnImport ?? fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.brollImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.brollImport?.transcodeVideosOnImport ?? fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, inspirationLibrary, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: configuredImageSource === undefined || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: configuredVideoSource === undefined || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
             normalizedConfig.folderAlphabetFilterEnabled = fileConfig.folderAlphabetFilterEnabled !== false;
             normalizedConfig.progressNamePresets = normalizeProgressNamePresets(fileConfig.progressNamePresets);
             normalizedConfig.smartImport.autoMoveProjectAfterSdImport = fileConfig.smartImport?.autoMoveProjectAfterSdImport ?? true;
@@ -526,7 +368,7 @@ const App: React.FC = () => {
               setShowWorkspaceSetup(true);
             }
             setStartupSdAutoStart(normalizedConfig.smartImport.autoStart === true); setConfig(normalizedConfig);
-            if ((JSON.stringify(fileConfig.workspacePaths) !== JSON.stringify(normalizedConfig.workspacePaths) || fileConfig.smartImport?.autoMoveProjectAfterSdImport === undefined || fileConfig.folderAlphabetFilterEnabled === undefined || JSON.stringify(fileConfig.progressNamePresets) !== JSON.stringify(normalizedConfig.progressNamePresets)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
+            if ((JSON.stringify(fileConfig.workspacePaths) !== JSON.stringify(normalizedConfig.workspacePaths) || fileConfig.smartImport?.autoMoveProjectAfterSdImport === undefined || JSON.stringify(fileConfig.smartImport?.sdDevices) !== JSON.stringify(savedSdDevices) || fileConfig.folderAlphabetFilterEnabled === undefined || JSON.stringify(fileConfig.progressNamePresets) !== JSON.stringify(normalizedConfig.progressNamePresets)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.createPlanningFolder === undefined || JSON.stringify(fileConfig.customProjectCategories) !== JSON.stringify(normalizedConfig.customProjectCategories) || JSON.stringify(fileConfig.projectCategoryOrder) !== JSON.stringify(normalizedConfig.projectCategoryOrder) || fileConfig.defaultFolderSort === undefined || fileConfig.itemOpenMode !== normalizedConfig.itemOpenMode || fileConfig.favoriteDisplayMode !== normalizedConfig.favoriteDisplayMode || fileConfig.usagePreferencesVersion !== normalizedConfig.usagePreferencesVersion || legacyFolderOpenMode !== undefined || fileConfig.birthdayEnabled === undefined || fileConfig.pinInspirationLibrary === undefined || !fileConfig.backup || fileConfig.backup?.targetType === undefined || !fileConfig.backup?.nas || !fileConfig.archive || !fileConfig.importDefaults || fileConfig.importDefaults?.splitVideosOnImport === undefined || fileConfig.importDefaults?.transcodeVideosOnImport === undefined || !fileConfig.videoTools?.transcode || legacyFileImport !== undefined || legacyBrollClearSource !== undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || !fileConfig.smartImport?.sdDeviceIds || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.videoPreviewQuality !== normalizedConfig.smartImport.videoPreviewQuality || fileConfig.smartImport?.splitLargeFiles === undefined || fileConfig.smartImport?.dateFilter !== normalizedConfig.smartImport.dateFilter || !fileConfig.brollImport || fileConfig.brollImport?.splitVideosOnImport === undefined || fileConfig.brollImport?.transcodeVideosOnImport === undefined || !fileConfig.inspirationLibrary || JSON.stringify(fileConfig.research) !== JSON.stringify(researchSettings) || fileConfig.personDetection?.useGpu === undefined || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || JSON.stringify(fileConfig.projectToolbar) !== JSON.stringify(normalizedConfig.projectToolbar) || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             console.log('📋 Configuration loaded from file');
           } else {
@@ -893,7 +735,7 @@ const App: React.FC = () => {
   const handleProjectAction = (action: 'import' | 'broll' | 'match', project: WorkspaceProject) => {
     openProjectTab(project, action);
   };
-  const startupSdImportRequest = useStartupSdAutoImport({ enabledAtLaunch: startupSdAutoStart, ready: Boolean(configLoaded && privacyStateLoaded && !privacyConsentRequired && config && !showWorkspaceSetup && config.usagePreferencesVersion >= USAGE_PREFERENCES_VERSION), onStart: showHomeTab });
+  const startupSdImportRequest = useStartupSdAutoImport({ enabledAtLaunch: startupSdAutoStart, enabledNow: config?.smartImport.autoStart === true, ready: Boolean(configLoaded && privacyStateLoaded && !privacyConsentRequired && config && !showWorkspaceSetup && config.usagePreferencesVersion >= USAGE_PREFERENCES_VERSION), onStart: showHomeTab });
   if (!configLoaded || !config || !privacyStateLoaded) {
     return (
       <StartupWindowFrame>

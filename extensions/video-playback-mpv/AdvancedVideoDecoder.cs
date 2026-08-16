@@ -75,6 +75,8 @@ namespace PhotoFlow.AdvancedVideoDecoder
 
     internal sealed class LibMpv : IDisposable
     {
+        private const int MpvErrorOptionNotFound = -5;
+
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate IntPtr MpvCreate();
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int MpvInitialize(IntPtr context);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)] private delegate int MpvSetOptionString(IntPtr context, [MarshalAs(UnmanagedType.LPStr)] string name, [MarshalAs(UnmanagedType.LPStr)] string value);
@@ -161,7 +163,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
             SetOption("demuxer-max-bytes", "256MiB");
             SetOption("keep-open", "yes");
             SetOption("idle", "yes");
-            SetOption("osc", "no");
+            SetOptionalOption("osc", "no");
             SetOption("input-default-bindings", "no");
             SetOption("input-cursor", "no");
             SetOption("pause", "yes");
@@ -189,6 +191,12 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private void SetOption(string name, string value)
         {
             Check(setOptionString(context, name, value), "设置 " + name);
+        }
+
+        private void SetOptionalOption(string name, string value)
+        {
+            int result = setOptionString(context, name, value);
+            if (result < 0 && result != MpvErrorOptionNotFound) Check(result, "设置 " + name);
         }
 
         internal void SetProperty(string name, string value)

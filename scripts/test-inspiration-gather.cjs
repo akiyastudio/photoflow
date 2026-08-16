@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { registerWorkspaceIpc } = require('../electron/modules/workspace-ipc.cjs');
 const { createMediaAccessService } = require('../electron/services/media-access-service.cjs');
+const { createProjectVirtualPathService } = require('../electron/services/project-virtual-path-service.cjs');
 const { copyFileAtomic, uniqueDestination } = require('../electron/services/file-transfer-service.cjs');
 
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-inspiration-gather-'));
@@ -28,6 +29,20 @@ const watchedRoots = [];
 const releasedRoots = [];
 const grantedRoots = [];
 const shortcutDescriptions = new Map();
+const shortcutDescriptionsByTarget = new Map();
+const shortcutShell = {
+  writeShortcutLink: (shortcutPath, options) => {
+    fs.writeFileSync(shortcutPath, options.target);
+    shortcutDescriptions.set(path.resolve(shortcutPath), options.description || '');
+    shortcutDescriptionsByTarget.set(path.resolve(options.target), options.description || '');
+    return true;
+  },
+  readShortcutLink: shortcutPath => {
+    const target = fs.readFileSync(shortcutPath, 'utf8');
+    return { target, description: shortcutDescriptions.get(path.resolve(shortcutPath)) || shortcutDescriptionsByTarget.get(path.resolve(target)) || '' };
+  },
+};
+const projectVirtualPaths = createProjectVirtualPathService({ shell: shortcutShell, registryPath: path.join(temporaryRoot, 'managed-external-links.json') });
 const mediaAccessService = createMediaAccessService({ getWorkspaceRoots: () => [targetRoot] });
 const handlerFs = {
   ...fs,
@@ -86,10 +101,8 @@ registerWorkspaceIpc({
   },
   thumbnailService: { indexDirectory: async () => false, scanProject: async () => undefined },
   scheduleMediaTrackingScan: () => undefined,
-  shell: {
-    writeShortcutLink: (shortcutPath, options) => { fs.writeFileSync(shortcutPath, options.target); shortcutDescriptions.set(path.resolve(shortcutPath), options.description || ''); return true; },
-    readShortcutLink: shortcutPath => ({ target: fs.readFileSync(shortcutPath, 'utf8'), description: shortcutDescriptions.get(path.resolve(shortcutPath)) || '' }),
-  },
+  shell: shortcutShell,
+  projectVirtualPaths,
   pushUndoOperation: async operation => undoOperations.push(operation),
   mainWindow: { webContents: { send: () => undefined } },
   writeLog: () => undefined,
@@ -112,8 +125,7 @@ registerWorkspaceIpc({
     assert(!browseResult.entries.some(entry => entry.name === '.photoflow-workspace-id'), 'the inspiration library must hide its workspace identity marker');
     const managedExternalTarget = path.join(sourceRoot, '参考目录');
     const managedExternalShortcut = path.join(targetRoot, '外部素材.lnk');
-    fs.writeFileSync(managedExternalShortcut, managedExternalTarget);
-    shortcutDescriptions.set(path.resolve(managedExternalShortcut), 'PhotoFlow 外链文件夹：参考目录');
+    projectVirtualPaths.createManagedExternalLink(managedExternalShortcut, { target: managedExternalTarget, kind: 'folder', displayName: '参考目录' });
     const projectRootBrowse = await browseFiles({}, temporaryRoot, '策划中', '项目');
     const managedExternalEntry = projectRootBrowse.entries.find(entry => entry.name === '外部素材.lnk');
     assert.strictEqual(managedExternalEntry?.externalLink, true, 'managed folder links must be identified as external links in the project root');

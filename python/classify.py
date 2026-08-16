@@ -84,10 +84,45 @@ def ensure_import_disk_space(destination, required_bytes, purpose='导入'):
         raise OSError(f'{purpose}磁盘空间不足，还需要约 {missing / (1024 ** 3):.2f} GB 可用空间。')
 
 
-def promote_staged_file(source, destination, on_progress=None, allow_atomic_move=True):
-    """Move a staged file without rewriting it when both paths share a volume."""
+def _move_file_no_replace(source, destination):
+    """Commit one file without ever replacing an independently created target."""
+    if os.name == 'nt':
+        moved = ctypes.windll.kernel32.MoveFileExW(
+            ctypes.c_wchar_p(os.path.abspath(source)),
+            ctypes.c_wchar_p(os.path.abspath(destination)),
+            0,
+        )
+        if not moved:
+            raise ctypes.WinError()
+        return
+    os.link(source, destination)
+    os.remove(source)
+
+
+def import_part_path(destination, staged_path):
+    """Return the deterministic, session-owned temporary path for a promotion."""
+    token = hashlib.sha256(os.path.normcase(os.path.abspath(staged_path)).encode('utf-8', errors='surrogatepass')).hexdigest()[:12]
+    return f'{os.path.abspath(destination)}.photoflow-part-{token}'
+
+
+def _files_have_same_import_content(source, candidate):
+    try:
+        source_size = os.path.getsize(source)
+        if os.path.getsize(candidate) != source_size:
+            return False
+        return _source_sample_fingerprint(source, source_size) == _source_sample_fingerprint(candidate, source_size)
+    except OSError:
+        return False
+
+
+def promote_staged_file(source, destination, on_progress=None, allow_atomic_move=True, temporary_path=None):
+    """Safely promote a staged file without exposing partial or overwritten targets."""
     if os.path.exists(destination):
         raise FileExistsError(f'目标中已出现同名文件：{os.path.basename(destination)}')
+    expected_temporary = import_part_path(destination, source)
+    temporary = os.path.abspath(temporary_path or expected_temporary)
+    if temporary != expected_temporary:
+        raise ValueError('导入临时文件与当前目标不匹配')
     if allow_atomic_move:
         try:
             same_volume = os.stat(source).st_dev == os.stat(os.path.dirname(destination)).st_dev
@@ -95,14 +130,30 @@ def promote_staged_file(source, destination, on_progress=None, allow_atomic_move
             same_volume = False
         if same_volume:
             try:
-                os.replace(source, destination)
+                _move_file_no_replace(source, destination)
+                if os.path.isfile(temporary):
+                    try:
+                        os.remove(temporary)
+                    except OSError:
+                        pass
                 return True
             except OSError:
                 # Some filesystems or security products can reject metadata-only
                 # moves. Retain the verified copy path as a safe fallback.
+                if os.path.exists(destination):
+                    raise FileExistsError(f'目标中已出现同名文件：{os.path.basename(destination)}')
                 if not os.path.exists(source):
                     raise
-    safe_chunk_copy(source, destination, on_progress=on_progress)
+
+    if os.path.exists(temporary) and not _files_have_same_import_content(source, temporary):
+        os.remove(temporary)
+    if not os.path.isfile(temporary):
+        safe_chunk_copy(source, temporary, on_progress=on_progress)
+    if not _files_have_same_import_content(source, temporary):
+        raise IOError(f'整理校验失败：{os.path.basename(source)}')
+    if os.path.exists(destination):
+        raise FileExistsError(f'目标中已出现同名文件：{os.path.basename(destination)}')
+    _move_file_no_replace(temporary, destination)
     return False
 
 VALID_MEDIA_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.avif', '.heic', '.heif', '.hif', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.mp4', '.mov', '.avi', '.crm', '.rwl', '.raf', '.3fr', '.fff')
@@ -461,6 +512,19 @@ def _entry_matches_current_source(entry):
     return _entry_current_source_status(entry) == 'match'
 
 
+def _entry_matches_imported_content(entry, file_path, expected_size):
+    """Verify that a recovered destination contains this entry's staged media."""
+    stored_fingerprint = str(entry.get('sourceFingerprint') or '')
+    if not stored_fingerprint:
+        return False
+    try:
+        if not os.path.isfile(file_path) or os.path.getsize(file_path) != expected_size:
+            return False
+        return _source_sample_fingerprint(file_path, expected_size) == stored_fingerprint
+    except OSError:
+        return False
+
+
 def _validate_staged_source_identity(staged_import):
     """Return whether the original source is still present and unchanged."""
     base_source = str(staged_import.get('baseSource') or '')
@@ -604,7 +668,7 @@ def load_staged_import(dest_path, import_session=''):
             committed_inside_destination = False
             outputs_inside_destination = False
         staged_valid = inside_staging and os.path.isfile(staged_path) and os.path.getsize(staged_path) == expected_size
-        committed_valid = committed_inside_destination and committed_path and os.path.isfile(committed_path) and os.path.getsize(committed_path) == expected_size
+        committed_valid = committed_inside_destination and committed_path and _entry_matches_imported_content(entry, committed_path, expected_size)
         outputs_valid = outputs_inside_destination and output_paths and all(os.path.isfile(value) and os.path.getsize(value) > 0 for value in output_paths)
         if expected_size < 0 or not (staged_valid or committed_valid or outputs_valid):
             return None
@@ -613,6 +677,10 @@ def load_staged_import(dest_path, import_session=''):
         normalized_entry.update({'source': source_path, 'staged': staged_path, 'size': expected_size, 'localPath': local_path})
         if committed_valid and not normalized_entry.get('committedDestination'):
             normalized_entry['committedDestination'] = committed_path
+        elif not committed_valid:
+            normalized_entry.pop('committedDestination', None)
+        if not outputs_valid:
+            normalized_entry.pop('outputPaths', None)
         originals.append(source_path)
         local_files.append(local_path)
         normalized_entries.append(normalized_entry)
@@ -1615,7 +1683,7 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
             if committed_outputs:
                 item['importedPaths'] = committed_outputs
                 continue
-            if committed_destination and os.path.isfile(committed_destination):
+            if committed_destination and _entry_matches_imported_content(entry, committed_destination, int(entry.get('size') or 0)):
                 item['importedPaths'] = [committed_destination]
                 continue
 
@@ -1623,6 +1691,7 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
             destination_dir = classified_destination_directory(target_folder, original_name)
             os.makedirs(destination_dir, exist_ok=True)
             pending_destination = os.path.abspath(str(entry.get('pendingDestination') or '')) if entry.get('pendingDestination') else ''
+            previous_temporary = os.path.abspath(str(entry.get('pendingTemporary') or '')) if entry.get('pendingTemporary') else ''
             pending_key = os.path.normcase(pending_destination) if pending_destination else ''
             if pending_destination \
                     and os.path.dirname(pending_destination) == os.path.abspath(destination_dir) \
@@ -1632,11 +1701,20 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                 reserved_destinations.add(pending_key)
             else:
                 destination = reserve_unique_destination(destination_dir, original_name, reserved_destinations)
+            temporary = import_part_path(destination, entry['staged'])
+            expected_previous_temporary = import_part_path(pending_destination, entry['staged']) if pending_destination else ''
+            if previous_temporary \
+                    and previous_temporary == expected_previous_temporary \
+                    and previous_temporary != temporary \
+                    and os.path.isfile(previous_temporary):
+                os.remove(previous_temporary)
             patch_staged_entry_fields(entry, {
                 'pendingDestination': destination,
+                'pendingTemporary': temporary,
                 'committedDestination': None,
             })
             item['destination'] = destination
+            item['temporary'] = temporary
             has_planned_moves = True
 
         if has_planned_moves:
@@ -1650,10 +1728,11 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
             imported_paths = item.get('importedPaths')
             if imported_paths is None:
                 destination = item['destination']
-                promote_staged_file(item['sourcePath'], destination)
+                promote_staged_file(item['sourcePath'], destination, temporary_path=item['temporary'])
                 patch_staged_entry_fields(entry, {
                     'committedDestination': destination,
                     'pendingDestination': None,
+                    'pendingTemporary': None,
                     'localPath': destination,
                 })
                 imported_paths = [destination]
@@ -1889,19 +1968,12 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                     },
                 )
 
-            try:
-                moved_from_staging = promote_staged_file(
-                    source,
-                    destination,
-                    on_progress=publish_broll_progress,
-                    allow_atomic_move=True,
-                )
-            except Exception:
-                try:
-                    os.remove(destination)
-                except OSError:
-                    pass
-                raise
+            moved_from_staging = promote_staged_file(
+                source,
+                destination,
+                on_progress=publish_broll_progress,
+                allow_atomic_move=True,
+            )
             if os.path.getsize(destination) != source_size:
                 try:
                     os.remove(destination)

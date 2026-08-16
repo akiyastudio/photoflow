@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { PLUGIN_API_VERSION, PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
+const { listIntegrityFiles, readPinnedComponentIntegrity, validateComponentIntegrity, validateComponentIntegrityAsync } = require('./component-integrity.cjs');
 
 const COMPONENT_API_VERSION = PLUGIN_API_VERSION;
 const COMPONENT_DEFINITIONS = Object.freeze(Object.fromEntries(Object.entries(PLUGIN_DEFINITIONS).map(([id, definition]) => [id, {
@@ -31,7 +32,7 @@ const directorySize = async root => {
   return size;
 };
 
-const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, platform = process.platform, arch = process.arch }) => {
+const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, platform = process.platform, arch = process.arch, integrityManifests = null }) => {
   if (isPackaged && !userComponentRoot) throw new Error('打包版本必须提供用户组件目录');
   const installRoot = isPackaged ? path.resolve(userComponentRoot) : path.join(projectRoot, 'components');
   const roots = isPackaged
@@ -40,8 +41,63 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
       { source: 'development', path: path.join(projectRoot, 'extensions') },
       { source: 'development', path: installRoot },
     ];
+  const integrityCache = new Map();
+  const integrityPending = new Map();
+  const expectedIntegrity = new Map();
+  const getExpectedIntegrity = definition => {
+    if (!definition.integrityManifest) return null;
+    if (expectedIntegrity.has(definition.id)) return expectedIntegrity.get(definition.id);
+    const manifest = integrityManifests?.[definition.id]
+      || readPinnedComponentIntegrity(projectRoot, definition.integrityManifest);
+    if (manifest.componentId !== definition.id || String(manifest.version || '') !== String(definition.version)) {
+      throw new Error(`组件可信完整性清单版本不匹配：${definition.id}`);
+    }
+    expectedIntegrity.set(definition.id, manifest);
+    return manifest;
+  };
+  const integrityMetadataToken = (componentRoot, manifest) => [
+    ...listIntegrityFiles(componentRoot).map(file => {
+      const stat = fs.statSync(path.resolve(componentRoot, file), { throwIfNoEntry: false });
+      return `${file}:${stat?.size ?? -1}:${stat?.mtimeMs ?? -1}`;
+    }),
+    (() => {
+      const stat = fs.statSync(path.join(componentRoot, 'component-integrity.json'), { throwIfNoEntry: false });
+      return `component-integrity.json:${stat?.size ?? -1}:${stat?.mtimeMs ?? -1}`;
+    })(),
+  ].join('|');
+  const verifyDirectory = (id, componentRoot, force = false) => {
+    const definition = COMPONENT_DEFINITIONS[id];
+    if (!definition) throw new Error(`未知组件：${id}`);
+    const expected = getExpectedIntegrity(definition);
+    if (!expected) return true;
+    const token = integrityMetadataToken(componentRoot, expected);
+    const cacheKey = `${id}:${path.resolve(componentRoot)}`;
+    if (!force && integrityCache.get(cacheKey) === token) return true;
+    validateComponentIntegrity(componentRoot, expected);
+    integrityCache.set(cacheKey, token);
+    return true;
+  };
+  const verifyDirectoryAsync = async (id, componentRoot, force = false) => {
+    const definition = COMPONENT_DEFINITIONS[id];
+    if (!definition) throw new Error(`未知组件：${id}`);
+    const expected = getExpectedIntegrity(definition);
+    if (!expected) return true;
+    const token = integrityMetadataToken(componentRoot, expected);
+    const cacheKey = `${id}:${path.resolve(componentRoot)}`;
+    if (!force && integrityCache.get(cacheKey) === token) return true;
+    const pending = integrityPending.get(cacheKey);
+    if (pending?.token === token) return pending.promise;
+    const promise = validateComponentIntegrityAsync(componentRoot, expected).then(() => {
+      integrityCache.set(cacheKey, token);
+      return true;
+    }).finally(() => {
+      if (integrityPending.get(cacheKey)?.promise === promise) integrityPending.delete(cacheKey);
+    });
+    integrityPending.set(cacheKey, { token, promise });
+    return promise;
+  };
 
-  const inspectAt = (definition, root) => {
+  const inspectAt = (definition, root, { verifyIntegrity = true } = {}) => {
     const containerRoot = path.join(root.path, definition.id);
     const nestedRuntimeRoot = path.join(containerRoot, 'runtime');
     const componentRoot = fs.existsSync(path.join(nestedRuntimeRoot, 'component.json')) ? nestedRuntimeRoot : containerRoot;
@@ -66,6 +122,7 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
         if (!isInside(componentRoot, requiredFile)) throw new Error(`组件必需文件超出组件目录：${relativeFile}`);
         if (!fs.existsSync(requiredFile) || !fs.statSync(requiredFile).isFile()) throw new Error(`组件必需文件不存在：${relativeFile}`);
       }
+      if (verifyIntegrity && root.source === 'user' && definition.integrityManifest) verifyDirectory(definition.id, componentRoot);
       return {
         ...definition,
         installed: true,
@@ -92,12 +149,12 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     }
   };
 
-  const inspect = id => {
+  const inspect = (id, options) => {
     const definition = COMPONENT_DEFINITIONS[id];
     if (!definition) return null;
     let incompatible = null;
     for (const root of roots) {
-      const result = inspectAt(definition, root);
+      const result = inspectAt(definition, root, options);
       if (!result) continue;
       if (result.installed) return result;
       incompatible ||= result;
@@ -114,8 +171,14 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
   };
 
   const list = () => Object.keys(COMPONENT_DEFINITIONS).map(inspect);
-  const resolve = id => {
-    const component = inspect(id);
+  const resolve = (id, { verifyIntegrity = false } = {}) => {
+    const component = inspect(id, { verifyIntegrity: false });
+    if (component?.installed && verifyIntegrity && component.source === 'user') verifyDirectory(id, component.path, true);
+    return component?.installed ? component : null;
+  };
+  const resolveAsync = async (id, { verifyIntegrity = false } = {}) => {
+    const component = inspect(id, { verifyIntegrity: false });
+    if (component?.installed && verifyIntegrity && component.source === 'user') await verifyDirectoryAsync(id, component.path, true);
     return component?.installed ? component : null;
   };
   const ensureInstallRoot = () => {
@@ -123,14 +186,21 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     return installRoot;
   };
 
-  const listWithSizes = async () => Promise.all(list().map(async component => ({
-    ...component,
-    sizeBytes: component.path && await fs.promises.stat(component.path).then(stat => stat.isDirectory(), () => false)
-      ? await directorySize(component.path)
-      : 0,
-  })));
+  const listWithSizes = async () => Promise.all(Object.keys(COMPONENT_DEFINITIONS).map(id => inspect(id, { verifyIntegrity: false })).map(async component => {
+    let verified = component;
+    if (component.installed && component.source === 'user' && COMPONENT_DEFINITIONS[component.id]?.integrityManifest) {
+      try { await verifyDirectoryAsync(component.id, component.path); }
+      catch (error) { verified = { ...component, installed: false, compatible: false, error: error.message || String(error) }; }
+    }
+    return {
+      ...verified,
+      sizeBytes: verified.path && await fs.promises.stat(verified.path).then(stat => stat.isDirectory(), () => false)
+        ? await directorySize(verified.path)
+        : 0,
+    };
+  }));
 
-  return { inspect, list, listWithSizes, resolve, ensureInstallRoot, installRoot, roots };
+  return { inspect, list, listWithSizes, resolve, resolveAsync, verifyDirectory, verifyDirectoryAsync, ensureInstallRoot, installRoot, roots };
 };
 
 module.exports = { COMPONENT_API_VERSION, COMPONENT_DEFINITIONS, createComponentRegistry };

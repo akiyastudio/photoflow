@@ -70,6 +70,7 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
   const revisionRef = useRef(0);
   const loadSequenceRef = useRef(0);
   const saveQueueRef = useRef(Promise.resolve());
+  const saveEpochRef = useRef(0);
   const generationRef = useRef(0);
   const disposedRef = useRef(false);
   const nodeDragRef = useRef<NodeDrag | null>(null);
@@ -142,6 +143,7 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
       suppressClickRef.current = '';
       spacePressedRef.current = false;
       dragStateRef.current = null;
+      saveEpochRef.current += 1;
       saveQueueRef.current = Promise.resolve();
     };
   }, [dragStateRef]);
@@ -152,7 +154,7 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
     appliedServerNodeKeysRef.current = new Set();
     applyPositions(defaultPositions());
     void loadServerLayout(generation);
-    return () => { loadSequenceRef.current += 1; generationRef.current += 1; saveQueueRef.current = Promise.resolve(); };
+    return () => { loadSequenceRef.current += 1; generationRef.current += 1; saveEpochRef.current += 1; saveQueueRef.current = Promise.resolve(); };
   }, [applyPositions, defaultPositions, loadServerLayout]);
 
   useEffect(() => {
@@ -185,8 +187,9 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
   const enqueueSave = useCallback((mode: 'patch' | 'replace', savedPositions: Map<string, VersionTreeCanvasPosition>, before: Map<string, VersionTreeCanvasPosition>, applyOnSuccess?: Map<string, VersionTreeCanvasPosition>) => {
     if (disposedRef.current) return Promise.resolve(false);
     const generation = generationRef.current;
+    const saveEpoch = saveEpochRef.current;
     const operation = saveQueueRef.current.then(async () => {
-      if (disposedRef.current || generation !== generationRef.current) return false;
+      if (disposedRef.current || generation !== generationRef.current || saveEpoch !== saveEpochRef.current) return false;
       const buildPayload = () => {
         const nodeById = new Map(nodesRef.current.map(node => [node.id, node]));
         return [...savedPositions].flatMap(([id, position]) => {
@@ -201,14 +204,15 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
         mode,
         positions: payload,
       }).catch(error => ({ success: false, error: error instanceof Error ? error.message : String(error) }));
-      if (!result.success && String(result.error || '').startsWith('stale_layout:')) {
+      const staleLayout = !result.success && String(result.error || '').startsWith('stale_layout:');
+      if (staleLayout && mode === 'patch') {
         const latest = await window.electronAPI.getVersionTreeLayout(workspacePath, projectName, scopeKey).catch(error => ({
           success: false,
           revision: revisionRef.current,
           positions: [],
           error: error instanceof Error ? error.message : String(error),
         }));
-        if (disposedRef.current || generation !== generationRef.current) return false;
+        if (disposedRef.current || generation !== generationRef.current || saveEpoch !== saveEpochRef.current) return false;
         if (latest.success) {
           revisionRef.current = latest.revision;
           payload = buildPayload();
@@ -221,7 +225,7 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
           }).catch(error => ({ success: false, error: error instanceof Error ? error.message : String(error) }));
         }
       }
-      if (disposedRef.current || generation !== generationRef.current) return false;
+      if (disposedRef.current || generation !== generationRef.current || saveEpoch !== saveEpochRef.current) return false;
       if (result.success) {
         revisionRef.current = 'revision' in result && result.revision !== undefined ? result.revision : revisionRef.current + 1;
         if (applyOnSuccess) {
@@ -233,9 +237,13 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
         }
         return true;
       }
+      saveEpochRef.current += 1;
+      undoStackRef.current = [];
+      redoStackRef.current = [];
+      setHistoryRevision(value => value + 1);
       if (!applyOnSuccess) applyPositions(before);
       onNoticeRef.current(`保存版本树布局失败：${result.error || '未知错误'}`, 5000);
-      if (!applyOnSuccess) await loadServerLayout(generation);
+      if (!applyOnSuccess || staleLayout) await loadServerLayout(generation);
       return false;
     });
     saveQueueRef.current = operation.then(() => undefined);
@@ -370,11 +378,12 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
   const undoLayout = useCallback(async () => {
     const entry = undoStackRef.current.pop();
     if (!entry) return false;
+    const historyEpoch = saveEpochRef.current;
     const current = new Map(positionsRef.current);
     applyPositions(new Map(entry.before));
     const success = await enqueueSave('replace', entry.before, current);
     if (success) redoStackRef.current.push(entry);
-    else undoStackRef.current.push(entry);
+    else if (historyEpoch === saveEpochRef.current) undoStackRef.current.push(entry);
     setHistoryRevision(value => value + 1);
     return success;
   }, [applyPositions, enqueueSave]);
@@ -382,11 +391,12 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
   const redoLayout = useCallback(async () => {
     const entry = redoStackRef.current.pop();
     if (!entry) return false;
+    const historyEpoch = saveEpochRef.current;
     const current = new Map(positionsRef.current);
     applyPositions(new Map(entry.after));
     const success = await enqueueSave('replace', entry.after, current);
     if (success) undoStackRef.current.push(entry);
-    else redoStackRef.current.push(entry);
+    else if (historyEpoch === saveEpochRef.current) redoStackRef.current.push(entry);
     setHistoryRevision(value => value + 1);
     return success;
   }, [applyPositions, enqueueSave]);

@@ -18,7 +18,7 @@ const retryDatabaseLocked = async (operation, attempts = 4) => {
 };
 
 const registerVersionIpc = context => {
-  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
+  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, projectVirtualPaths, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
   const listRatedProjectMedia = projectPath => mediaRatingService.listProject(projectPath);
   const teamDataDirectory = (workspaceRoot, photoId, baseVersionId) => path.join(getWorkspaceDataRoot(workspaceRoot), 'team-retouch', photoId, baseVersionId);
   const deliveryName = (photo, basePath) => path.parse(photo?.originalName || photo?.displayName || basePath).name;
@@ -492,16 +492,10 @@ const registerVersionIpc = context => {
       const workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-      let folderPath = resolveProjectEntry(workspacePath, status, projectName, request.relativePath);
-      let shortcutRelativePath = '';
-      if (path.extname(folderPath).toLowerCase() === '.lnk' && fs.statSync(folderPath).isFile()) {
-        const details = shell.readShortcutLink(folderPath);
-        if (!String(details?.description || '').startsWith('PhotoFlow 外链文件夹：')) throw new Error('只有由 PhotoFlow 创建的文件夹外链可以纳入版本管理');
-        const target = path.resolve(String(details?.target || ''));
-        if (!(await fs.promises.stat(target).catch(() => null))?.isDirectory()) throw new Error('外链文件夹当前不可用');
-        shortcutRelativePath = path.relative(projectPath, folderPath).replace(/\\/g, '/');
-        folderPath = target;
-      }
+      const resolution = projectVirtualPaths.resolve(projectPath, request.relativePath, { externalRootMode: 'target' });
+      let folderPath = resolution.physicalPath;
+      let shortcutRelativePath = resolution.viaExternalLink ? resolution.virtualPath : '';
+      if (resolution.viaExternalLink && resolution.externalTargetKind !== 'folder') throw new Error('只有文件夹外链可以纳入版本管理');
       if (!fs.statSync(folderPath).isDirectory()) throw new Error('版本进度文件夹不存在');
       if (request.moveToRoot && !shortcutRelativePath && path.dirname(folderPath).toLocaleLowerCase() !== projectPath.toLocaleLowerCase()) {
         if (fs.lstatSync(folderPath).isSymbolicLink()) throw new Error('快捷方式或链接目录不能移动为版本进度');
@@ -521,6 +515,7 @@ const registerVersionIpc = context => {
         parentProgressId: request.parentProgressId,
         displayName: request.displayName || path.basename(folderPath),
         folderPath,
+        externalLinkRelativePath: shortcutRelativePath || undefined,
         trackingEnabled: Boolean(request.trackingEnabled),
         trackingState: request.trackingState,
         nodeRole: request.nodeRole,
@@ -595,17 +590,17 @@ const registerVersionIpc = context => {
         if (!validProgressFolderName(displayName) || !['image', 'video'].includes(mediaKind) || !versionKey) {
           throw new Error('progress_graph_payload_invalid: 新进度字段无效');
         }
-        let folderPath = progress.relativePath !== undefined
-          ? resolveProjectEntry(workspacePath, status, projectName, String(progress.relativePath || ''))
-          : existing?.folderPath ? path.resolve(existing.folderPath) : path.resolve(projectPath, displayName);
+        let folderResolution = progress.relativePath !== undefined
+          ? projectVirtualPaths.resolve(projectPath, String(progress.relativePath || ''), { externalRootMode: 'target' })
+          : null;
+        let folderPath = folderResolution?.physicalPath
+          || (existing?.folderPath ? path.resolve(existing.folderPath) : path.resolve(projectPath, displayName));
         let shortcutRelativePath = '';
-        if (progress.relativePath !== undefined && path.extname(folderPath).toLowerCase() === '.lnk' && fs.existsSync(folderPath) && fs.statSync(folderPath).isFile()) {
-          const details = shell.readShortcutLink(folderPath);
-          if (!String(details?.description || '').startsWith('PhotoFlow 外链文件夹：')) throw new Error('progress_graph_folder_invalid: 只有由 PhotoFlow 创建的文件夹外链可以纳入版本管理');
-          const target = path.resolve(String(details?.target || ''));
-          if (!(await fs.promises.stat(target).catch(() => null))?.isDirectory()) throw new Error('progress_graph_folder_invalid: 外链文件夹当前不可用');
-          shortcutRelativePath = String(progress.relativePath || '').replace(/\\/g, '/');
-          folderPath = target;
+        if (folderResolution?.viaExternalLink) {
+          if (folderResolution.externalTargetKind !== 'folder') throw new Error('progress_graph_folder_invalid: 只有文件夹外链可以纳入版本管理');
+          shortcutRelativePath = folderResolution.virtualPath;
+        } else if (existing?.externalLinkRelativePath && progress.relativePath === undefined) {
+          shortcutRelativePath = existing.externalLinkRelativePath;
         }
         if (!shortcutRelativePath && !isInside(projectPath, folderPath)) throw new Error('progress_graph_folder_invalid: 进度目录必须位于当前项目内');
         if (!fs.existsSync(folderPath)) {
@@ -629,6 +624,7 @@ const registerVersionIpc = context => {
         databaseProgress = {
           progressId: progressId || undefined,
           mediaKind, versionKey, displayName, folderPath,
+          externalLinkRelativePath: shortcutRelativePath || undefined,
           parentProgressId: progress.parentProgressId ? String(progress.parentProgressId) : undefined,
           relationKind: progress.relationKind || undefined,
           trackingEnabled: Boolean(progress.trackingEnabled),
@@ -698,14 +694,9 @@ const registerVersionIpc = context => {
         || !['original', 'companion', 'preview'].includes(mode) || !['image', 'video'].includes(mediaKind)) {
         throw new Error('media_adopt_payload_invalid: 项目内相对路径和素材类型必填');
       }
-      let folderPath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
-      if (path.extname(folderPath).toLowerCase() === '.lnk' && fs.statSync(folderPath).isFile()) {
-        const details = shell.readShortcutLink(folderPath);
-        if (!String(details?.description || '').startsWith('PhotoFlow 外链文件夹：')) throw new Error('media_adopt_folder_invalid: 只有由 PhotoFlow 创建的文件夹外链可以纳入版本树');
-        const target = path.resolve(String(details?.target || ''));
-        if (!(await fs.promises.stat(target).catch(() => null))?.isDirectory()) throw new Error('media_adopt_folder_invalid: 外链文件夹当前不可用');
-        folderPath = target;
-      }
+      const resolution = projectVirtualPaths.resolve(path.resolve(getProjectPath(workspacePath, status, projectName)), relativePath, { externalRootMode: 'target' });
+      const folderPath = resolution.physicalPath;
+      if (resolution.viaExternalLink && resolution.externalTargetKind !== 'folder') throw new Error('media_adopt_folder_invalid: 只有文件夹外链可以纳入版本树');
       if (!fs.statSync(folderPath).isDirectory()) throw new Error('media_adopt_folder_invalid: 目标必须是文件夹');
       const listed = await versionService.listProgress(workspaceRoot, projectName, true);
       if (sourceProgressId && !(listed.progressFolders || []).some(folder => folder.id === sourceProgressId && !folder.folderMissing)) {
@@ -713,6 +704,7 @@ const registerVersionIpc = context => {
       }
       return await versionService.adoptMediaFolder(workspaceRoot, {
         projectName, folderPath, mode, mediaKind,
+        ...(resolution.viaExternalLink ? { externalLinkRelativePath: resolution.virtualPath } : {}),
         ...(sourceProgressId ? { sourceProgressId } : {}),
       });
     } catch (error) {

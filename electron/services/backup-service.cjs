@@ -3,6 +3,11 @@ const fs = require('fs');
 const path = require('path');
 const { Transform } = require('stream');
 const { pipeline } = require('stream/promises');
+const {
+  MANAGED_EXTERNAL_FOLDER_PREFIX,
+  MANAGED_EXTERNAL_FILE_PREFIX,
+  MANAGED_EXTERNAL_ID_MARKER,
+} = require('./project-virtual-path-service.cjs');
 
 const STORE_FORMAT_VERSION = 1;
 const SNAPSHOT_FORMAT_VERSION = 1;
@@ -44,11 +49,16 @@ const createBackupService = context => {
     backgroundTasks,
     getConfigPath,
     getUserBirthdaysPath,
+    getManagedExternalLinkRegistryPath,
+    getManagedExternalLinks,
     getWorkspaceDatabasePath,
+    getWorkspaceOperationsDatabasePath,
+    getWorkspaceTeamRetouchDatabasePath,
     getWorkspaceDataRoot,
     credentialService,
     readSavedConfig,
     runPythonJsonAction,
+    shell,
     writeLog,
   } = context;
   const connectionStates = new Map();
@@ -428,6 +438,24 @@ const createBackupService = context => {
       const liveDatabasePath = path.resolve(getWorkspaceDatabasePath(root));
       task.report(1, '正在创建数据库快照');
       const databaseInfo = await runPythonJsonAction('backup_db.py', ['snapshot', '--source', liveDatabasePath, '--destination', databaseSnapshot], 30 * 60 * 1000);
+      const liveOperationsDatabasePath = getWorkspaceOperationsDatabasePath?.(root);
+      let operationsSnapshot = null;
+      let operationsDatabaseInfo = null;
+      if (liveOperationsDatabasePath && await exists(liveOperationsDatabasePath)) {
+        operationsSnapshot = path.join(stage, 'operations.sqlite3');
+        operationsDatabaseInfo = await runPythonJsonAction('operations_db.py', [
+          'snapshot', '--source', liveOperationsDatabasePath, '--destination', operationsSnapshot,
+        ], 30 * 60 * 1000);
+      }
+      const liveTeamRetouchDatabasePath = getWorkspaceTeamRetouchDatabasePath?.(root);
+      let teamRetouchSnapshot = null;
+      let teamRetouchDatabaseInfo = null;
+      if (liveTeamRetouchDatabasePath && await exists(liveTeamRetouchDatabasePath)) {
+        teamRetouchSnapshot = path.join(stage, 'team-retouch.sqlite3');
+        teamRetouchDatabaseInfo = await runPythonJsonAction('team_retouch_db.py', [
+          'snapshot', '--source', liveTeamRetouchDatabasePath, '--destination', teamRetouchSnapshot,
+        ], 30 * 60 * 1000);
+      }
       const workspaceId = await readWorkspaceId(root);
       const previousManifest = (await listManifests(target)).find(manifest => manifest.workspace?.id === workspaceId);
       const previousByInput = new Map((previousManifest?.files || []).map(entry => [`${entry.scope}:${normalizeKey(entry.path)}`, entry]));
@@ -445,19 +473,70 @@ const createBackupService = context => {
         materializedArchiveProjectIds.push(project.id);
       }
       const databaseRelative = normalizeKey(path.relative(workspaceDataRoot, liveDatabasePath));
+      const operationsDatabaseRelative = liveOperationsDatabasePath
+        ? normalizeKey(path.relative(workspaceDataRoot, liveOperationsDatabasePath))
+        : '';
+      const teamRetouchDatabaseRelative = liveTeamRetouchDatabasePath
+        ? normalizeKey(path.relative(workspaceDataRoot, liveTeamRetouchDatabasePath))
+        : '';
       const workspaceDataFiles = await collectFiles(workspaceDataRoot, 'workspace-data', (relative, item) => {
         const normalized = normalizeKey(relative);
         const first = normalized.split('/')[0];
         return (item.isDirectory() && ['thumbnails', 'backups'].includes(first))
           || normalized === databaseRelative
           || normalized === `${databaseRelative}-wal`
-          || normalized === `${databaseRelative}-shm`;
+          || normalized === `${databaseRelative}-shm`
+          || normalized === operationsDatabaseRelative
+          || normalized === `${operationsDatabaseRelative}-wal`
+          || normalized === `${operationsDatabaseRelative}-shm`
+          || normalized === teamRetouchDatabaseRelative
+          || normalized === `${teamRetouchDatabaseRelative}-wal`
+          || normalized === `${teamRetouchDatabaseRelative}-shm`;
       });
       const appFiles = [];
       for (const [relative, absolute] of [['photoflow_config.json', getConfigPath()], ['birthdays.json', getUserBirthdaysPath()]]) {
         if (await exists(absolute)) appFiles.push({ scope: 'app-config', relative, absolute });
       }
-      const inputs = [...workspaceFiles, ...workspaceDataFiles, ...appFiles, { scope: 'database', relative: 'workspace.sqlite3', absolute: databaseSnapshot }];
+      const externalRegistryPath = getManagedExternalLinkRegistryPath?.();
+      if (externalRegistryPath && await exists(externalRegistryPath)) {
+        const registry = await fs.promises.readFile(externalRegistryPath, 'utf8').then(value => {
+          try { return JSON.parse(value); }
+          catch { return { version: 1, links: {} }; }
+        });
+        const usedLinkIds = new Set();
+        for (const project of databaseInfo.projects || []) {
+          const archivePath = String(project.extra?.archive?.path || '');
+          const projectRoot = archivePath && await exists(archivePath)
+            ? path.resolve(archivePath)
+            : path.resolve(root, project.relativePath || project.relative_path || '');
+          for (const link of getManagedExternalLinks?.(projectRoot) || []) if (link.linkId) usedLinkIds.add(String(link.linkId));
+        }
+        const scopedRegistry = {
+          version: 1,
+          links: Object.fromEntries(Object.entries(registry?.links || {}).filter(([linkId]) => usedLinkIds.has(linkId))),
+        };
+        const scopedRegistryPath = path.join(stage, 'managed-external-links.json');
+        await fs.promises.writeFile(scopedRegistryPath, JSON.stringify(scopedRegistry), 'utf8');
+        appFiles.push({ scope: 'app-config', relative: 'managed-external-links.json', absolute: scopedRegistryPath });
+      }
+      const inputs = [
+        ...workspaceFiles,
+        ...workspaceDataFiles,
+        ...appFiles,
+        { scope: 'database', relative: 'workspace.sqlite3', absolute: databaseSnapshot },
+        ...(operationsSnapshot ? [{
+          scope: 'domain-database',
+          relative: 'operations.sqlite3',
+          absolute: operationsSnapshot,
+          schemaVersion: operationsDatabaseInfo?.schemaVersion || 0,
+        }] : []),
+        ...(teamRetouchSnapshot ? [{
+          scope: 'domain-database',
+          relative: 'team-retouch.sqlite3',
+          absolute: teamRetouchSnapshot,
+          schemaVersion: teamRetouchDatabaseInfo?.schemaVersion || 0,
+        }] : []),
+      ];
       const totalBytes = (await Promise.all(inputs.map(item => fs.promises.stat(item.absolute).then(stat => stat.size)))).reduce((sum, size) => sum + size, 0);
       let copiedBytes = 0;
       let transferredBytes = 0;
@@ -522,6 +601,7 @@ const createBackupService = context => {
           scope: input.scope,
           path: normalizeKey(input.relative),
           ...result,
+          ...(input.scope === 'domain-database' ? { schemaVersion: input.schemaVersion || 0 } : {}),
           projectIds: [...(projectAssociations.get(`${input.scope}:${normalizeKey(input.relative)}`) || [])],
         });
       }
@@ -606,6 +686,72 @@ const createBackupService = context => {
     await fs.promises.rename(temporary, destination);
   };
 
+  const externalTargetKey = value => {
+    const resolved = path.resolve(String(value || ''));
+    return process.platform === 'win32' ? resolved.toLocaleLowerCase() : resolved;
+  };
+
+  const restoredExternalLinkEntries = (restored, shortcutPaths) => {
+    if (!shell?.readShortcutLink || !restored?.links || typeof restored.links !== 'object') return {};
+    const scoped = {};
+    for (const shortcutPath of shortcutPaths) {
+      if (path.extname(shortcutPath).toLowerCase() !== '.lnk') continue;
+      const stat = fs.lstatSync(shortcutPath, { throwIfNoEntry: false });
+      if (!stat?.isFile() || stat.isSymbolicLink()) continue;
+      let details;
+      try { details = shell.readShortcutLink(shortcutPath); }
+      catch { continue; }
+      const description = String(details?.description || '');
+      const kind = description.startsWith(MANAGED_EXTERNAL_FOLDER_PREFIX) ? 'folder'
+        : description.startsWith(MANAGED_EXTERNAL_FILE_PREFIX) ? 'file' : '';
+      const markerIndex = description.lastIndexOf(MANAGED_EXTERNAL_ID_MARKER);
+      const linkId = markerIndex >= 0 ? description.slice(markerIndex + MANAGED_EXTERNAL_ID_MARKER.length).trim() : '';
+      const registered = linkId ? restored.links[linkId] : null;
+      const shortcutTarget = String(details?.target || '').trim();
+      const registeredTarget = String(registered?.target || '').trim();
+      if (!kind || !registered || registered.kind !== kind || !path.isAbsolute(shortcutTarget) || !path.isAbsolute(registeredTarget)) continue;
+      if (externalTargetKey(shortcutTarget) !== externalTargetKey(registeredTarget)) continue;
+      scoped[linkId] = registered;
+    }
+    return scoped;
+  };
+
+  const mergeExternalLinkRegistry = async (target, manifest, temporaryRoot, shortcutPaths, task) => {
+    const externalLinksEntry = manifest.files.find(entry => entry.scope === 'app-config' && entry.path === 'managed-external-links.json');
+    const registryPath = getManagedExternalLinkRegistryPath?.();
+    if (!externalLinksEntry || !registryPath) return false;
+    const temporaryRegistry = path.join(temporaryRoot, `.photoflow-restored-external-links-${crypto.randomUUID()}.json`);
+    await materialize(target, externalLinksEntry, temporaryRegistry, task);
+    try {
+      const restored = JSON.parse(await fs.promises.readFile(temporaryRegistry, 'utf8'));
+      const current = await fs.promises.readFile(registryPath, 'utf8').then(value => {
+        try { return JSON.parse(value); }
+        catch { return { version: 1, links: {} }; }
+      }, () => ({ version: 1, links: {} }));
+      const restoredLinks = restoredExternalLinkEntries(restored, shortcutPaths);
+      if (!Object.keys(restoredLinks).length) return false;
+      const merged = { version: 1, links: { ...restoredLinks, ...(current?.links || {}) } };
+      await fs.promises.mkdir(path.dirname(registryPath), { recursive: true });
+      const nextPath = `${registryPath}.restore-${crypto.randomUUID()}.tmp`;
+      const backupPath = `${registryPath}.restore-${crypto.randomUUID()}.backup`;
+      await fs.promises.writeFile(nextPath, JSON.stringify(merged), { encoding: 'utf8', flag: 'wx' });
+      try {
+        if (await exists(registryPath)) await fs.promises.rename(registryPath, backupPath);
+        await fs.promises.rename(nextPath, registryPath);
+        await fs.promises.rm(backupPath, { force: true });
+      } catch (error) {
+        if (!await exists(registryPath) && await exists(backupPath)) await fs.promises.rename(backupPath, registryPath);
+        throw error;
+      } finally {
+        await fs.promises.rm(nextPath, { force: true });
+        await fs.promises.rm(backupPath, { force: true });
+      }
+      return true;
+    } finally {
+      await fs.promises.rm(temporaryRegistry, { force: true });
+    }
+  };
+
   const restoreWorkspace = async (workspaceRoot, snapshot, targetRoot) => {
     const config = readSavedConfig();
     const target = String(config?.backup?.targetPath || '').trim();
@@ -649,6 +795,20 @@ const createBackupService = context => {
         await materialize(target, entry, safeDestination(newDataRoot, entry.path), task);
         task.report(75 + (index + 1) / Math.max(1, dataEntries.length) * 10, `正在恢复内部数据 ${index + 1}/${dataEntries.length}`);
       }
+      const operationsEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'operations.sqlite3');
+      if (operationsEntry && getWorkspaceOperationsDatabasePath) {
+        await materialize(target, operationsEntry, getWorkspaceOperationsDatabasePath(destination), task);
+      }
+      const teamRetouchEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'team-retouch.sqlite3');
+      if (teamRetouchEntry && getWorkspaceTeamRetouchDatabasePath) {
+        const teamRetouchDestination = getWorkspaceTeamRetouchDatabasePath(destination);
+        await materialize(target, teamRetouchEntry, teamRetouchDestination, task);
+        await runPythonJsonAction('team_retouch_db.py', [
+          'restore-workspace', '--destination', teamRetouchDestination,
+          '--old-root', manifest.workspace.root, '--new-root', destination,
+          '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
+        ], 30 * 60 * 1000);
+      }
       const databaseSource = objectPath(target, manifest.database.hash);
       await runPythonJsonAction('backup_db.py', [
         'restore-workspace', '--source', databaseSource, '--destination', getWorkspaceDatabasePath(destination),
@@ -669,6 +829,13 @@ const createBackupService = context => {
       }
       const birthdaysEntry = manifest.files.find(entry => entry.scope === 'app-config' && entry.path === 'birthdays.json');
       if (birthdaysEntry) await materialize(target, birthdaysEntry, getUserBirthdaysPath(), task);
+      await mergeExternalLinkRegistry(
+        target,
+        manifest,
+        destination,
+        workspaceEntries.filter(entry => path.extname(entry.path).toLowerCase() === '.lnk').map(entry => safeDestination(destination, entry.path)),
+        task,
+      );
       await fs.promises.rm(path.join(destination, '.photoflow-restore-incomplete'), { force: true });
       const savedConfig = readSavedConfig();
       await fs.promises.writeFile(getConfigPath(), JSON.stringify({ ...savedConfig, ...restoredConfig, workspacePath: destination, backup: savedConfig?.backup || restoredConfig.backup }, null, 2), 'utf8');
@@ -722,6 +889,22 @@ const createBackupService = context => {
         '--target-relative-path', project.relativePath, '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
         '--materialized-archive-project-ids', JSON.stringify(manifest.materializedArchiveProjectIds || []),
       ], 30 * 60 * 1000);
+      const teamRetouchEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'team-retouch.sqlite3');
+      if (teamRetouchEntry && getWorkspaceTeamRetouchDatabasePath) {
+        await runPythonJsonAction('team_retouch_db.py', [
+          'restore-project', '--source', objectPath(target, teamRetouchEntry.hash),
+          '--destination', getWorkspaceTeamRetouchDatabasePath(root), '--project-id', project.id,
+          '--old-root', manifest.workspace.root, '--new-root', root,
+          '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
+        ], 30 * 60 * 1000);
+      }
+      await mergeExternalLinkRegistry(
+        target,
+        manifest,
+        root,
+        projectEntries.filter(entry => path.extname(entry.path).toLowerCase() === '.lnk').map(entry => safeDestination(projectRoot, entry.path.slice(prefix.length))),
+        task,
+      );
       task.report(100, '项目恢复完成');
       return { project };
     }, run);

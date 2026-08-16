@@ -26,8 +26,8 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(state.selectedItemId, 'pending', 'row click selection is client state');
   state = model.applyTrackingItemDecision(state, 'pending', 'accepted');
   assert.strictEqual(state.selectedItemId, 'missing', 'decision advances to the next unresolved item');
-  state = model.applyTrackingItemDecision(state, 'missing', 'accepted', 'relocated.jpg');
-  assert.strictEqual(state.items.find(item => item.id === 'missing').referenceName, 'relocated.jpg', 'relocation updates the persisted relationship name');
+  state = model.applyTrackingItemDecision(state, 'missing', 'rejected');
+  assert.strictEqual(state.items.find(item => item.id === 'missing').status, 'rejected', 'a missing current-media row is resolved only as an acknowledged deletion');
   assert.strictEqual(model.canCommitTrackingSession(state.items), true, 'commit opens only after every item is resolved');
   assert.strictEqual(model.canCommitTrackingSession(items), false, 'unresolved items gate commit');
   assert.strictEqual(model.firstUnresolvedTrackingItemId(items), 'missing', 'the pending action selects the first unresolved row in list order');
@@ -64,6 +64,19 @@ const { pathToFileURL } = require('url');
   assert(panelSource.includes('标记不关联') && panelSource.includes("hasReferenceCandidate ? '不是同一张' : '标记不关联'"), 'items without a previous-version candidate use the explicit unlinked action');
   assert(panelSource.includes('不是同一张') && panelSource.includes('是同一张'), 'items with a reference candidate keep image-relationship wording');
   assert(panelSource.includes('onClick={revealPending}') && panelSource.includes('data-tracking-item-id={item.id}'), 'the pending action reveals and scrolls to the first unresolved image');
+  assert(panelSource.includes('limit: TRACKING_PAGE_SIZE') && !panelSource.includes('do {'), 'the confirmation panel must fetch one bounded page instead of retaining the entire session in the renderer');
+  assert(panelSource.includes('view.session?.unresolvedCount') && panelSource.includes('setPageCursor(view.nextCursor)'), 'pagination must use the session-wide unresolved count and expose navigation to later pending pages');
+  assert(panelSource.includes("selectedItem?.kind === 'missing'") && panelSource.includes('!missingCurrentItem && hasReferenceCandidate'), 'missing current media must not expose relocation or acceptance controls');
+  assert(panelSource.includes('actionGenerationRef') && workspaceSource.includes('key={`${workspacePath}:${trackingConfirmationSessionId}`}'), 'session switches must isolate pagination, optimistic decisions, and late async completions');
+
+  const pagedState = {
+    sessionId: 'paged',
+    session: { ...session('paged'), total: 50000, unresolvedCount: 1200 },
+    items: [items[2]],
+    minimized: false,
+  };
+  const decidedPage = model.applyTrackingItemDecision(pagedState, 'pending', 'accepted');
+  assert.strictEqual(decidedPage.session.unresolvedCount, 1199, 'resolving one paged item must decrement the global unresolved count instead of replacing it with the current-page count');
 
   console.log('version tracking confirmation UI model tests passed');
 })().catch(error => {

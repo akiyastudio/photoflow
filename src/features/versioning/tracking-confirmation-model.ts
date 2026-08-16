@@ -76,6 +76,7 @@ export const applyTrackingItemDecision = (
   status: 'accepted' | 'rejected',
   referenceName?: string,
 ) => {
+  const previousItem = state.items.find(item => item.id === itemId);
   const items = state.items.map(item => item.id === itemId
     ? { ...item, status, ...(referenceName === undefined ? {} : { referenceName }) }
     : item);
@@ -85,7 +86,7 @@ export const applyTrackingItemDecision = (
     selectedItemId: nextPendingTrackingItemId(items, itemId) || itemId,
     session: state.session ? {
       ...state.session,
-      unresolvedCount: items.filter(item => unresolvedTrackingStatus(item.status)).length,
+      unresolvedCount: Math.max(0, state.session.unresolvedCount - (previousItem && unresolvedTrackingStatus(previousItem.status) ? 1 : 0)),
     } : state.session,
   };
 };

@@ -3,6 +3,7 @@ const { StringDecoder } = require('string_decoder');
 const COMPONENT_ID = 'video-playback-mpv';
 const START_TIMEOUT_MS = 8000;
 const SCREENSHOT_TIMEOUT_MS = 8000;
+const CLIENT_TOKEN_PATTERN = /^[a-zA-Z0-9_-]{8,96}$/;
 
 const nativeWindowHandleValue = window => {
   const handle = window.getNativeWindowHandle();
@@ -10,11 +11,26 @@ const nativeWindowHandleValue = window => {
   return handle.length >= 8 ? handle.readBigUInt64LE(0).toString() : String(handle.readUInt32LE(0));
 };
 
-const createAdvancedVideoService = ({ BrowserWindow, crypto, mediaService, path, pluginService, spawn, writeLog }) => {
+const createAdvancedVideoService = ({ BrowserWindow, crypto, mediaService, path, pluginService, processSupervisor = null, spawn, writeLog }) => {
   const sessions = new Map();
+  const sessionsByPlayer = new Map();
+  const launches = new Map();
+
+  const playerKey = (senderId, playerId) => `${senderId}:${playerId}`;
+  const removeSession = session => {
+    sessions.delete(session.id);
+    const key = playerKey(session.sender.id, session.playerId);
+    if (sessionsByPlayer.get(key) === session.id) sessionsByPlayer.delete(key);
+    if (launches.get(key) === session.requestId) launches.delete(key);
+  };
 
   const emit = (session, value) => {
-    if (!session.sender.isDestroyed()) session.sender.send('advanced-video-state', { sessionId: session.id, ...value });
+    if (!session.sender.isDestroyed()) session.sender.send('advanced-video-state', {
+      ...value,
+      sessionId: session.id,
+      playerId: session.playerId,
+      requestId: session.requestId,
+    });
   };
 
   const sendCommand = (session, value) => {
@@ -31,8 +47,13 @@ const createAdvancedVideoService = ({ BrowserWindow, crypto, mediaService, path,
   const stop = (sessionId, senderId) => {
     const session = sessions.get(String(sessionId || ''));
     if (!session || senderId !== undefined && session.sender.id !== senderId) return false;
-    sessions.delete(session.id);
+    removeSession(session);
+    emit(session, { type: 'stopped' });
     session.stopped = true;
+    if (session.rejectReady) {
+      session.rejectReady(new Error('视频播放启动已取消'));
+      session.rejectReady = null;
+    }
     if (session.onSenderDestroyed) {
       session.sender.removeListener('destroyed', session.onSenderDestroyed);
       session.onSenderDestroyed = null;
@@ -44,105 +65,149 @@ const createAdvancedVideoService = ({ BrowserWindow, crypto, mediaService, path,
     session.pendingScreenshots.clear();
     try { session.child.stdin.end(`${JSON.stringify({ command: 'close' })}\n`); } catch { /* process already exited */ }
     const timer = setTimeout(() => {
-      if (!session.child.killed) session.child.kill();
+      if (session.managedProcess) session.managedProcess.stop('advanced-video-stop');
+      else if (!session.child.killed) session.child.kill();
     }, 1200);
     timer.unref?.();
     return true;
   };
 
-  const stopForSender = senderId => {
-    for (const session of [...sessions.values()]) if (session.sender.id === senderId) stop(session.id, senderId);
+  const stopForPlayer = (senderId, playerId) => {
+    const id = sessionsByPlayer.get(playerKey(senderId, playerId));
+    if (id) stop(id, senderId);
   };
 
-  const start = async (event, filePath, arrowKeyAction = 'seek') => {
+  const start = async (event, filePath, arrowKeyAction = 'seek', playerId, requestId) => {
     const sender = event.sender;
-    stopForSender(sender.id);
-    const authorizedPath = await mediaService.authorizeInput(filePath);
-    const ownerWindow = BrowserWindow.fromWebContents(sender);
-    if (!ownerWindow || ownerWindow.isDestroyed()) throw new Error('照片流窗口已经关闭');
-    const runConfig = pluginService.resolveRunConfig(COMPONENT_ID, ['--parent-hwnd', nativeWindowHandleValue(ownerWindow)]);
-    const id = crypto.randomUUID();
-    const child = spawn(runConfig.command, runConfig.args, {
-      cwd: path.dirname(runConfig.command),
-      windowsHide: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    const session = { id, sender, child, filePath: authorizedPath, stopped: false, ready: false, lastError: '', pendingScreenshots: new Map(), onSenderDestroyed: null };
-    sessions.set(id, session);
-    session.onSenderDestroyed = () => stop(id, sender.id);
-    sender.once('destroyed', session.onSenderDestroyed);
-
-    const decoder = new StringDecoder('utf8');
-    let buffered = '';
-    let settleReady;
-    let rejectReady;
-    const readyPromise = new Promise((resolve, reject) => { settleReady = resolve; rejectReady = reject; });
-    const startupTimer = setTimeout(() => rejectReady(new Error('高级视频解码组件启动超时')), START_TIMEOUT_MS);
-    startupTimer.unref?.();
-
-    const consumeLine = line => {
-      if (!line.trim()) return;
-      let value;
-      try { value = JSON.parse(line); }
-      catch {
-        writeLog('warn', 'Advanced video decoder emitted invalid JSON', { line: line.slice(0, 500) });
-        return;
-      }
-      if (value.type === 'screenshot-result') {
-        const requestId = String(value.requestId || '');
-        const pending = session.pendingScreenshots.get(requestId);
-        if (!pending) return;
-        session.pendingScreenshots.delete(requestId);
-        clearTimeout(pending.timer);
-        if (value.success) pending.resolve({ path: String(value.path || pending.path) });
-        else pending.reject(new Error(String(value.error || '无法保存当前视频帧')));
-        return;
-      }
-      if (value.type === 'ready') {
-        session.ready = true;
-        clearTimeout(startupTimer);
-        settleReady();
-      } else if (value.type === 'fatal') {
-        session.lastError = String(value.error || '高级视频解码组件启动失败');
-        clearTimeout(startupTimer);
-        rejectReady(new Error(session.lastError));
-      }
-      emit(session, value);
+    const normalizedPlayerId = String(playerId || '');
+    const normalizedRequestId = String(requestId || '');
+    if (!CLIENT_TOKEN_PATTERN.test(normalizedPlayerId) || !CLIENT_TOKEN_PATTERN.test(normalizedRequestId)) throw new Error('高级视频播放请求标识无效');
+    const key = playerKey(sender.id, normalizedPlayerId);
+    launches.set(key, normalizedRequestId);
+    stopForPlayer(sender.id, normalizedPlayerId);
+    const assertCurrentLaunch = () => {
+      if (launches.get(key) !== normalizedRequestId) throw new Error('高级视频播放请求已被替换');
     };
-    child.stdout.on('data', chunk => {
-      buffered += decoder.write(chunk);
-      let newline;
-      while ((newline = buffered.indexOf('\n')) >= 0) {
-        const line = buffered.slice(0, newline).replace(/\r$/, '');
-        buffered = buffered.slice(newline + 1);
-        consumeLine(line);
-      }
-    });
-    let stderr = '';
-    child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString('utf8')).slice(-8000); });
-    child.once('error', error => {
-      session.lastError = error.message || String(error);
-      clearTimeout(startupTimer);
-      rejectReady(error);
-      emit(session, { type: 'fatal', error: session.lastError });
-    });
-    child.once('exit', code => {
-      clearTimeout(startupTimer);
-      sessions.delete(id);
-      if (!session.ready) rejectReady(new Error(session.lastError || stderr.trim() || `高级视频解码组件退出（${code ?? '未知'}）`));
-      else if (!session.stopped) emit(session, { type: 'fatal', error: session.lastError || stderr.trim() || '高级视频解码组件意外退出' });
-      writeLog(code === 0 || session.stopped ? 'info' : 'warn', 'Advanced video decoder exited', { sessionId: id, code, error: stderr.trim() });
-    });
+    let session = null;
 
     try {
+      const authorizedPath = await mediaService.authorizeInput(filePath);
+      assertCurrentLaunch();
+      const ownerWindow = BrowserWindow.fromWebContents(sender);
+      if (!ownerWindow || ownerWindow.isDestroyed()) throw new Error('照片流窗口已经关闭');
+      const runConfig = await pluginService.resolveRunConfigAsync(COMPONENT_ID, ['--parent-hwnd', nativeWindowHandleValue(ownerWindow)]);
+      assertCurrentLaunch();
+      const id = crypto.randomUUID();
+      const managedProcess = processSupervisor?.launch({
+        id: `component:advanced-video:${id}`,
+        kind: 'optional-component',
+        command: runConfig.command,
+        args: runConfig.args,
+        options: { cwd: path.dirname(runConfig.command), stdio: ['pipe', 'pipe', 'pipe'] },
+        health: { startupTimeoutMs: START_TIMEOUT_MS },
+        ephemeral: true,
+      });
+      const child = managedProcess?.child || spawn(runConfig.command, runConfig.args, {
+        cwd: path.dirname(runConfig.command), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      session = {
+        id,
+        sender,
+        child,
+        managedProcess,
+        playerId: normalizedPlayerId,
+        requestId: normalizedRequestId,
+        filePath: authorizedPath,
+        stopped: false,
+        ready: false,
+        lastError: '',
+        pendingScreenshots: new Map(),
+        onSenderDestroyed: null,
+        rejectReady: null,
+      };
+      sessions.set(id, session);
+      sessionsByPlayer.set(key, id);
+      session.onSenderDestroyed = () => stop(id, sender.id);
+      sender.once('destroyed', session.onSenderDestroyed);
+
+      const decoder = new StringDecoder('utf8');
+      let buffered = '';
+      let settleReady;
+      let rejectReady;
+      const readyPromise = new Promise((resolve, reject) => {
+        settleReady = resolve;
+        rejectReady = reject;
+        session.rejectReady = reject;
+      });
+      const startupTimer = setTimeout(() => rejectReady(new Error('高级视频解码组件启动超时')), START_TIMEOUT_MS);
+      startupTimer.unref?.();
+
+      const consumeLine = line => {
+        if (session.stopped || !line.trim()) return;
+        let value;
+        try { value = JSON.parse(line); }
+        catch {
+          writeLog('warn', 'Advanced video decoder emitted invalid JSON', { line: line.slice(0, 500) });
+          return;
+        }
+        if (value.type === 'screenshot-result') {
+          const screenshotRequestId = String(value.requestId || '');
+          const pending = session.pendingScreenshots.get(screenshotRequestId);
+          if (!pending) return;
+          session.pendingScreenshots.delete(screenshotRequestId);
+          clearTimeout(pending.timer);
+          if (value.success) pending.resolve({ path: String(value.path || pending.path) });
+          else pending.reject(new Error(String(value.error || '无法保存当前视频帧')));
+          return;
+        }
+        if (value.type === 'ready') {
+          session.ready = true;
+          session.managedProcess?.markHealthy({ protocol: 'advanced-video-v1' });
+          session.rejectReady = null;
+          clearTimeout(startupTimer);
+          settleReady();
+        } else if (value.type === 'fatal') {
+          session.lastError = String(value.error || '高级视频解码组件启动失败');
+          clearTimeout(startupTimer);
+          rejectReady(new Error(session.lastError));
+        }
+        emit(session, value);
+      };
+      child.stdout.on('data', chunk => {
+        buffered += decoder.write(chunk);
+        let newline;
+        while ((newline = buffered.indexOf('\n')) >= 0) {
+          const line = buffered.slice(0, newline).replace(/\r$/, '');
+          buffered = buffered.slice(newline + 1);
+          consumeLine(line);
+        }
+      });
+      let stderr = '';
+      child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString('utf8')).slice(-8000); });
+      child.once('error', error => {
+        session.lastError = error.message || String(error);
+        clearTimeout(startupTimer);
+        rejectReady(error);
+        if (!session.stopped) emit(session, { type: 'fatal', error: session.lastError });
+      });
+      child.once('exit', code => {
+        clearTimeout(startupTimer);
+        removeSession(session);
+        if (!session.ready) rejectReady(new Error(session.lastError || stderr.trim() || `高级视频解码组件退出（${code ?? '未知'}）`));
+        else if (!session.stopped) emit(session, { type: 'fatal', error: session.lastError || stderr.trim() || '高级视频解码组件意外退出' });
+        writeLog(code === 0 || session.stopped ? 'info' : 'warn', 'Advanced video decoder exited', { sessionId: id, code, error: stderr.trim() });
+      });
+
       await readyPromise;
+      assertCurrentLaunch();
       sendCommand(session, { command: 'set-keyboard-mode', value: arrowKeyAction === 'navigate' ? 'navigate' : 'seek' });
       if (!sendCommand(session, { command: 'open', path: authorizedPath })) throw new Error('无法向高级视频解码组件发送文件');
       if (!sendCommand(session, { command: 'play' })) throw new Error('无法启动高级视频播放');
       writeLog('info', 'Advanced video decoder started', { sessionId: id, filePath: authorizedPath });
-      return { sessionId: id };
+      return { sessionId: id, playerId: normalizedPlayerId, requestId: normalizedRequestId };
     } catch (error) {
-      stop(id, sender.id);
+      if (session) stop(session.id, sender.id);
+      else if (launches.get(key) === normalizedRequestId) launches.delete(key);
       throw error;
     }
   };
@@ -219,7 +284,7 @@ const createAdvancedVideoService = ({ BrowserWindow, crypto, mediaService, path,
     for (const session of [...sessions.values()]) stop(session.id);
   };
 
-  return { start, setBounds, control, screenshot, stop, dispose, sessions };
+  return { start, setBounds, control, screenshot, stop, dispose, sessions, sessionsByPlayer, launches };
 };
 
 module.exports = { COMPONENT_ID, createAdvancedVideoService, nativeWindowHandleValue };

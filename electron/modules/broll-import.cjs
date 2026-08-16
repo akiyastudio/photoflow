@@ -16,6 +16,14 @@ const { createProjectFileTask } = require('../services/project-file-task-service
 const BROLL_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.avif', '.heic', '.heif', '.hif', '.mp4', '.mov', '.avi', '.m4v', '.mkv']);
 const BROLL_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.m4v', '.mkv']);
 const FOUR_GB = 4 * 1024 * 1024 * 1024;
+let brollProcessSequence = 0;
+
+const launchWorker = (processSupervisor, prefix, command, args) => processSupervisor
+  ? processSupervisor.launch({
+    id: `python:${prefix}:${++brollProcessSequence}`,
+    kind: 'python-job', command, args, options: { stdio: ['pipe', 'pipe', 'pipe'] }, ephemeral: true,
+  }).child
+  : spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 
 const expandBrollSourcePaths = async selectedPaths => {
   const discovered = new Set();
@@ -41,7 +49,7 @@ const expandBrollSourcePaths = async selectedPaths => {
   return [...discovered];
 };
 
-const runSplitter = async ({ getRunConfig, source, outputDirectory, outputStem, extension, onProgress, isCancelled }) => {
+const runSplitter = async ({ getRunConfig, processSupervisor, source, outputDirectory, outputStem, extension, onProgress, isCancelled }) => {
   const prefix = `${outputStem}_part`;
   const listOutputs = async () => (await fs.promises.readdir(outputDirectory))
     .filter(name => name.startsWith(prefix) && path.extname(name).toLowerCase() === extension)
@@ -57,7 +65,7 @@ const runSplitter = async ({ getRunConfig, source, outputDirectory, outputStem, 
   };
   return new Promise((resolve, reject) => {
   const { command, args } = getRunConfig('cut_video.py', [source, '--output-dir', outputDirectory, '--output-stem', outputStem]);
-  const child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = launchWorker(processSupervisor, 'broll-split', command, args);
   let stdout = '';
   let stderr = '';
   let reportedError = '';
@@ -113,7 +121,7 @@ const runSplitter = async ({ getRunConfig, source, outputDirectory, outputStem, 
   });
 };
 
-const runTranscoder = async ({ getRunConfig, source, settings, onProgress, isCancelled }) => new Promise((resolve, reject) => {
+const runTranscoder = async ({ getRunConfig, processSupervisor, source, settings, onProgress, isCancelled }) => new Promise((resolve, reject) => {
   const args = [
     source,
     '--container', settings?.container || 'mp4',
@@ -125,7 +133,7 @@ const runTranscoder = async ({ getRunConfig, source, settings, onProgress, isCan
     '--output-mode', 'new',
   ];
   const runConfig = getRunConfig('ffmpeg_transcode.py', args);
-  const child = spawn(runConfig.command, runConfig.args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = launchWorker(processSupervisor, 'broll-transcode', runConfig.command, runConfig.args);
   let stdout = '';
   let stderr = '';
   let output = '';
@@ -168,10 +176,12 @@ const registerBrollImportIpc = ({
   ipcMain,
   dialog,
   shell,
+  projectVirtualPaths,
   recycleBinService,
   getMainWindow,
   getProjectPath,
   getRunConfig,
+  processSupervisor,
   writeLog,
   pushUndoOperation,
   activeOperations,
@@ -193,6 +203,7 @@ const registerBrollImportIpc = ({
     let task = null;
     const publish = payload => task?.publish(payload);
     const createdPaths = [];
+    const createdManagedLinkIds = [];
     const moves = [];
     try {
       const deleteSourceAfterImport = options?.deleteSourceAfterImport === true;
@@ -218,15 +229,21 @@ const registerBrollImportIpc = ({
       await fs.promises.mkdir(destinationDir, { recursive: true });
       if (linkOnly) {
         const reserved = new Set();
+        const linkRequests = [];
         for (const selected of sourcePaths) {
           const source = path.resolve(selected);
           const stat = await fs.promises.stat(source);
           if (!stat.isFile() && !stat.isDirectory()) throw new Error(`不支持创建外链：${path.basename(source)}`);
           const shortcutPath = uniqueDestination(destinationDir, `${path.basename(source)}.lnk`, reserved);
-          if (!shell.writeShortcutLink(shortcutPath, { target: source, cwd: stat.isDirectory() ? source : path.dirname(source), description: `${stat.isDirectory() ? 'PhotoFlow 外链文件夹' : 'PhotoFlow 外链文件'}：${path.basename(source)}` })) throw new Error(`无法创建外链：${path.basename(source)}`);
-          createdPaths.push(shortcutPath);
+          linkRequests.push({ shortcutPath, target: source, kind: stat.isDirectory() ? 'folder' : 'file', displayName: path.basename(source) });
         }
-        if (createdPaths.length) await pushUndoOperation({ kind: 'remove-created', paths: createdPaths, label: '导入花絮外链' });
+        const createdLinks = projectVirtualPaths.createManagedExternalLinksBatch(linkRequests);
+        createdPaths.push(...createdLinks.map(item => item.shortcutPath));
+        createdManagedLinkIds.push(...createdLinks.map(item => item.linkId));
+        if (createdPaths.length) await pushUndoOperation({
+          kind: 'remove-created', paths: createdPaths, managedExternalLinkIds: createdManagedLinkIds,
+          managedExternalWatcher: { workspacePath, status, projectName }, label: '导入花絮外链',
+        });
         return { success: true, operationId, count: createdPaths.length, splitCount: 0, transcodeCount: 0, clearedCount: 0, linked: true };
       }
       sourcePaths = await expandBrollSourcePaths(sourcePaths);
@@ -292,6 +309,7 @@ const registerBrollImportIpc = ({
           const outputStem = path.parse(targetPath).name;
           const outputs = await runSplitter({
             getRunConfig,
+            processSupervisor,
             source: item.path,
             outputDirectory: destinationDir,
             outputStem,
@@ -323,6 +341,7 @@ const registerBrollImportIpc = ({
           for (const videoPath of importedVideoPaths) {
             const output = await runTranscoder({
               getRunConfig,
+              processSupervisor,
               source: videoPath,
               settings: transcodeSettings,
               isCancelled: () => job.cancelled,
@@ -368,6 +387,10 @@ const registerBrollImportIpc = ({
       });
       return { success: true, operationId, count: sources.length, splitCount, transcodeCount, clearedCount, warning: warning || undefined };
     } catch (error) {
+      if (createdManagedLinkIds.length) {
+        try { projectVirtualPaths.revokeManagedExternalLinkIds(createdManagedLinkIds); }
+        catch (rollbackError) { writeLog('error', 'Unable to revoke failed B-roll external-link identities', rollbackError); }
+      }
       for (const move of [...moves].reverse()) {
         try {
           if (fs.existsSync(move.destination) && !fs.existsSync(move.source)) await moveFileAtomic(move.destination, move.source);

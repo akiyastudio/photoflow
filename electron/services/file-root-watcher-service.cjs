@@ -20,12 +20,17 @@ const createFileRootWatcherService = ({
   };
   const publish = (state, changedEntries) => {
     const mainWindow = getMainWindow();
-    if (!mainWindow || mainWindow.isDestroyed()) return;
     for (const binding of state.bindings.values()) {
+      const publishedEntries = [];
       for (const [changedName, eventType] of changedEntries) {
         if (binding.fileNameFilter && comparable(path.join(state.root, changedName)) !== binding.fileNameFilter) continue;
         const fileName = [binding.virtualPrefix, binding.virtualFileName || changedName].filter(Boolean).join('/').replace(/\\/g, '/');
-        mainWindow.webContents.send('workspace-files-changed', { root: binding.publishRoot, fileName, eventType, viaExternalLink: Boolean(binding.virtualPrefix || binding.virtualFileName) });
+        publishedEntries.push({ fileName, eventType });
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('workspace-files-changed', { root: binding.publishRoot, fileName, eventType, viaExternalLink: Boolean(binding.virtualPrefix || binding.virtualFileName) });
+      }
+      if (publishedEntries.length && binding.onChanged) {
+        try { binding.onChanged(publishedEntries); }
+        catch (error) { writeLog('warn', 'Unable to publish file-root tracking changes', { root: state.root, error: error.message || String(error) }); }
       }
     }
   };
@@ -40,12 +45,13 @@ const createFileRootWatcherService = ({
     const existing = watchers.get(key);
     if (existing) {
       existing.references += 1;
-      const binding = existing.bindings.get(bindingKey) || { publishRoot, virtualPrefix, fileNameFilter, virtualFileName, references: 0 };
+      const binding = existing.bindings.get(bindingKey) || { publishRoot, virtualPrefix, fileNameFilter, virtualFileName, onChanged: options.onChanged, references: 0 };
+      if (options.onChanged) binding.onChanged = options.onChanged;
       binding.references += 1;
       existing.bindings.set(bindingKey, binding);
       return { success: true, root };
     }
-    const state = { root, references: 1, watcher: null, timer: null, changes: new Map(), bindings: new Map([[bindingKey, { publishRoot, virtualPrefix, fileNameFilter, virtualFileName, references: 1 }]]) };
+    const state = { root, references: 1, watcher: null, timer: null, changes: new Map(), bindings: new Map([[bindingKey, { publishRoot, virtualPrefix, fileNameFilter, virtualFileName, onChanged: options.onChanged, references: 1 }]]) };
     try {
       state.watcher = fs.watch(root, { recursive: process.platform !== 'linux' }, (eventType, fileName) => {
         if (!fileName || isInternalChange(fileName) || isSuppressedChange(root, fileName)) return;

@@ -136,7 +136,7 @@ with tempfile.TemporaryDirectory() as root:
         'workflowInputProgressIds':[selection['id']],
     })['progressFolder']
     assert updated_output['versionKey'] == '11' and updated_output['parentProgressId'] == source_one['id']
-    assert updated_output['trackingState'] == 'pending_compare'
+    assert updated_output['trackingState'] == 'stale'
     assert updated_output['renameFromParent'] and updated_output['copyMissingFromParent']
     assert db.execute("SELECT COUNT(*) FROM version_graph_edges WHERE source_progress_id=? AND target_progress_id=?", (selection['id'], output_one['id'])).fetchone()[0] == 1
     before_invalid = tuple(db.execute("SELECT version_key,parent_progress_id,tracking_state,rename_from_parent,copy_missing_from_parent FROM progress_folders WHERE id=?", (output_one['id'],)).fetchone())
@@ -242,6 +242,18 @@ registerVersionIpc({
     return resolved;
   },
   fs, path,
+  projectVirtualPaths: {
+    resolve: (root, relativePath) => ({
+      projectRoot: path.resolve(root),
+      virtualPath: String(relativePath || '').replace(/\\/g, '/'),
+      physicalPath: path.resolve(root, String(relativePath || '')),
+      mediaRoot: path.resolve(root),
+      viaExternalLink: false,
+      isExternalLinkRoot: false,
+      writable: true,
+      offline: false,
+    }),
+  },
   versionService: {
     listProgress: async () => ({ success: true, progressFolders: listedProgressFolders }),
     registerProgressWithGraph: async (_root, payload) => {

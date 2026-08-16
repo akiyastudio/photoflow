@@ -17,6 +17,7 @@ const formatTime = (seconds: number) => {
 
 const PLAYBACK_SPEEDS = [0.5, 1, 1.25, 1.5, 2, 3, 4];
 const SKIP_SECONDS = 5;
+const createPlaybackToken = () => globalThis.crypto?.randomUUID?.() || `video_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 
 type VideoDirectionalInputGroup = 'arrows' | 'forward-back';
 type VideoDirectionalAction = 'navigate' | 'seek';
@@ -50,6 +51,8 @@ type AdvancedVideoPlayerProps = {
 
 const initialState = (): AdvancedVideoState => ({
   sessionId: '',
+  playerId: '',
+  requestId: '',
   type: 'loading',
   paused: true,
   buffering: true,
@@ -72,9 +75,12 @@ const hasVisibleExternalModal = (surface: HTMLElement | null) => {
 const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onContextMenuAt, onPointerActivity, topRightOverlayHole = 0, onEscape, bottomControls, editorSeekRequest, onPlaybackState, keyboardSettings = { arrowKeyAction: 'seek' } }: AdvancedVideoPlayerProps) => {
   const navigate = onNavigate || (() => undefined);
   const showNavigation = Boolean(onNavigate);
+  const playerRootRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const controlPanelRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef('');
+  const playerIdRef = useRef(createPlaybackToken());
+  const requestIdRef = useRef('');
   const errorReportedRef = useRef(false);
   const metadataKeyRef = useRef('');
   const onErrorRef = useRef(onError);
@@ -125,6 +131,10 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
 
   useEffect(() => {
     let active = true;
+    const requestId = createPlaybackToken();
+    requestIdRef.current = requestId;
+    sessionRef.current = '';
+    nativeContextMenuOpenRef.current = false;
     errorReportedRef.current = false;
     metadataKeyRef.current = '';
     setStarting(true);
@@ -134,17 +144,19 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
     setControlPanel(null);
     setState(initialState());
     const unsubscribe = window.electronAPI.onAdvancedVideoState(update => {
-      if (update.sessionId !== sessionRef.current) return;
+      if (update.playerId !== playerIdRef.current || update.requestId !== requestIdRef.current) return;
+      if (sessionRef.current && update.sessionId !== sessionRef.current) return;
       if (update.type === 'navigate') {
         onNavigateRef.current(update.direction === -1 ? -1 : 1);
         return;
       }
       if (update.type === 'context-menu') {
+        if (!onContextMenuAtRef.current) return;
         const rect = surfaceRef.current?.getBoundingClientRect();
         if (rect) {
           nativeContextMenuOpenRef.current = true;
           if (sessionRef.current) window.electronAPI.setAdvancedVideoBounds(sessionRef.current, { x: 0, y: 0, width: 0, height: 0, visible: false });
-          onContextMenuAtRef.current?.(rect.left + Number(update.x || 0), rect.top + Number(update.y || 0));
+          onContextMenuAtRef.current(rect.left + Number(update.x || 0), rect.top + Number(update.y || 0));
         }
         return;
       }
@@ -156,10 +168,10 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
         onEscapeRef.current?.();
         return;
       }
-      if (update.type === 'fatal' || update.type === 'error') {
+      if (update.type === 'fatal' || update.type === 'error' || update.type === 'stopped') {
         if (!errorReportedRef.current) {
           errorReportedRef.current = true;
-          onErrorRef.current(update.error || '高级视频解码失败');
+          onErrorRef.current(update.error || (update.type === 'stopped' ? '高级视频播放会话已停止' : '高级视频解码失败'));
         }
         return;
       }
@@ -173,7 +185,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
         setState(current => ({ ...current, ...update }));
       }
     });
-    void window.electronAPI.startAdvancedVideo(filePath, keyboardSettings.arrowKeyAction).then(result => {
+    void window.electronAPI.startAdvancedVideo(filePath, keyboardSettings.arrowKeyAction, playerIdRef.current, requestId).then(result => {
       if (!result.success || !result.sessionId) {
         if (active && !errorReportedRef.current) {
           errorReportedRef.current = true;
@@ -181,7 +193,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
         }
         return;
       }
-      if (!active) {
+      if (!active || requestIdRef.current !== requestId) {
         void window.electronAPI.stopAdvancedVideo(result.sessionId);
         return;
       }
@@ -190,6 +202,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
     });
     return () => {
       active = false;
+      if (requestIdRef.current === requestId) requestIdRef.current = '';
       unsubscribe();
       const currentSession = sessionRef.current;
       sessionRef.current = '';
@@ -348,6 +361,9 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
       const input = videoDirectionalKeyboardInput(event.key);
       if (!input) return;
       if (event.ctrlKey || event.metaKey || event.altKey) return;
+      const visiblePlayers = [...document.querySelectorAll<HTMLElement>('[data-advanced-video-player="true"]')]
+        .filter(player => player.getClientRects().length > 0);
+      if (visiblePlayers.length > 1 && !playerRootRef.current?.contains(document.activeElement)) return;
       const target = event.target as HTMLElement | null;
       if (target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
       event.preventDefault();
@@ -384,7 +400,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
   const backwardControlLabel = forwardBackAction === 'navigate' ? '上一个视频' : '快退 5 秒';
   const forwardControlLabel = forwardBackAction === 'navigate' ? '下一个视频' : '快进 5 秒';
 
-  return <div className="absolute inset-0 flex min-h-0 flex-col bg-black">
+  return <div ref={playerRootRef} data-advanced-video-player="true" className="absolute inset-0 flex min-h-0 flex-col bg-black">
     <div
       ref={surfaceRef}
       role="button"

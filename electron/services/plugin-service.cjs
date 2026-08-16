@@ -19,7 +19,20 @@ const createPluginService = ({ app, projectRoot, registry, getDevelopmentPython,
       const development = developmentRunConfig(pluginId, args);
       if (development) return development;
     }
-    const plugin = registry.resolve(pluginId);
+    const plugin = registry.resolve(pluginId, { verifyIntegrity: app.isPackaged });
+    if (!plugin) {
+      const error = new Error(`未安装插件：${PLUGIN_DEFINITIONS[pluginId]?.name || pluginId}`);
+      error.code = 'PLUGIN_MISSING';
+      throw error;
+    }
+    return { command: plugin.command, args: [...plugin.argsPrefix, ...args] };
+  };
+  const resolveRunConfigAsync = async (pluginId, args = []) => {
+    if (!app.isPackaged) {
+      const development = developmentRunConfig(pluginId, args);
+      if (development) return development;
+    }
+    const plugin = await registry.resolveAsync(pluginId, { verifyIntegrity: app.isPackaged });
     if (!plugin) {
       const error = new Error(`未安装插件：${PLUGIN_DEFINITIONS[pluginId]?.name || pluginId}`);
       error.code = 'PLUGIN_MISSING';
@@ -42,7 +55,7 @@ const createPluginService = ({ app, projectRoot, registry, getDevelopmentPython,
         sizeBytes: 0,
       };
     }
-    return registry.inspect(pluginId);
+    return registry.inspect(pluginId, { verifyIntegrity: false });
   };
 
   const list = () => Object.keys(PLUGIN_DEFINITIONS).map(inspect);
@@ -63,6 +76,9 @@ const createPluginService = ({ app, projectRoot, registry, getDevelopmentPython,
     list,
     listWithSizes: async () => app.isPackaged ? registry.listWithSizes() : list(),
     resolveRunConfig,
+    resolveRunConfigAsync,
+    verifyComponentDirectory: (pluginId, componentRoot, force = true) => registry.verifyDirectory(pluginId, componentRoot, force),
+    verifyComponentDirectoryAsync: (pluginId, componentRoot, force = true) => registry.verifyDirectoryAsync(pluginId, componentRoot, force),
     requireCapability,
     runJson: (pluginId, args, timeoutMs, onMessage) => runJsonCommand(resolveRunConfig(pluginId, args), `Plugin ${pluginId}`, timeoutMs, onMessage),
     installRoot: registry.installRoot,

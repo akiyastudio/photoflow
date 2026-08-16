@@ -27,9 +27,14 @@ const { createMediaAccessService } = require('./services/media-access-service.cj
 const { createMediaFileResponse } = require('./services/media-response-service.cjs');
 const { PythonDatabaseClient } = require('./repositories/database-client.cjs');
 const { createWorkspaceRepository } = require('./repositories/workspace-repository.cjs');
+const { createOperationsRepository } = require('./repositories/operations-repository.cjs');
 const { createMediaRepository } = require('./repositories/media-repository.cjs');
+const { createTeamRetouchRepository } = require('./repositories/team-retouch-repository.cjs');
 const { createEventBus } = require('./services/event-bus.cjs');
+const { createDomainCommandJournal } = require('./services/domain-command-journal.cjs');
+const { createDomainHealthService } = require('./services/domain-health-service.cjs');
 const { createBackgroundTaskService } = require('./services/background-task-service.cjs');
+const { createProcessSupervisor } = require('./services/process-supervisor.cjs');
 const { createBackupService } = require('./services/backup-service.cjs');
 const { createArchiveService } = require('./services/archive-service.cjs');
 const { createCredentialService } = require('./services/credential-service.cjs');
@@ -53,11 +58,16 @@ const { createProjectVirtualPathService } = require('./services/project-virtual-
 const cloudConfig = require('./cloud-config.cjs');
 const { registerBackgroundTasksIpc } = require('./modules/background-tasks-ipc.cjs');
 const { createElectronSecurity, normalizeBundledPythonTool, normalizeExternalUrl } = require('./security-policy.cjs');
-const projectVirtualPaths = createProjectVirtualPathService({ shell });
 // Keep user-facing OS labels localized while runtime data stays in a stable,
 // Latin-only directory name.
 app.setPath('userData', path.join(app.getPath('appData'), 'Photoflow'));
 app.setName('照片流');
+const managedExternalLinkRegistryPath = path.join(app.getPath('userData'), 'managed-external-links.json');
+const projectVirtualPaths = createProjectVirtualPathService({
+  shell,
+  crypto,
+  registryPath: managedExternalLinkRegistryPath,
+});
 const projectRoot = path.join(__dirname, '..');
 const privacyService = createPrivacyService({ app, fs, path, shell, projectRoot });
 const userComponentRoot = process.env.LOCALAPPDATA
@@ -158,6 +168,7 @@ const pushUndoOperation = async operation => {
 };
 const workspaceCatalogs = new Map();
 let shellThumbnailProcess = null;
+let shellThumbnailManagedProcess = null;
 let shellThumbnailOutput = '';
 let shellThumbnailRequestId = 0;
 let shellThumbnailWorkChain = Promise.resolve();
@@ -215,9 +226,10 @@ const releaseWorkspaceWatchPath = (targetPath, delayMs = 750) => {
 const trackedVersionThumbnailCopies = new Map();
 const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
+const processSupervisor = createProcessSupervisor({ writeLog: (...args) => writeLog(...args) });
 
-const recycleBinService = createRecycleBinService({ app, shell, projectRoot });
-const fileClipboardService = createFileClipboardService({ app, projectRoot });
+const recycleBinService = createRecycleBinService({ app, shell, projectRoot, processSupervisor });
+const fileClipboardService = createFileClipboardService({ app, projectRoot, processSupervisor });
 const shellNewService = createShellNewService({ app });
 const fileSystemService = createFileSystemService({ recycleBinService });
 const {
@@ -311,6 +323,18 @@ const writeLog = (level, message, details) => {
     nativeConsoleError('Failed to write application log:', error);
   }
 };
+const domainCommandJournal = createDomainCommandJournal({
+  filePath: path.join(app.getPath('userData'), 'domain-command-journal.json'),
+  writeLog,
+});
+const domainHealthService = createDomainHealthService();
+const databaseHealthOptions = domainId => ({
+  domainId,
+  onHealthChange: state => {
+    domainHealthService.update(domainId, state);
+    if (state.state !== 'healthy') writeLog(state.state === 'unavailable' ? 'error' : 'warn', 'Domain health changed', state);
+  },
+});
 
 const rendererEntryFile = path.join(__dirname, '../artifacts/web/index.html');
 const isDevelopmentRenderer = () => process.env.NODE_ENV === 'development';
@@ -335,22 +359,13 @@ const stopShellThumbnailProcess = () => {
   shellThumbnailProcess = null;
   shellThumbnailOutput = '';
   finishShellThumbnailRequests();
-  if (child && !child.killed) child.kill();
+  if (shellThumbnailManagedProcess) {
+    shellThumbnailManagedProcess.stop('shell-thumbnail-stop');
+    shellThumbnailManagedProcess = null;
+  } else if (child && !child.killed) child.kill();
 };
 
-const ensureShellThumbnailProcess = () => {
-  if (process.platform !== 'win32') return null;
-  if (shellThumbnailProcess && !shellThumbnailProcess.killed) return shellThumbnailProcess;
-  const executable = getShellThumbnailExecutable();
-  if (!fs.existsSync(executable)) {
-    if (!shellThumbnailUnavailableLogged) {
-      shellThumbnailUnavailableLogged = true;
-      writeLog('warn', 'Windows Shell thumbnail cache helper is unavailable', { executable });
-    }
-    return null;
-  }
-
-  const child = spawn(executable, [], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+const attachShellThumbnailProcess = (child, managedProcess = null) => {
   shellThumbnailProcess = child;
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', data => {
@@ -361,6 +376,7 @@ const ensureShellThumbnailProcess = () => {
       const fields = rawLine.replace(/^\uFEFF/, '').split('\t');
       const request = shellThumbnailRequests.get(fields[0]);
       if (!request) continue;
+      managedProcess?.markHealthy({ protocol: 'tab-lines' });
       shellThumbnailRequests.delete(fields[0]);
       clearTimeout(request.timer);
       let accepted = fields[1] === '1' && fs.existsSync(request.targetPath);
@@ -391,6 +407,35 @@ const ensureShellThumbnailProcess = () => {
     if (code && code !== 0) writeLog('warn', 'Windows Shell thumbnail cache helper exited', { code, signal });
   });
   return child;
+};
+
+const ensureShellThumbnailProcess = () => {
+  if (process.platform !== 'win32') return null;
+  if (shellThumbnailProcess && !shellThumbnailProcess.killed) return shellThumbnailProcess;
+  if (shellThumbnailManagedProcess && !shellThumbnailManagedProcess.released) {
+    if (shellThumbnailManagedProcess.state === 'restarting') return shellThumbnailManagedProcess.start();
+    shellThumbnailManagedProcess.release();
+    shellThumbnailManagedProcess = null;
+  }
+  const executable = getShellThumbnailExecutable();
+  if (!fs.existsSync(executable)) {
+    if (!shellThumbnailUnavailableLogged) {
+      shellThumbnailUnavailableLogged = true;
+      writeLog('warn', 'Windows Shell thumbnail cache helper is unavailable', { executable });
+    }
+    return null;
+  }
+
+  shellThumbnailManagedProcess = processSupervisor.launch({
+    id: 'csharp:shell-thumbnail',
+    kind: 'csharp-helper',
+    command: executable,
+    args: [],
+    options: { stdio: ['pipe', 'pipe', 'ignore'] },
+    restart: { enabled: true, maxRestarts: 3, windowMs: 60000, backoffMs: [100, 400, 1200] },
+    onSpawn: attachShellThumbnailProcess,
+  });
+  return shellThumbnailManagedProcess.child;
 };
 
 // Query Explorer's cache first, then optionally ask the installed provider to
@@ -498,7 +543,7 @@ const loadMainWindowRenderer = () => {
 };
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'ffmpeg_transcode', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'backup_db']);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'ffmpeg_transcode', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'operations_db', 'team_retouch_db', 'backup_db']);
 const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract', 'screenshot_main_image']);
 
 const getDevelopmentPython = () => {
@@ -551,8 +596,18 @@ const getRunConfig = (scriptName, args) => {
   }
 };
 
+let supervisedJobSequence = 0;
+const spawnSupervisedJob = ({ prefix, kind, command, args, options }) => processSupervisor.launch({
+  id: `${prefix}:${++supervisedJobSequence}`,
+  kind,
+  command,
+  args,
+  options,
+  ephemeral: true,
+}).child;
+
 const runJsonCommand = (run, label, timeoutMs = 20 * 60 * 1000, onMessage) => new Promise((resolve, reject) => {
-  const child = spawn(run.command, run.args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawnSupervisedJob({ prefix: 'python:json-job', kind: 'python-job', command: run.command, args: run.args, options: { stdio: ['ignore', 'pipe', 'pipe'] } });
   let stdout = '';
   let messageBuffer = '';
   let stderr = '';
@@ -601,7 +656,7 @@ const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, onMes
 
 const runPythonEventAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, signal, onEvent) => new Promise((resolve, reject) => {
   const run = getRunConfig(scriptName, args);
-  const child = spawn(run.command, run.args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawnSupervisedJob({ prefix: 'python:event-job', kind: 'python-job', command: run.command, args: run.args, options: { stdio: ['ignore', 'pipe', 'pipe'] } });
   let stdout = '';
   let stderr = '';
   let eventBuffer = '';
@@ -827,6 +882,18 @@ const getWorkspaceDataRoot = root => path.join(
   getWorkspaceStorageKey(root),
 );
 
+const getWorkspaceOperationsDatabasePath = root => path.join(
+  getWorkspaceDataRoot(root),
+  'databases',
+  'operations.sqlite3',
+);
+
+const getWorkspaceTeamRetouchDatabasePath = root => path.join(
+  getWorkspaceDataRoot(root),
+  'databases',
+  'team-retouch.sqlite3',
+);
+
 const getTrackedVersionThumbnailPath = (workspaceRoot, photoId, versionId) => {
   const safeSegment = (value, label) => {
     const segment = String(value || '');
@@ -847,18 +914,34 @@ const workspaceDatabase = new PythonDatabaseClient({
   getRunConfig,
   getDatabasePath: getWorkspaceDatabasePath,
   writeLog,
+  processSupervisor,
+  processId: 'python:workspace-catalog',
+  ...databaseHealthOptions('workspace'),
   // A one-time reconciliation can cascade through thousands of media rows
   // after a project folder disappears outside the app. Do not kill the worker
   // halfway through that recovery and leave the project list empty.
   defaultTimeoutMs: 2 * 60 * 1000,
 });
-const workspaceRepository = createWorkspaceRepository(workspaceDatabase);
+const operationsDatabase = new PythonDatabaseClient({
+  getRunConfig,
+  getDatabasePath: getWorkspaceOperationsDatabasePath,
+  writeLog,
+  scriptName: 'operations_db.py',
+  processSupervisor,
+  processId: 'python:operations',
+  ...databaseHealthOptions('file-operations'),
+});
+const operationsRepository = createOperationsRepository(operationsDatabase, getWorkspaceDatabasePath);
+const workspaceRepository = createWorkspaceRepository(workspaceDatabase, operationsRepository, domainCommandJournal);
 // Run routine integrity checks and backups in an independent process so they
 // cannot hold up interactive project-catalog requests.
 const workspaceMaintenanceDatabase = new PythonDatabaseClient({
   getRunConfig,
   getDatabasePath: getWorkspaceDatabasePath,
   writeLog,
+  processSupervisor,
+  processId: 'python:workspace-maintenance',
+  ...databaseHealthOptions('workspace-maintenance'),
   defaultTimeoutMs: 30 * 60 * 1000,
 });
 const workspaceMaintenanceRepository = createWorkspaceRepository(workspaceMaintenanceDatabase);
@@ -867,6 +950,9 @@ const mediaDatabase = new PythonDatabaseClient({
   getRunConfig,
   getDatabasePath: getWorkspaceDatabasePath,
   writeLog,
+  processSupervisor,
+  processId: 'python:media-background',
+  ...databaseHealthOptions('media-background'),
   defaultTimeoutMs: 30 * 60 * 1000,
 });
 // Keep small user-driven mutations away from the worker that also performs
@@ -877,23 +963,70 @@ const mediaInteractionDatabase = new PythonDatabaseClient({
   getRunConfig,
   getDatabasePath: getWorkspaceDatabasePath,
   writeLog,
+  processSupervisor,
+  processId: 'python:media-interaction',
+  ...databaseHealthOptions('media-interaction'),
+  defaultTimeoutMs: 60 * 1000,
+});
+// Team-retouch has its own protocol process. It may read stable media IDs from
+// the core store, but a failed team database or worker cannot block the media
+// interaction queue.
+const teamRetouchDatabase = new PythonDatabaseClient({
+  getRunConfig,
+  getDatabasePath: getWorkspaceDatabasePath,
+  writeLog,
+  processSupervisor,
+  processId: 'python:team-retouch-database',
+  ...databaseHealthOptions('team-retouch'),
   defaultTimeoutMs: 60 * 1000,
 });
 const mediaBackgroundRepository = createMediaRepository(mediaDatabase);
 const mediaInteractionRepository = createMediaRepository(mediaInteractionDatabase);
+const teamRetouchRepository = createTeamRetouchRepository(teamRetouchDatabase);
+domainCommandJournal.register('team-retouch', 'team-retouch.project.purge.v1', command => (
+  teamRetouchRepository.purgeTeamProject(command.workspaceRoot, command.payload)
+));
+const trustedExternalMediaRoots = (root, projectName) => {
+  const project = workspaceCatalogs.get(path.resolve(root))?.byName.get(String(projectName || '').toLocaleLowerCase());
+  if (!project?.relative_path) return [];
+  const projectRoot = path.resolve(root, project.relative_path);
+  return projectVirtualPaths.listManagedExternalLinks(projectRoot)
+    .filter(link => !link.offline)
+    .map(link => ({ path: link.externalTargetRoot, kind: link.externalTargetKind, virtualPath: link.shortcutVirtualPath }));
+};
 const mediaRepository = {
   ...mediaBackgroundRepository,
+  syncProject: (root, projectName) => mediaBackgroundRepository.syncProject(root, projectName, trustedExternalMediaRoots(root, projectName)),
+  getPhoto: mediaInteractionRepository.getPhoto,
+  createVersion: mediaInteractionRepository.createVersion,
+  updateVersion: mediaInteractionRepository.updateVersion,
+  listFinalVersions: mediaInteractionRepository.listFinalVersions,
+  relocateVersion: mediaInteractionRepository.relocateVersion,
+  deleteVersion: mediaInteractionRepository.deleteVersion,
+  getVersionDeleteScope: mediaInteractionRepository.getVersionDeleteScope,
+  deleteProjectMissingVersion: mediaInteractionRepository.deleteProjectMissingVersion,
+  recordCompare: mediaInteractionRepository.recordCompare,
+  listProgress: mediaInteractionRepository.listProgress,
+  snapshotProgress: mediaInteractionRepository.snapshotProgress,
+  registerProgress: mediaInteractionRepository.registerProgress,
+  registerProgressWithGraph: mediaInteractionRepository.registerProgressWithGraph,
+  adoptMediaFolder: mediaInteractionRepository.adoptMediaFolder,
+  revertExternalAdoptions: mediaInteractionRepository.revertExternalAdoptions,
+  updateProgressTree: mediaInteractionRepository.updateProgressTree,
+  updateProgressRelation: mediaInteractionRepository.updateProgressRelation,
+  repairLegacySelectionRelation: mediaInteractionRepository.repairLegacySelectionRelation,
+  createVersionGraphEdge: mediaInteractionRepository.createVersionGraphEdge,
+  deleteVersionGraphEdge: mediaInteractionRepository.deleteVersionGraphEdge,
+  replaceVersionGraphEdgeSource: mediaInteractionRepository.replaceVersionGraphEdgeSource,
+  getVersionTreeLayout: mediaInteractionRepository.getVersionTreeLayout,
+  saveVersionTreeLayout: mediaInteractionRepository.saveVersionTreeLayout,
+  unregisterProgress: mediaInteractionRepository.unregisterProgress,
+  deleteMissingProgress: mediaInteractionRepository.deleteMissingProgress,
+  listBatchOperations: mediaInteractionRepository.listBatchOperations,
   getTrackingSession: mediaInteractionRepository.getTrackingSession,
   releaseTrackingSession: mediaInteractionRepository.releaseTrackingSession,
   decideTrackingItem: mediaInteractionRepository.decideTrackingItem,
-  getTeamProjectWorkspace: mediaInteractionRepository.getTeamProjectWorkspace,
-  saveTeamIdentity: mediaInteractionRepository.saveTeamIdentity,
-  assignTeamIdentity: mediaInteractionRepository.assignTeamIdentity,
-  confirmTeamIdentityGroup: mediaInteractionRepository.confirmTeamIdentityGroup,
-  completeTeamIdentity: mediaInteractionRepository.completeTeamIdentity,
-  deleteTeamIdentity: mediaInteractionRepository.deleteTeamIdentity,
-  updateTeamPatch: mediaInteractionRepository.updateTeamPatch,
-  deleteTeamPatch: mediaInteractionRepository.deleteTeamPatch,
+  ...teamRetouchRepository,
 };
 const versionService = createVersionService({ repository: mediaRepository });
 let selectionService = null;
@@ -905,10 +1038,16 @@ const mediaScanDatabase = new PythonDatabaseClient({
   getRunConfig,
   getDatabasePath: getWorkspaceDatabasePath,
   writeLog,
+  processSupervisor,
+  processId: 'python:media-scan',
+  ...databaseHealthOptions('media-scan'),
   defaultTimeoutMs: 30 * 60 * 1000,
 });
 const mediaScanRepository = createMediaRepository(mediaScanDatabase);
-const mediaScanService = createVersionService({ repository: mediaScanRepository });
+const mediaScanService = createVersionService({ repository: {
+  ...mediaScanRepository,
+  syncProject: (root, projectName) => mediaScanRepository.syncProject(root, projectName, trustedExternalMediaRoots(root, projectName)),
+} });
 // Version comparisons can run alongside a full media-index scan. Give them a
 // separate database worker so the scheduler's read concurrency is real rather
 // than two UI tasks queued inside one synchronous Python server process.
@@ -916,6 +1055,9 @@ const trackingScanDatabase = new PythonDatabaseClient({
   getRunConfig,
   getDatabasePath: getWorkspaceDatabasePath,
   writeLog,
+  processSupervisor,
+  processId: 'python:tracking-scan',
+  ...databaseHealthOptions('versioning-scan'),
   defaultTimeoutMs: 30 * 60 * 1000,
 });
 const trackingScanRepository = createMediaRepository(trackingScanDatabase);
@@ -1175,6 +1317,7 @@ const RAW_EXTENSIONS = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', 
 const mediaRatingService = createMediaRatingService({
   exiftool, fs, path, imageExtensions: IMAGE_EXTENSIONS, rawExtensions: RAW_EXTENSIONS,
   releaseWorkspaceWatchPath, suppressWorkspaceWatchPath, versionService, projectVirtualPaths, writeLog,
+  pendingRatingsPath: path.join(app.getPath('userData'), 'pending-media-ratings.json'),
   onInvalidate: filePath => {
     const prefix = `${path.resolve(filePath)}|`;
     for (const key of mediaMetadataCache.keys()) if (key.startsWith(prefix)) mediaMetadataCache.delete(key);
@@ -1462,13 +1605,14 @@ const ensureTrackedVersionThumbnail = async ({ workspaceRoot, photoId, versionId
 
 const rawOrientationCorrection = createRawOrientationService({ exiftool }).correction;
 const imageThumbnailRuntime = createImageThumbnailRuntime({
-  crypto, fs, nativeImage, spawn, getRunConfig, runPythonJsonAction,
+  crypto, fs, nativeImage, spawn, processSupervisor, getRunConfig, runPythonJsonAction,
   getMediaCacheDir, mediaThumbnailCacheFile, copyWindowsShellThumbnail,
   thumbnailVersion: THUMBNAIL_VERSION,
 });
 
 thumbnailPipeline = new ThumbnailPipeline({
   getRunConfig,
+  processSupervisor,
   databasePath: path.join(getConfigDir(), 'thumbnail-index.sqlite3'),
   getCacheDir: getMediaCacheDir,
   cacheFilePath: mediaThumbnailCacheFile,
@@ -1708,10 +1852,12 @@ registerBrollImportIpc({
   ipcMain,
   dialog,
   shell,
+  projectVirtualPaths,
   recycleBinService,
   getMainWindow: () => mainWindow,
   getProjectPath,
   getRunConfig,
+  processSupervisor,
   writeLog,
   pushUndoOperation,
   activeOperations: activeProjectFileOperations,
@@ -1750,16 +1896,16 @@ app.whenReady().then(async () => {
   // not load renderer code until every channel has been registered.
   createWindow(false);
 
-  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
-  registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
-  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, workspaceRepository, writeLog, writeSystemFileClipboard });
+  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
+  const workspaceIpcController = registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
+  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });
-  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
+  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, projectVirtualPaths, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
   registerSelectionIpc({ ipcMain, path, fs, selectionService, workspaceCatalogs });
-  registerAdvancedVideoIpc({ BrowserWindow, app, crypto, ipcMain, mediaService, path, pluginService, spawn, writeLog });
+  registerAdvancedVideoIpc({ BrowserWindow, app, crypto, ipcMain, mediaService, path, pluginService, processSupervisor, spawn, writeLog });
   const credentialService = createCredentialService({ writeLog });
-  const backupService = createBackupService({ app, backgroundTasks, credentialService, getConfigPath, getUserBirthdaysPath, getWorkspaceDatabasePath, getWorkspaceDataRoot, readSavedConfig, runPythonJsonAction, writeLog });
+  const backupService = createBackupService({ app, backgroundTasks, credentialService, getConfigPath, getUserBirthdaysPath, getManagedExternalLinkRegistryPath: () => managedExternalLinkRegistryPath, getManagedExternalLinks: projectRoot => projectVirtualPaths.listManagedExternalLinks(projectRoot), getWorkspaceDatabasePath, getWorkspaceOperationsDatabasePath, getWorkspaceTeamRetouchDatabasePath, getWorkspaceDataRoot, readSavedConfig, runPythonJsonAction, shell, writeLog });
   registerBackupIpc({ backupService, credentialService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
   const archiveService = createArchiveService({ backgroundTasks, movePathAtomic, readSavedConfig, workspaceRepository, writeLog });
   registerArchiveIpc({ archiveService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
@@ -1781,14 +1927,18 @@ app.on('before-quit', () => {
   stopFileRootWatchers();
   stopShellThumbnailProcess();
   workspaceDatabase.stop();
+  operationsDatabase.stop();
   workspaceMaintenanceDatabase.stop();
   mediaDatabase.stop();
   mediaInteractionDatabase.stop();
+  teamRetouchDatabase.stop();
   mediaScanDatabase.stop();
   trackingScanDatabase.stop();
   imageThumbnailRuntime.stop();
   thumbnailService?.stop();
   backgroundTasks.stop();
+  domainCommandJournal.stop();
+  processSupervisor.stopAll();
   eventBus.clear();
   void exiftool.end().catch(() => undefined);
 });

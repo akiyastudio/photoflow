@@ -3,6 +3,9 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { readJson, validateMpvManifest } = require('./media-runtime/runtime-policy.cjs');
+const { createComponentIntegrityManifest } = require('../electron/component-integrity.cjs');
+const { normalizeDotnetAssembly } = require('./deterministic-dotnet-assembly.cjs');
+const { verifyPeDependencyClosure } = require('./media-runtime/pe-dependency-closure.cjs');
 
 if (process.platform !== 'win32' || process.arch !== 'x64') {
   throw new Error('“高级视频解码”组件当前只支持 Windows x64');
@@ -12,10 +15,17 @@ const root = path.resolve(__dirname, '..');
 const sourceRoot = path.join(root, 'extensions', 'video-playback-mpv');
 const templatePath = path.join(sourceRoot, 'component.template.json');
 const manifest = JSON.parse(fs.readFileSync(templatePath, 'utf8'));
-const argumentIndex = process.argv.indexOf('--mpv-root');
-const configuredRoot = argumentIndex >= 0 ? process.argv[argumentIndex + 1] : process.env.PHOTOFLOW_MPV_ROOT;
+const argumentValue = name => {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : '';
+};
+const configuredRoot = argumentValue('--mpv-root') || process.env.PHOTOFLOW_MPV_ROOT;
 const mpvRoot = path.resolve(configuredRoot || path.join(sourceRoot, 'vendor'));
 const runtimeManifestPath = path.join(mpvRoot, 'runtime-manifest.json');
+const sourceDateEpoch = Number.parseInt(process.env.SOURCE_DATE_EPOCH || '0', 10);
+if (!Number.isSafeInteger(sourceDateEpoch) || sourceDateEpoch < 0) throw new Error('SOURCE_DATE_EPOCH 必须是非负整数秒');
+const buildDate = new Date(sourceDateEpoch * 1000);
+const zipTimestamp = new Date(Math.max(sourceDateEpoch, 315532800) * 1000);
 
 if (!fs.existsSync(runtimeManifestPath)) {
   throw new Error(`找不到 libmpv LGPL 运行时清单：${runtimeManifestPath}\n组件构建不接受无法证明许可证、构建参数和文件哈希的第三方二进制。`);
@@ -52,6 +62,61 @@ const findFile = (directory, names) => {
   return '';
 };
 
+const normalizeZipTimestamps = (archivePath, epochSeconds) => {
+  const image = fs.readFileSync(archivePath);
+  let endOfCentralDirectory = -1;
+  for (let offset = image.length - 22; offset >= Math.max(0, image.length - 65557); offset--) {
+    if (image.readUInt32LE(offset) === 0x06054b50) {
+      endOfCentralDirectory = offset;
+      break;
+    }
+  }
+  if (endOfCentralDirectory < 0) throw new Error('高级视频解码组件 ZIP 缺少中央目录');
+
+  const normalizeExtraFields = (start, length) => {
+    const end = start + length;
+    for (let cursor = start; cursor + 4 <= end;) {
+      const fieldId = image.readUInt16LE(cursor);
+      const fieldLength = image.readUInt16LE(cursor + 2);
+      const fieldEnd = cursor + 4 + fieldLength;
+      if (fieldEnd > end) throw new Error('高级视频解码组件 ZIP 扩展字段损坏');
+      if (fieldId === 0x5455 && fieldLength >= 1) {
+        const flags = image[cursor + 4];
+        let timestampOffset = cursor + 5;
+        for (const flag of [1, 2, 4]) {
+          if (!(flags & flag)) continue;
+          if (timestampOffset + 4 > fieldEnd) throw new Error('高级视频解码组件 ZIP 时间字段损坏');
+          image.writeUInt32LE(epochSeconds, timestampOffset);
+          timestampOffset += 4;
+        }
+      }
+      cursor = fieldEnd;
+    }
+  };
+
+  const entryCount = image.readUInt16LE(endOfCentralDirectory + 10);
+  let centralOffset = image.readUInt32LE(endOfCentralDirectory + 16);
+  for (let index = 0; index < entryCount; index++) {
+    if (image.readUInt32LE(centralOffset) !== 0x02014b50) throw new Error('高级视频解码组件 ZIP 中央目录损坏');
+    const nameLength = image.readUInt16LE(centralOffset + 28);
+    const extraLength = image.readUInt16LE(centralOffset + 30);
+    const commentLength = image.readUInt16LE(centralOffset + 32);
+    const localOffset = image.readUInt32LE(centralOffset + 42);
+    if (image.readUInt32LE(localOffset) !== 0x04034b50) throw new Error('高级视频解码组件 ZIP 本地条目损坏');
+
+    image.writeUInt16LE(0, localOffset + 10);
+    image.writeUInt16LE(33, localOffset + 12);
+    image.writeUInt16LE(0, centralOffset + 12);
+    image.writeUInt16LE(33, centralOffset + 14);
+    const localNameLength = image.readUInt16LE(localOffset + 26);
+    const localExtraLength = image.readUInt16LE(localOffset + 28);
+    normalizeExtraFields(localOffset + 30 + localNameLength, localExtraLength);
+    normalizeExtraFields(centralOffset + 46 + nameLength, extraLength);
+    centralOffset += 46 + nameLength + extraLength + commentLength;
+  }
+  fs.writeFileSync(archivePath, image);
+};
+
 const declaredMpvFile = runtimeManifest.files.find(entry => /^(?:lib)?mpv-2\.dll$/i.test(path.basename(entry.file)));
 const mpvLibrary = declaredMpvFile ? path.resolve(mpvRoot, declaredMpvFile.file) : findFile(mpvRoot, ['libmpv-2.dll', 'mpv-2.dll']);
 if (!mpvLibrary) {
@@ -71,7 +136,10 @@ const frameworkRoots = [
 const frameworkRoot = frameworkRoots.find(candidate => fs.existsSync(path.join(candidate, 'csc.exe')));
 if (!frameworkRoot) throw new Error('找不到 Windows C# 编译器，无法构建高级视频解码桥接程序');
 
-const outputRoot = path.join(root, 'artifacts', 'installers', 'components');
+const releaseRoot = path.join(root, 'artifacts', 'installers');
+const outputRoot = path.resolve(argumentValue('--output-root') || path.join(releaseRoot, 'components'));
+const relativeOutputRoot = path.relative(releaseRoot, outputRoot);
+if (relativeOutputRoot.startsWith('..') || path.isAbsolute(relativeOutputRoot)) throw new Error(`组件输出目录必须位于安装包目录内：${outputRoot}`);
 const target = path.join(outputRoot, manifest.id);
 const relativeTarget = path.relative(outputRoot, target);
 if (!relativeTarget || relativeTarget.startsWith('..') || path.isAbsolute(relativeTarget)) throw new Error(`不安全的组件输出路径：${target}`);
@@ -87,6 +155,7 @@ const compile = spawnSync(path.join(frameworkRoot, 'csc.exe'), [
   path.join(sourceRoot, 'AdvancedVideoDecoder.cs'),
 ], { cwd: root, encoding: 'utf8', windowsHide: true });
 if (compile.status !== 0) throw new Error(`高级视频解码桥接程序构建失败：${compile.stderr || compile.stdout}`);
+normalizeDotnetAssembly(executable);
 
 const runtimeRoot = path.dirname(mpvLibrary);
 const copiedNames = new Set();
@@ -98,6 +167,7 @@ for (const entry of runtimeManifest.files) {
   copiedNames.add(destinationName.toLowerCase());
   fs.copyFileSync(sourcePath, path.join(target, destinationName));
 }
+verifyPeDependencyClosure(target, ['libmpv-2.dll']);
 
 for (const entry of fs.readdirSync(runtimeRoot, { withFileTypes: true })) {
   if (!entry.isFile() || !/^(license|copying|copyright|readme|build)/i.test(entry.name)) continue;
@@ -109,9 +179,14 @@ for (const entry of Object.values(runtimeManifest.complianceArtifacts)) {
   fs.copyFileSync(path.resolve(mpvRoot, entry.file), path.join(target, path.basename(entry.file)));
 }
 fs.copyFileSync(templatePath, path.join(target, 'component.json'));
+const integrityManifest = createComponentIntegrityManifest(target, manifest.id, manifest.version);
+const serializedIntegrity = `${JSON.stringify(integrityManifest, null, 2)}\n`;
+fs.writeFileSync(path.join(target, 'component-integrity.json'), serializedIntegrity, 'utf8');
+fs.writeFileSync(path.join(root, 'electron', 'plugins', 'video-playback-mpv-integrity.json'), serializedIntegrity, 'utf8');
 
 const files = fs.readdirSync(target, { withFileTypes: true })
   .filter(entry => entry.isFile())
+  .sort((left, right) => left.name.localeCompare(right.name, 'en'))
   .map(entry => {
     const filePath = path.join(target, entry.name);
     return {
@@ -123,7 +198,7 @@ const files = fs.readdirSync(target, { withFileTypes: true })
 fs.writeFileSync(path.join(target, 'build-info.json'), JSON.stringify({
   componentId: manifest.id,
   version: manifest.version,
-  builtAt: new Date().toISOString(),
+  builtAt: buildDate.toISOString(),
   mediaRuntime: {
     mpvVersion: runtimeManifest.mpv?.version || '',
     mpvCommit: runtimeManifest.mpv?.commit || runtimeManifest.mpv?.ref || '',
@@ -134,7 +209,13 @@ fs.writeFileSync(path.join(target, 'build-info.json'), JSON.stringify({
   files,
 }, null, 2));
 
-const releaseRoot = path.join(root, 'artifacts', 'installers');
+const archiveEntries = fs.readdirSync(target, { withFileTypes: true })
+  .filter(entry => entry.isFile())
+  .map(entry => entry.name)
+  .sort((left, right) => left.localeCompare(right, 'en'));
+for (const name of archiveEntries) fs.utimesSync(path.join(target, name), zipTimestamp, zipTimestamp);
+fs.utimesSync(target, zipTimestamp, zipTimestamp);
+
 const artifactName = `PhotoFlow-${manifest.id}-${manifest.version}-${process.platform}-${process.arch}.zip`;
 const artifactPath = path.join(releaseRoot, artifactName);
 for (const existingName of fs.readdirSync(releaseRoot)) {
@@ -142,10 +223,12 @@ for (const existingName of fs.readdirSync(releaseRoot)) {
     fs.rmSync(path.join(releaseRoot, existingName), { force: true });
   }
 }
-const archive = spawnSync('tar.exe', ['-a', '-c', '-f', artifactPath, manifest.id], {
+const archive = spawnSync('tar.exe', ['-a', '-c', '-f', artifactPath,
+  ...archiveEntries.map(name => path.join(manifest.id, name))], {
   cwd: outputRoot,
   encoding: 'utf8',
   windowsHide: true,
 });
 if (archive.status !== 0) throw new Error(`高级视频解码组件打包失败：${archive.stderr || archive.stdout}`);
+normalizeZipTimestamps(artifactPath, Math.floor(zipTimestamp.getTime() / 1000));
 console.log(`高级视频解码组件已生成：${artifactPath}`);

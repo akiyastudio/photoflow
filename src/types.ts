@@ -287,6 +287,7 @@ export interface AppConfig {
     sdPaths: string[];
     sdDriveTypes: Record<string, 'work' | 'broll'>;
     sdDeviceIds: Record<string, string>;
+    sdDevices: ConfiguredSdDevice[];
     destPath: string;
     backupEnabled: boolean;
     backupPath: string;
@@ -317,12 +318,29 @@ export interface AppConfig {
   research: ResearchSettings;
 }
 
+export interface ConfiguredSdDevice {
+  deviceId: string;
+  lastMountPath: string;
+  type: 'work' | 'broll';
+  confirmedAt: number;
+  enabled: boolean;
+}
+
 export interface StorageDevice {
   id: string;
   mountPath: string;
   label: string;
   removable: boolean;
   driveType: number;
+  identityStable: boolean;
+  hasSupportedMedia: boolean;
+  eligibleForSdImport: boolean;
+}
+
+export interface StorageDeviceInventoryResult {
+  devices: StorageDevice[];
+  complete: boolean;
+  error?: string;
 }
 
 export interface PrivacyConsentState {
@@ -480,6 +498,7 @@ export interface ProgressFolder {
   parentVersionKey?: string;
   displayName: string;
   folderPath: string;
+  externalLinkRelativePath?: string;
   folderMissing: boolean;
   missingSince?: number;
   nodeRole: 'original' | 'progress' | 'selection' | 'artifact' | 'workflow';
@@ -827,7 +846,9 @@ export interface ComponentStatus {
 
 export interface AdvancedVideoState {
   sessionId: string;
-  type: 'ready' | 'loading' | 'file-loaded' | 'state' | 'ended' | 'navigate' | 'context-menu' | 'pointer-activity' | 'escape' | 'error' | 'fatal';
+  playerId: string;
+  requestId: string;
+  type: 'ready' | 'loading' | 'file-loaded' | 'state' | 'ended' | 'navigate' | 'context-menu' | 'pointer-activity' | 'escape' | 'stopped' | 'error' | 'fatal';
   time?: number;
   duration?: number;
   paused?: boolean;
@@ -924,7 +945,8 @@ export interface IElectronAPI {
   installTeamRetouchAdvanced: (options?: { repair?: boolean }) => Promise<{ success: boolean; cancelled?: boolean; restartRequired?: boolean; packageSizeBytes?: number; error?: string }>;
   uninstallTeamRetouchAdvanced: () => Promise<{ success: boolean; error?: string }>;
   onTeamRetouchAdvancedProgress: (callback: (value: { phase: string; progress?: number; message: string }) => void) => () => void;
-  getStorageDevices: () => Promise<StorageDevice[]>;
+  getStorageDevices: () => Promise<StorageDeviceInventoryResult>;
+  getDomainHealth: () => Promise<{ success: boolean; domains: Array<{ domainId: string; state: 'healthy' | 'degraded' | 'unavailable' | 'recovering'; failures: number; lastError: string; updatedAt: number }>; commands: Array<{ commandId: string; target: string; type: string; status: 'pending' | 'processing' | 'dead'; attempts: number; error: string }> }>;
   getDrives: () => Promise<string[]>;
   setTheme: (theme: Theme) => Promise<void>;
   minimizeWindow: () => void;
@@ -954,7 +976,7 @@ export interface IElectronAPI {
   getProjectContents: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; folders: Array<{ name: string; path: string; updatedAt: number }>;error?: string }> ;
   watchFileRoot: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; root?: string; watchedRoots?: number; offlineLinks?: number; error?: string }>;
   unwatchFileRoot: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; error?: string }>;
-  browseProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath?: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path?: string; entries: ProjectFileEntry[]; viaExternalLink?: boolean; externalLinkOffline?: boolean; missingDirectory?: boolean; error?: string }>;
+  browseProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath?: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path?: string; entries: ProjectFileEntry[]; viaExternalLink?: boolean; externalLinkRootRelativePath?: string; externalLinkOffline?: boolean; missingDirectory?: boolean; error?: string }>;
   inspectProjectToolSources: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], collectVideos?: boolean, collectDirectPng?: boolean, collectRecursivePng?: boolean) => Promise<{ success: boolean; indexed: boolean; hasVideo: boolean; hasPng: boolean; videoPaths: string[]; pngPaths: string[]; folderPaths: string[]; error?: string }>;
   resolveProjectShortcut: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; target?: string; targetKind?: 'folder' | 'file'; error?: string }>;
   materializeProjectExternalLinks: (workspacePath: string, status: ProjectStatus, name: string, relativePaths?: string[]) => Promise<{ success: boolean; count: number; items?: Array<{ shortcutPath: string; source: string; destination: string }>; error?: string }>;
@@ -1093,7 +1115,7 @@ export interface IElectronAPI {
   getMediaThumbnail: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache'], requestedSize?: number, priority?: 0 | 1 | 2 | 3, queueOrder?: number) => Promise<{ success: boolean; taskId?: string; state?: ThumbnailState; previewUrl?: string; mediaUrl?: string; usingImportedPreview?: boolean; importedVideoWithoutPreview?: boolean; cacheLayer?: 'memory' | 'disk' | 'source'; error?: string }>;
   cancelMediaThumbnail: (filePath: string, requestedSize?: number) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
   onThumbnailStateChanged: (callback: (update: { filePath: string; state: ThumbnailState; previewUrls?: Partial<Record<'small' | 'medium' | 'large', string>>; sourceMtimeMs?: number; sourceSize?: number; error?: string }) => void) => () => void;
-  startAdvancedVideo: (filePath: string, arrowKeyAction?: AdvancedVideoComponentSettings['arrowKeyAction']) => Promise<{ success: boolean; sessionId?: string; error?: string }>;
+  startAdvancedVideo: (filePath: string, arrowKeyAction: AdvancedVideoComponentSettings['arrowKeyAction'] | undefined, playerId: string, requestId: string) => Promise<{ success: boolean; sessionId?: string; playerId?: string; requestId?: string; error?: string }>;
   setAdvancedVideoBounds: (sessionId: string, bounds: {
     x: number;
     y: number;

@@ -6,6 +6,7 @@ const path = require('path');
 
 const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
 const { createMediaRepository } = require('../electron/repositories/media-repository.cjs');
+const { createProjectVirtualPathService } = require('../electron/services/project-virtual-path-service.cjs');
 
 const handlers = new Map();
 const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-version-ipc-'));
@@ -13,6 +14,11 @@ const trustedParent = path.join(workspaceRoot, 'Project', 'source');
 const trustedProgress = path.join(workspaceRoot, 'Project', 'edit');
 fs.mkdirSync(trustedParent, { recursive: true });
 fs.mkdirSync(trustedProgress, { recursive: true });
+const testShell = {
+  readShortcutLink: shortcutPath => JSON.parse(fs.readFileSync(shortcutPath, 'utf8')),
+  writeShortcutLink: (shortcutPath, details) => { fs.writeFileSync(shortcutPath, JSON.stringify(details)); return true; },
+};
+const projectVirtualPaths = createProjectVirtualPathService({ shell: testShell, registryPath: path.join(workspaceRoot, 'managed-links.json') });
 const calls = {};
 const taskReports = [];
 
@@ -121,6 +127,7 @@ registerVersionIpc({
   mediaMetadataCache: new Map(),
   mediaScanService,
   path,
+  projectVirtualPaths,
   releaseWorkspaceWatchPath: () => undefined,
   refreshWorkspaceCatalog: async () => undefined,
   resolveProjectEntry: (_root, _status, _projectName, relativePath) => {
@@ -135,7 +142,7 @@ registerVersionIpc({
     onEvent?.(progressEvent);
     return [progressEvent, { type: 'preview', data: { matches: [], suggestions: [], unmatched: ['new.jpg'] } }];
   },
-  shell: { readShortcutLink: shortcutPath => JSON.parse(fs.readFileSync(shortcutPath, 'utf8')) },
+  shell: testShell,
   suppressWorkspaceWatchPath: () => undefined,
   undefined,
   versionService,
@@ -232,6 +239,28 @@ async function main() {
   }, 'tracking snapshot finalization must use the isolated media-scan database worker');
   assert(!JSON.stringify(calls.commit.request).includes(maliciousPath));
 
+  const originalGetTrackingCommitPlan = versionService.getTrackingCommitPlan;
+  let releaseCommitPlan;
+  const commitPlanGate = new Promise(resolve => { releaseCommitPlan = resolve; });
+  let concurrentPlanCalls = 0;
+  versionService.getTrackingCommitPlan = async (...args) => {
+    concurrentPlanCalls += 1;
+    await commitPlanGate;
+    return originalGetTrackingCommitPlan(...args);
+  };
+  const concurrentSessionId = '66666666-6666-4666-8666-666666666666';
+  const firstConcurrentCommit = commit({}, workspaceRoot, { sessionId: concurrentSessionId });
+  await Promise.resolve();
+  const secondConcurrentCommit = commit({}, workspaceRoot, { sessionId: concurrentSessionId });
+  const releaseDuringCommit = await release({}, workspaceRoot, { sessionId: concurrentSessionId });
+  assert.strictEqual(releaseDuringCommit.success, false, 'an in-flight commit session must not be released');
+  assert.match(releaseDuringCommit.error, /正在提交/);
+  releaseCommitPlan();
+  const concurrentResults = await Promise.all([firstConcurrentCommit, secondConcurrentCommit]);
+  assert(concurrentResults.every(result => result.success), 'duplicate commit callers must share the successful result');
+  assert.strictEqual(concurrentPlanCalls, 1, 'duplicate commit requests for one session must execute one commit plan');
+  versionService.getTrackingCommitPlan = originalGetTrackingCommitPlan;
+
   let commitAttempts = 0;
   let failureRecorded = 0;
   versionService.commitBatchCompare = async (root, request) => {
@@ -265,7 +294,7 @@ async function main() {
   const externalProgressPath = path.join(workspaceRoot, 'external-progress');
   const externalShortcutPath = path.join(workspaceRoot, 'Project', 'external-progress.lnk');
   fs.mkdirSync(externalProgressPath, { recursive: true });
-  fs.writeFileSync(externalShortcutPath, JSON.stringify({ target: externalProgressPath, description: 'PhotoFlow 外链文件夹：external-progress' }));
+  projectVirtualPaths.createManagedExternalLink(externalShortcutPath, { target: externalProgressPath, kind: 'folder', displayName: 'external-progress' });
   let externalRegistrationRequest;
   versionService.registerProgress = async (_root, request) => {
     externalRegistrationRequest = request;
@@ -278,6 +307,7 @@ async function main() {
   assert.strictEqual(externalRegistration.success, true, externalRegistration.error);
   assert.strictEqual(externalRegistration.relativePath, 'external-progress.lnk');
   assert.strictEqual(externalRegistrationRequest.folderPath, externalProgressPath, 'external progress tracking must persist the shortcut target path');
+  assert.strictEqual(externalRegistrationRequest.externalLinkRelativePath, 'external-progress.lnk');
 
   const failedNested = path.join(workspaceRoot, 'Project', 'nested', 'Rollback me');
   fs.mkdirSync(failedNested, { recursive: true });

@@ -689,6 +689,17 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
         tracking = workspace_db.tracking_session_create(str(workspace), db, {
             "projectName": "Project", "progressId": tracked_progress["id"], "mode": "refresh",
         })
+        rejected(lambda: workspace_db.progress_register_with_graph(str(workspace), db, {
+            "projectName": "Project",
+            "progress": {
+                "progressId": progress["id"], "mediaKind": "image", "versionKey": "1",
+                "displayName": "Progress", "folderPath": str(project / "Progress"),
+                "trackingEnabled": False, "trackingState": "disabled",
+                "renameFromParent": False, "copyMissingFromParent": False,
+            },
+            "workflowInputProgressIds": [],
+        }), "node_busy")
+        workspace_db.tracking_session_release(db, {"sessionId": tracking["sessionId"]})
         detached_progress = workspace_db.progress_register_with_graph(str(workspace), db, {
             "projectName": "Project",
             "progress": {
@@ -930,6 +941,207 @@ def test_legacy_selection_keep_independent_is_durable(root: Path) -> None:
         db.close()
 
 
+def test_external_link_progress_is_persisted_and_sync_safe(root: Path) -> None:
+    workspace = root / "external-progress-workspace"
+    project = workspace / "Project"
+    project.mkdir(parents=True)
+    (project / "RAW.lnk").write_text("managed external original", encoding="utf-8")
+    (project / "Retouch.lnk").write_text("managed external progress", encoding="utf-8")
+    external_original = root / "external-media" / "RAW"
+    external_progress = root / "external-media" / "Retouch"
+    external_original.mkdir(parents=True)
+    external_progress.mkdir(parents=True)
+    (external_original / "base.jpg").write_bytes(b"original")
+    changed_media = external_progress / "edit.jpg"
+    changed_media.write_bytes(b"first")
+    database = root / "external-progress.sqlite3"
+    db = workspace_db.connect(str(workspace), str(database))
+    now = int(time.time() * 1000)
+    db.execute(
+        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES('external-project','Project','后期中','Project',?,?)",
+        (now, now),
+    )
+    db.commit()
+    try:
+        rejected = False
+        try:
+            workspace_db.progress_adopt_media(str(workspace), db, {
+                "projectName": "Project", "folderPath": str(external_original),
+                "mode": "original", "mediaKind": "image",
+            })
+        except ValueError:
+            rejected = True
+        assert rejected, "an arbitrary external absolute path must remain rejected"
+
+        original_adoption = workspace_db.progress_adopt_media(str(workspace), db, {
+            "projectName": "Project", "folderPath": str(external_original),
+            "externalLinkRelativePath": "RAW.lnk", "mode": "original", "mediaKind": "image",
+        })
+        assert original_adoption["created"] is True
+        original = original_adoption["progressFolder"]
+        duplicate_adoption = workspace_db.progress_adopt_media(str(workspace), db, {
+            "projectName": "Project", "folderPath": str(external_original),
+            "externalLinkRelativePath": "RAW.lnk", "mode": "original", "mediaKind": "image",
+        })
+        assert duplicate_adoption["created"] is False and duplicate_adoption["progressFolder"]["id"] == original["id"]
+        try:
+            workspace_db.progress_adopt_media(str(workspace), db, {
+                "projectName": "Project", "folderPath": str(external_original),
+                "externalLinkRelativePath": "duplicate-RAW.lnk", "mode": "original", "mediaKind": "image",
+            })
+            assert False, "the same physical external folder must not be rebound through a second shortcut"
+        except ValueError as error:
+            assert "media_adopt_external_conflict" in str(error)
+        progress = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "folderPath": str(external_progress),
+            "externalLinkRelativePath": "Retouch.lnk", "mediaKind": "image", "versionKey": "1",
+            "parentProgressId": original["id"], "displayName": "Retouch", "trackingEnabled": True,
+        })["progressFolder"]
+        assert original["nodeRole"] == "original" and original["externalLinkRelativePath"] == "RAW.lnk"
+        assert progress["externalLinkRelativePath"] == "Retouch.lnk" and progress["trackingEnabled"] is True
+
+        synced = workspace_db.media_sync_project(str(workspace), db, {
+            "projectName": "Project",
+            "externalRoots": [
+                {"path": str(external_original), "kind": "folder", "virtualPath": "RAW.lnk"},
+                {"path": str(external_progress), "kind": "folder", "virtualPath": "Retouch.lnk"},
+            ],
+        })
+        assert synced["count"] == 2, "trusted external roots must participate in the same media database sync as project folders"
+        indexed_paths = {
+            Path(row["file_path"]).resolve()
+            for row in db.execute("SELECT file_path FROM versions WHERE is_deleted=0").fetchall()
+        }
+        assert (external_original / "base.jpg").resolve() in indexed_paths
+        assert changed_media.resolve() in indexed_paths
+
+        session = workspace_db.tracking_session_create(str(workspace), db, {
+            "projectName": "Project", "progressId": progress["id"], "mode": "compare",
+        })
+        assert session["progressFolderPath"] == str(external_progress.resolve())
+        assert session["parentFolderPath"] == str(external_original.resolve())
+        preview = workspace_db.tracking_store_preview(db, {
+            "sessionId": session["sessionId"],
+            "items": [{
+                "kind": "missing", "sourceName": "removed.jpg", "referenceName": "base.jpg",
+                "targetName": "removed.jpg", "status": "missing_reference",
+            }],
+        })
+        missing_item_id = preview["items"][0]["id"]
+        try:
+            workspace_db.tracking_session_decide(str(workspace), db, {
+                "sessionId": session["sessionId"], "itemId": missing_item_id, "status": "accepted",
+            })
+            assert False, "a missing current-media item must never be accepted as an import source"
+        except ValueError as error:
+            assert "只能确认缺失" in str(error)
+        workspace_db.tracking_session_decide(str(workspace), db, {
+            "sessionId": session["sessionId"], "itemId": missing_item_id, "status": "rejected",
+        })
+        try:
+            workspace_db.progress_register(str(workspace), db, {
+                "projectName": "Project", "progressId": progress["id"], "folderPath": str(external_progress),
+                "externalLinkRelativePath": "Retouch.lnk", "mediaKind": "image", "versionKey": "1",
+                "parentProgressId": original["id"], "displayName": "Retouch", "nodeRole": "progress",
+                "relationKind": "main", "trackingEnabled": True, "trackingState": "pending_confirm",
+                "renameFromParent": True, "copyMissingFromParent": False,
+            })
+            assert False, "an active comparison must lock tracking policy and node context"
+        except ValueError as error:
+            assert "node_busy" in str(error)
+        db.execute("UPDATE tracking_sessions SET status='committed' WHERE id=?", (session["sessionId"],))
+        db.commit()
+        late_failure = workspace_db.tracking_commit_failed(db, {
+            "sessionId": session["sessionId"], "error": "late renderer failure",
+        })
+        assert late_failure["alreadyCommitted"] is True
+        assert db.execute("SELECT status FROM tracking_sessions WHERE id=?", (session["sessionId"],)).fetchone()[0] == "committed", "a late failure callback must not downgrade a committed session"
+        workspace_db.tracking_session_release(db, {"sessionId": session["sessionId"]})
+
+        snapshot = {"files": workspace_db.folder_media_snapshot(str(external_progress)), "parent": {}}
+        db.execute(
+            "UPDATE progress_folders SET tracking_state='ready',tracking_snapshot_json=?,folder_signature='stable-signature',last_tracked_at=123456 WHERE id=?",
+            (json.dumps(snapshot), progress["id"]),
+        )
+        db.commit()
+        workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "progressId": progress["id"], "folderPath": str(external_progress),
+            "externalLinkRelativePath": "Retouch.lnk", "mediaKind": "image", "versionKey": "1",
+            "parentProgressId": original["id"], "displayName": "Retouch", "nodeRole": "progress",
+            "relationKind": "main", "trackingEnabled": True, "trackingState": "ready",
+            "renameFromParent": False, "copyMissingFromParent": False,
+        })
+        preserved = db.execute(
+            "SELECT tracking_snapshot_json,folder_signature,last_tracked_at FROM progress_folders WHERE id=?",
+            (progress["id"],),
+        ).fetchone()
+        assert json.loads(preserved["tracking_snapshot_json"]) == snapshot
+        assert preserved["folder_signature"] == "stable-signature" and preserved["last_tracked_at"] == 123456, \
+            "a partial metadata update must preserve the committed tracking baseline"
+        changed_media.write_bytes(b"second revision")
+        stale = workspace_db.progress_detect_stale(str(workspace), db, {
+            "projectName": "Project", "changedPaths": [str(project / "Retouch.lnk" / "edit.jpg")],
+        })
+        assert progress["id"] in stale["staleProgressIds"], "the virtual shortcut path must invalidate its physical external target"
+
+        workspace_db.sync_progress_folder_locations(str(workspace), db, workspace_db.project_row(db, "Project"))
+        listed = workspace_db.progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"]
+        by_id = {item["id"]: item for item in listed}
+        assert by_id[original["id"]]["folderMissing"] is False
+        assert by_id[progress["id"]]["folderPath"] == str(external_progress.resolve())
+        assert by_id[progress["id"]]["externalLinkRelativePath"] == "Retouch.lnk"
+
+        db.execute(
+            "UPDATE progress_folders SET external_link_relative_path=? WHERE id=?",
+            ("Retouch.lnk/Nested", progress["id"]),
+        )
+        db.commit()
+        nested_link_progress = workspace_db.progress_list(
+            str(workspace), db, {"projectName": "Project"}
+        )["progressFolders"]
+        assert next(item for item in nested_link_progress if item["id"] == progress["id"])["folderMissing"] is False, \
+            "a progress node below an external root must validate the root shortcut rather than a virtual child path"
+        db.execute(
+            "UPDATE progress_folders SET external_link_relative_path=? WHERE id=?",
+            ("Retouch.lnk", progress["id"]),
+        )
+        db.commit()
+
+        (project / "Retouch.lnk").unlink()
+        missing_link_progress = workspace_db.progress_list(str(workspace), db, {"projectName": "Project", "includeMissing": True})["progressFolders"]
+        assert next(item for item in missing_link_progress if item["id"] == progress["id"])["folderMissing"] is True, \
+            "an external progress node must become unavailable when its managed shortcut is removed"
+        (project / "Retouch.lnk").write_text("managed external progress", encoding="utf-8")
+        restored_link_progress = workspace_db.progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"]
+        assert next(item for item in restored_link_progress if item["id"] == progress["id"])["folderMissing"] is False, \
+            "restoring the managed shortcut must make the external progress node available again"
+
+        workspace_db.media_sync_project(str(workspace), db, {"projectName": "Project", "externalRoots": []})
+        revoked_rows = db.execute(
+            "SELECT file_path,file_missing FROM versions WHERE file_path IN (?,?)",
+            (str((external_original / "base.jpg").resolve()), str(changed_media.resolve())),
+        ).fetchall()
+        assert revoked_rows and all(row["file_missing"] == 1 for row in revoked_rows), "physically present media must become unavailable after its trusted external root is revoked"
+
+        reversible_folder = root / "external-media" / "Reversible"
+        reversible_folder.mkdir(parents=True)
+        reversible = workspace_db.progress_adopt_media(str(workspace), db, {
+            "projectName": "Project", "folderPath": str(reversible_folder),
+            "externalLinkRelativePath": "Reversible.lnk", "mode": "original", "mediaKind": "image",
+        })
+        reversible_id = reversible["progressFolder"]["id"]
+        reverted = workspace_db.progress_revert_external_adoptions(db, {
+            "projectName": "Project", "progressIds": [reversible_id],
+        })
+        assert reverted["removedProgressIds"] == [reversible_id]
+        assert db.execute("SELECT 1 FROM progress_folders WHERE id=?", (reversible_id,)).fetchone() is None
+        workspace_db.progress_revert_external_adoptions(db, {
+            "projectName": "Project", "progressIds": [reversible_id],
+        })
+    finally:
+        db.close()
+
+
 def main() -> None:
     temp_root = Path(tempfile.mkdtemp(prefix="photoflow-versioning-v2-db-"))
     try:
@@ -942,6 +1154,7 @@ def main() -> None:
         test_legacy_selection_relation_repair(temp_root)
         test_legacy_selection_keep_independent_is_durable(temp_root)
         test_version_tree_layout_persistence(temp_root)
+        test_external_link_progress_is_persisted_and_sync_safe(temp_root)
         print("versioning V2 database tests passed")
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)

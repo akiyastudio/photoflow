@@ -1,8 +1,9 @@
 const createImageThumbnailRuntime = ({
-  crypto, fs, nativeImage, spawn, getRunConfig, runPythonJsonAction,
+  crypto, fs, nativeImage, spawn, processSupervisor = null, getRunConfig, runPythonJsonAction,
   getMediaCacheDir, mediaThumbnailCacheFile, copyWindowsShellThumbnail,
   thumbnailVersion,
 }) => {
+  let imageWorkerSequence = 0;
   class ThumbnailImageWorkerPool {
     constructor(size) {
       this.size = size;
@@ -24,8 +25,12 @@ const createImageThumbnailRuntime = ({
 
     createWorker() {
       const { command, args } = getRunConfig('thumbnail_image.py', ['--server']);
-      const child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-      const worker = { child, output: '', stderr: '', job: null, timer: null, dead: false };
+      const managedProcess = processSupervisor?.launch({
+        id: `python:thumbnail-image:${++imageWorkerSequence}`,
+        kind: 'python-worker', command, args, options: { stdio: ['pipe', 'pipe', 'pipe'] }, ephemeral: true,
+      });
+      const child = managedProcess?.child || spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      const worker = { child, managedProcess, output: '', stderr: '', job: null, timer: null, dead: false };
       this.workers.push(worker);
       child.stdout.setEncoding('utf8');
       child.stdout.on('data', data => {
@@ -37,6 +42,7 @@ const createImageThumbnailRuntime = ({
           let response;
           try { response = JSON.parse(line); } catch { continue; }
           if (!worker.job || response.id !== worker.job.id) continue;
+          worker.managedProcess?.markHealthy({ protocol: 'json-lines' });
           const job = worker.job;
           worker.job = null;
           clearTimeout(worker.timer);
@@ -81,7 +87,10 @@ const createImageThumbnailRuntime = ({
     stop() {
       this.stopped = true;
       for (const job of this.queue.splice(0)) job.reject(new Error('图片解码服务已经停止'));
-      for (const worker of this.workers) if (!worker.child.killed) worker.child.kill();
+      for (const worker of this.workers) {
+        if (worker.managedProcess) worker.managedProcess.stop('thumbnail-image-pool-stop');
+        else if (!worker.child.killed) worker.child.kill();
+      }
     }
   }
 
@@ -109,7 +118,11 @@ const createImageThumbnailRuntime = ({
     const cacheKey = crypto.createHash('sha256').update(`scheduler-video-cover|v${thumbnailVersion}|${requestedSize}|${sourcePath}|${stat.size}|${stat.mtimeMs}`).digest('hex');
     const toolArgs = ['--source', sourcePath, '--output_dir', cacheDir, '--cache_key', cacheKey, '--size', String(requestedSize)];
     const { command, args } = getRunConfig('video_preview.py', toolArgs);
-    const child = spawn(command, args, { windowsHide: true });
+    const managedProcess = processSupervisor?.launch({
+      id: `python:video-preview:${++imageWorkerSequence}`,
+      kind: 'python-job', command, args, options: {}, ephemeral: true,
+    });
+    const child = managedProcess?.child || spawn(command, args, { windowsHide: true });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => child.kill(), 120000);
