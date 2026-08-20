@@ -55,6 +55,29 @@ def main():
         finally:
             raw_team.close()
 
+        # Progress-only workers deliberately do not attach the team store. A
+        # canonical team-workspace directory must still be discoverable without
+        # the legacy graph reconciler querying an unavailable team table.
+        project_path = workspace / "项目 2"
+        (project_path / "团片协作").mkdir(parents=True)
+        progress_only = workspace_db.connect(str(workspace), str(database), include_domains=True)
+        attached = {row[1] for row in progress_only.execute("PRAGMA database_list").fetchall()}
+        assert "team_retouch" not in attached
+        progress_only.execute(
+            """INSERT INTO projects(id,name,status,relative_path,is_deleted,created_at,updated_at,extra_json)
+               VALUES('project-2','项目 2','后期中','项目 2',0,?,?, '{}')""",
+            (now, now),
+        )
+        progress_only.commit()
+        progress = workspace_db.progress_list(
+            str(workspace), progress_only, {"projectName": "项目 2"}
+        )
+        assert any(
+            item["nodeRole"] == "workflow" and item["artifactKind"] == "team_workspace"
+            for item in progress["progressFolders"]
+        )
+        progress_only.close()
+
         team_snapshot = temporary_root / "snapshots" / "team-retouch.sqlite3"
         assert snapshot(str(team_database), str(team_snapshot))["schemaVersion"] == 1
 
