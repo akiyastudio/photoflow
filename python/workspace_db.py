@@ -14,17 +14,17 @@ import uuid
 from pathlib import Path
 
 try:
-    from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS
+    from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
     from team_retouch_storage import attach_and_migrate as attach_team_retouch_storage
-    from workspace_domain_storage import attach_and_migrate as attach_workspace_domain_storage
+    from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage
     from workspace_db_migrations import migration_26, migration_27
 except ModuleNotFoundError:
     # Some regression tests load this file directly through importlib instead
     # of importing it from the Python source directory.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS
+    from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
     from team_retouch_storage import attach_and_migrate as attach_team_retouch_storage
-    from workspace_domain_storage import attach_and_migrate as attach_workspace_domain_storage
+    from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage
     from workspace_db_migrations import migration_26, migration_27
 
 STATUSES = ("未分类", "策划中", "待拍摄", "后期中", "已归档")
@@ -1325,7 +1325,7 @@ def _check_integrity(db, force: bool = False):
     db.commit()
 
 
-def connect(root: str, database: str, include_domains: bool | None = None, include_team: bool = False):
+def connect(root: str, database: str, include_domains=None, include_team: bool = False):
     root = os.path.abspath(root)
     database = os.path.abspath(database)
     os.makedirs(os.path.dirname(database), exist_ok=True)
@@ -1365,15 +1365,18 @@ def connect(root: str, database: str, include_domains: bool | None = None, inclu
         and _meta_value(db, "version_tree_default_layout_revision") == VERSION_TREE_DEFAULT_LAYOUT_REVISION
         and _meta_value(db, "workspace_root") == root
     )
-    attach_domains = bool(
-        include_team
-        or include_domains is True
-        or include_domains is None and "meta" in existing_tables and _meta_value(db, "domain_storage_revision")
-    )
+    if include_team or include_domains is True:
+        requested_domains = tuple(DOMAIN_TABLES)
+    elif isinstance(include_domains, (tuple, list, set, frozenset)):
+        requested_domains = tuple(dict.fromkeys(include_domains))
+    elif include_domains is None and "meta" in existing_tables and _meta_value(db, "domain_storage_revision"):
+        requested_domains = tuple(DOMAIN_TABLES)
+    else:
+        requested_domains = ()
     if schema_is_current:
         try:
-            if attach_domains:
-                attach_workspace_domain_storage(db, database)
+            if requested_domains:
+                attach_workspace_domain_storage(db, database, requested_domains)
             if include_team:
                 attach_team_retouch_storage(db, database)
         except Exception:
@@ -1715,8 +1718,8 @@ def connect(root: str, database: str, include_domains: bool | None = None, inclu
             db.execute("DELETE FROM version_tree_layouts")
             _set_meta(db, "version_tree_default_layout_revision", VERSION_TREE_DEFAULT_LAYOUT_REVISION)
     try:
-        if include_domains is True or include_team:
-            attach_workspace_domain_storage(db, database)
+        if requested_domains:
+            attach_workspace_domain_storage(db, database, requested_domains)
         if include_team:
             attach_team_retouch_storage(db, database)
     except Exception:
@@ -2612,9 +2615,16 @@ def migrate_legacy_media_workflow_graph_once(root: str, db, project):
                 team_path, os.path.basename(team_path), "image",
                 "team-workspace", "workflow", "team_workspace",
             )
-            if workflow["node_role"] == "workflow" and workflow["artifact_kind"] == "team_workspace":
+            attached_databases = {row[1] for row in db.execute("PRAGMA database_list").fetchall()}
+            team_source_table = (
+                "team_retouch.team_retouch_photos" if "team_retouch" in attached_databases
+                else "main.team_retouch_photos" if _table_exists(db, "team_retouch_photos")
+                else None
+            )
+            if workflow["node_role"] == "workflow" and workflow["artifact_kind"] == "team_workspace" \
+                    and team_source_table:
                 source_rows = db.execute(
-                    """SELECT versions.file_path FROM team_retouch_photos team
+                    f"""SELECT versions.file_path FROM {team_source_table} team
                        JOIN versions ON versions.id=team.base_version_id AND versions.is_deleted=0
                        WHERE team.project_id=?""",
                     (project["id"],),
@@ -7694,7 +7704,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
         "purge_deleted_project", "purge_missing_project",
     }
     needs_team = action in TEAM_ACTIONS
-    needs_domains = needs_team or action in domain_actions
+    needs_domains = ("versioning",) if action in VERSIONING_ONLY_ACTIONS else needs_team or action in domain_actions
     db = connect(root, database, include_domains=needs_domains, include_team=needs_team)
     now = int(time.time() * 1000)
     if action == "catalog_sync":
