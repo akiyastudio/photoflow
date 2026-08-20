@@ -2604,9 +2604,16 @@ def migrate_legacy_media_workflow_graph_once(root: str, db, project):
                 team_path, os.path.basename(team_path), "image",
                 "team-workspace", "workflow", "team_workspace",
             )
-            if workflow["node_role"] == "workflow" and workflow["artifact_kind"] == "team_workspace":
+            attached_databases = {row[1] for row in db.execute("PRAGMA database_list").fetchall()}
+            team_source_table = (
+                "team_retouch.team_retouch_photos" if "team_retouch" in attached_databases
+                else "main.team_retouch_photos" if _table_exists(db, "team_retouch_photos")
+                else None
+            )
+            if workflow["node_role"] == "workflow" and workflow["artifact_kind"] == "team_workspace" \
+                    and team_source_table:
                 source_rows = db.execute(
-                    """SELECT versions.file_path FROM team_retouch_photos team
+                    f"""SELECT versions.file_path FROM {team_source_table} team
                        JOIN versions ON versions.id=team.base_version_id AND versions.is_deleted=0
                        WHERE team.project_id=?""",
                     (project["id"],),
