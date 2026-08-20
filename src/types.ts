@@ -947,6 +947,7 @@ export interface IElectronAPI {
   onTeamRetouchAdvancedProgress: (callback: (value: { phase: string; progress?: number; message: string }) => void) => () => void;
   getStorageDevices: () => Promise<StorageDeviceInventoryResult>;
   getDomainHealth: () => Promise<{ success: boolean; domains: Array<{ domainId: string; state: 'healthy' | 'degraded' | 'unavailable' | 'recovering'; failures: number; lastError: string; updatedAt: number }>; commands: Array<{ commandId: string; target: string; type: string; status: 'pending' | 'processing' | 'dead'; attempts: number; error: string }> }>;
+  retryDomainCommand: (commandId: string) => Promise<{ success: boolean; error?: string }>;
   getDrives: () => Promise<string[]>;
   setTheme: (theme: Theme) => Promise<void>;
   minimizeWindow: () => void;
@@ -1170,6 +1171,10 @@ export interface IElectronAPI {
   runBackup: (workspacePath: string, reason?: 'manual' | 'daily' | 'after-import') => Promise<{ success: boolean; queued?: boolean; error?: string }>;
   runBackupIfDue: (workspacePath: string) => Promise<{ success: boolean; skipped?: boolean; error?: string }>;
   verifyBackup: (workspacePath: string, snapshotId: string) => Promise<{ success: boolean; queued?: boolean; error?: string }>;
+  verifyDomainStorage: (workspacePath: string, domain: 'media' | 'versioning' | 'operations' | 'team-retouch') => Promise<{ success: boolean; state?: string; schemaVersion?: number; error?: string }>;
+  runDomainBackup: (workspacePath: string, domain: 'media' | 'versioning' | 'operations' | 'team-retouch') => Promise<{ success: boolean; path?: string; error?: string }>;
+  restoreDomainBackup: (workspacePath: string, snapshotId: string, domain: 'media' | 'versioning' | 'operations' | 'team-retouch') => Promise<{ success: boolean; error?: string }>;
+  resetDomainStorage: (workspacePath: string, domain: 'media' | 'operations' | 'team-retouch') => Promise<{ success: boolean; quarantine?: string; requiresReindex?: boolean; error?: string }>;
   restoreBackupWorkspace: (workspacePath: string, snapshotId: string) => Promise<{ success: boolean; cancelled?: boolean; workspacePath?: string; error?: string }>;
   restoreBackupProject: (workspacePath: string, snapshotId: string, projectId: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }>;
   openBackupTarget: () => Promise<{ success: boolean; error?: string }>;

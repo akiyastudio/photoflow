@@ -27,11 +27,7 @@ import { directoryEntryToSelectOnReturn, fileEntryClickIntent } from './file-ent
 import { FOLDER_ALPHABET_FILTER_THRESHOLD, FOLDER_ALPHABET_KEYS, availableFolderAlphabetKeys, folderAlphabetKey } from './folder-alphabet-filter-model';
 import { useRecentFilesAutoLoad } from './useRecentFilesAutoLoad';
 import { collectProgressSubtree, inspectProgressRelations } from './progress-tree-model';
-import { TrackingConfirmationPanel } from '../versioning/TrackingConfirmationPanel';
-import { ProgressPairPreview as SharedProgressPairPreview, type ProgressPairPreviewMode } from '../versioning/ProgressPairPreview';
-import { VersionProgressPanel, type VersionProgressDraft } from '../versioning/VersionProgressPanel';
-import { defaultMainParentId, defaultWorkflowInputIds, isUserVersionKey, nextVersionKeys, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressRelationChangeError, progressTrackingAction, progressTrackingActionLabel, selectableVersionParents, trackingPolicyForRelationChange, trackingStateLabel, versionKeyMatchesParentKind, versionKindForParent, versionTreeNodeBadgeLabel, workflowInputIdsForRelationChange, type VersionRelationKind } from '../versioning/versioning-v2-model';
-import { ProgressRelationMutationQueue } from '../versioning/progress-relation-mutation-queue';
+import { TrackingConfirmationPanel, ProgressPairPreview as SharedProgressPairPreview, type ProgressPairPreviewMode, VersionProgressPanel, type VersionProgressDraft, defaultMainParentId, defaultWorkflowInputIds, isUserVersionKey, nextVersionKeys, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressRelationChangeError, progressTrackingAction, progressTrackingActionLabel, selectableVersionParents, trackingPolicyForRelationChange, trackingStateLabel, versionKeyMatchesParentKind, versionKindForParent, versionTreeNodeBadgeLabel, workflowInputIdsForRelationChange, type VersionRelationKind, ProgressRelationMutationQueue } from '../versioning/public';
 import { metadataFieldLabel, metadataGroupLabel } from '../metadata/metadata-labels';
 import { metadataGroupDependencyKey, previewMetadataFieldsForEntry, reconcileExpandedMetadataGroups } from '../metadata/metadata-pane-model';
 import { projectWorkspaceClient } from '../../platform/project-workspace-client';

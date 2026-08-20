@@ -25,6 +25,14 @@ TRACKING_ACTIONS = (
     "tracking_session_release", "tracking_session_decide", "tracking_commit_plan", "tracking_commit_complete",
     "tracking_commit_failed",
 )
+# These commands only need the workspace catalog plus versioning.sqlite3. Keep
+# the list deliberately small: an action belongs here only after its SQL has
+# been reviewed for media-table access. This lets version layouts and progress
+# snapshots remain usable while the rebuildable media index is unavailable.
+VERSIONING_ONLY_ACTIONS = frozenset((
+    "batch_list", "progress_snapshot", "version_graph_edge_list",
+    "version_tree_layout_get", "version_tree_layout_save",
+))
 TEAM_ACTIONS = (
     "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo",
     "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete",

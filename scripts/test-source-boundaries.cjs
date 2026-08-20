@@ -43,7 +43,18 @@ for (const file of sourceFiles) {
       assert(target.startsWith('src/contracts/') || target === 'src/types' || target.startsWith('src/types.'),
         `renderer platform adapter may depend only on contracts/types: ${relativeFile} -> ${target}`);
     }
+    if (targetFeature === 'versioning' && sourceFeature !== 'versioning') {
+      assert(target === 'src/features/versioning/public',
+        `versioning internals must be imported through its public API: ${relativeFile} -> ${target}`);
+    }
   }
+}
+
+const mainSource = fs.readFileSync(path.join(root, 'electron/main.cjs'), 'utf8');
+assert(!/require\(['"]\.\/repositories\/(?:workspace|operations|media|team-retouch)-repository/.test(mainSource),
+  'the composition root must use domain public APIs rather than repository implementations');
+for (const domain of ['workspace', 'file-operations', 'media', 'versioning', 'team-retouch']) {
+  assert(fs.existsSync(path.join(root, 'electron', 'domains', domain, 'public.cjs')), `missing public API for ${domain}`);
 }
 
 assert.deepStrictEqual([...rendererFeatureEdges].sort(), [...ALLOWED_RENDERER_FEATURE_EDGES].sort(),

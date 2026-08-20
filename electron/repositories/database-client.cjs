@@ -207,6 +207,21 @@ class PythonDatabaseClient {
     } else if (child && !child.killed) child.kill();
   }
 
+  resume() {
+    this.stopping = false;
+    if (this.health.state === 'unavailable') this.updateHealth('recovering', { failures: 0, circuitOpenedAt: 0, lastError: '' });
+  }
+
+  async suspend(timeoutMs = 5000) {
+    const child = this.process;
+    this.stop();
+    if (!child || child.exitCode != null) return;
+    await Promise.race([
+      new Promise(resolve => { child.once('exit', resolve); child.once('error', resolve); }),
+      new Promise(resolve => { const timer = setTimeout(resolve, timeoutMs); timer.unref?.(); }),
+    ]);
+  }
+
   status() { return { ...this.health, pending: this.pending.size }; }
 }
 

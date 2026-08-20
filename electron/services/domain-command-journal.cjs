@@ -11,8 +11,10 @@ const createDomainCommandJournal = ({ filePath, writeLog = () => undefined, now 
   let draining = false;
   let stopped = false;
   let timer = null;
+  let persistenceError = null;
 
   const persist = () => {
+    if (persistenceError) throw persistenceError;
     fs.mkdirSync(path.dirname(absolute), { recursive: true });
     const temporary = `${absolute}.tmp-${process.pid}-${crypto.randomUUID()}`;
     fs.writeFileSync(temporary, JSON.stringify({ version: 1, records }, null, 2), { encoding: 'utf8', flag: 'wx' });
@@ -26,7 +28,20 @@ const createDomainCommandJournal = ({ filePath, writeLog = () => undefined, now 
       for (const record of records) if (record.status === 'processing') record.status = 'pending';
       persist();
     } catch (error) {
-      if (error?.code !== 'ENOENT') writeLog('error', 'Unable to load domain command journal', { error: error.message || String(error) });
+      if (error?.code !== 'ENOENT') {
+        const quarantine = `${absolute}.corrupt-${now()}`;
+        try {
+          fs.renameSync(absolute, quarantine);
+          writeLog('error', 'Corrupt domain command journal quarantined', { error: error.message || String(error), quarantine });
+        } catch (quarantineError) {
+          // Refuse to silently overwrite an unreadable journal. Enqueue will
+          // surface the filesystem error until an operator can recover it.
+          writeLog('error', 'Unable to quarantine corrupt domain command journal', {
+            error: error.message || String(error), quarantineError: quarantineError.message || String(quarantineError),
+          });
+          persistenceError = new Error(`domain command journal is unreadable and could not be quarantined: ${quarantineError.message || String(quarantineError)}`);
+        }
+      }
       records = [];
     }
   };
@@ -65,7 +80,7 @@ const createDomainCommandJournal = ({ filePath, writeLog = () => undefined, now 
             writeLog('error', 'Domain command moved to dead letter', { commandId: record.commandId, target: record.target, type: record.type, attempts: record.attempts, error: record.error });
           } else {
             record.status = 'pending';
-            record.nextAttemptAt = now() + (backoffMs[Math.min(record.attempts - 1, backoffMs.length - 1)] || 30000);
+            record.nextAttemptAt = now() + (backoffMs[Math.min(record.attempts - 1, backoffMs.length - 1)] ?? 30000);
             writeLog('warn', 'Domain command retry scheduled', { commandId: record.commandId, target: record.target, type: record.type, attempts: record.attempts, error: record.error });
           }
         }
@@ -79,7 +94,9 @@ const createDomainCommandJournal = ({ filePath, writeLog = () => undefined, now 
       }
     } finally {
       draining = false;
-      const next = records.filter(item => item.status === 'pending').sort((left, right) => left.nextAttemptAt - right.nextAttemptAt)[0];
+      const next = records
+        .filter(item => item.status === 'pending' && handlers.has(`${item.target}:${item.type}`))
+        .sort((left, right) => left.nextAttemptAt - right.nextAttemptAt)[0];
       if (next) schedule(Math.max(0, next.nextAttemptAt - now()));
     }
   };
@@ -128,4 +145,3 @@ const createDomainCommandJournal = ({ filePath, writeLog = () => undefined, now 
 };
 
 module.exports = { createDomainCommandJournal };
-
