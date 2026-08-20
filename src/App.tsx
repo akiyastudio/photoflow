@@ -26,6 +26,7 @@ import { BackgroundTaskIndicator } from './features/background-tasks/BackgroundT
 import { useTaskCenter } from './features/background-tasks/TaskCenter';
 import { useTopToastStack } from './features/app/useTopToastStack';
 import { rendererErrorFingerprint, rendererErrorNoticeSummary, shouldReportRendererError, type RendererErrorOccurrence } from './features/app/renderer-error-notice-model';
+import { DomainHealthBanner } from './features/app/DomainHealthBanner';
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
 import { UsagePreferencesOnboarding, USAGE_PREFERENCES_VERSION } from './features/settings/UsagePreferencesOnboarding';
 import type { SettingsSection } from './features/settings/SettingsFeature';
@@ -272,6 +273,7 @@ const App: React.FC = () => {
   }, [refreshComponents]);
 
   useEffect(() => { void refreshComponents(); }, [refreshComponents]);
+
 
   useEffect(() => window.electronAPI.onComponentsStatusChanged(result => {
     if (!result.success) return;
@@ -810,6 +812,8 @@ const App: React.FC = () => {
         <BackgroundTaskIndicator ownerPageIds={openPageIds}/>
         <WindowControls/>
       </header>
+
+      <DomainHealthBanner onNotice={showNotice}/>
 
       {showWorkspaceSetup ? <WorkspaceSetupPage config={config} onSave={handleWorkspaceSetup}/> : <div className="flex min-h-0 flex-1">
       {/* Sidebar */}

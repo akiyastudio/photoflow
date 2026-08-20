@@ -35,7 +35,17 @@ const waitFor = async predicate => {
   const reopened = createDomainCommandJournal({ filePath: journalPath, writeLog: () => undefined });
   assert.strictEqual(reopened.status()[0].status, 'completed', 'journal state must survive restart');
   reopened.stop();
+
+  const corruptPath = path.join(temporary, 'corrupt-journal.json');
+  fs.writeFileSync(corruptPath, '{not-json', 'utf8');
+  const corrupt = createDomainCommandJournal({ filePath: corruptPath, now: () => 12345, writeLog: () => undefined });
+  assert.deepStrictEqual(corrupt.status(), [], 'a corrupt journal must not expose partial records');
+  assert.ok(fs.existsSync(`${corruptPath}.corrupt-12345`), 'the corrupt journal must be quarantined before new writes');
+  corrupt.enqueue({ commandId: 'waiting', target: 'late-domain', type: 'late.command.v1', workspaceRoot: temporary, payload: {} });
+  assert.strictEqual(corrupt.status()[0].status, 'pending', 'a command may wait safely for a late handler');
+  corrupt.register('late-domain', 'late.command.v1', async () => ({ handled: true }));
+  await waitFor(() => corrupt.status()[0]?.status === 'completed');
+  corrupt.stop();
   fs.rmSync(temporary, { recursive: true, force: true });
   console.log('Durable domain command journal tests passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
-

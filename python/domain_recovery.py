@@ -10,6 +10,7 @@ import sqlite3
 import sys
 import time
 import tempfile
+import uuid
 from pathlib import Path
 
 from workspace_domain_storage import DOMAIN_TABLES
@@ -124,16 +125,45 @@ def restore_workspace(source: str, destination: str, domain: str, replacements) 
     if not status["success"]:
         raise RuntimeError(f"domain snapshot is not healthy: {status}")
     destination_path = os.path.abspath(destination)
-    if os.path.isfile(destination_path):
-        backup = f"{destination_path}.before-domain-restore.{int(time.time())}.bak"
-        shutil.copy2(destination_path, backup)
-    snapshot(source, destination_path)
-    db = _connect(destination_path)
+    os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+    staged = f"{destination_path}.restore-{uuid.uuid4().hex}.tmp"
+    backup = ""
     try:
-        _rebase(db, domain, replacements)
+        snapshot(source, staged)
+        db = _connect(staged)
+        try:
+            _rebase(db, domain, replacements)
+        finally:
+            db.close()
+        staged_status = verify(staged)
+        if not staged_status["success"]:
+            raise RuntimeError(f"rebased domain snapshot is not healthy: {staged_status}")
+
+        if os.path.isfile(destination_path):
+            backup = f"{destination_path}.before-domain-restore.{int(time.time())}.bak"
+            current = verify(destination_path)
+            if current["success"]:
+                snapshot(destination_path, backup)
+            else:
+                shutil.copy2(destination_path, backup)
+        # Workers are suspended by Electron before this point. Remove stale WAL
+        # sidecars only after the current store has a recoverable backup.
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.remove(destination_path + suffix)
+            except FileNotFoundError:
+                pass
+        os.replace(staged, destination_path)
     finally:
-        db.close()
-    return verify(destination_path)
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(staged + suffix)
+            except FileNotFoundError:
+                pass
+    result = verify(destination_path)
+    if not result["success"]:
+        raise RuntimeError(f"restored domain store is not healthy: {result}")
+    return {**result, "backup": backup}
 
 
 def _columns(db: sqlite3.Connection, schema: str, table: str) -> list[str]:
@@ -213,40 +243,64 @@ def restore_project(source: str, destination: str, domain: str, project_id: str,
 def reset_store(destination: str, domain: str) -> dict:
     """Quarantine one store and recreate only its empty owned schema."""
     destination_path = os.path.abspath(destination)
-    quarantine = ""
-    if os.path.isfile(destination_path):
-        quarantine = f"{destination_path}.quarantine.{int(time.time())}.bak"
-        os.replace(destination_path, quarantine)
     os.makedirs(os.path.dirname(destination_path), exist_ok=True)
-    if domain == "operations":
-        from operations_db import _connect as connect_operations
-        db = connect_operations(destination_path)
-        db.close()
-    elif domain == "team-retouch":
-        from team_retouch_storage import ensure_schema
-        db = ensure_schema(destination_path)
-        db.close()
-    elif domain in DOMAIN_TABLES:
-        import workspace_db
-        from workspace_domain_storage import attach_and_migrate, database_path_for_workspace_database
-        with tempfile.TemporaryDirectory(prefix="photoflow-domain-schema-") as temporary:
-            root = os.path.join(temporary, "workspace")
-            os.makedirs(root, exist_ok=True)
-            core = os.path.join(temporary, "workspace-data", "template.sqlite3")
-            template = workspace_db.connect(root, core, include_domains=False)
+    staged = f"{destination_path}.reset-{uuid.uuid4().hex}.tmp"
+    quarantine = ""
+    moved_sidecars = []
+    try:
+        if domain == "operations":
+            from operations_db import _connect as connect_operations
+            db = connect_operations(staged)
+            db.close()
+        elif domain == "team-retouch":
+            from team_retouch_storage import ensure_schema
+            db = ensure_schema(staged)
+            db.close()
+        elif domain in DOMAIN_TABLES:
+            import workspace_db
+            from workspace_domain_storage import attach_and_migrate, database_path_for_workspace_database
+            with tempfile.TemporaryDirectory(prefix="photoflow-domain-schema-") as temporary:
+                root = os.path.join(temporary, "workspace")
+                os.makedirs(root, exist_ok=True)
+                core = os.path.join(temporary, "workspace-data", "template.sqlite3")
+                template = workspace_db.connect(root, core, include_domains=False)
+                try:
+                    attach_and_migrate(template, core)
+                finally:
+                    template.close()
+                generated = database_path_for_workspace_database(core, domain)
+                shutil.copy2(generated, staged)
+        else:
+            raise ValueError("domain reset is not supported")
+
+        staged_status = verify(staged)
+        if not staged_status["success"]:
+            raise RuntimeError(f"unable to create a healthy replacement domain store: {staged_status}")
+        if os.path.isfile(destination_path):
+            quarantine = f"{destination_path}.quarantine.{int(time.time())}.bak"
+            os.replace(destination_path, quarantine)
+            for suffix in ("-wal", "-shm"):
+                if os.path.exists(destination_path + suffix):
+                    os.replace(destination_path + suffix, quarantine + suffix)
+                    moved_sidecars.append(suffix)
+        try:
+            os.replace(staged, destination_path)
+        except Exception:
+            if quarantine and os.path.isfile(quarantine):
+                os.replace(quarantine, destination_path)
+                for suffix in moved_sidecars:
+                    if os.path.exists(quarantine + suffix):
+                        os.replace(quarantine + suffix, destination_path + suffix)
+            raise
+    finally:
+        for suffix in ("", "-wal", "-shm"):
             try:
-                attach_and_migrate(template, core)
-            finally:
-                template.close()
-            generated = database_path_for_workspace_database(core, domain)
-            shutil.copy2(generated, destination_path)
-    else:
-        raise ValueError("domain reset is not supported")
+                os.remove(staged + suffix)
+            except FileNotFoundError:
+                pass
     result = verify(destination_path)
     if not result["success"]:
-        if quarantine and os.path.isfile(quarantine):
-            os.replace(quarantine, destination_path)
-        raise RuntimeError(f"unable to create a healthy domain store: {result}")
+        raise RuntimeError(f"replacement domain store is not healthy: {result}")
     return {**result, "quarantine": quarantine, "requiresReindex": domain == "media"}
 
 

@@ -52,6 +52,7 @@
     "test:domain-storage": ".venv\\Scripts\\python.exe scripts\\test-domain-storage-isolation.py",
     "test:domain-journal": "node scripts/test-domain-command-journal.cjs",
     "test:domain-health": "node scripts/test-domain-health.cjs",
+    "test:domain-recovery": ".venv\\Scripts\\python.exe scripts\\test-domain-recovery.py",
     "test:source-boundaries": "node scripts/test-source-boundaries.cjs",
     "test:metadata-pane": "node scripts/test-metadata-pane-model.cjs",
     "test:renderer-error-notice": "node scripts/test-renderer-error-notice-model.cjs",

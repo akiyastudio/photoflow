@@ -64,6 +64,25 @@ def main():
             except (sqlite3.Error, RuntimeError):
                 pass
 
+            healthy_domain = "versioning" if failed_domain == "media" else "media"
+            independent = workspace_db.connect(
+                str(workspace), str(database), include_domains=(healthy_domain,)
+            )
+            try:
+                attached = {row[1] for row in independent.execute("PRAGMA database_list").fetchall()}
+                assert healthy_domain in attached and failed_domain not in attached
+                table = "version_tree_layouts" if healthy_domain == "versioning" else "photos"
+                independent.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
+            finally:
+                independent.close()
+
+            if failed_domain == "media":
+                layout = workspace_db.mutate(
+                    str(workspace), str(database), "version_tree_layout_get",
+                    {"projectName": "项目", "scopeKey": ""},
+                )
+                assert layout["success"], "media failure must not block a versioning-only command"
+
     print("Domain storage and catalog fault-isolation tests passed.")
 
 

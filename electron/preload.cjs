@@ -65,6 +65,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onTeamRetouchAdvancedProgress: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('team-retouch-advanced-progress', subscription); return () => ipcRenderer.removeListener('team-retouch-advanced-progress', subscription); },
   getStorageDevices: () => ipcRenderer.invoke('getStorageDevices'),
   getDomainHealth: () => ipcRenderer.invoke('domain-health-status'),
+  retryDomainCommand: (commandId) => ipcRenderer.invoke('domain-command-retry', commandId),
   getDrives: () => ipcRenderer.invoke('getDrives'),
   getWorkspaceProjects: (workspacePath) => ipcRenderer.invoke('workspace-projects', workspacePath),
   onWorkspaceFilesChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-files-changed', subscription); return () => ipcRenderer.removeListener('workspace-files-changed', subscription); },
