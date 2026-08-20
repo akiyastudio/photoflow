@@ -58,6 +58,12 @@ const registerSystemIpc = context => {
     domains: domainHealthService?.status?.() || [],
     commands: domainCommandJournal?.status?.().filter(command => command.status !== 'completed') || [],
   }));
+  ipcMain.handle('domain-command-retry', (_event, commandId) => {
+    const normalized = String(commandId || '').trim();
+    if (!/^[a-z0-9._:-]{1,128}$/i.test(normalized)) return { success: false, error: '无效的跨域任务标识' };
+    const retried = Boolean(domainCommandJournal?.retryDead?.(normalized));
+    return retried ? { success: true } : { success: false, error: '任务不存在或尚未进入失败队列' };
+  });
   const activePythonTasks = new Map();
   const rememberPythonTask = (requestId, invocationId, task) => {
     const requests = activePythonTasks.get(requestId) || new Map();

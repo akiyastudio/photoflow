@@ -37,17 +37,21 @@ def database_path_for_workspace_database(workspace_database: str, domain: str) -
 def _connect_domain(path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     db = sqlite3.connect(path, timeout=30)
-    db.execute("PRAGMA busy_timeout=30000")
-    if str(db.execute("PRAGMA journal_mode").fetchone()[0]).casefold() != "wal":
-        db.execute("PRAGMA journal_mode=WAL")
-    db.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
-    db.execute(
-        "INSERT INTO meta(key,value) VALUES('schema_version',?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (str(SCHEMA_VERSION),),
-    )
-    db.commit()
-    return db
+    try:
+        db.execute("PRAGMA busy_timeout=30000")
+        if str(db.execute("PRAGMA journal_mode").fetchone()[0]).casefold() != "wal":
+            db.execute("PRAGMA journal_mode=WAL")
+        db.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        db.execute(
+            "INSERT INTO meta(key,value) VALUES('schema_version',?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(SCHEMA_VERSION),),
+        )
+        db.commit()
+        return db
+    except Exception:
+        db.close()
+        raise
 
 
 def _strip_cross_store_references(sql: str) -> str:
@@ -128,21 +132,15 @@ def _backup_before_extraction(workspace_database: str) -> str:
     return destination
 
 
-def attach_and_migrate(workspace_db: sqlite3.Connection, workspace_database: str) -> dict[str, str]:
-    paths = {domain: database_path_for_workspace_database(workspace_database, domain) for domain in DOMAIN_TABLES}
-    for domain_path in paths.values():
-        probe = _connect_domain(domain_path)
-        try:
-            check = probe.execute("PRAGMA quick_check").fetchone()[0]
-            if check != "ok":
-                raise RuntimeError(f"domain database integrity check failed: {check}")
-        finally:
-            probe.close()
-    attached = {row[1] for row in workspace_db.execute("PRAGMA database_list").fetchall()}
-    for domain, domain_path in paths.items():
-        if domain not in attached:
-            workspace_db.execute(f"ATTACH DATABASE ? AS {domain}", (domain_path,))
-            workspace_db.execute(f"PRAGMA {domain}.busy_timeout=30000")
+def attach_and_migrate(
+    workspace_db: sqlite3.Connection,
+    workspace_database: str,
+    domains=None,
+) -> dict[str, str]:
+    requested = tuple(DOMAIN_TABLES) if domains is None else tuple(dict.fromkeys(domains))
+    unknown = set(requested) - set(DOMAIN_TABLES)
+    if unknown:
+        raise ValueError(f"unknown workspace storage domains: {sorted(unknown)}")
 
     legacy_tables = {
         row[0] for row in workspace_db.execute(
@@ -153,6 +151,25 @@ def attach_and_migrate(workspace_db: sqlite3.Connection, workspace_database: str
         (domain, table) for domain, tables in DOMAIN_TABLES.items()
         for table in tables if table in legacy_tables
     ]
+    # The one-time extraction must move the complete ownership graph before it
+    # drops any legacy table. Once extraction is complete, normal requests open
+    # only their declared domain stores.
+    prepared = tuple(DOMAIN_TABLES) if owned_legacy else requested
+    paths = {domain: database_path_for_workspace_database(workspace_database, domain) for domain in prepared}
+    for domain, domain_path in paths.items():
+        probe = _connect_domain(domain_path)
+        try:
+            check = probe.execute("PRAGMA quick_check").fetchone()[0]
+            if check != "ok":
+                raise RuntimeError(f"{domain} database integrity check failed: {check}")
+        finally:
+            probe.close()
+    attached = {row[1] for row in workspace_db.execute("PRAGMA database_list").fetchall()}
+    for domain, domain_path in paths.items():
+        if domain not in attached:
+            workspace_db.execute(f"ATTACH DATABASE ? AS {domain}", (domain_path,))
+            workspace_db.execute(f"PRAGMA {domain}.busy_timeout=30000")
+
     if owned_legacy:
         with workspace_db:
             for domain, table in owned_legacy:

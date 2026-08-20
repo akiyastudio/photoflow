@@ -26,7 +26,7 @@ import { useEscapeLayer } from './LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG } from '../utils/recycleBinFailure';
 import { AdvancedVideoPlayer } from './AdvancedVideoPlayer';
 import { metadataFieldLabel, metadataGroupLabel } from '../features/metadata/metadata-labels';
-import { mainBranchPhotoSummaries, mainBranchVersionsForPhoto, paginateMainBranchPhotos, type MainBranchPhotoSummary } from '../features/versioning/version-manager-model';
+import { mainBranchPhotoSummaries, mainBranchVersionsForPhoto, paginateMainBranchPhotos, type MainBranchPhotoSummary } from '../features/versioning/public';
 import { ImageComparisonView, type ImageComparisonMode } from './ImageComparisonView';
 
 type VersionManagerProps = {
