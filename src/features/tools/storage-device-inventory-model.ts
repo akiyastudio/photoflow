@@ -6,6 +6,8 @@ export interface StorageDeviceInventorySnapshot {
   status: 'idle' | 'loading' | 'ready' | 'error';
   lastSuccessAt: number | null;
   error: string | null;
+  warning: string | null;
+  deviceErrors: Array<{ mountPath: string; error: string }>;
 }
 
 type Schedule = (callback: () => void, delayMs: number) => unknown;
@@ -48,7 +50,7 @@ export const createStorageDeviceInventoryController = ({
   now?: () => number;
   pollIntervalMs?: number;
 }) => {
-  let snapshot: StorageDeviceInventorySnapshot = { devices: [], status: 'idle', lastSuccessAt: null, error: null };
+  let snapshot: StorageDeviceInventorySnapshot = { devices: [], status: 'idle', lastSuccessAt: null, error: null, warning: null, deviceErrors: [] };
   let scheduledHandle: unknown;
   let running = false;
   let generation = 0;
@@ -65,11 +67,11 @@ export const createStorageDeviceInventoryController = ({
     try {
       const result = await load();
       if (currentGeneration !== generation || listeners.size === 0) return;
-      if (result.complete) emit({ devices: result.devices, status: 'ready', lastSuccessAt: now(), error: null });
-      else emit({ devices: result.devices, status: 'error', lastSuccessAt: snapshot.lastSuccessAt, error: result.error || '存储设备枚举不完整' });
+      if (result.complete) emit({ devices: result.devices, status: 'ready', lastSuccessAt: now(), error: null, warning: result.warning || null, deviceErrors: result.deviceErrors || [] });
+      else emit({ devices: result.devices, status: 'error', lastSuccessAt: snapshot.lastSuccessAt, error: result.error || '存储设备枚举不完整', warning: result.warning || null, deviceErrors: result.deviceErrors || [] });
     } catch (error) {
       if (currentGeneration !== generation || listeners.size === 0) return;
-      emit({ ...snapshot, status: 'error', error: error instanceof Error ? error.message : String(error) });
+      emit({ ...snapshot, status: 'error', error: error instanceof Error ? error.message : String(error), warning: null });
     } finally {
       running = false;
       if (listeners.size > 0) {
@@ -82,7 +84,7 @@ export const createStorageDeviceInventoryController = ({
 
   const start = () => {
     generation += 1;
-    emit({ ...snapshot, status: 'loading', error: null });
+    emit({ ...snapshot, status: 'loading', error: null, warning: null, deviceErrors: [] });
     void poll(generation);
   };
 

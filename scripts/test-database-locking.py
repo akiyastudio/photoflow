@@ -20,7 +20,10 @@ with tempfile.TemporaryDirectory() as temporary:
     project_path = root / "Project"
     project_path.mkdir()
 
-    initialized = workspace_db.connect(str(root), str(database))
+    # Finish one-time domain extraction before the test deliberately holds the
+    # catalog writer lock; the assertion below covers current-schema opens, not
+    # first-run migration work.
+    initialized = workspace_db.connect(str(root), str(database), include_domains=True)
     now = int(time.time() * 1000)
     initialized.execute(
         "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",

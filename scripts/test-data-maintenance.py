@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -62,6 +63,53 @@ def test_thumbnail_missing_prune(root: Path) -> None:
     assert str(cached.resolve()).casefold() in {str(Path(item).resolve()).casefold() for item in result["thumbnailPaths"]}
     assert database.get_file(str(source)) is None
     database.close()
+
+
+def test_thumbnail_cleanup_uses_access_index(root: Path) -> None:
+    project = root / "thumbnail-cleanup-project"
+    source = project / "source.jpg"
+    stale_cache = root / "cache" / "stale.jpg"
+    recent_cache = root / "cache" / "recent.jpg"
+    write_media(source, b"source")
+    write_media(stale_cache, b"stale")
+    write_media(recent_cache, b"recent")
+    database = ThumbnailDatabase(str(root / "thumbnail-cleanup.sqlite3"))
+    try:
+        database.sync_directory(str(project), str(project))
+        source_mtime = source.stat().st_mtime_ns / 1_000_000
+        database.mark_ready(str(source), source_mtime, None, [
+            {"sizeLabel": "small", "pixelSize": 320, "path": str(stale_cache), "fileSize": stale_cache.stat().st_size},
+            {"sizeLabel": "medium", "pixelSize": 640, "path": str(recent_cache), "fileSize": recent_cache.stat().st_size},
+        ])
+        database.connection.execute(
+            "UPDATE thumbnails SET last_accessed_at=? WHERE size_label='small'",
+            (100,),
+        )
+        database.connection.execute(
+            "UPDATE thumbnails SET last_accessed_at=? WHERE size_label='medium'",
+            (300,),
+        )
+        database.connection.commit()
+        candidates = database.list_cache_cleanup(200)
+        assert {str(Path(item).resolve()).casefold() for item in candidates["thumbnailPaths"]} == {str(stale_cache.resolve()).casefold()}
+        database.invalidate_cache(before_ms=200)
+        remaining = database.connection.execute("SELECT thumbnail_path FROM thumbnails").fetchall()
+        assert {str(Path(row["thumbnail_path"]).resolve()).casefold() for row in remaining} == {str(recent_cache.resolve()).casefold()}
+        database.invalidate_cache(deleted_paths=[])
+        assert database.connection.execute("SELECT COUNT(*) FROM thumbnails").fetchone()[0] == 1
+
+        orphan_cache = root / "cache" / ("a" * 64 + ".jpg")
+        unrelated_file = root / "cache" / "keep-user-file.jpg"
+        write_media(orphan_cache, b"orphan")
+        write_media(unrelated_file, b"unrelated")
+        os.utime(orphan_cache, (0, 0))
+        os.utime(unrelated_file, (0, 0))
+        orphan_result = database.cleanup_orphan_cache(str(root / "cache"), 200, 7 * 24 * 60 * 60 * 1000)
+        assert orphan_result["deletedCount"] == 1 and not orphan_cache.exists()
+        assert unrelated_file.exists()
+        assert database.cleanup_orphan_cache(str(root / "cache"), 200, 7 * 24 * 60 * 60 * 1000)["skipped"]
+    finally:
+        database.close()
 
 
 def test_media_workflow_graph_cleanup(root: Path) -> None:
@@ -572,6 +620,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="photoflow-maintenance-") as directory:
         root = Path(directory)
         test_thumbnail_missing_prune(root)
+        test_thumbnail_cleanup_uses_access_index(root)
         test_media_workflow_graph_cleanup(root)
         test_thumbnail_tool_sources_limit_png_to_direct_children(root)
         test_team_return_missing_reconciliation(root)

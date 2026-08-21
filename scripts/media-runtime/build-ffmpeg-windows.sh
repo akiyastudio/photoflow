@@ -38,9 +38,12 @@ x264_commit="$(node -p "require('./media-runtime.lock.json').x264.commit")"
 x265_commit="$(node -p "require('./media-runtime.lock.json').x265.commit")"
 ffmpeg_repo="$(node -p "require('./media-runtime.lock.json').ffmpeg.repository")"
 x264_repo="$(node -p "require('./media-runtime.lock.json').x264.repository")"
+x264_mirror_repo="$(node -p "require('./media-runtime.lock.json').x264.mirrorRepository")"
 x265_repo="$(node -p "require('./media-runtime.lock.json').x265.repository")"
 zlib_commit="$(node -p "require('./media-runtime.lock.json').zlib.commit")"
 zlib_repo="$(node -p "require('./media-runtime.lock.json').zlib.repository")"
+nv_codec_headers_commit="$(node -p "require('./media-runtime.lock.json').nvCodecHeaders.commit")"
+nv_codec_headers_repo="$(node -p "require('./media-runtime.lock.json').nvCodecHeaders.repository")"
 
 if [[ "${PHOTOFLOW_MEDIA_RESUME:-0}" != 1 ]]; then
   rm -rf "$work_root"
@@ -48,7 +51,12 @@ fi
 mkdir -p "$work_root/src" "$work_root/prefix" "$work_root/package/runtime" "$work_root/package/licenses" "$work_root/package/source" "$output_root"
 
 if [[ ! -d "$work_root/src/x264/.git" ]]; then
-  git clone --filter=blob:none "$x264_repo" "$work_root/src/x264"
+  if ! git clone --filter=blob:none "$x264_repo" "$work_root/src/x264"; then
+    # code.videolan.org occasionally rejects CI downloads. The GitHub mirror
+    # carries the same commit IDs; checkout below still enforces the lock file.
+    rm -rf "$work_root/src/x264"
+    git clone --filter=blob:none "$x264_mirror_repo" "$work_root/src/x264"
+  fi
 fi
 git -C "$work_root/src/x264" checkout --detach "$x264_commit"
 x264_flags=(
@@ -114,6 +122,14 @@ if [[ ! -d "$work_root/src/ffmpeg/.git" ]]; then
 fi
 git -C "$work_root/src/ffmpeg" checkout --detach "$ffmpeg_commit"
 
+if [[ ! -d "$work_root/src/nv-codec-headers/.git" ]]; then
+  git clone --filter=blob:none "$nv_codec_headers_repo" "$work_root/src/nv-codec-headers"
+fi
+git -C "$work_root/src/nv-codec-headers" checkout --detach "$nv_codec_headers_commit"
+# nv-codec-headers is header-only. Installing it into the private prefix lets
+# FFmpeg expose NVENC without requiring the CUDA toolkit or shipping an extra DLL.
+make -C "$work_root/src/nv-codec-headers" PREFIX="$work_root/prefix" install
+
 ffmpeg_flags=(
   --prefix="$work_root/prefix"
   --arch=x86_64
@@ -125,6 +141,8 @@ ffmpeg_flags=(
   --enable-zlib
   --enable-mediafoundation
   --enable-d3d11va
+  --enable-ffnvcodec
+  --enable-nvenc
   --enable-static
   --disable-shared
   --disable-autodetect
@@ -163,11 +181,13 @@ if "$objdump_command" -p "$ffmpeg_exe" | grep -Eiq 'DLL Name:.*(libwinpthread|li
   "$objdump_command" -p "$ffmpeg_exe" | grep -Ei 'DLL Name:' >&2
   exit 1
 fi
-for required in --enable-gpl --enable-libx264 --enable-libx265 --enable-zlib --enable-mediafoundation --enable-d3d11va --disable-autodetect --disable-network; do
+for required in --enable-gpl --enable-libx264 --enable-libx265 --enable-zlib --enable-mediafoundation --enable-d3d11va --enable-ffnvcodec --enable-nvenc --disable-autodetect --disable-network; do
   grep -Fq -- "$required" <<<"$configuration" || { echo "Missing FFmpeg option: $required" >&2; exit 1; }
 done
 "$ffmpeg_exe" -hide_banner -encoders 2>&1 | grep -Eq '^ V.* h264_mf ' || { echo 'Missing Media Foundation H.264 encoder' >&2; exit 1; }
 "$ffmpeg_exe" -hide_banner -encoders 2>&1 | grep -Eq '^ V.* hevc_mf ' || { echo 'Missing Media Foundation H.265 encoder' >&2; exit 1; }
+"$ffmpeg_exe" -hide_banner -encoders 2>&1 | grep -Eq '^ V.* h264_nvenc ' || { echo 'Missing NVIDIA NVENC H.264 encoder' >&2; exit 1; }
+"$ffmpeg_exe" -hide_banner -encoders 2>&1 | grep -Eq '^ V.* hevc_nvenc ' || { echo 'Missing NVIDIA NVENC H.265 encoder' >&2; exit 1; }
 "$ffmpeg_exe" -hide_banner -encoders 2>&1 | grep -Eq '^ V.* libx265 ' || { echo 'Missing libx265 H.265 encoder' >&2; exit 1; }
 
 # Exercise every command family used by the desktop app: H.264/AAC preview,
@@ -193,6 +213,9 @@ cp "$work_root/src/ffmpeg/COPYING.GPLv2" "$work_root/package/runtime/COPYING.GPL
 cp "$work_root/src/x264/COPYING" "$work_root/package/runtime/COPYING.x264"
 cp "$work_root/src/x265/COPYING" "$work_root/package/runtime/COPYING.x265"
 cp "$work_root/src/zlib/LICENSE" "$work_root/package/runtime/LICENSE.zlib"
+# The repository has no standalone LICENSE file; preserve the MIT notice from
+# the NVENC API header in both redistributable license bundles.
+sed -n '1,/^ \*\/$/p' "$work_root/src/nv-codec-headers/include/ffnvcodec/nvEncodeAPI.h" > "$work_root/package/runtime/LICENSE.nv-codec-headers"
 cp "$work_root/configure-flags.txt" "$work_root/package/runtime/configure-flags.txt"
 cp "$repo_root/docs/legal/OPEN_SOURCE_NOTICES.html" "$work_root/package/runtime/OPEN_SOURCE_NOTICES.html"
 
@@ -200,12 +223,14 @@ cp "$work_root/src/ffmpeg/COPYING.GPLv2" "$work_root/package/licenses/FFmpeg-COP
 cp "$work_root/src/x264/COPYING" "$work_root/package/licenses/x264-COPYING"
 cp "$work_root/src/x265/COPYING" "$work_root/package/licenses/x265-COPYING"
 cp "$work_root/src/zlib/LICENSE" "$work_root/package/licenses/zlib-LICENSE"
+cp "$work_root/package/runtime/LICENSE.nv-codec-headers" "$work_root/package/licenses/nv-codec-headers-LICENSE"
 cp "$repo_root/docs/legal/OPEN_SOURCE_NOTICES.html" "$work_root/package/licenses/OPEN_SOURCE_NOTICES.html"
 
 git -C "$work_root/src/ffmpeg" archive --format=zip --output="$work_root/package/source/ffmpeg-$ffmpeg_commit.zip" HEAD
 git -C "$work_root/src/x264" archive --format=zip --output="$work_root/package/source/x264-$x264_commit.zip" HEAD
 git -C "$work_root/src/x265" archive --format=zip --output="$work_root/package/source/x265-$x265_commit.zip" HEAD
 git -C "$work_root/src/zlib" archive --format=zip --output="$work_root/package/source/zlib-$zlib_commit.zip" HEAD
+git -C "$work_root/src/nv-codec-headers" archive --format=zip --output="$work_root/package/source/nv-codec-headers-$nv_codec_headers_commit.zip" HEAD
 cp "$repo_root/media-runtime.lock.json" "$work_root/package/source/build-materials/media-runtime.lock.json"
 cp "$repo_root/scripts/media-runtime/build-ffmpeg-windows.sh" "$work_root/package/source/build-materials/build-ffmpeg-windows.sh"
 cp "$repo_root/scripts/media-runtime/create-ffmpeg-manifest.cjs" "$work_root/package/source/build-materials/create-ffmpeg-manifest.cjs"
@@ -216,10 +241,13 @@ cp "$work_root/ffmpeg-config.mak" "$work_root/package/source/build-materials/ffm
 cp "$work_root/x264-configure-flags.txt" "$work_root/package/source/build-materials/x264-configure-flags.txt"
 cp "$work_root/x264-config.mak" "$work_root/package/source/build-materials/x264-config.mak"
 cp "$work_root/x265-cmake-flags.txt" "$work_root/package/source/build-materials/x265-cmake-flags.txt"
-git -C "$work_root/src/ffmpeg" diff --binary > "$work_root/package/source/build-materials/ffmpeg-changes.diff"
-git -C "$work_root/src/x264" diff --binary > "$work_root/package/source/build-materials/x264-changes.diff"
-git -C "$work_root/src/x265" diff --binary > "$work_root/package/source/build-materials/x265-changes.diff"
-git -C "$work_root/src/zlib" diff --binary > "$work_root/package/source/build-materials/zlib-changes.diff"
+# Ignore checkout-only CRLF conversion when a Windows Git installation has a
+# global core.autocrlf policy; real source changes remain recorded.
+git -C "$work_root/src/ffmpeg" diff --binary --ignore-space-at-eol > "$work_root/package/source/build-materials/ffmpeg-changes.diff"
+git -C "$work_root/src/x264" diff --binary --ignore-space-at-eol > "$work_root/package/source/build-materials/x264-changes.diff"
+git -C "$work_root/src/x265" diff --binary --ignore-space-at-eol > "$work_root/package/source/build-materials/x265-changes.diff"
+git -C "$work_root/src/zlib" diff --binary --ignore-space-at-eol > "$work_root/package/source/build-materials/zlib-changes.diff"
+git -C "$work_root/src/nv-codec-headers" diff --binary --ignore-space-at-eol > "$work_root/package/source/build-materials/nv-codec-headers-changes.diff"
 if command -v pacman >/dev/null 2>&1; then
   pacman -Q > "$work_root/package/source/build-materials/msys2-packages.txt"
 else

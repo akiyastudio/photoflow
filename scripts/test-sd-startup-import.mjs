@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { reconcileConfiguredSdDevices, resolveConfiguredSdDevices } from '../src/features/tools/sd-startup-import-model.ts';
+import { reconcileConfiguredSdDevices, removeConfiguredSdDevice, resolveConfiguredSdDevices, storageDeviceMatchesId, upsertConfiguredSdDevice } from '../src/features/tools/sd-startup-import-model.ts';
 import { createStorageDeviceInventoryController, isFreshStorageDeviceInventory, shouldPollStorageDeviceInventory } from '../src/features/tools/storage-device-inventory-model.ts';
 import { decideStartupSdAutoImport, handledStartupRequestAfterBatchStart, shouldDeleteSourceForImportBatch } from '../src/features/tools/startup-sd-auto-import-model.ts';
 
 const require = createRequire(import.meta.url);
-const { normalizeMountPath, parseDiskutilInfoPlist, parseWindowsLogicalDisks, parseWindowsMountvolOutput, parseWindowsVolOutput, summarizeDarwinStorageDeviceResults } = require('../electron/services/storage-device-service.cjs');
+const { listWindowsStorageDevices, normalizeMountPath, parseDiskutilInfoPlist, parseWindowsLogicalDisks, parseWindowsMountvolOutput, parseWindowsVolOutput, probeWindowsStorageDevice, summarizeDarwinStorageDeviceResults } = require('../electron/services/storage-device-service.cjs');
 const storageDeviceServiceSource = readFileSync(new URL('../electron/services/storage-device-service.cjs', import.meta.url), 'utf8');
 
 const config = (paths, ids = {}, types = {}) => ({
@@ -52,6 +52,37 @@ assert.deepEqual(parseWindowsMountvolOutput('\\\\?\\Volume{f3444f32-8514-11f1-ab
   mountPath: 'E:/',
   identityStable: true,
 });
+
+const windowsProbeOutput = (mountPath, label = 'CAMERA') => JSON.stringify({ Name: mountPath, DriveType: 2, VolumeLabel: label, HasSupportedMedia: true });
+const probeBase = parseWindowsLogicalDisks(JSON.stringify({ Name: 'H:\\', DriveType: 2 }))[0];
+const canonicalWithGuid = await probeWindowsStorageDevice(probeBase, async (command, args) => {
+  if (command === 'powershell.exe') return windowsProbeOutput('H:\\');
+  if (args.includes('vol')) return 'Volume Serial Number is AB12-CD34';
+  return '\\\\?\\Volume{F3444F32-8514-11F1-AB45-94E70BB1E2C4}\\';
+});
+const canonicalWithoutGuid = await probeWindowsStorageDevice(probeBase, async (command, args) => {
+  if (command === 'powershell.exe') return windowsProbeOutput('H:\\');
+  if (args.includes('vol')) return 'Volume Serial Number is AB12-CD34';
+  throw new Error('mountvol timeout');
+});
+assert.equal(canonicalWithGuid.device.id, 'win-volume:AB12-CD34');
+assert.equal(canonicalWithoutGuid.device.id, canonicalWithGuid.device.id, 'mountvol availability must never change the public device ID');
+assert.deepEqual(canonicalWithGuid.device.aliases, ['win-volume-guid:F3444F32-8514-11F1-AB45-94E70BB1E2C4']);
+
+const isolatedWindowsInventory = await listWindowsStorageDevices({ collect: async (command, args) => {
+  const commandText = args.join(' ');
+  if (command === 'powershell.exe' && commandText.includes('GetDrives')) {
+    return JSON.stringify([{ Name: 'H:\\', DriveType: 2 }, { Name: 'I:\\', DriveType: 2 }]);
+  }
+  if (command === 'powershell.exe' && commandText.includes("'H:/'")) throw new Error('H probe timeout');
+  if (command === 'powershell.exe') return windowsProbeOutput('I:\\', 'HEALTHY');
+  if (args.includes('vol') && args.includes('I:')) return 'Volume Serial Number is 1111-2222';
+  if (args.includes('mountvol') && args.includes('I:')) return '\\\\?\\Volume{11111111-2222-3333-4444-555555555555}\\';
+  throw new Error('simulated broken device probe');
+} });
+assert.equal(isolatedWindowsInventory.complete, true, 'one failed device probe must not invalidate recognized cards');
+assert.deepEqual(isolatedWindowsInventory.devices.map(item => item.id), ['win-volume:1111-2222']);
+assert(isolatedWindowsInventory.deviceErrors.some(item => item.mountPath === 'H:/'), 'the failed card must remain visible as a per-device error');
 
 const macDevice = parseDiskutilInfoPlist(`
   <plist><dict>
@@ -100,6 +131,24 @@ const movedCard = resolveConfiguredSdDevices(
   [device('card-a', 'K:/')],
 );
 assert.equal(movedCard[0]?.mountPath, 'K:/', 'a known volume must follow its identity when its drive letter changes');
+
+const legacyGuid = 'win-volume-guid:F3444F32-8514-11F1-AB45-94E70BB1E2C4';
+const canonicalCard = device('win-volume:AB12-CD34', 'K:/', { aliases: [legacyGuid] });
+assert.equal(storageDeviceMatchesId(canonicalCard, legacyGuid), true);
+assert.equal(resolveConfiguredSdDevices(config(['H:/'], { 'H:/': legacyGuid }), [canonicalCard])[0]?.deviceId, 'win-volume:AB12-CD34', 'legacy GUID enrollment must resolve through the canonical serial identity');
+const migratedGuidConfig = reconcileConfiguredSdDevices(config(['H:/'], { 'H:/': legacyGuid }), [canonicalCard]);
+assert.equal(migratedGuidConfig.sdDevices[0].deviceId, 'win-volume:AB12-CD34', 'legacy GUID enrollment must be rewritten to the canonical ID');
+assert.deepEqual(migratedGuidConfig.sdDeviceIds, { 'K:/': 'win-volume:AB12-CD34' }, 'canonical migration must remove the old GUID mirror and drive letter');
+assert.deepEqual(removeConfiguredSdDevice(migratedGuidConfig, canonicalCard.id).sdPaths, [], 'removing a migrated device must not resurrect its legacy path');
+
+const guidWithoutAliasConfig = reconcileConfiguredSdDevices(
+  config(['H:/'], { 'H:/': legacyGuid }),
+  [device('win-volume:AB12-CD34', 'H:/')],
+);
+assert.equal(guidWithoutAliasConfig.sdDevices[0].confirmedAt, 0, 'a legacy GUID without a live alias must require explicit confirmation instead of trusting the drive letter');
+const reconfirmedGuidConfig = upsertConfiguredSdDevice(guidWithoutAliasConfig, device('win-volume:AB12-CD34', 'H:/'), 'work', 99);
+assert.deepEqual(reconfirmedGuidConfig.sdDevices.map(record => record.deviceId), ['win-volume:AB12-CD34'], 'explicit confirmation must replace the pending GUID record in place');
+assert.deepEqual(reconfirmedGuidConfig.sdDeviceIds, { 'H:/': 'win-volume:AB12-CD34' });
 
 const reusedLetter = resolveConfiguredSdDevices(
   config(['H:/'], { 'H:/': 'card-a' }),
@@ -189,9 +238,11 @@ const snapshots = [];
 const unsubscribeFirst = inventory.subscribe(snapshot => snapshots.push(snapshot));
 const unsubscribeSecond = inventory.subscribe(() => undefined);
 assert.equal(loadCount, 1, 'multiple mounted views must share one inventory request');
-pendingLoads.shift()({ devices: [device('card-a', 'H:/')], complete: true });
+pendingLoads.shift()({ devices: [device('card-a', 'H:/')], complete: true, warning: 'one probe failed', deviceErrors: [{ mountPath: 'I:/', error: 'timeout' }] });
 await new Promise(resolve => setImmediate(resolve));
 assert.equal(snapshots.at(-1).status, 'ready');
+assert.equal(snapshots.at(-1).warning, 'one probe failed');
+assert.deepEqual(snapshots.at(-1).deviceErrors, [{ mountPath: 'I:/', error: 'timeout' }]);
 assert.equal(isFreshStorageDeviceInventory(snapshots.at(-1), now), true);
 assert.equal(scheduled.length, 1, 'the next poll must be scheduled only after the active request completes');
 scheduled.shift()();

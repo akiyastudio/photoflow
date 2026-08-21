@@ -3,6 +3,15 @@ const path = require('path');
 const { spawn } = require('child_process');
 let recycleProcessSequence = 0;
 
+const probeManyIndividually = async (values, probe) => {
+  const items = [];
+  for (const pidl of values) {
+    try { items.push({ pidl, ...await probe(pidl) }); }
+    catch (error) { items.push({ success: false, exists: false, pidl, error: error.message || String(error) }); }
+  }
+  return { success: true, items };
+};
+
 const runJson = (command, args, timeoutMs = 120000, stdin = '', processSupervisor = null) => new Promise((resolve, reject) => {
   const child = processSupervisor
     ? processSupervisor.launch({
@@ -102,7 +111,17 @@ const createRecycleBinService = ({ app, shell, projectRoot, processSupervisor = 
     return runJson(executable(), ['probe', '--pidl', recyclePidl], 15000, '', processSupervisor);
   };
 
-  return { trash, trashMany, restore, probe, nativeAvailable };
+  const probeMany = async recyclePidls => {
+    const values = Array.from(new Set((Array.isArray(recyclePidls) ? recyclePidls : []).filter(Boolean).map(String)));
+    if (!values.length || !nativeAvailable()) return { success: true, items: [] };
+    try {
+      return await runJson(executable(), ['probe-many'], Math.min(120000, 15000 + values.length * 250), JSON.stringify(values), processSupervisor);
+    } catch {
+      return probeManyIndividually(values, probe);
+    }
+  };
+
+  return { trash, trashMany, restore, probe, probeMany, nativeAvailable };
 };
 
-module.exports = { createRecycleBinService };
+module.exports = { createRecycleBinService, probeManyIndividually };

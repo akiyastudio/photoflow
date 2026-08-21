@@ -7,6 +7,7 @@ import { useAppDialog } from './AppDialogProvider';
 import { useEscapeLayer } from './LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../utils/recycleBinFailure';
 import { useTaskCenter } from '../features/background-tasks/TaskCenter';
+import { getWorkspaceCatalog, readWorkspaceCatalogSnapshot, workspaceCatalogEventMatches } from '../platform/workspace-catalog-client';
 
 type Action = 'import' | 'broll' | 'match';
 type ExistingProjectCandidate = {
@@ -122,6 +123,8 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   configuredWorkspacePathsRef.current = configuredWorkspacePaths;
   const refreshInFlightRef = useRef<Promise<void> | null>(null);
   const refreshQueuedRef = useRef(false);
+  const refreshQueuedFreshRef = useRef(false);
+  const refreshQueuedCachedOnlyRef = useRef(true);
   const refreshGenerationRef = useRef(0);
   const mountedRef = useRef(true);
   const statuses = useMemo<ProjectStatus[]>(() => {
@@ -326,7 +329,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   const formattedDate = year.trim() && month.trim() ? `${String(year).trim().slice(-2)}-${Number(month)}${day.trim() ? `-${Number(day)}` : ''}` : '';
   const nextProjectDisplayName = [formattedDate, name.trim()].filter(Boolean).join(' ');
 
-  const refreshOnce = async () => {
+  const refreshOnce = async (fresh = false, cachedOnly = false) => {
     const requestedWorkspacePaths = configuredWorkspacePathsRef.current;
     const requestKey = requestedWorkspacePaths.join('\0').toLocaleLowerCase();
     const generation = ++refreshGenerationRef.current;
@@ -337,7 +340,10 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     }
     let results: Array<{ requestedPath: string; result: Awaited<ReturnType<typeof window.electronAPI.getWorkspaceProjects>> }>;
     try {
-      results = await Promise.all(requestedWorkspacePaths.map(async requestedPath => ({ requestedPath, result: await window.electronAPI.getWorkspaceProjects(requestedPath) })));
+      results = await Promise.all(requestedWorkspacePaths.map(async requestedPath => ({
+        requestedPath,
+        result: cachedOnly ? readWorkspaceCatalogSnapshot(requestedPath) || await getWorkspaceCatalog(requestedPath) : await getWorkspaceCatalog(requestedPath, { fresh }),
+      })));
     } catch (refreshError) {
       if (mountedRef.current && generation === refreshGenerationRef.current) {
         setError(refreshError instanceof Error ? refreshError.message : '无法刷新项目目录');
@@ -363,15 +369,28 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     setError(failures.length ? `${failures.length} 个工作目录暂时无法读取，其余项目仍可使用` : '');
   };
 
-  const refresh = async () => {
+  const refresh = async (fresh = false, cachedOnly = false) => {
     if (refreshInFlightRef.current) {
+      if (!refreshQueuedRef.current) {
+        refreshQueuedFreshRef.current = fresh;
+        refreshQueuedCachedOnlyRef.current = cachedOnly;
+      } else {
+        refreshQueuedFreshRef.current ||= fresh;
+        refreshQueuedCachedOnlyRef.current &&= cachedOnly;
+      }
       refreshQueuedRef.current = true;
       return refreshInFlightRef.current;
     }
     const operation = (async () => {
+      let nextFresh = fresh;
+      let nextCachedOnly = cachedOnly;
       do {
         refreshQueuedRef.current = false;
-        await refreshOnce();
+        refreshQueuedFreshRef.current = false;
+        refreshQueuedCachedOnlyRef.current = true;
+        await refreshOnce(nextFresh, nextCachedOnly);
+        nextFresh = refreshQueuedFreshRef.current;
+        nextCachedOnly = refreshQueuedCachedOnlyRef.current;
       } while (refreshQueuedRef.current && mountedRef.current);
     })().finally(() => {
       refreshInFlightRef.current = null;
@@ -385,6 +404,8 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     return () => {
       mountedRef.current = false;
       refreshQueuedRef.current = false;
+      refreshQueuedFreshRef.current = false;
+      refreshQueuedCachedOnlyRef.current = true;
       refreshGenerationRef.current += 1;
     };
   }, []);
@@ -393,33 +414,41 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   useEffect(() => {
     if (!autoCleanupDeletedProjectData || !configuredWorkspacePaths.length) return;
     let disposed = false;
-    for (const currentWorkspacePath of configuredWorkspacePaths) {
-      const key = currentWorkspacePath.toLocaleLowerCase();
-      if (cleanupCheckedWorkspaces.has(key)) continue;
-      cleanupCheckedWorkspaces.add(key);
-      const storageKey = `photoflow:maintenance:deleted-project-cleanup:${key}`;
-      const today = localDateKey();
-      if (window.localStorage.getItem(storageKey) === today) continue;
-      void window.electronAPI.cleanupDeletedWorkspaceProjects(currentWorkspacePath).then(result => {
-        if (!result.success) return;
-        window.localStorage.setItem(storageKey, today);
-        if (!disposed && result.cleanedCount > 0) void refresh();
-      });
-    }
-    return () => { disposed = true; };
+    const timer = window.setTimeout(() => {
+      for (const currentWorkspacePath of configuredWorkspacePaths) {
+        const key = currentWorkspacePath.toLocaleLowerCase();
+        if (cleanupCheckedWorkspaces.has(key)) continue;
+        cleanupCheckedWorkspaces.add(key);
+        const storageKey = `photoflow:maintenance:deleted-project-cleanup:${key}`;
+        const today = localDateKey();
+        if (window.localStorage.getItem(storageKey) === today) continue;
+        void window.electronAPI.cleanupDeletedWorkspaceProjects(currentWorkspacePath).then(result => {
+          if (!result.success) return;
+          window.localStorage.setItem(storageKey, today);
+          if (!disposed && result.cleanedCount > 0) void refresh(true);
+        });
+      }
+    }, 15000);
+    return () => { disposed = true; window.clearTimeout(timer); };
   }, [configuredWorkspacePaths, autoCleanupDeletedProjectData]);
   useEffect(() => {
     const close = () => { setMenu(null); setShowCreateMenu(false); };
     let refreshTimer = 0;
     const changed = () => {
       window.clearTimeout(refreshTimer);
-      refreshTimer = window.setTimeout(() => void refresh(), 250);
+      refreshTimer = window.setTimeout(() => void refresh(true), 250);
+    };
+    const snapshotChanged = (event: Event) => {
+      if (!configuredWorkspacePaths.some(currentPath => workspaceCatalogEventMatches(event, currentPath))) return;
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => void refresh(false, true), 0);
     };
     const unsubscribe = window.electronAPI.onWorkspaceProjectsChanged(changed);
     window.addEventListener('click', close);
     window.addEventListener('photoflow-menu-open', close);
     window.addEventListener('workspace-projects-changed', changed);
-    return () => { window.clearTimeout(refreshTimer); unsubscribe(); window.removeEventListener('click', close); window.removeEventListener('photoflow-menu-open', close); window.removeEventListener('workspace-projects-changed', changed); };
+    window.addEventListener('workspace-catalog-snapshot-changed', snapshotChanged);
+    return () => { window.clearTimeout(refreshTimer); unsubscribe(); window.removeEventListener('click', close); window.removeEventListener('photoflow-menu-open', close); window.removeEventListener('workspace-projects-changed', changed); window.removeEventListener('workspace-catalog-snapshot-changed', snapshotChanged); };
   }, [configuredWorkspacePaths]);
   useEffect(() => {
     const hasOfflineArchive = groups.some(group => group.projects.some(project => project.archived && project.availability === 'missing'));

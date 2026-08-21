@@ -12,6 +12,23 @@ export type ProjectWorkspaceLifecycleAction = {
   resetNavigation: boolean;
 };
 
+export const PROJECT_BACKGROUND_LOAD_DELAYS_MS = Object.freeze({
+  progress: 40,
+  watcher: 160,
+  clipboard: 320,
+  drives: 480,
+  teamRetouch: 640,
+});
+
+export const PROJECT_WATCH_RECONCILE_COOLDOWN_MS = 30_000;
+
+export const shouldReconcileProjectWatch = (
+  lastReconciledAt: number,
+  now: number,
+  force = false,
+  cooldownMs = PROJECT_WATCH_RECONCILE_COOLDOWN_MS,
+) => force || lastReconciledAt <= 0 || now - lastReconciledAt >= cooldownMs;
+
 export const resolveProjectWorkspaceLifecycle = (
   previous: ProjectWorkspaceLifecycleIdentity | undefined,
   next: ProjectWorkspaceLifecycleIdentity,

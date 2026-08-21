@@ -359,7 +359,10 @@ class ThumbnailPipeline {
     // The database index is durable metadata, not a prerequisite for showing
     // an image. Visible cache misses enter the scheduler immediately; index
     // and state writes are completed asynchronously in the background.
-    this.enqueue({ filePath: sourcePath, kind, cacheConfig, stat, persistState: false, requestedSizes: [size], queueOrder }, priority);
+    const accepted = this.enqueue({ filePath: sourcePath, kind, cacheConfig, stat, persistState: false, requestedSizes: [size], queueOrder }, priority);
+    if (!accepted) {
+      return { success: false, state: 'NOT_READY', error: '缩略图任务队列繁忙，请稍后重试', cacheLayer: 'source', mediaUrl: kind === 'video' ? null : undefined };
+    }
     return { success: true, state: 'QUEUED', cacheLayer: 'source', mediaUrl: kind === 'video' ? null : undefined };
   }
 
@@ -386,9 +389,9 @@ class ThumbnailPipeline {
       } else if (!existing.running) {
         this.queues[existing.priority].sort((left, right) => left.order - right.order);
       }
-      return;
+      return true;
     }
-    if (normalizedPriority >= PRIORITY.directory && this.tasks.size >= this.maxBackgroundTasks) return;
+    if (normalizedPriority >= PRIORITY.directory && this.tasks.size >= this.maxBackgroundTasks) return false;
     const requestedSizes = new Map((input.requestedSizes || [THUMBNAIL_SIZES[0]]).map(size => [size.label, size]));
     const task = { key, input: { ...input, filePath: sourcePath }, requestedSizes, completedSizes: new Set(), priority: normalizedPriority, order: queueOrder, running: false, cancelled: false };
     this.tasks.set(key, task);
@@ -396,6 +399,7 @@ class ThumbnailPipeline {
     this.queues[normalizedPriority].sort((left, right) => left.order - right.order);
     if (input.persistState !== false) void this.database.call('set_state', { file_path: sourcePath, state: 'QUEUED' }).catch(() => undefined);
     this.schedulePump();
+    return true;
   }
 
   schedulePump() {
@@ -729,6 +733,14 @@ class ThumbnailPipeline {
       }
     }
     await this.database.call('invalidate_cache', { deleted_paths: deletedPaths || null, before_ms: beforeMs || null });
+  }
+
+  async listCacheCleanupCandidates(beforeMs) {
+    return this.database.call('list_cache_cleanup', { before_ms: beforeMs });
+  }
+
+  async cleanupOrphanCache(cacheRoot, beforeMs, intervalMs) {
+    return this.database.call('cleanup_orphan_cache', { cache_root: cacheRoot, before_ms: beforeMs, interval_ms: intervalMs });
   }
 
   async invalidateSources(sourcePaths) {

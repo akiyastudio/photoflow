@@ -19,6 +19,7 @@ const steps = [
   ['domain recovery', ['run', 'test:domain-recovery']],
   ['source boundaries', ['run', 'test:source-boundaries']],
   ['SD startup import', ['run', 'test:sd-startup-import']],
+  ['startup catalog hydration', ['run', 'test:startup-catalog']],
   ['file entry interaction', ['run', 'test:file-entry-interaction']],
   ['file entry sort', ['run', 'test:file-entry-sort']],
   ['Electron security', ['run', 'test:electron-security']],

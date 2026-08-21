@@ -39,12 +39,14 @@ const { createBackupService } = require('./services/backup-service.cjs');
 const { createArchiveService } = require('./services/archive-service.cjs');
 const { createCredentialService } = require('./services/credential-service.cjs');
 const { createStorageUsageService } = require('./services/storage-usage-service.cjs');
+const { createWorkspaceReconcileTask } = require('./services/workspace-reconcile-task.cjs');
 const { cleanupRetiredCaptureTimeCache } = require('./services/retired-cache-service.cjs');
 const { createPluginService } = require('./services/plugin-service.cjs');
 const { createWorkspaceService } = require('./domains/workspace/public.cjs');
 const { createFileSystemService } = require('./services/file-system-service.cjs');
 const { createThumbnailService } = require('./services/thumbnail-service.cjs');
 const { createMediaService } = require('./services/media-service.cjs');
+const { findPythonJsonFailureMessage, parsePythonJsonMessages } = require('./services/python-json-protocol.cjs');
 const { createMediaRatingService } = require('./services/media-rating-service.cjs');
 const { createRawOrientationService } = require('./services/raw-orientation-service.cjs');
 const { createImageThumbnailRuntime } = require('./services/image-thumbnail-runtime.cjs');
@@ -143,7 +145,6 @@ let workspaceWatcher = null;
 let watchedWorkspacePath = '';
 let workspaceWatchTimer = null;
 let workspaceReconciliationTimer = null;
-let workspaceReconciliationRunning = false;
 const fileOperationState = { projectFileClipboard: null };
 const activeProjectFileOperations = new Map();
 const mediaMetadataCache = new Map();
@@ -161,10 +162,19 @@ const discardUndoOperation = operation => {
   }
 };
 const pushUndoOperation = async operation => {
-  renameHistory.push(await addUndoIdentities(operation));
+  const stored = { ...await addUndoIdentities(operation), undoToken: operation.undoToken || crypto.randomUUID() };
+  renameHistory.push(stored);
   // Keep undo data bounded. Entries that fall off the stack intentionally
   // become permanent, matching the behaviour of standard file managers.
   if (renameHistory.length > MAX_UNDO_HISTORY) discardUndoOperation(renameHistory.shift());
+  return stored;
+};
+const removeUndoOperation = undoToken => {
+  const index = renameHistory.findIndex(operation => operation.undoToken === undoToken);
+  if (index < 0) return false;
+  const [removed] = renameHistory.splice(index, 1);
+  discardUndoOperation(removed);
+  return true;
 };
 const workspaceCatalogs = new Map();
 let shellThumbnailProcess = null;
@@ -253,7 +263,10 @@ const {
   samePathIdentity,
 } = fileSystemService;
 const eventBus = createEventBus();
-const backgroundTasks = createBackgroundTaskService({ eventBus });
+const backgroundTasks = createBackgroundTaskService({
+  eventBus,
+  persistencePath: path.join(app.getPath('userData'), 'background-tasks.json'),
+});
 mediaAccessService = createMediaAccessService({
   getWorkspaceRoots: () => [...workspaceCatalogs.keys()],
   getAdditionalRoots: () => [
@@ -323,6 +336,7 @@ const writeLog = (level, message, details) => {
     nativeConsoleError('Failed to write application log:', error);
   }
 };
+eventBus.on('background-task:persistence-error', details => writeLog('error', 'Background task persistence failed', details));
 const domainCommandJournal = createDomainCommandJournal({
   filePath: path.join(app.getPath('userData'), 'domain-command-journal.json'),
   writeLog,
@@ -635,12 +649,11 @@ const runJsonCommand = (run, label, timeoutMs = 20 * 60 * 1000, onMessage) => ne
   child.stderr.on('data', data => { stderr = (stderr + data).slice(-16000); });
   child.on('error', error => fail(error));
   child.on('close', code => {
-    if (code !== 0) return fail(new Error(stderr.trim() || `${label} 处理失败（代码 ${code}）`));
-    const lines = stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      try { return succeed(JSON.parse(lines[index])); }
-      catch { /* keep looking for the last JSON result */ }
-    }
+    const messages = parsePythonJsonMessages(stdout);
+    const protocolFailure = findPythonJsonFailureMessage(messages);
+    if (code !== 0) return fail(new Error(protocolFailure || stderr.trim() || `${label} 处理失败（代码 ${code}）`));
+    if (protocolFailure) return fail(new Error(protocolFailure));
+    if (messages.length) return succeed(messages[messages.length - 1]);
     fail(new Error(stderr.trim() || `${label} 未返回有效结果`));
   });
   const timer = setTimeout(() => {
@@ -689,12 +702,12 @@ const runPythonEventAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, sign
   child.stderr.on('data', data => { stderr = (stderr + data).slice(-16000); });
   child.on('error', fail);
   child.on('close', code => {
-    if (code !== 0) return fail(new Error(stderr.trim() || `${scriptName} 处理失败（代码 ${code}）`));
     if (eventBuffer.trim()) {
       try { const event = JSON.parse(eventBuffer); events.push(event); onEvent?.(event); } catch { /* ignore trailing non-protocol output */ }
     }
-    const errorEvent = events.find(event => event.type === 'error');
-    if (errorEvent) return fail(new Error(errorEvent.message || `${scriptName} 处理失败`));
+    const protocolFailure = findPythonJsonFailureMessage(events);
+    if (code !== 0) return fail(new Error(protocolFailure || stderr.trim() || `${scriptName} 处理失败（代码 ${code}）`));
+    if (protocolFailure) return fail(new Error(protocolFailure));
     succeed(events);
   });
   const timer = setTimeout(() => {
@@ -1074,6 +1087,7 @@ const trackingScanRepository = createMediaRepository(trackingScanDatabase);
 const trackingScanService = createVersionService({ repository: trackingScanRepository });
 const workspaceService = createWorkspaceService({
   repository: workspaceRepository,
+  reconcileRepository: workspaceMaintenanceRepository,
   catalogs: workspaceCatalogs,
   statuses: WORKSPACE_STATUSES,
   assertInside,
@@ -1130,7 +1144,7 @@ const stopWorkspaceWatcher = () => {
   workspaceWatchSuppressions.clear();
   if (workspaceReconciliationTimer) clearInterval(workspaceReconciliationTimer);
   workspaceReconciliationTimer = null;
-  workspaceReconciliationRunning = false;
+  workspaceReconcileTask.reset();
   for (const state of mediaTrackingTimers.values()) clearTimeout(state?.timer || state);
   mediaTrackingTimers.clear();
   versionStaleDetectionService.stop();
@@ -1148,34 +1162,8 @@ const suspendFileRootWatcher = rootPath => fileRootWatcherService?.suspend(rootP
 const resumeFileRootWatcher = (rootPath, references) => fileRootWatcherService?.resume(rootPath, references)
   || { success: false, root: path.resolve(rootPath), error: '文件根目录监听服务尚未初始化' };
 
-const reconcileWorkspaceState = async root => {
-  if (workspaceReconciliationRunning || watchedWorkspacePath !== root) return;
-  workspaceReconciliationRunning = true;
-  try {
-    await backgroundTasks.run({
-      type: 'workspace-reconcile',
-      title: '工作区文件与数据库对账',
-      dedupeKey: `workspace-reconcile:${root}`,
-      cancellable: false,
-      metadata: { root },
-    }, async task => {
-      task.report(5, '正在读取项目目录');
-      const previousProjectsSnapshot = JSON.stringify(workspaceCatalogs.get(root)?.projects || []);
-      const catalog = await reconcileWorkspaceCatalog(root);
-      const catalogChanged = previousProjectsSnapshot !== JSON.stringify(catalog.projects || []);
-      // Recursive media/version scans are driven by actual file watcher events
-      // or explicit tool requests. Rewalking every project here kept the disk
-      // saturated even when the workspace was completely idle.
-      task.report(95, '项目目录核对完成');
-      writeLog('info', 'Periodic workspace reconciliation completed', { root, projects: catalog.projects.length, catalogChanged });
-      return catalog;
-    });
-  } catch (error) {
-    writeLog('warn', 'Periodic workspace reconciliation deferred', { root, error: error.message || String(error) });
-  } finally {
-    workspaceReconciliationRunning = false;
-  }
-};
+const workspaceReconcileTask = createWorkspaceReconcileTask({ backgroundTasks, getWatchedWorkspacePath: () => watchedWorkspacePath, getProjects: root => workspaceCatalogs.get(root)?.projects, reconcileWorkspaceCatalog, writeLog });
+const reconcileWorkspaceState = workspaceReconcileTask.run;
 
 const startWorkspaceReconciliation = root => {
   if (workspaceReconciliationTimer) clearInterval(workspaceReconciliationTimer);
@@ -1907,7 +1895,7 @@ app.whenReady().then(async () => {
   createWindow(false);
 
   registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
-  const workspaceIpcController = registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
+  const workspaceIpcController = registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });

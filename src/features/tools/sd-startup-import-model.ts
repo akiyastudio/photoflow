@@ -10,11 +10,18 @@ export interface ResolvedSdDevice {
 }
 
 const pathKey = (value: string) => value.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase();
+const identityKey = (value: string) => String(value || '').trim().toLocaleLowerCase();
+const isLegacyWindowsGuid = (value: string) => identityKey(value).startsWith('win-volume-guid:');
 const uniquePaths = (paths: string[]) => paths.filter((path, index) => paths.findIndex(candidate => pathKey(candidate) === pathKey(path)) === index);
 const legacySelectedPaths = (config: SmartImportConfig) => [...new Set(config.sdPaths?.length ? config.sdPaths : config.sdPath ? [config.sdPath] : [])];
 
 export const isTrustedSdImportDevice = (device: StorageDevice) => device.identityStable === true
   && device.eligibleForSdImport === true;
+
+export const storageDeviceMatchesId = (device: StorageDevice, deviceId: string) => {
+  const expected = identityKey(deviceId);
+  return Boolean(expected) && [device.id, ...(device.aliases || [])].some(candidate => identityKey(candidate) === expected);
+};
 
 export const normalizeConfiguredSdDeviceRecords = (records: ConfiguredSdDevice[] | undefined): ConfiguredSdDevice[] => {
   if (!Array.isArray(records)) return [];
@@ -68,7 +75,9 @@ export const normalizeSavedSdDeviceRecords = (
 
 const legacyUnboundPaths = (config: SmartImportConfig, records: ConfiguredSdDevice[]) => {
   const recordIds = new Set(records.map(record => record.deviceId));
+  const recordPaths = new Set(records.map(record => pathKey(record.lastMountPath)));
   return legacySelectedPaths(config).filter(path => {
+    if (recordPaths.has(pathKey(path))) return false;
     const legacyId = config.sdDeviceIds?.[path];
     return !legacyId || !recordIds.has(legacyId);
   });
@@ -86,7 +95,6 @@ export const syncLegacySdMirrors = (config: SmartImportConfig, records: Configur
     if (config.sdDeviceIds?.[path]) sdDeviceIds[path] = config.sdDeviceIds[path];
   }
   for (const record of enabledRecords) {
-    if (sdDeviceIds[record.lastMountPath]) continue;
     sdDriveTypes[record.lastMountPath] = record.type;
     sdDeviceIds[record.lastMountPath] = record.deviceId;
   }
@@ -103,7 +111,7 @@ export const syncLegacySdMirrors = (config: SmartImportConfig, records: Configur
 export const configuredSdSelectionPaths = (config: SmartImportConfig, devices: StorageDevice[]) => {
   const records = normalizeConfiguredSdDeviceRecords(config.sdDevices);
   const recordPaths = records.filter(record => record.enabled).map(record => (
-    devices.find(device => device.id === record.deviceId)?.mountPath || record.lastMountPath
+    devices.find(device => storageDeviceMatchesId(device, record.deviceId))?.mountPath || record.lastMountPath
   ));
   return uniquePaths([...recordPaths, ...legacyUnboundPaths(config, records)]);
 };
@@ -111,7 +119,7 @@ export const configuredSdSelectionPaths = (config: SmartImportConfig, devices: S
 export const configuredSdDriveTypes = (config: SmartImportConfig, devices: StorageDevice[]) => {
   const result = { ...(config.sdDriveTypes || {}) };
   for (const record of normalizeConfiguredSdDeviceRecords(config.sdDevices)) {
-    const mountPath = devices.find(device => device.id === record.deviceId)?.mountPath || record.lastMountPath;
+    const mountPath = devices.find(device => storageDeviceMatchesId(device, record.deviceId))?.mountPath || record.lastMountPath;
     result[mountPath] = record.type;
   }
   return result;
@@ -124,7 +132,8 @@ export const upsertConfiguredSdDevice = (
   confirmedAt: number,
 ) => {
   const records = normalizeConfiguredSdDeviceRecords(config.sdDevices).map(record => {
-    if (record.deviceId === device.id) return { ...record, lastMountPath: device.mountPath, type, confirmedAt, enabled: true };
+    if (storageDeviceMatchesId(device, record.deviceId)) return { ...record, deviceId: device.id, lastMountPath: device.mountPath, type, confirmedAt, enabled: true };
+    if (record.confirmedAt <= 0 && pathKey(record.lastMountPath) === pathKey(device.mountPath)) return { ...record, deviceId: device.id, lastMountPath: device.mountPath, type, confirmedAt, enabled: true };
     if (record.enabled && pathKey(record.lastMountPath) === pathKey(device.mountPath)) return { ...record, enabled: false };
     return record;
   });
@@ -152,7 +161,7 @@ export const resolveConfiguredSdDevices = (
   devices: StorageDevice[],
 ): ResolvedSdDevice[] => normalizeConfiguredSdDeviceRecords(config.sdDevices).flatMap(record => {
   if (!record.enabled || record.confirmedAt <= 0) return [];
-  const device = devices.find(candidate => candidate.id === record.deviceId && isTrustedSdImportDevice(candidate));
+  const device = devices.find(candidate => storageDeviceMatchesId(candidate, record.deviceId) && isTrustedSdImportDevice(candidate));
   if (!device) return [];
   return [{
     configuredPath: record.lastMountPath,
@@ -168,12 +177,25 @@ export const reconcileConfiguredSdDevices = (
 ): SmartImportConfig => {
   const records = normalizeConfiguredSdDeviceRecords(config.sdDevices);
   if (!records.length) return config;
+  const staleMirrorPaths = new Set<string>();
   const nextRecords = records.map(record => {
-    const match = devices.find(device => device.id === record.deviceId && isTrustedSdImportDevice(device));
-    return match && pathKey(match.mountPath) !== pathKey(record.lastMountPath)
-      ? { ...record, lastMountPath: match.mountPath }
-      : record;
+    const match = devices.find(device => storageDeviceMatchesId(device, record.deviceId) && isTrustedSdImportDevice(device));
+    if (match && (identityKey(match.id) !== identityKey(record.deviceId) || pathKey(match.mountPath) !== pathKey(record.lastMountPath))) {
+      staleMirrorPaths.add(pathKey(record.lastMountPath));
+      return { ...record, deviceId: match.id, lastMountPath: match.mountPath };
+    }
+    const samePathCanonical = isLegacyWindowsGuid(record.deviceId)
+      ? devices.find(device => isTrustedSdImportDevice(device) && pathKey(device.mountPath) === pathKey(record.lastMountPath))
+      : undefined;
+    return samePathCanonical && record.confirmedAt > 0 ? { ...record, confirmedAt: 0 } : record;
   });
-  const nextConfig = syncLegacySdMirrors(config, nextRecords);
+  const nextConfigBase = staleMirrorPaths.size ? {
+    ...config,
+    sdPath: legacySelectedPaths(config).find(path => !staleMirrorPaths.has(pathKey(path))) || '',
+    sdPaths: legacySelectedPaths(config).filter(path => !staleMirrorPaths.has(pathKey(path))),
+    sdDriveTypes: Object.fromEntries(Object.entries(config.sdDriveTypes || {}).filter(([path]) => !staleMirrorPaths.has(pathKey(path)))),
+    sdDeviceIds: Object.fromEntries(Object.entries(config.sdDeviceIds || {}).filter(([path]) => !staleMirrorPaths.has(pathKey(path)))),
+  } : config;
+  const nextConfig = syncLegacySdMirrors(nextConfigBase, nextRecords);
   return JSON.stringify(nextConfig) === JSON.stringify(config) ? config : nextConfig;
 };

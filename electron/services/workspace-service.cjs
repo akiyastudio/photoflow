@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const createWorkspaceService = ({ repository, catalogs, assertInside, assertExistingInside }) => {
+const createWorkspaceService = ({ repository, reconcileRepository = repository, catalogs, assertInside, assertExistingInside }) => {
   const resolveRoot = workspacePath => {
     if (typeof workspacePath !== 'string' || !workspacePath.trim()) throw new Error('尚未选择工作目录');
     const requestedPath = path.resolve(workspacePath.trim());
@@ -24,7 +24,7 @@ const createWorkspaceService = ({ repository, catalogs, assertInside, assertExis
   };
 
   const reconcileCatalog = async root => {
-    const response = await repository.syncCatalog(root);
+    const response = await reconcileRepository.syncCatalog(root);
     const projects = Array.isArray(response.projects) ? response.projects : [];
     const catalog = { projects, byName: new Map(projects.map(project => [project.name.toLocaleLowerCase(), project])) };
     catalogs.set(root, catalog);

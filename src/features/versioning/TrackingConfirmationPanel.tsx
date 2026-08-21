@@ -23,7 +23,7 @@ type TrackingConfirmationPanelProps = {
   onClose: () => void;
   onCommitted: () => void;
   onReleased: () => void;
-  onNotice: (message: string) => void;
+  onNotice: (message: string, duration?: number) => void;
 };
 
 const statusLabel: Record<ProgressTrackingItem['status'], string> = {
@@ -102,24 +102,21 @@ export const TrackingConfirmationPanel = ({ sessionId, workspacePath, progressFo
     if (!result.success) { setView(previousView); onNotice(`保存决定失败：${result.error || '未知错误'}`); }
   };
 
-  const commit = async () => {
+  const commit = () => {
     if (busyItemId || (view.session?.unresolvedCount ?? 1) > 0 || !canCommitTrackingSession(view.items)) return;
-    const generation = actionGenerationRef.current;
     setCommitting(true);
-    const result = await window.electronAPI.commitProgressTracking(workspacePath, { sessionId })
-      .catch(error => ({ success: false, error: error instanceof Error ? error.message : String(error) }));
-    if (generation !== actionGenerationRef.current) {
-      if (result.success) void window.electronAPI.releaseProgressTrackingSession(workspacePath, { sessionId });
-      return;
-    }
-    if (!result.success) { setCommitting(false); onNotice(`提交跟踪结果失败：${result.error || '未知错误'}`); return; }
-    const released = await window.electronAPI.releaseProgressTrackingSession(workspacePath, { sessionId })
-      .catch(error => ({ success: false, released: false, error: error instanceof Error ? error.message : String(error) }));
-    if (generation !== actionGenerationRef.current) return;
-    setCommitting(false);
-    if (!released.success || !released.released) onNotice(`跟踪结果已提交，但会话释放失败：${released.error || '稍后将由维护任务清理'}`);
-    onNotice('跟踪结果已提交。');
-    onCommitted();
+    onClose();
+    onNotice('已转入后台提交，可以继续操作。');
+    void (async () => {
+      const result = await window.electronAPI.commitProgressTracking(workspacePath, { sessionId })
+        .catch(error => ({ success: false, error: error instanceof Error ? error.message : String(error) }));
+      if (!result.success) { onNotice(`提交跟踪结果失败：${result.error || '未知错误'}`, 8000); return; }
+      const released = await window.electronAPI.releaseProgressTrackingSession(workspacePath, { sessionId })
+        .catch(error => ({ success: false, released: false, error: error instanceof Error ? error.message : String(error) }));
+      if (!released.success || !released.released) onNotice(`跟踪结果已提交，但会话释放失败：${released.error || '稍后将由维护任务清理'}`);
+      onNotice('跟踪结果已提交。');
+      onCommitted();
+    })();
   };
 
   const release = async () => {

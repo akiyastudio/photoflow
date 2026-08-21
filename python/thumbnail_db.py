@@ -114,6 +114,11 @@ class ThumbnailDatabase:
                 started_at INTEGER NOT NULL,
                 completed_at INTEGER
             );
+
+            CREATE TABLE IF NOT EXISTS maintenance_state (
+                key TEXT PRIMARY KEY,
+                completed_at INTEGER NOT NULL
+            );
             """
         )
         # Jobs interrupted by a previous shutdown are safe to retry. Secondary
@@ -440,13 +445,72 @@ class ThumbnailDatabase:
         self.connection.commit()
         return {"success": True}
 
+    def list_cache_cleanup(self, before_ms: int) -> dict:
+        rows = self.connection.execute(
+            """SELECT DISTINCT thumbnail_path FROM thumbnails
+               WHERE last_accessed_at < ? AND thumbnail_path <> ''""",
+            (int(before_ms),),
+        ).fetchall()
+        return {
+            "success": True,
+            "thumbnailPaths": [row["thumbnail_path"] for row in rows],
+        }
+
+    def cleanup_orphan_cache(self, cache_root: str, before_ms: int, interval_ms: int) -> dict:
+        root = canonical(cache_root)
+        maintenance_key = "cache-orphans:" + hashlib.sha256(root.encode("utf-8")).hexdigest()
+        timestamp = now_ms()
+        previous = self.connection.execute(
+            "SELECT completed_at FROM maintenance_state WHERE key=?",
+            (maintenance_key,),
+        ).fetchone()
+        if previous is not None and timestamp - int(previous["completed_at"]) < max(0, int(interval_ms)):
+            return {"success": True, "skipped": True, "checkedCount": 0, "deletedCount": 0}
+        indexed = {
+            canonical(row["thumbnail_path"])
+            for row in self.connection.execute("SELECT thumbnail_path FROM thumbnails").fetchall()
+            if row["thumbnail_path"]
+        }
+        checked_count = 0
+        deleted_count = 0
+        if os.path.isdir(root):
+            for entry in os.scandir(root):
+                try:
+                    name = entry.name.lower()
+                    stem, extension = os.path.splitext(name)
+                    if (not entry.is_file(follow_symlinks=False) or extension != ".jpg"
+                            or len(stem) != 64 or any(character not in "0123456789abcdef" for character in stem)):
+                        continue
+                    candidate = canonical(entry.path)
+                    if candidate in indexed:
+                        continue
+                    checked_count += 1
+                    if entry.stat(follow_symlinks=False).st_mtime * 1000 < int(before_ms):
+                        os.unlink(entry.path)
+                        deleted_count += 1
+                except OSError:
+                    continue
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO maintenance_state(key,completed_at) VALUES(?,?)
+                   ON CONFLICT(key) DO UPDATE SET completed_at=excluded.completed_at""",
+                (maintenance_key, timestamp),
+            )
+        return {
+            "success": True,
+            "skipped": False,
+            "checkedCount": checked_count,
+            "deletedCount": deleted_count,
+        }
+
     def invalidate_cache(self, deleted_paths: list[str] | None = None, before_ms: int | None = None) -> dict:
         with self.connection:
-            if deleted_paths:
+            if deleted_paths is not None:
                 normalized = [canonical(value) for value in deleted_paths]
-                self.connection.executemany("DELETE FROM thumbnails WHERE thumbnail_path=?", [(value,) for value in normalized])
+                if normalized:
+                    self.connection.executemany("DELETE FROM thumbnails WHERE thumbnail_path=?", [(value,) for value in normalized])
             elif before_ms is not None:
-                self.connection.execute("DELETE FROM thumbnails WHERE generated_at < ?", (before_ms,))
+                self.connection.execute("DELETE FROM thumbnails WHERE last_accessed_at < ?", (before_ms,))
             else:
                 self.connection.execute("DELETE FROM thumbnails")
             self.connection.execute(

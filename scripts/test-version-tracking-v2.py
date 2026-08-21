@@ -49,13 +49,10 @@ def decide_all(db, workspace: Path, session_id: str) -> None:
         })
 
 
-def complete_without_folder_rescan(db, workspace: Path, session_id: str):
-    original = db_api.folder_media_snapshot
-    db_api.folder_media_snapshot = lambda _path: (_ for _ in ()).throw(AssertionError("tracking commit rescanned a prepared folder"))
-    try:
-        return db_api.tracking_commit_complete(str(workspace), db, {"sessionId": session_id})
-    finally:
-        db_api.folder_media_snapshot = original
+def complete_with_snapshot_validation(db, workspace: Path, session_id: str):
+    result = db_api.tracking_commit_complete(str(workspace), db, {"sessionId": session_id})
+    assert result["success"], result.get("error")
+    return result
 
 
 def test_tracking_engine(root: Path) -> None:
@@ -90,8 +87,8 @@ def test_tracking_engine(root: Path) -> None:
             parent_id=original["id"],
         )
 
-        # Preparing a branch without parent-copy policy must not hash or scan
-        # every parent RAW merely to find changed child files.
+        # Every confirmation session snapshots both sides. The parent snapshot
+        # is the optimistic-concurrency token even when copy-missing is off.
         no_parent_scan_folder = project / "No parent scan child"
         no_parent_scan_folder.mkdir()
         write_media(no_parent_scan_folder / "working.jpg", b"working-v1")
@@ -106,9 +103,24 @@ def test_tracking_engine(root: Path) -> None:
             fast_prepared = db_api.tracking_prepare(str(workspace), db, {
                 "projectName": "Project", "progressId": no_parent_scan["id"], "mode": "compare",
             })
-            assert scanned_paths == [no_parent_scan_folder]
+            assert scanned_paths == [no_parent_scan_folder, original_folder]
         finally:
             db_api.folder_media_snapshot = original_snapshot
+        preview = db_api.tracking_store_preview(db, {
+            "sessionId": fast_prepared["sessionId"],
+            "items": [{
+                "kind": "new", "status": "pending_confirmation",
+                "sourceName": "working.jpg", "targetName": "working.jpg",
+            }],
+        })
+        db_api.tracking_session_decide(str(workspace), db, {
+            "sessionId": fast_prepared["sessionId"], "itemId": preview["items"][0]["id"],
+            "status": "accepted",
+        })
+        write_media(no_parent_scan_folder / "working.jpg", b"changed-during-confirmation")
+        stale_plan = db_api.tracking_commit_plan(str(workspace), db, {"sessionId": fast_prepared["sessionId"]})
+        assert stale_plan["success"] is False and stale_plan["staleSnapshot"] is True
+        assert db_api._progress_row_by_id(db, no_parent_scan["id"])["tracking_state"] == "stale"
         db_api.tracking_session_release(db, {"sessionId": fast_prepared["sessionId"]})
         db.execute("DELETE FROM progress_folders WHERE id=?", (no_parent_scan["id"],))
         db.commit()
@@ -135,7 +147,7 @@ def test_tracking_engine(root: Path) -> None:
         decide_all(db, workspace, prepared["sessionId"])
         plan = db_api.tracking_commit_plan(str(workspace), db, {"sessionId": prepared["sessionId"]})
         assert plan["progressId"] == progress["id"] and plan["parentProgressId"] == original["id"]
-        complete_without_folder_rescan(db, workspace, prepared["sessionId"])
+        complete_with_snapshot_validation(db, workspace, prepared["sessionId"])
 
         # An unchanged refresh does not replay previously confirmed media.
         unchanged = db_api.tracking_prepare(str(workspace), db, {
@@ -144,7 +156,7 @@ def test_tracking_engine(root: Path) -> None:
         assert unchanged["sourceNames"] == [] and unchanged["copyCandidateNames"] == []
         db_api.tracking_store_preview(db, {"sessionId": unchanged["sessionId"], "items": []})
         db_api.tracking_commit_plan(str(workspace), db, {"sessionId": unchanged["sessionId"]})
-        complete_without_folder_rescan(db, workspace, unchanged["sessionId"])
+        complete_with_snapshot_validation(db, workspace, unchanged["sessionId"])
 
         # Child changes and newly added parent media are the only next candidates.
         write_media(progress_folder / "delta.jpg", b"delta-v1")
@@ -180,10 +192,15 @@ def test_tracking_engine(root: Path) -> None:
         # A failed commit is retryable without losing decisions or accepting new paths.
         db_api.tracking_commit_failed(db, {"sessionId": refresh["sessionId"], "error": "simulated failure"})
         retry_plan = db_api.tracking_commit_plan(str(workspace), db, {"sessionId": refresh["sessionId"]})
+        assert retry_plan.get("success"), retry_plan
         assert retry_plan["matches"] == refresh_plan["matches"]
         (progress_folder / "delta.jpg").rename(progress_folder / "base.jpg")
+        # Simulate a crash after the atomic copy became visible but before its
+        # journal status was persisted. Re-entry must verify and adopt it.
         shutil.copy2(original_folder / "parent-added.jpg", progress_folder / "parent-added.jpg")
-        complete_without_folder_rescan(db, workspace, refresh["sessionId"])
+        copied = db_api.tracking_apply_copies(str(workspace), db, {"sessionId": refresh["sessionId"]})
+        assert copied["success"] and copied["copiedNames"] == ["parent-added.jpg"]
+        complete_with_snapshot_validation(db, workspace, refresh["sessionId"])
 
         # Direct content changes mark the tracked node stale, including changes
         # discovered after the application was not watching the project.

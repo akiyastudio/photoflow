@@ -81,7 +81,7 @@ def test_schema_17_upgrade(root: Path) -> None:
         session_columns = {row[1] for row in db.execute("PRAGMA table_info(tracking_sessions)")}
         item_columns = {row[1] for row in db.execute("PRAGMA table_info(tracking_session_items)")}
         assert {"progress_id", "parent_progress_id", "mode", "status", "rename_from_parent",
-                "copy_missing_from_parent", "committed_batch_id"} <= session_columns
+                "copy_missing_from_parent", "committed_batch_id", "copy_operations_json"} <= session_columns
         assert {"session_id", "item_kind", "source_name", "reference_name", "target_name", "status"} <= item_columns
         rows = {row["id"]: row for row in db.execute("SELECT * FROM progress_folders")}
         assert rows["legacy-raw"]["node_role"] == "original"
@@ -1020,6 +1020,11 @@ def test_external_link_progress_is_persisted_and_sync_safe(root: Path) -> None:
         })
         assert session["progressFolderPath"] == str(external_progress.resolve())
         assert session["parentFolderPath"] == str(external_original.resolve())
+        try:
+            workspace_db.progress_update_tree_begin(db, {"projectName": "Project"})
+            assert False, "an active tracking session must block a whole-tree mutation lease"
+        except ValueError as error:
+            assert "node_busy" in str(error)
         preview = workspace_db.tracking_store_preview(db, {
             "sessionId": session["sessionId"],
             "items": [{
@@ -1057,6 +1062,35 @@ def test_external_link_progress_is_persisted_and_sync_safe(root: Path) -> None:
         assert late_failure["alreadyCommitted"] is True
         assert db.execute("SELECT status FROM tracking_sessions WHERE id=?", (session["sessionId"],)).fetchone()[0] == "committed", "a late failure callback must not downgrade a committed session"
         workspace_db.tracking_session_release(db, {"sessionId": session["sessionId"]})
+
+        mutation = workspace_db.progress_update_tree_begin(db, {"projectName": "Project"})
+        try:
+            workspace_db.tracking_session_create(str(workspace), db, {
+                "projectName": "Project", "progressId": progress["id"], "mode": "compare",
+            })
+            assert False, "a progress-tree mutation lease must block a new tracking session"
+        except ValueError as error:
+            assert "node_busy" in str(error)
+        workspace_db.progress_update_tree_finish(db, {
+            "projectName": "Project", "mutationToken": mutation["mutationToken"],
+        })
+
+        moved_external = project / "Retouch"
+        moved_external.mkdir()
+        try:
+            workspace_db.progress_update_tree(str(workspace), db, {
+                "projectName": "Project", "primaryProgressId": progress["id"],
+                "updates": [{
+                    "id": progress["id"], "mediaKind": "image", "versionKey": "1",
+                    "displayName": "Retouch", "folderPath": str(moved_external),
+                    "parentProgressId": original["id"], "trackingEnabled": True,
+                    "trackingState": "ready",
+                }],
+            })
+            assert False, "editing an external progress must never move it into the project"
+        except ValueError as error:
+            assert "external_progress_path_immutable" in str(error)
+        moved_external.rmdir()
 
         snapshot = {"files": workspace_db.folder_media_snapshot(str(external_progress)), "parent": {}}
         db.execute(

@@ -13,7 +13,7 @@ MEDIA_ACTIONS = (
 )
 PROGRESS_ACTIONS = (
     "batch_list", "progress_list", "progress_snapshot", "progress_register", "progress_register_with_graph",
-    "progress_adopt_media", "progress_revert_external_adoptions", "progress_update_tree", "progress_relation_update", "progress_legacy_selection_repair",
+    "progress_adopt_media", "progress_revert_external_adoptions", "progress_update_tree_begin", "progress_update_tree", "progress_update_tree_finish", "progress_relation_update", "progress_legacy_selection_repair",
     "version_graph_edge_create", "version_graph_edge_list", "version_graph_edge_delete", "version_graph_edge_replace_source",
     "version_tree_layout_get", "version_tree_layout_save", "progress_policy_save", "progress_mark_stale",
     "progress_mark_ready", "progress_main_branch", "progress_visible_relations", "progress_copy_missing_children",
@@ -23,7 +23,7 @@ PROGRESS_ACTIONS = (
 TRACKING_ACTIONS = (
     "tracking_session_create", "tracking_prepare", "tracking_store_preview", "tracking_session_get",
     "tracking_session_release", "tracking_session_decide", "tracking_commit_plan", "tracking_commit_complete",
-    "tracking_commit_failed",
+    "tracking_commit_failed", "tracking_apply_copies", "tracking_commit_resources",
 )
 # These commands only need the workspace catalog plus versioning.sqlite3. Keep
 # the list deliberately small: an action belongs here only after its SQL has
@@ -42,7 +42,7 @@ TEAM_ACTIONS = (
 UNDO_ACTIONS = ("undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable")
 
 ALL_ACTIONS = ("init", *CATALOG_ACTIONS, *MEDIA_ACTIONS, *PROGRESS_ACTIONS, *TRACKING_ACTIONS, *TEAM_ACTIONS, *UNDO_ACTIONS)
-READ_ONLY_ACTIONS = frozenset(("progress_snapshot", "tracking_session_get", "version_tree_layout_get"))
+READ_ONLY_ACTIONS = frozenset(("progress_snapshot", "tracking_session_get", "tracking_commit_resources", "version_tree_layout_get"))
 
 if len(ALL_ACTIONS) != len(set(ALL_ACTIONS)):
     raise RuntimeError("workspace database action catalog contains duplicates")

@@ -8,6 +8,7 @@
   },
   "x264": {
     "repository": "https://code.videolan.org/videolan/x264.git",
+    "mirrorRepository": "https://github.com/mirror/x264.git",
     "commit": "3a21e97bf23676a0bf4616df8bc2207c9fd7b1d3",
     "license": "GPL-2.0-or-later"
   },
@@ -22,6 +23,12 @@
     "repository": "https://github.com/madler/zlib.git",
     "commit": "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
     "license": "Zlib"
+  },
+  "nvCodecHeaders": {
+    "version": "12.1.14.0",
+    "repository": "https://github.com/FFmpeg/nv-codec-headers.git",
+    "commit": "1889e62e2d35ff7aa9baca2bceb14f053785e6f1",
+    "license": "MIT"
   },
   "mpv": {
     "version": "0.41.0",

@@ -137,7 +137,7 @@ const commitTemporaryFile = async (temporary, target, options = {}) => {
 };
 
 const copyFileAtomic = async (source, destination, options = {}) => {
-  const { onProgress = () => undefined, isCancelled = () => false, durable = false } = options;
+  const { onProgress = () => undefined, isCancelled = () => false, waitIfPaused = async () => undefined, durable = false } = options;
   const sourceInfo = await assertRegularFile(source).catch(error => { throw attachTransferContext(error, 'inspect-source', source, destination); });
   const target = path.resolve(destination);
   const targetDirectory = path.dirname(target);
@@ -158,14 +158,24 @@ const copyFileAtomic = async (source, destination, options = {}) => {
     reader.destroy(error);
     writer.destroy(error);
   };
-  reader.on('data', chunk => {
+  const observeChunk = chunk => {
+    reader.pause();
     copied += chunk.length;
     onProgress({ bytesCopied: copied, totalBytes: sourceInfo.stat.size });
     checkCancelled();
-  });
+    void Promise.resolve(waitIfPaused()).then(() => {
+      checkCancelled();
+      if (!reader.destroyed) reader.resume();
+    }, error => {
+      reader.destroy(error);
+      writer.destroy(error);
+    });
+  };
 
   try {
     checkCancelled();
+    await waitIfPaused();
+    reader.on('data', observeChunk);
     await pipeline(reader, writer).catch(error => { throw attachTransferContext(error, 'copy-data', sourceInfo.path, target); });
     checkCancelled();
     const written = await fs.promises.stat(temporary);
@@ -304,6 +314,9 @@ const copyPlannedFiles = async (plan, options = {}) => {
     onCreated = () => undefined,
     onFileStart = () => undefined,
     onProgress = () => undefined,
+    waitIfPaused = async () => undefined,
+    isEntryComplete = async () => false,
+    onEntryComplete = async () => undefined,
   } = options;
   const directories = plan.filter(entry => entry.kind === 'directory');
   const files = plan.filter(entry => entry.kind === 'file');
@@ -314,14 +327,20 @@ const copyPlannedFiles = async (plan, options = {}) => {
 
   for (const entry of directories) {
     throwIfCancelled(isCancelled);
+    await waitIfPaused();
+    if (await isEntryComplete(entry)) continue;
     await fs.promises.mkdir(entry.destination, { recursive: false }).catch(error => { throw attachTransferContext(error, 'prepare-target', entry.source, entry.destination); });
     onCreated(entry.destination);
+    await onEntryComplete(entry, { copied: true, bytes: 0 });
   }
 
   const control = { error: null };
   let activeSmallCopies = 0;
   let peakSmallConcurrency = 0;
   let fallbackCommits = 0;
+  let smallFilesCopied = 0;
+  let largeFilesCopied = 0;
+  let resumedFiles = 0;
   const shouldCancel = () => Boolean(control.error) || isCancelled();
   const rememberError = error => {
     if (!control.error) control.error = error;
@@ -331,15 +350,24 @@ const copyPlannedFiles = async (plan, options = {}) => {
     const worker = async () => {
       while (!control.error) {
         try { throwIfCancelled(isCancelled); } catch (error) { rememberError(error); return; }
+        try { await waitIfPaused(); } catch (error) { rememberError(error); return; }
         const index = nextIndex++;
         if (index >= entries.length) return;
         const entry = entries[index];
         try {
+          if (await isEntryComplete(entry)) {
+            resumedFiles += 1;
+            onProgress({ entry, bytesDelta: entry.size, fileCompleted: true, resumed: true });
+            continue;
+          }
           onFileStart(entry);
           const result = await copyEntry(entry);
           if (result?.commitStrategy === 'copy-fallback') fallbackCommits += 1;
+          if (entry.size <= smallFileThreshold) smallFilesCopied += 1;
+          else largeFilesCopied += 1;
           onCreated(entry.destination);
           onProgress({ entry, bytesDelta: result?.progressReported ? 0 : entry.size, fileCompleted: true });
+          await onEntryComplete(entry, result);
         } catch (error) {
           rememberError(error);
           return;
@@ -353,6 +381,7 @@ const copyPlannedFiles = async (plan, options = {}) => {
     activeSmallCopies += 1;
     peakSmallConcurrency = Math.max(peakSmallConcurrency, activeSmallCopies);
     try {
+      await waitIfPaused();
       return await copySmallFileAtomic(entry, { durable, isCancelled: shouldCancel });
     } finally {
       activeSmallCopies -= 1;
@@ -363,6 +392,7 @@ const copyPlannedFiles = async (plan, options = {}) => {
     const result = await copyFileAtomic(entry.source, entry.destination, {
       durable,
       isCancelled: shouldCancel,
+      waitIfPaused,
       onProgress: progress => {
         const bytesDelta = Math.max(0, progress.bytesCopied - reportedBytes);
         reportedBytes = progress.bytesCopied;
@@ -376,8 +406,9 @@ const copyPlannedFiles = async (plan, options = {}) => {
   if (control.error) throw control.error;
   throwIfCancelled(isCancelled);
   return {
-    smallFilesCopied: smallFiles.length,
-    largeFilesCopied: largeFiles.length,
+    smallFilesCopied,
+    largeFilesCopied,
+    resumedFiles,
     peakSmallConcurrency,
     fallbackCommits,
   };

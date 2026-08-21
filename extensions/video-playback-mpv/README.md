@@ -2,7 +2,7 @@
 
 这是照片流的可选视频播放组件。它在独立进程中运行 libmpv，通过 Win32 子窗口把视频画面嵌入照片流，并通过 JSON Lines 与 Electron 主进程交换播放状态和控制命令。
 
-组件默认使用 `gpu-next`、D3D11、`hwdec=auto-safe` 和预读缓存。硬件不支持相机的 H.265 10-bit 4:2:2 时，libmpv 会回退到 CPU 解码；组件启动或播放失败时，照片流会回退到 Chromium `<video>` 预览。
+组件默认使用稳定的 `gpu` 视频输出、D3D11、`hwdec=auto-safe` 和预读缓存。硬件不支持相机的 H.265 10-bit 4:2:2 时，libmpv 会回退到 CPU 解码；组件启动或播放失败时，照片流会回退到 Chromium `<video>` 预览。这里不启用 `gpu-next`，因为它在嵌入 Electron 子窗口时可能触发原生 D3D11 访问冲突。
 
 ## 一键构建发布包
 

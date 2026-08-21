@@ -1,15 +1,47 @@
 import type { BackgroundTask } from '../../types';
 
-export const isActiveProjectFileTask = (task: BackgroundTask) => (task.type === 'project-file-operation' || task.type === 'version-tracking')
-  && (task.state === 'queued' || task.state === 'running');
+const FAILURE_TOAST_MS = 10_000;
+const RESULT_TOAST_MS = 6_000;
+const TERMINAL_TASK_STATES = new Set<BackgroundTask['state']>(['completed', 'cancelled']);
+
+export const mergeBackgroundTaskSnapshots = (current: BackgroundTask[], incoming: BackgroundTask[], limit = 200) => {
+  const merged: BackgroundTask[] = [];
+  const seen = new Set<string>();
+  for (const task of [...incoming, ...current]) {
+    if (seen.has(task.id)) continue;
+    seen.add(task.id);
+    merged.push(task);
+  }
+  const retained = merged.filter(task => !TERMINAL_TASK_STATES.has(task.state));
+  const history = merged.filter(task => TERMINAL_TASK_STATES.has(task.state));
+  return [...retained, ...history.slice(0, Math.max(0, limit - retained.length))];
+};
+
+export const taskToastExpiresAt = (task: BackgroundTask) => task.state === 'failed'
+  ? task.updatedAt + FAILURE_TOAST_MS
+  : task.state === 'completed' && task.notificationPolicy === 'result-only'
+    ? task.updatedAt + RESULT_TOAST_MS
+    : 0;
+
+export const isActiveProjectFileTask = (task: BackgroundTask, now = Date.now()) => {
+  const active = task.state === 'queued' || task.state === 'running' || task.state === 'pausing' || task.state === 'paused' || task.state === 'resuming';
+  const progressPolicy = task.notificationPolicy === 'progress-toast'
+    || (!task.notificationPolicy && (task.type === 'project-file-operation' || task.type === 'version-tracking'));
+  if (active) return progressPolicy;
+  if (task.state === 'failed') return task.notificationPolicy !== 'silent' && now < taskToastExpiresAt(task);
+  return task.state === 'completed' && task.notificationPolicy === 'result-only' && now < taskToastExpiresAt(task);
+};
 
 export const compareProjectFileTasks = (left: BackgroundTask, right: BackgroundTask) => {
-  if (left.state !== right.state) return left.state === 'running' ? -1 : 1;
+  const priority = (task: BackgroundTask) => task.state === 'running' || task.state === 'resuming' ? 0
+    : task.state === 'paused' || task.state === 'pausing' ? 1
+      : task.state === 'queued' ? 2 : 3;
+  if (priority(left) !== priority(right)) return priority(left) - priority(right);
   return left.createdAt - right.createdAt;
 };
 
 export const selectProjectFileTaskToasts = (tasks: BackgroundTask[], minimizedTaskIds: ReadonlySet<string>, limit = 4, now = Date.now(), queuedDelayMs = 700) => {
-  const eligible = tasks.filter(task => isActiveProjectFileTask(task)
+  const eligible = tasks.filter(task => isActiveProjectFileTask(task, now)
     && !minimizedTaskIds.has(task.id)
     && (task.state !== 'queued' || now - task.createdAt >= queuedDelayMs)).sort(compareProjectFileTasks);
   return { visible: eligible.slice(0, limit), overflowCount: Math.max(0, eligible.length - limit) };
@@ -24,7 +56,7 @@ export const setTaskToastMinimized = (current: Set<string>, id: string, minimize
 };
 
 export const pruneFinishedTaskToastIds = (current: Set<string>, tasks: BackgroundTask[]): Set<string> => {
-  const activeIds = new Set(tasks.filter(isActiveProjectFileTask).map(task => task.id));
+  const activeIds = new Set(tasks.filter(task => isActiveProjectFileTask(task)).map(task => task.id));
   const next = new Set([...current].filter(id => activeIds.has(id)));
   return next.size === current.size ? current : next;
 };

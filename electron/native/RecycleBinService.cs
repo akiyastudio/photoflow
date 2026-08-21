@@ -34,6 +34,7 @@ internal static class RecycleBinService
             else if (args[0] == "trash-many") result = TrashMany(ReadPaths());
             else if (args[0] == "restore") result = Restore(Required(options, "pidl"), Required(options, "target"));
             else if (args[0] == "probe") result = Probe(Required(options, "pidl"));
+            else if (args[0] == "probe-many") result = ProbeMany(ReadValues(5000));
             else if (args[0] == "check") result = Check(Required(options, "directory"));
             else throw new ArgumentException("不支持的操作：" + args[0]);
             WriteJson(result);
@@ -122,11 +123,18 @@ internal static class RecycleBinService
 
     private static string[] ReadPaths()
     {
-        var input = Console.In.ReadToEnd();
-        var paths = new JavaScriptSerializer().Deserialize<string[]>(input);
+        var paths = ReadValues(500);
         if (paths == null || paths.Length == 0) throw new ArgumentException("没有要删除的文件或文件夹");
-        if (paths.Length > 500) throw new ArgumentException("单次最多删除 500 个项目");
         return paths;
+    }
+
+    private static string[] ReadValues(int maximum)
+    {
+        var input = Console.In.ReadToEnd();
+        var values = new JavaScriptSerializer().Deserialize<string[]>(input);
+        if (values == null || values.Length == 0) throw new ArgumentException("没有输入项目");
+        if (values.Length > maximum) throw new ArgumentException("输入项目数量过多");
+        return values;
     }
 
     private static object TrashMany(string[] requestedPaths)
@@ -275,6 +283,28 @@ internal static class RecycleBinService
             Marshal.FreeCoTaskMem(pidl);
             Release(item);
         }
+    }
+
+    private static object ProbeMany(string[] encodedPidls)
+    {
+        var items = new List<Dictionary<string, object>>();
+        foreach (var encodedPidl in encodedPidls)
+        {
+            try
+            {
+                var result = (Dictionary<string, object>)Probe(encodedPidl);
+                result["pidl"] = encodedPidl;
+                items.Add(result);
+            }
+            catch (Exception error)
+            {
+                items.Add(new Dictionary<string, object> {
+                    { "success", false }, { "exists", false }, { "pidl", encodedPidl },
+                    { "error", error.Message }, { "hresult", error.HResult }
+                });
+            }
+        }
+        return new Dictionary<string, object> { { "success", true }, { "items", items } };
     }
 
     private static IntPtr DecodePidl(string encoded)

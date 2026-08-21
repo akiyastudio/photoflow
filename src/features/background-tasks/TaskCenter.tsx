@@ -2,7 +2,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import type { BackgroundTask, LogEntry } from '../../types';
 import { panelTaskSessionKey, removePanelTasksByOwnerPageId } from './panel-task-session-model';
-import { pruneFinishedTaskToastIds, setTaskToastMinimized } from './task-toast-model';
+import { mergeBackgroundTaskSnapshots, pruneFinishedTaskToastIds, setTaskToastMinimized } from './task-toast-model';
 
 export type PanelTaskState = 'idle' | 'running' | 'completed' | 'failed';
 
@@ -33,7 +33,12 @@ interface TaskCenterValue {
 }
 
 const TaskCenterContext = createContext<TaskCenterValue | null>(null);
-const PanelTaskReporterContext = createContext<((report: PanelTaskReport) => void) | null>(null);
+type PanelTaskIdentity = Pick<PanelTaskSnapshot, 'key' | 'ownerPageId' | 'panelKind' | 'title'>;
+type PanelTaskContextValue = {
+  identity: PanelTaskIdentity;
+  report: (report: PanelTaskReport) => void;
+};
+const PanelTaskReporterContext = createContext<PanelTaskContextValue | null>(null);
 
 const sameLogs = (left: LogEntry[], right: LogEntry[]) => {
   if (left === right) return true;
@@ -51,10 +56,10 @@ export const TaskCenterProvider = ({ children }: { children: React.ReactNode }) 
   useEffect(() => {
     let active = true;
     void window.electronAPI.getBackgroundTasks().then(result => {
-      if (active && result.success) setBackgroundTasks(result.tasks);
+      if (active && result.success) setBackgroundTasks(current => mergeBackgroundTaskSnapshots(current, result.tasks));
     });
     const unsubscribe = window.electronAPI.onBackgroundTaskChanged(task => {
-      setBackgroundTasks(current => [task, ...current.filter(item => item.id !== task.id)].slice(0, 200));
+      setBackgroundTasks(current => mergeBackgroundTaskSnapshots(current, [task]));
     });
     return () => {
       active = false;
@@ -117,8 +122,11 @@ export const useTaskCenter = () => {
 export const PanelTaskScope = ({ ownerPageId, panelKind, title, children }: { ownerPageId: string; panelKind: string; title: string; children: React.ReactNode }) => {
   const { reportPanelTask } = useTaskCenter();
   const key = panelTaskSessionKey(ownerPageId, panelKind);
-  const reporter = useCallback((report: PanelTaskReport) => reportPanelTask({ key, ownerPageId, panelKind, title }, report), [key, ownerPageId, panelKind, reportPanelTask, title]);
-  return <PanelTaskReporterContext.Provider value={reporter}>{children}</PanelTaskReporterContext.Provider>;
+  const identity = useMemo<PanelTaskIdentity>(() => ({ key, ownerPageId, panelKind, title }), [key, ownerPageId, panelKind, title]);
+  const report = useCallback((value: PanelTaskReport) => reportPanelTask(identity, value), [identity, reportPanelTask]);
+  const value = useMemo<PanelTaskContextValue>(() => ({ identity, report }), [identity, report]);
+  return <PanelTaskReporterContext.Provider value={value}>{children}</PanelTaskReporterContext.Provider>;
 };
 
-export const usePanelTaskReporter = () => useContext(PanelTaskReporterContext);
+export const usePanelTaskReporter = () => useContext(PanelTaskReporterContext)?.report || null;
+export const usePanelTaskIdentity = () => useContext(PanelTaskReporterContext)?.identity || null;

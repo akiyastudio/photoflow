@@ -3,10 +3,12 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { EventEmitter } = require('events');
 const { registerFileOperationsIpc } = require('../electron/modules/files-ipc.cjs');
 const { registerWorkspaceIpc } = require('../electron/modules/workspace-ipc.cjs');
 const { registerBrollImportIpc } = require('../electron/modules/broll-import.cjs');
 const { createProjectVirtualPathService } = require('../electron/services/project-virtual-path-service.cjs');
+const { createBackgroundTaskService } = require('../electron/services/background-task-service.cjs');
 const { addUndoIdentities, assertUndoIdentity, capturePathIdentity, samePathIdentity } = require('../electron/services/file-identity-service.cjs');
 const {
   CANCELLED_CODE,
@@ -191,6 +193,90 @@ const run = async () => {
     assert.strictEqual(batchStats.smallFilesCopied, 96);
     assert.strictEqual(batchStats.largeFilesCopied, 1);
     assert.strictEqual(batchStats.peakSmallConcurrency, DEFAULT_SMALL_FILE_CONCURRENCY);
+    let replayWrites = 0;
+    const replayStats = await copyPlannedFiles(batchPlan, {
+      destinationRoot: root,
+      isEntryComplete: async entry => {
+        const stat = await fs.promises.stat(entry.destination).catch(() => null);
+        return entry.kind === 'directory' ? Boolean(stat?.isDirectory()) : Boolean(stat?.isFile() && stat.size === entry.size);
+      },
+      onEntryComplete: async () => { replayWrites += 1; },
+    });
+    assert.strictEqual(replayStats.resumedFiles, 97, 'a resumed copy must skip every previously committed file');
+    assert.strictEqual(replayStats.smallFilesCopied, 0);
+    assert.strictEqual(replayStats.largeFilesCopied, 0);
+    assert.strictEqual(replayWrites, 0, 'skipped checkpoint entries must not be committed again');
+    const pausedSource = path.join(root, 'paused-source.bin');
+    const pausedTarget = path.join(root, 'paused-target.bin');
+    fs.writeFileSync(pausedSource, Buffer.alloc(4 * 1024 * 1024, 0x2a));
+    const pausedPlan = [];
+    await collectCopyPlan(pausedSource, pausedTarget, pausedPlan);
+    let releasePause;
+    let paused = true;
+    const pausePromise = new Promise(resolve => { releasePause = resolve; });
+    const pausedCopy = copyPlannedFiles(pausedPlan, {
+      destinationRoot: root,
+      waitIfPaused: async () => { if (paused) await pausePromise; },
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.strictEqual(fs.existsSync(pausedTarget), false, 'a paused transfer must not commit its target');
+    paused = false;
+    releasePause();
+    await pausedCopy;
+    assert.strictEqual(fs.statSync(pausedTarget).size, fs.statSync(pausedSource).size, 'continued transfer must complete the target');
+
+    const resumedPasteProject = path.join(root, 'resumed-paste-project');
+    const resumedPasteSources = path.join(root, 'resumed-paste-sources');
+    fs.mkdirSync(resumedPasteProject);
+    fs.mkdirSync(resumedPasteSources);
+    const resumeSourceA = path.join(resumedPasteSources, 'first.bin');
+    const resumeSourceB = path.join(resumedPasteSources, 'second.bin');
+    const resumeSourceFolder = path.join(resumedPasteSources, 'folder');
+    fs.writeFileSync(resumeSourceA, Buffer.alloc(1024, 0x31));
+    fs.writeFileSync(resumeSourceB, Buffer.alloc(2048, 0x32));
+    fs.mkdirSync(resumeSourceFolder);
+    fs.writeFileSync(path.join(resumeSourceFolder, 'nested.txt'), 'resumed-folder');
+    const resumeOperationId = 'paste-resume-test';
+    const resumeCheckpoint = {
+      version: 1, kind: 'paste-copy-v1', phase: 'copying', workspacePath: 'workspace', status: '策划中', projectName: 'project', targetRelativePath: '',
+      files: [resumeSourceA, resumeSourceB, resumeSourceFolder].map((source, index) => {
+        const stat = fs.statSync(source);
+        return { source, destinationName: path.basename(source), stagedName: `${index}-${path.basename(source)}`, size: stat.size, mtimeMs: stat.mtimeMs, isDirectory: stat.isDirectory() };
+      }),
+    };
+    const resumePersistencePath = path.join(root, 'paste-resume-tasks.json');
+    const interruptedPasteTasks = createBackgroundTaskService({ eventBus: new EventEmitter(), persistencePath: resumePersistencePath });
+    const interruptedPaste = interruptedPasteTasks.create({ id: resumeOperationId, type: 'project-file-operation', title: '粘贴恢复测试' });
+    await interruptedPaste.waitForStart();
+    interruptedPaste.context.saveCheckpoint(resumeCheckpoint, 40, '正在粘贴');
+    const incomingResumeRoot = path.join(resumedPasteProject, `.photoflow-paste-${resumeOperationId}`);
+    fs.mkdirSync(incomingResumeRoot);
+    const resumeFingerprintPlan = [];
+    for (const item of resumeCheckpoint.files) await collectCopyPlan(item.source, path.join(incomingResumeRoot, item.stagedName), resumeFingerprintPlan);
+    resumeCheckpoint.planFingerprint = crypto.createHash('sha256').update(resumeFingerprintPlan.map(entry => JSON.stringify({ kind: entry.kind, source: path.resolve(entry.source), size: Number(entry.size) || 0, identity: entry.sourceIdentity || {}, children: entry.children || [] })).sort().join('\n')).digest('hex');
+    interruptedPaste.context.saveCheckpoint(resumeCheckpoint, 40, '正在粘贴');
+    const completedStage = path.join(incomingResumeRoot, resumeCheckpoint.files[0].stagedName);
+    fs.copyFileSync(resumeSourceA, completedStage);
+    fs.utimesSync(completedStage, fs.statSync(resumeSourceA).atime, fs.statSync(resumeSourceA).mtime);
+    interruptedPasteTasks.stop();
+    const restoredPasteTasks = createBackgroundTaskService({ eventBus: new EventEmitter(), persistencePath: resumePersistencePath });
+    let resumedPasteUndo = null;
+    registerFileOperationsIpc({
+      Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: () => undefined, on: () => undefined }, fs, path,
+      getProjectPath: () => resumedPasteProject, activeProjectFileOperations: new Map(), backgroundTasks: restoredPasteTasks,
+      assertInside, assertDiskSpace, collectCopyPlan, copyPlannedFiles, removeCreatedPasteTargets, throwIfCancelled, uniqueDestination,
+      pushUndoOperation: async operation => { resumedPasteUndo = operation; }, writeLog: () => undefined,
+    });
+    assert.strictEqual(restoredPasteTasks.get(resumeOperationId).resumeAvailable, true, 'an interrupted plain file paste must expose continue');
+    const resumedPaste = await restoredPasteTasks.resume(resumeOperationId);
+    assert.strictEqual(resumedPaste.task.state, 'completed');
+    assert.strictEqual(fs.readFileSync(path.join(resumedPasteProject, 'first.bin')).length, 1024);
+    assert.strictEqual(fs.readFileSync(path.join(resumedPasteProject, 'second.bin')).length, 2048);
+    assert.strictEqual(fs.readFileSync(path.join(resumedPasteProject, 'folder', 'nested.txt'), 'utf8'), 'resumed-folder');
+    assert.strictEqual(fs.existsSync(incomingResumeRoot), false);
+    assert.deepStrictEqual(resumedPasteUndo.paths.sort(), [path.join(resumedPasteProject, 'first.bin'), path.join(resumedPasteProject, 'second.bin'), path.join(resumedPasteProject, 'folder')].sort());
+    restoredPasteTasks.stop();
     assert.strictEqual(batchFilesCopied, 97);
     assert.strictEqual(batchBytesCopied, batchPlan.reduce((sum, entry) => sum + entry.size, 0));
     assert(batchCreated.includes(batchTarget));
@@ -584,7 +670,10 @@ const run = async () => {
     let failExternalAdoptionRollback = false;
     let failImportUndoOperation = false;
     let failManagedLinkRevoke = false;
+    let failManagedExternalWatcher = false;
+    let failCreatedTargetRemoval = false;
     let managedWatcherAcquisitions = 0;
+    let trackingReconciliations = 0;
     let materializedProgressFolders = [];
     const importUndoOperations = [];
     const revertedExternalAdoptions = [];
@@ -596,6 +685,7 @@ const run = async () => {
         readdir: async (...args) => { importInspectionReadCalls += 1; return fs.promises.readdir(...args); },
         rm: async (target, options) => {
           if (failShortcutRemoval && path.extname(String(target)).toLowerCase() === '.lnk') throw Object.assign(new Error('simulated shortcut lock'), { code: 'EPERM' });
+          if (failCreatedTargetRemoval && String(target).includes('cleanup-copy')) throw Object.assign(new Error('simulated copied target lock'), { code: 'EPERM' });
           return fs.promises.rm(target, options);
         },
       },
@@ -635,12 +725,17 @@ const run = async () => {
       collectCopyPlan: async (...args) => { importCopyPlanCalls += 1; return collectCopyPlan(...args); },
       copyPlannedFiles, removeCopiedSources, throwIfCancelled, shell: importShell,
       projectVirtualPaths: importProjectVirtualPaths,
-      acquireFileRootWatcher: () => { managedWatcherAcquisitions += 1; return { success: true }; },
+      acquireFileRootWatcher: watchedRoot => {
+        managedWatcherAcquisitions += 1;
+        if (failManagedExternalWatcher && path.resolve(watchedRoot) !== path.resolve(fileLinkProjectPath)) return { success: false, error: 'simulated external watcher failure' };
+        return { success: true };
+      },
       releaseFileRootWatcher: () => undefined,
       mediaRuntimeState: {}, mediaService: { grantRoot: () => undefined }, normalizeMediaCacheSizeGB: value => value || 1,
       thumbnailService: { indexDirectory: () => undefined },
       versionService: {
         listProgress: async () => ({ progressFolders: materializedProgressFolders }),
+        detectProgressStale: async () => { trackingReconciliations += 1; return { success: true, staleProgressIds: [] }; },
         adoptMediaFolder: async (_workspaceRoot, request) => ({ success: true, created: true, progressFolder: { id: `adopted-${path.basename(request.folderPath)}` } }),
         revertExternalAdoptions: async (_workspaceRoot, request) => {
           revertedExternalAdoptions.push(request);
@@ -660,7 +755,15 @@ const run = async () => {
       },
       pushUndoOperation: async operation => {
         if (failImportUndoOperation) throw new Error('simulated undo persistence failure');
-        importUndoOperations.push(operation);
+        const stored = { ...operation, undoToken: crypto.randomUUID() };
+        importUndoOperations.push(stored);
+        return stored;
+      },
+      removeUndoOperation: undoToken => {
+        const index = importUndoOperations.findIndex(operation => operation.undoToken === undoToken);
+        if (index < 0) return false;
+        importUndoOperations.splice(index, 1);
+        return true;
       }, writeLog: () => undefined, mainWindow: null,
     });
     const importedProject = await importProjectHandlers.get('workspace-import-existing-project')(
@@ -783,9 +886,65 @@ const run = async () => {
     failExternalAdoptionRollback = false;
     assert.strictEqual(failedAdoptionRollback.success, false, 'the original import failure must still be reported');
     assert.strictEqual(failedAdoptionRollback.recoveryRequired, true, 'a failed database rollback must advertise recovery state');
-    assert.match(failedAdoptionRollback.error, /已保留外链以便恢复/);
+    assert.match(failedAdoptionRollback.error, /部分导入结果已保留/);
+    assert(failedAdoptionRollback.recovery.cleanupErrors.some(item => item.path === 'external-adoption-registry'));
     assert.strictEqual(fs.existsSync(preservedAdoptionShortcut), true, 'a link still referenced by the database must be preserved');
     assert(importProjectVirtualPaths.readManagedExternalLink(preservedAdoptionShortcut), 'the preserved shortcut must retain its managed identity');
+
+    failManagedExternalWatcher = true;
+    const degradedWatch = await importProjectHandlers.get('workspace-watch-file-root')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, { reconcile: true },
+    );
+    assert.strictEqual(degradedWatch.success, true, 'the healthy project watcher must remain usable');
+    assert.strictEqual(degradedWatch.degraded, true, 'one failed external watcher must degrade the aggregate result');
+    assert(degradedWatch.failedRoots.some(item => item.external && item.virtualPath), 'failed external roots must be reported to the renderer');
+    assert.strictEqual(trackingReconciliations > 0, true, 'watcher installation must reconcile changes missed while inactive');
+
+    const degradedImportSource = path.join(root, 'degraded-watcher-import');
+    fs.mkdirSync(degradedImportSource, { recursive: true });
+    const undoCountBeforeDegradedImport = importUndoOperations.length;
+    const degradedImport = await importProjectHandlers.get('workspace-import-files')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, '', {
+        linkOnly: true, deleteSourceAfterImport: false, sourcePaths: [degradedImportSource],
+      },
+    );
+    assert.strictEqual(degradedImport.success, true, degradedImport.error);
+    assert.strictEqual(degradedImport.watchDegraded, true, 'watch failure must use polling fallback instead of rolling back a valid import');
+    assert.strictEqual(importUndoOperations.length, undoCountBeforeDegradedImport + 1, 'watch failure must leave exactly one valid undo record');
+    failManagedExternalWatcher = false;
+
+    const lockedRollbackSource = path.join(root, 'locked-rollback-source');
+    const lockedRollbackShortcut = path.join(fileLinkProjectPath, 'locked-rollback-source.lnk');
+    fs.mkdirSync(lockedRollbackSource, { recursive: true });
+    failImportUndoOperation = true;
+    failShortcutRemoval = true;
+    const lockedRollback = await importProjectHandlers.get('workspace-import-files')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, '', {
+        linkOnly: true, deleteSourceAfterImport: false, sourcePaths: [lockedRollbackSource], adoptAsOriginal: true, mediaKind: 'image',
+      },
+    );
+    failImportUndoOperation = false;
+    failShortcutRemoval = false;
+    assert.strictEqual(lockedRollback.recoveryRequired, true);
+    assert(lockedRollback.recovery.cleanupErrors.some(item => item.path === lockedRollbackShortcut));
+    assert.strictEqual(fs.existsSync(lockedRollbackShortcut), true, 'a locked shortcut must be reported and retained');
+    assert(importProjectVirtualPaths.readManagedExternalLink(lockedRollbackShortcut), 'a retained shortcut must keep its managed identity');
+
+    const cleanupCopySource = path.join(root, 'cleanup-copy-source.jpg');
+    const cleanupCopyTarget = path.join(fileLinkProjectPath, 'cleanup-copy-source.jpg');
+    fs.writeFileSync(cleanupCopySource, 'copy-cleanup');
+    failImportUndoOperation = true;
+    failCreatedTargetRemoval = true;
+    const failedCopyCleanup = await importProjectHandlers.get('workspace-import-files')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, '', {
+        deleteSourceAfterImport: false, sourcePaths: [cleanupCopySource],
+      },
+    );
+    failImportUndoOperation = false;
+    failCreatedTargetRemoval = false;
+    assert.strictEqual(failedCopyCleanup.recoveryRequired, true, 'ordinary copy cleanup failures must be surfaced');
+    assert(failedCopyCleanup.recovery.leftoverPaths.includes(cleanupCopyTarget));
+    assert.strictEqual(fs.existsSync(cleanupCopyTarget), true);
 
     const retryableUndoSource = path.join(root, 'retryable-undo-source');
     fs.mkdirSync(retryableUndoSource, { recursive: true });
