@@ -39,7 +39,7 @@ class TestNode extends TestEventTarget {
     return null;
   }
 }
-const layoutRequests = { loads: 0, saves: [], failLoadBudget: 0, failNextSave: false, staleNextSave: false, revision: 0, positions: [], holdSaves: false, saveReleases: [] };
+const layoutRequests = { loads: 0, saves: [], failLoadBudget: 0, failNextSave: false, staleNextSave: false, staleMutation: null, revision: 0, positions: [], holdSaves: false, saveReleases: [] };
 const testWindow = Object.assign(new TestEventTarget(), { HTMLElement: TestNode, HTMLIFrameElement: class {}, Node: TestNode, getSelection: () => null, electronAPI: {
   async getVersionTreeLayout() {
     layoutRequests.loads += 1;
@@ -52,7 +52,16 @@ const testWindow = Object.assign(new TestEventTarget(), { HTMLElement: TestNode,
   async saveVersionTreeLayout(_workspacePath, _projectName, request) {
     layoutRequests.saves.push(request);
     if (layoutRequests.holdSaves) await new Promise(resolve => layoutRequests.saveReleases.push(resolve));
-    if (layoutRequests.staleNextSave) { layoutRequests.staleNextSave = false; layoutRequests.revision += 1; return { success: false, error: `stale_layout: 布局已更新（当前 revision=${layoutRequests.revision}）` }; }
+    if (layoutRequests.staleNextSave) {
+      layoutRequests.staleNextSave = false;
+      layoutRequests.revision += 1;
+      if (layoutRequests.staleMutation) {
+        const mutation = layoutRequests.staleMutation;
+        layoutRequests.staleMutation = null;
+        layoutRequests.positions = [...layoutRequests.positions.filter(position => position.nodeKey !== mutation.nodeKey), mutation];
+      }
+      return { success: false, error: `stale_layout: 布局已更新（当前 revision=${layoutRequests.revision}）` };
+    }
     if (layoutRequests.failNextSave) { layoutRequests.failNextSave = false; return { success: false, error: 'simulated layout failure' }; }
     layoutRequests.revision += 1;
     if (request.mode === 'replace') layoutRequests.positions = request.positions;
@@ -90,7 +99,7 @@ assert(canvasHookSource.includes('sameCanvasPositions(positionsRef.current, next
 assert(projectWorkspaceSource.includes("progressSetup.existingProgressId ? 'modify' : 'create'"), 'newly marked folders must use the complete editable version panel');
 assert(projectWorkspaceSource.includes("(source.nodeRole !== 'original' && source.nodeRole !== 'progress')"), 'drag-to-create must accept both original material and version progress as structural parents');
 assert(projectWorkspaceSource.includes("setProgressSetup({ ...nextDraft, contextLocked: true })"), 'dragging a version line to an ordinary or managed external folder must open the locked progress settings panel');
-assert(projectWorkspaceSource.includes("targetRelativePath,\n      trackingEnabled: false,\n      preserveFolderName: true"), 'drag-to-create must prefill tracking as disabled before the user submits the mark-progress panel');
+assert(projectWorkspaceSource.includes('targetRelativePath,') && projectWorkspaceSource.includes('trackingEnabled: false,') && projectWorkspaceSource.includes('preserveFolderName: true,'), 'drag-to-create must prefill tracking as disabled before the user submits the mark-progress panel');
 assert(projectWorkspaceSource.includes('projectWorkspaceClient.unregisterProgressFolder(workspacePath, project.name, childProgressId)'), 'removing a structural version relation must unregister the folder instead of retaining a detached version node');
 assert(projectWorkspaceSource.includes('committedWorkflowInputIds.size === nextWorkflowInputProgressIds.length'), 'structural relation updates must verify obsolete derived selection inputs were removed');
 assert(projectWorkspaceSource.includes("edge.edgeKind !== 'workflow_input' || edge.targetProgressId !== childProgressId"), 'the renderer must immediately replace a child version\'s workflow inputs after its structural parent changes');
@@ -100,7 +109,9 @@ assert(projectWorkspaceSource.includes("progressFolders.filter(folder => folder.
 assert(!projectWorkspaceSource.includes('relationReconnect: true'), 'removed detached records must not retain the obsolete reconnect intake path');
 assert(projectWorkspaceSource.includes("progressSetup?.mode === 'mark' && !progressSetup.existingProgressId ? '标记版本进度'"), 'connecting an ordinary folder must open the mark-progress panel before persistence');
 const workspaceGridModel = loadCommonJs(compile('src/features/workspace/marquee-selection-model.ts'));
+const versioningPublic = { ...model, ...layoutModel, ...canvasModel, ...edgeModel, ...canvasHook };
 const tree = loadCommonJs(compile('src/components/ProjectVersionTree.tsx'), request => {
+  if (request === '../features/versioning/public') return versioningPublic;
   if (request === '../features/versioning/versioning-v2-model') return model;
   if (request === '../features/versioning/version-tree-layout-model') return layoutModel;
   if (request === '../features/versioning/version-tree-canvas-model') return canvasModel;
@@ -266,6 +277,14 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert(!parentOptionText.includes('generated JPG artifact'), 'generated JPG artifacts must not be structural parent options');
   assert(!parentOptionText.includes('RAW_选片') && !parentOptionText.includes('团片协作节点'), 'selection and workflow nodes must not be structural parent options');
   assert(!textContent(container).includes('工作流输入'), 'selection and collaboration creation must stay in their own components');
+  await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, {
+    draft: draft('modify'), folders, state: 'processing',
+    progress: { currentName: '等待“完善版本文件校验信息”完成', waiting: true },
+    onChange() {}, onSubmit() {}, onClose() {},
+  })));
+  assert(textContent(container).includes('等待“完善版本文件校验信息”完成'));
+  assert(textContent(container).includes('等待后台资源'));
+  assert(!textContent(container).includes('0 / —'), 'indeterminate version edits must not present a fake zero-count progress');
   const entries = [
     { kind: 'folder', name: 'RAW', relativePath: 'RAW', path: 'C:/p/RAW', extension: '', size: 0, createdAt: 1, updatedAt: 1 },
     { kind: 'folder', name: 'Tracked', relativePath: 'Tracked', path: 'C:/p/Tracked', extension: '', size: 0, createdAt: 2, updatedAt: 2 },
@@ -453,15 +472,32 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   let savedTop = rawCanvasNode.style.top;
   const savesBeforeStaleRetry = layoutRequests.saves.length;
   const noticesBeforeStaleRetry = layoutNotices.length;
+  const freeCanvasNode = allNodes(container).find(node => node.attributes.get('data-version-progress-id') === 'free');
+  const concurrentFreePosition = { nodeKey: 'progress:free', x: parseFloat(freeCanvasNode.style.left) + 333, y: parseFloat(freeCanvasNode.style.top) + 222 };
+  layoutRequests.staleMutation = concurrentFreePosition;
   layoutRequests.staleNextSave = true;
+  layoutRequests.holdSaves = true;
+  let queuedConflictUndo;
   await React.act(async () => {
     dispatch(rawCanvasNode, 'pointerdown', { pointerId: 420, button: 0, clientX: 700, clientY: 600 });
     dispatch(rawCanvasNode, 'pointermove', { pointerId: 420, button: 0, clientX: 720, clientY: 620 });
     dispatch(rawCanvasNode, 'pointerup', { pointerId: 420, button: 0, clientX: 720, clientY: 620 });
+    await Promise.resolve();
+    queuedConflictUndo = canvasController.undoLayout();
+    layoutRequests.holdSaves = false;
+    layoutRequests.saveReleases.splice(0).forEach(release => release());
+    assert.strictEqual(await queuedConflictUndo, false, 'undo queued before stale recovery must be invalidated by the new history epoch');
     await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
   });
   assert.strictEqual(layoutRequests.saves.length, savesBeforeStaleRetry + 2, 'stale layout saves must reload the revision and retry exactly once');
   assert.strictEqual(layoutNotices.length, noticesBeforeStaleRetry, 'a recovered stale layout save must not show an error notice');
+  assert.strictEqual(parseFloat(freeCanvasNode.style.left), concurrentFreePosition.x + 32, 'stale patch recovery must merge the winning server X coordinate for untouched nodes');
+  assert.strictEqual(parseFloat(freeCanvasNode.style.top), concurrentFreePosition.y + 32, 'stale patch recovery must merge the winning server Y coordinate for untouched nodes');
+  const savesBeforeConflictUndo = layoutRequests.saves.length;
+  let conflictUndoResult;
+  await React.act(async () => { conflictUndoResult = await canvasController.undoLayout(); });
+  assert.strictEqual(conflictUndoResult, false, 'history based on a losing revision must be discarded after a merged retry');
+  assert.strictEqual(layoutRequests.saves.length, savesBeforeConflictUndo, 'discarded conflict history must never issue a full replace undo');
   savedLeft = rawCanvasNode.style.left;
   savedTop = rawCanvasNode.style.top;
   const loadsBeforeFailure = layoutRequests.loads;

@@ -1,5 +1,15 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+for (const channel of [
+  'team-retouch-advanced-progress',
+  'workspace-screenshot-main-image-progress',
+  'workspace-selection-progress',
+  'workspace-team-workflow-progress',
+  'workspace-team-patch-detect-progress',
+  'workspace-team-patch-detect-batch-progress',
+  'workspace-team-patch-return-batch-progress',
+]) ipcRenderer.on(channel, (_event, value) => ipcRenderer.send('background-task-external-progress', channel, value));
+
 const RENDERER_PYTHON_TOOLS = new Set(['catch.py', 'classify.py', 'cut_video.py', 'ffmpeg_transcode.py', 'png_to_jpg.py', 'research.py']);
 const validatePythonInvocation = (scriptName, args, requestId) => {
   if (typeof scriptName !== 'string' || !RENDERER_PYTHON_TOOLS.has(scriptName)) throw new Error('Python tool is not available');
@@ -9,6 +19,13 @@ const validatePythonInvocation = (scriptName, args, requestId) => {
   const normalizedRequestId = String(requestId || '');
   if (normalizedRequestId && !/^[a-z0-9-]{8,80}$/i.test(normalizedRequestId)) throw new Error('Invalid Python request identifier');
   return { scriptName, args, requestId: normalizedRequestId };
+};
+const normalizePythonTaskPresentation = value => {
+  if (!value || typeof value !== 'object') return undefined;
+  const ownerPageId = String(value.ownerPageId || '').trim().slice(0, 160);
+  const panelKind = String(value.panelKind || '').trim().slice(0, 80);
+  const title = String(value.title || '').trim().slice(0, 160);
+  return ownerPageId && panelKind ? { ownerPageId, panelKind, title } : undefined;
 };
 
 const trackFeature = feature => ipcRenderer.send('telemetry-track', 'feature_used', { feature });
@@ -20,11 +37,11 @@ const omitUndefined = value => Object.fromEntries(Object.entries(value).filter((
 
 contextBridge.exposeInMainWorld('electronAPI', {
   apiContractVersion: 1,
-  runScript: (scriptName, args, requestId) => {
+  runScript: (scriptName, args, requestId, presentation) => {
     const invocation = validatePythonInvocation(scriptName, args, requestId);
     const feature = invocation.scriptName.replace(/\.py$/i, '').slice(0, 48);
     if (feature) trackFeature(feature);
-    ipcRenderer.send('run-python', invocation.scriptName, invocation.args, invocation.requestId);
+    ipcRenderer.send('run-python', invocation.scriptName, invocation.args, invocation.requestId, normalizePythonTaskPresentation(presentation));
   },
   cancelPythonTask: (requestId) => ipcRenderer.invoke('cancel-python', requestId),
   getBirthdays: () => ipcRenderer.invoke('get-birthdays'),
@@ -35,6 +52,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('python-event', subscription);
   },
   loadConfig: () => ipcRenderer.invoke('loadConfig'),
+  loadStartupSnapshot: () => ipcRenderer.invoke('load-startup-snapshot'),
   saveConfig: (config) => ipcRenderer.invoke('saveConfig', config),
   getPrivacyConsentState: () => ipcRenderer.invoke('privacy-consent-state'),
   savePrivacyConsent: (request) => ipcRenderer.invoke('privacy-consent-save', request),
@@ -49,7 +67,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openExternal: (url) => ipcRenderer.send('open-external', url),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   submitFeedback: (message) => ipcRenderer.invoke('submit-feedback', message),
-  getComponents: () => ipcRenderer.invoke('components-list'),
+  getComponents: (force = false) => ipcRenderer.invoke('components-list', force),
   onComponentsStatusChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('components-status-changed', subscription); return () => ipcRenderer.removeListener('components-status-changed', subscription); },
   openComponentsFolder: (componentId) => ipcRenderer.invoke('components-open-folder', componentId),
   openLogsFolder: () => ipcRenderer.invoke('logs-open-folder'),
@@ -88,7 +106,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   trashWorkspaceProject: (workspacePath, status, name) => ipcRenderer.invoke('workspace-trash-project', workspacePath, status, name),
   cleanupDeletedWorkspaceProjects: (workspacePath) => ipcRenderer.invoke('workspace-cleanup-deleted-projects', workspacePath),
   getProjectContents: (workspacePath, status, name) => ipcRenderer.invoke('workspace-project-contents', workspacePath, status, name),
-  watchFileRoot: (workspacePath, status, name) => ipcRenderer.invoke('workspace-watch-file-root', workspacePath, status, name),
+  watchFileRoot: (workspacePath, status, name, options) => ipcRenderer.invoke('workspace-watch-file-root', workspacePath, status, name, options),
   unwatchFileRoot: (workspacePath, status, name) => ipcRenderer.invoke('workspace-unwatch-file-root', workspacePath, status, name),
   browseProjectFiles: (workspacePath, status, name, relativePath, cacheConfig) => ipcRenderer.invoke('workspace-browse-files', workspacePath, status, name, relativePath, cacheConfig),
   inspectProjectToolSources: (workspacePath, status, name, relativePaths, collectVideos, collectDirectPng, collectRecursivePng) => ipcRenderer.invoke('workspace-inspect-tool-sources', workspacePath, status, name, relativePaths, collectVideos, collectDirectPng, collectRecursivePng),
@@ -290,7 +308,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getStorageUsageOverview: (force) => ipcRenderer.invoke('storage-usage-overview', force),
   getBackgroundTasks: () => ipcRenderer.invoke('background-tasks-list'),
   cancelBackgroundTask: (id) => ipcRenderer.invoke('background-task-cancel', id),
+  pauseBackgroundTask: (id) => ipcRenderer.invoke('background-task-pause', id),
+  continueBackgroundTask: (id) => ipcRenderer.invoke('background-task-continue', id),
   dismissBackgroundTask: (id) => ipcRenderer.invoke('background-task-dismiss', id),
+  resumeBackgroundTask: (id) => ipcRenderer.invoke('background-task-resume', id),
+  restartBackgroundTask: (id) => ipcRenderer.invoke('background-task-restart', id),
   retryBackgroundTask: (id) => ipcRenderer.invoke('background-task-retry', id),
   onBackgroundTaskChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('background-task-changed', subscription); return () => ipcRenderer.removeListener('background-task-changed', subscription); },
   chooseBackupTarget: (currentPath) => ipcRenderer.invoke('backup-choose-target', currentPath),

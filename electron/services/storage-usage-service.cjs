@@ -134,11 +134,13 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
     return stat ? { online: true, totalBytes: Number(stat.blocks) * Number(stat.bsize), freeBytes: Number(stat.bavail) * Number(stat.bsize) } : { online: true };
   };
 
-  const runScan = async (sources, signature) => backgroundTasks.run({
+  const runScan = async (sources, signature, restartTask = null) => backgroundTasks.run({
+    ...(restartTask?.id ? { id: restartTask.id } : {}),
     type: 'storage-usage-scan',
     title: '统计 PhotoFlow 存储占用',
     dedupeKey: 'storage-usage-scan',
     cancellable: true,
+    metadata: { signature, sourceCount: sources.length },
   }, async task => {
     const state = { processed: 0 };
     const measured = [];
@@ -192,6 +194,11 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
     });
     return { success: true, updatedAt: Number(cache.updatedAt || 0), scanning: nowActive || ((force || stale) && !active), stale, volumes: orderedVolumes };
   };
+
+  backgroundTasks.registerTypeRestartFactory?.('storage-usage-scan', async task => {
+    const sources = await configuredSources();
+    return runScan(sources, signatureFor(sources), task);
+  }, { autoRestart: true });
 
   return { overview };
 };

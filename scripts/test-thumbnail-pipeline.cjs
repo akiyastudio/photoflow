@@ -6,7 +6,7 @@ const { ThumbnailPipeline, PRIORITY, isThumbnailSizeSufficient } = require('../e
 
 const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(124), Buffer.from([0xff, 0xd9])]);
 
-const createPipeline = ({ root, target, generate, toPreviewUrl = filePath => filePath, notify = () => undefined, log = () => undefined, sourceStabilityDelayMs = 20, sourceStabilityProbeMs = 10 }) => {
+const createPipeline = ({ root, target, generate, toPreviewUrl = filePath => filePath, notify = () => undefined, log = () => undefined, sourceStabilityDelayMs = 20, sourceStabilityProbeMs = 10, maxBackgroundTasks }) => {
   const pipeline = new ThumbnailPipeline({
     getRunConfig: () => { throw new Error('database service must not start during this test'); },
     databasePath: path.join(root, 'thumbnail-index.sqlite3'),
@@ -18,6 +18,7 @@ const createPipeline = ({ root, target, generate, toPreviewUrl = filePath => fil
     notify,
     log,
     concurrency: 1,
+    ...(maxBackgroundTasks === undefined ? {} : { maxBackgroundTasks }),
     sourceStabilityDelayMs,
     sourceStabilityProbeMs,
   });
@@ -98,6 +99,23 @@ const run = async () => {
     assert.notEqual(memoryHit.previewUrl, diskHit.previewUrl, 'a memory hit must issue a fresh media URL instead of reusing an expiring grant');
     assert.equal(grants, 2);
     cachedPipeline.stop();
+
+    const saturatedTarget = path.join(temporaryRoot, 'saturated.jpg');
+    const saturatedPipeline = createPipeline({
+      root: temporaryRoot,
+      target: saturatedTarget,
+      maxBackgroundTasks: 0,
+      generate: async () => [],
+    });
+    saturatedPipeline.schedulePump = () => undefined;
+    const rejectedBackground = await saturatedPipeline.request({ filePath: source, kind: 'image', requestedSize: 320, priority: PRIORITY.directory });
+    assert.equal(rejectedBackground.success, false);
+    assert.equal(rejectedBackground.state, 'NOT_READY', 'a saturated background queue must not claim that a dropped request is queued');
+    assert.equal(saturatedPipeline.tasks.size, 0, 'a rejected background request must not leave a phantom task');
+    const acceptedNearby = await saturatedPipeline.request({ filePath: source, kind: 'image', requestedSize: 320, priority: PRIORITY.nearby });
+    assert.equal(acceptedNearby.state, 'QUEUED', 'visible and nearby work must bypass the background task cap');
+    assert.equal(saturatedPipeline.tasks.size, 1);
+    saturatedPipeline.stop();
 
     const directoryTarget = path.join(temporaryRoot, 'directory-target.jpg');
     let directoryGenerationCount = 0;

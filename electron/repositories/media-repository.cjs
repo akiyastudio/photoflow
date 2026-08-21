@@ -19,6 +19,8 @@ const createMediaRepository = client => ({
   adoptMediaFolder: (root, payload) => client.call(root, 'progress_adopt_media', payload),
   revertExternalAdoptions: (root, payload) => client.call(root, 'progress_revert_external_adoptions', payload),
   updateProgressTree: (root, payload) => client.call(root, 'progress_update_tree', payload),
+  beginProgressTreeUpdate: (root, payload) => client.call(root, 'progress_update_tree_begin', payload),
+  finishProgressTreeUpdate: (root, payload) => client.call(root, 'progress_update_tree_finish', payload),
   updateProgressRelation: (root, payload) => client.call(root, 'progress_relation_update', payload),
   repairLegacySelectionRelation: (root, payload) => client.call(root, 'progress_legacy_selection_repair', payload),
   commitImportGraph: (root, payload) => client.call(root, 'media_workflow_import_commit', payload),
@@ -41,6 +43,8 @@ const createMediaRepository = client => ({
   releaseTrackingSession: (root, sessionId) => client.call(root, 'tracking_session_release', { sessionId }),
   decideTrackingItem: (root, payload) => client.call(root, 'tracking_session_decide', payload),
   getTrackingCommitPlan: (root, sessionId) => client.call(root, 'tracking_commit_plan', { sessionId }),
+  getTrackingCommitResources: (root, sessionId) => client.call(root, 'tracking_commit_resources', { sessionId }),
+  applyTrackingCopies: (root, sessionId) => client.call(root, 'tracking_apply_copies', { sessionId }, 30 * 60 * 1000),
   // Legacy in-flight sessions may not have a prepared snapshot and must fall
   // back to fingerprinting both folders. Keep that compatibility path bounded
   // as a long disk operation instead of killing the database worker at 60s.

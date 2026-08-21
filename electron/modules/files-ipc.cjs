@@ -77,6 +77,102 @@ const registerFileOperationsIpc = context => {
       && [...actual].every(source => expected.has(source));
   };
 
+  const copyPlanFingerprint = plan => {
+    const records = plan.map(entry => JSON.stringify({
+      kind: entry.kind,
+      source: path.resolve(entry.source),
+      size: Number(entry.size) || 0,
+      identity: entry.sourceIdentity || {},
+      children: entry.children || [],
+    })).sort();
+    return crypto.createHash('sha256').update(records.join('\n')).digest('hex');
+  };
+
+  const resumeCopyPaste = async interruptedTask => {
+    const checkpoint = interruptedTask?.checkpoint || {};
+    if (checkpoint.kind !== 'paste-copy-v1' || checkpoint.phase !== 'copying' || !Array.isArray(checkpoint.files) || !checkpoint.files.length) throw new Error('该粘贴任务没有可继续的复制断点');
+    const root = path.resolve(getProjectPath(checkpoint.workspacePath, checkpoint.status, checkpoint.projectName));
+    const destinationResolution = resolveVirtual(root, checkpoint.targetRelativePath || '', { externalRootMode: 'target' });
+    const destinationDir = path.resolve(destinationResolution.physicalPath);
+    if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('粘贴目标文件夹当前不可用');
+    const incomingRoot = path.join(destinationDir, `.photoflow-paste-${interruptedTask.id}`);
+    const incomingStat = await fs.promises.lstat(incomingRoot).catch(() => null);
+    if (incomingStat?.isSymbolicLink()) throw new Error('粘贴暂存目录不安全');
+    await fs.promises.mkdir(incomingRoot, { recursive: true });
+    const safeName = value => typeof value === 'string' && value && path.basename(value) === value && !/[\0\r\n]/.test(value);
+    const targets = [];
+    const plan = [];
+    for (const [index, item] of checkpoint.files.entries()) {
+      if (!safeName(item.destinationName) || !safeName(item.stagedName) || item.stagedName !== `${index}-${item.destinationName}`) throw new Error('粘贴断点中的目标名称无效');
+      const source = path.resolve(String(item.source || ''));
+      const sourceStat = await fs.promises.stat(source).catch(() => null);
+      const expectedDirectory = Boolean(item.isDirectory);
+      const sourceInvalid = !sourceStat || (expectedDirectory
+        ? !sourceStat.isDirectory()
+        : !sourceStat.isFile() || sourceStat.size !== Number(item.size) || Math.abs(sourceStat.mtimeMs - Number(item.mtimeMs)) >= 1);
+      if (sourceInvalid) throw new Error(`源文件在暂停后发生变化：${path.basename(source)}`);
+      const destination = path.join(destinationDir, item.destinationName);
+      const stagedDestination = path.join(incomingRoot, item.stagedName);
+      if (fs.existsSync(destination)) throw new Error(`目标位置已经出现同名文件：${item.destinationName}`);
+      targets.push({ source, destination, stagedDestination, size: sourceStat.size, mtimeMs: sourceStat.mtimeMs, isDirectory: expectedDirectory });
+      await collectCopyPlan(source, stagedDestination, plan);
+    }
+    if (targets.some(item => item.isDirectory) && !checkpoint.planFingerprint) throw new Error('文件夹粘贴断点缺少完整性指纹');
+    if (checkpoint.planFingerprint && copyPlanFingerprint(plan) !== checkpoint.planFingerprint) throw new Error('源文件夹内容在暂停后发生变化');
+    const removeStaleParts = async directory => {
+      for (const entry of await fs.promises.readdir(directory, { withFileTypes: true }).catch(() => [])) {
+        const candidate = path.join(directory, entry.name);
+        if (entry.isDirectory()) await removeStaleParts(candidate);
+        else if (entry.isFile() && entry.name.endsWith('.photoflow-part')) await fs.promises.rm(candidate, { force: true });
+      }
+    };
+    await removeStaleParts(incomingRoot);
+    const totalBytes = plan.reduce((sum, item) => sum + (Number(item.size) || 0), 0);
+    let bytesCopied = 0;
+    let filesCopied = 0;
+    const run = () => backgroundTasks.run({
+      id: interruptedTask.id,
+      type: 'project-file-operation',
+      title: `继续粘贴文件 · ${checkpoint.projectName}`,
+      cancellable: true,
+      pausable: true,
+      resumable: true,
+      checkpoint,
+      progress: interruptedTask.progress,
+      resumeFactory: resumeCopyPaste,
+      resources: [...targets.map(item => item.source), destinationDir],
+      metadata: { operation: 'paste', projectName: checkpoint.projectName, workspacePath: checkpoint.workspacePath, phase: 'copying' },
+    }, async task => {
+      await copyPlannedFiles(plan, {
+        destinationRoot: destinationDir,
+        isCancelled: () => task.signal.aborted,
+        waitIfPaused: () => task.waitIfPaused(),
+        isEntryComplete: async entry => {
+          const stat = await fs.promises.stat(entry.destination).catch(() => null);
+          return entry.kind === 'directory'
+            ? Boolean(stat?.isDirectory())
+            : Boolean(stat?.isFile() && stat.size === entry.size && Math.abs(stat.mtimeMs - entry.mtime.getTime()) < 1);
+        },
+        onProgress: ({ bytesDelta, fileCompleted }) => {
+          bytesCopied += bytesDelta;
+          if (fileCompleted) filesCopied += 1;
+          task.report(totalBytes ? Math.min(98, bytesCopied / totalBytes * 98) : 98, `正在继续粘贴 ${filesCopied}/${targets.length}`, { bytesCopied, totalBytes, filesCopied, totalFiles: targets.length });
+        },
+      });
+      task.setPausable(false);
+      task.saveCheckpoint({ ...checkpoint, phase: 'finalizing' }, 99, '正在完成粘贴');
+      for (const item of targets) await fs.promises.rename(item.stagedDestination, item.destination);
+      await fs.promises.rm(incomingRoot, { recursive: true, force: true });
+      await pushUndoOperation({ kind: 'remove-created', paths: targets.map(item => item.destination), label: '粘贴' }).catch(error => writeLog('warn', 'Unable to record resumed paste undo history', error));
+      task.report(100, '文件粘贴完成', { bytesCopied: totalBytes, totalBytes, filesCopied: targets.length, totalFiles: targets.length });
+      return { count: targets.length, createdPaths: targets.map(item => item.destination) };
+    });
+    return run();
+  };
+  backgroundTasks?.registerTypeResumeFactory?.('project-file-operation', resumeCopyPaste, {
+    canResume: task => task.checkpoint?.kind === 'paste-copy-v1' && task.checkpoint?.phase === 'copying',
+  });
+
   ipcMain.handle('workspace-file-details', async (_event, workspacePath, status, projectName, relativePaths = []) => {
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
@@ -271,6 +367,7 @@ const registerFileOperationsIpc = context => {
             destinationRoot: destinationDir,
             diskSpaceChecked: true,
             isCancelled: () => job.cancelled,
+            waitIfPaused: () => task.waitIfPaused(),
             onCreated: target => createdTargets.push(target),
             onFileStart: entry => reportCopyProgress(path.basename(entry.source)),
             onProgress: ({ entry, bytesDelta, fileCompleted }) => {
@@ -280,6 +377,7 @@ const registerFileOperationsIpc = context => {
             },
           });
           throwIfCancelled(() => job.cancelled);
+          task.setPausable(false);
           job.finishing = true;
           publish({ phase: 'finishing', progress: 99, currentName: '正在完成文件导入', bytesCopied, totalBytes, filesCopied, totalFiles });
           if (importPlan.length) await pushUndoOperation({ kind: 'remove-created', paths: importPlan.map(item => item.destination), label: '导入' });
@@ -429,6 +527,7 @@ const registerFileOperationsIpc = context => {
         let topLevelTargets = [];
         let incomingRoot = '';
         let replacementRoot = '';
+        let pasteResumeCheckpoint = null;
         const publish = payload => task?.publish(payload);
         publish({ phase: 'scanning', progress: 0, currentName: '', bytesCopied: 0, totalBytes: 0 });
         try {
@@ -524,7 +623,12 @@ const registerFileOperationsIpc = context => {
           responseContext.affectedDirectories = affectedDirectories;
           task = createProjectFileTask({
             backgroundTasks, event, operationId, operation: 'paste', title: `粘贴文件 · ${projectName}`,
-            projectName, resources: [destinationDir, ...uniqueSources], cancelledCode: CANCELLED_CODE,
+            projectName,
+            resources: [
+              { path: destinationDir, access: 'write' },
+              ...uniqueSources.map(source => ({ path: source, access: clipboardSnapshot.operation === 'cut' ? 'write' : 'read' })),
+            ],
+            cancelledCode: CANCELLED_CODE,
           });
           job = task.job;
           job.cancel = task.cancel;
@@ -610,6 +714,23 @@ const registerFileOperationsIpc = context => {
               await collectCopyPlan(target.source, target.stagedDestination, plan, { isCancelled: () => job.cancelled });
             }
             await assertDiskSpace(destinationDir, plan.reduce((sum, entry) => sum + entry.size, 0));
+            if (clipboardSnapshot.operation === 'copy' && !replaceConflicts) {
+              pasteResumeCheckpoint = {
+                version: 1,
+                kind: 'paste-copy-v1',
+                phase: 'copying',
+                workspacePath,
+                status,
+                projectName,
+                targetRelativePath,
+                planFingerprint: copyPlanFingerprint(plan),
+                files: await Promise.all(topLevelTargets.map(async (item, index) => {
+                  const stat = await fs.promises.stat(item.source);
+                  return { source: item.source, destinationName: path.basename(item.destination), stagedName: `${index}-${path.basename(item.destination)}`, size: stat.size, mtimeMs: stat.mtimeMs, isDirectory: item.isDirectory };
+                })),
+              };
+              task.saveCheckpoint(pasteResumeCheckpoint, 0, '正在准备可恢复粘贴', { workspacePath, targetRelativePath });
+            }
           }
 
           const stageReplacements = async () => {
@@ -660,6 +781,7 @@ const registerFileOperationsIpc = context => {
             try {
               for (const [index, item] of topLevelTargets.entries()) {
                 throwIfCancelled(() => job.cancelled);
+                await task.waitIfPaused();
                 publish({ phase: 'moving', progress: Math.round(index / Math.max(1, topLevelTargets.length) * 100), currentName: path.basename(item.source), bytesCopied: 0, totalBytes: 0, filesCopied: index, totalFiles: topLevelTargets.length });
                 await movePathAtomic(item.source, item.destination, { isCancelled: () => job.cancelled });
                 moved.push(item);
@@ -671,6 +793,7 @@ const registerFileOperationsIpc = context => {
               await rollbackStagedReplacements();
               throw error;
             }
+            task.setPausable(false);
             job.finishing = true;
             fileOperationState.projectFileClipboard = null;
             await clearClipboardIfSnapshotCurrent(clipboardSnapshot);
@@ -711,6 +834,7 @@ const registerFileOperationsIpc = context => {
             diskSpaceChecked: true,
             durable: clipboardSnapshot.operation === 'cut',
             isCancelled: () => job.cancelled,
+            waitIfPaused: () => task.waitIfPaused(),
             onCreated: markCreatedTarget,
             onFileStart: entry => reportCopyProgress(path.basename(entry.source)),
             onProgress: ({ entry, bytesDelta, fileCompleted }) => {
@@ -720,6 +844,8 @@ const registerFileOperationsIpc = context => {
             },
           });
           throwIfCancelled(() => job.cancelled);
+          if (pasteResumeCheckpoint) task.saveCheckpoint({ ...pasteResumeCheckpoint, phase: 'finalizing' }, 99, '正在完成粘贴');
+          task.setPausable(false);
           await stageReplacements();
           try {
             for (const item of topLevelTargets) {

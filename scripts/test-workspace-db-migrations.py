@@ -14,6 +14,33 @@ workspace_db = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(workspace_db)
 
 
+def test_schema_28_migrates_detached_versioning_store(temp_root):
+    workspace_root = os.path.join(temp_root, "schema-28-detached-workspace")
+    os.makedirs(workspace_root)
+    database = os.path.join(temp_root, "schema-28-detached.sqlite3")
+    db = workspace_db.connect(workspace_root, database, include_domains=True)
+    db.close()
+    versioning_database = os.path.join(
+        os.path.splitext(database)[0], "databases", "versioning.sqlite3",
+    )
+    catalog = sqlite3.connect(database)
+    catalog.execute("UPDATE meta SET value='27' WHERE key='schema_version'")
+    catalog.commit()
+    catalog.close()
+    versioning = sqlite3.connect(versioning_database)
+    versioning.execute("ALTER TABLE tracking_sessions DROP COLUMN copy_operations_json")
+    versioning.commit()
+    versioning.close()
+
+    catalog_only = workspace_db.connect(workspace_root, database, include_domains=False)
+    assert catalog_only.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "28"
+    catalog_only.close()
+    upgraded = workspace_db.connect(workspace_root, database, include_domains=True)
+    columns = {row[1] for row in upgraded.execute("PRAGMA versioning.table_info(tracking_sessions)").fetchall()}
+    assert "copy_operations_json" in columns, "the first versioning caller must finish deferred domain migration"
+    upgraded.close()
+
+
 def create_legacy_database(database, project_id, photo_id, version_id):
     db = sqlite3.connect(database)
     now = int(time.time() * 1000)
@@ -103,7 +130,7 @@ def test_existing_v1_can_receive_v0(temp_root):
         output.write(b"returned-jpeg-v1")
 
     database = os.path.join(temp_root, "merge-workspace.sqlite3")
-    db = workspace_db.connect(workspace_root, database)
+    db = workspace_db.connect(workspace_root, database, include_team=True)
     now = int(time.time() * 1000)
     project_id = "merge-project-id"
     db.execute(
@@ -157,11 +184,13 @@ def test_existing_v1_can_receive_v0(temp_root):
             {"reference": "IMG_0001.CR3", "source": "missing.jpg", "target": "missing.jpg", "distance": 1, "confidence": "高"},
         ],
     }
+    db.close()
     failed = False
     try:
-        workspace_db.batch_commit_compare(workspace_root, db, payload)
+        workspace_db.mutate(workspace_root, database, "batch_commit_compare", payload)
     except ValueError:
         failed = True
+    db = workspace_db.connect(workspace_root, database, include_team=True)
     assert failed, "a bad later match must fail the batch"
     assert db.execute("SELECT photo_id FROM versions WHERE id=?", (v1["id"],)).fetchone()[0] == source_photo_id
     assert db.execute("SELECT photo_id FROM team_patch_tasks WHERE id='merge-task'").fetchone()[0] == source_photo_id
@@ -170,7 +199,9 @@ def test_existing_v1_can_receive_v0(temp_root):
     assert db.execute("SELECT COUNT(*) FROM batch_items WHERE batch_id=?", (failed_batch["id"],)).fetchone()[0] == 0
 
     payload["matches"] = payload["matches"][:1]
-    result = workspace_db.batch_commit_compare(workspace_root, db, payload)
+    db.close()
+    result = workspace_db.mutate(workspace_root, database, "batch_commit_compare", payload)
+    db = workspace_db.connect(workspace_root, database, include_team=True)
     assert result["success"] is True
     moved_v1 = db.execute("SELECT * FROM versions WHERE id=?", (v1["id"],)).fetchone()
     assert moved_v1["photo_id"] == v0["photo_id"]
@@ -782,6 +813,7 @@ def main():
         test_schema_22_upgrades_to_layout_schema_23(temp_root)
         test_schema_23_upgrades_to_graph_schema_24(temp_root)
         test_schema_24_upgrades_to_import_slots_schema_25(temp_root)
+        test_schema_28_migrates_detached_versioning_store(temp_root)
         print("workspace database migration tests passed")
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)

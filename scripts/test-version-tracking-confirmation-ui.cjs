@@ -68,6 +68,9 @@ const { pathToFileURL } = require('url');
   assert(panelSource.includes('view.session?.unresolvedCount') && panelSource.includes('setPageCursor(view.nextCursor)'), 'pagination must use the session-wide unresolved count and expose navigation to later pending pages');
   assert(panelSource.includes("selectedItem?.kind === 'missing'") && panelSource.includes('!missingCurrentItem && hasReferenceCandidate'), 'missing current media must not expose relocation or acceptance controls');
   assert(panelSource.includes('actionGenerationRef') && workspaceSource.includes('key={`${workspacePath}:${trackingConfirmationSessionId}`}'), 'session switches must isolate pagination, optimistic decisions, and late async completions');
+  const commitSource = panelSource.slice(panelSource.indexOf('const commit = () =>'), panelSource.indexOf('const release = async'));
+  assert(commitSource.indexOf('onClose();') < commitSource.indexOf('await window.electronAPI.commitProgressTracking'), 'submitting confirmation must close immediately before waiting for background commit');
+  assert(commitSource.includes("onNotice('已转入后台提交，可以继续操作。')"), 'detached confirmation commit must explain that work continues in the background');
 
   const pagedState = {
     sessionId: 'paged',

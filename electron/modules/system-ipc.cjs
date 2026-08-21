@@ -1,7 +1,62 @@
 const { validateRendererPythonInvocation } = require('../security-policy.cjs');
 const { listStorageDevices } = require('../services/storage-device-service.cjs');
+const { decideComponentStatusRefresh, nextComponentProbeTimestamps } = require('../services/component-status-refresh-policy.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
+
+const PYTHON_BACKGROUND_TASK_PROFILES = Object.freeze({
+  'png_to_jpg.py': Object.freeze({ title: 'PNG 转 JPG', type: 'python-tool', concurrencyGroup: 'disk-io', concurrencyLimit: 3, concurrencyWriteLimit: 2 }),
+  'research.py': Object.freeze({ title: '截取分镜帧', type: 'python-tool', concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1 }),
+  'ffmpeg_transcode.py': Object.freeze({ title: '视频转码', type: 'python-tool', concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1 }),
+  'cut_video.py': Object.freeze({ title: '视频切割', type: 'python-tool', concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1 }),
+});
+
+const normalizePythonTaskPresentation = value => {
+  if (!value || typeof value !== 'object') return null;
+  const ownerPageId = String(value.ownerPageId || '').trim().slice(0, 160);
+  const panelKind = String(value.panelKind || '').trim().slice(0, 80);
+  const title = String(value.title || '').trim().slice(0, 160);
+  return ownerPageId && panelKind ? { ownerPageId, panelKind, title } : null;
+};
+
+const pythonToolResourcePaths = (scriptName, args, pathApi) => {
+  const paths = [];
+  const addDirectoryFor = value => {
+    const normalized = String(value || '').trim();
+    if (!normalized) return;
+    const resolved = pathApi.resolve(normalized);
+    if (resolved) paths.push(pathApi.dirname(resolved));
+  };
+  const addDirectory = value => {
+    const normalized = String(value || '').trim();
+    if (!normalized) return;
+    const resolved = pathApi.resolve(normalized);
+    if (resolved) paths.push(resolved);
+  };
+  if (scriptName === 'research.py') {
+    for (let index = 0; index < args.length; index += 1) {
+      if (args[index] === '--path' && args[index + 1]) addDirectoryFor(args[++index]);
+    }
+  } else {
+    const valueOptions = new Set(scriptName === 'png_to_jpg.py'
+      ? ['--quality']
+      : scriptName === 'ffmpeg_transcode.py'
+        ? ['--container', '--video-mode', '--quality', '--resolution', '--frame-rate', '--audio-mode', '--output-mode', '--source-folder']
+        : ['--output-dir', '--output-stem', '--trim-start', '--trim-end', '--output-path', '--timeline-frames']);
+    for (let index = 0; index < args.length; index += 1) {
+      const value = args[index];
+      if (valueOptions.has(value)) {
+        const optionValue = args[++index];
+        if (value === '--source-folder') addDirectoryFor(optionValue);
+        else if (value === '--output-dir') addDirectory(optionValue);
+        else if (value === '--output-path') addDirectoryFor(optionValue);
+        continue;
+      }
+      if (!String(value || '').startsWith('--')) addDirectoryFor(value);
+    }
+  }
+  return [...new Set(paths)].map(resourcePath => ({ path: resourcePath, access: 'write' }));
+};
 
 const RESERVED_PROJECT_CATEGORIES = new Set(['未分类', '策划中', '待拍摄', '后期中', '已归档']);
 const normalizeCustomProjectCategories = value => {
@@ -110,14 +165,19 @@ const registerSystemIpc = context => {
   };
 
   const componentStatusCachePath = path.join(app.getPath('userData'), 'component-status-cache.json');
-  let componentStatusCache = { updatedAt: 0, components: [] };
+  const componentRuntimeProbeTtlMs = 24 * 60 * 60 * 1000;
+  const componentRuntimeRetryDelayMs = 30 * 60 * 1000;
+  let componentStatusCache = { updatedAt: 0, lastDetailedAt: 0, lastDetailedAttemptAt: 0, components: [], integrityTokens: {} };
   try {
     const parsed = JSON.parse(fs.readFileSync(componentStatusCachePath, 'utf8'));
     if (Array.isArray(parsed?.components)) componentStatusCache = parsed;
   } catch { /* the cache is optional */ }
   let componentStatusDirty = false;
   let componentStatusRefreshActive = false;
+  let componentStatusRefreshActiveForce = false;
   let componentStatusGeneration = 0;
+  let componentStatusRefreshTimer = null;
+  let componentStatusForceQueued = false;
 
   const mergeCachedComponentStatuses = components => components.map(component => {
     const cached = componentStatusCache.components.find(item => item.id === component.id);
@@ -132,13 +192,42 @@ const registerSystemIpc = context => {
     };
   });
 
-  const refreshDetailedComponentStatuses = async task => {
+  const refreshDetailedComponentStatuses = async (task, { forceRuntimeProbe = false } = {}) => {
     const refreshGeneration = componentStatusGeneration;
     task?.report(5, '正在后台读取组件占用空间');
-    const components = await pluginService.listWithSizes();
+    const listedComponents = pluginService.list();
+    const integrityTokens = {};
+    for (const component of listedComponents) {
+      if (!component.installed || component.source !== 'user') continue;
+      try { integrityTokens[component.id] = pluginService.componentIntegrityToken(component.id, component.path); }
+      catch { integrityTokens[component.id] = ''; }
+    }
+    const reusableIntegrity = listedComponents.every(component => {
+      const cached = componentStatusCache.components.find(item => item.id === component.id);
+      if (!cached || cached.installed !== component.installed || String(cached.version || '') !== String(component.version || '')) return false;
+      if (!component.installed || component.source !== 'user') return true;
+      return Boolean(integrityTokens[component.id] && componentStatusCache.integrityTokens?.[component.id] === integrityTokens[component.id]);
+    });
+    const policy = decideComponentStatusRefresh({
+      force: forceRuntimeProbe,
+      dirty: componentStatusDirty,
+      integrityReusable: reusableIntegrity,
+      lastDetailedAt: componentStatusCache.lastDetailedAt,
+      lastDetailedAttemptAt: componentStatusCache.lastDetailedAttemptAt,
+      runtimeProbeTtlMs: componentRuntimeProbeTtlMs,
+      failureRetryDelayMs: componentRuntimeRetryDelayMs,
+    });
+    if (!reusableIntegrity) {
+      for (const component of listedComponents) {
+        const token = integrityTokens[component.id];
+        if (token && componentStatusCache.integrityTokens?.[component.id] === token) pluginService.seedIntegrityToken(component.id, component.path, token);
+      }
+    }
+    const components = reusableIntegrity ? mergeCachedComponentStatuses(listedComponents) : await pluginService.listWithSizes();
     for (const component of components) component.packagePath = componentRoot(component.id);
     const gpu = components.find(component => component.id === 'team-retouch');
-    if (gpu?.installed) {
+    let runtimeProbeSucceeded = true;
+    if (gpu?.installed && policy.shouldProbeRuntime) {
       try {
         const probe = await pluginService.runJson('team-retouch', ['probe'], 60000);
         const runtimeAvailable = Boolean(probe.componentAvailable ?? probe.cpuAvailable);
@@ -159,7 +248,24 @@ const registerSystemIpc = context => {
           advancedError: probe.advancedAvailable ? '' : (probe.advancedError || ''),
         });
       } catch (error) {
-        Object.assign(gpu, { runtimeAvailable: false, provider: '', providers: [], runtimeError: error.message || String(error) });
+        runtimeProbeSucceeded = false;
+        const runtimeError = error.message || String(error);
+        Object.assign(gpu, {
+          runtimeAvailable: false,
+          gpuAvailable: false,
+          advancedAvailable: false,
+          mergeAvailable: false,
+          identityAvailable: false,
+          faceBackend: '',
+          bodyBackend: '',
+          identityError: runtimeError,
+          provider: '',
+          advancedProvider: '',
+          providers: [],
+          runtimeError,
+          gpuError: runtimeError,
+          advancedError: runtimeError,
+        });
       }
       const storage = await readAdvancedStorage();
       Object.assign(gpu, {
@@ -168,7 +274,18 @@ const registerSystemIpc = context => {
         advancedState: gpu.advancedAvailable ? 'ready' : storage.vhdPath ? 'repair-needed' : 'not-installed',
       });
     }
-    componentStatusCache = { updatedAt: Date.now(), components };
+    const probeTimestamps = nextComponentProbeTimestamps({
+      attempted: policy.shouldProbeRuntime,
+      succeeded: runtimeProbeSucceeded,
+      lastDetailedAt: componentStatusCache.lastDetailedAt,
+      lastDetailedAttemptAt: componentStatusCache.lastDetailedAttemptAt,
+    });
+    componentStatusCache = {
+      updatedAt: Date.now(),
+      ...probeTimestamps,
+      components,
+      integrityTokens,
+    };
     componentStatusDirty = componentStatusGeneration !== refreshGeneration;
     await fs.promises.writeFile(componentStatusCachePath, JSON.stringify(componentStatusCache), 'utf8').catch(error => {
       writeLog('warn', 'Unable to persist component status cache', { error: error.message || String(error) });
@@ -183,27 +300,46 @@ const registerSystemIpc = context => {
   };
 
   const queueComponentStatusRefresh = (force = false) => {
-    if (componentStatusRefreshActive) return;
-    if (!force && !componentStatusDirty && Date.now() - Number(componentStatusCache.updatedAt || 0) < 5 * 60 * 1000) return;
-    componentStatusRefreshActive = true;
-    const execute = async task => {
-      try { return await refreshDetailedComponentStatuses(task); }
-      finally {
-        componentStatusRefreshActive = false;
-        if (componentStatusDirty) setTimeout(() => queueComponentStatusRefresh(true), 100);
-      }
-    };
-    if (!backgroundTasks?.run) {
-      setTimeout(() => void execute().catch(error => writeLog('warn', 'Background component status refresh failed', { error: error.message || String(error) })), 0);
+    if (componentStatusRefreshActive) {
+      componentStatusForceQueued ||= force && !componentStatusRefreshActiveForce;
       return;
     }
-    const run = () => backgroundTasks.run({
-      type: 'component-status-refresh',
-      title: '刷新组件状态',
-      dedupeKey: 'component-status-refresh',
-      cancellable: false,
-    }, execute, run);
-    setTimeout(() => void run().catch(error => writeLog('warn', 'Background component status refresh failed', { error: error.message || String(error) })), 100);
+    if (componentStatusRefreshTimer) {
+      if (!force) return;
+      clearTimeout(componentStatusRefreshTimer);
+      componentStatusRefreshTimer = null;
+    }
+    if (!force && !componentStatusDirty && Date.now() - Number(componentStatusCache.updatedAt || 0) < 5 * 60 * 1000) return;
+    const execute = async task => {
+      try { return await refreshDetailedComponentStatuses(task, { forceRuntimeProbe: force }); }
+      finally {
+        componentStatusRefreshActive = false;
+        componentStatusRefreshActiveForce = false;
+        if (componentStatusDirty || componentStatusForceQueued) {
+          const queuedForce = componentStatusForceQueued || componentStatusDirty;
+          componentStatusForceQueued = false;
+          setTimeout(() => queueComponentStatusRefresh(queuedForce), 100);
+        }
+      }
+    };
+    const launch = () => {
+      componentStatusRefreshTimer = null;
+      if (componentStatusRefreshActive) return;
+      componentStatusRefreshActive = true;
+      componentStatusRefreshActiveForce = force;
+      if (!backgroundTasks?.run) {
+        void execute().catch(error => writeLog('warn', 'Background component status refresh failed', { error: error.message || String(error) }));
+        return;
+      }
+      const run = () => backgroundTasks.run({
+        type: 'component-status-refresh',
+        title: '刷新组件状态',
+        dedupeKey: 'component-status-refresh',
+        cancellable: false,
+      }, execute, run);
+      void run().catch(error => writeLog('warn', 'Background component status refresh failed', { error: error.message || String(error) }));
+    };
+    componentStatusRefreshTimer = setTimeout(launch, force ? 100 : 15000);
   };
 
   const invalidateComponentStatus = () => {
@@ -212,8 +348,27 @@ const registerSystemIpc = context => {
     queueComponentStatusRefresh(true);
   };
 
-  const queueSystemFilesystemCleanup = (paths, title) => {
-    const targets = [...new Set((paths || []).filter(Boolean).map(candidate => path.resolve(candidate)))];
+  backgroundTasks?.registerTypeRestartFactory?.('component-status-refresh', task => {
+    componentStatusRefreshActive = true;
+    const execute = async taskContext => {
+      try { return await refreshDetailedComponentStatuses(taskContext); }
+      finally { componentStatusRefreshActive = false; }
+    };
+    return backgroundTasks.run({
+      id: task.id,
+      type: 'component-status-refresh',
+      title: '刷新组件状态',
+      dedupeKey: 'component-status-refresh',
+      cancellable: false,
+    }, execute);
+  }, { autoRestart: true });
+
+  const queueSystemFilesystemCleanup = (paths, title, restartTask = null) => {
+    const allowedRoots = [app.getPath('temp'), app.getPath('userData'), pluginService.installRoot].filter(Boolean).map(candidate => path.resolve(candidate));
+    const targets = [...new Set((paths || []).filter(Boolean).map(candidate => path.resolve(candidate)))].filter(target => allowedRoots.some(root => {
+      const relative = path.relative(root, target);
+      return relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+    }));
     if (!targets.length) return;
     const execute = async task => {
       task?.report(10, title);
@@ -229,13 +384,17 @@ const registerSystemIpc = context => {
     }
     const dedupeKey = `system-filesystem-cleanup:${crypto.randomUUID()}`;
     const run = () => backgroundTasks.run({
+      ...(restartTask?.id ? { id: restartTask.id } : {}),
       type: 'system-filesystem-cleanup',
       title,
       dedupeKey,
       cancellable: false,
+      metadata: { targets, title },
     }, execute, run);
+    if (restartTask?.id) return run();
     setTimeout(() => void run().catch(error => writeLog('warn', 'Deferred system cleanup failed', { error: error.message || String(error) })), 250);
   };
+  backgroundTasks?.registerTypeRestartFactory?.('system-filesystem-cleanup', task => queueSystemFilesystemCleanup(task.metadata?.targets || [], task.metadata?.title || task.title, task));
 
   const resolveAdvancedInstaller = (component, fileName) => app.isPackaged
     ? path.join(component.path, 'advanced-installer', fileName)
@@ -398,9 +557,9 @@ const registerSystemIpc = context => {
 
   ipcMain.handle('cursor-screen-point', () => screen.getCursorScreenPoint());
   
-  ipcMain.handle('components-list', async () => {
+  ipcMain.handle('components-list', async (_event, force = false) => {
     const components = mergeCachedComponentStatuses(pluginService.list());
-    queueComponentStatusRefresh();
+    queueComponentStatusRefresh(force === true);
     return { success: true, components, installPath: pluginService.installRoot };
   });
   
@@ -650,7 +809,7 @@ const registerSystemIpc = context => {
     }
   });
 
-  ipcMain.on('run-python', async (event, scriptName, args = [], requestId = '') => {
+  ipcMain.on('run-python', async (event, scriptName, args = [], requestId = '', requestedPresentation) => {
     let command;
     let spawnArgs;
     try {
@@ -665,6 +824,7 @@ const registerSystemIpc = context => {
       return;
     }
     const normalizedRequestId = String(requestId || '');
+    const taskPresentation = normalizePythonTaskPresentation(requestedPresentation);
     const invocationId = crypto.randomUUID();
     const stageArgumentIndex = scriptName === 'classify.py' ? args.indexOf('--stage') : -1;
     const classifyStage = stageArgumentIndex >= 0 ? String(args[stageArgumentIndex + 1] || '') : '';
@@ -684,8 +844,9 @@ const registerSystemIpc = context => {
     }
     const destinationArgumentIndex = scriptName === 'classify.py' ? args.indexOf('--dest_path') : -1;
     const importDestination = destinationArgumentIndex >= 0 ? path.resolve(String(args[destinationArgumentIndex + 1] || '')) : '';
-    const backgroundTaskId = tracksImportTask ? `${normalizedRequestId}:${classifyStage}:${invocationId}` : '';
+    let backgroundTaskId = tracksImportTask ? `${normalizedRequestId}:${classifyStage}:${invocationId}` : '';
     let importTask = null;
+    let toolTask = null;
     let importTargets = importDestination ? [importDestination] : [];
     if (tracksImportTask && normalizedRequestId) {
       const sdPathIndex = args.indexOf('--sd_path');
@@ -734,6 +895,47 @@ const registerSystemIpc = context => {
         }
       }
     }
+    const toolProfile = PYTHON_BACKGROUND_TASK_PROFILES[scriptName];
+    if (!tracksImportTask && toolProfile && normalizedRequestId) {
+      backgroundTaskId = `python-tool:${normalizedRequestId}`;
+      const presentationMetadata = taskPresentation ? {
+        presentationOwnerPageId: taskPresentation.ownerPageId,
+        presentationPanelKind: taskPresentation.panelKind,
+      } : {};
+      const taskResources = pythonToolResourcePaths(scriptName, args, path);
+      toolTask = backgroundTasks?.create?.({
+        id: backgroundTaskId,
+        type: toolProfile.type,
+        title: taskPresentation?.title || toolProfile.title,
+        message: '等待任务资源',
+        runningMessage: '正在启动任务',
+        cancellable,
+        notificationPolicy: 'progress-toast',
+        resumePolicy: 'atomic',
+        concurrencyGroup: toolProfile.concurrencyGroup,
+        concurrencyLimit: toolProfile.concurrencyLimit,
+        concurrencyWriteLimit: toolProfile.concurrencyWriteLimit,
+        resourceAccess: 'write',
+        resources: taskResources,
+        metadata: { scriptName, requestId: normalizedRequestId, phase: 'queued', ...presentationMetadata },
+      }) || null;
+      if (toolTask && !toolTask.deduplicated) {
+        if (cancelFile) rememberPythonTask(normalizedRequestId, invocationId, { process: null, cancelFile, backgroundTaskId });
+        toolTask.context.signal.addEventListener('abort', () => {
+          if (cancelFile) fs.promises.writeFile(cancelFile, 'cancel', 'utf8').catch(() => undefined);
+        }, { once: true });
+        try {
+          await toolTask.waitForStart();
+        } catch (error) {
+          toolTask.cancelled();
+          forgetPythonTask(normalizedRequestId, invocationId);
+          if (cancelFile) fs.promises.rm(cancelFile, { force: true }).catch(() => undefined);
+          event.sender.send('python-event', { type: 'cancelled', message: '任务已取消', scriptName, requestId });
+          event.sender.send('python-event', { type: 'complete', message: '任务未启动', data: { exitCode: 0 }, scriptName, requestId });
+          return;
+        }
+      }
+    }
     const importWatchSuppressedPaths = [];
     let importWatchFinalized = false;
     const importedMediaPaths = new Set();
@@ -773,6 +975,7 @@ const registerSystemIpc = context => {
       }
     } catch (error) {
       importTask?.fail(error);
+      toolTask?.fail(error);
       forgetPythonTask(normalizedRequestId, invocationId);
       event.sender.send('python-event', { type: 'error', message: error.message || String(error), scriptName, requestId });
       event.sender.send('python-event', {
@@ -812,6 +1015,9 @@ const registerSystemIpc = context => {
       let importFailed = false;
       let importCancelled = false;
       let importProgress = 0;
+      let toolFailed = false;
+      let toolCancelled = false;
+      let toolProgress = 0;
       const handlePythonOutputLine = line => {
         const trimmed = line.trim();
         if (!trimmed) return;
@@ -839,6 +1045,19 @@ const registerSystemIpc = context => {
                 totalBytes: Number(jsonMsg.data?.totalBytes) || 0,
                 filesCopied: Number(jsonMsg.data?.filesCopied) || 0,
                 totalFiles: Number(jsonMsg.data?.totalFiles) || 0,
+              });
+            }
+          }
+          if (toolTask && !toolTask.deduplicated) {
+            if (jsonMsg.type === 'error') toolFailed = true;
+            if (jsonMsg.type === 'cancelled') toolCancelled = true;
+            if (jsonMsg.type === 'progress' || jsonMsg.type === 'status') {
+              if (jsonMsg.type === 'progress' && Number.isFinite(Number(jsonMsg.progress))) toolProgress = Number(jsonMsg.progress);
+              toolTask.context.report(toolProgress, jsonMsg.message || `正在执行${toolProfile.title}`, {
+                phase: jsonMsg.type === 'progress' ? 'processing' : 'starting',
+                currentName: String(jsonMsg.data?.currentName || jsonMsg.data?.fileName || ''),
+                processedCount: Number(jsonMsg.data?.processedCount ?? jsonMsg.data?.filesProcessed) || 0,
+                totalCount: Number(jsonMsg.data?.totalCount ?? jsonMsg.data?.totalFiles) || 0,
               });
             }
           }
@@ -883,12 +1102,19 @@ const registerSystemIpc = context => {
         if (stdoutBuffer.trim()) handlePythonOutputLine(stdoutBuffer);
         stdoutBuffer = '';
         const cancelledByCoordinator = Boolean(importTask?.context?.signal.aborted);
+        const toolCancelledByCoordinator = Boolean(toolTask?.context?.signal.aborted);
         if (cancelledByCoordinator && !importCancelled) {
           importCancelled = true;
           mainWindow.webContents.send('python-event', { type: 'cancelled', message: classifyStage === 'plan' ? '素材分析已取消' : '导入已取消', scriptName, requestId });
+        } else if (toolCancelledByCoordinator && !toolCancelled) {
+          toolCancelled = true;
+          mainWindow.webContents.send('python-event', { type: 'cancelled', message: '任务已取消', scriptName, requestId });
         } else if (code !== 0 && importTask && !importFailed && !importCancelled) {
           importFailed = true;
           mainWindow.webContents.send('python-event', { type: 'error', message: classifyStage === 'plan' ? '素材分析失败' : `导入进程异常退出（代码 ${code}）`, scriptName, requestId });
+        } else if (code !== 0 && toolTask && !toolFailed && !toolCancelled) {
+          toolFailed = true;
+          mainWindow.webContents.send('python-event', { type: 'error', message: `任务进程异常退出（代码 ${code}）`, scriptName, requestId });
         }
         // 可以在这里针对特定脚本做处理，比如 classify 退出不一定代表错误
         console.log(`${scriptName} finished with code ${code}`);
@@ -913,12 +1139,18 @@ const registerSystemIpc = context => {
           else if (code === 0 && !importFailed) importTask.complete(classifyStage === 'plan' ? '素材分析完成' : '导入完成');
           else importTask.fail(new Error(code === 0 ? '导入失败' : `导入进程异常退出（代码 ${code}）`));
         }
+        if (toolTask && !toolTask.deduplicated) {
+          if (toolCancelled || toolTask.context.signal.aborted) toolTask.cancelled();
+          else if (code === 0 && !toolFailed) toolTask.complete(`${toolProfile.title}完成`);
+          else toolTask.fail(new Error(code === 0 ? `${toolProfile.title}失败` : `任务进程异常退出（代码 ${code}）`));
+        }
         finalizeImportWatch(classifyStage !== 'plan' && code === 0 && !importFailed && !importCancelled);
       });
       
       // 监听启动错误（比如 exe 不存在）
       pyProcess.on('error', (err) => {
          importTask?.fail(err);
+         toolTask?.fail(err);
          finalizeImportWatch(false);
          if (cancellable) {
            forgetPythonTask(normalizedRequestId, invocationId);
@@ -935,6 +1167,7 @@ const registerSystemIpc = context => {
   
     } catch (e) {
       importTask?.fail(e);
+      toolTask?.fail(e);
       forgetPythonTask(normalizedRequestId, invocationId);
       finalizeImportWatch(false);
       console.error("Spawn Error:", e);
@@ -1006,15 +1239,36 @@ const registerSystemIpc = context => {
     }
   });
   
-  ipcMain.handle('loadConfig', async (event) => {
+  const readBirthdays = () => {
     try {
-      const configPath = getConfigPath();
-      if (fs.existsSync(configPath)) {
-        console.log('✅ Config loaded from:', configPath);
-        const config = readSavedConfig();
-        if (config?.mediaCache?.directory) approvedMediaCacheDirectories.add(path.resolve(config.mediaCache.directory));
-        return config;
+      const userPath = getUserBirthdaysPath();
+      if (!fs.existsSync(userPath)) {
+        const resourcePath = getResourceBirthdaysPath();
+        if (!fs.existsSync(resourcePath)) return {};
+        console.log('Initialize birthdays.json from resources...');
+        fs.copyFileSync(resourcePath, userPath);
       }
+      const parsed = JSON.parse(fs.readFileSync(userPath, 'utf8'));
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (error) {
+      console.error('Error reading birthdays.json:', error);
+      return {};
+    }
+  };
+
+  const loadConfigSnapshot = () => {
+    const configPath = getConfigPath();
+    if (!fs.existsSync(configPath)) return null;
+    console.log('✅ Config loaded from:', configPath);
+    const config = readSavedConfig();
+    if (config?.mediaCache?.directory) approvedMediaCacheDirectories.add(path.resolve(config.mediaCache.directory));
+    return config;
+  };
+
+  ipcMain.handle('loadConfig', async () => {
+    try {
+      const config = loadConfigSnapshot();
+      if (config) return config;
       console.log('⚠️ No config file found, will use defaults');
       return null;
     } catch (error) {
@@ -1022,30 +1276,14 @@ const registerSystemIpc = context => {
       return null;
     }
   });
+
+  ipcMain.handle('load-startup-snapshot', async () => ({
+    config: loadConfigSnapshot(),
+    birthdays: readBirthdays(),
+  }));
   
   ipcMain.handle('get-birthdays', async () => {
-    try {
-      const userPath = getUserBirthdaysPath();
-      
-      // 如果用户目录没有该文件，尝试从资源目录复制一份
-      if (!fs.existsSync(userPath)) {
-        const resourcePath = getResourceBirthdaysPath();
-        if (fs.existsSync(resourcePath)) {
-          console.log('Initialize birthdays.json from resources...');
-          fs.copyFileSync(resourcePath, userPath);
-        } else {
-          // 如果资源目录也没有，就创建一个空的
-          return {}; 
-        }
-      }
-  
-      // 读取用户目录下的文件
-      const data = fs.readFileSync(userPath, 'utf8');
-      return JSON.parse(data);
-    } catch (error) {
-      console.error('Error reading birthdays.json:', error);
-      return {};
-    }
+    return readBirthdays();
   });
   
   ipcMain.handle('save-birthdays', async (event, newContent) => {
@@ -1143,4 +1381,4 @@ const registerSystemIpc = context => {
   });
 };
 
-module.exports = { normalizeSdImportAutoMove, registerSystemIpc };
+module.exports = { normalizeSdImportAutoMove, pythonToolResourcePaths, registerSystemIpc };

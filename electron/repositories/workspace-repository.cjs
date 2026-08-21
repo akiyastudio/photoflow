@@ -1,7 +1,6 @@
 const createWorkspaceRepository = (client, operationsRepository = null, domainCommandJournal = null) => ({
   load: async root => {
     const catalog = await client.call(root, 'init');
-    await operationsRepository?.load(root);
     return catalog;
   },
   syncCatalog: root => client.call(root, 'catalog_sync', {}),

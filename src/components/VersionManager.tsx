@@ -374,6 +374,16 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
   const [activePhotoId, setActivePhotoId] = useState('');
   const branchPhotoRequestRef = useRef(0);
   const loadRequestRef = useRef(0);
+  const pageGenerationRef = useRef(0);
+  const pageIdentityKey = `${workspacePath}\0${project.status}\0${project.name}\0${entry.path}\0${entry.updatedAt}\0${progressId}\0${progressVersionKey}\0${initialCompareKey}`;
+  const pageIdentityRef = useRef(pageIdentityKey);
+  if (pageIdentityRef.current !== pageIdentityKey) {
+    pageIdentityRef.current = pageIdentityKey;
+    pageGenerationRef.current += 1;
+    loadRequestRef.current += 1;
+    branchPhotoRequestRef.current += 1;
+  }
+  const pageGenerationIsCurrent = (generation: number) => generation === pageGenerationRef.current;
   useEscapeLayer(Boolean(editing), () => setEditing(null), !busy);
   const initialCompareAppliedRef = useRef('');
   const [editNote, setEditNote] = useState('');
@@ -417,13 +427,13 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     setCompareIds(ids => ids.filter(id => versions.some(version => version.id === id && !version.fileMissing)).slice(0, 2));
   };
 
-  const loadBranchPhoto = async (photoId: string, fallback?: TrackedPhoto, summaries = branchPhotos) => {
-    if (!progressId || !photoId) return false;
+  const loadBranchPhoto = async (photoId: string, fallback?: TrackedPhoto, summaries = branchPhotos, pageGeneration = pageGenerationRef.current) => {
+    if (!progressId || !photoId || !pageGenerationIsCurrent(pageGeneration)) return false;
     const requestId = ++branchPhotoRequestRef.current;
     setCompareIds([]);
     setBranchPhotoLoading(true);
     const result = await window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId, photoId });
-    if (requestId !== branchPhotoRequestRef.current) return false;
+    if (requestId !== branchPhotoRequestRef.current || !pageGenerationIsCurrent(pageGeneration)) return false;
     setBranchPhotoLoading(false);
     if (!result.success) { onNotice(`读取主分支版本失败：${result.error || '未知错误'}`); return false; }
     const versions = mainBranchVersionsForPhoto(result.entries, photoId);
@@ -431,14 +441,22 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     applyBranchPhoto(photoId, versions, fallback, summaries);
     return true;
   };
+  const selectBranchPhoto = async (photoId: string) => {
+    const pageGeneration = ++pageGenerationRef.current;
+    loadRequestRef.current += 1;
+    setBusy(false);
+    setEditing(null);
+    return loadBranchPhoto(photoId, undefined, branchPhotos, pageGeneration);
+  };
 
-  const load = async () => {
+  const load = async (pageGeneration = pageGenerationRef.current) => {
+    if (!pageGenerationIsCurrent(pageGeneration)) return;
     const requestId = ++loadRequestRef.current;
     branchPhotoRequestRef.current += 1;
     setBranchPhotoLoading(false);
     setLoading(true);
     const result = await window.electronAPI.getMediaVersions(workspacePath, project.status, project.name, entry.relativePath);
-    if (requestId !== loadRequestRef.current) return;
+    if (requestId !== loadRequestRef.current || !pageGenerationIsCurrent(pageGeneration)) return;
     if (!result.success) {
       setLoading(false);
       setBundle({ ...result, versions: [] });
@@ -456,7 +474,7 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
         window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId, photoId: result.photo.id }),
         window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId }),
       ]);
-      if (requestId !== loadRequestRef.current) return;
+      if (requestId !== loadRequestRef.current || !pageGenerationIsCurrent(pageGeneration)) return;
       if (fullBranch.success) {
         summaries = mainBranchPhotoSummaries(fullBranch.entries);
         setBranchPhotos(summaries);
@@ -473,7 +491,7 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     } else {
       setBranchPhotos([]);
     }
-    if (requestId !== loadRequestRef.current) return;
+    if (requestId !== loadRequestRef.current || !pageGenerationIsCurrent(pageGeneration)) return;
     setLoading(false);
     if (result.photo) applyBranchPhoto(result.photo.id, visibleVersions, result.photo, summaries);
     else setBundle({ ...result, versions: visibleVersions });
@@ -487,10 +505,14 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     }
   };
   useEffect(() => {
-    void load();
+    const pageGeneration = ++pageGenerationRef.current;
+    setBusy(false);
+    setEditing(null);
+    void load(pageGeneration);
     return () => {
       loadRequestRef.current += 1;
       branchPhotoRequestRef.current += 1;
+      if (pageGenerationRef.current === pageGeneration) pageGenerationRef.current += 1;
     };
   }, [entry.path, entry.updatedAt, workspacePath, project.status, project.name, initialCompareKey, progressId, progressVersionKey]);
 
@@ -528,27 +550,36 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
   }, [bundle.versions]);
 
   const updateVersion = async (request: { versionId: string; versionName?: string; note?: string; makeCurrent?: boolean }, notice: string) => {
+    const pageGeneration = pageGenerationRef.current;
+    if (!pageGenerationIsCurrent(pageGeneration)) return;
     setBusy(true);
     const result = await window.electronAPI.updateMediaVersion(workspacePath, request);
+    if (!pageGenerationIsCurrent(pageGeneration)) return;
     setBusy(false);
     if (!result.success) { onNotice(`更新版本失败：${result.error || '未知错误'}`); return; }
-    if (!result.photo || !await loadBranchPhoto(result.photo.id, result.photo)) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
+    const branchLoaded = result.photo ? await loadBranchPhoto(result.photo.id, result.photo, branchPhotos, pageGeneration) : false;
+    if (!pageGenerationIsCurrent(pageGeneration)) return;
+    if (!result.photo || !branchLoaded) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
     setEditing(null);
     onVersionStateChanged?.();
     onNotice(notice);
   };
   const deleteVersion = async (version: MediaVersion) => {
     if (!bundle.photo) return;
+    const pageGeneration = pageGenerationRef.current;
+    const photoId = bundle.photo.id;
     const scope = await window.electronAPI.getMediaVersionDeleteScope(workspacePath, version.id);
+    if (!pageGenerationIsCurrent(pageGeneration)) return;
     const selectedReparentText = scope.success && scope.selectedChildCount
       ? `\n\n该版本有 ${scope.selectedChildCount} 条直接子版本；删除后会自动改接到它的上一级版本，编号不会变化。`
       : '';
-    if (!await appDialog.confirm({
+    const confirmed = await appDialog.confirm({
       title: `确定删除 ${visibleVersionLabel(version)} 吗？`,
       message: `将删除“${visibleVersionName(version)}”的版本记录。${selectedReparentText}`,
       confirmLabel: '删除版本',
       tone: 'danger',
-    })) return;
+    });
+    if (!pageGenerationIsCurrent(pageGeneration) || !confirmed) return;
     if (version.fileMissing) {
       if (scope.success && scope.allMissing && scope.versionCount > 1) {
         const bulkReparentText = scope.childCount ? `\n其中 ${scope.childCount} 条直接子版本会自动改接到上一级版本。` : '';
@@ -559,13 +590,16 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
           cancelLabel: '只删当前图片',
           tone: 'danger',
         });
+        if (!pageGenerationIsCurrent(pageGeneration)) return;
         if (deleteAll) {
           setBusy(true);
           const bulkResult = await window.electronAPI.deleteProjectMissingMediaVersion(workspacePath, version.id);
+          if (!pageGenerationIsCurrent(pageGeneration)) return;
           setBusy(false);
           if (!bulkResult.success) { onNotice(`批量删除失效版本失败：${bulkResult.error || '未知错误'}`); return; }
           setCompareIds([]);
-          await load();
+          await load(pageGeneration);
+          if (!pageGenerationIsCurrent(pageGeneration)) return;
           onVersionStateChanged?.();
           onNotice(`已删除当前项目 ${bulkResult.deletedCount} 张图片的 V${bulkResult.versionNumber} 失效版本${bulkResult.reparentedCount ? `，并改接 ${bulkResult.reparentedCount} 条后续版本` : ''}；其他版本编号保持不变`);
           return;
@@ -579,11 +613,15 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
       cancelLabel: '仅删除记录',
       tone: 'danger',
     });
+    if (!pageGenerationIsCurrent(pageGeneration)) return;
     setBusy(true);
-    const result = await window.electronAPI.deleteMediaVersion(workspacePath, { photoId: bundle.photo.id, versionId: version.id, trashFile });
+    const result = await window.electronAPI.deleteMediaVersion(workspacePath, { photoId, versionId: version.id, trashFile });
+    if (!pageGenerationIsCurrent(pageGeneration)) return;
     setBusy(false);
     if (!result.success) { onNotice(`删除版本失败：${result.error || '未知错误'}`); return; }
-    if (!result.photo || !await loadBranchPhoto(result.photo.id, result.photo)) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
+    const branchLoaded = result.photo ? await loadBranchPhoto(result.photo.id, result.photo, branchPhotos, pageGeneration) : false;
+    if (!pageGenerationIsCurrent(pageGeneration)) return;
+    if (!result.photo || !branchLoaded) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
     setSelectedId(result.versions.find(item => item.isCurrent)?.id || result.versions[0]?.id || '');
     setCompareIds(ids => ids.filter(id => id !== version.id));
     onVersionStateChanged?.();
@@ -592,11 +630,14 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
   };
   const relocateVersion = async (version: MediaVersion) => {
     if (!bundle.photo) return;
+    const pageGeneration = pageGenerationRef.current;
+    const photoId = bundle.photo.id;
     setBusy(true);
     let result = await window.electronAPI.relocateMediaVersion(workspacePath, project.status, project.name, {
-      photoId: bundle.photo.id,
+      photoId,
       versionId: version.id,
     });
+    if (!pageGenerationIsCurrent(pageGeneration)) return;
     setBusy(false);
     if (result.requiresDecision?.kind === 'version-fingerprint-mismatch') {
       const decision = result.requiresDecision;
@@ -607,19 +648,23 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
         choices: [{ value: 'relocate', label: '仍然重新定位' }],
         cancelDefault: true,
       });
+      if (!pageGenerationIsCurrent(pageGeneration)) return;
       if (action !== 'relocate') return;
       setBusy(true);
       result = await window.electronAPI.relocateMediaVersion(workspacePath, project.status, project.name, {
-        photoId: bundle.photo.id,
+        photoId,
         versionId: version.id,
         filePath: decision.filePath,
         force: true,
       });
+      if (!pageGenerationIsCurrent(pageGeneration)) return;
       setBusy(false);
     }
     if (result.cancelled) return;
     if (!result.success) { onNotice(`重新定位失败：${result.error || '未知错误'}`); return; }
-    if (!result.photo || !await loadBranchPhoto(result.photo.id, result.photo)) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
+    const branchLoaded = result.photo ? await loadBranchPhoto(result.photo.id, result.photo, branchPhotos, pageGeneration) : false;
+    if (!pageGenerationIsCurrent(pageGeneration)) return;
+    if (!result.photo || !branchLoaded) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
     onNotice(result.versions.find(item => item.id === version.id)?.contentChanged ? '已重新定位，但文件内容与原记录不同。' : '版本文件已重新定位');
   };
   const toggleCompare = (id: string) => setCompareIds(current => current.includes(id) ? current.filter(value => value !== id) : [...(current.length >= 2 ? current.slice(1) : current), id]);
@@ -634,7 +679,7 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
         <header className="sticky top-0 z-10 border-b border-slate-200 bg-white px-4 py-3"><div className="flex items-start gap-2"><GitBranch size={18} className="mt-0.5 shrink-0 text-blue-600"/><div className="min-w-0 flex-1"><h2 className="truncate text-sm font-bold text-slate-800">版本管理 · {bundle.photo?.displayName || entry.name}</h2><p className="mt-1 truncate text-[11px] text-slate-500" title={bundle.photo?.id}>Photo ID：<span className="font-mono">{bundle.photo?.id || '正在建立追踪…'}</span></p></div><button onClick={onClose} title="关闭版本管理" aria-label="关闭版本管理" className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100"><X size={17}/></button></div></header>
         <div className="flex items-start gap-2 border-b border-slate-200 bg-slate-50 px-4 py-2 text-[11px] leading-5 text-slate-600"><AlertTriangle size={14} className="mt-0.5 shrink-0 text-slate-400"/><span>版本管理不保存文件副本。被覆盖或永久删除的内容无法恢复。</span></div>
         {missingVersionCount > 0 && <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[11px] font-medium leading-5 text-amber-800"><AlertTriangle size={14} className="mt-0.5 shrink-0"/><span>{missingVersionCount} 个版本文件不可用，请重新定位或删除记录。</span></div>}
-        {branchPhotos.length > 1 && <section className="border-b border-slate-200 bg-slate-50/70 p-3"><div className="mb-2 flex items-center justify-between"><span className="text-xs font-bold text-slate-600">主分支图片</span><span className="text-[10px] text-slate-400">{branchPhotoPagination.total} 张</span></div><div className="max-h-48 space-y-1 overflow-y-auto">{branchPhotoPagination.items.map(photo => <button key={photo.photoId} type="button" aria-pressed={activePhotoId === photo.photoId} onClick={() => void loadBranchPhoto(photo.photoId)} className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs ${activePhotoId === photo.photoId ? 'bg-blue-100 font-bold text-blue-700' : 'text-slate-600 hover:bg-white'}`}><span className={`h-2 w-2 shrink-0 rounded-full ${photo.missing ? 'bg-red-400' : 'bg-emerald-400'}`}/><span className="min-w-0 flex-1 truncate" title={photo.originalName}>{photo.originalName}</span><span className="shrink-0 text-[10px] text-slate-400">{photo.versionCount} 版</span></button>)}</div>{branchPhotoPagination.pageCount > 1 && <div className="mt-2 flex items-center justify-between"><button type="button" disabled={branchPhotoPagination.currentPage === 0 || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => Math.max(0, page - 1))} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">上一页</button><span className="text-[10px] text-slate-400">{branchPhotoPagination.currentPage + 1} / {branchPhotoPagination.pageCount}</span><button type="button" disabled={branchPhotoPagination.currentPage + 1 >= branchPhotoPagination.pageCount || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => page + 1)} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">下一页</button></div>}</section>}
+        {branchPhotos.length > 1 && <section className="border-b border-slate-200 bg-slate-50/70 p-3"><div className="mb-2 flex items-center justify-between"><span className="text-xs font-bold text-slate-600">主分支图片</span><span className="text-[10px] text-slate-400">{branchPhotoPagination.total} 张</span></div><div className="max-h-48 space-y-1 overflow-y-auto">{branchPhotoPagination.items.map(photo => <button key={photo.photoId} type="button" aria-pressed={activePhotoId === photo.photoId} onClick={() => void selectBranchPhoto(photo.photoId)} className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs ${activePhotoId === photo.photoId ? 'bg-blue-100 font-bold text-blue-700' : 'text-slate-600 hover:bg-white'}`}><span className={`h-2 w-2 shrink-0 rounded-full ${photo.missing ? 'bg-red-400' : 'bg-emerald-400'}`}/><span className="min-w-0 flex-1 truncate" title={photo.originalName}>{photo.originalName}</span><span className="shrink-0 text-[10px] text-slate-400">{photo.versionCount} 版</span></button>)}</div>{branchPhotoPagination.pageCount > 1 && <div className="mt-2 flex items-center justify-between"><button type="button" disabled={branchPhotoPagination.currentPage === 0 || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => Math.max(0, page - 1))} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">上一页</button><span className="text-[10px] text-slate-400">{branchPhotoPagination.currentPage + 1} / {branchPhotoPagination.pageCount}</span><button type="button" disabled={branchPhotoPagination.currentPage + 1 >= branchPhotoPagination.pageCount || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => page + 1)} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">下一页</button></div>}</section>}
         <div className="p-3"><div className="mb-2 flex items-center justify-between px-2"><span className="text-xs font-bold uppercase tracking-wider text-slate-400">版本树</span><span className="text-xs text-slate-400">{bundle.versions.length} 个版本</span></div>
         <div className="space-y-2">{bundle.versions.map(version => <div key={version.id} className={`relative w-full rounded-xl border p-3 text-left transition ${selectedId === version.id ? 'border-blue-400 bg-blue-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'}`} style={{ paddingLeft: 12 + (depths.get(version.id) || 0) * 14 }}><button type="button" aria-label={`预览 ${visibleVersionLabel(version)} ${visibleVersionName(version)}`} onClick={() => previewVersion(version.id)} className="absolute inset-0 z-0 cursor-pointer rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"/>
           {(depths.get(version.id) || 0) > 0 && <span className="absolute bottom-1/2 top-0 w-px bg-slate-200" style={{ left: 8 + (depths.get(version.id) || 0) * 14 }}/>} 

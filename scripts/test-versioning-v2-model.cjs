@@ -10,6 +10,24 @@ const { pathToFileURL } = require('url');
   assert.deepStrictEqual([...model.VERSION_PANEL_DEFINITIONS.import.states], ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure']);
   assert.deepStrictEqual([...model.VERSION_PANEL_DEFINITIONS.modify.states], ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure']);
   assert.deepStrictEqual([...model.VERSION_PANEL_DEFINITIONS.confirm.states], ['loading', 'waiting_confirmation', 'committing', 'result', 'failure']);
+  const queuedTreeTask = {
+    type: 'version-tree-update', state: 'queued', progress: 0,
+    message: '等待“完善版本文件校验信息”完成',
+    metadata: { projectName: 'Project', progressId: 'progress-1' },
+  };
+  assert.deepStrictEqual(model.versionTreeTaskPanelProgress([queuedTreeTask], 'Project', 'progress-1'), {
+    currentName: '等待“完善版本文件校验信息”完成', waiting: true,
+  }, 'queued version edits must expose their real scheduler wait reason');
+  assert.strictEqual(model.versionTreeTaskPanelProgress([queuedTreeTask], 'Other', 'progress-1'), undefined);
+  assert.deepStrictEqual(model.versionTreeTaskPanelProgress([{
+    ...queuedTreeTask,
+    state: 'running',
+    progress: 35,
+    message: '正在修改版本树',
+    metadata: { ...queuedTreeTask.metadata, processedCount: 7, totalCount: 20 },
+  }], 'Project', 'progress-1'), {
+    percentage: 35, processedCount: 7, totalCount: 20, currentName: '正在修改版本树', waiting: false,
+  });
   assert.deepStrictEqual(model.normalizeTrackingPolicy('auxiliary', { trackingEnabled: true, renameFromParent: true, copyMissingFromParent: true }), {
     trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false,
   });

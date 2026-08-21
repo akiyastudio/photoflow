@@ -5,6 +5,7 @@ const path = require('path');
 const ts = require('typescript');
 const { createComponentRegistry } = require('../electron/component-registry.cjs');
 const { createComponentIntegrityManifest } = require('../electron/component-integrity.cjs');
+const { decideComponentStatusRefresh } = require('../electron/services/component-status-refresh-policy.cjs');
 const { PLUGIN_DEFINITIONS } = require('../electron/plugins/plugin-catalog.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-components-test-'));
@@ -196,7 +197,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   const compiledProjectWorkspaceLifecycle = ts.transpileModule(projectWorkspaceLifecycleSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const projectWorkspaceLifecycleModule = { exports: {} };
   new Function('module', 'exports', compiledProjectWorkspaceLifecycle)(projectWorkspaceLifecycleModule, projectWorkspaceLifecycleModule.exports);
-  const { resolveProjectWorkspaceLifecycle } = projectWorkspaceLifecycleModule.exports;
+  const { PROJECT_BACKGROUND_LOAD_DELAYS_MS, PROJECT_WATCH_RECONCILE_COOLDOWN_MS, resolveProjectWorkspaceLifecycle, shouldReconcileProjectWatch } = projectWorkspaceLifecycleModule.exports;
   const pageIdentity = (pageId, overrides = {}) => ({ pageId, projectId: 'shared-project', projectPath: 'C:\\projects\\original', projectName: 'original', projectStatus: 'planning', ...overrides });
   const pageAIdentity = pageIdentity('page-a');
   const pageBIdentity = pageIdentity('page-b');
@@ -208,6 +209,15 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert.deepStrictEqual(resolveProjectWorkspaceLifecycle(pageBIdentity, movedPageB, 'retouch/group-b', 'retouch'), { kind: 'refresh', relativePath: 'retouch/group-b', resetNavigation: false }, 'page B must retain its independently navigated folder after the same project rename or move');
   const statusChangedPageA = { ...movedPageA, projectStatus: 'delivered' };
   assert.deepStrictEqual(resolveProjectWorkspaceLifecycle(movedPageA, statusChangedPageA, 'selection/group-a', 'selection'), { kind: 'refresh', relativePath: 'selection/group-a', resetNavigation: false }, 'project status changes must refresh page A at its current folder');
+  assert(PROJECT_BACKGROUND_LOAD_DELAYS_MS.progress < PROJECT_BACKGROUND_LOAD_DELAYS_MS.watcher
+    && PROJECT_BACKGROUND_LOAD_DELAYS_MS.watcher < PROJECT_BACKGROUND_LOAD_DELAYS_MS.clipboard
+    && PROJECT_BACKGROUND_LOAD_DELAYS_MS.clipboard < PROJECT_BACKGROUND_LOAD_DELAYS_MS.drives
+    && PROJECT_BACKGROUND_LOAD_DELAYS_MS.drives < PROJECT_BACKGROUND_LOAD_DELAYS_MS.teamRetouch,
+  'non-critical project services must start in a staggered order after the first directory paint');
+  assert.strictEqual(shouldReconcileProjectWatch(0, 10_000), true, 'the first project watcher install must reconcile missed changes');
+  assert.strictEqual(shouldReconcileProjectWatch(10_000, 10_000 + PROJECT_WATCH_RECONCILE_COOLDOWN_MS - 1), false, 'quick tab reactivation must reuse the recent reconciliation');
+  assert.strictEqual(shouldReconcileProjectWatch(10_000, 10_000 + PROJECT_WATCH_RECONCILE_COOLDOWN_MS), true, 'an older watcher reconciliation must be refreshed');
+  assert.strictEqual(shouldReconcileProjectWatch(10_000, 10_001, true), true, 'external-link changes and degraded watcher recovery must force reconciliation');
   const shortcutPreviewStateModelSource = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'workspace', 'shortcut-preview-state-model.ts'), 'utf8');
   const compiledShortcutPreviewStateModel = ts.transpileModule(shortcutPreviewStateModelSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const shortcutPreviewStateModelModule = { exports: {} };
@@ -228,6 +238,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(!projectWorkspace.includes('团片协作菜单'), 'project toolbar must not expose a separate team-retouch dropdown menu');
   assert(projectWorkspace.includes('teamRetouchWorkflowGeneratedRef.current = Boolean(result.workflowGenerated)') && projectWorkspace.includes("setTeamRetouchStep(validTargets.length ? 'detect' : teamRetouchWorkflowGeneratedRef.current ? 'workflow' : 'detect')"), 'existing generated workflows must reopen on task scheduling while newly added images still start at person detection');
   assert(projectWorkspace.includes('const [directoryLoading, setDirectoryLoading]') && projectWorkspace.includes('role="status" aria-live="polite"') && projectWorkspace.includes('加载中…'), 'project browsing must distinguish directory loading from an empty directory');
+  assert(projectWorkspace.includes('foregroundDirectoryReady') && projectWorkspace.includes('scheduleAfterProjectPaint(PROJECT_BACKGROUND_LOAD_DELAYS_MS.progress') && projectWorkspace.includes('scheduleAfterProjectPaint(PROJECT_BACKGROUND_LOAD_DELAYS_MS.watcher') && projectWorkspace.includes('scheduleAfterProjectPaint(PROJECT_BACKGROUND_LOAD_DELAYS_MS.teamRetouch'), 'directory content must paint before progress, watcher reconciliation, and team-retouch services cold-start');
   const markProgressSource = projectWorkspace.slice(projectWorkspace.indexOf('const openMarkProgress'), projectWorkspace.indexOf('useEffect(() => {', projectWorkspace.indexOf('const openMarkProgress')));
   assert(markProgressSource.indexOf('setProgressSetup(initialDraft)') < markProgressSource.indexOf('void loadProgressFolders().then'), 'mark-progress must open from cached data before refreshing progress folders');
   assert(markProgressSource.includes('current === initialDraft ? latestDraft : current'), 'background progress refresh must not overwrite a mark-progress draft after the user edits it');
@@ -240,12 +251,16 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   const topToastStack = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'app', 'useTopToastStack.tsx'), 'utf8');
   assert(projectNavigator.includes('cancelExistingProjectImport') && projectNavigator.includes('cancelBackgroundTask(existingProjectImportTask.id)') && indexCss.includes('z-index:510'), 'existing-project imports must remain cancellable from both the modal and the transfer toast above its backdrop');
   assert(fileTransferToast.includes('aria-label="收起到任务中心"') && fileTransferToast.includes('onMinimize(task.id)') && fileTransferToast.includes('isTaskToastMinimized(task.id)') && fileTransferToast.includes('selectProjectFileTaskToasts(backgroundTasks, minimizedTaskIds, 4, clock)'), 'each active file-transfer toast must minimize without cancelling and stay hidden until restored');
+  assert(fileTransferToast.includes('aria-label="暂停任务"') && fileTransferToast.includes("(task.state === 'running' || task.state === 'resuming') && task.capabilities.pausable") && fileTransferToast.includes('aria-label="继续任务"') && fileTransferToast.includes('(paused || pausing) && task.capabilities.pausable') && fileTransferToast.includes('aria-label="取消任务"') && !fileTransferToast.includes('<span>后台</span>') && !fileTransferToast.includes('>暂停</button>') && !fileTransferToast.includes('>继续</button>') && !fileTransferToast.includes('>取消</button>'), 'toast task actions must stay icon-only, show pause only while pausing is available, and replace it with continue after pausing');
   assert(fileTransferToast.includes('selectProjectFileTaskToasts') && taskToastModel.includes("task.type === 'project-file-operation'") && !taskToastModel.includes("operation === 'paste'"), 'all active project file operations must use one task-type based toast eligibility rule');
-  assert(taskToastModel.includes("left.state === 'running' ? -1 : 1") && taskToastModel.includes('left.createdAt - right.createdAt') && taskToastModel.includes('eligible.slice(0, limit)') && fileTransferToast.includes('还有 {overflowCount} 个任务'), 'the transfer toast model must prioritize running tasks, preserve creation order, and cap visible cards');
+  assert(taskToastModel.includes("task.state === 'running' || task.state === 'resuming' ? 0") && taskToastModel.includes('left.createdAt - right.createdAt') && taskToastModel.includes('eligible.slice(0, limit)') && taskToastModel.includes('mergeBackgroundTaskSnapshots') && taskToastModel.includes('limit - retained.length') && fileTransferToast.includes('还有 {overflowCount} 个任务'), 'the transfer toast model must prioritize running tasks, preserve creation order, cap visible cards, and retain active tasks ahead of bounded history');
   assert(indexCss.includes('.top-toast-stack') && indexCss.includes('display:flex') && indexCss.includes('gap:.75rem') && indexCss.includes('.app-notice-toast') && fileTransferToast.includes('previousTop - top') && fileTransferToast.includes('element.animate(') && !fileTransferToast.includes('style={{ top:') && !fileTransferToast.includes('className="fixed'), 'ordinary notices and file tasks must share one gap-based top stack and animate actual layout movement without per-card positioning');
   assert(topToastStack.includes('enqueueTopToastNotice') && topToastStack.includes('notice.count > 1') && topToastStack.includes('dismissNotice(notice.id)'), 'persistent notices must use the bounded merge model while retaining per-toast manual dismissal');
   assert(projectWorkspace.includes("entry.kind !== 'folder' && entry.kind !== 'shortcut'") && projectWorkspace.includes('browseProjectShortcutPreview(workspacePath, project.status, project.name, entry.relativePath)') && projectWorkspace.includes('shortcut:${entry.relativePath}:${entry.updatedAt}'), 'folder covers must lazily load project folders and shortcut folders through separate bounded APIs and versioned cache keys');
+  assert(projectWorkspace.includes("requestedSize, 1, queueOrder") && projectWorkspace.includes("result.state === 'NOT_READY' || result.state === 'QUEUED' || result.state === 'GENERATING'") && projectWorkspace.includes('FOLDER_COVER_THUMBNAIL_RETRY_DELAYS_MS'), 'visible folder covers must bypass the background-only queue cap and recover from a dropped or missed thumbnail completion');
   assert(projectWorkspace.includes("entry.shortcutTargetKind === 'folder') return <>") && projectWorkspace.includes('<FolderCover entry={entry}') && projectWorkspace.includes('aria-label="快捷方式" className="shortcut-cover-badge"') && projectWorkspace.includes('ArrowUpRight'), 'folder shortcuts must reuse the exact normal folder layout with an independently overlaid shortcut badge');
+  assert(projectWorkspace.includes('const shortcutIcon = <ShortcutEntryIcon') && projectWorkspace.includes('relative flex h-full w-full min-h-0 min-w-0 items-center justify-center'), 'large shortcut icons must stay inside a fixed grid-square wrapper so their folder preview cannot push shortcut labels below ordinary file labels');
+  assert(!projectWorkspace.includes("['raw', 'jpg', 'mov'].includes(displayName.toLocaleLowerCase())") && projectWorkspace.includes('title={displayName}>{displayName}</p>'), 'version-tree node names must preserve the original filename casing instead of forcing RAW, JPG, or MOV to uppercase');
   assert(projectWorkspace.includes('entry.shortcutBroken') && projectWorkspace.includes('AlertTriangle') && indexCss.includes('.shortcut-folder-cover.is-broken'), 'broken shortcut folders must use a gray folder treatment with a warning badge');
   assert(projectWorkspace.includes('setFileEntries(applyState)') && projectWorkspace.includes('setScopeEntries(applyState)') && projectWorkspace.includes('setSearchEntries(applyState)') && projectWorkspace.includes('directoryEntriesCacheRef.current.set(directoryKey, next)'), 'shortcut cover resolution must update current-folder, current-project, recursive, and cached directory entries');
   assert(projectWorkspace.includes('pageId: string') && projectWorkspace.includes('initialRelativePath =') && projectWorkspace.includes('useState(initialRelativePath)') && projectWorkspace.includes('onDirectoryChange?.(pageId, relativePath)'), 'each project page instance must own its initial directory and report navigation by page id');
@@ -501,6 +516,13 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert.strictEqual(installed.installed, true);
   assert.strictEqual(installed.source, 'user');
   assert.strictEqual(registry.resolve('team-retouch').command, path.join(installRoot, 'team-retouch', 'runtime', 'team-retouch.exe'));
+  const teamRetouchToken = registry.componentIntegrityToken('team-retouch', installed.path);
+  assert.match(teamRetouchToken, /^metadata\|/, 'a user component without an integrity manifest must still expose a reusable metadata token');
+  const unchangedTeamRetouchToken = registry.componentIntegrityToken('team-retouch', installed.path);
+  assert.strictEqual(unchangedTeamRetouchToken, teamRetouchToken, 'unchanged team-retouch metadata must remain reusable across refreshes');
+  assert.strictEqual(decideComponentStatusRefresh({ integrityReusable: Boolean(unchangedTeamRetouchToken && unchangedTeamRetouchToken === teamRetouchToken), lastDetailedAt: Date.now(), lastDetailedAttemptAt: Date.now() }).shouldProbeRuntime, false, 'the real packaged team-retouch definition must not trigger a runtime probe before TTL expiry');
+  fs.appendFileSync(path.join(installed.path, 'team-retouch.exe'), 'changed');
+  assert.notStrictEqual(registry.componentIntegrityToken('team-retouch', installed.path), teamRetouchToken, 'entrypoint changes must invalidate the lightweight team-retouch token');
 
   console.log('Component registry tests passed');
 } finally {

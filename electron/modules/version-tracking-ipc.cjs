@@ -1,5 +1,7 @@
+const FINGERPRINT_MAINTENANCE_IDLE_DELAY_MS = 15_000;
+
 const registerVersionTrackingIpc = context => {
-  const { backgroundTasks, copyFileAtomic, crypto, ensureWorkspace, fs, getWorkspaceDataRoot = root => root, ipcMain, path, refreshWorkspaceCatalog, runPythonEventAction, trackingScanService, versionService, workspaceCatalogs, writeLog = () => undefined } = context;
+  const { backgroundTasks, crypto, ensureWorkspace, fs, getWorkspaceDataRoot = root => root, ipcMain, path, refreshWorkspaceCatalog, runPythonEventAction, trackingScanService, versionService, workspaceCatalogs, writeLog = () => undefined } = context;
   const trackingCommitJobs = new Map();
   const trackingCommitKey = (workspaceRoot, sessionId) => `${process.platform === 'win32' ? path.resolve(workspaceRoot).toLowerCase() : path.resolve(workspaceRoot)}\0${sessionId}`;
   const trackingPreviewItems = (prepared, preview = {}) => {
@@ -104,9 +106,8 @@ const registerVersionTrackingIpc = context => {
     return stored;
   };
 
-  const queueFingerprintMaintenance = (workspaceRoot, projectName, resourcePath) => {
-    if (!backgroundTasks?.run || !trackingScanService?.syncProject) return;
-    setTimeout(() => void backgroundTasks.run({
+  const runFingerprintMaintenance = (workspaceRoot, projectName, resourcePath, restartTask = null) => backgroundTasks.run({
+      ...(restartTask?.id ? { id: restartTask.id } : {}),
       type: 'version-fingerprint-maintenance',
       title: '完善版本文件校验信息',
       dedupeKey: `version-fingerprint-maintenance:${workspaceRoot}:${projectName}`,
@@ -116,8 +117,67 @@ const registerVersionTrackingIpc = context => {
       resourceAccess: 'read',
       cancellable: false,
       resources: resourcePath ? [resourcePath] : [],
-    }, () => trackingScanService.syncProject(workspaceRoot, projectName)).catch(() => undefined), 250);
+      metadata: { workspaceRoot, projectName, resourcePath },
+    }, () => trackingScanService.syncProject(workspaceRoot, projectName));
+  const queueFingerprintMaintenance = (workspaceRoot, projectName, resourcePath) => {
+    if (!backgroundTasks?.run || !trackingScanService?.syncProject) return;
+    // Full-file hashes are maintenance metadata, not part of the interactive
+    // commit. Give the user a short window to continue editing the version tree
+    // before this low-priority disk reader reserves the same project paths.
+    const timer = setTimeout(() => void runFingerprintMaintenance(workspaceRoot, projectName, resourcePath).catch(() => undefined), FINGERPRINT_MAINTENANCE_IDLE_DELAY_MS);
+    timer.unref?.();
   };
+  backgroundTasks?.registerTypeRestartFactory?.('version-fingerprint-maintenance', task => runFingerprintMaintenance(task.metadata?.workspaceRoot, task.metadata?.projectName, task.metadata?.resourcePath, task), {
+    canRestart: task => Boolean(task.metadata?.workspaceRoot && task.metadata?.projectName),
+    autoRestart: true,
+  });
+
+  const restartTrackingTask = async interruptedTask => {
+    const workspaceRoot = ensureWorkspace(interruptedTask.metadata?.workspaceRoot);
+    const projectName = String(interruptedTask.metadata?.projectName || '');
+    const progressId = String(interruptedTask.metadata?.progressId || '');
+    const mode = interruptedTask.metadata?.mode === 'refresh' ? 'refresh' : 'compare';
+    if (!projectName || !/^[0-9a-z-]{8,128}$/i.test(progressId)) throw new Error('版本跟踪重跑参数无效');
+    if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+    const previousSessionId = String(interruptedTask.metadata?.sessionId || '');
+    if (previousSessionId) await versionService.releaseTrackingSession(workspaceRoot, previousSessionId).catch(() => undefined);
+    const created = await versionService.createTrackingSession(workspaceRoot, { projectName, progressId, mode });
+    const handle = backgroundTasks.create({
+      id: interruptedTask.id,
+      type: 'version-tracking',
+      title: mode === 'refresh' ? '刷新版本跟踪' : '比较版本跟踪',
+      message: '正在重新开始版本比较',
+      runningMessage: '正在准备版本比较',
+      cancellable: true,
+      resources: [created.parentFolderPath, created.progressFolderPath],
+      concurrencyGroup: 'disk-io',
+      concurrencyLimit: 3,
+      concurrencyWriteLimit: 2,
+      resourceAccess: 'read',
+      dedupeKey: `version-tracking:${workspaceRoot}:${progressId}`,
+      metadata: { workspaceRoot, projectName, mode, sessionId: created.sessionId, progressId: created.progressId, processedCount: 0, totalCount: 0 },
+    });
+    if (!handle.deduplicated) setTimeout(() => void (async () => {
+      try {
+        await handle.waitForStart();
+        const prepared = await trackingScanService.prepareTracking(workspaceRoot, { projectName, progressId, mode, sessionId: created.sessionId });
+        await executeTrackingCompare(workspaceRoot, prepared, handle.context);
+        handle.complete('等待确认跟踪图片');
+      } catch (error) {
+        if (handle.context.signal.aborted || error?.code === 'TASK_CANCELLED') {
+          await versionService.releaseTrackingSession(workspaceRoot, created.sessionId).catch(() => undefined);
+          handle.cancelled();
+        } else {
+          await versionService.failTrackingCommit(workspaceRoot, { sessionId: created.sessionId, error: error?.message || String(error) }).catch(() => undefined);
+          handle.fail(error);
+        }
+      }
+    })(), 0);
+    return { task: handle.task, result: { sessionId: created.sessionId, progressId: created.progressId } };
+  };
+  backgroundTasks?.registerTypeRestartFactory?.('version-tracking', restartTrackingTask, {
+    canRestart: task => Boolean(task.metadata?.workspaceRoot && task.metadata?.projectName && task.metadata?.progressId),
+  });
 
   ipcMain.handle('workspace-progress-tracking-start', async (_event, workspacePath, projectName, request = {}) => {
     try {
@@ -157,7 +217,7 @@ const registerVersionTrackingIpc = context => {
         resourceAccess: 'read',
         dedupeKey: `version-tracking:${workspaceRoot}:${progressId}`,
         metadata: {
-          sessionId: created.sessionId, progressId: created.progressId,
+          workspaceRoot, projectName, mode, sessionId: created.sessionId, progressId: created.progressId,
           processedCount: 0, totalCount: 0,
         },
       }) || {
@@ -236,27 +296,26 @@ const registerVersionTrackingIpc = context => {
   });
 
   const runTrackingCommit = async (workspaceRoot, sessionId) => {
-    const copiedPaths = [];
+    let committedBatchId;
     try {
       const plan = await versionService.getTrackingCommitPlan(workspaceRoot, sessionId);
+      if (!plan.success && plan.staleSnapshot) return plan;
       if (plan.alreadyCommitted) return await versionService.getTrackingSession(workspaceRoot, { sessionId, cursor: 0, limit: 200 });
       if (plan.repairBatchId) {
         const repaired = await versionService.retryBatchOperations(workspaceRoot, plan.repairBatchId);
         if (repaired.repairRequired) throw Object.assign(new Error('文件操作仍需修复后重试'), { batchId: plan.repairBatchId });
         return await trackingScanService.completeTrackingCommit(workspaceRoot, { sessionId, batchId: plan.repairBatchId });
       }
-      if (plan.copyMissingFromParent) {
-        for (const reference of plan.copyReferences || []) {
-          if (!reference || path.basename(reference) !== reference) throw new Error('补齐候选文件名无效');
-          const sourcePath = path.join(plan.parentFolderPath, reference);
-          const destinationPath = path.join(plan.progressFolderPath, reference);
-          if (path.dirname(sourcePath) !== plan.parentFolderPath || path.dirname(destinationPath) !== plan.progressFolderPath) throw new Error('补齐候选越出版本目录');
-          if (fs.existsSync(destinationPath)) throw new Error(`补齐目标已存在：${reference}`);
-          await copyFileAtomic(sourcePath, destinationPath);
-          copiedPaths.push(destinationPath);
+      let copiedNames = [];
+      if (plan.copyMissingFromParent && (plan.copyReferences || []).length) {
+        const copyResult = await versionService.applyTrackingCopies(workspaceRoot, sessionId);
+        copiedNames = copyResult.copiedNames || [];
+        if (!copyResult.success || copyResult.repairRequired) {
+          throw Object.assign(new Error(copyResult.copyErrors?.[0]?.error || '补齐文件需要修复后重试'), {
+            copyRepairRequired: true,
+          });
         }
       }
-      const copiedNames = copiedPaths.map(filePath => path.basename(filePath));
       if (!(plan.matches || []).length && !(plan.incrementalSources || []).length && !copiedNames.length) {
         return await trackingScanService.completeTrackingCommit(workspaceRoot, { sessionId });
       }
@@ -271,6 +330,7 @@ const registerVersionTrackingIpc = context => {
         incrementalSources: [...new Set([...(plan.incrementalSources || []), ...copiedNames])],
         matches: [...(plan.matches || []), ...copiedNames.map(name => ({ reference: name, source: name, target: name, distance: 0, confidence: '复制补齐' }))],
       });
+      committedBatchId = result.batch?.id;
       if (result.repairRequired) {
         await versionService.failTrackingCommit(workspaceRoot, {
           sessionId, batchId: result.batch?.id, error: '文件操作需要修复后重试',
@@ -281,9 +341,8 @@ const registerVersionTrackingIpc = context => {
       queueFingerprintMaintenance(workspaceRoot, plan.projectName, plan.progressFolderPath);
       return { ...completed, batch: result.batch, renamedCount: result.renamedCount || 0 };
     } catch (error) {
-      await Promise.all(copiedPaths.map(filePath => fs.promises.rm(filePath, { force: true }).catch(() => undefined)));
       if (workspaceRoot && sessionId) await versionService.failTrackingCommit(workspaceRoot, {
-        sessionId, batchId: error.batchId, error: error.message || String(error),
+        sessionId, batchId: error.batchId || committedBatchId, error: error.message || String(error),
       }).catch(() => undefined);
       return { success: false, sessionId, retryable: true, items: [], error: error.message || String(error) };
     }
@@ -297,7 +356,35 @@ const registerVersionTrackingIpc = context => {
       const key = trackingCommitKey(workspaceRoot, sessionId);
       const running = trackingCommitJobs.get(key);
       if (running) return await running;
-      const job = runTrackingCommit(workspaceRoot, sessionId);
+      const resources = versionService.getTrackingCommitResources
+        ? await versionService.getTrackingCommitResources(workspaceRoot, sessionId)
+        : { parentFolderPath: '', progressFolderPath: '' };
+      const execute = async () => {
+        const result = await runTrackingCommit(workspaceRoot, sessionId);
+        if (!result?.success) {
+          const error = new Error(result?.error || '版本跟踪提交失败');
+          error.trackingResult = result;
+          throw error;
+        }
+        return result;
+      };
+      const job = backgroundTasks?.run
+        ? backgroundTasks.run({
+          type: 'version-tracking-commit',
+          title: '提交版本跟踪',
+          message: '等待其他文件操作完成',
+          runningMessage: '正在提交版本跟踪',
+          notificationPolicy: 'progress-toast',
+          cancellable: false,
+          resources: [resources.parentFolderPath, resources.progressFolderPath].filter(Boolean),
+          concurrencyGroup: 'disk-io',
+          concurrencyLimit: 3,
+          concurrencyWriteLimit: 2,
+          resourceAccess: 'write',
+          dedupeKey: `version-tracking-commit:${workspaceRoot}:${sessionId}`,
+          metadata: { sessionId },
+        }, execute).then(execution => execution.result || { success: false, sessionId, error: '版本跟踪提交没有返回结果' })
+        : execute();
       trackingCommitJobs.set(key, job);
       try {
         return await job;
@@ -305,7 +392,7 @@ const registerVersionTrackingIpc = context => {
         if (trackingCommitJobs.get(key) === job) trackingCommitJobs.delete(key);
       }
     } catch (error) {
-      return { success: false, sessionId: String(request.sessionId || ''), retryable: true, items: [], error: error.message || String(error) };
+      return error.trackingResult || { success: false, sessionId: String(request.sessionId || ''), retryable: true, items: [], error: error.message || String(error) };
     }
   });
 

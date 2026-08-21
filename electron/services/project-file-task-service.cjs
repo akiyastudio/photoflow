@@ -19,6 +19,7 @@ const createProjectFileTask = ({
   concurrencyLimit = 3,
   concurrencyWriteLimit = 2,
   cancellable = true,
+  pausable = ['copy', 'paste', 'import', 'import-project', 'import-broll'].includes(operation),
   cancelledCode = 'FILE_OPERATION_CANCELLED',
   emitLegacyProgress = false,
 }) => {
@@ -29,6 +30,7 @@ const createProjectFileTask = ({
     message: '等待其他文件操作完成',
     runningMessage: '正在统计',
     cancellable,
+    pausable,
     concurrencyGroup,
     concurrencyLimit,
     concurrencyWriteLimit,
@@ -84,6 +86,9 @@ const createProjectFileTask = ({
       }
     },
     cancel: () => backgroundTasks?.cancel?.(operationId),
+    waitIfPaused: () => handle?.context?.waitIfPaused?.() || Promise.resolve(),
+    setPausable: pausableValue => handle?.context?.setPausable?.(pausableValue),
+    saveCheckpoint: (checkpoint, progress, message, metadata) => handle?.context?.saveCheckpoint?.(checkpoint, progress, message, metadata),
     complete: message => handle && !handle.deduplicated && handle.complete(message),
     fail: error => handle && !handle.deduplicated && handle.fail(error),
     cancelled: () => handle && !handle.deduplicated && handle.cancelled(),

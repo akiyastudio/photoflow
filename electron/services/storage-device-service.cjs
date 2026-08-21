@@ -91,6 +91,8 @@ const collectProcessOutput = (command, args, options = {}) => new Promise((resol
 });
 
 const MEDIA_ROOT_PROBE_TIMEOUT_MS = 1500;
+const WINDOWS_ENUMERATION_TIMEOUT_MS = 3000;
+const WINDOWS_DEVICE_PROBE_TIMEOUT_MS = 2500;
 const hasSupportedMediaRoot = async (mountPath, platform = process.platform) => {
   if (platform !== 'darwin') return false;
   const results = await Promise.all(['DCIM', 'PRIVATE'].map(async folderName => {
@@ -113,43 +115,76 @@ const finalizeStorageDevice = async (device, platform = process.platform) => {
   };
 };
 
-const listWindowsStorageDevices = async () => {
-  const command = `[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()
+const WINDOWS_ENUMERATION_COMMAND = `[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()
 $items = foreach ($drive in [System.IO.DriveInfo]::GetDrives()) {
   $driveType = [int]$drive.DriveType
   if ($driveType -ne 2) { continue }
-  $label = ''
-  $hasSupportedMedia = $false
-  try {
-    if ($drive.IsReady) {
-      $label = $drive.VolumeLabel
-      $hasSupportedMedia = (Test-Path -LiteralPath (Join-Path $drive.Name 'DCIM') -PathType Container) -or (Test-Path -LiteralPath (Join-Path $drive.Name 'PRIVATE') -PathType Container)
-    }
-  } catch {}
-  [PSCustomObject]@{ Name = $drive.Name; DriveType = $driveType; VolumeLabel = $label; HasSupportedMedia = $hasSupportedMedia }
+  [PSCustomObject]@{ Name = $drive.Name; DriveType = $driveType }
 }
 @($items) | ConvertTo-Json -Compress`;
+
+const windowsDeviceProbeCommand = mountPath => `[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()
+$drive = [System.IO.DriveInfo]::new('${normalizeMountPath(mountPath, 'win32')}')
+$driveType = [int]$drive.DriveType
+$label = ''
+$hasSupportedMedia = $false
+try {
+  if ($drive.IsReady) {
+    $label = $drive.VolumeLabel
+    $hasSupportedMedia = (Test-Path -LiteralPath (Join-Path $drive.Name 'DCIM') -PathType Container) -or (Test-Path -LiteralPath (Join-Path $drive.Name 'PRIVATE') -PathType Container)
+  }
+} catch {}
+[PSCustomObject]@{ Name = $drive.Name; DriveType = $driveType; VolumeLabel = $label; HasSupportedMedia = $hasSupportedMedia } | ConvertTo-Json -Compress`;
+
+const probeWindowsStorageDevice = async (device, collect = collectProcessOutput) => {
+  const drive = device.mountPath.slice(0, 2);
+  const [metadataResult, serialResult, guidResult] = await Promise.allSettled([
+    collect('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', windowsDeviceProbeCommand(device.mountPath)], { timeoutMs: WINDOWS_DEVICE_PROBE_TIMEOUT_MS }),
+    collect('cmd.exe', ['/d', '/s', '/c', 'vol', drive], { timeoutMs: WINDOWS_DEVICE_PROBE_TIMEOUT_MS }),
+    collect('cmd.exe', ['/d', '/s', '/c', 'mountvol', drive, '/L'], { timeoutMs: WINDOWS_DEVICE_PROBE_TIMEOUT_MS }),
+  ]);
+  if (metadataResult.status === 'rejected') {
+    return { recognized: false, mountPath: device.mountPath, error: `${device.mountPath}: ${errorMessage(metadataResult.reason)}` };
+  }
+  let metadata;
+  try { metadata = parseWindowsLogicalDisks(metadataResult.value)[0]; }
+  catch (error) { return { recognized: false, mountPath: device.mountPath, error: `${device.mountPath}: ${errorMessage(error)}` }; }
+  if (!metadata) return { recognized: false, mountPath: device.mountPath, error: `${device.mountPath}: 设备探测没有返回有效结果` };
+  const serialIdentity = serialResult.status === 'fulfilled' ? parseWindowsVolOutput(serialResult.value, device.mountPath) : null;
+  const guidIdentity = guidResult.status === 'fulfilled' ? parseWindowsMountvolOutput(guidResult.value, device.mountPath) : null;
+  const aliases = guidIdentity?.identityStable ? [guidIdentity.id] : [];
+  const canonicalIdentity = serialIdentity?.identityStable ? serialIdentity : parseWindowsVolOutput('', device.mountPath);
+  const finalized = await finalizeStorageDevice({ ...device, ...metadata, id: canonicalIdentity.id, identityStable: canonicalIdentity.identityStable, aliases }, 'win32');
+  const warnings = [
+    ...(serialResult.status === 'rejected' ? [`${device.mountPath} 卷序列号：${errorMessage(serialResult.reason)}`] : []),
+    ...(guidResult.status === 'rejected' ? [`${device.mountPath} 旧 GUID：${errorMessage(guidResult.reason)}`] : []),
+  ];
+  return { recognized: true, device: finalized, warnings };
+};
+
+const summarizeWindowsStorageDeviceResults = results => {
+  const devices = results.flatMap(result => result.device ? [result.device] : []);
+  const deviceErrors = results.flatMap(result => [
+    ...(result.error ? [{ mountPath: result.mountPath || '', error: result.error }] : []),
+    ...((result.warnings || []).map(error => ({ mountPath: result.device?.mountPath || result.mountPath || '', error }))),
+  ]);
+  const recognizedCount = results.filter(result => result.recognized === true).length;
+  if (deviceErrors.length && recognizedCount === 0) {
+    return { devices, complete: false, deviceErrors, error: `无法识别 Windows 存储设备：${deviceErrors.map(item => item.error).join('；')}` };
+  }
+  return { devices, complete: true, ...(deviceErrors.length ? { deviceErrors, warning: `有 ${deviceErrors.length} 个设备探测步骤失败，其他存储卡仍可使用` } : {}) };
+};
+
+const listWindowsStorageDevices = async ({ collect = collectProcessOutput } = {}) => {
   let devices;
   try {
-    const output = await collectProcessOutput('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command]);
+    const output = await collect('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_ENUMERATION_COMMAND], { timeoutMs: WINDOWS_ENUMERATION_TIMEOUT_MS });
     devices = parseWindowsLogicalDisks(output);
   } catch (error) {
     return { devices: [], complete: false, error: `无法判断 Windows 存储设备类型：${errorMessage(error)}` };
   }
-  const removableDevices = devices.filter(device => device.removable === true);
-  const identifiedDevices = await Promise.all(removableDevices.map(async device => {
-    try {
-      const output = await collectProcessOutput('cmd.exe', ['/d', '/s', '/c', 'mountvol', device.mountPath.slice(0, 2), '/L']);
-      const identified = parseWindowsMountvolOutput(output, device.mountPath);
-      if (identified.identityStable) return { ...device, id: identified.id, identityStable: true };
-    } catch { /* fall back to the filesystem serial below */ }
-    try {
-      const output = await collectProcessOutput('cmd.exe', ['/d', '/s', '/c', 'vol', device.mountPath.slice(0, 2)]);
-      const identified = parseWindowsVolOutput(output, device.mountPath);
-      return { ...device, id: identified.id, identityStable: identified.identityStable };
-    } catch { return device; }
-  }));
-  return { devices: await Promise.all(identifiedDevices.map(device => finalizeStorageDevice(device, 'win32'))), complete: true };
+  const results = await Promise.all(devices.filter(device => device.removable === true).map(device => probeWindowsStorageDevice(device, collect)));
+  return summarizeWindowsStorageDeviceResults(results);
 };
 
 const readPlistValue = (output, key, valueTag) => {
@@ -220,10 +255,13 @@ const listStorageDevices = async (platform = process.platform) => {
 
 module.exports = {
   listStorageDevices,
+  listWindowsStorageDevices,
   normalizeMountPath,
   parseDiskutilInfoPlist,
   parseWindowsLogicalDisks,
   parseWindowsMountvolOutput,
   parseWindowsVolOutput,
+  probeWindowsStorageDevice,
   summarizeDarwinStorageDeviceResults,
+  summarizeWindowsStorageDeviceResults,
 };

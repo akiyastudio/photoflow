@@ -1,7 +1,7 @@
 import { Loader2 } from 'lucide-react';
 import type { ProgressFolder } from '../../types';
 import { ImportSourceControls, type ImportMaterialKind } from '../../components/ImportSourceControls';
-import { isUserVersionKey, nextVersionKeys, normalizeTrackingPolicy, planProgressRootMove, selectableVersionParents, versionKeyMatchesParentKind, versionKeyWithFinalIndex, versionKindForParent, type VersionPanelState, type VersionRelationKind } from './versioning-v2-model';
+import { isUserVersionKey, nextVersionKeys, normalizeTrackingPolicy, planProgressRootMove, selectableVersionParents, versionKeyMatchesParentKind, versionKeyWithFinalIndex, versionKindForParent, type VersionPanelState, type VersionPanelTaskProgress, type VersionRelationKind } from './versioning-v2-model';
 
 export type VersionProgressDraft = {
   mode: 'create' | 'create-next' | 'import' | 'modify';
@@ -28,7 +28,7 @@ type VersionProgressPanelProps = {
   draft: VersionProgressDraft;
   folders: ProgressFolder[];
   state?: VersionPanelState;
-  progress?: { percentage?: number; processedCount?: number; totalCount?: number; currentName?: string };
+  progress?: VersionPanelTaskProgress;
   message?: string;
   error?: string;
   namePresets?: string[];
@@ -142,8 +142,17 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
     : <Callout title={`将创建首个版本 ${resolvedVersionLabel}`}>当前媒体类型还没有可选父版本，因此会建立第一个独立版本节点。</Callout>;
 
   if (state !== 'ready') {
-    const progressValue = Math.min(100, Math.max(0, progress?.percentage ?? (progress?.totalCount ? Math.round((progress.processedCount || 0) / progress.totalCount * 100) : 0)));
-    return <div className="space-y-4"><Callout tone={state === 'failure' ? 'danger' : state === 'result' ? 'success' : 'info'} title={stateLabel[state] || state}>{error || message || (busy ? '版本任务正在后台执行；收起面板不会中断任务。' : '版本节点及其自动关系已更新。')}</Callout>{busy && <Card><div className="flex items-center justify-between text-xs font-semibold text-slate-600"><span className="truncate">{progress?.currentName || '正在准备版本任务…'}</span><span className="ml-3 tabular-nums text-blue-600">{Math.round(progressValue)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${progressValue > 0 ? Math.max(2, progressValue) : 0}%` }}/></div><p className="mt-2 text-xs text-slate-500">{progress?.processedCount || 0} / {progress?.totalCount || '—'}{progress?.currentName ? ` · ${progress.currentName}` : ''}</p></Card>}<div className="flex justify-end"><button type="button" disabled={busy} onClick={onClose} className="dialog-primary">关闭</button></div></div>;
+    const totalCount = progress?.totalCount && progress.totalCount > 0 ? progress.totalCount : 0;
+    const processedCount = Math.max(0, progress?.processedCount || 0);
+    const hasExplicitPercentage = typeof progress?.percentage === 'number' && Number.isFinite(progress.percentage);
+    const determinate = hasExplicitPercentage || totalCount > 0;
+    const progressValue = Math.min(100, Math.max(0, hasExplicitPercentage
+      ? progress.percentage!
+      : totalCount ? Math.round(processedCount / totalCount * 100) : 0));
+    const progressStatus = totalCount
+      ? `${processedCount} / ${totalCount}`
+      : progress?.waiting ? '等待后台资源' : '处理中';
+    return <div className="space-y-4"><Callout tone={state === 'failure' ? 'danger' : state === 'result' ? 'success' : 'info'} title={stateLabel[state] || state}>{error || message || (busy ? '版本任务正在后台执行；收起面板不会中断任务。' : '版本节点及其自动关系已更新。')}</Callout>{busy && <Card><div className="flex items-center justify-between text-xs font-semibold text-slate-600"><span className="truncate">{progress?.currentName || '正在启动版本任务…'}</span><span className="ml-3 tabular-nums text-blue-600">{determinate ? `${Math.round(progressValue)}%` : progress?.waiting ? '等待中' : '处理中'}</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100">{determinate ? <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${progressValue > 0 ? Math.max(2, progressValue) : 0}%` }}/> : <div className="h-full w-1/3 animate-pulse rounded-full bg-blue-500"/>}</div><p className="mt-2 text-xs text-slate-500">{progressStatus}</p></Card>}<div className="flex justify-end"><button type="button" disabled={busy} onClick={onClose} className="dialog-primary">关闭</button></div></div>;
   }
 
   if (draft.mode === 'import' && importStep === 'source') {

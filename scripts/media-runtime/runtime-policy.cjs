@@ -20,6 +20,8 @@ const REQUIRED_FFMPEG_FLAGS = [
 const REQUIRED_GPU_FFMPEG_FLAGS = [
   '--enable-mediafoundation',
   '--enable-d3d11va',
+  '--enable-ffnvcodec',
+  '--enable-nvenc',
 ];
 
 const sha256File = filePath => crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
@@ -52,6 +54,10 @@ function validateFfmpegManifest(manifest, artifactRoot) {
   if (!x265 || !/^[a-f0-9]{40}$/i.test(String(x265.commit || ''))) throw new Error('FFmpeg 清单未声明固定版本和完整提交哈希的 x265');
   const zlib = Array.isArray(manifest.components) ? manifest.components.find(item => item.name === 'zlib') : null;
   if (!zlib || !/^[a-f0-9]{40}$/i.test(String(zlib.commit || ''))) throw new Error('FFmpeg 清单未声明固定版本和完整提交哈希的 zlib');
+  const nvCodecHeaders = Array.isArray(manifest.components) ? manifest.components.find(item => item.name === 'nv-codec-headers') : null;
+  if (manifest.schemaVersion >= 2 && (!nvCodecHeaders || !/^[a-f0-9]{40}$/i.test(String(nvCodecHeaders.commit || '')))) {
+    throw new Error('FFmpeg 清单未声明固定版本和完整提交哈希的 nv-codec-headers');
+  }
   for (const required of ['runtimeArchive', 'sourceArchive', 'licenseArchive']) {
     const entry = manifest.artifacts?.[required];
     if (!entry?.file || !entry.sha256) throw new Error(`FFmpeg 清单缺少 ${required}`);

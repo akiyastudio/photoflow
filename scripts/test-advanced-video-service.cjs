@@ -144,7 +144,11 @@ const run = async () => {
     && decoderBuildSource.includes('archiveEntries.map')
     && decoderBuildSource.includes('normalizeZipTimestamps'),
   'advanced video packaging must use deterministic metadata, timestamps, and entry ordering');
-  assert(decoderSource.includes('SetOption("gpu-api", "d3d11")') && decoderSource.includes('SetOption("hwdec", "auto-safe")'), 'advanced video playback must prefer safe D3D11 hardware decoding with automatic CPU fallback');
+  assert(decoderSource.includes('SetOption("vo", probeOnly ? "null" : "gpu")')
+    && !decoderSource.includes('"gpu-next')
+    && decoderSource.includes('SetOption("gpu-api", "d3d11")')
+    && decoderSource.includes('SetOption("hwdec", "auto-safe")'),
+  'advanced video playback must use the stable embedded D3D11 renderer with automatic CPU decoding fallback');
   assert(decoderSource.includes('SetOptionalOption("osc", "no")')
     && decoderSource.includes('result != MpvErrorOptionNotFound'),
   'advanced video playback must tolerate LGPL builds without the optional OSC script option');

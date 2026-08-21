@@ -75,7 +75,7 @@ const createArchiveService = ({ backgroundTasks, movePathAtomic, readSavedConfig
     };
   };
 
-  const archiveProject = async (workspaceRoot, projectName) => {
+  const archiveProject = async (workspaceRoot, projectName, resumeTask = null) => {
     const root = path.resolve(workspaceRoot);
     const config = readSavedConfig()?.archive || {};
     const target = String(config.targetPath || '').trim();
@@ -85,29 +85,44 @@ const createArchiveService = ({ backgroundTasks, movePathAtomic, readSavedConfig
     const catalog = await workspaceRepository.load(root);
     const project = (catalog.projects || []).find(row => !row.is_deleted && String(row.name).toLocaleLowerCase() === String(projectName).toLocaleLowerCase());
     if (!project) throw new Error('项目不存在');
-    if (parseArchive(project)?.path) throw new Error('项目已经位于归档盘');
+    if (parseArchive(project)?.path && !resumeTask?.id) throw new Error('项目已经位于归档盘');
     const source = path.resolve(root, project.relative_path);
-    if (!inside(root, source) || !await exists(source)) throw new Error('项目文件夹当前不可用');
-    const destination = path.join(path.resolve(target), await workspaceId(root), project.name);
-    if (await exists(destination)) throw new Error('归档盘中已存在同名项目');
+    if (!inside(root, source)) throw new Error('项目文件夹当前不可用');
+    const destination = path.resolve(resumeTask?.metadata?.archivePath || path.join(path.resolve(target), await workspaceId(root), project.name));
+    if (!await exists(source) && !await exists(destination)) throw new Error('项目文件夹当前不可用');
+    if (await exists(destination) && !resumeTask?.id) throw new Error('归档盘中已存在同名项目');
     const run = () => backgroundTasks.run({
+      ...(resumeTask?.id ? { id: resumeTask.id } : {}),
       type: 'project-archive',
       title: `归档项目 · ${project.name}`,
       dedupeKey: `project-archive:${project.id}`,
       cancellable: false,
+      resumable: true,
+      checkpoint: resumeTask?.checkpoint,
+      progress: resumeTask?.progress,
       resources: [source, target],
       metadata: { workspacePath: root, projectId: project.id, projectName: project.name, archivePath: destination },
+      resumeFactory: taskSnapshot => archiveProject(root, project.name, taskSnapshot),
     }, async task => {
+      const savedCheckpoint = task.getCheckpoint() || {};
       task.report(5, '正在统计并抽检源项目');
-      const expected = await scanTree(source, true);
-      task.report(20, '正在移动到归档盘');
-      await movePathAtomic(source, destination);
+      const sourceStat = await fs.promises.lstat(source).catch(() => null);
+      const expected = savedCheckpoint.expected || await scanTree(sourceStat && !sourceStat.isSymbolicLink() ? source : destination, true);
+      task.saveCheckpoint({ version: 1, phase: 'moving', expected }, 20, '正在移动到归档盘');
+      if (!await exists(destination)) {
+        if (!sourceStat || sourceStat.isSymbolicLink()) throw new Error('归档源项目不可用');
+        await movePathAtomic(source, destination);
+      }
       let linked = false;
       try {
-        task.report(75, '正在验证归档副本');
+        task.saveCheckpoint({ version: 1, phase: 'verifying', expected }, 75, '正在验证归档副本');
         await verifyDestination(destination, expected);
-        await createLink(destination, source);
-        linked = true;
+        const currentSource = await fs.promises.lstat(source).catch(() => null);
+        if (!currentSource) {
+          await createLink(destination, source);
+          linked = true;
+        } else if (!currentSource.isSymbolicLink()) throw new Error('工作区原位置已被其他目录占用');
+        task.saveCheckpoint({ version: 1, phase: 'finalizing', expected }, 90, '正在登记归档状态');
         await workspaceRepository.archiveProject(root, { name: project.name, archivePath: destination, verifiedAt: Date.now(), fileCount: expected.fileCount, bytes: expected.bytes });
         await workspaceRepository.syncCatalog(root);
         task.report(100, '项目已归档并验证');
@@ -121,31 +136,43 @@ const createArchiveService = ({ backgroundTasks, movePathAtomic, readSavedConfig
     return run();
   };
 
-  const moveBack = async (workspaceRoot, projectName, statusAfter = '后期中') => {
+  const moveBack = async (workspaceRoot, projectName, statusAfter = '后期中', resumeTask = null) => {
     const root = path.resolve(workspaceRoot);
     const catalog = await workspaceRepository.load(root);
     const project = (catalog.projects || []).find(row => !row.is_deleted && String(row.name).toLocaleLowerCase() === String(projectName).toLocaleLowerCase());
-    const archive = parseArchive(project);
+    const archive = parseArchive(project) || (resumeTask?.metadata?.archivePath ? { path: resumeTask.metadata.archivePath, ...(resumeTask.checkpoint?.expected || {}) } : null);
     if (!project || !archive?.path) throw new Error('项目没有归档位置记录');
     const sourceLink = path.resolve(root, project.relative_path);
     const archivePath = path.resolve(archive.path);
-    if (!await exists(archivePath)) throw new Error('归档盘当前未连接');
+    const archiveAvailable = await exists(archivePath);
+    const resumedSource = resumeTask?.id ? await fs.promises.lstat(sourceLink).catch(() => null) : null;
+    const moveAlreadyCommitted = Boolean(resumedSource?.isDirectory() && !resumedSource.isSymbolicLink());
+    if (!archiveAvailable && !moveAlreadyCommitted) throw new Error('归档盘当前未连接');
     const run = () => backgroundTasks.run({
+      ...(resumeTask?.id ? { id: resumeTask.id } : {}),
       type: 'project-unarchive',
       title: `移回工作盘 · ${project.name}`,
       dedupeKey: `project-unarchive:${project.id}`,
       cancellable: false,
+      resumable: true,
+      checkpoint: resumeTask?.checkpoint,
+      progress: resumeTask?.progress,
       resources: [sourceLink, archivePath],
-      metadata: { workspacePath: root, projectId: project.id, projectName: project.name, archivePath },
+      metadata: { workspacePath: root, projectId: project.id, projectName: project.name, archivePath, statusAfter },
+      resumeFactory: taskSnapshot => moveBack(root, project.name, statusAfter, taskSnapshot),
     }, async task => {
+      const savedCheckpoint = task.getCheckpoint() || {};
+      const expected = savedCheckpoint.expected || { fileCount: Number(archive.fileCount || 0), bytes: Number(archive.bytes || 0) };
       const linkStat = await fs.promises.lstat(sourceLink).catch(() => null);
       if (linkStat?.isSymbolicLink()) await fs.promises.unlink(sourceLink);
-      else if (linkStat) throw new Error('工作区原位置已被其他目录占用');
+      else if (linkStat && await exists(archivePath)) throw new Error('工作区原位置已被其他目录占用');
       try {
-        task.report(15, '正在移回工作盘');
-        await movePathAtomic(archivePath, sourceLink);
+        task.saveCheckpoint({ version: 1, phase: 'moving', expected }, 15, '正在移回工作盘');
+        if (await exists(archivePath)) await movePathAtomic(archivePath, sourceLink);
+        else if (!await exists(sourceLink)) throw new Error('归档项目和工作区项目均不可用');
         const verified = await scanTree(sourceLink, false);
-        if (verified.fileCount !== Number(archive.fileCount || verified.fileCount) || verified.bytes !== Number(archive.bytes || verified.bytes)) throw new Error('移回后的项目校验失败');
+        if ((expected.fileCount && verified.fileCount !== expected.fileCount) || (expected.bytes && verified.bytes !== expected.bytes)) throw new Error('移回后的项目校验失败');
+        task.saveCheckpoint({ version: 1, phase: 'finalizing', expected }, 90, '正在登记移回状态');
         await workspaceRepository.unarchiveProject(root, { name: project.name, status: statusAfter });
         await workspaceRepository.syncCatalog(root);
         task.report(100, '项目已移回工作盘');
@@ -158,6 +185,9 @@ const createArchiveService = ({ backgroundTasks, movePathAtomic, readSavedConfig
     }, run);
     return run();
   };
+
+  backgroundTasks.registerTypeResumeFactory?.('project-archive', task => archiveProject(task.metadata?.workspacePath, task.metadata?.projectName, task));
+  backgroundTasks.registerTypeResumeFactory?.('project-unarchive', task => moveBack(task.metadata?.workspacePath, task.metadata?.projectName, task.metadata?.statusAfter || '后期中', task));
 
   return { approveTarget, isApprovedTarget, status, archiveProject, moveBack };
 };

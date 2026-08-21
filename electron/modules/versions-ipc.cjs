@@ -19,6 +19,28 @@ const retryDatabaseLocked = async (operation, attempts = 4) => {
 
 const registerVersionIpc = context => {
   const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, projectVirtualPaths, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
+  const runVersionMediaRescan = (workspaceRoot, projectName, projectPath, restartTask = null) => backgroundTasks.run({
+    ...(restartTask?.id ? { id: restartTask.id } : {}),
+    type: 'version-media-rescan',
+    title: '更新版本媒体索引',
+    dedupeKey: `version-media-rescan:${workspaceRoot}:${projectName}`,
+    concurrencyGroup: 'disk-io',
+    concurrencyLimit: 3,
+    concurrencyWriteLimit: 2,
+    resourceAccess: 'read',
+    cancellable: false,
+    resources: [projectPath],
+    metadata: { workspaceRoot, projectName, projectPath },
+  }, async task => {
+    task.report(5, '正在扫描项目媒体文件');
+    const result = await mediaScanService.syncProject(workspaceRoot, projectName);
+    task.report(95, '正在完成版本媒体索引');
+    return result;
+  });
+  backgroundTasks?.registerTypeRestartFactory?.('version-media-rescan', task => runVersionMediaRescan(task.metadata?.workspaceRoot, task.metadata?.projectName, task.metadata?.projectPath, task), {
+    canRestart: task => Boolean(task.metadata?.workspaceRoot && task.metadata?.projectName && task.metadata?.projectPath),
+    autoRestart: true,
+  });
   const listRatedProjectMedia = projectPath => mediaRatingService.listProject(projectPath);
   const teamDataDirectory = (workspaceRoot, photoId, baseVersionId) => path.join(getWorkspaceDataRoot(workspaceRoot), 'team-retouch', photoId, baseVersionId);
   const deliveryName = (photo, basePath) => path.parse(photo?.originalName || photo?.displayName || basePath).name;
@@ -310,7 +332,7 @@ const registerVersionIpc = context => {
     return removed.size;
   };
 
-  const queueCleanupArtifacts = (workspaceRoot, cleanup = {}, title = '清理版本内部文件') => {
+  const queueCleanupArtifacts = (workspaceRoot, cleanup = {}, title = '清理版本内部文件', restartTask = null) => {
     const snapshot = {
       deletedVersions: [...(cleanup.deletedVersions || [])],
       teamArtifactPaths: [...(cleanup.teamArtifactPaths || [])],
@@ -329,17 +351,23 @@ const registerVersionIpc = context => {
     }
     const dedupeKey = `internal-artifact-cleanup:${crypto.randomUUID()}`;
     const run = () => backgroundTasks.run({
+      ...(restartTask?.id ? { id: restartTask.id } : {}),
       type: 'internal-artifact-cleanup',
       title,
       dedupeKey,
       cancellable: false,
-      metadata: { workspaceRoot },
+      metadata: { workspaceRoot, snapshot, title },
     }, execute, run);
+    if (restartTask?.id) return run();
     setTimeout(() => void run().catch(error => writeLog('warn', 'Deferred artifact cleanup failed', { error: error.message || String(error) })), 250);
   };
 
-  const queueFilesystemCleanup = (paths, title = '清理旧工作流文件') => {
-    const targets = [...new Set((paths || []).filter(Boolean).map(candidate => path.resolve(candidate)))];
+  const queueFilesystemCleanup = (paths, title = '清理旧工作流文件', scope = {}, restartTask = null) => {
+    const allowedRoot = scope.projectPath ? path.resolve(scope.projectPath) : '';
+    const targets = [...new Set((paths || []).filter(Boolean).map(candidate => path.resolve(candidate)))].filter(target => {
+      const relative = allowedRoot ? path.relative(allowedRoot, target) : '';
+      return Boolean(relative && !relative.startsWith('..') && !path.isAbsolute(relative) && path.basename(target).startsWith('.photoflow-team-workflow-previous-'));
+    });
     if (!targets.length) return;
     const execute = async task => {
       task?.report(20, title);
@@ -355,13 +383,24 @@ const registerVersionIpc = context => {
     }
     const dedupeKey = `internal-filesystem-cleanup:${crypto.randomUUID()}`;
     const run = () => backgroundTasks.run({
+      ...(restartTask?.id ? { id: restartTask.id } : {}),
       type: 'internal-filesystem-cleanup',
       title,
       dedupeKey,
       cancellable: false,
+      metadata: { targets, title, workspacePath: scope.workspacePath, status: scope.status, projectName: scope.projectName },
     }, execute, run);
+    if (restartTask?.id) return run();
     setTimeout(() => void run().catch(error => writeLog('warn', 'Deferred filesystem cleanup failed', { error: error.message || String(error) })), 250);
   };
+  backgroundTasks?.registerTypeRestartFactory?.('internal-artifact-cleanup', task => queueCleanupArtifacts(ensureWorkspace(task.metadata?.workspaceRoot), task.metadata?.snapshot || {}, task.metadata?.title || task.title, task));
+  backgroundTasks?.registerTypeRestartFactory?.('internal-filesystem-cleanup', task => {
+    const workspaceRoot = ensureWorkspace(task.metadata?.workspacePath);
+    const projectPath = path.resolve(getProjectPath(workspaceRoot, task.metadata?.status, task.metadata?.projectName));
+    return queueFilesystemCleanup(task.metadata?.targets || [], task.metadata?.title || task.title, { workspacePath: workspaceRoot, status: task.metadata?.status, projectName: task.metadata?.projectName, projectPath }, task);
+  }, {
+    canRestart: task => Boolean(task.metadata?.workspacePath && task.metadata?.status && task.metadata?.projectName && task.metadata?.targets?.length),
+  });
 
   ipcMain.handle('workspace-media-versions', async (_event, workspacePath, status, projectName, relativePath) => {
     try {
@@ -856,10 +895,30 @@ const registerVersionIpc = context => {
   ipcMain.handle('workspace-progress-update', async (_event, workspacePath, status, projectName, request = {}) => {
     const completedMoves = [];
     const stagedMoves = [];
+    let mutationHandle = null;
+    let mutationToken = '';
+    let mutationWorkspaceRoot = '';
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
+      mutationWorkspaceRoot = workspaceRoot;
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+      mutationHandle = backgroundTasks?.create?.({
+        type: 'version-tree-update',
+        title: '修改版本树',
+        message: '等待版本比较和其他文件操作完成',
+        runningMessage: '正在修改版本树',
+        cancellable: false,
+        resources: [projectPath],
+        concurrencyGroup: 'disk-io',
+        concurrencyLimit: 3,
+        concurrencyWriteLimit: 2,
+        resourceAccess: 'write',
+        metadata: { projectName, progressId: String(request.progressId || '') },
+      }) || null;
+      await mutationHandle?.waitForStart?.();
+      const mutation = await versionService.beginProgressTreeUpdate(workspaceRoot, { projectName });
+      mutationToken = mutation.mutationToken;
       const listed = await versionService.listProgress(workspaceRoot, projectName);
       const progressFolders = Array.isArray(listed.progressFolders) ? listed.progressFolders : [];
       const current = progressFolders.find(progress => progress.id === request.progressId);
@@ -906,7 +965,9 @@ const registerVersionIpc = context => {
           parentProgressId: progress.id === current.id ? requestedParentId : progress.parentProgressId || null,
           displayName: nextDisplayName,
           previousFolderPath: path.resolve(progress.folderPath),
-          folderPath: request.preserveFolderPath ? path.resolve(progress.folderPath) : path.resolve(projectPath, nextDisplayName),
+          folderPath: request.preserveFolderPath || progress.externalLinkRelativePath
+            ? path.resolve(progress.folderPath)
+            : path.resolve(projectPath, nextDisplayName),
           trackingEnabled: progress.id === current.id
             ? request.trackingEnabled === undefined ? Boolean(current.trackingEnabled) : Boolean(request.trackingEnabled)
             : Boolean(progress.trackingEnabled),
@@ -969,35 +1030,21 @@ const registerVersionIpc = context => {
       }));
       const updated = await versionService.updateProgressTree(workspaceRoot, {
         projectName,
+        mutationToken,
         primaryProgressId: replacementTarget?.id || current.id,
         replacementProgressId: replacementTarget ? current.id : undefined,
         updates: databaseUpdates,
       });
-      // Updating/renaming the progress tree is already atomic. A full project
-      // media rescan is read-only filesystem maintenance and can touch thousands
-      // of files. Do not reserve the whole project path for it: that would block
-      // a focused version comparison on a child folder until the entire scan
-      // finishes. The isolated scan worker/database make both operations safe to
-      // run concurrently, while the shared disk group still limits total load.
-      if (backgroundTasks?.run && mediaScanService?.syncProject) setTimeout(() => void backgroundTasks.run({
-        type: 'version-media-rescan',
-        title: '更新版本媒体索引',
-        dedupeKey: `version-media-rescan:${workspaceRoot}:${projectName}`,
-        concurrencyGroup: 'disk-io',
-        concurrencyLimit: 3,
-        concurrencyWriteLimit: 2,
-        resourceAccess: 'read',
-        cancellable: false,
-        resources: [projectPath],
-      }, async task => {
-        task.report(5, '正在扫描项目媒体文件');
-        const result = await mediaScanService.syncProject(workspaceRoot, projectName);
-        task.report(95, '正在完成版本媒体索引');
-        return result;
-      }).catch(error => {
+      // The write reservation above ends with the tree mutation. The deferred
+      // project rescan is read-only, so its project-wide read reservation remains
+      // compatible with focused version comparisons while still excluding later
+      // filesystem writers.
+      if (backgroundTasks?.run && mediaScanService?.syncProject) setTimeout(() => void runVersionMediaRescan(workspaceRoot, projectName, projectPath).catch(error => {
         writeLog('warn', 'Deferred progress-tree media rescan failed', { projectName, error: error.message || String(error) });
       }), 250);
       const updatedFolderPath = updates.find(update => update.id === current.id)?.folderPath || current.folderPath;
+      mutationToken = '';
+      mutationHandle?.complete?.('版本树已更新');
       return {
         ...updated,
         folder: {
@@ -1022,6 +1069,12 @@ const registerVersionIpc = context => {
           writeLog('error', 'Unable to restore staged progress folder', { path: move.temporaryPath, error: rollbackError.message || String(rollbackError) });
         }
       }
+      if (mutationToken && mutationWorkspaceRoot) {
+        await versionService.finishProgressTreeUpdate(mutationWorkspaceRoot, { projectName, mutationToken }).catch(finishError => {
+          writeLog('error', 'Unable to release progress-tree mutation lease', { projectName, error: finishError.message || String(finishError) });
+        });
+      }
+      mutationHandle?.fail?.(error);
       return { success: false, error: error.message || String(error) };
     }
   });
@@ -2139,7 +2192,7 @@ const registerVersionIpc = context => {
       if (backupDirectory) {
         const previousWorkflowDirectory = backupDirectory;
         backupDirectory = '';
-        queueFilesystemCleanup([previousWorkflowDirectory], '清理旧的团队工作流目录');
+        queueFilesystemCleanup([previousWorkflowDirectory], '清理旧的团队工作流目录', { workspacePath, status, projectName, projectPath });
       }
       publish({ state: 'completed', phase: 'complete', progress: 100, completedFiles: plan.files.length, copiedBytes: plan.totalBytes, message: '工作流程生成完成' }, true);
       return { success: true, operationId, count: plan.files.length, groupCount: manifest.groups.length, path: outputDirectory };

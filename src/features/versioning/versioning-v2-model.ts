@@ -1,9 +1,16 @@
-import type { ProgressFolder, VersionGraphEdge } from '../../types';
+import type { BackgroundTask, ProgressFolder, VersionGraphEdge } from '../../types';
 
 export type VersionPanelKind = 'create' | 'create-next' | 'import' | 'modify' | 'confirm';
 export type VersionPanelState = 'ready' | 'move_confirm' | 'processing' | 'waiting_confirmation' | 'loading' | 'committing' | 'result' | 'failure';
 export type VersionRelationKind = 'main' | 'auxiliary';
 export type VersionTrackingPolicy = Pick<ProgressFolder, 'trackingEnabled' | 'renameFromParent' | 'copyMissingFromParent'>;
+export type VersionPanelTaskProgress = {
+  percentage?: number;
+  processedCount?: number;
+  totalCount?: number;
+  currentName?: string;
+  waiting?: boolean;
+};
 
 export const VERSION_PANEL_DEFINITIONS: Record<VersionPanelKind, { title: string; states: readonly VersionPanelState[] }> = {
   create: { title: '新建进度', states: ['ready', 'processing', 'result', 'failure'] },
@@ -11,6 +18,32 @@ export const VERSION_PANEL_DEFINITIONS: Record<VersionPanelKind, { title: string
   import: { title: '导入进度', states: ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure'] },
   modify: { title: '修改进度', states: ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure'] },
   confirm: { title: '确认版本匹配', states: ['loading', 'waiting_confirmation', 'committing', 'result', 'failure'] },
+};
+
+const taskMetadataCount = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0
+  ? value
+  : undefined;
+
+export const versionTreeTaskPanelProgress = (
+  tasks: readonly BackgroundTask[],
+  projectName: string,
+  progressId: string,
+): VersionPanelTaskProgress | undefined => {
+  if (!progressId) return undefined;
+  const task = tasks.find(candidate => candidate.type === 'version-tree-update'
+    && candidate.metadata?.projectName === projectName
+    && candidate.metadata?.progressId === progressId
+    && (candidate.state === 'queued' || candidate.state === 'running'));
+  if (!task) return undefined;
+  const processedCount = taskMetadataCount(task.metadata?.processedCount);
+  const totalCount = taskMetadataCount(task.metadata?.totalCount);
+  return {
+    ...(task.progress > 0 ? { percentage: task.progress } : {}),
+    ...(processedCount !== undefined ? { processedCount } : {}),
+    ...(totalCount !== undefined ? { totalCount } : {}),
+    currentName: task.message || (task.state === 'queued' ? '正在等待其他文件操作完成…' : '正在修改版本树…'),
+    waiting: task.state === 'queued',
+  };
 };
 
 export const normalizeVersionPath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');

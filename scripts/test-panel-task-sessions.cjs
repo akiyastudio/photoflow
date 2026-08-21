@@ -17,6 +17,7 @@ const topToastNoticeModelSource = read('src/features/app/top-toast-notice-model.
 const projectPanelLifecycleSource = read('src/features/workspace/project-panel-lifecycle.ts');
 const panelTaskSessionModelSource = read('src/features/background-tasks/panel-task-session-model.ts');
 const workspace = read('src/features/workspace/ProjectWorkspace.tsx');
+const projectToolModal = read('src/features/workspace/ProjectToolModal.tsx');
 
 const compiledFileTransferToast = ts.transpileModule(fileTransferToast, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
 
@@ -26,6 +27,7 @@ new Function('module', 'exports', 'require', compiledToastModel)(toastModelModul
 const {
   isActiveProjectFileTask,
   isPointerInsideTaskIndicator,
+  mergeBackgroundTaskSnapshots,
   pruneFinishedTaskToastIds,
   selectProjectFileTaskToasts,
   setTaskToastMinimized,
@@ -58,7 +60,7 @@ assert.strictEqual(converterTriggerAction(true, false), 'close', 'an already-ope
 assert.strictEqual(converterTriggerAction(true, true), 'restore', 'an open running converter must remain active');
 assert.strictEqual(converterTriggerAction(false, true), 'restore', 'a minimized running converter must be restored without starting another inspection');
 
-const makeTask = (id, operation, state, createdAt) => ({ id, type: 'project-file-operation', title: id, state, progress: 0, message: '', cancellable: true, retryable: false, metadata: { operation }, createdAt, updatedAt: createdAt, startedAt: 0, finishedAt: 0 });
+const makeTask = (id, operation, state, createdAt) => ({ id, type: 'project-file-operation', title: id, state, progress: 0, message: '', cancellable: true, retryable: false, resumable: false, resumeAvailable: false, restartAvailable: false, capabilities: { cancellable: true, pausable: false, resumable: false, retryable: false }, resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', metadata: { operation }, createdAt, updatedAt: createdAt, startedAt: 0, finishedAt: 0 });
 const moveTask = makeTask('move', 'move', 'running', 20);
 const trashTask = makeTask('trash', 'trash', 'queued', 10);
 const pasteTask = makeTask('paste', 'paste', 'running', 5);
@@ -67,6 +69,11 @@ assert(!isActiveProjectFileTask(makeTask('done', 'move', 'completed', 1)), 'term
 assert.deepStrictEqual(selectProjectFileTaskToasts([trashTask, moveTask, pasteTask], new Set()).visible.map(task => task.id), ['paste', 'move', 'trash'], 'running tasks must precede queued tasks and use creation order within a state');
 assert.deepStrictEqual(selectProjectFileTaskToasts([{ ...trashTask, createdAt: 9_600 }], new Set(), 4, 10_000).visible, [], 'short queued waits must not flash a scheduler toast');
 assert.deepStrictEqual(selectProjectFileTaskToasts([{ ...trashTask, createdAt: 9_000 }], new Set(), 4, 10_000).visible.map(task => task.id), ['trash'], 'a real queued wait must become visible after the grace period');
+const retainedRunningTask = { ...moveTask, id: 'long-running', createdAt: 1, updatedAt: 1 };
+const completedHistory = Array.from({ length: 205 }, (_, index) => ({ ...makeTask(`done-${index}`, 'copy', 'completed', 1000 - index), updatedAt: 1000 - index }));
+const mergedSnapshots = completedHistory.reduce((current, task) => mergeBackgroundTaskSnapshots(current, [task]), [retainedRunningTask]);
+assert(mergedSnapshots.some(task => task.id === retainedRunningTask.id), 'the renderer task-history cap must never evict an older active task');
+assert.equal(mergedSnapshots.length, 200, 'terminal task history must remain bounded after retaining active tasks');
 const copiedFilesMarkup = renderToStaticMarkup(React.createElement(FileTransferToastItem, { task: { ...pasteTask, metadata: { operation: 'paste', filesCopied: 3, totalFiles: 10 } }, onMinimize: () => {} }));
 assert(copiedFilesMarkup.includes('3/10 文件'), 'copy-style task metadata must render its actual file count with the file unit');
 const processedItemsMarkup = renderToStaticMarkup(React.createElement(FileTransferToastItem, { task: { ...moveTask, metadata: { operation: 'move', processedCount: 3, totalCount: 10 } }, onMinimize: () => {} }));
@@ -163,15 +170,16 @@ assert(taskCenter.includes('onBackgroundTaskChanged') && taskCenter.includes('re
 assert(taskStatus.includes('usePanelTaskReporter') && taskStatus.includes("const state: TaskCenterProgressReport['state'] = isRunning ? 'running'"), 'the shared progress component must report panel task state without per-panel adapters');
 assert(indicator.includes('useTaskCenter()') && !indicator.includes('onBackgroundTaskChanged('), 'the background indicator must consume the shared provider instead of creating a duplicate subscription');
 assert(workspace.includes('mountedPanels.has') && workspace.includes("open={panel === 'research'}") && workspace.includes("open={panel === 'converter'}"), 'component panels must stay mounted while their modal is minimized');
-assert(workspace.includes("aria-label={effectiveBusy ? '收起到后台' : '关闭'}") && workspace.includes('if (event.target === event.currentTarget && !effectiveBusy)'), 'running panels must minimize explicitly and ignore accidental backdrop clicks');
+assert(projectToolModal.includes("aria-label={effectiveBusy ? '收起到后台' : '关闭'}") && projectToolModal.includes('if (event.target === event.currentTarget && !effectiveBusy)'), 'running panels must minimize explicitly and ignore accidental backdrop clicks');
 assert(indicator.includes('visiblePanelTasks') && indicator.includes('恢复面板') && workspace.includes('photoflow:restore-panel-task'), 'minimized component tasks must restore through the single global task center');
 assert(taskCenter.includes('minimizedToastTaskIds') && taskCenter.includes('minimizeTaskToast') && taskCenter.includes('restoreTaskToast') && taskCenter.includes('isTaskToastMinimized') && !taskCenter.includes('localStorage'), 'file-transfer toast minimization must be session-only shared task-center state');
 assert(taskCenter.includes('pruneFinishedTaskToastIds(current, backgroundTasks)'), 'terminal background tasks must be removed from the minimized-toast set');
 assert(indicator.includes('isTaskToastMinimized(task.id)') && indicator.includes('显示进度') && indicator.includes('restoreTaskToast(task.id)'), 'the background task indicator must restore the current minimized file-transfer task');
-assert(fileTransferToast.includes('Minimize2') && fileTransferToast.includes('aria-label="收起到任务中心"') && fileTransferToast.includes('<span>后台</span>') && !fileTransferToast.includes('minimizeTaskToast(task.id)} className="shrink-0 rounded-md px-2.5 py-1.5 text-xs font-bold text-red'), 'minimizing a file-transfer toast must use a clearly labeled control rather than the cancel action');
+assert(fileTransferToast.includes('Minimize2') && fileTransferToast.includes('aria-label="收起到任务中心"') && fileTransferToast.includes('title="收起到任务中心，任务会继续运行"') && !fileTransferToast.includes('minimizeTaskToast(task.id)} className="shrink-0 rounded-md px-2.5 py-1.5 text-xs font-bold text-red'), 'minimizing a file-transfer toast must use a clearly labeled control rather than the cancel action');
 assert(indicator.includes('triggerRef') && indicator.includes('panelRef') && indicator.includes("document.addEventListener('pointerdown', handlePointerDown)") && indicator.includes("document.removeEventListener('pointerdown', handlePointerDown)"), 'the task popover must register and clean up one document pointer boundary listener while open');
+assert(indicator.includes('createPortal(') && indicator.includes('document.body') && indicator.includes('className="fixed z-[600]'), 'the task popover must escape the titlebar stacking context so workspace tool surfaces cannot cover it');
 assert(main.includes('<TaskCenterProvider>') && !main.includes('<FileTransferToast') && app.includes('useTopToastStack()') && topToastStack.includes('className="top-toast-stack"') && topToastStack.includes('<FileTransferToast stackRef={stackRef}/>') && topToastStack.includes('notices.map('), 'ordinary notices and file task progress must render in one shared top stack');
-assert(workspace.includes("const reportBusyAsPanelTask = !panelKind.startsWith('version-')") && workspace.includes('progressSubmittingRef.current'), 'version operations must not create a duplicate panel task and must synchronously reject repeated submissions');
+assert(projectToolModal.includes("const reportBusyAsPanelTask = !panelKind.startsWith('version-')") && workspace.includes('progressSubmittingRef.current'), 'version operations must not create a duplicate panel task and must synchronously reject repeated submissions');
 const closePngConverter = workspace.slice(workspace.indexOf('const closePngConverterPanel'), workspace.indexOf('const openPngConverter'));
 assert(closePngConverter.includes('conversionInspectionSequenceRef.current += 1') && closePngConverter.includes('setConversionCollecting(false)') && closePngConverter.includes('setPanel(null)'), 'closing an idle converter must invalidate source inspection and clear its collecting state');
 assert(workspace.includes("triggerAction === 'restore'") && workspace.includes("setPanel('converter')") && workspace.includes('onClose={closePngConverterPanel}'), 'running converter triggers must restore the persistent panel while every real close uses the same cleanup path');

@@ -384,13 +384,14 @@ const createBackupService = context => {
     };
   };
 
-  const cleanup = async workspaceRoot => {
+  const cleanup = async (workspaceRoot, restartTask = null) => {
     const backupConfig = readSavedConfig()?.backup || {};
     const target = String(backupConfig.targetPath || '').trim();
     if (!target || !isApprovedTarget(target)) throw new Error('备份位置当前不可用');
     const root = path.resolve(workspaceRoot);
     const workspaceId = await readWorkspaceId(root);
     const run = () => backgroundTasks.run({
+      ...(restartTask?.id ? { id: restartTask.id } : {}),
       type: 'backup-cleanup',
       title: '清理备份空间',
       dedupeKey: `backup-cleanup:${target}`,
@@ -416,7 +417,7 @@ const createBackupService = context => {
     return run();
   };
 
-  const runBackup = async (workspaceRoot, reason = 'manual') => {
+  const runBackup = async (workspaceRoot, reason = 'manual', resumeTask = null) => {
     const config = readSavedConfig();
     const backupConfig = config?.backup || {};
     const target = String(backupConfig.targetPath || '').trim();
@@ -425,12 +426,17 @@ const createBackupService = context => {
     const root = path.resolve(workspaceRoot);
     if (inside(root, target) || inside(target, root)) throw new Error('备份位置不能位于工作区内部，也不能包含工作区');
     const run = () => backgroundTasks.run({
+      ...(resumeTask?.id ? { id: resumeTask.id } : {}),
       type: 'workspace-backup',
       title: '备份工作区',
       dedupeKey: `workspace-backup:${root}`,
       cancellable: true,
       resources: [root, target],
+      resumable: true,
+      checkpoint: resumeTask?.checkpoint,
+      progress: resumeTask?.progress,
       metadata: { workspacePath: root, targetPath: target, reason },
+      resumeFactory: snapshot => runBackup(root, reason, snapshot),
     }, async task => {
       await ensureTargetConnection(target, backupConfig);
       await ensureStore(target);
@@ -577,6 +583,10 @@ const createBackupService = context => {
       let reusedBytes = 0;
       let reusedFiles = 0;
       let completedFiles = 0;
+      const savedCheckpoint = task.getCheckpoint() || {};
+      const checkpointInputs = new Map(Array.isArray(savedCheckpoint.inputs) ? savedCheckpoint.inputs : []);
+      const maxPersistedCheckpointInputs = 4096;
+      let lastCheckpointAt = 0;
       const projectAssociations = new Map();
       for (const project of databaseInfo.projects || []) {
         const projectPrefix = normalizeKey(project.relativePath).replace(/\/$/, '') + '/';
@@ -603,7 +613,8 @@ const createBackupService = context => {
       for (const input of inputs) {
         task.throwIfCancelled();
         const inputKey = `${input.scope}:${normalizeKey(input.relative)}`;
-        const previous = previousByInput.get(inputKey);
+        const checkpointEntry = checkpointInputs.get(inputKey);
+        const previous = checkpointEntry || previousByInput.get(inputKey);
         const sourceStat = await fs.promises.stat(input.absolute);
         const canReuse = previous
           && validObjectHash(previous.hash)
@@ -627,6 +638,17 @@ const createBackupService = context => {
           }, backupConfig);
         }
         completedFiles += 1;
+        checkpointInputs.set(inputKey, { hash: result.hash, size: result.size, mtimeMs: result.mtimeMs });
+        while (checkpointInputs.size > maxPersistedCheckpointInputs) checkpointInputs.delete(checkpointInputs.keys().next().value);
+        const checkpointProgress = totalBytes ? 5 + copiedBytes / totalBytes * 90 : 95;
+        const checkpointDue = completedFiles === inputs.length || completedFiles % 64 === 0 || Date.now() - lastCheckpointAt >= 2000;
+        if (checkpointDue) {
+          lastCheckpointAt = Date.now();
+          const compactInputs = [...checkpointInputs.entries()].slice(-maxPersistedCheckpointInputs);
+          task.saveCheckpoint({ version: 1, phase: 'storing-files', inputs: compactInputs, completedFiles }, checkpointProgress, `已保存 ${completedFiles}/${inputs.length} 个文件`, {
+            copiedBytes: Math.max(0, transferredBytes), reusedBytes, totalBytes, completedFiles, totalFiles: inputs.length,
+          });
+        }
         if (input.scope === 'database') {
           databaseStored = result;
           continue;
@@ -786,31 +808,48 @@ const createBackupService = context => {
     }
   };
 
-  const restoreWorkspace = async (workspaceRoot, snapshot, targetRoot) => {
+  const restoreWorkspace = async (workspaceRoot, snapshot, targetRoot, resumeTask = null) => {
     const config = readSavedConfig();
     const target = String(config?.backup?.targetPath || '').trim();
     if (!isApprovedTarget(target)) throw new Error('备份位置未经授权');
     const destination = path.resolve(targetRoot);
     if (workspaceRoot && inside(path.resolve(workspaceRoot), destination)) throw new Error('恢复位置不能位于当前工作区内部');
     const existing = await fs.promises.readdir(destination).catch(() => []);
-    if (existing.length) throw new Error('请选择一个空文件夹作为恢复位置');
+    const incompleteMarker = path.join(destination, '.photoflow-restore-incomplete');
+    if (existing.length && !(resumeTask?.id && await exists(incompleteMarker))) throw new Error('请选择一个空文件夹作为恢复位置');
     const manifest = await manifestFor(target, snapshot);
     const run = () => backgroundTasks.run({
+      ...(resumeTask?.id ? { id: resumeTask.id } : {}),
       type: 'workspace-restore',
       title: '恢复工作区',
       dedupeKey: `workspace-restore:${destination}`,
       cancellable: true,
       resources: [destination, target],
-      metadata: { snapshotId: snapshot, targetPath: destination },
+      resumable: true,
+      checkpoint: resumeTask?.checkpoint,
+      progress: resumeTask?.progress,
+      metadata: { workspacePath: workspaceRoot ? path.resolve(workspaceRoot) : '', snapshotId: snapshot, targetPath: destination },
+      resumeFactory: taskSnapshot => restoreWorkspace(workspaceRoot, snapshot, destination, taskSnapshot),
     }, async task => {
       await fs.promises.mkdir(destination, { recursive: true });
       await fs.promises.writeFile(path.join(destination, '.photoflow-restore-incomplete'), String(Date.now()), 'utf8');
       const workspaceEntries = manifest.files.filter(item => item.scope === 'workspace' && item.path !== '.photoflow-workspace-id');
+      const savedCheckpoint = task.getCheckpoint() || {};
+      const newId = String(savedCheckpoint.newWorkspaceId || crypto.randomUUID().replaceAll('-', ''));
+      const completedWorkspace = new Set(Array.isArray(savedCheckpoint.completedWorkspace) ? savedCheckpoint.completedWorkspace : []);
+      const completedData = new Set(Array.isArray(savedCheckpoint.completedData) ? savedCheckpoint.completedData : []);
+      task.saveCheckpoint({ version: 1, phase: 'preparing', newWorkspaceId: newId, completedWorkspace: [...completedWorkspace], completedData: [...completedData] }, Math.max(1, Number(resumeTask?.progress) || 1), '正在准备恢复工作区');
       let completed = 0;
       for (const entry of workspaceEntries) {
-        await materialize(target, entry, safeDestination(destination, entry.path), task);
+        const entryDestination = safeDestination(destination, entry.path);
+        const existingStat = completedWorkspace.has(entry.path) ? await fs.promises.stat(entryDestination).catch(() => null) : null;
+        const checkpointValid = existingStat?.isFile() && existingStat.size === Number(entry.size)
+          && await sha256File(entryDestination).then(hash => hash === entry.hash, () => false);
+        if (!checkpointValid) await materialize(target, entry, entryDestination, task);
+        completedWorkspace.add(entry.path);
         completed += 1;
-        task.report(5 + completed / Math.max(1, workspaceEntries.length) * 70, `正在恢复项目文件 ${completed}/${workspaceEntries.length}`);
+        const progress = 5 + completed / Math.max(1, workspaceEntries.length) * 70;
+        task.saveCheckpoint({ version: 1, phase: 'workspace-files', newWorkspaceId: newId, completedWorkspace: [...completedWorkspace], completedData: [...completedData] }, progress, `正在恢复项目文件 ${completed}/${workspaceEntries.length}`, { completedFiles: completed, totalFiles: workspaceEntries.length });
       }
       const materializedArchiveIds = new Set(manifest.materializedArchiveProjectIds || []);
       for (const project of manifest.projects || []) {
@@ -821,13 +860,18 @@ const createBackupService = context => {
         await fs.promises.mkdir(path.dirname(linkPath), { recursive: true });
         await fs.promises.symlink(archivePath, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
       }
-      const newId = crypto.randomUUID().replaceAll('-', '');
       await fs.promises.writeFile(markerPath(destination), `${newId}\n`, 'utf8');
       const newDataRoot = getWorkspaceDataRoot(destination);
       const dataEntries = manifest.files.filter(item => item.scope === 'workspace-data');
       for (const [index, entry] of dataEntries.entries()) {
-        await materialize(target, entry, safeDestination(newDataRoot, entry.path), task);
-        task.report(75 + (index + 1) / Math.max(1, dataEntries.length) * 10, `正在恢复内部数据 ${index + 1}/${dataEntries.length}`);
+        const entryDestination = safeDestination(newDataRoot, entry.path);
+        const existingStat = completedData.has(entry.path) ? await fs.promises.stat(entryDestination).catch(() => null) : null;
+        const checkpointValid = existingStat?.isFile() && existingStat.size === Number(entry.size)
+          && await sha256File(entryDestination).then(hash => hash === entry.hash, () => false);
+        if (!checkpointValid) await materialize(target, entry, entryDestination, task);
+        completedData.add(entry.path);
+        const progress = 75 + (index + 1) / Math.max(1, dataEntries.length) * 10;
+        task.saveCheckpoint({ version: 1, phase: 'workspace-data', newWorkspaceId: newId, completedWorkspace: [...completedWorkspace], completedData: [...completedData] }, progress, `正在恢复内部数据 ${index + 1}/${dataEntries.length}`);
       }
       const operationsEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'operations.sqlite3');
       if (operationsEntry && getWorkspaceOperationsDatabasePath) {
@@ -882,16 +926,17 @@ const createBackupService = context => {
         workspaceEntries.filter(entry => path.extname(entry.path).toLowerCase() === '.lnk').map(entry => safeDestination(destination, entry.path)),
         task,
       );
-      await fs.promises.rm(path.join(destination, '.photoflow-restore-incomplete'), { force: true });
       const savedConfig = readSavedConfig();
       await fs.promises.writeFile(getConfigPath(), JSON.stringify({ ...savedConfig, ...restoredConfig, workspacePath: destination, backup: savedConfig?.backup || restoredConfig.backup }, null, 2), 'utf8');
       task.report(100, '工作区恢复完成');
       return { workspacePath: destination };
     }, run);
-    return run();
+    const execution = await run();
+    if (execution.task?.state === 'completed' && backgroundTasks.flush?.() !== false) await fs.promises.rm(incompleteMarker, { force: true });
+    return execution;
   };
 
-  const restoreProject = async (workspaceRoot, snapshot, projectId) => {
+  const restoreProject = async (workspaceRoot, snapshot, projectId, resumeTask = null) => {
     const config = readSavedConfig();
     const target = String(config?.backup?.targetPath || '').trim();
     if (!isApprovedTarget(target)) throw new Error('备份位置未经授权');
@@ -901,21 +946,37 @@ const createBackupService = context => {
     if (!project) throw new Error('备份快照中找不到该项目');
     const projectRoot = path.resolve(root, project.relativePath);
     if (!inside(root, projectRoot) || projectRoot === root) throw new Error('备份中的项目路径无效');
-    if (await exists(projectRoot)) throw new Error('原项目位置已被占用，请先重命名现有目录');
+    const incompleteMarker = path.join(root, `.photoflow-project-restore-${project.id}.incomplete`);
+    if (await exists(projectRoot) && !(resumeTask?.id && await exists(incompleteMarker))) throw new Error('原项目位置已被占用，请先重命名现有目录');
     const run = () => backgroundTasks.run({
+      ...(resumeTask?.id ? { id: resumeTask.id } : {}),
       type: 'project-restore',
       title: `恢复项目：${project.name}`,
       dedupeKey: `project-restore:${root}:${project.id}`,
       cancellable: true,
       resources: [projectRoot, target],
-      metadata: { snapshotId: snapshot, projectId: project.id, projectName: project.name },
+      resumable: true,
+      checkpoint: resumeTask?.checkpoint,
+      progress: resumeTask?.progress,
+      metadata: { workspacePath: root, snapshotId: snapshot, projectId: project.id, projectName: project.name },
+      resumeFactory: taskSnapshot => restoreProject(root, snapshot, project.id, taskSnapshot),
     }, async task => {
+      await fs.promises.writeFile(incompleteMarker, String(Date.now()), 'utf8');
+      const savedCheckpoint = task.getCheckpoint() || {};
+      const completedProject = new Set(Array.isArray(savedCheckpoint.completedProject) ? savedCheckpoint.completedProject : []);
+      const completedData = new Set(Array.isArray(savedCheckpoint.completedData) ? savedCheckpoint.completedData : []);
       const prefix = normalizeKey(project.relativePath).replace(/\/$/, '') + '/';
       const projectEntries = manifest.files.filter(item => item.scope === 'workspace' && item.projectIds?.includes(project.id) && (item.path === prefix.slice(0, -1) || item.path.startsWith(prefix)));
       for (const [index, entry] of projectEntries.entries()) {
         const relative = entry.path.slice(prefix.length);
-        await materialize(target, entry, safeDestination(projectRoot, relative), task);
-        task.report(5 + (index + 1) / Math.max(1, projectEntries.length) * 70, `正在恢复项目文件 ${index + 1}/${projectEntries.length}`);
+        const entryDestination = safeDestination(projectRoot, relative);
+        const existingStat = completedProject.has(entry.path) ? await fs.promises.stat(entryDestination).catch(() => null) : null;
+        const checkpointValid = existingStat?.isFile() && existingStat.size === Number(entry.size)
+          && await sha256File(entryDestination).then(hash => hash === entry.hash, () => false);
+        if (!checkpointValid) await materialize(target, entry, entryDestination, task);
+        completedProject.add(entry.path);
+        const progress = 5 + (index + 1) / Math.max(1, projectEntries.length) * 70;
+        task.saveCheckpoint({ version: 1, phase: 'project-files', completedProject: [...completedProject], completedData: [...completedData] }, progress, `正在恢复项目文件 ${index + 1}/${projectEntries.length}`);
       }
       const archivePath = String(project.extra?.archive?.path || '');
       if (archivePath && !(manifest.materializedArchiveProjectIds || []).includes(project.id) && path.isAbsolute(archivePath)
@@ -926,8 +987,14 @@ const createBackupService = context => {
       const newDataRoot = getWorkspaceDataRoot(root);
       const dataEntries = manifest.files.filter(item => item.scope === 'workspace-data' && item.projectIds?.includes(project.id));
       for (const [index, entry] of dataEntries.entries()) {
-        await materialize(target, entry, safeDestination(newDataRoot, entry.path), task);
-        task.report(76 + (index + 1) / Math.max(1, dataEntries.length) * 9, `正在恢复项目内部数据 ${index + 1}/${dataEntries.length}`);
+        const entryDestination = safeDestination(newDataRoot, entry.path);
+        const existingStat = completedData.has(entry.path) ? await fs.promises.stat(entryDestination).catch(() => null) : null;
+        const checkpointValid = existingStat?.isFile() && existingStat.size === Number(entry.size)
+          && await sha256File(entryDestination).then(hash => hash === entry.hash, () => false);
+        if (!checkpointValid) await materialize(target, entry, entryDestination, task);
+        completedData.add(entry.path);
+        const progress = 76 + (index + 1) / Math.max(1, dataEntries.length) * 9;
+        task.saveCheckpoint({ version: 1, phase: 'project-data', completedProject: [...completedProject], completedData: [...completedData] }, progress, `正在恢复项目内部数据 ${index + 1}/${dataEntries.length}`);
       }
       await runPythonJsonAction('backup_db.py', [
         'restore-project', '--source', objectPath(target, manifest.database.hash), '--destination', getWorkspaceDatabasePath(root),
@@ -974,29 +1041,40 @@ const createBackupService = context => {
       task.report(100, '项目恢复完成');
       return { project };
     }, run);
-    return run();
+    const execution = await run();
+    if (execution.task?.state === 'completed' && backgroundTasks.flush?.() !== false) await fs.promises.rm(incompleteMarker, { force: true });
+    return execution;
   };
 
-  const verify = async (workspaceRoot, snapshot) => {
+  const verify = async (workspaceRoot, snapshot, resumeTask = null) => {
     const config = readSavedConfig();
     const target = String(config?.backup?.targetPath || '').trim();
     if (!isApprovedTarget(target)) throw new Error('备份位置未经授权');
     const manifest = await manifestFor(target, snapshot);
     const run = () => backgroundTasks.run({
+      ...(resumeTask?.id ? { id: resumeTask.id } : {}),
       type: 'backup-verify',
       title: '验证备份',
       dedupeKey: `backup-verify:${snapshot}`,
       cancellable: true,
       resources: [target],
+      resumable: true,
+      checkpoint: resumeTask?.checkpoint,
+      progress: resumeTask?.progress,
       metadata: { workspacePath: path.resolve(workspaceRoot), snapshotId: snapshot },
+      resumeFactory: taskSnapshot => verify(workspaceRoot, snapshot, taskSnapshot),
     }, async task => {
       const entries = [{ path: 'workspace.sqlite3', hash: manifest.database.hash }, ...manifest.files];
+      const savedCheckpoint = task.getCheckpoint() || {};
+      const nextIndex = Math.max(0, Math.min(entries.length, Number(savedCheckpoint.nextIndex) || 0));
       for (const [index, entry] of entries.entries()) {
+        if (index < nextIndex) continue;
         task.throwIfCancelled();
         const source = objectPath(target, entry.hash);
         if (!await exists(source)) throw new Error(`备份对象缺失：${entry.path}`);
         if (await sha256File(source) !== entry.hash) throw new Error(`备份对象校验失败：${entry.path}`);
-        task.report((index + 1) / entries.length * 100, `正在验证 ${index + 1}/${entries.length} 个文件`);
+        const progress = (index + 1) / entries.length * 100;
+        task.saveCheckpoint({ version: 1, phase: 'verifying', nextIndex: index + 1 }, progress, `正在验证 ${index + 1}/${entries.length} 个文件`);
       }
       return { verifiedAt: Date.now(), files: entries.length };
     }, run);
@@ -1071,6 +1149,12 @@ const createBackupService = context => {
       resume?.();
     }
   };
+
+  backgroundTasks.registerTypeResumeFactory?.('workspace-backup', task => runBackup(task.metadata?.workspacePath, task.metadata?.reason || 'manual', task));
+  backgroundTasks.registerTypeResumeFactory?.('workspace-restore', task => restoreWorkspace(task.metadata?.workspacePath || '', task.metadata?.snapshotId, task.metadata?.targetPath, task));
+  backgroundTasks.registerTypeResumeFactory?.('project-restore', task => restoreProject(task.metadata?.workspacePath, task.metadata?.snapshotId, task.metadata?.projectId, task));
+  backgroundTasks.registerTypeResumeFactory?.('backup-verify', task => verify(task.metadata?.workspacePath, task.metadata?.snapshotId, task));
+  backgroundTasks.registerTypeRestartFactory?.('backup-cleanup', task => cleanup(task.metadata?.workspacePath, task));
 
   return { approveTarget, isApprovedTarget, runBackup, runDomainBackup, runIfDue, status, restoreWorkspace, restoreProject, restoreDomain, resetDomain, verify, verifyDomain, testConnection, spaceStatus, cleanup };
 };

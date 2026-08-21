@@ -19,6 +19,7 @@ const manifest = {
     { name: 'x264', repository: lock.x264.repository, commit: lock.x264.commit, license: lock.x264.license },
     { name: 'x265', version: lock.x265.version, repository: lock.x265.repository, commit: lock.x265.commit, license: lock.x265.license },
     { name: 'zlib', version: lock.zlib.version, repository: lock.zlib.repository, commit: lock.zlib.commit, license: lock.zlib.license },
+    { name: 'nv-codec-headers', version: lock.nvCodecHeaders.version, repository: lock.nvCodecHeaders.repository, commit: lock.nvCodecHeaders.commit, license: lock.nvCodecHeaders.license },
   ],
   configureFlags,
   artifacts: {

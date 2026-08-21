@@ -24,15 +24,15 @@ try {
     license: 'GPL-2.0-or-later',
     reproducibleSource: true,
     ffmpeg: { version: '7.1.1', commit: 'a'.repeat(40) },
-    configureFlags: ['--enable-gpl', '--enable-libx264', '--enable-libx265', '--enable-zlib', '--enable-mediafoundation', '--enable-d3d11va', '--disable-autodetect', '--disable-network'],
-    components: [{ name: 'x264', commit: 'b'.repeat(40) }, { name: 'x265', commit: 'c'.repeat(40) }, { name: 'zlib', commit: 'e'.repeat(40) }],
+    configureFlags: ['--enable-gpl', '--enable-libx264', '--enable-libx265', '--enable-zlib', '--enable-mediafoundation', '--enable-d3d11va', '--enable-ffnvcodec', '--enable-nvenc', '--disable-autodetect', '--disable-network'],
+    components: [{ name: 'x264', commit: 'b'.repeat(40) }, { name: 'x265', commit: 'c'.repeat(40) }, { name: 'zlib', commit: 'e'.repeat(40) }, { name: 'nv-codec-headers', commit: 'f'.repeat(40) }],
     artifacts,
   };
   assert.doesNotThrow(() => validateFfmpegManifest(ffmpeg, root));
   assert.doesNotThrow(() => validateFfmpegManifest({
     ...ffmpeg,
     schemaVersion: 1,
-    configureFlags: ffmpeg.configureFlags.filter(flag => !['--enable-mediafoundation', '--enable-d3d11va'].includes(flag)),
+    configureFlags: ffmpeg.configureFlags.filter(flag => !['--enable-mediafoundation', '--enable-d3d11va', '--enable-ffnvcodec', '--enable-nvenc'].includes(flag)),
   }, root));
   assert.throws(() => validateFfmpegManifest({
     ...ffmpeg,
@@ -40,6 +40,8 @@ try {
   }, root), /硬件加速构建参数/);
   assert.throws(() => validateFfmpegManifest({ ...ffmpeg, configureFlags: ffmpeg.configureFlags.filter(flag => flag !== '--enable-libx265') }, root), /缺少必需构建参数/);
   assert.throws(() => validateFfmpegManifest({ ...ffmpeg, components: ffmpeg.components.filter(component => component.name !== 'x265') }, root), /未声明固定版本.*x265/);
+  assert.throws(() => validateFfmpegManifest({ ...ffmpeg, configureFlags: ffmpeg.configureFlags.filter(flag => flag !== '--enable-nvenc') }, root), /硬件加速构建参数/);
+  assert.throws(() => validateFfmpegManifest({ ...ffmpeg, components: ffmpeg.components.filter(component => component.name !== 'nv-codec-headers') }, root), /未声明固定版本.*nv-codec-headers/);
 
   const dll = create('libmpv-2.dll');
   const sourceArchive = create('libmpv-source.zip');

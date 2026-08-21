@@ -33,8 +33,9 @@ const main = async () => {
       },
     };
     const config = { archive: { enabled: true, targetPath: archiveRoot } };
+    const backgroundTasks = createBackgroundTaskService({ eventBus: new EventEmitter() });
     const service = createArchiveService({
-      backgroundTasks: createBackgroundTaskService({ eventBus: new EventEmitter() }),
+      backgroundTasks,
       movePathAtomic,
       readSavedConfig: () => config,
       workspaceRepository,
@@ -49,6 +50,22 @@ const main = async () => {
     assert.strictEqual(await fs.promises.readFile(path.join(archivePath, '修图', '版本一.jpg'), 'utf8'), 'edited-photo');
     assert.strictEqual(row.status, '已归档');
 
+    const persistencePath = path.join(temporaryRoot, 'archive-tasks.json');
+    const interruptedTasks = createBackgroundTaskService({ eventBus: new EventEmitter(), persistencePath });
+    const interrupted = interruptedTasks.create({
+      id: 'archive-resume-test', type: 'project-archive', title: '归档恢复测试', resumable: true,
+      metadata: { workspacePath: workspaceRoot, projectId: row.id, projectName: row.name, archivePath },
+    });
+    await interrupted.waitForStart();
+    interrupted.context.saveCheckpoint({ version: 1, phase: 'finalizing', expected: { fileCount: 2, bytes: 26, samples: [] } }, 90, '正在登记归档状态');
+    interruptedTasks.stop();
+    const restoredTasks = createBackgroundTaskService({ eventBus: new EventEmitter(), persistencePath });
+    createArchiveService({ backgroundTasks: restoredTasks, movePathAtomic, readSavedConfig: () => config, workspaceRepository, writeLog: () => undefined });
+    assert.strictEqual(restoredTasks.get('archive-resume-test').resumeAvailable, true, 'archive resume worker must register after restart');
+    const resumedArchive = await restoredTasks.resume('archive-resume-test');
+    assert.strictEqual(resumedArchive.task.state, 'completed', 'an interrupted archive must finish from its saved phase');
+    restoredTasks.stop();
+
     const disconnectedRoot = `${archiveRoot}-offline`;
     await fs.promises.rename(archiveRoot, disconnectedRoot);
     assert.strictEqual(fs.existsSync(projectRoot), false, 'the directory link must naturally become unavailable while the archive disk is offline');
@@ -62,6 +79,26 @@ const main = async () => {
     assert.strictEqual(fs.existsSync(archivePath), false);
     assert.strictEqual(row.status, '后期中');
     assert.deepStrictEqual(JSON.parse(row.extra_json), {});
+
+    const rearchived = await service.archiveProject(workspaceRoot, row.name);
+    const resumedMoveArchivePath = rearchived.result.archivePath;
+    await fs.promises.unlink(projectRoot);
+    await movePathAtomic(resumedMoveArchivePath, projectRoot);
+    const movePersistencePath = path.join(temporaryRoot, 'unarchive-tasks.json');
+    const interruptedMoveTasks = createBackgroundTaskService({ eventBus: new EventEmitter(), persistencePath: movePersistencePath });
+    const interruptedMove = interruptedMoveTasks.create({
+      id: 'unarchive-resume-test', type: 'project-unarchive', title: '解档恢复测试', resumable: true,
+      metadata: { workspacePath: workspaceRoot, projectId: row.id, projectName: row.name, archivePath: resumedMoveArchivePath, statusAfter: '后期中' },
+    });
+    await interruptedMove.waitForStart();
+    interruptedMove.context.saveCheckpoint({ version: 1, phase: 'finalizing', expected: { fileCount: 2, bytes: 26 } }, 90, '正在登记移回状态');
+    interruptedMoveTasks.stop();
+    const restoredMoveTasks = createBackgroundTaskService({ eventBus: new EventEmitter(), persistencePath: movePersistencePath });
+    createArchiveService({ backgroundTasks: restoredMoveTasks, movePathAtomic, readSavedConfig: () => config, workspaceRepository, writeLog: () => undefined });
+    const resumedMove = await restoredMoveTasks.resume('unarchive-resume-test');
+    assert.strictEqual(resumedMove.task.state, 'completed', 'an unarchive interrupted after its move must finish database registration');
+    assert.strictEqual(row.status, '后期中');
+    restoredMoveTasks.stop();
     console.log('Archive service integration tests passed.');
   } finally {
     await fs.promises.rm(temporaryRoot, { recursive: true, force: true });

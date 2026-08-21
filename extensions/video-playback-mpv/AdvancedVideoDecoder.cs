@@ -150,7 +150,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
             context = create();
             if (context == IntPtr.Zero) throw new InvalidOperationException("libmpv 初始化内存失败");
             if (videoWindow != IntPtr.Zero) SetOption("wid", videoWindow.ToInt64().ToString(CultureInfo.InvariantCulture));
-            SetOption("vo", probeOnly ? "null" : "gpu-next,gpu");
+            SetOption("vo", probeOnly ? "null" : "gpu");
             if (probeOnly) SetOption("audio", "no");
             else
             {

@@ -163,6 +163,8 @@ registerWorkspaceIpc({
     assert.strictEqual(result.fileCount, 1);
     assert.strictEqual(fs.readFileSync(path.join(targetRoot, '策划', '画面.jpg'), 'utf8'), 'image payload');
     assert.strictEqual(fs.readFileSync(path.join(targetRoot, '策划', '参考目录.lnk'), 'utf8'), path.join(sourceRoot, '参考目录'));
+    const planningBrowse = await browseFiles({}, temporaryRoot, '策划中', '项目', '策划');
+    assert.strictEqual(planningBrowse.entries.find(entry => entry.name === '参考目录.lnk')?.sourceChannel, 'inspiration', 'shortcuts gathered from the inspiration library must retain their display channel');
     if (process.platform === 'win32') {
       const resolveShortcut = handlers.get('workspace-resolve-shortcut');
       assert(resolveShortcut, 'shortcut resolution IPC handler was not registered');

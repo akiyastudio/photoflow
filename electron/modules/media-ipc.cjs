@@ -153,31 +153,50 @@ const registerMediaIpc = context => {
     catch (error) { return { success: false, path: '', sizeBytes: 0, fileCount: 0, error: error.message || String(error) }; }
   });
   
-  ipcMain.handle('media-cache-clear', async (_event, cacheConfig = {}, olderThanDays) => {
-    try {
-      const execution = await backgroundTasks.run({ type: 'cache-cleanup', title: '清理媒体缓存' }, async task => {
+  const runCacheCleanup = (cacheConfig = {}, olderThanDays, restartTask = null) => backgroundTasks.run({
+    ...(restartTask?.id ? { id: restartTask.id } : {}),
+    type: 'cache-cleanup',
+    title: '清理媒体缓存',
+    metadata: { cacheConfig, olderThanDays },
+  }, async task => {
         const cacheDir = getMediaCacheDir(cacheConfig);
         const days = Number(olderThanDays);
         const cutoff = Number.isFinite(days) && days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : null;
         const deletedPaths = [];
-        const entries = (await fs.promises.readdir(cacheDir, { withFileTypes: true })).filter(entry => entry.isFile());
-        for (let offset = 0; offset < entries.length; offset += 64) {
+        const candidates = cutoff === null
+          ? (await fs.promises.readdir(cacheDir, { withFileTypes: true })).filter(entry => entry.isFile()).map(entry => path.join(cacheDir, entry.name))
+          : ((await thumbnailService.listCacheCleanupCandidates(cutoff)).thumbnailPaths || []).flatMap(candidate => {
+            const resolved = path.resolve(candidate);
+            const relative = path.relative(path.resolve(cacheDir), resolved);
+            return relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? [resolved] : [];
+          });
+        let deletedCount = 0;
+        for (let offset = 0; offset < candidates.length; offset += 64) {
           task.throwIfCancelled();
-          await Promise.all(entries.slice(offset, offset + 64).map(async entry => {
-            const filePath = path.join(cacheDir, entry.name);
+          await Promise.all(candidates.slice(offset, offset + 64).map(async filePath => {
             try {
-              if (cutoff !== null && (await fs.promises.stat(filePath)).mtimeMs >= cutoff) return;
               await fs.promises.unlink(filePath);
               deletedPaths.push(filePath);
-            } catch { /* cache files can disappear while cleanup is running */ }
+              deletedCount += 1;
+            } catch (error) {
+              if (error?.code === 'ENOENT') deletedPaths.push(filePath);
+            }
           }));
-          task.report(Math.round(((offset + 64) / Math.max(1, entries.length)) * 95), `已检查 ${Math.min(offset + 64, entries.length)} / ${entries.length} 个文件`);
+          task.report(Math.round(((offset + 64) / Math.max(1, candidates.length)) * 95), `已处理 ${Math.min(offset + 64, candidates.length)} / ${candidates.length} 个过期缓存`);
         }
-        await thumbnailService.invalidateDeleted(deletedPaths, cutoff);
+        await thumbnailService.invalidateDeleted(deletedPaths, null);
+        const orphanCleanup = cutoff === null
+          ? { deletedCount: 0 }
+          : await thumbnailService.cleanupOrphanCache(cacheDir, cutoff, 7 * 24 * 60 * 60 * 1000);
         const pruned = await thumbnailService.pruneMissingSources();
         mediaCacheIndexes.delete(path.resolve(cacheDir));
-        return { deletedCount: deletedPaths.length, prunedSourceCount: pruned.sourceCount || 0 };
-      });
+        return { deletedCount: deletedCount + Number(orphanCleanup.deletedCount || 0), prunedSourceCount: pruned.sourceCount || 0 };
+  });
+  backgroundTasks?.registerTypeRestartFactory?.('cache-cleanup', task => runCacheCleanup(task.metadata?.cacheConfig || {}, task.metadata?.olderThanDays, task));
+
+  ipcMain.handle('media-cache-clear', async (_event, cacheConfig = {}, olderThanDays) => {
+    try {
+      const execution = await runCacheCleanup(cacheConfig, olderThanDays);
       return { success: true, deletedCount: execution.result.deletedCount, prunedSourceCount: execution.result.prunedSourceCount, taskId: execution.task.id };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
   });

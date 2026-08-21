@@ -8,6 +8,7 @@ const COMPONENT_DEFINITIONS = Object.freeze(Object.fromEntries(Object.entries(PL
   ...definition,
   capability: definition.capabilities[0],
 }])));
+const normalizeRelativeFile = value => String(value || '').replace(/\\/g, '/');
 
 const isInside = (root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -58,13 +59,33 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
   const integrityMetadataToken = (componentRoot, manifest) => [
     ...listIntegrityFiles(componentRoot).map(file => {
       const stat = fs.statSync(path.resolve(componentRoot, file), { throwIfNoEntry: false });
-      return `${file}:${stat?.size ?? -1}:${stat?.mtimeMs ?? -1}`;
+      return `${file}:${stat?.size ?? -1}:${stat?.mtimeMs ?? -1}:${stat?.ctimeMs ?? -1}`;
     }),
     (() => {
       const stat = fs.statSync(path.join(componentRoot, 'component-integrity.json'), { throwIfNoEntry: false });
-      return `component-integrity.json:${stat?.size ?? -1}:${stat?.mtimeMs ?? -1}`;
+      return `component-integrity.json:${stat?.size ?? -1}:${stat?.mtimeMs ?? -1}:${stat?.ctimeMs ?? -1}`;
     })(),
   ].join('|');
+  const componentMetadataToken = (id, componentRoot) => {
+    const manifestPath = path.join(componentRoot, 'component.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    if (manifest.id !== id) throw new Error(`组件 ID 不匹配：${manifest.id || '未填写'}`);
+    const entrypoints = manifest.entrypoints || {};
+    const relativeEntry = entrypoints[`${platform}-${arch}`] || entrypoints[platform] || entrypoints.default;
+    const relativeFiles = [...new Set([
+      'component.json',
+      ...(typeof relativeEntry === 'string' && relativeEntry.trim() ? [relativeEntry] : []),
+      ...(Array.isArray(manifest.requiredFiles) ? manifest.requiredFiles : []),
+    ].map(normalizeRelativeFile))].sort((left, right) => left.localeCompare(right, 'en'));
+    const tokens = relativeFiles.map(relativeFile => {
+      const absolute = path.resolve(componentRoot, relativeFile);
+      if (!isInside(componentRoot, absolute)) throw new Error(`组件元数据路径越界：${relativeFile}`);
+      const stat = fs.lstatSync(absolute, { throwIfNoEntry: false });
+      if (!stat?.isFile() || stat.isSymbolicLink()) throw new Error(`组件文件不存在或类型不安全：${relativeFile}`);
+      return `${relativeFile}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    });
+    return `metadata|${tokens.join('|')}`;
+  };
   const verifyDirectory = (id, componentRoot, force = false) => {
     const definition = COMPONENT_DEFINITIONS[id];
     if (!definition) throw new Error(`未知组件：${id}`);
@@ -95,6 +116,19 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     });
     integrityPending.set(cacheKey, { token, promise });
     return promise;
+  };
+  const componentIntegrityToken = (id, componentRoot) => {
+    const definition = COMPONENT_DEFINITIONS[id];
+    if (!definition) throw new Error(`未知组件：${id}`);
+    if (!definition.integrityManifest) return componentMetadataToken(id, componentRoot);
+    return `integrity|${integrityMetadataToken(componentRoot, getExpectedIntegrity(definition))}`;
+  };
+  const seedIntegrityToken = (id, componentRoot, token) => {
+    if (!token || token !== componentIntegrityToken(id, componentRoot)) return false;
+    if (COMPONENT_DEFINITIONS[id]?.integrityManifest) {
+      integrityCache.set(`${id}:${path.resolve(componentRoot)}`, token.replace(/^integrity\|/, ''));
+    }
+    return true;
   };
 
   const inspectAt = (definition, root, { verifyIntegrity = true } = {}) => {
@@ -200,7 +234,7 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     };
   }));
 
-  return { inspect, list, listWithSizes, resolve, resolveAsync, verifyDirectory, verifyDirectoryAsync, ensureInstallRoot, installRoot, roots };
+  return { inspect, list, listWithSizes, resolve, resolveAsync, verifyDirectory, verifyDirectoryAsync, componentIntegrityToken, seedIntegrityToken, ensureInstallRoot, installRoot, roots };
 };
 
 module.exports = { COMPONENT_API_VERSION, COMPONENT_DEFINITIONS, createComponentRegistry };

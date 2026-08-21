@@ -19,3 +19,21 @@ def migration_27(db, table_columns):
         "CREATE INDEX IF NOT EXISTS progress_folders_external_link "
         "ON progress_folders(project_id, external_link_relative_path)"
     )
+
+
+def migration_28(db, table_columns):
+    """Journal tracking copies and serialize progress-tree filesystem mutations."""
+    del table_columns
+    # Catalog-only startup deliberately leaves the optional versioning store
+    # detached. Inspect every attached schema so the migration can be rerun
+    # safely when that domain is opened by its first caller.
+    migrated = False
+    for schema in [row[1] for row in db.execute("PRAGMA database_list").fetchall()]:
+        columns = {row[1] for row in db.execute(f'PRAGMA "{schema}".table_info("tracking_sessions")').fetchall()}
+        if columns and "copy_operations_json" not in columns:
+            db.execute(
+                f'ALTER TABLE "{schema}"."tracking_sessions" ADD COLUMN copy_operations_json '
+                "TEXT NOT NULL DEFAULT '[]'"
+            )
+            migrated = True
+    return migrated

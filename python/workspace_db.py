@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import sqlite3
 import sys
 import time
@@ -17,7 +18,7 @@ try:
     from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
     from team_retouch_storage import attach_and_migrate as attach_team_retouch_storage
     from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage
-    from workspace_db_migrations import migration_26, migration_27
+    from workspace_db_migrations import migration_26, migration_27, migration_28
 except ModuleNotFoundError:
     # Some regression tests load this file directly through importlib instead
     # of importing it from the Python source directory.
@@ -25,7 +26,7 @@ except ModuleNotFoundError:
     from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
     from team_retouch_storage import attach_and_migrate as attach_team_retouch_storage
     from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage
-    from workspace_db_migrations import migration_26, migration_27
+    from workspace_db_migrations import migration_26, migration_27, migration_28
 
 STATUSES = ("未分类", "策划中", "待拍摄", "后期中", "已归档")
 IMAGE_EXTENSIONS = {
@@ -40,7 +41,13 @@ LEGACY_MEDIA_WORKFLOW_MIGRATION_KEY = "legacy_media_workflow_graph_migrated_v1"
 LEGACY_SELECTION_INDEPENDENT_KEY_PREFIX = "legacy_selection_independent:"
 SELECTION_MAINLINE_REPAIR_REVISION = "1"
 VERSION_TREE_DEFAULT_LAYOUT_REVISION = "2"
-TARGET_SCHEMA_VERSION = 27
+TARGET_SCHEMA_VERSION = 28
+TEAM_INTEGRATED_ACTIONS = frozenset((
+    "batch_commit_compare",
+    "media_delete_version",
+    "media_delete_project_missing_version",
+    "progress_delete_missing",
+))
 PROGRESS_NODE_ROLES = ("original", "progress", "selection", "artifact", "workflow")
 PROGRESS_RELATION_KINDS = ("main", "auxiliary")
 PROGRESS_ARTIFACT_KINDS = ("companion", "preview", "team_workspace")
@@ -1221,6 +1228,10 @@ def _migration_27(db):
     migration_27(db, _table_columns)
 
 
+def _migration_28(db):
+    return migration_28(db, _table_columns)
+
+
 MIGRATIONS = {
     11: _migration_11,
     12: _migration_12,
@@ -1239,6 +1250,7 @@ MIGRATIONS = {
     25: _migration_25,
     26: _migration_26,
     27: _migration_27,
+    28: _migration_28,
 }
 
 
@@ -1374,14 +1386,19 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
     else:
         requested_domains = ()
     if schema_is_current:
+        domain_migrated = False
         try:
             if requested_domains:
                 attach_workspace_domain_storage(db, database, requested_domains)
+                domain_migrated = _migration_28(db)
             if include_team:
                 attach_team_retouch_storage(db, database)
         except Exception:
             db.close()
             raise
+        if domain_migrated:
+            db.commit()
+            _check_integrity(db, force=True)
         return db
     db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     db.commit()
@@ -1681,6 +1698,7 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
             _migration_25(db)
             _migration_26(db)
             _migration_27(db)
+            _migration_28(db)
             _set_meta(db, "schema_version", TARGET_SCHEMA_VERSION)
     else:
         for next_version in range(schema_version + 1, TARGET_SCHEMA_VERSION + 1):
@@ -1720,6 +1738,7 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
     try:
         if requested_domains:
             attach_workspace_domain_storage(db, database, requested_domains)
+            _migration_28(db)
         if include_team:
             attach_team_retouch_storage(db, database)
     except Exception:
@@ -1733,7 +1752,10 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
     # Routine daily maintenance is dispatched by Electron on a separate worker
     # so opening the project list never waits for a full integrity scan/backup.
     if backup_path or is_fresh:
-        _check_integrity(db, force=True)
+        if requested_domains or (_table_exists(db, "tracking_sessions") and _table_exists(db, "version_graph_edges")):
+            _check_integrity(db, force=True)
+        elif db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise RuntimeError("目录数据库完整性检查失败")
     return db
 
 
@@ -4131,13 +4153,83 @@ def progress_revert_external_adoptions(db, payload: dict):
     return {"success": True, "removedProgressIds": progress_ids}
 
 
+def _progress_tree_mutation_key(project_id: str) -> str:
+    return f"progress_tree_mutation:{project_id}"
+
+
+def _progress_tree_mutation_lease(db, project_id: str):
+    raw = _meta_value(db, _progress_tree_mutation_key(project_id))
+    if not raw:
+        return None
+    try:
+        lease = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return lease if isinstance(lease, dict) else None
+
+
+def progress_update_tree_begin(db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    token = str(payload.get("mutationToken") or uuid.uuid4())
+    if len(token) > 128:
+        raise ValueError("progress_tree_mutation_token_invalid: 变更令牌无效")
+    timestamp = int(time.time() * 1000)
+    stale_before = timestamp - 60 * 60 * 1000
+    with db:
+        lease = _progress_tree_mutation_lease(db, project["id"])
+        if lease is not None and int(lease.get("createdAt") or 0) < stale_before:
+            db.execute("DELETE FROM meta WHERE key=?", (_progress_tree_mutation_key(project["id"]),))
+            lease = None
+        active = db.execute(
+            """SELECT 1 FROM tracking_sessions WHERE project_id=?
+               AND status IN ('comparing','pending_confirm','committing','failed') LIMIT 1""",
+            (project["id"],),
+        ).fetchone()
+        if active is not None:
+            raise ValueError("node_busy: 项目中存在正在比较、确认或提交的版本，暂时不能修改版本树")
+        if lease is not None and lease.get("token") != token:
+            raise ValueError("node_busy: 版本树正在由另一个操作修改")
+        _set_meta(
+            db, _progress_tree_mutation_key(project["id"]),
+            json.dumps({"token": token, "createdAt": timestamp}, separators=(",", ":")),
+        )
+    return {"success": True, "mutationToken": token}
+
+
+def progress_update_tree_finish(db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    token = str(payload.get("mutationToken") or "")
+    lease = _progress_tree_mutation_lease(db, project["id"])
+    if token and lease is not None and lease.get("token") == token:
+        db.execute(
+            "DELETE FROM meta WHERE key=?",
+            (_progress_tree_mutation_key(project["id"]),),
+        )
+        db.commit()
+    return {"success": True}
+
+
 def progress_update_tree(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     updates = payload.get("updates")
     primary_id = str(payload.get("primaryProgressId") or "")
     replacement_id = str(payload.get("replacementProgressId") or "")
+    mutation_token = str(payload.get("mutationToken") or "")
     if not primary_id or not isinstance(updates, list) or not updates:
         raise ValueError("没有可更新的进度关系")
+
+    lease = _progress_tree_mutation_lease(db, project["id"])
+    if lease is not None and lease.get("token") != mutation_token:
+        raise ValueError("node_busy: 版本树正在由另一个操作修改")
+    if mutation_token and (lease is None or lease.get("token") != mutation_token):
+        raise ValueError("progress_tree_mutation_expired: 版本树变更令牌已失效")
+    active_session = db.execute(
+        """SELECT 1 FROM tracking_sessions WHERE project_id=?
+           AND status IN ('comparing','pending_confirm','committing','failed') LIMIT 1""",
+        (project["id"],),
+    ).fetchone()
+    if active_session is not None:
+        raise ValueError("node_busy: 项目中存在正在比较、确认或提交的版本，暂时不能修改版本树")
 
     rows = {row["id"]: row for row in progress_rows(db, project["id"])}
     update_ids = {str(update.get("id") or "") for update in updates}
@@ -4193,6 +4285,8 @@ def progress_update_tree(root: str, db, payload: dict):
             raise ValueError("进度名称不能为空")
         folder_path = canonical_path(update.get("folderPath") or "")
         external_link_relative_path = row["external_link_relative_path"]
+        if external_link_relative_path and folder_path.casefold() != row["folder_path_key"]:
+            raise ValueError("external_progress_path_immutable: 外链版本只能通过“移动外链到项目内”改变物理位置")
         is_unchanged_external = bool(external_link_relative_path) and folder_path.casefold() == row["folder_path_key"]
         if (not is_unchanged_external and not is_project_descendant(folder_path, project_path)) or not os.path.isdir(folder_path):
             raise ValueError("版本进度必须是项目内的文件夹")
@@ -4262,6 +4356,11 @@ def progress_update_tree(root: str, db, payload: dict):
                 """UPDATE progress_folders SET folder_id=NULL,missing_since=COALESCE(missing_since,?),updated_at=?
                    WHERE id=?""",
                 (timestamp, timestamp, replacement_id),
+            )
+        if mutation_token:
+            db.execute(
+                "DELETE FROM meta WHERE key=?",
+                (_progress_tree_mutation_key(project["id"]),),
             )
         db.commit()
     except Exception:
@@ -4768,6 +4867,15 @@ def tracking_session_create(root: str, db, payload: dict):
     project, parent, progress, parent_path, progress_path = _validated_tracking_nodes(
         root, db, str(payload.get("projectName") or ""), progress_id,
     )
+    stale_before = int(time.time() * 1000) - 60 * 60 * 1000
+    mutation = _progress_tree_mutation_lease(db, project["id"])
+    if mutation is not None and int(mutation.get("createdAt") or 0) < stale_before:
+        db.execute("DELETE FROM meta WHERE key=?", (_progress_tree_mutation_key(project["id"]),))
+        db.commit()
+        mutation = None
+    if mutation is not None:
+        db.commit()
+        raise ValueError("node_busy: 版本树正在修改，暂时不能开始版本比较")
     active = db.execute(
         """SELECT * FROM tracking_sessions WHERE progress_id=?
            AND status IN ('comparing','pending_confirm','committing','failed') LIMIT 1""",
@@ -4822,12 +4930,10 @@ def tracking_prepare(root: str, db, payload: dict):
     )
     previous_files, previous_parent = _tracking_snapshot_parts(progress)
     current_files = folder_media_snapshot(progress_path)
-    # The parent snapshot only drives "copy missing from parent" detection.
-    # Hashing every RAW in a large parent folder can read hundreds of MB before
-    # comparison even begins, so preserve the previous snapshot when that
-    # policy is disabled. rename.py still reads the parent files it actually
-    # needs for visual matching.
-    current_parent = folder_media_snapshot(parent_path) if progress["copy_missing_from_parent"] else previous_parent
+    # The parent snapshot is also the optimistic-concurrency token for the
+    # confirmation window. It must be captured even when copy-missing is off;
+    # otherwise a changed parent can silently invalidate accepted matches.
+    current_parent = folder_media_snapshot(parent_path)
     if mode == "refresh" and previous_files:
         source_names = sorted(
             name for name, signature in current_files.items()
@@ -5128,6 +5234,115 @@ def _rename_target_preserving_source_extension(source_name: str, reference_name:
     return _valid_tracking_file_name(f"{reference_stem}{source_extension}")
 
 
+def _prepared_tracking_base_snapshot(session):
+    raw_files = session["prepared_files_snapshot_json"]
+    raw_parent = session["prepared_parent_snapshot_json"]
+    if raw_files is None or raw_parent is None:
+        return None
+    try:
+        files = json.loads(raw_files)
+        parent = json.loads(raw_parent)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(files, dict) or not isinstance(parent, dict):
+        return None
+    return {"files": files, "parent": parent}
+
+
+def _tracking_copy_operations(session):
+    try:
+        operations = json.loads(session["copy_operations_json"] or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        operations = []
+    return operations if isinstance(operations, list) else []
+
+
+def _tracking_file_matches_snapshot(file_path: str, expected) -> bool:
+    if not isinstance(expected, dict) or not os.path.isfile(file_path):
+        return False
+    stat = os.stat(file_path)
+    return (
+        int(expected.get("size", -1)) == stat.st_size
+        and str(expected.get("signature") or "") == quick_fingerprint(file_path, stat)
+    )
+
+
+def _tracking_target_file(folder_path: str, file_name: str) -> str:
+    file_name = _valid_tracking_file_name(file_name)
+    file_path = canonical_path(os.path.join(folder_path, file_name))
+    if os.path.dirname(file_path).casefold() != canonical_path(folder_path).casefold():
+        raise ValueError("补齐目标超出版本目录")
+    return file_path
+
+
+def _save_tracking_copy_operations(db, session_id: str, operations):
+    db.execute(
+        "UPDATE tracking_sessions SET copy_operations_json=?,updated_at=? WHERE id=?",
+        (json.dumps(operations, ensure_ascii=False, separators=(",", ":")), int(time.time() * 1000), session_id),
+    )
+
+
+def _reconcile_tracking_copy_operations(db, session, parent_path: str, progress_path: str, prepared):
+    operations = _tracking_copy_operations(session)
+    changed = False
+    for operation in operations:
+        reference_name = _valid_tracking_file_name(operation.get("referenceName"))
+        expected = operation.get("expected")
+        if expected != prepared["parent"].get(reference_name):
+            raise ValueError("tracking_copy_plan_invalid: 补齐操作与比较快照不一致")
+        source_path = safe_folder_file(parent_path, reference_name)
+        target_path = _tracking_target_file(progress_path, reference_name)
+        if os.path.isfile(target_path):
+            if not _tracking_file_matches_snapshot(target_path, expected):
+                raise ValueError(f"tracking_copy_conflict: 补齐目标已存在且内容不同：{reference_name}")
+            if operation.get("status") != "succeeded":
+                operation["status"] = "succeeded"
+                operation["error"] = ""
+                changed = True
+        elif operation.get("status") == "succeeded":
+            operation["status"] = "failed"
+            operation["error"] = "已完成的补齐文件后来丢失"
+            changed = True
+        if not os.path.isfile(source_path):
+            raise ValueError(f"tracking_snapshot_stale: 父版本补齐源已不存在：{reference_name}")
+    if changed:
+        _save_tracking_copy_operations(db, session["id"], operations)
+        db.commit()
+    return operations
+
+
+def _mark_tracking_snapshot_stale(db, session, message: str):
+    timestamp = int(time.time() * 1000)
+    db.execute(
+        "UPDATE tracking_sessions SET status='failed',error=?,updated_at=? WHERE id=?",
+        (message[:2000], timestamp, session["id"]),
+    )
+    db.execute(
+        "UPDATE progress_folders SET tracking_state='stale',updated_at=? WHERE id=?",
+        (timestamp, session["progress_id"]),
+    )
+    db.commit()
+    return {
+        "success": False, "sessionId": session["id"], "staleSnapshot": True,
+        "retryable": False, "error": message,
+    }
+
+
+def tracking_commit_resources(root: str, db, payload: dict):
+    session_id = str(payload.get("sessionId") or "")
+    session = db.execute("SELECT * FROM tracking_sessions WHERE id=?", (session_id,)).fetchone()
+    if session is None:
+        raise ValueError("跟踪会话不存在")
+    project_name = db.execute("SELECT name FROM projects WHERE id=?", (session["project_id"],)).fetchone()[0]
+    _project, _parent, _progress, parent_path, progress_path = _validated_tracking_nodes(
+        root, db, project_name, session["progress_id"],
+    )
+    return {
+        "success": True, "sessionId": session_id,
+        "parentFolderPath": parent_path, "progressFolderPath": progress_path,
+    }
+
+
 def tracking_commit_plan(root: str, db, payload: dict):
     session_id = str(payload.get("sessionId") or "")
     session = db.execute("SELECT * FROM tracking_sessions WHERE id=?", (session_id,)).fetchone()
@@ -5154,6 +5369,38 @@ def tracking_commit_plan(root: str, db, payload: dict):
     _project, parent, progress, parent_path, progress_path = _validated_tracking_nodes(
         root, db, project_name, session["progress_id"],
     )
+    if session["committed_batch_id"]:
+        timestamp = int(time.time() * 1000)
+        db.execute("UPDATE tracking_sessions SET status='committing',error='',updated_at=? WHERE id=?", (timestamp, session_id))
+        db.execute("UPDATE progress_folders SET tracking_state='committing',updated_at=? WHERE id=?", (timestamp, progress["id"]))
+        db.commit()
+        return {
+            "success": True, "alreadyCommitted": False, "sessionId": session_id,
+            "mode": session["mode"], "repairBatchId": session["committed_batch_id"],
+            "projectName": project_name, "progressId": progress["id"], "parentProgressId": parent["id"],
+            "parentFolderPath": parent_path, "progressFolderPath": progress_path,
+            "displayName": progress["display_name"], "renameFromParent": bool(session["rename_from_parent"]),
+            "copyMissingFromParent": bool(session["copy_missing_from_parent"]),
+            "matches": [], "incrementalSources": [], "copyReferences": [],
+        }
+    prepared = _prepared_tracking_base_snapshot(session)
+    if prepared is not None:
+        try:
+            copy_operations = _reconcile_tracking_copy_operations(
+                db, session, parent_path, progress_path, prepared,
+            )
+        except ValueError as error:
+            return _mark_tracking_snapshot_stale(db, session, str(error))
+        expected_files = dict(prepared["files"])
+        for operation in copy_operations:
+            if operation.get("status") == "succeeded":
+                expected_files[_valid_tracking_file_name(operation.get("referenceName"))] = operation.get("expected")
+        current_files = folder_media_snapshot(progress_path)
+        current_parent = folder_media_snapshot(parent_path)
+        if current_files != expected_files or current_parent != prepared["parent"]:
+            return _mark_tracking_snapshot_stale(
+                db, session, "tracking_snapshot_stale: 确认期间父版本或当前版本文件已发生变化，请重新比较",
+            )
     rows = db.execute(
         "SELECT * FROM tracking_session_items WHERE session_id=? AND status IN ('recognized','accepted') ORDER BY created_at,id",
         (session_id,),
@@ -5181,6 +5428,18 @@ def tracking_commit_plan(root: str, db, payload: dict):
             incremental.append(item["source_name"])
         elif item["source_name"]:
             incremental.append(item["source_name"])
+    existing_copy_operations = _tracking_copy_operations(session)
+    if copies and not existing_copy_operations:
+        if prepared is None:
+            raise ValueError("tracking_copy_plan_invalid: 旧跟踪会话缺少可验证的父版本快照")
+        existing_copy_operations = [{
+            "referenceName": reference_name,
+            "expected": prepared["parent"].get(reference_name),
+            "status": "pending", "attemptCount": 0, "error": "",
+        } for reference_name in sorted(set(copies))]
+        if any(not isinstance(operation["expected"], dict) for operation in existing_copy_operations):
+            raise ValueError("tracking_snapshot_stale: 补齐源不在已确认的父版本快照中")
+        _save_tracking_copy_operations(db, session_id, existing_copy_operations)
     timestamp = int(time.time() * 1000)
     db.execute("UPDATE tracking_sessions SET status='committing',error='',updated_at=? WHERE id=?", (timestamp, session_id))
     db.execute("UPDATE progress_folders SET tracking_state='committing',updated_at=? WHERE id=?", (timestamp, progress["id"]))
@@ -5196,19 +5455,85 @@ def tracking_commit_plan(root: str, db, payload: dict):
     }
 
 
-def _prepared_tracking_commit_snapshot(db, session):
-    raw_files = session["prepared_files_snapshot_json"]
-    raw_parent = session["prepared_parent_snapshot_json"]
-    if raw_files is None or raw_parent is None:
-        return None
+def _copy_tracking_file_atomic(source_path: str, target_path: str):
+    temporary_path = os.path.join(
+        os.path.dirname(target_path),
+        f".{os.path.basename(target_path)}.{uuid.uuid4().hex}.photoflow-copy",
+    )
     try:
-        files = json.loads(raw_files)
-        parent = json.loads(raw_parent)
-    except (TypeError, ValueError, json.JSONDecodeError):
+        shutil.copy2(source_path, temporary_path)
+        with open(temporary_path, "rb") as copied:
+            os.fsync(copied.fileno())
+        os.replace(temporary_path, target_path)
+    finally:
+        try:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
+        except OSError:
+            pass
+
+
+def tracking_apply_copies(root: str, db, payload: dict):
+    session_id = str(payload.get("sessionId") or "")
+    session = db.execute("SELECT * FROM tracking_sessions WHERE id=?", (session_id,)).fetchone()
+    if session is None or session["status"] not in ("committing", "failed"):
+        raise ValueError("跟踪会话当前不能执行补齐操作")
+    project_name = db.execute("SELECT name FROM projects WHERE id=?", (session["project_id"],)).fetchone()[0]
+    _project, _parent, _progress, parent_path, progress_path = _validated_tracking_nodes(
+        root, db, project_name, session["progress_id"],
+    )
+    prepared = _prepared_tracking_base_snapshot(session)
+    if prepared is None:
+        raise ValueError("tracking_copy_plan_invalid: 跟踪会话缺少可验证快照")
+    operations = _tracking_copy_operations(session)
+    errors = []
+    for operation in operations:
+        reference_name = _valid_tracking_file_name(operation.get("referenceName"))
+        source_path = safe_folder_file(parent_path, reference_name)
+        target_path = _tracking_target_file(progress_path, reference_name)
+        expected = operation.get("expected")
+        operation["attemptCount"] = int(operation.get("attemptCount") or 0) + 1
+        operation["status"] = "running"
+        operation["error"] = ""
+        _save_tracking_copy_operations(db, session_id, operations)
+        db.commit()
+        try:
+            if not _tracking_file_matches_snapshot(source_path, expected):
+                raise ValueError(f"父版本补齐源已发生变化：{reference_name}")
+            if os.path.exists(target_path):
+                if not _tracking_file_matches_snapshot(target_path, expected):
+                    raise FileExistsError(f"补齐目标已存在且内容不同：{reference_name}")
+            else:
+                _copy_tracking_file_atomic(source_path, target_path)
+                if not _tracking_file_matches_snapshot(target_path, expected):
+                    raise ValueError(f"补齐文件复制后校验失败：{reference_name}")
+            operation["status"] = "succeeded"
+            operation["error"] = ""
+        except Exception as error:
+            operation["status"] = "failed"
+            operation["error"] = str(error)[:2000]
+            errors.append({"referenceName": reference_name, "error": str(error)})
+        _save_tracking_copy_operations(db, session_id, operations)
+        db.commit()
+    succeeded_names = [
+        _valid_tracking_file_name(operation.get("referenceName"))
+        for operation in operations if operation.get("status") == "succeeded"
+    ]
+    return {
+        "success": not errors,
+        "sessionId": session_id,
+        "copiedNames": succeeded_names,
+        "repairRequired": bool(errors),
+        "copyErrors": errors,
+    }
+
+
+def _prepared_tracking_commit_snapshot(db, session):
+    prepared = _prepared_tracking_base_snapshot(session)
+    if prepared is None:
         return None
-    if not isinstance(files, dict) or not isinstance(parent, dict):
-        return None
-    files = dict(files)
+    files = dict(prepared["files"])
+    parent = prepared["parent"]
     rows = db.execute(
         """SELECT item_kind,source_name,reference_name,target_name,status
            FROM tracking_session_items WHERE session_id=?
@@ -5243,13 +5568,18 @@ def tracking_commit_complete(root: str, db, payload: dict):
         raise ValueError("跟踪会话不存在")
     project_name = db.execute("SELECT name FROM projects WHERE id=?", (session["project_id"],)).fetchone()[0]
     _project, _parent, progress, parent_path, progress_path = _validated_tracking_nodes(root, db, project_name, session["progress_id"])
-    snapshot = _prepared_tracking_commit_snapshot(db, session)
-    if snapshot is None:
-        snapshot = {"files": folder_media_snapshot(progress_path), "parent": folder_media_snapshot(parent_path)}
+    expected_snapshot = _prepared_tracking_commit_snapshot(db, session)
+    actual_snapshot = {"files": folder_media_snapshot(progress_path), "parent": folder_media_snapshot(parent_path)}
+    if expected_snapshot is not None and actual_snapshot != expected_snapshot:
+        return _mark_tracking_snapshot_stale(
+            db, session, "tracking_snapshot_stale: 提交期间父版本或当前版本文件已发生变化，请重新比较",
+        )
+    snapshot = actual_snapshot
     timestamp = int(time.time() * 1000)
     db.execute(
         """UPDATE tracking_sessions SET status='committed',committed_batch_id=?,error='',
-           prepared_files_snapshot_json=NULL,prepared_parent_snapshot_json=NULL,updated_at=? WHERE id=?""",
+           prepared_files_snapshot_json=NULL,prepared_parent_snapshot_json=NULL,
+           copy_operations_json='[]',updated_at=? WHERE id=?""",
         (payload.get("batchId") or session["committed_batch_id"], timestamp, session_id),
     )
     db.execute(
@@ -7696,14 +8026,14 @@ def reconcile_cross_domain_references(db) -> dict:
 def mutate(root: str, database: str, action: str, payload: dict):
     # Interactive version-tree and confirmation reads must never compete for
     # SQLite's writer slot with media scans or tracking commits.
-    # Team-retouch is attached only inside its dedicated worker/action set. A
-    # corrupt or unavailable team store must never prevent catalog, media or
-    # versioning connections from opening.
+    # Team-retouch is attached for its dedicated actions and for the few
+    # media/versioning mutations that must preserve cross-store owner
+    # references. Other actions remain isolated from an unavailable team store.
     domain_actions = set(MEDIA_ACTIONS) | set(PROGRESS_ACTIONS) | set(TRACKING_ACTIONS) | {
         "maintenance_run", "deleted_projects_list", "deleted_project_cleanup_plan",
         "purge_deleted_project", "purge_missing_project",
     }
-    needs_team = action in TEAM_ACTIONS
+    needs_team = action in TEAM_ACTIONS or action in TEAM_INTEGRATED_ACTIONS
     needs_domains = ("versioning",) if action in VERSIONING_ONLY_ACTIONS else needs_team or action in domain_actions
     db = connect(root, database, include_domains=needs_domains, include_team=needs_team)
     now = int(time.time() * 1000)
@@ -7870,8 +8200,16 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = progress_register_with_graph(root, db, payload)
         db.close()
         return result
+    elif action == "progress_update_tree_begin":
+        result = progress_update_tree_begin(db, payload)
+        db.close()
+        return result
     elif action == "progress_update_tree":
         result = progress_update_tree(root, db, payload)
+        db.close()
+        return result
+    elif action == "progress_update_tree_finish":
+        result = progress_update_tree_finish(db, payload)
         db.close()
         return result
     elif action == "progress_relation_update":
@@ -7972,6 +8310,14 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "tracking_commit_plan":
         result = tracking_commit_plan(root, db, payload)
+        db.close()
+        return result
+    elif action == "tracking_commit_resources":
+        result = tracking_commit_resources(root, db, payload)
+        db.close()
+        return result
+    elif action == "tracking_apply_copies":
+        result = tracking_apply_copies(root, db, payload)
         db.close()
         return result
     elif action == "tracking_commit_complete":

@@ -19,8 +19,25 @@ const normalizeRelativePath = value => {
 
 const filenameSelectionKey = fileName => path.parse(fileName).name.match(/(\d{3,})$/)?.[1] || '';
 const parseSelectionKeywords = values => {
-  const matches = String(Array.isArray(values) ? values.join(' ') : values || '').match(/[A-Za-z0-9_.]+/g) || [];
-  return [...new Set(matches.map(token => token.match(/(\d{3,})(?:\.[A-Za-z0-9]+)?$/)?.[1] || '').filter(Boolean))];
+  const tokens = String(Array.isArray(values) ? values.join(' ') : values || '').match(/[\p{L}\p{N}_.-]+/gu) || [];
+  const keywords = [];
+  const seen = new Set();
+  const append = keyword => {
+    const identity = /\p{L}/u.test(keyword) ? keyword.toLocaleLowerCase() : keyword;
+    if (!seen.has(identity)) {
+      seen.add(identity);
+      keywords.push(keyword);
+    }
+  };
+  for (const token of tokens) {
+    if (/\p{L}/u.test(token)) {
+      const filename = token.replace(/^[._-]+|[._-]+$/g, '');
+      if (/\d{3,}/.test(filename) || /\.[\p{L}\p{N}]+$/u.test(filename)) append(filename);
+      continue;
+    }
+    for (const match of token.matchAll(/\d{3,}/g)) append(match[0]);
+  }
+  return keywords;
 };
 
 const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, projectVirtualPaths, imageExtensions, rawExtensions, videoExtensions }) => {
@@ -235,17 +252,29 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, pr
     if (!keywords.length) throw new Error('没有可用的文件名编号');
     const allFiles = await listFiles(source, request, job);
     const byKeyword = new Map();
+    const byFilename = new Map();
+    const byStem = new Map();
+    const addToIndex = (index, key, filePath) => {
+      if (!index.has(key)) index.set(key, []);
+      index.get(key).push(filePath);
+    };
     for (const filePath of allFiles) {
-      const key = filenameSelectionKey(path.basename(filePath));
-      if (!key) continue;
-      if (!byKeyword.has(key)) byKeyword.set(key, []);
-      byKeyword.get(key).push(filePath);
+      const fileName = path.basename(filePath);
+      const key = filenameSelectionKey(fileName);
+      if (key) addToIndex(byKeyword, key, filePath);
+      addToIndex(byFilename, fileName.toLocaleLowerCase(), filePath);
+      addToIndex(byStem, path.parse(fileName).name.toLocaleLowerCase(), filePath);
     }
     const files = [];
     const unsupportedPaths = [];
     const missingKeywords = [];
     for (const keyword of keywords) {
-      const matches = byKeyword.get(keyword) || [];
+      const normalizedKeyword = keyword.toLocaleLowerCase();
+      const matches = /^\d{3,}$/.test(keyword)
+        ? byKeyword.get(keyword) || []
+        : path.extname(keyword)
+          ? byFilename.get(normalizedKeyword) || []
+          : byStem.get(normalizedKeyword) || [];
       const supported = matches.filter(filePath => {
         const kind = mediaKind(filePath);
         return kind && (!request.mediaKind || kind === request.mediaKind);

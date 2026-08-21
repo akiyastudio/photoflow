@@ -71,6 +71,9 @@ const versionService = {
       copyReferences: [],
     };
   },
+  getTrackingCommitResources: async () => ({
+    success: true, parentFolderPath: trustedParent, progressFolderPath: trustedProgress,
+  }),
   commitBatchCompare: async (root, request) => {
     calls.commit = { root, request };
     return { success: true, batch: { id: 'batch-id' }, renamedCount: 1 };
@@ -108,11 +111,18 @@ registerVersionIpc({
   String,
   VIDEO_EXTENSIONS: new Set(),
   backgroundTasks: {
-    create: () => ({
+    create: definition => {
+      (calls.taskDefinitions ||= []).push(definition);
+      return ({
       context: { signal: new AbortController().signal, report: (...args) => taskReports.push(args), throwIfCancelled: () => undefined },
       waitForStart: async () => undefined, complete: () => undefined, fail: () => undefined, cancelled: () => undefined,
-    }),
+      });
+    },
     list: () => calls.activeTasks || [],
+    run: async (definition, worker) => {
+      (calls.commitTaskDefinitions ||= []).push(definition);
+      return { result: await worker({ signal: new AbortController().signal, report: () => undefined, throwIfCancelled: () => undefined }) };
+    },
   },
   copyFileAtomic: async () => undefined,
   crypto,
@@ -237,6 +247,9 @@ async function main() {
     root: workspaceRoot,
     request: { sessionId: '11111111-1111-4111-8111-111111111111', batchId: 'batch-id' },
   }, 'tracking snapshot finalization must use the isolated media-scan database worker');
+  assert.strictEqual(calls.commitTaskDefinitions[0].resourceAccess, 'write', 'tracking commit must reserve both version folders for writes');
+  assert.deepStrictEqual(calls.commitTaskDefinitions[0].resources, [trustedParent, trustedProgress]);
+  assert.strictEqual(calls.commitTaskDefinitions[0].notificationPolicy, 'progress-toast', 'detached tracking commits must remain visible while running');
   assert(!JSON.stringify(calls.commit.request).includes(maliciousPath));
 
   const originalGetTrackingCommitPlan = versionService.getTrackingCommitPlan;
@@ -308,6 +321,34 @@ async function main() {
   assert.strictEqual(externalRegistration.relativePath, 'external-progress.lnk');
   assert.strictEqual(externalRegistrationRequest.folderPath, externalProgressPath, 'external progress tracking must persist the shortcut target path');
   assert.strictEqual(externalRegistrationRequest.externalLinkRelativePath, 'external-progress.lnk');
+
+  const updateProgress = handlers.get('workspace-progress-update');
+  let treeUpdateRequest;
+  versionService.beginProgressTreeUpdate = async () => ({ success: true, mutationToken: 'tree-mutation-token' });
+  versionService.finishProgressTreeUpdate = async () => ({ success: true });
+  versionService.listProgress = async () => ({
+    success: true,
+    progressFolders: [{
+      id: 'external-node', nodeRole: 'progress', relationKind: 'main', mediaKind: 'image',
+      versionKey: '1', displayName: 'external-progress', folderPath: externalProgressPath,
+      externalLinkRelativePath: 'external-progress.lnk', trackingEnabled: false,
+      trackingState: 'disabled', parentProgressId: null,
+    }],
+  });
+  versionService.updateProgressTree = async (_root, request) => {
+    treeUpdateRequest = request;
+    return { success: true, progressFolder: { id: 'external-node' }, progressFolders: [] };
+  };
+  const externalUpdate = await updateProgress({}, workspaceRoot, 'active', 'Project', {
+    progressId: 'external-node', mediaKind: 'image', versionKey: '2',
+    displayName: 'renamed-external-progress', preserveFolderPath: false,
+  });
+  assert.strictEqual(externalUpdate.success, true, externalUpdate.error);
+  assert.strictEqual(treeUpdateRequest.mutationToken, 'tree-mutation-token');
+  assert.strictEqual(treeUpdateRequest.updates[0].folderPath, externalProgressPath, 'server policy must preserve an external progress physical path');
+  assert.strictEqual(fs.existsSync(externalProgressPath), true, 'editing external progress metadata must not move the external directory');
+  const treeTask = calls.taskDefinitions.find(definition => definition.type === 'version-tree-update');
+  assert(treeTask && treeTask.resourceAccess === 'write' && treeTask.resources[0] === path.join(workspaceRoot, 'Project'), 'whole-tree edits must reserve the project path for writes');
 
   const failedNested = path.join(workspaceRoot, 'Project', 'nested', 'Rollback me');
   fs.mkdirSync(failedNested, { recursive: true });

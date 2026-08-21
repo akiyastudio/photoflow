@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { FolderInput, ScanSearch, HardDrive, Play, Trash2, AlertCircle, Edit, X, Plus, User, Loader2, RotateCcw, Download, Scissors, Video, ChevronDown, ChevronUp, Crop, CheckCircle2 } from 'lucide-react';
 import { TaskProgress } from '../../components/TaskStatus';
+import { useTaskPresentation } from '../../components/useTaskPresentation';
 import type { AppConfig, LogEntry, MediaWorkflowImportManifest, ProjectStatus, SelectionPreflightResult, StorageDevice, VideoTranscodeSettings, WorkspaceProject } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
@@ -10,10 +11,11 @@ import { ImportSourceControls, type ImportMaterialKind } from '../../components/
 import { PanelSwitch } from '../../components/PanelSwitch';
 import { appendImportSuccess, type ImportCompletion } from './import-completion-model';
 import { filenameSelectionOutputName, resolveFilenameSelectionSource } from './filename-selection-model';
-import { configuredSdDriveTypes, configuredSdSelectionPaths, isTrustedSdImportDevice, normalizeConfiguredSdDeviceRecords, reconcileConfiguredSdDevices, resolveConfiguredSdDevices, syncLegacySdMirrors, upsertConfiguredSdDevice } from './sd-startup-import-model';
+import { configuredSdDriveTypes, configuredSdSelectionPaths, isTrustedSdImportDevice, normalizeConfiguredSdDeviceRecords, reconcileConfiguredSdDevices, resolveConfiguredSdDevices, storageDeviceMatchesId, syncLegacySdMirrors, upsertConfiguredSdDevice } from './sd-startup-import-model';
 import { decideStartupSdAutoImport, handledStartupRequestAfterBatchStart, shouldDeleteSourceForImportBatch, type StartupSdAutoImportRequest } from './startup-sd-auto-import-model';
 import { isFreshStorageDeviceInventory, shouldPollStorageDeviceInventory } from './storage-device-inventory-model';
 import { useStorageDeviceInventory } from './use-storage-device-inventory';
+import { getWorkspaceCatalog, readWorkspaceCatalogSnapshot, workspaceCatalogEventMatches } from '../../platform/workspace-catalog-client';
 
 export type { ImportCompletion } from './import-completion-model';
 
@@ -52,6 +54,7 @@ const importCountBucket = (count: number) => count <= 20
         : '2001+';
 
 const usePythonTask = (scriptName: string, initialStatus: string) => {
+  const panelTaskIdentity = useTaskPresentation();
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
@@ -147,7 +150,11 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
     setStatusMsg(startingStatus);
     const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     requestIdRef.current = requestId;
-    window.electronAPI.runScript(scriptName, args, requestId);
+    window.electronAPI.runScript(scriptName, args, requestId, panelTaskIdentity ? {
+      ownerPageId: panelTaskIdentity.ownerPageId,
+      panelKind: panelTaskIdentity.panelKind,
+      title: panelTaskIdentity.title,
+    } : undefined);
     return true;
   };
 
@@ -386,9 +393,9 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     const device = storageDevices.find(candidate => candidate.mountPath === sdPath);
     if (device && isTrustedSdImportDevice(device)) {
       const records = normalizeConfiguredSdDeviceRecords(config.sdDevices);
-      const matchingRecord = records.find(record => record.deviceId === device.id);
+      const matchingRecord = records.find(record => storageDeviceMatchesId(device, record.deviceId));
       if (removing && matchingRecord?.enabled && matchingRecord.confirmedAt > 0) {
-        onImportConfigChange(syncLegacySdMirrors(config, records.map(record => record.deviceId === device.id ? { ...record, enabled: false } : record)));
+        onImportConfigChange(syncLegacySdMirrors(config, records.map(record => storageDeviceMatchesId(device, record.deviceId) ? { ...record, deviceId: device.id, enabled: false } : record)));
       } else {
         onImportConfigChange(upsertConfiguredSdDevice(config, device, driveTypes[sdPath] || 'work', Date.now()));
       }
@@ -404,7 +411,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     const device = storageDevices.find(candidate => candidate.mountPath === sdPath);
     const records = normalizeConfiguredSdDeviceRecords(config.sdDevices);
     const nextRecords = records.map(record => (
-      (device ? record.deviceId === device.id : record.lastMountPath === sdPath) ? { ...record, type } : record
+      (device ? storageDeviceMatchesId(device, record.deviceId) : record.lastMountPath === sdPath) ? { ...record, ...(device ? { deviceId: device.id } : {}), type } : record
     ));
     onImportConfigChange(syncLegacySdMirrors({ ...config, sdDriveTypes: { ...driveTypes, [sdPath]: type } }, nextRecords));
   };
@@ -815,7 +822,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
       }
       const needsEnrollment = selectedDrives.some(path => {
         const connectedDevice = storageDevices.find(device => device.mountPath === path);
-        const record = connectedDevice && normalizeConfiguredSdDeviceRecords(config?.sdDevices).find(item => item.deviceId === connectedDevice.id);
+        const record = connectedDevice && normalizeConfiguredSdDeviceRecords(config?.sdDevices).find(item => storageDeviceMatchesId(connectedDevice, item.deviceId));
         return Boolean(connectedDevice && isTrustedSdImportDevice(connectedDevice) && (!record || record.confirmedAt <= 0 || !record.enabled));
       });
       setStatusMsg(needsEnrollment ? '已有 SD 卡配置需要重新确认设备身份；请打开盘符列表并点击对应卡片' : '正在等待已启用的 SD 卡接入…');
@@ -1198,6 +1205,30 @@ const BirthdayManagerModal = ({ onClose, onDataChanged }: { onClose: () => void,
 
 type HomePanelDragProps = Pick<React.ComponentProps<'button'>, 'draggable' | 'onDragStart' | 'onDragEnd' | 'onDragOver' | 'onDrop'>;
 
+const parseBirthday = (dateStr: string) => {
+  const match = dateStr.trim().match(/^(\d{1,2})(?:\.|月\.?)(\d{1,2})日?$/);
+  return { month: Number(match?.[1] || 0), day: Number(match?.[2] || 0) };
+};
+
+const upcomingBirthdaysFrom = (data: Record<string, string>, today = new Date()) => {
+  const todayZero = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const currentMonth = today.getMonth() + 1;
+  const nextMonth = (currentMonth % 12) + 1;
+  const results: {name: string, date: string, sortKey: number}[] = [];
+  for (const [name, dateStr] of Object.entries(data)) {
+    const { month, day } = parseBirthday(dateStr);
+    const probe = new Date(2000, month - 1, day);
+    if (month < 1 || month > 12 || day < 1 || day > 31 || probe.getMonth() !== month - 1 || probe.getDate() !== day) continue;
+    if (month !== currentMonth && month !== nextMonth) continue;
+    let targetYear = today.getFullYear();
+    if (currentMonth === 12 && month === 1) targetYear += 1;
+    const birthdayDate = new Date(targetYear, month - 1, day);
+    if (birthdayDate < todayZero) continue;
+    results.push({ name, date: `${month}月${day}日`, sortKey: birthdayDate.getTime() });
+  }
+  return results.sort((left, right) => left.sortKey - right.sortKey);
+};
+
 const DashboardView = ({
   workspacePath,
   section = 'all',
@@ -1211,6 +1242,7 @@ const DashboardView = ({
   projectName,
   onImportConfigChange,
   onImportComplete,
+  initialBirthdays,
   dragProps
 }: {
   workspacePath: string;
@@ -1225,11 +1257,12 @@ const DashboardView = ({
   projectName?: string;
   onImportConfigChange: (config: AppConfig['smartImport']) => void;
   onImportComplete?: (result: ImportCompletion) => void | Promise<void>;
+  initialBirthdays?: Record<string, string>;
   dragProps?: HomePanelDragProps;
 }) => {
   // 生日逻辑保持不变
-  const [upcomingBirthdays, setUpcomingBirthdays] = useState<{name: string, date: string, sortKey: number}[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [upcomingBirthdays, setUpcomingBirthdays] = useState<{name: string, date: string, sortKey: number}[]>(() => upcomingBirthdaysFrom(initialBirthdays || {}));
+  const [loading, setLoading] = useState(!initialBirthdays);
   const [showManager, setShowManager] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [workspaceProjects, setWorkspaceProjects] = useState<WorkspaceProject[]>([]);
@@ -1271,11 +1304,11 @@ const DashboardView = ({
         void loadProjects();
       }, 2500);
     };
-    async function loadProjects() {
+    async function loadProjects(fresh = false, cachedOnly = false) {
       if (projectLoadRunning) return;
       projectLoadRunning = true;
       try {
-        const result = await window.electronAPI.getWorkspaceProjects(workspacePath);
+        const result = cachedOnly ? readWorkspaceCatalogSnapshot(workspacePath) || await getWorkspaceCatalog(workspacePath) : await getWorkspaceCatalog(workspacePath, { fresh });
         if (!mounted) return;
         if (!result.success) throw new Error(result.error || '无法读取工作区项目');
         if (retryTimer !== undefined) window.clearTimeout(retryTimer);
@@ -1294,52 +1327,24 @@ const DashboardView = ({
       }
     }
     void loadProjects();
-    const unsubscribe = window.electronAPI.onWorkspaceProjectsChanged(() => { void loadProjects(); });
+    const refreshProjects = () => { void loadProjects(true); };
+    const snapshotChanged = (event: Event) => { if (workspaceCatalogEventMatches(event, workspacePath)) void loadProjects(false, true); };
+    const unsubscribe = window.electronAPI.onWorkspaceProjectsChanged(refreshProjects);
+    window.addEventListener('workspace-catalog-snapshot-changed', snapshotChanged);
     return () => {
       mounted = false;
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       unsubscribe();
+      window.removeEventListener('workspace-catalog-snapshot-changed', snapshotChanged);
     };
   }, [active, importBusy, projectDestination, section, workspacePath]);
-
-  // 解析 "M月.D日" 格式
-  const parseBirthday = (dateStr: string) => {
-    const match = dateStr.trim().match(/^(\d{1,2})(?:\.|月\.?)(\d{1,2})日?$/);
-    return {
-      month: Number(match?.[1] || 0),
-      day: Number(match?.[2] || 0)
-    };
-  };
 
   const fetchBirthdays = async () => {
     if (!window.electronAPI) return;
     try {
       setLoading(true);
       const data = await window.electronAPI.getBirthdays();
-      const today = new Date();
-      const todayZero = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-      const currentMonth = today.getMonth() + 1;
-      const nextMonth = (currentMonth % 12) + 1;
-      const results: {name: string, date: string, sortKey: number}[] = [];
-
-      Object.entries(data).forEach(([name, dateStr]) => {
-        const { month, day } = parseBirthday(dateStr);
-        const probe = new Date(2000, month - 1, day);
-        if (month < 1 || month > 12 || day < 1 || day > 31 || probe.getMonth() !== month - 1 || probe.getDate() !== day) return;
-        if (month === currentMonth || month === nextMonth) {
-          let targetYear = today.getFullYear();
-          if (currentMonth === 12 && month === 1) targetYear += 1;
-          const birthdayDate = new Date(targetYear, month - 1, day);
-          if (birthdayDate < todayZero) return;
-          results.push({
-            name,
-            date: `${month}月${day}日`,
-            sortKey: birthdayDate.getTime()
-          });
-        }
-      });
-      results.sort((a, b) => a.sortKey - b.sortKey);
-      setUpcomingBirthdays(results);
+      setUpcomingBirthdays(upcomingBirthdaysFrom(data));
     } catch (e) {
       console.error(e);
     } finally {
@@ -1348,8 +1353,14 @@ const DashboardView = ({
   };
 
   useEffect(() => {
-    if (section !== 'import') fetchBirthdays();
-  }, [section]);
+    if (section === 'import') return;
+    if (initialBirthdays) {
+      setUpcomingBirthdays(upcomingBirthdaysFrom(initialBirthdays));
+      setLoading(false);
+      return;
+    }
+    void fetchBirthdays();
+  }, [initialBirthdays, section]);
 
   return (
     <div className="space-y-8 animate-in fade-in duration-500">
@@ -1363,6 +1374,7 @@ const DashboardView = ({
 
       {section !== 'birthday' && <HomePanel title="从 SD 卡导入" initiallyOpen onOpenChange={setImportPanelOpen} {...dragProps}>
         <div className="flex flex-col gap-6">
+          {storageInventory.warning && <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700">{storageInventory.warning}{storageInventory.deviceErrors.length ? `；故障位置：${storageInventory.deviceErrors.map(item => item.mountPath || '未知设备').join('、')}` : ''}</div>}
           <ImportCard config={config} drives={drives} storageDevices={storageDevices} workspacePath={workspacePath} destinationPath={projectDestination ?? workspacePath} brollDestinationPath={projectDestination} workspaceProjects={projectDestination ? undefined : workspaceProjects} active={active} startupAutoImportRequest={startupAutoImportRequest} startupAutoImportReady={storageInventoryFresh && (Boolean(projectDestination) || workspaceProjectsLoaded)} startupAutoImportError={storageInventory.error || workspaceProjectsError} startupAutoImportSelections={startupAutoImportSelections} deleteSourceAfterImport={importDefaults.deleteSourceAfterImport} generateJpgFromRaw={importDefaults.generateJpgFromRaw} splitVideosOnImport={importDefaults.splitVideosOnImport} transcodeVideosOnImport={importDefaults.transcodeVideosOnImport} splitBrollVideosOnImport={brollConfig.splitVideosOnImport} transcodeBrollVideosOnImport={brollConfig.transcodeVideosOnImport} transcodeSettings={videoTools.transcode} onBusyChange={setImportBusy} onImportConfigChange={onImportConfigChange} onImportComplete={projectDestination ? undefined : result => { void onImportComplete?.(result); }} completedActionLabel="刷新卡片" />
         </div>
       </HomePanel>}
@@ -1502,6 +1514,7 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
           logs={logs}
           progress={progress}
           isRunning={isRunning}
+          reportToTaskCenter={false}
           idleMessage={isRunning ? '正在转换…' : '进度'}
           action={<button
                 onClick={startConversion}
@@ -1864,6 +1877,7 @@ const ResearchView = ({
           logs={logs}
           progress={progress}
           isRunning={isRunning}
+          reportToTaskCenter={false}
           idleMessage={statusMsg}
           action={<button
                onClick={runAnalysis}
@@ -1977,7 +1991,7 @@ const MatchView = ({
   const runTask = async () => {
     if (!projectPath || !selectedSources.length || !keywords.trim() || isRunning || isConfirming) return;
     setIsRunning(true);
-    setProgress(5);
+    setProgress(0);
     setStatusMsg('正在预检来源与目标…');
     setLogs([]);
     try {
@@ -2003,19 +2017,22 @@ const MatchView = ({
       operationIdRef.current = '';
       setProgress(30);
       setIsConfirming(true);
-      const details = previews.flatMap(({ source, preview }) => [
-        `${source.label}：${preview.sourceFolderRelativePath} → ${preview.targetFolderRelativePath}`,
-        `匹配 ${Number(preview.matchedCount || 0)} 个；待复制 ${Number(preview.filesToCopy || 0)} 个；已存在 ${Number(preview.existingCount || 0)} 个；冲突 ${Number(preview.conflictCount || 0)} 个；未找到 ${Number(preview.missingCount || 0)} 个`,
-        preview.existingPaths?.length ? `已存在：${preview.existingPaths.slice(0, 8).join('、')}` : '',
-        preview.conflictPaths?.length ? `冲突：${preview.conflictPaths.slice(0, 8).join('、')}` : '',
-        preview.missingKeywords?.length ? `未找到：${preview.missingKeywords.slice(0, 12).join('、')}` : '',
-        preview.unsupportedPaths?.length ? `不支持：${preview.unsupportedPaths.slice(0, 8).join('、')}` : '',
-      ]).filter(Boolean).join('\n');
       const filesToCopy = previews.reduce((sum, { preview }) => sum + Number(preview.filesToCopy || 0), 0);
-      const outputNames = previews.map(({ preview }) => `“${preview.outputFolderName}”`).join('、');
+      const totalBytes = previews.reduce((sum, { preview }) => sum + Number(preview.totalBytes || 0), 0);
+      const imageCount = previews.reduce((sum, { preview }) => sum + Number(preview.imageCount || 0), 0);
+      const videoCount = previews.reduce((sum, { preview }) => sum + Number(preview.videoCount || 0), 0);
+      const existingCount = previews.reduce((sum, { preview }) => sum + Number(preview.existingCount || 0), 0);
+      const conflictCount = previews.reduce((sum, { preview }) => sum + Number(preview.conflictCount || 0), 0);
+      const missingKeywords = tokens.filter(keyword => previews.every(({ preview }) => preview.missingKeywords?.includes(keyword)));
+      const details = [
+        `图片 ${imageCount} 个，视频 ${videoCount} 个`,
+        existingCount ? `目标中已存在 ${existingCount} 个，将保留原文件` : '',
+        conflictCount ? `发现 ${conflictCount} 个来源同名冲突，将跳过以避免覆盖` : '',
+        missingKeywords.length ? `未找到 ${missingKeywords.length} 个编号：${missingKeywords.slice(0, 10).join('、')}${missingKeywords.length > 10 ? '…' : ''}` : '',
+      ].filter(Boolean).join('；');
       const confirmed = await appDialog.confirm({
         title: '确认从文件名选片',
-        message: `输出文件夹为${outputNames}，本次复制 ${filesToCopy} 个文件。`,
+        message: `将复制 ${filesToCopy} 个文件，共 ${formatTransferBytes(totalBytes)}。`,
         detail: details,
         confirmLabel: '开始复制',
         cancelLabel: '取消',
@@ -2073,14 +2090,14 @@ const MatchView = ({
     {!embedded && <h2 className="text-2xl font-bold text-slate-800">选片</h2>}
     <div className={embedded ? 'space-y-6' : 'space-y-6 rounded-xl border border-slate-200 bg-white p-6'}>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <label className="text-sm text-slate-600">从文件夹选择图片
+        <label className="text-sm text-slate-600">图片来源文件夹
           <select value={selectedImageRelativePath} onChange={event => onUpdateConfig({ ...config, sourceFolderRelativePath: undefined, imageSourceFolderName: event.target.value })} disabled={isRunning || loadingFolders} className="form-input mt-1">
             <option value="">无</option>
             {sourceFolders.map(folder => <option key={folder.relativePath} value={folder.relativePath}>{folder.relativePath}</option>)}
           </select>
           <span className="mt-1 block text-xs font-bold text-slate-500">选中的图片会存放到“{filenameSelectionOutputName(selectedImageRelativePath) || '图片选片'}”文件夹</span>
         </label>
-        <label className="text-sm text-slate-600">从文件夹选择视频
+        <label className="text-sm text-slate-600">视频来源文件夹
           <select value={selectedVideoRelativePath} onChange={event => onUpdateConfig({ ...config, sourceFolderRelativePath: undefined, videoSourceFolderName: event.target.value })} disabled={isRunning || loadingFolders} className="form-input mt-1">
             <option value="">无</option>
             {sourceFolders.map(folder => <option key={folder.relativePath} value={folder.relativePath}>{folder.relativePath}</option>)}
@@ -2290,7 +2307,7 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
       {!settingsOnly && <div className="grid gap-3 md:grid-cols-2"><label className={`rounded-lg border p-3 text-sm ${outputMode === 'new' ? 'border-blue-400 bg-blue-50' : 'border-slate-200'}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="new" checked={outputMode === 'new'} disabled={isRunning} onChange={() => setOutputMode('new')} className="mt-0.5"/><span><b className="block text-slate-800">另存为新视频</b><span className="mt-1 block text-xs leading-5 text-slate-500">{activeSourceFolders.length ? '文件夹任务输出到原文件夹旁的新“_转码”目录。' : '保存在原视频旁边，文件名增加“_转码”。发生重名时自动编号。'}</span></span></span></label><label className={`rounded-lg border p-3 text-sm ${outputMode === 'replace' ? 'border-red-400 bg-red-50' : 'border-slate-200'} ${paths.length !== 1 || activeSourceFolders.length ? 'opacity-50' : ''}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="replace" checked={outputMode === 'replace'} disabled={isRunning || paths.length !== 1 || Boolean(activeSourceFolders.length)} onChange={() => setOutputMode('replace')} className="mt-0.5"/><span><b className="block text-slate-800">替换原视频</b><span className="mt-1 block text-xs leading-5 text-red-600">仅限直接选择的单个文件且封装不变。验证成功后原子替换，无法在软件内撤销。</span></span></span></label></div>}
       {videoMode === 'h264' && <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">H.264 兼容性更好；不保留 HDR 或 10-bit。可用时自动使用显卡。</div>}
       {videoMode === 'h265' && <div className="rounded-lg bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">H.265 文件更小，但兼容性较低；不保留 HDR 或 10-bit。可用时自动使用显卡。</div>}
-      {!settingsOnly && <TaskProgress logs={logs} progress={progress} isRunning={isRunning} idleMessage={sourcesLoading ? '正在读取后台媒体索引…' : statusMsg} statusMessage={sourcesLoading ? '正在读取后台媒体索引…' : statusMsg} action={<button type="button" onClick={isRunning ? () => void cancel() : startTranscode} disabled={isCancelling || sourcesLoading || (!isRunning && !paths.length)} className={`flex items-center gap-2 rounded-lg px-6 py-2.5 font-bold transition ${isRunning ? 'bg-red-600 text-white hover:bg-red-500' : paths.length && !sourcesLoading ? 'bg-blue-600 text-white hover:bg-blue-500' : 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400'}`}>{isRunning ? isCancelling ? <Loader2 size={17} className="animate-spin"/> : <X size={17}/> : sourcesLoading ? <Loader2 size={17} className="animate-spin"/> : <Play size={17} fill="currentColor"/>}{isRunning ? isCancelling ? '正在取消…' : '取消转码' : sourcesLoading ? '正在建立索引' : '开始转码'}</button>}/>}</div>
+      {!settingsOnly && <TaskProgress logs={logs} progress={progress} isRunning={isRunning} reportToTaskCenter={false} idleMessage={sourcesLoading ? '正在读取后台媒体索引…' : statusMsg} statusMessage={sourcesLoading ? '正在读取后台媒体索引…' : statusMsg} action={<button type="button" onClick={isRunning ? () => void cancel() : startTranscode} disabled={isCancelling || sourcesLoading || (!isRunning && !paths.length)} className={`flex items-center gap-2 rounded-lg px-6 py-2.5 font-bold transition ${isRunning ? 'bg-red-600 text-white hover:bg-red-500' : paths.length && !sourcesLoading ? 'bg-blue-600 text-white hover:bg-blue-500' : 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400'}`}>{isRunning ? isCancelling ? <Loader2 size={17} className="animate-spin"/> : <X size={17}/> : sourcesLoading ? <Loader2 size={17} className="animate-spin"/> : <Play size={17} fill="currentColor"/>}{isRunning ? isCancelling ? '正在取消…' : '取消转码' : sourcesLoading ? '正在建立索引' : '开始转码'}</button>}/>}</div>
   </div>;
 };
 
@@ -2355,6 +2372,7 @@ const VideoSplitView = ({ embedded = false, initialTargetPath = '', initialTarge
           logs={logs}
           progress={progress}
           isRunning={isRunning}
+          reportToTaskCenter={false}
           idleMessage={statusMsg}
           action={<button
             onClick={isRunning ? () => void cancel() : startSplit}

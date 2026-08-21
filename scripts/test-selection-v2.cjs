@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { pathToFileURL } = require('url');
-const { SELECTION_LIMITS, createSelectionService } = require('../electron/services/selection-service.cjs');
+const { SELECTION_LIMITS, createSelectionService, parseSelectionKeywords } = require('../electron/services/selection-service.cjs');
 const { registerSelectionIpc } = require('../electron/modules/selection-ipc.cjs');
 
 const mkdir = value => fs.mkdirSync(value, { recursive: true });
@@ -47,6 +47,12 @@ const expectReject = async (promise, pattern) => {
 };
 
 const run = async () => {
+  assert.deepStrictEqual(parseSelectionKeywords('4310.4309.4056.'), ['4310', '4309', '4056'], '英文句号分隔的纯编号必须全部识别');
+  assert.deepStrictEqual(parseSelectionKeywords('4310，4309、4056;4157|4178/4181'), ['4310', '4309', '4056', '4157', '4178', '4181'], '常见中英文符号必须可以混合分隔编号');
+  assert.deepStrictEqual(parseSelectionKeywords('IMG_4310.CR3、DSC-4309.JPG，4056 img_4310.cr3'), ['IMG_4310.CR3', 'DSC-4309.JPG', '4056'], '完整文件名与纯编号必须可以混输，并对文件名忽略大小写去重');
+  assert.deepStrictEqual(parseSelectionKeywords('618A7394.CR3 20260818_IMG_4310.CR3'), ['618A7394.CR3', '20260818_IMG_4310.CR3'], '完整文件名必须原样保留');
+  assert.deepStrictEqual(parseSelectionKeywords('12 99 IMG_ABCD'), [], '少于三位或不含末尾编号的内容必须忽略');
+  assert.deepStrictEqual(parseSelectionKeywords('4310-4320'), ['4310', '4320'], '连字符只分隔端点，不展开编号范围');
   const sourceModel = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'tools', 'filename-selection-model.ts')).href);
   const sourceFolders = [{ name: 'RAW', relativePath: 'RAW' }, { name: 'MOV', relativePath: 'MOV' }, { name: 'JPG', relativePath: 'shoot/day/JPG' }];
   assert.strictEqual(sourceModel.resolveFilenameSelectionSource(sourceFolders, undefined, 'raw'), 'RAW', '图片来源必须默认匹配 RAW，且不受大小写影响');
@@ -73,6 +79,8 @@ const run = async () => {
   try {
     put(projectRoot, 'RAW/IMG_1001.CR3');
     put(projectRoot, 'RAW/note_1001.txt');
+    put(projectRoot, 'RAW/618A7394.CR3');
+    put(projectRoot, 'RAW/IMG_7394.JPG');
     put(projectRoot, 'shoot/day/JPG/DSC_2002.JPG');
     put(projectRoot, 'MOV/clip_3003.MOV');
     put(projectRoot, 'Mixed/still_3500.JPG');
@@ -80,6 +88,15 @@ const run = async () => {
 
     const folders = await service.listSourceFolders(request('RAW'));
     assert(folders.folders.some(folder => folder.relativePath === 'shoot/day/JPG'), '嵌套来源应出现在文件夹列表');
+
+    const exactFilenamePreview = await service.preflightFilename({ ...request('RAW'), mediaKind: 'image', keywords: '618A7394.CR3' });
+    assert.strictEqual(exactFilenamePreview.matchedCount, 1, '完整文件名只能精确匹配同名文件');
+    assert(exactFilenamePreview.items.some(item => item.sourceRelativePath === 'RAW/618A7394.CR3'));
+    const exactStemPreview = await service.preflightFilename({ ...request('RAW'), mediaKind: 'image', keywords: 'IMG_7394' });
+    assert.strictEqual(exactStemPreview.matchedCount, 1, '省略扩展名时必须按完整主文件名精确匹配');
+    assert(exactStemPreview.items.some(item => item.sourceRelativePath === 'RAW/IMG_7394.JPG'));
+    const numericPreview = await service.preflightFilename({ ...request('RAW'), mediaKind: 'image', keywords: '7394' });
+    assert.strictEqual(numericPreview.matchedCount, 2, '纯编号仍应匹配具有相同末尾编号的所有媒体');
 
     const virtualRealpath = value => path.resolve(value);
     virtualRealpath.native = virtualRealpath;
@@ -342,15 +359,20 @@ const run = async () => {
     const handlers = new Map();
     let capturedRequest;
     const ipcProgressEvents = [];
+    const executeSelection = async value => {
+      if (value.outcome === 'failed') throw new Error('injected IPC selection failure');
+      if (value.outcome === 'cancelled') return { success: false, cancelled: true, operationId: value.operationId };
+      return { success: true, operationId: value.operationId };
+    };
     registerSelectionIpc({
       ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) }, path, fs,
       workspaceCatalogs: new Map([[workspaceRoot, { projects: [{ name: 'Project A', relative_path: 'Project A' }] }]]),
       selectionService: {
         preflightFilename: async value => { capturedRequest = value; return { success: true }; },
         listSourceFolders: async value => { value.onProgress({ operationId: 'ipc-progress', phase: 'listing_source_folders', directoriesScanned: 1 }); return { success: true, folders: [], nextCursor: null, truncated: false }; },
-        executeFilename: async () => ({ success: true }),
+        executeFilename: executeSelection,
         preflightManual: async () => ({ success: true }),
-        executeManual: async () => ({ success: true }),
+        executeManual: executeSelection,
         cancel: () => false,
       },
     });
@@ -368,6 +390,22 @@ const run = async () => {
     const registeredFolderScan = await handlers.get('workspace-selection-source-folders')({ sender: { send: (channel, payload) => ipcProgressEvents.push([channel, payload]) } }, projectRoot, { pageSize: 500 });
     assert.strictEqual(registeredFolderScan.success, true);
     assert.strictEqual(ipcProgressEvents[0][0], 'workspace-selection-progress', '文件夹扫描进度必须通过可取消任务通道返回');
+    const executeEvent = { sender: { send: (channel, payload) => ipcProgressEvents.push([channel, payload]) } };
+    for (const channel of ['workspace-selection-filename-execute', 'workspace-selection-manual-execute']) {
+      for (const outcome of ['complete', 'cancelled', 'failed']) {
+        const operationId = `${channel.includes('filename') ? 'filename' : 'manual'}-${outcome}`;
+        const before = ipcProgressEvents.length;
+        const result = await handlers.get(channel)(executeEvent, projectRoot, { operationId, outcome });
+        const terminal = ipcProgressEvents.slice(before).at(-1)?.[1];
+        assert.strictEqual(terminal?.operationId, operationId, `${channel} 的终态必须沿用原 operationId`);
+        assert.strictEqual(terminal?.phase, outcome, `${channel} 必须发送 ${outcome} 终态`);
+        assert.strictEqual(terminal?.progress, outcome === 'complete' ? 100 : 0, `${channel} 的终态进度必须规范化`);
+        if (outcome === 'failed') {
+          assert.strictEqual(result.success, false);
+          assert.match(terminal.error, /injected IPC selection failure/);
+        }
+      }
+    }
 
     console.log('selection V2 behavior tests passed');
   } finally {
