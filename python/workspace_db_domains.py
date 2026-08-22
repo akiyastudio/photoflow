@@ -6,7 +6,7 @@ CATALOG_ACTIONS = (
     "purge_deleted_project", "missing_projects_list", "purge_missing_project",
 )
 MEDIA_ACTIONS = (
-    "media_sync_project", "media_get", "media_get_photo", "media_create_version", "media_update_version",
+    "media_sync_prepare", "media_sync_apply_batch", "media_sync_finalize", "media_get", "media_get_photo", "media_create_version", "media_update_version",
     "media_refresh_metadata_fingerprint", "final_version_list", "media_set_thumbnail", "media_relocate_version",
     "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare",
     "media_workflow_import_commit",
@@ -17,7 +17,7 @@ PROGRESS_ACTIONS = (
     "version_graph_edge_create", "version_graph_edge_list", "version_graph_edge_delete", "version_graph_edge_replace_source",
     "version_tree_layout_get", "version_tree_layout_save", "progress_policy_save", "progress_mark_stale",
     "progress_mark_ready", "progress_main_branch", "progress_visible_relations", "progress_copy_missing_children",
-    "progress_detect_stale", "progress_main_branch_media", "progress_unregister", "progress_delete_missing", "batch_register_baseline",
+    "progress_stale_prepare", "progress_stale_apply", "progress_main_branch_media", "progress_unregister", "progress_delete_missing", "batch_register_baseline",
     "batch_commit_compare", "batch_operation_list", "batch_retry_operations",
 )
 TRACKING_ACTIONS = (
@@ -42,7 +42,10 @@ TEAM_ACTIONS = (
 UNDO_ACTIONS = ("undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable")
 
 ALL_ACTIONS = ("init", *CATALOG_ACTIONS, *MEDIA_ACTIONS, *PROGRESS_ACTIONS, *TRACKING_ACTIONS, *TEAM_ACTIONS, *UNDO_ACTIONS)
-READ_ONLY_ACTIONS = frozenset(("progress_snapshot", "tracking_session_get", "tracking_commit_resources", "version_tree_layout_get"))
+READ_ONLY_ACTIONS = frozenset((
+    "progress_snapshot", "tracking_session_get", "tracking_commit_resources", "version_tree_layout_get",
+    "media_sync_prepare", "progress_stale_prepare",
+))
 
 if len(ALL_ACTIONS) != len(set(ALL_ACTIONS)):
     raise RuntimeError("workspace database action catalog contains duplicates")

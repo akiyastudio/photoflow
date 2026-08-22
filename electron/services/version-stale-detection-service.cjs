@@ -1,48 +1,81 @@
 const path = require('path');
+const { createDirtyCoalescingRunner } = require('./dirty-coalescing-runner.cjs');
 
-const createVersionStaleDetectionService = ({ versionService, delayMs = 1500, writeLog = () => undefined }) => {
-  const pending = new Map();
-  const keyFor = (root, projectName) => `${path.resolve(root).toLocaleLowerCase()}\0${String(projectName || '').toLocaleLowerCase()}`;
-
-  const schedule = (root, projectName, changedPaths = [], fullScan = false) => {
-    if (!projectName) return;
-    const key = keyFor(root, projectName);
-    const previous = pending.get(key);
-    if (previous?.timer) clearTimeout(previous.timer);
-    const state = {
-      root: path.resolve(root),
-      projectName: String(projectName),
-      changedPaths: new Set([...(previous?.changedPaths || []), ...changedPaths.map(value => path.resolve(value))]),
-      fullScan: Boolean(fullScan || previous?.fullScan),
-      timer: null,
-    };
-    state.timer = setTimeout(() => {
-      pending.delete(key);
-      void versionService.detectProgressStale(state.root, {
-        projectName: state.projectName,
-        changedPaths: state.fullScan ? [] : [...state.changedPaths],
-      }).catch(error => {
-        writeLog('warn', 'Unable to detect stale version tracking nodes', {
-          projectName: state.projectName, error: error.message || String(error),
-        });
-      });
-    }, Math.max(0, Number(delayMs) || 0));
-    pending.set(key, state);
+const mergeDetectionBatch = (current, delta) => {
+  const left = current || {};
+  const right = delta || {};
+  return {
+    root: right.root || left.root,
+    projectName: right.projectName || left.projectName,
+    changedPaths: new Set([...(left.changedPaths || []), ...(right.changedPaths || [])]),
+    fullScan: Boolean(left.fullScan || right.fullScan),
+    restartTask: right.restartTask || left.restartTask || null,
   };
-
-  const cancel = (root, projectName) => {
-    const key = keyFor(root, projectName);
-    const state = pending.get(key);
-    if (state?.timer) clearTimeout(state.timer);
-    pending.delete(key);
-  };
-
-  const stop = () => {
-    for (const state of pending.values()) if (state.timer) clearTimeout(state.timer);
-    pending.clear();
-  };
-
-  return { schedule, cancel, stop, pendingCount: () => pending.size };
 };
 
-module.exports = { createVersionStaleDetectionService };
+const createVersionStaleDetectionService = ({ versionService, backgroundTasks = null, delayMs = 1500, runnerRetryDelays = undefined, writeLog = () => undefined }) => {
+  const keyFor = (root, projectName) => `${path.resolve(root).toLocaleLowerCase()}\0${String(projectName || '').toLocaleLowerCase()}`;
+  let runner;
+
+  const enqueueRetry = (key, batch, restartTask = null) => {
+    const ticket = runner.enqueue(key, { ...batch, restartTask });
+    return runner.flush(ticket);
+  };
+
+  const executeWrapper = async ({ key, batch }) => {
+    const payload = { projectName: batch.projectName, changedPaths: batch.fullScan ? [] : [...batch.changedPaths] };
+    const executeDatabaseWork = () => versionService.detectProgressStale(batch.root, payload);
+    if (!backgroundTasks?.run) return executeDatabaseWork();
+    const execution = await backgroundTasks.run({
+      ...(batch.restartTask?.id ? { id: batch.restartTask.id } : {}),
+      type: 'version-stale-detection',
+      title: `检查版本跟踪 · ${batch.projectName}`,
+      notificationPolicy: 'silent',
+      cancellable: false,
+      resources: [{ path: `photoflow-workspace-database/${batch.root}`, access: 'write' }],
+      metadata: {
+        workspaceRoot: batch.root, projectName: batch.projectName,
+        changedPaths: [...batch.changedPaths], fullScan: batch.fullScan,
+      },
+    }, executeDatabaseWork, () => enqueueRetry(key, batch));
+    backgroundTasks.dismiss(execution.task.id);
+    return execution;
+  };
+
+  runner = createDirtyCoalescingRunner({
+    merge: mergeDetectionBatch,
+    hasWork: batch => Boolean(batch?.root && batch?.projectName),
+    worker: executeWrapper,
+    delayMs,
+    ...(runnerRetryDelays ? { retryDelays: runnerRetryDelays } : {}),
+    onError: (error, context) => writeLog('warn', 'Unable to detect stale version tracking nodes', {
+      projectName: context.batch?.projectName, retryAttempt: context.retryAttempt,
+      willRetry: context.willRetry, error: error.message || String(error),
+    }),
+  });
+
+  backgroundTasks?.registerTypeRestartFactory?.('version-stale-detection', task => enqueueRetry(
+    keyFor(task.metadata?.workspaceRoot, task.metadata?.projectName),
+    mergeDetectionBatch(null, {
+      root: task.metadata?.workspaceRoot, projectName: task.metadata?.projectName,
+      changedPaths: task.metadata?.changedPaths || [], fullScan: task.metadata?.fullScan === true,
+    }),
+    task,
+  ), {
+    canRestart: task => Boolean(task.metadata?.workspaceRoot && task.metadata?.projectName),
+    autoRestart: true,
+  });
+
+  const schedule = (root, projectName, changedPaths = [], fullScan = false) => {
+    if (!projectName) return null;
+    return runner.enqueue(keyFor(root, projectName), {
+      root: path.resolve(root), projectName: String(projectName),
+      changedPaths: changedPaths.map(value => path.resolve(value)), fullScan,
+    });
+  };
+
+  const cancel = (root, projectName) => runner.cancel(keyFor(root, projectName));
+  return { schedule, cancel, stop: runner.stop, pendingCount: runner.pendingCount, flush: runner.flush, runner };
+};
+
+module.exports = { createVersionStaleDetectionService, mergeDetectionBatch };

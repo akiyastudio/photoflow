@@ -2,10 +2,12 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { PythonDatabaseClient } = require('../electron/repositories/database-client.cjs');
+const { WorkspaceSqliteCoordinator } = require('../electron/services/workspace-sqlite-coordinator.cjs');
 const { createDomainHealthService } = require('../electron/services/domain-health-service.cjs');
 
 const registry = createDomainHealthService();
 const client = new PythonDatabaseClient({
+  coordinator: new WorkspaceSqliteCoordinator(),
   getRunConfig: () => ({ command: 'unused', args: [] }), getDatabasePath: () => 'unused.sqlite3',
   writeLog: () => undefined, domainId: 'team-retouch', circuitCooldownMs: 60000,
   onHealthChange: state => registry.update('team-retouch', state),

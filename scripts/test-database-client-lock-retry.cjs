@@ -24,7 +24,7 @@ stdin.write = (line, callback) => {
   writes += 1;
   const request = JSON.parse(line);
   queueMicrotask(() => stdout.emit('data', `${JSON.stringify(writes < 3
-    ? { id: request.id, success: false, error: 'database is locked' }
+    ? { id: request.id, success: false, code: 'SQLITE_BUSY', error: 'localized sqlite busy message' }
     : { id: request.id, success: true, result: { success: true, attempts: writes } })}\n`));
   callback?.();
 };
@@ -40,7 +40,9 @@ Module._load = function(request, parent, isMain) {
     const modulePath = path.resolve(__dirname, '..', 'electron', 'repositories', 'database-client.cjs');
     delete require.cache[modulePath];
     const { PythonDatabaseClient } = require(modulePath);
+    const { WorkspaceSqliteCoordinator } = require('../electron/services/workspace-sqlite-coordinator.cjs');
     const client = new PythonDatabaseClient({
+      coordinator: new WorkspaceSqliteCoordinator(),
       getRunConfig: () => ({ command: 'python', args: [] }),
       getDatabasePath: () => 'workspace.sqlite3',
       writeLog: () => undefined,

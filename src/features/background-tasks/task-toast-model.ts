@@ -2,7 +2,16 @@ import type { BackgroundTask } from '../../types';
 
 const FAILURE_TOAST_MS = 10_000;
 const RESULT_TOAST_MS = 6_000;
-const TERMINAL_TASK_STATES = new Set<BackgroundTask['state']>(['completed', 'cancelled']);
+const TERMINAL_TASK_STATES = new Set<BackgroundTask['state']>(['completed', 'failed', 'cancelled', 'interrupted']);
+const ACTIVE_TASK_STATES = new Set<BackgroundTask['state']>(['queued', 'running', 'pausing', 'paused', 'resuming']);
+
+export const normalizeBackgroundTaskSnapshots = (tasks: BackgroundTask[], limit = 200) => {
+  const retained = tasks.filter(task => task.historyPolicy !== 'ephemeral' && !TERMINAL_TASK_STATES.has(task.state));
+  const history = tasks
+    .filter(task => task.historyPolicy !== 'ephemeral' && TERMINAL_TASK_STATES.has(task.state))
+    .sort((left, right) => right.updatedAt - left.updatedAt);
+  return [...retained, ...history.slice(0, Math.max(0, limit - retained.length))];
+};
 
 export const mergeBackgroundTaskSnapshots = (current: BackgroundTask[], incoming: BackgroundTask[], limit = 200) => {
   const merged: BackgroundTask[] = [];
@@ -12,9 +21,14 @@ export const mergeBackgroundTaskSnapshots = (current: BackgroundTask[], incoming
     seen.add(task.id);
     merged.push(task);
   }
-  const retained = merged.filter(task => !TERMINAL_TASK_STATES.has(task.state));
-  const history = merged.filter(task => TERMINAL_TASK_STATES.has(task.state));
-  return [...retained, ...history.slice(0, Math.max(0, limit - retained.length))];
+  return normalizeBackgroundTaskSnapshots(merged, limit);
+};
+
+export const collapseRetryPredecessors = (tasks: BackgroundTask[]) => {
+  const retrySources = new Set(tasks
+    .filter(task => task.retryOfTaskId && ACTIVE_TASK_STATES.has(task.state))
+    .map(task => String(task.retryOfTaskId)));
+  return tasks.filter(task => !retrySources.has(task.id));
 };
 
 export const taskToastExpiresAt = (task: BackgroundTask) => task.state === 'failed'
@@ -41,7 +55,7 @@ export const compareProjectFileTasks = (left: BackgroundTask, right: BackgroundT
 };
 
 export const selectProjectFileTaskToasts = (tasks: BackgroundTask[], minimizedTaskIds: ReadonlySet<string>, limit = 4, now = Date.now(), queuedDelayMs = 700) => {
-  const eligible = tasks.filter(task => isActiveProjectFileTask(task, now)
+  const eligible = collapseRetryPredecessors(tasks).filter(task => isActiveProjectFileTask(task, now)
     && !minimizedTaskIds.has(task.id)
     && (task.state !== 'queued' || now - task.createdAt >= queuedDelayMs)).sort(compareProjectFileTasks);
   return { visible: eligible.slice(0, limit), overflowCount: Math.max(0, eligible.length - limit) };

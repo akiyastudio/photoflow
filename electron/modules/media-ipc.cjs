@@ -159,39 +159,36 @@ const registerMediaIpc = context => {
     title: '清理媒体缓存',
     metadata: { cacheConfig, olderThanDays },
   }, async task => {
-        const cacheDir = getMediaCacheDir(cacheConfig);
-        const days = Number(olderThanDays);
-        const cutoff = Number.isFinite(days) && days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : null;
-        const deletedPaths = [];
-        const candidates = cutoff === null
-          ? (await fs.promises.readdir(cacheDir, { withFileTypes: true })).filter(entry => entry.isFile()).map(entry => path.join(cacheDir, entry.name))
-          : ((await thumbnailService.listCacheCleanupCandidates(cutoff)).thumbnailPaths || []).flatMap(candidate => {
-            const resolved = path.resolve(candidate);
-            const relative = path.relative(path.resolve(cacheDir), resolved);
-            return relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? [resolved] : [];
+      task.throwIfCancelled();
+      task.report(5, '正在分批移除缓存索引');
+      const cacheDir = getMediaCacheDir(cacheConfig);
+      const days = Number(olderThanDays);
+      const cutoff = Number.isFinite(days) && days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : null;
+      const deadlineAt = Date.now() + 10 * 60 * 1000;
+      let lastPhaseReportAt = 0;
+      const result = await thumbnailService.evictCache({
+        cacheRoot: cacheDir,
+        ...(cutoff == null ? { all: true } : { beforeMs: cutoff }),
+        recoverOrphans: true,
+        orphanBeforeMs: cutoff,
+        pruneMissing: true,
+        task,
+        signal: task.signal,
+        deadlineAt,
+        onBlocked: ({ phase, processedCount }) => {
+          if (Date.now() - lastPhaseReportAt < 250) return;
+          lastPhaseReportAt = Date.now();
+          task.report(Math.min(95, 5 + Math.floor(Number(processedCount || 0) / 64)), `缓存维护：${phase}，已处理 ${processedCount || 0} 条`, {
+            maintenancePhase: phase,
+            processedCount: processedCount || 0,
+            deadlineAt,
           });
-        let deletedCount = 0;
-        for (let offset = 0; offset < candidates.length; offset += 64) {
-          task.throwIfCancelled();
-          await Promise.all(candidates.slice(offset, offset + 64).map(async filePath => {
-            try {
-              await fs.promises.unlink(filePath);
-              deletedPaths.push(filePath);
-              deletedCount += 1;
-            } catch (error) {
-              if (error?.code === 'ENOENT') deletedPaths.push(filePath);
-            }
-          }));
-          task.report(Math.round(((offset + 64) / Math.max(1, candidates.length)) * 95), `已处理 ${Math.min(offset + 64, candidates.length)} / ${candidates.length} 个过期缓存`);
-        }
-        await thumbnailService.invalidateDeleted(deletedPaths, null);
-        const orphanCleanup = cutoff === null
-          ? { deletedCount: 0 }
-          : await thumbnailService.cleanupOrphanCache(cacheDir, cutoff, 7 * 24 * 60 * 60 * 1000);
-        const pruned = await thumbnailService.pruneMissingSources();
-        mediaCacheIndexes.delete(path.resolve(cacheDir));
-        return { deletedCount: deletedCount + Number(orphanCleanup.deletedCount || 0), prunedSourceCount: pruned.sourceCount || 0 };
-  });
+        },
+      });
+      task.report(100, `已清理 ${result.deletedCount} 个缓存文件`);
+      mediaCacheIndexes.delete(path.resolve(cacheDir));
+      return { deletedCount: result.deletedCount, prunedSourceCount: result.prunedSourceCount || 0 };
+  }, () => runCacheCleanup(cacheConfig, olderThanDays));
   backgroundTasks?.registerTypeRestartFactory?.('cache-cleanup', task => runCacheCleanup(task.metadata?.cacheConfig || {}, task.metadata?.olderThanDays, task));
 
   ipcMain.handle('media-cache-clear', async (_event, cacheConfig = {}, olderThanDays) => {

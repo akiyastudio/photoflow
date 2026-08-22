@@ -351,7 +351,7 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert(versionsIpc.includes("'team-retouch', 'workflows'"), 'workflow metadata must live in workspace user data');
   assert(versionsIpc.includes('legacyManifestPath'), 'legacy project-local workflow metadata must migrate automatically');
   assert(versionsIpc.includes('refreshDownstreamWorkflowFiles'), 'returned edits must refresh generated downstream workflow files');
-  assert(versionsIpc.includes('refreshWorkflowTaskSourceFiles') && versionsIpc.includes('thumbnailService.invalidateSources([cropTargetPath])'), 'recropping must refresh generated workflow copies and invalidate the old thumbnail');
+  assert(versionsIpc.includes('refreshWorkflowTaskSourceFiles') && versionsIpc.includes('thumbnailService.evictCache({ sourcePaths: [cropTargetPath] })'), 'recropping must refresh generated workflow copies and evict the old thumbnail through the indexed protocol');
   assert(versionsIpc.includes('readyTeamWorkflowSubjects(workspace, request.items || [])'), 'workflow return matching must revalidate the currently unlocked person in the main process');
   assert(!versionsIpc.includes('if (task.needsReview) continue;'), 'suggested-review work images must remain available for identity marking and workflow generation');
   assert(!versionsIpc.includes('reviewTaskIds.has(String(item.taskId))'), 'suggested-review status must be advisory instead of blocking workflow generation');

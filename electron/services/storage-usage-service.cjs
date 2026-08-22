@@ -32,8 +32,8 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
   const cachePath = path.join(app.getPath('userData'), 'storage-usage-cache.json');
   const invalidatingTaskTypes = new Set(['project-file-operation', 'project-archive', 'project-unarchive', 'workspace-backup', 'backup-cleanup', 'workspace-restore', 'project-restore', 'cache-cleanup', 'deleted-project-cleanup']);
   let invalidatedAt = 0;
-  eventBus?.on('background-task:changed', task => {
-    if (task?.state === 'completed' && invalidatingTaskTypes.has(task.type)) invalidatedAt = Date.now();
+  eventBus?.on('background-task:changed', delta => {
+    if (delta?.upserts?.some(task => task.state === 'completed' && invalidatingTaskTypes.has(task.type))) invalidatedAt = Date.now();
   });
 
   const workspaceId = async root => {

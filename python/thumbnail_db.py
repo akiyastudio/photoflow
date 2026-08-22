@@ -12,10 +12,12 @@ import os
 import sqlite3
 import sys
 import time
+import uuid
 from pathlib import Path
 
 
 THUMBNAIL_STATES = {"NOT_READY", "QUEUED", "GENERATING", "READY", "STALE", "FAILED", "MISSING"}
+CACHE_INVALIDATION_BATCH_SIZE = 512
 MEDIA_EXTENSIONS = {
     ".jpg": "image", ".jpeg": "image", ".png": "image", ".gif": "image",
     ".webp": "image", ".bmp": "image", ".tif": "image", ".tiff": "image",
@@ -61,9 +63,27 @@ def source_hash(file_path: str) -> str:
     return digest.hexdigest()
 
 
+class ThumbnailPublishError(RuntimeError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 class ThumbnailDatabase:
     def __init__(self, database_path: str, recover: bool = True):
         Path(database_path).parent.mkdir(parents=True, exist_ok=True)
+        if recover and os.path.isfile(database_path) and os.path.getsize(database_path) > 0:
+            uri = f"{Path(database_path).resolve().as_uri()}?mode=ro"
+            try:
+                probe = sqlite3.connect(uri, uri=True, timeout=30)
+                try:
+                    check = str(probe.execute("PRAGMA quick_check").fetchone()[0])
+                finally:
+                    probe.close()
+            except sqlite3.Error as error:
+                raise RuntimeError(f"thumbnail database integrity check failed before recovery: {error}") from error
+            if check != "ok":
+                raise RuntimeError(f"thumbnail database integrity check failed before recovery: {check}")
         self.connection = sqlite3.connect(database_path, timeout=30)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
@@ -90,6 +110,8 @@ class ThumbnailDatabase:
                 ON files(project_root, relative_path);
             CREATE INDEX IF NOT EXISTS files_state
                 ON files(project_root, thumbnail_state);
+            CREATE INDEX IF NOT EXISTS files_missing
+                ON files(exists_on_disk, thumbnail_state, path);
 
             CREATE TABLE IF NOT EXISTS thumbnails (
                 file_path TEXT NOT NULL,
@@ -100,6 +122,8 @@ class ThumbnailDatabase:
                 thumbnail_version INTEGER NOT NULL,
                 source_mtime_ms REAL NOT NULL,
                 source_hash TEXT,
+                cache_epoch INTEGER NOT NULL DEFAULT 1,
+                cache_root TEXT NOT NULL DEFAULT '',
                 generated_at INTEGER NOT NULL,
                 last_accessed_at INTEGER NOT NULL,
                 PRIMARY KEY(file_path, size_label),
@@ -119,8 +143,28 @@ class ThumbnailDatabase:
                 key TEXT PRIMARY KEY,
                 completed_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS cache_control (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                cache_epoch INTEGER NOT NULL
+            );
             """
         )
+        thumbnail_columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(thumbnails)").fetchall()
+        }
+        if "cache_epoch" not in thumbnail_columns:
+            self.connection.execute("ALTER TABLE thumbnails ADD COLUMN cache_epoch INTEGER NOT NULL DEFAULT 1")
+        if "cache_root" not in thumbnail_columns:
+            self.connection.execute("ALTER TABLE thumbnails ADD COLUMN cache_root TEXT NOT NULL DEFAULT ''")
+            rows = self.connection.execute("SELECT file_path,size_label,thumbnail_path FROM thumbnails").fetchall()
+            self.connection.executemany(
+                "UPDATE thumbnails SET cache_root=? WHERE file_path=? AND size_label=?",
+                [(canonical(os.path.dirname(row["thumbnail_path"])), row["file_path"], row["size_label"]) for row in rows if row["thumbnail_path"]],
+            )
+        self.connection.execute("CREATE INDEX IF NOT EXISTS thumbnails_path ON thumbnails(thumbnail_path)")
+        self.connection.execute("CREATE INDEX IF NOT EXISTS thumbnails_cache_access ON thumbnails(cache_root,last_accessed_at)")
+        self.connection.execute("INSERT OR IGNORE INTO cache_control(singleton,cache_epoch) VALUES(1,1)")
         # Jobs interrupted by a previous shutdown are safe to retry. Secondary
         # scan connections skip this so they never rewrite live worker state.
         if recover:
@@ -402,10 +446,158 @@ class ThumbnailDatabase:
             )
         return {"state": state, "count": len(file_paths)}
 
+    def get_cache_epoch(self) -> dict:
+        row = self.connection.execute(
+            "SELECT cache_epoch FROM cache_control WHERE singleton=1"
+        ).fetchone()
+        return {"cacheEpoch": int(row["cache_epoch"] if row else 1)}
+
+    def get_thumbnail_publish(self, file_path: str, size_label: str,
+                              source_size: int, source_mtime_ms: float) -> dict | None:
+        row = self.connection.execute(
+            """SELECT thumbnails.thumbnail_path,thumbnails.thumbnail_size,thumbnails.cache_epoch,
+                      thumbnails.thumbnail_version,files.version
+               FROM thumbnails JOIN files ON files.path=thumbnails.file_path
+               JOIN cache_control ON cache_control.singleton=1
+               WHERE thumbnails.file_path=? AND thumbnails.size_label=?
+                 AND files.size=? AND files.mtime_ms=?
+                 AND thumbnails.thumbnail_version=files.version
+                 AND thumbnails.cache_epoch=cache_control.cache_epoch""",
+            (canonical(file_path), str(size_label), int(source_size), float(source_mtime_ms)),
+        ).fetchone()
+        if row is None or not os.path.isfile(row["thumbnail_path"]):
+            return None
+        return {
+            "thumbnailPath": row["thumbnail_path"],
+            "thumbnailSize": int(row["thumbnail_size"]),
+            "cacheEpoch": int(row["cache_epoch"]),
+            "sourceVersion": int(row["version"]),
+        }
+
+    def bump_cache_epoch(self) -> dict:
+        with self.connection:
+            self.connection.execute(
+                "UPDATE cache_control SET cache_epoch=cache_epoch+1 WHERE singleton=1"
+            )
+            row = self.connection.execute(
+                "SELECT cache_epoch FROM cache_control WHERE singleton=1"
+            ).fetchone()
+        return {"cacheEpoch": int(row["cache_epoch"])}
+
+    def begin_cache_maintenance(self) -> dict:
+        with self.connection:
+            self.connection.execute(
+                "UPDATE cache_control SET cache_epoch=cache_epoch+1 WHERE singleton=1"
+            )
+            epoch = int(self.connection.execute(
+                "SELECT cache_epoch FROM cache_control WHERE singleton=1"
+            ).fetchone()[0])
+            # Existing committed publications remain valid. Advancing their
+            # fence inside the same exclusive transaction only rejects workers
+            # that captured the previous epoch but have not committed yet.
+            self.connection.execute("UPDATE thumbnails SET cache_epoch=?", (epoch,))
+        return {"cacheEpoch": epoch}
+
+    def capture_thumbnail_publish(self, file_path: str, kind: str,
+                                  project_root: str | None = None) -> dict:
+        file_path = canonical(file_path)
+        stat = os.stat(file_path)
+        existing = self.connection.execute(
+            "SELECT project_root FROM files WHERE path=?", (file_path,)
+        ).fetchone()
+        root = canonical(project_root or (existing["project_root"] if existing else os.path.dirname(file_path)))
+        with self.connection:
+            record = self._upsert_file(root, file_path, kind, stat, calculate_hash=False)
+        epoch = self.get_cache_epoch()["cacheEpoch"]
+        return {
+            "cacheEpoch": epoch,
+            "filePath": file_path,
+            "sourceVersion": int(record["version"]),
+            "sourceSize": int(record["size"]),
+            "sourceMtimeMs": float(record["mtimeMs"]),
+        }
+
+    def commit_thumbnail_publish(self, file_path: str, cache_epoch: int,
+                                 source_version: int, source_size: int,
+                                 source_mtime_ms: float, thumbnails: list[dict],
+                                 source_digest: str | None = None) -> dict:
+        file_path = canonical(file_path)
+        epoch = self.get_cache_epoch()["cacheEpoch"]
+        if int(cache_epoch) != epoch:
+            raise ThumbnailPublishError("EPOCH_STALE", "thumbnail cache epoch changed")
+        row = self.connection.execute(
+            "SELECT version,size,mtime_ms FROM files WHERE path=?", (file_path,)
+        ).fetchone()
+        if (row is None or int(row["version"]) != int(source_version) \
+                or int(row["size"]) != int(source_size) \
+                or float(row["mtime_ms"]) != float(source_mtime_ms)):
+            raise ThumbnailPublishError("SOURCE_STALE", "thumbnail source revision changed")
+        try:
+            source_stat = os.stat(file_path)
+        except OSError as error:
+            raise ThumbnailPublishError("SOURCE_STALE", "thumbnail source disappeared") from error
+        if int(source_stat.st_size) != int(source_size) \
+                or float(source_stat.st_mtime_ns / 1_000_000) != float(source_mtime_ms):
+            raise ThumbnailPublishError("SOURCE_STALE", "thumbnail source identity changed")
+        normalized = []
+        for item in thumbnails:
+            final_path = canonical(item["path"])
+            if not os.path.isfile(final_path):
+                raise ThumbnailPublishError("SOURCE_STALE", "published thumbnail does not exist")
+            stat = os.stat(final_path)
+            if int(stat.st_size) != int(item["fileSize"]):
+                raise ThumbnailPublishError("SOURCE_STALE", "published thumbnail size changed")
+            normalized.append((item, final_path, stat))
+        timestamp = now_ms()
+        with self.connection:
+            # Recheck epoch inside the write transaction.
+            current_epoch = self.connection.execute(
+                "SELECT cache_epoch FROM cache_control WHERE singleton=1"
+            ).fetchone()[0]
+            if int(current_epoch) != int(cache_epoch):
+                raise ThumbnailPublishError("EPOCH_STALE", "thumbnail cache epoch changed")
+            updated = self.connection.execute(
+                """UPDATE files SET thumbnail_state='READY',source_hash=COALESCE(?,source_hash),
+                   last_error=NULL,exists_on_disk=1,updated_at=?
+                   WHERE path=? AND version=? AND size=? AND mtime_ms=?""",
+                (source_digest, timestamp, file_path, int(source_version), int(source_size), float(source_mtime_ms)),
+            ).rowcount
+            if updated != 1:
+                raise ThumbnailPublishError("SOURCE_STALE", "thumbnail source revision changed")
+            for item, final_path, _stat in normalized:
+                self.connection.execute(
+                    """INSERT INTO thumbnails
+                       (file_path,size_label,pixel_size,thumbnail_path,thumbnail_size,
+                        thumbnail_version,source_mtime_ms,source_hash,cache_epoch,cache_root,
+                        generated_at,last_accessed_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(file_path,size_label) DO UPDATE SET
+                         pixel_size=excluded.pixel_size,thumbnail_path=excluded.thumbnail_path,
+                         thumbnail_size=excluded.thumbnail_size,thumbnail_version=excluded.thumbnail_version,
+                         source_mtime_ms=excluded.source_mtime_ms,source_hash=excluded.source_hash,
+                         cache_epoch=excluded.cache_epoch,cache_root=excluded.cache_root,
+                         generated_at=excluded.generated_at,last_accessed_at=excluded.last_accessed_at""",
+                    (file_path, item["sizeLabel"], item["pixelSize"], final_path,
+                     item["fileSize"], int(source_version), float(source_mtime_ms), source_digest,
+                     int(cache_epoch), canonical(os.path.dirname(final_path)), timestamp, timestamp),
+                )
+        return {"state": "READY", "cacheEpoch": int(cache_epoch), "sourceVersion": int(source_version)}
+
+    def touch_thumbnails(self, touches: list[dict]) -> dict:
+        timestamp = now_ms()
+        unique = {(canonical(item["file_path"]), str(item["size_label"])) for item in touches}
+        with self.connection:
+            self.connection.executemany(
+                "UPDATE thumbnails SET last_accessed_at=? WHERE file_path=? AND size_label=?",
+                [(timestamp, file_path, size_label) for file_path, size_label in unique],
+            )
+        return {"success": True, "count": len(unique)}
+
     def mark_ready(self, file_path: str, source_mtime_ms: float, source_digest: str | None,
                    thumbnails: list[dict]) -> dict:
         file_path = canonical(file_path)
         timestamp = now_ms()
+        cache_epoch = self.get_cache_epoch()["cacheEpoch"]
         with self.connection:
             self.connection.execute(
                 """UPDATE files SET thumbnail_state='READY', source_hash=COALESCE(?, source_hash),
@@ -425,15 +617,18 @@ class ThumbnailDatabase:
                 self.connection.execute(
                     """INSERT INTO thumbnails
                        (file_path, size_label, pixel_size, thumbnail_path, thumbnail_size,
-                        thumbnail_version, source_mtime_ms, source_hash, generated_at, last_accessed_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        thumbnail_version, source_mtime_ms, source_hash, cache_epoch, cache_root,
+                        generated_at, last_accessed_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(file_path, size_label) DO UPDATE SET
                          pixel_size=excluded.pixel_size, thumbnail_path=excluded.thumbnail_path,
                          thumbnail_size=excluded.thumbnail_size, thumbnail_version=excluded.thumbnail_version,
                          source_mtime_ms=excluded.source_mtime_ms, source_hash=excluded.source_hash,
+                         cache_epoch=excluded.cache_epoch, cache_root=excluded.cache_root,
                          generated_at=excluded.generated_at, last_accessed_at=excluded.last_accessed_at""",
                     (file_path, item["sizeLabel"], item["pixelSize"], canonical(item["path"]),
-                     item["fileSize"], source_version, source_mtime_ms, source_digest, timestamp, timestamp),
+                     item["fileSize"], source_version, source_mtime_ms, source_digest, cache_epoch,
+                     canonical(os.path.dirname(item["path"])), timestamp, timestamp),
                 )
         return {"state": "READY"}
 
@@ -445,12 +640,235 @@ class ThumbnailDatabase:
         self.connection.commit()
         return {"success": True}
 
-    def list_cache_cleanup(self, before_ms: int) -> dict:
+    def detach_cache_batch(self, cache_root: str | None = None,
+                           before_ms: int | None = None,
+                           thumbnail_paths: list[str] | None = None,
+                           source_paths: list[str] | None = None,
+                           exclude_paths: list[str] | None = None,
+                           all_cache: bool = False, limit: int = 512) -> dict:
+        limit = max(1, min(CACHE_INVALIDATION_BATCH_SIZE, int(limit)))
+        conditions = []
+        parameters: list[object] = []
+        if cache_root:
+            conditions.append("cache_root=?")
+            parameters.append(canonical(cache_root))
+        if before_ms is not None:
+            conditions.append("last_accessed_at<?")
+            parameters.append(int(before_ms))
+        if thumbnail_paths is not None:
+            normalized = list(dict.fromkeys(canonical(value) for value in thumbnail_paths if value))[:limit]
+            if not normalized:
+                return {"success": True, "thumbnailPaths": [], "detachedCount": 0, "detachedBytes": 0, "done": True}
+            placeholders = ",".join("?" for _ in normalized)
+            conditions.append(f"thumbnail_path IN ({placeholders})")
+            parameters.extend(normalized)
+        if source_paths is not None:
+            normalized_sources = list(dict.fromkeys(canonical(value) for value in source_paths if value))[:limit]
+            if not normalized_sources:
+                return {"success": True, "thumbnailPaths": [], "detachedCount": 0, "detachedBytes": 0, "done": True}
+            placeholders = ",".join("?" for _ in normalized_sources)
+            conditions.append(f"file_path IN ({placeholders})")
+            parameters.extend(normalized_sources)
+        excluded = list(dict.fromkeys(canonical(value) for value in (exclude_paths or []) if value))[:limit]
+        if excluded:
+            placeholders = ",".join("?" for _ in excluded)
+            conditions.append(f"thumbnail_path NOT IN ({placeholders})")
+            parameters.extend(excluded)
+        if not conditions and not all_cache:
+            raise ValueError("cache detach requires a bounded selector")
+        where_sql = " AND ".join(conditions) if conditions else "1=1"
         rows = self.connection.execute(
-            """SELECT DISTINCT thumbnail_path FROM thumbnails
-               WHERE last_accessed_at < ? AND thumbnail_path <> ''""",
-            (int(before_ms),),
+            f"""SELECT rowid,file_path,thumbnail_path,thumbnail_size FROM thumbnails
+                WHERE {where_sql} ORDER BY last_accessed_at,rowid LIMIT ?""",
+            (*parameters, limit),
         ).fetchall()
+        affected_sources = list(dict.fromkeys(row["file_path"] for row in rows))
+        timestamp = now_ms()
+        with self.connection:
+            if rows:
+                placeholders = ",".join("?" for _ in rows)
+                self.connection.execute(
+                    f"DELETE FROM thumbnails WHERE rowid IN ({placeholders})",
+                    [row["rowid"] for row in rows],
+                )
+            for file_path in affected_sources:
+                self.connection.execute(
+                    """UPDATE files SET thumbnail_state='STALE',updated_at=?
+                       WHERE path=? AND thumbnail_state='READY' AND NOT EXISTS(
+                         SELECT 1 FROM thumbnails WHERE thumbnails.file_path=files.path)""",
+                    (timestamp, file_path),
+                )
+            if source_paths is not None and not rows:
+                self.connection.executemany(
+                    "UPDATE files SET thumbnail_state='STALE',updated_at=? WHERE path=?",
+                    [(timestamp, value) for value in normalized_sources],
+                )
+        return {
+            "success": True,
+            "thumbnailPaths": list(dict.fromkeys(row["thumbnail_path"] for row in rows if row["thumbnail_path"])),
+            "detachedCount": len(rows),
+            "detachedBytes": sum(int(row["thumbnail_size"] or 0) for row in rows),
+            "done": len(rows) < limit,
+        }
+
+    def prune_missing_batch(self, limit: int = 512, cache_root: str | None = None) -> dict:
+        limit = max(1, min(CACHE_INVALIDATION_BATCH_SIZE, int(limit)))
+        root = canonical(cache_root) if cache_root else None
+        rows = self.connection.execute(
+            """SELECT thumbnails.rowid,thumbnails.file_path,thumbnails.thumbnail_path
+               FROM thumbnails JOIN files ON files.path=thumbnails.file_path
+               WHERE (files.exists_on_disk=0 OR files.thumbnail_state='MISSING')
+                 AND (? IS NULL OR thumbnails.cache_root=?)
+               ORDER BY thumbnails.rowid LIMIT ?""",
+            (root, root, limit),
+        ).fetchall()
+        with self.connection:
+            if rows:
+                placeholders = ",".join("?" for _ in rows)
+                self.connection.execute(
+                    f"DELETE FROM thumbnails WHERE rowid IN ({placeholders})",
+                    [row["rowid"] for row in rows],
+                )
+            removable = self.connection.execute(
+                """SELECT path FROM files
+                   WHERE (exists_on_disk=0 OR thumbnail_state='MISSING')
+                     AND NOT EXISTS(SELECT 1 FROM thumbnails WHERE thumbnails.file_path=files.path)
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            if removable:
+                placeholders = ",".join("?" for _ in removable)
+                self.connection.execute(
+                    f"DELETE FROM files WHERE path IN ({placeholders})",
+                    [row["path"] for row in removable],
+                )
+        remaining = self.connection.execute(
+            """SELECT 1 FROM thumbnails JOIN files ON files.path=thumbnails.file_path
+               WHERE (files.exists_on_disk=0 OR files.thumbnail_state='MISSING')
+                 AND (? IS NULL OR thumbnails.cache_root=?) LIMIT 1""",
+            (root, root),
+        ).fetchone()
+        return {
+            "success": True,
+            "thumbnailPaths": list(dict.fromkeys(row["thumbnail_path"] for row in rows if row["thumbnail_path"])),
+            "detachedCount": len(rows),
+            "sourceCount": len(removable),
+            "done": remaining is None,
+        }
+
+    def recover_cache_publications(self, cache_root: str, before_ms: int | None = None,
+                                   exclude_paths: list[str] | None = None,
+                                   scan_root_orphans: bool = True,
+                                   limit: int = 512) -> dict:
+        root = canonical(cache_root)
+        limit = max(1, min(CACHE_INVALIDATION_BATCH_SIZE, int(limit)))
+        excluded = {canonical(value) for value in (exclude_paths or []) if value}
+        missing_rows = self.connection.execute(
+            "SELECT rowid,file_path,thumbnail_path FROM thumbnails WHERE cache_root=? ORDER BY rowid",
+            (root,),
+        ).fetchall()
+        missing_candidates = [row for row in missing_rows if not os.path.isfile(row["thumbnail_path"])]
+        missing = missing_candidates[:limit]
+        if missing:
+            with self.connection:
+                placeholders = ",".join("?" for _ in missing)
+                self.connection.execute(
+                    f"DELETE FROM thumbnails WHERE rowid IN ({placeholders})",
+                    [row["rowid"] for row in missing],
+                )
+                self.connection.executemany(
+                    """UPDATE files SET thumbnail_state='STALE',updated_at=?
+                       WHERE path=? AND thumbnail_state='READY' AND NOT EXISTS
+                         (SELECT 1 FROM thumbnails WHERE thumbnails.file_path=files.path)""",
+                    [(now_ms(), row["file_path"]) for row in missing],
+                )
+        indexed = {
+            canonical(row["thumbnail_path"])
+            for row in self.connection.execute("SELECT thumbnail_path FROM thumbnails WHERE cache_root=?", (root,)).fetchall()
+            if row["thumbnail_path"]
+        }
+        candidates = []
+        scan_roots = [os.path.join(root, ".staging")]
+        if scan_root_orphans:
+            scan_roots.insert(0, root)
+        cutoff = int(before_ms) if before_ms is not None else None
+        for scan_root in scan_roots:
+            if not os.path.isdir(scan_root):
+                continue
+            for entry in os.scandir(scan_root):
+                try:
+                    if not entry.is_file(follow_symlinks=False) or Path(entry.name).suffix.lower() != ".jpg":
+                        continue
+                    stem = Path(entry.name).stem.lower()
+                    if scan_root == root:
+                        if len(stem) != 64 or any(character not in "0123456789abcdef" for character in stem):
+                            continue
+                    else:
+                        try:
+                            uuid.UUID(stem)
+                        except ValueError:
+                            continue
+                    candidate = canonical(entry.path)
+                    if candidate in indexed or candidate in excluded:
+                        continue
+                    if cutoff is not None and entry.stat(follow_symlinks=False).st_mtime * 1000 >= cutoff:
+                        continue
+                    candidates.append(candidate)
+                    if len(candidates) >= limit:
+                        break
+                except OSError:
+                    continue
+            if len(candidates) >= limit:
+                break
+        return {
+            "success": True,
+            "orphanPaths": candidates,
+            "repairedMissingCount": len(missing),
+            "done": len(missing_candidates) <= limit and len(candidates) < limit,
+        }
+
+    def check_integrity(self) -> dict:
+        result = str(self.connection.execute("PRAGMA quick_check").fetchone()[0])
+        if result != "ok":
+            raise RuntimeError(f"thumbnail database integrity check failed: {result}")
+        return {"success": True, "result": result}
+
+    def maintenance_state_get(self, key: str) -> dict:
+        normalized = str(key or "").strip()[:500]
+        if not normalized:
+            raise ValueError("maintenance state key is required")
+        row = self.connection.execute(
+            "SELECT completed_at FROM maintenance_state WHERE key=?",
+            (normalized,),
+        ).fetchone()
+        return {"success": True, "completed": row is not None, "completedAt": int(row["completed_at"]) if row else 0}
+
+    def maintenance_state_complete(self, key: str) -> dict:
+        normalized = str(key or "").strip()[:500]
+        if not normalized:
+            raise ValueError("maintenance state key is required")
+        timestamp = now_ms()
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO maintenance_state(key,completed_at) VALUES(?,?)
+                   ON CONFLICT(key) DO UPDATE SET completed_at=excluded.completed_at""",
+                (normalized, timestamp),
+            )
+        return {"success": True, "completedAt": timestamp}
+
+    def list_cache_cleanup(self, before_ms: int, cache_root: str | None = None) -> dict:
+        if cache_root:
+            rows = self.connection.execute(
+                """SELECT DISTINCT thumbnail_path FROM thumbnails
+                   WHERE cache_root=? AND last_accessed_at < ? AND thumbnail_path <> ''""",
+                (canonical(cache_root), int(before_ms)),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """SELECT DISTINCT thumbnail_path FROM thumbnails
+                   WHERE last_accessed_at < ? AND thumbnail_path <> ''""",
+                (int(before_ms),),
+            ).fetchall()
         return {
             "success": True,
             "thumbnailPaths": [row["thumbnail_path"] for row in rows],
@@ -458,21 +876,14 @@ class ThumbnailDatabase:
 
     def cleanup_orphan_cache(self, cache_root: str, before_ms: int, interval_ms: int) -> dict:
         root = canonical(cache_root)
-        maintenance_key = "cache-orphans:" + hashlib.sha256(root.encode("utf-8")).hexdigest()
-        timestamp = now_ms()
-        previous = self.connection.execute(
-            "SELECT completed_at FROM maintenance_state WHERE key=?",
-            (maintenance_key,),
-        ).fetchone()
-        if previous is not None and timestamp - int(previous["completed_at"]) < max(0, int(interval_ms)):
-            return {"success": True, "skipped": True, "checkedCount": 0, "deletedCount": 0}
+        _ = interval_ms  # compatibility argument; retries must never be suppressed
         indexed = {
             canonical(row["thumbnail_path"])
             for row in self.connection.execute("SELECT thumbnail_path FROM thumbnails").fetchall()
             if row["thumbnail_path"]
         }
         checked_count = 0
-        deleted_count = 0
+        orphan_paths = []
         if os.path.isdir(root):
             for entry in os.scandir(root):
                 try:
@@ -486,76 +897,105 @@ class ThumbnailDatabase:
                         continue
                     checked_count += 1
                     if entry.stat(follow_symlinks=False).st_mtime * 1000 < int(before_ms):
-                        os.unlink(entry.path)
-                        deleted_count += 1
+                        orphan_paths.append(canonical(entry.path))
                 except OSError:
                     continue
-        with self.connection:
-            self.connection.execute(
-                """INSERT INTO maintenance_state(key,completed_at) VALUES(?,?)
-                   ON CONFLICT(key) DO UPDATE SET completed_at=excluded.completed_at""",
-                (maintenance_key, timestamp),
-            )
         return {
             "success": True,
             "skipped": False,
             "checkedCount": checked_count,
-            "deletedCount": deleted_count,
+            "deletedCount": 0,
+            "orphanPaths": orphan_paths,
         }
 
     def invalidate_cache(self, deleted_paths: list[str] | None = None, before_ms: int | None = None) -> dict:
-        with self.connection:
-            if deleted_paths is not None:
-                normalized = [canonical(value) for value in deleted_paths]
-                if normalized:
-                    self.connection.executemany("DELETE FROM thumbnails WHERE thumbnail_path=?", [(value,) for value in normalized])
-            elif before_ms is not None:
-                self.connection.execute("DELETE FROM thumbnails WHERE last_accessed_at < ?", (before_ms,))
-            else:
-                self.connection.execute("DELETE FROM thumbnails")
-            self.connection.execute(
-                """UPDATE files SET thumbnail_state='STALE', updated_at=?
-                   WHERE thumbnail_state='READY' AND NOT EXISTS
-                     (SELECT 1 FROM thumbnails WHERE thumbnails.file_path=files.path)""",
-                (now_ms(),),
-            )
-        return {"success": True}
+        deleted_count = 0
+
+        def delete_rowids(rowids) -> None:
+            nonlocal deleted_count
+            if not rowids:
+                return
+            placeholders = ",".join("?" for _ in rowids)
+            with self.connection:
+                cursor = self.connection.execute(
+                    f"DELETE FROM thumbnails WHERE rowid IN ({placeholders})",
+                    rowids,
+                )
+            deleted_count += max(0, int(cursor.rowcount or 0))
+
+        if deleted_paths is not None:
+            normalized = list(dict.fromkeys(canonical(value) for value in deleted_paths if value))
+            for offset in range(0, len(normalized), CACHE_INVALIDATION_BATCH_SIZE):
+                chunk = normalized[offset:offset + CACHE_INVALIDATION_BATCH_SIZE]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = self.connection.execute(
+                    f"SELECT rowid FROM thumbnails WHERE thumbnail_path IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                delete_rowids([row["rowid"] for row in rows])
+        else:
+            where_sql = "WHERE last_accessed_at < ?" if before_ms is not None else ""
+            parameters = (int(before_ms),) if before_ms is not None else ()
+            while True:
+                rows = self.connection.execute(
+                    f"SELECT rowid FROM thumbnails {where_sql} LIMIT ?",
+                    (*parameters, CACHE_INVALIDATION_BATCH_SIZE),
+                ).fetchall()
+                if not rows:
+                    break
+                delete_rowids([row["rowid"] for row in rows])
+
+        stale_count = 0
+        timestamp = now_ms()
+        while True:
+            rows = self.connection.execute(
+                """SELECT path FROM files WHERE thumbnail_state='READY' AND NOT EXISTS
+                     (SELECT 1 FROM thumbnails WHERE thumbnails.file_path=files.path)
+                     LIMIT ?""",
+                (CACHE_INVALIDATION_BATCH_SIZE,),
+            ).fetchall()
+            if not rows:
+                break
+            with self.connection:
+                cursor = self.connection.executemany(
+                    "UPDATE files SET thumbnail_state='STALE', updated_at=? WHERE path=? AND thumbnail_state='READY'",
+                    [(timestamp, row["path"]) for row in rows],
+                )
+            stale_count += max(0, int(cursor.rowcount or 0))
+        return {"success": True, "deletedCount": deleted_count, "staleCount": stale_count}
 
     def invalidate_sources(self, source_paths: list[str] | None = None) -> dict:
         normalized = list(dict.fromkeys(canonical(value) for value in (source_paths or []) if value))
         if not normalized:
             return {"success": True, "thumbnailPaths": [], "sourceCount": 0}
-        placeholders = ",".join("?" for _ in normalized)
-        thumbnail_rows = self.connection.execute(
-            f"SELECT thumbnail_path FROM thumbnails WHERE file_path IN ({placeholders})",
-            normalized,
-        ).fetchall()
-        with self.connection:
-            self.connection.execute(f"DELETE FROM files WHERE path IN ({placeholders})", normalized)
+        thumbnail_paths = []
+        for offset in range(0, len(normalized), CACHE_INVALIDATION_BATCH_SIZE):
+            chunk = normalized[offset:offset + CACHE_INVALIDATION_BATCH_SIZE]
+            while True:
+                result = self.detach_cache_batch(source_paths=chunk)
+                thumbnail_paths.extend(result["thumbnailPaths"])
+                if result["done"]:
+                    break
         return {
             "success": True,
-            "thumbnailPaths": list(dict.fromkeys(row["thumbnail_path"] for row in thumbnail_rows if row["thumbnail_path"])),
+            "thumbnailPaths": list(dict.fromkeys(thumbnail_paths)),
             "sourceCount": len(normalized),
         }
 
     def prune_missing_sources(self) -> dict:
-        """Remove source-index rows already confirmed missing by a directory/project scan."""
-        rows = self.connection.execute(
-            """SELECT DISTINCT thumbnails.thumbnail_path
-               FROM thumbnails JOIN files ON files.path=thumbnails.file_path
-               WHERE files.exists_on_disk=0 OR files.thumbnail_state='MISSING'"""
-        ).fetchall()
-        count_row = self.connection.execute(
-            "SELECT COUNT(*) AS count FROM files WHERE exists_on_disk=0 OR thumbnail_state='MISSING'"
-        ).fetchone()
-        with self.connection:
-            self.connection.execute(
-                "DELETE FROM files WHERE exists_on_disk=0 OR thumbnail_state='MISSING'"
-            )
+        """Compatibility wrapper over bounded prune_missing_batch transactions."""
+        thumbnail_paths = []
+        source_count = 0
+        while True:
+            result = self.prune_missing_batch()
+            thumbnail_paths.extend(result["thumbnailPaths"])
+            source_count += int(result["sourceCount"])
+            if result["done"]:
+                break
         return {
             "success": True,
-            "thumbnailPaths": list(dict.fromkeys(row["thumbnail_path"] for row in rows if row["thumbnail_path"])),
-            "sourceCount": int(count_row["count"] if count_row else 0),
+            "thumbnailPaths": list(dict.fromkeys(thumbnail_paths)),
+            "sourceCount": source_count,
         }
 
 
@@ -580,7 +1020,8 @@ def run_server(database_path: str, recover: bool = True) -> None:
                 response = {"id": request_id, "success": True, "result": result}
             except Exception as error:  # service errors must not terminate the index
                 response = {"id": request.get("id") if isinstance(request, dict) else None,
-                            "success": False, "error": str(error)}
+                            "success": False, "error": str(error),
+                            "code": getattr(error, "code", "THUMBNAIL_DATABASE_ERROR")}
             print(json.dumps(response, ensure_ascii=False), flush=True)
     finally:
         database.close()

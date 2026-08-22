@@ -11,6 +11,13 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPOSITORY_ROOT / "python"))
 
 import workspace_db  # noqa: E402
+from database_error_codes import error_response  # noqa: E402
+
+
+busy_error = sqlite3.OperationalError("本地化后的错误消息")
+busy_error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+assert error_response("request", busy_error)["code"] == "SQLITE_BUSY", \
+    "the worker protocol must expose SQLite status without parsing localized text"
 
 
 with tempfile.TemporaryDirectory() as temporary:

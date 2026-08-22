@@ -22,6 +22,21 @@ const runJson = (command, args, input) => {
   return payload;
 };
 
+const syncMediaProject = (python, script, workspace, database, projectName) => {
+  const invoke = (action, payload) => runJson(python, [script, action, '--root', workspace, '--database', database, '--payload', JSON.stringify(payload)]);
+  const prepared = invoke('media_sync_prepare', { projectName });
+  for (let offset = 0, batchIndex = 0; offset < prepared.files.length; offset += 64, batchIndex += 1) {
+    invoke('media_sync_apply_batch', {
+      projectName, snapshotId: prepared.snapshotId, batchIndex,
+      authorizedRoots: prepared.authorizedRoots, files: prepared.files.slice(offset, offset + 64),
+    });
+  }
+  return invoke('media_sync_finalize', {
+    projectName, snapshotId: prepared.snapshotId, authorizedRoots: prepared.authorizedRoots,
+    files: prepared.files, baselineVersions: prepared.baselineVersions,
+  });
+};
+
 (async () => {
   try {
     const original = path.join(workspace, 'identity.txt');
@@ -156,7 +171,7 @@ const runJson = (command, args, input) => {
     assert.strictEqual(path.resolve(finalVersions.versions[0].filePath), path.resolve(renamedSourceFile));
     const externallyRenamedSource = path.join(sourceFolder, 'final-renamed.jpg');
     fs.renameSync(renamedSourceFile, externallyRenamedSource);
-    runJson(python, [script, 'media_sync_project', '--root', workspace, '--database', database, '--payload', JSON.stringify({ projectName: 'progress-project' })]);
+    syncMediaProject(python, script, workspace, database, 'progress-project');
     const finalsAfterRename = runJson(python, [script, 'final_version_list', '--root', workspace, '--database', database, '--payload', JSON.stringify({ projectName: 'progress-project' })]);
     assert.strictEqual(path.resolve(finalsAfterRename.versions[0].filePath), path.resolve(externallyRenamedSource), 'a final batch version must follow an external source rename');
 

@@ -1,12 +1,12 @@
 const { spawn } = require('child_process');
+const { CoordinatedDatabaseClient } = require('./coordinated-database-client.cjs');
+const { WorkspaceDatabaseOperationPolicy } = require('./workspace-database-operation-policy.cjs');
 
-const DATABASE_LOCK_PATTERN = /(?:database|database table) is locked|SQLITE_BUSY/i;
 const INFRASTRUCTURE_FAILURE_PATTERN = /(?:SQLITE_|database disk image is malformed|database service exited|EPIPE|ECONNRESET|timed out|operation timeout|操作超时|I\/O error|readonly database)/i;
-const DATABASE_LOCK_RETRY_DELAYS_MS = [80, 180, 360, 700, 1400];
 let databaseClientSequence = 0;
 
 class PythonDatabaseClient {
-  constructor({ getRunConfig, getDatabasePath, writeLog, defaultTimeoutMs = 30000, scriptName = 'workspace_db.py', processSupervisor = null, processId = '', domainId = '', onHealthChange = () => undefined, failureThreshold = 3, circuitCooldownMs = 5000, maximumPending = 100 }) {
+  constructor({ getRunConfig, getDatabasePath, writeLog, coordinator, operationPolicy = new WorkspaceDatabaseOperationPolicy(), defaultTimeoutMs = 30000, scriptName = 'workspace_db.py', processSupervisor = null, processId = '', domainId = '', onHealthChange = () => undefined, failureThreshold = 3, circuitCooldownMs = 5000, maximumPending = 100 }) {
     this.getRunConfig = getRunConfig;
     this.getDatabasePath = getDatabasePath;
     this.writeLog = writeLog;
@@ -25,6 +25,13 @@ class PythonDatabaseClient {
     this.nextId = 0;
     this.pending = new Map();
     this.stopping = false;
+    this.coordinated = new CoordinatedDatabaseClient({
+      coordinator,
+      operationPolicy,
+      getDatabasePath,
+      scriptName,
+      execute: request => this.callOnce(request.root, request.database, request.action, request.payload, request.timeoutMs),
+    });
   }
 
   updateHealth(state, details = {}) {
@@ -96,31 +103,14 @@ class PythonDatabaseClient {
           managedProcess?.markHealthy({ protocol: 'json-lines' });
           const request = this.pending.get(response.id);
           if (!request || request.child !== child) continue;
-          if (!response.success && DATABASE_LOCK_PATTERN.test(response.error || '')
-            && request.lockRetryCount < DATABASE_LOCK_RETRY_DELAYS_MS.length) {
-            const delay = DATABASE_LOCK_RETRY_DELAYS_MS[request.lockRetryCount] + Math.floor(Math.random() * 60);
-            request.lockRetryCount += 1;
-            request.retryTimer = setTimeout(() => {
-              request.retryTimer = null;
-              if (this.pending.get(response.id) !== request || request.child !== child || child.killed) return;
-              child.stdin.write(`${request.serialized}\n`, error => {
-                if (!error) return;
-                if (this.pending.get(response.id) !== request) return;
-                this.pending.delete(response.id);
-                clearTimeout(request.timer);
-                request.reject(error);
-              });
-            }, delay);
-            continue;
-          }
           this.pending.delete(response.id);
           clearTimeout(request.timer);
-          if (request.retryTimer) clearTimeout(request.retryTimer);
           if (response.success) {
             this.noteSuccess();
             request.resolve(response.result);
           } else {
             const error = new Error(response.error || '工作区数据库操作失败');
+            if (response.code) error.code = response.code;
             this.noteFailure(error);
             request.reject(error);
           }
@@ -139,7 +129,6 @@ class PythonDatabaseClient {
       for (const [id, request] of this.pending.entries()) {
         if (request.child !== child) continue;
         clearTimeout(request.timer);
-        if (request.retryTimer) clearTimeout(request.retryTimer);
         request.reject(error);
         this.pending.delete(id);
       }
@@ -149,7 +138,11 @@ class PythonDatabaseClient {
     child.on('exit', code => finish(new Error(stderr.trim() || `Workspace database service exited with code ${code}`)));
   }
 
-  call(root, action, payload = {}, timeoutMs = this.defaultTimeoutMs) {
+  call(root, action, payload = {}, timeoutMs = this.defaultTimeoutMs, options = {}) {
+    return this.coordinated.call(root, action, payload, { ...options, timeoutMs });
+  }
+
+  callOnce(root, database, action, payload = {}, timeoutMs = this.defaultTimeoutMs) {
     return new Promise((resolve, reject) => {
       try { this.assertCircuitAvailable(); } catch (error) { reject(error); return; }
       if (this.pending.size >= this.maximumPending) {
@@ -173,9 +166,9 @@ class PythonDatabaseClient {
           } else if (!child.killed) child.kill();
         }
       }, timeoutMs);
-      const request = { id, root, database: this.getDatabasePath(root), action, payload };
+      const request = { id, root, database, action, payload };
       const serialized = JSON.stringify(request);
-      this.pending.set(id, { resolve, reject, timer, child, serialized, lockRetryCount: 0, retryTimer: null });
+      this.pending.set(id, { resolve, reject, timer, child, serialized });
       try {
         child.stdin.write(`${serialized}\n`, error => {
           if (!error) return;
@@ -183,7 +176,6 @@ class PythonDatabaseClient {
           if (!pending || pending.child !== child) return;
           this.pending.delete(id);
           clearTimeout(pending.timer);
-          if (pending.retryTimer) clearTimeout(pending.retryTimer);
           pending.reject(error);
         });
       } catch (error) {
@@ -191,7 +183,6 @@ class PythonDatabaseClient {
         if (!pending) return;
         this.pending.delete(id);
         clearTimeout(pending.timer);
-        if (pending.retryTimer) clearTimeout(pending.retryTimer);
         pending.reject(error);
       }
     });

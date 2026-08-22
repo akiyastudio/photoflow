@@ -104,10 +104,175 @@ def test_thumbnail_cleanup_uses_access_index(root: Path) -> None:
         write_media(unrelated_file, b"unrelated")
         os.utime(orphan_cache, (0, 0))
         os.utime(unrelated_file, (0, 0))
-        orphan_result = database.cleanup_orphan_cache(str(root / "cache"), 200, 7 * 24 * 60 * 60 * 1000)
-        assert orphan_result["deletedCount"] == 1 and not orphan_cache.exists()
+        orphan_result = database.recover_cache_publications(str(root / "cache"), 200)
+        orphan_paths = {str(Path(item).resolve()).casefold() for item in orphan_result["orphanPaths"]}
+        assert str(orphan_cache.resolve()).casefold() in orphan_paths
+        assert str(unrelated_file.resolve()).casefold() not in orphan_paths
+        assert orphan_cache.exists(), "SQLite recovery must return orphan paths without deleting files"
+        orphan_cache.unlink()
         assert unrelated_file.exists()
-        assert database.cleanup_orphan_cache(str(root / "cache"), 200, 7 * 24 * 60 * 60 * 1000)["skipped"]
+        assert database.check_integrity()["result"] == "ok"
+        marker_key = "thumbnail-cache-recovery-test"
+        assert database.maintenance_state_get(marker_key)["completed"] is False
+        database.maintenance_state_complete(marker_key)
+        assert database.maintenance_state_get(marker_key)["completed"] is True
+    finally:
+        database.close()
+
+
+def test_thumbnail_epoch_publish_contract(root: Path) -> None:
+    project = root / "thumbnail-epoch-project"
+    source = project / "source.jpg"
+    final = root / "epoch-cache" / "final.jpg"
+    write_media(source, b"source-v1")
+    write_media(final, b"published-thumbnail")
+    database = ThumbnailDatabase(str(root / "thumbnail-epoch.sqlite3"))
+    try:
+        capture = database.capture_thumbnail_publish(str(source), "image", str(project))
+        committed = database.commit_thumbnail_publish(
+            str(source), capture["cacheEpoch"], capture["sourceVersion"],
+            capture["sourceSize"], capture["sourceMtimeMs"], [{
+                "sizeLabel": "small", "pixelSize": 320, "path": str(final),
+                "fileSize": final.stat().st_size,
+            }],
+        )
+        assert committed["state"] == "READY"
+        row = database.connection.execute(
+            "SELECT cache_epoch,cache_root FROM thumbnails WHERE size_label='small'",
+        ).fetchone()
+        assert row["cache_epoch"] == capture["cacheEpoch"]
+        assert Path(row["cache_root"]).resolve() == final.parent.resolve()
+
+        stale_epoch = database.capture_thumbnail_publish(str(source), "image", str(project))
+        database.bump_cache_epoch()
+        try:
+            database.commit_thumbnail_publish(
+                str(source), stale_epoch["cacheEpoch"], stale_epoch["sourceVersion"],
+                stale_epoch["sourceSize"], stale_epoch["sourceMtimeMs"], [{
+                    "sizeLabel": "medium", "pixelSize": 640, "path": str(final),
+                    "fileSize": final.stat().st_size,
+                }],
+            )
+            raise AssertionError("old epoch publish must fail")
+        except Exception as error:
+            assert getattr(error, "code", None) == "EPOCH_STALE"
+
+        stale_source = database.capture_thumbnail_publish(str(source), "image", str(project))
+        write_media(source, b"source-v2-with-different-size")
+        try:
+            database.commit_thumbnail_publish(
+                str(source), stale_source["cacheEpoch"], stale_source["sourceVersion"],
+                stale_source["sourceSize"], stale_source["sourceMtimeMs"], [{
+                    "sizeLabel": "large", "pixelSize": 1600, "path": str(final),
+                    "fileSize": final.stat().st_size,
+                }],
+            )
+            raise AssertionError("changed source publish must fail")
+        except Exception as error:
+            assert getattr(error, "code", None) == "SOURCE_STALE"
+
+        indexes = {row["name"] for row in database.connection.execute("PRAGMA index_list(thumbnails)")}
+        file_indexes = {row["name"] for row in database.connection.execute("PRAGMA index_list(files)")}
+        assert {"thumbnails_path", "thumbnails_cache_access"} <= indexes
+        assert "files_missing" in file_indexes
+    finally:
+        database.close()
+
+
+def test_thumbnail_cleanup_commits_in_batches(root: Path) -> None:
+    project = root / "thumbnail-batch-project"
+    source = project / "source.jpg"
+    write_media(source, b"source")
+    database = ThumbnailDatabase(str(root / "thumbnail-batch.sqlite3"))
+    try:
+        database.sync_directory(str(project), str(project))
+        source_path = database.connection.execute("SELECT path FROM files").fetchone()[0]
+        database.connection.executemany(
+            """INSERT INTO thumbnails(file_path,size_label,pixel_size,thumbnail_path,thumbnail_size,
+               thumbnail_version,source_mtime_ms,source_hash,generated_at,last_accessed_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            [
+                (source_path, f"batch-{index}", 320, str((root / "cache" / f"batch-{index}.jpg").resolve()),
+                 10, 1, source.stat().st_mtime_ns / 1_000_000, None, 100, 100)
+                for index in range(520)
+            ],
+        )
+        database.connection.execute("UPDATE files SET thumbnail_state='READY' WHERE path=?", (source_path,))
+        database.connection.commit()
+        result = database.invalidate_cache(before_ms=200)
+        assert result["deletedCount"] == 520
+        assert result["staleCount"] == 1
+        assert database.connection.execute("SELECT COUNT(*) FROM thumbnails").fetchone()[0] == 0
+        assert database.connection.execute("SELECT thumbnail_state FROM files WHERE path=?", (source_path,)).fetchone()[0] == "STALE"
+
+        database.connection.executemany(
+            """INSERT INTO thumbnails(file_path,size_label,pixel_size,thumbnail_path,thumbnail_size,
+               thumbnail_version,source_mtime_ms,source_hash,generated_at,last_accessed_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            [
+                (source_path, f"missing-{index}", 320, str((root / "cache" / f"missing-{index}.jpg").resolve()),
+                 10, 1, source.stat().st_mtime_ns / 1_000_000, None, 100, 100)
+                for index in range(520)
+            ],
+        )
+        database.connection.execute(
+            "UPDATE files SET thumbnail_state='MISSING',exists_on_disk=0 WHERE path=?", (source_path,)
+        )
+        database.connection.commit()
+        first_prune = database.prune_missing_batch()
+        second_prune = database.prune_missing_batch()
+        assert first_prune["detachedCount"] == 512 and first_prune["done"] is False
+        assert second_prune["detachedCount"] == 8 and second_prune["sourceCount"] == 1 and second_prune["done"] is True
+        assert database.connection.execute("SELECT COUNT(*) FROM files WHERE path=?", (source_path,)).fetchone()[0] == 0
+    finally:
+        database.close()
+
+
+def test_thumbnail_startup_recovery_contract(root: Path) -> None:
+    corrupt_database = root / "thumbnail-corrupt.sqlite3"
+    corrupt_database.write_bytes(b"not-a-sqlite-database")
+    corrupt_before = corrupt_database.read_bytes()
+    try:
+        ThumbnailDatabase(str(corrupt_database))
+        raise AssertionError("corrupt thumbnail database must fail before recovery writes")
+    except RuntimeError as error:
+        assert "integrity check failed before recovery" in str(error)
+    assert corrupt_database.read_bytes() == corrupt_before
+
+    project = root / "thumbnail-recovery-project"
+    source = project / "source.jpg"
+    cache = root / "thumbnail-recovery-cache"
+    missing_cache = cache / ("1" * 64 + ".jpg")
+    managed_orphan = cache / ("2" * 64 + ".jpg")
+    user_jpeg = cache / "holiday.jpg"
+    old_staging = cache / ".staging" / "11111111-1111-4111-8111-111111111111.jpg"
+    fresh_staging = cache / ".staging" / "22222222-2222-4222-8222-222222222222.jpg"
+    write_media(source, b"source")
+    write_media(managed_orphan, b"orphan")
+    write_media(user_jpeg, b"user")
+    write_media(old_staging, b"old staging")
+    write_media(fresh_staging, b"fresh staging")
+    os.utime(managed_orphan, (0, 0))
+    os.utime(user_jpeg, (0, 0))
+    os.utime(old_staging, (0, 0))
+    database = ThumbnailDatabase(str(root / "thumbnail-recovery.sqlite3"))
+    try:
+        database.sync_directory(str(project), str(project))
+        database.mark_ready(str(source), source.stat().st_mtime_ns / 1_000_000, None, [{
+            "sizeLabel": "small", "pixelSize": 320, "path": str(missing_cache), "fileSize": 128,
+        }])
+        assert database.get_file(str(source))["thumbnail_state"] == "READY"
+        result = database.recover_cache_publications(str(cache), 200, scan_root_orphans=False)
+        orphan_paths = {str(Path(item).resolve()).casefold() for item in result["orphanPaths"]}
+        assert result["repairedMissingCount"] == 1
+        assert database.get_file(str(source))["thumbnail_state"] == "STALE"
+        assert str(old_staging.resolve()).casefold() in orphan_paths
+        assert str(fresh_staging.resolve()).casefold() not in orphan_paths
+        assert str(managed_orphan.resolve()).casefold() not in orphan_paths, "custom/shared root recovery must not scan root JPEGs"
+        root_scan = database.recover_cache_publications(str(cache), 200, scan_root_orphans=True)
+        root_orphans = {str(Path(item).resolve()).casefold() for item in root_scan["orphanPaths"]}
+        assert str(managed_orphan.resolve()).casefold() in root_orphans
+        assert str(user_jpeg.resolve()).casefold() not in root_orphans
     finally:
         database.close()
 
@@ -621,6 +786,9 @@ def main() -> None:
         root = Path(directory)
         test_thumbnail_missing_prune(root)
         test_thumbnail_cleanup_uses_access_index(root)
+        test_thumbnail_epoch_publish_contract(root)
+        test_thumbnail_cleanup_commits_in_batches(root)
+        test_thumbnail_startup_recovery_contract(root)
         test_media_workflow_graph_cleanup(root)
         test_thumbnail_tool_sources_limit_png_to_direct_children(root)
         test_team_return_missing_reconciliation(root)

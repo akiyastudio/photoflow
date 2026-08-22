@@ -1,18 +1,20 @@
 const assert = require('assert');
 const { EventEmitter } = require('events');
 const { createBackgroundTaskService } = require('../electron/services/background-task-service.cjs');
-const { normalizeExternalProgress } = require('../electron/modules/background-tasks-ipc.cjs');
+const { normalizeExternalProgress, registerBackgroundTasksIpc } = require('../electron/modules/background-tasks-ipc.cjs');
 const { pythonToolResourcePaths } = require('../electron/modules/system-ipc.cjs');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const projectFileTaskSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'project-file-task-service.cjs'), 'utf8');
 const versionsIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
+const mediaScanSchedulerSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'media-tracking-scan-scheduler.cjs'), 'utf8');
 assert(projectFileTaskSource.includes("scanning: '正在统计'") && projectFileTaskSource.includes('concurrencyLimit = 3') && projectFileTaskSource.includes('concurrencyWriteLimit = 2'), 'file tasks must allow three total disk tasks while retaining the two-writer limit');
-const deferredMediaScanStart = versionsIpcSource.indexOf("type: 'version-media-rescan'");
-const deferredMediaScanBlock = versionsIpcSource.slice(deferredMediaScanStart, versionsIpcSource.indexOf('const updatedFolderPath', deferredMediaScanStart));
-assert(deferredMediaScanBlock.includes("resourceAccess: 'read'") && deferredMediaScanBlock.includes('resources: [projectPath]'), 'deferred media maintenance must declare its project path as read-only');
+const deferredMediaScanStart = mediaScanSchedulerSource.indexOf("type: 'version-media-rescan'");
+const deferredMediaScanBlock = mediaScanSchedulerSource.slice(deferredMediaScanStart, mediaScanSchedulerSource.indexOf('runner = createDirtyCoalescingRunner', deferredMediaScanStart));
+assert(deferredMediaScanBlock.includes("{ path: projectPath, access: 'read' }") && deferredMediaScanBlock.includes('photoflow-workspace-database/'), 'deferred media maintenance must read project files while reserving the shared workspace database writer');
 assert(deferredMediaScanBlock.includes("task.report(5, '正在扫描项目媒体文件')"), 'deferred media maintenance must leave 0% immediately after it starts');
+assert(versionsIpcSource.includes('scheduleMediaTrackingScan(workspaceRoot, projectName, [], true)') && !versionsIpcSource.includes('runVersionMediaRescan'), 'deferred rescan and retry must enter the shared scheduler wrapper');
 const resourcePathsFor = (scriptName, args) => pythonToolResourcePaths(scriptName, args, path.win32).map(resource => resource.path);
 assert.deepStrictEqual(resourcePathsFor('png_to_jpg.py', ['--quality', '95', '--keep-original', 'C:\\project\\images\\a.png']), ['C:\\project\\images'], 'PNG conversion must lock the directory where it writes JPG output');
 assert.deepStrictEqual(resourcePathsFor('research.py', ['--path', 'C:\\project\\video\\clip.mp4', '--sensitivity', 'standard']), ['C:\\project\\video'], 'research must lock the directory where it exports frames');
@@ -28,6 +30,32 @@ const queued = async promise => {
 };
 
 const main = async () => {
+  const ipcHandlers = new Map();
+  const ipcMain = {
+    on: () => undefined,
+    handle: (channel, handler) => ipcHandlers.set(channel, handler),
+    removeListener: () => undefined,
+  };
+  registerBackgroundTasksIpc({
+    ipcMain,
+    eventBus: { on: () => () => undefined },
+    backgroundTasks: {
+      snapshot: () => ({ revision: 0, tasks: [] }), list: () => [], get: () => null,
+      cancel: () => false, pause: () => false, continuePaused: () => false, dismiss: () => false,
+      resume: async () => ({}), restart: async () => ({}), upsertExternal: () => undefined,
+      retry: async () => ({
+        accepted: true, sourceTaskId: 'source', replacementTaskId: 'replacement', deduplicated: false,
+        task: { id: 'replacement' }, completion: Promise.resolve({}),
+      }),
+    },
+    getMainWindow: () => null,
+  });
+  const retryResponse = await ipcHandlers.get('background-task-retry')(null, 'source');
+  assert.equal(retryResponse.success, true);
+  assert.equal(retryResponse.accepted, true);
+  assert.equal(retryResponse.replacementTaskId, 'replacement');
+  assert.equal('completion' in retryResponse, false, 'retry IPC must return acceptance immediately without serializing the completion promise');
+
   assert.equal(normalizeExternalProgress('workspace-selection-progress', { operationId: 'folder-listing', phase: 'listing_source_folders' }), null, 'opening filename selection must not create a background task for folder discovery');
   assert.equal(normalizeExternalProgress('workspace-selection-progress', { operationId: 'preflight-scan', phase: 'scanning_source' }), null, 'filename preflight scans must not create duplicate 0% background tasks');
   assert.equal(normalizeExternalProgress('workspace-selection-progress', { phase: 'copying', progress: 50 }), null, 'selection progress without an operation id must not create a shared invalid task');
@@ -48,6 +76,22 @@ const main = async () => {
   assert.equal(service.get('monotonic').cancellable, false, 'a running task must be able to disable cancellation before its atomic commit phase');
   assert.equal(service.cancel('monotonic'), false, 'a task in its atomic commit phase must reject cancellation');
   monotonic.complete();
+  let retryRuns = 0;
+  const runRetryReplacement = definition => service.run({
+    ...(definition || {}),
+    type: 'test-retry',
+    title: 'retry replacement',
+  }, async () => {
+    retryRuns += 1;
+    if (retryRuns === 1) throw new Error('transient failure');
+    return { success: true };
+  }, () => runRetryReplacement());
+  await assert.rejects(runRetryReplacement({ id: 'retry-original' }), /transient failure/);
+  assert.equal(service.get('retry-original').state, 'failed');
+  const retryAccepted = await service.retry('retry-original');
+  const retried = await retryAccepted.completion;
+  assert.equal(service.get('retry-original'), null, 'a successful replacement retry must remove the superseded failure');
+  assert.equal(retried.task.state, 'completed');
   const pausable = service.create({ id: 'pausable', type: 'project-file-operation', title: 'pausable', pausable: true });
   await pausable.waitForStart();
   assert.equal(service.pause('pausable'), true, 'a pausable running task must accept pause');
@@ -123,6 +167,24 @@ const main = async () => {
   await overlappingWriteStart;
   overlappingWrite.complete();
 
+  const mediaIndex = service.create({
+    id: 'workspace-media-index', type: 'test', title: 'media index',
+    resources: [
+      { path: 'D:/workspace/project', access: 'read' },
+      { path: 'photoflow-workspace-database/D:/workspace', access: 'write' },
+    ],
+  });
+  await mediaIndex.waitForStart();
+  const databaseMaintenance = service.create({
+    id: 'workspace-database-maintenance', type: 'test', title: 'database maintenance',
+    resources: [{ path: 'photoflow-workspace-database/d:/workspace', access: 'write' }],
+  });
+  const databaseMaintenanceStart = databaseMaintenance.waitForStart();
+  assert.equal(await queued(databaseMaintenanceStart), true, 'workspace maintenance must wait for a media index writer on the same SQLite database');
+  mediaIndex.complete();
+  await databaseMaintenanceStart;
+  databaseMaintenance.complete();
+
   const sourceScan = service.create(definition('source-scan', 'C:/projects/source', { access: 'read' }));
   await sourceScan.waitForStart();
   const copyPaste = service.create({
@@ -149,6 +211,145 @@ const main = async () => {
   assert.equal(service.get('cancelled'), null);
   blocker.complete();
 
+  const replacementEvents = [];
+  const replacementBus = new EventEmitter();
+  replacementBus.on('background-task:changed', delta => replacementEvents.push(delta));
+  const replacementService = createBackgroundTaskService({ eventBus: replacementBus });
+  const createFailedRetryable = async (id, replacementWorker, factoryFailure = null) => {
+    const retryFactory = factoryFailure
+      ? async () => { throw factoryFailure; }
+      : () => replacementService.run({ type: 'retry-test', title: `replacement-${id}` }, replacementWorker, retryFactory);
+    await assert.rejects(replacementService.run(
+      { id, type: 'retry-test', title: id },
+      async () => { throw new Error(`failed-${id}`); },
+      retryFactory,
+    ));
+    return retryFactory;
+  };
+
+  await createFailedRetryable('retry-completed', async () => 'ok');
+  const completedAccepted = await replacementService.retry('retry-completed');
+  const completedRetry = await completedAccepted.completion;
+  assert.equal(replacementService.get('retry-completed'), null);
+  assert.equal(completedRetry.task.state, 'completed');
+  assert.equal(completedRetry.task.retryOfTaskId, 'retry-completed');
+  assert.equal(completedRetry.task.retryAttempt, 1);
+  const completedDelta = replacementEvents.at(-1);
+  assert(completedDelta.removeIds.includes('retry-completed') && completedDelta.upserts.some(task => task.state === 'completed'), 'replacement completion must atomically remove the old failure');
+
+  await createFailedRetryable('retry-failed', async () => { throw new Error('replacement failed'); });
+  const failedAccepted = await replacementService.retry('retry-failed');
+  await assert.rejects(failedAccepted.completion, /replacement failed/);
+  assert.equal(replacementService.get('retry-failed'), null);
+  const replacementFailures = replacementService.list().filter(task => task.type === 'retry-test' && task.state === 'failed');
+  assert.equal(replacementFailures.filter(task => task.retryOfTaskId === 'retry-failed').length, 1, 'new failure must atomically replace the old failure card');
+
+  await createFailedRetryable('retry-cancelled', async () => {
+    throw Object.assign(new Error('cancel replacement'), { code: 'TASK_CANCELLED' });
+  });
+  const cancelledAccepted = await replacementService.retry('retry-cancelled');
+  const cancelledRetry = await cancelledAccepted.completion;
+  assert.equal(cancelledRetry.cancelled, true);
+  const restoredFailure = replacementService.get('retry-cancelled');
+  assert.equal(restoredFailure.state, 'failed');
+  assert.equal(restoredFailure.retryPending, false);
+  assert.equal(restoredFailure.retryable, true, 'cancelled replacement must restore the old retry button');
+
+  const factoryFailure = new Error('factory did not start');
+  await createFailedRetryable('retry-factory-failed', null, factoryFailure);
+  const beforeFactoryFailure = replacementService.get('retry-factory-failed');
+  await assert.rejects(replacementService.retry('retry-factory-failed'), /factory did not start/);
+  assert.deepEqual(replacementService.get('retry-factory-failed'), beforeFactoryFailure, 'factory startup failure must leave the old failure untouched');
+  assert(replacementEvents.every((delta, index) => index === 0 || delta.revision > replacementEvents[index - 1].revision), 'task deltas must have strictly increasing revisions');
+
+  const asyncRetryService = createBackgroundTaskService({ eventBus: new EventEmitter() });
+  let asyncFactoryCalls = 0;
+  let releaseAsyncReplacement;
+  const asyncReplacementGate = new Promise(resolve => { releaseAsyncReplacement = resolve; });
+  let asyncRetryFactory;
+  asyncRetryFactory = async () => {
+    asyncFactoryCalls += 1;
+    await Promise.resolve();
+    return asyncRetryService.run(
+      { type: 'async-retry-test', title: 'async replacement' },
+      async () => { await asyncReplacementGate; return 'async-ok'; },
+      asyncRetryFactory,
+    );
+  };
+  await assert.rejects(asyncRetryService.run(
+    { id: 'async-retry-source', type: 'async-retry-test', title: 'async source' },
+    async () => { throw new Error('async source failed'); },
+    asyncRetryFactory,
+  ));
+  const firstAsyncStart = asyncRetryService.retry('async-retry-source');
+  const secondAsyncStart = asyncRetryService.retry('async-retry-source');
+  const [firstAsyncAccepted, secondAsyncAccepted] = await Promise.all([firstAsyncStart, secondAsyncStart]);
+  assert.equal(asyncFactoryCalls, 1, 'double-click retry must share one asynchronous factory start');
+  assert.equal(firstAsyncAccepted.replacementTaskId, secondAsyncAccepted.replacementTaskId);
+  assert.equal(secondAsyncAccepted.deduplicated, true);
+  assert.equal(asyncRetryService.get('async-retry-source').retryPending, true);
+  assert.equal(asyncRetryService.dismiss('async-retry-source'), false, 'a failure with an active replacement must not be dismissible');
+  releaseAsyncReplacement();
+  const asyncCompleted = await firstAsyncAccepted.completion;
+  assert.equal(asyncCompleted.result, 'async-ok');
+  assert.equal(asyncRetryService.get('async-retry-source'), null);
+
+  const conflictService = createBackgroundTaskService({ eventBus: new EventEmitter() });
+  let releaseConflict;
+  const conflictGate = new Promise(resolve => { releaseConflict = resolve; });
+  const activeConflict = conflictService.start(
+    { id: 'active-conflict', type: 'conflict-test', title: 'active conflict', dedupeKey: 'same-logical-task' },
+    async () => { await conflictGate; },
+  );
+  await assert.rejects(conflictService.run(
+    { id: 'conflict-source', type: 'conflict-test', title: 'conflict source' },
+    async () => { throw new Error('conflict source failed'); },
+    () => conflictService.run(
+      { type: 'conflict-test', title: 'deduped replacement', dedupeKey: 'same-logical-task' },
+      async () => undefined,
+    ),
+  ));
+  await assert.rejects(conflictService.retry('conflict-source'), error => error?.code === 'RETRY_DEDUPE_CONFLICT');
+  assert.equal(conflictService.get('conflict-source').retryPending, false);
+  releaseConflict();
+  await activeConflict.completion;
+
+  const pendingHistoryService = createBackgroundTaskService({ eventBus: new EventEmitter(), maxHistory: 1 });
+  let pendingRetryFactory;
+  pendingRetryFactory = () => pendingHistoryService.run(
+    { type: 'pending-history-test', title: 'pending replacement' },
+    task => new Promise(resolve => task.signal.addEventListener('abort', resolve, { once: true })),
+    pendingRetryFactory,
+  );
+  await assert.rejects(pendingHistoryService.run(
+    { id: 'pending-history-source', type: 'pending-history-test', title: 'pending source' },
+    async () => { throw new Error('pending source failed'); },
+    pendingRetryFactory,
+  ));
+  const pendingAccepted = await pendingHistoryService.retry('pending-history-source');
+  assert(pendingHistoryService.get('pending-history-source'), 'history pruning must retain a failure while its replacement is active');
+  assert.equal(pendingHistoryService.cancel(pendingAccepted.replacementTaskId), true);
+  await pendingAccepted.completion;
+  assert.equal(pendingHistoryService.get('pending-history-source').state, 'failed');
+
+  const ephemeralLogs = [];
+  const ephemeralService = createBackgroundTaskService({
+    eventBus: new EventEmitter(),
+    writeLog: (...args) => ephemeralLogs.push(args),
+  });
+  await ephemeralService.run({ id: 'ephemeral-completed', type: 'silent-test', title: 'silent', notificationPolicy: 'silent' }, async () => undefined);
+  await assert.rejects(ephemeralService.run({ id: 'ephemeral-failed', type: 'silent-test', title: 'silent fail', notificationPolicy: 'silent' }, async () => { throw new Error('silent failure'); }));
+  assert.equal(ephemeralService.list().length, 0, 'ephemeral tasks must disappear for every terminal state');
+  assert(ephemeralLogs.some(([, message, details]) => message === 'Ephemeral background task failed' && details.taskId === 'ephemeral-failed'), 'ephemeral failures must produce a structured log');
+
+  const cappedService = createBackgroundTaskService({ eventBus: new EventEmitter(), maxHistory: 10 });
+  for (let index = 0; index < 14; index += 1) {
+    const handle = cappedService.create({ id: `history-failure-${index}`, type: 'history-test', title: `history-${index}` });
+    await handle.waitForStart();
+    handle.fail(new Error('history failure'));
+  }
+  assert.equal(cappedService.list().length, 10, 'failed history must obey the same cap as completed history');
+
   const persistenceDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-background-tasks-'));
   const persistencePath = path.join(persistenceDirectory, 'tasks.json');
   try {
@@ -165,11 +366,33 @@ const main = async () => {
     const automaticTask = persistentService.create({ id: 'automatic-restart', type: 'component-status-refresh', title: '自动重跑测试' });
     await automaticTask.waitForStart();
     automaticTask.context.report(50, '刷新中');
+    const ephemeralActive = persistentService.create({ id: 'ephemeral-active', type: 'silent-persist-test', title: 'silent active', notificationPolicy: 'silent' });
+    await ephemeralActive.waitForStart();
     persistentService.upsertExternal({ id: 'external-progress', type: 'selection-operation', title: '外部进度', state: 'running', progress: 42, message: '正在处理' });
+    let releaseInterruptedReplacement;
+    const interruptedReplacementGate = new Promise(resolve => { releaseInterruptedReplacement = resolve; });
+    let interruptedRetryFactory;
+    interruptedRetryFactory = () => persistentService.run(
+      { type: 'storage-usage-scan', title: 'interrupted replacement' },
+      async () => { await interruptedReplacementGate; },
+      interruptedRetryFactory,
+    );
+    await assert.rejects(persistentService.run(
+      { id: 'retry-interrupted-old', type: 'storage-usage-scan', title: 'retry interrupted old' },
+      async () => { throw new Error('old failure'); },
+      interruptedRetryFactory,
+    ));
+    const interruptedRetryPromise = persistentService.retry('retry-interrupted-old').catch(() => undefined);
+    await new Promise(resolve => setImmediate(resolve));
+    const interruptedReplacementId = persistentService.get('retry-interrupted-old').replacedByTaskId;
+    assert(interruptedReplacementId && persistentService.get(interruptedReplacementId)?.state === 'running');
     persistentService.stop();
 
     const restoredService = createBackgroundTaskService({ eventBus: new EventEmitter(), persistencePath });
     const restoredTask = restoredService.get('persistent');
+    assert.equal(restoredService.get('ephemeral-active'), null, 'ephemeral tasks must never enter persisted history');
+    assert.equal(restoredService.get(interruptedReplacementId), null, 'interrupted replacement must be removed during recovery');
+    assert.equal(restoredService.get('retry-interrupted-old').retryPending, false, 'interrupted replacement must restore the old failure');
     assert.equal(restoredService.get('external-progress').state, 'interrupted', 'external progress tasks must participate in restart recovery');
     assert.equal(restoredService.get('external-progress').progress, 42, 'external progress tasks must retain their progress');
     assert.equal(restoredTask.state, 'interrupted', 'running tasks must be restored as interrupted after restart');
@@ -192,6 +415,7 @@ const main = async () => {
       restartedTaskId = task.id;
       return { task };
     });
+    assert.equal(restoredService.get('retry-interrupted-old').retryable, true, 'restored old failure must regain retry after its safe worker registers');
     assert.equal(restoredService.get('restartable').restartAvailable, true, 'safe restart workers must expose a restart action');
     await restoredService.restart('restartable');
     assert.equal(restartedTaskId, 'restartable', 'restart workers must receive the interrupted task identity');
@@ -203,6 +427,24 @@ const main = async () => {
     await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(automaticRestarted, true, 'whitelisted safe tasks must restart automatically after registration');
     restoredService.stop();
+    releaseInterruptedReplacement();
+    await interruptedRetryPromise;
+    fs.writeFileSync(persistencePath, JSON.stringify({
+      version: 2,
+      tasks: [{
+        id: 'dangling-retry-source', type: 'storage-usage-scan', title: 'dangling retry', state: 'failed',
+        progress: 10, message: 'failed', error: 'failed', cancellable: false, retryable: false,
+        resumable: false, resumeAvailable: false, restartAvailable: false,
+        capabilities: { cancellable: false, pausable: false, resumable: false, retryable: false },
+        resumePolicy: 'safe-restart', notificationPolicy: 'error-only', historyPolicy: 'persistent',
+        retryOfTaskId: null, replacedByTaskId: 'missing-replacement', retryAttempt: 0, retryPending: true,
+        metadata: {}, createdAt: 1, updatedAt: 2, startedAt: 1, finishedAt: 2,
+      }],
+    }), 'utf8');
+    const danglingService = createBackgroundTaskService({ eventBus: new EventEmitter(), persistencePath });
+    assert.equal(danglingService.get('dangling-retry-source').retryPending, false, 'a missing replacement must not leave a restored failure permanently retry-pending');
+    assert.equal(danglingService.get('dangling-retry-source').replacedByTaskId, null);
+    danglingService.stop();
   } finally {
     fs.rmSync(persistenceDirectory, { recursive: true, force: true });
   }

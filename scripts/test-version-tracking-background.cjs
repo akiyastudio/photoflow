@@ -84,6 +84,50 @@ async function testWatcherDebounce() {
   assert.strictEqual(calls.length, 2);
   assert.deepStrictEqual(calls[1].payload.changedPaths, [], 'project reopen must request a full snapshot scan');
   stale.stop();
+
+  let releaseRunningDetection;
+  const runningDetectionGate = new Promise(resolve => { releaseRunningDetection = resolve; });
+  const runningCalls = [];
+  const rerun = createVersionStaleDetectionService({
+    delayMs: 0,
+    versionService: {
+      detectProgressStale: async (root, payload) => {
+        runningCalls.push({ root, payload });
+        if (runningCalls.length === 1) await runningDetectionGate;
+      },
+    },
+  });
+  rerun.schedule('C:/workspace', 'Project', ['C:/workspace/Project/first.jpg']);
+  await wait(20);
+  assert.strictEqual(runningCalls.length, 1);
+  rerun.schedule('C:/workspace', 'Project', ['C:/workspace/Project/second.jpg']);
+  releaseRunningDetection();
+  await wait(30);
+  assert.strictEqual(runningCalls.length, 2, 'changes received during a stale scan must trigger one follow-up scan');
+  assert.deepStrictEqual(runningCalls[1].payload.changedPaths, [require('path').resolve('C:/workspace/Project/second.jpg')]);
+  rerun.stop();
+
+  const backgroundTasks = createBackgroundTaskService({ eventBus: new EventEmitter() });
+  const blocker = backgroundTasks.create({
+    id: 'database-blocker', type: 'test', title: 'database blocker',
+    resources: [{ path: 'photoflow-workspace-database/C:/workspace', access: 'write' }],
+  });
+  await blocker.waitForStart();
+  const coordinatedCalls = [];
+  const coordinated = createVersionStaleDetectionService({
+    delayMs: 0,
+    backgroundTasks,
+    versionService: {
+      detectProgressStale: async (root, payload) => { coordinatedCalls.push({ root, payload }); },
+    },
+  });
+  coordinated.schedule('C:/workspace', 'Project', [], true);
+  await wait(20);
+  assert.strictEqual(coordinatedCalls.length, 0, 'stale detection must wait for the shared workspace database writer');
+  blocker.complete();
+  await wait(20);
+  assert.strictEqual(coordinatedCalls.length, 1);
+  coordinated.stop();
 }
 
 async function main() {

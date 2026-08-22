@@ -66,6 +66,7 @@ const appErrorBoundary = read('src/features/app/AppErrorBoundary.tsx');
 const workspaceDb = read('python/workspace_db.py');
 const thumbnailDb = read('python/thumbnail_db.py');
 const thumbnailPipeline = read('electron/thumbnail-pipeline.cjs');
+const thumbnailService = read('electron/services/thumbnail-service.cjs');
 const recycleBinFailure = read('src/utils/recycleBinFailure.ts');
 const recycleBinService = read('electron/services/recycle-bin-service.cjs');
 assert(main.includes("mainWindow.webContents.on('before-input-event'") && main.includes("input.key !== 'F11'") && main.includes('mainWindow.setFullScreen(!mainWindow.isFullScreen())'), 'F11 must toggle the main application window between fullscreen and its previous window state');
@@ -176,7 +177,10 @@ assert(workspaceCatalogClient.includes('const inFlight = new Map') && workspaceC
 assert(projectNavigator.includes('refreshQueuedFreshRef.current ||= fresh') && projectNavigator.includes('refreshQueuedCachedOnlyRef.current &&= cachedOnly'), 'queued catalog refreshes must preserve the strongest fresh-versus-cached request semantics');
 assert(workspaceIpc.includes('workspaceCatalogs.get(root) || await refreshWorkspaceCatalog(root)') && workspaceService.includes('reconcileRepository.syncCatalog(root)') && main.includes('reconcileRepository: workspaceMaintenanceRepository'), 'interactive project reads must return cached catalogs while filesystem reconciliation runs on the maintenance worker');
 assert(!workspaceRepository.includes('operationsRepository?.load(root)') && workspaceRepository.includes("client.call(root, 'init')"), 'read-only project catalog initialization must not cold-start the operations database');
-assert(mediaIpc.includes('listCacheCleanupCandidates(cutoff)') && thumbnailDb.includes('def list_cache_cleanup') && !mediaIpc.includes('fs.promises.stat(filePath)).mtimeMs'), 'automatic cache cleanup must select expired thumbnails from the access index instead of statting the entire cache');
+assert(mediaIpc.includes('thumbnailService.evictCache({') && main.includes('await thumbnailService.evictCache({')
+  && thumbnailDb.includes('def detach_cache_batch') && thumbnailDb.includes('def prune_missing_batch')
+  && thumbnailDb.includes('def recover_cache_publications') && thumbnailDb.includes('thumbnails_cache_access')
+  && !mediaIpc.includes('fs.promises.unlink(filePath)'), 'manual, dated, capacity, missing, and orphan cache eviction must use the indexed batch protocol');
 const nativeRecycleBinService = read('electron/native/RecycleBinService.cs');
 assert(recycleBinService.includes("['probe-many']") && nativeRecycleBinService.includes('ProbeMany(ReadValues(5000))'), 'deleted-project maintenance must batch recycle-bin probes into one native helper process');
 assert(systemIpc.includes('componentStatusCache.integrityTokens') && systemIpc.includes('seedIntegrityToken') && systemIpc.includes('lastDetailedAttemptAt') && systemIpc.includes('policy.shouldProbeRuntime') && systemIpc.includes('forceRuntimeProbe') && systemIpc.includes('componentStatusForceQueued ||= force'), 'component status refresh must reuse integrity metadata while runtime probes honor TTL, failure backoff, and queued manual refresh');
@@ -220,6 +224,7 @@ assert(/label: '界面'[\s\S]*?label: '项目'[\s\S]*?label: '导入'[\s\S]*?lab
 assert(settingsFeature.includes("id: 'general', label: '界面', description: '配色、标签与首页', icon: <Palette"), 'interface settings navigation must use its interface-specific label, description, and icon');
 assert(settingsFeature.includes("id: 'backup', label: '存储', description: '工作目录、归档与工作区备份', icon: <HardDrive") && !settingsFeature.includes("id: 'storage', label: '缓存'"), 'cache settings must be merged into the storage navigation page');
 assert(settingsFeature.includes('const SettingsPageGroup') && settingsFeature.includes('const SettingsRow') && settingsFeature.includes('settings-group-card') && /activeSection === 'general'[\s\S]*?title="外观"[\s\S]*?title="界面配色"[\s\S]*?title="显示角色生日"[\s\S]*?title="文件浏览"/.test(settingsFeature), 'settings pages must use unified grouped cards with one horizontal row per setting');
+assert(settingsFeature.includes('title="视频剪辑"') && settingsFeature.includes('title="裁剪导出方式"') && settingsFeature.includes('<option value="fast">快速导出（默认）</option>') && settingsFeature.includes('<option value="exact">精确导出</option>') && app.includes("trim: { exportMode: 'fast' }"), 'video trim export mode must be configurable in settings and default to fast stream copy');
 assert(/title="统计"[\s\S]*?title="工作目录"[\s\S]*?title="项目工作目录"[\s\S]*?title="灵感库目录"[\s\S]*?title="项目归档盘位置"[\s\S]*?title="备份"[\s\S]*?title="启用工作区备份"[\s\S]*?title="缓存"[\s\S]*?title="最大缩略图缓存容量"/.test(settingsFeature), 'storage settings must be divided into statistics, directories, backup, and cache groups');
 assert(toolViews.includes("args.push('--transcode_import_videos', '--transcode_settings', JSON.stringify(transcodeSettings))"), 'SD-card imports must forward the selected video transcode settings');
 assert(toolViews.includes("const queue = directSource") && toolViews.includes("args.push('--split_import_videos')") && toolViews.includes("args.push('--transcode_import_videos', '--transcode_settings', JSON.stringify(transcodeSettings))"), 'work and B-roll imports must share video split and transcode panel settings');
@@ -246,7 +251,7 @@ assert(ffmpegTranscode.includes('正在编码（{active_backend}）：{name}{ite
 assert(workspaceIpc.includes('folderPaths') && projectWorkspace.includes('initialSourceFolders={videoTranscodeSourceFolders}') && toolViews.includes("'--source-folder', folder") && ffmpegTranscode.includes('def _create_unique_transcode_folder') && ffmpegTranscode.includes('文件夹转码任务不能替换原视频'), 'folder-based video transcoding must preserve source-folder identity and write into a new sibling output folder');
 assert(toolViews.includes('已选择 {paths.length} 个视频') && toolViews.includes('批量粘贴路径') && toolViews.includes('removeVideoPath(item.path)') && toolViews.includes("label: '编码中'") && toolViews.includes("label: '失败'"), 'video transcoding inputs must use a grouped queue with removable items and per-file task states while keeping raw path entry available');
 assert(projectWorkspace.includes("const VideoTrimTimeline") && projectWorkspace.includes("onChange={changeVideoTrimEdge}") && projectWorkspace.includes('另存为新视频') && projectWorkspace.includes('替换原视频') && !projectWorkspace.includes('fixed inset-0 z-[540]') && workspaceIpc.includes("request.saveMode === 'replace'") && workspaceIpc.includes('replaceVideoFileWithRollback') && workspaceIpc.includes('.photoflow-trim'), 'video trimming must use an in-preview dual-handle timeline and offer save-as-new or rollback-safe source replacement');
-assert(cutVideo.includes('Manual trimming therefore always decodes') && cutVideo.includes('"-c:v", "libx264"') && cutVideo.includes('"-crf", "16"') && !cutVideo.includes('"-c", "copy", "-copyts"'), 'manual video trimming must encode from the selected timestamp instead of snapping to a stream-copy keyframe');
+assert(cutVideo.includes('def trim_video_fast') && cutVideo.includes('"-c", "copy"') && cutVideo.includes('def trim_video_exactly') && cutVideo.includes('"-c:v", "libx264"') && cutVideo.includes('"-crf", "16"'), 'video trimming must provide fast stream-copy and exact re-encode modes');
 assert(/for cleanup_index, source in enumerate\(original_files\):\s+ensure_not_cancelled\(\)/.test(classifyImport) && classifyImport.includes('deleted_source_count += 1') && classifyImport.includes('已停止继续清理源文件'), 'SD-card B-roll source cleanup must stop between files when cancellation is requested and report partial cleanup accurately');
 assert(/if \(isClipboardSelection\) \{\s*setClipboardPending\(true\);\s*\}[\s\S]*?result = await projectWorkspaceClient\.projectFileOperation/.test(projectWorkspace), 'copy and cut must remain pending until Windows clipboard synchronization succeeds');
 assert(/if \(operation === 'copy' \|\| operation === 'cut'\) \{[\s\S]*?clipboardOperationSequenceRef\.current !== clipboardOperationSequence[\s\S]*?setCutPaths\([\s\S]*?setClipboardHasFiles\(true\)[\s\S]*?setClipboardPending\(false\)[\s\S]*?onNotice\(/.test(projectWorkspace), 'copy and cut success state must only be confirmed by the latest completed clipboard write');
@@ -569,7 +574,7 @@ assert(projectWorkspace.includes('data-inline-rename-input="true"') && projectWo
 assert(workspaceIpc.includes('replaceVideoFileWithRollback({ crypto, fs, path, sourcePath, replacementPath: safeGenerated })') && workspaceIpc.includes('.photoflow-trim-output-') && videoTrimCommitService.includes('await renameWithRetry(fs, sourcePath, backupPath') && videoTrimCommitService.includes('await renameWithRetry(fs, backupPath, sourcePath') && projectWorkspace.includes("fallbackVideo.querySelectorAll('source').forEach") && projectWorkspace.includes('const trimEditing = Boolean(trimEditor) && !trimBusy'), 'replacing a trimmed video must release every preview reader and use a rollback-safe Windows file commit');
 assert(main.includes("normalized.includes('.photoflow-part')") && workspaceIpc.includes("normalized.includes('.photoflow-part')"), 'workspace watchers and file listings must ignore in-progress media files whose temporary marker appears before the extension');
 assert(projectWorkspace.includes('setTrimEditor({ start: 0, end: videoDuration })') && projectWorkspace.includes('previewVideoTrimTime(0)'), 'video trimming must open with the full clip selected even when playback previously reached the end');
-assert(cutVideo.includes('def trim_video_exactly') && cutVideo.includes('command.index') === false && cutVideo.includes('"-c:v", "libx264"') && !cutVideo.includes('"-c", "copy", "-copyts"') && cutVideo.includes('def extract_timeline_frames') && workspaceIpc.includes("ipcMain.handle('workspace-video-timeline-frames'") && projectWorkspace.includes('loadVideoTimelineFramesRef.current(times)'), 'manual video trimming must always encode from the selected timestamp and use FFmpeg-decoded timeline frames');
+assert(cutVideo.includes('parser.add_argument("--trim-mode", choices=("fast", "exact"), default="fast")') && workspaceIpc.includes("'--trim-mode', exportMode") && projectWorkspace.includes('exportMode: videoTools.trim.exportMode') && projectWorkspace.includes('loadVideoTimelineFramesRef.current(times)'), 'video trimming must default to the configured fast mode while retaining exact export and FFmpeg-decoded timeline frames');
 assert(cutVideo.includes('"-progress", "pipe:1"') && cutVideo.includes('phase="encoding"') && workspaceIpc.includes("'workspace-video-trim-progress'") && preload.includes('onProjectVideoTrimProgress') && projectWorkspace.includes('role="progressbar"') && projectWorkspace.includes("'取消导出'"), 'video trimming must expose real FFmpeg progress and keep a cancellable inline export status');
 assert(projectWorkspace.includes('className="pointer-events-none absolute inset-0 z-40 overflow-hidden bg-slate-600/65') && projectWorkspace.includes('正在裁剪视频…') && projectWorkspace.includes('absolute inset-x-0 top-0 h-1') && !projectWorkspace.includes('className="mt-2.5 rounded-md border border-white/10 bg-white/[.04] px-2.5 py-2"'), 'video trim progress must dim the full timeline and explain progress at its top without adding layout height');
 assert(workspaceIpc.includes("type: 'video-trim'") && workspaceIpc.includes('backgroundTasks.create({') && workspaceIpc.includes('taskHandle.context.setCancellable(false)') && projectWorkspace.includes("task.type === 'video-trim'") && projectWorkspace.includes('restoredBackgroundTrimIdRef') && projectWorkspace.includes('sourceDuration: number'), 'video trimming must remain a cancellable main-process background task and restore its progress after the preview pane remounts');
@@ -631,6 +636,10 @@ assert(versionTreeCanvas.includes('mergedAfterConflict') && versionTreeCanvas.in
 const versionManagerSource = read('src/components/VersionManager.tsx');
 assert(versionManagerSource.includes('const pageGenerationRef = useRef(0)') && versionManagerSource.includes('pageIdentityRef.current !== pageIdentityKey') && versionManagerSource.includes('selectBranchPhoto(photo.photoId)') && (versionManagerSource.match(/pageGenerationIsCurrent\(pageGeneration\)/g) || []).length >= 12, 'version mutations must be isolated from entry and branch-photo generation changes');
 assert(thumbnailPipeline.includes('Directory indexing is metadata-only') && !thumbnailPipeline.includes('pending.push(entry)') && !thumbnailPipeline.includes("state: 'QUEUED' }, 10 * 60 * 1000"), 'directory browsing must not invisibly warm every uncached media thumbnail');
+assert(main.includes('app.requestSingleInstanceLock()') && main.includes('thumbnailService.recoverCache(startupMediaCacheConfig)')
+  && main.indexOf('thumbnailService.recoverCache(startupMediaCacheConfig)') < main.lastIndexOf('loadMainWindowRenderer()'), 'startup cache recovery must be single-instance and reserve maintenance before renderer media requests start');
+assert(thumbnailService.includes("type: 'thumbnail-cache-recovery'") && thumbnailService.includes('maintenanceKey')
+  && thumbnailPipeline.includes('isSafeManagedCachePath') && thumbnailDb.includes('def maintenance_state_complete'), 'startup recovery must be versioned, retryable, and guarded by strict cache-path ownership checks');
 assert(!systemIpc.includes('activeClassifyWrite') && systemIpc.includes("const tracksImportTask = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage)") && systemIpc.includes("const writesImportFiles = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage)") && systemIpc.includes('resources: [...(writesImportFiles ? importTargets : []), ...sourcePaths].filter(Boolean)'), 'SD-card planning and its safety staging writes must retain the shared resource-aware project lock');
 assert(systemIpc.includes('PYTHON_BACKGROUND_TASK_PROFILES') && systemIpc.includes("'png_to_jpg.py'") && systemIpc.includes("'research.py'") && systemIpc.includes("'ffmpeg_transcode.py'") && systemIpc.includes("'cut_video.py'") && systemIpc.includes('presentationOwnerPageId') && systemIpc.includes('presentationPanelKind') && systemIpc.includes('pythonToolResourcePaths(scriptName, args, path)') && systemIpc.includes("resumePolicy: 'atomic'"), 'shared Python tools must register real path-aware background tasks with restorable panel ownership and honest interruption policy');
 assert(toolViews.includes("['--import_session', currentImportSessionRef.current || importRequestIdRef.current]") && toolViews.includes("'--dest_path', resolvedDestinationPath") && classifyImport.includes('load_staged_import(dest_path, import_session)'), 'project routing must copy into a per-card resumable safety area and reuse its manifest before classifying local files');
@@ -662,7 +671,7 @@ const testBackgroundTasks = async () => {
   const eventBus = createEventBus();
   const service = createBackgroundTaskService({ eventBus, maxHistory: 10 });
   const updates = [];
-  eventBus.on('background-task:changed', task => updates.push(task));
+  eventBus.on('background-task:changed', delta => updates.push(delta));
 
   const completed = await service.run({ type: 'test', title: 'test task' }, async task => {
     task.report(50, 'half');
@@ -670,7 +679,8 @@ const testBackgroundTasks = async () => {
   });
   assert.strictEqual(completed.result, 42);
   assert.strictEqual(completed.task.state, 'completed');
-  assert(updates.some(task => task.progress === 50));
+  assert(updates.some(delta => delta.upserts.some(task => task.progress === 50)));
+  assert(updates.every((delta, index) => index === 0 || delta.revision > updates[index - 1].revision));
 
   let attempts = 0;
   let retryRun;
@@ -686,7 +696,8 @@ const testBackgroundTasks = async () => {
     failedId = service.list().find(task => task.type === 'retry-test')?.id || '';
   }
   assert(failedId, 'failed task was not retained');
-  const retried = await service.retry(failedId);
+  const retryAccepted = await service.retry(failedId);
+  const retried = await retryAccepted.completion;
   assert.strictEqual(retried.result, 'retried');
 
   const cancelling = service.run({ type: 'cancel-test', title: 'cancel test' }, task => new Promise(resolve => {

@@ -25,12 +25,26 @@ const run = (action, payload = {}) => {
   return response;
 };
 
+const syncMediaProject = project => {
+  const prepared = run('media_sync_prepare', { projectName: project });
+  for (let offset = 0, batchIndex = 0; offset < prepared.files.length; offset += 64, batchIndex += 1) {
+    run('media_sync_apply_batch', {
+      projectName: project, snapshotId: prepared.snapshotId, batchIndex,
+      authorizedRoots: prepared.authorizedRoots, files: prepared.files.slice(offset, offset + 64),
+    });
+  }
+  return run('media_sync_finalize', {
+    projectName: project, snapshotId: prepared.snapshotId, authorizedRoots: prepared.authorizedRoots,
+    files: prepared.files, baselineVersions: prepared.baselineVersions,
+  });
+};
+
 try {
   fs.mkdirSync(projectPath, { recursive: true });
   fs.writeFileSync(path.join(projectPath, 'photo.jpg'), Buffer.from('test-image'));
   run('init');
   run('catalog_sync');
-  run('media_sync_project', { projectName });
+  syncMediaProject(projectName);
   run('undo_record_add', {
     kind: 'trash',
     payload: {

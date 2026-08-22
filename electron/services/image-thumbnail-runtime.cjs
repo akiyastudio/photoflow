@@ -155,7 +155,10 @@ const createImageThumbnailRuntime = ({
   const generateThumbnailSet = async (sourcePath, stat, kind, cacheConfig, sizes) => {
     const cacheDir = getMediaCacheDir(cacheConfig);
     const ordered = [...sizes].sort((left, right) => right.pixels - left.pixels);
-    const targets = new Map(ordered.map(size => [size.label, mediaThumbnailCacheFile(sourcePath, stat, cacheDir, size.pixels, thumbnailVersion)]));
+    const targets = new Map(ordered.map(size => [
+      size.label,
+      size.path ? path.resolve(size.path) : mediaThumbnailCacheFile(sourcePath, stat, cacheDir, size.pixels, thumbnailVersion),
+    ]));
     let missing = ordered.filter(size => !fs.existsSync(targets.get(size.label)));
     if (!missing.length) return ordered.map(size => ({ sizeLabel: size.label, pixelSize: size.pixels, path: targets.get(size.label) }));
     const largest = missing[0];

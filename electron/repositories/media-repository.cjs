@@ -1,5 +1,63 @@
-const createMediaRepository = client => ({
-  syncProject: (root, projectName, externalRoots = []) => client.call(root, 'media_sync_project', { projectName, externalRoots }),
+const MEDIA_SYNC_BATCH_SIZE = 64;
+
+const createMediaRepository = client => {
+  const prepareMediaSync = (root, projectName, externalRoots = []) => client.call(root, 'media_sync_prepare', { projectName, externalRoots }, 30 * 60 * 1000);
+  const applyMediaSyncBatch = (root, payload) => client.call(root, 'media_sync_apply_batch', payload, 2 * 60 * 1000);
+  const finalizeMediaSync = (root, payload) => client.call(root, 'media_sync_finalize', payload, 2 * 60 * 1000);
+  const syncProject = async (root, projectName, externalRoots = []) => {
+    const prepared = await prepareMediaSync(root, projectName, externalRoots);
+    if (prepared.projectUnavailable) return prepared;
+    let count = 0;
+    for (let offset = 0, batchIndex = 0; offset < prepared.files.length; offset += MEDIA_SYNC_BATCH_SIZE, batchIndex += 1) {
+      const applied = await applyMediaSyncBatch(root, {
+        projectName,
+        snapshotId: prepared.snapshotId,
+        batchIndex,
+        authorizedRoots: prepared.authorizedRoots,
+        files: prepared.files.slice(offset, offset + MEDIA_SYNC_BATCH_SIZE),
+      });
+      count += Number(applied.count) || 0;
+      // The physical writer lease was released when the action returned. Yield
+      // before rejoining the coordinator so queued interactive writes can run.
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    const finalized = await finalizeMediaSync(root, {
+      projectName,
+      snapshotId: prepared.snapshotId,
+      authorizedRoots: prepared.authorizedRoots,
+      files: prepared.files,
+      baselineVersions: prepared.baselineVersions,
+    });
+    return { ...finalized, count };
+  };
+
+  const prepareProgressStale = (root, payload) => client.call(root, 'progress_stale_prepare', payload, 30 * 60 * 1000);
+  const applyProgressStale = (root, payload) => client.call(root, 'progress_stale_apply', payload);
+  const detectProgressStale = async (root, payload) => {
+    for (let revisionAttempt = 0; revisionAttempt < 5; revisionAttempt += 1) {
+      const prepared = await prepareProgressStale(root, payload);
+      if (!prepared.candidates.length) return prepared;
+      const applied = await applyProgressStale(root, {
+        projectName: payload.projectName,
+        snapshotId: prepared.snapshotId,
+        revision: prepared.revision,
+        candidates: prepared.candidates,
+        scannedProgressIds: prepared.scannedProgressIds,
+        propagatedProgressIds: prepared.propagatedProgressIds,
+      });
+      if (!applied.revisionExpired) return applied;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    const error = new Error('progress_stale_revision_busy: 版本状态持续变化，请稍后重试');
+    error.code = 'PROGRESS_STALE_REVISION_BUSY';
+    throw error;
+  };
+
+  return ({
+  syncProject,
+  prepareMediaSync,
+  applyMediaSyncBatch,
+  finalizeMediaSync,
   setThumbnail: (root, payload) => client.call(root, 'media_set_thumbnail', payload),
   getMedia: (root, payload) => client.call(root, 'media_get', payload),
   getPhoto: (root, photoId) => client.call(root, 'media_get_photo', { photoId }),
@@ -35,7 +93,9 @@ const createMediaRepository = client => ({
   commitBatchCompare: (root, payload) => client.call(root, 'batch_commit_compare', payload),
   listBatchOperations: (root, batchId) => client.call(root, 'batch_operation_list', { batchId }),
   retryBatchOperations: (root, batchId) => client.call(root, 'batch_retry_operations', { batchId }),
-  detectProgressStale: (root, payload) => client.call(root, 'progress_detect_stale', payload, 60 * 1000),
+  detectProgressStale,
+  prepareProgressStale,
+  applyProgressStale,
   createTrackingSession: (root, payload) => client.call(root, 'tracking_session_create', payload),
   prepareTracking: (root, payload) => client.call(root, 'tracking_prepare', payload, 30 * 60 * 1000),
   storeTrackingPreview: (root, payload) => client.call(root, 'tracking_store_preview', payload, 60 * 1000),
@@ -52,6 +112,7 @@ const createMediaRepository = client => ({
   failTrackingCommit: (root, payload) => client.call(root, 'tracking_commit_failed', payload),
   getMainBranchMedia: (root, payload) => client.call(root, 'progress_main_branch_media', payload),
   stop: () => client.stop(),
-});
+  });
+};
 
-module.exports = { createMediaRepository };
+module.exports = { createMediaRepository, MEDIA_SYNC_BATCH_SIZE };
