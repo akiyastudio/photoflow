@@ -36,7 +36,7 @@ class ThumbnailCoordinator {
       worker = options;
       options = {};
     }
-    const { signal, deadlineAt, onBlocked = () => undefined } = options || {};
+    const { signal, deadlineAt, onBlocked = () => undefined, onAdmitted = () => undefined } = options || {};
     if (signal?.aborted) return Promise.reject(signal.reason || Object.assign(new Error('thumbnail maintenance cancelled'), { code: 'TASK_CANCELLED' }));
     if (Number.isFinite(deadlineAt) && deadlineAt <= Date.now()) {
       return Promise.reject(Object.assign(new Error('thumbnail maintenance deadline exceeded'), { code: 'THUMBNAIL_MAINTENANCE_DEADLINE' }));
@@ -85,6 +85,7 @@ class ThumbnailCoordinator {
         }
       };
       this.maintenanceQueue.push(run);
+      onAdmitted({ waiting: this.maintenanceWaiting, activeReaders: this.activeReaders });
       if (this.activeReaders || this.maintenanceActive || this.maintenanceQueue[0] !== run) {
         onBlocked({ phase: this.activeReaders ? 'waiting-indexer-publisher' : 'waiting-maintenance-turn', activeReaders: this.activeReaders });
       }

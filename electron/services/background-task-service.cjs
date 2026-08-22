@@ -21,6 +21,7 @@ const TASK_POLICIES = Object.freeze({
   'version-media-rescan': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
   'version-fingerprint-maintenance': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
   'thumbnail-generate': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
+  'thumbnail-cache-recovery': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
   'backup-verify': { resumePolicy: 'checkpoint', notificationPolicy: 'error-only', resumable: true },
   'workspace-reconcile': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
   'storage-usage-scan': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
@@ -618,7 +619,12 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       return result;
     } catch (error) {
       tasks.set(id, task);
-      update(task, { state: 'failed', error: error?.message || String(error), message: error?.message || String(error), finishedAt: now(), restartAvailable: false });
+      const typeFactory = typeRestartFactories.get(task.type);
+      if (typeFactory) retryFactories.set(id, () => typeFactory(publicTask(task)));
+      update(task, {
+        state: 'failed', error: error?.message || String(error), message: error?.message || String(error), finishedAt: now(),
+        restartAvailable: false, retryable: Boolean(typeFactory), capabilities: { ...task.capabilities, retryable: Boolean(typeFactory) },
+      });
       throw error;
     }
   };
