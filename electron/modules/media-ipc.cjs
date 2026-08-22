@@ -153,47 +153,119 @@ const registerMediaIpc = context => {
     catch (error) { return { success: false, path: '', sizeBytes: 0, fileCount: 0, error: error.message || String(error) }; }
   });
   
-  const runCacheCleanup = (cacheConfig = {}, olderThanDays, restartTask = null) => backgroundTasks.run({
-    ...(restartTask?.id ? { id: restartTask.id } : {}),
-    type: 'cache-cleanup',
-    title: '清理媒体缓存',
-    metadata: { cacheConfig, olderThanDays },
-  }, async task => {
+  const runCacheCleanup = async (cacheConfig = {}, olderThanDays, options = {}, restartTask = null) => {
+    const origin = options?.origin === 'daily-auto' ? 'daily-auto' : 'manual';
+    if (origin === 'daily-auto') await thumbnailService.waitForStartupRecovery?.(cacheConfig);
+    const cleanupRoot = path.resolve(getMediaCacheDir(cacheConfig));
+    const execution = await backgroundTasks.run({
+      ...(restartTask?.id ? { id: restartTask.id } : {}),
+      type: 'cache-cleanup',
+      title: '清理媒体缓存',
+      dedupeKey: `cache-cleanup:${origin}:${cleanupRoot.toLocaleLowerCase()}:${Number(olderThanDays) || 'all'}`,
+      ...(origin === 'daily-auto' ? { notificationPolicy: 'error-only' } : {}),
+      metadata: {
+        cacheConfig, olderThanDays, origin,
+        ...(origin === 'daily-auto' ? { taskCenterVisibility: 'attention-only' } : {}),
+      },
+    }, async task => {
       task.throwIfCancelled();
       task.report(5, '正在分批移除缓存索引');
-      const cacheDir = getMediaCacheDir(cacheConfig);
+      const cacheDir = cleanupRoot;
       const days = Number(olderThanDays);
       const cutoff = Number.isFinite(days) && days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : null;
-      const deadlineAt = Date.now() + 10 * 60 * 1000;
       let lastPhaseReportAt = 0;
-      const result = await thumbnailService.evictCache({
-        cacheRoot: cacheDir,
-        ...(cutoff == null ? { all: true } : { beforeMs: cutoff }),
-        recoverOrphans: true,
-        orphanBeforeMs: cutoff,
-        pruneMissing: true,
-        task,
-        signal: task.signal,
-        deadlineAt,
-        onBlocked: ({ phase, processedCount }) => {
-          if (Date.now() - lastPhaseReportAt < 250) return;
-          lastPhaseReportAt = Date.now();
-          task.report(Math.min(95, 5 + Math.floor(Number(processedCount || 0) / 64)), `缓存维护：${phase}，已处理 ${processedCount || 0} 条`, {
-            maintenancePhase: phase,
-            processedCount: processedCount || 0,
+      const reportBlocked = (processedOffset, deadlineAt) => ({ phase, processedCount }) => {
+        const totalProcessed = processedOffset + Number(processedCount || 0);
+        if (Date.now() - lastPhaseReportAt < 250) return;
+        lastPhaseReportAt = Date.now();
+        task.report(Math.min(95, 5 + Math.floor(totalProcessed / 64)), `缓存维护：${phase}，已处理 ${totalProcessed} 条`, {
+          maintenancePhase: phase,
+          processedCount: totalProcessed,
+          deadlineAt,
+        });
+      };
+      let result;
+      if (origin !== 'daily-auto') {
+        const deadlineAt = Date.now() + 10 * 60 * 1000;
+        result = await thumbnailService.evictCache({
+          cacheRoot: cacheDir,
+          ...(cutoff == null ? { all: true } : { beforeMs: cutoff }),
+          recoverOrphans: true,
+          orphanBeforeMs: cutoff,
+          pruneMissing: true,
+          task,
+          signal: task.signal,
+          deadlineAt,
+          onBlocked: reportBlocked(0, deadlineAt),
+        });
+      } else {
+        const aggregate = {
+          deletedCount: 0, deletedBytes: 0, detachedCount: 0, detachedBytes: 0,
+          prunedSourceCount: 0, repairedMissingCount: 0, failedCount: 0,
+          maintenanceComplete: false,
+        };
+        let recoveryCursor = {};
+        let processedOffset = 0;
+        let detachPending = true;
+        let prunePending = true;
+        let firstSlice = true;
+        while (!aggregate.maintenanceComplete) {
+          task.throwIfCancelled();
+          const deadlineAt = Date.now() + 60 * 1000;
+          const slice = await thumbnailService.evictCache({
+            cacheRoot: cacheDir,
+            ...(detachPending ? cutoff == null ? { all: true } : { beforeMs: cutoff } : {}),
+            recoverOrphans: true,
+            orphanBeforeMs: cutoff,
+            pruneMissing: prunePending,
+            recoveryCursor,
+            recoveryInspectLimit: 128,
+            recoveryDeleteLimit: 64,
+            recoveryDirectoryInspectLimit: 4096,
+            maxDetachBatches: 1,
+            maxPruneBatches: 1,
+            maxRecoveryPages: 1,
+            bumpCacheEpoch: firstSlice,
+            task,
+            signal: task.signal,
             deadlineAt,
+            onBlocked: reportBlocked(processedOffset, deadlineAt),
           });
-        },
-      });
+          for (const field of ['deletedCount', 'deletedBytes', 'detachedCount', 'detachedBytes', 'prunedSourceCount', 'repairedMissingCount', 'failedCount']) {
+            aggregate[field] += Number(slice[field]) || 0;
+          }
+          processedOffset += Number(slice.processedCount) || 0;
+          detachPending = slice.detachComplete === false;
+          prunePending = slice.pruneComplete === false;
+          recoveryCursor = slice.recoveryCursor || recoveryCursor;
+          aggregate.maintenanceComplete = slice.maintenanceComplete === true;
+          firstSlice = false;
+          if (!aggregate.maintenanceComplete) await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        result = aggregate;
+      }
       task.report(100, `已清理 ${result.deletedCount} 个缓存文件`);
       mediaCacheIndexes.delete(path.resolve(cacheDir));
       return { deletedCount: result.deletedCount, prunedSourceCount: result.prunedSourceCount || 0 };
-  }, () => runCacheCleanup(cacheConfig, olderThanDays));
-  backgroundTasks?.registerTypeRestartFactory?.('cache-cleanup', task => runCacheCleanup(task.metadata?.cacheConfig || {}, task.metadata?.olderThanDays, task));
+    }, () => runCacheCleanup(cacheConfig, olderThanDays, { origin }));
+    if (origin === 'daily-auto' && execution.task.state === 'completed') backgroundTasks.dismiss(execution.task.id);
+    return execution;
+  };
+  // Older builds did not mark the daily cleanup origin. A daily cleanup that
+  // was interrupted is safe to discard because the renderer schedules a fresh,
+  // deduplicated run after startup recovery completes.
+  for (const task of backgroundTasks?.list?.() || []) {
+    const legacyDaily = !task.metadata?.origin && Number(task.metadata?.olderThanDays) === 30;
+    if (task.type === 'cache-cleanup' && task.state === 'interrupted'
+        && (task.metadata?.origin === 'daily-auto' || legacyDaily)) backgroundTasks.dismiss(task.id);
+  }
+  backgroundTasks?.registerTypeRestartFactory?.('cache-cleanup', task => runCacheCleanup(
+    task.metadata?.cacheConfig || {}, task.metadata?.olderThanDays, { origin: task.metadata?.origin }, task,
+  ));
 
-  ipcMain.handle('media-cache-clear', async (_event, cacheConfig = {}, olderThanDays) => {
+  ipcMain.handle('media-cache-clear', async (_event, cacheConfig = {}, olderThanDays, options = {}) => {
     try {
-      const execution = await runCacheCleanup(cacheConfig, olderThanDays);
+      const execution = await runCacheCleanup(cacheConfig, olderThanDays, options);
       return { success: true, deletedCount: execution.result.deletedCount, prunedSourceCount: execution.result.prunedSourceCount, taskId: execution.task.id };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
   });

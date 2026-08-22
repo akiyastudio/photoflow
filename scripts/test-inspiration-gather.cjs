@@ -28,6 +28,7 @@ const readDirectories = [];
 const watchedRoots = [];
 const releasedRoots = [];
 const grantedRoots = [];
+let inspirationTrackingReconciliations = 0;
 const shortcutDescriptions = new Map();
 const shortcutDescriptionsByTarget = new Map();
 const shortcutShell = {
@@ -100,6 +101,7 @@ registerWorkspaceIpc({
     },
   },
   thumbnailService: { indexDirectory: async () => false, scanProject: async () => undefined },
+  versionService: { detectProgressStale: async () => { inspirationTrackingReconciliations += 1; throw new Error('virtual inspiration roots are not catalog projects'); } },
   scheduleMediaTrackingScan: () => undefined,
   shell: shortcutShell,
   projectVirtualPaths,
@@ -115,6 +117,9 @@ registerWorkspaceIpc({
     assert(watchFileRoot && unwatchFileRoot, 'file-root watcher IPC handlers were not registered');
     const watchResult = await watchFileRoot({}, sourceRoot, '未分类', '.__photoflow_inspiration__');
     assert.strictEqual(watchResult.success, true, watchResult.error);
+    assert.strictEqual(watchResult.degraded, false, 'the virtual inspiration root must not enter polling fallback');
+    assert.strictEqual(watchResult.reconciled, false, 'the virtual inspiration root has no catalog-backed tracking state to reconcile');
+    assert.strictEqual(inspirationTrackingReconciliations, 0, 'the virtual inspiration root must not call catalog-backed tracking reconciliation');
     await unwatchFileRoot({}, sourceRoot, '未分类', '.__photoflow_inspiration__');
     assert.deepStrictEqual(watchedRoots, [path.resolve(sourceRoot)]);
     assert.deepStrictEqual(releasedRoots, [path.resolve(sourceRoot)]);

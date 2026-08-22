@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { filterActionableWatchEntries } = require('./watch-change-filter.cjs');
 
 const createFileRootWatcherService = ({
   getMainWindow,
@@ -61,8 +62,9 @@ const createFileRootWatcherService = ({
         if (state.timer) clearTimeout(state.timer);
         state.timer = setTimeout(() => {
           state.timer = null;
-          const changedEntries = [...state.changes];
+          const changedEntries = filterActionableWatchEntries(root, [...state.changes], fs);
           state.changes.clear();
+          if (!changedEntries.length) return;
           const thumbnailService = getThumbnailService();
           if (thumbnailService && changedEntries.length) {
             const changedPaths = changedEntries.map(([changedName]) => path.join(root, changedName));

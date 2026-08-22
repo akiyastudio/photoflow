@@ -304,7 +304,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   chooseVideoFiles: () => ipcRenderer.invoke('choose-video-files'),
   chooseVideoFolder: () => ipcRenderer.invoke('choose-video-folder'),
   getMediaCacheInfo: (cacheConfig) => ipcRenderer.invoke('media-cache-info', cacheConfig),
-  clearMediaCache: (cacheConfig, olderThanDays) => ipcRenderer.invoke('media-cache-clear', cacheConfig, olderThanDays),
+  clearMediaCache: (cacheConfig, olderThanDays, options) => ipcRenderer.invoke('media-cache-clear', cacheConfig, olderThanDays, options),
   getStorageUsageOverview: (force) => ipcRenderer.invoke('storage-usage-overview', force),
   getBackgroundTasks: () => ipcRenderer.invoke('background-tasks-list'),
   cancelBackgroundTask: (id) => ipcRenderer.invoke('background-task-cancel', id),

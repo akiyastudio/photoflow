@@ -5,12 +5,7 @@ import { ProgressBar } from '../../components/ProgressBar';
 import type { BackgroundTask } from '../../types';
 import { useTaskCenter } from './TaskCenter';
 import { panelTaskRestoreDetail } from './panel-task-session-model';
-import { collapseRetryPredecessors, isPointerInsideTaskIndicator } from './task-toast-model';
-
-const isVisible = (task: BackgroundTask) => task.notificationPolicy !== 'silent' && (
-  task.state === 'queued' || task.state === 'running' || task.state === 'pausing' || task.state === 'resuming' || task.state === 'paused' || task.state === 'interrupted' || task.state === 'failed'
-  || (task.type === 'version-tracking' && (task.state === 'completed' || task.state === 'cancelled'))
-);
+import { collapseRetryPredecessors, isBackgroundTaskCenterVisible, isPointerInsideTaskIndicator } from './task-toast-model';
 const formatBytes = (value: number) => value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(1)} GB` : value >= 1024 ** 2 ? `${(value / 1024 ** 2).toFixed(1)} MB` : `${Math.round(value / 1024)} KB`;
 const taskSummary = (task: BackgroundTask) => {
   const metadata = task.metadata || {};
@@ -58,7 +53,7 @@ export const BackgroundTaskIndicator = ({ ownerPageIds }: { ownerPageIds: Readon
   }, [open]);
 
   const presentedTasks = useMemo(() => collapseRetryPredecessors(tasks), [tasks]);
-  const visibleTasks = useMemo(() => presentedTasks.filter(task => isVisible(task) || (
+  const visibleTasks = useMemo(() => presentedTasks.filter(task => isBackgroundTaskCenterVisible(task) || (
     task.type === 'python-tool'
     && task.state === 'completed'
     && ownerPageIds.has(String(task.metadata?.presentationOwnerPageId || ''))

@@ -1,3 +1,5 @@
+const path = require('path');
+
 const createImageThumbnailRuntime = ({
   crypto, fs, nativeImage, spawn, processSupervisor = null, getRunConfig, runPythonJsonAction,
   getMediaCacheDir, mediaThumbnailCacheFile, copyWindowsShellThumbnail,

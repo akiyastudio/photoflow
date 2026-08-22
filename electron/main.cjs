@@ -61,6 +61,7 @@ const { createSelectionService } = require('./services/selection-service.cjs');
 const { createTelemetryService } = require('./services/telemetry-service.cjs');
 const { createPrivacyService } = require('./privacy-service.cjs');
 const { createFileRootWatcherService } = require('./services/file-root-watcher-service.cjs');
+const { filterActionableWatchEntries } = require('./services/watch-change-filter.cjs');
 const { createProjectVirtualPathService } = require('./services/project-virtual-path-service.cjs');
 const cloudConfig = require('./cloud-config.cjs');
 const { registerBackgroundTasksIpc } = require('./modules/background-tasks-ipc.cjs');
@@ -1178,10 +1179,11 @@ const watchWorkspace = (root) => {
       if (workspaceWatchChanges.get(changedName) !== 'rename') workspaceWatchChanges.set(changedName, normalizedEventType);
       if (workspaceWatchTimer) clearTimeout(workspaceWatchTimer);
       workspaceWatchTimer = setTimeout(() => {
-        const changedEntries = [...workspaceWatchChanges];
+        const changedEntries = filterActionableWatchEntries(root, [...workspaceWatchChanges], fs);
+        workspaceWatchChanges.clear();
+        if (!changedEntries.length) return;
         const changedNames = changedEntries.map(([changedName]) => changedName);
         const changedEventTypes = new Map(changedEntries);
-        workspaceWatchChanges.clear();
         if (thumbnailService) {
           const changesByProject = new Map();
           for (const changedName of changedNames) {
@@ -1200,12 +1202,20 @@ const watchWorkspace = (root) => {
         const catalog = workspaceCatalogs.get(root);
         const knownProjectPaths = new Set((catalog?.projects || []).map(project => project.relative_path.toLocaleLowerCase()));
         const changedSegments = changedNames.map(changedName => changedName.split(/[\\/]/).filter(Boolean));
-        const changedTopLevelNames = new Set(changedSegments.map(segments => segments[0]).filter(Boolean));
+        const catalogRescanNames = new Set(changedEntries.flatMap(([changedName, changedEventType]) => {
+          const segments = changedName.split(/[\\/]/).filter(Boolean);
+          const firstSegment = segments[0];
+          if (!firstSegment) return [];
+          return (segments.length === 1 && changedEventType === 'rename'
+            || !knownProjectPaths.has(firstSegment.toLocaleLowerCase())) ? [firstSegment] : [];
+        }));
         const catalogMayHaveChanged = !changedNames.length || changedSegments.some(segments => segments.length === 1 || !knownProjectPaths.has(String(segments[0] || '').toLocaleLowerCase()));
         const changedProjects = new Set();
         const changedPathsByProject = new Map();
         for (const changedName of changedNames) {
-          const firstSegment = changedName.split(/[\\/]/).filter(Boolean)[0];
+          const segments = changedName.split(/[\\/]/).filter(Boolean);
+          if (segments.length < 2) continue;
+          const firstSegment = segments[0];
           const project = catalog?.projects.find(item => item.relative_path.toLocaleLowerCase() === String(firstSegment || '').toLocaleLowerCase());
           if (project) {
             changedProjects.add(project.name);
@@ -1224,9 +1234,9 @@ const watchWorkspace = (root) => {
         }
         if (catalogMayHaveChanged) {
           void reconcileWorkspaceCatalog(root).then(refreshedCatalog => {
-            for (const topLevelName of changedTopLevelNames) {
+            for (const topLevelName of catalogRescanNames) {
               const project = refreshedCatalog.projects.find(item => item.relative_path.toLocaleLowerCase() === String(topLevelName).toLocaleLowerCase());
-              if (project) scheduleMediaTrackingScan(root, project.name);
+              if (project) scheduleMediaTrackingScan(root, project.name, [], true);
             }
           }).catch(error => {
             writeLog('warn', 'Unable to reconcile workspace catalog after file change', { root, error: error.message || String(error) });
@@ -1234,12 +1244,9 @@ const watchWorkspace = (root) => {
         }
       }, 200);
     });
-    // Reopening a workspace only snapshots registered version folders. A
-    // catalog read must never fan out into an unrestricted media walk of every
-    // project.
-    for (const project of workspaceCatalogs.get(root)?.projects || []) {
-      versionStaleDetectionService.schedule(root, project.name, [], true);
-    }
+    // Reconcile version state lazily when a project watcher is installed. A
+    // workspace with dozens of projects must not enqueue one database writer
+    // per project merely because its catalog was opened.
     workspaceWatcher.on('error', error => {
       writeLog('warn', 'Workspace file watcher stopped', { root, error: error.message || String(error) });
       if (workspaceWatcher) workspaceWatcher.close();

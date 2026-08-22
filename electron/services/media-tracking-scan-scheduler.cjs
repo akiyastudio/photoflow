@@ -1,6 +1,8 @@
 const path = require('path');
 const { createDirtyCoalescingRunner } = require('./dirty-coalescing-runner.cjs');
 
+const MEDIA_RESCAN_POLICY_VERSION = 2;
+
 const mergeMediaScanBatch = (current, delta) => {
   const left = current || {};
   const right = delta || {};
@@ -34,7 +36,10 @@ const createMediaTrackingScanScheduler = ({
 
   const executeWrapper = async ({ key, batch }) => {
     const project = getProject(batch.root, batch.projectName);
-    if (!project || project.availability === 'missing') return { skipped: true };
+    if (!project || project.availability === 'missing') {
+      if (batch.restartTask?.id) throw new Error('项目目录尚未加载，自动索引将在目录可用后重试');
+      return { skipped: true };
+    }
     const projectPath = path.resolve(batch.root, project.relative_path);
     const execution = await backgroundTasks.run({
       ...(batch.restartTask?.id ? { id: batch.restartTask.id } : {}),
@@ -52,6 +57,8 @@ const createMediaTrackingScanScheduler = ({
       metadata: {
         workspaceRoot: batch.root, projectName: batch.projectName, projectPath,
         changedPaths: [...batch.changedPaths], fullScan: batch.fullScan,
+        taskCenterVisibility: 'attention-only',
+        mediaRescanPolicyVersion: MEDIA_RESCAN_POLICY_VERSION,
       },
     }, async task => {
       task.report(5, '正在扫描项目媒体文件');
@@ -85,6 +92,18 @@ const createMediaTrackingScanScheduler = ({
     }),
   });
 
+  // Builds before policy v2 persisted watcher-noise rescans without enough
+  // event identity to distinguish an actual rename from directory/access
+  // metadata noise. Drop interrupted incremental legacy work; the v2 watcher
+  // will schedule a fresh task if a real change still exists.
+  for (const task of backgroundTasks?.list?.() || []) {
+    if (task.type === 'version-media-rescan' && task.state === 'interrupted'
+        && task.metadata?.fullScan !== true
+        && Number(task.metadata?.mediaRescanPolicyVersion || 0) < MEDIA_RESCAN_POLICY_VERSION) {
+      backgroundTasks.dismiss(task.id);
+    }
+  }
+
   backgroundTasks?.registerTypeRestartFactory?.('version-media-rescan', task => enqueueRetry(
     keyFor(task.metadata?.workspaceRoot, task.metadata?.projectName),
     mergeMediaScanBatch(null, {
@@ -93,15 +112,20 @@ const createMediaTrackingScanScheduler = ({
     }),
     task,
   ), {
-    canRestart: task => Boolean(task.metadata?.workspaceRoot && task.metadata?.projectName),
+    canRestart: task => Boolean(task.metadata?.workspaceRoot && task.metadata?.projectName)
+      && (task.metadata?.fullScan === true || Number(task.metadata?.mediaRescanPolicyVersion || 0) >= MEDIA_RESCAN_POLICY_VERSION),
     autoRestart: true,
+    // Let startup catalog/database maintenance take the writer first. Restored
+    // media work is recoverable and should not hold routine maintenance behind
+    // a many-project replay wave.
+    autoRestartDelayMs: 30000,
   });
 
   const schedule = (root, projectName, changedPaths = [], fullScan = false) => {
     if (!projectName) return null;
-    versionStaleDetectionService.schedule(root, projectName, changedPaths, fullScan);
     const project = getProject(root, projectName);
     if (!project || project.availability === 'missing') return null;
+    versionStaleDetectionService.schedule(root, projectName, changedPaths, fullScan);
     return runner.enqueue(keyFor(root, projectName), {
       root: path.resolve(root), projectName: String(projectName),
       changedPaths: changedPaths.map(value => path.resolve(value)), fullScan,
@@ -117,4 +141,4 @@ const createMediaTrackingScanScheduler = ({
   return { schedule, cancel, stop: runner.stop, pendingCount: runner.pendingCount, flush: runner.flush, runner };
 };
 
-module.exports = { createMediaTrackingScanScheduler, mergeMediaScanBatch };
+module.exports = { createMediaTrackingScanScheduler, mergeMediaScanBatch, MEDIA_RESCAN_POLICY_VERSION };

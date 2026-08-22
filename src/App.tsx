@@ -228,7 +228,7 @@ const App: React.FC = () => {
     }
     cacheCleanupCheckedRef.current = true;
     const timer = window.setTimeout(() => {
-      void window.electronAPI.clearMediaCache(config.mediaCache, 30).then(result => {
+      void window.electronAPI.clearMediaCache(config.mediaCache, 30, { origin: 'daily-auto' }).then(result => {
         if (result.success) window.localStorage.setItem(storageKey, today);
       });
     }, 15000);

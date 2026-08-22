@@ -80,6 +80,49 @@ const run = async () => {
     assert.equal(indexedRecord.thumbnail_state, 'STALE');
     assert.equal(cachedPaths.some(cachedPath => fs.existsSync(cachedPath)), false);
     assert.equal(pipeline.activeProjectScans, 0);
+
+    const missingRows = Array.from({ length: 130 }, (_, index) => ({
+      sizeLabel: `missing-${index}`,
+      pixelSize: 320,
+      path: path.join(cacheRoot, `missing-${index}.jpg`),
+      fileSize: 128,
+    }));
+    await pipeline.database.call('mark_ready', {
+      file_path: indexedSource,
+      source_mtime_ms: indexedSourceStat.mtimeMs,
+      source_digest: null,
+      thumbnails: missingRows,
+    }, 60 * 1000);
+    const markerKey = 'sliced-recovery-integration';
+    let recoveryCursor = { generation: 'sliced-generation', generationMaxRowId: 0, afterRowId: 0, lastCompletedAt: 0, directory: {} };
+    const epochBeforeSlices = (await pipeline.database.call('get_cache_epoch')).cacheEpoch;
+    const sliceResults = [];
+    for (let slice = 0; slice < 5; slice += 1) {
+      const result = await pipeline.evictCache({
+        cacheRoot,
+        recoverOrphans: true,
+        scanRootOrphans: false,
+        completeMaintenanceKey: markerKey,
+        recoveryCursor,
+        recoveryInspectLimit: 64,
+        recoveryDeleteLimit: 64,
+        maxRecoveryPages: 1,
+        bumpCacheEpoch: slice === 0,
+        deadlineAt: Date.now() + 30 * 1000,
+      });
+      sliceResults.push(result);
+      recoveryCursor = result.recoveryCursor;
+      const foregroundRead = await withTimeout(pipeline.database.call('get_file', { file_path: indexedSource }), 2000, 'foreground read between recovery slices');
+      assert(foregroundRead, 'foreground thumbnail reads must run between bounded maintenance slices');
+      if (result.recoveryComplete) break;
+    }
+    assert.equal(sliceResults.length, 3, '130 rows with a 64-row bound must complete in three maintenance slices');
+    assert.deepEqual(sliceResults.map(result => result.repairedMissingCount), [64, 64, 2]);
+    assert.equal(sliceResults.at(-1).recoveryComplete, true);
+    assert.equal((await pipeline.database.call('get_cache_epoch')).cacheEpoch, epochBeforeSlices + 1, 'continuation slices must not repeatedly invalidate cache publications');
+    const slicedMarker = await pipeline.maintenanceState(markerKey);
+    assert.equal(slicedMarker.completed, true);
+    assert(slicedMarker.cursor.lastCompletedAt > 0);
   } finally {
     pipeline.stop();
     const resolvedRoot = path.resolve(temporaryRoot);

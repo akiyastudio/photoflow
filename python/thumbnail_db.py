@@ -7,6 +7,7 @@ shipping a Node native addon whose ABI must match every Electron release.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import os
 import sqlite3
@@ -802,10 +803,12 @@ class ThumbnailDatabase:
                                    generation_max_row_id: int = 0,
                                    inspect_limit: int = 2048,
                                    delete_limit: int = 512,
+                                   directory_inspect_limit: int = 2048,
                                    directory_cursor: dict | None = None) -> dict:
         root = canonical(cache_root)
         inspect_limit = max(1, min(8192, int(inspect_limit)))
         delete_limit = max(1, min(CACHE_INVALIDATION_BATCH_SIZE, int(delete_limit)))
+        directory_inspect_limit = max(1, min(8192, int(directory_inspect_limit)))
         generation = str(generation or "") or f"legacy-{uuid.uuid4().hex}"
         after_row_id = max(0, int(after_row_id or 0))
         generation_max_row_id = int(generation_max_row_id or 0)
@@ -852,6 +855,7 @@ class ThumbnailDatabase:
             scan_roots.insert(0, root)
         cursor = directory_cursor if isinstance(directory_cursor, dict) else {}
         root_index = max(0, min(len(scan_roots), int(cursor.get("rootIndex") or 0)))
+        after_name = str(cursor.get("afterName") or "")
         with self.connection:
             self.connection.execute(
                 "DELETE FROM thumbnail_orphan_scan_entries WHERE cache_root=? AND generation<>?", (root, generation)
@@ -866,66 +870,64 @@ class ThumbnailDatabase:
         ).fetchall()
         retry_candidates = [canonical(row["thumbnail_path"]) for row in retry_rows]
         candidates = list(dict.fromkeys(retry_candidates))
-        directory_done = root_index >= len(scan_roots)
+        retry_candidate_set = set(candidates)
+        directory_done = False
         cutoff = int(before_ms) if before_ms is not None else None
-        next_directory_cursor = {"rootIndex": root_index}
-        if not directory_done and len(candidates) < delete_limit:
+        next_directory_cursor = {"rootIndex": root_index, "afterName": after_name}
+        if root_index < len(scan_roots) and len(candidates) < delete_limit:
             scan_root = scan_roots[root_index]
-            prepared = self.connection.execute(
-                """SELECT 1 FROM thumbnail_orphan_scan_state
-                   WHERE generation=? AND cache_root=? AND root_index=?""",
-                (generation, root, root_index),
-            ).fetchone()
-            if prepared is None:
+            page_names = []
+            if os.path.isdir(scan_root):
+                after_key = after_name.casefold()
+                try:
+                    with os.scandir(scan_root) as entries:
+                        page_names = heapq.nsmallest(
+                            directory_inspect_limit,
+                            (entry.name for entry in entries if (entry.name.casefold(), entry.name) > (after_key, after_name)),
+                            key=lambda value: (value.casefold(), value),
+                        )
+                except OSError:
+                    page_names = []
+            insert_rows = []
+            for name in page_names:
+                suffix = Path(name).suffix.lower()
+                stem = Path(name).stem.lower()
+                if suffix != ".jpg":
+                    continue
+                if scan_root == root:
+                    if len(stem) != 64 or any(character not in "0123456789abcdef" for character in stem):
+                        continue
+                else:
+                    try:
+                        uuid.UUID(stem)
+                    except ValueError:
+                        continue
+                candidate = canonical(os.path.join(scan_root, name))
+                if candidate not in excluded:
+                    insert_rows.append((generation, root, root_index, candidate))
+            if insert_rows:
                 with self.connection:
-                    self.connection.execute(
-                        """DELETE FROM thumbnail_orphan_scan_entries
-                           WHERE generation=? AND cache_root=? AND root_index=?""",
-                        (generation, root, root_index),
+                    self.connection.executemany(
+                        """INSERT OR IGNORE INTO thumbnail_orphan_scan_entries
+                           (generation,cache_root,root_index,thumbnail_path) VALUES(?,?,?,?)""",
+                        insert_rows,
                     )
-                    if os.path.isdir(scan_root):
-                        for entry in os.scandir(scan_root):
-                            try:
-                                if not entry.is_file(follow_symlinks=False) or Path(entry.name).suffix.lower() != ".jpg":
-                                    continue
-                                stem = Path(entry.name).stem.lower()
-                                if scan_root == root:
-                                    if len(stem) != 64 or any(character not in "0123456789abcdef" for character in stem):
-                                        continue
-                                else:
-                                    try:
-                                        uuid.UUID(stem)
-                                    except ValueError:
-                                        continue
-                                candidate = canonical(entry.path)
-                                if candidate in excluded:
-                                    continue
-                                if cutoff is not None and entry.stat(follow_symlinks=False).st_mtime * 1000 >= cutoff:
-                                    continue
-                                self.connection.execute(
-                                    """INSERT OR IGNORE INTO thumbnail_orphan_scan_entries
-                                       (generation,cache_root,root_index,thumbnail_path) VALUES(?,?,?,?)""",
-                                    (generation, root, root_index, candidate),
-                                )
-                            except OSError:
-                                continue
-                    self.connection.execute(
-                        """INSERT INTO thumbnail_orphan_scan_state(generation,cache_root,root_index,prepared_at)
-                           VALUES(?,?,?,?)""",
-                        (generation, root, root_index, now_ms()),
-                    )
-            remaining_limit = delete_limit - len(candidates)
-            scan_rows = self.connection.execute(
-                """SELECT thumbnail_path FROM thumbnail_orphan_scan_entries
-                   WHERE generation=? AND cache_root=? AND root_index=?
-                   ORDER BY thumbnail_path LIMIT ?""",
-                (generation, root, root_index, remaining_limit),
-            ).fetchall()
-            candidates.extend(canonical(row["thumbnail_path"]) for row in scan_rows)
-            if len(scan_rows) < remaining_limit:
+            if page_names:
+                after_name = page_names[-1]
+            if len(page_names) < directory_inspect_limit:
                 root_index += 1
-                next_directory_cursor = {"rootIndex": root_index}
-                directory_done = root_index >= len(scan_roots)
+                after_name = ""
+            next_directory_cursor = {"rootIndex": root_index, "afterName": after_name}
+
+        remaining_limit = delete_limit - len(candidates)
+        scan_rows = self.connection.execute(
+            """SELECT thumbnail_path FROM thumbnail_orphan_scan_entries
+               WHERE generation=? AND cache_root=?
+               ORDER BY root_index,thumbnail_path LIMIT ?""",
+            (generation, root, remaining_limit),
+        ).fetchall() if remaining_limit > 0 else []
+        candidates.extend(canonical(row["thumbnail_path"]) for row in scan_rows)
+        directory_done = root_index >= len(scan_roots) and len(scan_rows) < remaining_limit
 
         indexed = set()
         for offset_index in range(0, len(candidates), 400):
@@ -947,6 +949,25 @@ class ThumbnailDatabase:
                     "DELETE FROM thumbnail_orphan_scan_entries WHERE thumbnail_path=?",
                     [(candidate,) for candidate in indexed],
                 )
+        rejected_scan_candidates = []
+        for candidate in candidates:
+            if candidate in retry_candidate_set:
+                continue
+            try:
+                if not os.path.isfile(candidate):
+                    rejected_scan_candidates.append(candidate)
+                elif cutoff is not None and os.path.getmtime(candidate) * 1000 >= cutoff:
+                    rejected_scan_candidates.append(candidate)
+            except OSError:
+                rejected_scan_candidates.append(candidate)
+        if rejected_scan_candidates:
+            rejected_set = set(rejected_scan_candidates)
+            candidates = [candidate for candidate in candidates if candidate not in rejected_set]
+            with self.connection:
+                self.connection.executemany(
+                    "DELETE FROM thumbnail_orphan_scan_entries WHERE thumbnail_path=?",
+                    [(candidate,) for candidate in rejected_scan_candidates],
+                )
         recovery_cursor = {
             "generation": generation,
             "generationMaxRowId": generation_max_row_id,
@@ -957,6 +978,7 @@ class ThumbnailDatabase:
         return {
             "success": True,
             "orphanPaths": candidates,
+            "inspectedCount": len(window),
             "repairedMissingCount": len(missing),
             "generationMaxRowId": generation_max_row_id,
             "afterRowId": next_row_id,

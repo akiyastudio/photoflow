@@ -25,6 +25,11 @@ const isInternalTransientMediaPath = filePath => path.resolve(filePath)
     return normalized.startsWith('.') && normalized.includes('.photoflow-transcode')
       || /^\.photoflow-(?:import-|paste|replace|split-|undo|team-workflow-)/i.test(normalized);
   });
+const taskCompletion = () => {
+  let resolve;
+  const promise = new Promise(accepted => { resolve = accepted; });
+  return { promise, resolve };
+};
 
 const chooseSize = requestedSize => {
   const requested = Math.max(1, Number(requestedSize) || 640);
@@ -537,7 +542,10 @@ class ThumbnailPipeline {
     // closes the read/delete race between a foreground request and generation.
     if (this.tasks.has(pathKey(sourcePath))) {
       this.enqueue({ filePath: sourcePath, kind, cacheConfig, stat, persistState: false, requestedSizes: [size], queueOrder, forceRegenerate }, priority);
-      return { success: true, state: 'QUEUED', cacheLayer: 'source', mediaUrl: kind === 'video' ? null : undefined };
+      return {
+        success: true, state: 'QUEUED', cacheLayer: 'source', mediaUrl: kind === 'video' ? null : undefined,
+        completion: this.tasks.get(pathKey(sourcePath))?.completion,
+      };
     }
 
     if (!forceRegenerate) {
@@ -552,7 +560,10 @@ class ThumbnailPipeline {
     if (!accepted) {
       return { success: false, state: 'NOT_READY', error: '缩略图任务队列繁忙，请稍后重试', cacheLayer: 'source', mediaUrl: kind === 'video' ? null : undefined };
     }
-    return { success: true, state: 'QUEUED', cacheLayer: 'source', mediaUrl: kind === 'video' ? null : undefined };
+    return {
+      success: true, state: 'QUEUED', cacheLayer: 'source', mediaUrl: kind === 'video' ? null : undefined,
+      completion: this.tasks.get(pathKey(sourcePath))?.completion,
+    };
   }
 
   enqueue(input, priority = PRIORITY.project) {
@@ -571,7 +582,11 @@ class ThumbnailPipeline {
       }
       if (normalizedPriority < existing.priority && !existing.running) {
         existing.cancelled = true;
-        const replacement = { key, input: existing.input, requestedSizes: existing.requestedSizes, completedSizes: existing.completedSizes, priority: normalizedPriority, order: existing.order, running: false, cancelled: false };
+        const replacement = {
+          key, input: existing.input, requestedSizes: existing.requestedSizes, completedSizes: existing.completedSizes,
+          priority: normalizedPriority, order: existing.order, running: false, cancelled: false,
+          completion: existing.completion, resolveCompletion: existing.resolveCompletion,
+        };
         this.tasks.set(key, replacement);
         this.queues[normalizedPriority].push(replacement);
         this.queues[normalizedPriority].sort((left, right) => left.order - right.order);
@@ -582,7 +597,12 @@ class ThumbnailPipeline {
     }
     if (normalizedPriority >= PRIORITY.directory && this.tasks.size >= this.maxBackgroundTasks) return false;
     const requestedSizes = new Map((input.requestedSizes || [THUMBNAIL_SIZES[0]]).map(size => [size.label, size]));
-    const task = { key, input: { ...input, filePath: sourcePath }, requestedSizes, completedSizes: new Set(), priority: normalizedPriority, order: queueOrder, running: false, cancelled: false };
+    const completion = taskCompletion();
+    const task = {
+      key, input: { ...input, filePath: sourcePath }, requestedSizes, completedSizes: new Set(),
+      priority: normalizedPriority, order: queueOrder, running: false, cancelled: false,
+      completion: completion.promise, resolveCompletion: completion.resolve,
+    };
     this.tasks.set(key, task);
     this.queues[normalizedPriority].push(task);
     this.queues[normalizedPriority].sort((left, right) => left.order - right.order);
@@ -610,6 +630,7 @@ class ThumbnailPipeline {
     if (task.requestedSizes.size) return true;
     task.cancelled = true;
     this.tasks.delete(key);
+    task.resolveCompletion({ state: 'CANCELLED' });
     return true;
   }
 
@@ -642,7 +663,10 @@ class ThumbnailPipeline {
       if (!task) break;
       task.running = true;
       this.activeWorkers += 1;
-      void this.runTask(task).finally(() => {
+      void this.runTask(task).then(
+        outcome => task.resolveCompletion(outcome || { state: 'READY' }),
+        error => task.resolveCompletion({ state: 'FAILED', error: error?.message || String(error) }),
+      ).finally(() => {
         this.activeWorkers -= 1;
         if (this.tasks.get(task.key) === task) this.tasks.delete(task.key);
         this.pump();
@@ -803,7 +827,7 @@ class ThumbnailPipeline {
       void this.setPersistentState(filePath, state, error.message || String(error)).catch(() => undefined);
       this.notify({ filePath, state, error: error.message || String(error) });
       this.log('warn', 'Thumbnail source is missing', { filePath, kind, state, error: error.message || String(error) });
-      return;
+      return { state, error: error.message || String(error) };
     }
     try {
       this.notify({ filePath, state: 'GENERATING' });
@@ -844,7 +868,7 @@ class ThumbnailPipeline {
                 forceRegenerate: true,
                 requestedSizes,
               }, task.priority), 0);
-              return;
+              return { state: 'STALE' };
             }
             throw error;
           }
@@ -860,6 +884,7 @@ class ThumbnailPipeline {
         this.notify({ filePath, state: 'READY', previewUrls: urls });
         this.trimCache(this.getCacheDir(cacheConfig), cacheConfig.maxSizeGB, published.map(item => item.path));
       }
+      return { state: 'READY' };
     } catch (error) {
       let sourceExists = false;
       try { sourceExists = (await fs.promises.stat(filePath)).isFile(); } catch { /* source is genuinely missing/offline */ }
@@ -867,6 +892,7 @@ class ThumbnailPipeline {
       void this.setPersistentState(filePath, state, error.message || String(error)).catch(() => undefined);
       this.notify({ filePath, state, error: error.message || String(error) });
       this.log('warn', 'Thumbnail generation failed', { filePath, kind, state, error: error.message || String(error) });
+      return { state, error: error.message || String(error) };
     }
   }
 
@@ -989,7 +1015,9 @@ class ThumbnailPipeline {
           await options.preflight(control);
         }
         this.assertMaintenanceBoundary(control, 'begin-cache-maintenance', control.processedCount);
-        await this.database.call('begin_cache_maintenance', {}, this.maintenanceCallTimeout(control));
+        if (options.bumpCacheEpoch !== false) {
+          await this.database.call('begin_cache_maintenance', {}, this.maintenanceCallTimeout(control));
+        }
         this.memory.clear();
         return this.maintenanceContext.run({ pipeline: this, control }, () => worker(control));
       });
@@ -1146,6 +1174,10 @@ class ThumbnailPipeline {
       let detachedBytes = 0;
       let prunedSourceCount = 0;
       let repairedMissingCount = 0;
+      let recoveryInspectedCount = 0;
+      let detachComplete = true;
+      let pruneComplete = options.pruneMissing !== true;
+      let recoveryComplete = options.recoverOrphans !== true;
       let completedRecoveryCursor = options.recoveryCursor && typeof options.recoveryCursor === 'object'
         ? options.recoveryCursor : {};
       const collect = result => {
@@ -1158,12 +1190,20 @@ class ThumbnailPipeline {
         control.processedCount = detachedCount;
       };
 
+      let detachBatchCount = 0;
+      const maxDetachBatches = Number.isFinite(Number(options.maxDetachBatches))
+        ? Math.max(1, Number(options.maxDetachBatches)) : Number.POSITIVE_INFINITY;
       const detachSelector = async selector => {
         while (true) {
           this.assertMaintenanceBoundary(control, 'detach-cache-batch', control.processedCount);
           const result = await this.database.call('detach_cache_batch', { ...selector, limit: 512 }, this.maintenanceCallTimeout(control));
+          detachBatchCount += 1;
           collect(result);
           if (result.done || (options.bytesToFree && detachedBytes >= Number(options.bytesToFree))) break;
+          if (detachBatchCount >= maxDetachBatches) {
+            detachComplete = false;
+            break;
+          }
         }
       };
 
@@ -1171,12 +1211,14 @@ class ThumbnailPipeline {
         const values = [...new Set(options.thumbnailPaths.map(value => path.resolve(value)))];
         for (let offset = 0; offset < values.length; offset += 512) {
           await detachSelector({ thumbnail_paths: values.slice(offset, offset + 512) });
+          if (!detachComplete) break;
         }
         for (const value of values) physicalPaths.set(pathKey(value), value);
       } else if (options.sourcePaths) {
         const values = [...new Set(options.sourcePaths.map(value => path.resolve(value)))];
         for (let offset = 0; offset < values.length; offset += 512) {
           await detachSelector({ source_paths: values.slice(offset, offset + 512) });
+          if (!detachComplete) break;
         }
       } else if (options.all || options.beforeMs != null || options.bytesToFree) {
         await detachSelector({
@@ -1187,13 +1229,21 @@ class ThumbnailPipeline {
         });
       }
 
-      if (options.pruneMissing) {
+      if (options.pruneMissing && detachComplete) {
+        let pruneBatchCount = 0;
+        const maxPruneBatches = Number.isFinite(Number(options.maxPruneBatches))
+          ? Math.max(1, Number(options.maxPruneBatches)) : Number.POSITIVE_INFINITY;
         while (true) {
           this.assertMaintenanceBoundary(control, 'prune-missing-batch', control.processedCount);
           const result = await this.database.call('prune_missing_batch', { limit: 512, cache_root: options.cacheRoot || null }, this.maintenanceCallTimeout(control));
           collect(result);
           prunedSourceCount += Number(result.sourceCount) || 0;
-          if (result.done) break;
+          pruneBatchCount += 1;
+          if (result.done) {
+            pruneComplete = true;
+            break;
+          }
+          if (pruneBatchCount >= maxPruneBatches) break;
         }
       }
 
@@ -1239,9 +1289,12 @@ class ThumbnailPipeline {
         }, this.maintenanceCallTimeout(control));
       }
 
-      if (options.recoverOrphans && options.cacheRoot
+      if (detachComplete && pruneComplete && options.recoverOrphans && options.cacheRoot
           && (!options.bytesToFree || deletedBytes < Number(options.bytesToFree))) {
         let recoveryCursor = completedRecoveryCursor;
+        let recoveryPageCount = 0;
+        const maxRecoveryPages = Number.isFinite(Number(options.maxRecoveryPages))
+          ? Math.max(1, Number(options.maxRecoveryPages)) : Number.POSITIVE_INFINITY;
         const attempted = new Set([
           ...[...physicalPaths.values()].map(value => pathKey(value)),
           ...(options.excludePaths || []).map(value => pathKey(value)),
@@ -1252,14 +1305,18 @@ class ThumbnailPipeline {
           const recovered = await this.database.call('recover_cache_publications', {
             cache_root: options.cacheRoot,
             before_ms: options.orphanBeforeMs ?? options.beforeMs ?? null,
+            exclude_paths: options.excludePaths || [],
             scan_root_orphans: options.scanRootOrphans !== false,
             generation: String(recoveryCursor.generation || ''),
             generation_max_row_id: Number(recoveryCursor.generationMaxRowId) || 0,
             after_row_id: Number(recoveryCursor.afterRowId) || 0,
-            inspect_limit: 2048,
-            delete_limit: 512,
+            inspect_limit: Math.max(1, Number(options.recoveryInspectLimit) || 2048),
+            delete_limit: Math.max(1, Number(options.recoveryDeleteLimit) || 512),
+            directory_inspect_limit: Math.max(1, Number(options.recoveryDirectoryInspectLimit) || 2048),
             directory_cursor: recoveryCursor.directory || {},
           }, this.maintenanceCallTimeout(control));
+          recoveryPageCount += 1;
+          recoveryComplete = recovered.done === true;
           recoveryCursor = recovered.cursor || {
             generation: String(recoveryCursor.generation || ''),
             generationMaxRowId: Number(recovered.generationMaxRowId) || 0,
@@ -1269,7 +1326,8 @@ class ThumbnailPipeline {
           };
           completedRecoveryCursor = recoveryCursor;
           repairedMissingCount += Number(recovered.repairedMissingCount) || 0;
-          control.processedCount = detachedCount + repairedMissingCount + prunedSourceCount;
+          recoveryInspectedCount += Number(recovered.inspectedCount) || 0;
+          control.processedCount = detachedCount + recoveryInspectedCount + prunedSourceCount;
           if (!recovered.orphanPaths?.length) {
             if (options.completeMaintenanceKey) {
               await this.database.call('maintenance_state_save', {
@@ -1277,7 +1335,7 @@ class ThumbnailPipeline {
                 cursor: recoveryCursor,
               }, this.maintenanceCallTimeout(control));
             }
-            if (recovered.done) break;
+            if (recovered.done || recoveryPageCount >= maxRecoveryPages) break;
             continue;
           }
           let newCandidateCount = 0;
@@ -1333,7 +1391,7 @@ class ThumbnailPipeline {
             }, this.maintenanceCallTimeout(control));
           }
           if (options.failOnDeleteError && failedPaths.length > pageFailureCount) break;
-          if (recovered.done || newCandidateCount === 0
+          if (recovered.done || recoveryPageCount >= maxRecoveryPages || newCandidateCount === 0
               || (options.bytesToFree && deletedBytes >= Number(options.bytesToFree))) break;
         }
       }
@@ -1349,6 +1407,13 @@ class ThumbnailPipeline {
         failedPaths,
         prunedSourceCount,
         repairedMissingCount,
+        recoveryInspectedCount,
+        detachComplete,
+        pruneComplete,
+        recoveryComplete,
+        maintenanceComplete: detachComplete && pruneComplete && recoveryComplete,
+        recoveryCursor: completedRecoveryCursor,
+        processedCount: control.processedCount,
       };
       if (options.failOnDeleteError && failedPaths.length) {
         throw Object.assign(new Error(`thumbnail cache recovery left ${failedPaths.length} unsafe or unavailable paths`), {
@@ -1356,7 +1421,7 @@ class ThumbnailPipeline {
           result,
         });
       }
-      if (options.completeMaintenanceKey) {
+      if (options.completeMaintenanceKey && detachComplete && pruneComplete && recoveryComplete) {
         await this.database.call('maintenance_state_complete', {
           key: options.completeMaintenanceKey,
           cursor: completedRecoveryCursor,
@@ -1369,6 +1434,7 @@ class ThumbnailPipeline {
       task: options.task,
       onBlocked: options.onBlocked,
       onAdmitted: options.onAdmitted,
+      bumpCacheEpoch: options.bumpCacheEpoch,
       preflight: options.completeMigrationKey
         ? control => this.runThumbnailMigration(control, options)
         : options.verifyIntegrity
@@ -1410,6 +1476,9 @@ class ThumbnailPipeline {
     this.projectScanIdleWaiters.clear();
     this.backgroundResumeTimer = null;
     this.memory.clear();
+    for (const task of this.tasks.values()) task.resolveCompletion({ state: 'CANCELLED' });
+    this.tasks.clear();
+    for (const queue of this.queues) queue.length = 0;
     this.database.stop();
   }
 }

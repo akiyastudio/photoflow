@@ -6,6 +6,36 @@ const { createMediaTrackingScanScheduler } = require('../electron/services/media
 const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 const run = async () => {
+  const dismissedLegacyTasks = [];
+  let restartPolicy;
+  createMediaTrackingScanScheduler({
+    backgroundTasks: {
+      list: () => [
+        {
+          id: 'legacy-noise', type: 'version-media-rescan', state: 'interrupted',
+          metadata: { workspaceRoot: 'C:/workspace', projectName: 'Project', fullScan: false },
+        },
+        {
+          id: 'legacy-full', type: 'version-media-rescan', state: 'interrupted',
+          metadata: { workspaceRoot: 'C:/workspace', projectName: 'Project', fullScan: true },
+        },
+        {
+          id: 'v2-incremental', type: 'version-media-rescan', state: 'interrupted',
+          metadata: { workspaceRoot: 'C:/workspace', projectName: 'Project', fullScan: false, mediaRescanPolicyVersion: 2 },
+        },
+      ],
+      dismiss: id => { dismissedLegacyTasks.push(id); return true; },
+      registerTypeRestartFactory: (_type, _factory, options) => { restartPolicy = options; return () => undefined; },
+    },
+    mediaScanService: { syncProject: async () => ({ thumbnailCandidates: [] }) },
+    versionStaleDetectionService: { schedule: () => undefined, cancel: () => undefined },
+    getProject: () => null,
+  }).stop();
+  assert.deepEqual(dismissedLegacyTasks, ['legacy-noise'], 'interrupted pre-v2 watcher rescans must be discarded instead of replaying a known task storm');
+  assert.equal(restartPolicy.canRestart({ metadata: { workspaceRoot: 'C:/workspace', projectName: 'Project', fullScan: true } }), true, 'explicit legacy full scans must remain restartable');
+  assert.equal(restartPolicy.canRestart({ metadata: { workspaceRoot: 'C:/workspace', projectName: 'Project', fullScan: false, mediaRescanPolicyVersion: 2 } }), true, 'v2 incremental work must remain restartable');
+  assert.equal(restartPolicy.autoRestartDelayMs, 30000, 'restored media scans must yield startup priority to database maintenance');
+
   const backgroundTasks = createBackgroundTaskService({ eventBus: new EventEmitter() });
   const blocker = backgroundTasks.create({
     id: 'workspace-writer', type: 'test', title: 'workspace writer',
@@ -48,6 +78,20 @@ const run = async () => {
   assert.equal(staleCalls.length, 2, 'every scheduled media change must also reach stale detection');
   assert.equal(scheduler.pendingCount(), 0);
   scheduler.stop();
+
+  const missingStaleCalls = [];
+  const missingScheduler = createMediaTrackingScanScheduler({
+    backgroundTasks: createBackgroundTaskService({ eventBus: new EventEmitter() }),
+    delayMs: 0,
+    mediaScanService: { syncProject: async () => { throw new Error('missing projects must not scan'); } },
+    versionStaleDetectionService: { schedule: (...args) => missingStaleCalls.push(args), cancel: () => undefined },
+    getProject: () => null,
+  });
+  assert.equal(missingScheduler.schedule('C:/workspace', 'Not registered', ['C:/workspace/Not registered/a.jpg']), null);
+  await wait(10);
+  assert.equal(missingStaleCalls.length, 0, 'unknown projects must be rejected before catalog-backed stale detection is scheduled');
+  assert.equal(missingScheduler.pendingCount(), 0);
+  missingScheduler.stop();
 
   const retryTasks = createBackgroundTaskService({ eventBus: new EventEmitter() });
   let retryAttempts = 0;

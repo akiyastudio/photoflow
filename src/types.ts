@@ -1187,7 +1187,7 @@ export interface IElectronAPI {
   chooseVideoFiles: () => Promise<{ cancelled?: boolean; paths: string[] }>;
   chooseVideoFolder: () => Promise<{ cancelled?: boolean; path?: string }>;
   getMediaCacheInfo: (cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path: string; sizeBytes: number; fileCount: number; error?: string }>;
-  clearMediaCache: (cacheConfig?: AppConfig['mediaCache'], olderThanDays?: number) => Promise<{ success: boolean; deletedCount?: number; prunedSourceCount?: number; taskId?: string; error?: string }>;
+  clearMediaCache: (cacheConfig?: AppConfig['mediaCache'], olderThanDays?: number, options?: { origin?: 'manual' | 'daily-auto' }) => Promise<{ success: boolean; deletedCount?: number; prunedSourceCount?: number; taskId?: string; error?: string }>;
   getStorageUsageOverview: (force?: boolean) => Promise<StorageUsageOverview>;
   getBackgroundTasks: () => Promise<{ success: boolean; revision: number; tasks: BackgroundTask[] }>;
   cancelBackgroundTask: (id: string) => Promise<{ success: boolean }>;

@@ -123,6 +123,9 @@ const registerWorkspaceIpc = context => {
   const progressImportConflictCache = new Map();
   const workspaceMaintenanceScheduledAt = new Map();
   const workspaceMaintenanceCooldownMs = 24 * 60 * 60 * 1000;
+  for (const task of backgroundTasks?.list?.() || []) {
+    if (task.type === 'workspace-database-maintenance' && task.state === 'interrupted') backgroundTasks.dismiss(task.id);
+  }
   const watchedProjectFileRoots = new Map();
   const watchedProjectFileRootHealth = new Map();
   const watchedProjectFileRootKey = (workspaceRoot, status, projectName) => `${path.resolve(workspaceRoot).toLocaleLowerCase()}\0${String(status)}\0${String(projectName).toLocaleLowerCase()}`;
@@ -343,7 +346,7 @@ const registerWorkspaceIpc = context => {
       dedupeKey: `workspace-database-maintenance:${root}`,
       cancellable: false,
       resources: [workspaceDatabaseTaskResource(root)],
-      metadata: { root },
+      metadata: { root, taskCenterVisibility: 'attention-only' },
     }, async task => {
       task.report(10, '正在检查项目数据库');
       const result = await runWorkspaceMaintenanceWithRetry({ root, repository: workspaceMaintenanceRepository, task });
@@ -1242,9 +1245,10 @@ const registerWorkspaceIpc = context => {
     const mainWatched = acquired.includes(bindings[0]);
     let degraded = !mainWatched || failedRoots.length > 0 || offlineLinks > 0;
     let reconciliationFailed = false;
+    const supportsTrackingReconciliation = projectName !== '.__photoflow_inspiration__';
     let reconciled = false;
     const shouldReconcile = options.reconcile !== false || previousHealth?.degraded && !degraded;
-    if (shouldReconcile && mainWatched) {
+    if (supportsTrackingReconciliation && shouldReconcile && mainWatched) {
       try {
         const reconciliation = await versionService.detectProgressStale(publishRoot, { projectName, changedPaths: [] });
         if (!reconciliation?.success) throw new Error(reconciliation?.error || '无法补扫版本跟踪状态');

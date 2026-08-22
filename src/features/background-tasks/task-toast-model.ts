@@ -31,6 +31,19 @@ export const collapseRetryPredecessors = (tasks: BackgroundTask[]) => {
   return tasks.filter(task => !retrySources.has(task.id));
 };
 
+export const isBackgroundTaskCenterVisible = (task: BackgroundTask) => {
+  if (task.notificationPolicy === 'silent') return false;
+  const attentionOnly = task.metadata?.taskCenterVisibility === 'attention-only'
+    || task.type === 'version-media-rescan' || task.type === 'thumbnail-cache-recovery'
+    || task.type === 'thumbnail-generate' || task.type === 'workspace-database-maintenance';
+  if (attentionOnly) {
+    return task.state === 'failed';
+  }
+  return task.state === 'queued' || task.state === 'running' || task.state === 'pausing'
+    || task.state === 'resuming' || task.state === 'paused' || task.state === 'interrupted' || task.state === 'failed'
+    || (task.type === 'version-tracking' && (task.state === 'completed' || task.state === 'cancelled'));
+};
+
 export const taskToastExpiresAt = (task: BackgroundTask) => task.state === 'failed'
   ? task.updatedAt + FAILURE_TOAST_MS
   : task.state === 'completed' && task.notificationPolicy === 'result-only'
