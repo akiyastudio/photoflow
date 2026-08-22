@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -211,6 +212,73 @@ def test_thumbnail_epoch_publish_contract(root: Path) -> None:
         file_indexes = {row["name"] for row in database.connection.execute("PRAGMA index_list(files)")}
         assert {"thumbnails_path", "thumbnails_cache_access"} <= indexes
         assert "files_missing" in file_indexes
+    finally:
+        database.close()
+
+
+def test_thumbnail_epoch_fence_at_scale(root: Path) -> None:
+    """Prove cache maintenance is O(1) at the acceptance-test row count."""
+    project = root / "thumbnail-epoch-scale-project"
+    source = project / "source.jpg"
+    cache = root / "thumbnail-epoch-scale-cache"
+    final = cache / "committed.jpg"
+    write_media(source, b"source")
+    write_media(final, b"committed-thumbnail")
+    database_path = root / "thumbnail-epoch-scale.sqlite3"
+    database = ThumbnailDatabase(str(database_path))
+    statements: list[str] = []
+    try:
+        database.sync_directory(str(project), str(project))
+        source_path = database.connection.execute("SELECT path FROM files").fetchone()[0]
+        cache_root = os.path.normcase(os.path.abspath(cache))
+        source_mtime = source.stat().st_mtime_ns / 1_000_000
+        rows = (
+            (source_path, f"scale-{index}", 320, str((cache / f"{index:064x}.jpg").resolve()),
+             10, 1, source_mtime, None, 1, cache_root, 100, 100)
+            for index in range(85_000)
+        )
+        database.connection.executemany(
+            """INSERT INTO thumbnails(file_path,size_label,pixel_size,thumbnail_path,thumbnail_size,
+               thumbnail_version,source_mtime_ms,source_hash,cache_epoch,cache_root,generated_at,last_accessed_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            rows,
+        )
+        database.connection.execute("UPDATE thumbnails SET thumbnail_path=? WHERE size_label='scale-0'", (str(final.resolve()),))
+        database.connection.execute("UPDATE files SET thumbnail_state='READY' WHERE path=?", (source_path,))
+        database.connection.commit()
+        capture = database.capture_thumbnail_publish(str(source), "image", str(project))
+        epoch_before = database.get_cache_epoch()["cacheEpoch"]
+        changes_before = database.connection.total_changes
+        database.connection.set_trace_callback(statements.append)
+        started = time.perf_counter()
+        epoch_after = database.begin_cache_maintenance()["cacheEpoch"]
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        database.connection.set_trace_callback(None)
+        assert database.connection.total_changes - changes_before == 1
+        assert epoch_after == epoch_before + 1
+        assert not any("UPDATE THUMBNAILS SET CACHE_EPOCH" in statement.upper() for statement in statements)
+        assert database.connection.execute("SELECT COUNT(*) FROM thumbnails").fetchone()[0] == 85_000
+        assert database.get_thumbnail_publish(str(source), "scale-0", source.stat().st_size, source_mtime) is not None
+        try:
+            database.commit_thumbnail_publish(
+                "scale-stale-publish", str(source), capture["cacheEpoch"], capture["sourceVersion"],
+                capture["sourceSize"], capture["sourceMtimeMs"], [{
+                    "sizeLabel": "post-maintenance", "pixelSize": 640, "path": str(final),
+                    "fileSize": final.stat().st_size,
+                }],
+            )
+            raise AssertionError("a publish captured before maintenance must be rejected")
+        except Exception as error:
+            assert getattr(error, "code", None) == "EPOCH_STALE"
+        assert database.check_integrity()["result"] == "ok"
+        wal_path = Path(f"{database_path}-wal")
+        print(
+            "85,000 epoch evidence:",
+            f"elapsed_ms={elapsed_ms:.3f}",
+            f"database_bytes={database_path.stat().st_size}",
+            f"wal_bytes={wal_path.stat().st_size if wal_path.exists() else 0}",
+            "total_changes_delta=1",
+        )
     finally:
         database.close()
 
@@ -1030,6 +1098,7 @@ def main() -> None:
         test_thumbnail_missing_prune(root)
         test_thumbnail_cleanup_uses_access_index(root)
         test_thumbnail_epoch_publish_contract(root)
+        test_thumbnail_epoch_fence_at_scale(root)
         test_thumbnail_cleanup_commits_in_batches(root)
         test_thumbnail_recovery_cursor_pages(root)
         test_thumbnail_resumable_schema_migration(root)
