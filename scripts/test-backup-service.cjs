@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const { createBackgroundTaskService } = require('../electron/services/background-task-service.cjs');
+const { WorkspaceSqliteCoordinator } = require('../electron/services/workspace-sqlite-coordinator.cjs');
 const { createBackupService, STORE_DIRECTORY } = require('../electron/services/backup-service.cjs');
 
 const runPython = (script, args, timeoutMs = 120000) => new Promise((resolve, reject) => {
@@ -80,6 +81,11 @@ const main = async () => {
     };
     await fs.promises.writeFile(configPath, JSON.stringify(config), 'utf8');
     const backgroundTasks = createBackgroundTaskService({ eventBus: new EventEmitter() });
+    const physicalCoordinator = new WorkspaceSqliteCoordinator();
+    const recoveryLeases = [];
+    const recoveryEvents = [];
+    const recoveryActionOptions = [];
+    let rejectRecoveryPause = false;
     const service = createBackupService({
       app: { getVersion: () => 'test' },
       backgroundTasks,
@@ -93,8 +99,26 @@ const main = async () => {
       getWorkspaceMediaDatabasePath: () => currentWorkspace.mediaDatabase,
       getWorkspaceVersioningDatabasePath: () => currentWorkspace.versioningDatabase,
       getWorkspaceDataRoot: () => currentWorkspace.dataRoot,
+      workspaceSqliteCoordinator: {
+        run: (options, worker) => {
+          recoveryLeases.push(options);
+          return physicalCoordinator.run(options, worker);
+        },
+      },
+      prepareDomainRecovery: async () => {
+        if (rejectRecoveryPause) throw new Error('simulated client shutdown failure');
+        recoveryEvents.push('suspended');
+        assert(physicalCoordinator.status().activeDatabases > 0, 'clients must be suspended after the physical lease is granted');
+        return async () => {
+          assert(physicalCoordinator.status().activeDatabases > 0, 'clients must resume before the physical lease is released');
+          recoveryEvents.push('resumed');
+        };
+      },
       readSavedConfig: () => config,
-      runPythonJsonAction: runPython,
+      runPythonJsonAction: (...args) => {
+        if (args.length >= 6) recoveryActionOptions.push({ timeoutMs: args[2], signal: args[4], deadlineAt: args[5] });
+        return runPython(...args);
+      },
       shell: { readShortcutLink: shortcutPath => JSON.parse(fs.readFileSync(shortcutPath, 'utf8')) },
       writeLog: () => undefined,
     });
@@ -130,6 +154,22 @@ const main = async () => {
     assert.strictEqual(fs.existsSync(backedProjectRoot), false);
     const restoredProject = await service.restoreProject(first.root, replacementRun.result.id, backedProject.id);
     assert.strictEqual(restoredProject.task.state, 'completed');
+    assert.equal(recoveryLeases.at(-1).databases.length, 4, 'project restore must lock core/media/versioning/team-retouch only');
+    assert(recoveryLeases.at(-1).databases.every(database => database.mode === 'exclusive'));
+    assert(recoveryActionOptions.some(options => options.signal && Number.isFinite(options.deadlineAt) && options.timeoutMs <= options.deadlineAt - Date.now() + 1000), 'recovery tools must receive the active AbortSignal and remaining deadline');
+    await service.restoreDomain(first.root, replacementRun.result.id, 'media');
+    assert.deepStrictEqual(recoveryLeases.at(-1).databases, [{ path: path.resolve(first.mediaDatabase), mode: 'exclusive' }], 'domain restore must lock only its target database');
+    await service.resetDomain(first.root, 'operations');
+    assert.deepStrictEqual(recoveryLeases.at(-1).databases, [{ path: path.resolve(first.operationsDatabase), mode: 'exclusive' }], 'domain reset must lock only its target database');
+    rejectRecoveryPause = true;
+    let recoveryWorkerCalled = false;
+    await assert.rejects(
+      service.withWorkspaceRecoveryLease({ workspaceRoot: first.root, domains: ['media'] }, async () => { recoveryWorkerCalled = true; }),
+      /simulated client shutdown failure/,
+    );
+    rejectRecoveryPause = false;
+    assert.strictEqual(recoveryWorkerCalled, false, 'restore worker must not run when a client cannot be stopped');
+    assert.strictEqual(physicalCoordinator.status().activeDatabases, 0, 'failed client suspension must release the physical lease');
     assert.strictEqual(await fs.promises.readFile(path.join(first.project, '新增文件.txt'), 'utf8'), 'incremental-content');
     const restoredExternalLinks = JSON.parse(await fs.promises.readFile(externalLinksPath, 'utf8'));
     assert.ok(restoredExternalLinks.links['backed-link'], 'project restore must restore external-link authorization identities from the snapshot');
@@ -177,6 +217,8 @@ const main = async () => {
     await fs.promises.writeFile(externalLinksPath, JSON.stringify({ version: 1, links: { 'current-link': { target: 'E:/current-media', kind: 'folder', createdAt: 2 } } }), 'utf8');
     const restored = await service.restoreWorkspace(first.root, replacementRun.result.id, restoreRoot);
     assert.strictEqual(restored.task.state, 'completed');
+    assert.equal(recoveryLeases.at(-1).databases.length, 5, 'workspace restore must also lock operations');
+    assert(recoveryEvents.every((event, index) => event === (index % 2 === 0 ? 'suspended' : 'resumed')), 'every recovery lease must suspend and then resume all clients');
     assert.strictEqual(await fs.promises.readFile(path.join(restoreRoot, '待处理', 'workspace-one-项目', '新增文件.txt'), 'utf8'), 'incremental-content');
     assert.ok(await fs.promises.readFile(path.join(restoreRoot, '.photoflow-workspace-id'), 'utf8'));
     assert.ok((await fs.promises.stat(restoredDatabase)).isFile());

@@ -72,19 +72,13 @@ class ThumbnailPublishError(RuntimeError):
 class ThumbnailDatabase:
     def __init__(self, database_path: str, recover: bool = True):
         Path(database_path).parent.mkdir(parents=True, exist_ok=True)
-        if recover and os.path.isfile(database_path) and os.path.getsize(database_path) > 0:
-            uri = f"{Path(database_path).resolve().as_uri()}?mode=ro"
-            try:
-                probe = sqlite3.connect(uri, uri=True, timeout=30)
-                try:
-                    check = str(probe.execute("PRAGMA quick_check").fetchone()[0])
-                finally:
-                    probe.close()
-            except sqlite3.Error as error:
-                raise RuntimeError(f"thumbnail database integrity check failed before recovery: {error}") from error
-            if check != "ok":
-                raise RuntimeError(f"thumbnail database integrity check failed before recovery: {check}")
-        self.connection = sqlite3.connect(database_path, timeout=30)
+        try:
+            self.connection = sqlite3.connect(database_path, timeout=30)
+            self.connection.execute("PRAGMA schema_version").fetchone()
+        except sqlite3.Error as error:
+            if getattr(self, "connection", None) is not None:
+                self.connection.close()
+            raise RuntimeError(f"thumbnail database bootstrap failed: {error}") from error
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=NORMAL")
@@ -106,12 +100,6 @@ class ThumbnailDatabase:
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS files_project_relative
-                ON files(project_root, relative_path);
-            CREATE INDEX IF NOT EXISTS files_state
-                ON files(project_root, thumbnail_state);
-            CREATE INDEX IF NOT EXISTS files_missing
-                ON files(exists_on_disk, thumbnail_state, path);
 
             CREATE TABLE IF NOT EXISTS thumbnails (
                 file_path TEXT NOT NULL,
@@ -129,9 +117,6 @@ class ThumbnailDatabase:
                 PRIMARY KEY(file_path, size_label),
                 FOREIGN KEY(file_path) REFERENCES files(path) ON DELETE CASCADE
             );
-            CREATE INDEX IF NOT EXISTS thumbnails_accessed
-                ON thumbnails(last_accessed_at);
-
             CREATE TABLE IF NOT EXISTS project_indexes (
                 project_root TEXT PRIMARY KEY,
                 state TEXT NOT NULL,
@@ -141,12 +126,46 @@ class ThumbnailDatabase:
 
             CREATE TABLE IF NOT EXISTS maintenance_state (
                 key TEXT PRIMARY KEY,
-                completed_at INTEGER NOT NULL
+                completed_at INTEGER NOT NULL,
+                cursor_json TEXT NOT NULL DEFAULT '{}'
             );
 
             CREATE TABLE IF NOT EXISTS cache_control (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                 cache_epoch INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS thumbnail_publish_receipts (
+                publish_id TEXT PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                cache_epoch INTEGER NOT NULL,
+                source_version INTEGER NOT NULL,
+                result_json TEXT NOT NULL,
+                committed_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS thumbnail_orphan_delete_retries (
+                thumbnail_path TEXT PRIMARY KEY,
+                cache_root TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 1,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS thumbnail_orphan_scan_state (
+                generation TEXT NOT NULL,
+                cache_root TEXT NOT NULL,
+                root_index INTEGER NOT NULL,
+                prepared_at INTEGER NOT NULL,
+                PRIMARY KEY(generation,cache_root,root_index)
+            );
+            CREATE TABLE IF NOT EXISTS thumbnail_orphan_scan_entries (
+                generation TEXT NOT NULL,
+                cache_root TEXT NOT NULL,
+                root_index INTEGER NOT NULL,
+                thumbnail_path TEXT NOT NULL,
+                PRIMARY KEY(generation,cache_root,root_index,thumbnail_path)
             );
             """
         )
@@ -157,21 +176,12 @@ class ThumbnailDatabase:
             self.connection.execute("ALTER TABLE thumbnails ADD COLUMN cache_epoch INTEGER NOT NULL DEFAULT 1")
         if "cache_root" not in thumbnail_columns:
             self.connection.execute("ALTER TABLE thumbnails ADD COLUMN cache_root TEXT NOT NULL DEFAULT ''")
-            rows = self.connection.execute("SELECT file_path,size_label,thumbnail_path FROM thumbnails").fetchall()
-            self.connection.executemany(
-                "UPDATE thumbnails SET cache_root=? WHERE file_path=? AND size_label=?",
-                [(canonical(os.path.dirname(row["thumbnail_path"])), row["file_path"], row["size_label"]) for row in rows if row["thumbnail_path"]],
-            )
-        self.connection.execute("CREATE INDEX IF NOT EXISTS thumbnails_path ON thumbnails(thumbnail_path)")
-        self.connection.execute("CREATE INDEX IF NOT EXISTS thumbnails_cache_access ON thumbnails(cache_root,last_accessed_at)")
+        maintenance_columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(maintenance_state)").fetchall()
+        }
+        if "cursor_json" not in maintenance_columns:
+            self.connection.execute("ALTER TABLE maintenance_state ADD COLUMN cursor_json TEXT NOT NULL DEFAULT '{}'")
         self.connection.execute("INSERT OR IGNORE INTO cache_control(singleton,cache_epoch) VALUES(1,1)")
-        # Jobs interrupted by a previous shutdown are safe to retry. Secondary
-        # scan connections skip this so they never rewrite live worker state.
-        if recover:
-            self.connection.execute(
-                "UPDATE files SET thumbnail_state='QUEUED', updated_at=? WHERE thumbnail_state='GENERATING'",
-                (now_ms(),),
-            )
         self.connection.commit()
 
     def close(self) -> None:
@@ -458,11 +468,9 @@ class ThumbnailDatabase:
             """SELECT thumbnails.thumbnail_path,thumbnails.thumbnail_size,thumbnails.cache_epoch,
                       thumbnails.thumbnail_version,files.version
                FROM thumbnails JOIN files ON files.path=thumbnails.file_path
-               JOIN cache_control ON cache_control.singleton=1
                WHERE thumbnails.file_path=? AND thumbnails.size_label=?
                  AND files.size=? AND files.mtime_ms=?
-                 AND thumbnails.thumbnail_version=files.version
-                 AND thumbnails.cache_epoch=cache_control.cache_epoch""",
+                 AND thumbnails.thumbnail_version=files.version""",
             (canonical(file_path), str(size_label), int(source_size), float(source_mtime_ms)),
         ).fetchone()
         if row is None or not os.path.isfile(row["thumbnail_path"]):
@@ -492,10 +500,6 @@ class ThumbnailDatabase:
             epoch = int(self.connection.execute(
                 "SELECT cache_epoch FROM cache_control WHERE singleton=1"
             ).fetchone()[0])
-            # Existing committed publications remain valid. Advancing their
-            # fence inside the same exclusive transaction only rejects workers
-            # that captured the previous epoch but have not committed yet.
-            self.connection.execute("UPDATE thumbnails SET cache_epoch=?", (epoch,))
         return {"cacheEpoch": epoch}
 
     def capture_thumbnail_publish(self, file_path: str, kind: str,
@@ -517,10 +521,26 @@ class ThumbnailDatabase:
             "sourceMtimeMs": float(record["mtimeMs"]),
         }
 
-    def commit_thumbnail_publish(self, file_path: str, cache_epoch: int,
+    def resolve_thumbnail_publish(self, publish_id: str) -> dict:
+        identifier = str(publish_id or "")
+        row = self.connection.execute(
+            "SELECT result_json FROM thumbnail_publish_receipts WHERE publish_id=?", (identifier,)
+        ).fetchone()
+        if row is None:
+            return {"state": "NOT_FOUND", "committed": False, "publishId": identifier}
+        result = json.loads(row["result_json"])
+        return {"state": "COMMITTED", "committed": True, "publishId": identifier, "result": result}
+
+    def commit_thumbnail_publish(self, publish_id: str, file_path: str, cache_epoch: int,
                                  source_version: int, source_size: int,
                                  source_mtime_ms: float, thumbnails: list[dict],
                                  source_digest: str | None = None) -> dict:
+        identifier = str(publish_id or "")
+        if not identifier or len(identifier) > 128:
+            raise ValueError("invalid thumbnail publish ID")
+        previous = self.resolve_thumbnail_publish(identifier)
+        if previous["committed"]:
+            return previous["result"]
         file_path = canonical(file_path)
         epoch = self.get_cache_epoch()["cacheEpoch"]
         if int(cache_epoch) != epoch:
@@ -549,6 +569,12 @@ class ThumbnailDatabase:
                 raise ThumbnailPublishError("SOURCE_STALE", "published thumbnail size changed")
             normalized.append((item, final_path, stat))
         timestamp = now_ms()
+        result = {
+            "state": "READY",
+            "cacheEpoch": int(cache_epoch),
+            "sourceVersion": int(source_version),
+            "publishId": identifier,
+        }
         with self.connection:
             # Recheck epoch inside the write transaction.
             current_epoch = self.connection.execute(
@@ -579,9 +605,15 @@ class ThumbnailDatabase:
                          generated_at=excluded.generated_at,last_accessed_at=excluded.last_accessed_at""",
                     (file_path, item["sizeLabel"], item["pixelSize"], final_path,
                      item["fileSize"], int(source_version), float(source_mtime_ms), source_digest,
-                     int(cache_epoch), canonical(os.path.dirname(final_path)), timestamp, timestamp),
+                    int(cache_epoch), canonical(os.path.dirname(final_path)), timestamp, timestamp),
                 )
-        return {"state": "READY", "cacheEpoch": int(cache_epoch), "sourceVersion": int(source_version)}
+            self.connection.execute(
+                """INSERT INTO thumbnail_publish_receipts
+                   (publish_id,file_path,cache_epoch,source_version,result_json,committed_at)
+                   VALUES(?,?,?,?,?,?)""",
+                (identifier, file_path, int(cache_epoch), int(source_version), json.dumps(result, ensure_ascii=False), timestamp),
+            )
+        return result
 
     def touch_thumbnails(self, touches: list[dict]) -> dict:
         timestamp = now_ms()
@@ -748,27 +780,58 @@ class ThumbnailDatabase:
                  AND (? IS NULL OR thumbnails.cache_root=?) LIMIT 1""",
             (root, root),
         ).fetchone()
+        remaining_sources = self.connection.execute(
+            """SELECT 1 FROM files
+               WHERE (exists_on_disk=0 OR thumbnail_state='MISSING')
+                 AND NOT EXISTS(SELECT 1 FROM thumbnails WHERE thumbnails.file_path=files.path)
+               LIMIT 1"""
+        ).fetchone()
         return {
             "success": True,
             "thumbnailPaths": list(dict.fromkeys(row["thumbnail_path"] for row in rows if row["thumbnail_path"])),
             "detachedCount": len(rows),
             "sourceCount": len(removable),
-            "done": remaining is None,
+            "done": remaining is None and remaining_sources is None,
         }
 
     def recover_cache_publications(self, cache_root: str, before_ms: int | None = None,
                                    exclude_paths: list[str] | None = None,
                                    scan_root_orphans: bool = True,
-                                   limit: int = 512) -> dict:
+                                   after_row_id: int = 0,
+                                   generation: str = "",
+                                   generation_max_row_id: int = 0,
+                                   inspect_limit: int = 2048,
+                                   delete_limit: int = 512,
+                                   directory_cursor: dict | None = None) -> dict:
         root = canonical(cache_root)
-        limit = max(1, min(CACHE_INVALIDATION_BATCH_SIZE, int(limit)))
+        inspect_limit = max(1, min(8192, int(inspect_limit)))
+        delete_limit = max(1, min(CACHE_INVALIDATION_BATCH_SIZE, int(delete_limit)))
+        generation = str(generation or "") or f"legacy-{uuid.uuid4().hex}"
+        after_row_id = max(0, int(after_row_id or 0))
+        generation_max_row_id = int(generation_max_row_id or 0)
+        if generation_max_row_id == 0:
+            captured_max_row_id = int(self.connection.execute(
+                "SELECT COALESCE(MAX(rowid),0) FROM thumbnails WHERE cache_root=?", (root,)
+            ).fetchone()[0])
+            # -1 distinguishes an initialized empty snapshot from the 0 value
+            # that requests a fresh generation boundary.
+            generation_max_row_id = captured_max_row_id if captured_max_row_id > 0 else -1
         excluded = {canonical(value) for value in (exclude_paths or []) if value}
-        missing_rows = self.connection.execute(
-            "SELECT rowid,file_path,thumbnail_path FROM thumbnails WHERE cache_root=? ORDER BY rowid",
-            (root,),
+        window = self.connection.execute(
+            """SELECT rowid,file_path,thumbnail_path FROM thumbnails
+               WHERE cache_root=? AND rowid>? AND rowid<=? ORDER BY rowid LIMIT ?""",
+            (root, after_row_id, generation_max_row_id, inspect_limit),
         ).fetchall()
-        missing_candidates = [row for row in missing_rows if not os.path.isfile(row["thumbnail_path"])]
-        missing = missing_candidates[:limit]
+        missing = []
+        next_row_id = after_row_id
+        stopped_at_delete_limit = False
+        for row in window:
+            next_row_id = int(row["rowid"])
+            if not os.path.isfile(row["thumbnail_path"]):
+                missing.append(row)
+                if len(missing) >= delete_limit:
+                    stopped_at_delete_limit = True
+                    break
         if missing:
             with self.connection:
                 placeholders = ",".join("?" for _ in missing)
@@ -782,50 +845,166 @@ class ThumbnailDatabase:
                          (SELECT 1 FROM thumbnails WHERE thumbnails.file_path=files.path)""",
                     [(now_ms(), row["file_path"]) for row in missing],
                 )
-        indexed = {
-            canonical(row["thumbnail_path"])
-            for row in self.connection.execute("SELECT thumbnail_path FROM thumbnails WHERE cache_root=?", (root,)).fetchall()
-            if row["thumbnail_path"]
-        }
-        candidates = []
+        publication_done = not stopped_at_delete_limit and len(window) < inspect_limit
+
         scan_roots = [os.path.join(root, ".staging")]
         if scan_root_orphans:
             scan_roots.insert(0, root)
+        cursor = directory_cursor if isinstance(directory_cursor, dict) else {}
+        root_index = max(0, min(len(scan_roots), int(cursor.get("rootIndex") or 0)))
+        with self.connection:
+            self.connection.execute(
+                "DELETE FROM thumbnail_orphan_scan_entries WHERE cache_root=? AND generation<>?", (root, generation)
+            )
+            self.connection.execute(
+                "DELETE FROM thumbnail_orphan_scan_state WHERE cache_root=? AND generation<>?", (root, generation)
+            )
+        retry_rows = self.connection.execute(
+            """SELECT thumbnail_path FROM thumbnail_orphan_delete_retries
+               WHERE cache_root=? ORDER BY updated_at,thumbnail_path LIMIT ?""",
+            (root, delete_limit),
+        ).fetchall()
+        retry_candidates = [canonical(row["thumbnail_path"]) for row in retry_rows]
+        candidates = list(dict.fromkeys(retry_candidates))
+        directory_done = root_index >= len(scan_roots)
         cutoff = int(before_ms) if before_ms is not None else None
-        for scan_root in scan_roots:
-            if not os.path.isdir(scan_root):
-                continue
-            for entry in os.scandir(scan_root):
-                try:
-                    if not entry.is_file(follow_symlinks=False) or Path(entry.name).suffix.lower() != ".jpg":
-                        continue
-                    stem = Path(entry.name).stem.lower()
-                    if scan_root == root:
-                        if len(stem) != 64 or any(character not in "0123456789abcdef" for character in stem):
-                            continue
-                    else:
-                        try:
-                            uuid.UUID(stem)
-                        except ValueError:
-                            continue
-                    candidate = canonical(entry.path)
-                    if candidate in indexed or candidate in excluded:
-                        continue
-                    if cutoff is not None and entry.stat(follow_symlinks=False).st_mtime * 1000 >= cutoff:
-                        continue
-                    candidates.append(candidate)
-                    if len(candidates) >= limit:
-                        break
-                except OSError:
-                    continue
-            if len(candidates) >= limit:
-                break
+        next_directory_cursor = {"rootIndex": root_index}
+        if not directory_done and len(candidates) < delete_limit:
+            scan_root = scan_roots[root_index]
+            prepared = self.connection.execute(
+                """SELECT 1 FROM thumbnail_orphan_scan_state
+                   WHERE generation=? AND cache_root=? AND root_index=?""",
+                (generation, root, root_index),
+            ).fetchone()
+            if prepared is None:
+                with self.connection:
+                    self.connection.execute(
+                        """DELETE FROM thumbnail_orphan_scan_entries
+                           WHERE generation=? AND cache_root=? AND root_index=?""",
+                        (generation, root, root_index),
+                    )
+                    if os.path.isdir(scan_root):
+                        for entry in os.scandir(scan_root):
+                            try:
+                                if not entry.is_file(follow_symlinks=False) or Path(entry.name).suffix.lower() != ".jpg":
+                                    continue
+                                stem = Path(entry.name).stem.lower()
+                                if scan_root == root:
+                                    if len(stem) != 64 or any(character not in "0123456789abcdef" for character in stem):
+                                        continue
+                                else:
+                                    try:
+                                        uuid.UUID(stem)
+                                    except ValueError:
+                                        continue
+                                candidate = canonical(entry.path)
+                                if candidate in excluded:
+                                    continue
+                                if cutoff is not None and entry.stat(follow_symlinks=False).st_mtime * 1000 >= cutoff:
+                                    continue
+                                self.connection.execute(
+                                    """INSERT OR IGNORE INTO thumbnail_orphan_scan_entries
+                                       (generation,cache_root,root_index,thumbnail_path) VALUES(?,?,?,?)""",
+                                    (generation, root, root_index, candidate),
+                                )
+                            except OSError:
+                                continue
+                    self.connection.execute(
+                        """INSERT INTO thumbnail_orphan_scan_state(generation,cache_root,root_index,prepared_at)
+                           VALUES(?,?,?,?)""",
+                        (generation, root, root_index, now_ms()),
+                    )
+            remaining_limit = delete_limit - len(candidates)
+            scan_rows = self.connection.execute(
+                """SELECT thumbnail_path FROM thumbnail_orphan_scan_entries
+                   WHERE generation=? AND cache_root=? AND root_index=?
+                   ORDER BY thumbnail_path LIMIT ?""",
+                (generation, root, root_index, remaining_limit),
+            ).fetchall()
+            candidates.extend(canonical(row["thumbnail_path"]) for row in scan_rows)
+            if len(scan_rows) < remaining_limit:
+                root_index += 1
+                next_directory_cursor = {"rootIndex": root_index}
+                directory_done = root_index >= len(scan_roots)
+
+        indexed = set()
+        for offset_index in range(0, len(candidates), 400):
+            chunk = candidates[offset_index:offset_index + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.connection.execute(
+                f"SELECT thumbnail_path FROM thumbnails WHERE thumbnail_path IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            indexed.update(canonical(row["thumbnail_path"]) for row in rows)
+        candidates = [candidate for candidate in candidates if candidate not in indexed]
+        if indexed:
+            with self.connection:
+                self.connection.executemany(
+                    "DELETE FROM thumbnail_orphan_delete_retries WHERE thumbnail_path=?",
+                    [(candidate,) for candidate in indexed],
+                )
+                self.connection.executemany(
+                    "DELETE FROM thumbnail_orphan_scan_entries WHERE thumbnail_path=?",
+                    [(candidate,) for candidate in indexed],
+                )
+        recovery_cursor = {
+            "generation": generation,
+            "generationMaxRowId": generation_max_row_id,
+            "afterRowId": next_row_id,
+            "lastCompletedAt": 0,
+            "directory": next_directory_cursor,
+        }
         return {
             "success": True,
             "orphanPaths": candidates,
             "repairedMissingCount": len(missing),
-            "done": len(missing_candidates) <= limit and len(candidates) < limit,
+            "generationMaxRowId": generation_max_row_id,
+            "afterRowId": next_row_id,
+            "directoryCursor": next_directory_cursor,
+            "cursor": recovery_cursor,
+            "publicationDone": publication_done,
+            "orphanDone": directory_done,
+            "done": publication_done and directory_done,
         }
+
+    def record_orphan_delete_failures(self, cache_root: str, failures: list[dict]) -> dict:
+        root = canonical(cache_root)
+        timestamp = now_ms()
+        normalized = []
+        for failure in failures or []:
+            raw_path = str(failure.get("path") or "").strip()
+            if not raw_path:
+                continue
+            thumbnail_path = canonical(raw_path)
+            normalized.append((thumbnail_path, root, str(failure.get("error") or "")[:2000], timestamp, timestamp))
+        with self.connection:
+            self.connection.executemany(
+                """INSERT INTO thumbnail_orphan_delete_retries
+                   (thumbnail_path,cache_root,attempts,last_error,created_at,updated_at)
+                   VALUES(?,?,1,?,?,?)
+                   ON CONFLICT(thumbnail_path) DO UPDATE SET
+                     cache_root=excluded.cache_root,attempts=attempts+1,
+                     last_error=excluded.last_error,updated_at=excluded.updated_at""",
+                normalized,
+            )
+            self.connection.executemany(
+                "DELETE FROM thumbnail_orphan_scan_entries WHERE thumbnail_path=?",
+                [(value[0],) for value in normalized],
+            )
+        return {"success": True, "count": len(normalized)}
+
+    def clear_orphan_delete_retries(self, thumbnail_paths: list[str]) -> dict:
+        normalized = [canonical(value) for value in thumbnail_paths or [] if value]
+        with self.connection:
+            self.connection.executemany(
+                "DELETE FROM thumbnail_orphan_delete_retries WHERE thumbnail_path=?",
+                [(value,) for value in normalized],
+            )
+            self.connection.executemany(
+                "DELETE FROM thumbnail_orphan_scan_entries WHERE thumbnail_path=?",
+                [(value,) for value in normalized],
+            )
+        return {"success": True, "count": len(normalized)}
 
     def check_integrity(self) -> dict:
         result = str(self.connection.execute("PRAGMA quick_check").fetchone()[0])
@@ -833,28 +1012,136 @@ class ThumbnailDatabase:
             raise RuntimeError(f"thumbnail database integrity check failed: {result}")
         return {"success": True, "result": result}
 
+    def run_thumbnail_cache_migration(self, migration_version: str,
+                                      cursor: dict | None = None,
+                                      limit: int = 512) -> dict:
+        version = str(migration_version or "")
+        if version != "thumbnail-cache-migration-v2":
+            raise ValueError("unsupported thumbnail cache migration")
+        target_user_version = 2
+        current_user_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
+        if current_user_version >= target_user_version:
+            return {"success": True, "done": True, "userVersion": current_user_version,
+                    "cursor": {"phase": "complete", "afterRowId": 0, "indexOffset": 11}}
+        state = cursor if isinstance(cursor, dict) else {}
+        phase = str(state.get("phase") or "reset-generating")
+        after_row_id = max(0, int(state.get("afterRowId") or 0))
+        limit = max(1, min(512, int(limit)))
+        if phase == "reset-generating":
+            rows = self.connection.execute(
+                "SELECT rowid FROM files WHERE rowid>? AND thumbnail_state='GENERATING' ORDER BY rowid LIMIT ?",
+                (after_row_id, limit),
+            ).fetchall()
+            if rows:
+                with self.connection:
+                    self.connection.executemany(
+                        "UPDATE files SET thumbnail_state='QUEUED',updated_at=? WHERE rowid=?",
+                        [(now_ms(), row["rowid"]) for row in rows],
+                    )
+                return {
+                    "success": True, "done": False, "processed": len(rows), "userVersion": current_user_version,
+                    "cursor": {"phase": "reset-generating", "afterRowId": int(rows[-1]["rowid"]), "indexOffset": 0},
+                }
+            phase = "backfill"
+            after_row_id = 0
+        if phase == "backfill":
+            rows = self.connection.execute(
+                """SELECT rowid,thumbnail_path FROM thumbnails
+                   WHERE rowid>? AND cache_root='' ORDER BY rowid LIMIT ?""",
+                (after_row_id, limit),
+            ).fetchall()
+            if rows:
+                with self.connection:
+                    self.connection.executemany(
+                        "UPDATE thumbnails SET cache_root=? WHERE rowid=?",
+                        [(canonical(os.path.dirname(row["thumbnail_path"])), row["rowid"]) for row in rows],
+                    )
+                next_cursor = {"phase": "backfill", "afterRowId": int(rows[-1]["rowid"]), "indexOffset": 0}
+                return {"success": True, "done": False, "processed": len(rows), "userVersion": current_user_version, "cursor": next_cursor}
+            phase = "indexes"
+            state = {"phase": phase, "afterRowId": after_row_id, "indexOffset": 0}
+        indexes = [
+            ("files_project_relative", "CREATE INDEX IF NOT EXISTS files_project_relative ON files(project_root,relative_path)"),
+            ("files_state", "CREATE INDEX IF NOT EXISTS files_state ON files(project_root,thumbnail_state)"),
+            ("files_missing", "CREATE INDEX IF NOT EXISTS files_missing ON files(exists_on_disk,thumbnail_state,path)"),
+            ("thumbnails_accessed", "CREATE INDEX IF NOT EXISTS thumbnails_accessed ON thumbnails(last_accessed_at)"),
+            ("thumbnails_path", "CREATE INDEX IF NOT EXISTS thumbnails_path ON thumbnails(thumbnail_path)"),
+            ("thumbnails_cache_access", "CREATE INDEX IF NOT EXISTS thumbnails_cache_access ON thumbnails(cache_root,last_accessed_at)"),
+            ("thumbnail_publish_receipts_file", "CREATE INDEX IF NOT EXISTS thumbnail_publish_receipts_file ON thumbnail_publish_receipts(file_path,committed_at)"),
+            ("thumbnail_orphan_delete_retries_root", "CREATE INDEX IF NOT EXISTS thumbnail_orphan_delete_retries_root ON thumbnail_orphan_delete_retries(cache_root,updated_at,thumbnail_path)"),
+            ("thumbnail_orphan_scan_entries_page", "CREATE INDEX IF NOT EXISTS thumbnail_orphan_scan_entries_page ON thumbnail_orphan_scan_entries(generation,cache_root,root_index,thumbnail_path)"),
+            ("thumbnail_orphan_scan_entries_cleanup", "CREATE INDEX IF NOT EXISTS thumbnail_orphan_scan_entries_cleanup ON thumbnail_orphan_scan_entries(cache_root,generation)"),
+            ("thumbnail_orphan_scan_state_cleanup", "CREATE INDEX IF NOT EXISTS thumbnail_orphan_scan_state_cleanup ON thumbnail_orphan_scan_state(cache_root,generation)"),
+        ]
+        if phase == "indexes":
+            index_offset = max(0, int(state.get("indexOffset") or 0))
+            if index_offset < len(indexes):
+                index_name, statement = indexes[index_offset]
+                with self.connection:
+                    self.connection.execute(statement)
+                return {
+                    "success": True, "done": False, "createdIndex": index_name,
+                    "userVersion": current_user_version,
+                    "cursor": {"phase": "indexes", "afterRowId": after_row_id, "indexOffset": index_offset + 1},
+                }
+        integrity = self.check_integrity()
+        with self.connection:
+            self.connection.execute(f"PRAGMA user_version={target_user_version}")
+        return {
+            "success": True, "done": True, "userVersion": target_user_version,
+            "integrity": integrity["result"],
+            "cursor": {"phase": "complete", "afterRowId": after_row_id, "indexOffset": len(indexes)},
+        }
+
     def maintenance_state_get(self, key: str) -> dict:
         normalized = str(key or "").strip()[:500]
         if not normalized:
             raise ValueError("maintenance state key is required")
         row = self.connection.execute(
-            "SELECT completed_at FROM maintenance_state WHERE key=?",
+            "SELECT completed_at,cursor_json FROM maintenance_state WHERE key=?",
             (normalized,),
         ).fetchone()
-        return {"success": True, "completed": row is not None, "completedAt": int(row["completed_at"]) if row else 0}
+        cursor = {}
+        if row:
+            try:
+                cursor = json.loads(row["cursor_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                cursor = {}
+        return {
+            "success": True,
+            "completed": bool(row and int(row["completed_at"]) > 0),
+            "completedAt": int(row["completed_at"]) if row else 0,
+            "cursor": cursor,
+        }
 
-    def maintenance_state_complete(self, key: str) -> dict:
+    def maintenance_state_save(self, key: str, cursor: dict) -> dict:
+        normalized = str(key or "").strip()[:500]
+        if not normalized:
+            raise ValueError("maintenance state key is required")
+        payload = cursor if isinstance(cursor, dict) else {}
+        with self.connection:
+            self.connection.execute(
+                """INSERT INTO maintenance_state(key,completed_at,cursor_json) VALUES(?,0,?)
+                   ON CONFLICT(key) DO UPDATE SET completed_at=0,cursor_json=excluded.cursor_json""",
+                (normalized, json.dumps(payload, ensure_ascii=False)),
+            )
+        return {"success": True, "cursor": payload}
+
+    def maintenance_state_complete(self, key: str, cursor: dict | None = None) -> dict:
         normalized = str(key or "").strip()[:500]
         if not normalized:
             raise ValueError("maintenance state key is required")
         timestamp = now_ms()
+        payload = dict(cursor) if isinstance(cursor, dict) else {}
+        if payload:
+            payload["lastCompletedAt"] = timestamp
         with self.connection:
             self.connection.execute(
-                """INSERT INTO maintenance_state(key,completed_at) VALUES(?,?)
-                   ON CONFLICT(key) DO UPDATE SET completed_at=excluded.completed_at""",
-                (normalized, timestamp),
+                """INSERT INTO maintenance_state(key,completed_at,cursor_json) VALUES(?,?,?)
+                   ON CONFLICT(key) DO UPDATE SET completed_at=excluded.completed_at,cursor_json=excluded.cursor_json""",
+                (normalized, timestamp, json.dumps(payload, ensure_ascii=False)),
             )
-        return {"success": True, "completedAt": timestamp}
+        return {"success": True, "completedAt": timestamp, "cursor": payload}
 
     def list_cache_cleanup(self, before_ms: int, cache_root: str | None = None) -> dict:
         if cache_root:
@@ -999,7 +1286,7 @@ class ThumbnailDatabase:
         }
 
 
-def run_server(database_path: str, recover: bool = True) -> None:
+def run_server(database_path: str, recover: bool = True, crash_after_publish_commit: bool = False) -> None:
     # Keep the JSONL protocol independent of the Windows system code page;
     # project and media paths commonly contain Chinese characters.
     if hasattr(sys.stdin, "reconfigure"):
@@ -1007,6 +1294,7 @@ def run_server(database_path: str, recover: bool = True) -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="strict")
     database = ThumbnailDatabase(database_path, recover=recover)
+    print(json.dumps({"type": "ready", "success": True, "userVersion": int(database.connection.execute("PRAGMA user_version").fetchone()[0])}), flush=True)
     try:
         for line in sys.stdin:
             request = None
@@ -1017,6 +1305,10 @@ def run_server(database_path: str, recover: bool = True) -> None:
                 args = request.get("args", {})
                 handler = getattr(database, operation)
                 result = handler(**args)
+                if crash_after_publish_commit and operation == "commit_thumbnail_publish":
+                    # Integration fault injection: SQLite is committed, but no
+                    # JSONL response is written, reproducing ambiguous commit.
+                    os._exit(91)
                 response = {"id": request_id, "success": True, "result": result}
             except Exception as error:  # service errors must not terminate the index
                 response = {"id": request.get("id") if isinstance(request, dict) else None,
@@ -1034,10 +1326,11 @@ def run(args_list=None):
     parser.add_argument("--server", action="store_true")
     parser.add_argument("--db", required=True)
     parser.add_argument("--no-recover", action="store_true")
+    parser.add_argument("--crash-after-publish-commit", action="store_true")
     args = parser.parse_args(args_list)
     if not args.server:
         raise SystemExit("thumbnail_db must run in server mode")
-    run_server(args.db, recover=not args.no_recover)
+    run_server(args.db, recover=not args.no_recover, crash_after_publish_commit=args.crash_after_publish_commit)
 
 
 if __name__ == "__main__":

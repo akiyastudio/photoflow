@@ -182,7 +182,7 @@ def _copy_filtered(db: sqlite3.Connection, table: str, where: str, values) -> in
     ).rowcount
 
 
-def restore_project(source: str, destination: str, domain: str, project_id: str, peer_source: str = "", replacements=()) -> dict:
+def _restore_project_in_place(source: str, destination: str, domain: str, project_id: str, peer_source: str = "", replacements=()) -> dict:
     if domain not in ("media", "versioning", "team-retouch"):
         raise ValueError("project restore is not supported for this domain")
     db = _connect(destination)
@@ -238,6 +238,30 @@ def restore_project(source: str, destination: str, domain: str, project_id: str,
         except sqlite3.Error: pass
         db.close()
     return {"success": True, "projectId": project_id, "restoredRows": restored}
+
+
+def restore_project(source: str, destination: str, domain: str, project_id: str, peer_source: str = "", replacements=()) -> dict:
+    destination_path = os.path.abspath(destination)
+    staged = f"{destination_path}.restore-project-{uuid.uuid4().hex}.tmp"
+    try:
+        snapshot(destination_path, staged)
+        result = _restore_project_in_place(source, staged, domain, project_id, peer_source, replacements)
+        staged_status = verify(staged)
+        if not staged_status["success"]:
+            raise RuntimeError(f"restored project domain staging is not healthy: {staged_status}")
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.remove(destination_path + suffix)
+            except FileNotFoundError:
+                pass
+        os.replace(staged, destination_path)
+        return {**result, "quickCheck": staged_status.get("quickCheck", "ok")}
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(staged + suffix)
+            except FileNotFoundError:
+                pass
 
 
 def reset_store(destination: str, domain: str) -> dict:

@@ -41,6 +41,7 @@ const run = async () => {
 
   try {
     await pipeline.database.call('sync_directory', { project_root: projectRoot, directory: projectRoot }, 60 * 1000);
+    assert.equal(pipeline.database.lastHandshake?.type, 'ready', 'the database process must acknowledge readiness before its first request completes');
     const indexedSource = path.join(projectRoot, 'image-0000.jpg');
     const indexedSourceStat = fs.statSync(indexedSource);
     const cachedPaths = [];

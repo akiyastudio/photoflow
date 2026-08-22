@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+import uuid
 from pathlib import Path
 
 
@@ -232,7 +233,7 @@ def rebase_workspace(database: str, replacements) -> dict:
         db.close()
 
 
-def restore_project(source: str, destination: str, project_id: str, replacements) -> dict:
+def _restore_project_in_place(source: str, destination: str, project_id: str, replacements) -> dict:
     target = ensure_schema(destination)
     source_path = os.path.abspath(source)
     target.execute("ATTACH DATABASE ? AS portable", (source_path,))
@@ -267,3 +268,32 @@ def restore_project(source: str, destination: str, project_id: str, replacements
         return {"success": True, "photoCount": len(photo_ids)}
     finally:
         target.close()
+
+
+def restore_project(source: str, destination: str, project_id: str, replacements) -> dict:
+    destination_path = os.path.abspath(destination)
+    staged = f"{destination_path}.restore-project-{uuid.uuid4().hex}.tmp"
+    try:
+        snapshot(destination_path, staged)
+        result = _restore_project_in_place(source, staged, project_id, replacements)
+        check_db = sqlite3.connect(staged)
+        try:
+            check_db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            check = check_db.execute("PRAGMA quick_check").fetchone()[0]
+        finally:
+            check_db.close()
+        if check != "ok":
+            raise RuntimeError(f"team-retouch 项目恢复临时数据库完整性检查失败：{check}")
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.remove(destination_path + suffix)
+            except FileNotFoundError:
+                pass
+        os.replace(staged, destination_path)
+        return {**result, "quickCheck": check}
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(staged + suffix)
+            except FileNotFoundError:
+                pass

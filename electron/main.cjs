@@ -36,10 +36,12 @@ const { createDomainCommandJournal } = require('./services/domain-command-journa
 const { createDomainHealthService } = require('./services/domain-health-service.cjs');
 const { createBackgroundTaskService } = require('./services/background-task-service.cjs');
 const { createProcessSupervisor } = require('./services/process-supervisor.cjs');
+const { createJsonCommandRunner } = require('./services/json-command-runner.cjs');
 const { createBackupService } = require('./services/backup-service.cjs');
 const { createArchiveService } = require('./services/archive-service.cjs');
 const { createCredentialService } = require('./services/credential-service.cjs');
 const { createStorageUsageService } = require('./services/storage-usage-service.cjs');
+const { loadOrCreateInstallationId, resolveMediaCacheNamespace } = require('./services/media-cache-namespace.cjs');
 const { createWorkspaceReconcileTask } = require('./services/workspace-reconcile-task.cjs');
 const { cleanupRetiredCaptureTimeCache } = require('./services/retired-cache-service.cjs');
 const { createPluginService } = require('./services/plugin-service.cjs');
@@ -282,7 +284,8 @@ const backgroundTasks = createBackgroundTaskService({
 mediaAccessService = createMediaAccessService({
   getWorkspaceRoots: () => [...workspaceCatalogs.keys()],
   getAdditionalRoots: () => [
-    mediaRuntimeState.activeMediaCacheConfig.directory && approvedMediaCacheDirectories.has(path.resolve(mediaRuntimeState.activeMediaCacheConfig.directory)) ? mediaRuntimeState.activeMediaCacheConfig.directory : '',
+    mediaRuntimeState.activeMediaCacheConfig.directory && approvedMediaCacheDirectories.has(path.resolve(mediaRuntimeState.activeMediaCacheConfig.directory))
+      ? resolveMediaCacheDir(mediaRuntimeState.activeMediaCacheConfig) : '',
     path.join(app.getPath('userData'), 'media-cache'),
     path.join(app.getPath('userData'), 'workspace-data'),
   ],
@@ -632,52 +635,14 @@ const spawnSupervisedJob = ({ prefix, kind, command, args, options }) => process
   ephemeral: true,
 }).child;
 
-const runJsonCommand = (run, label, timeoutMs = 20 * 60 * 1000, onMessage) => new Promise((resolve, reject) => {
-  const child = spawnSupervisedJob({ prefix: 'python:json-job', kind: 'python-job', command: run.command, args: run.args, options: { stdio: ['ignore', 'pipe', 'pipe'] } });
-  let stdout = '';
-  let messageBuffer = '';
-  let stderr = '';
-  let finished = false;
-  const settle = callback => value => {
-    if (finished) return;
-    finished = true;
-    clearTimeout(timer);
-    callback(value);
-  };
-  const succeed = settle(resolve);
-  const fail = settle(reject);
-  child.stdout.setEncoding('utf8');
-  child.stderr.setEncoding('utf8');
-  child.stdout.on('data', data => {
-    stdout = (stdout + data).slice(-2 * 1024 * 1024);
-    if (!onMessage) return;
-    const lines = (messageBuffer + data).split(/\r?\n/);
-    messageBuffer = lines.pop() || '';
-    for (const line of lines) {
-      try { onMessage(JSON.parse(line.trim())); }
-      catch { /* progress messages are compact JSON lines; ignore other output */ }
-    }
-  });
-  child.stderr.on('data', data => { stderr = (stderr + data).slice(-16000); });
-  child.on('error', error => fail(error));
-  child.on('close', code => {
-    const messages = parsePythonJsonMessages(stdout);
-    const protocolFailure = findPythonJsonFailureMessage(messages);
-    if (code !== 0) return fail(new Error(protocolFailure || stderr.trim() || `${label} 处理失败（代码 ${code}）`));
-    if (protocolFailure) return fail(new Error(protocolFailure));
-    if (messages.length) return succeed(messages[messages.length - 1]);
-    fail(new Error(stderr.trim() || `${label} 未返回有效结果`));
-  });
-  const timer = setTimeout(() => {
-    if (!child.killed) child.kill();
-    fail(new Error(`${label} 处理超时`));
-  }, timeoutMs);
+const runJsonCommand = createJsonCommandRunner({
+  spawnJob: run => spawnSupervisedJob({ prefix: 'python:json-job', kind: 'python-job', command: run.command, args: run.args, options: { stdio: ['ignore', 'pipe', 'pipe'] } }),
 });
 
 pluginService = createPluginService({ app, projectRoot, registry: componentRegistry, getDevelopmentPython, runJsonCommand });
 
-const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, onMessage) =>
-  runJsonCommand(getRunConfig(scriptName, args), scriptName, timeoutMs, onMessage);
+const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, onMessage, signal, deadlineAt) =>
+  runJsonCommand(getRunConfig(scriptName, args), scriptName, timeoutMs, onMessage, signal, deadlineAt);
 
 const runPythonEventAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, signal, onEvent) => new Promise((resolve, reject) => {
   const run = getRunConfig(scriptName, args);
@@ -801,6 +766,7 @@ const getConfigDir = () => {
   fs.mkdirSync(configDir, { recursive: true });
   return configDir;
 };
+const installationId = loadOrCreateInstallationId({ fs, path, crypto, userDataPath: getConfigDir() });
 
 const getConfigPath = () => {
   return path.join(getConfigDir(), 'photoflow_config.json');
@@ -1297,10 +1263,15 @@ selectionService = createSelectionService({
 const RAW_DECODER_CACHE_VERSION = 'libraw-rawpy-v1';
 const HIDDEN_SYSTEM_ENTRY_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store', '.photoflow-workspace-id']);
 
+const resolveMediaCacheDir = (config = {}) => {
+  return resolveMediaCacheNamespace({ path, userDataPath: getConfigDir(), installationId, configuredDirectory: config.directory });
+};
+
 const getMediaCacheDir = (config = {}) => {
   const requested = typeof config.directory === 'string' ? config.directory.trim() : '';
-  const cacheDir = requested || path.join(getConfigDir(), 'media-cache');
-  if (!approvedMediaCacheDirectories.has(path.resolve(cacheDir))) throw new Error('媒体缓存目录未经授权');
+  const selectedRoot = path.resolve(requested || path.join(getConfigDir(), 'media-cache'));
+  const cacheDir = resolveMediaCacheDir(config);
+  if (!approvedMediaCacheDirectories.has(selectedRoot)) throw new Error('媒体缓存目录未经授权');
   if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
   return cacheDir;
 };
@@ -1592,6 +1563,7 @@ thumbnailPipeline = new ThumbnailPipeline({
   processSupervisor,
   databasePath: path.join(getConfigDir(), 'thumbnail-index.sqlite3'),
   getCacheDir: getMediaCacheDir,
+  resolveCacheDir: resolveMediaCacheDir,
   cacheFilePath: mediaThumbnailCacheFile,
   generateThumbnailSet: imageThumbnailRuntime.generateThumbnailSet,
   toPreviewUrl: toMediaUrl,
@@ -1891,21 +1863,57 @@ app.whenReady().then(async () => {
   registerSelectionIpc({ ipcMain, path, fs, selectionService, workspaceCatalogs });
   registerAdvancedVideoIpc({ BrowserWindow, app, crypto, ipcMain, mediaService, path, pluginService, processSupervisor, spawn, writeLog });
   const credentialService = createCredentialService({ writeLog });
-  const prepareDomainRecovery = async domain => {
-    const clients = domain === 'operations' ? [operationsDatabase]
-      : domain === 'team-retouch' ? [teamRetouchDatabase]
-        : [mediaDatabase, mediaInteractionDatabase, mediaScanDatabase, trackingScanDatabase, teamRetouchDatabase];
-    await Promise.all(clients.map(client => client.suspend()));
-    return () => clients.forEach(client => client.resume());
+  const recoveryClients = [
+    workspaceDatabase,
+    operationsDatabase,
+    workspaceMaintenanceDatabase,
+    mediaDatabase,
+    mediaInteractionDatabase,
+    teamRetouchDatabase,
+    mediaScanDatabase,
+    trackingScanDatabase,
+  ];
+  let recoveryClientUsers = 0;
+  let recoveryClientTransition = Promise.resolve();
+  const runRecoveryClientTransition = worker => {
+    const result = recoveryClientTransition.then(worker, worker);
+    recoveryClientTransition = result.catch(() => undefined);
+    return result;
   };
-  const backupService = createBackupService({ app, backgroundTasks, credentialService, getConfigPath, getUserBirthdaysPath, getManagedExternalLinkRegistryPath: () => managedExternalLinkRegistryPath, getManagedExternalLinks: projectRoot => projectVirtualPaths.listManagedExternalLinks(projectRoot), getWorkspaceDatabasePath, getWorkspaceOperationsDatabasePath, getWorkspaceTeamRetouchDatabasePath, getWorkspaceMediaDatabasePath, getWorkspaceVersioningDatabasePath, getWorkspaceDataRoot, prepareDomainRecovery, readSavedConfig, runPythonJsonAction, shell, writeLog });
+  const prepareDomainRecovery = () => runRecoveryClientTransition(async () => {
+    if (recoveryClientUsers === 0) {
+      const results = await Promise.allSettled(recoveryClients.map(client => client.suspend()));
+      const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
+      if (failures.length) {
+        await Promise.allSettled(recoveryClients.map(client => Promise.resolve().then(() => client.resume())));
+        throw new AggregateError(failures, '数据库 client 未能全部退出，已取消恢复');
+      }
+    }
+    recoveryClientUsers += 1;
+    let released = false;
+    return () => runRecoveryClientTransition(async () => {
+      if (released) return;
+      released = true;
+      recoveryClientUsers = Math.max(0, recoveryClientUsers - 1);
+      if (recoveryClientUsers > 0) return;
+      const resumes = await Promise.allSettled(recoveryClients.map(client => Promise.resolve().then(() => client.resume())));
+      const failures = resumes.filter(result => result.status === 'rejected').map(result => result.reason);
+      if (failures.length) throw new AggregateError(failures, '数据库恢复完成，但部分 client 未能恢复');
+    });
+  });
+  const backupService = createBackupService({ app, backgroundTasks, credentialService, getConfigPath, getUserBirthdaysPath, getManagedExternalLinkRegistryPath: () => managedExternalLinkRegistryPath, getManagedExternalLinks: projectRoot => projectVirtualPaths.listManagedExternalLinks(projectRoot), getWorkspaceDatabasePath, getWorkspaceOperationsDatabasePath, getWorkspaceTeamRetouchDatabasePath, getWorkspaceMediaDatabasePath, getWorkspaceVersioningDatabasePath, getWorkspaceDataRoot, workspaceSqliteCoordinator, prepareDomainRecovery, readSavedConfig, runPythonJsonAction, shell, writeLog });
   registerBackupIpc({ backupService, credentialService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
   const archiveService = createArchiveService({ backgroundTasks, movePathAtomic, readSavedConfig, workspaceRepository, writeLog });
   registerArchiveIpc({ archiveService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
-  const storageUsageService = createStorageUsageService({ app, backgroundTasks, eventBus, getWorkspaceDatabasePath, getWorkspaceDataRoot, readSavedConfig, writeLog });
+  const storageUsageService = createStorageUsageService({ app, backgroundTasks, eventBus, getWorkspaceDatabasePath, getWorkspaceDataRoot, readSavedConfig, resolveMediaCacheDirectory: resolveMediaCacheDir, writeLog });
   registerStorageUsageIpc({ ipcMain, storageUsageService });
-  void thumbnailService.recoverCache(startupMediaCacheConfig).catch(error => {
+  thumbnailService.activateStartupRecovery();
+  const startupRecovery = thumbnailService.ensureStartupRecovery(startupMediaCacheConfig);
+  await startupRecovery.admitted.catch(error => {
     writeLog('error', 'Thumbnail cache startup recovery failed', { error: error.message || String(error), code: error.code });
+  });
+  void startupRecovery.completion?.catch(error => {
+    writeLog('error', 'Thumbnail cache startup recovery failed after admission', { error: error.message || String(error), code: error.code });
   });
   // A fast renderer can invoke preload APIs immediately on warm starts.
   loadMainWindowRenderer();

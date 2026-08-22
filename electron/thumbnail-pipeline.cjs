@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { spawn } = require('child_process');
 const { ThumbnailCoordinator } = require('./services/thumbnail-coordinator.cjs');
+const { stopProcessAndWait } = require('./services/process-supervisor.cjs');
 
 // v3 switches media covers from square crops to full-frame thumbnails.
 // v4 rejects undersized Windows Shell images that were previously cached as
@@ -51,6 +52,29 @@ class ThumbnailDatabaseClient {
     this.nextId = 0;
     this.pending = new Map();
     this.terminationReasons = new WeakMap();
+    this.processStops = new WeakMap();
+    this.processReady = new WeakMap();
+    this.terminationPromise = null;
+  }
+
+  stopChildAndWait(child, reason, timeoutMs = 2000) {
+    const existing = this.processStops.get(child);
+    if (existing) return existing;
+    let resolveBarrier;
+    const barrier = new Promise(resolve => { resolveBarrier = resolve; });
+    this.processStops.set(child, barrier);
+    this.terminationPromise = barrier;
+    this.terminationReasons.set(child, reason);
+    if (this.process === child) this.process = null;
+    const managed = this.managedProcess?.child === child ? this.managedProcess : null;
+    if (managed) this.managedProcess = null;
+    const stopping = managed
+      ? managed.stop(reason, { timeoutMs, rollbackSettleMs: 25 })
+      : stopProcessAndWait(child, timeoutMs, { rollbackSettleMs: 25 });
+    Promise.resolve(stopping).catch(() => undefined).then(resolveBarrier).finally(() => {
+      if (this.terminationPromise === barrier) this.terminationPromise = null;
+    });
+    return barrier;
   }
 
   ensureProcess() {
@@ -81,6 +105,11 @@ class ThumbnailDatabaseClient {
 
   attachProcess(child, managedProcess) {
     this.process = child;
+    let resolveReady;
+    let rejectReady;
+    const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+    this.processReady.set(child, ready);
+    void ready.catch(() => undefined);
     let output = '';
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', data => {
@@ -92,6 +121,11 @@ class ThumbnailDatabaseClient {
         try {
           const response = JSON.parse(line);
           managedProcess?.markHealthy({ protocol: 'json-lines' });
+          if (response.type === 'ready') {
+            this.lastHandshake = response;
+            resolveReady(response);
+            continue;
+          }
           const request = this.pending.get(response.id);
           if (!request || request.child !== child) continue;
           this.pending.delete(response.id);
@@ -114,7 +148,8 @@ class ThumbnailDatabaseClient {
     // EPIPE before the child exit event; consume it here and let pending calls
     // receive the more useful service-termination error below.
     child.stdin.on('error', () => undefined);
-    const finish = (error) => {
+    const finishRequests = (error) => {
+      rejectReady(error);
       if (this.process === child) this.process = null;
       for (const [id, request] of this.pending.entries()) {
         if (request.child !== child) continue;
@@ -123,28 +158,41 @@ class ThumbnailDatabaseClient {
         this.pending.delete(id);
       }
     };
+    const finish = error => {
+      const barrier = this.processStops.get(child);
+      if (barrier) void barrier.then(() => finishRequests(error));
+      else finishRequests(error);
+    };
     child.on('error', error => finish(error));
     child.on('exit', code => finish(new Error(this.terminationReasons.get(child) || stderr.trim() || `Thumbnail database service exited with code ${code}`)));
   }
 
   call(op, args = {}, timeoutMs = 30000) {
+    if (this.terminationPromise) return this.terminationPromise.then(() => this.call(op, args, timeoutMs));
+    const child = this.ensureProcess();
+    const ready = this.processReady.get(child);
+    if (!ready) return Promise.reject(new Error('Thumbnail database service has no readiness handshake'));
     return new Promise((resolve, reject) => {
-      const child = this.ensureProcess();
+      const timer = setTimeout(() => {
+        const error = Object.assign(new Error('Thumbnail database service readiness timed out'), { code: 'THUMBNAIL_DATABASE_READY_TIMEOUT' });
+        void this.stopChildAndWait(child, 'thumbnail-database-readiness-timeout').then(() => reject(error));
+      }, Math.min(10000, timeoutMs));
+      ready.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+    }).then(() => this.callReady(child, op, args, timeoutMs));
+  }
+
+  callReady(child, op, args = {}, timeoutMs = 30000) {
+    return new Promise((resolve, reject) => {
       const id = ++this.nextId;
       const timer = setTimeout(() => {
+        const timedOut = this.pending.get(id);
+        if (!timedOut || timedOut.child !== child) return;
         this.pending.delete(id);
-        reject(new Error(`Thumbnail database request timed out: ${op}`));
+        const error = Object.assign(new Error(`Thumbnail database request timed out: ${op}`), { code: 'THUMBNAIL_DATABASE_TIMEOUT' });
         // A synchronous Python handler can be stuck in filesystem I/O. Merely
         // rejecting this request leaves every later operation trapped behind
         // it, so recycle the service and let the caller retry safely via WAL.
-        if (this.process === child) {
-          this.terminationReasons.set(child, `Thumbnail database service recycled after ${op} timed out`);
-          this.process = null;
-          if (this.managedProcess?.child === child) {
-            this.managedProcess.stop(`request-timeout:${op}`);
-            this.managedProcess = null;
-          } else if (!child.killed) child.kill();
-        }
+        void this.stopChildAndWait(child, `Thumbnail database service recycled after ${op} timed out`).then(() => reject(error));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, child });
       try {
@@ -168,11 +216,13 @@ class ThumbnailDatabaseClient {
 
   stop() {
     const child = this.process;
-    this.process = null;
+    if (child) return this.stopChildAndWait(child, 'thumbnail-database-stop');
     if (this.managedProcess) {
-      this.managedProcess.stop('thumbnail-database-stop');
+      const managed = this.managedProcess;
       this.managedProcess = null;
-    } else if (child && !child.killed) child.kill();
+      return managed.stop('thumbnail-database-stop');
+    }
+    return Promise.resolve();
   }
 }
 
@@ -227,9 +277,11 @@ class MemoryThumbnailCache {
 class ThumbnailPipeline {
   constructor({ getRunConfig, databasePath, getCacheDir, cacheFilePath, generateThumbnailSet,
     toPreviewUrl, trimCache, notify, log, concurrency = 2, maxBackgroundTasks = 1000,
-    sourceStabilityDelayMs = 350, sourceStabilityProbeMs = 100, processSupervisor = null }) {
-    this.databaseConfig = { getRunConfig, databasePath, log, processSupervisor };
+    sourceStabilityDelayMs = 350, sourceStabilityProbeMs = 100, processSupervisor = null,
+    databaseServiceArgs = [], resolveCacheDir = getCacheDir }) {
+    this.databaseConfig = { getRunConfig, databasePath, log, processSupervisor, serviceArgs: databaseServiceArgs };
     this.database = new ThumbnailDatabaseClient(this.databaseConfig);
+    this.resolveCacheDir = resolveCacheDir;
     this.coordinator = new ThumbnailCoordinator({
       touchFlusher: touches => this.database.call('touch_thumbnails', { touches }),
     });
@@ -277,8 +329,10 @@ class ThumbnailPipeline {
   }
 
   cacheDirectory(cacheConfig = {}) {
-    return this.getCacheDir(cacheConfig);
+    return this.resolveCacheDir(cacheConfig);
   }
+
+  ensureCacheDirectory(cacheConfig = {}) { return this.getCacheDir(cacheConfig); }
 
   async isSafeManagedCachePath(cacheRoot, candidate) {
     const root = path.resolve(cacheRoot);
@@ -324,6 +378,31 @@ class ThumbnailPipeline {
   maintenanceCallTimeout(control) {
     if (!Number.isFinite(control?.deadlineAt)) return THUMBNAIL_MAINTENANCE_TIMEOUT_MS;
     return Math.max(1, control.deadlineAt - Date.now());
+  }
+
+  async runThumbnailMigration(control, options) {
+    let migrationCursor = options.migrationCursor && typeof options.migrationCursor === 'object'
+      ? options.migrationCursor : {};
+    while (true) {
+      this.assertMaintenanceBoundary(control, 'thumbnail-cache-migration', control.processedCount);
+      const migration = await this.database.call('run_thumbnail_cache_migration', {
+        migration_version: options.migrationVersion,
+        cursor: migrationCursor,
+        limit: 512,
+      }, this.maintenanceCallTimeout(control));
+      migrationCursor = migration.cursor || migrationCursor;
+      await this.database.call('maintenance_state_save', {
+        key: options.completeMigrationKey,
+        cursor: migrationCursor,
+      }, this.maintenanceCallTimeout(control));
+      control.processedCount += Number(migration.processed) || 0;
+      if (!migration.done) continue;
+      await this.database.call('maintenance_state_complete', {
+        key: options.completeMigrationKey,
+        cursor: { ...migrationCursor, migrationVersion: options.migrationVersion, userVersion: 2 },
+      }, this.maintenanceCallTimeout(control));
+      return migration;
+    }
   }
 
   async withMaintenanceDeadline(operation, control, phase) {
@@ -615,6 +694,9 @@ class ThumbnailPipeline {
 
   async publishStagedThumbnailSet(filePath, capture, staged) {
     const ownedFinals = [];
+    const publishId = crypto.randomUUID();
+    let published = [];
+    let publishRequest = null;
     try {
       return await this.coordinator.withPublisher(async () => {
         const currentSource = await fs.promises.stat(filePath);
@@ -625,7 +707,7 @@ class ThumbnailPipeline {
         if (currentEpoch.cacheEpoch !== capture.cacheEpoch) {
           throw Object.assign(new Error('thumbnail cache epoch changed before publish'), { code: 'EPOCH_STALE' });
         }
-        const published = [];
+        published = [];
         for (const item of staged) {
           await fs.promises.mkdir(path.dirname(item.finalPath), { recursive: true });
           let ownsFinal = false;
@@ -645,7 +727,8 @@ class ThumbnailPipeline {
             ownsFinal,
           });
         }
-        await this.database.call('commit_thumbnail_publish', {
+        publishRequest = {
+          publish_id: publishId,
           file_path: filePath,
           cache_epoch: capture.cacheEpoch,
           source_version: capture.sourceVersion,
@@ -653,16 +736,60 @@ class ThumbnailPipeline {
           source_mtime_ms: capture.sourceMtimeMs,
           source_digest: capture.sourceDigest || null,
           thumbnails: published.map(({ ownsFinal: _ownsFinal, ...item }) => item),
-        });
+        };
+        await this.database.call('commit_thumbnail_publish', publishRequest);
         return published;
       });
     } catch (error) {
-      await Promise.all([
-        ...staged.map(item => fs.promises.unlink(item.stagingPath).catch(() => undefined)),
-        ...ownedFinals.map(item => fs.promises.unlink(item).catch(() => undefined)),
-      ]);
+      await Promise.all(staged.map(item => fs.promises.unlink(item.stagingPath).catch(() => undefined)));
+      const explicitlyRejected = error?.code === 'EPOCH_STALE' || error?.code === 'SOURCE_STALE';
+      if (explicitlyRejected) {
+        await Promise.all(ownedFinals.map(item => fs.promises.unlink(item).catch(() => undefined)));
+        throw error;
+      }
+      try {
+        const outcome = await this.resolveThumbnailPublish(publishId, publishRequest);
+        if (outcome?.state === 'COMMITTED') return published;
+      } catch (resolutionError) {
+        if (resolutionError?.code === 'EPOCH_STALE' || resolutionError?.code === 'SOURCE_STALE') {
+          await Promise.all(ownedFinals.map(item => fs.promises.unlink(item).catch(() => undefined)));
+          throw resolutionError;
+        }
+      }
+      // Ambiguous after bounded reconnection attempts: keep owned finals. They
+      // are either the committed publication or safe orphans for startup
+      // recovery; deleting them could corrupt a committed READY row.
+      error.publishOutcome = 'unknown';
+      this.log('warn', 'Thumbnail publish result remains ambiguous; preserving final files', {
+        filePath,
+        publishId,
+        error: error.message || String(error),
+      });
       throw error;
     }
+  }
+
+  async resolveThumbnailPublish(publishId, publishRequest, attempts = 4) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const receipt = await this.database.call('resolve_thumbnail_publish', { publish_id: publishId }, 30 * 1000);
+        if (receipt?.state === 'COMMITTED') return receipt;
+        if (receipt?.state === 'NOT_FOUND' && publishRequest) {
+          const result = await this.database.call('commit_thumbnail_publish', publishRequest, 30 * 1000);
+          return { state: 'COMMITTED', committed: true, publishId, result };
+        }
+      } catch (error) {
+        if (error?.code === 'EPOCH_STALE' || error?.code === 'SOURCE_STALE') throw error;
+        if (attempt === attempts - 1) return null;
+        this.log('warn', 'Unable to resolve thumbnail publish result; reconnecting', {
+          publishId,
+          attempt: attempt + 1,
+          error: error.message || String(error),
+        });
+      }
+      if (attempt < attempts - 1) await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+    return null;
   }
 
   async runTask(task) {
@@ -796,6 +923,7 @@ class ThumbnailPipeline {
               fileSize: (await fs.promises.stat(item.target)).size,
           })));
           await this.coordinator.withPublisher(() => this.database.call('commit_thumbnail_publish', {
+            publish_id: crypto.randomUUID(),
             file_path: entry.path,
             cache_epoch: capture.cacheEpoch,
             source_version: capture.sourceVersion,
@@ -833,6 +961,7 @@ class ThumbnailPipeline {
       task: options.task || null,
       deadlineAt: Number.isFinite(options.deadlineAt) ? options.deadlineAt : Date.now() + THUMBNAIL_MAINTENANCE_TIMEOUT_MS,
       onBlocked: options.onBlocked || (() => undefined),
+      onAdmitted: options.onAdmitted || (() => undefined),
       processedCount: 0,
     };
     this.assertMaintenanceBoundary(control, 'waiting-maintenance-turn', 0);
@@ -852,6 +981,7 @@ class ThumbnailPipeline {
       return await this.coordinator.withMaintenance({
         signal: control.signal,
         deadlineAt: control.deadlineAt,
+        onAdmitted: control.onAdmitted,
         onBlocked: details => control.onBlocked({ ...details, processedCount: control.processedCount, deadlineAt: control.deadlineAt }),
       }, async () => {
         if (typeof options.preflight === 'function') {
@@ -1016,6 +1146,8 @@ class ThumbnailPipeline {
       let detachedBytes = 0;
       let prunedSourceCount = 0;
       let repairedMissingCount = 0;
+      let completedRecoveryCursor = options.recoveryCursor && typeof options.recoveryCursor === 'object'
+        ? options.recoveryCursor : {};
       const collect = result => {
         detachedCount += Number(result?.detachedCount) || 0;
         detachedBytes += Number(result?.detachedBytes) || 0;
@@ -1067,6 +1199,8 @@ class ThumbnailPipeline {
 
       const deletedPaths = [];
       const failedPaths = [];
+      const physicalRetryFailures = [];
+      const physicalRetryClears = [];
       let deletedBytes = 0;
       for (const filePath of physicalPaths.values()) {
         this.assertMaintenanceBoundary(control, 'delete-cache-files', control.processedCount + deletedPaths.length + failedPaths.length);
@@ -1082,34 +1216,73 @@ class ThumbnailPipeline {
           await this.withMaintenanceDeadline(fs.promises.unlink(filePath), control, 'delete-cache-file');
           deletedPaths.push(filePath);
           deletedBytes += fileSize;
+          physicalRetryClears.push(filePath);
         } catch (error) {
-          if (error?.code === 'ENOENT') deletedPaths.push(filePath);
-          else failedPaths.push(filePath);
+          if (error?.code === 'ENOENT') {
+            deletedPaths.push(filePath);
+            physicalRetryClears.push(filePath);
+          } else {
+            failedPaths.push(filePath);
+            physicalRetryFailures.push({ path: filePath, error: error?.message || String(error) });
+          }
         }
+      }
+      if (options.cacheRoot && physicalRetryClears.length) {
+        await this.database.call('clear_orphan_delete_retries', {
+          thumbnail_paths: physicalRetryClears,
+        }, this.maintenanceCallTimeout(control));
+      }
+      if (options.cacheRoot && physicalRetryFailures.length) {
+        await this.database.call('record_orphan_delete_failures', {
+          cache_root: options.cacheRoot,
+          failures: physicalRetryFailures,
+        }, this.maintenanceCallTimeout(control));
       }
 
       if (options.recoverOrphans && options.cacheRoot
           && (!options.bytesToFree || deletedBytes < Number(options.bytesToFree))) {
+        let recoveryCursor = completedRecoveryCursor;
         const attempted = new Set([
           ...[...physicalPaths.values()].map(value => pathKey(value)),
           ...(options.excludePaths || []).map(value => pathKey(value)),
         ]);
         while (true) {
+          const pageFailureCount = failedPaths.length;
           this.assertMaintenanceBoundary(control, 'recover-cache-publications', control.processedCount + deletedPaths.length + failedPaths.length);
           const recovered = await this.database.call('recover_cache_publications', {
             cache_root: options.cacheRoot,
             before_ms: options.orphanBeforeMs ?? options.beforeMs ?? null,
-            exclude_paths: [...attempted].slice(-512),
             scan_root_orphans: options.scanRootOrphans !== false,
-            limit: 512,
+            generation: String(recoveryCursor.generation || ''),
+            generation_max_row_id: Number(recoveryCursor.generationMaxRowId) || 0,
+            after_row_id: Number(recoveryCursor.afterRowId) || 0,
+            inspect_limit: 2048,
+            delete_limit: 512,
+            directory_cursor: recoveryCursor.directory || {},
           }, this.maintenanceCallTimeout(control));
+          recoveryCursor = recovered.cursor || {
+            generation: String(recoveryCursor.generation || ''),
+            generationMaxRowId: Number(recovered.generationMaxRowId) || 0,
+            afterRowId: Number(recovered.afterRowId) || 0,
+            lastCompletedAt: 0,
+            directory: recovered.directoryCursor || {},
+          };
+          completedRecoveryCursor = recoveryCursor;
           repairedMissingCount += Number(recovered.repairedMissingCount) || 0;
           control.processedCount = detachedCount + repairedMissingCount + prunedSourceCount;
           if (!recovered.orphanPaths?.length) {
+            if (options.completeMaintenanceKey) {
+              await this.database.call('maintenance_state_save', {
+                key: options.completeMaintenanceKey,
+                cursor: recoveryCursor,
+              }, this.maintenanceCallTimeout(control));
+            }
             if (recovered.done) break;
             continue;
           }
           let newCandidateCount = 0;
+          const clearedRetryPaths = [];
+          const retryFailures = [];
           for (const value of recovered.orphanPaths) {
             if (options.bytesToFree && deletedBytes >= Number(options.bytesToFree)) break;
             this.assertMaintenanceBoundary(control, 'delete-orphan-files', control.processedCount + deletedPaths.length + failedPaths.length);
@@ -1120,6 +1293,7 @@ class ThumbnailPipeline {
             newCandidateCount += 1;
             if (!await this.isSafeManagedCachePath(options.cacheRoot, filePath)) {
               failedPaths.push(filePath);
+              retryFailures.push({ path: filePath, error: 'unsafe managed cache path' });
               this.log('warn', 'Skipped unsafe thumbnail orphan deletion path', { cacheRoot: options.cacheRoot, filePath });
               continue;
             }
@@ -1130,11 +1304,35 @@ class ThumbnailPipeline {
               await this.withMaintenanceDeadline(fs.promises.unlink(filePath), control, 'delete-orphan-file');
               deletedPaths.push(filePath);
               deletedBytes += fileSize;
+              clearedRetryPaths.push(filePath);
             } catch (error) {
-              if (error?.code === 'ENOENT') deletedPaths.push(filePath);
-              else failedPaths.push(filePath);
+              if (error?.code === 'ENOENT') {
+                deletedPaths.push(filePath);
+                clearedRetryPaths.push(filePath);
+              } else {
+                failedPaths.push(filePath);
+                retryFailures.push({ path: filePath, error: error?.message || String(error) });
+              }
             }
           }
+          if (clearedRetryPaths.length) {
+            await this.database.call('clear_orphan_delete_retries', {
+              thumbnail_paths: clearedRetryPaths,
+            }, this.maintenanceCallTimeout(control));
+          }
+          if (retryFailures.length) {
+            await this.database.call('record_orphan_delete_failures', {
+              cache_root: options.cacheRoot,
+              failures: retryFailures,
+            }, this.maintenanceCallTimeout(control));
+          }
+          if (options.completeMaintenanceKey && failedPaths.length === pageFailureCount) {
+            await this.database.call('maintenance_state_save', {
+              key: options.completeMaintenanceKey,
+              cursor: recoveryCursor,
+            }, this.maintenanceCallTimeout(control));
+          }
+          if (options.failOnDeleteError && failedPaths.length > pageFailureCount) break;
           if (recovered.done || newCandidateCount === 0
               || (options.bytesToFree && deletedBytes >= Number(options.bytesToFree))) break;
         }
@@ -1159,7 +1357,10 @@ class ThumbnailPipeline {
         });
       }
       if (options.completeMaintenanceKey) {
-        await this.database.call('maintenance_state_complete', { key: options.completeMaintenanceKey }, this.maintenanceCallTimeout(control));
+        await this.database.call('maintenance_state_complete', {
+          key: options.completeMaintenanceKey,
+          cursor: completedRecoveryCursor,
+        }, this.maintenanceCallTimeout(control));
       }
       return result;
     }, {
@@ -1167,14 +1368,21 @@ class ThumbnailPipeline {
       deadlineAt: options.deadlineAt,
       task: options.task,
       onBlocked: options.onBlocked,
-      preflight: options.verifyIntegrity
-        ? control => this.database.call('check_integrity', {}, this.maintenanceCallTimeout(control))
-        : null,
+      onAdmitted: options.onAdmitted,
+      preflight: options.completeMigrationKey
+        ? control => this.runThumbnailMigration(control, options)
+        : options.verifyIntegrity
+          ? control => this.database.call('check_integrity', {}, this.maintenanceCallTimeout(control))
+          : null,
     });
   }
 
   async maintenanceState(key) {
     return this.withIndexer(() => this.database.call('maintenance_state_get', { key }));
+  }
+
+  async saveMaintenanceState(key, cursor) {
+    return this.withIndexer(() => this.database.call('maintenance_state_save', { key, cursor }));
   }
 
   async cleanupOrphanCache(cacheRoot, beforeMs, intervalMs) {

@@ -44,6 +44,18 @@ def write_media(path: Path, value: bytes) -> None:
     path.write_bytes(value)
 
 
+def complete_thumbnail_migration(database: ThumbnailDatabase, cursor=None) -> list[dict]:
+    state = cursor or {}
+    results = []
+    for _ in range(10000):
+        result = database.run_thumbnail_cache_migration("thumbnail-cache-migration-v2", state, 512)
+        results.append(result)
+        state = result["cursor"]
+        if result["done"]:
+            return results
+    raise AssertionError("thumbnail migration did not complete")
+
+
 def test_thumbnail_missing_prune(root: Path) -> None:
     project = root / "thumbnail-project"
     source = project / "source.jpg"
@@ -114,6 +126,8 @@ def test_thumbnail_cleanup_uses_access_index(root: Path) -> None:
         assert database.check_integrity()["result"] == "ok"
         marker_key = "thumbnail-cache-recovery-test"
         assert database.maintenance_state_get(marker_key)["completed"] is False
+        migrations = complete_thumbnail_migration(database)
+        assert migrations[-1]["success"] is True and migrations[-1]["integrity"] == "ok"
         database.maintenance_state_complete(marker_key)
         assert database.maintenance_state_get(marker_key)["completed"] is True
     finally:
@@ -128,26 +142,48 @@ def test_thumbnail_epoch_publish_contract(root: Path) -> None:
     write_media(final, b"published-thumbnail")
     database = ThumbnailDatabase(str(root / "thumbnail-epoch.sqlite3"))
     try:
+        complete_thumbnail_migration(database)
         capture = database.capture_thumbnail_publish(str(source), "image", str(project))
         committed = database.commit_thumbnail_publish(
-            str(source), capture["cacheEpoch"], capture["sourceVersion"],
+            "publish-success", str(source), capture["cacheEpoch"], capture["sourceVersion"],
             capture["sourceSize"], capture["sourceMtimeMs"], [{
                 "sizeLabel": "small", "pixelSize": 320, "path": str(final),
                 "fileSize": final.stat().st_size,
             }],
         )
         assert committed["state"] == "READY"
+        repeated = database.commit_thumbnail_publish(
+            "publish-success", str(source), -1, -1, -1, -1, [],
+        )
+        assert repeated == committed, "the same publish ID must return its original committed result"
+        queried = database.resolve_thumbnail_publish("publish-success")
+        assert queried["committed"] is True and queried["result"] == committed
         row = database.connection.execute(
             "SELECT cache_epoch,cache_root FROM thumbnails WHERE size_label='small'",
         ).fetchone()
         assert row["cache_epoch"] == capture["cacheEpoch"]
         assert Path(row["cache_root"]).resolve() == final.parent.resolve()
 
+        changes_before_maintenance = database.connection.total_changes
+        maintenance_epoch = database.begin_cache_maintenance()["cacheEpoch"]
+        assert database.connection.total_changes - changes_before_maintenance == 1, \
+            "maintenance must update only the singleton cache_control fence"
+        retained = database.connection.execute(
+            "SELECT cache_epoch FROM thumbnails WHERE size_label='small'"
+        ).fetchone()
+        assert maintenance_epoch > capture["cacheEpoch"]
+        assert retained["cache_epoch"] == capture["cacheEpoch"], \
+            "maintenance must not rewrite epochs on committed thumbnail rows"
+        durable = database.get_thumbnail_publish(
+            str(source), "small", source.stat().st_size, source.stat().st_mtime_ns / 1_000_000,
+        )
+        assert durable is not None, "committed rows from an older epoch must remain readable"
+
         stale_epoch = database.capture_thumbnail_publish(str(source), "image", str(project))
-        database.bump_cache_epoch()
+        database.begin_cache_maintenance()
         try:
             database.commit_thumbnail_publish(
-                str(source), stale_epoch["cacheEpoch"], stale_epoch["sourceVersion"],
+                "publish-stale-epoch", str(source), stale_epoch["cacheEpoch"], stale_epoch["sourceVersion"],
                 stale_epoch["sourceSize"], stale_epoch["sourceMtimeMs"], [{
                     "sizeLabel": "medium", "pixelSize": 640, "path": str(final),
                     "fileSize": final.stat().st_size,
@@ -161,7 +197,7 @@ def test_thumbnail_epoch_publish_contract(root: Path) -> None:
         write_media(source, b"source-v2-with-different-size")
         try:
             database.commit_thumbnail_publish(
-                str(source), stale_source["cacheEpoch"], stale_source["sourceVersion"],
+                "publish-stale-source", str(source), stale_source["cacheEpoch"], stale_source["sourceVersion"],
                 stale_source["sourceSize"], stale_source["sourceMtimeMs"], [{
                     "sizeLabel": "large", "pixelSize": 1600, "path": str(final),
                     "fileSize": final.stat().st_size,
@@ -224,6 +260,213 @@ def test_thumbnail_cleanup_commits_in_batches(root: Path) -> None:
         assert first_prune["detachedCount"] == 512 and first_prune["done"] is False
         assert second_prune["detachedCount"] == 8 and second_prune["sourceCount"] == 1 and second_prune["done"] is True
         assert database.connection.execute("SELECT COUNT(*) FROM files WHERE path=?", (source_path,)).fetchone()[0] == 0
+
+        missing_without_thumbnails = [str((project / f"zero-thumbnail-{index}.jpg").resolve()) for index in range(1537)]
+        database.connection.executemany(
+            """INSERT INTO files(path,project_root,relative_path,kind,size,mtime_ms,source_hash,version,
+               thumbnail_state,last_error,exists_on_disk,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            [
+                (file_path, str(project.resolve()), f"zero-thumbnail-{index}.jpg", "image", 10, 100.0,
+                 None, 1, "MISSING", None, 0, 100, 100)
+                for index, file_path in enumerate(missing_without_thumbnails)
+            ],
+        )
+        database.connection.commit()
+        zero_thumbnail_batches = []
+        while True:
+            batch = database.prune_missing_batch()
+            zero_thumbnail_batches.append(batch["sourceCount"])
+            assert batch["detachedCount"] == 0
+            if batch["done"]:
+                break
+        assert zero_thumbnail_batches == [512, 512, 512, 1]
+        assert database.connection.execute(
+            "SELECT COUNT(*) FROM files WHERE thumbnail_state='MISSING' AND NOT EXISTS(SELECT 1 FROM thumbnails WHERE thumbnails.file_path=files.path)"
+        ).fetchone()[0] == 0
+    finally:
+        database.close()
+
+
+def test_thumbnail_recovery_cursor_pages(root: Path) -> None:
+    project = root / "thumbnail-recovery-project"
+    source = project / "source.jpg"
+    cache = root / "thumbnail-recovery-cache"
+    write_media(source, b"source")
+    cache.mkdir()
+    database = ThumbnailDatabase(str(root / "thumbnail-recovery-cursor.sqlite3"))
+    try:
+        database.sync_directory(str(project), str(project))
+        source_path = database.connection.execute("SELECT path FROM files").fetchone()[0]
+        cache_root = os.path.normcase(os.path.abspath(cache))
+        database.connection.executemany(
+            """INSERT INTO thumbnails(file_path,size_label,pixel_size,thumbnail_path,thumbnail_size,
+               thumbnail_version,source_mtime_ms,source_hash,cache_epoch,cache_root,generated_at,last_accessed_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            [
+                (source_path, f"cursor-{index}", 320, str((cache / f"{index:064x}.jpg").resolve()),
+                 10, 1, source.stat().st_mtime_ns / 1_000_000, None, 1, cache_root, 100, 100)
+                for index in range(3000)
+            ],
+        )
+        database.connection.execute("UPDATE files SET thumbnail_state='READY' WHERE path=?", (source_path,))
+        database.connection.commit()
+        cursor = {"generation": "cursor-generation", "generationMaxRowId": 0, "afterRowId": 0, "lastCompletedAt": 0, "directory": {}}
+        repaired = 0
+        row_cursors = []
+        isfile_counts = {}
+        original_isfile = os.path.isfile
+        def counted_isfile(value):
+            normalized = os.path.normcase(os.path.abspath(value))
+            isfile_counts[normalized] = isfile_counts.get(normalized, 0) + 1
+            return original_isfile(value)
+        os.path.isfile = counted_isfile
+        try:
+            for _ in range(10):
+                page = database.recover_cache_publications(
+                    cache_root, scan_root_orphans=False,
+                    generation=cursor["generation"], generation_max_row_id=cursor["generationMaxRowId"],
+                    after_row_id=cursor["afterRowId"], directory_cursor=cursor["directory"],
+                    inspect_limit=2048, delete_limit=512,
+                )
+                repaired += page["repairedMissingCount"]
+                cursor = page["cursor"]
+                row_cursors.append(cursor["afterRowId"])
+                database.maintenance_state_save("cursor-test", cursor)
+                assert database.maintenance_state_get("cursor-test")["cursor"] == cursor
+                if page["done"]:
+                    break
+        finally:
+            os.path.isfile = original_isfile
+        assert repaired == 3000
+        assert row_cursors == sorted(row_cursors) and len(row_cursors) == 6
+        assert max(isfile_counts.values()) == 1, "each indexed thumbnail row must be statted at most once per generation"
+        assert database.connection.execute("SELECT COUNT(*) FROM thumbnails").fetchone()[0] == 0
+
+        empty_generation = database.recover_cache_publications(
+            cache_root, scan_root_orphans=False, generation="empty-generation",
+            generation_max_row_id=0, after_row_id=0, directory_cursor={"rootIndex": 1, "offset": 0},
+        )
+        assert empty_generation["generationMaxRowId"] == -1
+
+        database.connection.execute(
+            """INSERT INTO thumbnails(file_path,size_label,pixel_size,thumbnail_path,thumbnail_size,
+               thumbnail_version,source_mtime_ms,source_hash,cache_epoch,cache_root,generated_at,last_accessed_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (source_path, "later-missing", 320, str((cache / f"{9999:064x}.jpg").resolve()),
+             10, 1, source.stat().st_mtime_ns / 1_000_000, None, 1, cache_root, 100, 100),
+        )
+        database.connection.commit()
+        same_empty_generation = database.recover_cache_publications(
+            cache_root, scan_root_orphans=False, generation="empty-generation",
+            generation_max_row_id=empty_generation["generationMaxRowId"], after_row_id=empty_generation["afterRowId"],
+            directory_cursor={"rootIndex": 1, "offset": 0},
+        )
+        assert same_empty_generation["repairedMissingCount"] == 0, "an active generation must keep its original empty maxRowId boundary"
+        next_generation = database.recover_cache_publications(
+            cache_root, scan_root_orphans=False, generation="next-generation",
+            generation_max_row_id=0, after_row_id=0, directory_cursor={"rootIndex": 1, "offset": 0},
+            inspect_limit=2048, delete_limit=512,
+        )
+        assert next_generation["repairedMissingCount"] == 1, "a new generation must revisit rows created after the previous completion"
+
+        staging = cache / ".staging"
+        staging.mkdir()
+        for index in range(520):
+            write_media(staging / f"00000000-0000-4000-8000-{index:012d}.jpg", b"orphan")
+        scandir_calls = 0
+        original_scandir = os.scandir
+        def counted_scandir(value):
+            nonlocal scandir_calls
+            scandir_calls += 1
+            return original_scandir(value)
+        os.scandir = counted_scandir
+        try:
+            first = database.recover_cache_publications(
+                cache_root, scan_root_orphans=False, generation="orphan-generation", generation_max_row_id=0, after_row_id=0,
+                directory_cursor={"rootIndex": 0, "offset": 0}, inspect_limit=2048, delete_limit=512,
+            )
+            assert len(first["orphanPaths"]) == 512 and first["done"] is False
+            for candidate in first["orphanPaths"]:
+                Path(candidate).unlink()
+            database.clear_orphan_delete_retries(first["orphanPaths"])
+            second = database.recover_cache_publications(
+                cache_root, scan_root_orphans=False, generation="orphan-generation",
+                generation_max_row_id=first["generationMaxRowId"], after_row_id=first["afterRowId"],
+                directory_cursor=first["directoryCursor"], inspect_limit=2048, delete_limit=512,
+            )
+        finally:
+            os.scandir = original_scandir
+        assert len(second["orphanPaths"]) == 8 and second["orphanDone"] is True
+        assert scandir_calls == 1, "orphan directory enumeration must run only once per generation"
+
+        persistent_retry = cache / ("f" * 64 + ".jpg")
+        write_media(persistent_retry, b"retry orphan")
+        database.record_orphan_delete_failures(cache_root, [{"path": str(persistent_retry), "error": "volume busy"}])
+        retry_page = database.recover_cache_publications(
+            cache_root, scan_root_orphans=False, generation="retry-generation",
+            generation_max_row_id=0, after_row_id=0,
+            directory_cursor={"rootIndex": 1, "offset": 0}, inspect_limit=32, delete_limit=32,
+        )
+        assert os.path.normcase(str(persistent_retry.resolve())) in retry_page["orphanPaths"], \
+            "persistent delete failures must be retried without relying on the directory cursor or recent excludes"
+        database.clear_orphan_delete_retries([str(persistent_retry)])
+        cleared_page = database.recover_cache_publications(
+            cache_root, scan_root_orphans=False, generation="retry-generation",
+            generation_max_row_id=retry_page["generationMaxRowId"], after_row_id=retry_page["afterRowId"],
+            directory_cursor={"rootIndex": 1, "offset": 0}, inspect_limit=32, delete_limit=32,
+        )
+        assert os.path.normcase(str(persistent_retry.resolve())) not in cleared_page["orphanPaths"]
+    finally:
+        database.close()
+
+
+def test_thumbnail_resumable_schema_migration(root: Path) -> None:
+    project = root / "thumbnail-migration-project"
+    source = project / "source.jpg"
+    cache = root / "thumbnail-migration-cache"
+    write_media(source, b"source")
+    cache.mkdir()
+    database_path = root / "thumbnail-migration.sqlite3"
+    migration_key = "thumbnail-cache-migration-v2"
+    database = ThumbnailDatabase(str(database_path))
+    try:
+        database.sync_directory(str(project), str(project))
+        source_path = database.connection.execute("SELECT path FROM files").fetchone()[0]
+        database.connection.executemany(
+            """INSERT INTO thumbnails(file_path,size_label,pixel_size,thumbnail_path,thumbnail_size,
+               thumbnail_version,source_mtime_ms,source_hash,cache_epoch,cache_root,generated_at,last_accessed_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            [
+                (source_path, f"migration-{index}", 320, str((cache / f"{index:064x}.jpg").resolve()),
+                 10, 1, source.stat().st_mtime_ns / 1_000_000, None, 1, "", 100, 100)
+                for index in range(1537)
+            ],
+        )
+        database.connection.commit()
+        first = database.run_thumbnail_cache_migration(migration_key, {}, 512)
+        assert first["processed"] == 512 and first["done"] is False
+        database.maintenance_state_save(migration_key, first["cursor"])
+    finally:
+        database.close()
+
+    database = ThumbnailDatabase(str(database_path))
+    try:
+        cursor = database.maintenance_state_get(migration_key)["cursor"]
+        results = complete_thumbnail_migration(database, cursor)
+        processed = [first["processed"], *[result.get("processed", 0) for result in results]]
+        assert [value for value in processed if value] == [512, 512, 512, 1]
+        assert int(database.connection.execute("PRAGMA user_version").fetchone()[0]) == 2
+        assert database.connection.execute("SELECT COUNT(*) FROM thumbnails WHERE cache_root=''").fetchone()[0] == 0
+        indexes = {row["name"] for row in database.connection.execute("PRAGMA index_list(thumbnails)")}
+        assert {"thumbnails_path", "thumbnails_cache_access"} <= indexes
+        assert [result.get("createdIndex") for result in results if result.get("createdIndex")] == [
+            "files_project_relative", "files_state", "files_missing", "thumbnails_accessed",
+            "thumbnails_path", "thumbnails_cache_access",
+            "thumbnail_publish_receipts_file", "thumbnail_orphan_delete_retries_root",
+            "thumbnail_orphan_scan_entries_page", "thumbnail_orphan_scan_entries_cleanup",
+            "thumbnail_orphan_scan_state_cleanup",
+        ]
     finally:
         database.close()
 
@@ -236,7 +479,7 @@ def test_thumbnail_startup_recovery_contract(root: Path) -> None:
         ThumbnailDatabase(str(corrupt_database))
         raise AssertionError("corrupt thumbnail database must fail before recovery writes")
     except RuntimeError as error:
-        assert "integrity check failed before recovery" in str(error)
+        assert "thumbnail database bootstrap failed" in str(error)
     assert corrupt_database.read_bytes() == corrupt_before
 
     project = root / "thumbnail-recovery-project"
@@ -788,6 +1031,8 @@ def main() -> None:
         test_thumbnail_cleanup_uses_access_index(root)
         test_thumbnail_epoch_publish_contract(root)
         test_thumbnail_cleanup_commits_in_batches(root)
+        test_thumbnail_recovery_cursor_pages(root)
+        test_thumbnail_resumable_schema_migration(root)
         test_thumbnail_startup_recovery_contract(root)
         test_media_workflow_graph_cleanup(root)
         test_thumbnail_tool_sources_limit_png_to_direct_children(root)
