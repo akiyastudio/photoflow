@@ -6,7 +6,20 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { createBackgroundTaskService } = require('../electron/services/background-task-service.cjs');
 const { WorkspaceSqliteCoordinator } = require('../electron/services/workspace-sqlite-coordinator.cjs');
+const { PythonDatabaseClient } = require('../electron/repositories/database-client.cjs');
+const { createWorkspaceRepository } = require('../electron/repositories/workspace-repository.cjs');
+const { createMediaRepository } = require('../electron/repositories/media-repository.cjs');
+const { createOperationsRepository } = require('../electron/repositories/operations-repository.cjs');
+const { createTeamRetouchRepository } = require('../electron/repositories/team-retouch-repository.cjs');
 const { createBackupService, STORE_DIRECTORY } = require('../electron/services/backup-service.cjs');
+
+const waitForCoordinatorQueue = async (coordinator, minimum, timeoutMs = 5000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (coordinator.status().waiting < minimum) {
+    if (Date.now() >= deadline) throw new Error(`coordinator queue did not reach ${minimum}`);
+    await new Promise(resolve => setImmediate(resolve));
+  }
+};
 
 const runPython = (script, args, timeoutMs = 120000) => new Promise((resolve, reject) => {
   const executable = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
@@ -28,6 +41,21 @@ const runPython = (script, args, timeoutMs = 120000) => new Promise((resolve, re
     try { resolve(JSON.parse(stdout.trim())); }
     catch (error) { reject(new Error(`Invalid Python output: ${stdout}\n${error.message}`)); }
   });
+});
+
+const quickCheck = databasePath => new Promise((resolve, reject) => {
+  const executable = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
+  const child = spawn(executable, ['-c', 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); print(c.execute("PRAGMA quick_check").fetchone()[0]); c.close()', databasePath], {
+    windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  child.on('error', reject);
+  child.on('close', code => code === 0 && stdout.trim() === 'ok' ? resolve('ok') : reject(new Error(stderr || `quick_check failed: ${stdout}`)));
 });
 
 const prepareWorkspace = async (temporaryRoot, name, id) => {
@@ -85,7 +113,17 @@ const main = async () => {
     const recoveryLeases = [];
     const recoveryEvents = [];
     const recoveryActionOptions = [];
+    const databaseLogs = [];
     let rejectRecoveryPause = false;
+    let nextRecoveryBarrier = null;
+    const armRecoveryBarrier = () => {
+      let admit;
+      let release;
+      const admitted = new Promise(resolve => { admit = resolve; });
+      const released = new Promise(resolve => { release = resolve; });
+      nextRecoveryBarrier = { admit, released };
+      return { admitted, release };
+    };
     const service = createBackupService({
       app: { getVersion: () => 'test' },
       backgroundTasks,
@@ -109,6 +147,12 @@ const main = async () => {
         if (rejectRecoveryPause) throw new Error('simulated client shutdown failure');
         recoveryEvents.push('suspended');
         assert(physicalCoordinator.status().activeDatabases > 0, 'clients must be suspended after the physical lease is granted');
+        const barrier = nextRecoveryBarrier;
+        nextRecoveryBarrier = null;
+        if (barrier) {
+          barrier.admit();
+          await barrier.released;
+        }
         return async () => {
           assert(physicalCoordinator.status().activeDatabases > 0, 'clients must resume before the physical lease is released');
           recoveryEvents.push('resumed');
@@ -120,8 +164,30 @@ const main = async () => {
         return runPython(...args);
       },
       shell: { readShortcutLink: shortcutPath => JSON.parse(fs.readFileSync(shortcutPath, 'utf8')) },
-      writeLog: () => undefined,
+      writeLog: (...args) => databaseLogs.push(args.map(String).join(' ')),
     });
+
+    const createClient = (getDatabasePath, scriptName = 'workspace_db.py', id = scriptName) => new PythonDatabaseClient({
+      coordinator: physicalCoordinator,
+      getRunConfig: (requestedScript, args) => ({
+        command: path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe'),
+        args: [path.join(__dirname, '..', 'python', requestedScript), ...args],
+      }),
+      getDatabasePath,
+      writeLog: (...args) => databaseLogs.push(args.map(String).join(' ')),
+      scriptName,
+      processId: `backup-concurrency:${id}`,
+      defaultTimeoutMs: 120000,
+    });
+    const maintenanceClient = createClient(() => first.database, 'workspace_db.py', 'maintenance');
+    const writerClient = createClient(() => first.database, 'workspace_db.py', 'interactive');
+    const domainWriterClient = createClient(() => first.database, 'workspace_db.py', 'domain-writer');
+    const operationsClient = createClient(() => first.operationsDatabase, 'operations_db.py', 'operations-writer');
+    const maintenanceRepository = createWorkspaceRepository(maintenanceClient);
+    const writerRepository = createWorkspaceRepository(writerClient);
+    const mediaRepository = createMediaRepository(domainWriterClient);
+    const teamRepository = createTeamRetouchRepository(domainWriterClient);
+    const operationsRepository = createOperationsRepository(operationsClient, () => first.database);
 
     const firstRun = await service.runBackup(first.root, 'manual');
     assert.strictEqual(firstRun.task.state, 'completed');
@@ -152,15 +218,60 @@ const main = async () => {
     const backedProjectRoot = path.resolve(first.root, backedProject.relativePath);
     await fs.promises.rm(backedProjectRoot, { recursive: true, force: true });
     assert.strictEqual(fs.existsSync(backedProjectRoot), false);
-    const restoredProject = await service.restoreProject(first.root, replacementRun.result.id, backedProject.id);
+    const projectBarrier = armRecoveryBarrier();
+    const restoredProjectPromise = service.restoreProject(first.root, replacementRun.result.id, backedProject.id);
+    await projectBarrier.admitted;
+    const queuedMaintenance = maintenanceRepository.runMaintenance(first.root);
+    const queuedWriter = writerRepository.syncCatalog(first.root);
+    await waitForCoordinatorQueue(physicalCoordinator, 2);
+    assert.equal(maintenanceClient.process, null, 'maintenance must not enter its Python worker while restore owns exclusive');
+    assert.equal(writerClient.process, null, 'interactive writer must not enter its Python worker while restore owns exclusive');
+    assert(physicalCoordinator.status().waiting >= 2, 'maintenance and writer must both be queued behind restore');
+    projectBarrier.release();
+    const [restoredProject] = await Promise.all([restoredProjectPromise, queuedMaintenance, queuedWriter]);
     assert.strictEqual(restoredProject.task.state, 'completed');
     assert.equal(recoveryLeases.at(-1).databases.length, 4, 'project restore must lock core/media/versioning/team-retouch only');
     assert(recoveryLeases.at(-1).databases.every(database => database.mode === 'exclusive'));
     assert(recoveryActionOptions.some(options => options.signal && Number.isFinite(options.deadlineAt) && options.timeoutMs <= options.deadlineAt - Date.now() + 1000), 'recovery tools must receive the active AbortSignal and remaining deadline');
-    await service.restoreDomain(first.root, replacementRun.result.id, 'media');
+    const mediaBarrier = armRecoveryBarrier();
+    const mediaRestore = service.restoreDomain(first.root, replacementRun.result.id, 'media');
+    await mediaBarrier.admitted;
+    const mediaWrite = mediaRepository.prepareMediaSync(first.root, backedProject.name, []);
+    await waitForCoordinatorQueue(physicalCoordinator, 1);
+    assert.equal(domainWriterClient.process, null, 'media writer must remain queued behind media restore');
+    mediaBarrier.release();
+    await Promise.all([mediaRestore, mediaWrite]);
     assert.deepStrictEqual(recoveryLeases.at(-1).databases, [{ path: path.resolve(first.mediaDatabase), mode: 'exclusive' }], 'domain restore must lock only its target database');
-    await service.resetDomain(first.root, 'operations');
+
+    const versioningBarrier = armRecoveryBarrier();
+    const versioningRestore = service.restoreDomain(first.root, replacementRun.result.id, 'versioning');
+    await versioningBarrier.admitted;
+    const versioningWrite = domainWriterClient.call(first.root, 'progress_snapshot', { projectName: backedProject.name, includeMissing: true });
+    await waitForCoordinatorQueue(physicalCoordinator, 1);
+    versioningBarrier.release();
+    await Promise.all([versioningRestore, versioningWrite]);
+
+    const teamBarrier = armRecoveryBarrier();
+    const teamRestore = service.restoreDomain(first.root, replacementRun.result.id, 'team-retouch');
+    await teamBarrier.admitted;
+    const teamWrite = teamRepository.listTeamPatches(first.root, 'missing-photo');
+    await waitForCoordinatorQueue(physicalCoordinator, 1);
+    teamBarrier.release();
+    await Promise.all([teamRestore, teamWrite]);
+
+    const operationsBarrier = armRecoveryBarrier();
+    const operationsReset = service.resetDomain(first.root, 'operations');
+    await operationsBarrier.admitted;
+    const operationsWrite = operationsRepository.addUndoRecord(first.root, { id: 'queued-after-reset', kind: 'trash', payload: { items: [] } });
+    await waitForCoordinatorQueue(physicalCoordinator, 1);
+    assert.equal(operationsClient.process, null, 'operations writer must remain queued behind operations reset');
+    operationsBarrier.release();
+    await Promise.all([operationsReset, operationsWrite]);
     assert.deepStrictEqual(recoveryLeases.at(-1).databases, [{ path: path.resolve(first.operationsDatabase), mode: 'exclusive' }], 'domain reset must lock only its target database');
+    assert.equal(databaseLogs.some(line => /SQLITE_BUSY|database is locked/i.test(line)), false, 'recovery concurrency logs must not contain SQLite lock failures');
+    assert.deepStrictEqual(await Promise.all([
+      first.database, first.mediaDatabase, first.versioningDatabase, first.teamRetouchDatabase, first.operationsDatabase,
+    ].map(quickCheck)), ['ok', 'ok', 'ok', 'ok', 'ok']);
     rejectRecoveryPause = true;
     let recoveryWorkerCalled = false;
     await assert.rejects(
@@ -231,6 +342,8 @@ const main = async () => {
     assert.strictEqual(workspaceRestoredExternalLinks.links['unrelated-link'], undefined, 'workspace restore must not restore unrelated global identities');
     assert.ok((await fs.promises.readdir(path.join(target, STORE_DIRECTORY, 'objects'))).length > 0);
     currentWorkspace = { ...first, dataRoot: originalDataRoot, database: originalDatabase };
+
+    await Promise.all([maintenanceClient.stop(), writerClient.stop(), domainWriterClient.stop(), operationsClient.stop()]);
 
     console.log('Backup service integration tests passed.');
   } finally {

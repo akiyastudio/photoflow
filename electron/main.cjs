@@ -42,6 +42,7 @@ const { createArchiveService } = require('./services/archive-service.cjs');
 const { createCredentialService } = require('./services/credential-service.cjs');
 const { createStorageUsageService } = require('./services/storage-usage-service.cjs');
 const { loadOrCreateInstallationId, resolveMediaCacheNamespace } = require('./services/media-cache-namespace.cjs');
+const { runElectronSmokeProbe } = require('./services/electron-smoke-probe.cjs');
 const { createWorkspaceReconcileTask } = require('./services/workspace-reconcile-task.cjs');
 const { cleanupRetiredCaptureTimeCache } = require('./services/retired-cache-service.cjs');
 const { createPluginService } = require('./services/plugin-service.cjs');
@@ -64,9 +65,21 @@ const { createProjectVirtualPathService } = require('./services/project-virtual-
 const cloudConfig = require('./cloud-config.cjs');
 const { registerBackgroundTasksIpc } = require('./modules/background-tasks-ipc.cjs');
 const { createElectronSecurity, normalizeBundledPythonTool, normalizeExternalUrl } = require('./security-policy.cjs');
-// Keep user-facing OS labels localized while runtime data stays in a stable,
-// Latin-only directory name.
-app.setPath('userData', path.join(app.getPath('appData'), 'Photoflow'));
+const smokeTestEnabled = process.env.PHOTOFLOW_SMOKE_TEST === '1';
+const smokeUserDataPath = String(process.env.PHOTOFLOW_USER_DATA_DIR || '').trim();
+if (smokeTestEnabled) {
+  // Headless/CI Windows sessions may be unable to initialize Electron's GPU
+  // child even when Chromium receives --disable-gpu. Disable acceleration at
+  // the Electron application layer as well; production startup is unchanged.
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu');
+  if (!smokeUserDataPath || !path.isAbsolute(smokeUserDataPath)) throw new Error('PHOTOFLOW_USER_DATA_DIR must be an absolute path in smoke mode');
+  app.setPath('userData', path.resolve(smokeUserDataPath));
+} else {
+  // Keep user-facing OS labels localized while runtime data stays in a stable,
+  // Latin-only directory name.
+  app.setPath('userData', path.join(app.getPath('appData'), 'Photoflow'));
+}
 app.setName('照片流');
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
@@ -276,11 +289,6 @@ const {
   samePathIdentity,
 } = fileSystemService;
 const eventBus = createEventBus();
-const backgroundTasks = createBackgroundTaskService({
-  eventBus,
-  writeLog,
-  persistencePath: path.join(app.getPath('userData'), 'background-tasks.json'),
-});
 mediaAccessService = createMediaAccessService({
   getWorkspaceRoots: () => [...workspaceCatalogs.keys()],
   getAdditionalRoots: () => [
@@ -351,6 +359,11 @@ const writeLog = (level, message, details) => {
     nativeConsoleError('Failed to write application log:', error);
   }
 };
+const backgroundTasks = createBackgroundTaskService({
+  eventBus,
+  writeLog,
+  persistencePath: path.join(app.getPath('userData'), 'background-tasks.json'),
+});
 eventBus.on('background-task:persistence-error', details => writeLog('error', 'Background task persistence failed', details));
 const domainCommandJournal = createDomainCommandJournal({
   filePath: path.join(app.getPath('userData'), 'domain-command-journal.json'),
@@ -529,6 +542,7 @@ function createWindow(loadRenderer = true) {
       contextIsolation: true,
       sandbox: true,
       webviewTag: false,
+      ...(smokeTestEnabled ? { offscreen: true } : {}),
     },
   });
   configureWindowSecurity(mainWindow);
@@ -1915,8 +1929,13 @@ app.whenReady().then(async () => {
   void startupRecovery.completion?.catch(error => {
     writeLog('error', 'Thumbnail cache startup recovery failed after admission', { error: error.message || String(error), code: error.code });
   });
+  const smokeRecoveryResult = smokeTestEnabled && startupRecovery.completion
+    ? await startupRecovery.completion
+    : null;
   // A fast renderer can invoke preload APIs immediately on warm starts.
-  loadMainWindowRenderer();
+  if (smokeTestEnabled) {
+    await runElectronSmokeProbe({ app, mainWindow, rendererEntryFile, loadRenderer: loadMainWindowRenderer, recoveryResult: smokeRecoveryResult, processSupervisor });
+  } else loadMainWindowRenderer();
 
   setTimeout(checkForUpdates, 3000);
   app.on('activate', () => {
