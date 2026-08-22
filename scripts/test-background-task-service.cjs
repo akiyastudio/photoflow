@@ -366,6 +366,8 @@ const main = async () => {
     const automaticTask = persistentService.create({ id: 'automatic-restart', type: 'component-status-refresh', title: '自动重跑测试' });
     await automaticTask.waitForStart();
     automaticTask.context.report(50, '刷新中');
+    const restartFactoryFailureTask = persistentService.create({ id: 'restart-factory-failure', type: 'thumbnail-cache-recovery', title: '恢复工厂失败测试' });
+    await restartFactoryFailureTask.waitForStart();
     const ephemeralActive = persistentService.create({ id: 'ephemeral-active', type: 'silent-persist-test', title: 'silent active', notificationPolicy: 'silent' });
     await ephemeralActive.waitForStart();
     persistentService.upsertExternal({ id: 'external-progress', type: 'selection-operation', title: '外部进度', state: 'running', progress: 42, message: '正在处理' });
@@ -426,6 +428,10 @@ const main = async () => {
     }, { autoRestart: true });
     await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(automaticRestarted, true, 'whitelisted safe tasks must restart automatically after registration');
+    restoredService.registerTypeRestartFactory('thumbnail-cache-recovery', async () => { throw new Error('restart factory unavailable'); });
+    await assert.rejects(restoredService.restart('restart-factory-failure'), /restart factory unavailable/);
+    assert.equal(restoredService.get('restart-factory-failure').state, 'failed');
+    assert.equal(restoredService.get('restart-factory-failure').retryable, true, 'a failed restart factory must leave the restored card retryable');
     restoredService.stop();
     releaseInterruptedReplacement();
     await interruptedRetryPromise;

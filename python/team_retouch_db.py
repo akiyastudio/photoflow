@@ -4,7 +4,8 @@ import argparse
 import json
 import sys
 
-from team_retouch_storage import rebase_workspace, restore_project, snapshot
+from domain_recovery import restore_workspace as restore_domain_workspace
+from team_retouch_storage import restore_project, snapshot
 
 
 def _replacements(args):
@@ -30,7 +31,9 @@ def run(args_list=None):
             parser.error("--source is required")
         result = snapshot(args.source, args.destination)
     elif args.action == "restore-workspace":
-        result = rebase_workspace(args.destination, _replacements(args))
+        if not args.source:
+            parser.error("--source is required")
+        result = restore_domain_workspace(args.source, args.destination, "team-retouch", _replacements(args))
     else:
         if not args.source or not args.project_id:
             parser.error("--source and --project-id are required")

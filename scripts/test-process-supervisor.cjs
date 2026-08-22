@@ -2,6 +2,7 @@ const assert = require('assert');
 const { EventEmitter } = require('events');
 const { PassThrough } = require('stream');
 const { createProcessSupervisor } = require('../electron/services/process-supervisor.cjs');
+const { createJsonCommandRunner } = require('../electron/services/json-command-runner.cjs');
 const fs = require('fs');
 const path = require('path');
 
@@ -58,8 +59,7 @@ const main = async () => {
   assert.strictEqual(worker.status().generation, 2);
   assert.ok(logs.some(entry => entry.message === 'Managed process restart scheduled'));
 
-  worker.stop('test-complete');
-  await delay(0);
+  await worker.stop('test-complete', { rollbackSettleMs: 0 });
   assert.strictEqual(supervisor.status('python:test-worker'), null, 'stopped processes must be released');
   const countAfterStop = children.length;
   await delay(10);
@@ -84,7 +84,30 @@ const main = async () => {
   oneShot.child.emit('exit', 0, null);
   assert.strictEqual(supervisor.status('csharp:test-job'), null, 'completed one-shot helpers must not remain registered');
 
-  supervisor.stopAll();
+  const jsonChild = new EventEmitter();
+  jsonChild.stdin = new PassThrough();
+  jsonChild.stdout = new PassThrough();
+  jsonChild.stderr = new PassThrough();
+  jsonChild.exitCode = null;
+  jsonChild.signalCode = null;
+  jsonChild.killed = false;
+  jsonChild.kill = () => { jsonChild.killed = true; return true; };
+  const runJsonCommand = createJsonCommandRunner({ spawnJob: () => jsonChild, terminationTimeoutMs: 200 });
+  let jsonSettled = false;
+  const timedJson = runJsonCommand({ command: 'python', args: [] }, 'json-test', 10).finally(() => { jsonSettled = true; });
+  const timedJsonRejection = assert.rejects(timedJson, error => error.code === 'PROCESS_TIMEOUT');
+  await delay(30);
+  assert.equal(jsonSettled, false, 'runJsonCommand timeout must wait for the child exit fence');
+  jsonChild.exitCode = 0;
+  jsonChild.emit('exit', 0, null);
+  await timedJsonRejection;
+
+  let expiredSpawned = false;
+  const expiredRunner = createJsonCommandRunner({ spawnJob: () => { expiredSpawned = true; return jsonChild; } });
+  await assert.rejects(expiredRunner({ command: 'python', args: [] }, 'expired-json', 1000, undefined, undefined, Date.now() - 1), error => error.code === 'PROCESS_TIMEOUT');
+  assert.equal(expiredSpawned, false, 'expired JSON commands must not spawn a child');
+
+  await supervisor.stopAll();
   assert.deepStrictEqual(supervisor.list(), []);
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
   assert.match(mainSource, /processId:\s*'python:workspace-catalog'/);

@@ -29,18 +29,22 @@ class CoordinatedDatabaseClient {
     this.waitForRetry = waitForRetry;
   }
 
-  async call(root, action, payload, { timeoutMs, signal, label } = {}) {
+  async call(root, action, payload, { timeoutMs, signal, label, deadlineAt: requestedDeadlineAt } = {}) {
     const database = this.getDatabasePath(root);
     const policy = this.operationPolicy.classify({ root, database, action, payload, scriptName: this.scriptName });
-    const deadlineAt = Number.isFinite(timeoutMs) ? Date.now() + timeoutMs : undefined;
+    const timeoutDeadline = Number.isFinite(timeoutMs) ? Date.now() + timeoutMs : undefined;
+    const deadlineAt = Number.isFinite(requestedDeadlineAt) && Number.isFinite(timeoutDeadline)
+      ? Math.min(requestedDeadlineAt, timeoutDeadline)
+      : Number.isFinite(requestedDeadlineAt) ? requestedDeadlineAt : timeoutDeadline;
     let attempt = 0;
     while (true) {
       try {
         // The lease exists only for this attempt. A rejected attempt unwinds
         // coordinator.run before backoff, so retries always rejoin the queue.
-        return await this.coordinator.run({ databases: policy.databases, signal, deadlineAt, label: label || action }, () => (
-          this.execute({ root, database, action, payload, timeoutMs, signal })
-        ));
+        return await this.coordinator.run({ databases: policy.databases, signal, deadlineAt, label: label || action }, () => {
+          const remainingMs = Number.isFinite(deadlineAt) ? Math.max(0, deadlineAt - Date.now()) : timeoutMs;
+          return this.execute({ root, database, databases: policy.databases, action, payload, timeoutMs: remainingMs, signal, deadlineAt });
+        });
       } catch (error) {
         if (!policy.idempotent || !SQLITE_RETRYABLE_CODES.has(error?.code) || attempt >= this.retryDelays.length) throw error;
         const delay = this.retryDelays[attempt] + Math.floor(Math.random() * 60);

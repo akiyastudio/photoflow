@@ -44,7 +44,31 @@ class WorkspaceSqliteCoordinator {
   constructor() {
     this.active = new Map();
     this.queue = [];
+    this.quarantined = new Map();
     this.sequence = 0;
+  }
+
+  quarantine(databases, cause) {
+    const error = cause instanceof Error ? cause : new Error(String(cause || '数据库已隔离'));
+    for (const database of normalizeRequest(databases)) {
+      this.quarantined.set(database.path, { error, at: Date.now() });
+    }
+    this.drain();
+  }
+
+  clearQuarantine(databases) {
+    for (const database of normalizeRequest(databases)) this.quarantined.delete(database.path);
+    this.drain();
+  }
+
+  quarantineError(entry) {
+    const blocked = entry.databases.find(database => database.mode !== 'read' && this.quarantined.has(database.path));
+    if (!blocked) return null;
+    const cause = this.quarantined.get(blocked.path)?.error;
+    const error = new Error(`数据库已隔离，拒绝新的写入：${blocked.path}${cause?.message ? `（${cause.message}）` : ''}`);
+    error.code = 'DATABASE_QUARANTINED';
+    error.cause = cause;
+    return error;
   }
 
   run({ databases, signal, deadlineAt, label = '' } = {}, worker) {
@@ -52,6 +76,8 @@ class WorkspaceSqliteCoordinator {
     let normalized;
     try { normalized = normalizeRequest(databases); } catch (error) { return Promise.reject(error); }
     if (!normalized.length) return Promise.resolve().then(worker);
+    const quarantinedError = this.quarantineError({ databases: normalized });
+    if (quarantinedError) return Promise.reject(quarantinedError);
     if (signal?.aborted) return Promise.reject(abortError(signal.reason));
     if (Number.isFinite(deadlineAt) && deadlineAt <= Date.now()) return Promise.reject(timeoutError(label));
 
@@ -100,6 +126,15 @@ class WorkspaceSqliteCoordinator {
       granted = false;
       for (let index = 0; index < this.queue.length; index += 1) {
         const entry = this.queue[index];
+        const quarantinedError = this.quarantineError(entry);
+        if (quarantinedError) {
+          this.queue.splice(index, 1);
+          entry.settled = true;
+          this.cleanup(entry);
+          entry.reject(quarantinedError);
+          granted = true;
+          break;
+        }
         if (!this.canGrant(entry, index)) continue;
         this.queue.splice(index, 1);
         this.grant(entry);
@@ -135,7 +170,7 @@ class WorkspaceSqliteCoordinator {
     entry.signal?.removeEventListener?.('abort', entry.onAbort);
   }
 
-  status() { return { activeDatabases: this.active.size, waiting: this.queue.length }; }
+  status() { return { activeDatabases: this.active.size, waiting: this.queue.length, quarantinedDatabases: this.quarantined.size }; }
 }
 
 module.exports = { WorkspaceSqliteCoordinator, normalizeDatabasePath };

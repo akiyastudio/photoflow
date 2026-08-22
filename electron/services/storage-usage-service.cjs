@@ -28,7 +28,7 @@ const roleDetails = {
   backup: { label: '备份数据', priority: 5 },
 };
 
-const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspaceDatabasePath, getWorkspaceDataRoot, readSavedConfig, writeLog }) => {
+const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspaceDatabasePath, getWorkspaceDataRoot, readSavedConfig, resolveMediaCacheDirectory, writeLog }) => {
   const cachePath = path.join(app.getPath('userData'), 'storage-usage-cache.json');
   const invalidatingTaskTypes = new Set(['project-file-operation', 'project-archive', 'project-unarchive', 'workspace-backup', 'backup-cleanup', 'workspace-restore', 'project-restore', 'cache-cleanup', 'deleted-project-cleanup']);
   let invalidatedAt = 0;
@@ -69,7 +69,9 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
     if (archiveTarget) for (const id of workspaceIds) add('archive', path.join(archiveTarget, id));
     const backupTarget = String(config.backup?.targetPath || '').trim();
     if (backupTarget) add('backup', path.join(backupTarget, BACKUP_STORE_DIRECTORY));
-    const cacheRoot = String(config.mediaCache?.directory || '').trim() || path.join(app.getPath('userData'), 'media-cache');
+    const cacheRoot = typeof resolveMediaCacheDirectory === 'function'
+      ? resolveMediaCacheDirectory(config.mediaCache || {})
+      : String(config.mediaCache?.directory || '').trim() || path.join(app.getPath('userData'), 'media-cache');
     add('cache', cacheRoot);
     return sources.sort((left, right) => left.key.localeCompare(right.key));
   };

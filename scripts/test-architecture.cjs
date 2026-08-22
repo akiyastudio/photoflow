@@ -67,6 +67,7 @@ const workspaceDb = read('python/workspace_db.py');
 const thumbnailDb = read('python/thumbnail_db.py');
 const thumbnailPipeline = read('electron/thumbnail-pipeline.cjs');
 const thumbnailService = read('electron/services/thumbnail-service.cjs');
+const mediaCacheNamespace = read('electron/services/media-cache-namespace.cjs');
 const recycleBinFailure = read('src/utils/recycleBinFailure.ts');
 const recycleBinService = read('electron/services/recycle-bin-service.cjs');
 assert(main.includes("mainWindow.webContents.on('before-input-event'") && main.includes("input.key !== 'F11'") && main.includes('mainWindow.setFullScreen(!mainWindow.isFullScreen())'), 'F11 must toggle the main application window between fullscreen and its previous window state');
@@ -90,6 +91,10 @@ const selectionIpc = read('electron/modules/selection-ipc.cjs');
 const selectionService = read('electron/services/selection-service.cjs');
 const systemIpc = read('electron/modules/system-ipc.cjs');
 const backupService = read('electron/services/backup-service.cjs');
+const backupDb = read('python/backup_db.py');
+const domainRecovery = read('python/domain_recovery.py');
+const teamRetouchStorage = read('python/team_retouch_storage.py');
+const teamRetouchDb = read('python/team_retouch_db.py');
 const mediaRatingService = read('electron/services/media-rating-service.cjs');
 const mediaRatingIpc = read('electron/modules/media-rating-ipc.cjs');
 const imageThumbnailRuntime = read('electron/services/image-thumbnail-runtime.cjs');
@@ -181,6 +186,19 @@ assert(mediaIpc.includes('thumbnailService.evictCache({') && main.includes('awai
   && thumbnailDb.includes('def detach_cache_batch') && thumbnailDb.includes('def prune_missing_batch')
   && thumbnailDb.includes('def recover_cache_publications') && thumbnailDb.includes('thumbnails_cache_access')
   && !mediaIpc.includes('fs.promises.unlink(filePath)'), 'manual, dated, capacity, missing, and orphan cache eviction must use the indexed batch protocol');
+assert(thumbnailDb.includes('CREATE TABLE IF NOT EXISTS thumbnail_publish_receipts')
+  && thumbnailDb.includes('def resolve_thumbnail_publish') && thumbnailDb.includes('publish_id')
+  && thumbnailPipeline.includes('resolveThumbnailPublish(publishId, publishRequest)')
+  && thumbnailPipeline.includes("receipt?.state === 'NOT_FOUND' && publishRequest")
+  && !thumbnailPipeline.includes("outcome?.state === 'NOT_FOUND'")
+  && thumbnailPipeline.includes("outcome?.state === 'COMMITTED'")
+  && thumbnailPipeline.includes("error?.code === 'EPOCH_STALE'")
+  && thumbnailPipeline.includes("error.publishOutcome = 'unknown'"),
+'thumbnail publication commits must be token-idempotent and preserve finals while an ambiguous outcome is resolved');
+assert(thumbnailDb.includes('def begin_cache_maintenance')
+  && !thumbnailDb.includes('UPDATE thumbnails SET cache_epoch=?')
+  && !thumbnailDb.includes('thumbnails.cache_epoch=cache_control.cache_epoch'),
+'maintenance epochs must fence only uncommitted workers without rewriting or invalidating committed thumbnail rows');
 const nativeRecycleBinService = read('electron/native/RecycleBinService.cs');
 assert(recycleBinService.includes("['probe-many']") && nativeRecycleBinService.includes('ProbeMany(ReadValues(5000))'), 'deleted-project maintenance must batch recycle-bin probes into one native helper process');
 assert(systemIpc.includes('componentStatusCache.integrityTokens') && systemIpc.includes('seedIntegrityToken') && systemIpc.includes('lastDetailedAttemptAt') && systemIpc.includes('policy.shouldProbeRuntime') && systemIpc.includes('forceRuntimeProbe') && systemIpc.includes('componentStatusForceQueued ||= force'), 'component status refresh must reuse integrity metadata while runtime probes honor TTL, failure backoff, and queued manual refresh');
@@ -238,6 +256,16 @@ assert(classifyImport.includes('def save_staged_capture_times') && classifyImpor
 assert(!classifyImport.includes('--backup_path') && !classifyImport.includes('shutil.copytree(target_folder, backup_dst)'), 'retired whole-project import backup copies must not remain reachable');
 assert(systemIpc.includes('importStage: classifyStage') && app.includes("importStage === 'plan'") && (app.match(/runBackup\(config\.workspacePath, 'after-import'\)/g) || []).length === 1, 'only completed import execution tasks may trigger the single centralized post-import backup');
 assert(backupService.includes('previousByInput') && backupService.includes('canReuse') && backupService.includes('incremental: { reusedFiles, reusedBytes'), 'post-import backups must reuse unchanged content objects instead of retransferring the full workspace');
+assert(backupService.includes('withWorkspaceRecoveryLease') && backupService.includes('workspaceSqliteCoordinator.run({')
+  && backupService.includes("mode: 'exclusive'") && backupService.includes('runRecoveryPythonAction')
+  && backupService.includes('recoveryLeaseContext.getStore()') && main.includes('workspaceSqliteCoordinator, prepareDomainRecovery')
+  && ['workspaceDatabase', 'operationsDatabase', 'workspaceMaintenanceDatabase', 'mediaDatabase', 'mediaInteractionDatabase', 'teamRetouchDatabase', 'mediaScanDatabase', 'trackingScanDatabase'].every(name => main.includes(name)),
+'database restore/reset tools must run under one five-store exclusive lease after every related Python client is suspended');
+assert(backupDb.includes('.restore-project-') && backupDb.includes('PRAGMA quick_check') && backupDb.includes('os.replace(staged_target, destination)')
+  && domainRecovery.includes('.restore-project-') && domainRecovery.includes('staged_status = verify(staged)') && domainRecovery.includes('os.replace(staged, destination_path)')
+  && teamRetouchStorage.includes('.restore-project-') && teamRetouchStorage.includes('PRAGMA quick_check') && teamRetouchStorage.includes('os.replace(staged, destination_path)')
+  && teamRetouchDb.includes('restore_domain_workspace(args.source, args.destination'),
+'core, domain, and team restore paths must validate staging databases before atomic replacement');
 assert(workspaceIpc.includes('progressImportConflictCache') && workspaceIpc.includes('conflictCacheKey') && workspaceIpc.includes('cachedConflicts'), 'progress-import conflict decisions must reuse recent full-hash comparisons');
 assert(classifyImport.includes("destination = unique_broll_destination(broll_folder, os.path.basename(source), will_split)") && !classifyImport.includes("date_folder = os.path.join(broll_folder, date_name)"), 'SD-card and project B-roll imports must both place files directly in the project B-roll folder');
 assert(classifyImport.includes('def _image_capture_timestamp(file_path)') && classifyImport.includes('def _video_capture_timestamp(file_path)') && classifyImport.includes('Prefer the media capture time; use filesystem mtime only as a fallback'), 'SD-card project routing must prefer embedded image and video capture timestamps over filesystem modification time');
@@ -458,7 +486,7 @@ assert(toolViews.includes('onScreenshotMainImageProgress') && toolViews.includes
 assert(toolViews.includes("projectFileOperation(workspacePath, projectStatus, projectName, 'trash', croppedRelativePaths)"), 'successful screenshot crops must recycle their originals by default through the recoverable project-file operation');
 assert(toolViews.includes('if (croppedRelativePaths.length) await onFilesChanged?.()') && projectWorkspace.includes('directoryEntriesCacheRef.current.clear()') && projectWorkspace.includes('refreshRecursiveResults(screenshotMainImageTargets.map') && projectWorkspace.includes('await refresh(currentRelativePathRef.current)'), 'screenshot main-image completion must immediately refresh the active file list and affected recursive result groups');
 assert(workspaceIpc.includes('thumbnailService.syncChangedPaths(item.root, [item.path]') && workspaceIpc.includes("root: workspaceRoot, fileName: path.relative(workspaceRoot, projectRoot), eventType: 'rename'"), 'screenshot main-image output must queue fresh thumbnails against each validated local or external media root and publish a workspace-root-relative file change');
-assert(workspaceIpc.includes("workspace-screenshot-main-image-progress") && main.includes('const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, onMessage)'), 'screenshot main-image extraction must stream per-image progress from the Python JSON protocol');
+assert(workspaceIpc.includes("workspace-screenshot-main-image-progress") && main.includes('const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, onMessage, signal, deadlineAt)'), 'screenshot main-image extraction must stream per-image progress from the Python JSON protocol');
 assert(inspirationTools.includes('"screenshot_main_image": "screenshot_main_image"') && pythonBuild.includes("'--hidden-import', 'screenshot_main_image'"), 'screenshot main-image extraction must be bundled in the core inspiration-tools runtime');
 for (const code of ['RECYCLE_BIN_FAILED', 'RECYCLE_UNAVAILABLE', 'RECYCLE_SERVICE_MISSING', 'EPERM', 'EACCES', 'EBUSY']) {
   assert(recycleBinFailure.includes(`'${code}'`), `recycle-bin failure dialog must recognize ${code}`);
@@ -636,10 +664,40 @@ assert(versionTreeCanvas.includes('mergedAfterConflict') && versionTreeCanvas.in
 const versionManagerSource = read('src/components/VersionManager.tsx');
 assert(versionManagerSource.includes('const pageGenerationRef = useRef(0)') && versionManagerSource.includes('pageIdentityRef.current !== pageIdentityKey') && versionManagerSource.includes('selectBranchPhoto(photo.photoId)') && (versionManagerSource.match(/pageGenerationIsCurrent\(pageGeneration\)/g) || []).length >= 12, 'version mutations must be isolated from entry and branch-photo generation changes');
 assert(thumbnailPipeline.includes('Directory indexing is metadata-only') && !thumbnailPipeline.includes('pending.push(entry)') && !thumbnailPipeline.includes("state: 'QUEUED' }, 10 * 60 * 1000"), 'directory browsing must not invisibly warm every uncached media thumbnail');
-assert(main.includes('app.requestSingleInstanceLock()') && main.includes('thumbnailService.recoverCache(startupMediaCacheConfig)')
-  && main.indexOf('thumbnailService.recoverCache(startupMediaCacheConfig)') < main.lastIndexOf('loadMainWindowRenderer()'), 'startup cache recovery must be single-instance and reserve maintenance before renderer media requests start');
-assert(thumbnailService.includes("type: 'thumbnail-cache-recovery'") && thumbnailService.includes('maintenanceKey')
+assert(main.includes('app.requestSingleInstanceLock()') && main.includes('thumbnailService.ensureStartupRecovery(startupMediaCacheConfig)')
+  && main.includes('await startupRecovery.admitted')
+  && main.indexOf('approvedMediaCacheDirectories.add(path.resolve(savedCacheDirectory))') < main.indexOf('thumbnailService.activateStartupRecovery()')
+  && main.indexOf('await startupRecovery.admitted') < main.lastIndexOf('loadMainWindowRenderer()'), 'startup cache recovery must be single-instance and await maintenance admission before renderer media requests start');
+assert(thumbnailService.includes("const RECOVERY_TYPE = 'thumbnail-cache-recovery'") && thumbnailService.includes('maintenanceKey')
+  && thumbnailService.includes("resumePolicy: 'safe-restart'") && thumbnailService.includes('ensureStartupRecovery')
+  && thumbnailService.includes("MIGRATION_VERSION = 'thumbnail-cache-migration-v2'")
+  && thumbnailService.includes("RECONCILIATION_VERSION = 'thumbnail-reconcile-publications-v1'")
+  && thumbnailDb.includes('def run_thumbnail_cache_migration')
+  && thumbnailDb.includes('PRAGMA user_version')
+  && thumbnailDb.includes('"type": "ready"')
+  && thumbnailPipeline.includes("response.type === 'ready'")
+  && thumbnailPipeline.includes('migrationCursor = migration.cursor')
+  && main.includes('const resolveMediaCacheDir') && thumbnailPipeline.includes('ensureCacheDirectory')
   && thumbnailPipeline.includes('isSafeManagedCachePath') && thumbnailDb.includes('def maintenance_state_complete'), 'startup recovery must be versioned, retryable, and guarded by strict cache-path ownership checks');
+assert(mediaCacheNamespace.includes("'.photoflow-cache', installationId.toLocaleLowerCase()")
+  && mediaCacheNamespace.includes('loadOrCreateInstallationId')
+  && main.includes('configuredDirectory: config.directory')
+  && storageUsageService.includes('resolveMediaCacheDirectory(config.mediaCache || {})'),
+'custom media caches must isolate every installation beneath its own persistent namespace');
+assert(thumbnailDb.includes('generation: str = ""') && thumbnailDb.includes('generation_max_row_id: int = 0')
+  && thumbnailDb.includes('after_row_id: int = 0') && thumbnailDb.includes('inspect_limit: int = 2048')
+  && thumbnailDb.includes('delete_limit: int = 512') && thumbnailDb.includes('directory_cursor: dict | None = None')
+  && thumbnailDb.includes('thumbnail_path IN (') && thumbnailDb.includes('def maintenance_state_save')
+  && thumbnailPipeline.includes('generation_max_row_id: Number(recoveryCursor.generationMaxRowId)')
+  && thumbnailPipeline.includes('after_row_id: Number(recoveryCursor.afterRowId)')
+  && thumbnailService.includes('previousCursor.generation && !Number(previousCursor.lastCompletedAt)')
+  && thumbnailService.includes('generationMaxRowId: 0, afterRowId: 0, lastCompletedAt: 0')
+  && thumbnailDb.includes('thumbnail_orphan_delete_retries')
+  && thumbnailDb.includes('thumbnail_orphan_scan_entries')
+  && thumbnailPipeline.includes("record_orphan_delete_failures")
+  && !thumbnailPipeline.includes('exclude_paths: [...attempted].slice(-512)')
+  && !thumbnailDb.includes('SELECT thumbnail_path FROM thumbnails WHERE cache_root=?'),
+'startup thumbnail recovery must page database rows and directories from a persisted cursor without rebuilding the full indexed-path set');
 assert(!systemIpc.includes('activeClassifyWrite') && systemIpc.includes("const tracksImportTask = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage)") && systemIpc.includes("const writesImportFiles = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage)") && systemIpc.includes('resources: [...(writesImportFiles ? importTargets : []), ...sourcePaths].filter(Boolean)'), 'SD-card planning and its safety staging writes must retain the shared resource-aware project lock');
 assert(systemIpc.includes('PYTHON_BACKGROUND_TASK_PROFILES') && systemIpc.includes("'png_to_jpg.py'") && systemIpc.includes("'research.py'") && systemIpc.includes("'ffmpeg_transcode.py'") && systemIpc.includes("'cut_video.py'") && systemIpc.includes('presentationOwnerPageId') && systemIpc.includes('presentationPanelKind') && systemIpc.includes('pythonToolResourcePaths(scriptName, args, path)') && systemIpc.includes("resumePolicy: 'atomic'"), 'shared Python tools must register real path-aware background tasks with restorable panel ownership and honest interruption policy');
 assert(toolViews.includes("['--import_session', currentImportSessionRef.current || importRequestIdRef.current]") && toolViews.includes("'--dest_path', resolvedDestinationPath") && classifyImport.includes('load_staged_import(dest_path, import_session)'), 'project routing must copy into a per-card resumable safety area and reuse its manifest before classifying local files');
