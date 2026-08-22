@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -15,6 +16,7 @@ import uuid
 from pathlib import Path
 
 try:
+    from database_error_codes import error_response
     from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
     from team_retouch_storage import attach_and_migrate as attach_team_retouch_storage
     from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage
@@ -23,6 +25,7 @@ except ModuleNotFoundError:
     # Some regression tests load this file directly through importlib instead
     # of importing it from the Python source directory.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from database_error_codes import error_response
     from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
     from team_retouch_storage import attach_and_migrate as attach_team_retouch_storage
     from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage
@@ -2174,7 +2177,200 @@ def mark_missing_project_versions(db, project_id: str):
         )
 
 
-def media_sync_project(root: str, db, payload: dict):
+def _validated_media_scan_roots(root: str, project, external_roots) -> list[tuple[str, str]]:
+    project_path = os.path.join(os.path.abspath(root), project["relative_path"])
+    if not isinstance(external_roots, list) or len(external_roots) > 2048:
+        raise ValueError("external_media_roots_invalid: 外链媒体根目录无效")
+    scan_roots = [(canonical_path(project_path), "folder")]
+    for item in external_roots:
+        if not isinstance(item, dict):
+            raise ValueError("external_media_root_invalid: 外链媒体根目录无效")
+        raw_candidate = str(item.get("path") or "").strip()
+        candidate = canonical_path(raw_candidate) if raw_candidate else ""
+        kind = str(item.get("kind") or "")
+        if not candidate or not os.path.isabs(candidate) or kind not in ("folder", "file"):
+            raise ValueError("external_media_root_invalid: 外链媒体根目录无效")
+        if kind == "folder" and os.path.isdir(candidate) or kind == "file" and os.path.isfile(candidate):
+            scan_roots.append((candidate, kind))
+    deduplicated = []
+    seen = set()
+    for candidate, kind in scan_roots:
+        key = canonical_path(candidate).casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduplicated.append((candidate, kind))
+    return deduplicated
+
+
+def _media_path_is_authorized(file_path: str, scan_roots: list[tuple[str, str]]) -> bool:
+    candidate = canonical_path(os.path.realpath(file_path))
+    for scan_root, scan_kind in scan_roots:
+        authorized = canonical_path(os.path.realpath(scan_root))
+        if scan_kind == "file" and candidate.casefold() == authorized.casefold():
+            return True
+        if scan_kind == "folder" and is_project_descendant(candidate, authorized):
+            return True
+    return False
+
+
+def media_sync_prepare(root: str, db, payload: dict):
+    """Build an immutable filesystem enumeration while holding only a read lease."""
+    project = project_row(db, payload["projectName"])
+    if "availability" in project.keys() and project["availability"] == "missing":
+        return {"success": True, "count": 0, "files": [], "baselineVersions": [],
+                "authorizedRoots": [], "thumbnailCandidates": [], "projectUnavailable": True}
+    scan_roots = _validated_media_scan_roots(root, project, payload.get("externalRoots") or [])
+    files = []
+    seen_paths = set()
+
+    def snapshot_file(file_path: str):
+        path_key = canonical_path(file_path).casefold()
+        if path_key in seen_paths or not media_type(file_path):
+            return
+        try:
+            stat = os.stat(file_path)
+        except (FileNotFoundError, PermissionError, OSError):
+            return
+        if not os.path.isfile(file_path):
+            return
+        seen_paths.add(path_key)
+        files.append({
+            "filePath": canonical_path(file_path),
+            "fileSize": int(stat.st_size),
+            "modifiedAt": int(stat.st_mtime_ns / 1_000_000),
+        })
+
+    for scan_root, scan_kind in scan_roots:
+        if scan_kind == "file":
+            snapshot_file(scan_root)
+            continue
+        real_scan_root = os.path.realpath(scan_root)
+
+        def inside_scan_root(candidate):
+            try:
+                return os.path.commonpath((os.path.realpath(candidate), real_scan_root)).casefold() == real_scan_root.casefold()
+            except ValueError:
+                return False
+
+        for directory, directory_names, file_names in os.walk(scan_root):
+            directory_names[:] = [name for name in directory_names if inside_scan_root(os.path.join(directory, name))]
+            if not inside_scan_root(directory):
+                continue
+            for name in file_names:
+                snapshot_file(os.path.join(directory, name))
+
+    baseline = db.execute(
+        """SELECT versions.id,versions.updated_at FROM versions
+           JOIN photos ON photos.id=versions.photo_id
+           WHERE photos.project_id=? AND versions.is_deleted=0""",
+        (project["id"],),
+    ).fetchall()
+    return {
+        "success": True,
+        "projectName": project["name"],
+        "snapshotId": str(uuid.uuid4()),
+        "files": files,
+        "baselineVersions": [{"id": row["id"], "updatedAt": int(row["updated_at"])} for row in baseline],
+        "authorizedRoots": [{"path": candidate, "kind": kind} for candidate, kind in scan_roots],
+    }
+
+
+def _media_sync_marker(snapshot_id: str, suffix: str) -> str:
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", snapshot_id):
+        raise ValueError("media_sync_snapshot_invalid: 扫描快照无效")
+    return f"media_sync:{snapshot_id}:{suffix}"
+
+
+def media_sync_apply_batch(root: str, db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    snapshot_id = str(payload.get("snapshotId") or "")
+    batch_index = int(payload.get("batchIndex") or 0)
+    if batch_index < 0:
+        raise ValueError("media_sync_batch_invalid: 扫描批次无效")
+    marker = _media_sync_marker(snapshot_id, f"batch:{batch_index}")
+    cached = _meta_value(db, marker)
+    if cached:
+        return json.loads(cached)
+    files = payload.get("files") or []
+    if not isinstance(files, list) or len(files) > 256:
+        raise ValueError("media_sync_batch_invalid: 扫描批次过大")
+    roots = _validated_media_scan_roots(root, project, payload.get("authorizedRoots") or [])
+    count = 0
+    pending_hashes = []
+    for entry in files:
+        file_path = canonical_path(str((entry or {}).get("filePath") or ""))
+        if not file_path or not _media_path_is_authorized(file_path, roots):
+            raise ValueError("media_sync_file_outside_snapshot: 扫描文件超出授权范围")
+        try:
+            if sync_media_file(db, project, file_path, pending_hashes):
+                count += 1
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+    result = {"success": True, "snapshotId": snapshot_id, "batchIndex": batch_index, "count": count}
+    _set_meta(db, marker, json.dumps(result, ensure_ascii=False))
+    db.commit()
+    # Full-file hashing is deliberately not performed under this writer lease.
+    # A later fingerprint-maintenance pass can fill the optional hashes.
+    return result
+
+
+def media_sync_finalize(root: str, db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    snapshot_id = str(payload.get("snapshotId") or "")
+    marker = _media_sync_marker(snapshot_id, "finalize")
+    cached = _meta_value(db, marker)
+    if cached:
+        return json.loads(cached)
+    files = payload.get("files") or []
+    baseline_versions = payload.get("baselineVersions") or []
+    if not isinstance(files, list) or len(files) > 1_000_000 or not isinstance(baseline_versions, list) or len(baseline_versions) > 1_000_000:
+        raise ValueError("media_sync_snapshot_invalid: 扫描快照过大")
+    roots = _validated_media_scan_roots(root, project, payload.get("authorizedRoots") or [])
+    seen_paths = {canonical_path(str((entry or {}).get("filePath") or "")).casefold() for entry in files}
+    baseline = {str((entry or {}).get("id") or ""): int((entry or {}).get("updatedAt") or 0) for entry in baseline_versions}
+    timestamp = int(time.time() * 1000)
+    version_rows = db.execute(
+        """SELECT versions.id,versions.updated_at,versions.file_path,versions.file_path_key
+           FROM versions JOIN photos ON photos.id=versions.photo_id
+           WHERE photos.project_id=? AND versions.is_deleted=0""",
+        (project["id"],),
+    ).fetchall()
+    missing_count = 0
+    for row in version_rows:
+        # New or interactively changed rows have a different per-row revision;
+        # an old filesystem snapshot must never mark them missing.
+        if row["id"] not in baseline or int(row["updated_at"]) != baseline[row["id"]]:
+            continue
+        if row["file_path_key"] in seen_paths:
+            continue
+        if os.path.isfile(row["file_path"]) and _media_path_is_authorized(row["file_path"], roots):
+            continue
+        db.execute("UPDATE versions SET file_missing=1,updated_at=? WHERE id=? AND updated_at=?", (timestamp, row["id"], row["updated_at"]))
+        db.execute("UPDATE file_records SET missing=1,updated_at=? WHERE owner_type='version' AND owner_id=?", (timestamp, row["id"]))
+        missing_count += 1
+    thumbnail_rows = db.execute(
+        """SELECT versions.id AS version_id,versions.photo_id,versions.file_path,versions.thumbnail_path
+           FROM versions JOIN photos ON photos.id=versions.photo_id
+           WHERE photos.project_id=? AND versions.is_deleted=0 AND versions.file_missing=0""",
+        (project["id"],),
+    ).fetchall()
+    result = {
+        "success": True,
+        "snapshotId": snapshot_id,
+        "missingCount": missing_count,
+        "thumbnailCandidates": [
+            {"versionId": row["version_id"], "photoId": row["photo_id"], "filePath": row["file_path"]}
+            for row in thumbnail_rows if not row["thumbnail_path"] or not os.path.isfile(row["thumbnail_path"])
+        ],
+    }
+    db.execute("DELETE FROM meta WHERE key LIKE ?", (f"media_sync:{snapshot_id}:batch:%",))
+    _set_meta(db, marker, json.dumps(result, ensure_ascii=False))
+    db.commit()
+    return result
+
+
+def _legacy_media_sync_project(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     if "availability" in project.keys() and project["availability"] == "missing":
         return {"success": True, "count": 0, "thumbnailCandidates": [], "projectUnavailable": True}
@@ -2276,6 +2472,35 @@ def media_sync_project(root: str, db, payload: dict):
         if not row["thumbnail_path"] or not os.path.isfile(row["thumbnail_path"])
     ]
     return {"success": True, "count": created_or_updated, "thumbnailCandidates": thumbnail_candidates}
+
+
+# Direct Python callers retain this helper, but it now has the same transaction
+# boundaries as Electron's split protocol.
+def media_sync_project(root: str, db, payload: dict):
+    prepared = media_sync_prepare(root, db, payload)
+    if prepared.get("projectUnavailable"):
+        return prepared
+    count = 0
+    batch_size = 64
+    for offset in range(0, len(prepared["files"]), batch_size):
+        batch_index = offset // batch_size
+        applied = media_sync_apply_batch(root, db, {
+            "projectName": payload["projectName"],
+            "snapshotId": prepared["snapshotId"],
+            "batchIndex": batch_index,
+            "authorizedRoots": prepared["authorizedRoots"],
+            "files": prepared["files"][offset:offset + batch_size],
+        })
+        count += int(applied.get("count") or 0)
+    finalized = media_sync_finalize(root, db, {
+        "projectName": payload["projectName"],
+        "snapshotId": prepared["snapshotId"],
+        "authorizedRoots": prepared["authorizedRoots"],
+        "files": prepared["files"],
+        "baselineVersions": prepared["baselineVersions"],
+    })
+    finalized["count"] = count
+    return finalized
 
 
 def media_get(root: str, db, payload: dict):
@@ -5107,9 +5332,18 @@ def cleanup_tracking_sessions(db, cutoff: int | None = None):
     return {"releasedSessionIds": released, "releasedCount": len(released)}
 
 
-def progress_detect_stale(root: str, db, payload: dict):
+def _progress_stale_revision(rows) -> str:
+    state = [
+        [row["id"], int(row["updated_at"]), row["tracking_state"], row["tracking_snapshot_json"],
+         row["folder_path_key"], row["missing_since"], row["parent_progress_id"]]
+        for row in sorted(rows, key=lambda value: value["id"])
+    ]
+    return hashlib.sha256(json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def progress_stale_prepare(root: str, db, payload: dict):
+    """Compare filesystem snapshots without taking a writer lease."""
     project = project_row(db, payload["projectName"])
-    sync_progress_folder_locations(root, db, project)
     project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
     raw_changed_paths = payload.get("changedPaths") or []
     if not isinstance(raw_changed_paths, list) or len(raw_changed_paths) > 10_000:
@@ -5147,7 +5381,6 @@ def progress_detect_stale(root: str, db, payload: dict):
     stale_ids = set()
     propagated_ids = set()
     scanned_ids = set()
-    timestamp = int(time.time() * 1000)
     for node in rows:
         if (node["node_role"] != "progress" or node["relation_kind"] != "main"
                 or not node["tracking_enabled"] or node["tracking_state"] != "ready"
@@ -5174,20 +5407,83 @@ def progress_detect_stale(root: str, db, payload: dict):
         if current_parent is not None and any(name not in previous_parent for name in current_parent):
             stale_ids.add(child["id"])
             propagated_ids.add(child["id"])
-    if stale_ids:
-        placeholders = ",".join("?" for _ in stale_ids)
-        db.execute(
-            f"UPDATE progress_folders SET tracking_state='stale',updated_at=? WHERE id IN ({placeholders}) AND tracking_state='ready'",
-            (timestamp, *sorted(stale_ids)),
-        )
-        db.commit()
     return {
         "success": True,
         "projectName": project["name"],
+        "snapshotId": str(uuid.uuid4()),
+        "revision": _progress_stale_revision(rows),
+        "candidates": [
+            {"id": row["id"], "expectedUpdatedAt": int(row["updated_at"]), "expectedState": row["tracking_state"]}
+            for row in rows if row["id"] in stale_ids
+        ],
         "scannedProgressIds": sorted(scanned_ids),
         "staleProgressIds": sorted(stale_ids),
         "propagatedProgressIds": sorted(propagated_ids),
     }
+
+
+def progress_stale_apply(root: str, db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    snapshot_id = str(payload.get("snapshotId") or "")
+    marker = _media_sync_marker(snapshot_id, "progress-stale")
+    cached = _meta_value(db, marker)
+    if cached:
+        return json.loads(cached)
+    current_rows = progress_rows(db, project["id"])
+    if str(payload.get("revision") or "") != _progress_stale_revision(current_rows):
+        return {"success": True, "snapshotId": snapshot_id, "revisionExpired": True}
+    candidates = payload.get("candidates") or []
+    if not isinstance(candidates, list) or len(candidates) > 10_000:
+        raise ValueError("progress_stale_candidates_invalid: 陈旧状态候选无效")
+    normalized = []
+    for candidate in candidates:
+        progress_id = str((candidate or {}).get("id") or "")
+        expected_updated_at = int((candidate or {}).get("expectedUpdatedAt") or 0)
+        expected_state = str((candidate or {}).get("expectedState") or "")
+        row = db.execute(
+            "SELECT updated_at,tracking_state FROM progress_folders WHERE id=? AND project_id=?",
+            (progress_id, project["id"]),
+        ).fetchone()
+        if row is None or int(row["updated_at"]) != expected_updated_at or row["tracking_state"] != expected_state:
+            return {"success": True, "snapshotId": snapshot_id, "revisionExpired": True}
+        normalized.append((progress_id, expected_updated_at))
+    timestamp = int(time.time() * 1000)
+    for progress_id, expected_updated_at in normalized:
+        updated = db.execute(
+            """UPDATE progress_folders SET tracking_state='stale',updated_at=?
+               WHERE id=? AND project_id=? AND tracking_state='ready' AND updated_at=?""",
+            (timestamp, progress_id, project["id"], expected_updated_at),
+        ).rowcount
+        if updated != 1:
+            db.rollback()
+            return {"success": True, "snapshotId": snapshot_id, "revisionExpired": True}
+    result = {
+        "success": True,
+        "projectName": project["name"],
+        "snapshotId": snapshot_id,
+        "revisionExpired": False,
+        "scannedProgressIds": sorted({str(value) for value in payload.get("scannedProgressIds") or []}),
+        "staleProgressIds": sorted(progress_id for progress_id, _revision in normalized),
+        "propagatedProgressIds": sorted({str(value) for value in payload.get("propagatedProgressIds") or []}),
+    }
+    _set_meta(db, marker, json.dumps(result, ensure_ascii=False))
+    db.commit()
+    return result
+
+
+def progress_detect_stale(root: str, db, payload: dict):
+    """Compatibility helper for direct Python callers; the server uses split actions."""
+    prepared = progress_stale_prepare(root, db, payload)
+    if not prepared["candidates"]:
+        return prepared
+    return progress_stale_apply(root, db, {
+        "projectName": payload["projectName"],
+        "snapshotId": prepared["snapshotId"],
+        "revision": prepared["revision"],
+        "candidates": prepared["candidates"],
+        "scannedProgressIds": prepared["scannedProgressIds"],
+        "propagatedProgressIds": prepared["propagatedProgressIds"],
+    })
 
 
 def tracking_session_decide(root: str, db, payload: dict):
@@ -8164,8 +8460,16 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = missing_projects_list(db, payload)
         db.close()
         return result
-    elif action == "media_sync_project":
-        result = media_sync_project(root, db, payload)
+    elif action == "media_sync_prepare":
+        result = media_sync_prepare(root, db, payload)
+        db.close()
+        return result
+    elif action == "media_sync_apply_batch":
+        result = media_sync_apply_batch(root, db, payload)
+        db.close()
+        return result
+    elif action == "media_sync_finalize":
+        result = media_sync_finalize(root, db, payload)
         db.close()
         return result
     elif action == "media_get":
@@ -8280,8 +8584,12 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = progress_copy_missing_children(db, payload)
         db.close()
         return result
-    elif action == "progress_detect_stale":
-        result = progress_detect_stale(root, db, payload)
+    elif action == "progress_stale_prepare":
+        result = progress_stale_prepare(root, db, payload)
+        db.close()
+        return result
+    elif action == "progress_stale_apply":
+        result = progress_stale_apply(root, db, payload)
         db.close()
         return result
     elif action == "tracking_session_create":
@@ -8520,7 +8828,7 @@ def run_server():
             result = load(root, database) if action == "init" else mutate(root, database, action, payload)
             response = {"id": request_id, "success": True, "result": result}
         except Exception as error:
-            response = {"id": request_id, "success": False, "error": str(error)}
+            response = error_response(request_id, error)
         print(json.dumps(response, ensure_ascii=False), flush=True)
 
 

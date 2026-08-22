@@ -5,10 +5,12 @@ import { ProgressBar } from '../../components/ProgressBar';
 import type { BackgroundTask } from '../../types';
 import { useTaskCenter } from './TaskCenter';
 import { panelTaskRestoreDetail } from './panel-task-session-model';
-import { isPointerInsideTaskIndicator } from './task-toast-model';
+import { collapseRetryPredecessors, isPointerInsideTaskIndicator } from './task-toast-model';
 
-const isVisible = (task: BackgroundTask) => task.state === 'queued' || task.state === 'running' || task.state === 'pausing' || task.state === 'resuming' || task.state === 'paused' || task.state === 'interrupted' || task.state === 'failed'
-  || (task.type === 'version-tracking' && (task.state === 'completed' || task.state === 'cancelled'));
+const isVisible = (task: BackgroundTask) => task.notificationPolicy !== 'silent' && (
+  task.state === 'queued' || task.state === 'running' || task.state === 'pausing' || task.state === 'resuming' || task.state === 'paused' || task.state === 'interrupted' || task.state === 'failed'
+  || (task.type === 'version-tracking' && (task.state === 'completed' || task.state === 'cancelled'))
+);
 const formatBytes = (value: number) => value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(1)} GB` : value >= 1024 ** 2 ? `${(value / 1024 ** 2).toFixed(1)} MB` : `${Math.round(value / 1024)} KB`;
 const taskSummary = (task: BackgroundTask) => {
   const metadata = task.metadata || {};
@@ -23,7 +25,7 @@ const taskSummary = (task: BackgroundTask) => {
 };
 
 export const BackgroundTaskIndicator = ({ ownerPageIds }: { ownerPageIds: ReadonlySet<string> }) => {
-  const { backgroundTasks: tasks, panelTasks, dismissPanelTask, dismissBackgroundTask, isTaskToastMinimized, restoreTaskToast } = useTaskCenter();
+  const { backgroundTasks: tasks, panelTasks, dismissPanelTask, dismissBackgroundTask, retryBackgroundTask, isTaskToastMinimized, restoreTaskToast } = useTaskCenter();
   const [open, setOpen] = useState(false);
   const [panelPosition, setPanelPosition] = useState({ top: 44, right: 8 });
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -55,11 +57,12 @@ export const BackgroundTaskIndicator = ({ ownerPageIds }: { ownerPageIds: Readon
     return () => document.removeEventListener('pointerdown', handlePointerDown);
   }, [open]);
 
-  const visibleTasks = useMemo(() => tasks.filter(task => isVisible(task) || (
+  const presentedTasks = useMemo(() => collapseRetryPredecessors(tasks), [tasks]);
+  const visibleTasks = useMemo(() => presentedTasks.filter(task => isVisible(task) || (
     task.type === 'python-tool'
     && task.state === 'completed'
     && ownerPageIds.has(String(task.metadata?.presentationOwnerPageId || ''))
-  )), [ownerPageIds, tasks]);
+  )), [ownerPageIds, presentedTasks]);
   const visiblePanelTasks = useMemo(() => Object.values(panelTasks).filter(task => task.state !== 'idle' && ownerPageIds.has(task.ownerPageId)).sort((left, right) => right.updatedAt - left.updatedAt), [ownerPageIds, panelTasks]);
   const runningCount = visibleTasks.filter(task => task.state === 'queued' || task.state === 'running' || task.state === 'resuming').length + visiblePanelTasks.filter(task => task.state === 'running').length;
   const failedCount = visibleTasks.filter(task => task.state === 'failed').length + visiblePanelTasks.filter(task => task.state === 'failed').length;
@@ -130,8 +133,9 @@ export const BackgroundTaskIndicator = ({ ownerPageIds }: { ownerPageIds: Readon
             {(task.state === 'paused' || task.state === 'pausing') && task.capabilities.pausable && <button type="button" onClick={() => void continueTask(task)} className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-blue-600 hover:bg-blue-50"><Play size={11}/>继续</button>}
             {task.type === 'version-tracking' && (task.state === 'completed' || task.state === 'failed') && <button type="button" onClick={() => openTrackingConfirmation(task)} className="rounded px-2 py-1 text-[11px] text-blue-600 hover:bg-blue-50">{task.state === 'failed' ? '恢复确认面板' : '打开确认面板'}</button>}
             {(task.state === 'queued' || task.state === 'running') && isTaskToastMinimized(task.id) && <button type="button" onClick={() => showTaskProgress(task)} className="rounded px-2 py-1 text-[11px] text-blue-600 hover:bg-blue-50">显示进度</button>}
-            {task.state === 'failed' && task.retryable && <button type="button" onClick={() => void window.electronAPI.retryBackgroundTask(task.id)} className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-blue-600 hover:bg-blue-50"><RotateCcw size={11}/>重试</button>}
-            {task.state === 'failed' && <button type="button" onClick={() => void dismissBackgroundTask(task.id)} className="rounded px-2 py-1 text-[11px] text-slate-500 hover:bg-slate-100">清除</button>}
+            {task.state === 'failed' && task.retryPending && <span className="mr-auto self-center text-[10px] text-blue-600">重试中…</span>}
+            {task.state === 'failed' && !task.retryPending && task.retryable && <button type="button" onClick={() => void retryBackgroundTask(task.id)} className="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-blue-600 hover:bg-blue-50"><RotateCcw size={11}/>重试</button>}
+            {task.state === 'failed' && !task.retryPending && <button type="button" onClick={() => void dismissBackgroundTask(task.id)} className="rounded px-2 py-1 text-[11px] text-slate-500 hover:bg-slate-100">清除</button>}
             {(task.state === 'completed' || task.state === 'cancelled' || task.state === 'interrupted') && <button type="button" onClick={() => void dismissBackgroundTask(task.id)} className="rounded px-2 py-1 text-[11px] text-slate-500 hover:bg-slate-100">清除</button>}
             {(task.state === 'queued' || task.state === 'running' || task.state === 'pausing' || task.state === 'paused' || task.state === 'resuming') && task.cancellable && <button type="button" onClick={() => void cancelTask(task)} className="rounded px-2 py-1 text-[11px] text-red-600 hover:bg-red-50">取消</button>}
           </div>

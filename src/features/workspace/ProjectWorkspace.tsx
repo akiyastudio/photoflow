@@ -1517,20 +1517,22 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   }, [active, progressFolders, workspacePath, project.name]);
   useEffect(() => {
     if (!active) return;
-    return projectWorkspaceClient.onBackgroundTaskChanged(task => {
-      if (task.type !== 'version-tracking') return;
+    return projectWorkspaceClient.onBackgroundTaskChanged(delta => {
+      for (const task of delta.upserts) {
+      if (task.type !== 'version-tracking') continue;
       const progressId = typeof task.metadata.progressId === 'string' ? task.metadata.progressId : '';
       const progress = progressFoldersRef.current.find(folder => folder.id === progressId);
       if (!progressId || !progress?.trackingEnabled) {
-        if (task.state === 'completed' || task.state === 'cancelled' || task.state === 'failed') void dismissBackgroundTask(task.id);
-        return;
+        if (!task.retryPending && (task.state === 'completed' || task.state === 'cancelled' || task.state === 'failed')) void dismissBackgroundTask(task.id);
+        continue;
       }
-      if (task.state !== 'completed') return;
+      if (task.state !== 'completed') continue;
       const sessionId = typeof task.metadata.sessionId === 'string' ? task.metadata.sessionId : '';
-      if (!sessionId) return;
+      if (!sessionId) continue;
       window.localStorage.setItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${progressId}`, sessionId);
       setTrackingConfirmationProgressId(progressId);
       setTrackingConfirmationSessionId(sessionId);
+      }
     });
   }, [active, dismissBackgroundTask, project.name, workspacePath]);
   const loadFinalVersionSummary = useCallback(async () => {
@@ -4376,7 +4378,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const trimPreviewVideo = async (start: number, end: number, saveMode: 'new' | 'replace', operationId: string, sourceDuration: number) => {
     if (!previewEntry || previewEntry.kind !== 'video' || isUnsupportedShortcutContent(previewEntry)) return { success: false, error: '当前视频不可剪辑' };
     const sourceRelativePath = previewEntry.relativePath;
-    const result = await projectWorkspaceClient.trimProjectVideo(workspacePath, project.status, project.name, sourceRelativePath, { start, end, saveMode, operationId, sourceDuration });
+    const result = await projectWorkspaceClient.trimProjectVideo(workspacePath, project.status, project.name, sourceRelativePath, { start, end, saveMode, exportMode: videoTools.trim.exportMode, operationId, sourceDuration });
     if (!result.success) {
       if (result.cancelled) {
         onNotice('已取消视频导出');
@@ -5829,7 +5831,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       </section>
 
       </div>
-      {previewPaneOpen && active && activeView === 'project' && <><ColumnResizeHandle label="调整文件区和预览区宽度" onDrag={resizeFilesAndPreview}/><MediaPreviewPane entry={previewEntry} cacheConfig={mediaCacheConfig} width={displayedColumnWidths.preview} pinned={previewPanePinned} advancedVideoAvailable={installedComponentIds.has('video-playback-mpv')} keyboardSettings={advancedVideoSettings} photoshopAvailable={photoshopAvailable && (!previewEntry || !isUnsupportedShortcutContent(previewEntry))} ratingAvailable={previewCanMarkFinal} rating={previewRating} ratingMode={favoriteDisplayMode} ratingLoading={previewRatingLoading} ratingBusy={previewRatingBusy} onChangeRating={rating => void updatePreviewRating(rating)} onTogglePinned={togglePreviewPanePinned} onTechnicalMetadata={setPreviewTechnicalMetadata} onNavigate={navigatePreviewMedia} onContextMenu={event => previewEntry && openFileMenu(event, previewEntry, false)} onContextMenuAt={(x, y) => previewEntry && openFileMenuAt(x, y, previewEntry, false)} onAnalyzeImageCrop={analyzePreviewImageCrop} onConfirmImageCrop={savePreviewImageCrop} onTrimVideo={trimPreviewVideo} onLoadVideoTimelineFrames={loadPreviewVideoTimelineFrames} onOpen={() => previewEntry && openProjectEntry(previewEntry)} onOpenInPhotoshop={() => previewEntry && openProjectEntriesInPhotoshop([previewEntry])} onClose={closePreviewPaneByUser}/></>}
+      {previewPaneOpen && active && activeView === 'project' && <><ColumnResizeHandle label="调整文件区和预览区宽度" onDrag={resizeFilesAndPreview}/><MediaPreviewPane entry={previewEntry} cacheConfig={mediaCacheConfig} width={displayedColumnWidths.preview} pinned={previewPanePinned} advancedVideoAvailable={installedComponentIds.has('video-playback-mpv')} keyboardSettings={advancedVideoSettings} videoTrimExportMode={videoTools.trim.exportMode} photoshopAvailable={photoshopAvailable && (!previewEntry || !isUnsupportedShortcutContent(previewEntry))} ratingAvailable={previewCanMarkFinal} rating={previewRating} ratingMode={favoriteDisplayMode} ratingLoading={previewRatingLoading} ratingBusy={previewRatingBusy} onChangeRating={rating => void updatePreviewRating(rating)} onTogglePinned={togglePreviewPanePinned} onTechnicalMetadata={setPreviewTechnicalMetadata} onNavigate={navigatePreviewMedia} onContextMenu={event => previewEntry && openFileMenu(event, previewEntry, false)} onContextMenuAt={(x, y) => previewEntry && openFileMenuAt(x, y, previewEntry, false)} onAnalyzeImageCrop={analyzePreviewImageCrop} onConfirmImageCrop={savePreviewImageCrop} onTrimVideo={trimPreviewVideo} onLoadVideoTimelineFrames={loadPreviewVideoTimelineFrames} onOpen={() => previewEntry && openProjectEntry(previewEntry)} onOpenInPhotoshop={() => previewEntry && openProjectEntriesInPhotoshop([previewEntry])} onClose={closePreviewPaneByUser}/></>}
       {metadataPaneOpen && <><ColumnResizeHandle label={previewPaneOpen ? '调整预览区和详细信息区宽度' : '调整文件区和详细信息区宽度'} onDrag={previewPaneOpen ? resizePreviewAndMetadata : resizeFilesAndMetadata}/><FileMetadataPane entry={focusedEntry} entryDetails={previewEntryDetails} metadataFields={currentPreviewMetadataFields} metadataLoading={currentPreviewMetadataLoading} metadataError={currentPreviewMetadataError} technicalMetadata={focusedEntry?.relativePath === previewEntry?.relativePath ? previewTechnicalMetadata : EMPTY_PREVIEW_TECHNICAL_METADATA} formatFileSize={formatFileSize} width={displayedColumnWidths.metadata} pinned={metadataPanePinned} onTogglePinned={toggleMetadataPanePinned} onOpen={() => focusedEntry && openProjectEntry(focusedEntry, true)} onCopyPath={() => focusedEntry && copyEntryPath(focusedEntry)} onClose={closeMetadataPaneByUser}/></>}
       </div>
 
@@ -5851,12 +5853,13 @@ const formatMediaDuration = (seconds?: number) => {
 
 type VideoTrimExportProgress = { phase: string; progress: number; message: string };
 
-const VideoTrimTimeline = ({ duration, start, end, currentTime, frames, busyMode, exportProgress, progressVisible, onChange, onPreview, onCancel, onSave }: {
+const VideoTrimTimeline = ({ duration, start, end, currentTime, frames, exportMode, busyMode, exportProgress, progressVisible, onChange, onPreview, onCancel, onSave }: {
   duration: number;
   start: number;
   end: number;
   currentTime: number;
   frames: string[];
+  exportMode: AppConfig['videoTools']['trim']['exportMode'];
   busyMode: 'new' | 'replace' | '';
   exportProgress?: VideoTrimExportProgress;
   progressVisible: boolean;
@@ -5922,18 +5925,19 @@ const VideoTrimTimeline = ({ duration, start, end, currentTime, frames, busyMode
       <button type="button" aria-label={`调整结束时间，当前 ${formatMediaDuration(end)}`} disabled={Boolean(busyMode)} onPointerDown={event => beginDrag(event, 'end')} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} className="absolute inset-y-0 z-30 w-5 -translate-x-1/2 cursor-ew-resize rounded-r-md border-y-[3px] border-r-[3px] border-amber-400 bg-amber-400/20 outline-none disabled:cursor-default" style={{ left: `${endPercent}%`, touchAction: 'none' }}><span className="absolute left-1/2 top-1/2 h-5 w-0.5 -translate-x-1/2 -translate-y-1/2 rounded bg-amber-100"/></button>
     </div>
     <div className="mt-2.5 flex items-center justify-between gap-2">
-      <p className="min-w-0 truncate text-[10px] text-slate-500">始终按所选首尾画面高质量精确裁剪，确保保留区间正确。</p>
+      <p className="min-w-0 truncate text-[10px] text-slate-500">{exportMode === 'fast' ? '快速导出不重新编码；边界可能按关键帧产生少量偏差。' : '精确导出会高质量重新编码，确保保留区间正确。'}</p>
       <div className="flex shrink-0 items-center gap-2"><button type="button" disabled={exportProgress?.phase === 'cancelling'} onClick={onCancel} className="rounded-md px-2.5 py-1.5 text-xs font-bold text-slate-300 hover:bg-white/10 disabled:opacity-40">{busyMode ? exportProgress?.phase === 'cancelling' ? '正在取消…' : '取消导出' : '取消'}</button><button type="button" disabled={Boolean(busyMode) || selectedDuration < .05} onClick={() => onSave('new')} className="inline-flex items-center gap-1.5 rounded-md bg-white/10 px-2.5 py-1.5 text-xs font-bold text-white hover:bg-white/20 disabled:opacity-40">{busyMode === 'new' && <Loader2 size={13} className="animate-spin"/>}{busyMode === 'new' ? '正在另存…' : '另存为新视频'}</button><button type="button" disabled={Boolean(busyMode) || selectedDuration < .05} onClick={() => onSave('replace')} className="inline-flex items-center gap-1.5 rounded-md bg-amber-500 px-2.5 py-1.5 text-xs font-bold text-slate-950 hover:bg-amber-400 disabled:opacity-40">{busyMode === 'replace' && <Loader2 size={13} className="animate-spin"/>}{busyMode === 'replace' ? '正在替换…' : '替换原视频'}</button></div>
     </div>
   </div>;
 };
-const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvailable, keyboardSettings, photoshopAvailable, ratingAvailable, rating, ratingMode, ratingLoading, ratingBusy, onChangeRating, onTogglePinned, onTechnicalMetadata, onNavigate, onContextMenu, onContextMenuAt, onAnalyzeImageCrop, onConfirmImageCrop, onTrimVideo, onLoadVideoTimelineFrames, onOpen, onOpenInPhotoshop, onClose }: {
+const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvailable, keyboardSettings, videoTrimExportMode, photoshopAvailable, ratingAvailable, rating, ratingMode, ratingLoading, ratingBusy, onChangeRating, onTogglePinned, onTechnicalMetadata, onNavigate, onContextMenu, onContextMenuAt, onAnalyzeImageCrop, onConfirmImageCrop, onTrimVideo, onLoadVideoTimelineFrames, onOpen, onOpenInPhotoshop, onClose }: {
   entry?: ProjectFileEntry;
   cacheConfig: AppConfig['mediaCache'];
   width: number;
   pinned: boolean;
   advancedVideoAvailable: boolean;
   keyboardSettings: NonNullable<AppConfig['componentSettings']['video-playback-mpv']>;
+  videoTrimExportMode: AppConfig['videoTools']['trim']['exportMode'];
   photoshopAvailable: boolean;
   ratingAvailable: boolean;
   rating: number;
@@ -6496,6 +6500,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
     end={trimEditor.end}
     currentTime={videoPlaybackTime}
     frames={videoTrimFrames}
+    exportMode={videoTrimExportMode}
     busyMode={trimBusyMode}
     exportProgress={trimExportProgress}
     progressVisible={trimProgressVisible}
@@ -6542,7 +6547,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
           {(imageCropPhase === 'analyzing' || imageCropPhase === 'saving') && <Loader2 size={13} className="animate-spin"/>}
           {imageCropPhase === 'analyzing' ? '识别边缘中' : imageCropPhase === 'saving' ? '正在裁剪…' : '确定裁剪'}
         </button>
-      </div> : trimEditor ? <button type="button" disabled={trimExportProgress?.phase === 'cancelling'} onClick={cancelVideoTrim} className="rounded-md px-2.5 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-40">{trimBusy ? trimExportProgress?.phase === 'cancelling' ? '正在取消…' : '取消导出' : '取消剪辑'}</button> : <div className="flex items-center gap-1">{entry && <><button type="button" onClick={() => setFullscreen(true)} title="全屏查看" aria-label="全屏查看" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Maximize2 size={16}/></button>{ratingAvailable && (ratingMode === 'stars' ? <div className="flex items-center" aria-label={`图片评分 ${rating} 星`}>{[1, 2, 3, 4, 5].map(star => <button key={star} type="button" disabled={ratingLoading || ratingBusy} onClick={() => onChangeRating(rating === star ? 0 : star)} title={rating === star ? `清除 ${star} 星评分` : `设为 ${star} 星`} aria-label={rating === star ? `清除 ${star} 星评分` : `设为 ${star} 星`} className={`rounded p-1 transition hover:bg-amber-50 hover:text-amber-500 disabled:opacity-40 ${rating >= star ? 'text-amber-400' : 'text-slate-300'}`}><Star size={15} fill={rating >= star ? 'currentColor' : 'none'}/></button>)}</div> : <button type="button" disabled={ratingLoading || ratingBusy} onClick={() => onChangeRating(rating > 0 ? 0 : 5)} title={rating > 0 ? `取消喜欢（当前 ${rating} 星）` : ratingLoading ? '正在读取图片评分' : '喜欢（写入五星）'} aria-label={rating > 0 ? '取消喜欢' : '标记为喜欢'} className={`rounded-md p-2 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-40 ${rating > 0 ? 'text-red-500' : 'text-slate-500'}`}><Heart size={16} fill={rating > 0 ? 'currentColor' : 'none'}/></button>)}{photoshopAvailable && (entry.kind === 'image' || entry.kind === 'raw') && <button type="button" onClick={onOpenInPhotoshop} title="使用 Photoshop 打开" aria-label="使用 Photoshop 打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><PhotoshopIcon size={16}/></button>}<button type="button" disabled={entry.kind === 'raw' || isUnsupportedShortcutContent(entry) || entry.kind === 'video' && !videoDuration} onClick={entry.kind === 'video' ? openVideoTrim : () => void beginImageCrop()} title={entry.kind === 'video' ? videoDuration ? '剪辑视频（精确保留所选区间）' : '正在读取视频时长' : entry.kind === 'raw' ? 'RAW 暂不支持直接裁剪' : '裁剪图片（识别并磁吸边缘）'} aria-label={entry.kind === 'video' ? '剪辑视频' : '裁剪图片'} className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-35"><Crop size={16}/></button></>}<button type="button" onClick={onTogglePinned} title={pinned ? '取消固定预览面板' : '固定预览面板'} aria-label={pinned ? '取消固定预览面板' : '固定预览面板'} aria-pressed={pinned} className={`rounded-md p-2 transition hover:bg-blue-50 hover:text-blue-600 ${pinned ? 'bg-blue-50 text-blue-600' : 'text-slate-500'}`}><Pin size={16} fill={pinned ? 'currentColor' : 'none'}/></button><button type="button" onClick={onClose} title="关闭预览" aria-label="关闭预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X size={16}/></button></div>}
+      </div> : trimEditor ? <button type="button" disabled={trimExportProgress?.phase === 'cancelling'} onClick={cancelVideoTrim} className="rounded-md px-2.5 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-40">{trimBusy ? trimExportProgress?.phase === 'cancelling' ? '正在取消…' : '取消导出' : '取消剪辑'}</button> : <div className="flex items-center gap-1">{entry && <><button type="button" onClick={() => setFullscreen(true)} title="全屏查看" aria-label="全屏查看" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Maximize2 size={16}/></button>{ratingAvailable && (ratingMode === 'stars' ? <div className="flex items-center" aria-label={`图片评分 ${rating} 星`}>{[1, 2, 3, 4, 5].map(star => <button key={star} type="button" disabled={ratingLoading || ratingBusy} onClick={() => onChangeRating(rating === star ? 0 : star)} title={rating === star ? `清除 ${star} 星评分` : `设为 ${star} 星`} aria-label={rating === star ? `清除 ${star} 星评分` : `设为 ${star} 星`} className={`rounded p-1 transition hover:bg-amber-50 hover:text-amber-500 disabled:opacity-40 ${rating >= star ? 'text-amber-400' : 'text-slate-300'}`}><Star size={15} fill={rating >= star ? 'currentColor' : 'none'}/></button>)}</div> : <button type="button" disabled={ratingLoading || ratingBusy} onClick={() => onChangeRating(rating > 0 ? 0 : 5)} title={rating > 0 ? `取消喜欢（当前 ${rating} 星）` : ratingLoading ? '正在读取图片评分' : '喜欢（写入五星）'} aria-label={rating > 0 ? '取消喜欢' : '标记为喜欢'} className={`rounded-md p-2 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-40 ${rating > 0 ? 'text-red-500' : 'text-slate-500'}`}><Heart size={16} fill={rating > 0 ? 'currentColor' : 'none'}/></button>)}{photoshopAvailable && (entry.kind === 'image' || entry.kind === 'raw') && <button type="button" onClick={onOpenInPhotoshop} title="使用 Photoshop 打开" aria-label="使用 Photoshop 打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><PhotoshopIcon size={16}/></button>}<button type="button" disabled={entry.kind === 'raw' || isUnsupportedShortcutContent(entry) || entry.kind === 'video' && !videoDuration} onClick={entry.kind === 'video' ? openVideoTrim : () => void beginImageCrop()} title={entry.kind === 'video' ? videoDuration ? `剪辑视频（${videoTrimExportMode === 'fast' ? '快速导出' : '精确导出'}）` : '正在读取视频时长' : entry.kind === 'raw' ? 'RAW 暂不支持直接裁剪' : '裁剪图片（识别并磁吸边缘）'} aria-label={entry.kind === 'video' ? '剪辑视频' : '裁剪图片'} className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-35"><Crop size={16}/></button></>}<button type="button" onClick={onTogglePinned} title={pinned ? '取消固定预览面板' : '固定预览面板'} aria-label={pinned ? '取消固定预览面板' : '固定预览面板'} aria-pressed={pinned} className={`rounded-md p-2 transition hover:bg-blue-50 hover:text-blue-600 ${pinned ? 'bg-blue-50 text-blue-600' : 'text-slate-500'}`}><Pin size={16} fill={pinned ? 'currentColor' : 'none'}/></button><button type="button" onClick={onClose} title="关闭预览" aria-label="关闭预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X size={16}/></button></div>}
     </header>}
     {fullscreen && fullscreenControlsVisible && <button type="button" onClick={() => setFullscreen(false)} title="退出全屏（Esc）" aria-label="退出全屏" className="fixed right-5 top-5 z-[520] rounded-full bg-black/60 p-2.5 text-white shadow-lg backdrop-blur transition hover:bg-black/80"><X size={20}/></button>}
     <div className={`relative flex min-h-0 flex-1 items-center justify-center overflow-hidden ${fullscreen ? 'bg-black' : 'bg-slate-50'}`}>

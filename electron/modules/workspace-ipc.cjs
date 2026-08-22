@@ -12,6 +12,25 @@ const { createManagedExternalWatcherBindings } = require('./workspace/managed-ex
 
 const MANAGED_EXTERNAL_FOLDER_PREFIX = 'PhotoFlow 外链文件夹：';
 const MANAGED_EXTERNAL_FILE_PREFIX = 'PhotoFlow 外链文件：';
+const WORKSPACE_MAINTENANCE_LOCK_RETRY_DELAYS_MS = [1000, 2500, 5000, 10000, 20000];
+const workspaceDatabaseTaskResource = root => ({ path: `photoflow-workspace-database/${root}`, access: 'write' });
+const isDatabaseLockedError = error => error?.code === 'SQLITE_BUSY' || error?.code === 'SQLITE_LOCKED';
+
+const runWorkspaceMaintenanceWithRetry = async ({ root, repository, task, wait = delay => new Promise(resolve => setTimeout(resolve, delay)), retryDelays = WORKSPACE_MAINTENANCE_LOCK_RETRY_DELAYS_MS }) => {
+  let lastError;
+  for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+    try {
+      return await repository.runMaintenance(root);
+    } catch (error) {
+      lastError = error;
+      if (!isDatabaseLockedError(error) || attempt >= retryDelays.length) throw error;
+      const delay = retryDelays[attempt];
+      task?.report?.(10, `项目数据库正忙，${Math.max(1, Math.ceil(delay / 1000))} 秒后自动重试`, { maintenanceAttempt: attempt + 2 });
+      await wait(delay);
+    }
+  }
+  throw lastError;
+};
 
 const registerWorkspaceIpc = context => {
   const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation = () => false, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
@@ -250,7 +269,7 @@ const registerWorkspaceIpc = context => {
     const cleanupPlan = await workspaceRepository.getDeletedProjectCleanupPlan(root, project.id);
     task?.report(35, `正在清理“${project.name}”的缩略图和内部文件`);
     const removedArtifactCount = await removeInternalProjectArtifacts(root, cleanupPlan);
-    await thumbnailService.invalidateSources(cleanupPlan.sourcePaths || []).catch(error => {
+    await thumbnailService.evictCache({ sourcePaths: cleanupPlan.sourcePaths || [] }).catch(error => {
       writeLog('warn', 'Unable to clear deleted project thumbnail cache', { project: project.name, error: error.message || String(error) });
     });
     task?.report(80, `正在完成“${project.name}”的数据清理`);
@@ -279,7 +298,7 @@ const registerWorkspaceIpc = context => {
   const purgeStaleMissingProject = async (root, project) => {
     const purgeResult = await workspaceRepository.purgeMissingProject(root, project.name);
     const removedArtifactCount = await removeInternalProjectArtifacts(root, purgeResult);
-    await thumbnailService.invalidateSources(purgeResult.sourcePaths || []).catch(error => {
+    await thumbnailService.evictCache({ sourcePaths: purgeResult.sourcePaths || [] }).catch(error => {
       writeLog('warn', 'Unable to clear stale offline project thumbnails', { projectName: project.name, error: error.message || String(error) });
     });
     writeLog('info', 'Purged stale offline project data', { root, projectName: project.name, removedArtifactCount });
@@ -323,10 +342,11 @@ const registerWorkspaceIpc = context => {
       title: '维护项目数据库',
       dedupeKey: `workspace-database-maintenance:${root}`,
       cancellable: false,
+      resources: [workspaceDatabaseTaskResource(root)],
       metadata: { root },
     }, async task => {
       task.report(10, '正在检查项目数据库');
-      const result = await workspaceMaintenanceRepository.runMaintenance(root);
+      const result = await runWorkspaceMaintenanceWithRetry({ root, repository: workspaceMaintenanceRepository, task });
       task.report(100, '项目数据库维护完成');
       return result;
     }, run);
@@ -2396,6 +2416,7 @@ const registerWorkspaceIpc = context => {
     const start = Number(metadata.start);
     const end = Number(metadata.end);
     const saveMode = metadata.saveMode === 'replace' ? 'replace' : 'new';
+    const exportMode = metadata.exportMode === 'fast' ? 'fast' : 'exact';
     if (!workspacePath || !status || !projectName || !relativePath || !Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) throw new Error('视频裁剪重跑参数无效');
     const projectRoot = path.resolve(getProjectPath(workspacePath, status, projectName));
     const sourceResolution = virtualPaths.resolve(projectRoot, relativePath, { externalRootMode: 'target' });
@@ -2419,21 +2440,21 @@ const registerWorkspaceIpc = context => {
       cancellable: true,
       resources: [sourcePath],
       resumePolicy: 'safe-restart',
-      metadata: { ...metadata, sourcePath, generatedPath },
+      metadata: { ...metadata, sourcePath, generatedPath, exportMode },
     }, async task => {
       const requestCancel = () => void fs.promises.writeFile(cancelFile, 'cancel', 'utf8').catch(() => undefined);
       task.signal.addEventListener('abort', requestCancel, { once: true });
       let committed = false;
       try {
-        task.report(1, '正在重新编码视频');
+        task.report(1, exportMode === 'fast' ? '正在快速导出视频' : '正在重新编码视频');
         const result = await runPythonJsonAction(
           'cut_video.py',
-          [sourcePath, '--trim-start', String(start), '--trim-end', String(end), '--output-path', generatedPath, '--cancel_file', cancelFile],
+          [sourcePath, '--trim-start', String(start), '--trim-end', String(end), '--output-path', generatedPath, '--trim-mode', exportMode, '--cancel_file', cancelFile],
           60 * 60 * 1000,
           message => {
             if (message?.type !== 'progress') return;
             if (message.phase === 'saving') task.setCancellable(false);
-            task.report(Math.max(1, Math.min(98, Number(message.progress) || 0)), String(message.message || '正在重新编码视频'), { phase: String(message.phase || 'encoding') });
+            task.report(Math.max(1, Math.min(98, Number(message.progress) || 0)), String(message.message || (exportMode === 'fast' ? '正在快速导出视频' : '正在重新编码视频')), { phase: String(message.phase || (exportMode === 'fast' ? 'copying' : 'encoding')) });
           },
         );
         if (!result?.success || !fs.existsSync(generatedPath)) throw new Error(result?.error || '视频裁剪重跑失败');
@@ -2494,6 +2515,7 @@ const registerWorkspaceIpc = context => {
       const end = Number(request.end);
       if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) throw new Error('剪辑时间范围无效');
       const saveMode = request.saveMode === 'replace' ? 'replace' : 'new';
+      const exportMode = request.exportMode === 'exact' ? 'exact' : 'fast';
       const parsed = path.parse(sourcePath);
       const sourceRelativePath = sourceResolution.virtualPath;
       const requestedSourceDuration = Number(request.sourceDuration);
@@ -2509,11 +2531,11 @@ const registerWorkspaceIpc = context => {
       taskHandle = backgroundTasks.create({
         id: operationId,
         type: 'video-trim',
-        title: `裁剪视频 · ${parsed.base}`,
+        title: `${exportMode === 'fast' ? '快速裁剪视频' : '精确裁剪视频'} · ${parsed.base}`,
         cancellable: true,
         resources: [sourcePath],
         resumePolicy: 'safe-restart',
-        metadata: { operationId, workspacePath: path.resolve(workspacePath), projectStatus: status, projectName, sourcePath, sourceRelativePath, generatedPath, saveMode, start, end, sourceDuration },
+        metadata: { operationId, workspacePath: path.resolve(workspacePath), projectStatus: status, projectName, sourcePath, sourceRelativePath, generatedPath, saveMode, exportMode, start, end, sourceDuration },
       });
       if (taskHandle.deduplicated) throw new Error('该视频导出任务已在运行');
       operation = { cancelFile, cancelled: false, cancellable: true, taskHandle };
@@ -2532,7 +2554,7 @@ const registerWorkspaceIpc = context => {
           try {
             const result = await runPythonJsonAction(
               'cut_video.py',
-              [sourcePath, '--trim-start', String(start), '--trim-end', String(end), '--output-path', generatedPath, '--cancel_file', cancelFile],
+              [sourcePath, '--trim-start', String(start), '--trim-end', String(end), '--output-path', generatedPath, '--trim-mode', exportMode, '--cancel_file', cancelFile],
               60 * 60 * 1000,
               message => {
                 if (message?.type !== 'progress') return;
@@ -2541,7 +2563,7 @@ const registerWorkspaceIpc = context => {
                   taskHandle.context.setCancellable(false);
                 }
                 publish({
-                  phase: String(message.phase || 'encoding'),
+                  phase: String(message.phase || (exportMode === 'fast' ? 'copying' : 'encoding')),
                   progress: Math.max(0, Math.min(99, Number(message.progress) || 0)),
                   message: String(message.message || '正在导出视频…'),
                 });
@@ -3235,4 +3257,4 @@ const registerWorkspaceIpc = context => {
   };
 };
 
-module.exports = { normalizeProjectFileListFilter, projectFileListEntryMatchesFilter, projectFileListSessionMatches, registerWorkspaceIpc };
+module.exports = { normalizeProjectFileListFilter, projectFileListEntryMatchesFilter, projectFileListSessionMatches, registerWorkspaceIpc, runWorkspaceMaintenanceWithRetry, workspaceDatabaseTaskResource };

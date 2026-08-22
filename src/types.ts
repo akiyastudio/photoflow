@@ -279,6 +279,9 @@ export interface AppConfig {
   };
   videoTools: {
     transcode: VideoTranscodeSettings;
+    trim: {
+      exportMode: 'fast' | 'exact';
+    };
   };
   smartImport: {
     autoStart: boolean;
@@ -921,6 +924,11 @@ export interface BackgroundTask {
   };
   resumePolicy: 'checkpoint' | 'safe-restart' | 'atomic';
   notificationPolicy: 'progress-toast' | 'result-only' | 'error-only' | 'silent';
+  historyPolicy: 'persistent' | 'ephemeral';
+  retryOfTaskId?: string | null;
+  replacedByTaskId?: string | null;
+  retryAttempt: number;
+  retryPending: boolean;
   checkpointVersion?: number;
   checkpoint?: unknown;
   metadata: Record<string, unknown>;
@@ -931,6 +939,12 @@ export interface BackgroundTask {
   /** Active tasks whose resource reservations currently block this queued task. */
   blockedByTaskIds?: string[];
   error?: string;
+}
+
+export interface BackgroundTaskDelta {
+  revision: number;
+  upserts: BackgroundTask[];
+  removeIds: string[];
 }
 
 export interface IElectronAPI {
@@ -1040,7 +1054,7 @@ export interface IElectronAPI {
     }>;
     error?: string;
   }>;
-  trimProjectVideo: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, request: { start: number; end: number; saveMode: 'new' | 'replace'; operationId: string; sourceDuration: number }) => Promise<{ success: boolean; started?: boolean; operationId?: string; outputPath?: string; relativePath?: string; duration?: number; replaced?: boolean; cancelled?: boolean; error?: string }>;
+  trimProjectVideo: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, request: { start: number; end: number; saveMode: 'new' | 'replace'; exportMode: 'fast' | 'exact'; operationId: string; sourceDuration: number }) => Promise<{ success: boolean; started?: boolean; operationId?: string; outputPath?: string; relativePath?: string; duration?: number; replaced?: boolean; cancelled?: boolean; error?: string }>;
   cancelProjectVideoTrim: (operationId: string) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
   onProjectVideoTrimProgress: (callback: (progress: { operationId: string; phase: 'preparing' | 'encoding' | 'verifying' | 'saving' | 'finalizing' | 'complete' | 'cancelled' | 'failed' | string; progress: number; message: string }) => void) => () => void;
   getProjectVideoTimelineFrames: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, times: number[]) => Promise<{ success: boolean; frames?: string[]; error?: string }>;
@@ -1175,15 +1189,24 @@ export interface IElectronAPI {
   getMediaCacheInfo: (cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path: string; sizeBytes: number; fileCount: number; error?: string }>;
   clearMediaCache: (cacheConfig?: AppConfig['mediaCache'], olderThanDays?: number) => Promise<{ success: boolean; deletedCount?: number; prunedSourceCount?: number; taskId?: string; error?: string }>;
   getStorageUsageOverview: (force?: boolean) => Promise<StorageUsageOverview>;
-  getBackgroundTasks: () => Promise<{ success: boolean; tasks: BackgroundTask[] }>;
+  getBackgroundTasks: () => Promise<{ success: boolean; revision: number; tasks: BackgroundTask[] }>;
   cancelBackgroundTask: (id: string) => Promise<{ success: boolean }>;
   pauseBackgroundTask: (id: string) => Promise<{ success: boolean }>;
   continueBackgroundTask: (id: string) => Promise<{ success: boolean }>;
   dismissBackgroundTask: (id: string) => Promise<{ success: boolean }>;
   resumeBackgroundTask: (id: string) => Promise<{ success: boolean; task?: BackgroundTask; error?: string }>;
   restartBackgroundTask: (id: string) => Promise<{ success: boolean; task?: BackgroundTask; error?: string }>;
-  retryBackgroundTask: (id: string) => Promise<{ success: boolean; task?: BackgroundTask; error?: string }>;
-  onBackgroundTaskChanged: (callback: (task: BackgroundTask) => void) => () => void;
+  retryBackgroundTask: (id: string) => Promise<{
+    success: boolean;
+    accepted?: boolean;
+    sourceTaskId?: string;
+    replacementTaskId?: string;
+    deduplicated?: boolean;
+    task?: BackgroundTask;
+    code?: string;
+    error?: string;
+  }>;
+  onBackgroundTaskChanged: (callback: (delta: BackgroundTaskDelta) => void) => () => void;
   chooseBackupTarget: (currentPath?: string) => Promise<{ cancelled: boolean; path?: string }>;
   getBackupStatus: (workspacePath: string) => Promise<BackupStatus>;
   setNasBackupTarget: (targetPath: string) => Promise<{ success: boolean; path?: string; error?: string }>;

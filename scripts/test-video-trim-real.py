@@ -89,6 +89,7 @@ def main():
                 "--trim-start", "0.5",
                 "--trim-end", "5.5",
                 "--output-path", str(cancelled_output),
+                "--trim-mode", "exact",
                 "--cancel_file", str(cancel_file),
             ],
             stdout=subprocess.PIPE,

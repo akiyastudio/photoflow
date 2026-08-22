@@ -2,6 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { EventEmitter } = require('events');
 const { createStorageUsageService } = require('../electron/services/storage-usage-service.cjs');
 
 const run = async () => {
@@ -52,9 +53,11 @@ const run = async () => {
       mediaCache: { directory: cache },
       inspirationLibrary: { rootPath: inspiration },
     };
+    const eventBus = new EventEmitter();
     const service = createStorageUsageService({
       app: { getPath: name => name === 'userData' ? userData : root },
       backgroundTasks,
+      eventBus,
       getWorkspaceDatabasePath: () => database,
       getWorkspaceDataRoot: () => workspaceData,
       readSavedConfig: () => config,
@@ -74,6 +77,17 @@ const run = async () => {
     const rolePriority = { workspace: 1, inspiration: 2, cache: 3, internal: 3, archive: 4, backup: 5 };
     assert.equal(items.every((item, index) => index === 0 || rolePriority[items[index - 1].kind] <= rolePriority[item.kind]), true);
     assert.equal(items.reduce((sum, item) => sum + item.bytes, 0), files.reduce((sum, [, content]) => sum + Buffer.byteLength(content), 0));
+    await fs.promises.appendFile(path.join(cache, 'thumb.jpg'), 'changed');
+    eventBus.emit('background-task:changed', {
+      revision: 1,
+      upserts: [{ id: 'cache-cleanup', type: 'cache-cleanup', state: 'completed' }],
+      removeIds: [],
+    });
+    const invalidated = await service.overview(false);
+    assert.equal(invalidated.scanning, true, 'completed invalidating tasks delivered as deltas must refresh cached storage usage');
+    await pending;
+    const refreshed = await service.overview(false);
+    assert(refreshed.volumes.flatMap(volume => volume.items).reduce((sum, item) => sum + item.bytes, 0) > items.reduce((sum, item) => sum + item.bytes, 0));
     console.log('Storage usage service integration tests passed.');
   } finally {
     await fs.promises.rm(root, { recursive: true, force: true });

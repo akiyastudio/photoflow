@@ -22,7 +22,16 @@ const createPipeline = ({ root, target, generate, toPreviewUrl = filePath => fil
     sourceStabilityDelayMs,
     sourceStabilityProbeMs,
   });
-  pipeline.database.call = async () => ({ success: true });
+  pipeline.database.call = async (operation, args = {}) => {
+    if (operation === 'capture_thumbnail_publish') {
+      const stat = fs.statSync(args.file_path);
+      return { cacheEpoch: 1, sourceVersion: 1, sourceSize: stat.size, sourceMtimeMs: stat.mtimeMs };
+    }
+    if (operation === 'get_cache_epoch') return { cacheEpoch: 1 };
+    if (operation === 'get_thumbnail_publish') return fs.existsSync(target) ? { thumbnailPath: target } : null;
+    if (operation === 'commit_thumbnail_publish') return { state: 'READY', cacheEpoch: 1, sourceVersion: 1 };
+    return { success: true };
+  };
   return pipeline;
 };
 
@@ -68,6 +77,112 @@ const run = async () => {
     assert.equal(attempts, 2, 'a vanished cache output should be regenerated exactly once');
     assert.equal(fs.existsSync(retryTarget), true);
     retryPipeline.stop();
+
+    const stagedTarget = path.join(temporaryRoot, 'staged-final.jpg');
+    const publishOrder = [];
+    const stagingPaths = [];
+    let stagedNotify = () => undefined;
+    const stagedPipeline = createPipeline({
+      root: temporaryRoot,
+      target: stagedTarget,
+      notify: update => {
+        if (update.state === 'READY') publishOrder.push('ready');
+        stagedNotify(update);
+      },
+      generate: async (_filePath, _stat, _kind, _config, sizes) => {
+        for (const size of sizes) {
+          stagingPaths.push(size.path);
+          fs.writeFileSync(size.path, jpeg);
+        }
+        return sizes.map(size => ({ sizeLabel: size.label, pixelSize: size.pixels, path: size.path }));
+      },
+    });
+    stagedPipeline.database.call = async (operation, args = {}) => {
+      if (operation === 'capture_thumbnail_publish') {
+        const sourceStat = fs.statSync(args.file_path);
+        return { cacheEpoch: 7, sourceVersion: 3, sourceSize: sourceStat.size, sourceMtimeMs: sourceStat.mtimeMs };
+      }
+      if (operation === 'get_cache_epoch') return { cacheEpoch: 7 };
+      if (operation === 'commit_thumbnail_publish') {
+        assert.equal(fs.existsSync(args.thumbnails[0].path), true, 'final file must exist before DB commit');
+        publishOrder.push('commit');
+        return { state: 'READY' };
+      }
+      return { success: true };
+    };
+    const stagedResult = await waitForTerminalState(notify => {
+      stagedNotify = notify;
+      void stagedPipeline.request({ filePath: source, kind: 'image', requestedSize: 640, priority: PRIORITY.visible });
+    });
+    assert.equal(stagedResult.state, 'READY');
+    assert.deepEqual(publishOrder, ['commit', 'ready'], 'DB publish commit must precede READY');
+    assert(stagingPaths.every(value => path.basename(path.dirname(value)) === '.staging'));
+    assert.equal(fs.existsSync(stagedTarget), true);
+    assert.equal(fs.readdirSync(path.join(temporaryRoot, '.staging')).length, 0, 'successful publish must consume staging files');
+    stagedPipeline.stop();
+
+    const rejectedTarget = path.join(temporaryRoot, 'rejected-final.jpg');
+    const rejectedNotifications = [];
+    let rejectedNotify = () => undefined;
+    const rejectedPipeline = createPipeline({
+      root: temporaryRoot,
+      target: rejectedTarget,
+      notify: update => { rejectedNotifications.push(update); rejectedNotify(update); },
+      generate: async (_filePath, _stat, _kind, _config, sizes) => {
+        for (const size of sizes) fs.writeFileSync(size.path, jpeg);
+        return sizes.map(size => ({ sizeLabel: size.label, pixelSize: size.pixels, path: size.path }));
+      },
+    });
+    rejectedPipeline.database.call = async (operation, args = {}) => {
+      if (operation === 'capture_thumbnail_publish') {
+        const sourceStat = fs.statSync(args.file_path);
+        return { cacheEpoch: 1, sourceVersion: 1, sourceSize: sourceStat.size, sourceMtimeMs: sourceStat.mtimeMs };
+      }
+      if (operation === 'get_cache_epoch') return { cacheEpoch: 1 };
+      if (operation === 'commit_thumbnail_publish') throw new Error('simulated commit failure');
+      return { success: true };
+    };
+    const rejectedResult = await waitForTerminalState(notify => {
+      rejectedNotify = notify;
+      void rejectedPipeline.request({ filePath: source, kind: 'image', requestedSize: 640, priority: PRIORITY.visible });
+    });
+    assert.equal(rejectedResult.state, 'FAILED');
+    assert.equal(rejectedNotifications.some(update => update.state === 'READY'), false, 'commit failure must never notify READY');
+    assert.equal(fs.existsSync(rejectedTarget), false, 'commit failure must remove the final created by this worker');
+    rejectedPipeline.stop();
+
+    const epochTarget = path.join(temporaryRoot, 'epoch-final.jpg');
+    let epochCapture = 0;
+    let epochGeneration = 0;
+    let epochNotify = () => undefined;
+    const epochPipeline = createPipeline({
+      root: temporaryRoot,
+      target: epochTarget,
+      notify: update => epochNotify(update),
+      generate: async (_filePath, _stat, _kind, _config, sizes) => {
+        epochGeneration += 1;
+        for (const size of sizes) fs.writeFileSync(size.path, jpeg);
+        return sizes.map(size => ({ sizeLabel: size.label, pixelSize: size.pixels, path: size.path }));
+      },
+    });
+    epochPipeline.database.call = async (operation, args = {}) => {
+      if (operation === 'capture_thumbnail_publish') {
+        epochCapture += 1;
+        const sourceStat = fs.statSync(args.file_path);
+        return { cacheEpoch: epochCapture, sourceVersion: 1, sourceSize: sourceStat.size, sourceMtimeMs: sourceStat.mtimeMs };
+      }
+      if (operation === 'get_cache_epoch') return { cacheEpoch: 2 };
+      if (operation === 'commit_thumbnail_publish') return { state: 'READY' };
+      return { success: true };
+    };
+    const epochResult = await waitForTerminalState(notify => {
+      epochNotify = notify;
+      void epochPipeline.request({ filePath: source, kind: 'image', requestedSize: 640, priority: PRIORITY.visible });
+    });
+    assert.equal(epochResult.state, 'READY');
+    assert.equal(epochGeneration, 2, 'EPOCH_STALE must regenerate under the fresh epoch');
+    assert.equal(fs.existsSync(epochTarget), true);
+    epochPipeline.stop();
 
     const protectedTarget = path.join(temporaryRoot, 'protected.jpg');
     fs.writeFileSync(protectedTarget, Buffer.alloc(16));
@@ -133,6 +248,178 @@ const run = async () => {
     assert.equal(directoryQueuedCount, 0, 'opening a directory must not queue every uncached source for hidden thumbnail warming');
     assert.equal(directoryGenerationCount, 0, 'directory indexing must stay metadata-only until a tile becomes visible');
     directoryPipeline.stop();
+
+    const maintenancePipeline = createPipeline({
+      root: temporaryRoot,
+      target: path.join(temporaryRoot, 'maintenance.jpg'),
+      generate: async () => [],
+    });
+    maintenancePipeline.lastForegroundActivityAt = 0;
+    let releaseMaintenance;
+    let maintenanceEntered = false;
+    const maintenanceGate = new Promise(resolve => { releaseMaintenance = resolve; });
+    const maintenanceRun = maintenancePipeline.runDatabaseMaintenance(async () => {
+      maintenanceEntered = true;
+      await maintenanceGate;
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(maintenanceEntered, true);
+    const deferredScan = maintenancePipeline.scanProject(temporaryRoot, {});
+    assert.equal(maintenancePipeline.activeProjectScans, 0, 'cache maintenance must prevent a new project index writer from starting');
+    assert.equal(maintenancePipeline.projectScanQueue.length, 1, 'a project scan requested during cache maintenance must remain queued');
+    const queuedScan = maintenancePipeline.projectScanQueue.shift();
+    maintenancePipeline.projectScans.delete(path.resolve(temporaryRoot));
+    queuedScan.resolve(undefined);
+    releaseMaintenance();
+    await Promise.all([maintenanceRun, deferredScan]);
+    const maintenanceCalls = [];
+    maintenancePipeline.database.call = async (...args) => { maintenanceCalls.push(args); return { success: true }; };
+    await maintenancePipeline.invalidateDeleted([], null);
+    assert.equal(maintenanceCalls[0][2], 10 * 60 * 1000, 'cache index invalidation must use the maintenance timeout instead of the interactive 30 second timeout');
+    maintenancePipeline.stop();
+
+    const failedDeletePath = path.join(temporaryRoot, 'delete-failure.jpg');
+    fs.writeFileSync(failedDeletePath, jpeg);
+    const evictionPipeline = createPipeline({
+      root: temporaryRoot,
+      target: path.join(temporaryRoot, 'eviction-unused.jpg'),
+      generate: async () => [],
+    });
+    const evictionOrder = [];
+    evictionPipeline.database.call = async operation => {
+      if (operation === 'begin_cache_maintenance') { evictionOrder.push('begin'); return { cacheEpoch: 2 }; }
+      if (operation === 'detach_cache_batch') {
+        evictionOrder.push('detach');
+        return { done: true, detachedCount: 1, detachedBytes: jpeg.length, thumbnailPaths: [failedDeletePath] };
+      }
+      return { success: true };
+    };
+    const originalUnlink = fs.promises.unlink;
+    let rejectDelete = true;
+    fs.promises.unlink = async filePath => {
+      if (rejectDelete && path.resolve(filePath) === path.resolve(failedDeletePath)) {
+        rejectDelete = false;
+        evictionOrder.push('unlink-failed');
+        throw Object.assign(new Error('simulated delete failure'), { code: 'EPERM' });
+      }
+      evictionOrder.push('unlink-retry');
+      return originalUnlink(filePath);
+    };
+    try {
+      const failedEviction = await evictionPipeline.evictCache({ thumbnailPaths: [failedDeletePath] });
+      assert.deepEqual(evictionOrder.slice(0, 3), ['begin', 'detach', 'unlink-failed'], 'index detach must commit before physical deletion');
+      assert.equal(failedEviction.failedCount, 1);
+      assert.equal(fs.existsSync(failedDeletePath), true, 'failed unlink must leave an unindexed orphan');
+      const retriedEviction = await evictionPipeline.evictCache({ thumbnailPaths: [failedDeletePath] });
+      assert.equal(retriedEviction.deletedCount, 1);
+      assert.equal(fs.existsSync(failedDeletePath), false, 'a later unified eviction retries the orphan path');
+    } finally {
+      fs.promises.unlink = originalUnlink;
+      evictionPipeline.stop();
+    }
+
+    const safeCacheRoot = path.join(temporaryRoot, 'safe-cache-root');
+    fs.mkdirSync(safeCacheRoot);
+    const outsideManagedName = path.join(temporaryRoot, `${'b'.repeat(64)}.jpg`);
+    const userJpeg = path.join(safeCacheRoot, 'holiday.jpg');
+    fs.writeFileSync(outsideManagedName, jpeg);
+    fs.writeFileSync(userJpeg, jpeg);
+    const unsafePipeline = createPipeline({
+      root: temporaryRoot,
+      target: path.join(safeCacheRoot, `${'c'.repeat(64)}.jpg`),
+      generate: async () => [],
+    });
+    const unsafeOperations = [];
+    unsafePipeline.database.call = async operation => {
+      unsafeOperations.push(operation);
+      if (operation === 'begin_cache_maintenance') return { cacheEpoch: 3 };
+      if (operation === 'detach_cache_batch') return {
+        done: true,
+        detachedCount: 2,
+        detachedBytes: jpeg.length * 2,
+        thumbnailPaths: [outsideManagedName, userJpeg],
+      };
+      return { success: true };
+    };
+    const unsafeResult = await unsafePipeline.evictCache({
+      cacheRoot: safeCacheRoot,
+      thumbnailPaths: [outsideManagedName, userJpeg],
+    });
+    assert.equal(unsafeResult.failedCount, 2);
+    assert.equal(fs.existsSync(outsideManagedName), true, 'a corrupted cache index must never delete a path outside the approved cache root');
+    assert.equal(fs.existsSync(userJpeg), true, 'a non-PhotoFlow JPEG inside a custom cache root must never be deleted');
+    unsafeOperations.length = 0;
+    await assert.rejects(unsafePipeline.evictCache({
+      cacheRoot: safeCacheRoot,
+      thumbnailPaths: [outsideManagedName, userJpeg],
+      failOnDeleteError: true,
+      completeMaintenanceKey: 'must-not-complete',
+    }), error => error.code === 'THUMBNAIL_CACHE_RECOVERY_INCOMPLETE');
+    assert(!unsafeOperations.includes('maintenance_state_complete'), 'an incomplete recovery must never write its completion marker');
+    unsafePipeline.stop();
+
+    const startupRecoveryPipeline = createPipeline({
+      root: safeCacheRoot,
+      target: path.join(safeCacheRoot, `${'d'.repeat(64)}.jpg`),
+      generate: async () => [],
+    });
+    const startupRecoveryOrder = [];
+    startupRecoveryPipeline.database.call = async operation => {
+      startupRecoveryOrder.push(operation);
+      if (operation === 'check_integrity') return { success: true, result: 'ok' };
+      if (operation === 'begin_cache_maintenance') return { cacheEpoch: 4 };
+      if (operation === 'prune_missing_batch') return { done: true, sourceCount: 0, thumbnailPaths: [] };
+      if (operation === 'recover_cache_publications') return { done: true, repairedMissingCount: 0, orphanPaths: [] };
+      if (operation === 'maintenance_state_complete') return { success: true };
+      return { success: true };
+    };
+    await startupRecoveryPipeline.evictCache({
+      cacheRoot: safeCacheRoot,
+      verifyIntegrity: true,
+      recoverOrphans: true,
+      scanRootOrphans: false,
+      pruneMissing: true,
+      completeMaintenanceKey: 'startup-recovery-test',
+    });
+    assert(startupRecoveryOrder.indexOf('check_integrity') < startupRecoveryOrder.indexOf('begin_cache_maintenance'), 'quick_check must run under the exclusive lease before epoch mutation');
+    assert.equal(startupRecoveryOrder.at(-1), 'maintenance_state_complete', 'the completion marker must be the final successful database write');
+    startupRecoveryPipeline.stop();
+
+    const cancelledPipeline = createPipeline({
+      root: temporaryRoot,
+      target: path.join(temporaryRoot, 'cancelled-unused.jpg'),
+      generate: async () => [],
+    });
+    const cancellationController = new AbortController();
+    let detachCalls = 0;
+    cancelledPipeline.database.call = async operation => {
+      if (operation === 'begin_cache_maintenance') return { cacheEpoch: 2 };
+      if (operation === 'detach_cache_batch') {
+        detachCalls += 1;
+        cancellationController.abort(Object.assign(new Error('cancelled at batch boundary'), { code: 'TASK_CANCELLED' }));
+        return { done: false, detachedCount: 512, detachedBytes: 5120, thumbnailPaths: [] };
+      }
+      return { success: true };
+    };
+    await assert.rejects(cancelledPipeline.evictCache({
+      all: true,
+      signal: cancellationController.signal,
+      deadlineAt: Date.now() + 1000,
+    }), error => error.code === 'TASK_CANCELLED');
+    assert.equal(detachCalls, 1, 'cancellation must stop before the next SQLite batch');
+    cancelledPipeline.stop();
+
+    const deadlinePipeline = createPipeline({
+      root: temporaryRoot,
+      target: path.join(temporaryRoot, 'deadline-unused.jpg'),
+      generate: async () => [],
+    });
+    deadlinePipeline.activeProjectScans = 1;
+    await assert.rejects(deadlinePipeline.runDatabaseMaintenance(async () => undefined, {
+      deadlineAt: Date.now() + 20,
+    }), error => error.code === 'THUMBNAIL_MAINTENANCE_DEADLINE');
+    deadlinePipeline.activeProjectScans = 0;
+    deadlinePipeline.stop();
 
     const changedTarget = path.join(temporaryRoot, 'changed.jpg');
     const changedNotifications = [];

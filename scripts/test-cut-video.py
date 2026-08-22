@@ -155,6 +155,34 @@ def main():
         assert captured_trim_commands
         assert trim_result["exactTranscodeUsed"] is True
 
+        fast_output = chinese_directory / "角色生日 录像_快速剪辑.mp4"
+        captured_fast_commands = []
+
+        class FakeFastTrimProcess(FakeTrimProcess):
+            def __init__(self, command):
+                captured_fast_commands.append(command)
+                assert command.index("-ss") < command.index("-i")
+                assert command[command.index("-c") + 1] == "copy"
+                assert "libx264" not in command
+                assert "-avoid_negative_ts" not in command
+                Path(command[-1]).write_bytes(b"fast trimmed video")
+                self.stdout = ["out_time_us=9250000\n"]
+                self.stderr = io.StringIO("")
+
+        fast_probe_values = iter([13.0, 9.25])
+        with mock.patch.object(cut_video, "probe_duration", side_effect=lambda *_args: next(fast_probe_values)), \
+                mock.patch.object(cut_video, "get_ffmpeg_exe", return_value="ffmpeg"), \
+                mock.patch.object(cut_video.subprocess, "Popen", side_effect=lambda command, **_kwargs: FakeFastTrimProcess(command)):
+            fast_result = cut_video.trim_video_fast(
+                str(chinese_source), 1.25, 10.5, str(fast_output),
+            )
+        assert fast_result["success"] is True
+        assert fast_result["fastCopyUsed"] is True
+        assert fast_result["exactTranscodeUsed"] is False
+        assert fast_output.read_bytes() == b"fast trimmed video"
+        assert captured_fast_commands
+        assert not any(chinese_directory.glob("*.photoflow-part.mp4"))
+
     with TemporaryDirectory() as temporary_directory:
         root = Path(temporary_directory)
         nested = root / "nested"

@@ -16,9 +16,9 @@ const normalizeExternalProgress = (channel, value = {}) => {
 };
 
 const registerBackgroundTasksIpc = ({ ipcMain, eventBus, backgroundTasks, getMainWindow }) => {
-  const sendTask = task => {
+  const sendTask = delta => {
     const window = getMainWindow();
-    if (window && !window.isDestroyed()) window.webContents.send('background-task-changed', task);
+    if (window && !window.isDestroyed()) window.webContents.send('background-task-changed', delta);
   };
   const unsubscribe = eventBus.on('background-task:changed', sendTask);
   const externalProgressListener = (event, channel, value) => {
@@ -28,7 +28,7 @@ const registerBackgroundTasksIpc = ({ ipcMain, eventBus, backgroundTasks, getMai
     if (task) backgroundTasks.upsertExternal(task);
   };
   ipcMain.on('background-task-external-progress', externalProgressListener);
-  ipcMain.handle('background-tasks-list', async () => ({ success: true, tasks: backgroundTasks.list() }));
+  ipcMain.handle('background-tasks-list', async () => ({ success: true, ...backgroundTasks.snapshot() }));
   ipcMain.handle('background-task-cancel', async (_event, id) => ({ success: backgroundTasks.cancel(String(id || '')) }));
   ipcMain.handle('background-task-pause', async (_event, id) => ({ success: backgroundTasks.pause(String(id || '')) }));
   ipcMain.handle('background-task-continue', async (_event, id) => ({ success: backgroundTasks.continuePaused(String(id || '')) }));
@@ -52,9 +52,10 @@ const registerBackgroundTasksIpc = ({ ipcMain, eventBus, backgroundTasks, getMai
   ipcMain.handle('background-task-retry', async (_event, id) => {
     try {
       const result = await backgroundTasks.retry(String(id || ''));
-      return { success: true, task: result.task };
+      const { completion: _completion, ...accepted } = result;
+      return { success: true, ...accepted };
     } catch (error) {
-      return { success: false, error: error.message || String(error) };
+      return { success: false, code: error.code || 'RETRY_FAILED', error: error.message || String(error) };
     }
   });
   return () => {

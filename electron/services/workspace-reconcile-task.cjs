@@ -13,6 +13,7 @@ const createWorkspaceReconcileTask = ({ backgroundTasks, getWatchedWorkspacePath
         title: '工作区文件与数据库对账',
         dedupeKey: `workspace-reconcile:${root}`,
         cancellable: false,
+        resources: [{ path: `photoflow-workspace-database/${root}`, access: 'write' }],
         metadata: { root },
       }, async task => {
         task.report(5, '正在读取项目目录');

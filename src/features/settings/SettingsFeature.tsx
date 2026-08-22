@@ -149,15 +149,17 @@ const StorageVolumeOverview = ({ sourceSignature }: { sourceSignature: string })
     finally { if (force) setRefreshing(false); }
   }, []);
   useEffect(() => {
-    return window.electronAPI.onBackgroundTaskChanged(task => {
+    return window.electronAPI.onBackgroundTaskChanged(delta => {
+      for (const task of delta.upserts) {
       const invalidatingTaskTypes = new Set(['project-file-operation', 'project-archive', 'project-unarchive', 'workspace-backup', 'backup-cleanup', 'workspace-restore', 'project-restore', 'cache-cleanup', 'deleted-project-cleanup']);
       if (task.type !== 'storage-usage-scan') {
         if (task.state === 'completed' && invalidatingTaskTypes.has(task.type)) void load(false);
-        return;
+        continue;
       }
       if (task.state === 'completed') void load(false);
       else if (task.state === 'failed' || task.state === 'cancelled') setOverview(current => ({ ...current, scanning: false, error: task.error || '存储占用统计未完成' }));
       else setOverview(current => ({ ...current, scanning: true }));
+      }
     });
   }, [load]);
   useEffect(() => {
@@ -686,8 +688,8 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   useEffect(() => {
     if (activeSection === 'backup') void refreshBackup();
   }, [activeSection, draft.backup, refreshBackup]);
-  useEffect(() => window.electronAPI.onBackgroundTaskChanged(task => {
-    if (activeSection === 'backup' && ['workspace-backup', 'backup-verify', 'backup-cleanup', 'workspace-restore', 'project-restore', 'project-archive', 'project-unarchive'].includes(task.type)) void refreshBackup();
+  useEffect(() => window.electronAPI.onBackgroundTaskChanged(delta => {
+    if (activeSection === 'backup' && delta.upserts.some(task => ['workspace-backup', 'backup-verify', 'backup-cleanup', 'workspace-restore', 'project-restore', 'project-archive', 'project-unarchive'].includes(task.type))) void refreshBackup();
   }), [activeSection, refreshBackup]);
   useEffect(() => {
     const credentialRef = draft.backup.nas.credentialRef;
@@ -869,6 +871,9 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     <section><h3 className="text-sm font-bold text-slate-800">项目工具栏</h3><p className="mt-1 text-xs leading-5 text-slate-500">设置项目工具栏按钮及顺序。</p><ProjectToolbarSettingsEditor value={draft.projectToolbar} onChange={projectToolbar => update('projectToolbar', projectToolbar)}/></section>
     <SettingsPageGroup title="设置">
       <SettingsRow title="恢复默认设置" description="保留当前工作目录，将其他全部应用设置恢复为初始值。"><button type="button" onClick={() => void restoreDefaults()} className="dialog-secondary ml-auto flex w-fit items-center gap-2"><RotateCcw size={15}/>恢复默认设置</button></SettingsRow>
+    </SettingsPageGroup>
+    <SettingsPageGroup title="视频剪辑">
+      <SettingsRow title="裁剪导出方式" description={draft.videoTools.trim.exportMode === 'fast' ? '快速导出不重新编码，不降低画质；边界可能按关键帧产生少量偏差。' : '精确导出会重新编码所选片段，边界精确但耗时更长。'}><select value={draft.videoTools.trim.exportMode} onChange={event => update('videoTools', { ...draft.videoTools, trim: { exportMode: event.target.value as AppConfig['videoTools']['trim']['exportMode'] } })} className="form-input ml-auto max-w-sm"><option value="fast">快速导出（默认）</option><option value="exact">精确导出</option></select></SettingsRow>
     </SettingsPageGroup>
     </>}
     {activeSection === 'project' && <SettingsPageGroup title="进度名称预设">

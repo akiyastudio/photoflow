@@ -785,7 +785,7 @@ def main():
             ).fetchone()
             assert repeated_missing[:] == first_missing_state, "repeated missing sync must be a no-op"
         assert db.execute("SELECT COUNT(*) FROM photos WHERE project_id=?", (project_id,)).fetchone()[0] == 1
-        offline_scan = workspace_db.media_sync_project(workspace_root, db, {"projectName": "迁移测试"})
+        offline_scan = workspace_db.media_sync_prepare(workspace_root, db, {"projectName": "迁移测试"})
         assert offline_scan["projectUnavailable"] is True
 
         os.mkdir(os.path.join(workspace_root, "迁移测试"))

@@ -205,6 +205,26 @@ def test_tracking_engine(root: Path) -> None:
         # Direct content changes mark the tracked node stale, including changes
         # discovered after the application was not watching the project.
         write_media(progress_folder / "delta.jpg", b"delta-v1-changed-content")
+        old_detection = db_api.progress_stale_prepare(str(workspace), db, {
+            "projectName": "Project", "changedPaths": [str(progress_folder / "delta.jpg")],
+        })
+        assert progress["id"] in old_detection["staleProgressIds"]
+        # A concurrent confirmation changes the project revision. Applying the
+        # old filesystem snapshot must request recomputation, not overwrite it.
+        db_api.progress_mark_ready(db, {
+            "progressId": progress["id"],
+            "trackingSnapshot": {
+                "files": db_api.folder_media_snapshot(str(progress_folder)),
+                "parent": db_api.folder_media_snapshot(str(original_folder)),
+            },
+        })
+        expired = db_api.progress_stale_apply(str(workspace), db, {
+            "projectName": "Project", "snapshotId": old_detection["snapshotId"],
+            "revision": old_detection["revision"], "candidates": old_detection["candidates"],
+        })
+        assert expired["revisionExpired"] is True
+        assert db.execute("SELECT tracking_state FROM progress_folders WHERE id=?", (progress["id"],)).fetchone()[0] == "ready"
+        write_media(progress_folder / "delta.jpg", b"delta-v2-changed-again")
         detected = db_api.progress_detect_stale(str(workspace), db, {
             "projectName": "Project", "changedPaths": [str(progress_folder / "delta.jpg")],
         })

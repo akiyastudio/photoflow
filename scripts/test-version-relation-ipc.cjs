@@ -73,7 +73,7 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
         layoutSaveAttempts += 1;
         if (layoutLockFailures > 0) {
           layoutLockFailures -= 1;
-          throw new Error('database is locked');
+          throw Object.assign(new Error('localized busy message'), { code: 'SQLITE_BUSY' });
         }
         layoutSavePayload = payload;
         return { success: true, revision: 1 };
@@ -192,11 +192,12 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   }, 'layout IPC must pass only the trusted project name, normalized scope, revision, mode, stable node IDs, and finite coordinates');
   layoutLockFailures = 2;
   const attemptsBeforeLockedSave = layoutSaveAttempts;
-  const retriedLayout = await layoutSaveHandler(null, workspaceRoot, 'Trusted Project', {
+  const busyLayout = await layoutSaveHandler(null, workspaceRoot, 'Trusted Project', {
     scopeKey: '', expectedRevision: 0, mode: 'patch', positions: [{ nodeKey: `progress:${child.id}`, x: 20, y: 30 }],
   });
-  assert.strictEqual(retriedLayout.success, true, 'temporary database locks must be retried inside the trusted layout-save boundary');
-  assert.strictEqual(layoutSaveAttempts - attemptsBeforeLockedSave, 3, 'layout save must retry until the temporary writer lock clears');
+  assert.strictEqual(busyLayout.success, false, 'non-idempotent layout writes must not be retried automatically');
+  assert.strictEqual(layoutSaveAttempts - attemptsBeforeLockedSave, 1, 'layout save must make one write attempt');
+  layoutLockFailures = 0;
   const ordinaryFolderLayout = await layoutSaveHandler(null, workspaceRoot, 'Trusted Project', {
     scopeKey: '', expectedRevision: 1, mode: 'patch', positions: [{ nodeKey: 'entry:other', x: 30, y: 40 }],
   });

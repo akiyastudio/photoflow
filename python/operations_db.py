@@ -9,6 +9,12 @@ import time
 import uuid
 from pathlib import Path
 
+try:
+    from database_error_codes import error_response
+except ModuleNotFoundError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from database_error_codes import error_response
+
 
 SCHEMA_VERSION = 1
 UNDO_ACTIONS = (
@@ -192,7 +198,7 @@ def run_server():
             result = execute(request["database"], request["action"], request.get("payload") or {})
             response = {"id": request_id, "success": True, "result": result}
         except Exception as error:
-            response = {"id": request_id, "success": False, "error": str(error)}
+            response = error_response(request_id, error)
         print(json.dumps(response, ensure_ascii=False), flush=True)
 
 

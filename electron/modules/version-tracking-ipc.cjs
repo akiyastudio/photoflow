@@ -116,7 +116,10 @@ const registerVersionTrackingIpc = context => {
       concurrencyWriteLimit: 2,
       resourceAccess: 'read',
       cancellable: false,
-      resources: resourcePath ? [resourcePath] : [],
+      resources: [
+        ...(resourcePath ? [{ path: resourcePath, access: 'read' }] : []),
+        { path: `photoflow-workspace-database/${workspaceRoot}`, access: 'write' },
+      ],
       metadata: { workspaceRoot, projectName, resourcePath },
     }, () => trackingScanService.syncProject(workspaceRoot, projectName));
   const queueFingerprintMaintenance = (workspaceRoot, projectName, resourcePath) => {
@@ -149,7 +152,11 @@ const registerVersionTrackingIpc = context => {
       message: '正在重新开始版本比较',
       runningMessage: '正在准备版本比较',
       cancellable: true,
-      resources: [created.parentFolderPath, created.progressFolderPath],
+      resources: [
+        { path: created.parentFolderPath, access: 'read' },
+        { path: created.progressFolderPath, access: 'read' },
+        { path: `photoflow-workspace-database/${workspaceRoot}`, access: 'write' },
+      ],
       concurrencyGroup: 'disk-io',
       concurrencyLimit: 3,
       concurrencyWriteLimit: 2,
@@ -210,7 +217,11 @@ const registerVersionTrackingIpc = context => {
         message: '等待其他文件操作完成，之后自动开始版本比较',
         runningMessage: '正在准备版本比较',
         cancellable: true,
-        resources: [created.parentFolderPath, created.progressFolderPath],
+        resources: [
+          { path: created.parentFolderPath, access: 'read' },
+          { path: created.progressFolderPath, access: 'read' },
+          { path: `photoflow-workspace-database/${workspaceRoot}`, access: 'write' },
+        ],
         concurrencyGroup: 'disk-io',
         concurrencyLimit: 3,
         concurrencyWriteLimit: 2,
@@ -376,7 +387,10 @@ const registerVersionTrackingIpc = context => {
           runningMessage: '正在提交版本跟踪',
           notificationPolicy: 'progress-toast',
           cancellable: false,
-          resources: [resources.parentFolderPath, resources.progressFolderPath].filter(Boolean),
+          resources: [
+            ...[resources.parentFolderPath, resources.progressFolderPath].filter(Boolean).map(resourcePath => ({ path: resourcePath, access: 'write' })),
+            { path: `photoflow-workspace-database/${workspaceRoot}`, access: 'write' },
+          ],
           concurrencyGroup: 'disk-io',
           concurrencyLimit: 3,
           concurrencyWriteLimit: 2,

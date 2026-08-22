@@ -152,6 +152,121 @@ def trim_video_exactly(
     return result
 
 
+def trim_video_fast(
+    input_file: str,
+    start_seconds: float,
+    end_seconds: float,
+    output_file: str,
+    cancel_file: str | None = None,
+):
+    """Copy encoded packets into a new container without re-encoding them."""
+    input_file = os.path.abspath(input_file)
+    output_file = os.path.abspath(output_file)
+    if not os.path.isfile(input_file):
+        raise FileNotFoundError(f"找不到文件：{input_file}")
+    if os.path.normcase(input_file) == os.path.normcase(output_file):
+        raise ValueError("剪辑结果不能覆盖原视频")
+    ffmpeg_exe = get_ffmpeg_exe()
+    duration = probe_duration(input_file)
+    start_seconds = max(0.0, float(start_seconds))
+    end_seconds = min(duration, float(end_seconds))
+    if end_seconds - start_seconds < 0.05:
+        raise ValueError("保留片段的时长必须大于 0.05 秒")
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    extension = os.path.splitext(output_file)[1]
+    temporary = os.path.join(
+        os.path.dirname(output_file),
+        f".{os.path.splitext(os.path.basename(output_file))[0]}.{uuid.uuid4().hex}.photoflow-part{extension}",
+    )
+    requested_duration = end_seconds - start_seconds
+    command = [
+        ffmpeg_exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+        "-ss", f"{start_seconds:.6f}", "-i", input_file,
+        "-t", f"{requested_duration:.6f}",
+        "-map", "0:v:0?", "-map", "0:a?", "-map_metadata", "0", "-map_chapters", "0",
+        # Keep the pre-roll packets and their original timestamps. The MP4/MOV
+        # muxer writes an edit list that hides frames before the requested
+        # timestamp while retaining the keyframe data needed to decode the
+        # first visible frame. Rebasing negative timestamps would expose that
+        # pre-roll and incorrectly lengthen the exported clip.
+        "-c", "copy",
+    ]
+    if extension.lower() in {".mp4", ".mov", ".m4v"}:
+        command.extend(["-movflags", "+faststart"])
+    command.extend(["-progress", "pipe:1", "-nostats", temporary])
+    process = None
+    try:
+        if cancel_file and os.path.isfile(cancel_file):
+            raise SplitCancelled("视频导出已取消")
+        emit("progress", "正在准备快速导出…", 2, phase="preparing")
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        last_progress = 2.0
+        for raw_line in process.stdout or []:
+            if cancel_file and os.path.isfile(cancel_file):
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+                raise SplitCancelled("视频导出已取消")
+            key, separator, value = raw_line.strip().partition("=")
+            if not separator or key not in {"out_time_us", "out_time_ms"}:
+                continue
+            try:
+                processed_seconds = max(0.0, float(value) / 1_000_000.0)
+            except ValueError:
+                continue
+            progress = min(92.0, 5.0 + processed_seconds / requested_duration * 87.0)
+            if progress - last_progress >= 0.5:
+                last_progress = progress
+                emit("progress", "正在快速导出视频…", progress, phase="copying")
+        return_code = process.wait()
+        error_output = (process.stderr.read() if process.stderr else "").strip()
+        if cancel_file and os.path.isfile(cancel_file):
+            raise SplitCancelled("视频导出已取消")
+        if return_code != 0 or not os.path.isfile(temporary) or os.path.getsize(temporary) <= 0:
+            detail = error_output[-2000:] or "FFmpeg 未能生成快速剪辑结果"
+            raise RuntimeError(f"快速导出失败，可在设置中切换为精确导出：{detail}")
+        emit("progress", "正在校验导出结果…", 95, phase="verifying")
+        output_duration = probe_duration(temporary)
+        duration_tolerance = max(3.0, min(10.0, requested_duration * 0.1))
+        if output_duration < 0.05 or abs(output_duration - requested_duration) > duration_tolerance:
+            raise RuntimeError(
+                f"快速导出结果时长异常：期望 {requested_duration:.2f} 秒，实际 {output_duration:.2f} 秒"
+            )
+        emit("progress", "正在保存视频…", 98, phase="saving")
+        os.replace(temporary, output_file)
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        try:
+            os.remove(temporary)
+        except FileNotFoundError:
+            pass
+    result = {
+        "success": True,
+        "output": output_file,
+        "start": start_seconds,
+        "end": end_seconds,
+        "duration": requested_duration,
+        "sourceDuration": duration,
+        "outputDuration": output_duration,
+        "exactTranscodeUsed": False,
+        "fastCopyUsed": True,
+        "boundaryMaySnap": True,
+    }
+    print(json.dumps(result, ensure_ascii=False), flush=True)
+    return result
+
+
 # Kept as a compatibility alias for callers from older releases.
 trim_video_losslessly = trim_video_exactly
 
@@ -401,6 +516,7 @@ def run(args_list=None):
     parser.add_argument("--trim-start", type=float)
     parser.add_argument("--trim-end", type=float)
     parser.add_argument("--output-path")
+    parser.add_argument("--trim-mode", choices=("fast", "exact"), default="fast")
     parser.add_argument("--timeline-frames", default="")
     parser.add_argument("--cancel_file", default="")
     args = parser.parse_args(args_list)
@@ -419,7 +535,8 @@ def run(args_list=None):
                 raise ValueError("剪辑视频仅支持单个输入文件")
             if args.trim_start is None or args.trim_end is None or not args.output_path:
                 raise ValueError("剪辑视频需要开始时间、结束时间和输出路径")
-            trim_video_exactly(
+            trim_function = trim_video_fast if args.trim_mode == "fast" else trim_video_exactly
+            trim_function(
                 args.video_path[0].strip('"').strip("'"),
                 args.trim_start,
                 args.trim_end,

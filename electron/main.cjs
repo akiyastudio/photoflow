@@ -26,6 +26,7 @@ const { createShellNewService } = require('./services/shell-new-service.cjs');
 const { createMediaAccessService } = require('./services/media-access-service.cjs');
 const { createMediaFileResponse } = require('./services/media-response-service.cjs');
 const { PythonDatabaseClient } = require('./repositories/database-client.cjs');
+const { WorkspaceSqliteCoordinator } = require('./services/workspace-sqlite-coordinator.cjs');
 const { createWorkspaceRepository } = require('./domains/workspace/public.cjs');
 const { createOperationsRepository } = require('./domains/file-operations/public.cjs');
 const { createMediaRepository } = require('./domains/media/public.cjs');
@@ -52,6 +53,7 @@ const { createRawOrientationService } = require('./services/raw-orientation-serv
 const { createImageThumbnailRuntime } = require('./services/image-thumbnail-runtime.cjs');
 const { createVersionService } = require('./domains/versioning/public.cjs');
 const { createVersionStaleDetectionService } = require('./services/version-stale-detection-service.cjs');
+const { createMediaTrackingScanScheduler } = require('./services/media-tracking-scan-scheduler.cjs');
 const { createSelectionService } = require('./services/selection-service.cjs');
 const { createTelemetryService } = require('./services/telemetry-service.cjs');
 const { createPrivacyService } = require('./privacy-service.cjs');
@@ -64,6 +66,14 @@ const { createElectronSecurity, normalizeBundledPythonTool, normalizeExternalUrl
 // Latin-only directory name.
 app.setPath('userData', path.join(app.getPath('appData'), 'Photoflow'));
 app.setName('照片流');
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
+else app.on('second-instance', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
 const managedExternalLinkRegistryPath = path.join(app.getPath('userData'), 'managed-external-links.json');
 const projectVirtualPaths = createProjectVirtualPathService({
   shell,
@@ -197,7 +207,7 @@ const normalizeMediaCacheSizeGB = (value, fallback = 50) => {
 };
 const workspaceWatchChanges = new Map();
 const workspaceWatchSuppressions = new Map();
-const mediaTrackingTimers = new Map();
+let mediaTrackingScanScheduler = null;
 const isInternalWorkspaceChange = fileName => String(fileName || '')
   .split(/[\\/]/)
   .some(segment => { const normalized = segment.toLowerCase(); return normalized.includes('.photoflow-part')
@@ -237,6 +247,7 @@ const trackedVersionThumbnailCopies = new Map();
 const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
 const processSupervisor = createProcessSupervisor({ writeLog: (...args) => writeLog(...args) });
+const workspaceSqliteCoordinator = new WorkspaceSqliteCoordinator();
 
 const recycleBinService = createRecycleBinService({ app, shell, projectRoot, processSupervisor });
 const fileClipboardService = createFileClipboardService({ app, projectRoot, processSupervisor });
@@ -265,6 +276,7 @@ const {
 const eventBus = createEventBus();
 const backgroundTasks = createBackgroundTaskService({
   eventBus,
+  writeLog,
   persistencePath: path.join(app.getPath('userData'), 'background-tasks.json'),
 });
 mediaAccessService = createMediaAccessService({
@@ -934,6 +946,7 @@ const getTrackedVersionThumbnailPath = (workspaceRoot, photoId, versionId) => {
 };
 
 const workspaceDatabase = new PythonDatabaseClient({
+  coordinator: workspaceSqliteCoordinator,
   getRunConfig,
   getDatabasePath: getWorkspaceDatabasePath,
   writeLog,
@@ -946,6 +959,7 @@ const workspaceDatabase = new PythonDatabaseClient({
   defaultTimeoutMs: 2 * 60 * 1000,
 });
 const operationsDatabase = new PythonDatabaseClient({
+  coordinator: workspaceSqliteCoordinator,
   getRunConfig,
   getDatabasePath: getWorkspaceOperationsDatabasePath,
   writeLog,
@@ -959,6 +973,7 @@ const workspaceRepository = createWorkspaceRepository(workspaceDatabase, operati
 // Run routine integrity checks and backups in an independent process so they
 // cannot hold up interactive project-catalog requests.
 const workspaceMaintenanceDatabase = new PythonDatabaseClient({
+  coordinator: workspaceSqliteCoordinator,
   getRunConfig,
   getDatabasePath: getWorkspaceDatabasePath,
   writeLog,
@@ -970,6 +985,7 @@ const workspaceMaintenanceDatabase = new PythonDatabaseClient({
 const workspaceMaintenanceRepository = createWorkspaceRepository(workspaceMaintenanceDatabase);
 // Keep interactive media/version/team requests on their own worker.
 const mediaDatabase = new PythonDatabaseClient({
+  coordinator: workspaceSqliteCoordinator,
   getRunConfig,
   getDatabasePath: getWorkspaceDatabasePath,
   writeLog,
@@ -983,6 +999,7 @@ const mediaDatabase = new PythonDatabaseClient({
 // one request at a time, so a dedicated worker prevents clicks such as
 // tracking/team confirmations from waiting behind an unrelated long request.
 const mediaInteractionDatabase = new PythonDatabaseClient({
+  coordinator: workspaceSqliteCoordinator,
   getRunConfig,
   getDatabasePath: getWorkspaceDatabasePath,
   writeLog,
@@ -995,6 +1012,7 @@ const mediaInteractionDatabase = new PythonDatabaseClient({
 // the core store, but a failed team database or worker cannot block the media
 // interaction queue.
 const teamRetouchDatabase = new PythonDatabaseClient({
+  coordinator: workspaceSqliteCoordinator,
   getRunConfig,
   getDatabasePath: getWorkspaceDatabasePath,
   writeLog,
@@ -1053,11 +1071,12 @@ const mediaRepository = {
 };
 const versionService = createVersionService({ repository: mediaRepository });
 let selectionService = null;
-const versionStaleDetectionService = createVersionStaleDetectionService({ versionService, writeLog });
+const versionStaleDetectionService = createVersionStaleDetectionService({ versionService, backgroundTasks, writeLog });
 // Directory walks and deferred full-hash backfills can take minutes on large
 // projects. Run scheduled scans on a separate worker so opening team retouch
 // never waits behind background media tracking work.
 const mediaScanDatabase = new PythonDatabaseClient({
+  coordinator: workspaceSqliteCoordinator,
   getRunConfig,
   getDatabasePath: getWorkspaceDatabasePath,
   writeLog,
@@ -1075,6 +1094,7 @@ const mediaScanService = createVersionService({ repository: {
 // separate database worker so the scheduler's read concurrency is real rather
 // than two UI tasks queued inside one synchronous Python server process.
 const trackingScanDatabase = new PythonDatabaseClient({
+  coordinator: workspaceSqliteCoordinator,
   getRunConfig,
   getDatabasePath: getWorkspaceDatabasePath,
   writeLog,
@@ -1110,17 +1130,7 @@ const reconcileWorkspaceCatalog = root => {
   const existing = workspaceCatalogReconciliations.get(root);
   if (existing) return existing;
   const previousSnapshot = workspaceCatalogSemanticSnapshot(workspaceCatalogs.get(root));
-  const run = async () => {
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        return await reconcileWorkspaceCatalogDirect(root);
-      } catch (error) {
-        if (attempt >= 1 || !/database is locked/i.test(error?.message || String(error))) throw error;
-        await new Promise(resolve => setTimeout(resolve, 300));
-      }
-    }
-  };
-  const operation = run().then(catalog => {
+  const operation = reconcileWorkspaceCatalogDirect(root).then(catalog => {
     const changed = previousSnapshot !== workspaceCatalogSemanticSnapshot(catalog);
     if (changed && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('workspace-projects-changed', { root, reconciled: true });
@@ -1145,8 +1155,7 @@ const stopWorkspaceWatcher = () => {
   if (workspaceReconciliationTimer) clearInterval(workspaceReconciliationTimer);
   workspaceReconciliationTimer = null;
   workspaceReconcileTask.reset();
-  for (const state of mediaTrackingTimers.values()) clearTimeout(state?.timer || state);
-  mediaTrackingTimers.clear();
+  mediaTrackingScanScheduler?.stop();
   versionStaleDetectionService.stop();
 };
 
@@ -1170,48 +1179,8 @@ const startWorkspaceReconciliation = root => {
   workspaceReconciliationTimer = setInterval(() => { void reconcileWorkspaceState(root); }, 5 * 60 * 1000);
 };
 
-const scheduleMediaTrackingScan = (root, projectName, changedPaths = [], fullScan = false) => {
-  if (!projectName) return;
-  versionStaleDetectionService.schedule(root, projectName, changedPaths, fullScan);
-  const project = workspaceCatalogs.get(root)?.byName.get(projectName.toLocaleLowerCase());
-  if (project?.availability === 'missing') return;
-  const key = `${root}\0${projectName.toLocaleLowerCase()}`;
-  const previous = mediaTrackingTimers.get(key);
-  if (previous) clearTimeout(previous.timer || previous);
-  const state = {
-    changedPaths: new Set([...(previous?.changedPaths || []), ...changedPaths.map(value => path.resolve(value))]),
-    fullScan: Boolean(fullScan || previous?.fullScan),
-    timer: null,
-  };
-  state.timer = setTimeout(() => {
-    mediaTrackingTimers.delete(key);
-    void mediaScanService.syncProject(root, projectName).then(result => {
-      const row = workspaceCatalogs.get(root)?.byName.get(projectName.toLocaleLowerCase());
-      if (!row) return;
-      for (const candidate of (result.thumbnailCandidates || []).slice(0, 750)) {
-        void ensureTrackedVersionThumbnail({
-          workspaceRoot: root,
-          photoId: candidate.photoId,
-          versionId: candidate.versionId,
-          filePath: candidate.filePath,
-          priority: PRIORITY.project,
-        });
-      }
-    }).catch(error => {
-      writeLog('warn', 'Media version tracking scan deferred', { projectName, error: error.message || String(error) });
-    });
-  }, 1500);
-  mediaTrackingTimers.set(key, state);
-};
-
-const cancelMediaTrackingScan = (root, projectName) => {
-  if (!projectName) return;
-  const key = `${root}\0${projectName.toLocaleLowerCase()}`;
-  const state = mediaTrackingTimers.get(key);
-  if (state) clearTimeout(state.timer || state);
-  mediaTrackingTimers.delete(key);
-  versionStaleDetectionService.cancel(root, projectName);
-};
+const scheduleMediaTrackingScan = (...args) => mediaTrackingScanScheduler?.schedule(...args);
+const cancelMediaTrackingScan = (...args) => mediaTrackingScanScheduler?.cancel(...args);
 
 const watchWorkspace = (root) => {
   if (watchedWorkspacePath === root && workspaceWatcher) return;
@@ -1387,6 +1356,7 @@ const updateMediaCacheIndex = async (state, changedPaths) => {
 };
 
 const runMediaCacheMaintenance = async cacheDir => {
+  const deadlineAt = Date.now() + 10 * 60 * 1000;
   const directory = path.resolve(cacheDir);
   const state = await getMediaCacheIndex(directory);
   if (state.running) return;
@@ -1398,19 +1368,18 @@ const runMediaCacheMaintenance = async cacheDir => {
     if (state.totalBytes <= state.maxBytes) return;
     // Access times only need a full refresh when eviction is actually needed.
     const refreshed = await refreshMediaCacheIndex(directory);
-    const oldest = [...refreshed.files.entries()].sort((left, right) => left[1].used - right[1].used);
     const protectedCachePaths = new Set([...trackedVersionThumbnailCopies.values()].map(pending => {
       const resolved = path.resolve(pending.cachePath);
       return process.platform === 'win32' ? resolved.toLocaleLowerCase() : resolved;
     }));
-    for (const [filePath, record] of oldest) {
-      if (refreshed.totalBytes <= refreshed.maxBytes) break;
-      const cacheKey = process.platform === 'win32' ? path.resolve(filePath).toLocaleLowerCase() : path.resolve(filePath);
-      if (protectedCachePaths.has(cacheKey)) continue;
-      try { await fs.promises.unlink(filePath); } catch { continue; }
-      refreshed.files.delete(filePath);
-      refreshed.totalBytes -= record.size;
-    }
+    await thumbnailService.evictCache({
+      cacheRoot: directory,
+      bytesToFree: Math.max(0, refreshed.totalBytes - refreshed.maxBytes),
+      excludePaths: [...protectedCachePaths],
+      recoverOrphans: true,
+      deadlineAt,
+    });
+    await refreshMediaCacheIndex(directory);
   } finally {
     state.running = false;
     if (state.pendingPaths.size) trimMediaCache(directory, state.maxBytes / 1024 ** 3, []);
@@ -1452,7 +1421,7 @@ const decodedImagePreviewPath = async (sourcePath, stat, cacheConfig, kind) => {
   const cacheDir = getMediaCacheDir(cacheConfig);
   const target = decodedImagePreviewCacheFile(sourcePath, stat, cacheDir, kind);
   if (isCompleteJpegFile(target)) return target;
-  if (fs.existsSync(target)) void fs.promises.unlink(target).catch(() => undefined);
+  if (fs.existsSync(target)) await thumbnailService?.evictCache({ thumbnailPaths: [target] }).catch(() => undefined);
   try {
     await imageThumbnailRuntime.generateOriginalImagePreviewFile(sourcePath, kind, [{ sizeLabel: `${kind}-preview`, pixels: 0, path: target }]);
     if (!isCompleteJpegFile(target)) return null;
@@ -1600,6 +1569,16 @@ const ensureTrackedVersionThumbnail = async ({ workspaceRoot, photoId, versionId
     writeLog('warn', 'Unable to persist ID-based version thumbnail', { versionId, filePath, error: error.message || String(error) });
   }
 };
+
+mediaTrackingScanScheduler = createMediaTrackingScanScheduler({
+  backgroundTasks,
+  mediaScanService,
+  versionStaleDetectionService,
+  getProject: (root, projectName) => workspaceCatalogs.get(root)?.byName.get(String(projectName || '').toLocaleLowerCase()),
+  onThumbnailCandidate: candidate => { void ensureTrackedVersionThumbnail(candidate); },
+  thumbnailPriority: PRIORITY.project,
+  writeLog,
+});
 
 const rawOrientationCorrection = createRawOrientationService({ exiftool }).correction;
 const imageThumbnailRuntime = createImageThumbnailRuntime({
@@ -1878,6 +1857,15 @@ app.whenReady().then(async () => {
   const deletedLogFiles = await cleanupExpiredLogs();
   const deletedCaptureTimeCacheFiles = await cleanupRetiredCaptureTimeCache({ app, fs, path, onError: nativeConsoleError });
   writeLog('info', 'Application started', { version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, deletedExpiredLogFiles: deletedLogFiles, deletedCaptureTimeCacheFiles });
+  const savedStartupConfig = readSavedConfig() || {};
+  const savedCacheDirectory = String(savedStartupConfig.mediaCache?.directory || '').trim();
+  if (savedCacheDirectory) approvedMediaCacheDirectories.add(path.resolve(savedCacheDirectory));
+  const startupMediaCacheConfig = {
+    maxSizeGB: normalizeMediaCacheSizeGB(savedStartupConfig.mediaCache?.maxSizeGB),
+    directory: savedCacheDirectory,
+    autoCleanup30Days: savedStartupConfig.mediaCache?.autoCleanup30Days === true,
+  };
+  mediaRuntimeState.activeMediaCacheConfig = startupMediaCacheConfig;
   telemetryService = createTelemetryService({
     app,
     fs,
@@ -1899,7 +1887,7 @@ app.whenReady().then(async () => {
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });
-  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, projectVirtualPaths, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
+  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, projectVirtualPaths, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
   registerSelectionIpc({ ipcMain, path, fs, selectionService, workspaceCatalogs });
   registerAdvancedVideoIpc({ BrowserWindow, app, crypto, ipcMain, mediaService, path, pluginService, processSupervisor, spawn, writeLog });
   const credentialService = createCredentialService({ writeLog });
@@ -1916,6 +1904,9 @@ app.whenReady().then(async () => {
   registerArchiveIpc({ archiveService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
   const storageUsageService = createStorageUsageService({ app, backgroundTasks, eventBus, getWorkspaceDatabasePath, getWorkspaceDataRoot, readSavedConfig, writeLog });
   registerStorageUsageIpc({ ipcMain, storageUsageService });
+  void thumbnailService.recoverCache(startupMediaCacheConfig).catch(error => {
+    writeLog('error', 'Thumbnail cache startup recovery failed', { error: error.message || String(error), code: error.code });
+  });
   // A fast renderer can invoke preload APIs immediately on warm starts.
   loadMainWindowRenderer();
 

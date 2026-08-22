@@ -2,45 +2,9 @@ const { CANCELLED_CODE: WORKFLOW_CANCELLED_CODE, buildWorkflowPlan, copyWorkflow
 const { registerVersionTrackingIpc } = require('./version-tracking-ipc.cjs');
 
 const workflowGenerationJobs = new Map();
-const isDatabaseLockedError = error => /(?:database|database table) is locked|SQLITE_BUSY/i.test(error?.message || String(error));
-const retryDatabaseLocked = async (operation, attempts = 4) => {
-  let lastError;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      lastError = error;
-      if (!isDatabaseLockedError(error) || attempt === attempts - 1) throw error;
-      await new Promise(resolve => setTimeout(resolve, 100 * 2 ** attempt));
-    }
-  }
-  throw lastError;
-};
 
 const registerVersionIpc = context => {
-  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, projectVirtualPaths, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
-  const runVersionMediaRescan = (workspaceRoot, projectName, projectPath, restartTask = null) => backgroundTasks.run({
-    ...(restartTask?.id ? { id: restartTask.id } : {}),
-    type: 'version-media-rescan',
-    title: '更新版本媒体索引',
-    dedupeKey: `version-media-rescan:${workspaceRoot}:${projectName}`,
-    concurrencyGroup: 'disk-io',
-    concurrencyLimit: 3,
-    concurrencyWriteLimit: 2,
-    resourceAccess: 'read',
-    cancellable: false,
-    resources: [projectPath],
-    metadata: { workspaceRoot, projectName, projectPath },
-  }, async task => {
-    task.report(5, '正在扫描项目媒体文件');
-    const result = await mediaScanService.syncProject(workspaceRoot, projectName);
-    task.report(95, '正在完成版本媒体索引');
-    return result;
-  });
-  backgroundTasks?.registerTypeRestartFactory?.('version-media-rescan', task => runVersionMediaRescan(task.metadata?.workspaceRoot, task.metadata?.projectName, task.metadata?.projectPath, task), {
-    canRestart: task => Boolean(task.metadata?.workspaceRoot && task.metadata?.projectName && task.metadata?.projectPath),
-    autoRestart: true,
-  });
+  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, projectVirtualPaths, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
   const listRatedProjectMedia = projectPath => mediaRatingService.listProject(projectPath);
   const teamDataDirectory = (workspaceRoot, photoId, baseVersionId) => path.join(getWorkspaceDataRoot(workspaceRoot), 'team-retouch', photoId, baseVersionId);
   const deliveryName = (photo, basePath) => path.parse(photo?.originalName || photo?.displayName || basePath).name;
@@ -326,7 +290,7 @@ const registerVersionIpc = context => {
       await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => undefined);
       removed.add(directory);
     }
-    await thumbnailService.invalidateSources(cleanup.sourcePaths || []).catch(error => {
+    await thumbnailService.evictCache({ sourcePaths: cleanup.sourcePaths || [] }).catch(error => {
       writeLog('warn', 'Unable to clear deleted version thumbnail cache', { error: error.message || String(error) });
     });
     return removed.size;
@@ -853,7 +817,7 @@ const registerVersionIpc = context => {
       const expectedRevision = request.expectedRevision;
       const positions = Array.isArray(request.positions) ? request.positions : [];
       if (!mode || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || positions.length > 1000) throw new Error('version_tree_layout_payload_invalid: 布局请求无效');
-      const listed = await retryDatabaseLocked(() => versionService.listProgress(workspaceRoot, projectName, true));
+      const listed = await versionService.listProgress(workspaceRoot, projectName, true);
       const allowedNodeKeys = new Set((listed.progressFolders || []).map(folder => `progress:${folder.id}`));
       const seen = new Set();
       const normalizedPositions = positions.map(position => {
@@ -865,7 +829,7 @@ const registerVersionIpc = context => {
         seen.add(nodeKey);
         return { nodeKey, x, y };
       });
-      return await retryDatabaseLocked(() => versionService.saveVersionTreeLayout(workspaceRoot, { projectName, scopeKey, expectedRevision, mode, positions: normalizedPositions }));
+      return await versionService.saveVersionTreeLayout(workspaceRoot, { projectName, scopeKey, expectedRevision, mode, positions: normalizedPositions });
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -1039,9 +1003,7 @@ const registerVersionIpc = context => {
       // project rescan is read-only, so its project-wide read reservation remains
       // compatible with focused version comparisons while still excluding later
       // filesystem writers.
-      if (backgroundTasks?.run && mediaScanService?.syncProject) setTimeout(() => void runVersionMediaRescan(workspaceRoot, projectName, projectPath).catch(error => {
-        writeLog('warn', 'Deferred progress-tree media rescan failed', { projectName, error: error.message || String(error) });
-      }), 250);
+      if (scheduleMediaTrackingScan) setTimeout(() => scheduleMediaTrackingScan(workspaceRoot, projectName, [], true), 250);
       const updatedFolderPath = updates.find(update => update.id === current.id)?.folderPath || current.folderPath;
       mutationToken = '';
       mutationHandle?.complete?.('版本树已更新');
@@ -2801,7 +2763,7 @@ const registerVersionIpc = context => {
       let workflowRefreshCount = 0;
       let warning;
       if (cropTargetPath) {
-        await thumbnailService.invalidateSources([cropTargetPath]).catch(error => {
+        await thumbnailService.evictCache({ sourcePaths: [cropTargetPath] }).catch(error => {
           writeLog('warn', 'Unable to invalidate recropped team patch thumbnail', { taskId: request.taskId, error: error.message || String(error) });
         });
         try {
