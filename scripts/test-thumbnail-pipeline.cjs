@@ -123,6 +123,7 @@ const run = async () => {
 
     const rejectedTarget = path.join(temporaryRoot, 'rejected-final.jpg');
     const rejectedNotifications = [];
+    const rejectedPublishIds = [];
     let rejectedNotify = () => undefined;
     const rejectedPipeline = createPipeline({
       root: temporaryRoot,
@@ -139,7 +140,11 @@ const run = async () => {
         return { cacheEpoch: 1, sourceVersion: 1, sourceSize: sourceStat.size, sourceMtimeMs: sourceStat.mtimeMs };
       }
       if (operation === 'get_cache_epoch') return { cacheEpoch: 1 };
-      if (operation === 'commit_thumbnail_publish') throw new Error('simulated commit failure');
+      if (operation === 'commit_thumbnail_publish') {
+        rejectedPublishIds.push(args.publish_id);
+        throw new Error('simulated commit failure');
+      }
+      if (operation === 'resolve_thumbnail_publish') return { state: 'NOT_FOUND', committed: false };
       return { success: true };
     };
     const rejectedResult = await waitForTerminalState(notify => {
@@ -148,8 +153,39 @@ const run = async () => {
     });
     assert.equal(rejectedResult.state, 'FAILED');
     assert.equal(rejectedNotifications.some(update => update.state === 'READY'), false, 'commit failure must never notify READY');
-    assert.equal(fs.existsSync(rejectedTarget), false, 'commit failure must remove the final created by this worker');
+    assert.equal(fs.existsSync(rejectedTarget), true, 'an unresolved commit failure must preserve the final as an orphan');
+    assert(rejectedPublishIds.length > 1, 'a missing receipt must retry the commit');
+    assert.equal(new Set(rejectedPublishIds).size, 1, 'ambiguous retries must reuse the exact publish ID');
     rejectedPipeline.stop();
+
+    const unknownTarget = path.join(temporaryRoot, 'unknown-final.jpg');
+    let unknownNotify = () => undefined;
+    const unknownPipeline = createPipeline({
+      root: temporaryRoot,
+      target: unknownTarget,
+      notify: update => unknownNotify(update),
+      generate: async (_filePath, _stat, _kind, _config, sizes) => {
+        for (const size of sizes) fs.writeFileSync(size.path, jpeg);
+        return sizes.map(size => ({ sizeLabel: size.label, pixelSize: size.pixels, path: size.path }));
+      },
+    });
+    unknownPipeline.database.call = async (operation, args = {}) => {
+      if (operation === 'capture_thumbnail_publish') {
+        const sourceStat = fs.statSync(args.file_path);
+        return { cacheEpoch: 1, sourceVersion: 1, sourceSize: sourceStat.size, sourceMtimeMs: sourceStat.mtimeMs };
+      }
+      if (operation === 'get_cache_epoch') return { cacheEpoch: 1 };
+      if (operation === 'commit_thumbnail_publish') throw Object.assign(new Error('connection lost'), { code: 'ECONNRESET' });
+      return { success: true };
+    };
+    unknownPipeline.resolveThumbnailPublish = async () => null;
+    const unknownResult = await waitForTerminalState(notify => {
+      unknownNotify = notify;
+      void unknownPipeline.request({ filePath: source, kind: 'image', requestedSize: 640, priority: PRIORITY.visible });
+    });
+    assert.equal(unknownResult.state, 'FAILED');
+    assert.equal(fs.existsSync(unknownTarget), true, 'unresolved ambiguous commit must preserve a safe orphan');
+    unknownPipeline.stop();
 
     const epochTarget = path.join(temporaryRoot, 'epoch-final.jpg');
     let epochCapture = 0;
@@ -275,7 +311,7 @@ const run = async () => {
     const maintenanceCalls = [];
     maintenancePipeline.database.call = async (...args) => { maintenanceCalls.push(args); return { success: true }; };
     await maintenancePipeline.invalidateDeleted([], null);
-    assert.equal(maintenanceCalls[0][2], 10 * 60 * 1000, 'cache index invalidation must use the maintenance timeout instead of the interactive 30 second timeout');
+    assert(maintenanceCalls[0][2] <= 10 * 60 * 1000 && maintenanceCalls[0][2] > 9 * 60 * 1000, 'cache index invalidation must use the remaining maintenance deadline instead of the interactive 30 second timeout');
     maintenancePipeline.stop();
 
     const failedDeletePath = path.join(temporaryRoot, 'delete-failure.jpg');

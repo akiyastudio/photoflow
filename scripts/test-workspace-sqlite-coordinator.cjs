@@ -74,6 +74,40 @@ const run = async () => {
   attempts = 0;
   await assert.rejects(client.call('root', 'legacy_action', {}, { timeoutMs: 1000 }), error => error.code === 'SQLITE_BUSY');
   assert.equal(attempts, 1, 'unclassified non-idempotent action is never retried');
+
+  const remainingCoordinator = new WorkspaceSqliteCoordinator();
+  const blockerStarted = deferred();
+  const unblock = deferred();
+  const blocker = remainingCoordinator.run({ databases: [{ path: 'C:/Data/workspace.sqlite3', mode: 'write' }] }, async () => {
+    blockerStarted.resolve();
+    await unblock.promise;
+  });
+  await blockerStarted.promise;
+  let activeOptions = null;
+  const activeSignal = new AbortController().signal;
+  const remainingClient = new CoordinatedDatabaseClient({
+    coordinator: remainingCoordinator,
+    operationPolicy: policy,
+    getDatabasePath: () => 'C:/Data/workspace.sqlite3',
+    scriptName: 'workspace_db.py',
+    execute: async options => { activeOptions = options; return true; },
+  });
+  const queuedAt = Date.now();
+  const queuedCall = remainingClient.call('root', 'legacy_action', {}, { timeoutMs: 200, signal: activeSignal });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  unblock.resolve();
+  await Promise.all([blocker, queuedCall]);
+  assert.equal(activeOptions.signal, activeSignal, 'AbortSignal must reach the active database request');
+  assert(activeOptions.deadlineAt >= queuedAt + 150 && activeOptions.deadlineAt <= queuedAt + 250);
+  assert(activeOptions.timeoutMs < 190, 'active request receives only the deadline remaining after coordinator queueing');
+
+  const quarantineCoordinator = new WorkspaceSqliteCoordinator();
+  quarantineCoordinator.quarantine([{ path: 'C:/Data/quarantined.sqlite3', mode: 'exclusive' }], new Error('termination failed'));
+  await assert.rejects(
+    quarantineCoordinator.run({ databases: [{ path: 'C:/Data/quarantined.sqlite3', mode: 'write' }] }, () => undefined),
+    error => error.code === 'DATABASE_QUARANTINED',
+  );
+  assert.equal(await quarantineCoordinator.run({ databases: [{ path: 'C:/Data/quarantined.sqlite3', mode: 'read' }] }, () => 'readable'), 'readable');
   console.log('workspace sqlite coordinator tests passed');
 };
 

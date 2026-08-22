@@ -4,6 +4,71 @@ const { spawn: defaultSpawn } = require('child_process');
 const DEFAULT_RESTART_POLICY = Object.freeze({ enabled: false, maxRestarts: 0, windowMs: 60000, backoffMs: [100, 300, 1000] });
 const safeError = error => error?.message || String(error || 'unknown error');
 
+const delay = milliseconds => new Promise(resolve => setTimeout(resolve, Math.max(0, milliseconds)));
+const childHasExited = child => !child || child.exitCode != null || child.signalCode != null;
+const waitForChildExit = (child, deadlineAt = Infinity) => {
+  if (childHasExited(child)) return Promise.resolve(true);
+  return new Promise(resolve => {
+    let timer = null;
+    const finish = () => {
+      child.removeListener?.('exit', finish);
+      child.removeListener?.('close', finish);
+      child.removeListener?.('error', finish);
+      if (timer) clearTimeout(timer);
+      resolve(true);
+    };
+    child.once('exit', finish);
+    child.once('close', finish);
+    child.once('error', finish);
+    if (Number.isFinite(deadlineAt)) {
+      timer = setTimeout(() => {
+        child.removeListener?.('exit', finish);
+        child.removeListener?.('close', finish);
+        child.removeListener?.('error', finish);
+        resolve(childHasExited(child));
+      }, Math.max(0, deadlineAt - Date.now()));
+    }
+  });
+};
+
+const terminateAndWait = async (child, deadlineAt, { rollbackSettleMs = 25 } = {}) => {
+  if (!child) return { exited: true, forced: false };
+  const terminationDeadline = Number.isFinite(deadlineAt) ? deadlineAt : Date.now() + 2000;
+  try { child.stdin?.end?.(); } catch { /* stdin may already be closed */ }
+  try { child.stdin?.destroy?.(); } catch { /* best effort */ }
+  if (!childHasExited(child)) {
+    try { child.kill(); } catch { /* exit/error may already be in flight */ }
+  }
+  let exited = childHasExited(child);
+  if (!exited) {
+    const remaining = Math.max(0, terminationDeadline - Date.now());
+    const gracefulDeadline = Date.now() + Math.min(500, Math.floor(remaining / 2));
+    exited = await waitForChildExit(child, gracefulDeadline);
+  }
+  let forced = false;
+  if (!exited) {
+    forced = true;
+    let forcedByChild = false;
+    try { forcedByChild = child.kill('SIGKILL') !== false; } catch { /* fall through to PID kill */ }
+    if (!forcedByChild && child.pid) {
+      try { process.kill(child.pid, 'SIGKILL'); } catch { /* wait for an already requested exit */ }
+    }
+    exited = await waitForChildExit(child, terminationDeadline);
+  }
+  if (!exited) {
+    const error = new Error('无法确认子进程已退出，数据库可能仍被占用');
+    error.code = 'PROCESS_TERMINATION_FAILED';
+    error.pid = child.pid || null;
+    throw error;
+  }
+  if (rollbackSettleMs > 0) await delay(rollbackSettleMs);
+  return { exited: true, forced };
+};
+
+const stopProcessAndWait = (child, timeoutMs = 2000, options = {}) => (
+  terminateAndWait(child, Date.now() + Math.max(0, timeoutMs), options)
+);
+
 class ManagedProcess extends EventEmitter {
   constructor(supervisor, specification) {
     super();
@@ -91,7 +156,7 @@ class ManagedProcess extends EventEmitter {
     return child;
   }
 
-  stop(reason = 'shutdown', { release = true } = {}) {
+  async stop(reason = 'shutdown', { release = true, timeoutMs = 2000, rollbackSettleMs = 25 } = {}) {
     this.stopping = true;
     this.state = 'stopping';
     this._restartReason = null;
@@ -100,11 +165,12 @@ class ManagedProcess extends EventEmitter {
     this.restartTimer = null;
     this.healthTimer = null;
     const child = this.child;
-    this.child = null;
-    if (child && !child.killed) child.kill();
+    await stopProcessAndWait(child, timeoutMs, { rollbackSettleMs });
+    if (this.child === child) this.child = null;
     this.state = 'stopped';
     this.supervisor.log('info', 'Managed process stopped', this.details({ reason }));
     if (release) this.release();
+    return { stopped: true };
   }
 
   release() {
@@ -224,13 +290,13 @@ class ProcessSupervisor {
     return [...this.processes.values()].map(process => process.status()).sort((left, right) => left.id.localeCompare(right.id));
   }
 
-  stopAll(reason = 'application-shutdown') {
+  async stopAll(reason = 'application-shutdown') {
     this.stopping = true;
-    for (const process of [...this.processes.values()]) process.stop(reason);
+    await Promise.all([...this.processes.values()].map(process => process.stop(reason)));
     this.processes.clear();
   }
 }
 
 const createProcessSupervisor = options => new ProcessSupervisor(options);
 
-module.exports = { DEFAULT_RESTART_POLICY, ManagedProcess, ProcessSupervisor, createProcessSupervisor };
+module.exports = { DEFAULT_RESTART_POLICY, ManagedProcess, ProcessSupervisor, createProcessSupervisor, stopProcessAndWait, terminateAndWait };

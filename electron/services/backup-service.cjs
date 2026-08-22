@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { Transform } = require('stream');
 const { pipeline } = require('stream/promises');
+const { AsyncLocalStorage } = require('async_hooks');
 const {
   MANAGED_EXTERNAL_FOLDER_PREFIX,
   MANAGED_EXTERNAL_FILE_PREFIX,
@@ -57,6 +58,7 @@ const createBackupService = context => {
     getWorkspaceMediaDatabasePath,
     getWorkspaceVersioningDatabasePath,
     getWorkspaceDataRoot,
+    workspaceSqliteCoordinator,
     credentialService,
     prepareDomainRecovery,
     readSavedConfig,
@@ -64,6 +66,76 @@ const createBackupService = context => {
     shell,
     writeLog,
   } = context;
+  const recoveryDatabaseGetters = {
+    core: getWorkspaceDatabasePath,
+    operations: getWorkspaceOperationsDatabasePath,
+    media: getWorkspaceMediaDatabasePath,
+    versioning: getWorkspaceVersioningDatabasePath,
+    'team-retouch': getWorkspaceTeamRetouchDatabasePath,
+  };
+  const recoveryDatabases = (workspaceRoot, domains) => domains.map(domain => {
+    const databasePath = recoveryDatabaseGetters[domain]?.(workspaceRoot);
+    if (!databasePath) throw new Error(`数据库恢复缺少 ${domain} 数据库路径`);
+    return { path: databasePath, mode: 'exclusive' };
+  });
+  const recoveryLeaseContext = new AsyncLocalStorage();
+  const runRecoveryPythonAction = async (scriptName, args, timeoutMs) => {
+    const action = String(args?.[0] || '');
+    const restoreTool = ['backup_db.py', 'domain_recovery.py', 'team_retouch_db.py'].includes(scriptName)
+      && (action.startsWith('restore-') || action === 'reset');
+    if (restoreTool) {
+      const lease = recoveryLeaseContext.getStore();
+      const destinationIndex = args.indexOf('--destination');
+      const destination = destinationIndex >= 0 ? path.resolve(String(args[destinationIndex + 1] || '')) : '';
+      if (!lease || !destination || !lease.databases.has(destination)) {
+        throw new Error(`恢复工具禁止在目标 SQLite exclusive 租约外执行：${scriptName} ${action}`);
+      }
+      const remainingMs = Number.isFinite(lease.deadlineAt) ? Math.max(0, lease.deadlineAt - Date.now()) : timeoutMs;
+      try {
+        return await runPythonJsonAction(scriptName, args, Math.min(timeoutMs, remainingMs), undefined, lease.signal, lease.deadlineAt);
+      } catch (error) {
+        if (error?.code === 'PROCESS_TERMINATION_FAILED') {
+          workspaceSqliteCoordinator.quarantine?.(
+            [...lease.databases].map(databasePath => ({ path: databasePath, mode: 'exclusive' })),
+            error,
+          );
+        }
+        throw error;
+      }
+    }
+    return runPythonJsonAction(scriptName, args, timeoutMs);
+  };
+
+  const withWorkspaceRecoveryLease = async ({ workspaceRoot, domains = [], signal, deadlineAt } = {}, worker) => {
+    if (!workspaceSqliteCoordinator?.run) throw new Error('工作区数据库恢复缺少 SQLite 协调器');
+    if (typeof prepareDomainRecovery !== 'function') throw new Error('工作区数据库恢复缺少 client 暂停器');
+    if (typeof worker !== 'function') throw new TypeError('工作区数据库恢复 worker 必须是函数');
+    const root = path.resolve(workspaceRoot);
+    const requested = recoveryDatabases(root, domains);
+    if (!requested.length) throw new Error('工作区数据库恢复至少需要一个目标数据库');
+    return workspaceSqliteCoordinator.run({
+      databases: requested,
+      signal,
+      deadlineAt,
+      label: `workspace-recovery:${root}:${domains.join(',')}`,
+    }, async () => {
+      const resume = await prepareDomainRecovery({ workspaceRoot: root, databases: requested, domains: [...domains] });
+      if (typeof resume !== 'function') throw new Error('client 暂停器未返回恢复函数');
+      try {
+        return await recoveryLeaseContext.run({
+          workspaceRoot: root,
+          databases: new Set(requested.map(database => path.resolve(database.path))),
+          signal,
+          deadlineAt,
+        }, worker);
+      } finally {
+        // Resume while the physical exclusive lease is still held. The
+        // coordinator releases it only after this worker (including cleanup)
+        // has completely settled.
+        await resume();
+      }
+    });
+  };
   const connectionStates = new Map();
   const approvedTargets = new Set();
   const approveTarget = value => {
@@ -873,39 +945,40 @@ const createBackupService = context => {
         const progress = 75 + (index + 1) / Math.max(1, dataEntries.length) * 10;
         task.saveCheckpoint({ version: 1, phase: 'workspace-data', newWorkspaceId: newId, completedWorkspace: [...completedWorkspace], completedData: [...completedData] }, progress, `正在恢复内部数据 ${index + 1}/${dataEntries.length}`);
       }
-      const operationsEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'operations.sqlite3');
-      if (operationsEntry && getWorkspaceOperationsDatabasePath) {
-        await materialize(target, operationsEntry, getWorkspaceOperationsDatabasePath(destination), task);
-      }
-      const teamRetouchEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'team-retouch.sqlite3');
-      if (teamRetouchEntry && getWorkspaceTeamRetouchDatabasePath) {
-        const teamRetouchDestination = getWorkspaceTeamRetouchDatabasePath(destination);
-        await materialize(target, teamRetouchEntry, teamRetouchDestination, task);
-        await runPythonJsonAction('team_retouch_db.py', [
-          'restore-workspace', '--destination', teamRetouchDestination,
+      await withWorkspaceRecoveryLease({
+        workspaceRoot: destination,
+        domains: ['core', 'operations', 'media', 'versioning', 'team-retouch'],
+        signal: task.signal,
+        deadlineAt: Date.now() + 30 * 60 * 1000,
+      }, async () => {
+        for (const [domain, getter] of [
+          ['operations', getWorkspaceOperationsDatabasePath],
+          ['media', getWorkspaceMediaDatabasePath],
+          ['versioning', getWorkspaceVersioningDatabasePath],
+          ['team-retouch', getWorkspaceTeamRetouchDatabasePath],
+        ]) {
+          const entry = manifest.files.find(item => item.scope === 'domain-database' && item.path === `${domain}.sqlite3`);
+          if (!entry || !getter) continue;
+          const portable = path.join(destination, `.photoflow-${domain}-restore.sqlite3`);
+          try {
+            await materialize(target, entry, portable, task);
+            await runRecoveryPythonAction('domain_recovery.py', [
+              'restore-workspace', '--domain', domain, '--source', portable, '--destination', getter(destination),
+              '--old-root', manifest.workspace.root, '--new-root', destination,
+              '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
+            ], 30 * 60 * 1000);
+          } finally {
+            await fs.promises.rm(portable, { force: true });
+          }
+        }
+        const databaseSource = objectPath(target, manifest.database.hash);
+        await runRecoveryPythonAction('backup_db.py', [
+          'restore-workspace', '--source', databaseSource, '--destination', getWorkspaceDatabasePath(destination),
           '--old-root', manifest.workspace.root, '--new-root', destination,
           '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
+          '--materialized-archive-project-ids', JSON.stringify(manifest.materializedArchiveProjectIds || []),
         ], 30 * 60 * 1000);
-      }
-      for (const [domain, getter] of [['media', getWorkspaceMediaDatabasePath], ['versioning', getWorkspaceVersioningDatabasePath]]) {
-        const entry = manifest.files.find(item => item.scope === 'domain-database' && item.path === `${domain}.sqlite3`);
-        if (!entry || !getter) continue;
-        const portable = path.join(destination, `.photoflow-${domain}-restore.sqlite3`);
-        await materialize(target, entry, portable, task);
-        await runPythonJsonAction('domain_recovery.py', [
-          'restore-workspace', '--domain', domain, '--source', portable, '--destination', getter(destination),
-          '--old-root', manifest.workspace.root, '--new-root', destination,
-          '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
-        ], 30 * 60 * 1000);
-        await fs.promises.rm(portable, { force: true });
-      }
-      const databaseSource = objectPath(target, manifest.database.hash);
-      await runPythonJsonAction('backup_db.py', [
-        'restore-workspace', '--source', databaseSource, '--destination', getWorkspaceDatabasePath(destination),
-        '--old-root', manifest.workspace.root, '--new-root', destination,
-        '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
-        '--materialized-archive-project-ids', JSON.stringify(manifest.materializedArchiveProjectIds || []),
-      ], 30 * 60 * 1000);
+      });
       const restoredConfigEntry = manifest.files.find(entry => entry.scope === 'app-config' && entry.path === 'photoflow_config.json');
       let restoredConfig = {};
       if (restoredConfigEntry) {
@@ -996,41 +1069,48 @@ const createBackupService = context => {
         const progress = 76 + (index + 1) / Math.max(1, dataEntries.length) * 9;
         task.saveCheckpoint({ version: 1, phase: 'project-data', completedProject: [...completedProject], completedData: [...completedData] }, progress, `正在恢复项目内部数据 ${index + 1}/${dataEntries.length}`);
       }
-      await runPythonJsonAction('backup_db.py', [
-        'restore-project', '--source', objectPath(target, manifest.database.hash), '--destination', getWorkspaceDatabasePath(root),
-        '--project-id', project.id, '--old-root', manifest.workspace.root, '--new-root', root,
-        '--target-relative-path', project.relativePath, '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
-        '--materialized-archive-project-ids', JSON.stringify(manifest.materializedArchiveProjectIds || []),
-      ], 30 * 60 * 1000);
-      const mediaEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'media.sqlite3');
-      const versioningEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'versioning.sqlite3');
-      if (mediaEntry && getWorkspaceMediaDatabasePath) {
-        await runPythonJsonAction('domain_recovery.py', [
-          'restore-project', '--domain', 'media', '--source', objectPath(target, mediaEntry.hash),
-          '--destination', getWorkspaceMediaDatabasePath(root), '--project-id', project.id,
-          ...(versioningEntry ? ['--peer-source', objectPath(target, versioningEntry.hash)] : []),
-          '--old-root', manifest.workspace.root, '--new-root', root,
-          '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
+      await withWorkspaceRecoveryLease({
+        workspaceRoot: root,
+        domains: ['core', 'media', 'versioning', 'team-retouch'],
+        signal: task.signal,
+        deadlineAt: Date.now() + 30 * 60 * 1000,
+      }, async () => {
+        await runRecoveryPythonAction('backup_db.py', [
+          'restore-project', '--source', objectPath(target, manifest.database.hash), '--destination', getWorkspaceDatabasePath(root),
+          '--project-id', project.id, '--old-root', manifest.workspace.root, '--new-root', root,
+          '--target-relative-path', project.relativePath, '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
+          '--materialized-archive-project-ids', JSON.stringify(manifest.materializedArchiveProjectIds || []),
         ], 30 * 60 * 1000);
-      }
-      if (versioningEntry && mediaEntry && getWorkspaceVersioningDatabasePath) {
-        await runPythonJsonAction('domain_recovery.py', [
-          'restore-project', '--domain', 'versioning', '--source', objectPath(target, versioningEntry.hash),
-          '--destination', getWorkspaceVersioningDatabasePath(root), '--project-id', project.id,
-          '--peer-source', objectPath(target, mediaEntry.hash),
-          '--old-root', manifest.workspace.root, '--new-root', root,
-          '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
-        ], 30 * 60 * 1000);
-      }
-      const teamRetouchEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'team-retouch.sqlite3');
-      if (teamRetouchEntry && getWorkspaceTeamRetouchDatabasePath) {
-        await runPythonJsonAction('team_retouch_db.py', [
-          'restore-project', '--source', objectPath(target, teamRetouchEntry.hash),
-          '--destination', getWorkspaceTeamRetouchDatabasePath(root), '--project-id', project.id,
-          '--old-root', manifest.workspace.root, '--new-root', root,
-          '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
-        ], 30 * 60 * 1000);
-      }
+        const mediaEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'media.sqlite3');
+        const versioningEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'versioning.sqlite3');
+        if (mediaEntry && getWorkspaceMediaDatabasePath) {
+          await runRecoveryPythonAction('domain_recovery.py', [
+            'restore-project', '--domain', 'media', '--source', objectPath(target, mediaEntry.hash),
+            '--destination', getWorkspaceMediaDatabasePath(root), '--project-id', project.id,
+            ...(versioningEntry ? ['--peer-source', objectPath(target, versioningEntry.hash)] : []),
+            '--old-root', manifest.workspace.root, '--new-root', root,
+            '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
+          ], 30 * 60 * 1000);
+        }
+        if (versioningEntry && mediaEntry && getWorkspaceVersioningDatabasePath) {
+          await runRecoveryPythonAction('domain_recovery.py', [
+            'restore-project', '--domain', 'versioning', '--source', objectPath(target, versioningEntry.hash),
+            '--destination', getWorkspaceVersioningDatabasePath(root), '--project-id', project.id,
+            '--peer-source', objectPath(target, mediaEntry.hash),
+            '--old-root', manifest.workspace.root, '--new-root', root,
+            '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
+          ], 30 * 60 * 1000);
+        }
+        const teamRetouchEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'team-retouch.sqlite3');
+        if (teamRetouchEntry && getWorkspaceTeamRetouchDatabasePath) {
+          await runRecoveryPythonAction('team_retouch_db.py', [
+            'restore-project', '--source', objectPath(target, teamRetouchEntry.hash),
+            '--destination', getWorkspaceTeamRetouchDatabasePath(root), '--project-id', project.id,
+            '--old-root', manifest.workspace.root, '--new-root', root,
+            '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
+          ], 30 * 60 * 1000);
+        }
+      });
       await mergeExternalLinkRegistry(
         target,
         manifest,
@@ -1125,16 +1205,24 @@ const createBackupService = context => {
     if (!entry) throw new Error(`该快照不包含 ${domain} 业务域`);
     const portable = path.join(getWorkspaceDataRoot(root), 'domain-restore', `${domain}-${crypto.randomUUID()}.sqlite3`);
     await materialize(target, entry, portable, { throwIfCancelled: () => undefined });
-    const resume = await prepareDomainRecovery?.(domain);
     try {
-      return await runPythonJsonAction('domain_recovery.py', [
-        'restore-workspace', '--domain', domain, '--source', portable, '--destination', database,
-        '--old-root', manifest.workspace.root, '--new-root', root,
-        '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', getWorkspaceDataRoot(root),
-      ], 30 * 60 * 1000);
+      return await withWorkspaceRecoveryLease({
+        workspaceRoot: root,
+        domains: [domain],
+        deadlineAt: Date.now() + 30 * 60 * 1000,
+      }, async () => {
+        try {
+          return await runRecoveryPythonAction('domain_recovery.py', [
+            'restore-workspace', '--domain', domain, '--source', portable, '--destination', database,
+            '--old-root', manifest.workspace.root, '--new-root', root,
+            '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', getWorkspaceDataRoot(root),
+          ], 30 * 60 * 1000);
+        } finally {
+          await fs.promises.rm(portable, { force: true });
+        }
+      });
     } finally {
       await fs.promises.rm(portable, { force: true }).catch(() => undefined);
-      resume?.();
     }
   };
 
@@ -1142,12 +1230,11 @@ const createBackupService = context => {
     if (domain === 'versioning') throw new Error('版本域不能直接重置，请从快照恢复');
     const database = domainPath(workspaceRoot, domain);
     if (!database) throw new Error(`不支持的业务域：${domain}`);
-    const resume = await prepareDomainRecovery?.(domain);
-    try {
-      return await runPythonJsonAction('domain_recovery.py', ['reset', '--domain', domain, '--destination', database], 30 * 60 * 1000);
-    } finally {
-      resume?.();
-    }
+    return withWorkspaceRecoveryLease({
+      workspaceRoot,
+      domains: [domain],
+      deadlineAt: Date.now() + 30 * 60 * 1000,
+    }, () => runRecoveryPythonAction('domain_recovery.py', ['reset', '--domain', domain, '--destination', database], 30 * 60 * 1000));
   };
 
   backgroundTasks.registerTypeResumeFactory?.('workspace-backup', task => runBackup(task.metadata?.workspacePath, task.metadata?.reason || 'manual', task));
@@ -1156,7 +1243,7 @@ const createBackupService = context => {
   backgroundTasks.registerTypeResumeFactory?.('backup-verify', task => verify(task.metadata?.workspacePath, task.metadata?.snapshotId, task));
   backgroundTasks.registerTypeRestartFactory?.('backup-cleanup', task => cleanup(task.metadata?.workspacePath, task));
 
-  return { approveTarget, isApprovedTarget, runBackup, runDomainBackup, runIfDue, status, restoreWorkspace, restoreProject, restoreDomain, resetDomain, verify, verifyDomain, testConnection, spaceStatus, cleanup };
+  return { approveTarget, isApprovedTarget, runBackup, runDomainBackup, runIfDue, status, restoreWorkspace, restoreProject, restoreDomain, resetDomain, verify, verifyDomain, testConnection, spaceStatus, cleanup, withWorkspaceRecoveryLease };
 };
 
 module.exports = { createBackupService, STORE_DIRECTORY };

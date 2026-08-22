@@ -9,6 +9,7 @@ import os
 import shutil
 import sqlite3
 import sys
+import uuid
 from pathlib import Path
 
 
@@ -178,7 +179,8 @@ def restore_workspace(source: str, destination: str, old_root: str, new_root: st
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     if os.path.exists(destination):
         raise RuntimeError("目标工作区数据库已存在")
-    target_db = connect(destination)
+    staged = f"{destination}.restore-{uuid.uuid4().hex}.tmp"
+    target_db = connect(staged)
     try:
         source_db.backup(target_db)
         replacements = [(old_root, new_root)]
@@ -194,10 +196,19 @@ def restore_workspace(source: str, destination: str, old_root: str, new_root: st
         check = target_db.execute("PRAGMA quick_check").fetchone()[0]
         if check != "ok":
             raise RuntimeError(f"恢复后的数据库完整性检查失败：{check}")
+        target_db.close()
+        target_db = None
+        os.replace(staged, destination)
         return {"success": True}
     finally:
-        target_db.close()
+        if target_db is not None:
+            target_db.close()
         source_db.close()
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(staged + suffix)
+            except FileNotFoundError:
+                pass
 
 
 def table_columns(db: sqlite3.Connection, table: str):
@@ -210,7 +221,12 @@ def table_columns(db: sqlite3.Connection, table: str):
 def restore_project(source: str, destination: str, project_id: str, old_root: str, new_root: str,
                     target_relative_path: str, old_data_root: str = "", new_data_root: str = "", materialized_archive_project_ids=None) -> dict:
     source_db = connect(source, readonly=True)
-    target_db = connect(destination)
+    destination = os.path.abspath(destination)
+    staged_target = f"{destination}.restore-project-{uuid.uuid4().hex}.tmp"
+    live_db = connect(destination, readonly=True)
+    target_db = connect(staged_target)
+    live_db.backup(target_db)
+    live_db.close()
     temporary = f"{destination}.project-import-{os.getpid()}.sqlite3"
     try:
         project = source_db.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -288,14 +304,31 @@ def restore_project(source: str, destination: str, project_id: str, old_root: st
         except Exception:
             target_db.rollback()
             raise
+        check = target_db.execute("PRAGMA quick_check").fetchone()[0]
+        if check != "ok":
+            raise RuntimeError(f"项目恢复临时数据库完整性检查失败：{check}")
+        target_db.close()
+        target_db = None
+        for suffix in ("-wal", "-shm"):
+            try:
+                os.remove(destination + suffix)
+            except FileNotFoundError:
+                pass
+        os.replace(staged_target, destination)
         return {"success": True, "projectId": project_id, "name": project["name"]}
     finally:
-        target_db.close()
+        if target_db is not None:
+            target_db.close()
         source_db.close()
         try:
             os.remove(temporary)
         except OSError:
             pass
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(staged_target + suffix)
+            except FileNotFoundError:
+                pass
 
 
 def main(argv=None):
