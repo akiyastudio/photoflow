@@ -37,7 +37,6 @@ const { WorkspaceSqliteCoordinator } = require('./services/workspace-sqlite-coor
 const { createWorkspaceRepository } = require('./domains/workspace/public.cjs');
 const { createOperationsRepository } = require('./domains/file-operations/public.cjs');
 const { createMediaRepository } = require('./domains/media/public.cjs');
-const { createTeamRetouchRepository } = require('./domains/team-retouch/public.cjs');
 const { createEventBus } = require('./services/event-bus.cjs');
 const { createDomainCommandJournal } = require('./services/domain-command-journal.cjs');
 const { createDomainHealthService } = require('./services/domain-health-service.cjs');
@@ -962,7 +961,7 @@ const operationsDatabase = new PythonDatabaseClient({
   ...databaseHealthOptions('file-operations'),
 });
 const operationsRepository = createOperationsRepository(operationsDatabase, getWorkspaceDatabasePath);
-const workspaceRepository = createWorkspaceRepository(workspaceDatabase, operationsRepository, domainCommandJournal);
+const workspaceRepository = createWorkspaceRepository(workspaceDatabase, operationsRepository);
 // Run routine integrity checks and backups in an independent process so they
 // cannot hold up interactive project-catalog requests.
 const workspaceMaintenanceDatabase = new PythonDatabaseClient({
@@ -1001,25 +1000,8 @@ const mediaInteractionDatabase = new PythonDatabaseClient({
   ...databaseHealthOptions('media-interaction'),
   defaultTimeoutMs: 60 * 1000,
 });
-// Team-retouch has its own protocol process. It may read stable media IDs from
-// the core store, but a failed team database or worker cannot block the media
-// interaction queue.
-const teamRetouchDatabase = new PythonDatabaseClient({
-  coordinator: workspaceSqliteCoordinator,
-  getRunConfig,
-  getDatabasePath: getWorkspaceDatabasePath,
-  writeLog,
-  processSupervisor,
-  processId: 'python:team-retouch-database',
-  ...databaseHealthOptions('team-retouch'),
-  defaultTimeoutMs: 60 * 1000,
-});
 const mediaBackgroundRepository = createMediaRepository(mediaDatabase);
 const mediaInteractionRepository = createMediaRepository(mediaInteractionDatabase);
-const teamRetouchRepository = createTeamRetouchRepository(teamRetouchDatabase);
-domainCommandJournal.register('team-retouch', 'team-retouch.project.purge.v1', command => (
-  teamRetouchRepository.purgeTeamProject(command.workspaceRoot, command.payload)
-));
 const trustedExternalMediaRoots = (root, projectName) => {
   const project = workspaceCatalogs.get(path.resolve(root))?.byName.get(String(projectName || '').toLocaleLowerCase());
   if (!project?.relative_path) return [];
@@ -1060,7 +1042,6 @@ const mediaRepository = {
   getTrackingSession: mediaInteractionRepository.getTrackingSession,
   releaseTrackingSession: mediaInteractionRepository.releaseTrackingSession,
   decideTrackingItem: mediaInteractionRepository.decideTrackingItem,
-  ...teamRetouchRepository,
 };
 const versionService = createVersionService({ repository: mediaRepository });
 let selectionService = null;
@@ -1856,12 +1837,12 @@ app.whenReady().then(async () => {
     broker: componentCapabilityBroker,
     ensureWorkspace,
     getWorkspaceDataRoot,
-    getWorkspaceTeamRetouchDatabasePath,
     resolveProjectEntry,
     versionService,
     IMAGE_EXTENSIONS,
     path, fs, crypto, getConfigPath, readSavedConfig,
-    getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks, uniqueDestination, ensureTrackedVersionThumbnail, pluginService, privacyService,
+    getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks,
+    uniqueDestination, ensureTrackedVersionThumbnail,
   });
   componentServiceManager = new ComponentServiceManager({
     registry: componentHostRegistry,
@@ -1886,7 +1867,7 @@ app.whenReady().then(async () => {
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });
-  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, componentCapabilityBroker, componentServiceManager, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, projectVirtualPaths, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
+  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
   registerSelectionIpc({ ipcMain, path, fs, selectionService, workspaceCatalogs });
   registerAdvancedVideoIpc({ BrowserWindow, app, crypto, ipcMain, mediaService, path, pluginService, processSupervisor, spawn, writeLog });
   const credentialService = createCredentialService({ writeLog });
@@ -1896,7 +1877,6 @@ app.whenReady().then(async () => {
     workspaceMaintenanceDatabase,
     mediaDatabase,
     mediaInteractionDatabase,
-    teamRetouchDatabase,
     mediaScanDatabase,
     trackingScanDatabase,
   ];
@@ -1969,7 +1949,6 @@ app.on('before-quit', () => {
   workspaceMaintenanceDatabase.stop();
   mediaDatabase.stop();
   mediaInteractionDatabase.stop();
-  teamRetouchDatabase.stop();
   mediaScanDatabase.stop();
   trackingScanDatabase.stop();
   imageThumbnailRuntime.stop();

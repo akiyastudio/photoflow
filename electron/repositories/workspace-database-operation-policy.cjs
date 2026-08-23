@@ -12,8 +12,6 @@ const IDEMPOTENT_ACTIONS = new Set([
   'media_sync_paths_apply_batch', 'media_sync_paths_finalize', 'progress_stale_apply',
 ]);
 const VERSIONING_ONLY_ACTIONS = new Set(['batch_list', 'progress_snapshot', 'version_graph_edge_list', 'version_tree_layout_get', 'version_tree_layout_save']);
-const TEAM_INTEGRATED_ACTIONS = new Set(['batch_commit_compare', 'media_delete_version', 'media_delete_project_missing_version', 'progress_delete_missing']);
-const TEAM_ACTION_PREFIX = 'team_';
 
 const domainDatabasePath = (database, domain) => {
   const absolute = path.resolve(database);
@@ -29,13 +27,11 @@ class WorkspaceDatabaseOperationPolicy {
     if (scriptName === 'operations_db.py') {
       if (action === 'init' && payload.legacyDatabase) databases.push({ path: payload.legacyDatabase, mode: 'read' });
     } else if (scriptName === 'workspace_db.py') {
-      const needsTeam = action === 'init' || String(action).startsWith(TEAM_ACTION_PREFIX) || TEAM_INTEGRATED_ACTIONS.has(action);
-      const needsDomains = (needsTeam && action !== 'init') || action === 'maintenance_run' || VERSIONING_ONLY_ACTIONS.has(action)
+      const needsDomains = action === 'maintenance_run' || VERSIONING_ONLY_ACTIONS.has(action)
         || /^(media_|progress_|batch_|tracking_|version_)/.test(action)
         || ['deleted_projects_list', 'deleted_project_cleanup_plan', 'purge_deleted_project', 'purge_missing_project'].includes(action);
       if (needsDomains) databases.push({ path: domainDatabasePath(database, 'versioning'), mode });
       if (needsDomains && !VERSIONING_ONLY_ACTIONS.has(action)) databases.push({ path: domainDatabasePath(database, 'media'), mode });
-      if (needsTeam) databases.push({ path: domainDatabasePath(database, 'team-retouch'), mode });
     }
 
     return { databases, idempotent: IDEMPOTENT_ACTIONS.has(action), mode };

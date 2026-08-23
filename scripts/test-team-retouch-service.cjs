@@ -41,7 +41,6 @@ registerComponentProjectCapabilities({
   broker,
   ensureWorkspace: value => { assert.equal(value, workspace); return workspace; },
   getWorkspaceDataRoot: () => dataRoot,
-  getWorkspaceTeamRetouchDatabasePath: () => path.join(dataRoot, 'databases', 'team-retouch.sqlite3'),
   resolveProjectEntry: (_workspace, status, projectName, relativePath) => path.join(workspace, status, projectName, relativePath),
   versionService: {
     getPhoto: async (_root, photoId) => bundles.get(photoId),
@@ -50,8 +49,6 @@ registerComponentProjectCapabilities({
       photo: { id: 'photo-1', projectId: 'project-1', currentVersionId: 'version-1', displayName: 'one' },
       versions: [{ id: 'version-1', filePath: request.filePath, isCurrent: true }],
     }),
-    listTeamPatches: async () => ({ tasks: [{ id: 'task-1', photoId: 'photo-1', baseVersionId: 'version-1', personIndex: 1, patchPath: path.join(dataRoot, 'authorized-patch.png') }] }),
-    updateTeamPatch: async () => ({ success: true }),
   },
   IMAGE_EXTENSIONS: new Set(['.jpg']),
   path,
@@ -63,8 +60,6 @@ registerComponentProjectCapabilities({
   dialog: { showOpenDialog: async () => ({ canceled: false, filePaths: [selectedReturn] }) }, mainWindow: {},
   mediaService: { grantPath: value => value, authorizeInput: async token => token.replace(/^media-token:/, '') },
   shell: { openPath: async () => '' }, backgroundTasks,
-  pluginService: { requireCapability: () => true, runJson: async () => ({ clusters: [], similarities: [] }) },
-  privacyService: { hasFaceRecognitionConsent: () => true },
 });
 broker.register('project.media.access.v1', payload => {
   if (payload.photoId !== 'photo-1' || payload.baseVersionId !== 'version-1' || payload.taskId !== 'task-1') throw new Error('media ownership rejected');
@@ -73,12 +68,12 @@ broker.register('project.media.access.v1', payload => {
 });
 broker.register('project.identity.complete.v1', payload => payload.photoId === 'photo-1' && payload.baseVersionId === 'version-1' ? { success: true } : Promise.reject(new Error('identity ownership rejected')));
 broker.register('component.lifecycle.v1', payload => Object.keys(payload).every(field => ['action', 'repair'].includes(field)) ? { success: true, action: payload.action } : Promise.reject(new Error('lifecycle injection rejected')));
-const descriptor = { componentId: 'team-retouch', service: { runtimeActions: ['identity.suggest'], capabilities: ['component.storage.v1', 'project.media.read.v1', 'project.output.authorize.v1', 'version.register.v1', 'tasks.report.v1', 'dialogs.open.v1', 'project.media.access.v1', 'project.identity.complete.v1', 'component.settings.v1', 'component.runtime.v1', 'component.lifecycle.v1'] } };
+const descriptor = { componentId: 'team-retouch', service: { runtimeActions: [], capabilities: ['component.storage.v1', 'project.media.read.v1', 'project.output.authorize.v1', 'version.register.v1', 'tasks.report.v1', 'dialogs.open.v1', 'project.media.access.v1', 'project.identity.complete.v1', 'component.settings.v1', 'component.lifecycle.v1'] } };
 const context = { workspacePath: workspace, projectId: 'project-1', projectName: 'Project', projectStatus: 'active' };
 assert.throws(() => broker.invoke(descriptor, 'component.storage.v1', { namespace: 'arbitrary' }, context), /Unknown component storage namespace/);
 assert.rejects(() => broker.invoke({ componentId: 'other-component', service: { capabilities: ['component.settings.v1'] } }, 'component.settings.v1', { action: 'get' }, context), /Unknown component settings namespace/);
 assert.rejects(() => broker.invoke(descriptor, 'project.output.authorize.v1', { action: 'stage-inputs', tokens: ['C:/arbitrary.jpg'] }, context), /selector tokens/);
-assert.rejects(() => broker.invoke(descriptor, 'version.register.v1', { action: 'team-return', photoId: 'other-photo', baseVersionId: 'version-1', taskId: 'task-1', stageId: '12345678', inputName: 'escape.jpg' }, context), /bound project/);
+assert.rejects(() => broker.invoke(descriptor, 'version.register.v1', { action: 'team-return', photoId: 'other-photo', baseVersionId: 'version-1', taskId: 'task-1', stageId: '12345678', inputName: 'escape.jpg' }, context), /Unknown component version registration/);
 
 const child = spawn(process.execPath, [path.join(__dirname, '..', 'extensions', 'team-retouch', 'service.cjs')], {
   env: { SystemRoot: process.env.SystemRoot, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'],

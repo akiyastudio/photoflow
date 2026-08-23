@@ -1,4 +1,4 @@
-const createWorkspaceRepository = (client, operationsRepository = null, domainCommandJournal = null) => ({
+const createWorkspaceRepository = (client, operationsRepository = null) => ({
   load: async root => {
     const catalog = await client.call(root, 'init');
     return catalog;
@@ -25,9 +25,6 @@ const createWorkspaceRepository = (client, operationsRepository = null, domainCo
       ...(operationsRepository ? { undoRecords: (await operationsRepository.listUndoRecords(root)).records } : {}),
     });
     if (operationsRepository && result.removedUndoIds?.length) await operationsRepository.removeUndoRecords(root, result.removedUndoIds);
-    if (result.teamCleanup && domainCommandJournal) domainCommandJournal.enqueue({
-      target: 'team-retouch', type: 'team-retouch.project.purge.v1', workspaceRoot: root, payload: result.teamCleanup,
-    });
     return result;
   },
   purgeMissingProject: async (root, name) => {
@@ -36,9 +33,6 @@ const createWorkspaceRepository = (client, operationsRepository = null, domainCo
       ...(operationsRepository ? { undoRecords: (await operationsRepository.listUndoRecords(root)).records } : {}),
     });
     if (operationsRepository && result.removedUndoIds?.length) await operationsRepository.removeUndoRecords(root, result.removedUndoIds);
-    if (result.teamCleanup && domainCommandJournal) domainCommandJournal.enqueue({
-      target: 'team-retouch', type: 'team-retouch.project.purge.v1', workspaceRoot: root, payload: result.teamCleanup,
-    });
     return result;
   },
   listMissingProjects: (root, missingBefore) => client.call(root, 'missing_projects_list', { missingBefore }),

@@ -54,9 +54,9 @@
       "capabilities": [
         "project.media.read.v1", "project.output.authorize.v1", "version.register.v1",
         "tasks.report.v1", "dialogs.open.v1", "project.media.access.v1", "project.identity.complete.v1",
-        "component.storage.v1", "component.settings.v1", "component.runtime.v1", "component.lifecycle.v1"
+        "component.storage.v1", "component.settings.v1", "component.lifecycle.v1"
       ],
-      "runtimeActions": ["identity.suggest"],
+      "runtimeActions": [],
       "lifecycleActions": {
         "advanced.preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "0980e1c2157be0d9753c76c632b2ca183415d1b93faae6ff65d62f0f77896cc0" },
         "advanced.install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "0980e1c2157be0d9753c76c632b2ca183415d1b93faae6ff65d62f0f77896cc0" },

@@ -51,4 +51,13 @@ The page key is `componentId + normalized workspace path + projectId`. Repeated 
 
 The main React renderer contains no team-retouch manager, identity manager, step UI, toolbar action, context-menu action, embedded panel, settings contribution, or `workspace-team-*` preload API. It renders only the manifest-derived toolbar button and host-owned page chrome. The component page owns detection, identity, workflow, return, merge, and settings UI.
 
-The RPC implementation is currently a compatibility-backend milestone, not the final process extraction. Restricted component methods map to existing validated team-retouch handlers while later work moves their orchestration out of the host. Compatibility keeps the existing `team-retouch.sqlite3` and workspace-data layout single-written and readable. Uninstalling the component does not delete data; a missing or malformed component only removes its dynamic action.
+Every manifest-declared `team.*` RPC is implemented by `extensions/team-retouch/service.cjs`; none maps to a `workspace-team-*` renderer IPC handler. Detection, identity inference, recropping, merging, return ingestion, and post-install advanced-runtime probing run inside the component service. The application process does not compose a team-retouch repository, database worker, project-purge command handler, or algorithm invocation.
+
+The remaining host references are compatibility and trust-boundary identifiers, not business implementations:
+
+- `electron/main.cjs` and `electron/services/backup-service.cjs` retain the `team-retouch.sqlite3` path/domain name so backup, restore, reset, and recovery continue to preserve existing component data.
+- `electron/modules/system-ipc.cjs` retains the component package root and advanced-package filename pattern for validated install-package discovery and cleanup.
+- `electron/services/component-lifecycle-service.cjs` retains the signed advanced-package pattern and lifecycle path policy; the component service performs the runtime probe.
+- `electron/services/component-project-capabilities.cjs` retains the `team-retouch` owner checks that bind storage, project media/output, dialogs, settings, and task events to the installed manifest and current project. These checks grant bounded host resources and do not implement team algorithms or persistence.
+
+Uninstalling the component does not delete data; a missing or malformed component only removes its dynamic action.

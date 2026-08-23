@@ -8,6 +8,7 @@ const { CANCELLED_CODE, buildWorkflowPlan, copyWorkflowPlan } = require('./workf
 const { createTeamWorkflowArtifactService } = require('./workflow-artifact.cjs');
 
 const MAX_ITEMS = 2000;
+const RETURN_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp', '.heic', '.heif']);
 const pendingCapabilities = new Map();
 const activeAlgorithms = new Set();
 const workflowJobs = new Map();
@@ -719,9 +720,23 @@ const suggestIdentities = async (parentId, _payload, context) => {
     photoId: photo.photoId,
     baseVersionId: photo.baseVersionId,
     personIndex: Number(member.personIndex),
+    sourcePath: photo.sourcePath,
+    patchPath: task.patchPath,
+    bbox: member.bbox || task.bbox,
+    faceBox: member.faceBox || null,
   }))));
   if (!subjects.length) throw new Error('项目里还没有已识别的人物');
-  const suggested = await callHost(parentId, 'component.runtime.v1', { action: 'identity.suggest' });
+  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+  const batchDirectory = path.join(storage.dataRoot, 'batches');
+  const manifestPath = path.join(batchDirectory, `identify-${crypto.randomUUID()}.json`);
+  let suggested;
+  try {
+    await fs.promises.mkdir(batchDirectory, { recursive: true });
+    await fs.promises.writeFile(manifestPath, JSON.stringify({ subjects }, null, 2), 'utf8');
+    suggested = await runAlgorithm(parentId, ['identify', '--manifest', manifestPath]);
+  } finally {
+    await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined);
+  }
   await withDomain(parentId, db => {
     const projectId = String(context.projectId);
     const generated = db.prepare('SELECT id FROM team_person_identities WHERE project_id=? AND name GLOB ?').all(projectId, '待确认人物 *').map(row => String(row.id));
@@ -766,7 +781,6 @@ const suggestIdentities = async (parentId, _payload, context) => {
     const saved = await saveIdentity(parentId, { name: `待确认人物 ${nextCandidateNumber++}`, assignments: [{ ...subject, confidence: .35, source: 'suggested' }] }, context);
     if (saved.identityId) { assignedKeys.add(subject.key); created += 1; }
   }
-  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
   await replaceJsonAtomic(path.join(storage.dataRoot, 'identity-similarities', `${sha256(context.projectName)}.json`), { updatedAt: Date.now(), similarities: suggested.similarities || [] });
   current = await workspaceSnapshot(parentId, context);
   return publicWorkspace({ ...current, similarities: suggested.similarities || [], suggestedCount: created, candidateGroupCount: suggested.clusters?.length || 0, method: suggested.method || 'sface-osnet-gallery-v3', faceBackend: suggested.faceBackend, bodyBackend: suggested.bodyBackend, unmatchedCount: suggested.unmatchedCount, provider: suggested.provider });
@@ -798,6 +812,34 @@ const saveWorkflowSettings = async (parentId, payload, context) => {
 };
 
 const componentSettings = async (parentId, payload) => callHost(parentId, 'component.settings.v1', payload);
+
+const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomain(parentId, async db => {
+  const source = path.resolve(sourcePath);
+  const sourceStat = await fs.promises.stat(source).catch(() => null);
+  if (!sourceStat?.isFile() || !RETURN_IMAGE_EXTENSIONS.has(path.extname(source).toLowerCase())) throw new Error('Component return input is not a supported image');
+  const row = db.prepare('SELECT * FROM team_patch_tasks WHERE id=? AND photo_id=? AND base_version_id=? AND is_deleted=0').get(String(payload.taskId || ''), String(payload.photoId || ''), String(payload.baseVersionId || ''));
+  if (!row) throw new Error('Component return task is outside the bound photo version');
+  const authorized = await callHost(parentId, 'project.output.authorize.v1', { operation: 'artifacts', photoId: row.photo_id, baseVersionId: row.base_version_id });
+  const destination = path.join(authorized.uploadDirectory, `${row.id}-${crypto.randomUUID()}${path.extname(source).toLowerCase()}`);
+  await fs.promises.mkdir(authorized.uploadDirectory, { recursive: true });
+  await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status='uploaded',needs_review=0,review_reason='',updated_at=? WHERE id=?`).run(destination, Date.now(), row.id);
+      if (payload.complete) {
+        const personIndex = Number(payload.personIndex);
+        db.prepare(upsertAssignmentSql).run(String(context.projectId), row.photo_id, row.base_version_id, personIndex, null, 1, 'manual', 1, Date.now());
+        db.prepare(`UPDATE team_person_assignments SET edited_patch_path=?,completed=1,completion_kind='returned',completed_at=?,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(destination, Date.now(), Date.now(), row.photo_id, row.base_version_id, personIndex);
+      }
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+    return { success: true, artifactPath: destination };
+  } catch (error) {
+    await fs.promises.rm(destination, { force: true }).catch(() => undefined);
+    throw error;
+  }
+});
 const mediaRequest = payload => Object.fromEntries(['kind', 'photoId', 'baseVersionId', 'taskId', 'reviewSessionId', 'returnId'].filter(field => Object.hasOwn(payload || {}, field)).map(field => [field, payload[field]]));
 const completionRequest = payload => Object.fromEntries(['photoId', 'baseVersionId', 'personIndex', 'completed', 'completionKind', 'taskId', 'taskOrder'].filter(field => Object.hasOwn(payload || {}, field)).map(field => [field, payload[field]]));
 const publicWorkspace = value => ({
@@ -1127,11 +1169,13 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
     const returnOperationId = `returns-${staged.stageId}`;
     await reportTask(parentId, returnOperationId, 'start', { kind: 'team-return-batch', title: '批量处理协作返图', message: '正在识别返图' }, 'patch.return-batch.progress');
     const returned = staged.items.map((item, index) => ({ returnId: `${workflowMode ? 'workflow-' : ''}return-${index + 1}`, path: item.path, sourceName: item.name, inputName: path.basename(item.path) }));
+    const stagedSources = new Set(staged.items.map(item => path.resolve(item.path)));
     const matched = await runMatcher(returned, candidates);
     const accepted = [];
     const high = (matched.matches || []).filter(item => item.confidence === 'high' && item.taskId);
     for (const [index, match] of high.entries()) {
-      const registered = await callHost(parentId, 'version.register.v1', { action: 'team-return', stageId: staged.stageId, inputName: path.basename(match.path), photoId: match.photoId, baseVersionId: match.baseVersionId, taskId: match.taskId, personIndex: match.personIndex, complete: workflowMode });
+      if (!stagedSources.has(path.resolve(match.path))) throw new Error('Matched return escaped its component staging grant');
+      const registered = await storeReturnedPatch(parentId, match.path, { photoId: match.photoId, baseVersionId: match.baseVersionId, taskId: match.taskId, personIndex: match.personIndex, complete: workflowMode }, context);
       if (workflowMode) await refreshDownstream(parentId, context, match.taskId, match.personIndex, registered.artifactPath).catch(() => undefined);
       accepted.push({ ...match, path: undefined, patchPath: undefined, accepted: true });
       await reportTask(parentId, returnOperationId, 'report', { phase: 'importing', progress: 82 + 18 * (index + 1) / Math.max(1, high.length), message: `正在归档返图 ${index + 1}/${high.length}` }, 'patch.return-batch.progress').catch(() => undefined);
@@ -1193,7 +1237,8 @@ const returnConfirm = async (parentId, payload, context) => {
   if (!match || match.accepted) throw new Error('这张返图已经处理');
   const candidate = readyWorkflowCandidates(await workspaceSnapshot(parentId, context), [payload])[0];
   if (!candidate || String(candidate.taskId) !== String(payload.taskId)) throw new Error('候选任务当前不可确认');
-  const registered = await callHost(parentId, 'version.register.v1', { action: 'team-return', reviewSessionId: target.session.id, returnId: match.returnId, inputName: path.basename(match.path), photoId: candidate.photoId, baseVersionId: candidate.baseVersionId, taskId: candidate.taskId, personIndex: candidate.personIndex, complete: true });
+  if (!match.path || !isInside(target.directory, match.path)) throw new Error('Reviewed return escaped its component review grant');
+  const registered = await storeReturnedPatch(parentId, match.path, { photoId: candidate.photoId, baseVersionId: candidate.baseVersionId, taskId: candidate.taskId, personIndex: candidate.personIndex, complete: true }, context);
   await refreshDownstream(parentId, context, candidate.taskId, candidate.personIndex, registered.artifactPath).catch(() => undefined);
   match.accepted = true; match.confidence = 'manual'; match.photoId = candidate.photoId; match.baseVersionId = candidate.baseVersionId; match.taskId = candidate.taskId; match.personIndex = candidate.personIndex;
   target.session.result.reviewCount = target.session.result.matches.filter(item => !item.accepted).length;
@@ -1248,7 +1293,12 @@ const handlers = {
   'component.settings.get.v1': parentId => componentSettings(parentId, { action: 'get' }),
   'component.settings.update.v1': (parentId, payload) => componentSettings(parentId, { action: 'update', settings: payload }),
   'component.advanced.preflight.v1': parentId => callHost(parentId, 'component.lifecycle.v1', { action: 'advanced.preflight' }),
-  'component.advanced.install.v1': (parentId, payload) => callHost(parentId, 'component.lifecycle.v1', { action: 'advanced.install', repair: payload.repair === true }),
+  'component.advanced.install.v1': async (parentId, payload) => {
+    const installed = await callHost(parentId, 'component.lifecycle.v1', { action: 'advanced.install', repair: payload.repair === true });
+    const probe = await runAlgorithm(parentId, ['probe-advanced-runtime'], { timeoutMs: 4 * 60 * 1000 });
+    if (!probe.pairDetrReady || !probe.sam2Ready) throw new Error('高级模型服务没有全部进入可用状态');
+    return installed;
+  },
   'component.advanced.uninstall.v1': parentId => callHost(parentId, 'component.lifecycle.v1', { action: 'advanced.uninstall' }),
 };
 

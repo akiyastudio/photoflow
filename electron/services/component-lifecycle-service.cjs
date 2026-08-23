@@ -85,11 +85,6 @@ const createComponentLifecycleService = ({ app, backgroundTasks, pluginService, 
     }, async task => {
       task.report(1, `${title}已启动`, { phase: 'starting' });
       const output = await runProcess({ spawn, command: 'powershell.exe', args, cwd: path.dirname(entry), report: task.report });
-      if (action === 'advanced.install') {
-        task.report(98, '正在实际加载 PairDETR 与 SAM 2.1', { phase: 'verifying' });
-        const probe = await pluginService.runJson('team-retouch', ['probe-advanced-runtime'], 4 * 60 * 1000);
-        if (!probe.pairDetrReady || !probe.sam2Ready) throw new Error('高级模型服务没有全部进入可用状态');
-      }
       task.report(99, `${title}即将完成`, { phase: 'complete' });
       return output;
     });

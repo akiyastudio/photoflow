@@ -10,7 +10,6 @@ const { PythonDatabaseClient } = require('../electron/repositories/database-clie
 const { createWorkspaceRepository } = require('../electron/repositories/workspace-repository.cjs');
 const { createMediaRepository } = require('../electron/repositories/media-repository.cjs');
 const { createOperationsRepository } = require('../electron/repositories/operations-repository.cjs');
-const { createTeamRetouchRepository } = require('../electron/repositories/team-retouch-repository.cjs');
 const { createBackupService, STORE_DIRECTORY } = require('../electron/services/backup-service.cjs');
 
 const waitForCoordinatorQueue = async (coordinator, minimum, timeoutMs = 5000) => {
@@ -186,7 +185,6 @@ const main = async () => {
     const maintenanceRepository = createWorkspaceRepository(maintenanceClient);
     const writerRepository = createWorkspaceRepository(writerClient);
     const mediaRepository = createMediaRepository(domainWriterClient);
-    const teamRepository = createTeamRetouchRepository(domainWriterClient);
     const operationsRepository = createOperationsRepository(operationsClient, () => first.database);
 
     const firstRun = await service.runBackup(first.root, 'manual');
@@ -254,7 +252,7 @@ const main = async () => {
     const teamBarrier = armRecoveryBarrier();
     const teamRestore = service.restoreDomain(first.root, replacementRun.result.id, 'team-retouch');
     await teamBarrier.admitted;
-    const teamWrite = teamRepository.listTeamPatches(first.root, 'missing-photo');
+    const teamWrite = physicalCoordinator.run({ databases: [{ path: first.teamRetouchDatabase, mode: 'write' }] }, async () => true);
     await waitForCoordinatorQueue(physicalCoordinator, 1);
     teamBarrier.release();
     await Promise.all([teamRestore, teamWrite]);

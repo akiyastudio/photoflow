@@ -53,9 +53,11 @@ for (const file of sourceFiles) {
 const mainSource = fs.readFileSync(path.join(root, 'electron/main.cjs'), 'utf8');
 assert(!/require\(['"]\.\/repositories\/(?:workspace|operations|media|team-retouch)-repository/.test(mainSource),
   'the composition root must use domain public APIs rather than repository implementations');
-for (const domain of ['workspace', 'file-operations', 'media', 'versioning', 'team-retouch']) {
+for (const domain of ['workspace', 'file-operations', 'media', 'versioning']) {
   assert(fs.existsSync(path.join(root, 'electron', 'domains', domain, 'public.cjs')), `missing public API for ${domain}`);
 }
+assert(!fs.existsSync(path.join(root, 'electron', 'domains', 'team-retouch')) && !fs.existsSync(path.join(root, 'electron', 'repositories', 'team-retouch-repository.cjs')),
+  'team-retouch business persistence must live only in its component service');
 
 assert.deepStrictEqual([...rendererFeatureEdges].sort(), [...ALLOWED_RENDERER_FEATURE_EDGES].sort(),
   'renderer feature dependency graph changed; use a public contract or update the reviewed boundary policy');

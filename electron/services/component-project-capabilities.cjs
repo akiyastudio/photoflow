@@ -2,20 +2,17 @@ const MAX_MEDIA_ITEMS = 2000;
 const componentTaskHandles = new Map();
 
 const registerComponentProjectCapabilities = ({
-  broker, ensureWorkspace, getWorkspaceDataRoot, getWorkspaceTeamRetouchDatabasePath,
+  broker, ensureWorkspace, getWorkspaceDataRoot,
   resolveProjectEntry, versionService, IMAGE_EXTENSIONS, path, fs, crypto, getConfigPath, readSavedConfig,
   getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks,
   uniqueDestination, ensureTrackedVersionThumbnail,
-  pluginService, privacyService,
 }) => {
   broker.register('component.storage.v1', (payload, context, descriptor) => {
     if (payload.namespace !== 'domain') throw new Error('Unknown component storage namespace');
     const workspaceRoot = ensureWorkspace(context.workspacePath);
     const componentId = String(descriptor.componentId || '');
     const dataRoot = path.join(getWorkspaceDataRoot(workspaceRoot), componentId);
-    const databasePath = componentId === 'team-retouch'
-      ? getWorkspaceTeamRetouchDatabasePath(workspaceRoot)
-      : path.join(getWorkspaceDataRoot(workspaceRoot), 'databases', `${componentId}.sqlite3`);
+    const databasePath = path.join(getWorkspaceDataRoot(workspaceRoot), 'databases', `${componentId}.sqlite3`);
     return { databasePath, dataRoot };
   });
 
@@ -71,7 +68,7 @@ const registerComponentProjectCapabilities = ({
     };
   };
 
-  broker.register('project.output.authorize.v1', async (payload, context, descriptor) => {
+  const authorizeComponentWorkspaceOutput = async (payload, context, descriptor) => {
     if (descriptor.componentId !== 'team-retouch') throw new Error('Unknown component output namespace');
     const workspaceRoot = ensureWorkspace(context.workspacePath);
     if (payload.operation) {
@@ -152,8 +149,9 @@ const registerComponentProjectCapabilities = ({
       }, async () => { await fs.promises.rm(target, { recursive: true, force: true }); });
       return { success: true, taskId: execution.task.id };
     }
-    throw new Error('Unknown component output action');
-  });
+    if (payload.action) throw new Error('Unknown component output action');
+    return null;
+  };
 
   broker.register('dialogs.open.v1', async (payload, context, descriptor) => {
     if (descriptor.componentId !== 'team-retouch') throw new Error('Unknown component dialog namespace');
@@ -182,6 +180,13 @@ const registerComponentProjectCapabilities = ({
       const error = await shell.openPath(directory);
       if (error) throw new Error(error);
       return { success: true };
+    }
+    if (payload.kind === 'image') {
+      const choice = await dialog.showOpenDialog(mainWindow, { title: String(payload.title || '选择图片'), properties: ['openFile'], filters: [{ name: '图片', extensions: [...IMAGE_EXTENSIONS].map(value => value.slice(1)) }] });
+      if (choice.canceled || !choice.filePaths.length) return { cancelled: true };
+      const filePath = path.resolve(choice.filePaths[0]);
+      if (!IMAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) throw new Error('请选择支持的图片文件');
+      return { cancelled: false, filePath };
     }
     throw new Error('Unknown component dialog action');
   });
@@ -271,7 +276,6 @@ const registerComponentProjectCapabilities = ({
       throw error;
     }
   });
-
   broker.register('component.settings.v1', async (payload, _context, descriptor) => {
     const componentId = String(descriptor.componentId || '');
     if (componentId !== 'team-retouch') throw new Error('Unknown component settings namespace');
@@ -302,44 +306,6 @@ const registerComponentProjectCapabilities = ({
     return { success: true, settings };
   });
 
-  broker.register('component.runtime.v1', async (payload, context, descriptor) => {
-    const action = String(payload.action || '');
-    if (!descriptor?.service?.runtimeActions.includes(action)) throw new Error(`Component runtime action is not declared: ${action}`);
-    if (descriptor.componentId !== 'team-retouch' || action !== 'identity.suggest') throw new Error('Unknown component runtime action');
-    if (Object.keys(payload).some(field => field !== 'action')) throw new Error('Component runtime actions do not accept renderer paths or arguments');
-    if (!privacyService.hasFaceRecognitionConsent()) throw new Error('使用人物身份识别前，需要单独同意《人脸信息处理规则》');
-    pluginService.requireCapability('team-retouch.identify');
-    const workspaceRoot = ensureWorkspace(context.workspacePath);
-    const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, context.projectName);
-    const subjects = [];
-    for (const photo of workspace.photos || []) {
-      for (const task of photo.tasks || []) {
-        const members = task.members?.length ? task.members : [{ personIndex: task.personIndex, bbox: task.bbox }];
-        for (const member of members) {
-          subjects.push({
-            key: `${photo.photoId}:${photo.baseVersionId}:${Number(member.personIndex)}`,
-            photoId: photo.photoId,
-            baseVersionId: photo.baseVersionId,
-            personIndex: Number(member.personIndex),
-            sourcePath: photo.sourcePath,
-            patchPath: task.patchPath,
-            bbox: member.bbox || task.bbox,
-          });
-        }
-      }
-    }
-    if (!subjects.length) throw new Error('项目里还没有已识别的人物');
-    if (subjects.length > MAX_MEDIA_ITEMS) throw new Error('Too many component identity subjects');
-    const batchDirectory = path.join(getWorkspaceDataRoot(workspaceRoot), descriptor.componentId, 'batches');
-    await fs.promises.mkdir(batchDirectory, { recursive: true });
-    const manifestPath = path.join(batchDirectory, `identify-${crypto.randomUUID()}.json`);
-    try {
-      await fs.promises.writeFile(manifestPath, JSON.stringify({ subjects }, null, 2), 'utf8');
-      return await pluginService.runJson('team-retouch', ['identify', '--manifest', manifestPath], 60 * 60 * 1000);
-    } finally {
-      await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined);
-    }
-  });
 };
 
 module.exports = { MAX_MEDIA_ITEMS, registerComponentProjectCapabilities };

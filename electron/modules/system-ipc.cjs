@@ -135,34 +135,6 @@ const registerSystemIpc = context => {
 
   const componentRoot = componentId => path.join(pluginService.installRoot, String(componentId));
   const teamRetouchRoot = () => componentRoot('team-retouch');
-  const advancedStateRoot = () => path.join(teamRetouchRoot(), 'advanced');
-  const defaultAdvancedInstallRoot = () => path.join(advancedStateRoot(), 'wsl', 'PhotoFlowNative');
-  const legacyAdvancedInstallRoot = () => path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'PhotoFlow', 'wsl', 'PhotoFlowNative');
-  const readAdvancedStorage = async () => {
-    let installRoot = '';
-    try {
-      const raw = await fs.promises.readFile(path.join(advancedStateRoot(), 'install-state.json'), 'utf8');
-      installRoot = String(JSON.parse(raw.replace(/^\uFEFF/, '')).installRoot || '');
-    } catch { /* fall through to known locations */ }
-    const candidates = [installRoot, defaultAdvancedInstallRoot(), legacyAdvancedInstallRoot()].filter(Boolean);
-    let vhdPath = '';
-    let sizeBytes = 0;
-    for (const candidate of candidates) {
-      const possibleVhd = path.join(candidate, 'ext4.vhdx');
-      const stat = await fs.promises.stat(possibleVhd).catch(() => null);
-      if (!stat?.isFile()) continue;
-      installRoot = candidate;
-      vhdPath = possibleVhd;
-      sizeBytes = stat.size;
-      break;
-    }
-    installRoot ||= defaultAdvancedInstallRoot();
-    let probePath = installRoot;
-    while (!fs.existsSync(probePath) && path.dirname(probePath) !== probePath) probePath = path.dirname(probePath);
-    const disk = await fs.promises.statfs(probePath).catch(() => null);
-    const freeBytes = disk ? Number(disk.bavail) * Number(disk.bsize) : 0;
-    return { installRoot, vhdPath, sizeBytes, freeBytes };
-  };
 
   const componentStatusCachePath = path.join(app.getPath('userData'), 'component-status-cache.json');
   const componentRuntimeProbeTtlMs = 24 * 60 * 60 * 1000;
@@ -225,58 +197,9 @@ const registerSystemIpc = context => {
     }
     const components = reusableIntegrity ? mergeCachedComponentStatuses(listedComponents) : await pluginService.listWithSizes();
     for (const component of components) component.packagePath = componentRoot(component.id);
-    const gpu = components.find(component => component.id === 'team-retouch');
-    let runtimeProbeSucceeded = true;
-    if (gpu?.installed && policy.shouldProbeRuntime) {
-      try {
-        const probe = await pluginService.runJson('team-retouch', ['probe'], 60000);
-        const runtimeAvailable = Boolean(probe.componentAvailable ?? probe.cpuAvailable);
-        Object.assign(gpu, {
-          runtimeAvailable,
-          gpuAvailable: Boolean(probe.gpuAvailable),
-          advancedAvailable: Boolean(probe.advancedAvailable),
-          mergeAvailable: Boolean(probe.mergeAvailable),
-          identityAvailable: Boolean(probe.identityAvailable),
-          faceBackend: probe.faceBackend || '',
-          bodyBackend: probe.bodyBackend || '',
-          identityError: probe.identityError || '',
-          provider: probe.provider || '',
-          advancedProvider: probe.advancedAvailable ? 'PairDETR + SAM 2.1 · NVIDIA CUDA' : '',
-          providers: Array.isArray(probe.providers) ? probe.providers : [],
-          runtimeError: runtimeAvailable ? '' : (probe.runtimeError || probe.error || ''),
-          gpuError: probe.gpuAvailable || !runtimeAvailable ? '' : (probe.gpuError || probe.error || ''),
-          advancedError: probe.advancedAvailable ? '' : (probe.advancedError || ''),
-        });
-      } catch (error) {
-        runtimeProbeSucceeded = false;
-        const runtimeError = error.message || String(error);
-        Object.assign(gpu, {
-          runtimeAvailable: false,
-          gpuAvailable: false,
-          advancedAvailable: false,
-          mergeAvailable: false,
-          identityAvailable: false,
-          faceBackend: '',
-          bodyBackend: '',
-          identityError: runtimeError,
-          provider: '',
-          advancedProvider: '',
-          providers: [],
-          runtimeError,
-          gpuError: runtimeError,
-          advancedError: runtimeError,
-        });
-      }
-      const storage = await readAdvancedStorage();
-      Object.assign(gpu, {
-        advancedSizeBytes: storage.sizeBytes,
-        advancedFreeBytes: storage.freeBytes,
-        advancedState: gpu.advancedAvailable ? 'ready' : storage.vhdPath ? 'repair-needed' : 'not-installed',
-      });
-    }
     const probeTimestamps = nextComponentProbeTimestamps({
       attempted: policy.shouldProbeRuntime,
-      succeeded: runtimeProbeSucceeded,
+      succeeded: true,
       lastDetailedAt: componentStatusCache.lastDetailedAt,
       lastDetailedAttemptAt: componentStatusCache.lastDetailedAttemptAt,
     });

@@ -40,6 +40,8 @@ const projectWorkspaceContract = read('src/contracts/project-workspace-api.ts');
 const projectWorkspaceClient = read('src/platform/project-workspace-client.ts');
 const componentRpcContract = read('electron/component-rpc-contract.cjs');
 const componentProjectCapabilities = read('electron/services/component-project-capabilities.cjs');
+const componentTemplate = JSON.parse(read('extensions/team-retouch/component.template.json'));
+const { COMPONENT_RPC_METHODS } = require('../electron/component-rpc-contract.cjs');
 const componentRenderer = read('extensions/team-retouch/renderer/src/main.tsx') + read('extensions/team-retouch/renderer/src/interaction-model.ts');
 const componentSdk = read('extensions/team-retouch/renderer/src/sdk.ts');
 const fileEntryInteractionModel = read('src/features/workspace/file-entry-interaction-model.ts');
@@ -105,7 +107,11 @@ const mediaRatingIpc = read('electron/modules/media-rating-ipc.cjs');
 const imageThumbnailRuntime = read('electron/services/image-thumbnail-runtime.cjs');
 const retiredCacheService = read('electron/services/retired-cache-service.cjs');
 assert((projectWorkspace.match(/loadFinalVersionSummary\(\)/g) || []).length === 2, 'full-project media rating scans must only run during the explicit favorite export workflow');
-assert(main.includes('const mediaInteractionDatabase = new PythonDatabaseClient') && main.includes('decideTrackingItem: mediaInteractionRepository.decideTrackingItem') && main.includes('const teamRetouchDatabase = new PythonDatabaseClient') && main.includes("processId: 'python:team-retouch-database'") && main.includes('...teamRetouchRepository'), 'tracking and team confirmations must use separate workers isolated from long media jobs and from each other');
+assert(main.includes('const mediaInteractionDatabase = new PythonDatabaseClient') && main.includes('decideTrackingItem: mediaInteractionRepository.decideTrackingItem'), 'interactive media confirmations must remain isolated from long media jobs');
+assert(!main.includes('teamRetouchDatabase') && !main.includes('teamRetouchRepository') && !fs.existsSync(path.join(root, 'electron/repositories/team-retouch-repository.cjs')), 'the application process must not own team-retouch persistence');
+assert.equal((versionsIpc.match(/ipcMain\.handle\('workspace-team-/g) || []).length, 0, 'versions IPC must not retain legacy team handlers');
+assert(componentTemplate.componentHost.service.rpcMethods.filter(method => method.startsWith('team.')).every(method => !COMPONENT_RPC_METHODS[method]), 'manifest-owned team RPC methods must have no legacy mapping');
+assert(!versionsIpc.includes('shell.openPath') && !componentProjectCapabilities.includes("pluginService.runJson('team-retouch'"), 'legacy arbitrary-path routes and host-owned team algorithm calls must not remain');
 assert(trackingConfirmationPanel.indexOf('setView(current => applyTrackingItemDecision') < trackingConfirmationPanel.indexOf('await window.electronAPI.decideProgressTrackingItem'), 'tracking decisions must update the UI optimistically before waiting for database persistence');
 assert(projectWorkspace.indexOf('setPreviewRating(requestedRating)') < projectWorkspace.indexOf('await projectWorkspaceClient.setMediaRating'), 'media ratings must update the UI optimistically before metadata persistence');
 assert(mediaRatingService.includes('void versionService.refreshMetadataFingerprint') && mediaRatingService.includes('return rating;'), 'rating fingerprint maintenance must run outside the interactive write critical path');
@@ -264,8 +270,8 @@ assert(backupService.includes('previousByInput') && backupService.includes('canR
 assert(backupService.includes('withWorkspaceRecoveryLease') && backupService.includes('workspaceSqliteCoordinator.run({')
   && backupService.includes("mode: 'exclusive'") && backupService.includes('runRecoveryPythonAction')
   && backupService.includes('recoveryLeaseContext.getStore()') && main.includes('workspaceSqliteCoordinator, prepareDomainRecovery')
-  && ['workspaceDatabase', 'operationsDatabase', 'workspaceMaintenanceDatabase', 'mediaDatabase', 'mediaInteractionDatabase', 'teamRetouchDatabase', 'mediaScanDatabase', 'trackingScanDatabase'].every(name => main.includes(name)),
-'database restore/reset tools must run under one five-store exclusive lease after every related Python client is suspended');
+  && ['workspaceDatabase', 'operationsDatabase', 'workspaceMaintenanceDatabase', 'mediaDatabase', 'mediaInteractionDatabase', 'mediaScanDatabase', 'trackingScanDatabase'].every(name => main.includes(name)),
+'database restore/reset tools must run under one exclusive lease after every application-owned Python client is suspended');
 assert(backupDb.includes('.restore-project-') && backupDb.includes('PRAGMA quick_check') && backupDb.includes('os.replace(staged_target, destination)')
   && domainRecovery.includes('.restore-project-') && domainRecovery.includes('staged_status = verify(staged)') && domainRecovery.includes('os.replace(staged, destination_path)')
   && teamRetouchStorage.includes('.restore-project-') && teamRetouchStorage.includes('PRAGMA quick_check') && teamRetouchStorage.includes('os.replace(staged, destination_path)')
