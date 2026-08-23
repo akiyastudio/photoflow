@@ -7,13 +7,14 @@ const validBounds = value => value && ['x', 'y', 'width', 'height'].every(key =>
   && value.width >= 0 && value.height >= 0 && value.width <= 20000 && value.height <= 20000;
 
 class ComponentViewManager {
-  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, writeLog = () => undefined }) {
+  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, writeLog = () => undefined }) {
     this.WebContentsView = WebContentsView;
     this.mainWindow = mainWindow;
     this.registry = registry;
     this.preloadPath = preloadPath;
     this.ipcMain = ipcMain;
     this.writeLog = writeLog;
+    this.serviceManager = serviceManager;
     this.instances = new Map();
     this.senderBindings = new Map();
     this.rpcMethods = new Map();
@@ -31,8 +32,11 @@ class ComponentViewManager {
       if (!instance || instance.view.webContents !== event.sender) throw new Error('Unauthorized component sender');
       const normalizedMethod = String(method || '');
       const registration = this.rpcMethods.get(normalizedMethod);
-      if (!registration || registration.componentId !== instance.context.componentId) throw new Error(`Unknown component RPC method: ${normalizedMethod}`);
-      return registration.handler(event, payload, instance.context);
+      if (registration?.componentId === instance.context.componentId) return registration.handler(event, payload, instance.context);
+      if (this.serviceManager?.supports(instance.context.componentId, normalizedMethod)) {
+        return this.serviceManager.invoke(instance.context.componentId, normalizedMethod, payload, instance.context);
+      }
+      throw new Error(`Unknown component RPC method: ${normalizedMethod}`);
     });
   }
 

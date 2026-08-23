@@ -9,6 +9,8 @@ const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY, isThumbnailSizeSufficien
 const { createComponentRegistry } = require('./component-registry.cjs');
 const { createComponentHostRegistry } = require('./component-host-contract.cjs');
 const { ComponentViewManager } = require('./services/component-view-manager.cjs');
+const { ComponentCapabilityBroker } = require('./services/component-capability-broker.cjs');
+const { ComponentServiceManager } = require('./services/component-service-manager.cjs');
 const { createComponentRpcIpcProxy } = require('./component-rpc-contract.cjs');
 const { registerComponentHostIpc } = require('./modules/component-host-ipc.cjs');
 const { PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
@@ -113,6 +115,7 @@ const componentRegistry = createComponentRegistry({
 });
 const componentHostRegistry = createComponentHostRegistry({ roots: componentRegistry.roots });
 let componentViewManager;
+let componentServiceManager;
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 let mediaAccessService;
@@ -1847,12 +1850,20 @@ app.whenReady().then(async () => {
   // not load renderer code until every channel has been registered.
   createWindow(false);
 
+  const componentCapabilityBroker = new ComponentCapabilityBroker();
+  componentServiceManager = new ComponentServiceManager({
+    registry: componentHostRegistry,
+    processSupervisor,
+    capabilityBroker: componentCapabilityBroker,
+    writeLog,
+  });
   componentViewManager = new ComponentViewManager({
     WebContentsView,
     mainWindow,
     registry: componentHostRegistry,
     preloadPath: path.join(__dirname, 'component-preload.cjs'),
     ipcMain: electronIpcMain,
+    serviceManager: componentServiceManager,
     writeLog,
   });
   registerComponentHostIpc({ ipcMain, manager: componentViewManager });
@@ -1935,6 +1946,7 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   componentViewManager?.destroy();
+  void componentServiceManager?.destroy();
   telemetryService?.stop();
   pluginService?.stop?.();
   stopWorkspaceWatcher();

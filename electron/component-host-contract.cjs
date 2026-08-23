@@ -3,8 +3,15 @@ const path = require('path');
 
 const COMPONENT_HOST_CONTRACT_VERSION = 1;
 const COMPONENT_HOST_API_VERSION = 1;
+const COMPONENT_SERVICE_PROTOCOL_VERSION = 1;
 const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPage']);
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
+const VERSIONED_METHOD = /^[a-z][a-z0-9.-]{0,119}\.v[1-9][0-9]*$/;
+const HOST_CAPABILITIES = new Set([
+  'project.media.list.v1', 'project.media.read.v1', 'project.output.authorize.v1',
+  'version.register.v1', 'tasks.report.v1', 'component.settings.v1',
+  'component.storage.v1', 'dialogs.open.v1', 'component.lifecycle.v1',
+]);
 
 const isInside = (root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -62,6 +69,33 @@ const parseComponentHostManifest = (manifest, componentRoot) => {
   if (pages.size !== 1 || actions.length !== 1) throw new Error('Component Host V1 requires exactly one toolbar action and one full page');
   if (!pages.has(actions[0].pageId)) throw new Error(`Component toolbar action references an unknown page: ${actions[0].pageId}`);
   const page = pages.get(actions[0].pageId);
+  let service = null;
+  if (host.service !== undefined) {
+    const raw = host.service;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid component service manifest');
+    if (Number(raw.protocolVersion) !== COMPONENT_SERVICE_PROTOCOL_VERSION) throw new Error(`Unsupported component service protocolVersion: ${raw.protocolVersion}`);
+    if (!['node', 'executable'].includes(raw.runtime)) throw new Error('Invalid component service runtime');
+    const entries = raw.entrypoints;
+    if (!entries || typeof entries !== 'object' || Array.isArray(entries)) throw new Error('Missing component service entrypoints');
+    const platformKey = `${process.platform}-${process.arch}`;
+    const relativeEntry = requiredText(entries[platformKey] || entries[process.platform] || entries.default, 'service entry', 512).replace(/\\/g, '/');
+    const entry = path.resolve(componentRoot, relativeEntry);
+    if (!isInside(componentRoot, entry)) throw new Error('Component service entry escapes component root');
+    const stat = fs.statSync(entry, { throwIfNoEntry: false });
+    if (!stat?.isFile() || stat.isSymbolicLink()) throw new Error(`Component service entry is missing or unsafe: ${relativeEntry}`);
+    const rpcMethods = [...new Set((raw.rpcMethods || []).map(value => requiredText(value, 'service RPC method', 128)))];
+    if (!rpcMethods.length || rpcMethods.length > 128 || rpcMethods.some(method => !VERSIONED_METHOD.test(method))) throw new Error('Component service RPC methods must be a bounded versioned allowlist');
+    const capabilities = [...new Set((raw.capabilities || []).map(value => requiredText(value, 'service capability', 128)))];
+    if (capabilities.length > 32 || capabilities.some(capability => !HOST_CAPABILITIES.has(capability))) throw new Error('Component service requests an unknown host capability');
+    service = Object.freeze({
+      protocolVersion: COMPONENT_SERVICE_PROTOCOL_VERSION,
+      runtime: raw.runtime,
+      entry,
+      relativeEntry,
+      rpcMethods: Object.freeze(rpcMethods),
+      capabilities: Object.freeze(capabilities),
+    });
+  }
   return Object.freeze({
     componentId,
     componentVersion: requiredText(manifest.version, 'component version', 80),
@@ -70,6 +104,7 @@ const parseComponentHostManifest = (manifest, componentRoot) => {
     compatibility: { minHostApiVersion: min, maxHostApiVersion: max },
     toolbarAction: Object.freeze({ ...actions[0], pageTitle: page.title }),
     fullPage: Object.freeze(page),
+    service,
   });
 };
 
@@ -111,7 +146,9 @@ const createComponentHostRegistry = ({ roots }) => {
 module.exports = {
   COMPONENT_HOST_API_VERSION,
   COMPONENT_HOST_CONTRACT_VERSION,
+  COMPONENT_SERVICE_PROTOCOL_VERSION,
   CONTRIBUTION_TYPES,
+  HOST_CAPABILITIES,
   createComponentHostRegistry,
   parseComponentHostManifest,
 };
