@@ -2,7 +2,7 @@ const readline = require('readline');
 const path = require('path');
 
 const MAX_LINE_BYTES = 2 * 1024 * 1024;
-const REQUEST_TIMEOUT_MS = 60 * 1000;
+const REQUEST_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 
 const cloneRequestPayload = payload => {
   if (payload === undefined || payload === null) return {};

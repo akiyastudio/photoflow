@@ -24,15 +24,18 @@ assert(template.componentHost.contributions.some(item => item.type === 'componen
 assert(template.requiredFiles.includes('ui/index.html') && template.requiredFiles.includes('ui/team-retouch.svg'), 'installation must reject a component missing its renderer or icon');
 assert(template.requiredFiles.includes('service.cjs'), 'installation must reject a component missing its backend service');
 assert.deepEqual(template.componentHost.service.rpcMethods, [
-  'team.project.get.v1', 'team.project.register.v1',
+  'team.project.get.v1', 'team.project.register.v1', 'team.project.remove-photo.v1',
   'team.identity.save.v1', 'team.identity.assign.v1', 'team.identity.confirm-group.v1', 'team.identity.delete.v1',
+  'team.person.exclude.v1', 'team.patch.get.v1', 'team.patch.detect.v1', 'team.patch.detect-batch.v1',
+  'team.patch.update.v1', 'team.patch.delete.v1', 'team.patch.cleanup.v1', 'team.patch.upload.v1',
+  'team.patch.remove-upload.v1', 'team.patch.merge.v1',
   'team.identity.similarities.v1', 'team.workflow.settings.save.v1',
   'component.settings.get.v1', 'component.settings.update.v1',
 ]);
 assert(template.componentHost.service.rpcMethods.every(method => !COMPONENT_RPC_METHODS[method]), 'service-owned routes must not retain legacy RPC mappings');
 for (const channel of ['workspace-team-identity-similarities', 'workspace-team-workflow-settings-save']) assert(!versionsIpc.includes(`ipcMain.handle('${channel}'`), `${channel} must have exactly one component-service writer`);
 for (const channel of ['component-settings-get', 'component-settings-update']) assert(!systemIpc.includes(`ipcMain.handle('${channel}'`), `${channel} must not retain a system IPC route`);
-assert(template.componentHost.service.capabilities.includes('component.storage.v1') && template.componentHost.service.capabilities.includes('project.media.read.v1') && template.componentHost.service.capabilities.includes('component.settings.v1'));
+for (const capability of ['component.storage.v1', 'project.media.read.v1', 'project.output.authorize.v1', 'version.register.v1', 'tasks.report.v1', 'dialogs.open.v1', 'component.settings.v1']) assert(template.componentHost.service.capabilities.includes(capability), `${capability} must be fixed in the service manifest`);
 assert(builder.indexOf('buildRenderer(id)') < builder.indexOf("if (id === 'team-retouch' && !probeModule('onnxruntime'))"), 'renderer must build before native runtime packaging starts');
 assert(builder.includes('fs.cpSync(rendererOutput, uiRoot, { recursive: true })') && builder.includes("path.join(target, 'ui')"), 'component package must receive the renderer output');
 assert(!preload.includes('workspace-team-') && !workspace.includes('TeamRetouch') && !workspace.includes('团片协作') && !settings.includes("activeSection === 'team-retouch'"), 'application renderer boundaries must remain free of legacy team UI and APIs');

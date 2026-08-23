@@ -25,7 +25,7 @@ class ComponentViewManager {
     this.ipcMain.handle('component-sdk:get-context', event => {
       const instance = this.senderBindings.get(event.sender.id);
       if (!instance || instance.view.webContents !== event.sender) throw new Error('Unauthorized component sender');
-      const { workspacePath: _privateWorkspacePath, ...publicContext } = instance.context;
+      const { workspacePath: _privateWorkspacePath, eventSender: _privateEventSender, ...publicContext } = instance.context;
       return publicContext;
     });
     this.ipcMain.handle('component-sdk:rpc', (event, method, payload) => {
@@ -83,6 +83,7 @@ class ComponentViewManager {
         projectId: String(request.projectId || ''),
         projectName: String(request.projectName || ''),
         projectStatus: String(request.projectStatus || ''),
+        eventSender: view.webContents,
       }),
     };
     this.instances.set(key, instance);

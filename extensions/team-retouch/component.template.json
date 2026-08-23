@@ -31,13 +31,20 @@
       "runtime": "node",
       "entrypoints": { "default": "service.cjs" },
       "rpcMethods": [
-        "team.project.get.v1", "team.project.register.v1",
+        "team.project.get.v1", "team.project.register.v1", "team.project.remove-photo.v1",
         "team.identity.save.v1", "team.identity.assign.v1",
         "team.identity.confirm-group.v1", "team.identity.delete.v1",
+        "team.person.exclude.v1", "team.patch.get.v1",
+        "team.patch.detect.v1", "team.patch.detect-batch.v1",
+        "team.patch.update.v1", "team.patch.delete.v1", "team.patch.cleanup.v1",
+        "team.patch.upload.v1", "team.patch.remove-upload.v1", "team.patch.merge.v1",
         "team.identity.similarities.v1", "team.workflow.settings.save.v1",
         "component.settings.get.v1", "component.settings.update.v1"
       ],
-      "capabilities": ["project.media.read.v1", "component.storage.v1", "component.settings.v1"]
+      "capabilities": [
+        "project.media.read.v1", "project.output.authorize.v1", "version.register.v1",
+        "tasks.report.v1", "dialogs.open.v1", "component.storage.v1", "component.settings.v1"
+      ]
     }
   }
 }
