@@ -1307,14 +1307,6 @@ const registerVersionIpc = context => {
     getWorkspaceDataRoot(workspaceRoot), 'team-retouch', 'workflow-settings',
     `${crypto.createHash('sha256').update(String(projectName)).digest('hex')}.json`,
   );
-  const readTeamIdentitySimilarities = async (workspaceRoot, projectName) => {
-    try {
-      const payload = JSON.parse(await fs.promises.readFile(teamIdentitySimilarityPath(workspaceRoot, projectName), 'utf8'));
-      return Array.isArray(payload.similarities) ? payload.similarities : [];
-    } catch {
-      return [];
-    }
-  };
   const writeTeamIdentitySimilarities = async (workspaceRoot, projectName, similarities) => {
     const outputPath = teamIdentitySimilarityPath(workspaceRoot, projectName);
     await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
@@ -1332,22 +1324,6 @@ const registerVersionIpc = context => {
     } catch {
       return {};
     }
-  };
-  const writeTeamWorkflowSettings = async (workspaceRoot, projectName, settings) => {
-    const outputPath = teamWorkflowSettingsPath(workspaceRoot, projectName);
-    await fs.promises.mkdir(path.dirname(outputPath), { recursive: true });
-    const pendingPath = `${outputPath}.${crypto.randomUUID()}.tmp`;
-    const preferredIdentityOrder = [...new Set((settings.preferredIdentityOrder || []).map(String).filter(Boolean))];
-    const sameWeekIdentityIds = [...new Set((settings.sameWeekIdentityIds || []).map(String).filter(Boolean))]
-      .filter(identityId => preferredIdentityOrder.slice(1).includes(identityId));
-    await fs.promises.writeFile(pendingPath, JSON.stringify({
-      updatedAt: Date.now(),
-      preferredIdentityOrder,
-      preferredIdentityId: preferredIdentityOrder[0] || undefined,
-      sameWeekIdentityIds,
-    }, null, 2), 'utf8');
-    await fs.promises.rm(outputPath, { force: true });
-    await fs.promises.rename(pendingPath, outputPath);
   };
   const isGeneratedTeamIdentity = identity => /^待确认人物\s+\d+$/.test(String(identity?.name || ''));
   const teamBboxIou = (left, right) => {
@@ -1463,15 +1439,6 @@ const registerVersionIpc = context => {
       return { success: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
-    }
-  });
-
-  ipcMain.handle('workspace-team-identity-similarities', async (_event, workspacePath, projectName) => {
-    try {
-      const similarities = await readTeamIdentitySimilarities(ensureWorkspace(workspacePath), projectName);
-      return { success: true, similarities };
-    } catch (error) {
-      return { success: false, similarities: [], error: error.message || String(error) };
     }
   });
 
@@ -1607,36 +1574,6 @@ const registerVersionIpc = context => {
       return { success: true };
     }
     catch (error) { return { success: false, error: error.message || String(error) }; }
-  });
-  ipcMain.handle('workspace-team-workflow-settings-save', async (_event, workspacePath, request = {}) => {
-    try {
-      const workspaceRoot = ensureWorkspace(workspacePath);
-      const projectName = String(request.projectName || '').trim();
-      if (!projectName) throw new Error('项目名称不能为空');
-      const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
-      const workflowStarted = (workspace.assignments || []).some(assignment => assignment.completed || assignment.returnMissing)
-        || (workspace.photos || []).some(photo => (photo.tasks || []).some(task => Boolean(task.editedPatchPath) || !['', 'exported'].includes(String(task.status || 'exported'))));
-      if (workflowStarted) throw new Error('已有任务返图或完成，不能再修改优先开工人物');
-      const requestedOrder = Array.isArray(request.preferredIdentityOrder)
-        ? request.preferredIdentityOrder
-        : request.preferredIdentityId ? [request.preferredIdentityId] : [];
-      const preferredIdentityOrder = [...new Set(requestedOrder.map(String).filter(Boolean))];
-      const identityIds = new Set((workspace.identities || []).map(identity => identity.id));
-      const assignedIdentityIds = new Set((workspace.assignments || []).map(assignment => assignment.identityId).filter(Boolean));
-      if (preferredIdentityOrder.some(identityId => !identityIds.has(identityId))) throw new Error('排序中包含不存在的人物，请刷新后重试');
-      if (preferredIdentityOrder.some(identityId => !assignedIdentityIds.has(identityId))) throw new Error('排序中的人物还没有任何任务');
-      const requestedSameWeekIdentityIds = [...new Set((request.sameWeekIdentityIds || []).map(String).filter(Boolean))];
-      if (requestedSameWeekIdentityIds.some(identityId => !preferredIdentityOrder.slice(1).includes(identityId))) throw new Error('同周关系必须连接优先队列中相邻的人物');
-      const workflowSettings = {
-        preferredIdentityOrder,
-        preferredIdentityId: preferredIdentityOrder[0] || undefined,
-        sameWeekIdentityIds: requestedSameWeekIdentityIds,
-      };
-      await writeTeamWorkflowSettings(workspaceRoot, projectName, workflowSettings);
-      return { success: true, workflowSettings };
-    } catch (error) {
-      return { success: false, error: error.message || String(error) };
-    }
   });
   ipcMain.handle('workspace-team-person-exclude', async (event, workspacePath, status, projectName, request = {}) => {
     try {

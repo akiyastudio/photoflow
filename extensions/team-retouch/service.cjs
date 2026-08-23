@@ -15,6 +15,31 @@ const parseJson = (value, fallback) => {
 const uniqueText = values => [...new Set((values || []).map(value => String(value || '').trim()).filter(Boolean))];
 const sha256 = value => crypto.createHash('sha256').update(String(value)).digest('hex');
 
+const readJson = async (filePath, fallback) => {
+  try { return JSON.parse(await fs.promises.readFile(filePath, 'utf8')); } catch { return fallback; }
+};
+
+const replaceJsonAtomic = async (filePath, value) => {
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  const token = crypto.randomUUID();
+  const pendingPath = `${filePath}.${token}.tmp`;
+  const backupPath = `${filePath}.${token}.backup`;
+  let backedUp = false;
+  try {
+    await fs.promises.writeFile(pendingPath, JSON.stringify(value, null, 2), 'utf8');
+    if (fs.existsSync(filePath)) {
+      await fs.promises.rename(filePath, backupPath);
+      backedUp = true;
+    }
+    await fs.promises.rename(pendingPath, filePath);
+    if (backedUp) await fs.promises.rm(backupPath, { force: true });
+  } catch (error) {
+    await fs.promises.rm(pendingPath, { force: true }).catch(() => undefined);
+    if (backedUp && !fs.existsSync(filePath)) await fs.promises.rename(backupPath, filePath).catch(() => undefined);
+    throw error;
+  }
+};
+
 const callHost = (parentId, method, payload = {}) => new Promise((resolve, reject) => {
   const id = `cap-${nextCapabilityId++}`;
   pendingCapabilities.set(id, { resolve, reject });
@@ -243,6 +268,39 @@ const deleteIdentity = (parentId, payload, context) => withDomain(parentId, db =
   } catch (error) { db.exec('ROLLBACK'); throw error; }
 });
 
+const readIdentitySimilarities = async (parentId, _payload, context) => {
+  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+  const payload = await readJson(path.join(storage.dataRoot, 'identity-similarities', `${sha256(context.projectName)}.json`), {});
+  return { success: true, similarities: Array.isArray(payload.similarities) ? payload.similarities : [] };
+};
+
+const saveWorkflowSettings = async (parentId, payload, context) => {
+  const snapshot = await workspaceSnapshot(parentId, context);
+  const workflowStarted = snapshot.assignments.some(assignment => assignment.completed || assignment.returnMissing)
+    || snapshot.photos.some(photo => photo.tasks.some(task => Boolean(task.editedPatchPath) || !['', 'exported'].includes(String(task.status || 'exported'))));
+  if (workflowStarted) throw new Error('已有任务返图或完成，不能再修改优先开工人物');
+  const requestedOrder = Array.isArray(payload.preferredIdentityOrder)
+    ? payload.preferredIdentityOrder
+    : payload.preferredIdentityId ? [payload.preferredIdentityId] : [];
+  const preferredIdentityOrder = uniqueText(requestedOrder);
+  const identityIds = new Set(snapshot.identities.map(identity => String(identity.id)));
+  const assignedIdentityIds = new Set(snapshot.assignments.map(assignment => String(assignment.identityId || '')).filter(Boolean));
+  if (preferredIdentityOrder.some(identityId => !identityIds.has(identityId))) throw new Error('排序中包含不存在的人物，请刷新后重试');
+  if (preferredIdentityOrder.some(identityId => !assignedIdentityIds.has(identityId))) throw new Error('排序中的人物还没有任何任务');
+  const sameWeekIdentityIds = uniqueText(payload.sameWeekIdentityIds);
+  if (sameWeekIdentityIds.some(identityId => !preferredIdentityOrder.slice(1).includes(identityId))) throw new Error('同周关系必须连接优先队列中相邻的人物');
+  const workflowSettings = {
+    preferredIdentityOrder,
+    preferredIdentityId: preferredIdentityOrder[0] || undefined,
+    sameWeekIdentityIds,
+  };
+  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+  await replaceJsonAtomic(path.join(storage.dataRoot, 'workflow-settings', `${sha256(context.projectName)}.json`), { updatedAt: Date.now(), ...workflowSettings });
+  return { success: true, workflowSettings };
+};
+
+const componentSettings = async (parentId, payload) => callHost(parentId, 'component.settings.v1', payload);
+
 const workspaceSnapshot = async (parentId, context) => {
   const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
   const db = ensureSchema(storage.databasePath);
@@ -336,6 +394,10 @@ const handlers = {
   'team.identity.assign.v1': assignIdentity,
   'team.identity.confirm-group.v1': confirmIdentityGroup,
   'team.identity.delete.v1': deleteIdentity,
+  'team.identity.similarities.v1': readIdentitySimilarities,
+  'team.workflow.settings.save.v1': saveWorkflowSettings,
+  'component.settings.get.v1': parentId => componentSettings(parentId, { action: 'get' }),
+  'component.settings.update.v1': (parentId, payload) => componentSettings(parentId, { action: 'update', settings: payload }),
 };
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });

@@ -1239,30 +1239,6 @@ const registerSystemIpc = context => {
     }
   });
 
-  ipcMain.handle('component-settings-get', async (_event, componentId) => {
-    if (componentId !== 'team-retouch') return { success: false, error: 'Unknown component settings namespace' };
-    const config = readSavedConfig() || {};
-    const legacy = config.personDetection || {};
-    const stored = config.componentSettings?.[componentId] || legacy;
-    return { success: true, settings: { useGpu: stored.useGpu !== false, oversizeCropMode: stored.oversizeCropMode === 'expand' ? 'expand' : 'face-centered' } };
-  });
-
-  ipcMain.handle('component-settings-update', async (_event, componentId, request = {}) => {
-    if (componentId !== 'team-retouch') return { success: false, error: 'Unknown component settings namespace' };
-    try {
-      const config = readSavedConfig() || {};
-      const settings = {
-        useGpu: request.useGpu !== false,
-        oversizeCropMode: request.oversizeCropMode === 'expand' ? 'expand' : 'face-centered',
-      };
-      const next = { ...config, componentSettings: { ...(config.componentSettings || {}), [componentId]: settings } };
-      await fs.promises.writeFile(getConfigPath(), JSON.stringify(next, null, 2), 'utf8');
-      return { success: true, settings };
-    } catch (error) {
-      return { success: false, error: error.message || String(error) };
-    }
-  });
-  
   const readBirthdays = () => {
     try {
       const userPath = getUserBirthdaysPath();

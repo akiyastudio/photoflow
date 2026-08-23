@@ -12,6 +12,8 @@ const builder = fs.readFileSync(path.join(root, 'scripts', 'build-components.cjs
 const preload = fs.readFileSync(path.join(root, 'electron', 'preload.cjs'), 'utf8');
 const workspace = fs.readFileSync(path.join(root, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
 const settings = fs.readFileSync(path.join(root, 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
+const versionsIpc = fs.readFileSync(path.join(root, 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
+const systemIpc = fs.readFileSync(path.join(root, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
 
 assert(fs.existsSync(path.join(rendererOutput, 'index.html')), 'independent team-retouch renderer must be built before this test');
 const outputFiles = fs.readdirSync(path.join(rendererOutput, 'assets'));
@@ -24,9 +26,13 @@ assert(template.requiredFiles.includes('service.cjs'), 'installation must reject
 assert.deepEqual(template.componentHost.service.rpcMethods, [
   'team.project.get.v1', 'team.project.register.v1',
   'team.identity.save.v1', 'team.identity.assign.v1', 'team.identity.confirm-group.v1', 'team.identity.delete.v1',
+  'team.identity.similarities.v1', 'team.workflow.settings.save.v1',
+  'component.settings.get.v1', 'component.settings.update.v1',
 ]);
 assert(template.componentHost.service.rpcMethods.every(method => !COMPONENT_RPC_METHODS[method]), 'service-owned routes must not retain legacy RPC mappings');
-assert(template.componentHost.service.capabilities.includes('component.storage.v1') && template.componentHost.service.capabilities.includes('project.media.read.v1'));
+for (const channel of ['workspace-team-identity-similarities', 'workspace-team-workflow-settings-save']) assert(!versionsIpc.includes(`ipcMain.handle('${channel}'`), `${channel} must have exactly one component-service writer`);
+for (const channel of ['component-settings-get', 'component-settings-update']) assert(!systemIpc.includes(`ipcMain.handle('${channel}'`), `${channel} must not retain a system IPC route`);
+assert(template.componentHost.service.capabilities.includes('component.storage.v1') && template.componentHost.service.capabilities.includes('project.media.read.v1') && template.componentHost.service.capabilities.includes('component.settings.v1'));
 assert(builder.indexOf('buildRenderer(id)') < builder.indexOf("if (id === 'team-retouch' && !probeModule('onnxruntime'))"), 'renderer must build before native runtime packaging starts');
 assert(builder.includes('fs.cpSync(rendererOutput, uiRoot, { recursive: true })') && builder.includes("path.join(target, 'ui')"), 'component package must receive the renderer output');
 assert(!preload.includes('workspace-team-') && !workspace.includes('TeamRetouch') && !workspace.includes('团片协作') && !settings.includes("activeSection === 'team-retouch'"), 'application renderer boundaries must remain free of legacy team UI and APIs');

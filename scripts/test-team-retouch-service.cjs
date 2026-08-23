@@ -12,8 +12,10 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-team-service-')
 const workspace = path.join(sandbox, 'workspace');
 const dataRoot = path.join(sandbox, 'workspace-data', 'key');
 const projectRoot = path.join(workspace, 'active', 'Project');
+const configPath = path.join(sandbox, 'config.json');
 fs.mkdirSync(projectRoot, { recursive: true });
 fs.writeFileSync(path.join(projectRoot, 'one.jpg'), 'fixture');
+fs.writeFileSync(configPath, JSON.stringify({ personDetection: { useGpu: false, oversizeCropMode: 'expand' } }));
 
 const broker = new ComponentCapabilityBroker();
 const bundles = new Map();
@@ -33,10 +35,15 @@ registerComponentProjectCapabilities({
   },
   IMAGE_EXTENSIONS: new Set(['.jpg']),
   path,
+  fs,
+  crypto: require('crypto'),
+  getConfigPath: () => configPath,
+  readSavedConfig: () => JSON.parse(fs.readFileSync(configPath, 'utf8')),
 });
-const descriptor = { componentId: 'team-retouch', service: { capabilities: ['component.storage.v1', 'project.media.read.v1'] } };
+const descriptor = { componentId: 'team-retouch', service: { capabilities: ['component.storage.v1', 'project.media.read.v1', 'component.settings.v1'] } };
 const context = { workspacePath: workspace, projectId: 'project-1', projectName: 'Project', projectStatus: 'active' };
 assert.throws(() => broker.invoke(descriptor, 'component.storage.v1', { namespace: 'arbitrary' }, context), /Unknown component storage namespace/);
+assert.rejects(() => broker.invoke({ componentId: 'other-component', service: { capabilities: ['component.settings.v1'] } }, 'component.settings.v1', { action: 'get' }, context), /Unknown component settings namespace/);
 
 const child = spawn(process.execPath, [path.join(__dirname, '..', 'extensions', 'team-retouch', 'service.cjs')], {
   env: { SystemRoot: process.env.SystemRoot, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
@@ -90,8 +97,16 @@ const ready = new Promise((resolve, reject) => {
     assert.equal(snapshot.photos[0].photoId, 'photo-1');
     const saved = await invoke('team.identity.save.v1', { name: '人物 A', assignments: [] });
     assert(saved.identityId);
-    await invoke('team.identity.assign.v1', { photoId: 'photo-1', baseVersionId: 'version-1', personIndex: 1, identityId: saved.identityId, completed: true });
+    await invoke('team.identity.assign.v1', { photoId: 'photo-1', baseVersionId: 'version-1', personIndex: 1, identityId: saved.identityId, completed: false });
     assert.equal((await invoke('team.project.get.v1')).assignments[0].identityId, saved.identityId);
+    const workflowSettings = await invoke('team.workflow.settings.save.v1', { preferredIdentityOrder: [saved.identityId], sameWeekIdentityIds: [] });
+    assert.deepEqual(workflowSettings.workflowSettings.preferredIdentityOrder, [saved.identityId]);
+    const similarityDirectory = path.join(dataRoot, 'team-retouch', 'identity-similarities');
+    fs.mkdirSync(similarityDirectory, { recursive: true });
+    fs.writeFileSync(path.join(similarityDirectory, `${require('crypto').createHash('sha256').update('Project').digest('hex')}.json`), JSON.stringify({ similarities: [{ left: 'a', right: 'b', score: .8 }] }));
+    assert.equal((await invoke('team.identity.similarities.v1')).similarities[0].score, .8);
+    assert.deepEqual((await invoke('component.settings.get.v1')).settings, { useGpu: false, oversizeCropMode: 'expand' });
+    assert.deepEqual((await invoke('component.settings.update.v1', { useGpu: true, oversizeCropMode: 'face-centered' })).settings, { useGpu: true, oversizeCropMode: 'face-centered' });
     await invoke('team.identity.delete.v1', { identityId: saved.identityId });
     assert.equal((await invoke('team.project.get.v1')).identities.length, 0);
     console.log('Team-retouch component service integration tests passed');

@@ -33,9 +33,11 @@
       "rpcMethods": [
         "team.project.get.v1", "team.project.register.v1",
         "team.identity.save.v1", "team.identity.assign.v1",
-        "team.identity.confirm-group.v1", "team.identity.delete.v1"
+        "team.identity.confirm-group.v1", "team.identity.delete.v1",
+        "team.identity.similarities.v1", "team.workflow.settings.save.v1",
+        "component.settings.get.v1", "component.settings.update.v1"
       ],
-      "capabilities": ["project.media.read.v1", "component.storage.v1"]
+      "capabilities": ["project.media.read.v1", "component.storage.v1", "component.settings.v1"]
     }
   }
 }

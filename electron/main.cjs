@@ -1860,7 +1860,7 @@ app.whenReady().then(async () => {
     resolveProjectEntry,
     versionService,
     IMAGE_EXTENSIONS,
-    path,
+    path, fs, crypto, getConfigPath, readSavedConfig,
   });
   componentServiceManager = new ComponentServiceManager({
     registry: componentHostRegistry,
