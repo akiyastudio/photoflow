@@ -7,8 +7,9 @@ const { spawnSync } = require('node:child_process');
 const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
-const componentRenderer = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'main.ts'), 'utf8');
-assert(componentRenderer.includes("item.mediaKind==='image'&&!item.folderMissing&&item.nodeRole==='progress'"), 'component merge targets must be existing image progress nodes');
+const componentRenderer = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'main.tsx'), 'utf8');
+const interactionModel = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'interaction-model.ts'), 'utf8');
+assert(interactionModel.includes("folder.mediaKind === 'image'") && interactionModel.includes('!folder.folderMissing') && interactionModel.includes("folder.nodeRole === 'progress'"), 'component merge targets must be existing image progress nodes');
 assert(componentRenderer.includes("rpc<Json>('project.progress.list.v1')") && !componentRenderer.includes('createVersionGraphEdge'), 'the component must use versioned host graph capabilities instead of assembling edges directly');
 
 const dagResult = spawnSync(process.execPath, [path.join(repositoryRoot, 'scripts', 'test-version-tree-dag-layout.cjs')], { encoding: 'utf8' });

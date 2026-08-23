@@ -145,7 +145,8 @@ try {
 
   const settingsFeature = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
   const projectPreload = fs.readFileSync(path.join(repositoryRoot, 'electron', 'preload.cjs'), 'utf8');
-  const teamRenderer = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'main.ts'), 'utf8');
+  const teamRenderer = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'main.tsx'), 'utf8')
+    + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'interaction-model.ts'), 'utf8');
   const teamSdk = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'sdk.ts'), 'utf8');
   const componentRpcContract = fs.readFileSync(path.join(repositoryRoot, 'electron', 'component-rpc-contract.cjs'), 'utf8');
   const componentPreload = fs.readFileSync(path.join(repositoryRoot, 'electron', 'component-preload.cjs'), 'utf8');
@@ -155,7 +156,7 @@ try {
   }
   assert(!settingsFeature.includes("activeSection === 'team-retouch'") && !settingsFeature.includes('TeamRetouchEngineSettings'), 'application settings must only retain generic component management');
   assert(!projectPreload.includes('workspace-team-') && !projectPreload.includes('TeamRetouch'), 'the application preload must not expose team-retouch APIs or events');
-  assert(teamRenderer.includes("type Tab = 'detect' | 'people' | 'workflow' | 'returns' | 'merge' | 'settings'") && teamRenderer.includes('workflowGroups') && teamRenderer.includes('team.patch.return-batch.v1'), 'the component renderer must own the complete collaboration UI and workflow orchestration');
+  assert(teamRenderer.includes("export type Tab = 'detect' | 'people' | 'workflow' | 'returns' | 'merge' | 'settings'") && teamRenderer.includes('workflowGroups') && teamRenderer.includes('team.workflow.return-batch.v1'), 'the React component renderer must own the complete collaboration UI and workflow orchestration');
   assert(teamSdk.includes('allowedMethods') && teamSdk.includes('window.photoFlowComponent.rpc') && !teamSdk.includes('electronAPI') && !teamSdk.includes('ipcRenderer'), 'the component renderer must depend only on its restricted SDK');
   assert(componentRpcContract.includes('sanitizePayload') && componentRpcContract.includes('fields:') && componentRpcContract.includes('manager.registerRpcMethod') && componentRpcContract.includes("'team-retouch'"), 'component RPC methods must have payload field allowlists and a component owner');
   assert(componentPreload.includes('COMPONENT_EVENTS') && !componentPreload.includes("exposeInMainWorld('electronAPI'"), 'component events must use a closed topic map without the application bridge');
@@ -243,7 +244,10 @@ try {
   assert(projectWorkspace.includes('browserContext.rootFilterLabel') && projectWorkspace.includes('当前文件夹'), 'the shared filter menu must use project and inspiration-specific scope labels');
   assert(projectWorkspace.includes("projectWorkspaceClient.listProjectFiles(workspacePath, project.status, project.name, '', FILE_LIST_PAGE_SIZE") && projectWorkspace.includes('projectWorkspaceClient.cancelListProjectFiles'), 'project-root filtering must use the typed, cancellable paginated file-list API');
   assert(appSource.includes('photoflow:components-cache') && appSource.includes('componentHostActions={componentHostActions}'), 'installed component state must drive the declarative component host action list');
-  assert(teamRenderer.includes('检测全部图片') && teamRenderer.includes('人物身份') && teamRenderer.includes('协作工作流') && teamRenderer.includes('批量返图') && teamRenderer.includes('合并结果') && teamRenderer.includes('检测设置'), 'the independent renderer must contain every team-retouch workflow surface');
+  for (const requiredInteraction of ['检测全部', '逐人物身份确认', '确认人物组', '工作图上传', '拖拽排期', '生成工作流', '取消工作流', '导出人物任务', '选择返图文件', '逐张对比确认', '忽略返图', '选择合并目标进度', '合并到目标进度', '组件设置', '安装 / 修复', '卸载']) {
+    assert(teamRenderer.includes(requiredInteraction), `the independent React renderer must retain ${requiredInteraction}`);
+  }
+  assert(teamRenderer.includes('IntersectionObserver') && teamRenderer.includes('onDeactivate') && teamRenderer.includes("event.key === 'Escape'"), 'preview loading, deactivation, and Escape handling must remain component-owned');
   const versionsIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
   assert(versionsIpc.includes('workflowAvailableSubjectKeys') && versionsIpc.includes('`${item.baseVersionId}:${Number(item.personIndex)}`'), 'the workspace backend must expose stable availability keys for generated workflow subjects');
   const mediaRatingIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'media-rating-ipc.cjs'), 'utf8');
@@ -315,7 +319,7 @@ try {
   assert(systemIpc.includes('packageSizeBytes'), 'successful installers must report the actual package size for cleanup confirmation');
   assert(systemIpc.includes("const teamRetouchRoot"), 'all team-retouch packages must share one component directory');
   assert(systemIpc.includes("path.join(teamRetouchRoot(), 'advanced')") && !systemIpc.includes("path.join(teamRetouchRoot(), 'identity-models')"), 'only the optional detection engine may retain a team-retouch add-on directory');
-  assert(teamRenderer.includes('人物身份') && teamRenderer.includes('重新自动标记人物') && !settingsFeature.includes("activeSection === 'team-retouch'"), 'cross-photo identity controls must be owned by the component renderer');
+  assert(teamRenderer.includes('人物身份') && teamRenderer.includes('自动生成候选') && !settingsFeature.includes("activeSection === 'team-retouch'"), 'cross-photo identity controls must be owned by the component renderer');
   assert(!settingsFeature.includes('实验人物识别模型 · 用户自备'), 'settings must not require end users to compile identity models');
 
   assert(componentBuilder.includes("'.cache', 'model-lab', 'adaface', 'adaface_ir18_webface4m.onnx") && componentBuilder.includes("'.cache', 'model-lab', 'osnet', 'osnet_x1_0_msmt17.onnx"), 'team-retouch component must contain both enhanced identity ONNX models');
