@@ -86,8 +86,8 @@ export const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   pinInspirationLibrary: false,
   componentSettings: {
     'team-retouch': { useGpu: true, oversizeCropMode: 'face-centered' },
-    'video-playback-mpv': { arrowKeyAction: 'seek' },
   },
+  videoPlayback: { arrowKeyAction: 'seek' },
   mediaCache: { maxSizeGB: 50, directory: '', autoCleanup30Days: false },
   backup: {
     enabled: false,

@@ -419,7 +419,10 @@ assert(teamRetouchManager.includes('uniqueIdentitySubjectsPerPhoto'), 'identity 
   assert.strictEqual(registry.list().length, Object.keys(PLUGIN_DEFINITIONS).length);
   const advancedVideoManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'extensions', 'video-playback-mpv', 'component.template.json'), 'utf8'));
   assert.strictEqual(PLUGIN_DEFINITIONS['video-playback-mpv'].version, '26.8.16.1', 'the app must accept the latest published advanced-video component');
+  assert.strictEqual(PLUGIN_DEFINITIONS['video-playback-mpv'].runtimeOnly, true, 'advanced video must be catalogued as a backend runtime only');
   assert.strictEqual(advancedVideoManifest.version, PLUGIN_DEFINITIONS['video-playback-mpv'].version, 'the advanced-video manifest and app compatibility pin must stay aligned');
+  assert.deepStrictEqual(Object.keys(advancedVideoManifest.entrypoints), ['win32-x64'], 'advanced video must expose only its native decoder entrypoint');
+  assert(!('renderer' in advancedVideoManifest) && !('contributes' in advancedVideoManifest), 'advanced video manifest must not contribute a renderer or UI');
   assert.strictEqual(registry.resolve('team-retouch'), null);
   assert.strictEqual(registry.resolve('office-media-extractor'), null);
   const installRoot = userComponentRoot;

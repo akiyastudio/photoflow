@@ -278,7 +278,7 @@ type FileBrowserWorkspaceProps = {
   installedComponentIds: ReadonlySet<string>;
   componentsLoading: boolean;
   teamRetouchStatus?: ComponentStatus;
-  advancedVideoSettings: NonNullable<AppConfig['componentSettings']['video-playback-mpv']>;
+  advancedVideoSettings: AppConfig['videoPlayback'];
   projectToolbar?: AppConfig['projectToolbar'];
   customProjectCategories?: string[];
   projectCategoryOrder?: string[];
@@ -5816,7 +5816,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
   width: number;
   pinned: boolean;
   advancedVideoAvailable: boolean;
-  keyboardSettings: NonNullable<AppConfig['componentSettings']['video-playback-mpv']>;
+  keyboardSettings: AppConfig['videoPlayback'];
   videoTrimExportMode: AppConfig['videoTools']['trim']['exportMode'];
   photoshopAvailable: boolean;
   ratingAvailable: boolean;

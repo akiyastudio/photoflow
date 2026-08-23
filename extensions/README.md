@@ -63,7 +63,10 @@ The current component IDs are:
   whole team-retouch workflow is unavailable.
 - `video-playback-mpv`: “高级视频解码”. It runs libmpv in an isolated process,
   embeds the native video surface in PhotoFlow, and falls back to Chromium
-  playback if startup or decoding fails.
+  playback if startup or decoding fails. It is a runtime-only backend
+  capability: the player, controls, trimming, screenshots and settings remain
+  in the main application, and the component package must not contain renderer
+  JavaScript, HTML or CSS.
 
 The inspiration library, scene organizer, and Office image extractor are part
 of the main application and are not component IDs.

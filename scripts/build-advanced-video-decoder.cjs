@@ -213,6 +213,11 @@ const archiveEntries = fs.readdirSync(target, { withFileTypes: true })
   .filter(entry => entry.isFile())
   .map(entry => entry.name)
   .sort((left, right) => left.localeCompare(right, 'en'));
+const runtimePackageExtensions = new Set(['.dll', '.exe', '.json', '.md', '.txt', '.zip']);
+const unexpectedPackageEntries = archiveEntries.filter(name => !runtimePackageExtensions.has(path.extname(name).toLowerCase()));
+if (unexpectedPackageEntries.length) {
+  throw new Error(`高级视频解码运行时包含非运行时/清单/许可证文件：${unexpectedPackageEntries.join(', ')}`);
+}
 for (const name of archiveEntries) fs.utimesSync(path.join(target, name), zipTimestamp, zipTimestamp);
 fs.utimesSync(target, zipTimestamp, zipTimestamp);
 

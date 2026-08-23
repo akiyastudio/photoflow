@@ -12,7 +12,7 @@ const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
 };
-export type SettingsSection = 'general' | 'project' | 'privacy' | 'storage' | 'backup' | 'components' | 'import' | 'team-retouch' | 'video-playback-mpv' | 'about' | 'feedback';
+export type SettingsSection = 'general' | 'project' | 'privacy' | 'storage' | 'backup' | 'components' | 'import' | 'video' | 'team-retouch' | 'about' | 'feedback';
 
 const SETTINGS_SECTION_LABELS: Record<SettingsSection, string> = {
   general: '界面',
@@ -22,7 +22,7 @@ const SETTINGS_SECTION_LABELS: Record<SettingsSection, string> = {
   storage: '存储',
   components: '组件管理',
   'team-retouch': '团片协作',
-  'video-playback-mpv': '高级视频解码',
+  video: '视频',
   about: '关于',
   feedback: '问题和建议',
   privacy: '隐私与数据',
@@ -380,12 +380,12 @@ const SettingsNavigator = ({ activeSection, components, onSelect }: { activeSect
     { id: 'general', label: '界面', description: '配色、标签与首页', icon: <Palette size={18}/> },
     { id: 'project', label: '项目', description: '新建项目与分类', icon: <FolderOpen size={18}/> },
     { id: 'import', label: '导入', description: '默认行为、SD 卡与花絮', icon: <Download size={18}/> },
+    { id: 'video', label: '视频', description: '播放按键与视频工具', icon: <Video size={18}/> },
     { id: 'backup', label: '存储', description: '工作目录、归档与工作区备份', icon: <HardDrive size={18}/> },
     { id: 'components', label: '组件管理', description: '安装与卸载可选组件', icon: <Puzzle size={18}/> },
   ];
   const componentItems = ([
     { id: 'team-retouch', componentId: 'team-retouch', label: '团片协作', description: 'AI识别人物并把图片切小', icon: <UsersRound size={18}/> },
-    { id: 'video-playback-mpv', componentId: 'video-playback-mpv', label: '高级视频解码', description: '播放按键与解码偏好', icon: <Video size={18}/> },
   ] as Array<{ id: SettingsSection; componentId: string; label: string; description: string; icon: React.ReactNode }>).filter(item => installedComponentIds.has(item.componentId));
   const renderItem = (item: typeof items[number]) => <button key={item.id} type="button" aria-current={activeSection === item.id ? 'page' : undefined} onClick={() => onSelect(item.id)} className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition ${activeSection === item.id ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'}`}><span className={`shrink-0 ${activeSection === item.id ? 'text-blue-600' : 'text-slate-400'}`}>{item.icon}</span><span className="min-w-0 truncate text-sm font-bold">{item.label}</span></button>;
   return <nav aria-label="设置分类" className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain border-r border-slate-200 p-3">
@@ -837,11 +837,11 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     } finally { setBackupAction(''); }
   };
   const teamRetouchSettings = (draft.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || draft.personDetection;
-  const advancedVideoSettings = draft.componentSettings['video-playback-mpv'] || { arrowKeyAction: 'seek' as const };
+  const videoPlaybackSettings = draft.videoPlayback;
   const teamRetouchComponent = components.find(component => component.id === 'team-retouch');
   const inspirationLibrarySettings = draft.inspirationLibrary;
   const updateTeamRetouchSettings = (next: AppConfig['personDetection']) => commitSettings({ ...draft, personDetection: next, componentSettings: { ...draft.componentSettings, 'team-retouch': next } });
-  const updateAdvancedVideoSettings = (next: NonNullable<AppConfig['componentSettings']['video-playback-mpv']>) => commitSettings({ ...draft, componentSettings: { ...draft.componentSettings, 'video-playback-mpv': next } });
+  const updateVideoPlaybackSettings = (next: AppConfig['videoPlayback']) => commitSettings({ ...draft, videoPlayback: next });
   const updateInspirationLibrarySettings = (next: AppConfig['inspirationLibrary']) => commitSettings({ ...draft, inspirationLibrary: next });
   const updateInspirationLibraryRoot = (rootPath: string) => updateInspirationLibrarySettings({ ...inspirationLibrarySettings, rootPath });
   const visibleBackupSnapshots = backupProjectFocus ? backupStatus.snapshots.filter(snapshot => snapshot.projectItems?.some(project => project.name === backupProjectFocus.name)) : backupStatus.snapshots;
@@ -947,9 +947,9 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     </SettingsPageGroup>
     <TeamRetouchEngineSettings component={teamRetouchComponent} onRefresh={onRefreshComponents} onNotice={onNotice}/>
     </>}
-    {activeSection === 'video-playback-mpv' && <>
+    {activeSection === 'video' && <>
     <SettingsPageGroup title="视频浏览">
-      <SettingsRow title="左右方向键行为" description="设置左右方向键用于快进快退或切换视频。"><select value={advancedVideoSettings.arrowKeyAction} onChange={event => updateAdvancedVideoSettings({ arrowKeyAction: event.target.value as 'seek' | 'navigate' })} className="form-input ml-auto max-w-sm"><option value="seek">快退 / 快进 5 秒（默认）</option><option value="navigate">切换上一个 / 下一个视频</option></select></SettingsRow>
+      <SettingsRow title="左右方向键行为" description="设置主程序视频播放器的左右方向键用于快进快退或切换视频；无需安装高级解码组件。"><select value={videoPlaybackSettings.arrowKeyAction} onChange={event => updateVideoPlaybackSettings({ arrowKeyAction: event.target.value as 'seek' | 'navigate' })} className="form-input ml-auto max-w-sm"><option value="seek">快退 / 快进 5 秒（默认）</option><option value="navigate">切换上一个 / 下一个视频</option></select></SettingsRow>
     </SettingsPageGroup>
     </>}
     {activeSection === 'import' && <>

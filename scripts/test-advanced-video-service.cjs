@@ -131,6 +131,9 @@ const run = async () => {
   const decoderBuildSource = require('fs').readFileSync(path.join(__dirname, 'build-advanced-video-decoder.cjs'), 'utf8');
   const runtimeBuildSource = require('fs').readFileSync(path.join(__dirname, 'media-runtime', 'build-libmpv-dependencies-windows.sh'), 'utf8');
   const libmpvBuildSource = require('fs').readFileSync(path.join(__dirname, 'media-runtime', 'build-libmpv-lgpl-windows.sh'), 'utf8');
+  const pluginContributionsSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'features', 'plugins', 'plugin-contributions.ts'), 'utf8');
+  const settingsSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
+  const appSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'App.tsx'), 'utf8');
   assert(decoderBuildSource.includes("verifyPeDependencyClosure(target, ['libmpv-2.dll'])")
     && runtimeBuildSource.includes('libass-disable-iconv.patch')
     && runtimeBuildSource.includes('freetype-disable-bzip2.patch')
@@ -142,8 +145,14 @@ const run = async () => {
   assert(decoderBuildSource.includes('SOURCE_DATE_EPOCH')
     && decoderBuildSource.includes('fs.utimesSync')
     && decoderBuildSource.includes('archiveEntries.map')
-    && decoderBuildSource.includes('normalizeZipTimestamps'),
+    && decoderBuildSource.includes('normalizeZipTimestamps')
+    && decoderBuildSource.includes("new Set(['.dll', '.exe', '.json', '.md', '.txt', '.zip'])"),
   'advanced video packaging must use deterministic metadata, timestamps, and entry ordering');
+  assert(!pluginContributionsSource.includes("id: 'video-playback-mpv'")
+    && !pluginContributionsSource.includes('video-playback.settings')
+    && settingsSource.includes("{ id: 'video', label: '视频'")
+    && appSource.includes("delete componentSettings['video-playback-mpv']"),
+  'advanced video UI and settings must ship with the app instead of the optional runtime');
   assert(decoderSource.includes('SetOption("vo", probeOnly ? "null" : "gpu")')
     && !decoderSource.includes('"gpu-next')
     && decoderSource.includes('SetOption("gpu-api", "d3d11")')

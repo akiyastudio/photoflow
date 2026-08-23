@@ -35,7 +35,7 @@ export interface TeamRetouchComponentSettings {
   useGpu: boolean;
   oversizeCropMode: 'face-centered' | 'expand';
 }
-export interface AdvancedVideoComponentSettings {
+export interface VideoPlaybackSettings {
   arrowKeyAction: 'seek' | 'navigate';
 }
 export interface ResearchSettings {
@@ -49,7 +49,8 @@ export interface InspirationLibrarySettings {
 }
 export interface ComponentSettingsMap {
   'team-retouch'?: TeamRetouchComponentSettings;
-  'video-playback-mpv'?: AdvancedVideoComponentSettings;
+  /** Legacy location read during migration; video playback UI is owned by the app. */
+  'video-playback-mpv'?: VideoPlaybackSettings;
   [componentId: string]: unknown;
 }
 export const PROJECT_STATUS_LABELS: Record<string, string> = {
@@ -242,6 +243,8 @@ export interface AppConfig {
   birthdayEnabled: boolean;
   pinInspirationLibrary: boolean;
   componentSettings: ComponentSettingsMap;
+  /** Built-in player controls shared by Chromium and optional advanced decoding. */
+  videoPlayback: VideoPlaybackSettings;
   mediaCache: {
     maxSizeGB: number;
     directory: string;
@@ -1152,7 +1155,7 @@ export interface IElectronAPI {
   getMediaThumbnail: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache'], requestedSize?: number, priority?: 0 | 1 | 2 | 3, queueOrder?: number) => Promise<{ success: boolean; taskId?: string; state?: ThumbnailState; previewUrl?: string; mediaUrl?: string; usingImportedPreview?: boolean; importedVideoWithoutPreview?: boolean; cacheLayer?: 'memory' | 'disk' | 'source'; error?: string }>;
   cancelMediaThumbnail: (filePath: string, requestedSize?: number) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
   onThumbnailStateChanged: (callback: (update: { filePath: string; state: ThumbnailState; previewUrls?: Partial<Record<'small' | 'medium' | 'large', string>>; sourceMtimeMs?: number; sourceSize?: number; error?: string }) => void) => () => void;
-  startAdvancedVideo: (filePath: string, arrowKeyAction: AdvancedVideoComponentSettings['arrowKeyAction'] | undefined, playerId: string, requestId: string) => Promise<{ success: boolean; sessionId?: string; playerId?: string; requestId?: string; error?: string }>;
+  startAdvancedVideo: (filePath: string, arrowKeyAction: VideoPlaybackSettings['arrowKeyAction'] | undefined, playerId: string, requestId: string) => Promise<{ success: boolean; sessionId?: string; playerId?: string; requestId?: string; error?: string }>;
   setAdvancedVideoBounds: (sessionId: string, bounds: {
     x: number;
     y: number;

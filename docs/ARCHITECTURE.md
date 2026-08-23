@@ -73,8 +73,15 @@ file workflows.
 - `src/features/settings`, `src/features/plugins`, and
   `src/features/background-tasks`: settings, plugin availability and observable
   background-task UI. `src/App.tsx` is the application shell rather than the
-  previous 4,000-line feature container. Optional UI surfaces and settings are
-  discovered through `plugin-contributions.ts` capability metadata.
+  previous 4,000-line feature container. Optional team-retouch UI surfaces and
+  settings are discovered through `plugin-contributions.ts` capability metadata.
+- Advanced video UI is built into the application: `AdvancedVideoPlayer`,
+  Chromium fallback playback, trimming, screenshots, keyboard controls and the
+  `videoPlayback` preference all ship in the main renderer. The optional
+  `video-playback-mpv` component contributes only the supervised native decoder
+  process and libmpv runtime capability; installing it never installs a renderer
+  bundle. Configurations saved under the former component-settings key are
+  migrated into `videoPlayback` on load.
 
 ## Stable contracts
 

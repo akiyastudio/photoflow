@@ -1,12 +1,11 @@
 export type RendererPluginCapability =
   | 'team-retouch.workspace'
-  | 'team-retouch.settings'
-  | 'video-playback.settings';
+  | 'team-retouch.settings';
 
 export type RendererPluginContribution = {
-  id: 'team-retouch' | 'video-playback-mpv';
+  id: 'team-retouch';
   renderer: {
-    settingsSection: 'team-retouch' | 'video-playback-mpv';
+    settingsSection: 'team-retouch';
     workspaceSurfaces: readonly ('project-toolbar' | 'project-context-menu' | 'media-preview')[];
     capabilities: readonly RendererPluginCapability[];
   };
@@ -27,18 +26,6 @@ export const RENDERER_PLUGIN_CONTRIBUTIONS: readonly RendererPluginContribution[
     main: {
       ipcNamespaces: ['workspace-team-'],
       serviceCapabilities: ['team-retouch.detect', 'team-retouch.identify', 'team-retouch.merge'],
-    },
-  },
-  {
-    id: 'video-playback-mpv',
-    renderer: {
-      settingsSection: 'video-playback-mpv',
-      workspaceSurfaces: ['media-preview'],
-      capabilities: ['video-playback.settings'],
-    },
-    main: {
-      ipcNamespaces: ['advanced-video-'],
-      serviceCapabilities: ['video-playback.advanced'],
     },
   },
 ];

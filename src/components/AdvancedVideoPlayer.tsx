@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Camera, Gauge, Loader2, Pause, Play, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
-import type { AdvancedVideoComponentSettings, AdvancedVideoState } from '../types';
+import type { AdvancedVideoState, VideoPlaybackSettings } from '../types';
 
 const formatTime = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
@@ -22,7 +22,7 @@ const createPlaybackToken = () => globalThis.crypto?.randomUUID?.() || `video_${
 type VideoDirectionalInputGroup = 'arrows' | 'forward-back';
 type VideoDirectionalAction = 'navigate' | 'seek';
 
-const videoDirectionalAction = (arrowKeyAction: AdvancedVideoComponentSettings['arrowKeyAction'], group: VideoDirectionalInputGroup): VideoDirectionalAction => {
+const videoDirectionalAction = (arrowKeyAction: VideoPlaybackSettings['arrowKeyAction'], group: VideoDirectionalInputGroup): VideoDirectionalAction => {
   if (group === 'arrows') return arrowKeyAction === 'navigate' ? 'navigate' : 'seek';
   return arrowKeyAction === 'navigate' ? 'seek' : 'navigate';
 };
@@ -46,7 +46,7 @@ type AdvancedVideoPlayerProps = {
   bottomControls?: ReactNode;
   editorSeekRequest?: { id: number; time: number; pause?: boolean };
   onPlaybackState?: (state: { time: number; duration: number; paused: boolean }) => void;
-  keyboardSettings?: AdvancedVideoComponentSettings;
+  keyboardSettings?: VideoPlaybackSettings;
 };
 
 const initialState = (): AdvancedVideoState => ({

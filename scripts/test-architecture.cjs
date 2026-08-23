@@ -409,7 +409,19 @@ assert(versionsIpc.includes('registerVersionTrackingIpc') && versionTrackingIpc.
 assert(/workspaceDatabase = new PythonDatabaseClient\([\s\S]*?defaultTimeoutMs: 2 \* 60 \* 1000/.test(main), 'workspace recovery must allow long project-catalog reconciliation to finish');
 assert(lines(appEntry) < 950, 'App.tsx exceeded the architecture size budget');
 assert(!projectWorkspace.includes('window.electronAPI') && projectWorkspace.includes('projectWorkspaceClient') && projectWorkspaceContract.includes('Pick<IElectronAPI, ProjectWorkspaceApiKey>') && projectWorkspaceClient.includes('ProjectWorkspaceApi'), 'the workspace renderer must compile against its explicit preload contract');
-assert(pluginContributions.includes('workspaceSurfaces') && pluginContributions.includes('ipcNamespaces') && pluginContributions.includes('serviceCapabilities') && app.includes('componentIdForSettingsSection'), 'optional plugins must declare UI, IPC, and service contribution metadata');
+assert(pluginContributions.includes('workspaceSurfaces') && pluginContributions.includes('ipcNamespaces') && pluginContributions.includes('serviceCapabilities') && app.includes('componentIdForSettingsSection'), 'optional renderer plugins must declare UI, IPC, and service contribution metadata');
+assert(PLUGIN_DEFINITIONS['video-playback-mpv'].runtimeOnly === true
+  && PLUGIN_DEFINITIONS['video-playback-mpv'].capabilities.includes('video-playback.advanced')
+  && !pluginContributions.includes("id: 'video-playback-mpv'")
+  && !pluginContributions.includes('video-playback.settings'),
+'advanced video must remain a backend runtime capability without renderer plugin contributions');
+assert(types.includes('videoPlayback: VideoPlaybackSettings')
+  && appEntry.includes("const legacyAdvancedVideo = fileConfig.componentSettings?.['video-playback-mpv']")
+  && appEntry.includes("delete componentSettings['video-playback-mpv']")
+  && settingsFeature.includes("{ id: 'video', label: '视频'")
+  && settingsFeature.includes("activeSection === 'video'")
+  && !settingsFeature.includes("activeSection === 'video-playback-mpv'"),
+'video controls and preferences must be app-owned while migrating the legacy component setting');
 assert(!/run(?:Workspace|Media)Database/.test(`${main}\n${workspaceIpc}\n${versionsIpc}\n${versionTrackingIpc}`), 'IPC code bypassed repositories');
 assert.strictEqual((app.match(/electronAPI\.getComponents\(/g) || []).length, 1, 'App must be the single renderer owner of component status');
 assert(!app.includes('shrink-0 font-mono text-[10px] text-slate-400">v'), 'the title-bar brand must not display the application version');
@@ -422,7 +434,7 @@ assert(app.includes('整理和浏览灵感素材') && !app.includes('识别视�
 assert(!app.includes("installedComponentIds.has('research-tools')"), 'the inspiration library must not be gated by a component install');
 assert(projectWorkspace.includes("teamRetouchAvailable && fileMenu.entry.kind === 'image'"), 'team retouch context-menu contribution must require the installed component');
 assert(projectWorkspace.includes("const dismissLoadingNotice = onNotice('正在加载团片协作数据…', 30000)") && projectWorkspace.includes("if (typeof dismissLoadingNotice === 'function') dismissLoadingNotice()") && projectWorkspace.includes('teamRetouchOpening || !teamRetouchInstalled && componentsLoading') && projectWorkspace.includes('团片协作已加载，共 ${combined.size} 张图片'), 'opening team retouch must immediately expose loading, completion, and busy-button feedback while dismissing the loading toast');
-assert(settingsFeature.includes('filter(item => installedComponentIds.has(item.componentId))'), 'component settings contributions must require the installed component');
+assert(settingsFeature.includes('filter(item => installedComponentIds.has(item.componentId))'), 'component-owned settings contributions must require the installed component');
 assert(app.includes("delete componentSettings['research-tools']") && app.includes('const researchSettings:') && app.includes('const inspirationLibrary:'), 'legacy research component config must migrate into the built-in storyboard panel defaults');
 assert(inspirationLibrary.includes('FileBrowserWorkspace') && inspirationLibrary.includes('INSPIRATION_FILE_BROWSER_CONTEXT') && inspirationLibrary.includes('InspirationLibraryNavigator') && browserContext.includes('PROJECT_FILE_BROWSER_CONTEXT') && browserContext.includes('INSPIRATION_FILE_BROWSER_CONTEXT'), 'project and inspiration shells must compose the shared file browser through explicit contexts');
 assert(workspaceIpc.includes("ipcMain.handle('workspace-folder-tree'") && inspirationLibrary.includes('listWorkspaceFolders') && inspirationLibrary.includes('visibleFolders.map'), 'the inspiration sidebar must recursively list folders only through the workspace IPC boundary');
