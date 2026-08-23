@@ -3,6 +3,17 @@ const { registerVersionTrackingIpc } = require('./version-tracking-ipc.cjs');
 
 const workflowGenerationJobs = new Map();
 
+const resolveTeamProjectMediaPath = (workspace, request = {}) => {
+  const photo = (workspace?.photos || []).find(item => String(item.photoId) === String(request.photoId || '') && String(item.baseVersionId) === String(request.baseVersionId || ''));
+  if (!photo) throw new Error('媒体不属于当前团片项目');
+  if (request.kind === 'original') return String(photo.sourcePath || '');
+  const task = (photo.tasks || []).find(item => String(item.id) === String(request.taskId || '') && String(item.baseVersionId) === String(request.baseVersionId || ''));
+  if (!task) throw new Error('工作图不属于当前照片版本');
+  if (request.kind === 'working') return String(task.patchPath || '');
+  if (request.kind === 'returned') return String(task.editedPatchPath || '');
+  throw new Error('未知的团片媒体类型');
+};
+
 const registerVersionIpc = context => {
   const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, pluginService, privacyService, projectVirtualPaths, readSavedConfig, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, shell, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
   const listRatedProjectMedia = projectPath => mediaRatingService.listProject(projectPath);
@@ -1418,6 +1429,43 @@ const registerVersionIpc = context => {
     return ready;
   };
 
+  ipcMain.handle('workspace-team-media-authorize', async (_event, workspacePath, projectName, status, request = {}) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const kind = String(request.kind || '');
+      let targetPath = '';
+      if (kind === 'review-return') {
+        const reviewTarget = await readTeamWorkflowReturnReview(workspaceRoot, projectName);
+        if (!reviewTarget.session || String(reviewTarget.session.id) !== String(request.reviewSessionId || '')) throw new Error('待确认返图批次已经变化');
+        if (status && String(reviewTarget.session.status) !== String(status)) throw new Error('待确认返图不属于当前项目状态');
+        const match = (reviewTarget.session.result?.matches || []).find(item => String(item.returnId) === String(request.returnId || ''));
+        targetPath = String(match?.path || '');
+      } else {
+        const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+        targetPath = resolveTeamProjectMediaPath(workspace, { ...request, kind });
+      }
+      const resolved = path.resolve(targetPath);
+      if (!targetPath || !fs.existsSync(resolved) || !IMAGE_EXTENSIONS.has(path.extname(resolved).toLowerCase())) throw new Error('媒体文件不存在或格式不受支持');
+      return { success: true, url: mediaService.toUrl(resolved, true), expiresInSeconds: 3600 };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-team-patch-open-by-id', async (_event, workspacePath, projectName, request = {}) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
+      const targetPath = path.resolve(resolveTeamProjectMediaPath(workspace, { ...request, kind: 'working' }));
+      if (!fs.existsSync(targetPath) || !IMAGE_EXTENSIONS.has(path.extname(targetPath).toLowerCase())) throw new Error('工作图不存在或不属于当前项目');
+      const error = await shell.openPath(targetPath);
+      if (error) throw new Error(error);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
   ipcMain.handle('workspace-team-identity-similarities', async (_event, workspacePath, projectName) => {
     try {
       const similarities = await readTeamIdentitySimilarities(ensureWorkspace(workspacePath), projectName);
@@ -2053,6 +2101,22 @@ const registerVersionIpc = context => {
     }
   });
 
+  ipcMain.handle('workspace-team-identity-open-export', async (_event, workspacePath, status, projectName, request = {}) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const { outputDirectory, manifest } = await readTeamWorkflowManifest(workspaceRoot, status, projectName);
+      if (!manifest) throw new Error('请先生成工作流程');
+      const group = (manifest.groups || []).find(item => Number(item.week) === Number(request.week) && String(item.identityId || '') === String(request.identityId || ''));
+      const groupDirectory = path.resolve(outputDirectory, String(group?.relativePath || ''));
+      if (!group?.relativePath || !isInside(outputDirectory, groupDirectory) || !fs.existsSync(groupDirectory)) throw new Error('任务文件夹不存在或不属于当前工作流');
+      const error = await shell.openPath(groupDirectory);
+      if (error) throw new Error(error);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
   ipcMain.handle('workspace-team-workflow-return-review-get', async (_event, workspacePath, projectName, status) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
@@ -2129,7 +2193,8 @@ const registerVersionIpc = context => {
       }).filter(item => item.patchPath && fs.existsSync(item.patchPath));
       if (!candidates.length) throw new Error('当前没有可接收返图的工作流程任务');
 
-      const selectedFiles = await Promise.all((request.returnedFiles || []).map(filePath => mediaService.authorizeInput(String(filePath))));
+      if (!(request.returnedFiles || []).every(filePath => typeof filePath === 'string' && filePath.startsWith('media-token:'))) throw new Error('返图必须来自宿主文件选择授权');
+      const selectedFiles = await Promise.all((request.returnedFiles || []).map(filePath => mediaService.authorizeInput(filePath)));
       const returned = selectedFiles.map((filePath, index) => ({
         returnId: `workflow-return-${index + 1}`,
         path: path.resolve(filePath),
@@ -2982,4 +3047,4 @@ const registerVersionIpc = context => {
   });
 };
 
-module.exports = { registerVersionIpc };
+module.exports = { registerVersionIpc, resolveTeamProjectMediaPath };

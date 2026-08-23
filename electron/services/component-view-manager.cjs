@@ -25,7 +25,8 @@ class ComponentViewManager {
     this.ipcMain.handle('component-sdk:get-context', event => {
       const instance = this.senderBindings.get(event.sender.id);
       if (!instance || instance.view.webContents !== event.sender) throw new Error('Unauthorized component sender');
-      return { ...instance.context };
+      const { workspacePath: _privateWorkspacePath, ...publicContext } = instance.context;
+      return publicContext;
     });
     this.ipcMain.handle('component-sdk:rpc', (event, method, payload) => {
       const instance = this.senderBindings.get(event.sender.id);

@@ -3,6 +3,8 @@ import { scheduleWorkflowWeeks, type WorkflowScheduleEntry } from './workflow-sc
 export type Json = Record<string, any>;
 export type Tab = 'detect' | 'people' | 'workflow' | 'returns' | 'merge' | 'settings';
 export type Crop = { x: number; y: number; width: number; height: number };
+export type CropHandle = 'move' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw';
+export type CompareMode = 'side-by-side' | 'overlay' | 'blink' | 'difference' | 'split';
 
 export const assignmentKey = (photoId: unknown, baseVersionId: unknown, personIndex: unknown) =>
   `${String(photoId || '')}:${String(baseVersionId || '')}:${Number(personIndex || 0)}`;
@@ -49,9 +51,62 @@ export const progressCandidates = (result: Json, sourcePaths: string[] = []) => 
 };
 
 export const clampCrop = (crop: Crop, bounds: { width: number; height: number }): Crop => {
-  const x = Math.max(0, Math.min(bounds.width - 1, Math.round(crop.x)));
-  const y = Math.max(0, Math.min(bounds.height - 1, Math.round(crop.y)));
-  return { x, y, width: Math.max(1, Math.min(bounds.width - x, Math.round(crop.width))), height: Math.max(1, Math.min(bounds.height - y, Math.round(crop.height))) };
+  const width = Math.max(1, Number.isFinite(bounds.width) ? Math.round(bounds.width) : 1);
+  const height = Math.max(1, Number.isFinite(bounds.height) ? Math.round(bounds.height) : 1);
+  const finite = (value: number, fallback: number) => Number.isFinite(value) ? value : fallback;
+  const x = Math.max(0, Math.min(width - 1, Math.round(finite(crop.x, 0))));
+  const y = Math.max(0, Math.min(height - 1, Math.round(finite(crop.y, 0))));
+  return { x, y, width: Math.max(1, Math.min(width - x, Math.round(finite(crop.width, 1)))), height: Math.max(1, Math.min(height - y, Math.round(finite(crop.height, 1)))) };
 };
+
+export const resizeCrop = (start: Crop, handle: CropHandle, dx: number, dy: number, bounds: { width: number; height: number }): Crop => {
+  if (handle === 'move') return clampCrop({ ...start, x: Math.max(0, Math.min(bounds.width - start.width, start.x + dx)), y: Math.max(0, Math.min(bounds.height - start.height, start.y + dy)) }, bounds);
+  let left = start.x; let top = start.y; let right = start.x + start.width; let bottom = start.y + start.height;
+  if (handle.includes('w')) left = Math.min(right - 1, left + dx);
+  if (handle.includes('e')) right = Math.max(left + 1, right + dx);
+  if (handle.includes('n')) top = Math.min(bottom - 1, top + dy);
+  if (handle.includes('s')) bottom = Math.max(top + 1, bottom + dy);
+  left = Math.max(0, left); top = Math.max(0, top); right = Math.min(bounds.width, right); bottom = Math.min(bounds.height, bottom);
+  return clampCrop({ x: left, y: top, width: right - left, height: bottom - top }, bounds);
+};
+
+export const expandCrop = (crop: Crop, bounds: { width: number; height: number }, ratio = .1) => clampCrop({ x: crop.x - crop.width * ratio, y: crop.y - crop.height * ratio, width: crop.width * (1 + ratio * 2), height: crop.height * (1 + ratio * 2) }, bounds);
+
+export const fitCropToMembers = (members: Json[], bounds: { width: number; height: number }, padding = .12): Crop => {
+  const boxes = members.map(item => item.bbox || item).filter(box => [box?.x, box?.y, box?.width, box?.height].every(Number.isFinite) && box.width > 0 && box.height > 0);
+  if (!boxes.length) return clampCrop({ x: 0, y: 0, width: bounds.width, height: bounds.height }, bounds);
+  const left = Math.min(...boxes.map(box => box.x)); const top = Math.min(...boxes.map(box => box.y));
+  const right = Math.max(...boxes.map(box => box.x + box.width)); const bottom = Math.max(...boxes.map(box => box.y + box.height));
+  const padX = (right - left) * padding; const padY = (bottom - top) * padding;
+  return clampCrop({ x: left - padX, y: top - padY, width: right - left + padX * 2, height: bottom - top + padY * 2 }, bounds);
+};
+
+export const rankIdentityCandidates = (subject: Json, subjects: Json[], identities: Json[], similarities: Json[]) => {
+  const byKey = new Map(subjects.map(item => [item.key, item]));
+  const best = new Map<string, Json>();
+  for (const pair of similarities) {
+    const otherKey = pair.leftKey === subject.key ? pair.rightKey : pair.rightKey === subject.key ? pair.leftKey : '';
+    const other = byKey.get(otherKey) as Json | undefined;
+    const identityId = String(other?.assignment?.identityId || '');
+    if (!identityId) continue;
+    const current = best.get(identityId);
+    if (!current || Number(pair.score || 0) > Number(current.score || 0)) best.set(identityId, pair);
+  }
+  return identities.map((identity): Json => ({ identity, ...(best.get(String(identity.id)) || {}), confidence: Number(best.get(String(identity.id))?.score || 0) >= .72 ? '高' : Number(best.get(String(identity.id))?.score || 0) >= .5 ? '中' : '低' }))
+    .sort((left, right) => Number(right.score || 0) - Number(left.score || 0) || String(left.identity.name).localeCompare(String(right.identity.name), 'zh-CN'));
+};
+
+export const returnCandidates = (item: Json) => {
+  const seen = new Set<string>();
+  return [item, ...(item.alternatives || [])].filter(candidate => {
+    const key = `${candidate.photoId}:${candidate.baseVersionId}:${candidate.personIndex}:${candidate.taskId}`;
+    if (!candidate.taskId || seen.has(key)) return false;
+    seen.add(key); return true;
+  }).sort((left, right) => Number(right.score || 0) - Number(left.score || 0));
+};
+
+export const clampZoom = (value: number) => Math.max(1, Math.min(5, Number.isFinite(value) ? value : 1));
+export const normalizeRotation = (value: number) => ((Math.round(value / 90) * 90) % 360 + 360) % 360;
+export const shouldBlink = (mode: CompareMode, active: boolean) => mode === 'blink' && active;
 
 export const returnReviewItems = (review: Json | undefined) => review?.items || review?.matches || review?.returns || [];

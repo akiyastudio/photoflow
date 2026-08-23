@@ -80,6 +80,7 @@ try {
     assert(manager.setBounds(first.instanceId, { x: 2, y: 40, width: 800, height: 600 }));
     const context = await handlers.get('component-sdk:get-context')({ sender: view.webContents });
     assert.equal(context.projectId, 'project-1');
+    assert.equal(context.workspacePath, undefined, 'component pages receive project identity but never the private workspace path');
     assert.throws(() => handlers.get('component-sdk:get-context')({ sender: new FakeWebContents() }), /Unauthorized component sender/);
     manager.registerRpcMethod('sample.echo.v1', (_event, payload, boundContext) => ({ payload, projectId: boundContext.projectId }), 'sample-component');
     assert.deepEqual(await handlers.get('component-sdk:rpc')({ sender: view.webContents }, 'sample.echo.v1', { value: 1 }), { payload: { value: 1 }, projectId: 'project-1' });
