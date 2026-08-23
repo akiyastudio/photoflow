@@ -13,6 +13,7 @@
   "requiredFiles": [
     "ui/index.html",
     "ui/team-retouch.svg",
+    "service.cjs",
     "_internal/models/rtmdet-ins_m_640x640.onnx",
     "_internal/models/face_detection_yunet_2023mar.onnx",
     "_internal/models/adaface_ir18_webface4m.onnx",
@@ -24,6 +25,17 @@
     "contributions": [
       { "type": "workspace.toolbarAction", "id": "open", "label": "团片协作", "pageId": "main" },
       { "type": "component.fullPage", "id": "main", "title": "团片协作", "entry": "ui/index.html" }
-    ]
+    ],
+    "service": {
+      "protocolVersion": 1,
+      "runtime": "node",
+      "entrypoints": { "default": "service.cjs" },
+      "rpcMethods": [
+        "team.project.get.v1", "team.project.register.v1",
+        "team.identity.save.v1", "team.identity.assign.v1",
+        "team.identity.confirm-group.v1", "team.identity.delete.v1"
+      ],
+      "capabilities": ["project.media.read.v1", "component.storage.v1"]
+    }
   }
 }

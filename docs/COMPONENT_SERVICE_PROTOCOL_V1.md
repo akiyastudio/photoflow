@@ -34,4 +34,4 @@ Service extraction does not authorize moving or deleting component data. A domai
 
 ## Current migration status
 
-The protocol, manifest validation, capability broker, service launcher, renderer routing fallback, supervision, and boundary tests are implemented. Team-retouch has not declared this service yet: its existing compatibility RPC mapping and main-process handlers remain active until repository, workflow, algorithm, storage, and advanced-runtime operations can move together without breaking old projects or creating a second SQLite writer.
+The protocol, manifest validation, capability broker, service launcher, renderer routing fallback, supervision, and boundary tests are implemented. Team-retouch declares a Node service and owns project snapshot/registration plus identity save, assignment, group confirmation, and deletion; those routes no longer have main-process compatibility handlers or mappings. Identity suggestion/completion and the detection, patch, workflow, return, merge, and advanced-runtime routes still use their compatibility handlers and must not be described as extracted.

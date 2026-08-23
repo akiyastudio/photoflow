@@ -11,6 +11,7 @@ const { createComponentHostRegistry } = require('./component-host-contract.cjs')
 const { ComponentViewManager } = require('./services/component-view-manager.cjs');
 const { ComponentCapabilityBroker } = require('./services/component-capability-broker.cjs');
 const { ComponentServiceManager } = require('./services/component-service-manager.cjs');
+const { registerComponentProjectCapabilities } = require('./services/component-project-capabilities.cjs');
 const { createComponentRpcIpcProxy } = require('./component-rpc-contract.cjs');
 const { registerComponentHostIpc } = require('./modules/component-host-ipc.cjs');
 const { PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
@@ -1851,6 +1852,16 @@ app.whenReady().then(async () => {
   createWindow(false);
 
   const componentCapabilityBroker = new ComponentCapabilityBroker();
+  registerComponentProjectCapabilities({
+    broker: componentCapabilityBroker,
+    ensureWorkspace,
+    getWorkspaceDataRoot,
+    getWorkspaceTeamRetouchDatabasePath,
+    resolveProjectEntry,
+    versionService,
+    IMAGE_EXTENSIONS,
+    path,
+  });
   componentServiceManager = new ComponentServiceManager({
     registry: componentHostRegistry,
     processSupervisor,

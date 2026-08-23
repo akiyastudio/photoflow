@@ -1418,71 +1418,12 @@ const registerVersionIpc = context => {
     return ready;
   };
 
-  ipcMain.handle('workspace-team-project', async (_event, workspacePath, projectName, status) => {
-    try {
-      const workspaceRoot = ensureWorkspace(workspacePath);
-      const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
-      const settings = await readTeamWorkflowSettings(workspaceRoot, projectName);
-      const identityIds = new Set((workspace.identities || []).map(identity => identity.id));
-      const preferredIdentityOrder = (settings.preferredIdentityOrder || []).filter(identityId => identityIds.has(identityId));
-      const requestedSameWeekIdentityIds = new Set((settings.sameWeekIdentityIds || []).map(String));
-      const sameWeekIdentityIds = preferredIdentityOrder.slice(1).filter(identityId => requestedSameWeekIdentityIds.has(identityId));
-      const workflowTarget = status ? await readTeamWorkflowManifest(workspaceRoot, status, projectName) : null;
-      const workflowManifest = workflowTarget?.manifest || null;
-      const workflowGenerated = Boolean(workflowManifest && Number(workflowManifest.version) >= 2);
-      const generatedSettings = workflowManifest?.workflowSettings;
-      const generatedOrder = Array.isArray(generatedSettings?.preferredIdentityOrder) ? generatedSettings.preferredIdentityOrder.map(String) : [];
-      const generatedSameWeekSet = new Set(Array.isArray(generatedSettings?.sameWeekIdentityIds) ? generatedSettings.sameWeekIdentityIds.map(String) : []);
-      const generatedSameWeekIdentityIds = generatedOrder.slice(1).filter(identityId => generatedSameWeekSet.has(identityId));
-      const workflowNeedsRegeneration = Boolean(workflowGenerated && generatedSettings && (
-        JSON.stringify(generatedOrder) !== JSON.stringify(preferredIdentityOrder)
-        || JSON.stringify(generatedSameWeekIdentityIds) !== JSON.stringify(sameWeekIdentityIds)
-      ));
-      const availableWorkflowItems = workflowGenerated
-        ? (workflowManifest.groups || []).flatMap(group => (group.items || []).filter(item => {
-          if (!item.available || !item.relativePath) return false;
-          const itemPath = path.resolve(workflowTarget.outputDirectory, item.relativePath);
-          return isInside(workflowTarget.outputDirectory, itemPath) && fs.existsSync(itemPath);
-        }))
-        : [];
-      const workflowAvailableKeys = availableWorkflowItems.map(item => `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`);
-      // Photos can be re-registered while retaining the same base version. Generated
-      // workflows still contain the previous photo ID, so expose a stable key as well.
-      const workflowAvailableSubjectKeys = availableWorkflowItems.map(item => `${item.baseVersionId}:${Number(item.personIndex)}`);
-      return { ...workspace, workflowGenerated, workflowNeedsRegeneration, workflowAvailableKeys, workflowAvailableSubjectKeys, workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds } };
-    } catch (error) {
-      writeLog('error', 'Unable to load team retouch project workspace', {
-        projectName: String(projectName || ''),
-        error: error.message || String(error),
-      });
-      return { success: false, photos: [], identities: [], assignments: [], error: error.message || String(error) };
-    }
-  });
-
   ipcMain.handle('workspace-team-identity-similarities', async (_event, workspacePath, projectName) => {
     try {
       const similarities = await readTeamIdentitySimilarities(ensureWorkspace(workspacePath), projectName);
       return { success: true, similarities };
     } catch (error) {
       return { success: false, similarities: [], error: error.message || String(error) };
-    }
-  });
-
-  ipcMain.handle('workspace-team-project-register', async (_event, workspacePath, status, projectName, relativePaths = []) => {
-    try {
-      const workspaceRoot = ensureWorkspace(workspacePath);
-      for (const relativePath of [...new Set(relativePaths.map(value => String(value)))]) {
-        const filePath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
-        if (!IMAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) throw new Error(`不支持的图片：${path.basename(filePath)}`);
-        const bundle = await versionService.getMedia(workspaceRoot, { projectName, filePath });
-        const base = bundle.versions?.find(version => version.id === bundle.photo?.currentVersionId)
-          || bundle.versions?.find(version => version.isCurrent)
-          || bundle.versions?.at(-1);
-        if (!bundle.photo || !base) throw new Error(`无法登记图片：${path.basename(filePath)}`);
-      }
-      return await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
-    } catch (error) {
-      return { success: false, photos: [], identities: [], assignments: [], error: error.message || String(error) };
     }
   });
 
@@ -1570,98 +1511,6 @@ const registerVersionIpc = context => {
     }
   });
 
-  ipcMain.handle('workspace-team-identity-save', async (_event, workspacePath, request = {}) => {
-    try { return await versionService.saveTeamIdentity(ensureWorkspace(workspacePath), request); }
-    catch (error) { return { success: false, error: error.message || String(error) }; }
-  });
-  ipcMain.handle('workspace-team-identity-assign', async (_event, workspacePath, request = {}) => {
-    try { return await versionService.assignTeamIdentity(ensureWorkspace(workspacePath), request); }
-    catch (error) { return { success: false, error: error.message || String(error) }; }
-  });
-  ipcMain.handle('workspace-team-identity-confirm-group', async (_event, workspacePath, request = {}) => {
-    try {
-      const workspaceRoot = ensureWorkspace(workspacePath);
-      const projectName = String(request.projectName || '').trim();
-      if (!projectName) throw new Error('项目名称不能为空');
-      const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
-      if (!workspace.success) throw new Error(workspace.error || '无法读取人物识别结果');
-      const validSubjects = new Map(teamSubjects(workspace).map(subject => [subject.key, subject]));
-      const anchorSubjectKey = String(request.anchorSubjectKey || '');
-      const requestedAssignments = [];
-      const requestedKeys = new Set();
-      for (const item of Array.isArray(request.assignments) ? request.assignments : []) {
-        const key = teamSubjectKey(item);
-        const subject = validSubjects.get(key);
-        if (!subject || requestedKeys.has(key)) continue;
-        requestedKeys.add(key);
-        requestedAssignments.push({
-          key,
-          photoId: subject.photoId,
-          baseVersionId: subject.baseVersionId,
-          personIndex: subject.personIndex,
-          confidence: Number.isFinite(Number(item.confidence)) ? Math.max(0, Math.min(1, Number(item.confidence))) : 1,
-        });
-      }
-      if (!requestedKeys.has(anchorSubjectKey)) throw new Error('当前人物必须包含在本次标记范围内');
-      const includedPhotoKeys = new Set();
-      let duplicateSkippedCount = 0;
-      const assignments = [
-        ...requestedAssignments.filter(assignment => assignment.key === anchorSubjectKey),
-        ...requestedAssignments.filter(assignment => assignment.key !== anchorSubjectKey),
-      ].filter(assignment => {
-        const photoKey = `${assignment.photoId}:${assignment.baseVersionId}`;
-        if (includedPhotoKeys.has(photoKey)) { duplicateSkippedCount += 1; return false; }
-        includedPhotoKeys.add(photoKey);
-        return true;
-      }).map(({ key: _key, ...assignment }) => assignment);
-      const includedKeys = new Set(assignments.map(teamSubjectKey));
-      if (!assignments.length) throw new Error('没有需要标记的人物');
-      const targetIdentityId = String(request.identityId || '');
-      const clearAssignments = [];
-      const assignmentByKey = new Map((workspace.assignments || []).map(item => [teamSubjectKey(item), item]));
-      for (const assignment of assignments) {
-        const key = teamSubjectKey(assignment);
-        const current = assignmentByKey.get(key);
-        if (key !== anchorSubjectKey && targetIdentityId && current?.identityId && current.identityId !== targetIdentityId && ['manual', 'manual-group'].includes(current.source)) {
-          throw new Error('候选组中包含已经人工确认的其他人物，请先取消勾选冲突项');
-        }
-      }
-      if (targetIdentityId) {
-        const includedByPhoto = new Map();
-        for (const assignment of assignments) {
-          const key = `${assignment.photoId}:${assignment.baseVersionId}`;
-          const indexes = includedByPhoto.get(key) || new Set();
-          indexes.add(Number(assignment.personIndex));
-          includedByPhoto.set(key, indexes);
-        }
-        for (const current of workspace.assignments || []) {
-          if (current.identityId !== targetIdentityId) continue;
-          const currentKey = teamSubjectKey(current);
-          if (!validSubjects.has(currentKey)) continue;
-          const indexes = includedByPhoto.get(`${current.photoId}:${current.baseVersionId}`);
-          if (!indexes || indexes.has(Number(current.personIndex))) continue;
-          if (['manual', 'manual-group'].includes(current.source)) throw new Error('同一张照片中已有其他人工确认的人物使用该身份，请检查识别结果');
-          clearAssignments.push({
-            photoId: current.photoId,
-            baseVersionId: current.baseVersionId,
-            personIndex: Number(current.personIndex),
-          });
-        }
-      }
-      const confirmed = await versionService.confirmTeamIdentityGroup(workspaceRoot, {
-        projectName,
-        anchorSubjectKey,
-        identityId: targetIdentityId || undefined,
-        name: String(request.name || '').trim() || undefined,
-        assignments,
-        clearAssignments,
-      });
-      const updatedWorkspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);
-      return { ...updatedWorkspace, identityId: confirmed.identityId, updatedCount: confirmed.updatedCount, autoReleasedCount: clearAssignments.length, duplicateSkippedCount };
-    } catch (error) {
-      return { success: false, photos: [], identities: [], assignments: [], error: error.message || String(error) };
-    }
-  });
   ipcMain.handle('workspace-team-identity-complete', async (_event, workspacePath, request = {}) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
@@ -1709,10 +1558,6 @@ const registerVersionIpc = context => {
       await rewindWorkflowFiles(workspaceRoot, request.status, request.projectName, task.id, personIndex, sourcePath);
       return { success: true };
     }
-    catch (error) { return { success: false, error: error.message || String(error) }; }
-  });
-  ipcMain.handle('workspace-team-identity-delete', async (_event, workspacePath, request = {}) => {
-    try { return await versionService.deleteTeamIdentity(ensureWorkspace(workspacePath), request); }
     catch (error) { return { success: false, error: error.message || String(error) }; }
   });
   ipcMain.handle('workspace-team-workflow-settings-save', async (_event, workspacePath, request = {}) => {
