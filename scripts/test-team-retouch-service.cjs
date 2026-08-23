@@ -73,7 +73,7 @@ const context = { workspacePath: workspace, projectId: 'project-1', projectName:
 assert.throws(() => broker.invoke(descriptor, 'component.storage.v1', { namespace: 'arbitrary' }, context), /Unknown component storage namespace/);
 assert.rejects(() => broker.invoke({ componentId: 'other-component', service: { capabilities: ['component.settings.v1'] } }, 'component.settings.v1', { action: 'get' }, context), /Unknown component settings namespace/);
 assert.rejects(() => broker.invoke(descriptor, 'project.output.authorize.v1', { action: 'stage-inputs', tokens: ['C:/arbitrary.jpg'] }, context), /selector tokens/);
-assert.rejects(() => broker.invoke(descriptor, 'version.register.v1', { action: 'team-return', photoId: 'other-photo', baseVersionId: 'version-1', taskId: 'task-1', stageId: '12345678', inputName: 'escape.jpg' }, context), /Unknown component version registration/);
+assert.rejects(() => broker.invoke(descriptor, 'version.register.v1', { action: 'team-return', photoId: 'other-photo', baseVersionId: 'version-1', taskId: 'task-1', stageId: '12345678', inputName: 'escape.jpg' }, context), /outside the bound project/);
 
 const child = spawn(process.execPath, [path.join(__dirname, '..', 'extensions', 'team-retouch', 'service.cjs')], {
   env: { SystemRoot: process.env.SystemRoot, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'],

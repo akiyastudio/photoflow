@@ -153,6 +153,8 @@ const registerComponentProjectCapabilities = ({
     return null;
   };
 
+  broker.register('project.output.authorize.v1', authorizeComponentWorkspaceOutput);
+
   broker.register('dialogs.open.v1', async (payload, context, descriptor) => {
     if (descriptor.componentId !== 'team-retouch') throw new Error('Unknown component dialog namespace');
     if (payload.kind === 'image') {
