@@ -203,7 +203,7 @@ const registerMediaIpc = context => {
         const run = await runSlicedMaintenance({
           task,
           initialState: { recoveryCursor: {}, detachPending: true, prunePending: true },
-          initialMetrics: { deletedCount: 0, deletedBytes: 0, detachedCount: 0, detachedBytes: 0, prunedSourceCount: 0, repairedMissingCount: 0, recoveryInspectedCount: 0, failedCount: 0 },
+          initialMetrics: { deletedCount: 0, deletedBytes: 0, detachedCount: 0, detachedBytes: 0, prunedSourceCount: 0, repairedMissingCount: 0, recoveryInspectedCount: 0, orphanScanConsumedCount: 0, orphanProgressCount: 0, retryConsumedCount: 0, failedCount: 0 },
           sliceDeadlineMs: 60 * 1000,
           yieldMs: 50,
           runSlice: async ({ state, firstSlice, deadlineAt, signal }) => {
@@ -233,8 +233,9 @@ const registerMediaIpc = context => {
                 detachPending: slice.detachComplete === false,
                 prunePending: slice.pruneComplete === false,
               },
-              metricsDelta: Object.fromEntries(['deletedCount', 'deletedBytes', 'detachedCount', 'detachedBytes', 'prunedSourceCount', 'repairedMissingCount', 'recoveryInspectedCount', 'failedCount'].map(field => [field, Number(slice[field]) || 0])),
+              metricsDelta: Object.fromEntries(['deletedCount', 'deletedBytes', 'detachedCount', 'detachedBytes', 'prunedSourceCount', 'repairedMissingCount', 'recoveryInspectedCount', 'orphanScanConsumedCount', 'orphanProgressCount', 'retryConsumedCount', 'failedCount'].map(field => [field, Number(slice[field]) || 0])),
               processedDelta: slice.processedCount,
+              foregroundWaitMs: slice.foregroundWaitMs,
               phase: slice.maintenanceComplete ? 'complete' : slice.detachComplete === false ? 'detach' : slice.pruneComplete === false ? 'prune' : 'orphan-recovery',
             };
           },

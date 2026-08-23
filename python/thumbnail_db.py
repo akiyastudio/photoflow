@@ -7,7 +7,6 @@ shipping a Node native addon whose ABI must match every Electron release.
 from __future__ import annotations
 
 import hashlib
-import heapq
 import json
 import os
 import sqlite3
@@ -159,6 +158,8 @@ class ThumbnailDatabase:
                 cache_root TEXT NOT NULL,
                 root_index INTEGER NOT NULL,
                 prepared_at INTEGER NOT NULL,
+                started_mtime_ns INTEGER NOT NULL DEFAULT 0,
+                completed_mtime_ns INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(generation,cache_root,root_index)
             );
             CREATE TABLE IF NOT EXISTS thumbnail_orphan_scan_entries (
@@ -166,6 +167,7 @@ class ThumbnailDatabase:
                 cache_root TEXT NOT NULL,
                 root_index INTEGER NOT NULL,
                 thumbnail_path TEXT NOT NULL,
+                processed INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(generation,cache_root,root_index,thumbnail_path)
             );
             """
@@ -182,12 +184,43 @@ class ThumbnailDatabase:
         }
         if "cursor_json" not in maintenance_columns:
             self.connection.execute("ALTER TABLE maintenance_state ADD COLUMN cursor_json TEXT NOT NULL DEFAULT '{}'")
+        orphan_scan_columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(thumbnail_orphan_scan_entries)").fetchall()
+        }
+        if "processed" not in orphan_scan_columns:
+            self.connection.execute("ALTER TABLE thumbnail_orphan_scan_entries ADD COLUMN processed INTEGER NOT NULL DEFAULT 0")
+        orphan_scan_state_columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(thumbnail_orphan_scan_state)").fetchall()
+        }
+        if "started_mtime_ns" not in orphan_scan_state_columns:
+            self.connection.execute("ALTER TABLE thumbnail_orphan_scan_state ADD COLUMN started_mtime_ns INTEGER NOT NULL DEFAULT 0")
+        if "completed_mtime_ns" not in orphan_scan_state_columns:
+            self.connection.execute("ALTER TABLE thumbnail_orphan_scan_state ADD COLUMN completed_mtime_ns INTEGER NOT NULL DEFAULT 0")
+        self.connection.execute(
+            """CREATE INDEX IF NOT EXISTS thumbnail_orphan_scan_entries_pending
+               ON thumbnail_orphan_scan_entries(generation,cache_root,processed,root_index,thumbnail_path)"""
+        )
         self.connection.execute("INSERT OR IGNORE INTO cache_control(singleton,cache_epoch) VALUES(1,1)")
         self.connection.commit()
+        # Directory enumeration is deliberately kept outside SQLite and resumed
+        # in-process. Sorting the entire cache directory for every recovery page
+        # made each small page O(total cache files) and blocked the JSON service
+        # for seconds on large caches.
+        self._orphan_scan_iterators = {}
 
     def close(self) -> None:
+        for iterator, _offset in self._orphan_scan_iterators.values():
+            iterator.close()
+        self._orphan_scan_iterators.clear()
         self.connection.commit()
         self.connection.close()
+
+    @staticmethod
+    def _directory_mtime_ns(directory: str) -> int:
+        try:
+            return int(os.stat(directory).st_mtime_ns)
+        except OSError:
+            return 0
 
     def _upsert_file(self, project_root: str, file_path: str, kind: str, stat: os.stat_result,
                      calculate_hash: bool = False) -> dict:
@@ -804,7 +837,9 @@ class ThumbnailDatabase:
                                    inspect_limit: int = 2048,
                                    delete_limit: int = 512,
                                    directory_inspect_limit: int = 2048,
-                                   directory_cursor: dict | None = None) -> dict:
+                                   directory_cursor: dict | None = None,
+                                   orphan_recheck_at: int = 0,
+                                   orphan_retention_ms: int = 0) -> dict:
         root = canonical(cache_root)
         inspect_limit = max(1, min(8192, int(inspect_limit)))
         delete_limit = max(1, min(CACHE_INVALIDATION_BATCH_SIZE, int(delete_limit)))
@@ -855,7 +890,7 @@ class ThumbnailDatabase:
             scan_roots.insert(0, root)
         cursor = directory_cursor if isinstance(directory_cursor, dict) else {}
         root_index = max(0, min(len(scan_roots), int(cursor.get("rootIndex") or 0)))
-        after_name = str(cursor.get("afterName") or "")
+        entry_offset = max(0, int(cursor.get("entryOffset") or 0))
         with self.connection:
             self.connection.execute(
                 "DELETE FROM thumbnail_orphan_scan_entries WHERE cache_root=? AND generation<>?", (root, generation)
@@ -863,6 +898,10 @@ class ThumbnailDatabase:
             self.connection.execute(
                 "DELETE FROM thumbnail_orphan_scan_state WHERE cache_root=? AND generation<>?", (root, generation)
             )
+        for iterator_key, (iterator, _offset) in list(self._orphan_scan_iterators.items()):
+            if iterator_key[1] == root and iterator_key[0] != generation:
+                iterator.close()
+                self._orphan_scan_iterators.pop(iterator_key, None)
         retry_rows = self.connection.execute(
             """SELECT thumbnail_path FROM thumbnail_orphan_delete_retries
                WHERE cache_root=? ORDER BY updated_at,thumbnail_path LIMIT ?""",
@@ -871,63 +910,212 @@ class ThumbnailDatabase:
         retry_candidates = [canonical(row["thumbnail_path"]) for row in retry_rows]
         candidates = list(dict.fromkeys(retry_candidates))
         retry_candidate_set = set(candidates)
-        directory_done = False
         cutoff = int(before_ms) if before_ms is not None else None
-        next_directory_cursor = {"rootIndex": root_index, "afterName": after_name}
-        if root_index < len(scan_roots) and len(candidates) < delete_limit:
-            scan_root = scan_roots[root_index]
-            page_names = []
-            if os.path.isdir(scan_root):
-                after_key = after_name.casefold()
-                try:
-                    with os.scandir(scan_root) as entries:
-                        page_names = heapq.nsmallest(
-                            directory_inspect_limit,
-                            (entry.name for entry in entries if (entry.name.casefold(), entry.name) > (after_key, after_name)),
-                            key=lambda value: (value.casefold(), value),
-                        )
-                except OSError:
-                    page_names = []
-            insert_rows = []
-            for name in page_names:
-                suffix = Path(name).suffix.lower()
-                stem = Path(name).stem.lower()
-                if suffix != ".jpg":
-                    continue
-                if scan_root == root:
-                    if len(stem) != 64 or any(character not in "0123456789abcdef" for character in stem):
-                        continue
-                else:
-                    try:
-                        uuid.UUID(stem)
-                    except ValueError:
-                        continue
-                candidate = canonical(os.path.join(scan_root, name))
-                if candidate not in excluded:
-                    insert_rows.append((generation, root, root_index, candidate))
-            if insert_rows:
-                with self.connection:
-                    self.connection.executemany(
-                        """INSERT OR IGNORE INTO thumbnail_orphan_scan_entries
-                           (generation,cache_root,root_index,thumbnail_path) VALUES(?,?,?,?)""",
-                        insert_rows,
-                    )
-            if page_names:
-                after_name = page_names[-1]
-            if len(page_names) < directory_inspect_limit:
-                root_index += 1
-                after_name = ""
-            next_directory_cursor = {"rootIndex": root_index, "afterName": after_name}
-
+        next_orphan_recheck_at = max(0, int(orphan_recheck_at or 0))
         remaining_limit = delete_limit - len(candidates)
         scan_rows = self.connection.execute(
             """SELECT thumbnail_path FROM thumbnail_orphan_scan_entries
-               WHERE generation=? AND cache_root=?
+               WHERE generation=? AND cache_root=? AND processed=0
                ORDER BY root_index,thumbnail_path LIMIT ?""",
             (generation, root, remaining_limit),
         ).fetchall() if remaining_limit > 0 else []
+        snapshots_stable = True
+        if root_index >= len(scan_roots) and len(scan_rows) < remaining_limit:
+            state_rows = self.connection.execute(
+                """SELECT root_index,completed_mtime_ns FROM thumbnail_orphan_scan_state
+                   WHERE generation=? AND cache_root=? AND prepared_at>0""",
+                (generation, root),
+            ).fetchall()
+            for state_row in state_rows:
+                state_root_index = int(state_row["root_index"])
+                if state_root_index < 0 or state_root_index >= len(scan_roots):
+                    continue
+                scan_root = scan_roots[state_root_index]
+                verification_started_mtime = self._directory_mtime_ns(scan_root)
+                if int(state_row["completed_mtime_ns"] or 0) == verification_started_mtime:
+                    continue
+                verification_rows = []
+                try:
+                    for name in os.listdir(scan_root):
+                        suffix = Path(name).suffix.lower()
+                        stem = Path(name).stem.lower()
+                        if suffix != ".jpg":
+                            continue
+                        if scan_root == root:
+                            if len(stem) != 64 or any(character not in "0123456789abcdef" for character in stem):
+                                continue
+                        else:
+                            try:
+                                uuid.UUID(stem)
+                            except ValueError:
+                                continue
+                        candidate = canonical(os.path.join(scan_root, name))
+                        if candidate not in excluded:
+                            verification_rows.append((generation, root, state_root_index, candidate))
+                except OSError:
+                    verification_rows = []
+                verification_completed_mtime = self._directory_mtime_ns(scan_root)
+                if verification_rows:
+                    with self.connection:
+                        self.connection.executemany(
+                            """INSERT OR IGNORE INTO thumbnail_orphan_scan_entries
+                               (generation,cache_root,root_index,thumbnail_path) VALUES(?,?,?,?)""",
+                            verification_rows,
+                        )
+                if verification_started_mtime == verification_completed_mtime:
+                    with self.connection:
+                        self.connection.execute(
+                            """UPDATE thumbnail_orphan_scan_state SET completed_mtime_ns=?
+                               WHERE generation=? AND cache_root=? AND root_index=?""",
+                            (verification_completed_mtime, generation, root, state_root_index),
+                        )
+                else:
+                    snapshots_stable = False
+            scan_rows = self.connection.execute(
+                """SELECT thumbnail_path FROM thumbnail_orphan_scan_entries
+                   WHERE generation=? AND cache_root=? AND processed=0
+                   ORDER BY root_index,thumbnail_path LIMIT ?""",
+                (generation, root, remaining_limit),
+            ).fetchall() if remaining_limit > 0 else []
+        # Drain durable scan work before enumerating more names. This keeps the
+        # queue bounded and lets dozens of delete pages run without touching the
+        # large directory again.
+        if not scan_rows and remaining_limit > 0:
+            while root_index < len(scan_roots):
+                scan_root = scan_roots[root_index]
+                prepared = self.connection.execute(
+                    """SELECT prepared_at,completed_mtime_ns FROM thumbnail_orphan_scan_state
+                       WHERE generation=? AND cache_root=? AND root_index=?""",
+                    (generation, root, root_index),
+                ).fetchone()
+                if prepared and int(prepared["prepared_at"] or 0) > 0:
+                    if int(prepared["completed_mtime_ns"] or 0) == self._directory_mtime_ns(scan_root):
+                        root_index += 1
+                        entry_offset = 0
+                        continue
+                    with self.connection:
+                        self.connection.execute(
+                            """UPDATE thumbnail_orphan_scan_state
+                               SET prepared_at=0,started_mtime_ns=?,completed_mtime_ns=0
+                               WHERE generation=? AND cache_root=? AND root_index=?""",
+                            (self._directory_mtime_ns(scan_root), generation, root, root_index),
+                        )
+                    entry_offset = 0
+                    prepared = None
+                iterator_key = (generation, root, root_index)
+                iterator_state = self._orphan_scan_iterators.get(iterator_key)
+                restarted = iterator_state is None and entry_offset > 0
+                inserted_count = 0
+                try:
+                    if iterator_state is None:
+                        iterator = os.scandir(scan_root)
+                        with self.connection:
+                            self.connection.execute(
+                                """INSERT INTO thumbnail_orphan_scan_state
+                                   (generation,cache_root,root_index,prepared_at,started_mtime_ns,completed_mtime_ns)
+                                   VALUES(?,?,?,0,?,0)
+                                   ON CONFLICT(generation,cache_root,root_index) DO UPDATE SET
+                                     started_mtime_ns=CASE WHEN prepared_at=0 AND started_mtime_ns<>0 THEN started_mtime_ns ELSE excluded.started_mtime_ns END,
+                                     prepared_at=0,completed_mtime_ns=0""",
+                                (generation, root, root_index, self._directory_mtime_ns(scan_root)),
+                            )
+                        skipped = 0
+                        iterator_state = (iterator, skipped)
+                    iterator, current_offset = iterator_state
+                    while True:
+                        page_entries = []
+                        exhausted = False
+                        for _index in range(directory_inspect_limit):
+                            try:
+                                page_entries.append(next(iterator))
+                            except StopIteration:
+                                exhausted = True
+                                break
+                        current_offset += len(page_entries)
+                        insert_rows = []
+                        for entry in page_entries:
+                            name = entry.name
+                            suffix = Path(name).suffix.lower()
+                            stem = Path(name).stem.lower()
+                            if suffix != ".jpg":
+                                continue
+                            if scan_root == root:
+                                if len(stem) != 64 or any(character not in "0123456789abcdef" for character in stem):
+                                    continue
+                            else:
+                                try:
+                                    uuid.UUID(stem)
+                                except ValueError:
+                                    continue
+                            candidate = canonical(os.path.join(scan_root, name))
+                            if candidate not in excluded:
+                                insert_rows.append((generation, root, root_index, candidate))
+                        changes_before = self.connection.total_changes
+                        if insert_rows:
+                            with self.connection:
+                                self.connection.executemany(
+                                    """INSERT OR IGNORE INTO thumbnail_orphan_scan_entries
+                                       (generation,cache_root,root_index,thumbnail_path) VALUES(?,?,?,?)""",
+                                    insert_rows,
+                                )
+                        inserted_count = self.connection.total_changes - changes_before
+                        # After a process restart, replay the durable snapshot
+                        # prefix until new names are found. This never skips by
+                        # unstable filesystem order and never sorts the whole
+                        # directory on ordinary pages.
+                        if inserted_count or exhausted or not restarted:
+                            break
+                    if exhausted:
+                        iterator.close()
+                        self._orphan_scan_iterators.pop(iterator_key, None)
+                    else:
+                        self._orphan_scan_iterators[iterator_key] = (iterator, current_offset)
+                except (OSError, StopIteration):
+                    iterator = iterator_state[0] if iterator_state else None
+                    iterator and iterator.close()
+                    self._orphan_scan_iterators.pop(iterator_key, None)
+                    page_entries = []
+                    exhausted = True
+                    current_offset = entry_offset
+                if exhausted:
+                    state = self.connection.execute(
+                        """SELECT started_mtime_ns FROM thumbnail_orphan_scan_state
+                           WHERE generation=? AND cache_root=? AND root_index=?""",
+                        (generation, root, root_index),
+                    ).fetchone()
+                    completed_mtime_ns = self._directory_mtime_ns(scan_root)
+                    stable_snapshot = int(state["started_mtime_ns"] or 0) == completed_mtime_ns if state else completed_mtime_ns == 0
+                    with self.connection:
+                        if stable_snapshot:
+                            self.connection.execute(
+                                """UPDATE thumbnail_orphan_scan_state
+                                   SET prepared_at=?,completed_mtime_ns=?
+                                   WHERE generation=? AND cache_root=? AND root_index=?""",
+                                (now_ms(), completed_mtime_ns, generation, root, root_index),
+                            )
+                        else:
+                            self.connection.execute(
+                                """UPDATE thumbnail_orphan_scan_state
+                                   SET prepared_at=0,started_mtime_ns=?,completed_mtime_ns=0
+                                   WHERE generation=? AND cache_root=? AND root_index=?""",
+                                (completed_mtime_ns, generation, root, root_index),
+                            )
+                    if stable_snapshot:
+                        root_index += 1
+                    entry_offset = 0
+                else:
+                    entry_offset = max(entry_offset, current_offset)
+                if inserted_count or not exhausted:
+                    break
+            scan_rows = self.connection.execute(
+                """SELECT thumbnail_path FROM thumbnail_orphan_scan_entries
+                   WHERE generation=? AND cache_root=? AND processed=0
+                   ORDER BY root_index,thumbnail_path LIMIT ?""",
+                (generation, root, remaining_limit),
+            ).fetchall()
         candidates.extend(canonical(row["thumbnail_path"]) for row in scan_rows)
-        directory_done = root_index >= len(scan_roots) and len(scan_rows) < remaining_limit
+        next_directory_cursor = {"rootIndex": root_index, "entryOffset": entry_offset}
+        directory_done = snapshots_stable and root_index >= len(scan_roots) and len(scan_rows) < remaining_limit
 
         indexed = set()
         for offset_index in range(0, len(candidates), 400):
@@ -939,6 +1127,7 @@ class ThumbnailDatabase:
             ).fetchall()
             indexed.update(canonical(row["thumbnail_path"]) for row in rows)
         candidates = [candidate for candidate in candidates if candidate not in indexed]
+        indexed_retry_consumed_count = len(indexed.intersection(retry_candidate_set))
         if indexed:
             with self.connection:
                 self.connection.executemany(
@@ -946,7 +1135,7 @@ class ThumbnailDatabase:
                     [(candidate,) for candidate in indexed],
                 )
                 self.connection.executemany(
-                    "DELETE FROM thumbnail_orphan_scan_entries WHERE thumbnail_path=?",
+                    "UPDATE thumbnail_orphan_scan_entries SET processed=1 WHERE thumbnail_path=?",
                     [(candidate,) for candidate in indexed],
                 )
         rejected_scan_candidates = []
@@ -956,8 +1145,13 @@ class ThumbnailDatabase:
             try:
                 if not os.path.isfile(candidate):
                     rejected_scan_candidates.append(candidate)
-                elif cutoff is not None and os.path.getmtime(candidate) * 1000 >= cutoff:
-                    rejected_scan_candidates.append(candidate)
+                elif cutoff is not None:
+                    modified_at = int(os.path.getmtime(candidate) * 1000)
+                    if modified_at >= cutoff:
+                        rejected_scan_candidates.append(candidate)
+                        if orphan_retention_ms > 0:
+                            eligible_at = modified_at + int(orphan_retention_ms)
+                            next_orphan_recheck_at = eligible_at if next_orphan_recheck_at <= 0 else min(next_orphan_recheck_at, eligible_at)
             except OSError:
                 rejected_scan_candidates.append(candidate)
         if rejected_scan_candidates:
@@ -965,7 +1159,7 @@ class ThumbnailDatabase:
             candidates = [candidate for candidate in candidates if candidate not in rejected_set]
             with self.connection:
                 self.connection.executemany(
-                    "DELETE FROM thumbnail_orphan_scan_entries WHERE thumbnail_path=?",
+                    "UPDATE thumbnail_orphan_scan_entries SET processed=1 WHERE thumbnail_path=?",
                     [(candidate,) for candidate in rejected_scan_candidates],
                 )
         recovery_cursor = {
@@ -974,12 +1168,17 @@ class ThumbnailDatabase:
             "afterRowId": next_row_id,
             "lastCompletedAt": 0,
             "directory": next_directory_cursor,
+            "orphanRecheckAt": next_orphan_recheck_at,
         }
         return {
             "success": True,
             "orphanPaths": candidates,
             "inspectedCount": len(window),
             "repairedMissingCount": len(missing),
+            "orphanScanConsumedCount": len(scan_rows),
+            "retryConsumedCount": indexed_retry_consumed_count,
+            "orphanProgressCount": len(scan_rows) + indexed_retry_consumed_count,
+            "orphanRecheckAt": next_orphan_recheck_at,
             "generationMaxRowId": generation_max_row_id,
             "afterRowId": next_row_id,
             "directoryCursor": next_directory_cursor,
@@ -1010,7 +1209,7 @@ class ThumbnailDatabase:
                 normalized,
             )
             self.connection.executemany(
-                "DELETE FROM thumbnail_orphan_scan_entries WHERE thumbnail_path=?",
+                "UPDATE thumbnail_orphan_scan_entries SET processed=1 WHERE thumbnail_path=?",
                 [(value[0],) for value in normalized],
             )
         return {"success": True, "count": len(normalized)}
@@ -1023,10 +1222,37 @@ class ThumbnailDatabase:
                 [(value,) for value in normalized],
             )
             self.connection.executemany(
-                "DELETE FROM thumbnail_orphan_scan_entries WHERE thumbnail_path=?",
+                "UPDATE thumbnail_orphan_scan_entries SET processed=1 WHERE thumbnail_path=?",
                 [(value,) for value in normalized],
             )
         return {"success": True, "count": len(normalized)}
+
+    def prepare_thumbnail_deletions(self, thumbnail_paths: list[str]) -> dict:
+        normalized = list(dict.fromkeys(canonical(value) for value in thumbnail_paths or [] if value))
+        indexed = set()
+        for offset in range(0, len(normalized), 400):
+            chunk = normalized[offset:offset + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = self.connection.execute(
+                f"SELECT thumbnail_path FROM thumbnails WHERE thumbnail_path IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            indexed.update(canonical(row["thumbnail_path"]) for row in rows)
+        if indexed:
+            with self.connection:
+                self.connection.executemany(
+                    "DELETE FROM thumbnail_orphan_delete_retries WHERE thumbnail_path=?",
+                    [(value,) for value in indexed],
+                )
+                self.connection.executemany(
+                    "UPDATE thumbnail_orphan_scan_entries SET processed=1 WHERE thumbnail_path=?",
+                    [(value,) for value in indexed],
+                )
+        return {
+            "success": True,
+            "deletablePaths": [value for value in normalized if value not in indexed],
+            "indexedPaths": [value for value in normalized if value in indexed],
+        }
 
     def check_integrity(self) -> dict:
         result = str(self.connection.execute("PRAGMA quick_check").fetchone()[0])

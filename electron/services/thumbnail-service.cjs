@@ -11,6 +11,7 @@ const RECOVERY_SLICE_DELAY_MS = 50;
 const RECOVERY_INSPECT_LIMIT = 128;
 const RECOVERY_DELETE_LIMIT = 64;
 const RECOVERY_DIRECTORY_INSPECT_LIMIT = 4096;
+const RECOVERY_ORPHAN_RETENTION_MS = 24 * 60 * 60 * 1000;
 const recoverableStartupFailure = task => /(?:request timed out|deadline exceeded|maintenance deadline)/i.test(String(task?.error || task?.message || ''));
 
 const deferred = () => {
@@ -20,7 +21,7 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline.log || (() => undefined) }) => {
+const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline.log || (() => undefined), now = () => Date.now() }) => {
   const recoveryRuns = new Map();
   const startupGeneration = crypto.randomUUID();
   let unregisterRecoveryRestart = null;
@@ -68,7 +69,22 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
       ]);
       const previousCursor = reconciliationState.cursor && typeof reconciliationState.cursor === 'object'
         ? reconciliationState.cursor : {};
-      if (previousCursor.generation === startupGeneration && Number(previousCursor.lastCompletedAt) > 0) {
+      const currentCacheFingerprint = typeof pipeline.cacheDirectoryFingerprint === 'function'
+        ? await pipeline.cacheDirectoryFingerprint(cacheRoot) : null;
+      const cacheFingerprintMatches = Boolean(currentCacheFingerprint && previousCursor.cacheFingerprint
+        && JSON.stringify(currentCacheFingerprint) === JSON.stringify(previousCursor.cacheFingerprint));
+      const orphanRecheckDue = Number(previousCursor.orphanRecheckAt) > 0
+        && now() >= Number(previousCursor.orphanRecheckAt);
+      if (reconciliationState.completed && cacheFingerprintMatches && !orphanRecheckDue) {
+        admit({ skipped: true, unchangedCache: true });
+        return {
+          success: true, skipped: true, unchangedCache: true,
+          completedAt: reconciliationState.completedAt || previousCursor.lastCompletedAt,
+          generation: previousCursor.generation,
+        };
+      }
+      if (previousCursor.generation === startupGeneration && Number(previousCursor.lastCompletedAt) > 0
+          && (!currentCacheFingerprint || !previousCursor.cacheFingerprint)) {
         admit({ skipped: true });
         return { success: true, skipped: true, completedAt: previousCursor.lastCompletedAt, generation: startupGeneration };
       }
@@ -76,11 +92,11 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
         ? previousCursor
         : { generation: startupGeneration, generationMaxRowId: 0, afterRowId: 0, lastCompletedAt: 0, directory: {} };
       await pipeline.saveMaintenanceState(descriptor.maintenanceKey, recoveryCursor);
-      const orphanBeforeMs = Date.now() - 24 * 60 * 60 * 1000;
+      const orphanBeforeMs = now() - RECOVERY_ORPHAN_RETENTION_MS;
       const run = await runSlicedMaintenance({
         task,
         initialState: { recoveryCursor, prunePending: true },
-        initialMetrics: { repairedMissingCount: 0, recoveryInspectedCount: 0, deletedCount: 0, deletedBytes: 0, detachedCount: 0, detachedBytes: 0, prunedSourceCount: 0, failedCount: 0 },
+        initialMetrics: { repairedMissingCount: 0, recoveryInspectedCount: 0, orphanScanConsumedCount: 0, orphanProgressCount: 0, retryConsumedCount: 0, deletedCount: 0, deletedBytes: 0, detachedCount: 0, detachedBytes: 0, prunedSourceCount: 0, failedCount: 0 },
         sliceDeadlineMs: RECOVERY_SLICE_DEADLINE_MS,
         yieldMs: RECOVERY_SLICE_DELAY_MS,
         runSlice: async ({ state, firstSlice, deadlineAt, signal }) => {
@@ -93,6 +109,7 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
           recoverOrphans: true,
           scanRootOrphans: !String(cacheConfig?.directory || '').trim(),
           orphanBeforeMs,
+          orphanRetentionMs: RECOVERY_ORPHAN_RETENTION_MS,
           pruneMissing: state.prunePending,
           maxPruneBatches: 1,
           failOnDeleteError: true,
@@ -117,12 +134,13 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
             });
           },
           });
-          const metricsDelta = Object.fromEntries(['repairedMissingCount', 'recoveryInspectedCount', 'deletedCount', 'deletedBytes', 'detachedCount', 'detachedBytes', 'prunedSourceCount', 'failedCount'].map(field => [field, Number(result[field]) || 0]));
+          const metricsDelta = Object.fromEntries(['repairedMissingCount', 'recoveryInspectedCount', 'orphanScanConsumedCount', 'orphanProgressCount', 'retryConsumedCount', 'deletedCount', 'deletedBytes', 'detachedCount', 'detachedBytes', 'prunedSourceCount', 'failedCount'].map(field => [field, Number(result[field]) || 0]));
           return {
             complete: result.maintenanceComplete === true,
             nextState: { recoveryCursor: result.recoveryCursor || state.recoveryCursor, prunePending: result.pruneComplete === false },
             metricsDelta,
             processedDelta: result.processedCount,
+            foregroundWaitMs: result.foregroundWaitMs,
             phase: result.maintenanceComplete ? 'complete' : result.pruneComplete === false ? 'prune' : 'orphan-recovery',
           };
         },

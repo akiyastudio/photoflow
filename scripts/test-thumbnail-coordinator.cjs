@@ -56,6 +56,25 @@ const run = async () => {
   await assert.rejects(cancelled, error => error.code === 'TASK_CANCELLED');
   cancellationGate.resolve();
   await cancellationIndexer;
+
+  const yieldingCoordinator = new ThumbnailCoordinator();
+  let foregroundCompleted = false;
+  let maintenanceCompletedAt = 0;
+  const yieldingMaintenance = yieldingCoordinator.withMaintenance(async () => {
+    for (let batch = 0; batch < 4; batch += 1) {
+      await new Promise(resolve => setTimeout(resolve, 40));
+      await yieldingCoordinator.yieldToReaders({ deadlineAt: Date.now() + 1000 });
+    }
+    maintenanceCompletedAt = Date.now();
+  });
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const boundedForeground = yieldingCoordinator.withPublisher(async () => {
+    foregroundCompleted = true;
+  });
+  await boundedForeground;
+  assert.equal(foregroundCompleted, true);
+  assert.equal(maintenanceCompletedAt, 0, 'foreground work must complete before the multi-batch maintenance turn finishes');
+  await yieldingMaintenance;
   console.log('thumbnail coordinator tests passed');
 };
 

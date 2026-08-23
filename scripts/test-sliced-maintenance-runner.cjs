@@ -49,6 +49,23 @@ const task = signal => ({ signal, throwIfCancelled() { if (signal?.aborted) thro
   }), error => error.code === 'SLICED_MAINTENANCE_STALLED' && error.sliceCount === 3);
   assert.equal(stalledAttempts, 3, 'no-progress protection must terminate the runner after the configured consecutive slice limit');
 
+  let fixedCursorSlices = 0;
+  const fixedCursor = await runSlicedMaintenance({
+    task: task(), initialState: { cursor: 'tail' }, sliceDeadlineMs: 10,
+    yieldBetweenSlices: async () => undefined,
+    runSlice: async ({ state }) => {
+      fixedCursorSlices += 1;
+      return {
+        complete: fixedCursorSlices === 5,
+        nextState: state,
+        processedDelta: fixedCursorSlices <= 4 ? 2 : 0,
+        metricsDelta: { orphanScanConsumedCount: fixedCursorSlices <= 4 ? 2 : 0, deletedCount: 0 },
+      };
+    },
+  });
+  assert.equal(fixedCursor.sliceCount, 5, 'more than three fixed-cursor scan-queue pages must not trip the stall fuse');
+  assert.equal(fixedCursor.processedCount, 8, 'consumed scan entries count as progress even without deletion');
+
   let attempts = 0;
   await assert.rejects(runSlicedMaintenance({
     task: task(), initialState: { cursor: 0 }, sliceDeadlineMs: 10, yieldBetweenSlices: async () => undefined,

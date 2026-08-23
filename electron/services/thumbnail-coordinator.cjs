@@ -5,6 +5,8 @@ class ThumbnailCoordinator {
     this.activeReaders = 0;
     this.maintenanceActive = false;
     this.maintenanceWaiting = 0;
+    this.maintenanceYielding = false;
+    this.maintenanceYieldResolver = null;
     this.readerQueue = [];
     this.maintenanceQueue = [];
     this.touches = new Map();
@@ -26,9 +28,39 @@ class ThumbnailCoordinator {
         });
       };
       // Writer priority: once maintenance is waiting, later readers queue.
-      if (!this.maintenanceActive && this.maintenanceWaiting === 0) run();
+      if (!this.maintenanceYielding && !this.maintenanceActive && this.maintenanceWaiting === 0) run();
       else this.readerQueue.push(run);
     });
+  }
+
+  async yieldToReaders({ signal, deadlineAt } = {}) {
+    if (!this.maintenanceActive || !this.readerQueue.length) return 0;
+    if (signal?.aborted) throw signal.reason || Object.assign(new Error('thumbnail maintenance cancelled'), { code: 'TASK_CANCELLED' });
+    const startedAt = Date.now();
+    this.maintenanceYielding = true;
+    this.maintenanceActive = false;
+    const queued = this.readerQueue.splice(0);
+    let deadlineTimer = null;
+    try {
+      const drained = new Promise((resolve, reject) => {
+        this.maintenanceYieldResolver = resolve;
+        if (Number.isFinite(deadlineAt)) {
+          deadlineTimer = setTimeout(() => reject(Object.assign(
+            new Error('thumbnail maintenance deadline exceeded while yielding to foreground readers'),
+            { code: 'THUMBNAIL_MAINTENANCE_DEADLINE' },
+          )), Math.max(1, deadlineAt - Date.now()));
+        }
+      });
+      for (const run of queued) run();
+      if (this.activeReaders) await drained;
+    } finally {
+      if (deadlineTimer) clearTimeout(deadlineTimer);
+      this.maintenanceYieldResolver = null;
+      this.maintenanceYielding = false;
+      this.maintenanceActive = true;
+    }
+    if (signal?.aborted) throw signal.reason || Object.assign(new Error('thumbnail maintenance cancelled'), { code: 'TASK_CANCELLED' });
+    return Math.max(0, Date.now() - startedAt);
   }
 
   withMaintenance(options, worker) {
@@ -103,7 +135,7 @@ class ThumbnailCoordinator {
   touch(filePath, sizeLabel) {
     const key = `${filePath}\0${sizeLabel}`;
     this.touches.set(key, { file_path: filePath, size_label: sizeLabel });
-    if (this.maintenanceActive || this.maintenanceWaiting) return;
+    if (this.maintenanceActive || this.maintenanceYielding || this.maintenanceWaiting) return;
     if (this.touchTimer) return;
     this.touchTimer = setTimeout(() => {
       this.touchTimer = null;
@@ -130,6 +162,10 @@ class ThumbnailCoordinator {
   }
 
   drain() {
+    if (this.maintenanceYielding) {
+      if (!this.activeReaders) this.maintenanceYieldResolver?.();
+      return;
+    }
     if (this.maintenanceActive || this.activeReaders) return;
     if (this.maintenanceQueue.length) {
       const next = this.maintenanceQueue.shift();

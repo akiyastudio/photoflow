@@ -6,7 +6,7 @@ const { ThumbnailPipeline, PRIORITY } = require('../electron/thumbnail-pipeline.
 
 const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(124), Buffer.from([0xff, 0xd9])]);
 const repositoryRoot = path.resolve(__dirname, '..');
-const pythonExecutable = path.join(repositoryRoot, '.venv', 'Scripts', 'python.exe');
+const pythonExecutable = process.env.PHOTOFLOW_TEST_PYTHON || path.join(repositoryRoot, '.venv', 'Scripts', 'python.exe');
 const withTimeout = (promise, timeoutMs) => new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('ambiguous publish test timed out')), timeoutMs);
   promise.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });

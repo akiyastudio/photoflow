@@ -314,6 +314,44 @@ const run = async () => {
     assert(maintenanceCalls[0][2] <= 10 * 60 * 1000 && maintenanceCalls[0][2] > 9 * 60 * 1000, 'cache index invalidation must use the remaining maintenance deadline instead of the interactive 30 second timeout');
     maintenancePipeline.stop();
 
+    const cooperativePipeline = createPipeline({
+      root: temporaryRoot,
+      target: path.join(temporaryRoot, 'cooperative-unused.jpg'),
+      generate: async () => [],
+    });
+    let recoveryPages = 0;
+    cooperativePipeline.database.call = async operation => {
+      if (operation === 'begin_cache_maintenance') return { cacheEpoch: 2 };
+      if (operation === 'recover_cache_publications') {
+        recoveryPages += 1;
+        await new Promise(resolve => setTimeout(resolve, 40));
+        return {
+          done: recoveryPages === 4,
+          cursor: { generation: 'cooperative', generationMaxRowId: -1, afterRowId: 0, lastCompletedAt: 0, directory: { rootIndex: 0 } },
+          repairedMissingCount: 0,
+          inspectedCount: 0,
+          orphanScanConsumedCount: 1,
+          orphanPaths: [],
+        };
+      }
+      return { success: true };
+    };
+    let cooperativeMaintenanceDone = false;
+    const cooperativeMaintenance = cooperativePipeline.evictCache({
+      cacheRoot: temporaryRoot,
+      recoverOrphans: true,
+      deadlineAt: Date.now() + 2000,
+    }).then(result => { cooperativeMaintenanceDone = true; return result; });
+    await new Promise(resolve => setTimeout(resolve, 5));
+    const foregroundStartedAt = Date.now();
+    await cooperativePipeline.coordinator.withPublisher(async () => undefined);
+    const foregroundLatencyMs = Date.now() - foregroundStartedAt;
+    assert.equal(cooperativeMaintenanceDone, false, 'foreground publication must finish before four-page maintenance completes');
+    const cooperativeResult = await cooperativeMaintenance;
+    assert.equal(cooperativeResult.orphanScanConsumedCount, 4);
+    console.log(`thumbnail maintenance foreground evidence: latency=${foregroundLatencyMs}ms pages=${recoveryPages} maintenanceCompletedAfterForeground=true`);
+    cooperativePipeline.stop();
+
     const failedDeletePath = path.join(temporaryRoot, 'delete-failure.jpg');
     fs.writeFileSync(failedDeletePath, jpeg);
     const evictionPipeline = createPipeline({
@@ -328,6 +366,7 @@ const run = async () => {
         evictionOrder.push('detach');
         return { done: true, detachedCount: 1, detachedBytes: jpeg.length, thumbnailPaths: [failedDeletePath] };
       }
+      if (operation === 'prepare_thumbnail_deletions') return { deletablePaths: [failedDeletePath], indexedPaths: [] };
       return { success: true };
     };
     const originalUnlink = fs.promises.unlink;
@@ -366,7 +405,7 @@ const run = async () => {
       generate: async () => [],
     });
     const unsafeOperations = [];
-    unsafePipeline.database.call = async operation => {
+    unsafePipeline.database.call = async (operation, args) => {
       unsafeOperations.push(operation);
       if (operation === 'begin_cache_maintenance') return { cacheEpoch: 3 };
       if (operation === 'detach_cache_batch') return {
@@ -375,6 +414,7 @@ const run = async () => {
         detachedBytes: jpeg.length * 2,
         thumbnailPaths: [outsideManagedName, userJpeg],
       };
+      if (operation === 'prepare_thumbnail_deletions') return { deletablePaths: args.thumbnail_paths, indexedPaths: [] };
       return { success: true };
     };
     const unsafeResult = await unsafePipeline.evictCache({

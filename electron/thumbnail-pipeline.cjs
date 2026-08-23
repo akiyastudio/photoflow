@@ -339,6 +339,20 @@ class ThumbnailPipeline {
 
   ensureCacheDirectory(cacheConfig = {}) { return this.getCacheDir(cacheConfig); }
 
+  async cacheDirectoryFingerprint(cacheRoot) {
+    const signature = async target => {
+      const stat = await fs.promises.stat(target, { bigint: true }).catch(() => null);
+      if (!stat?.isDirectory()) return 'missing';
+      return `${stat.dev}:${stat.ino}:${stat.mtimeNs}`;
+    };
+    const root = path.resolve(cacheRoot);
+    const [rootSignature, stagingSignature] = await Promise.all([
+      signature(root),
+      signature(path.join(root, '.staging')),
+    ]);
+    return { version: 1, root: rootSignature, staging: stagingSignature };
+  }
+
   async isSafeManagedCachePath(cacheRoot, candidate) {
     const root = path.resolve(cacheRoot);
     const resolved = path.resolve(candidate);
@@ -407,26 +421,6 @@ class ThumbnailPipeline {
         cursor: { ...migrationCursor, migrationVersion: options.migrationVersion, userVersion: 2 },
       }, this.maintenanceCallTimeout(control));
       return migration;
-    }
-  }
-
-  async withMaintenanceDeadline(operation, control, phase) {
-    if (!Number.isFinite(control?.deadlineAt)) return operation;
-    const remaining = control.deadlineAt - Date.now();
-    if (remaining <= 0) this.assertMaintenanceBoundary(control, phase, control.processedCount || 0);
-    let timer;
-    try {
-      return await Promise.race([
-        operation,
-        new Promise((_, reject) => {
-          timer = setTimeout(() => reject(Object.assign(
-            new Error(`thumbnail maintenance deadline exceeded during ${phase}`),
-            { code: 'THUMBNAIL_MAINTENANCE_DEADLINE', phase, processedCount: control.processedCount || 0 },
-          )), Math.max(1, remaining));
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
     }
   }
 
@@ -989,6 +983,7 @@ class ThumbnailPipeline {
       onBlocked: options.onBlocked || (() => undefined),
       onAdmitted: options.onAdmitted || (() => undefined),
       processedCount: 0,
+      foregroundWaitMs: 0,
     };
     this.assertMaintenanceBoundary(control, 'waiting-maintenance-turn', 0);
     let releaseTurn;
@@ -1026,6 +1021,24 @@ class ThumbnailPipeline {
       releaseTurn();
       if (!this.databaseMaintenanceDepth) this.pumpProjectScans();
     }
+  }
+
+  async deleteCacheFile(control, filePath, statPhase, deletePhase) {
+    this.assertMaintenanceBoundary(control, statPhase, control.processedCount || 0);
+    const fileSize = await fs.promises.stat(filePath).then(stat => stat.size, () => 0);
+    this.assertMaintenanceBoundary(control, deletePhase, control.processedCount || 0);
+    await fs.promises.unlink(filePath);
+    // unlink cannot be cancelled once dispatched. Await it while the
+    // maintenance turn is still held; the caller records the settled outcome
+    // before checking whether the deadline expired during the operation.
+    return fileSize;
+  }
+
+  async yieldMaintenanceToForeground(control, phase) {
+    this.assertMaintenanceBoundary(control, phase, control.processedCount || 0);
+    const waited = await this.coordinator.yieldToReaders({ signal: control.signal, deadlineAt: control.deadlineAt });
+    control.foregroundWaitMs += Number(waited) || 0;
+    this.assertMaintenanceBoundary(control, phase, control.processedCount || 0);
   }
 
   async inspectToolSources(projectRoot, filePaths, collectVideos = false, collectDirectPng = false, collectRecursivePng = false) {
@@ -1175,6 +1188,9 @@ class ThumbnailPipeline {
       let prunedSourceCount = 0;
       let repairedMissingCount = 0;
       let recoveryInspectedCount = 0;
+      let orphanScanConsumedCount = 0;
+      let orphanProgressCount = 0;
+      let retryConsumedCount = 0;
       let detachComplete = true;
       let pruneComplete = options.pruneMissing !== true;
       let recoveryComplete = options.recoverOrphans !== true;
@@ -1199,6 +1215,7 @@ class ThumbnailPipeline {
           const result = await this.database.call('detach_cache_batch', { ...selector, limit: 512 }, this.maintenanceCallTimeout(control));
           detachBatchCount += 1;
           collect(result);
+          await this.yieldMaintenanceToForeground(control, 'yield-after-detach-batch');
           if (result.done || (options.bytesToFree && detachedBytes >= Number(options.bytesToFree))) break;
           if (detachBatchCount >= maxDetachBatches) {
             detachComplete = false;
@@ -1239,6 +1256,7 @@ class ThumbnailPipeline {
           collect(result);
           prunedSourceCount += Number(result.sourceCount) || 0;
           pruneBatchCount += 1;
+          await this.yieldMaintenanceToForeground(control, 'yield-after-prune-batch');
           if (result.done) {
             pruneComplete = true;
             break;
@@ -1252,7 +1270,13 @@ class ThumbnailPipeline {
       const physicalRetryFailures = [];
       const physicalRetryClears = [];
       let deletedBytes = 0;
-      for (const filePath of physicalPaths.values()) {
+      const physicalDeletionPlan = physicalPaths.size
+        ? await this.database.call('prepare_thumbnail_deletions', {
+          thumbnail_paths: [...physicalPaths.values()],
+        }, this.maintenanceCallTimeout(control))
+        : { deletablePaths: [] };
+      for (const candidate of physicalDeletionPlan.deletablePaths || []) {
+        const filePath = path.resolve(candidate);
         this.assertMaintenanceBoundary(control, 'delete-cache-files', control.processedCount + deletedPaths.length + failedPaths.length);
         if (options.cacheRoot && !await this.isSafeManagedCachePath(options.cacheRoot, filePath)) {
           failedPaths.push(filePath);
@@ -1260,10 +1284,7 @@ class ThumbnailPipeline {
           continue;
         }
         try {
-          const fileSize = await this.withMaintenanceDeadline(
-            fs.promises.stat(filePath).then(stat => stat.size, () => 0), control, 'stat-cache-file',
-          );
-          await this.withMaintenanceDeadline(fs.promises.unlink(filePath), control, 'delete-cache-file');
+          const fileSize = await this.deleteCacheFile(control, filePath, 'stat-cache-file', 'delete-cache-file');
           deletedPaths.push(filePath);
           deletedBytes += fileSize;
           physicalRetryClears.push(filePath);
@@ -1276,6 +1297,7 @@ class ThumbnailPipeline {
             physicalRetryFailures.push({ path: filePath, error: error?.message || String(error) });
           }
         }
+        this.assertMaintenanceBoundary(control, 'delete-cache-file-settled', control.processedCount + deletedPaths.length + failedPaths.length);
       }
       if (options.cacheRoot && physicalRetryClears.length) {
         await this.database.call('clear_orphan_delete_retries', {
@@ -1314,6 +1336,8 @@ class ThumbnailPipeline {
             delete_limit: Math.max(1, Number(options.recoveryDeleteLimit) || 512),
             directory_inspect_limit: Math.max(1, Number(options.recoveryDirectoryInspectLimit) || 2048),
             directory_cursor: recoveryCursor.directory || {},
+            orphan_recheck_at: Number(recoveryCursor.orphanRecheckAt) || 0,
+            orphan_retention_ms: Math.max(0, Number(options.orphanRetentionMs) || 0),
           }, this.maintenanceCallTimeout(control));
           recoveryPageCount += 1;
           recoveryComplete = recovered.done === true;
@@ -1323,11 +1347,16 @@ class ThumbnailPipeline {
             afterRowId: Number(recovered.afterRowId) || 0,
             lastCompletedAt: 0,
             directory: recovered.directoryCursor || {},
+            orphanRecheckAt: Number(recovered.orphanRecheckAt) || 0,
           };
           completedRecoveryCursor = recoveryCursor;
           repairedMissingCount += Number(recovered.repairedMissingCount) || 0;
           recoveryInspectedCount += Number(recovered.inspectedCount) || 0;
-          control.processedCount = detachedCount + recoveryInspectedCount + prunedSourceCount;
+          orphanScanConsumedCount += Number(recovered.orphanScanConsumedCount) || 0;
+          retryConsumedCount += Number(recovered.retryConsumedCount) || 0;
+          orphanProgressCount += Number(recovered.orphanProgressCount ?? recovered.orphanScanConsumedCount) || 0;
+          control.processedCount = detachedCount + recoveryInspectedCount + prunedSourceCount + orphanProgressCount;
+          await this.yieldMaintenanceToForeground(control, 'yield-after-orphan-page');
           if (!recovered.orphanPaths?.length) {
             if (options.completeMaintenanceKey) {
               await this.database.call('maintenance_state_save', {
@@ -1341,7 +1370,13 @@ class ThumbnailPipeline {
           let newCandidateCount = 0;
           const clearedRetryPaths = [];
           const retryFailures = [];
-          for (const value of recovered.orphanPaths) {
+          const orphanDeletionPlan = await this.database.call('prepare_thumbnail_deletions', {
+            thumbnail_paths: recovered.orphanPaths,
+          }, this.maintenanceCallTimeout(control));
+          const reindexedCandidateCount = Number(orphanDeletionPlan.indexedPaths?.length) || 0;
+          orphanProgressCount += reindexedCandidateCount;
+          control.processedCount += reindexedCandidateCount;
+          for (const value of orphanDeletionPlan.deletablePaths || []) {
             if (options.bytesToFree && deletedBytes >= Number(options.bytesToFree)) break;
             this.assertMaintenanceBoundary(control, 'delete-orphan-files', control.processedCount + deletedPaths.length + failedPaths.length);
             const filePath = path.resolve(value);
@@ -1356,10 +1391,7 @@ class ThumbnailPipeline {
               continue;
             }
             try {
-              const fileSize = await this.withMaintenanceDeadline(
-                fs.promises.stat(filePath).then(stat => stat.size, () => 0), control, 'stat-orphan-file',
-              );
-              await this.withMaintenanceDeadline(fs.promises.unlink(filePath), control, 'delete-orphan-file');
+              const fileSize = await this.deleteCacheFile(control, filePath, 'stat-orphan-file', 'delete-orphan-file');
               deletedPaths.push(filePath);
               deletedBytes += fileSize;
               clearedRetryPaths.push(filePath);
@@ -1372,11 +1404,14 @@ class ThumbnailPipeline {
                 retryFailures.push({ path: filePath, error: error?.message || String(error) });
               }
             }
+            this.assertMaintenanceBoundary(control, 'delete-orphan-file-settled', control.processedCount + deletedPaths.length + failedPaths.length);
           }
           if (clearedRetryPaths.length) {
             await this.database.call('clear_orphan_delete_retries', {
               thumbnail_paths: clearedRetryPaths,
             }, this.maintenanceCallTimeout(control));
+            orphanProgressCount += clearedRetryPaths.length;
+            control.processedCount += clearedRetryPaths.length;
           }
           if (retryFailures.length) {
             await this.database.call('record_orphan_delete_failures', {
@@ -1408,12 +1443,16 @@ class ThumbnailPipeline {
         prunedSourceCount,
         repairedMissingCount,
         recoveryInspectedCount,
+        orphanScanConsumedCount,
+        orphanProgressCount,
+        retryConsumedCount,
         detachComplete,
         pruneComplete,
         recoveryComplete,
         maintenanceComplete: detachComplete && pruneComplete && recoveryComplete,
         recoveryCursor: completedRecoveryCursor,
         processedCount: control.processedCount,
+        foregroundWaitMs: control.foregroundWaitMs,
       };
       if (options.failOnDeleteError && failedPaths.length) {
         throw Object.assign(new Error(`thumbnail cache recovery left ${failedPaths.length} unsafe or unavailable paths`), {
@@ -1422,6 +1461,13 @@ class ThumbnailPipeline {
         });
       }
       if (options.completeMaintenanceKey && detachComplete && pruneComplete && recoveryComplete) {
+        if (options.cacheRoot) {
+          completedRecoveryCursor = {
+            ...completedRecoveryCursor,
+            cacheFingerprint: await this.cacheDirectoryFingerprint(options.cacheRoot),
+          };
+          result.recoveryCursor = completedRecoveryCursor;
+        }
         await this.database.call('maintenance_state_complete', {
           key: options.completeMaintenanceKey,
           cursor: completedRecoveryCursor,
