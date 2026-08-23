@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "team-retouch",
-  "version": "26.7.30.1",
+  "version": "26.8.23.1",
   "displayName": "团片协作",
   "description": "人物检测、身份确认、工作流、返图与合并",
   "icon": "ui/team-retouch.svg",
@@ -9,6 +9,10 @@
   "architectures": ["x64"],
   "entrypoints": {
     "win32-x64": "team-retouch.exe"
+  },
+  "advancedRuntime": {
+    "apiVersion": 1,
+    "compatibleLegacyComponentVersions": ["26.7.30.1"]
   },
   "requiredFiles": [
     "ui/index.html",
@@ -58,9 +62,9 @@
       ],
       "runtimeActions": [],
       "lifecycleActions": {
-        "advanced.preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "0980e1c2157be0d9753c76c632b2ca183415d1b93faae6ff65d62f0f77896cc0" },
-        "advanced.install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "0980e1c2157be0d9753c76c632b2ca183415d1b93faae6ff65d62f0f77896cc0" },
-        "advanced.uninstall": { "entry": "advanced-installer/uninstall-team-retouch-advanced.ps1", "sha256": "582cf986b2e16de10ee88cc4b7e828793115fe364ab7e618076641570c2ca02c" }
+        "advanced.preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "569a3f89952f0f821448d61b1ace07b9de3e326b023cfa574765c6fe6a5d60e8" },
+        "advanced.install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "569a3f89952f0f821448d61b1ace07b9de3e326b023cfa574765c6fe6a5d60e8" },
+        "advanced.uninstall": { "entry": "advanced-installer/uninstall-team-retouch-advanced.ps1", "sha256": "1a0e2cc8688ca6f42f4bd61d66fe046d3eb193b9c5d7ed04148fbd6509d476da" }
       }
     }
   }

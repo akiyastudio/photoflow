@@ -91,6 +91,8 @@ try {
   assert.equal(descriptor.componentId, 'team-retouch');
   assert.equal(descriptor.fullPage.entry, path.join(staged, 'ui', 'index.html'));
   assert.equal(descriptor.service.entry, path.join(staged, 'service.cjs'));
+  assert.equal(descriptor.advancedRuntime.apiVersion, 1);
+  assert.deepEqual(descriptor.advancedRuntime.compatibleLegacyComponentVersions, ['26.7.30.1']);
   assert.deepEqual(descriptor.service.runtimeActions, []);
   assert.equal(descriptor.service.lifecycleActions['advanced.install'].sha256.length, 64);
 } finally {

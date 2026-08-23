@@ -1,6 +1,7 @@
 param(
     [string]$DistroName = 'PhotoFlowNative',
-    [string]$ComponentVersion = '26.7.30.4',
+    [string]$ComponentVersion = '26.8.23.1',
+    [int]$AdvancedRuntimeApiVersion = 1,
     [Parameter(Mandatory = $true)][string]$OutputPath
 )
 
@@ -49,6 +50,7 @@ try {
         formatVersion = 1
         componentId = 'team-retouch'
         componentVersion = $ComponentVersion
+        advancedRuntimeApiVersion = $AdvancedRuntimeApiVersion
         architecture = 'x64'
         distroName = $DistroName
         linuxUser = 'photoflowlab'

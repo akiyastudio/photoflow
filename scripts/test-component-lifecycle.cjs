@@ -12,7 +12,8 @@ const actionRoot = path.join(sandbox, 'actions');
 const scriptPath = path.join(actionRoot, 'fixture-action.ps1');
 fs.mkdirSync(componentRoot, { recursive: true });
 fs.mkdirSync(actionRoot, { recursive: true });
-fs.writeFileSync(scriptPath, "param([switch]$CheckOnly)\nif (-not $CheckOnly) { throw 'fixed argument missing' }\nWrite-Output 'OFFLINE_PREFLIGHT_OK|real process|fixed action'\n", 'utf8');
+fs.writeFileSync(scriptPath, "param([switch]$CheckOnly,[string]$InstallRoot,[string]$PackagePath,[string]$ExpectedComponentVersion,[int]$ExpectedAdvancedRuntimeApiVersion,[string]$CompatibleLegacyComponentVersions,[switch]$Repair)\nif ($CheckOnly) { Write-Output 'OFFLINE_PREFLIGHT_OK|real process|fixed action'; exit 0 }\nif ($ExpectedAdvancedRuntimeApiVersion -ne 1 -or $CompatibleLegacyComponentVersions -ne '26.7.30.1') { throw 'advanced compatibility arguments missing' }\nWrite-Output 'offline environment is ready'\n", 'utf8');
+fs.writeFileSync(path.join(componentRoot, 'PhotoFlow-team-retouch-advanced-legacy-win32-x64.zip'), 'fixture', 'utf8');
 const digest = crypto.createHash('sha256').update(fs.readFileSync(scriptPath)).digest('hex');
 const progress = [];
 const backgroundTasks = {
@@ -30,7 +31,11 @@ const pluginService = {
 const service = createComponentLifecycleService({ app: {}, backgroundTasks, pluginService, spawn, developmentActionRoot: actionRoot });
 const descriptor = {
   componentId: 'team-retouch', componentVersion: '1.0.0',
-  service: { lifecycleActions: { 'advanced.preflight': { entry: path.join(componentRoot, 'advanced-installer', 'fixture-action.ps1'), relativeEntry: 'advanced-installer/fixture-action.ps1', sha256: digest } } },
+  advancedRuntime: { apiVersion: 1, compatibleLegacyComponentVersions: ['26.7.30.1'] },
+  service: { lifecycleActions: {
+    'advanced.preflight': { entry: path.join(componentRoot, 'advanced-installer', 'fixture-action.ps1'), relativeEntry: 'advanced-installer/fixture-action.ps1', sha256: digest },
+    'advanced.install': { entry: path.join(componentRoot, 'advanced-installer', 'fixture-action.ps1'), relativeEntry: 'advanced-installer/fixture-action.ps1', sha256: digest },
+  } },
 };
 
 (async () => {
@@ -40,6 +45,8 @@ const descriptor = {
     assert.match(result.message, /real process/);
     assert.equal(result.taskId, 'task-real-process');
     assert(progress.length >= 2, 'real lifecycle process must report through the task center');
+    const installed = await service.invoke({ action: 'advanced.install' }, {}, descriptor);
+    assert.equal(installed.success, true, 'advanced install must receive the runtime API and reviewed legacy compatibility list');
     await assert.rejects(service.invoke({ action: 'advanced.preflight', script: 'C:/escape.ps1' }, {}, descriptor), /不接受脚本或路径参数/);
     await assert.rejects(service.resolveAction({ ...descriptor, service: { lifecycleActions: { 'advanced.preflight': { ...descriptor.service.lifecycleActions['advanced.preflight'], sha256: '0'.repeat(64) } } } }, 'advanced.preflight'), /签名\/哈希校验失败/);
     const escaped = { ...descriptor, service: { lifecycleActions: { 'advanced.preflight': { entry: scriptPath, relativeEntry: '../actions/fixture-action.ps1', sha256: digest } } } };

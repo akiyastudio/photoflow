@@ -3,7 +3,7 @@ const PLUGIN_API_VERSION = 1;
 const PLUGIN_DEFINITIONS = Object.freeze({
   'team-retouch': {
     id: 'team-retouch',
-    version: '26.7.30.1',
+    version: '26.8.23.1',
     name: '团片协作',
     description: 'AI识别人后规划可合并的工作图，支持人物标记、确定性任务重建并自动合回原尺寸。',
     capabilities: ['team-retouch.detect', 'team-retouch.identify', 'team-retouch.merge'],

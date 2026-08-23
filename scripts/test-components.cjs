@@ -121,11 +121,14 @@ try {
   assert(advancedInstaller.includes("PhotoFlow\\components\\team-retouch\\advanced\\wsl\\PhotoFlowNative"), 'advanced data must default to the component application-data namespace');
   assert(advancedInstaller.includes('PackagePath'), 'advanced setup must require a selected offline package');
   assert(advancedInstaller.includes('vhdSha256'), 'offline VHD must be checksum verified');
+  assert(advancedInstaller.includes('ExpectedAdvancedRuntimeApiVersion') && advancedInstaller.includes('advancedRuntimeApiVersion'), 'advanced packages must be checked by an API version independent from the component release');
+  assert(advancedInstaller.includes('CompatibleLegacyComponentVersions') && advancedInstaller.includes('reviewed compatibility list'), 'only explicitly reviewed legacy advanced packages may bypass the new API field');
   assert(advancedInstaller.includes('--import-in-place'), 'verified offline VHD must be imported in place');
   assert(!advancedInstaller.includes('curl.exe'), 'end-user advanced setup must never download from the network');
   assert(!advancedInstaller.includes('https://'), 'end-user advanced setup must not contain network package sources');
   const offlinePackageBuilder = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'create-team-retouch-advanced-offline-package.ps1'), 'utf8');
   assert(offlinePackageBuilder.includes('--export') && offlinePackageBuilder.includes('--vhd'), 'deployment tooling must export a complete verified WSL disk');
+  assert(offlinePackageBuilder.includes('advancedRuntimeApiVersion') && offlinePackageBuilder.includes('AdvancedRuntimeApiVersion'), 'new advanced packages must publish their independent runtime API version');
 
   const advancedBridge = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'advanced_bridge.py'), 'utf8');
   assert(advancedBridge.includes('DEFAULT_DISTROS = ("PhotoFlowNative", "PhotoflowLab")'), 'advanced backend must support both WSL distribution names');
@@ -435,7 +438,7 @@ try {
   fs.writeFileSync(path.join(invalidDirectory, 'component.json'), JSON.stringify({
     apiVersion: 1,
     id: 'team-retouch',
-    version: '26.7.30.1',
+    version: PLUGIN_DEFINITIONS['team-retouch'].version,
     entrypoints: { 'win32-x64': '..\\outside.exe' },
   }));
   const invalid = registry.inspect('team-retouch');
@@ -444,7 +447,7 @@ try {
   assert.match(invalid.error, /超出组件目录/);
 
   fs.rmSync(invalidDirectory, { recursive: true, force: true });
-  writeComponent(path.join(installRoot, 'team-retouch'), 'runtime', '26.7.30.1', 'team-retouch.exe', 'team-retouch');
+  writeComponent(path.join(installRoot, 'team-retouch'), 'runtime', PLUGIN_DEFINITIONS['team-retouch'].version, 'team-retouch.exe', 'team-retouch');
   const installed = registry.inspect('team-retouch');
   assert.strictEqual(installed.installed, true);
   assert.strictEqual(installed.source, 'user');

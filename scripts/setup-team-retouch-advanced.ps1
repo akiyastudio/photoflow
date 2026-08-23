@@ -4,6 +4,8 @@ param(
     [string]$InstallRoot = '',
     [string]$PackagePath = '',
     [string]$ExpectedComponentVersion = '',
+    [int]$ExpectedAdvancedRuntimeApiVersion = 0,
+    [string]$CompatibleLegacyComponentVersions = '',
     [switch]$Repair,
     [switch]$CheckOnly
 )
@@ -114,7 +116,17 @@ try {
     $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ([int]$manifest.formatVersion -ne 1 -or [string]$manifest.componentId -ne 'team-retouch') { throw 'This is not a supported PhotoFlow team-retouch offline package.' }
     if ([string]$manifest.architecture -ne 'x64') { throw 'The offline package architecture is not supported on this computer.' }
-    if ($ExpectedComponentVersion -and [string]$manifest.componentVersion -ne $ExpectedComponentVersion) {
+    $manifestAdvancedApiVersion = if ($manifest.PSObject.Properties['advancedRuntimeApiVersion']) { [int]$manifest.advancedRuntimeApiVersion } else { 0 }
+    $legacyVersions = @($CompatibleLegacyComponentVersions.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($ExpectedAdvancedRuntimeApiVersion -gt 0) {
+        if ($manifestAdvancedApiVersion -gt 0) {
+            if ($manifestAdvancedApiVersion -ne $ExpectedAdvancedRuntimeApiVersion) {
+                throw "Advanced runtime API $manifestAdvancedApiVersion is not compatible with required API $ExpectedAdvancedRuntimeApiVersion."
+            }
+        } elseif ($legacyVersions -notcontains ([string]$manifest.componentVersion)) {
+            throw "Legacy advanced package version $($manifest.componentVersion) is not in the reviewed compatibility list."
+        }
+    } elseif ($ExpectedComponentVersion -and [string]$manifest.componentVersion -ne $ExpectedComponentVersion) {
         throw "Offline package version $($manifest.componentVersion) does not match component version $ExpectedComponentVersion."
     }
     $vhdName = [string]$manifest.vhdFile
@@ -157,6 +169,8 @@ try {
         installedAt = [DateTime]::UtcNow.ToString('o')
         version = 2
         componentVersion = [string]$manifest.componentVersion
+        advancedRuntimeApiVersion = if ($manifestAdvancedApiVersion -gt 0) { $manifestAdvancedApiVersion } else { $ExpectedAdvancedRuntimeApiVersion }
+        legacyPackage = ($manifestAdvancedApiVersion -eq 0)
         packageSha256 = $actualHash
         offline = $true
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $stateRoot 'install-state.json') -Encoding UTF8

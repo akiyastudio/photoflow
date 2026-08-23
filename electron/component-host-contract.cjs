@@ -113,6 +113,18 @@ const parseComponentHostManifest = (manifest, componentRoot) => {
       lifecycleActions: Object.freeze(lifecycleActions),
     });
   }
+  let advancedRuntime = null;
+  if (manifest.advancedRuntime !== undefined) {
+    const raw = manifest.advancedRuntime;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid advanced runtime compatibility manifest');
+    const apiVersion = Number(raw.apiVersion);
+    if (!Number.isInteger(apiVersion) || apiVersion < 1) throw new Error('Invalid advanced runtime API version');
+    const compatibleLegacyComponentVersions = [...new Set((raw.compatibleLegacyComponentVersions || []).map(value => requiredText(value, 'legacy component version', 80)))];
+    if (compatibleLegacyComponentVersions.length > 16 || compatibleLegacyComponentVersions.some(version => !/^\d{2}\.\d{1,2}\.\d{1,2}\.\d+$/.test(version))) {
+      throw new Error('Invalid advanced runtime legacy compatibility list');
+    }
+    advancedRuntime = Object.freeze({ apiVersion, compatibleLegacyComponentVersions: Object.freeze(compatibleLegacyComponentVersions) });
+  }
   return Object.freeze({
     componentId,
     componentVersion: requiredText(manifest.version, 'component version', 80),
@@ -122,6 +134,7 @@ const parseComponentHostManifest = (manifest, componentRoot) => {
     toolbarAction: Object.freeze({ ...actions[0], pageTitle: page.title }),
     fullPage: Object.freeze(page),
     service,
+    advancedRuntime,
   });
 };
 

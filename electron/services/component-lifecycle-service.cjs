@@ -72,16 +72,24 @@ const createComponentLifecycleService = ({ app, backgroundTasks, pluginService, 
     if (action === 'advanced.preflight') args.push('-CheckOnly');
     else if (action === 'advanced.install') {
       title = payload.repair ? '修复高级修图引擎' : '安装高级修图引擎';
+      const compatibility = descriptor.advancedRuntime;
+      if (!compatibility?.apiVersion) throw new Error('组件没有声明高级运行时兼容策略');
       const entries = await fs.promises.readdir(containerRoot, { withFileTypes: true });
       const packages = entries.filter(item => item.isFile() && /^PhotoFlow-team-retouch-advanced-.*\.zip$/i.test(item.name)).map(item => path.join(containerRoot, item.name));
       if (packages.length !== 1) throw new Error(packages.length ? '高级环境目录存在多个离线包' : '未找到高级环境离线包');
-      args.push('-InstallRoot', installRoot, '-PackagePath', packages[0], '-ExpectedComponentVersion', component.version);
+      args.push(
+        '-InstallRoot', installRoot,
+        '-PackagePath', packages[0],
+        '-ExpectedComponentVersion', component.version,
+        '-ExpectedAdvancedRuntimeApiVersion', String(compatibility.apiVersion),
+        '-CompatibleLegacyComponentVersions', compatibility.compatibleLegacyComponentVersions.join(','),
+      );
       if (payload.repair) args.push('-Repair');
     } else if (action === 'advanced.uninstall') title = '卸载高级修图引擎';
     else throw new Error(`Unknown component lifecycle action: ${action}`);
     const execution = await backgroundTasks.run({
       type: 'component-lifecycle', title, dedupeKey: `component-lifecycle:${descriptor.componentId}`,
-      cancellable: false, resumePolicy: 'atomic', metadata: { componentId: descriptor.componentId, action },
+      cancellable: false, resumePolicy: 'atomic', metadata: { componentId: descriptor.componentId, action, advancedRuntimeApiVersion: descriptor.advancedRuntime?.apiVersion },
     }, async task => {
       task.report(1, `${title}已启动`, { phase: 'starting' });
       const output = await runProcess({ spawn, command: 'powershell.exe', args, cwd: path.dirname(entry), report: task.report });

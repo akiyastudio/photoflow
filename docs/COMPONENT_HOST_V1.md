@@ -53,6 +53,8 @@ The main React renderer contains no team-retouch manager, identity manager, step
 
 Every manifest-declared `team.*` RPC is implemented by `extensions/team-retouch/service.cjs`; none maps to a `workspace-team-*` renderer IPC handler. Detection, identity inference, recropping, merging, return ingestion, and post-install advanced-runtime probing run inside the component service. The application process does not compose a team-retouch repository, database worker, project-purge command handler, or algorithm invocation.
 
+The advanced WSL environment has its own `advancedRuntime.apiVersion`, independent from the component release version. New offline packages are accepted when that API version matches. Packages created before the API field existed are accepted only when their component version appears in the reviewed `compatibleLegacyComponentVersions` manifest list, so UI/service releases do not force a multi-gigabyte WSL rebuild without weakening compatibility checks.
+
 The remaining host references are compatibility and trust-boundary identifiers, not business implementations:
 
 - `electron/main.cjs` and `electron/services/backup-service.cjs` retain the `team-retouch.sqlite3` path/domain name so backup, restore, reset, and recovery continue to preserve existing component data.
