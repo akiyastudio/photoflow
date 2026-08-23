@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { BrowserPageInstance } from '../app/workspace-tab-model';
 import type { ComponentHostAction, ComponentPageInstance, ComponentStatus, WorkspaceProject } from '../../types';
 import { bindComponentPageInstance, closeComponentPage, closeProjectComponentPages, ensureComponentPage } from './component-page-model';
 
+type ComponentHostBrowserPage = { id: string; projectId: string; project?: WorkspaceProject | null };
+
 export const useComponentPages = ({ browserPages, components, onProjectFallback, onHomeFallback, onNotice }: {
-  browserPages: BrowserPageInstance[];
+  browserPages: ComponentHostBrowserPage[];
   components: ComponentStatus[];
-  onProjectFallback: (page: BrowserPageInstance) => void;
+  onProjectFallback: (page: ComponentHostBrowserPage) => void;
   onHomeFallback: () => void;
   onNotice: (message: string, duration?: number) => void;
 }) => {

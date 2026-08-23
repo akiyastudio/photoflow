@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { FolderInput, FolderPlus, Folder, Image as ImageIcon, ScanSearch, GalleryVerticalEnd, Play, Trash2, Edit, X, Plus, Loader2, CheckCircle2, ExternalLink, Video, ChevronDown, ChevronUp, File, FileImage, MemoryStick, LayoutList, Grid2X2, FileText, Copy, Scissors as Cut, ClipboardPaste, CheckSquare, ArrowLeft, ArrowRight, Camera, Aperture, Timer, Gauge, Ruler, Calendar, Activity, Volume2, PanelLeftOpen, ArrowUpDown, ArrowUp, ArrowDown, ArrowUpRight, AlertTriangle, Search, Filter as Funnel, Info, GripVertical, Maximize2, GitBranch, UsersRound, Heart, Star, RefreshCw, Crop, Pin, Puzzle } from 'lucide-react';
+import { FolderInput, FolderPlus, Folder, Image as ImageIcon, ScanSearch, GalleryVerticalEnd, Play, Trash2, Edit, X, Plus, Loader2, CheckCircle2, ExternalLink, Video, ChevronDown, ChevronUp, File, FileImage, MemoryStick, LayoutList, Grid2X2, FileText, Copy, Scissors as Cut, ClipboardPaste, CheckSquare, ArrowLeft, ArrowRight, Camera, Aperture, Timer, Gauge, Ruler, Calendar, Activity, Volume2, PanelLeftOpen, ArrowUpDown, ArrowUp, ArrowDown, ArrowUpRight, AlertTriangle, Search, Filter as Funnel, Info, GripVertical, Maximize2, GitBranch, UsersRound, Heart, Star, RefreshCw, Crop, Pin } from 'lucide-react';
 import { VersionManager } from '../../components/VersionManager';
 import { AdvancedVideoPlayer, videoDirectionalAction, videoDirectionalKeyboardInput } from '../../components/AdvancedVideoPlayer';
 import { InteractiveCropEditor } from '../../components/InteractiveCropEditor';
@@ -35,7 +35,7 @@ import { useProjectFileSelection } from './useProjectFileSelection';
 import { installedPluginHasCapability } from '../plugins/plugin-contributions';
 import { defaultProjectFileSortDirection, isFolderLikeEntry, sortProjectFileEntries } from './file-entry-sort-model';
 import { ImportCompletionNotice, ToolModal } from './ProjectToolModal';
-import { ColumnResizeHandle, ViewportContextMenu } from './ProjectWorkspaceLayout';
+import { ColumnResizeHandle, ComponentToolbarActions, ViewportContextMenu } from './ProjectWorkspaceLayout';
 import { deleteMediaThumbnailPreview, findCachedMediaThumbnailPreview, forgetMediaThumbnailPreviews, getMediaThumbnailPreview, mediaThumbnailPreviewKey, rememberMediaThumbnailPreview, requestThumbnail, useThumbnailUpdates } from './useProjectThumbnail';
 import { formatShutterSpeed, isOfficeOpenXmlEntry, isPhotoshopOpenEntry, isScreenshotMainImageEntry, pickCaptureDate, pickMetadataValue, requestCaptureDateTime } from './project-workspace-media-metadata';
 import { clampNumber, fitProjectColumnWidths, readStoredBoolean, readStoredNumber, scheduleAfterProjectPaint } from './project-workspace-layout-model';
@@ -45,7 +45,6 @@ const LazyPersonIdentityManager = React.lazy(() => import('../../components/Pers
 const TeamFeatureLoading = () => <div role="status" className="flex h-full min-h-48 items-center justify-center text-sm text-slate-500"><Loader2 size={18} className="mr-2 animate-spin"/>正在加载团片协作…</div>;
 const TeamRetouchManager = (props: React.ComponentProps<typeof LazyTeamRetouchManager>) => <React.Suspense fallback={<TeamFeatureLoading/>}><LazyTeamRetouchManager {...props}/></React.Suspense>;
 const PersonIdentityManager = (props: React.ComponentProps<typeof LazyPersonIdentityManager>) => <React.Suspense fallback={<TeamFeatureLoading/>}><LazyPersonIdentityManager {...props}/></React.Suspense>;
-
 const FILE_VIRTUAL_OVERSCAN_ROWS = 10;
 const RECENT_FILES_PAGE_SIZE = 240;
 const RECENT_FILES_LOAD_AHEAD_PX = 900;
@@ -278,9 +277,7 @@ type FileBrowserWorkspaceProps = {
   installedComponentIds: ReadonlySet<string>;
   componentsLoading: boolean;
   teamRetouchStatus?: ComponentStatus;
-  componentHostActions?: ComponentHostAction[];
-  onOpenComponentPage?: (action: ComponentHostAction) => void;
-  advancedVideoSettings: AppConfig['videoPlayback'];
+  componentHostActions?: ComponentHostAction[]; onOpenComponentPage?: (action: ComponentHostAction) => void; advancedVideoSettings: AppConfig['videoPlayback'];
   projectToolbar?: AppConfig['projectToolbar'];
   customProjectCategories?: string[];
   projectCategoryOrder?: string[];
@@ -5340,12 +5337,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         </div>
         {gatherToProject && !hiddenProjectToolbarActions.has('video-tools') && projectToolbarAvailability['video-tools'] && projectToolbarButtons['video-tools']}
         </div>
-        {projectWorkflows && componentHostActions.length > 0 && <>
-          <span aria-hidden className="toolbar-divider"/>
-          <div aria-label="UI 组件" className="component-toolbar-actions flex shrink-0 items-center gap-1">
-            {componentHostActions.map(action => <button key={`${action.componentId}:${action.actionId}`} type="button" onClick={() => onOpenComponentPage(action)} title={`${action.label}：在独立组件页中打开`} className="project-action-button"><Puzzle size={16}/>{action.label}</button>)}
-          </div>
-        </>}
+        {projectWorkflows && <ComponentToolbarActions actions={componentHostActions} onOpen={onOpenComponentPage}/>}
         <div className="project-toolbar-overflow relative" onClick={event => event.stopPropagation()}>
           <button type="button" onClick={() => { const next = !showToolbarOverflowMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowToolbarOverflowMenu(next); }} aria-label="展开工具栏操作" aria-haspopup="menu" aria-expanded={showToolbarOverflowMenu} className={`project-action-button ${showToolbarOverflowMenu ? 'bg-blue-50 text-blue-600' : ''}`}><ChevronDown size={17} className={`transition-transform ${showToolbarOverflowMenu ? 'rotate-180' : ''}`}/></button>
           {showToolbarOverflowMenu && <div className="project-toolbar-overflow-menu absolute left-0 top-full z-50 mt-1 w-56 overflow-visible rounded-lg border border-slate-200 bg-white p-1 shadow-xl" onClick={event => { const button = (event.target as HTMLElement).closest('button'); if (button && button.getAttribute('aria-haspopup') !== 'menu') setShowToolbarOverflowMenu(false); }}>
