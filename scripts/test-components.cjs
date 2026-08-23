@@ -3,7 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const ts = require('typescript');
-const { createComponentRegistry } = require('../electron/component-registry.cjs');
+const { createComponentRegistry, readComponentPackageManifest } = require('../electron/component-registry.cjs');
 const { createComponentIntegrityManifest } = require('../electron/component-integrity.cjs');
 const { decideComponentStatusRefresh } = require('../electron/services/component-status-refresh-policy.cjs');
 const { PLUGIN_DEFINITIONS } = require('../electron/plugins/plugin-catalog.cjs');
@@ -29,6 +29,26 @@ const writeComponent = (root, id, version, entrypoint = `${id}.exe`, manifestId 
     entrypoints: { 'win32-x64': entrypoint },
   }));
   return directory;
+};
+const zipCrc32 = buffer => {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+const writeStoredZip = (target, files) => {
+  const local = []; const central = []; let offset = 0;
+  for (const [name, raw] of Object.entries(files)) {
+    const nameBuffer = Buffer.from(name); const data = Buffer.from(raw); const crc = zipCrc32(data);
+    const header = Buffer.alloc(30); header.writeUInt32LE(0x04034b50); header.writeUInt16LE(20, 4); header.writeUInt32LE(crc, 14); header.writeUInt32LE(data.length, 18); header.writeUInt32LE(data.length, 22); header.writeUInt16LE(nameBuffer.length, 26);
+    local.push(header, nameBuffer, data);
+    const record = Buffer.alloc(46); record.writeUInt32LE(0x02014b50); record.writeUInt16LE(20, 4); record.writeUInt16LE(20, 6); record.writeUInt32LE(crc, 16); record.writeUInt32LE(data.length, 20); record.writeUInt32LE(data.length, 24); record.writeUInt16LE(nameBuffer.length, 28); record.writeUInt32LE(offset, 42);
+    central.push(record, nameBuffer); offset += header.length + nameBuffer.length + data.length;
+  }
+  const centralBuffer = Buffer.concat(central); const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50); end.writeUInt16LE(Object.keys(files).length, 8); end.writeUInt16LE(Object.keys(files).length, 10); end.writeUInt32LE(centralBuffer.length, 12); end.writeUInt32LE(offset, 16);
+  fs.writeFileSync(target, Buffer.concat([...local, centralBuffer, end]));
 };
 
 const run = async () => {
@@ -100,7 +120,7 @@ try {
   assert(installer.includes('不会删除工作区、项目中的照片和视频'), 'uninstall cleanup must disclose that user project media remains untouched');
 
   const componentSystemIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
-  assert(componentSystemIpc.includes('resolvePreparedPackage(pluginService.installRoot'), 'component installation must scan the shared components root');
+  assert(componentSystemIpc.includes('pluginService.resolvePackage(componentId)'), 'component installation must use the dynamically discovered package catalog');
   assert(componentSystemIpc.includes('allowedRoot = pluginService.installRoot'), 'component package cleanup must remain confined to the shared components root');
   assert(componentSystemIpc.includes('await pluginService.verifyComponentDirectoryAsync(componentId, componentRoot, true)'), 'native components must be integrity checked asynchronously before installation');
   const settingsSource = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
@@ -349,7 +369,7 @@ try {
     arch: 'x64',
   });
 
-  assert.strictEqual(registry.list().length, Object.keys(PLUGIN_DEFINITIONS).length);
+  assert.strictEqual(registry.list().length, 0, 'static compatibility definitions must not manufacture component UI entries');
   const advancedVideoManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'extensions', 'video-playback-mpv', 'component.template.json'), 'utf8'));
   assert.strictEqual(PLUGIN_DEFINITIONS['video-playback-mpv'].version, '26.8.16.1', 'the app must accept the latest published advanced-video component');
   assert.strictEqual(PLUGIN_DEFINITIONS['video-playback-mpv'].runtimeOnly, true, 'advanced video must be catalogued as a backend runtime only');
@@ -400,12 +420,12 @@ try {
   }
   fs.writeFileSync(path.join(integrityComponent, 'undeclared-helper.exe'), 'rogue executable');
   const undeclaredExecutable = (await integrityRegistry.listWithSizes()).find(component => component.id === 'video-playback-mpv');
-  assert.strictEqual(undeclaredExecutable.installed, false);
+  assert.strictEqual(undeclaredExecutable.status, 'integrity-invalid');
   assert.match(undeclaredExecutable.error, /未声明的可执行文件/);
   fs.rmSync(path.join(integrityComponent, 'undeclared-helper.exe'));
   fs.writeFileSync(path.join(integrityComponent, 'libmpv-2.dll'), 'tampered libmpv');
   const tampered = (await integrityRegistry.listWithSizes()).find(component => component.id === 'video-playback-mpv');
-  assert.strictEqual(tampered.installed, false);
+  assert.strictEqual(tampered.status, 'integrity-invalid');
   assert.match(tampered.error, /大小不匹配|SHA-256 不匹配/);
   fs.rmSync(integrityComponent, { recursive: true, force: true });
 
@@ -442,9 +462,9 @@ try {
     entrypoints: { 'win32-x64': '..\\outside.exe' },
   }));
   const invalid = registry.inspect('team-retouch');
-  assert.strictEqual(invalid.installed, false);
+  assert.strictEqual(invalid.installed, true, 'a discovered but invalid installed directory remains visible for repair or uninstall');
   assert.strictEqual(invalid.compatible, false);
-  assert.match(invalid.error, /超出组件目录/);
+  assert.match(invalid.error, /路径不安全/);
 
   fs.rmSync(invalidDirectory, { recursive: true, force: true });
   writeComponent(path.join(installRoot, 'team-retouch'), 'runtime', PLUGIN_DEFINITIONS['team-retouch'].version, 'team-retouch.exe', 'team-retouch');
@@ -459,6 +479,28 @@ try {
   assert.strictEqual(decideComponentStatusRefresh({ integrityReusable: Boolean(unchangedTeamRetouchToken && unchangedTeamRetouchToken === teamRetouchToken), lastDetailedAt: Date.now(), lastDetailedAttemptAt: Date.now() }).shouldProbeRuntime, false, 'the real packaged team-retouch definition must not trigger a runtime probe before TTL expiry');
   fs.appendFileSync(path.join(installed.path, 'team-retouch.exe'), 'changed');
   assert.notStrictEqual(registry.componentIntegrityToken('team-retouch', installed.path), teamRetouchToken, 'entrypoint changes must invalidate the lightweight team-retouch token');
+
+  fs.rmSync(path.join(installRoot, 'team-retouch'), { recursive: true, force: true });
+  const unknownManifest = { apiVersion: 1, id: 'sample-dynamic', version: '2.0.0', displayName: 'Dynamic sample', description: 'catalog test', platforms: ['win32'], architectures: ['x64'], entrypoints: { 'win32-x64': 'sample.exe' } };
+  const unknownZip = path.join(installRoot, 'arbitrary-package-name.zip');
+  writeStoredZip(unknownZip, { 'sample-dynamic/runtime/component.json': JSON.stringify(unknownManifest), 'sample-dynamic/runtime/sample.exe': 'binary' });
+  assert.strictEqual(readComponentPackageManifest(unknownZip).manifest.id, 'sample-dynamic');
+  let discovered = registry.list();
+  const pendingUnknown = discovered.find(component => component.id === 'sample-dynamic');
+  assert.strictEqual(pendingUnknown?.status, 'pending-install', 'a compatible unknown component must be discovered from its manifest rather than a static allowlist');
+  assert.strictEqual(pendingUnknown?.integrityStatus, 'unsigned', 'unsigned packages must state the actual conservative trust level');
+  writeComponent(path.join(installRoot, 'sample-dynamic'), 'runtime', '1.0.0', 'sample.exe', 'sample-dynamic');
+  discovered = registry.list();
+  assert.strictEqual(discovered.find(component => component.id === 'sample-dynamic')?.status, 'update-available');
+  fs.rmSync(unknownZip);
+  assert.strictEqual(registry.list().find(component => component.id === 'sample-dynamic')?.status, 'installed', 'installed components remain visible after their ZIP is deleted');
+  fs.rmSync(path.join(installRoot, 'sample-dynamic'), { recursive: true, force: true });
+  assert(!registry.list().some(component => component.id === 'sample-dynamic'), 'components disappear when neither ZIP nor installed directory exists');
+
+  const unsafeZip = path.join(installRoot, 'unsafe.zip');
+  writeStoredZip(unsafeZip, { '../component.json': JSON.stringify(unknownManifest) });
+  assert.throws(() => readComponentPackageManifest(unsafeZip), /不安全路径/);
+  assert.strictEqual(registry.list().find(component => component.packagePath === unsafeZip)?.status, 'package-invalid');
 
   console.log('Component registry tests passed');
 } finally {

@@ -57,6 +57,7 @@ class ComponentViewManager {
       label: item.toolbarAction.label,
       pageId: item.fullPage.id,
       pageTitle: item.fullPage.title,
+      ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}),
     }));
   }
 

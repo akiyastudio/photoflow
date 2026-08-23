@@ -156,12 +156,19 @@ const registerSystemIpc = context => {
     const compatibleCache = cached
       && cached.installed === component.installed
       && String(cached.version || '') === String(component.version || '');
-    return {
+    const merged = {
       ...(compatibleCache ? cached : {}),
       ...component,
       sizeBytes: compatibleCache ? Number(cached.sizeBytes || 0) : Number(component.sizeBytes || 0),
-      packagePath: componentRoot(component.id),
+      packagePath: component.packagePath,
     };
+    if (compatibleCache && cached.integrityStatus === 'invalid') Object.assign(merged, {
+      compatible: false,
+      status: 'integrity-invalid',
+      integrityStatus: 'invalid',
+      error: cached.error,
+    });
+    return merged;
   });
 
   const refreshDetailedComponentStatuses = async (task, { forceRuntimeProbe = false } = {}) => {
@@ -196,7 +203,6 @@ const registerSystemIpc = context => {
       }
     }
     const components = reusableIntegrity ? mergeCachedComponentStatuses(listedComponents) : await pluginService.listWithSizes();
-    for (const component of components) component.packagePath = componentRoot(component.id);
     const probeTimestamps = nextComponentProbeTimestamps({
       attempted: policy.shouldProbeRuntime,
       succeeded: true,
@@ -336,7 +342,7 @@ const registerSystemIpc = context => {
     throw new Error(`未在组件安装包目录中找到${description}：${packageRoot}`);
   };
   const resolveAdvancedPackage = () => resolvePreparedPackage(teamRetouchRoot(), /^PhotoFlow-team-retouch-advanced-.*\.zip$/i, '照片流高级引擎包');
-  const resolveComponentPackage = componentId => resolvePreparedPackage(pluginService.installRoot, new RegExp(`^PhotoFlow-${String(componentId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-(?!identity-models-|advanced-).*-${process.platform}-${process.arch}\\.zip$`, 'i'), `“${componentId}”组件包`);
+  const resolveComponentPackage = componentId => Promise.resolve(pluginService.resolvePackage(componentId).packagePath);
   const resolvePackageForDeletion = async (kind, componentId = '') => {
     let archivePath;
     let allowedRoot;
@@ -378,6 +384,16 @@ const registerSystemIpc = context => {
     }
     await fs.promises.mkdir(target, { recursive: true });
     await runPackageCommand('tar.exe', ['-xf', archivePath, '-C', target]);
+    const pending = [target];
+    while (pending.length) {
+      const directory = pending.pop();
+      for (const item of await fs.promises.readdir(directory, { withFileTypes: true })) {
+        const itemPath = path.join(directory, item.name);
+        const stat = await fs.promises.lstat(itemPath);
+        if (stat.isSymbolicLink()) throw new Error(`安装包解压后包含不安全的符号链接：${path.relative(target, itemPath)}`);
+        if (stat.isDirectory()) pending.push(itemPath);
+      }
+    }
   };
 
   ipcMain.on('renderer-error-log', (_event, message, details) => {
@@ -521,17 +537,15 @@ const registerSystemIpc = context => {
     let packageStagePath = '';
     try {
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，请在打包版本中测试安装');
-      const knownComponent = pluginService.list().find(component => component.id === componentId);
-      if (!knownComponent) throw new Error(`未知组件：${componentId}`);
-      const archivePath = await resolveComponentPackage(componentId);
+      const discoveredPackage = pluginService.resolvePackage(componentId);
+      const archivePath = discoveredPackage.packagePath;
       const packageSizeBytes = (await fs.promises.stat(archivePath)).size;
       packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${process.pid}-${Date.now()}`);
       await extractPreparedPackage(archivePath, packageStagePath);
-      const selectedPath = packageStagePath;
-      const directManifest = path.join(selectedPath, 'component.json');
-      const nestedPath = path.join(selectedPath, String(componentId));
-      const nestedRuntimePath = path.join(nestedPath, 'runtime');
-      const componentRoot = fs.existsSync(directManifest) ? selectedPath : fs.existsSync(path.join(nestedRuntimePath, 'component.json')) ? nestedRuntimePath : nestedPath;
+      const manifestDirectory = path.dirname(String(discoveredPackage.manifestEntry || 'component.json'));
+      const componentRoot = path.resolve(packageStagePath, manifestDirectory === '.' ? '' : manifestDirectory);
+      const stagedRelative = path.relative(packageStagePath, componentRoot);
+      if (stagedRelative.startsWith('..') || path.isAbsolute(stagedRelative)) throw new Error('组件清单路径越界');
       const manifestPath = path.join(componentRoot, 'component.json');
       if (!fs.existsSync(manifestPath)) throw new Error('所选文件夹中没有 component.json');
       const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));

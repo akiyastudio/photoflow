@@ -27,13 +27,14 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     setActiveIdentity(page.identity);
     if (page.instanceId) void window.electronAPI.activateComponentPage(page.instanceId);
   }, []);
-  const open = useCallback(async (action: ComponentHostAction, project: WorkspaceProject, workspacePath: string) => {
-    const ensured = ensureComponentPage(pages, action, project, workspacePath);
-    setPages(current => ensureComponentPage(current, action, project, workspacePath).pages);
+  const open = useCallback(async (action: ComponentHostAction, project: WorkspaceProject, workspacePath: string, insertAfterTabId = 'home') => {
+    const ensured = ensureComponentPage(pages, action, project, workspacePath, insertAfterTabId);
+    setPages(current => ensureComponentPage(current, action, project, workspacePath, insertAfterTabId).pages);
     setActiveIdentity(ensured.page.identity);
     const result = await window.electronAPI.openComponentPage({ componentId: action.componentId, pageId: action.pageId, workspacePath, projectId: project.id, projectName: project.name, projectStatus: project.status });
     if (!result.success || !result.page) {
-      setPages(current => closeComponentPage(current, ensured.page.identity)); setActiveIdentity('');
+      if (ensured.created) setPages(current => closeComponentPage(current, ensured.page.identity));
+      setActiveIdentity(ensured.created ? '' : ensured.page.identity);
       onNotice(`打开组件页失败：${result.error || '未知错误'}`, 5000); return false;
     }
     setPages(current => bindComponentPageInstance(current, ensured.page.identity, result.page!.instanceId));

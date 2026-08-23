@@ -13,6 +13,8 @@ const HOST_CAPABILITIES = new Set([
   'component.storage.v1', 'dialogs.open.v1', 'component.lifecycle.v1',
   'component.runtime.v1', 'project.media.access.v1', 'project.identity.complete.v1',
 ]);
+const COMPONENT_ICON_MIME_TYPES = new Map([['.png', 'image/png'], ['.svg', 'image/svg+xml']]);
+const MAX_COMPONENT_ICON_BYTES = 512 * 1024;
 
 const isInside = (root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -31,6 +33,38 @@ const requiredId = (value, field) => {
   return id;
 };
 
+const parseComponentIcon = (value, componentRoot) => {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') throw new Error('Invalid component icon declaration');
+  const relativeEntry = requiredText(value, 'icon', 512).replace(/\\/g, '/');
+  if (/^[a-z][a-z0-9+.-]*:/i.test(relativeEntry) || relativeEntry.startsWith('//')) throw new Error('Component icon must be a package-local file');
+  const entry = path.resolve(componentRoot, relativeEntry);
+  if (!isInside(componentRoot, entry)) throw new Error('Component icon escapes component root');
+  const mimeType = COMPONENT_ICON_MIME_TYPES.get(path.extname(entry).toLowerCase());
+  if (!mimeType) throw new Error('Component icon must be SVG or PNG');
+  const stat = fs.lstatSync(entry, { throwIfNoEntry: false });
+  if (!stat?.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > MAX_COMPONENT_ICON_BYTES) throw new Error(`Component icon is missing or unsafe: ${relativeEntry}`);
+  const realRoot = fs.realpathSync(componentRoot); const realEntry = fs.realpathSync(entry);
+  if (!isInside(realRoot, realEntry)) throw new Error('Component icon escapes component root through a linked path');
+  const bytes = fs.readFileSync(realEntry);
+  if (mimeType === 'image/png') {
+    if (bytes.length < 24 || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error('Component PNG icon has an invalid signature');
+    const width = bytes.readUInt32BE(16); const height = bytes.readUInt32BE(20);
+    if (width < 1 || height < 1 || width > 1024 || height > 1024) throw new Error('Component PNG icon dimensions are invalid');
+  } else {
+    const svg = bytes.toString('utf8').trim();
+    if (!/^<svg[\s>]/i.test(svg)
+      || /<\/?(?:script|foreignObject|iframe|object|embed|audio|video|image|use|style)\b/i.test(svg)
+      || /<!DOCTYPE|<\?xml-stylesheet/i.test(svg)
+      || /\son[a-z]+\s*=/i.test(svg)
+      || /(?:^|[\s:])(?:href|src)\s*=/i.test(svg)) throw new Error('Component SVG icon contains active or external content');
+    for (const match of svg.matchAll(/url\(\s*([^)]*)\s*\)/gi)) {
+      if (!String(match[1] || '').trim().startsWith('#')) throw new Error('Component SVG icon contains an external resource');
+    }
+  }
+  return Object.freeze({ entry: realEntry, relativeEntry, mimeType });
+};
+
 const parseComponentHostManifest = (manifest, componentRoot) => {
   const host = manifest?.componentHost;
   if (host === undefined) return null; // Existing native V1 components remain valid.
@@ -46,6 +80,7 @@ const parseComponentHostManifest = (manifest, componentRoot) => {
   if (!Array.isArray(host.contributions) || host.contributions.length < 2 || host.contributions.length > 32) throw new Error('Component host contributions must be a bounded array');
 
   const componentId = requiredId(manifest.id, 'component id');
+  const icon = parseComponentIcon(manifest.icon, componentRoot);
   const seen = new Set();
   const pages = new Map();
   const actions = [];
@@ -133,6 +168,7 @@ const parseComponentHostManifest = (manifest, componentRoot) => {
     compatibility: { minHostApiVersion: min, maxHostApiVersion: max },
     toolbarAction: Object.freeze({ ...actions[0], pageTitle: page.title }),
     fullPage: Object.freeze(page),
+    icon,
     service,
     advancedRuntime,
   });
@@ -179,6 +215,9 @@ module.exports = {
   COMPONENT_SERVICE_PROTOCOL_VERSION,
   CONTRIBUTION_TYPES,
   HOST_CAPABILITIES,
+  COMPONENT_ICON_MIME_TYPES,
+  MAX_COMPONENT_ICON_BYTES,
   createComponentHostRegistry,
+  parseComponentIcon,
   parseComponentHostManifest,
 };

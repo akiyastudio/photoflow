@@ -8,6 +8,7 @@ export const ensureComponentPage = (
   action: ComponentHostAction,
   project: WorkspaceProject,
   workspacePath: string,
+  insertAfterTabId = 'home',
 ): { pages: ComponentPageInstance[]; page: ComponentPageInstance; created: boolean } => {
   const identity = componentPageIdentity(action.componentId, workspacePath, project.id);
   const existing = pages.find(page => page.identity === identity);
@@ -21,6 +22,8 @@ export const ensureComponentPage = (
     projectId: project.id,
     projectName: project.name,
     instanceId: '',
+    insertAfterTabId,
+    iconUrl: action.iconUrl,
   };
   return { pages: [...pages, page], page, created: true };
 };

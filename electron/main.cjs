@@ -14,6 +14,7 @@ const { ComponentServiceManager } = require('./services/component-service-manage
 const { registerComponentProjectCapabilities } = require('./services/component-project-capabilities.cjs');
 const { createComponentRpcIpcProxy } = require('./component-rpc-contract.cjs');
 const { registerComponentHostIpc } = require('./modules/component-host-ipc.cjs');
+const { registerComponentIconProtocol } = require('./modules/component-icon-protocol.cjs');
 const { PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
 const { registerBrollImportIpc } = require('./modules/broll-import.cjs');
 const { registerSystemIpc } = require('./modules/system-ipc.cjs');
@@ -117,7 +118,10 @@ const componentHostRegistry = createComponentHostRegistry({ roots: componentRegi
 let componentViewManager;
 let componentServiceManager;
 
-protocol.registerSchemesAsPrivileged([{ scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
+  { scheme: 'photoflow-component', privileges: { standard: true, secure: true, supportFetchAPI: true } },
+]);
 let mediaAccessService;
 const toMediaUrl = (filePath, fresh = false) => `photoflow-media://file/${mediaAccessService.grantPath(filePath)}${fresh ? `?request=${crypto.randomUUID()}` : ''}`;
 
@@ -1793,6 +1797,7 @@ registerBrollImportIpc({
 });
 registerBackgroundTasksIpc({ ipcMain, eventBus, backgroundTasks, getMainWindow: () => mainWindow });
 app.whenReady().then(async () => {
+  registerComponentIconProtocol({ protocol, registry: componentHostRegistry, fs, writeLog });
   protocol.handle('photoflow-media', async request => {
     try {
       const token = new URL(request.url).pathname.replace(/^\//, '');

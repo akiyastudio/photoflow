@@ -98,6 +98,44 @@ const project = (overrides = {}) => ({
   );
 
   const titlebarOrder = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'app', 'useTitlebarTabOrder.ts')).href);
+  const componentOne = titlebarOrder.componentTabId('component-one');
+  const componentTwo = titlebarOrder.componentTabId('component-two');
+  assert.deepStrictEqual(
+    titlebarOrder.insertNewTabsAfterAnchors(
+      ['home', 'project-page:one', 'project-page:two', 'settings'],
+      ['home', 'project-page:one', 'project-page:two', componentOne, 'settings'],
+      [{ id: componentOne, insertAfterTabId: 'project-page:one' }],
+    ),
+    ['home', 'project-page:one', componentOne, 'project-page:two', 'settings'],
+    'a newly opened full-page component must be inserted immediately to the active project tab right',
+  );
+  assert.deepStrictEqual(
+    titlebarOrder.insertNewTabsAfterAnchors(
+      ['home', 'project-page:one'],
+      ['home', componentOne, 'project-page:one'],
+      [{ id: componentOne, insertAfterTabId: 'home' }],
+    ),
+    ['home', componentOne, 'project-page:one'],
+    'home is a valid insertion anchor and a component tab may never fall to its left',
+  );
+  assert.deepStrictEqual(
+    titlebarOrder.insertNewTabsAfterAnchors(
+      ['home', 'project-page:one', componentOne, 'project-page:two'],
+      ['home', 'project-page:one', componentOne, componentTwo, 'project-page:two'],
+      [{ id: componentOne, insertAfterTabId: 'project-page:one' }, { id: componentTwo, insertAfterTabId: componentOne }],
+    ),
+    ['home', 'project-page:one', componentOne, componentTwo, 'project-page:two'],
+    'a component opened from an active component tab is inserted to that tab right',
+  );
+  assert.deepStrictEqual(
+    titlebarOrder.insertNewTabsAfterAnchors(
+      ['home', 'project-page:one', componentOne, 'project-page:two'],
+      ['home', 'project-page:one', componentOne, 'project-page:two'],
+      [{ id: componentOne, insertAfterTabId: 'home' }],
+    ),
+    ['home', 'project-page:one', componentOne, 'project-page:two'],
+    'reopening or activating an existing component tab must not reorder it',
+  );
   const toolTabs = [
     { ownerPageId: 'version-owner', projectPath: 'C:\\workspace\\project-one', kind: 'version' },
     { ownerPageId: 'team-owner', projectPath: 'D:\\archive\\project-two', kind: 'team' },

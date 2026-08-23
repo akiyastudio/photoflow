@@ -1,0 +1,17 @@
+export type LegacyJson = Record<string, any>;
+export type AppConfig = LegacyJson & { mediaCache: { directory: string; maxSizeGB: number } };
+export type ComponentStatus = LegacyJson;
+export type MediaVersion = LegacyJson;
+export type ProjectFileEntry = LegacyJson & { name: string; path: string; relativePath: string; kind?: string };
+export type TeamIdentity = LegacyJson;
+export type TeamIdentityWorkspace = LegacyJson;
+export type TeamPatchBundle = LegacyJson;
+export type TeamPatchTask = LegacyJson;
+export type TeamPersonAssignment = LegacyJson;
+export type TeamProjectPhoto = LegacyJson;
+export type TeamPatchReturnBatchResult = LegacyJson;
+export type TeamPatchReturnMatch = LegacyJson;
+export type TeamWorkflowGenerationProgress = LegacyJson;
+export type ThumbnailState = 'PENDING' | 'READY' | 'FAILED' | 'MISSING';
+export type ProgressFolder = LegacyJson;
+export type WorkspaceProject = LegacyJson & { id: string; name: string; status: string; path: string };

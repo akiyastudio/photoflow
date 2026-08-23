@@ -7,6 +7,7 @@ const TAB_EDGE_SCROLL_ZONE_PX = 36;
 export const projectTabId = (pageId: string) => `project-page:${pageId}`;
 export const inspirationTabId = (pageId: string) => `inspiration-page:${pageId}`;
 export const workspaceToolTabId = (ownerPageId: string, kind: string) => `project-tool:${kind}:${ownerPageId}`;
+export const componentTabId = (identity: string) => `component-page:${encodeURIComponent(identity)}`;
 
 export const migrateLegacyWorkspaceToolTabId = (
   id: string,
@@ -28,6 +29,23 @@ const completeVisibleOrder = (savedOrder: string[], visibleIds: string[]) => {
   return [...ordered, ...visibleIds.filter(id => !ordered.includes(id))];
 };
 
+export const insertNewTabsAfterAnchors = (
+  savedOrder: string[],
+  visibleIds: string[],
+  insertions: Array<{ id: string; insertAfterTabId: string }>,
+) => {
+  const saved = new Set(savedOrder);
+  const next = completeVisibleOrder(savedOrder, visibleIds);
+  for (const insertion of insertions) {
+    if (saved.has(insertion.id) || !next.includes(insertion.id)) continue;
+    const currentIndex = next.indexOf(insertion.id);
+    next.splice(currentIndex, 1);
+    const anchorIndex = next.indexOf(insertion.insertAfterTabId);
+    next.splice(anchorIndex < 0 ? next.length : anchorIndex + 1, 0, insertion.id);
+  }
+  return next;
+};
+
 const keepPinnedInspirationBesideHome = (orderedIds: string[], pinnedInspirationId?: string) => {
   if (!pinnedInspirationId || !orderedIds.includes('home') || !orderedIds.includes(pinnedInspirationId)) return orderedIds;
   const next = orderedIds.filter(id => id !== pinnedInspirationId);
@@ -40,12 +58,14 @@ export const useTitlebarTabOrder = ({
   pinnedInspirationPageId,
   projectPages,
   toolTabs,
+  componentPages,
   settingsOpen,
 }: {
   inspirationPages: Array<{ id: string; currentRelativePath: string }>;
   pinnedInspirationPageId?: string;
   projectPages: Array<{ id: string; projectPath: string }>;
   toolTabs: Array<{ ownerPageId: string; projectPath: string; kind: string }>;
+  componentPages?: Array<{ identity: string; insertAfterTabId: string }>;
   settingsOpen: boolean;
 }) => {
   const [order, setOrder] = useState<string[]>(() => {
@@ -78,8 +98,15 @@ export const useTitlebarTabOrder = ({
       projectTabId(page.id),
       ...toolTabs.filter(tab => tab.ownerPageId === page.id).map(tab => workspaceToolTabId(tab.ownerPageId, tab.kind)),
     ]),
+    ...(componentPages || []).map(page => componentTabId(page.identity)),
     ...(settingsOpen ? ['settings'] : []),
-  ], [inspirationPages, projectPages, settingsOpen, toolTabs]);
+  ], [componentPages, inspirationPages, projectPages, settingsOpen, toolTabs]);
+
+  const completeOrder = useCallback((current: string[]) => insertNewTabsAfterAnchors(
+    current,
+    visibleIds,
+    (componentPages || []).map(page => ({ id: componentTabId(page.identity), insertAfterTabId: page.insertAfterTabId })),
+  ), [componentPages, visibleIds]);
 
   useEffect(() => {
     setOrder(current => {
@@ -99,10 +126,14 @@ export const useTitlebarTabOrder = ({
     });
   }, [inspirationPages, projectPages, toolTabs]);
 
-  const orderedVisibleIds = useMemo(() => keepPinnedInspirationBesideHome(
-    completeVisibleOrder(order, visibleIds),
-    pinnedInspirationPageId ? inspirationTabId(pinnedInspirationPageId) : undefined,
-  ), [order, pinnedInspirationPageId, visibleIds]);
+  const orderedVisibleIds = useMemo(() => {
+    const completed = completeOrder(order);
+    const newComponentBesideHome = (componentPages || []).some(page => page.insertAfterTabId === 'home' && !order.includes(componentTabId(page.identity)));
+    return newComponentBesideHome ? completed : keepPinnedInspirationBesideHome(
+      completed,
+      pinnedInspirationPageId ? inspirationTabId(pinnedInspirationPageId) : undefined,
+    );
+  }, [completeOrder, componentPages, order, pinnedInspirationPageId]);
 
   const reorder = useCallback((sourceId: string, targetId: string, side: 'before' | 'after') => {
     if (sourceId === targetId) return;

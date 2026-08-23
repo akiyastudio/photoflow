@@ -284,13 +284,19 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
   return <SettingsPageGroup title="组件安装与卸载">
     <SettingsRow title="组件根目录" description="将预编译 ZIP 放入此目录后，可在对应组件行中安装。"><div className="flex min-w-0 gap-2"><input readOnly value={installPath || '正在读取组件根目录'} className="form-input min-w-0 flex-1 font-mono text-xs"/><button type="button" onClick={() => void onRefresh()} disabled={loading} className="dialog-secondary inline-flex shrink-0 items-center gap-2"><RotateCcw size={15} className={loading ? 'animate-spin' : ''}/>刷新</button><button type="button" onClick={() => void openFolder()} className="dialog-secondary inline-flex shrink-0 items-center gap-2"><FolderOpen size={15}/>打开</button></div></SettingsRow>
     {components.map(component => {
-      const stateText = !component.installed ? (component.compatible ? '未安装' : '不兼容') : component.source === 'development' ? '开发组件' : '已安装';
+      const stateText = component.status === 'package-invalid' ? '安装包损坏或清单无效'
+        : component.status === 'integrity-invalid' ? '完整性校验失败'
+          : component.status === 'update-available' ? `可更新至 ${component.packageVersion}`
+            : !component.installed ? (component.compatible ? '待安装' : '不兼容')
+              : component.source === 'development' ? '开发组件' : component.compatible ? '已安装' : '已安装但不可用';
       const busy = busyId === component.id;
       const canUninstall = component.installed && component.source === 'user';
-      const details = [component.description, stateText, component.installed && component.version ? `版本 ${component.version}` : '', component.installed ? formatComponentSize(component.sizeBytes) : '', component.error || ''].filter(Boolean).join(' · ');
-      return <SettingsRow key={component.id} title={component.name} description={details}><div className="ml-auto flex w-fit items-center gap-2"><button type="button" onClick={() => void openFolder(component.id)} className="dialog-secondary inline-flex items-center gap-1.5"><FolderOpen size={13}/>目录</button>{!component.installed ? <button type="button" onClick={() => void install(component)} disabled={Boolean(busyId)} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}{component.compatible ? '安装' : '重新安装'}</button> : canUninstall ? <button type="button" onClick={() => void uninstall(component)} disabled={Boolean(busyId)} className="inline-flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}卸载</button> : <span className="text-xs text-slate-400">{component.source === 'development' ? '由源码提供' : '系统组件'}</span>}</div></SettingsRow>;
+      const hasInstallablePackage = Boolean(component.packagePath && (component.packageCompatible ?? component.compatible) && component.status !== 'package-invalid');
+      const trustText = component.integrityStatus === 'verified' ? '完整性已验证' : component.integrityMessage || '';
+      const details = [component.description, stateText, component.version ? `版本 ${component.version}` : '', component.installed ? formatComponentSize(component.sizeBytes) : '', trustText, component.error || component.packageError || ''].filter(Boolean).join(' · ');
+      return <SettingsRow key={component.id} title={component.name} description={details}><div className="ml-auto flex w-fit items-center gap-2"><button type="button" onClick={() => void openFolder(component.installed ? component.id : undefined)} className="dialog-secondary inline-flex items-center gap-1.5"><FolderOpen size={13}/>目录</button>{hasInstallablePackage && (!component.installed || component.updateAvailable || !component.compatible) && <button type="button" onClick={() => void install(component)} disabled={Boolean(busyId)} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}{component.updateAvailable ? '更新' : component.installed ? '重新安装' : '安装'}</button>}{canUninstall ? <button type="button" onClick={() => void uninstall(component)} disabled={Boolean(busyId)} className="inline-flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}卸载</button> : component.installed ? <span className="text-xs text-slate-400">{component.source === 'development' ? '由源码提供' : '系统组件'}</span> : null}</div></SettingsRow>;
     })}
-    {!loading && !components.length && <SettingsRow title="组件状态" description="没有读取到组件注册信息。"><span className="ml-auto block w-fit text-xs text-slate-400">暂无组件</span></SettingsRow>}
+    {!loading && !components.length && <SettingsRow title="组件状态" description="组件目录中没有安装包或已安装组件。"><span className="ml-auto block w-fit text-xs text-slate-400">暂无组件</span></SettingsRow>}
   </SettingsPageGroup>;
 };
 
@@ -783,9 +789,6 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     <SettingsPageGroup title="设置">
       <SettingsRow title="恢复默认设置" description="保留当前工作目录，将其他全部应用设置恢复为初始值。"><button type="button" onClick={() => void restoreDefaults()} className="dialog-secondary ml-auto flex w-fit items-center gap-2"><RotateCcw size={15}/>恢复默认设置</button></SettingsRow>
     </SettingsPageGroup>
-    <SettingsPageGroup title="视频剪辑">
-      <SettingsRow title="裁剪导出方式" description={draft.videoTools.trim.exportMode === 'fast' ? '快速导出不重新编码，不降低画质；边界可能按关键帧产生少量偏差。' : '精确导出会重新编码所选片段，边界精确但耗时更长。'}><select value={draft.videoTools.trim.exportMode} onChange={event => update('videoTools', { ...draft.videoTools, trim: { exportMode: event.target.value as AppConfig['videoTools']['trim']['exportMode'] } })} className="form-input ml-auto max-w-sm"><option value="fast">快速导出（默认）</option><option value="exact">精确导出</option></select></SettingsRow>
-    </SettingsPageGroup>
     </>}
     {activeSection === 'project' && <SettingsPageGroup title="进度名称预设">
       <div className="px-4 py-3.5"><h4 className="text-sm font-bold text-slate-800">预设与顺序</h4><p className="mt-1 text-xs leading-5 text-slate-500">修改进度时点击预设即可直接填入名称。可拖动、排序、新增或删除。</p></div>
@@ -854,6 +857,9 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     {activeSection === 'video' && <>
     <SettingsPageGroup title="视频浏览">
       <SettingsRow title="左右方向键行为" description="设置主程序视频播放器的左右方向键用于快进快退或切换视频；无需安装高级解码组件。"><select value={videoPlaybackSettings.arrowKeyAction} onChange={event => updateVideoPlaybackSettings({ arrowKeyAction: event.target.value as 'seek' | 'navigate' })} className="form-input ml-auto max-w-sm"><option value="seek">快退 / 快进 5 秒（默认）</option><option value="navigate">切换上一个 / 下一个视频</option></select></SettingsRow>
+    </SettingsPageGroup>
+    <SettingsPageGroup title="视频剪辑">
+      <SettingsRow title="裁剪导出方式" description={draft.videoTools.trim.exportMode === 'fast' ? '快速导出不重新编码，不降低画质；边界可能按关键帧产生少量偏差。' : '精确导出会重新编码所选片段，边界精确但耗时更长。'}><select value={draft.videoTools.trim.exportMode} onChange={event => update('videoTools', { ...draft.videoTools, trim: { exportMode: event.target.value as AppConfig['videoTools']['trim']['exportMode'] } })} className="form-input ml-auto max-w-sm"><option value="fast">快速导出（默认）</option><option value="exact">精确导出</option></select></SettingsRow>
     </SettingsPageGroup>
     </>}
     {activeSection === 'import' && <>

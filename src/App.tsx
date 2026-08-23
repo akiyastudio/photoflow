@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Folder, X, Settings, PanelLeftClose, PanelLeftOpen, ChevronLeft, ChevronRight, GitBranch, Home, Lightbulb, Pin, Puzzle } from 'lucide-react';
+import { Folder, X, Settings, PanelLeftClose, PanelLeftOpen, ChevronLeft, ChevronRight, GitBranch, Home, Lightbulb, Pin } from 'lucide-react';
 import { useAppDialog } from './components/AppDialogProvider';
 import { ProjectNavigator } from './components/ProjectNavigator';
 import { ProjectWorkspace } from './features/workspace/ProjectWorkspace';
 import { AppErrorBoundary } from './features/app/AppErrorBoundary';
 import { BackupHomeCard, StartupWindowFrame, UpdateModal, WindowControls } from './features/app/AppChrome';
-import { inspirationTabId, projectTabId, useTitlebarTabOrder, workspaceToolTabId } from './features/app/useTitlebarTabOrder';
+import { componentTabId, inspirationTabId, projectTabId, useTitlebarTabOrder, workspaceToolTabId } from './features/app/useTitlebarTabOrder';
 import { useWorkspaceTabs } from './features/app/useWorkspaceTabs';
 import { useFolderTabNavigation } from './features/app/useFolderTabNavigation';
 import { browserPageActivation } from './features/app/workspace-tab-model';
@@ -16,6 +16,7 @@ import { rendererErrorFingerprint, rendererErrorNoticeSummary, shouldReportRende
 import { DomainHealthBanner } from './features/app/DomainHealthBanner';
 import { ComponentPageSurface } from './features/components/ComponentPageSurface';
 import { useComponentPages } from './features/components/useComponentPages';
+import { ComponentIcon } from './components/ComponentIcon';
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
 import { UsagePreferencesOnboarding, USAGE_PREFERENCES_VERSION } from './features/settings/UsagePreferencesOnboarding';
 import type { SettingsSection } from './features/settings/SettingsFeature';
@@ -133,6 +134,7 @@ const App: React.FC = () => {
     pinnedInspirationPageId: titlebarPages.pinnedInspirationPageId,
     projectPages: titlebarPages.projects,
     toolTabs: workspaceToolTabs,
+    componentPages,
     settingsOpen: settingsTabOpen,
   });
   const updateTitlebarTabScroll = useCallback(() => {
@@ -160,7 +162,7 @@ const App: React.FC = () => {
       observer.disconnect();
       element.removeEventListener('scroll', updateTitlebarTabScroll);
     };
-  }, [configLoaded, projectPages.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
+  }, [componentPages.length, configLoaded, projectPages.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -169,7 +171,7 @@ const App: React.FC = () => {
       updateTitlebarTabScroll();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [configLoaded, activeTab, activePageId, projectPages.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
+  }, [componentPages.length, configLoaded, activeTab, activePageId, projectPages.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
 
   const scrollTitlebarTabs = (direction: -1 | 1) => {
     const element = titlebarTabsRef.current;
@@ -595,8 +597,14 @@ const App: React.FC = () => {
     componentHost.activate(page); setActiveTab('component');
   };
   const openComponentPage = async (action: ComponentHostAction, project: WorkspaceProject, workspacePath: string) => {
+    const insertAfterTabId = activeTab === 'home' ? 'home'
+      : activeTab === 'settings' ? 'settings'
+        : activeTab === 'component' && activeComponentPageIdentity ? componentTabId(activeComponentPageIdentity)
+          : activeTab === 'project-version' && activePageId ? workspaceToolTabId(activePageId, 'version')
+            : activeTab === 'inspiration' && activePageId ? inspirationTabId(activePageId)
+              : activePageId ? projectTabId(activePageId) : 'home';
     setSelectedProject(project); setProjectDestination(project.path); setActiveTab('component');
-    if (!await componentHost.open(action, project, workspacePath)) setActiveTab('project');
+    if (!await componentHost.open(action, project, workspacePath, insertAfterTabId)) setActiveTab('project');
   };
   const closeComponentPageTab = (page: typeof componentPages[number]) => componentHost.close(page);
   const disposeProjectComponentPages = componentHost.disposeProject;
@@ -767,8 +775,8 @@ const App: React.FC = () => {
                 </div>;
               })}
             </React.Fragment>; })}
-            {componentPages.map(page => { const isActive = activeTab === 'component' && activeComponentPageIdentity === page.identity; return <div key={page.identity} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[128px] max-w-[230px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
-              <button type="button" onClick={() => activateComponentPageTab(page)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Puzzle size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{page.title} · {page.projectName}</span></button>
+            {componentPages.map(page => { const isActive = activeTab === 'component' && activeComponentPageIdentity === page.identity; return <div key={page.identity} {...titlebarTabDragProps(componentTabId(page.identity))} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[128px] max-w-[230px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
+              <button type="button" onClick={() => activateComponentPageTab(page)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><ComponentIcon src={page.iconUrl} size={14}/><span className="min-w-0 flex-1 truncate">{page.title} · {page.projectName}</span></button>
               <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${page.title}`} title={`关闭 ${page.title}`} onClick={() => void closeComponentPageTab(page)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
             </div>; })}
             {settingsTabOpen && <div {...titlebarTabDragProps('settings')} data-active-tab={activeTab === 'settings'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[108px] max-w-[180px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'settings' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={openSettingsTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Settings size={14} className="shrink-0"/><span className="truncate">设置</span></button><button type="button" data-tab-drag-ignore="true" aria-label="关闭设置" title="关闭设置" onClick={closeSettingsTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}

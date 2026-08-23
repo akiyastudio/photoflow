@@ -58,7 +58,9 @@ const createPluginService = ({ app, projectRoot, registry, getDevelopmentPython,
     return registry.inspect(pluginId, { verifyIntegrity: false });
   };
 
-  const list = () => Object.keys(PLUGIN_DEFINITIONS).map(inspect);
+  // The registry owns discovery. Static definitions are only runtime compatibility
+  // metadata and must never manufacture settings rows for absent components.
+  const list = () => registry.list();
   const requireCapability = capability => {
     const definition = findPluginByCapability(capability);
     if (!definition) throw new Error(`未知插件能力：${capability}`);
@@ -74,7 +76,8 @@ const createPluginService = ({ app, projectRoot, registry, getDevelopmentPython,
   return {
     inspect,
     list,
-    listWithSizes: async () => app.isPackaged ? registry.listWithSizes() : list(),
+    listWithSizes: () => registry.listWithSizes(),
+    resolvePackage: pluginId => registry.resolvePackage(pluginId),
     resolveRunConfig,
     resolveRunConfigAsync,
     verifyComponentDirectory: (pluginId, componentRoot, force = true) => registry.verifyDirectory(pluginId, componentRoot, force),

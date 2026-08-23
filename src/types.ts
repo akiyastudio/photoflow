@@ -835,6 +835,14 @@ export interface ComponentStatus {
   source: 'user' | 'development' | 'missing' | string;
   sizeBytes: number;
   error?: string;
+  status?: 'pending-install' | 'installed' | 'update-available' | 'incompatible' | 'invalid' | 'integrity-invalid' | 'package-invalid' | string;
+  integrityStatus?: 'verified' | 'pinned-unverified' | 'unsigned' | 'invalid' | string;
+  integrityMessage?: string;
+  packageVersion?: string;
+  packageSizeBytes?: number;
+  packageCompatible?: boolean;
+  packageError?: string;
+  updateAvailable?: boolean;
   runtimeAvailable?: boolean;
   gpuAvailable?: boolean;
   advancedAvailable?: boolean;
@@ -864,6 +872,8 @@ export interface ComponentHostAction {
   label: string;
   pageId: string;
   pageTitle: string;
+  /** Host-issued URL for a validated package-local icon. */
+  iconUrl?: string;
 }
 
 export interface ComponentPageInstance {
@@ -875,6 +885,9 @@ export interface ComponentPageInstance {
   projectId: string;
   projectName: string;
   instanceId: string;
+  /** Stable titlebar id that this tab was first inserted after. */
+  insertAfterTabId: string;
+  iconUrl?: string;
 }
 
 export interface AdvancedVideoState {
