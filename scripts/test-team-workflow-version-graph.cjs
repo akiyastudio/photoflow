@@ -4,49 +4,12 @@ const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
 const { spawnSync } = require('node:child_process');
-const ts = require('typescript');
 const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
-const hookPath = path.join(repositoryRoot, 'src', 'components', 'useTeamOutputProgress.ts');
-const hookSource = fs.readFileSync(hookPath, 'utf8');
-const compiledHook = ts.transpileModule(hookSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-const hookModule = { exports: {} };
-new Function('require', 'module', 'exports', compiledHook)(name => {
-  if (name === 'react') return { useCallback: value => value, useEffect: () => undefined, useMemo: factory => factory(), useState: value => [value, () => undefined] };
-  throw new Error(`unexpected import: ${name}`);
-}, hookModule, hookModule.exports);
-const { isTeamProgressCandidate, isTeamSourceProgressCandidate, resolveTeamSourceProgressIds, teamWorkflowSourcePaths } = hookModule.exports;
-
-const folder = (id, folderPath, overrides = {}) => ({
-  id, projectId: 'project', mediaKind: 'image', versionKey: id, displayName: id, folderPath,
-  folderMissing: false, nodeRole: 'progress', relationKind: 'main', trackingEnabled: false,
-  renameFromParent: false, copyMissingFromParent: false, trackingState: 'disabled',
-  trackingSnapshot: {}, tombstone: {}, createdAt: 1, updatedAt: 1, ...overrides,
-});
-const modelFolders = [
-  folder('original', 'C:\\project\\original', { nodeRole: 'original', relationKind: undefined }),
-  folder('main-a', 'C:\\project\\work-a'),
-  folder('main-b', 'C:\\project\\work-b'),
-  folder('aux', 'C:\\project\\aux', { relationKind: 'auxiliary' }),
-  folder('selection', 'C:\\project\\selection', { nodeRole: 'selection', relationKind: 'auxiliary' }),
-  folder('artifact', 'C:\\project\\artifact', { nodeRole: 'artifact', relationKind: undefined }),
-  folder('workflow', 'C:\\project\\workflow', { nodeRole: 'workflow', relationKind: undefined }),
-  folder('missing', 'C:\\project\\missing', { folderMissing: true }),
-];
-assert.deepEqual(modelFolders.filter(isTeamProgressCandidate).map(item => item.id), ['main-a', 'main-b']);
-assert.deepEqual(modelFolders.filter(isTeamSourceProgressCandidate).map(item => item.id), ['main-a', 'main-b'], 'original and JPG companion folders must not become team workflow inputs');
-assert.deepEqual(resolveTeamSourceProgressIds([
-  'C:\\project\\work-b\\nested\\b.jpg',
-  'C:\\project\\work-a\\a.jpg',
-  'C:\\project\\work-b\\second.jpg',
-], modelFolders), ['main-b', 'main-a'], 'mixed sources must retain every owning main progress without comparing version keys');
-assert.deepEqual(teamWorkflowSourcePaths([
-  { sourcePath: 'C:\\project\\work-a\\cropped.jpg', tasks: [{ id: 'crop' }] },
-  { sourcePath: 'C:\\project\\work-b\\selected-only.jpg', tasks: [] },
-]), ['C:\\project\\work-a\\cropped.jpg'], 'selected photos without an AI crop must not become team workflow inputs');
-assert(hookSource.includes('registerProgressWithGraph'), 'the real team workflow must call the atomic graph API');
-assert(!hookSource.includes('createVersionGraphEdge('), 'the team workflow must not assemble graph edges in renderer code');
+const componentRenderer = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'main.ts'), 'utf8');
+assert(componentRenderer.includes("item.mediaKind==='image'&&!item.folderMissing&&item.nodeRole==='progress'"), 'component merge targets must be existing image progress nodes');
+assert(componentRenderer.includes("rpc<Json>('project.progress.list.v1')") && !componentRenderer.includes('createVersionGraphEdge'), 'the component must use versioned host graph capabilities instead of assembling edges directly');
 
 const dagResult = spawnSync(process.execPath, [path.join(repositoryRoot, 'scripts', 'test-version-tree-dag-layout.cjs')], { encoding: 'utf8' });
 assert.equal(dagResult.status, 0, dagResult.stderr || dagResult.stdout);

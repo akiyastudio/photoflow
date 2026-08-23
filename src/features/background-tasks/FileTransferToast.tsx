@@ -37,9 +37,7 @@ export const FileTransferToastItem = ({ task, onMinimize, onDismiss }: { task: B
   ].filter(Boolean).join(' · ');
   const cancelTask = () => task.type === 'selection-operation'
     ? window.electronAPI.cancelSelectionOperation(String(task.metadata?.operationId || ''))
-    : task.type === 'workspace-team-workflow'
-      ? window.electronAPI.cancelTeamWorkflowGeneration(String(task.metadata?.operationId || ''))
-      : window.electronAPI.cancelBackgroundTask(task.id);
+    : window.electronAPI.cancelBackgroundTask(task.id);
 
   return <div role={failed ? 'alert' : 'status'} data-top-toast-id={`task:${task.id}`} className={`file-transfer-toast ${failed ? 'border-red-200 bg-red-50' : completed ? 'border-emerald-200 bg-emerald-50' : ''}`}>
     <div className="flex min-w-0 items-center gap-3">

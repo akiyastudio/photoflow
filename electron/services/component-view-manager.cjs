@@ -16,6 +16,7 @@ class ComponentViewManager {
     this.writeLog = writeLog;
     this.instances = new Map();
     this.senderBindings = new Map();
+    this.rpcMethods = new Map();
     this.registerComponentSdkIpc();
   }
 
@@ -25,11 +26,20 @@ class ComponentViewManager {
       if (!instance || instance.view.webContents !== event.sender) throw new Error('Unauthorized component sender');
       return { ...instance.context };
     });
-    this.ipcMain.handle('component-sdk:rpc', (event, method) => {
+    this.ipcMain.handle('component-sdk:rpc', (event, method, payload) => {
       const instance = this.senderBindings.get(event.sender.id);
       if (!instance || instance.view.webContents !== event.sender) throw new Error('Unauthorized component sender');
-      throw new Error(`Component RPC method is not available in Host V1: ${String(method || '')}`);
+      const normalizedMethod = String(method || '');
+      const registration = this.rpcMethods.get(normalizedMethod);
+      if (!registration || registration.componentId !== instance.context.componentId) throw new Error(`Unknown component RPC method: ${normalizedMethod}`);
+      return registration.handler(event, payload, instance.context);
     });
+  }
+
+  registerRpcMethod(method, handler, componentId) {
+    if (this.rpcMethods.has(method)) throw new Error(`Duplicate component RPC method: ${method}`);
+    if (!componentId) throw new Error(`Component RPC method must declare an owner: ${method}`);
+    this.rpcMethods.set(method, { componentId, handler });
   }
 
   listToolbarActions() {
@@ -67,6 +77,7 @@ class ComponentViewManager {
         workspacePath: String(request.workspacePath || ''),
         projectId: String(request.projectId || ''),
         projectName: String(request.projectName || ''),
+        projectStatus: String(request.projectStatus || ''),
       }),
     };
     this.instances.set(key, instance);

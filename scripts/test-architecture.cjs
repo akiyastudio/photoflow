@@ -38,7 +38,9 @@ assert(toolViews.includes('const dateStr = `${month}.${day}`') && toolViews.incl
 const projectWorkspace = read('src/features/workspace/ProjectWorkspace.tsx') + read('src/features/workspace/ProjectToolModal.tsx') + read('src/features/workspace/ProjectWorkspaceLayout.tsx') + read('src/features/workspace/useProjectThumbnail.ts') + read('src/features/workspace/project-workspace-media-metadata.ts') + read('src/features/workspace/project-workspace-layout-model.ts');
 const projectWorkspaceContract = read('src/contracts/project-workspace-api.ts');
 const projectWorkspaceClient = read('src/platform/project-workspace-client.ts');
-const pluginContributions = read('src/features/plugins/plugin-contributions.ts');
+const componentRpcContract = read('electron/component-rpc-contract.cjs');
+const componentRenderer = read('extensions/team-retouch/renderer/src/main.ts');
+const componentSdk = read('extensions/team-retouch/renderer/src/sdk.ts');
 const fileEntryInteractionModel = read('src/features/workspace/file-entry-interaction-model.ts');
 const fileEntrySortModel = read('src/features/workspace/file-entry-sort-model.ts');
 const folderAlphabetFilterModel = read('src/features/workspace/folder-alphabet-filter-model.ts');
@@ -156,7 +158,7 @@ const indexCss = read('src/index.css');
 assert(app.includes("titlebarTabDragProps(projectTabId(page.id))") && app.includes("titlebarTabDragProps(workspaceToolTabId(tab.ownerPageId, tab.kind))") && app.includes("titlebarTabDragProps('settings')") && titlebarTabOrder.includes("window.addEventListener('pointermove', move") && titlebarTabOrder.includes('setOrder(current =>') && titlebarTabOrder.includes("window.localStorage.setItem(TITLEBAR_TAB_ORDER_KEY"), 'visible title-bar tabs must support pointer reordering and persist their order');
 assert(app.includes('ownerPageId: string; projectId: string') && app.includes('tab.ownerPageId === page.id') && app.includes('activePageId === tab.ownerPageId') && titlebarTabOrder.includes('tab.ownerPageId === page.id'), 'project tool tabs must be owned and activated by a specific page instance');
 assert(app.includes('const disposePageOwnedUi') && app.includes('dismissPanelTasksByOwnerPageId(pageId)') && app.includes('current.filter(tab => !pageIdSet.has(tab.ownerPageId))') && app.includes('disposePageOwnedUi(closingPageIds)'), 'every page close path must dispose its page-owned panel tasks and tool tabs through one lifecycle');
-assert(app.includes('tab.ownerPageId !== ownerPageId || tab.kind !== kind || tab.busy === busy'), 'tool busy state must not leak between two pages of the same project');
+assert(!app.includes("kind === 'team'") && app.includes('item.ownerPageId !== ownerPageId || item.kind !== kind'), 'legacy team tool tabs must be removed while version tabs stay page-scoped');
 assert(app.includes('item.id === ownerPageId') && projectWorkspace.includes('isPanelTaskRestoreForPage(pageId, detail)') && !app.includes('item.project?.path === scopeKey'), 'panel task restoration must activate and open only its exact owner page');
 assert(app.includes('pages: projectPages, activePageId') && !app.includes('const [openProjects') && app.includes('activePageId === page.id') && app.includes('key={page.id}'), 'project workspaces and active titlebar state must use page instance identity instead of project path uniqueness');
 assert(app.includes('pageId={page.id}') && app.includes('onDirectoryChange={updatePagePath}') && projectWorkspace.includes('onDirectoryChangeRef.current?.(currentRelativePath)') && projectWorkspace.includes('onDirectoryChange?.(pageId, relativePath)'), 'each mounted project workspace must report directory changes to its own page instance through a stable callback');
@@ -409,11 +411,16 @@ assert(versionsIpc.includes('registerVersionTrackingIpc') && versionTrackingIpc.
 assert(/workspaceDatabase = new PythonDatabaseClient\([\s\S]*?defaultTimeoutMs: 2 \* 60 \* 1000/.test(main), 'workspace recovery must allow long project-catalog reconciliation to finish');
 assert(lines(appEntry) < 950, 'App.tsx exceeded the architecture size budget');
 assert(!projectWorkspace.includes('window.electronAPI') && projectWorkspace.includes('projectWorkspaceClient') && projectWorkspaceContract.includes('Pick<IElectronAPI, ProjectWorkspaceApiKey>') && projectWorkspaceClient.includes('ProjectWorkspaceApi'), 'the workspace renderer must compile against its explicit preload contract');
-assert(pluginContributions.includes('workspaceSurfaces') && pluginContributions.includes('ipcNamespaces') && pluginContributions.includes('serviceCapabilities') && app.includes('componentIdForSettingsSection'), 'optional renderer plugins must declare UI, IPC, and service contribution metadata');
+assert(!fs.existsSync(path.join(root, 'src', 'features', 'plugins', 'plugin-contributions.ts'))
+  && !projectWorkspace.includes('TeamRetouch') && !settingsFeature.includes("activeSection === 'team-retouch'")
+  && componentRenderer.includes("type Tab = 'detect' | 'people' | 'workflow' | 'returns' | 'merge' | 'settings'")
+  && componentSdk.includes('window.photoFlowComponent.rpc') && !componentRenderer.includes('window.electronAPI')
+  && componentRpcContract.includes('sanitizePayload') && componentRpcContract.includes("'team-retouch'"),
+'team-retouch UI and settings must live in its isolated renderer behind an owned, payload-filtered component RPC contract');
 assert(PLUGIN_DEFINITIONS['video-playback-mpv'].runtimeOnly === true
   && PLUGIN_DEFINITIONS['video-playback-mpv'].capabilities.includes('video-playback.advanced')
-  && !pluginContributions.includes("id: 'video-playback-mpv'")
-  && !pluginContributions.includes('video-playback.settings'),
+  && !componentRenderer.includes('video-playback-mpv')
+  && !componentSdk.includes('video-playback.settings'),
 'advanced video must remain a backend runtime capability without renderer plugin contributions');
 assert(types.includes('videoPlayback: VideoPlaybackSettings')
   && appEntry.includes("const legacyAdvancedVideo = fileConfig.componentSettings?.['video-playback-mpv']")
@@ -426,15 +433,14 @@ assert(!/run(?:Workspace|Media)Database/.test(`${main}\n${workspaceIpc}\n${versi
 assert.strictEqual((app.match(/electronAPI\.getComponents\(/g) || []).length, 1, 'App must be the single renderer owner of component status');
 assert(!app.includes('shrink-0 font-mono text-[10px] text-slate-400">v'), 'the title-bar brand must not display the application version');
 assert(!settingsFeature.includes('electronAPI.getComponents('), 'settings must consume App component state instead of fetching it');
-assert(settingsFeature.includes("title: '删除已使用的安装包吗？'") && settingsFeature.includes('删除并释放 ${size}') && settingsFeature.includes("kind: 'component'") && settingsFeature.includes("kind: 'advanced'"), 'component and advanced package installers must offer optional cleanup with the actual size');
+assert(settingsFeature.includes("title: '删除已使用的安装包吗？'") && settingsFeature.includes('删除并释放 ${size}') && settingsFeature.includes("kind: 'component'") && !settingsFeature.includes("kind: 'advanced'"), 'generic component installation may offer package cleanup while advanced controls stay outside app settings');
 assert(!projectWorkspace.includes('electronAPI.getComponents('), 'project workspace must consume App component state instead of fetching it');
 assert(!preload.includes('checkScript') && !read('electron/modules/system-ipc.cjs').includes("ipcMain.handle('check-script'") && !fs.existsSync(path.join(root, 'src', 'features', 'plugins', 'RequirePlugin.tsx')), 'bundled Python tools must not retain optional-plugin existence checks or missing-plugin UI');
 assert(app.includes("DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'inspiration']") && app.includes("requestInspirationPath(config.inspirationLibrary.rootPath.trim(), '')") && !app.includes('openResearchTab') && !app.includes('openConverterTab') && !app.includes("setActiveTab('video_transcode')"), 'the home page must request an inspiration root page without standalone storyboard, PNG, or video-transcode tools');
 assert(app.includes('整理和浏览灵感素材') && !app.includes('识别视频转场并提取清晰分镜帧') && !app.includes('批量转换图片格式') && !app.includes('<HomePanel title="灵感库"'), 'the home page must keep only the direct inspiration launcher');
 assert(!app.includes("installedComponentIds.has('research-tools')"), 'the inspiration library must not be gated by a component install');
-assert(projectWorkspace.includes("teamRetouchAvailable && fileMenu.entry.kind === 'image'"), 'team retouch context-menu contribution must require the installed component');
-assert(projectWorkspace.includes("const dismissLoadingNotice = onNotice('正在加载团片协作数据…', 30000)") && projectWorkspace.includes("if (typeof dismissLoadingNotice === 'function') dismissLoadingNotice()") && projectWorkspace.includes('teamRetouchOpening || !teamRetouchInstalled && componentsLoading') && projectWorkspace.includes('团片协作已加载，共 ${combined.size} 张图片'), 'opening team retouch must immediately expose loading, completion, and busy-button feedback while dismissing the loading toast');
-assert(settingsFeature.includes('filter(item => installedComponentIds.has(item.componentId))'), 'component-owned settings contributions must require the installed component');
+assert(!projectWorkspace.includes('teamRetouch') && !projectWorkspace.includes('团片协作'), 'project workspace must not retain a team-retouch context menu, toolbar, panel, or loading flow');
+assert(!settingsFeature.includes('componentItems') && settingsFeature.includes("id: 'components', label: '组件管理'"), 'application settings must expose only generic component management, not component-owned pages');
 assert(app.includes("delete componentSettings['research-tools']") && app.includes('const researchSettings:') && app.includes('const inspirationLibrary:'), 'legacy research component config must migrate into the built-in storyboard panel defaults');
 assert(inspirationLibrary.includes('FileBrowserWorkspace') && inspirationLibrary.includes('INSPIRATION_FILE_BROWSER_CONTEXT') && inspirationLibrary.includes('InspirationLibraryNavigator') && browserContext.includes('PROJECT_FILE_BROWSER_CONTEXT') && browserContext.includes('INSPIRATION_FILE_BROWSER_CONTEXT'), 'project and inspiration shells must compose the shared file browser through explicit contexts');
 assert(workspaceIpc.includes("ipcMain.handle('workspace-folder-tree'") && inspirationLibrary.includes('listWorkspaceFolders') && inspirationLibrary.includes('visibleFolders.map'), 'the inspiration sidebar must recursively list folders only through the workspace IPC boundary');

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Folder, FolderOpen, HardDrive, Palette, Trash2, RotateCcw, Settings, Download, Puzzle, UsersRound, Loader2, Wrench, ExternalLink, AtSign, GripVertical, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, ShieldCheck, MessageSquareText, Send, LockKeyhole, Plus, X, FileImage, Pencil } from 'lucide-react';
+import { Folder, FolderOpen, HardDrive, Palette, Trash2, RotateCcw, Settings, Download, Puzzle, Loader2, ExternalLink, AtSign, GripVertical, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, ShieldCheck, MessageSquareText, Send, LockKeyhole, Plus, X, FileImage, Pencil } from 'lucide-react';
 import { BUILT_IN_PROJECT_STATUSES, PROJECT_TOOLBAR_ACTION_IDS, normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from '../../types';
 import type { AppConfig, BackupSpaceStatus, BackupStatus, ComponentStatus, LegalDocumentId, PrivacyConsentState, ProjectToolbarActionId, StorageUsageOverview, WorkspaceProject } from '../../types';
 import { useAppDialog } from '../../components/AppDialogProvider';
@@ -12,7 +12,7 @@ const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
 };
-export type SettingsSection = 'general' | 'project' | 'privacy' | 'storage' | 'backup' | 'components' | 'import' | 'video' | 'team-retouch' | 'about' | 'feedback';
+export type SettingsSection = 'general' | 'project' | 'privacy' | 'storage' | 'backup' | 'components' | 'import' | 'video' | 'about' | 'feedback';
 
 const SETTINGS_SECTION_LABELS: Record<SettingsSection, string> = {
   general: '界面',
@@ -21,7 +21,6 @@ const SETTINGS_SECTION_LABELS: Record<SettingsSection, string> = {
   backup: '存储',
   storage: '存储',
   components: '组件管理',
-  'team-retouch': '团片协作',
   video: '视频',
   about: '关于',
   feedback: '问题和建议',
@@ -219,85 +218,6 @@ const offerPackageCleanup = async ({ appDialog, kind, componentId, label, packag
   onNotice(`安装包已删除，释放约 ${formatStorageSize(deleted.deletedBytes || packageSizeBytes)}`);
 };
 
-const IdentityModelSettings = ({ component }: { component?: ComponentStatus }) => {
-  const ready = Boolean(component?.installed && component.identityAvailable && component.faceBackend === 'adaface-ir18' && component.bodyBackend === 'osnet-x1');
-  return <SettingsRow title="人物身份识别" description="用于跨照片识别同一人物。" align="start"><div className="ml-auto max-w-md text-right"><p className={`text-xs font-bold ${ready ? 'text-emerald-600' : 'text-amber-600'}`}>{ready ? '可用' : '需要更新组件'}</p><p className="mt-1 text-xs leading-5 text-slate-500">支持 CPU；可用显卡会自动加速。</p>{component?.identityError && <p className="mt-2 break-all text-xs leading-5 text-amber-600">{component.identityError}</p>}</div></SettingsRow>;
-};
-
-const TeamRetouchEngineSettings = ({ component, onRefresh, onNotice }: { component?: ComponentStatus; onRefresh: () => void | Promise<void>; onNotice: (message: string, duration?: number) => void }) => {
-  const appDialog = useAppDialog();
-  const [busy, setBusy] = useState<'check' | 'install' | 'repair' | 'uninstall' | ''>('');
-  const [progress, setProgress] = useState({ progress: 0, message: '' });
-  useEffect(() => window.electronAPI.onTeamRetouchAdvancedProgress(value => {
-    setProgress({ progress: Number(value.progress) || 0, message: value.message });
-  }), []);
-  const install = async (repair = false) => {
-    if (busy || !await appDialog.confirm({
-      title: repair ? '修复人物检测增强版吗？' : '安装人物检测增强版吗？',
-      message: repair
-        ? '程序将从上方显示的“团片协作组件目录”读取并校验当前版本的高级包，然后替换需要修复的环境。'
-        : '请先把照片流提供的高级引擎 ZIP 放入上方显示的“团片协作组件目录”。程序会校验版本和 SHA-256，然后注册预封装环境；用户不需要编译。',
-      confirmLabel: repair ? '修复检测增强包' : '安装检测增强包',
-    })) return;
-    setBusy(repair ? 'repair' : 'install');
-    setProgress({ progress: 1, message: repair ? '正在准备修复' : '正在准备安装' });
-    try {
-      const result = await window.electronAPI.installTeamRetouchAdvanced({ repair });
-      if (result.cancelled) return;
-      if (!result.success) { onNotice(`人物检测增强版${repair ? '修复' : '安装'}失败：${result.error || '未知错误'}`, 8000); return; }
-      onNotice(`人物检测增强版已${repair ? '修复' : '安装'}并通过运行验证`);
-      await offerPackageCleanup({ appDialog, kind: 'advanced', label: '人物检测增强包', packageSizeBytes: result.packageSizeBytes, repairHint: '以后如需修复或重新安装人物检测增强版，需要再次把高级引擎 ZIP 复制到团片协作组件目录。', onNotice });
-      await onRefresh();
-    } finally { setBusy(''); }
-  };
-  const checkRequirements = async () => {
-    if (busy) return;
-    setBusy('check');
-    setProgress({ progress: 2, message: '正在检查 WSL 2、NVIDIA 驱动和磁盘空间' });
-    try {
-      const result = await window.electronAPI.checkTeamRetouchAdvancedRequirements();
-      if (!result.success) { onNotice(`本机条件检查未通过：${result.error || '未知错误'}`, 8000); return; }
-      onNotice(result.message || '本机已满足高级引擎安装条件');
-    } finally { setBusy(''); }
-  };
-  const uninstall = async () => {
-    if (busy || !await appDialog.confirm({
-      title: '卸载人物检测增强版吗？',
-      message: `将注销照片流本地增强环境并删除 PairDETR、SAM 2.1、Python 环境和虚拟磁盘，预计释放 ${formatStorageSize(component?.advancedSizeBytes)}。两个基础版和身份识别增强版不受影响。`,
-      confirmLabel: '卸载检测增强版', tone: 'danger',
-    })) return;
-    setBusy('uninstall');
-    setProgress({ progress: 20, message: '正在停止并删除高级引擎' });
-    try {
-      const result = await window.electronAPI.uninstallTeamRetouchAdvanced();
-      if (!result.success) { onNotice(`卸载人物检测增强版失败：${result.error || '未知错误'}`, 8000); return; }
-      onNotice('人物检测增强版已卸载，基础版不受影响');
-      await onRefresh();
-    } finally { setBusy(''); }
-  };
-  const openComponentFolder = async () => {
-    const result = await window.electronAPI.openComponentsFolder('team-retouch');
-    if (!result.success) onNotice(`打开团片协作组件目录失败：${result.error || '未知错误'}`);
-  };
-  const baseAvailable = Boolean(component?.installed && component.runtimeAvailable);
-  const advancedReady = Boolean(component?.advancedAvailable);
-  const needsRepair = component?.advancedState === 'repair-needed';
-  return <>
-    <SettingsPageGroup title="识别引擎">
-      <SettingsRow title="组件目录" description="将组件 ZIP 放入此目录，无需解压。"><div className="flex min-w-0 gap-2"><input readOnly value={component?.packagePath || '等待读取组件目录'} className="form-input min-w-0 flex-1 font-mono text-xs"/><button type="button" onClick={() => void openComponentFolder()} className="dialog-secondary inline-flex shrink-0 items-center gap-2"><FolderOpen size={14}/>打开</button><button type="button" onClick={() => void onRefresh()} disabled={Boolean(busy)} className="dialog-secondary inline-flex shrink-0 items-center gap-2"><RotateCcw size={14} className={busy ? 'animate-spin' : ''}/>检测</button></div></SettingsRow>
-      <SettingsRow title="基础人物检测" description="提供基础人物检测、裁图和分割。" align="start"><div className="ml-auto max-w-md text-right"><p className={`text-xs font-bold ${baseAvailable ? 'text-emerald-600' : 'text-red-600'}`}>{baseAvailable ? '可用' : '不可用'}</p><p className="mt-1 text-xs leading-5 text-slate-500">{component?.provider ? `当前运行：${component.provider}` : component?.runtimeError || '等待组件状态'} · 占用 {formatStorageSize(component?.sizeBytes)}</p></div></SettingsRow>
-      <IdentityModelSettings component={component}/>
-    </SettingsPageGroup>
-    <SettingsPageGroup title="人物检测增强版">
-      <SettingsRow title="PairDETR + SAM 2.1" description="改善多人、遮挡和精细分割效果。" align="start"><div className="ml-auto max-w-lg"><p className={`text-right text-xs font-bold ${advancedReady ? 'text-emerald-600' : needsRepair ? 'text-amber-600' : 'text-slate-500'}`}>{advancedReady ? '可用' : needsRepair ? '需要修复' : '未安装'}</p><div className="mt-2 flex flex-wrap justify-end gap-2">{advancedReady ? <><button type="button" onClick={() => void install(true)} disabled={Boolean(busy)} className="dialog-secondary inline-flex items-center gap-2"><Wrench size={14}/>修复</button><button type="button" onClick={() => void uninstall()} disabled={Boolean(busy)} className="rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">卸载</button></> : needsRepair ? <button type="button" onClick={() => void install(true)} disabled={Boolean(busy)} className="dialog-primary inline-flex items-center gap-2"><Wrench size={14}/>修复增强包</button> : <button type="button" onClick={() => void install(false)} disabled={Boolean(busy) || !baseAvailable} className="dialog-primary disabled:opacity-45">安装增强版</button>}</div></div></SettingsRow>
-      <SettingsRow title="安装条件" description="Windows x64、WSL 2、支持 WSL CUDA 的 NVIDIA 显卡与驱动，以及至少 35 GB 可用空间。"><button type="button" title="检查 WSL 2、NVIDIA 显卡与驱动、目标磁盘空间" onClick={() => void checkRequirements()} disabled={Boolean(busy) || !baseAvailable} className="dialog-secondary ml-auto block w-fit disabled:opacity-45">检查安装条件</button></SettingsRow>
-      <SettingsRow title="运行环境与占用" description="建议至少 8 GB 显存和 16 GB 系统内存；这些是性能建议，不作为安装门槛。"><div className="ml-auto text-right text-xs leading-5 text-slate-500"><p>{component?.advancedProvider ? `当前运行：${component.advancedProvider}` : '当前运行：未安装'}</p><p>当前占用：{component?.advancedSizeBytes ? formatStorageSize(component.advancedSizeBytes) : '0 MB'}{component?.advancedFreeBytes ? ` · 目标磁盘剩余 ${formatStorageSize(component.advancedFreeBytes)}` : ''}</p></div></SettingsRow>
-      {component?.advancedError && !advancedReady && <SettingsRow title="增强版状态" description="检测到需要处理的问题。" align="start"><p className="ml-auto max-w-lg break-all text-right text-xs leading-5 text-amber-600">{component.advancedError}</p></SettingsRow>}
-      {busy && <SettingsRow title="正在处理" description={progress.message || '正在处理人物检测增强版'}><div className="ml-auto w-full max-w-md" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress.progress}><div className="flex justify-end text-xs font-bold text-blue-600">{Math.round(progress.progress)}%</div><div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-blue-600 transition-[width]" style={{ width: `${progress.progress > 0 ? Math.max(2, progress.progress) : 0}%` }}/></div></div></SettingsRow>}
-    </SettingsPageGroup>
-  </>;
-};
-
 const LogSettings = ({ onNotice }: { onNotice: (message: string, duration?: number) => void }) => {
   const appDialog = useAppDialog();
   const [clearing, setClearing] = useState(false);
@@ -374,8 +294,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
   </SettingsPageGroup>;
 };
 
-const SettingsNavigator = ({ activeSection, components, onSelect }: { activeSection: SettingsSection; components: ComponentStatus[]; onSelect: (section: SettingsSection) => void }) => {
-  const installedComponentIds = new Set(components.filter(component => component.installed).map(component => component.id));
+const SettingsNavigator = ({ activeSection, onSelect }: { activeSection: SettingsSection; onSelect: (section: SettingsSection) => void }) => {
   const items: Array<{ id: SettingsSection; label: string; description: string; icon: React.ReactNode }> = [
     { id: 'general', label: '界面', description: '配色、标签与首页', icon: <Palette size={18}/> },
     { id: 'project', label: '项目', description: '新建项目与分类', icon: <FolderOpen size={18}/> },
@@ -384,14 +303,10 @@ const SettingsNavigator = ({ activeSection, components, onSelect }: { activeSect
     { id: 'backup', label: '存储', description: '工作目录、归档与工作区备份', icon: <HardDrive size={18}/> },
     { id: 'components', label: '组件管理', description: '安装与卸载可选组件', icon: <Puzzle size={18}/> },
   ];
-  const componentItems = ([
-    { id: 'team-retouch', componentId: 'team-retouch', label: '团片协作', description: 'AI识别人物并把图片切小', icon: <UsersRound size={18}/> },
-  ] as Array<{ id: SettingsSection; componentId: string; label: string; description: string; icon: React.ReactNode }>).filter(item => installedComponentIds.has(item.componentId));
   const renderItem = (item: typeof items[number]) => <button key={item.id} type="button" aria-current={activeSection === item.id ? 'page' : undefined} onClick={() => onSelect(item.id)} className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition ${activeSection === item.id ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'}`}><span className={`shrink-0 ${activeSection === item.id ? 'text-blue-600' : 'text-slate-400'}`}>{item.icon}</span><span className="min-w-0 truncate text-sm font-bold">{item.label}</span></button>;
   return <nav aria-label="设置分类" className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain border-r border-slate-200 p-3">
     <div className="flex items-center gap-2 px-3 pb-3 pt-2 text-sm font-bold text-slate-800"><Settings size={17} className="text-blue-600"/>设置</div>
     <div className="space-y-1">{items.map(renderItem)}</div>
-    <div className="mt-3 border-t border-slate-200 pt-3"><p className="px-3 pb-1.5 text-[11px] font-bold tracking-wide text-slate-400">组件</p><div className="space-y-1">{componentItems.map(renderItem)}</div></div>
     <div className="mt-3 space-y-1 border-t border-slate-200 pt-3">
       {renderItem({ id: 'about', label: '关于', description: '版本、项目与开源许可', icon: <AtSign size={18}/> })}
       {renderItem({ id: 'feedback', label: '问题和建议', description: '向开发者发送反馈', icon: <MessageSquareText size={18}/> })}
@@ -408,7 +323,6 @@ const PROJECT_TOOLBAR_ITEMS: Record<ProjectToolbarActionId, { label: string; des
   photoshop: { label: '用 Photoshop 打开', description: '用 Photoshop 打开所选图片、RAW 或 PSD/PSB', icon: <span className="flex h-[17px] w-[17px] items-center justify-center rounded border border-blue-400 text-[9px] font-bold text-blue-600">Ps</span> },
   'office-extract': { label: '提取文档图片', description: '提取 Word、PowerPoint 和 Excel 中的图片', icon: <FileImage size={17}/> },
   'version-management': { label: '版本管理', description: '管理素材版本或标记进度文件夹', icon: <GitBranch size={17}/> },
-  'team-retouch': { label: '团片协作', description: '打开项目的团片协作工作区', icon: <UsersRound size={17}/> },
 };
 
 const ProjectToolbarSettingsEditor = ({ value, onChange }: { value: AppConfig['projectToolbar']; onChange: (value: AppConfig['projectToolbar']) => void }) => {
@@ -836,11 +750,8 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       if (result.success) window.dispatchEvent(new Event('workspace-projects-changed'));
     } finally { setBackupAction(''); }
   };
-  const teamRetouchSettings = (draft.componentSettings['team-retouch'] as AppConfig['personDetection'] | undefined) || draft.personDetection;
   const videoPlaybackSettings = draft.videoPlayback;
-  const teamRetouchComponent = components.find(component => component.id === 'team-retouch');
   const inspirationLibrarySettings = draft.inspirationLibrary;
-  const updateTeamRetouchSettings = (next: AppConfig['personDetection']) => commitSettings({ ...draft, personDetection: next, componentSettings: { ...draft.componentSettings, 'team-retouch': next } });
   const updateVideoPlaybackSettings = (next: AppConfig['videoPlayback']) => commitSettings({ ...draft, videoPlayback: next });
   const updateInspirationLibrarySettings = (next: AppConfig['inspirationLibrary']) => commitSettings({ ...draft, inspirationLibrary: next });
   const updateInspirationLibraryRoot = (rootPath: string) => updateInspirationLibrarySettings({ ...inspirationLibrarySettings, rootPath });
@@ -940,13 +851,6 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       </SettingsPageGroup>
     </>}
     {activeSection === 'components' && <ComponentSettings components={components} installPath={componentInstallPath} loading={componentsLoading} onRefresh={onRefreshComponents} onComponentsChanged={onComponentsChanged} onNotice={onNotice}/>}
-    {activeSection === 'team-retouch' && <>
-    <SettingsPageGroup title="处理偏好">
-      <SettingsRow title="优先使用 GPU" description="显卡不支持或运行失败时，基础人物检测会自动回退 CPU。"><SettingsToggle label="优先使用 GPU" checked={teamRetouchSettings.useGpu} onChange={checked => updateTeamRetouchSettings({ ...teamRetouchSettings, useGpu: checked })}/></SettingsRow>
-      <SettingsRow title="裁剪方式" description="人物超过 4000 像素时，可限制尺寸或保留完整人物；后者可能超出手机修图软件限制。"><select value={teamRetouchSettings.oversizeCropMode} onChange={event => updateTeamRetouchSettings({ ...teamRetouchSettings, oversizeCropMode: event.target.value as AppConfig['personDetection']['oversizeCropMode'] })} className="form-input ml-auto max-w-sm"><option value="face-centered">保持 4000 像素</option><option value="expand">扩大裁剪，保留完整人物</option></select></SettingsRow>
-    </SettingsPageGroup>
-    <TeamRetouchEngineSettings component={teamRetouchComponent} onRefresh={onRefreshComponents} onNotice={onNotice}/>
-    </>}
     {activeSection === 'video' && <>
     <SettingsPageGroup title="视频浏览">
       <SettingsRow title="左右方向键行为" description="设置主程序视频播放器的左右方向键用于快进快退或切换视频；无需安装高级解码组件。"><select value={videoPlaybackSettings.arrowKeyAction} onChange={event => updateVideoPlaybackSettings({ arrowKeyAction: event.target.value as 'seek' | 'navigate' })} className="form-input ml-auto max-w-sm"><option value="seek">快退 / 快进 5 秒（默认）</option><option value="navigate">切换上一个 / 下一个视频</option></select></SettingsRow>

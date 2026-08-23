@@ -320,7 +320,6 @@ export const InspirationLibraryPage = ({
   initialRelativePath,
   config,
   components,
-  componentsLoading,
   onUpdateConfig,
   onDirectoryChange,
   navigationRequest,
@@ -332,7 +331,6 @@ export const InspirationLibraryPage = ({
   initialRelativePath: string;
   config: AppConfig;
   components: ComponentStatus[];
-  componentsLoading: boolean;
   onUpdateConfig: (config: AppConfig) => void | boolean | Promise<void | boolean>;
   onDirectoryChange: (pageId: string, relativePath: string) => void;
   navigationRequest?: { path: string; id: number };
@@ -376,7 +374,6 @@ export const InspirationLibraryPage = ({
     updatedAt: Date.now(),
   };
   const installedComponentIds = new Set(components.filter(component => component.installed).map(component => component.id));
-  const teamRetouchStatus = components.find(component => component.id === 'team-retouch');
   return <FileBrowserWorkspace
     pageId={pageId}
     active={active}
@@ -390,8 +387,6 @@ export const InspirationLibraryPage = ({
     workspacePath={rootPath}
     inspirationTargetWorkspacePath={config.workspacePath}
     installedComponentIds={installedComponentIds}
-    componentsLoading={componentsLoading}
-    teamRetouchStatus={teamRetouchStatus}
     advancedVideoSettings={config.videoPlayback}
     initialPanel={null}
     importConfig={config.smartImport}

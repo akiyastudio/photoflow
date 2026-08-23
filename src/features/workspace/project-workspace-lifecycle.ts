@@ -17,7 +17,6 @@ export const PROJECT_BACKGROUND_LOAD_DELAYS_MS = Object.freeze({
   watcher: 160,
   clipboard: 320,
   drives: 480,
-  teamRetouch: 640,
 });
 
 export const PROJECT_WATCH_RECONCILE_COOLDOWN_MS = 30_000;

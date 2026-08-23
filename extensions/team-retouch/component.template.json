@@ -2,15 +2,28 @@
   "apiVersion": 1,
   "id": "team-retouch",
   "version": "26.7.30.1",
+  "displayName": "团片协作",
+  "description": "人物检测、身份确认、工作流、返图与合并",
+  "icon": "ui/team-retouch.svg",
   "platforms": ["win32"],
   "architectures": ["x64"],
   "entrypoints": {
     "win32-x64": "team-retouch.exe"
   },
   "requiredFiles": [
+    "ui/index.html",
+    "ui/team-retouch.svg",
     "_internal/models/rtmdet-ins_m_640x640.onnx",
     "_internal/models/face_detection_yunet_2023mar.onnx",
     "_internal/models/adaface_ir18_webface4m.onnx",
     "_internal/models/osnet_x1_0_msmt17.onnx"
-  ]
+  ],
+  "componentHost": {
+    "contractVersion": 1,
+    "compatibility": { "minHostApiVersion": 1, "maxHostApiVersion": 1 },
+    "contributions": [
+      { "type": "workspace.toolbarAction", "id": "open", "label": "团片协作", "pageId": "main" },
+      { "type": "component.fullPage", "id": "main", "title": "团片协作", "entry": "ui/index.html" }
+    ]
+  }
 }

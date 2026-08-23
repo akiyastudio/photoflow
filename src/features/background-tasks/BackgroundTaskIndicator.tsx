@@ -75,9 +75,7 @@ export const BackgroundTaskIndicator = ({ ownerPageIds }: { ownerPageIds: Readon
   };
   const cancelTask = (task: BackgroundTask) => task.type === 'selection-operation'
     ? window.electronAPI.cancelSelectionOperation(String(task.metadata?.operationId || ''))
-    : task.type === 'workspace-team-workflow'
-      ? window.electronAPI.cancelTeamWorkflowGeneration(String(task.metadata?.operationId || ''))
-      : window.electronAPI.cancelBackgroundTask(task.id);
+    : window.electronAPI.cancelBackgroundTask(task.id);
   const resumeTask = (task: BackgroundTask) => window.electronAPI.resumeBackgroundTask(task.id);
   const restartTask = (task: BackgroundTask) => window.electronAPI.restartBackgroundTask(task.id);
   const pauseTask = (task: BackgroundTask) => window.electronAPI.pauseBackgroundTask(task.id);

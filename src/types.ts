@@ -4,7 +4,7 @@ export interface LogEntry {
   type: 'info' | 'success' | 'warning' | 'error';
 }
 
-export type ToolType = 'home' | 'inspiration' | 'project' | 'project-version' | 'project-team' | 'component' | 'settings' | 'dashboard' | 'match' | 'video_split';
+export type ToolType = 'home' | 'inspiration' | 'project' | 'project-version' | 'component' | 'settings' | 'dashboard' | 'match' | 'video_split';
 
 export type Theme = 'light' | 'dark' | 'system';
 export type VideoTranscodeSettings = {
@@ -18,7 +18,7 @@ export type VideoTranscodeSettings = {
 export type HomeCardId = 'birthday' | 'import' | 'inspiration';
 export const PROJECT_TOOLBAR_ACTION_IDS = [
   'filename-selection', 'select-media', 'photoshop', 'video-tools', 'image-tools',
-  'office-extract', 'version-management', 'team-retouch',
+  'office-extract', 'version-management',
 ] as const;
 export type ProjectToolbarActionId = typeof PROJECT_TOOLBAR_ACTION_IDS[number];
 export interface ProjectToolbarSettings {
@@ -994,7 +994,7 @@ export interface IElectronAPI {
   submitFeedback: (message: string) => Promise<{ success: boolean; error?: string }>;
   getComponents: (force?: boolean) => Promise<{ success: boolean; components: ComponentStatus[]; installPath: string; error?: string }>;
   getComponentHostActions: () => Promise<{ success: boolean; actions: ComponentHostAction[]; error?: string }>;
-  openComponentPage: (request: { componentId: string; pageId: string; workspacePath: string; projectId: string; projectName: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string }; error?: string }>;
+  openComponentPage: (request: { componentId: string; pageId: string; workspacePath: string; projectId: string; projectName: string; projectStatus: ProjectStatus }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string }; error?: string }>;
   activateComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
   setComponentPageBounds: (instanceId: string, bounds: { x: number; y: number; width: number; height: number }) => Promise<{ success: boolean }>;
   closeComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
@@ -1008,10 +1008,6 @@ export interface IElectronAPI {
   installComponent: (componentId: string) => Promise<{ success: boolean; cancelled?: boolean; packageSizeBytes?: number; error?: string }>;
   deleteComponentPackage: (kind: 'component' | 'advanced', componentId?: string) => Promise<{ success: boolean; deletedBytes?: number; error?: string }>;
   uninstallComponent: (componentId: string) => Promise<{ success: boolean; error?: string }>;
-  checkTeamRetouchAdvancedRequirements: () => Promise<{ success: boolean; message?: string; error?: string }>;
-  installTeamRetouchAdvanced: (options?: { repair?: boolean }) => Promise<{ success: boolean; cancelled?: boolean; restartRequired?: boolean; packageSizeBytes?: number; error?: string }>;
-  uninstallTeamRetouchAdvanced: () => Promise<{ success: boolean; error?: string }>;
-  onTeamRetouchAdvancedProgress: (callback: (value: { phase: string; progress?: number; message: string }) => void) => () => void;
   getStorageDevices: () => Promise<StorageDeviceInventoryResult>;
   getDomainHealth: () => Promise<{ success: boolean; domains: Array<{ domainId: string; state: 'healthy' | 'degraded' | 'unavailable' | 'recovering'; failures: number; lastError: string; updatedAt: number }>; commands: Array<{ commandId: string; target: string; type: string; status: 'pending' | 'processing' | 'dead'; attempts: number; error: string }> }>;
   retryDomainCommand: (commandId: string) => Promise<{ success: boolean; error?: string }>;
@@ -1142,44 +1138,6 @@ export interface IElectronAPI {
   getProgressMainBranchMedia: (workspacePath: string, request: { progressId?: string; photoId?: string }) => Promise<{ success: boolean; progressId?: string; branchProgressIds: string[]; entries: MainBranchMediaEntry[]; error?: string }>;
   getVersionBatchOperations: (workspacePath: string, batchId: string) => Promise<{ success: boolean; batch?: VersionBatch; operations: VersionBatchFileOperation[]; error?: string }>;
   retryVersionBatchOperations: (workspacePath: string, batchId: string) => Promise<{ success: boolean; repairRequired?: boolean; batch?: VersionBatch; renamedCount?: number; renameErrors?: Array<{ operationId?: string; source: string; target: string; error: string }>; error?: string }>;
-  getTeamPatches: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<TeamPatchBundle>;
-  getTeamProjectWorkspace: (workspacePath: string, name: string, status?: ProjectStatus) => Promise<TeamIdentityWorkspace>;
-  getTeamIdentitySimilarities: (workspacePath: string, name: string) => Promise<{ success: boolean; similarities: NonNullable<TeamIdentityWorkspace['similarities']>; error?: string }>;
-  registerTeamProjectPhotos: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<TeamIdentityWorkspace>;
-  suggestTeamIdentities: (workspacePath: string, name: string) => Promise<TeamIdentityWorkspace & { suggestedCount?: number; candidateGroupCount?: number; unmatchedCount?: number; method?: string; faceBackend?: string; bodyBackend?: string; provider?: string }>;
-  saveTeamIdentity: (workspacePath: string, request: { projectName: string; identityId?: string; name: string; assignments?: Array<{ photoId: string; baseVersionId: string; personIndex: number; confidence?: number; source?: string; completed?: boolean }> }) => Promise<{ success: boolean; identityId?: string; error?: string }>;
-  assignTeamIdentity: (workspacePath: string, request: { projectName: string; photoId: string; baseVersionId: string; personIndex: number; identityId?: string; confidence?: number; source?: string; completed?: boolean }) => Promise<{ success: boolean; error?: string }>;
-  confirmTeamIdentityGroup: (workspacePath: string, request: { projectName: string; anchorSubjectKey: string; identityId?: string; name?: string; assignments: Array<{ photoId: string; baseVersionId: string; personIndex: number; confidence?: number }> }) => Promise<TeamIdentityWorkspace & { identityId?: string; updatedCount?: number; autoReleasedCount?: number; duplicateSkippedCount?: number }>;
-  completeTeamIdentity: (workspacePath: string, request: { photoId: string; baseVersionId: string; personIndex: number; completed: boolean; completionKind?: 'no-retouch' | ''; taskId?: string; taskOrder?: number[]; projectName?: string; status?: ProjectStatus }) => Promise<{ success: boolean; deferred?: boolean; warning?: string; error?: string }>;
-  deleteTeamIdentity: (workspacePath: string, request: { projectName: string; identityId: string }) => Promise<{ success: boolean; error?: string }>;
-  saveTeamWorkflowSettings: (workspacePath: string, request: { projectName: string; preferredIdentityOrder?: string[]; preferredIdentityId?: string; sameWeekIdentityIds?: string[] }) => Promise<{ success: boolean; workflowSettings?: { preferredIdentityOrder?: string[]; preferredIdentityId?: string; sameWeekIdentityIds?: string[] }; error?: string }>;
-  excludeTeamPerson: (workspacePath: string, status: ProjectStatus, projectName: string, request: { photoId: string; baseVersionId: string; personIndex: number }) => Promise<TeamIdentityWorkspace & TeamPatchBundle & { removedPersonCount?: number; workflowRefreshCount?: number; warning?: string; error?: string }>;
-  removeProjectTeamPhoto: (workspacePath: string, request: { photoId: string; baseVersionId: string }) => Promise<{ success: boolean; removedArtifactCount?: number; error?: string }>;
-  generateTeamWorkflow: (workspacePath: string, status: ProjectStatus, name: string, request: { operationId?: string; replace?: boolean; preferredIdentityOrder?: string[]; preferredIdentityId?: string; sameWeekIdentityIds?: string[]; groups: Array<{ week: number; identityId: string; identityName: string; items: Array<{ photoId: string; baseVersionId: string; personIndex: number; taskId: string; photoName: string }> }> }) => Promise<{ success: boolean; requiresConfirmation?: boolean; alreadyRunning?: boolean; cancelled?: boolean; resumable?: boolean; operationId?: string; count?: number; groupCount?: number; path?: string; error?: string }>;
-  getTeamWorkflowGenerationStatus: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; job: TeamWorkflowGenerationProgress | null; error?: string }>;
-  cancelTeamWorkflowGeneration: (operationId: string) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
-  onTeamWorkflowGenerationProgress: (callback: (value: TeamWorkflowGenerationProgress) => void) => () => void;
-  exportTeamIdentityTasks: (workspacePath: string, status: ProjectStatus, name: string, request: { week: number; identityId: string }) => Promise<{ success: boolean; count?: number; path?: string; error?: string }>;
-  returnTeamWorkflowBatch: (workspacePath: string, name: string, request: { status: ProjectStatus; returnedFiles: string[]; items: Array<{ photoId: string; baseVersionId: string; personIndex: number; taskId: string; taskOrder: number[] }> }) => Promise<TeamPatchReturnBatchResult>;
-  getTeamWorkflowReturnReview: (workspacePath: string, name: string, status: ProjectStatus) => Promise<{ success: boolean; review: TeamPatchReturnBatchResult | null; error?: string }>;
-  discardTeamWorkflowReturnReview: (workspacePath: string, name: string, reviewSessionId: string) => Promise<{ success: boolean; discarded: boolean; error?: string }>;
-  ignoreTeamWorkflowReturnReview: (workspacePath: string, name: string, reviewSessionId: string, returnId: string) => Promise<{ success: boolean; reviewSessionCompleted: boolean; error?: string }>;
-  confirmTeamWorkflowReturn: (workspacePath: string, name: string, request: { status: ProjectStatus; returnedPath: string; reviewSessionId?: string; returnId?: string; photoId: string; baseVersionId: string; personIndex: number; taskId: string; taskOrder: number[] }) => Promise<{ success: boolean; taskId?: string; editedPatchPath?: string; reviewSessionCompleted?: boolean; warning?: string; error?: string }>;
-  detectTeamPatchPeople: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; baseVersionId: string; restoreExcluded?: boolean }) => Promise<TeamPatchBundle>;
-  onTeamPatchDetectionProgress: (callback: (value: { photoId: string; baseVersionId: string; progress: number; message: string }) => void) => () => void;
-  detectTeamPatchBatch: (workspacePath: string, status: ProjectStatus, name: string, request: { relativePaths: string[] }) => Promise<{ success: boolean; persistentBackend?: boolean; requestedMode?: string; advancedUsedCount?: number; fallbackCount?: number; results: Array<{ relativePath: string; name: string; success: boolean; photoId?: string; baseVersionId?: string; personCount?: number; workTileCount?: number; deliveryDirectory?: string; detector?: string; fallbackReason?: string; error?: string }>; error?: string }>;
-  onTeamPatchBatchProgress: (callback: (value: { itemIndex: number; itemCount: number; relativePath: string; itemName: string; progress: number; message: string }) => void) => () => void;
-  updateTeamPatch: (workspacePath: string, request: { photoId?: string; taskId: string; status?: ProjectStatus; projectName?: string; personName?: string; assignee?: string; crop?: { x: number; y: number; width: number; height: number }; needsReview?: boolean; reviewReason?: string }) => Promise<{ success: boolean; tasks: TeamPatchTask[]; workflowRefreshCount?: number; warning?: string; error?: string }>;
-  deleteTeamPatch: (workspacePath: string, request: { photoId: string; taskId: string }) => Promise<{ success: boolean; tasks: TeamPatchTask[]; removedArtifactCount?: number; error?: string }>;
-  cleanupTeamPatches: (workspacePath: string, request: { photoId: string; baseVersionId: string }) => Promise<TeamPatchBundle & { removedArtifactCount?: number }>;
-  uploadTeamPatch: (workspacePath: string, request: { photoId: string; taskId: string; personIndex: number; projectName?: string; status?: ProjectStatus }) => Promise<{ success: boolean; cancelled?: boolean; tasks: TeamPatchTask[]; warning?: string; error?: string }>;
-  removeTeamPatchUpload: (workspacePath: string, request: { photoId: string; taskId: string; personIndex: number; projectName?: string; status?: ProjectStatus }) => Promise<{ success: boolean; tasks: TeamPatchTask[]; removedArtifactCount?: number; warning?: string; error?: string }>;
-  selectTeamPatchReturns: (projectName: string) => Promise<{ success: boolean; cancelled?: boolean; files?: string[]; error?: string }>;
-  returnTeamPatchBatch: (workspacePath: string, status: ProjectStatus, name: string, request: { relativePaths: string[]; returnedFiles?: string[]; outputProgressId?: string }) => Promise<TeamPatchReturnBatchResult>;
-  onTeamPatchReturnBatchProgress: (callback: (value: { phase: 'matching' | 'importing' | 'merging' | 'complete' | string; progress: number; message: string }) => void) => () => void;
-  openTeamPatch: (filePath: string) => Promise<{ success: boolean; error?: string }>;
-  openTeamPatchFolder: (filePath: string) => Promise<{ success: boolean; path?: string; error?: string }>;
-  mergeTeamPatches: (workspacePath: string, status: ProjectStatus, name: string, request: { photoId: string; baseVersionId: string; outputProgressId: string; versionName?: string }) => Promise<TeamPatchBundle>;
   getMediaThumbnail: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache'], requestedSize?: number, priority?: 0 | 1 | 2 | 3, queueOrder?: number) => Promise<{ success: boolean; taskId?: string; state?: ThumbnailState; previewUrl?: string; mediaUrl?: string; usingImportedPreview?: boolean; importedVideoWithoutPreview?: boolean; cacheLayer?: 'memory' | 'disk' | 'source'; error?: string }>;
   cancelMediaThumbnail: (filePath: string, requestedSize?: number) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
   onThumbnailStateChanged: (callback: (update: { filePath: string; state: ThumbnailState; previewUrls?: Partial<Record<'small' | 'medium' | 'large', string>>; sourceMtimeMs?: number; sourceSize?: number; error?: string }) => void) => () => void;

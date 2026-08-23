@@ -41,10 +41,14 @@ The host discovers manifests under component roots dynamically; UI component IDs
 
 Every page runs in a host-owned `WebContentsView` with `nodeIntegration:false`, `contextIsolation:true`, `sandbox:true`, and `webviewTag:false`. Window creation, navigation, webviews, and permissions are denied. The component entry never chooses its preload.
 
-The host binds each SDK request to the exact component `webContents` sender. `window.photoFlowComponent` exposes only `contractVersion`, `getContext()`, `rpc()`, `onActivate()`, and `onDeactivate()`. V1 has no business RPC methods yet; unknown methods fail closed. It never exposes `ipcRenderer` or the main renderer's `electronAPI`.
+The host binds each SDK request to the exact component `webContents` sender. `window.photoFlowComponent` exposes only `contractVersion`, `getContext()`, `rpc()`, `onEvent()`, `onActivate()`, and `onDeactivate()`. RPC methods are versioned, owned by one component ID, registered from an explicit mapping, and filter payload fields before dispatch. Workspace and project identity come from the bound page instance. Unknown methods, event topics, fields, senders, and component owners fail closed. The SDK never exposes `ipcRenderer`, arbitrary channels, arbitrary filesystem primitives, or the main renderer's `electronAPI`.
 
 The page key is `componentId + normalized workspace path + projectId`. Repeated toolbar clicks focus the existing page. Closing a page destroys its view; closing the last page for a project or deleting/closing the project closes every component view for that project. Bounds are supplied by a host-owned empty surface in the application renderer; component DOM is never mounted into PhotoFlow's React tree.
 
-## Current boundary
+## First-party team-retouch package
 
-The real `WebContentsView` integration, sender binding, layout, focus, and teardown are implemented. Component Host V1 does not yet provide domain/business RPC methods or a first-party UI component package. The existing package installer continues to serve cataloged native V1 components; dynamically discovered UI packages can be registered from the component root, while a generalized signed UI-package installer remains future work.
+`extensions/team-retouch` is the first first-party UI package. Its manifest, copy, icon, independent renderer source, Python backend, models, algorithms, and advanced-environment scripts live with the component package inputs. `npm run build:team-retouch-renderer` emits a standalone static renderer. `scripts/build-components.cjs` always builds it before the native runtime and copies it into the package's `ui/` directory. Production `component.json` points only to `ui/index.html` inside the installed component.
+
+The main React renderer contains no team-retouch manager, identity manager, step UI, toolbar action, context-menu action, embedded panel, settings contribution, or `workspace-team-*` preload API. It renders only the manifest-derived toolbar button and host-owned page chrome. The component page owns detection, identity, workflow, return, merge, and settings UI.
+
+The RPC implementation is currently a compatibility-backend milestone, not the final process extraction. Restricted component methods map to existing validated team-retouch handlers while later work moves their orchestration out of the host. Compatibility keeps the existing `team-retouch.sqlite3` and workspace-data layout single-written and readable. Uninstalling the component does not delete data; a missing or malformed component only removes its dynamic action.

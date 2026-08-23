@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Folder, X, Settings, PanelLeftClose, PanelLeftOpen, ChevronLeft, ChevronRight, GitBranch, Home, UsersRound, Lightbulb, Pin, Puzzle } from 'lucide-react';
+import { Folder, X, Settings, PanelLeftClose, PanelLeftOpen, ChevronLeft, ChevronRight, GitBranch, Home, Lightbulb, Pin, Puzzle } from 'lucide-react';
 import { useAppDialog } from './components/AppDialogProvider';
 import { ProjectNavigator } from './components/ProjectNavigator';
 import { ProjectWorkspace } from './features/workspace/ProjectWorkspace';
@@ -19,7 +19,6 @@ import { useComponentPages } from './features/components/useComponentPages';
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
 import { UsagePreferencesOnboarding, USAGE_PREFERENCES_VERSION } from './features/settings/UsagePreferencesOnboarding';
 import type { SettingsSection } from './features/settings/SettingsFeature';
-import { componentIdForSettingsSection } from './features/plugins/plugin-contributions';
 import { DashboardView, MatchView, VideoSplitView, type ImportCompletion } from './features/tools/ToolViews';
 import { useStartupSdAutoImport } from './features/tools/use-startup-sd-auto-import';
 import { normalizeSavedSdDeviceRecords } from './features/tools/sd-startup-import-model';
@@ -29,7 +28,7 @@ import type { AppConfig, BackupStatus, ComponentHostAction, ComponentStatus, Hom
 import { ColumnResizeHandle } from './features/app/AppShellLayout';
 import { clampNumber, readStoredNumber } from './features/app/app-shell-layout-model';
 import { DEFAULT_CONFIG, DEFAULT_HOME_ORDER, IMAGE_SELECTION_FOLDER_NAME, VIDEO_SELECTION_FOLDER_NAME, isMac, localDateKey, normalizeHomeOrder, normalizeMediaCacheSize, normalizeProjectCategories, normalizeProjectToolbar, normalizeVideoPreviewQuality } from './features/app/app-config';
-type WorkspaceToolKind = 'version' | 'team';
+type WorkspaceToolKind = 'version';
 type WorkspaceToolTab = { ownerPageId: string; projectId: string; projectPath: string; kind: WorkspaceToolKind; label: string; busy: boolean };
 interface PythonEvent {
   type: 'log' | 'error' | 'progress' | 'status' | 'ask_user' | 'success' | 'warning' | 'preview';
@@ -99,12 +98,6 @@ const App: React.FC = () => {
   const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed).map(component => component.id)), [components]);
   const componentHost = useComponentPages({ browserPages: projectPages, components, onProjectFallback: page => { if (page.project) { activatePage(page.id); setSelectedProject(page.project); setProjectDestination(page.project.path); setActiveTab('project'); } }, onHomeFallback: () => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); }, onNotice: showNotice });
   const { actions: componentHostActions, pages: componentPages, activeIdentity: activeComponentPageIdentity } = componentHost;
-
-  useEffect(() => {
-    if (componentsLoading) return;
-    const componentId = componentIdForSettingsSection(settingsSection);
-    if (componentId && !installedComponentIds.has(componentId)) setSettingsSection('components');
-  }, [componentsLoading, installedComponentIds, settingsSection]);
 
   useEffect(() => {
     window.localStorage.setItem('photoflow:sidebar-width', String(Math.round(sidebarWidth)));
@@ -316,11 +309,6 @@ const App: React.FC = () => {
               sensitivity: legacyResearch?.sensitivity ?? legacyInspiration?.sensitivity ?? (legacyThreshold !== undefined && legacyThreshold >= 0.98 ? 'high' : legacyThreshold !== undefined && legacyThreshold <= 0.85 ? 'low' : 'standard'),
               minDuration: legacyResearch?.minDuration ?? legacyInspiration?.minDuration ?? 0.2,
             };
-            const storedPersonDetection = fileConfig.componentSettings?.['team-retouch'] as AppConfig['personDetection'] | undefined;
-            const personDetectionSettings: AppConfig['personDetection'] = {
-              useGpu: storedPersonDetection?.useGpu ?? fileConfig.personDetection?.useGpu ?? true,
-              oversizeCropMode: storedPersonDetection?.oversizeCropMode ?? fileConfig.personDetection?.oversizeCropMode ?? 'face-centered',
-            };
             const legacyAdvancedVideo = fileConfig.componentSettings?.['video-playback-mpv'];
             const videoPlayback: AppConfig['videoPlayback'] = {
               arrowKeyAction: fileConfig.videoPlayback?.arrowKeyAction === 'navigate' ? 'navigate' : fileConfig.videoPlayback?.arrowKeyAction === 'seek' ? 'seek' : legacyAdvancedVideo?.arrowKeyAction === 'navigate' ? 'navigate' : 'seek',
@@ -329,7 +317,7 @@ const App: React.FC = () => {
             const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;
             const savedSdPaths = (Array.isArray(fileConfig.smartImport?.sdPaths) && fileConfig.smartImport.sdPaths.length ? fileConfig.smartImport.sdPaths : fileConfig.smartImport?.sdPath ? [fileConfig.smartImport.sdPath] : []).map((drive: string) => isMac ? drive : drive.replace(/\\/g, '/').replace(/\/DCIM\/?$/i, '/'));
             const savedSdDevices = normalizeSavedSdDeviceRecords(fileConfig.smartImport?.sdDevices, savedSdPaths, fileConfig.smartImport?.sdDeviceIds, fileConfig.smartImport?.sdDriveTypes);
-            const componentSettings: AppConfig['componentSettings'] = { ...fileConfig.componentSettings, 'team-retouch': personDetectionSettings };
+            const componentSettings: AppConfig['componentSettings'] = { ...fileConfig.componentSettings };
             delete componentSettings['video-playback-mpv'];
             delete componentSettings['research-tools'];
             delete componentSettings['office-media-extractor'];
@@ -341,7 +329,7 @@ const App: React.FC = () => {
             delete legacyConfig.fileImport;
             const customProjectCategories = normalizeProjectCategories(fileConfig.customProjectCategories);
             const configuredWorkspacePaths = normalizeWorkspacePaths(fileConfig.workspacePath, fileConfig.workspacePaths);
-            let normalizedConfig = { ...legacyConfig, theme: fileConfig.theme ?? 'system', telemetry: { enabled: fileConfig.telemetry?.enabled === true, crashReports: fileConfig.telemetry?.crashReports === true }, workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, customProjectCategories, projectCategoryOrder: normalizeProjectCategoryOrder(fileConfig.projectCategoryOrder, customProjectCategories), defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', itemOpenMode: fileConfig.itemOpenMode === 'double' || legacyFolderOpenMode === 'double' ? 'double' : 'single', favoriteDisplayMode: fileConfig.favoriteDisplayMode === 'stars' ? 'stars' : 'binary', usagePreferencesVersion: Number(fileConfig.usagePreferencesVersion) || 0, projectToolbar: normalizeProjectToolbar(fileConfig.projectToolbar), homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, pinInspirationLibrary: fileConfig.pinInspirationLibrary === true, componentSettings, videoPlayback, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, backup: { enabled: fileConfig.backup?.enabled === true, targetType: fileConfig.backup?.targetType === 'nas' || (fileConfig.backup?.targetType === undefined && fileConfig.backup?.targetPath?.startsWith('\\\\')) ? 'nas' : 'local', targetPath: fileConfig.backup?.targetPath ?? '', mode: fileConfig.backup?.mode === 'latest' ? 'latest' : 'history', automaticDaily: fileConfig.backup?.automaticDaily ?? true, afterImport: fileConfig.backup?.afterImport ?? true, retention: { daily: Math.max(1, Number(fileConfig.backup?.retention?.daily) || 7), weekly: Math.max(0, Number(fileConfig.backup?.retention?.weekly) || 4), monthly: Math.max(0, Number(fileConfig.backup?.retention?.monthly) || 12) }, nas: { credentialRef: fileConfig.backup?.nas?.credentialRef ?? '', limitEnabled: fileConfig.backup?.nas?.limitEnabled === true, bandwidthLimitMBps: Math.max(1, Number(fileConfig.backup?.nas?.bandwidthLimitMBps) || 20), limitStart: fileConfig.backup?.nas?.limitStart || '09:00', limitEnd: fileConfig.backup?.nas?.limitEnd || '18:00' } }, archive: { enabled: fileConfig.archive?.enabled === true, targetPath: fileConfig.archive?.targetPath ?? '' }, importDefaults: { deleteSourceAfterImport: fileConfig.importDefaults?.deleteSourceAfterImport ?? !(legacyFileImport?.preserveOriginal ?? false), generateJpgFromRaw: fileConfig.importDefaults?.generateJpgFromRaw ?? true, splitVideosOnImport: fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.smartImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, videoTools: { transcode: { container: fileConfig.videoTools?.transcode?.container ?? 'mp4', videoMode: fileConfig.videoTools?.transcode?.videoMode ?? 'h264', quality: fileConfig.videoTools?.transcode?.quality ?? 'balanced', resolution: fileConfig.videoTools?.transcode?.resolution ?? 'original', frameRate: fileConfig.videoTools?.transcode?.frameRate ?? 'original', audioMode: fileConfig.videoTools?.transcode?.audioMode ?? 'aac' } }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, sdDeviceIds: fileConfig.smartImport?.sdDeviceIds ?? {}, sdDevices: savedSdDevices, backupEnabled: false, generateVideoPreview: false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: false, dateFilter: fileConfig.smartImport?.dateFilter === 'today' || fileConfig.smartImport?.dateFilter === 'today_yesterday' ? fileConfig.smartImport.dateFilter : 'all' }, brollImport: { splitVideosOnImport: fileConfig.brollImport?.splitVideosOnImport ?? fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.brollImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.brollImport?.transcodeVideosOnImport ?? fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, inspirationLibrary, personDetection: personDetectionSettings, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: configuredImageSource === undefined || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: configuredVideoSource === undefined || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
+            let normalizedConfig = { ...legacyConfig, theme: fileConfig.theme ?? 'system', telemetry: { enabled: fileConfig.telemetry?.enabled === true, crashReports: fileConfig.telemetry?.crashReports === true }, workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, customProjectCategories, projectCategoryOrder: normalizeProjectCategoryOrder(fileConfig.projectCategoryOrder, customProjectCategories), defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', itemOpenMode: fileConfig.itemOpenMode === 'double' || legacyFolderOpenMode === 'double' ? 'double' : 'single', favoriteDisplayMode: fileConfig.favoriteDisplayMode === 'stars' ? 'stars' : 'binary', usagePreferencesVersion: Number(fileConfig.usagePreferencesVersion) || 0, projectToolbar: normalizeProjectToolbar(fileConfig.projectToolbar), homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, pinInspirationLibrary: fileConfig.pinInspirationLibrary === true, componentSettings, videoPlayback, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, backup: { enabled: fileConfig.backup?.enabled === true, targetType: fileConfig.backup?.targetType === 'nas' || (fileConfig.backup?.targetType === undefined && fileConfig.backup?.targetPath?.startsWith('\\\\')) ? 'nas' : 'local', targetPath: fileConfig.backup?.targetPath ?? '', mode: fileConfig.backup?.mode === 'latest' ? 'latest' : 'history', automaticDaily: fileConfig.backup?.automaticDaily ?? true, afterImport: fileConfig.backup?.afterImport ?? true, retention: { daily: Math.max(1, Number(fileConfig.backup?.retention?.daily) || 7), weekly: Math.max(0, Number(fileConfig.backup?.retention?.weekly) || 4), monthly: Math.max(0, Number(fileConfig.backup?.retention?.monthly) || 12) }, nas: { credentialRef: fileConfig.backup?.nas?.credentialRef ?? '', limitEnabled: fileConfig.backup?.nas?.limitEnabled === true, bandwidthLimitMBps: Math.max(1, Number(fileConfig.backup?.nas?.bandwidthLimitMBps) || 20), limitStart: fileConfig.backup?.nas?.limitStart || '09:00', limitEnd: fileConfig.backup?.nas?.limitEnd || '18:00' } }, archive: { enabled: fileConfig.archive?.enabled === true, targetPath: fileConfig.archive?.targetPath ?? '' }, importDefaults: { deleteSourceAfterImport: fileConfig.importDefaults?.deleteSourceAfterImport ?? !(legacyFileImport?.preserveOriginal ?? false), generateJpgFromRaw: fileConfig.importDefaults?.generateJpgFromRaw ?? true, splitVideosOnImport: fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.smartImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, videoTools: { transcode: { container: fileConfig.videoTools?.transcode?.container ?? 'mp4', videoMode: fileConfig.videoTools?.transcode?.videoMode ?? 'h264', quality: fileConfig.videoTools?.transcode?.quality ?? 'balanced', resolution: fileConfig.videoTools?.transcode?.resolution ?? 'original', frameRate: fileConfig.videoTools?.transcode?.frameRate ?? 'original', audioMode: fileConfig.videoTools?.transcode?.audioMode ?? 'aac' } }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, sdDeviceIds: fileConfig.smartImport?.sdDeviceIds ?? {}, sdDevices: savedSdDevices, backupEnabled: false, generateVideoPreview: false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: false, dateFilter: fileConfig.smartImport?.dateFilter === 'today' || fileConfig.smartImport?.dateFilter === 'today_yesterday' ? fileConfig.smartImport.dateFilter : 'all' }, brollImport: { splitVideosOnImport: fileConfig.brollImport?.splitVideosOnImport ?? fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.brollImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.brollImport?.transcodeVideosOnImport ?? fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, inspirationLibrary, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: configuredImageSource === undefined || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: configuredVideoSource === undefined || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
             normalizedConfig.videoTools.trim = { exportMode: fileConfig.videoTools?.trim?.exportMode === 'exact' ? 'exact' : 'fast' };
             normalizedConfig.folderAlphabetFilterEnabled = fileConfig.folderAlphabetFilterEnabled !== false;
             normalizedConfig.progressNamePresets = normalizeProgressNamePresets(fileConfig.progressNamePresets);
@@ -352,7 +340,7 @@ const App: React.FC = () => {
             setStartupSdAutoStart(normalizedConfig.smartImport.autoStart === true); setConfig(normalizedConfig);
             if (fileConfig.videoTools?.trim?.exportMode !== normalizedConfig.videoTools.trim.exportMode && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             if ((JSON.stringify(fileConfig.workspacePaths) !== JSON.stringify(normalizedConfig.workspacePaths) || fileConfig.smartImport?.autoMoveProjectAfterSdImport === undefined || JSON.stringify(fileConfig.smartImport?.sdDevices) !== JSON.stringify(savedSdDevices) || fileConfig.folderAlphabetFilterEnabled === undefined || JSON.stringify(fileConfig.progressNamePresets) !== JSON.stringify(normalizedConfig.progressNamePresets)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
-            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.createPlanningFolder === undefined || JSON.stringify(fileConfig.customProjectCategories) !== JSON.stringify(normalizedConfig.customProjectCategories) || JSON.stringify(fileConfig.projectCategoryOrder) !== JSON.stringify(normalizedConfig.projectCategoryOrder) || fileConfig.defaultFolderSort === undefined || fileConfig.itemOpenMode !== normalizedConfig.itemOpenMode || fileConfig.favoriteDisplayMode !== normalizedConfig.favoriteDisplayMode || fileConfig.usagePreferencesVersion !== normalizedConfig.usagePreferencesVersion || legacyFolderOpenMode !== undefined || fileConfig.birthdayEnabled === undefined || fileConfig.pinInspirationLibrary === undefined || !fileConfig.backup || fileConfig.backup?.targetType === undefined || !fileConfig.backup?.nas || !fileConfig.archive || !fileConfig.importDefaults || fileConfig.importDefaults?.splitVideosOnImport === undefined || fileConfig.importDefaults?.transcodeVideosOnImport === undefined || !fileConfig.videoTools?.transcode || legacyFileImport !== undefined || legacyBrollClearSource !== undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || !fileConfig.smartImport?.sdDeviceIds || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.videoPreviewQuality !== normalizedConfig.smartImport.videoPreviewQuality || fileConfig.smartImport?.splitLargeFiles === undefined || fileConfig.smartImport?.dateFilter !== normalizedConfig.smartImport.dateFilter || !fileConfig.brollImport || fileConfig.brollImport?.splitVideosOnImport === undefined || fileConfig.brollImport?.transcodeVideosOnImport === undefined || !fileConfig.inspirationLibrary || JSON.stringify(fileConfig.research) !== JSON.stringify(researchSettings) || fileConfig.personDetection?.useGpu === undefined || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || JSON.stringify(fileConfig.projectToolbar) !== JSON.stringify(normalizedConfig.projectToolbar) || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
+            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.createPlanningFolder === undefined || JSON.stringify(fileConfig.customProjectCategories) !== JSON.stringify(normalizedConfig.customProjectCategories) || JSON.stringify(fileConfig.projectCategoryOrder) !== JSON.stringify(normalizedConfig.projectCategoryOrder) || fileConfig.defaultFolderSort === undefined || fileConfig.itemOpenMode !== normalizedConfig.itemOpenMode || fileConfig.favoriteDisplayMode !== normalizedConfig.favoriteDisplayMode || fileConfig.usagePreferencesVersion !== normalizedConfig.usagePreferencesVersion || legacyFolderOpenMode !== undefined || fileConfig.birthdayEnabled === undefined || fileConfig.pinInspirationLibrary === undefined || !fileConfig.backup || fileConfig.backup?.targetType === undefined || !fileConfig.backup?.nas || !fileConfig.archive || !fileConfig.importDefaults || fileConfig.importDefaults?.splitVideosOnImport === undefined || fileConfig.importDefaults?.transcodeVideosOnImport === undefined || !fileConfig.videoTools?.transcode || legacyFileImport !== undefined || legacyBrollClearSource !== undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || !fileConfig.smartImport?.sdDeviceIds || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.videoPreviewQuality !== normalizedConfig.smartImport.videoPreviewQuality || fileConfig.smartImport?.splitLargeFiles === undefined || fileConfig.smartImport?.dateFilter !== normalizedConfig.smartImport.dateFilter || !fileConfig.brollImport || fileConfig.brollImport?.splitVideosOnImport === undefined || fileConfig.brollImport?.transcodeVideosOnImport === undefined || !fileConfig.inspirationLibrary || JSON.stringify(fileConfig.research) !== JSON.stringify(researchSettings) || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || JSON.stringify(fileConfig.projectToolbar) !== JSON.stringify(normalizedConfig.projectToolbar) || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             console.log('📋 Configuration loaded from file');
           } else {
             if (window.electronAPI?.getUserPath) {
@@ -593,13 +581,13 @@ const App: React.FC = () => {
     activatePage(ownerPageId);
     setSelectedProject(project);
     setProjectDestination(project.path);
-    setActiveTab(kind === 'version' ? 'project-version' : 'project-team');
+    setActiveTab('project-version');
   };
   const activateWorkspaceToolTab = (tab: WorkspaceToolTab, project: WorkspaceProject) => {
     activatePage(tab.ownerPageId);
     setSelectedProject(project);
     setProjectDestination(project.path);
-    setActiveTab(tab.kind === 'version' ? 'project-version' : 'project-team');
+    setActiveTab('project-version');
   };
   const activateComponentPageTab = (page: typeof componentPages[number]) => {
     const projectPage = projectPages.find(candidate => candidate.projectId === page.projectId && candidate.project);
@@ -612,27 +600,10 @@ const App: React.FC = () => {
   };
   const closeComponentPageTab = (page: typeof componentPages[number]) => componentHost.close(page);
   const disposeProjectComponentPages = componentHost.disposeProject;
-  const updateWorkspaceToolTabBusy = useCallback((ownerPageId: string, kind: WorkspaceToolKind, busy: boolean) => {
-    setWorkspaceToolTabs(current => {
-      let changed = false;
-      const next = current.map(tab => {
-        if (tab.ownerPageId !== ownerPageId || tab.kind !== kind || tab.busy === busy) return tab;
-        changed = true;
-        return { ...tab, busy };
-      });
-      return changed ? next : current;
-    });
-  }, []);
   const closeWorkspaceToolTab = async (ownerPageId: string, kind: WorkspaceToolKind) => {
-    const tab = workspaceToolTabs.find(item => item.ownerPageId === ownerPageId && item.kind === kind);
-    if (kind === 'team' && tab?.busy && !await appDialog.confirm({
-      title: '团片任务仍在运行',
-      message: '后台任务会继续运行，重新打开团片协作可查看进度。',
-      confirmLabel: '关闭标签',
-    })) return;
     setWorkspaceToolTabs(current => current.filter(item => item.ownerPageId !== ownerPageId || item.kind !== kind));
     const closingActiveTab = activePageId === ownerPageId
-      && activeTab === (kind === 'version' ? 'project-version' : 'project-team');
+      && activeTab === 'project-version';
     if (closingActiveTab) setActiveTab('project');
   };
   const showHomeTab = () => {
@@ -682,15 +653,9 @@ const App: React.FC = () => {
     setSettingsTabOpen(false);
     if (activeTab === 'settings') showHomeTab();
   };
-  const closeProjectTab = async (pageId: string, force = false) => {
+  const closeProjectTab = async (pageId: string, _force = false) => {
     const page = projectPages.find(candidate => candidate.id === pageId);
     if (!page?.project) return;
-    const runningTeamTab = workspaceToolTabs.find(tab => tab.ownerPageId === pageId && tab.kind === 'team' && tab.busy);
-    if (!force && runningTeamTab && !await appDialog.confirm({
-      title: '团片任务仍在运行',
-      message: '项目及团片标签将关闭，后台任务会继续运行。',
-      confirmLabel: '关闭项目标签',
-    })) return;
     const remaining = projectPages.filter(candidate => candidate.id !== pageId);
     const closingIndex = projectPages.findIndex(candidate => candidate.id === pageId);
     const closingLastProjectPage = !remaining.some(candidate => candidate.projectId === page.projectId);
@@ -793,11 +758,11 @@ const App: React.FC = () => {
                 <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${label}`} title={`关闭 ${label}`} onClick={() => void closeProjectTab(page.id)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
               </div>
               {workspaceToolTabs.filter(tab => tab.ownerPageId === page.id).map(tab => {
-                const tabType = tab.kind === 'version' ? 'project-version' : 'project-team';
+                const tabType = 'project-version';
                 const isActive = activePageId === tab.ownerPageId && activeTab === tabType;
-                const Icon = tab.kind === 'version' ? GitBranch : UsersRound;
+                const Icon = GitBranch;
                 return <div key={`${tab.ownerPageId}:${tab.kind}`} {...titlebarTabDragProps(workspaceToolTabId(tab.ownerPageId, tab.kind))} title={tab.label} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[128px] max-w-[230px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
-                  <button type="button" onClick={() => activateWorkspaceToolTab(tab, project)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Icon size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{tab.label}</span>{tab.kind === 'team' && tab.busy && <span aria-label="任务运行中" title="任务运行中" className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-violet-500"/>}</button>
+                  <button type="button" onClick={() => activateWorkspaceToolTab(tab, project)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Icon size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{tab.label}</span></button>
                   <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${tab.label}`} title={`关闭 ${tab.label}`} onClick={() => void closeWorkspaceToolTab(tab.ownerPageId, tab.kind)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
                 </div>;
               })}
@@ -820,7 +785,7 @@ const App: React.FC = () => {
       {showWorkspaceSetup ? <WorkspaceSetupPage config={config} onSave={handleWorkspaceSetup}/> : <div className="flex min-h-0 flex-1">
       {/* Sidebar */}
       <aside style={{ width: sidebarCollapsed ? 0 : renderedSidebarWidth }} className="relative z-30 flex min-w-0 shrink-0 flex-col overflow-hidden bg-white transition-[width] duration-200">
-        {activeTab === 'settings' && <SettingsNavigator activeSection={settingsSection} components={components} onSelect={section => { setSettingsSection(section); if (section === 'backup' || section === 'storage') setBackupProjectFocus(null); }}/>}
+        {activeTab === 'settings' && <SettingsNavigator activeSection={settingsSection} onSelect={section => { setSettingsSection(section); if (section === 'backup' || section === 'storage') setBackupProjectFocus(null); }}/>}
         {projectPages.some(page => page.kind === 'inspiration') && <div className={activeTab === 'inspiration' ? 'contents' : 'hidden'}><InspirationLibraryNavigator active={activeTab === 'inspiration'} rootPath={config.inspirationLibrary.rootPath} targetWorkspacePath={config.workspacePath} currentRelativePath={projectPages.find(page => page.id === activePageId && page.kind === 'inspiration')?.currentRelativePath || ''} onNavigate={navigateInspiration} onOpenInNewTab={openInspirationDirectoryPage} onOpenSettings={openSettingsTab} onNotice={showNotice}/></div>}
         {activeTab !== 'settings' && activeTab !== 'inspiration' && <><ProjectNavigator
           workspacePath={config.workspacePath}
@@ -875,12 +840,12 @@ const App: React.FC = () => {
                 </div>;
           return <div key={card} className={draggedHomeCard === card ? 'opacity-40' : undefined}>{content}</div>;
         })}</div>
-        {projectPages.filter(page => page.kind === 'inspiration').map(page => { const active = activeTab === 'inspiration' && activePageId === page.id; return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage pageId={page.id} active={active} initialRelativePath={page.initialRelativePath} navigationRequest={browserNavigationRequests[page.id]} config={config} components={components} componentsLoading={componentsLoading} onUpdateConfig={handleConfigUpdate} onDirectoryChange={updatePagePath} onOpenDirectoryPage={openInspirationDirectoryPage} onNotice={showNotice}/></div>; })}
+        {projectPages.filter(page => page.kind === 'inspiration').map(page => { const active = activeTab === 'inspiration' && activePageId === page.id; return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage pageId={page.id} active={active} initialRelativePath={page.initialRelativePath} navigationRequest={browserNavigationRequests[page.id]} config={config} components={components} onUpdateConfig={handleConfigUpdate} onDirectoryChange={updatePagePath} onOpenDirectoryPage={openInspirationDirectoryPage} onNotice={showNotice}/></div>; })}
         {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} backupProjectFocus={backupProjectFocus} onClearBackupProjectFocus={() => setBackupProjectFocus(null)} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={() => refreshComponents(true)} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} getDefaultSettings={getDefaultSettings} onNotice={showNotice}/>}
         {componentPages.map(page => <ComponentPageSurface key={page.identity} page={page} active={activeTab === 'component' && activeComponentPageIdentity === page.identity}/>)}
         {projectPages.filter(page => page.project).map(page => { const project = page.project!;
           const active = activeTab.startsWith('project') && activePageId === page.id;
-          const activeView = activeTab === 'project-version' ? 'version' : activeTab === 'project-team' ? 'team' : 'project';
+          const activeView = activeTab === 'project-version' ? 'version' : 'project';
           return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><ProjectWorkspace
             pageId={page.id}
             active={active}
@@ -889,8 +854,6 @@ const App: React.FC = () => {
             workspacePath={project.workspacePath || config.workspacePath}
             inspirationLibraryRootPath={config.inspirationLibrary.rootPath}
             installedComponentIds={installedComponentIds}
-            componentsLoading={componentsLoading}
-            teamRetouchStatus={components.find(component => component.id === 'team-retouch')}
             componentHostActions={componentHostActions} onOpenComponentPage={action => void openComponentPage(action, project, project.workspacePath || config.workspacePath)}
             advancedVideoSettings={config.videoPlayback}
             projectToolbar={config.projectToolbar}
@@ -915,7 +878,6 @@ const App: React.FC = () => {
             onOpenDirectoryPage={relativePath => openProjectDirectoryPage(project, relativePath)}
             onOpenToolTab={(pageId, kind, label) => openWorkspaceToolTab(pageId, project, kind, label)}
             onCloseToolTab={(pageId, kind) => void closeWorkspaceToolTab(pageId, kind)}
-            onToolTabBusyChange={(pageId, kind, busy) => updateWorkspaceToolTabBusy(pageId, kind, busy)}
             onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })}
             onMatchConfigChange={(smartMatch: AppConfig['smartMatch']) => handleConfigUpdate({ ...config, smartMatch })}
             onResearchConfigChange={(research: AppConfig['research']) => handleConfigUpdate({ ...config, research })}
@@ -923,7 +885,7 @@ const App: React.FC = () => {
             onProjectMoved={nextProject => {
               nextProject = { ...nextProject, workspacePath: project.workspacePath || config.workspacePath };
               updateProject(nextProject);
-              setWorkspaceToolTabs(current => current.map(tab => tab.projectId === project.id ? { ...tab, projectPath: nextProject.path, label: tab.kind === 'team' ? `团片 · ${nextProject.name}` : tab.label } : tab));
+              setWorkspaceToolTabs(current => current.map(tab => tab.projectId === project.id ? { ...tab, projectPath: nextProject.path } : tab));
               setSelectedProject(nextProject);
               setProjectDestination(nextProject.path);
               window.dispatchEvent(new Event('workspace-projects-changed'));

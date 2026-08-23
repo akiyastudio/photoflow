@@ -1,20 +1,19 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { FolderInput, FolderPlus, Folder, Image as ImageIcon, ScanSearch, GalleryVerticalEnd, Play, Trash2, Edit, X, Plus, Loader2, CheckCircle2, ExternalLink, Video, ChevronDown, ChevronUp, File, FileImage, MemoryStick, LayoutList, Grid2X2, FileText, Copy, Scissors as Cut, ClipboardPaste, CheckSquare, ArrowLeft, ArrowRight, Camera, Aperture, Timer, Gauge, Ruler, Calendar, Activity, Volume2, PanelLeftOpen, ArrowUpDown, ArrowUp, ArrowDown, ArrowUpRight, AlertTriangle, Search, Filter as Funnel, Info, GripVertical, Maximize2, GitBranch, UsersRound, Heart, Star, RefreshCw, Crop, Pin } from 'lucide-react';
+import { FolderInput, FolderPlus, Folder, Image as ImageIcon, ScanSearch, GalleryVerticalEnd, Play, Trash2, Edit, X, Plus, Loader2, CheckCircle2, ExternalLink, Video, ChevronDown, ChevronUp, File, FileImage, MemoryStick, LayoutList, Grid2X2, FileText, Copy, Scissors as Cut, ClipboardPaste, CheckSquare, ArrowLeft, ArrowRight, Camera, Aperture, Timer, Gauge, Ruler, Calendar, Activity, Volume2, PanelLeftOpen, ArrowUpDown, ArrowUp, ArrowDown, ArrowUpRight, AlertTriangle, Search, Filter as Funnel, Info, GripVertical, Maximize2, GitBranch, Heart, Star, RefreshCw, Crop, Pin } from 'lucide-react';
 import { VersionManager } from '../../components/VersionManager';
 import { AdvancedVideoPlayer, videoDirectionalAction, videoDirectionalKeyboardInput } from '../../components/AdvancedVideoPlayer';
 import { InteractiveCropEditor } from '../../components/InteractiveCropEditor';
 import { ImportSourceControls, type ImportMaterialKind } from '../../components/ImportSourceControls';
 import type { CropRectangle } from '../../components/InteractiveCropEditor';
 import { ProjectVersionTree, type VersionTreeCanvasController } from '../../components/ProjectVersionTree';
-import type { TeamRetouchStep } from '../../components/TeamRetouchSteps';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import { ConverterView, ImportCard, MatchView, ResearchView, ScreenshotMainImageView, VideoSplitView, VideoTranscodeView, type ImportCompletion } from '../tools/ToolViews';
 import { PROJECT_FILE_BROWSER_CONTEXT } from '../file-browser/browser-context';
 import type { FileBrowserContext } from '../file-browser/browser-context';
 import { normalizeProjectCategoryOrder, PROJECT_TOOLBAR_ACTION_IDS, projectStatusLabel } from '../../types';
-import type { AppConfig, ComponentHostAction, ComponentStatus, MediaMetadataField, ProgressFolder, ProjectFileEntry, ProjectFileListFilter, ProjectFileOperationProgress, ProjectFileSortField, ProjectFilterScope, ProjectToolbarActionId, ShellNewFileType, VersionBatchFileOperation, VersionGraphEdge, WorkspaceProject } from '../../types';
+import type { AppConfig, ComponentHostAction, MediaMetadataField, ProgressFolder, ProjectFileEntry, ProjectFileListFilter, ProjectFileOperationProgress, ProjectFileSortField, ProjectFilterScope, ProjectToolbarActionId, ShellNewFileType, VersionBatchFileOperation, VersionGraphEdge, WorkspaceProject } from '../../types';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
 import { useTaskCenter } from '../background-tasks/TaskCenter';
 import { isPanelTaskRestoreForPage, panelTaskSessionKey, type PanelTaskRestoreDetail } from '../background-tasks/panel-task-session-model';
@@ -32,7 +31,6 @@ import { metadataFieldLabel, metadataGroupLabel } from '../metadata/metadata-lab
 import { metadataGroupDependencyKey, previewMetadataFieldsForEntry, reconcileExpandedMetadataGroups } from '../metadata/metadata-pane-model';
 import { projectWorkspaceClient } from '../../platform/project-workspace-client';
 import { useProjectFileSelection } from './useProjectFileSelection';
-import { installedPluginHasCapability } from '../plugins/plugin-contributions';
 import { defaultProjectFileSortDirection, isFolderLikeEntry, sortProjectFileEntries } from './file-entry-sort-model';
 import { ImportCompletionNotice, ToolModal } from './ProjectToolModal';
 import { ColumnResizeHandle, ComponentToolbarActions, ViewportContextMenu } from './ProjectWorkspaceLayout';
@@ -40,11 +38,6 @@ import { deleteMediaThumbnailPreview, findCachedMediaThumbnailPreview, forgetMed
 import { formatShutterSpeed, isOfficeOpenXmlEntry, isPhotoshopOpenEntry, isScreenshotMainImageEntry, pickCaptureDate, pickMetadataValue, requestCaptureDateTime } from './project-workspace-media-metadata';
 import { clampNumber, fitProjectColumnWidths, readStoredBoolean, readStoredNumber, scheduleAfterProjectPaint } from './project-workspace-layout-model';
 import { PhotoshopIcon } from './PhotoshopIcon';
-const LazyTeamRetouchManager = React.lazy(() => import('../../components/TeamRetouchManager').then(module => ({ default: module.TeamRetouchManager })));
-const LazyPersonIdentityManager = React.lazy(() => import('../../components/PersonIdentityManager').then(module => ({ default: module.PersonIdentityManager })));
-const TeamFeatureLoading = () => <div role="status" className="flex h-full min-h-48 items-center justify-center text-sm text-slate-500"><Loader2 size={18} className="mr-2 animate-spin"/>正在加载团片协作…</div>;
-const TeamRetouchManager = (props: React.ComponentProps<typeof LazyTeamRetouchManager>) => <React.Suspense fallback={<TeamFeatureLoading/>}><LazyTeamRetouchManager {...props}/></React.Suspense>;
-const PersonIdentityManager = (props: React.ComponentProps<typeof LazyPersonIdentityManager>) => <React.Suspense fallback={<TeamFeatureLoading/>}><LazyPersonIdentityManager {...props}/></React.Suspense>;
 const FILE_VIRTUAL_OVERSCAN_ROWS = 10;
 const RECENT_FILES_PAGE_SIZE = 240;
 const RECENT_FILES_LOAD_AHEAD_PX = 900;
@@ -108,7 +101,7 @@ const PROJECT_STAR_RATING_FILTER_OPTIONS: ReadonlyArray<{ value: ProjectRatingFi
 ];
 const normalizeProjectRelativePath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
 const projectRelativeParentPath = (value: string) => normalizeProjectRelativePath(value).split('/').slice(0, -1).join('/');
-const PROTECTED_PROJECT_FOLDER_NAMES = new Set(['raw', 'jpg', 'mov', 'mov_预览', '策划', '团片协作']);
+const PROTECTED_PROJECT_FOLDER_NAMES = new Set(['raw', 'jpg', 'mov', 'mov_预览', '策划']);
 const PROGRESS_FOLDER_NAME_PATTERN = /^(?:图片后期|视频后期)_\d+(?:_\d+)*(?:_.+)?$/u;
 type ProgressSetupDraft = {
   mode: 'create' | 'import' | 'mark';
@@ -269,14 +262,12 @@ type FileBrowserWorkspaceProps = {
   pageId: string;
   initialRelativePath?: string;
   active: boolean;
-  activeView: 'project' | 'version' | 'team';
+  activeView: 'project' | 'version';
   project: WorkspaceProject;
   workspacePath: string;
   inspirationTargetWorkspacePath?: string;
   inspirationLibraryRootPath?: string;
   installedComponentIds: ReadonlySet<string>;
-  componentsLoading: boolean;
-  teamRetouchStatus?: ComponentStatus;
   componentHostActions?: ComponentHostAction[]; onOpenComponentPage?: (action: ComponentHostAction) => void; advancedVideoSettings: AppConfig['videoPlayback'];
   projectToolbar?: AppConfig['projectToolbar'];
   customProjectCategories?: string[];
@@ -299,9 +290,8 @@ type FileBrowserWorkspaceProps = {
   onDirectoryChange?: (relativePath: string) => void;
   onOpenInspirationPath?: (relativePath: string) => void;
   onOpenDirectoryPage?: (relativePath: string) => void;
-  onOpenToolTab?: (kind: 'version' | 'team', label: string) => void;
-  onCloseToolTab?: (kind: 'version' | 'team') => void;
-  onToolTabBusyChange?: (kind: 'version' | 'team', busy: boolean) => void;
+  onOpenToolTab?: (kind: 'version', label: string) => void;
+  onCloseToolTab?: (kind: 'version') => void;
   onImportConfigChange: (config: AppConfig['smartImport']) => void;
   onMatchConfigChange: (config: AppConfig['smartMatch']) => void;
   onResearchConfigChange: (config: AppConfig['research']) => void;
@@ -314,7 +304,7 @@ const isUnsupportedShortcutContent = (entry: ProjectFileEntry) => entry.viaShort
 const backgroundTaskPathKey = (value: unknown) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '').toLocaleLowerCase();
 const handledVideoTrimTaskIds = new Set<string>();
 
-const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePath, inspirationTargetWorkspacePath, inspirationLibraryRootPath, installedComponentIds, componentsLoading, teamRetouchStatus, componentHostActions = [], onOpenComponentPage = () => undefined, advancedVideoSettings, projectToolbar = { order: [...PROJECT_TOOLBAR_ACTION_IDS], hidden: [], onlyShowAvailable: false }, customProjectCategories = [], projectCategoryOrder = [], progressNamePresets = [], initialPanel, initialRelativePath = '', importConfig, importDefaults, brollConfig, videoTools, matchConfig, researchConfig, mediaCacheConfig, defaultFolderSort, itemOpenMode, folderAlphabetFilterEnabled = true, favoriteDisplayMode = 'binary', browserContext, navigationRequest, onDirectoryChange, onOpenInspirationPath, onOpenDirectoryPage, onOpenToolTab = () => undefined, onCloseToolTab = () => undefined, onToolTabBusyChange = () => undefined, onImportConfigChange, onMatchConfigChange, onResearchConfigChange, onNotice, onProjectMoved = () => undefined, onDeleted = () => undefined }: FileBrowserWorkspaceProps) => {
+const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePath, inspirationTargetWorkspacePath, inspirationLibraryRootPath, installedComponentIds, componentHostActions = [], onOpenComponentPage = () => undefined, advancedVideoSettings, projectToolbar = { order: [...PROJECT_TOOLBAR_ACTION_IDS], hidden: [], onlyShowAvailable: false }, customProjectCategories = [], projectCategoryOrder = [], progressNamePresets = [], initialPanel, initialRelativePath = '', importConfig, importDefaults, brollConfig, videoTools, matchConfig, researchConfig, mediaCacheConfig, defaultFolderSort, itemOpenMode, folderAlphabetFilterEnabled = true, favoriteDisplayMode = 'binary', browserContext, navigationRequest, onDirectoryChange, onOpenInspirationPath, onOpenDirectoryPage, onOpenToolTab = () => undefined, onCloseToolTab = () => undefined, onImportConfigChange, onMatchConfigChange, onResearchConfigChange, onNotice, onProjectMoved = () => undefined, onDeleted = () => undefined }: FileBrowserWorkspaceProps) => {
   const appDialog = useAppDialog();
   const projectStatuses = useMemo<Array<WorkspaceProject['status']>>(() => {
     const values = [...normalizeProjectCategoryOrder(projectCategoryOrder, customProjectCategories), project.status];
@@ -459,7 +449,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const projectPathRef = useRef(project.path);
   const projectLifecycleRef = useRef<ProjectWorkspaceLifecycleIdentity>();
   const automaticProgressLoadKeyRef = useRef('');
-  const automaticTeamRetouchLoadKeyRef = useRef('');
   const progressFoldersRequestRef = useRef<Promise<ProgressFolder[]> | null>(null);
   const watchReconcileStateRef = useRef({ identity: '', externalWatchRevision: -1, lastReconciledAt: 0 });
   const directoryEntriesCacheRef = useRef(new Map<string, ProjectFileEntry[]>());
@@ -695,12 +684,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [screenshotMainImageTargets, setScreenshotMainImageTargets] = useState<string[]>([]);
   const [screenshotMainImageMode, setScreenshotMainImageMode] = useState<'extract' | 'crop'>('extract');
   const [versionEntry, setVersionEntry] = useState<ProjectFileEntry | null>(null);
-  const [teamRetouchEntries, setTeamRetouchEntries] = useState<ProjectFileEntry[]>([]);
-  const [teamRetouchHistory, setTeamRetouchHistory] = useState<ProjectFileEntry[]>([]);
-  const [teamRetouchStep, setTeamRetouchStep] = useState<TeamRetouchStep | null>(null);
-  const [teamRetouchOpening, setTeamRetouchOpening] = useState(false);
-  const teamRetouchHistoryRequestRef = useRef<Promise<ProjectFileEntry[]> | null>(null);
-  const teamRetouchWorkflowGeneratedRef = useRef(false);
   const [, setFinalVersionSummary] = useState({ count: 0, availableCount: 0, missingCount: 0 });
   const [finalExporting, setFinalExporting] = useState(false);
   const [finalExportParentId, setFinalExportParentId] = useState('');
@@ -754,8 +737,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     }
   }, [project.path, projectWorkflows]);
   const officeImageExtractorAvailable = true;
-  const teamRetouchInstalled = installedPluginHasCapability(installedComponentIds, 'team-retouch.workspace');
-  const teamRetouchAvailable = teamRetouchInstalled || componentsLoading;
   const folderBrowseModeStorageKey = `photoflow:folder-browse-modes:${browserContext.kind}:${workspacePath}|${project.name}`;
   const folderGridIconSizeStorageKey = `photoflow:folder-grid-icon-sizes:${browserContext.kind}:${workspacePath}|${project.name}`;
   const readFolderBrowseModes = (): Record<string, ProjectBrowseMode> => {
@@ -853,39 +834,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     return () => { disposed = true; window.removeEventListener('workspace-projects-changed', changed); };
   }, [gatherToProject, inspirationTargetWorkspacePath]);
 
-  const loadTeamRetouchHistory = useCallback((): Promise<ProjectFileEntry[]> => {
-    if (!projectWorkflows || !teamRetouchAvailable) {
-      setTeamRetouchHistory([]);
-      teamRetouchWorkflowGeneratedRef.current = false;
-      return Promise.resolve([]);
-    }
-    if (teamRetouchHistoryRequestRef.current) return teamRetouchHistoryRequestRef.current;
-    const requestedProjectPath = project.path;
-    const request: Promise<ProjectFileEntry[]> = projectWorkspaceClient.getTeamProjectWorkspace(workspacePath, project.name, project.status).then(result => {
-      if (projectPathRef.current !== requestedProjectPath) return [];
-      if (!result.success) throw new Error(result.error || '无法读取团片协作记录');
-      if (result.workflowNodeCreated && result.workflowNode) {
-        setProgressFolders(current => {
-          const next = current.some(folder => folder.id === result.workflowNode!.id) ? current : [...current, result.workflowNode!];
-          progressFoldersRef.current = next;
-          return next;
-        });
-      }
-      teamRetouchWorkflowGeneratedRef.current = Boolean(result.workflowGenerated);
-      const entries = result.photos.map(photo => {
-        const name = photo.sourcePath.split(/[\\/]/).pop() || photo.name;
-        const extension = name.includes('.') ? `.${name.split('.').pop()}`.toLocaleLowerCase() : '';
-        return { name, path: photo.sourcePath, relativePath: photo.relativePath, kind: 'image' as const, extension, size: -1, createdAt: 0, updatedAt: Math.max(0, ...photo.tasks.map(task => task.updatedAt || 0)) };
-      });
-      setTeamRetouchHistory(entries);
-      return entries;
-    }).finally(() => {
-      if (teamRetouchHistoryRequestRef.current === request) teamRetouchHistoryRequestRef.current = null;
-    });
-    teamRetouchHistoryRequestRef.current = request;
-    return request;
-  }, [projectWorkflows, teamRetouchAvailable, workspacePath, project.name, project.path, project.status]);
-
   useEffect(() => {
     const items = progressCompare ? buildProgressCompareListItems(progressCompare, progressCompareFilter) : [];
     if (!items.length) {
@@ -895,25 +843,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setActiveProgressCompareItemKey(current => items.some(item => item.key === current) ? current : items[0].key);
   }, [progressCompare, progressCompareFilter]);
 
-  useEffect(() => {
-    if (!teamRetouchAvailable) {
-      automaticTeamRetouchLoadKeyRef.current = '';
-      setTeamRetouchEntries([]);
-      setTeamRetouchStep(null);
-      teamRetouchWorkflowGeneratedRef.current = false;
-      return;
-    }
-    if (!active || !foregroundDirectoryReady) return;
-    const loadKey = `${workspacePath}\0${project.status}\0${project.name}\0${project.path}`;
-    if (automaticTeamRetouchLoadKeyRef.current === loadKey) return;
-    return scheduleAfterProjectPaint(PROJECT_BACKGROUND_LOAD_DELAYS_MS.teamRetouch, () => {
-      if (!activeRef.current) return;
-      automaticTeamRetouchLoadKeyRef.current = loadKey;
-      void loadTeamRetouchHistory().catch(() => {
-        if (automaticTeamRetouchLoadKeyRef.current === loadKey) automaticTeamRetouchLoadKeyRef.current = '';
-      });
-    });
-  }, [active, foregroundDirectoryReady, loadTeamRetouchHistory, project.name, project.path, project.status, teamRetouchAvailable, workspacePath]);
 
   useEffect(() => {
     window.localStorage.setItem('photoflow:files-column-width', String(Math.round(columnWidths.files)));
@@ -1579,7 +1508,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     directoryPrefetchesRef.current.clear();
     shortcutPreviewStatesRef.current.clear();
     progressFoldersRequestRef.current = null;
-    teamRetouchHistoryRequestRef.current = null;
     setDirectoryLoading(active);
     if (lifecycle.kind === 'refresh') {
       if (active) refresh(lifecycle.relativePath);
@@ -1597,7 +1525,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setFinalViewOpen(false);
     setFinalViewEntries([]);
     setVersionEntry(null);
-    setTeamRetouchEntries([]);
     setProgressSetup(null);
     setProgressCompare(null);
     setProgressTask('');
@@ -1808,7 +1735,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       setFileEntries(applySourceRevision);
       setSearchEntries(applySourceRevision);
       setFinalViewEntries(applySourceRevision);
-      setTeamRetouchEntries(applySourceRevision);
     });
     return unsubscribe;
   }, [active, previewOnlyOnMediaClick]);
@@ -3641,47 +3567,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       setFinalExporting(false);
     }
   };
-  const openTeamRetouch = async (entry?: ProjectFileEntry) => {
-    if (teamRetouchOpening) return;
-    const targets = entry
-      ? (selectedPaths.includes(entry.relativePath) ? selectedEntries : [entry])
-      : selectedEntries;
-    const validTargets = targets.filter(target => target.kind === 'image');
-    if (!validTargets.length && teamRetouchStep && teamRetouchEntries.length) {
-      setTeamRetouchStep(teamRetouchWorkflowGeneratedRef.current ? 'workflow' : 'detect');
-      onOpenToolTab('team', `团片 · ${project.name}`);
-      return;
-    }
-    setTeamRetouchOpening(true);
-    const dismissLoadingNotice = onNotice('正在加载团片协作数据…', 30000);
-    try {
-      const history = teamRetouchHistory.length ? teamRetouchHistory : await loadTeamRetouchHistory();
-      if (targets.length && validTargets.length !== targets.length && !history.length) {
-        onNotice('请选择成片图片，不要混选文件夹、RAW 或视频。');
-        return;
-      }
-      if (!targets.length && !history.length) {
-        onNotice('请选择至少一张成片图片开始团片协作');
-        return;
-      }
-      const combined = new Map<string, ProjectFileEntry>();
-      for (const item of [...history, ...teamRetouchEntries, ...validTargets]) combined.set(item.relativePath.toLocaleLowerCase(), item);
-      if (validTargets.length) {
-        const registered = await projectWorkspaceClient.registerTeamProjectPhotos(workspacePath, project.status, project.name, validTargets.map(target => target.relativePath));
-        if (!registered.success) throw new Error(registered.error || '未知错误');
-        void loadTeamRetouchHistory().catch(() => undefined);
-      }
-      setTeamRetouchEntries([...combined.values()]);
-      setTeamRetouchStep(validTargets.length ? 'detect' : teamRetouchWorkflowGeneratedRef.current ? 'workflow' : 'detect');
-      onOpenToolTab('team', `团片 · ${project.name}`);
-      onNotice(`团片协作已加载，共 ${combined.size} 张图片`);
-    } catch (error) {
-      onNotice(`打开团片协作失败：${error instanceof Error ? error.message : String(error)}`, 7000);
-    } finally {
-      if (typeof dismissLoadingNotice === 'function') dismissLoadingNotice();
-      setTeamRetouchOpening(false);
-    }
-  };
   const openProjectEntriesInPhotoshop = async (entries: ProjectFileEntry[]) => {
     if (entries.some(entry => entry.viaShortcut && !entry.viaExternalLink)) {
       onNotice('快捷方式中的文件不能直接发送到 Photoshop。');
@@ -5112,7 +4997,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   };
   const renderVersionTreeEntry = (entry: ProjectFileEntry, progressFolder?: ProgressFolder, sourceKind?: 'image' | 'video') => {
     const selected = selectedPaths.includes(entry.relativePath) || previewPath === entry.relativePath;
-    const workflow = progressFolder?.nodeRole === 'workflow' && progressFolder.artifactKind === 'team_workspace';
+    const workflow = progressFolder?.nodeRole === 'workflow';
     const previewArtifact = progressFolder?.nodeRole === 'artifact' && progressFolder.artifactKind === 'preview';
     const displayName = getEntryDisplayName(entry);
     const statusLabel = progressFolder
@@ -5123,8 +5008,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
               : versionTreeStatusLabel(progressFolder)
       : sourceKind === 'image' ? '原始图片素材'
         : sourceKind === 'video' ? '原始视频素材'
-          : entry.name === '团片协作' ? '协作工作区'
-            : getEntryTypeLabel(entry);
+          : getEntryTypeLabel(entry);
     return <div
       role="button"
       tabIndex={0}
@@ -5145,7 +5029,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       <span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span>
       {progressFolder && (progressFolder.nodeRole === 'progress' ? <button type="button" onPointerDown={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); openMarkProgress(entry); }} title={`编辑 V${progressFolder.versionKey} 进度`} aria-label={`编辑 V${progressFolder.versionKey} 进度`} className="absolute right-3 top-3 z-10 rounded-full bg-blue-600 px-2 py-1 text-[10px] font-bold text-white shadow-sm transition hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-300">{versionTreeNodeBadgeLabel(progressFolder)}</button> : <span className={`absolute right-3 top-3 z-10 rounded-full px-2 py-1 text-[10px] font-bold shadow-sm ${progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' || workflow ? 'bg-violet-600 text-white' : previewArtifact ? 'bg-amber-500 text-white' : 'bg-slate-700 text-white'}`}>{versionTreeNodeBadgeLabel(progressFolder)}</span>)}
       {!progressFolder && sourceKind && <span className="absolute right-3 top-3 z-10 rounded-full bg-slate-700 px-2 py-1 text-[10px] font-bold text-white shadow-sm">原始素材</span>}
-      {!progressFolder && entry.name === '团片协作' && <span className="absolute right-3 top-3 z-10 rounded-full bg-violet-600 px-2 py-1 text-[10px] font-bold text-white shadow-sm">协作分支</span>}
       <div className={`relative flex aspect-square items-center justify-center ${previewArtifact ? 'rounded-xl bg-amber-500/[0.035]' : ''}`}>{renderEntryIcon(entry, true)}</div>
       {progressFolder ? <p className="mt-1 truncate text-xs font-medium text-slate-700" title={displayName}>{displayName}</p> : renderEntryName(entry, true)}
       <p className={`mt-0.5 truncate text-[10px] ${progressFolder?.trackingState === 'needs_repair' ? 'font-bold text-amber-600' : 'text-slate-400'}`}><span aria-hidden className="mr-1">●</span>{statusLabel}</p>
@@ -5173,7 +5056,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const fileMenuHasToolActions = Boolean(fileMenu && (fileMenuHasVideoTarget || fileMenuHasPngTarget || fileMenuScreenshotMainImageEntries.length || fileMenuOfficeEntries.length));
   const selectedCanSetVersionProgress = Boolean(projectWorkflows && selectedProgressFolder && !selectedRegisteredProgressFolder && !isUnsupportedShortcutContent(selectedProgressFolder));
   const versionManagementToolbarAvailable = Boolean(selectedEditableProgressFolder) || selectedCanSetVersionProgress || selectedEntries.length === 1 && hasVersionProgressForEntry(selectedEntries[0]);
-  const teamRetouchToolbarAvailable = teamRetouchInstalled && (selectedEntries.some(entry => entry.kind === 'image') || teamRetouchHistory.length > 0);
   const projectToolbarAvailability: Record<ProjectToolbarActionId, boolean> = {
     'filename-selection': true,
     'select-media': canSelectMedia,
@@ -5182,7 +5064,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     photoshop: photoshopToolbarAvailable,
     'office-extract': selectedOfficeExtractEntries.length > 0,
     'version-management': versionManagementToolbarAvailable,
-    'team-retouch': teamRetouchToolbarAvailable,
   };
   const unavailableProjectToolbarTitle = (label: string, reason: string) => `${label}，${reason}`;
   const projectToolbarButtons: Record<ProjectToolbarActionId, React.ReactNode> = {
@@ -5193,7 +5074,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     photoshop: <button disabled={!photoshopToolbarAvailable} onClick={() => void openProjectEntriesInPhotoshop(selectedEntries)} title={photoshopToolbarAvailable ? selectedEntries.length > 1 ? `用 Photoshop 打开：把所选 ${selectedEntries.length} 个图片、RAW 或 Photoshop 文档发送到 Photoshop` : '用 Photoshop 打开所选图片或文档' : unavailableProjectToolbarTitle('用 Photoshop 打开', !photoshopAvailable ? '未检测到 Photoshop' : selectedContainsShortcutContent ? '快捷方式内容暂不支持' : '需选择图片、RAW 或 PSD/PSB 使用')} aria-label="在 Photoshop 中打开所选图片、RAW 或 Photoshop 文档" className="project-action-button"><PhotoshopIcon size={16}/>用 Photoshop 打开{selectedEntries.length > 1 && photoshopToolbarAvailable ? `（${selectedEntries.length} 个）` : ''}</button>,
     'office-extract': <button type="button" disabled={!selectedOfficeExtractEntries.length} onClick={() => openOfficeImageExtractor(selectedOfficeExtractEntries)} aria-pressed={panel === 'office-extract'} title={selectedOfficeExtractEntries.length ? `从所选 ${selectedOfficeExtractEntries.length} 个 Office 文档提取图片` : '请选择 Office 文档'} className={`project-action-button ${panel === 'office-extract' ? 'bg-blue-50 text-blue-600' : ''}`}><FileImage size={16}/>提取文档图片</button>,
     'version-management': selectedEditableProgressFolder ? selectedEditableProgressFolder.trackingState === 'needs_repair' ? <button onClick={() => void openProgressRepair(selectedEditableProgressFolder)} title="修复版本批次：继续处理未完成的版本提交操作" aria-label="修复版本批次" className="project-action-button !text-amber-600"><RefreshCw size={16}/>修复版本批次</button> : <button disabled={selectedEditableProgressFolder.trackingState === 'committing'} onClick={() => void openMarkProgress(selectedProgressFolder!)} title={selectedEditableProgressFolder.trackingState === 'committing' ? unavailableProjectToolbarTitle('版本管理', '版本批次正在提交') : '修改当前版本进度'} aria-label="修改进度" className="project-action-button"><GitBranch size={16}/>{selectedEditableProgressFolder.trackingState === 'committing' ? '正在提交' : '修改进度'}</button> : selectedCanSetVersionProgress ? <button onClick={() => void openMarkProgress(selectedProgressFolder!)} title="将所选文件夹纳入版本管理" aria-label="纳入版本管理" className="project-action-button"><GitBranch size={16}/>纳入版本管理</button> : selectedEntries.length === 1 && hasVersionProgressForEntry(selectedEntries[0]) ? <button onClick={() => openVersions()} title="查看和管理素材版本" aria-label="版本管理" className="project-action-button"><GitBranch size={16}/>版本管理</button> : <button disabled title={unavailableProjectToolbarTitle('版本管理', '需选择版本文件夹或已纳入版本的媒体')} aria-label="版本管理" className="project-action-button"><GitBranch size={16}/>版本管理</button>,
-    'team-retouch': <button type="button" disabled={!teamRetouchToolbarAvailable || teamRetouchOpening} onClick={() => void openTeamRetouch()} title={!teamRetouchInstalled ? unavailableProjectToolbarTitle('团片协作', '组件未安装') : !teamRetouchToolbarAvailable ? unavailableProjectToolbarTitle('团片协作', '需选择图片使用') : teamRetouchOpening ? unavailableProjectToolbarTitle('团片协作', '正在加载') : selectedEntries.some(entry => entry.kind === 'image') ? '团片协作：打开协作工作区并加入所选图片' : `团片协作：打开项目已有的 ${teamRetouchHistory.length} 张协作图片`} className="project-action-button">{teamRetouchOpening ? <Loader2 size={16} className="animate-spin"/> : <UsersRound size={16}/>}团片协作{teamRetouchHistory.length ? `（${teamRetouchHistory.length} 张）` : ''}</button>,
   };
   const hiddenProjectToolbarActions = new Set(projectToolbar.hidden);
   const visibleProjectToolbarActionIds = projectToolbar.order.filter(id => !hiddenProjectToolbarActions.has(id) && (!projectToolbar.onlyShowAvailable || projectToolbarAvailability[id]));
@@ -5258,7 +5138,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); copyEntryPath(entry); }}><FileText size={14}/>{isFolderLikeEntry(fileMenu.entry) ? '复制文件夹地址' : '复制文件地址'}</button>
         <button className="project-menu-item" onClick={() => { const path = fileMenu.entry.relativePath; if (fileMenuEntrySelected) setSelectedPaths(current => current.filter(item => item !== path)); else { selectionAnchorPathRef.current = path; setSelectedPaths(current => [...current, path]); requestFileReveal(path); } setFileMenu(null); }}>{fileMenuEntrySelected ? <X size={14}/> : <CheckSquare size={14}/>} {fileMenuEntrySelected ? '取消选择' : '选择'}</button>
         {projectWorkflows && (fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <div className="my-1 border-t border-slate-100"/>}
-        {projectWorkflows && (fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <><button disabled={!hasVersionProgressForEntry(fileMenu.entry)} title={hasVersionProgressForEntry(fileMenu.entry) ? '管理素材的当前版本和历史版本' : '请先标记或导入版本进度'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openVersions(entry); }}><GitBranch size={14}/>版本管理</button>{teamRetouchAvailable && fileMenu.entry.kind === 'image' && <button disabled={!teamRetouchInstalled || teamRetouchOpening} title={!teamRetouchInstalled ? '正在检查团片协作组件' : teamRetouchOpening ? '正在加载团片协作数据' : '团片协作'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openTeamRetouch(entry); }}>{teamRetouchOpening || !teamRetouchInstalled && componentsLoading ? <Loader2 size={14} className="animate-spin"/> : <UsersRound size={14}/>}团片协作</button>}</>}
+        {projectWorkflows && (fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <button disabled={!hasVersionProgressForEntry(fileMenu.entry)} title={hasVersionProgressForEntry(fileMenu.entry) ? '管理素材的当前版本和历史版本' : '请先标记或导入版本进度'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openVersions(entry); }}><GitBranch size={14}/>版本管理</button>}
       </ViewportContextMenu>, document.body)}
       {surfaceMenu && createPortal(<ViewportContextMenu x={surfaceMenu.x} y={surfaceMenu.y} widthClass="w-56" allowSubmenus>
         {surfaceMenu.kind === 'version-tree-layout' && <><button type="button" title="恢复版本树标准排版" className="project-menu-item" onClick={() => void restoreStandardVersionTreeLayout()}><RefreshCw size={14}/>刷新</button><div className="my-1 border-t border-slate-100"/></>}
@@ -5621,31 +5501,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         <section className="mt-5 border-t border-slate-200 pt-5"><h4 className="mb-2 text-sm font-bold text-slate-700">预览</h4><div className="max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50">{batchRenameEntries.slice(0, 20).map((entry, index) => <div key={entry.path} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 border-b border-slate-200 px-3 py-2 text-xs last:border-0"><span className="truncate text-slate-500" title={entry.name}>{entry.name}</span><ArrowRight size={13} className="text-slate-300"/><span className="truncate font-medium text-slate-700" title={batchRenameNames[index]}>{batchRenameNames[index] || '（空文件名）'}</span></div>)}{batchRenameEntries.length > 20 && <p className="px-3 py-2 text-center text-xs text-slate-400">另有 {batchRenameEntries.length - 20} 个项目</p>}</div></section>
       </div><footer className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-5 py-4"><p className="text-xs text-slate-500">重命名使用临时文件过渡，不会因名称互换产生冲突。</p><div className="flex gap-2"><button onClick={() => setBatchRenameOpen(false)} className="dialog-secondary">取消</button><button onClick={commitBatchRename} disabled={!batchRenameNames.length || batchRenameNames.some(name => !name) || batchExtensionMode === 'replace' && !batchExtensionValue.trim() || new Set(batchRenameNames.map(name => name.toLocaleLowerCase())).size !== batchRenameNames.length || renameCommitRef.current} className="dialog-primary">批量重命名</button></div></footer></div></div>}
       {versionEntry && <div className={activeView === 'version' ? 'contents' : 'hidden'}><VersionManager active={active && activeView === 'version'} entry={versionEntry} workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} progressId={progressFolderForMediaEntry(versionEntry)?.id} progressVersionKey={progressFolderForMediaEntry(versionEntry)?.versionKey} onNotice={onNotice} onVersionStateChanged={() => { if (finalViewOpen) void loadFinalViewEntries(); }} onClose={() => { setVersionEntry(null); onCloseToolTab('version'); if (finalViewOpen) void loadFinalViewEntries(); }}/></div>}
-      {teamRetouchAvailable && (teamRetouchStep === 'detect' || teamRetouchStep === 'people') && teamRetouchEntries.length > 0 && <div className={activeView === 'team' ? 'contents' : 'hidden'}><TeamRetouchManager
-        entries={teamRetouchEntries}
-        workspacePath={workspacePath}
-        project={project}
-        cacheConfig={mediaCacheConfig}
-        componentStatus={teamRetouchStatus}
-        activeStep={teamRetouchStep === 'people' ? 'detect' : teamRetouchStep}
-        onStepChange={setTeamRetouchStep}
-        onNotice={onNotice}
-        onEntriesChange={setTeamRetouchEntries}
-        onProjectChanged={() => { void Promise.all([loadTeamRetouchHistory(), loadProgressFolders()]); }}
-        onBusyChange={busy => onToolTabBusyChange('team', busy)}
-        onClose={() => { onCloseToolTab('team'); void loadTeamRetouchHistory(); }}
-      /></div>}
-      {teamRetouchAvailable && teamRetouchStep === 'workflow' && <div className={activeView === 'team' ? 'contents' : 'hidden'}><PersonIdentityManager
-        workspacePath={workspacePath}
-        project={project}
-        cacheConfig={mediaCacheConfig}
-        activeStep={teamRetouchStep}
-        onStepChange={setTeamRetouchStep}
-        onNotice={onNotice}
-        onProjectChanged={() => { void Promise.all([loadTeamRetouchHistory(), loadProgressFolders()]); }}
-        onBusyChange={busy => onToolTabBusyChange('team', busy)}
-        onClose={() => { onCloseToolTab('team'); void loadTeamRetouchHistory(); }}
-      /></div>}
 
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         {versionTreeOpen ? <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={handleFileSurfacePointerDownCapture} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} style={{ marginInline: -FILE_SURFACE_HORIZONTAL_PADDING }} className={`relative min-h-0 flex-1 select-none overflow-hidden outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
@@ -7028,22 +6883,20 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
   </span>;
 };
 
-type ProjectWorkspaceProps = Omit<FileBrowserWorkspaceProps, 'browserContext' | 'onDirectoryChange' | 'onOpenToolTab' | 'onCloseToolTab' | 'onToolTabBusyChange'> & {
+type ProjectWorkspaceProps = Omit<FileBrowserWorkspaceProps, 'browserContext' | 'onDirectoryChange' | 'onOpenToolTab' | 'onCloseToolTab'> & {
   pageId: string;
   onDirectoryChange?: (pageId: string, relativePath: string) => void;
-  onOpenToolTab?: (pageId: string, kind: 'version' | 'team', label: string) => void;
-  onCloseToolTab?: (pageId: string, kind: 'version' | 'team') => void;
-  onToolTabBusyChange?: (pageId: string, kind: 'version' | 'team', busy: boolean) => void;
+  onOpenToolTab?: (pageId: string, kind: 'version', label: string) => void;
+  onCloseToolTab?: (pageId: string, kind: 'version') => void;
 };
-const ProjectWorkspace = ({ pageId, onDirectoryChange, onOpenToolTab, onCloseToolTab, onToolTabBusyChange, ...props }: ProjectWorkspaceProps) => {
-  const bridgeRef = useRef({ onDirectoryChange, onOpenToolTab, onCloseToolTab, onToolTabBusyChange });
-  bridgeRef.current = { onDirectoryChange, onOpenToolTab, onCloseToolTab, onToolTabBusyChange };
+const ProjectWorkspace = ({ pageId, onDirectoryChange, onOpenToolTab, onCloseToolTab, ...props }: ProjectWorkspaceProps) => {
+  const bridgeRef = useRef({ onDirectoryChange, onOpenToolTab, onCloseToolTab });
+  bridgeRef.current = { onDirectoryChange, onOpenToolTab, onCloseToolTab };
   const browserContext = useMemo(() => ({ ...PROJECT_FILE_BROWSER_CONTEXT, title: props.project.name }), [props.project.name]);
   const handleDirectoryChange = useCallback((relativePath: string) => bridgeRef.current.onDirectoryChange?.(pageId, relativePath), [pageId]);
-  const handleOpenToolTab = useCallback((kind: 'version' | 'team', label: string) => bridgeRef.current.onOpenToolTab?.(pageId, kind, label), [pageId]);
-  const handleCloseToolTab = useCallback((kind: 'version' | 'team') => bridgeRef.current.onCloseToolTab?.(pageId, kind), [pageId]);
-  const handleToolTabBusyChange = useCallback((kind: 'version' | 'team', busy: boolean) => bridgeRef.current.onToolTabBusyChange?.(pageId, kind, busy), [pageId]);
-  return <FileBrowserWorkspace {...props} pageId={pageId} onDirectoryChange={handleDirectoryChange} onOpenToolTab={handleOpenToolTab} onCloseToolTab={handleCloseToolTab} onToolTabBusyChange={handleToolTabBusyChange} browserContext={browserContext}/>;
+  const handleOpenToolTab = useCallback((kind: 'version', label: string) => bridgeRef.current.onOpenToolTab?.(pageId, kind, label), [pageId]);
+  const handleCloseToolTab = useCallback((kind: 'version') => bridgeRef.current.onCloseToolTab?.(pageId, kind), [pageId]);
+  return <FileBrowserWorkspace {...props} pageId={pageId} onDirectoryChange={handleDirectoryChange} onOpenToolTab={handleOpenToolTab} onCloseToolTab={handleCloseToolTab} browserContext={browserContext}/>;
 };
 
 export { FileBrowserWorkspace, ProjectWorkspace };

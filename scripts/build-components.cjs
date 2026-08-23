@@ -12,6 +12,14 @@ const venvPython = process.platform === 'win32'
 const python = fs.existsSync(venvPython) ? venvPython : 'python';
 const requested = process.argv.includes('--only') ? process.argv[process.argv.indexOf('--only') + 1] : '';
 const componentIds = requested ? [requested] : (process.platform === 'win32' ? ['team-retouch'] : []);
+const buildRenderer = id => {
+  if (id !== 'team-retouch') return;
+  const config = path.join(root, 'extensions', id, 'renderer', 'vite.config.ts');
+  const vite = path.join(root, 'node_modules', 'vite', 'bin', 'vite.js');
+  const result = spawnSync(process.execPath, [vite, 'build', '--config', config], { cwd: root, stdio: 'inherit' });
+  if (result.error) throw result.error;
+  if ((result.status ?? 1) !== 0) throw new Error(`${id} renderer build failed with code ${result.status}`);
+};
 
 const definitions = {
   'team-retouch': {
@@ -98,6 +106,7 @@ const build = id => {
   const definition = definitions[id];
   if (!definition) throw new Error(`Unknown component: ${id}`);
   if (!fs.existsSync(definition.source) || !fs.existsSync(definition.template)) throw new Error(`Component source is incomplete: ${id}`);
+  buildRenderer(id);
   for (const model of definition.models || []) {
     const modelPath = typeof model === 'string' ? model : model.path;
     const minBytes = typeof model === 'string' ? 1024 * 1024 : model.minBytes;
@@ -153,6 +162,13 @@ const build = id => {
     for (const installerFile of definition.advancedInstallerFiles) {
       fs.copyFileSync(installerFile, path.join(installerRoot, path.basename(installerFile)));
     }
+  }
+  if (id === 'team-retouch') {
+    const rendererOutput = path.join(root, 'artifacts', 'component-renderers', id);
+    const uiRoot = path.join(target, 'ui');
+    if (!fs.existsSync(path.join(rendererOutput, 'index.html'))) throw new Error('Team-retouch renderer output is missing');
+    fs.cpSync(rendererOutput, uiRoot, { recursive: true });
+    fs.copyFileSync(path.join(root, 'extensions', id, 'renderer', 'team-retouch.svg'), path.join(uiRoot, 'team-retouch.svg'));
   }
   fs.copyFileSync(definition.template, path.join(target, 'component.json'));
   console.log(`Component ready: ${target}`);

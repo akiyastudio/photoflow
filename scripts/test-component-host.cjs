@@ -39,7 +39,8 @@ try {
   const componentPreload = fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'component-preload.cjs'), 'utf8');
   assert(componentPreload.includes("exposeInMainWorld('photoFlowComponent'") && !componentPreload.includes("exposeInMainWorld('electronAPI'"), 'component preload exposes the restricted SDK instead of the application bridge');
   const projectWorkspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
-  assert.equal((projectWorkspaceSource.match(/component-toolbar-actions/g) || []).length, 1, 'declarative UI component actions have one dedicated project-toolbar group');
+  const projectWorkspaceLayoutSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspaceLayout.tsx'), 'utf8');
+  assert.equal((`${projectWorkspaceSource}\n${projectWorkspaceLayoutSource}`.match(/component-toolbar-actions/g) || []).length, 1, 'declarative UI component actions have one dedicated project-toolbar group');
   assert(!projectWorkspaceSource.includes('dangerouslySetInnerHTML') && !projectWorkspaceSource.includes('<iframe'), 'component page code is never injected into the workspace React DOM');
 
   class FakeWebContents extends EventEmitter {
@@ -62,7 +63,7 @@ try {
   const handlers = new Map();
   const rawIpc = { handle: (channel, handler) => handlers.set(channel, handler) };
   const manager = new ComponentViewManager({ WebContentsView: FakeView, mainWindow, registry, preloadPath: 'host-preload.cjs', ipcMain: rawIpc });
-  const request = { componentId: 'sample-component', pageId: 'main', workspacePath: 'C:\\Work', projectId: 'project-1', projectName: '项目一' };
+  const request = { componentId: 'sample-component', pageId: 'main', workspacePath: 'C:\\Work', projectId: 'project-1', projectName: '项目一', projectStatus: '后期中' };
   Promise.resolve().then(async () => {
     const first = await manager.open(request);
     const second = await manager.open({ ...request, workspacePath: 'c:/work' });
@@ -80,6 +81,9 @@ try {
     const context = await handlers.get('component-sdk:get-context')({ sender: view.webContents });
     assert.equal(context.projectId, 'project-1');
     assert.throws(() => handlers.get('component-sdk:get-context')({ sender: new FakeWebContents() }), /Unauthorized component sender/);
+    manager.registerRpcMethod('sample.echo.v1', (_event, payload, boundContext) => ({ payload, projectId: boundContext.projectId }), 'sample-component');
+    assert.deepEqual(await handlers.get('component-sdk:rpc')({ sender: view.webContents }, 'sample.echo.v1', { value: 1 }), { payload: { value: 1 }, projectId: 'project-1' });
+    assert.throws(() => handlers.get('component-sdk:rpc')({ sender: view.webContents }, 'unknown.v1', {}), /Unknown component RPC method/);
     assert.equal(manager.closeProject('C:/WORK', 'project-1'), 1);
     assert(view.webContents.destroyed && children.length === 0, 'project close explicitly destroys and detaches the component view');
     assert.equal(manager.close(first.instanceId), false, 'destroy is idempotent');

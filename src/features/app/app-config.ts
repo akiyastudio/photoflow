@@ -84,9 +84,7 @@ export const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   homeOrder: DEFAULT_HOME_ORDER,
   birthdayEnabled: true,
   pinInspirationLibrary: false,
-  componentSettings: {
-    'team-retouch': { useGpu: true, oversizeCropMode: 'face-centered' },
-  },
+  componentSettings: {},
   videoPlayback: { arrowKeyAction: 'seek' },
   mediaCache: { maxSizeGB: 50, directory: '', autoCleanup30Days: false },
   backup: {

@@ -64,19 +64,24 @@ Optional UI components follow the separate [Component Host V1 contract](./COMPON
   as isolated child processes while sharing one on-disk Python/Pillow/SQLite
   runtime. OpenCV-based analysis remains in `python/inspiration_tools.py` so
   the large vision dependencies are not duplicated into the core runtime.
-- `src/features/workspace`: the project browser, preview, metadata, version and
-  team-retouch workspace UI. Selection state is isolated in a controller hook,
-  and the feature compiles against the explicit `ProjectWorkspaceApi` preload
-  subset rather than the global bridge. Team-retouch views are lazy chunks.
+- `src/features/workspace`: the project browser, preview, metadata and version
+  UI. Selection state is isolated in a controller hook, and the feature compiles
+  against the explicit `ProjectWorkspaceApi` preload subset rather than the
+  global bridge. Optional component UI is not imported into this package.
 - `src/features/tools`: import, birthday, conversion, inspiration, matching and
   video-splitting tools.
 - `src/features/inspiration`: the built-in inspiration-library shell and its
   hierarchical navigation. It reuses the workspace file browser.
-- `src/features/settings`, `src/features/plugins`, and
-  `src/features/background-tasks`: settings, plugin availability and observable
-  background-task UI. `src/App.tsx` is the application shell rather than the
-  previous 4,000-line feature container. Optional team-retouch UI surfaces and
-  settings are discovered through `plugin-contributions.ts` capability metadata.
+- `src/features/settings` and `src/features/background-tasks`: application
+  settings, generic component management and observable background-task UI.
+  `src/App.tsx` is the application shell rather than the previous 4,000-line
+  feature container. Component actions are discovered only from `componentHost`
+  manifests; component settings live inside component pages.
+- `extensions/team-retouch/renderer`: independent team-retouch application UI.
+  It builds separately, ships in the component `ui/` directory, and calls only
+  the owner-bound, versioned `photoFlowComponent` RPC allowlist. Existing team
+  repositories and version IPC implementations remain a compatibility backend
+  during the next extraction stage; they are not exposed to the main renderer.
 - Advanced video UI is built into the application: `AdvancedVideoPlayer`,
   Chromium fallback playback, trimming, screenshots, keyboard controls and the
   `videoPlayback` preference all ship in the main renderer. The optional
@@ -87,7 +92,7 @@ Optional UI components follow the separate [Component Host V1 contract](./COMPON
 
 ## Stable contracts
 
-Existing preload and IPC method names are compatibility contracts. Internal
+Existing non-component preload and IPC method names are compatibility contracts. Internal
 modules may be replaced without changing renderer behaviour. Long-running file
 operations report progress through `workspace-file-operation-progress` and use
 the shared `ProjectFileOperationProgress` type.

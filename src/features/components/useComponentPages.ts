@@ -31,7 +31,7 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     const ensured = ensureComponentPage(pages, action, project, workspacePath);
     setPages(current => ensureComponentPage(current, action, project, workspacePath).pages);
     setActiveIdentity(ensured.page.identity);
-    const result = await window.electronAPI.openComponentPage({ componentId: action.componentId, pageId: action.pageId, workspacePath, projectId: project.id, projectName: project.name });
+    const result = await window.electronAPI.openComponentPage({ componentId: action.componentId, pageId: action.pageId, workspacePath, projectId: project.id, projectName: project.name, projectStatus: project.status });
     if (!result.success || !result.page) {
       setPages(current => closeComponentPage(current, ensured.page.identity)); setActiveIdentity('');
       onNotice(`打开组件页失败：${result.error || '未知错误'}`, 5000); return false;

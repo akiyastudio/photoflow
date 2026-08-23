@@ -26,6 +26,11 @@ The current shared `components` directory still depends on background-task,
 metadata, versioning and workspace models. These edges are a shrink-only
 baseline; new feature dependencies are rejected.
 
+Optional component renderers live below their component package, are built as
+independent entry points, and cannot import `src`, the application React tree,
+or the application preload contract. The application workspace may consume
+only manifest-derived component actions and the generic component-page model.
+
 ## Main-process direction
 
 ```text

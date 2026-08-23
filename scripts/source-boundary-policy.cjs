@@ -6,7 +6,6 @@ const ALLOWED_RENDERER_FEATURE_EDGES = Object.freeze([
   'workspace->background-tasks',
   'workspace->file-browser',
   'workspace->metadata',
-  'workspace->plugins',
   'workspace->tools',
   'workspace->versioning',
 ]);
