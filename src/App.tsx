@@ -891,8 +891,7 @@ const App: React.FC = () => {
             installedComponentIds={installedComponentIds}
             componentsLoading={componentsLoading}
             teamRetouchStatus={components.find(component => component.id === 'team-retouch')}
-            componentHostActions={componentHostActions}
-            onOpenComponentPage={action => void openComponentPage(action, project, project.workspacePath || config.workspacePath)}
+            componentHostActions={componentHostActions} onOpenComponentPage={action => void openComponentPage(action, project, project.workspacePath || config.workspacePath)}
             advancedVideoSettings={config.videoPlayback}
             projectToolbar={config.projectToolbar}
             customProjectCategories={config.customProjectCategories}
