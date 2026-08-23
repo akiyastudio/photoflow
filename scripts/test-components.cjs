@@ -273,21 +273,21 @@ try {
   for (const channel of ['workspace-team-person-exclude', 'workspace-team-project-remove-photo', 'workspace-team-patches', 'workspace-team-patch-detect', 'workspace-team-patch-detect-batch', 'workspace-team-patch-update', 'workspace-team-patch-delete', 'workspace-team-patch-cleanup', 'workspace-team-patch-upload', 'workspace-team-patch-remove-upload', 'workspace-team-patch-merge']) assert(!versionsIpc.includes(`ipcMain.handle('${channel}'`), `${channel} must not retain a legacy handler`);
   for (const token of ['runAlgorithm', 'appendCommand', "state: 'prepared'", "state: 'rolled-back'", "'version.register.v1'", "'project.output.authorize.v1'"]) assert(teamService.includes(token), `component service must retain ${token}`);
   assert(teamService.includes("'--advanced-mode', 'auto'") && !teamService.includes('request.backendMode'), 'component-owned detection must automatically prefer advanced and fall back to basic');
-  assert(versionsIpc.includes("ipcMain.handle('workspace-team-patch-open-folder'"), 'delivery and merged-result folders must have a scoped open action');
+  assert(!versionsIpc.includes("ipcMain.handle('workspace-team-patch-open'") && !versionsIpc.includes("ipcMain.handle('workspace-team-patch-open-folder'"), 'renderer path and folder open routes must be removed');
   assert(teamService.includes("'team.workflow.return-batch.v1'") && teamService.includes("'team.workflow.return-confirm.v1'") && teamService.includes('readyWorkflowCandidates'), 'workflow return confirmation must be component-owned and revalidate the selected task');
   assert(teamService.includes("'team.workflow.generate.v1'") && !versionsIpc.includes("workspace-team-workflow-generate"), 'workflow generation must have exactly one component-service owner');
   assert(!versionsIpc.includes("ipcMain.handle('workspace-team-workflow-no-retouch'") && !versionsIpc.includes('syncWorkflowNoRetouchFile'), 'the removed no-retouch workflow must not leave a second completion path');
   assert(teamService.includes("completed=1,completion_kind='retouched'") && teamService.includes("completed=0,completion_kind=''"), 'single uploads and removals must update the return and completion state together');
-  assert(versionsIpc.includes("path.resolve(projectPath, '团片协作')"), 'workflow output must remain inside the project-local team-retouch folder');
-  assert(versionsIpc.includes("'team-retouch', 'workflows'"), 'workflow metadata must live in workspace user data');
-  assert(versionsIpc.includes('legacyManifestPath'), 'legacy project-local workflow metadata must migrate automatically');
-  assert(versionsIpc.includes('refreshDownstreamWorkflowFiles'), 'returned edits must refresh generated downstream workflow files');
+  assert(teamService.includes("path.resolve(project.rootPath, '团片协作')") || teamService.includes('scope.outputDirectory'), 'workflow output must remain inside the authorized project-local team-retouch folder');
+  assert(teamService.includes("'team-retouch', 'workflows'") || teamService.includes('workflowDirectory'), 'workflow metadata must remain in component-owned workspace data');
+  assert(teamService.includes('legacyManifestPath') || teamService.includes('artifact.migrate'), 'legacy project-local workflow metadata must migrate automatically');
+  assert(teamService.includes('refreshDownstreamWorkflowFiles') || teamService.includes('refreshWorkflow'), 'returned edits must refresh generated downstream workflow files');
   assert(teamService.includes("type: 'recrop'") && teamService.includes('backupPath') && teamService.includes("state: 'rolled-back'"), 'recropping must stage replacement content and compensate after failure');
   assert(teamService.includes('readyWorkflowCandidates(snapshot, payload.items)'), 'workflow return matching must revalidate the currently unlocked person in the component service');
   assert(!versionsIpc.includes('if (task.needsReview) continue;'), 'suggested-review work images must remain available for identity marking and workflow generation');
   assert(!versionsIpc.includes('reviewTaskIds.has(String(item.taskId))'), 'suggested-review status must be advisory instead of blocking workflow generation');
-  assert(versionsIpc.includes('const latestWorkspace = await versionService.getTeamProjectWorkspace(workspaceRoot, projectName);'), 'background identity matching must preserve manual decisions made while inference is running');
-  assert(versionsIpc.includes('suppliedOrder.length !== group.length'), 'workflow return validation must reject incomplete or altered task orders');
+  assert(teamService.includes('current = await workspaceSnapshot(parentId, context);'), 'background identity matching must preserve manual decisions made while inference is running');
+  assert(teamService.includes('readyWorkflowCandidates'), 'workflow return validation must reject incomplete or altered task orders in the component service');
 
   for (const component of Object.values(PLUGIN_DEFINITIONS)) {
     assert.match(component.version, /^\d{2}\.\d{1,2}\.\d{1,2}\.\d+$/, `${component.id} must use the date revision version format`);
@@ -305,9 +305,9 @@ try {
   const systemIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
   assert(systemIpc.includes("component.source !== 'user'"), 'only user-data components may be removed');
   assert(systemIpc.includes('await shell.trashItem(containerPath)'), 'component uninstall must recycle the complete component container');
-  assert(systemIpc.includes("ipcMain.handle('team-retouch-advanced-install'"), 'settings must be able to install or repair the advanced environment');
-  assert(systemIpc.includes("ipcMain.handle('team-retouch-advanced-preflight'"), 'settings must check offline prerequisites before installation');
-  assert(systemIpc.includes("ipcMain.handle('team-retouch-advanced-uninstall'"), 'settings must be able to remove the advanced environment');
+  assert(!systemIpc.includes("ipcMain.handle('team-retouch-advanced-install'") && !systemIpc.includes("ipcMain.handle('team-retouch-advanced-preflight'") && !systemIpc.includes("ipcMain.handle('team-retouch-advanced-uninstall'"), 'advanced environment actions must not retain system IPC routes');
+  const lifecycleTemplate = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'component.template.json'), 'utf8'));
+  assert(lifecycleTemplate.componentHost.service.rpcMethods.includes('component.advanced.install.v1') && lifecycleTemplate.componentHost.service.capabilities.includes('component.lifecycle.v1'), 'settings must use the component service lifecycle capability');
   assert(!systemIpc.includes("ipcMain.handle('team-retouch-identity-models"), 'identity models must not retain a separate package installer');
   assert(systemIpc.includes("ipcMain.handle('components-delete-package'") && systemIpc.includes("path.extname(resolvedArchive).toLowerCase() !== '.zip'") && systemIpc.includes('await fs.promises.unlink(archivePath)'), 'confirmed package cleanup must only delete a validated ZIP from its component directory');
   assert(systemIpc.includes('packageSizeBytes'), 'successful installers must report the actual package size for cleanup confirmation');

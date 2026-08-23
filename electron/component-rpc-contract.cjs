@@ -17,13 +17,6 @@ const COMPONENT_RPC_METHODS = Object.freeze({
   'project.files.list.v1': { channel: 'workspace-list-files', fields: ['cursor'], args: (payload, context) => [context.workspacePath, context.projectStatus, context.projectName, '', 200, payload.cursor || '', { kind: 'image' }] },
   'project.progress.list.v1': { channel: 'workspace-progress-folders', args: (_payload, context) => [context.workspacePath, context.projectName] },
   'project.progress.create.v1': { channel: 'workspace-progress-register-with-graph', fields: ['projectName', 'progress', 'workflowInputProgressIds'], args: (payload, context) => [context.workspacePath, context.projectStatus, { ...payload, projectName: context.projectName }] },
-  'team.media.authorize.v1': { channel: 'workspace-team-media-authorize', fields: ['kind', 'photoId', 'baseVersionId', 'taskId', 'reviewSessionId', 'returnId'], args: (payload, context) => [context.workspacePath, context.projectName, context.projectStatus, payload] },
-  'team.patch.open.v1': { channel: 'workspace-team-patch-open-by-id', fields: ['photoId', 'baseVersionId', 'taskId'], args: (payload, context) => [context.workspacePath, context.projectName, payload] },
-  'team.identity.suggest.v1': { channel: 'workspace-team-identities-suggest', args: (_payload, context) => [context.workspacePath, context.projectName], result: stripWorkspacePaths },
-  'team.identity.complete.v1': { channel: 'workspace-team-identity-complete', fields: ['photoId', 'baseVersionId', 'personIndex', 'completed', 'completionKind', 'taskId', 'taskOrder'], args: (payload, context) => [context.workspacePath, { ...payload, projectName: context.projectName, status: context.projectStatus }] },
-  'component.advanced.preflight.v1': { channel: 'team-retouch-advanced-preflight', args: () => [] },
-  'component.advanced.install.v1': { channel: 'team-retouch-advanced-install', fields: ['repair'], args: payload => [payload] },
-  'component.advanced.uninstall.v1': { channel: 'team-retouch-advanced-uninstall', args: () => [] },
 });
 
 const sanitizePayload = (payload, fields = []) => {

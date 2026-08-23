@@ -11,6 +11,7 @@ const HOST_CAPABILITIES = new Set([
   'project.media.list.v1', 'project.media.read.v1', 'project.output.authorize.v1',
   'version.register.v1', 'tasks.report.v1', 'component.settings.v1',
   'component.storage.v1', 'dialogs.open.v1', 'component.lifecycle.v1',
+  'component.runtime.v1', 'project.media.access.v1', 'project.identity.complete.v1',
 ]);
 
 const isInside = (root, candidate) => {
@@ -87,6 +88,20 @@ const parseComponentHostManifest = (manifest, componentRoot) => {
     if (!rpcMethods.length || rpcMethods.length > 128 || rpcMethods.some(method => !VERSIONED_METHOD.test(method))) throw new Error('Component service RPC methods must be a bounded versioned allowlist');
     const capabilities = [...new Set((raw.capabilities || []).map(value => requiredText(value, 'service capability', 128)))];
     if (capabilities.length > 32 || capabilities.some(capability => !HOST_CAPABILITIES.has(capability))) throw new Error('Component service requests an unknown host capability');
+    const runtimeActions = [...new Set((raw.runtimeActions || []).map(value => requiredId(value, 'runtime action')))];
+    if (runtimeActions.length > 32) throw new Error('Component runtime actions must be a bounded allowlist');
+    const lifecycleActions = {};
+    for (const [action, declaration] of Object.entries(raw.lifecycleActions || {})) {
+      const actionId = requiredId(action, 'lifecycle action');
+      if (!declaration || typeof declaration !== 'object' || Array.isArray(declaration)) throw new Error(`Invalid component lifecycle action: ${actionId}`);
+      const relativeActionEntry = requiredText(declaration.entry, 'lifecycle action entry', 512).replace(/\\/g, '/');
+      const actionEntry = path.resolve(componentRoot, relativeActionEntry);
+      if (!isInside(componentRoot, actionEntry)) throw new Error('Component lifecycle action escapes component root');
+      const sha256 = requiredText(declaration.sha256, 'lifecycle action SHA-256', 64).toLowerCase();
+      if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error(`Invalid component lifecycle action SHA-256: ${actionId}`);
+      lifecycleActions[actionId] = Object.freeze({ entry: actionEntry, relativeEntry: relativeActionEntry, sha256 });
+    }
+    if (Object.keys(lifecycleActions).length > 16) throw new Error('Component lifecycle actions must be bounded');
     service = Object.freeze({
       protocolVersion: COMPONENT_SERVICE_PROTOCOL_VERSION,
       runtime: raw.runtime,
@@ -94,6 +109,8 @@ const parseComponentHostManifest = (manifest, componentRoot) => {
       relativeEntry,
       rpcMethods: Object.freeze(rpcMethods),
       capabilities: Object.freeze(capabilities),
+      runtimeActions: Object.freeze(runtimeActions),
+      lifecycleActions: Object.freeze(lifecycleActions),
     });
   }
   return Object.freeze({

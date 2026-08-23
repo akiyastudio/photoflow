@@ -37,6 +37,8 @@ assert.deepEqual(descriptor.service.rpcMethods, ['sample.echo.v1']);
 assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, rpcMethods: ['unversioned'] } } }, sandbox), /versioned allowlist/);
 assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, capabilities: ['ipc.any.v1'] } } }, sandbox), /unknown host capability/);
 assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, entrypoints: { default: '../escape.cjs' } } } }, sandbox), /escapes component root/);
+assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, lifecycleActions: { install: { entry: '../escape.ps1', sha256: '0'.repeat(64) } } } } }, sandbox), /lifecycle action escapes component root/);
+assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, lifecycleActions: { install: { entry: 'action.ps1', sha256: 'renderer-value' } } } } }, sandbox), /SHA-256/);
 
 const broker = new ComponentCapabilityBroker();
 broker.register('project.media.list.v1', (payload, context) => ({ cursor: payload.cursor, workspace: context.workspacePath }));

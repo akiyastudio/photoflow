@@ -711,6 +711,71 @@ const readIdentitySimilarities = async (parentId, _payload, context) => {
   return { success: true, similarities: Array.isArray(payload.similarities) ? payload.similarities : [] };
 };
 
+const subjectKey = item => `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`;
+const isGeneratedIdentity = identity => /^待确认人物\s+\d+$/.test(String(identity?.name || ''));
+
+const suggestIdentities = async (parentId, _payload, context) => {
+  const initial = await workspaceSnapshot(parentId, context);
+  const subjects = initial.photos.flatMap(photo => photo.tasks.flatMap(task => (
+    task.members?.length ? task.members : [{ personIndex: task.personIndex }]
+  ).map(member => ({
+    key: `${photo.photoId}:${photo.baseVersionId}:${Number(member.personIndex)}`,
+    photoId: photo.photoId,
+    baseVersionId: photo.baseVersionId,
+    personIndex: Number(member.personIndex),
+  }))));
+  if (!subjects.length) throw new Error('项目里还没有已识别的人物');
+  const suggested = await callHost(parentId, 'component.runtime.v1', { action: 'identity.suggest' });
+  await withDomain(parentId, db => {
+    const projectId = String(context.projectId);
+    const generated = db.prepare('SELECT id FROM team_person_identities WHERE project_id=? AND name GLOB ?').all(projectId, '待确认人物 *').map(row => String(row.id));
+    if (!generated.length) return;
+    const placeholders = generated.map(() => '?').join(',');
+    const anchored = new Set(db.prepare(`SELECT DISTINCT identity_id FROM team_person_assignments WHERE project_id=? AND identity_id IN (${placeholders}) AND source IN ('manual','manual-group')`).all(projectId, ...generated).map(row => String(row.identity_id)));
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare(`UPDATE team_person_assignments SET identity_id=NULL,confidence=0,completed=0,completion_kind='',edited_patch_path=NULL,return_missing=0,return_missing_since=NULL,completed_at=NULL,updated_at=? WHERE project_id=? AND identity_id IN (${placeholders}) AND source='suggested'`).run(Date.now(), projectId, ...generated);
+      const removable = generated.filter(id => !anchored.has(id));
+      if (removable.length) db.prepare(`DELETE FROM team_person_identities WHERE project_id=? AND id IN (${removable.map(() => '?').join(',')})`).run(projectId, ...removable);
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+  });
+  let current = await workspaceSnapshot(parentId, context);
+  const currentByKey = new Map(current.assignments.map(item => [subjectKey(item), item]));
+  const currentIdentities = new Map(current.identities.map(item => [String(item.id), item]));
+  const assignedKeys = new Set([...currentByKey].filter(([, assignment]) => assignment.identityId).map(([key]) => key));
+  let created = 0;
+  let nextCandidateNumber = Math.max(0, ...current.identities.map(identity => Number(String(identity.name || '').match(/^待确认人物\s+(\d+)$/)?.[1] || 0))) + 1;
+  for (const cluster of suggested.clusters || []) {
+    const members = (cluster.members || []).map(item => subjects.find(subject => subject.key === item.key)).filter(Boolean);
+    const known = new Set(members.map(member => currentByKey.get(member.key)).filter(item => item?.identityId && (item.source === 'manual' || !isGeneratedIdentity(currentIdentities.get(String(item.identityId))))).map(item => String(item.identityId)));
+    if (known.size > 1) continue;
+    const confidence = Number.isFinite(Number(cluster.score)) ? Math.max(.5, Math.min(.98, Number(cluster.score))) : cluster.confidence === 'high' ? .9 : .65;
+    let identityId = [...known][0];
+    if (!identityId) {
+      const saved = await saveIdentity(parentId, { name: `待确认人物 ${nextCandidateNumber++}`, assignments: members.map(member => ({ ...member, confidence, source: 'suggested' })) }, context);
+      identityId = saved.identityId;
+      created += 1;
+    } else {
+      for (const member of members) {
+        const assignment = currentByKey.get(member.key);
+        if (assignment?.source === 'manual' || assignment?.identityId && !isGeneratedIdentity(currentIdentities.get(String(assignment.identityId)))) continue;
+        await assignIdentity(parentId, { ...member, identityId, confidence, source: 'suggested' }, context);
+      }
+    }
+    for (const member of members) assignedKeys.add(member.key);
+  }
+  for (const subject of subjects) {
+    if (assignedKeys.has(subject.key)) continue;
+    const saved = await saveIdentity(parentId, { name: `待确认人物 ${nextCandidateNumber++}`, assignments: [{ ...subject, confidence: .35, source: 'suggested' }] }, context);
+    if (saved.identityId) { assignedKeys.add(subject.key); created += 1; }
+  }
+  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+  await replaceJsonAtomic(path.join(storage.dataRoot, 'identity-similarities', `${sha256(context.projectName)}.json`), { updatedAt: Date.now(), similarities: suggested.similarities || [] });
+  current = await workspaceSnapshot(parentId, context);
+  return publicWorkspace({ ...current, similarities: suggested.similarities || [], suggestedCount: created, candidateGroupCount: suggested.clusters?.length || 0, method: suggested.method || 'sface-osnet-gallery-v3', faceBackend: suggested.faceBackend, bodyBackend: suggested.bodyBackend, unmatchedCount: suggested.unmatchedCount, provider: suggested.provider });
+};
+
 const saveWorkflowSettings = async (parentId, payload, context) => {
   const snapshot = await workspaceSnapshot(parentId, context);
   const workflowStarted = snapshot.assignments.some(assignment => assignment.completed || assignment.returnMissing)
@@ -737,6 +802,16 @@ const saveWorkflowSettings = async (parentId, payload, context) => {
 };
 
 const componentSettings = async (parentId, payload) => callHost(parentId, 'component.settings.v1', payload);
+const mediaRequest = payload => Object.fromEntries(['kind', 'photoId', 'baseVersionId', 'taskId', 'reviewSessionId', 'returnId'].filter(field => Object.hasOwn(payload || {}, field)).map(field => [field, payload[field]]));
+const completionRequest = payload => Object.fromEntries(['photoId', 'baseVersionId', 'personIndex', 'completed', 'completionKind', 'taskId', 'taskOrder'].filter(field => Object.hasOwn(payload || {}, field)).map(field => [field, payload[field]]));
+const publicWorkspace = value => ({
+  ...value,
+  photos: (value?.photos || []).map(photo => ({
+    ...Object.fromEntries(Object.entries(photo).filter(([field]) => !['sourcePath', 'originalFilePath', 'previewUrl'].includes(field))),
+    tasks: (photo.tasks || []).map(task => Object.fromEntries(Object.entries(task).filter(([field]) => !['patchPath', 'maskPath', 'editedPatchPath', 'uploadPath', 'returnedPath', 'previewUrl', 'patchUrl'].includes(field)))),
+  })),
+  assignments: (value?.assignments || []).map(assignment => Object.fromEntries(Object.entries(assignment).filter(([field]) => !['editedPatchPath', 'returnedPath'].includes(field)))),
+});
 
 const migrateWorkflowArtifacts = async (parentId, payload) => {
   const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
@@ -1133,17 +1208,17 @@ const returnConfirm = async (parentId, payload, context) => {
 };
 
 const handlers = {
-  'team.project.get.v1': (parentId, _payload, context) => workspaceSnapshot(parentId, context),
+  'team.project.get.v1': async (parentId, _payload, context) => publicWorkspace(await workspaceSnapshot(parentId, context)),
   'team.project.register.v1': async (parentId, payload, context) => {
     const relativePaths = uniqueText(payload.relativePaths);
     if (relativePaths.length > MAX_ITEMS) throw new Error(`Too many project media items: ${relativePaths.length}`);
     await callHost(parentId, 'project.media.read.v1', { relativePaths });
-    return workspaceSnapshot(parentId, context);
+    return publicWorkspace(await workspaceSnapshot(parentId, context));
   },
   'team.project.remove-photo.v1': removeProjectPhoto,
   'team.identity.save.v1': saveIdentity,
   'team.identity.assign.v1': assignIdentity,
-  'team.identity.confirm-group.v1': confirmIdentityGroup,
+  'team.identity.confirm-group.v1': async (parentId, payload, context) => publicWorkspace(await confirmIdentityGroup(parentId, payload, context)),
   'team.identity.delete.v1': deleteIdentity,
   'team.person.exclude.v1': excludePerson,
   'team.patch.get.v1': getPatchBundle,
@@ -1156,6 +1231,10 @@ const handlers = {
   'team.patch.remove-upload.v1': removeUpload,
   'team.patch.merge.v1': mergePatches,
   'team.identity.similarities.v1': readIdentitySimilarities,
+  'team.identity.suggest.v1': suggestIdentities,
+  'team.identity.complete.v1': (parentId, payload) => callHost(parentId, 'project.identity.complete.v1', completionRequest(payload)),
+  'team.media.authorize.v1': (parentId, payload) => callHost(parentId, 'project.media.access.v1', { action: 'authorize', ...mediaRequest(payload) }),
+  'team.patch.open.v1': (parentId, payload) => callHost(parentId, 'project.media.access.v1', { action: 'open', ...mediaRequest({ ...payload, kind: 'working' }) }),
   'team.workflow.settings.save.v1': saveWorkflowSettings,
   'team.workflow.status.v1': workflowStatus,
   'team.workflow.cancel.v1': cancelWorkflow,
@@ -1172,6 +1251,9 @@ const handlers = {
   'team.workflow.artifact.migrate.v1': migrateWorkflowArtifacts,
   'component.settings.get.v1': parentId => componentSettings(parentId, { action: 'get' }),
   'component.settings.update.v1': (parentId, payload) => componentSettings(parentId, { action: 'update', settings: payload }),
+  'component.advanced.preflight.v1': parentId => callHost(parentId, 'component.lifecycle.v1', { action: 'advanced.preflight' }),
+  'component.advanced.install.v1': (parentId, payload) => callHost(parentId, 'component.lifecycle.v1', { action: 'advanced.install', repair: payload.repair === true }),
+  'component.advanced.uninstall.v1': parentId => callHost(parentId, 'component.lifecycle.v1', { action: 'advanced.uninstall' }),
 };
 
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });

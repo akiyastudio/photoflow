@@ -6,6 +6,7 @@ const registerComponentProjectCapabilities = ({
   resolveProjectEntry, versionService, IMAGE_EXTENSIONS, path, fs, crypto, getConfigPath, readSavedConfig,
   getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks,
   uniqueDestination, ensureTrackedVersionThumbnail,
+  pluginService, privacyService,
 }) => {
   broker.register('component.storage.v1', (payload, context, descriptor) => {
     if (payload.namespace !== 'domain') throw new Error('Unknown component storage namespace');
@@ -307,6 +308,45 @@ const registerComponentProjectCapabilities = ({
     const cancelled = Boolean(context.eventSender?.isDestroyed?.());
     if (!cancelled && context.eventSender) context.eventSender.send(channel, payload.value || {});
     return { reported: !cancelled, cancelled };
+  });
+
+  broker.register('component.runtime.v1', async (payload, context, descriptor) => {
+    const action = String(payload.action || '');
+    if (!descriptor?.service?.runtimeActions.includes(action)) throw new Error(`Component runtime action is not declared: ${action}`);
+    if (descriptor.componentId !== 'team-retouch' || action !== 'identity.suggest') throw new Error('Unknown component runtime action');
+    if (Object.keys(payload).some(field => field !== 'action')) throw new Error('Component runtime actions do not accept renderer paths or arguments');
+    if (!privacyService.hasFaceRecognitionConsent()) throw new Error('使用人物身份识别前，需要单独同意《人脸信息处理规则》');
+    pluginService.requireCapability('team-retouch.identify');
+    const workspaceRoot = ensureWorkspace(context.workspacePath);
+    const workspace = await versionService.getTeamProjectWorkspace(workspaceRoot, context.projectName);
+    const subjects = [];
+    for (const photo of workspace.photos || []) {
+      for (const task of photo.tasks || []) {
+        const members = task.members?.length ? task.members : [{ personIndex: task.personIndex, bbox: task.bbox }];
+        for (const member of members) {
+          subjects.push({
+            key: `${photo.photoId}:${photo.baseVersionId}:${Number(member.personIndex)}`,
+            photoId: photo.photoId,
+            baseVersionId: photo.baseVersionId,
+            personIndex: Number(member.personIndex),
+            sourcePath: photo.sourcePath,
+            patchPath: task.patchPath,
+            bbox: member.bbox || task.bbox,
+          });
+        }
+      }
+    }
+    if (!subjects.length) throw new Error('项目里还没有已识别的人物');
+    if (subjects.length > MAX_MEDIA_ITEMS) throw new Error('Too many component identity subjects');
+    const batchDirectory = path.join(getWorkspaceDataRoot(workspaceRoot), descriptor.componentId, 'batches');
+    await fs.promises.mkdir(batchDirectory, { recursive: true });
+    const manifestPath = path.join(batchDirectory, `identify-${crypto.randomUUID()}.json`);
+    try {
+      await fs.promises.writeFile(manifestPath, JSON.stringify({ subjects }, null, 2), 'utf8');
+      return await pluginService.runJson('team-retouch', ['identify', '--manifest', manifestPath], 60 * 60 * 1000);
+    } finally {
+      await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined);
+    }
   });
 };
 

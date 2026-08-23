@@ -1,6 +1,7 @@
 const { validateRendererPythonInvocation } = require('../security-policy.cjs');
 const { listStorageDevices } = require('../services/storage-device-service.cjs');
 const { decideComponentStatusRefresh, nextComponentProbeTimestamps } = require('../services/component-status-refresh-policy.cjs');
+const { createComponentLifecycleService } = require('../services/component-lifecycle-service.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
 
@@ -107,7 +108,7 @@ const normalizeProgressNamePresets = value => {
 };
 
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, componentCapabilityBroker, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
   ipcMain.handle('domain-health-status', () => ({
     success: true,
     domains: domainHealthService?.status?.() || [],
@@ -131,7 +132,6 @@ const registerSystemIpc = context => {
     requests.delete(invocationId);
     if (!requests.size) activePythonTasks.delete(requestId);
   };
-  let advancedOperation = null;
 
   const componentRoot = componentId => path.join(pluginService.installRoot, String(componentId));
   const teamRetouchRoot = () => componentRoot('team-retouch');
@@ -347,6 +347,12 @@ const registerSystemIpc = context => {
     componentStatusDirty = true;
     queueComponentStatusRefresh(true);
   };
+  const componentLifecycleService = createComponentLifecycleService({
+    app, backgroundTasks, pluginService, spawn,
+    developmentActionRoot: path.resolve(__dirname, '..', '..', 'scripts'),
+    invalidateComponentStatus, writeLog,
+  });
+  componentCapabilityBroker.register('component.lifecycle.v1', componentLifecycleService.invoke);
 
   backgroundTasks?.registerTypeRestartFactory?.('component-status-refresh', task => {
     componentStatusRefreshActive = true;
@@ -395,10 +401,6 @@ const registerSystemIpc = context => {
     setTimeout(() => void run().catch(error => writeLog('warn', 'Deferred system cleanup failed', { error: error.message || String(error) })), 250);
   };
   backgroundTasks?.registerTypeRestartFactory?.('system-filesystem-cleanup', task => queueSystemFilesystemCleanup(task.metadata?.targets || [], task.metadata?.title || task.title, task));
-
-  const resolveAdvancedInstaller = (component, fileName) => app.isPackaged
-    ? path.join(component.path, 'advanced-installer', fileName)
-    : path.resolve(component.path, '..', '..', 'scripts', fileName);
 
   const resolvePreparedPackage = async (packageRoot, pattern, description) => {
     await fs.promises.mkdir(packageRoot, { recursive: true });
@@ -454,38 +456,6 @@ const registerSystemIpc = context => {
     await fs.promises.mkdir(target, { recursive: true });
     await runPackageCommand('tar.exe', ['-xf', archivePath, '-C', target]);
   };
-
-  const installerProgress = message => {
-    const text = String(message || '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '').trim();
-    if (!text) return null;
-    const markers = [
-      ['Checking WSL', 2, '正在检查 WSL 2、NVIDIA 驱动和磁盘空间'],
-      ['Extracting verified package', 8, '正在解压高级引擎离线包'],
-      ['Verifying package SHA256', 48, '正在校验离线包完整性与版本'],
-      ['Replacing the registered', 65, '正在替换需要修复的高级环境'],
-      ['Installing PhotoFlowNative', 72, '正在安装照片流本地增强环境虚拟磁盘'],
-      ['offline environment is ready', 97, '高级引擎离线环境准备完成'],
-    ];
-    const marker = markers.find(([needle]) => text.includes(needle));
-    return marker ? { phase: 'installing', progress: marker[1], message: marker[2] } : null;
-  };
-
-  const runAdvancedPowerShell = (event, scriptPath, args = []) => new Promise((resolve, reject) => {
-    const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, ...args], {
-      cwd: path.dirname(scriptPath), windowsHide: true,
-    });
-    let output = '';
-    const consume = chunk => {
-      const text = chunk.toString('utf8');
-      output = (output + text).slice(-16000);
-      const progress = installerProgress(text);
-      if (progress && !event.sender.isDestroyed()) event.sender.send('team-retouch-advanced-progress', progress);
-    };
-    child.stdout.on('data', consume);
-    child.stderr.on('data', consume);
-    child.once('error', reject);
-    child.once('exit', code => code === 0 ? resolve(output) : reject(new Error(output.trim() || `高级环境操作失败（退出代码 ${code}）`)));
-  });
 
   ipcMain.on('renderer-error-log', (_event, message, details) => {
     const text = String(message || '未知错误').slice(0, 500);
@@ -724,73 +694,6 @@ const registerSystemIpc = context => {
       return { success: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
-    }
-  });
-
-  ipcMain.handle('team-retouch-advanced-preflight', async event => {
-    if (advancedOperation) return { success: false, error: '另一项高级环境操作正在进行' };
-    try {
-      const component = pluginService.list().find(item => item.id === 'team-retouch');
-      if (!component?.installed) throw new Error('请先安装“团片协作”基础组件');
-      const installer = resolveAdvancedInstaller(component, 'setup-team-retouch-advanced.ps1');
-      if (!(await fs.promises.stat(installer).catch(() => null))?.isFile()) throw new Error('高级环境离线安装器未随组件提供');
-      advancedOperation = runAdvancedPowerShell(event, installer, ['-CheckOnly']);
-      const output = await advancedOperation;
-      const message = output.split(/\r?\n/).find(line => line.includes('OFFLINE_PREFLIGHT_OK'))?.split('|').slice(1).join(' · ') || 'WSL 2、NVIDIA 显卡与磁盘空间检查通过';
-      return { success: true, message };
-    } catch (error) {
-      return { success: false, error: error.message || String(error) };
-    } finally {
-      advancedOperation = null;
-    }
-  });
-
-  ipcMain.handle('team-retouch-advanced-install', async (event, options = {}) => {
-    if (advancedOperation) return { success: false, error: '另一项高级环境操作正在进行' };
-    try {
-      const component = pluginService.list().find(item => item.id === 'team-retouch');
-      if (!component?.installed) throw new Error('请先安装“团片协作”基础组件');
-      const installer = resolveAdvancedInstaller(component, 'setup-team-retouch-advanced.ps1');
-      if (!(await fs.promises.stat(installer).catch(() => null))?.isFile()) throw new Error('高级环境安装器未随组件提供，请重新构建或安装组件');
-      const packagePath = await resolveAdvancedPackage();
-      const packageSizeBytes = (await fs.promises.stat(packagePath)).size;
-      const installRoot = defaultAdvancedInstallRoot();
-      if (!event.sender.isDestroyed()) event.sender.send('team-retouch-advanced-progress', { phase: 'starting', progress: 1, message: '正在读取高级引擎离线包' });
-      advancedOperation = runAdvancedPowerShell(event, installer, ['-InstallRoot', installRoot, '-PackagePath', packagePath, '-ExpectedComponentVersion', component.version, ...(options.repair ? ['-Repair'] : [])]);
-      await advancedOperation;
-      if (!event.sender.isDestroyed()) event.sender.send('team-retouch-advanced-progress', { phase: 'verifying', progress: 98, message: '正在实际加载 PairDETR 与 SAM 2.1' });
-      const runtimeProbe = await pluginService.runJson('team-retouch', ['probe-advanced-runtime'], 4 * 60 * 1000);
-      if (!runtimeProbe.pairDetrReady || !runtimeProbe.sam2Ready) throw new Error('高级模型服务没有全部进入可用状态');
-      if (!event.sender.isDestroyed()) event.sender.send('team-retouch-advanced-progress', { phase: 'complete', progress: 100, message: '高级引擎安装并验证完成' });
-      writeLog('info', 'Team retouch advanced environment installed from offline package', { installRoot, packagePath, repair: Boolean(options.repair) });
-      invalidateComponentStatus();
-      return { success: true, packageSizeBytes };
-    } catch (error) {
-      writeLog('error', 'Unable to install team retouch advanced environment', { error: error.message || String(error) });
-      return { success: false, error: error.message || String(error) };
-    } finally {
-      advancedOperation = null;
-    }
-  });
-
-  ipcMain.handle('team-retouch-advanced-uninstall', async event => {
-    if (advancedOperation) return { success: false, error: '另一项高级环境操作正在进行' };
-    try {
-      const component = pluginService.list().find(item => item.id === 'team-retouch');
-      if (!component?.installed) throw new Error('团片协作组件未安装');
-      const uninstaller = resolveAdvancedInstaller(component, 'uninstall-team-retouch-advanced.ps1');
-      if (!(await fs.promises.stat(uninstaller).catch(() => null))?.isFile()) throw new Error('高级环境卸载器不存在');
-      if (!event.sender.isDestroyed()) event.sender.send('team-retouch-advanced-progress', { phase: 'uninstalling', progress: 20, message: '正在停止并删除高级引擎' });
-      advancedOperation = runAdvancedPowerShell(event, uninstaller);
-      await advancedOperation;
-      invalidateComponentStatus();
-      writeLog('info', 'Team retouch advanced environment uninstalled');
-      return { success: true };
-    } catch (error) {
-      writeLog('error', 'Unable to uninstall team retouch advanced environment', { error: error.message || String(error) });
-      return { success: false, error: error.message || String(error) };
-    } finally {
-      advancedOperation = null;
     }
   });
 

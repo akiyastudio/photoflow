@@ -40,19 +40,28 @@
         "team.patch.detect.v1", "team.patch.detect-batch.v1",
         "team.patch.update.v1", "team.patch.delete.v1", "team.patch.cleanup.v1",
         "team.patch.upload.v1", "team.patch.remove-upload.v1", "team.patch.merge.v1",
-        "team.identity.similarities.v1", "team.workflow.settings.save.v1",
+        "team.identity.similarities.v1", "team.identity.suggest.v1", "team.identity.complete.v1",
+        "team.media.authorize.v1", "team.patch.open.v1", "team.workflow.settings.save.v1",
         "team.workflow.status.v1", "team.workflow.cancel.v1", "team.workflow.generate.v1",
         "team.workflow.export.v1", "team.workflow.open-export.v1",
         "team.workflow.return-review.get.v1", "team.workflow.return-review.discard.v1", "team.workflow.return-review.ignore.v1",
         "team.workflow.return-batch.v1", "team.workflow.return-confirm.v1",
         "team.patch.select-returns.v1", "team.patch.return-batch.v1",
         "team.workflow.artifact.migrate.v1",
-        "component.settings.get.v1", "component.settings.update.v1"
+        "component.settings.get.v1", "component.settings.update.v1",
+        "component.advanced.preflight.v1", "component.advanced.install.v1", "component.advanced.uninstall.v1"
       ],
       "capabilities": [
         "project.media.read.v1", "project.output.authorize.v1", "version.register.v1",
-        "tasks.report.v1", "dialogs.open.v1", "component.storage.v1", "component.settings.v1"
-      ]
+        "tasks.report.v1", "dialogs.open.v1", "project.media.access.v1", "project.identity.complete.v1",
+        "component.storage.v1", "component.settings.v1", "component.runtime.v1", "component.lifecycle.v1"
+      ],
+      "runtimeActions": ["identity.suggest"],
+      "lifecycleActions": {
+        "advanced.preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "0980e1c2157be0d9753c76c632b2ca183415d1b93faae6ff65d62f0f77896cc0" },
+        "advanced.install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "0980e1c2157be0d9753c76c632b2ca183415d1b93faae6ff65d62f0f77896cc0" },
+        "advanced.uninstall": { "entry": "advanced-installer/uninstall-team-retouch-advanced.ps1", "sha256": "582cf986b2e16de10ee88cc4b7e828793115fe364ab7e618076641570c2ca02c" }
+      }
     }
   }
 }
