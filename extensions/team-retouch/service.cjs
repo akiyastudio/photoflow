@@ -19,10 +19,6 @@ const parseJson = (value, fallback) => {
 };
 const uniqueText = values => [...new Set((values || []).map(value => String(value || '').trim()).filter(Boolean))];
 const sha256 = value => crypto.createHash('sha256').update(String(value)).digest('hex');
-const isInside = (root, candidate) => {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate));
-  return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
-};
 const safeSegment = (value, fallback) => String(value || fallback).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim().slice(0, 60) || fallback;
 const weekName = value => `第${Math.max(1, Math.floor(Number(value) || 1))}周`;
 
