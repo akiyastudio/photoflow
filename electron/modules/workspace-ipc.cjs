@@ -1,6 +1,5 @@
 const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = require('../services/protected-project-folder.cjs');
 const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
-const { createTeamWorkflowArtifactService } = require('../services/team-workflow-artifact-service.cjs');
 const { startDetachedBackgroundOperation } = require('../services/detached-background-operation.cjs');
 const { replaceVideoFileWithRollback } = require('../services/video-trim-commit-service.cjs');
 const { createProjectVirtualPathService } = require('../services/project-virtual-path-service.cjs');
@@ -17,7 +16,7 @@ const { runWorkspaceMaintenanceWithRetry, workspaceDatabaseTaskResource } = requ
 const MANAGED_EXTERNAL_FOLDER_PREFIX = 'PhotoFlow 外链文件夹：';
 const MANAGED_EXTERNAL_FILE_PREFIX = 'PhotoFlow 外链文件：';
 const registerWorkspaceIpc = context => {
-  const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation = () => false, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
+  const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation = () => false, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
   const logSlowWorkspaceInteraction = (operation, startedAt, details = {}) => {
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs >= 150) writeLog('info', 'Slow workspace interaction', { operation, elapsedMs, ...details });
@@ -68,7 +67,16 @@ const registerWorkspaceIpc = context => {
       return description.startsWith('灵感库：') ? 'inspiration' : undefined;
     } catch { return undefined; }
   };
-  const teamWorkflowArtifacts = createTeamWorkflowArtifactService({ crypto, fs, getWorkspaceDataRoot, path, writeLog });
+  const migrateTeamWorkflowArtifacts = async (workspaceRoot, from, to) => {
+    if (!componentServiceManager?.supports('team-retouch', 'team.workflow.artifact.migrate.v1')) {
+      writeLog('warn', 'Team workflow artifact migration deferred because component service is unavailable', { from, to });
+      return [];
+    }
+    return componentServiceManager.invoke('team-retouch', 'team.workflow.artifact.migrate.v1', { from, to }, {
+      componentId: 'team-retouch', componentVersion: '', workspacePath: workspaceRoot,
+      projectId: `artifact:${String(from.projectName || '')}`, projectName: String(from.projectName || ''), projectStatus: String(from.status || ''),
+    });
+  };
   const { selectWorkspaceForWrite } = createWorkspaceStoragePolicy({ fs, path, ensureWorkspace });
   const { acknowledgeImportReceipt, commitImportManifest, importStagingRoots, readImportReceipt, receiptLocationsForSession } = createImportReceiptService({ crypto, fs, path, pathExists, versionService });
   const isValidProjectStatus = value => typeof value === 'string' && value === value.trim() && value.length > 0 && value.length <= 24 && ![...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
@@ -501,7 +509,7 @@ const registerWorkspaceIpc = context => {
       const previousProjectDate = readProjectDate(catalog.byName.get(projectName.toLocaleLowerCase()));
       await mutateWorkspaceCatalog(root, 'renameProject', { name: projectName, nextName: cleanedName, relativePath: path.relative(root, destination), ...(legacyCall ? {} : { projectDate }) });
       if (cleanedName !== projectName) {
-        await teamWorkflowArtifacts.migrate(root,
+        await migrateTeamWorkflowArtifacts(root,
           { status, projectName },
           { status, projectName: cleanedName });
       }
@@ -888,7 +896,7 @@ const registerWorkspaceIpc = context => {
       const response = { success: true, message: `已撤销重命名：${operation.afterName} → ${operation.beforeName}` };
       if (operation.kind === 'project') {
         await mutateWorkspaceCatalog(operation.workspaceRoot, 'renameProject', { name: operation.afterName, nextName: operation.beforeName, relativePath: path.relative(operation.workspaceRoot, operation.source), ...(Object.prototype.hasOwnProperty.call(operation, 'beforeProjectDate') ? { projectDate: operation.beforeProjectDate || null } : {}) });
-        await teamWorkflowArtifacts.migrate(operation.workspaceRoot,
+        await migrateTeamWorkflowArtifacts(operation.workspaceRoot,
           { status: operation.status, projectName: operation.afterName },
           { status: operation.status, projectName: operation.beforeName });
         response.project = { name: operation.beforeName, path: operation.source, status: operation.status, updatedAt: Date.now(), projectDate: operation.beforeProjectDate };
@@ -909,7 +917,7 @@ const registerWorkspaceIpc = context => {
       const source = getProjectPath(workspacePath, currentStatus, projectName);
       if (!fs.existsSync(source)) throw new Error('项目不存在');
       await mutateWorkspaceCatalog(root, 'setProjectStatus', { name: projectName, status: nextStatus });
-      await teamWorkflowArtifacts.migrate(root,
+      await migrateTeamWorkflowArtifacts(root,
         { status: currentStatus, projectName },
         { status: nextStatus, projectName });
       return { success: true, project: { id: catalog.byName.get(projectName.toLocaleLowerCase())?.id, name: projectName, path: source, status: nextStatus, updatedAt: Date.now() } };
@@ -937,13 +945,13 @@ const registerWorkspaceIpc = context => {
         try {
           await workspaceRepository.setProjectStatus(root, { name: row.name, status: targetStatus });
           try {
-            const migrationResults = await teamWorkflowArtifacts.migrate(root,
+            const migrationResults = await migrateTeamWorkflowArtifacts(root,
               { status: row.status, projectName: row.name },
               { status: targetStatus, projectName: row.name });
             if (migrationResults.some(result => result.state === 'failed')) throw new Error('团队工作流数据迁移失败');
           } catch (migrationError) {
             await workspaceRepository.setProjectStatus(root, { name: row.name, status: row.status }).catch(() => undefined);
-            await teamWorkflowArtifacts.migrate(root,
+            await migrateTeamWorkflowArtifacts(root,
               { status: targetStatus, projectName: row.name },
               { status: row.status, projectName: row.name }).catch(() => undefined);
             throw migrationError;

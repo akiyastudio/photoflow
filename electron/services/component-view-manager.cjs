@@ -84,6 +84,11 @@ class ComponentViewManager {
         projectName: String(request.projectName || ''),
         projectStatus: String(request.projectStatus || ''),
         eventSender: view.webContents,
+        emitComponentEvent: (topic, payload) => {
+          const channels = { 'workflow.progress': 'workspace-team-workflow-progress', 'patch.return-batch.progress': 'workspace-team-patch-return-batch-progress' };
+          const channel = channels[String(topic || '')];
+          if (channel && !view.webContents.isDestroyed()) view.webContents.send(channel, payload);
+        },
       }),
     };
     this.instances.set(key, instance);

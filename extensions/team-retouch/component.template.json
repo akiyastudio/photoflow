@@ -14,6 +14,8 @@
     "ui/index.html",
     "ui/team-retouch.svg",
     "service.cjs",
+    "workflow-generation.cjs",
+    "workflow-artifact.cjs",
     "_internal/models/rtmdet-ins_m_640x640.onnx",
     "_internal/models/face_detection_yunet_2023mar.onnx",
     "_internal/models/adaface_ir18_webface4m.onnx",
@@ -39,6 +41,12 @@
         "team.patch.update.v1", "team.patch.delete.v1", "team.patch.cleanup.v1",
         "team.patch.upload.v1", "team.patch.remove-upload.v1", "team.patch.merge.v1",
         "team.identity.similarities.v1", "team.workflow.settings.save.v1",
+        "team.workflow.status.v1", "team.workflow.cancel.v1", "team.workflow.generate.v1",
+        "team.workflow.export.v1", "team.workflow.open-export.v1",
+        "team.workflow.return-review.get.v1", "team.workflow.return-review.discard.v1", "team.workflow.return-review.ignore.v1",
+        "team.workflow.return-batch.v1", "team.workflow.return-confirm.v1",
+        "team.patch.select-returns.v1", "team.patch.return-batch.v1",
+        "team.workflow.artifact.migrate.v1",
         "component.settings.get.v1", "component.settings.update.v1"
       ],
       "capabilities": [

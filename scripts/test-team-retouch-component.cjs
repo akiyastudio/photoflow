@@ -23,6 +23,7 @@ assert(!outputText.includes('/src/') && !outputText.includes('src/components/Tea
 assert(template.componentHost.contributions.some(item => item.type === 'component.fullPage' && item.entry === 'ui/index.html'));
 assert(template.requiredFiles.includes('ui/index.html') && template.requiredFiles.includes('ui/team-retouch.svg'), 'installation must reject a component missing its renderer or icon');
 assert(template.requiredFiles.includes('service.cjs'), 'installation must reject a component missing its backend service');
+assert(template.requiredFiles.includes('workflow-generation.cjs') && template.requiredFiles.includes('workflow-artifact.cjs'), 'installation must reject a component missing workflow orchestration modules');
 assert.deepEqual(template.componentHost.service.rpcMethods, [
   'team.project.get.v1', 'team.project.register.v1', 'team.project.remove-photo.v1',
   'team.identity.save.v1', 'team.identity.assign.v1', 'team.identity.confirm-group.v1', 'team.identity.delete.v1',
@@ -30,10 +31,23 @@ assert.deepEqual(template.componentHost.service.rpcMethods, [
   'team.patch.update.v1', 'team.patch.delete.v1', 'team.patch.cleanup.v1', 'team.patch.upload.v1',
   'team.patch.remove-upload.v1', 'team.patch.merge.v1',
   'team.identity.similarities.v1', 'team.workflow.settings.save.v1',
+  'team.workflow.status.v1', 'team.workflow.cancel.v1', 'team.workflow.generate.v1',
+  'team.workflow.export.v1', 'team.workflow.open-export.v1',
+  'team.workflow.return-review.get.v1', 'team.workflow.return-review.discard.v1', 'team.workflow.return-review.ignore.v1',
+  'team.workflow.return-batch.v1', 'team.workflow.return-confirm.v1',
+  'team.patch.select-returns.v1', 'team.patch.return-batch.v1',
+  'team.workflow.artifact.migrate.v1',
   'component.settings.get.v1', 'component.settings.update.v1',
 ]);
 assert(template.componentHost.service.rpcMethods.every(method => !COMPONENT_RPC_METHODS[method]), 'service-owned routes must not retain legacy RPC mappings');
-for (const channel of ['workspace-team-identity-similarities', 'workspace-team-workflow-settings-save']) assert(!versionsIpc.includes(`ipcMain.handle('${channel}'`), `${channel} must have exactly one component-service writer`);
+for (const channel of [
+  'workspace-team-identity-similarities', 'workspace-team-workflow-settings-save',
+  'workspace-team-workflow-status', 'workspace-team-workflow-cancel', 'workspace-team-workflow-generate',
+  'workspace-team-identity-export', 'workspace-team-identity-open-export',
+  'workspace-team-workflow-return-review-get', 'workspace-team-workflow-return-review-discard', 'workspace-team-workflow-return-review-ignore',
+  'workspace-team-workflow-return-batch', 'workspace-team-workflow-return-confirm',
+  'workspace-team-patch-select-returns', 'workspace-team-patch-return-batch',
+]) assert(!versionsIpc.includes(`ipcMain.handle('${channel}'`), `${channel} must have exactly one component-service writer`);
 for (const channel of ['component-settings-get', 'component-settings-update']) assert(!systemIpc.includes(`ipcMain.handle('${channel}'`), `${channel} must not retain a system IPC route`);
 for (const capability of ['component.storage.v1', 'project.media.read.v1', 'project.output.authorize.v1', 'version.register.v1', 'tasks.report.v1', 'dialogs.open.v1', 'component.settings.v1']) assert(template.componentHost.service.capabilities.includes(capability), `${capability} must be fixed in the service manifest`);
 assert(builder.indexOf('buildRenderer(id)') < builder.indexOf("if (id === 'team-retouch' && !probeModule('onnxruntime'))"), 'renderer must build before native runtime packaging starts');
@@ -43,8 +57,8 @@ assert(Object.keys(COMPONENT_RPC_METHODS).every(method => method.endsWith('.v1')
 assert.deepEqual(sanitizePayload({ relativePaths: ['a.jpg'], workspacePath: 'C:/escape', channel: 'arbitrary' }, ['relativePaths']), { relativePaths: ['a.jpg'] }, 'unknown fields, workspace identities, and arbitrary channels must be discarded');
 assert.throws(() => sanitizePayload('bad', []), /payload must be an object/);
 assert.throws(() => sanitizePayload({ value: 'x'.repeat(2 * 1024 * 1024) }, ['value']), /too large/);
-for (const method of ['team.media.authorize.v1', 'team.patch.open.v1', 'team.workflow.open-export.v1']) assert(COMPONENT_RPC_METHODS[method], `${method} must be an explicit versioned component capability`);
-for (const method of ['team.media.authorize.v1', 'team.patch.open.v1', 'team.workflow.open-export.v1', 'team.workflow.return-confirm.v1']) {
+for (const method of ['team.media.authorize.v1', 'team.patch.open.v1']) assert(COMPONENT_RPC_METHODS[method], `${method} must be an explicit versioned component capability`);
+for (const method of ['team.media.authorize.v1', 'team.patch.open.v1']) {
   const fields = COMPONENT_RPC_METHODS[method].fields || [];
   assert(!fields.some(field => /path|file|shell/i.test(field)), `${method} must reject renderer-controlled paths`);
 }
@@ -53,8 +67,7 @@ const boundContext = { workspacePath: 'C:/bound-workspace', projectName: 'Bound 
 const mediaSpec = COMPONENT_RPC_METHODS['team.media.authorize.v1'];
 const mediaArgs = mediaSpec.args(sanitizePayload({ kind: 'original', photoId: 'p1', workspacePath: 'C:/escape' }, mediaSpec.fields), boundContext);
 assert.equal(mediaArgs[0], boundContext.workspacePath); assert.equal(mediaArgs[1], boundContext.projectName); assert.equal(mediaArgs[3].workspacePath, undefined, 'media authorization must inject its workspace/project owner from the bound component context');
-const returnArgs = COMPONENT_RPC_METHODS['team.workflow.return-batch.v1'].args({ returnedFiles: ['media-token:picker'], items: [{ photoId: 'p1', baseVersionId: 'v1', personIndex: 1, taskId: 't1', patchPath: 'C:/escape.png' }] }, boundContext);
-assert.deepEqual(returnArgs[2].items, [{ photoId: 'p1', baseVersionId: 'v1', personIndex: 1, taskId: 't1' }], 'nested return candidates must discard renderer paths');
+for (const method of ['team.workflow.return-batch.v1', 'team.workflow.return-confirm.v1', 'team.workflow.generate.v1', 'team.patch.select-returns.v1', 'team.patch.return-batch.v1']) assert(!COMPONENT_RPC_METHODS[method], `${method} must not retain a legacy host route`);
 const safeWorkspace = stripWorkspacePaths({ photos: [{ photoId: 'p1', sourcePath: 'C:/secret.jpg', tasks: [{ id: 't1', patchPath: 'C:/patch.png', editedPatchPath: 'C:/return.png' }] }] });
 assert(!JSON.stringify(safeWorkspace).includes('C:/'), 'component workspace responses must not disclose host file paths');
 const safeReview = stripReturnPaths({ path: 'C:/return.jpg', matches: [{ returnId: 'r1', path: 'C:/return.jpg', mediaPath: 'media-token:secret', alternatives: [{ taskId: 't1', patchPath: 'C:/patch.png' }] }] });
@@ -66,12 +79,17 @@ assert.throws(() => resolveTeamProjectMediaPath(ownedWorkspace, { kind: 'working
 const rendererSource = fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'renderer', 'src', 'main.tsx'), 'utf8');
 assert(rendererSource.includes("rpc<Json>('team.identity.similarities.v1')") && rendererSource.includes('data-crop-handle') && rendererSource.includes("'difference', '差异'") && rendererSource.includes("'blink', '闪烁'"), 'independent renderer must contain ranked identity, 8-handle crop, and five-mode comparison behavior');
 assert(!rendererSource.includes('returnedPath:') && !rendererSource.includes('patchPath: subject.task') && !rendererSource.includes('window.electronAPI'), 'renderer must never submit paths or access the application preload');
+const serviceSource = fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'service.cjs'), 'utf8');
+assert(serviceSource.includes('if (host?.cancelled) job.cancelled = true') && serviceSource.includes('.photoflow-workflow-checkpoint.json'), 'task-center cancellation and checkpoint recovery must be enforced by the component service');
+assert(serviceSource.includes('await fs.promises.rename(backupDirectory, scope.outputDirectory)') && serviceSource.includes("action: 'cleanup-workflow-backup'"), 'workflow replacement must roll back crashes and defer committed backup cleanup');
 
 const staged = fs.mkdtempSync(path.join(require('os').tmpdir(), 'photoflow-team-component-'));
 try {
   fs.cpSync(rendererOutput, path.join(staged, 'ui'), { recursive: true });
   fs.copyFileSync(path.join(root, 'extensions', 'team-retouch', 'renderer', 'team-retouch.svg'), path.join(staged, 'ui', 'team-retouch.svg'));
   fs.copyFileSync(path.join(root, 'extensions', 'team-retouch', 'service.cjs'), path.join(staged, 'service.cjs'));
+  fs.copyFileSync(path.join(root, 'extensions', 'team-retouch', 'workflow-generation.cjs'), path.join(staged, 'workflow-generation.cjs'));
+  fs.copyFileSync(path.join(root, 'extensions', 'team-retouch', 'workflow-artifact.cjs'), path.join(staged, 'workflow-artifact.cjs'));
   fs.writeFileSync(path.join(staged, 'component.json'), JSON.stringify(template));
   const descriptor = parseComponentHostManifest(template, staged);
   assert.equal(descriptor.componentId, 'team-retouch');

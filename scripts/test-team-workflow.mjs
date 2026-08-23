@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { scheduleWorkflowWeeks } from '../extensions/team-retouch/renderer/src/workflow-schedule.ts';
-import workflowGeneration from '../electron/services/team-workflow-generation.cjs';
+import workflowGeneration from '../extensions/team-retouch/workflow-generation.cjs';
 
 const { buildWorkflowPlan, copyWorkflowPlan } = workflowGeneration;
 

@@ -75,8 +75,6 @@ const LEGACY_PROJECT_CONTENT_WRITERS = Object.freeze([
   'electron/modules/workspace-ipc.cjs',
   'electron/services/archive-service.cjs',
   'electron/services/selection-service.cjs',
-  'electron/services/team-workflow-artifact-service.cjs',
-  'electron/services/team-workflow-generation.cjs',
   'electron/services/video-trim-commit-service.cjs',
   'python/classify.py',
 ]);

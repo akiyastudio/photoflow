@@ -2,7 +2,9 @@ const readline = require('readline');
 const path = require('path');
 
 const MAX_LINE_BYTES = 2 * 1024 * 1024;
-const REQUEST_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = 60 * 1000;
+const LONG_RUNNING_METHODS = new Set(['team.workflow.generate.v1', 'team.workflow.return-batch.v1', 'team.patch.return-batch.v1']);
+const LONG_REQUEST_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 
 const cloneRequestPayload = payload => {
   if (payload === undefined || payload === null) return {};
@@ -58,7 +60,7 @@ class ComponentServiceManager {
       const timer = setTimeout(() => {
         session.pending.delete(id);
         reject(new Error(`Component service request timed out: ${method}`));
-      }, REQUEST_TIMEOUT_MS);
+      }, LONG_RUNNING_METHODS.has(String(method || '')) ? LONG_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
       timer.unref?.();
       session.pending.set(id, { resolve, reject, timer, context: boundContext });
       try { this.writeFrame(session, message); }
@@ -169,4 +171,4 @@ class ComponentServiceManager {
   }
 }
 
-module.exports = { ComponentServiceManager, MAX_LINE_BYTES, REQUEST_TIMEOUT_MS, cloneRequestPayload, prepareReady, publicContext, serviceEnvironment };
+module.exports = { ComponentServiceManager, LONG_REQUEST_TIMEOUT_MS, MAX_LINE_BYTES, REQUEST_TIMEOUT_MS, cloneRequestPayload, prepareReady, publicContext, serviceEnvironment };

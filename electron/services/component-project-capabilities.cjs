@@ -1,9 +1,11 @@
 const MAX_MEDIA_ITEMS = 2000;
+const componentTaskHandles = new Map();
 
 const registerComponentProjectCapabilities = ({
   broker, ensureWorkspace, getWorkspaceDataRoot, getWorkspaceTeamRetouchDatabasePath,
   resolveProjectEntry, versionService, IMAGE_EXTENSIONS, path, fs, crypto, getConfigPath, readSavedConfig,
-  dialog, mainWindow, uniqueDestination, ensureTrackedVersionThumbnail,
+  getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks,
+  uniqueDestination, ensureTrackedVersionThumbnail,
 }) => {
   broker.register('component.storage.v1', (payload, context, descriptor) => {
     if (payload.namespace !== 'domain') throw new Error('Unknown component storage namespace');
@@ -42,6 +44,171 @@ const registerComponentProjectCapabilities = ({
       items.push({ ...bundle, relativePath });
     }
     return { items };
+  });
+
+  const componentRoot = (workspaceRoot, componentId) => path.join(getWorkspaceDataRoot(workspaceRoot), componentId);
+  const projectKey = context => crypto.createHash('sha256').update(`${context.projectId}\0${context.projectStatus}\0${context.projectName}`).digest('hex');
+  const safeStageId = value => {
+    const id = String(value || '');
+    if (!/^[a-f0-9-]{8,80}$/i.test(id)) throw new Error('Invalid component stage identity');
+    return id;
+  };
+  const inside = (root, candidate) => {
+    const relative = path.relative(path.resolve(root), path.resolve(candidate));
+    return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
+  };
+  const workflowScope = context => {
+    const workspaceRoot = ensureWorkspace(context.workspacePath);
+    const projectRoot = path.resolve(getProjectPath(workspaceRoot, context.projectStatus, context.projectName));
+    const outputDirectory = path.join(projectRoot, '团片协作');
+    if (!inside(projectRoot, outputDirectory)) throw new Error('Invalid component workflow output scope');
+    const dataRoot = componentRoot(workspaceRoot, 'team-retouch');
+    return {
+      outputDirectory,
+      manifestPath: path.join(dataRoot, 'workflows', `${crypto.createHash('sha256').update(`${context.projectStatus}\0${context.projectName}`).digest('hex')}.json`),
+      reviewDirectory: path.join(dataRoot, 'workflow-return-reviews', crypto.createHash('sha256').update(context.projectName).digest('hex')),
+    };
+  };
+
+  broker.register('project.output.authorize.v1', async (payload, context, descriptor) => {
+    if (descriptor.componentId !== 'team-retouch') throw new Error('Unknown component output namespace');
+    const workspaceRoot = ensureWorkspace(context.workspacePath);
+    if (payload.action === 'workflow') return workflowScope(context);
+    if (payload.action === 'stage-inputs') {
+      const tokens = Array.isArray(payload.tokens) ? payload.tokens : [];
+      if (!tokens.length || tokens.length > MAX_MEDIA_ITEMS || tokens.some(token => typeof token !== 'string' || !token.startsWith('media-token:'))) throw new Error('Component inputs require bounded selector tokens');
+      const stageId = crypto.randomUUID();
+      const stageRoot = path.join(componentRoot(workspaceRoot, descriptor.componentId), 'staging', projectKey(context), stageId);
+      await fs.promises.mkdir(stageRoot, { recursive: true });
+      const items = [];
+      try {
+        for (const [index, token] of tokens.entries()) {
+          const source = path.resolve(await mediaService.authorizeInput(token));
+          const extension = path.extname(source).toLowerCase();
+          if (!IMAGE_EXTENSIONS.has(extension)) continue;
+          const destination = path.join(stageRoot, `${String(index + 1).padStart(4, '0')}${extension}`);
+          await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+          items.push({ id: `input-${index + 1}`, name: path.basename(source), path: destination });
+        }
+        if (!items.length) throw new Error('No supported component image inputs');
+        return { stageId, items };
+      } catch (error) {
+        await fs.promises.rm(stageRoot, { recursive: true, force: true }).catch(() => undefined);
+        throw error;
+      }
+    }
+    if (payload.action === 'discard-stage') {
+      const stageRoot = path.join(componentRoot(workspaceRoot, descriptor.componentId), 'staging', projectKey(context), safeStageId(payload.stageId));
+      await fs.promises.rm(stageRoot, { recursive: true, force: true });
+      return { success: true };
+    }
+    if (payload.action === 'cleanup-workflow-backup') {
+      const name = String(payload.backupName || '');
+      if (!/^\.photoflow-team-workflow-previous-[a-f0-9-]{36}$/i.test(name)) throw new Error('Invalid workflow backup cleanup grant');
+      const projectRoot = path.resolve(getProjectPath(workspaceRoot, context.projectStatus, context.projectName));
+      const target = path.join(projectRoot, name);
+      if (!inside(projectRoot, target)) throw new Error('Workflow backup cleanup escapes project');
+      const execution = backgroundTasks.start({
+        type: 'component-workflow-cleanup', title: '清理旧的团队工作流目录', message: '正在清理旧工作流',
+        cancellable: false, resources: [projectRoot], resourceAccess: 'write',
+        metadata: { componentId: descriptor.componentId, projectId: context.projectId, backupName: name },
+      }, async () => { await fs.promises.rm(target, { recursive: true, force: true }); });
+      return { success: true, taskId: execution.task.id };
+    }
+    throw new Error('Unknown component output action');
+  });
+
+  broker.register('dialogs.open.v1', async (payload, context, descriptor) => {
+    if (descriptor.componentId !== 'team-retouch') throw new Error('Unknown component dialog namespace');
+    if (payload.action === 'select-images') {
+      const choice = await dialog.showOpenDialog(mainWindow, {
+        title: `选择 ${String(context.projectName || '')} 的返图`, properties: ['openFile', 'multiSelections'],
+        filters: [{ name: '修图结果', extensions: [...IMAGE_EXTENSIONS].map(value => value.slice(1)) }],
+      });
+      if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, tokens: [] };
+      return { success: true, tokens: choice.filePaths.slice(0, MAX_MEDIA_ITEMS).map(filePath => `media-token:${mediaService.grantPath(path.resolve(filePath))}`) };
+    }
+    if (payload.action === 'open-workflow') {
+      const scope = workflowScope(context);
+      const relativePath = String(payload.relativePath || '').replace(/\\/g, '/');
+      const target = path.resolve(scope.outputDirectory, relativePath || '.');
+      if (target !== path.resolve(scope.outputDirectory) && !inside(scope.outputDirectory, target)) throw new Error('Component open target escapes workflow output');
+      const stat = await fs.promises.stat(target);
+      const directory = stat.isDirectory() ? target : path.dirname(target);
+      const error = await shell.openPath(directory);
+      if (error) throw new Error(error);
+      return { success: true };
+    }
+    throw new Error('Unknown component dialog action');
+  });
+
+  broker.register('tasks.report.v1', async (payload, context, descriptor) => {
+    const operationId = String(payload.operationId || '');
+    if (payload.action === 'latest') {
+      const task = backgroundTasks.list().find(item => item.metadata?.componentId === descriptor.componentId && item.metadata?.projectId === context.projectId && item.type === String(payload.kind || 'workspace-team-workflow')) || null;
+      return { task, cancelled: false };
+    }
+    if (!operationId || operationId.length > 100) throw new Error('Invalid component task operation');
+    const key = `${descriptor.componentId}:${context.projectId}:${operationId}`;
+    let handle = componentTaskHandles.get(key);
+    if (payload.action === 'start') {
+      if (!handle || handle.isFinished()) {
+        handle = backgroundTasks.create({
+          id: `component:${descriptor.componentId}:${operationId}`, type: String(payload.kind || 'component-workflow'),
+          title: String(payload.title || '组件任务').slice(0, 120), message: String(payload.message || ''), cancellable: true,
+          resumable: true, resumePolicy: 'checkpoint', checkpoint: payload.checkpoint,
+          metadata: { componentId: descriptor.componentId, projectId: context.projectId, projectName: context.projectName, operationId },
+        });
+        await handle.waitForStart();
+        componentTaskHandles.set(key, handle);
+      }
+    } else if (payload.action === 'report') {
+      if (!handle) throw new Error('Unknown component task');
+      handle.context.report(payload.progress, String(payload.message || ''), { phase: payload.phase, operationId, ...(payload.metadata || {}) });
+      if (payload.checkpoint !== undefined) handle.context.saveCheckpoint(payload.checkpoint, payload.progress, String(payload.message || ''), { phase: payload.phase, operationId });
+    } else if (payload.action === 'complete') {
+      handle?.complete(String(payload.message || '已完成'));
+    } else if (payload.action === 'failed') {
+      handle?.fail(new Error(String(payload.error || '组件任务失败')));
+    } else if (payload.action === 'cancel') {
+      if (handle && !handle.isFinished()) backgroundTasks.cancel(handle.task.id);
+    } else if (payload.action !== 'status') throw new Error('Unknown component task action');
+    const task = handle ? backgroundTasks.get(handle.task.id) || handle.snapshot() : backgroundTasks.list().find(item => item.metadata?.componentId === descriptor.componentId && item.metadata?.projectId === context.projectId && item.metadata?.operationId === operationId) || null;
+    if (payload.eventTopic && context.emitComponentEvent) context.emitComponentEvent(String(payload.eventTopic), payload.event || {});
+    return { task, cancelled: Boolean(handle?.context.signal.aborted) };
+  });
+
+  broker.register('version.register.v1', async (payload, context, descriptor) => {
+    if (descriptor.componentId !== 'team-retouch' || payload.action !== 'team-return') throw new Error('Unknown component version registration');
+    const workspaceRoot = ensureWorkspace(context.workspacePath);
+    const bundle = await versionService.getPhoto(workspaceRoot, String(payload.photoId || ''));
+    if (String(bundle?.photo?.projectId || '') !== String(context.projectId || '')) throw new Error('Component return photo is outside the bound project');
+    const tasks = await versionService.listTeamPatches(workspaceRoot, String(payload.photoId || ''));
+    const task = (tasks.tasks || []).find(item => String(item.id) === String(payload.taskId || '') && String(item.baseVersionId) === String(payload.baseVersionId || ''));
+    if (!task) throw new Error('Component return task is outside the bound photo version');
+    const sourceRoot = payload.reviewSessionId
+      ? workflowScope(context).reviewDirectory
+      : path.join(componentRoot(workspaceRoot, descriptor.componentId), 'staging', projectKey(context), safeStageId(payload.stageId));
+    const source = path.resolve(sourceRoot, String(payload.inputName || ''));
+    if (!inside(sourceRoot, source) || !fs.existsSync(source) || !IMAGE_EXTENSIONS.has(path.extname(source).toLowerCase())) throw new Error('Component return input is outside its staging grant');
+    if (payload.reviewSessionId) {
+      const session = JSON.parse(await fs.promises.readFile(path.join(sourceRoot, 'session.json'), 'utf8'));
+      if (String(session.id) !== String(payload.reviewSessionId) || !(session.result?.matches || []).some(item => String(item.returnId) === String(payload.returnId) && path.basename(String(item.path || '')) === path.basename(source))) throw new Error('Component review input is outside its review session');
+    }
+    const uploadRoot = path.join(componentRoot(workspaceRoot, descriptor.componentId), String(payload.photoId), String(payload.baseVersionId), 'uploads');
+    await fs.promises.mkdir(uploadRoot, { recursive: true });
+    const destination = path.join(uploadRoot, `${task.id}-${crypto.randomUUID()}${path.extname(source).toLowerCase()}`);
+    await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+    try {
+      await versionService.updateTeamPatch(workspaceRoot, {
+        taskId: task.id, editedPatchPath: destination, status: 'uploaded', needsReview: false, reviewReason: '',
+        ...(payload.complete ? { assignmentCompletion: { personIndex: Number(payload.personIndex), completed: true, completionKind: 'returned' } } : {}),
+      });
+      return { success: true, artifactPath: destination };
+    } catch (error) {
+      await fs.promises.rm(destination, { force: true }).catch(() => undefined);
+      throw error;
+    }
   });
 
   broker.register('component.settings.v1', async (payload, _context, descriptor) => {

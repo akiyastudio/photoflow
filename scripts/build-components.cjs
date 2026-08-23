@@ -170,6 +170,8 @@ const build = id => {
     fs.cpSync(rendererOutput, uiRoot, { recursive: true });
     fs.copyFileSync(path.join(root, 'extensions', id, 'renderer', 'team-retouch.svg'), path.join(uiRoot, 'team-retouch.svg'));
     fs.copyFileSync(path.join(root, 'extensions', id, 'service.cjs'), path.join(target, 'service.cjs'));
+    fs.copyFileSync(path.join(root, 'extensions', id, 'workflow-generation.cjs'), path.join(target, 'workflow-generation.cjs'));
+    fs.copyFileSync(path.join(root, 'extensions', id, 'workflow-artifact.cjs'), path.join(target, 'workflow-artifact.cjs'));
   }
   fs.copyFileSync(definition.template, path.join(target, 'component.json'));
   console.log(`Component ready: ${target}`);

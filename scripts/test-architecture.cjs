@@ -39,6 +39,7 @@ const projectWorkspace = read('src/features/workspace/ProjectWorkspace.tsx') + r
 const projectWorkspaceContract = read('src/contracts/project-workspace-api.ts');
 const projectWorkspaceClient = read('src/platform/project-workspace-client.ts');
 const componentRpcContract = read('electron/component-rpc-contract.cjs');
+const componentProjectCapabilities = read('electron/services/component-project-capabilities.cjs');
 const componentRenderer = read('extensions/team-retouch/renderer/src/main.tsx') + read('extensions/team-retouch/renderer/src/interaction-model.ts');
 const componentSdk = read('extensions/team-retouch/renderer/src/sdk.ts');
 const fileEntryInteractionModel = read('src/features/workspace/file-entry-interaction-model.ts');
@@ -540,7 +541,7 @@ assert(recycleBinService.includes('const trashMany = async filePaths =>') && rec
 const componentsListHandler = systemIpc.slice(systemIpc.indexOf("ipcMain.handle('components-list'"), systemIpc.indexOf("ipcMain.handle('components-open-folder'"));
 assert(componentsListHandler.includes('pluginService.list()') && componentsListHandler.includes('queueComponentStatusRefresh(force === true)') && !componentsListHandler.includes('listWithSizes'), 'component listing must return cached status before recursive sizing and optionally queue a forced runtime probe');
 assert(systemIpc.includes("type: 'component-status-refresh'") && app.includes('onComponentsStatusChanged'), 'detailed component status must refresh through a background event');
-assert(systemIpc.includes('queueSystemFilesystemCleanup(cleanupPaths') && versionsIpc.includes('queueCleanupArtifacts(workspaceRoot') && versionsIpc.includes("queueFilesystemCleanup([previousWorkflowDirectory]"), 'committed installs, versions, and workflows must defer obsolete internal-file cleanup');
+assert(systemIpc.includes('queueSystemFilesystemCleanup(cleanupPaths') && versionsIpc.includes('queueCleanupArtifacts(workspaceRoot') && componentProjectCapabilities.includes("type: 'component-workflow-cleanup'") && componentProjectCapabilities.includes('backgroundTasks.start({'), 'committed installs, versions, and workflows must defer obsolete internal-file cleanup');
 assert(appDialogProvider.includes('choice: (options: ChoiceDialogOptions)') && appDialogProvider.includes("enqueue('choice', options)"), 'the shared in-app dialog provider must support multi-choice decisions');
 assert(filesIpc.includes("kind: 'paste-conflict'") && projectWorkspace.includes("value: 'replace'") && projectWorkspace.includes("value: 'keep-both'"), 'paste conflicts must return a decision request and let the in-app UI replace, keep both, or cancel');
 assert(workspaceIpc.includes("kind: 'restore-conflict'") && app.includes("value: 'rename'") && app.includes("value: 'overwrite'"), 'occupied restore targets must be resolved through the in-app choice dialog');

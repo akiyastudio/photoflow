@@ -3,7 +3,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createTeamWorkflowArtifactService } = require('../electron/services/team-workflow-artifact-service.cjs');
+const { createTeamWorkflowArtifactService } = require('../extensions/team-retouch/workflow-artifact.cjs');
 
 const run = async () => {
   const temporaryRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'photoflow-team-workflow-artifacts-'));
