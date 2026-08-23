@@ -4,8 +4,8 @@ const { createDirtyCoalescingRunner } = require('./dirty-coalescing-runner.cjs')
 const { createKeyedAdmissionQueue } = require('./keyed-admission-queue.cjs');
 const { isMediaRelevantChange } = require('./watch-change-filter.cjs');
 const { MEDIA_RESCAN_POLICY_VERSION } = require('./background-task-policy-versions.cjs');
+const { MAX_CHANGED_PATHS } = require('../contracts/media-sync-limits.cjs');
 
-const MAX_CHANGED_PATHS = 2048;
 const comparablePath = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
 
 const normalizeChange = value => typeof value === 'string'
@@ -59,10 +59,30 @@ const createMediaTrackingScanScheduler = ({
   runnerRetryDelays = undefined,
 }) => {
   const keyFor = (root, projectName) => `${path.resolve(root).toLocaleLowerCase()}\0${String(projectName || '').toLocaleLowerCase()}`;
+  const replayKeyFor = (root, projectName, taskId) => `${keyFor(root, projectName)}\0replay:${String(taskId || crypto.randomUUID())}`;
   const workspaceKey = root => comparablePath(root);
   const workspaceAdmission = createKeyedAdmissionQueue();
   const admissionControllers = new Map();
+  const replayKeysByProject = new Map();
+  const cancellationEpochs = new Map();
+  let stopped = false;
   let runner;
+
+  const cancellationEpoch = key => cancellationEpochs.get(key) || 0;
+  const trackReplayKey = (projectKey, replayKey) => {
+    let keys = replayKeysByProject.get(projectKey);
+    if (!keys) {
+      keys = new Set();
+      replayKeysByProject.set(projectKey, keys);
+    }
+    keys.add(replayKey);
+  };
+  const untrackReplayKey = (projectKey, replayKey) => {
+    const keys = replayKeysByProject.get(projectKey);
+    if (!keys) return;
+    keys.delete(replayKey);
+    if (!keys.size) replayKeysByProject.delete(projectKey);
+  };
 
   const enqueueRetry = (key, batch, restartTask = null) => {
     const ticket = runner.enqueue(key, { ...batch, restartTask });
@@ -140,15 +160,28 @@ const createMediaTrackingScanScheduler = ({
     }),
   });
 
-  backgroundTasks?.registerTypeRestartFactory?.('version-media-rescan', task => enqueueRetry(
-    keyFor(task.metadata?.workspaceRoot, task.metadata?.projectName),
-    mergeMediaScanBatch(null, {
+  backgroundTasks?.registerTypeRestartFactory?.('version-media-rescan', async task => {
+    const projectKey = keyFor(task.metadata?.workspaceRoot, task.metadata?.projectName);
+    const replayKey = replayKeyFor(task.metadata?.workspaceRoot, task.metadata?.projectName, task.id);
+    const epoch = cancellationEpoch(projectKey);
+    trackReplayKey(projectKey, replayKey);
+    try {
+      const result = await enqueueRetry(replayKey, mergeMediaScanBatch(null, {
       root: task.metadata?.workspaceRoot, projectName: task.metadata?.projectName,
       changes: task.metadata?.changes || task.metadata?.changedPaths || [], fullScan: task.metadata?.fullScan !== false,
       snapshotId: task.metadata?.snapshotId,
-    }),
-    task,
-  ), {
+      }), task);
+      // Watcher events are not journaled across process downtime. A successful
+      // immutable-manifest replay must therefore be followed by a fresh full
+      // scan on the normal lane, using a newly generated snapshot id.
+      if (!stopped && cancellationEpoch(projectKey) === epoch) {
+        schedule(task.metadata?.workspaceRoot, task.metadata?.projectName, [], true);
+      }
+      return result;
+    } finally {
+      untrackReplayKey(projectKey, replayKey);
+    }
+  }, {
     canRestart: task => Boolean(task.metadata?.workspaceRoot && task.metadata?.projectName)
       && (task.metadata?.fullScan === true || Number(task.metadata?.mediaRescanPolicyVersion || 0) >= MEDIA_RESCAN_POLICY_VERSION),
     autoRestart: true,
@@ -174,14 +207,22 @@ const createMediaTrackingScanScheduler = ({
   const cancel = (root, projectName) => {
     if (!projectName) return;
     const key = keyFor(root, projectName);
+    cancellationEpochs.set(key, cancellationEpoch(key) + 1);
     admissionControllers.get(key)?.abort();
     runner.cancel(key);
+    for (const replayKey of replayKeysByProject.get(key) || []) {
+      admissionControllers.get(replayKey)?.abort();
+      runner.cancel(replayKey);
+    }
+    replayKeysByProject.delete(key);
     versionStaleDetectionService.cancel(root, projectName);
   };
 
   const stop = () => {
+    stopped = true;
     for (const controller of admissionControllers.values()) controller.abort();
     admissionControllers.clear();
+    replayKeysByProject.clear();
     workspaceAdmission.stop();
     runner.stop();
   };

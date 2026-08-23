@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -74,8 +75,64 @@ def change(path: Path, event_type="rename", kind="file"):
     return {"path": str(path.resolve()), "eventType": event_type, "kind": kind}
 
 
+def assert_inside_temporary(temporary: Path, path: Path, label: str):
+    temporary_resolved = temporary.resolve(strict=True)
+    path_absolute = path.absolute()
+    try:
+        common = os.path.commonpath((str(temporary_resolved), str(path_absolute)))
+        inside = os.path.normcase(common) == os.path.normcase(str(temporary_resolved))
+    except ValueError:
+        inside = False
+    assert inside, f"{label} must remain inside the test temporary directory: {path_absolute}"
+
+
+def is_directory_link(path: Path):
+    if path.is_symlink():
+        return True
+    is_junction = getattr(path, "is_junction", None)
+    if is_junction is not None and is_junction():
+        return True
+    if os.name == "nt" and os.path.lexists(path):
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+        return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    return False
+
+
+def create_directory_link(temporary: Path, link: Path, target: Path):
+    temporary_resolved = temporary.resolve(strict=True)
+    target_resolved = target.resolve(strict=True)
+    requested_link_absolute = link.absolute()
+    link_absolute = link.parent.resolve(strict=True) / link.name
+    assert os.path.normcase(str(link_absolute)) == os.path.normcase(str(requested_link_absolute)), (
+        f"link path must have a resolved parent and fixed basename: {requested_link_absolute}"
+    )
+    assert_inside_temporary(temporary_resolved, target_resolved, "link target")
+    assert_inside_temporary(temporary_resolved, link_absolute, "link path")
+    assert not os.path.lexists(link_absolute), f"test link path already exists: {link_absolute}"
+    try:
+        os.symlink(str(target_resolved), str(link_absolute), target_is_directory=True)
+        mechanism = "symbolic link"
+    except (OSError, NotImplementedError) as error:
+        if not isinstance(error, OSError) or os.name != "nt" or getattr(error, "winerror", None) != 1314:
+            raise AssertionError(f"unable to create test directory symbolic link: {error}") from error
+        junction = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(link_absolute), str(target_resolved)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        if junction.returncode != 0:
+            reason = (junction.stderr or junction.stdout).strip() or f"exit code {junction.returncode}"
+            raise AssertionError(f"unable to create safe test directory junction: {reason}") from error
+        mechanism = "directory junction"
+    assert is_directory_link(link_absolute), f"created {mechanism} is not a reparse link: {link_absolute}"
+    assert link_absolute.resolve(strict=True) == target_resolved, (
+        f"created {mechanism} resolves outside its expected target: {link_absolute}"
+    )
+    return mechanism
+
+
 def main():
-    temporary = Path(tempfile.mkdtemp(prefix="photoflow-media-incremental-"))
+    temporary_directory = tempfile.TemporaryDirectory(prefix="photoflow-media-incremental-")
+    temporary = Path(temporary_directory.name)
     try:
         workspace = temporary / "workspace"
         project = workspace / "Project"
@@ -202,16 +259,28 @@ def main():
         except ValueError as error:
             assert "unauthorized" in str(error)
 
-        escape = project / "escape-link"
+        escape = (project / "escape-link").absolute()
+        link_mechanism = None
         try:
-            os.symlink(str(temporary), str(escape), target_is_directory=True)
+            link_mechanism = create_directory_link(temporary, escape, temporary)
             try:
                 apply_changes(workspace, db, "Project", [change(escape / "unauthorized.jpg")])
                 assert False, "a symlink/junction escape must be rejected"
             except ValueError as error:
                 assert "unauthorized" in str(error)
-        except (OSError, NotImplementedError) as error:
-            print(f"SKIP: junction/symbolic-link escape test unavailable: {error}")
+        finally:
+            if os.path.lexists(escape):
+                assert is_directory_link(escape), "refusing to recursively remove a non-link escape-link path"
+                assert escape.resolve(strict=True) == temporary.resolve(strict=True), (
+                    "refusing to remove an escape-link whose target is not the test temporary directory"
+                )
+                if escape.is_symlink():
+                    escape.unlink()
+                else:
+                    os.rmdir(escape)
+                assert not os.path.lexists(escape), "test escape link was not removed"
+                if link_mechanism is not None:
+                    print(f"{link_mechanism} escape rejection and link-only cleanup verified")
 
         retry_file = project / "retry.jpg"
         retry_file.write_bytes(b"retry")
@@ -331,7 +400,7 @@ def main():
         checked.close()
         print("incremental media synchronization tests passed")
     finally:
-        shutil.rmtree(temporary, ignore_errors=True)
+        temporary_directory.cleanup()
 
 
 if __name__ == "__main__":

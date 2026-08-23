@@ -1,3 +1,5 @@
+const { MAX_CHANGED_PATHS } = require('../../contracts/media-sync-limits.cjs');
+
 const scheduleSdImportedMedia = ({
   root,
   projects,
@@ -23,12 +25,10 @@ const scheduleSdImportedMedia = ({
           && fs.existsSync(candidate) && fs.statSync(candidate).isFile()
           && mediaExtensions.has(path.extname(candidate).toLocaleLowerCase());
       }))];
-    scheduleMediaTrackingScan(
-      root,
-      project.name,
-      importedPaths.map(importedPath => ({ path: importedPath, eventType: 'rename', kind: 'file' })),
-      importedPaths.length === 0,
-    );
+    const useFullScan = importedPaths.length === 0 || importedPaths.length > MAX_CHANGED_PATHS;
+    scheduleMediaTrackingScan(root, project.name, useFullScan ? [] : importedPaths.map(importedPath => ({
+      path: importedPath, eventType: 'rename', kind: 'file',
+    })), useFullScan);
   }
 };
 

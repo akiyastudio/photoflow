@@ -20,8 +20,8 @@ const ALLOWED_COMPONENT_FEATURE_EDGES = Object.freeze([
 
 const ENTRY_FILE_BUDGETS = Object.freeze({
   'src/App.tsx': 950,
-  'src/features/workspace/ProjectWorkspace.tsx': 7170,
-  'electron/modules/workspace-ipc.cjs': 3265,
+  'src/features/workspace/ProjectWorkspace.tsx': 7050,
+  'electron/modules/workspace-ipc.cjs': 3100,
 });
 
 const ALLOWED_IPC_REGISTRAR_EDGES = Object.freeze([

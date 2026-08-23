@@ -37,7 +37,9 @@ import { defaultProjectFileSortDirection, isFolderLikeEntry, sortProjectFileEntr
 import { ImportCompletionNotice, ToolModal } from './ProjectToolModal';
 import { ColumnResizeHandle, ViewportContextMenu } from './ProjectWorkspaceLayout';
 import { deleteMediaThumbnailPreview, findCachedMediaThumbnailPreview, forgetMediaThumbnailPreviews, getMediaThumbnailPreview, mediaThumbnailPreviewKey, rememberMediaThumbnailPreview, requestThumbnail, useThumbnailUpdates } from './useProjectThumbnail';
-
+import { formatShutterSpeed, isOfficeOpenXmlEntry, isPhotoshopOpenEntry, isScreenshotMainImageEntry, pickCaptureDate, pickMetadataValue, requestCaptureDateTime } from './project-workspace-media-metadata';
+import { clampNumber, fitProjectColumnWidths, readStoredBoolean, readStoredNumber, scheduleAfterProjectPaint } from './project-workspace-layout-model';
+import { PhotoshopIcon } from './PhotoshopIcon';
 const LazyTeamRetouchManager = React.lazy(() => import('../../components/TeamRetouchManager').then(module => ({ default: module.TeamRetouchManager })));
 const LazyPersonIdentityManager = React.lazy(() => import('../../components/PersonIdentityManager').then(module => ({ default: module.PersonIdentityManager })));
 const TeamFeatureLoading = () => <div role="status" className="flex h-full min-h-48 items-center justify-center text-sm text-slate-500"><Loader2 size={18} className="mr-2 animate-spin"/>正在加载团片协作…</div>;
@@ -51,28 +53,6 @@ const RECENT_FILES_SESSION_EXPIRED = 'RECENT_FILES_SESSION_EXPIRED';
 const FILE_LIST_PAGE_SIZE = 200;
 const FILE_LIST_SESSION_EXPIRED = 'FILE_LIST_SESSION_EXPIRED';
 const FILE_LIST_CANCELLED = 'FILE_LIST_CANCELLED';
-const scheduleAfterProjectPaint = (delayMs: number, callback: () => void) => {
-  let timer = 0;
-  const frame = window.requestAnimationFrame(() => {
-    timer = window.setTimeout(callback, delayMs);
-  });
-  return () => {
-    window.cancelAnimationFrame(frame);
-    window.clearTimeout(timer);
-  };
-};
-const OFFICE_OPEN_XML_EXTENSIONS = new Set([
-  '.docx', '.docm', '.dotx', '.dotm',
-  '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam',
-  '.xlsx', '.xlsm', '.xltx', '.xltm', '.xlam', '.xlsb',
-]);
-const isOfficeOpenXmlEntry = (entry: ProjectFileEntry) => entry.kind === 'file' && OFFICE_OPEN_XML_EXTENSIONS.has(entry.extension.toLocaleLowerCase());
-const SCREENSHOT_MAIN_IMAGE_EXTENSIONS = new Set(['.bmp', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp']);
-const isScreenshotMainImageEntry = (entry: ProjectFileEntry) => entry.kind === 'image' && SCREENSHOT_MAIN_IMAGE_EXTENSIONS.has(entry.extension.toLocaleLowerCase());
-const PHOTOSHOP_DOCUMENT_EXTENSIONS = new Set(['.psd', '.psb']);
-const isPhotoshopOpenEntry = (entry: ProjectFileEntry) => entry.kind === 'image'
-  || entry.kind === 'raw'
-  || entry.kind === 'file' && PHOTOSHOP_DOCUMENT_EXTENSIONS.has(entry.extension.toLocaleLowerCase());
 
 type PreviewImageCropAnalysis = {
   success: boolean;
@@ -80,106 +60,6 @@ type PreviewImageCropAnalysis = {
   snapGuides?: { x: number[]; y: number[] };
   originalSize?: { width: number; height: number };
   error?: string;
-};
-
-const PhotoshopIcon = ({ size = 16 }: { size?: number }) => (
-  <svg aria-hidden="true" width={size} height={size} viewBox="0 0 18 18" className="shrink-0">
-    <rect x="0.75" y="0.75" width="16.5" height="16.5" rx="3" fill="#001E36" stroke="#31A8FF" strokeWidth="1.5"/>
-    <text x="3.2" y="12.4" fill="#31A8FF" fontFamily="Arial, sans-serif" fontSize="9.2" fontWeight="700">Ps</text>
-  </svg>
-);
-
-const METADATA_GROUP_PRIORITY = ['ExifIFD', 'ExifIFD1', 'IFD0', 'Composite', 'QuickTime', 'Track1', 'XMP', 'File', 'System', '其他'];
-const pickMetadataValue = (fields: readonly MediaMetadataField[], ...names: string[]) => {
-  for (const name of names) {
-    const matches = fields.filter(field => field.name === name);
-    const preferred = [...matches].sort((left, right) => {
-      const leftRank = METADATA_GROUP_PRIORITY.indexOf(left.group);
-      const rightRank = METADATA_GROUP_PRIORITY.indexOf(right.group);
-      return (leftRank < 0 ? 999 : leftRank) - (rightRank < 0 ? 999 : rightRank);
-    })[0];
-    if (preferred?.value) return preferred.value;
-  }
-  return undefined;
-};
-const formatCaptureDate = (value?: string) => {
-  const source = value?.trim();
-  if (!source) return undefined;
-  const parts = source.match(/^(\d{4})[:-](\d{2})[:-](\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/);
-  if (parts) {
-    const [, yearText, monthText, dayText, hourText = '00', minuteText = '00', secondText = '00'] = parts;
-    const year = Number(yearText); const month = Number(monthText); const day = Number(dayText);
-    const hour = Number(hourText); const minute = Number(minuteText); const second = Number(secondText);
-    const maximumDay = year > 0 && month >= 1 && month <= 12 ? new Date(Date.UTC(year, month, 0)).getUTCDate() : 0;
-    if (year < 1 || month < 1 || month > 12 || day < 1 || day > maximumDay || hour > 23 || minute > 59 || second > 59) return undefined;
-  }
-  return source.replace(/^(\d{4}):(\d{2}):(\d{2})/, '$1-$2-$3').replace(/([+-]\d{2}):?(\d{2})$/, ' $1:$2');
-};
-const pickCaptureDate = (fields: readonly MediaMetadataField[], ...names: string[]) => {
-  for (const name of names) {
-    const formatted = formatCaptureDate(pickMetadataValue(fields, name));
-    if (formatted) return formatted;
-  }
-  return undefined;
-};
-const formatShutterSpeed = (value?: string) => {
-  if (!value) return undefined;
-  if (/\//.test(value)) return value;
-  const seconds = Number(value.replace(/\s*s(?:ec(?:onds?)?)?$/i, '').trim());
-  if (!Number.isFinite(seconds) || seconds <= 0) return value;
-  if (seconds < 1) return `1/${Math.max(1, Math.round(1 / seconds))} 秒`;
-  return `${Number(seconds.toFixed(3))} 秒`;
-};
-
-const captureDateTimeRequestCache = new Map<string, Promise<string | undefined>>();
-const requestCaptureDateTime = (entry: ProjectFileEntry) => {
-  const cacheKey = `${entry.path}|${entry.updatedAt}`;
-  const cached = captureDateTimeRequestCache.get(cacheKey);
-  if (cached) return cached;
-  const request = projectWorkspaceClient.getMediaMetadata(entry.path).then(result => {
-    if (!result.success) return undefined;
-    return pickCaptureDate(result.fields, 'DateTimeOriginal', 'CreateDate', 'MediaCreateDate', 'TrackCreateDate', 'CreationDate', 'FileModifyDate');
-  });
-  if (captureDateTimeRequestCache.size >= 256) captureDateTimeRequestCache.delete(captureDateTimeRequestCache.keys().next().value as string);
-  captureDateTimeRequestCache.set(cacheKey, request);
-  return request;
-};
-
-const clampNumber = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, value));
-type ProjectColumnWidths = { files: number; preview: number; metadata: number };
-const fitProjectColumnWidths = (preferred: ProjectColumnWidths, containerWidth: number, previewOpen: boolean, metadataOpen: boolean) => {
-  const handleCount = Number(previewOpen) + Number(metadataOpen);
-  const available = Math.max(0, containerWidth - handleCount);
-  const preferredTotal = preferred.files + (previewOpen ? preferred.preview : 0) + (metadataOpen ? preferred.metadata : 0);
-  if (!previewOpen && !metadataOpen) return { ...preferred, files: available };
-  if (preferredTotal <= 0) return preferred;
-  if (available >= preferredTotal) {
-    // Side panes keep their preferred positions. Any newly available room is
-    // assigned to the file browser first.
-    return { ...preferred, files: preferred.files + available - preferredTotal };
-  }
-  const scale = available / preferredTotal;
-  return {
-    files: preferred.files * scale,
-    preview: previewOpen ? preferred.preview * scale : preferred.preview,
-    metadata: metadataOpen ? preferred.metadata * scale : preferred.metadata
-  };
-};
-const readStoredNumber = (key: string, fallback: number) => {
-  try {
-    const value = Number(window.localStorage.getItem(key));
-    return Number.isFinite(value) && value > 0 ? value : fallback;
-  } catch {
-    return fallback;
-  }
-};
-const readStoredBoolean = (key: string, fallback: boolean) => {
-  try {
-    const value = window.localStorage.getItem(key);
-    return value === null ? fallback : value === 'true';
-  } catch {
-    return fallback;
-  }
 };
 
 type CompareMatch = { source: string; reference: string; target: string; confidence: string; distance: number };

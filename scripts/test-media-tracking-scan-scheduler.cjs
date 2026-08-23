@@ -1,5 +1,7 @@
 const assert = require('assert/strict');
 const { EventEmitter } = require('events');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { createBackgroundTaskService } = require('../electron/services/background-task-service.cjs');
 const { coalesceMediaChanges, createMediaTrackingScanScheduler } = require('../electron/services/media-tracking-scan-scheduler.cjs');
@@ -48,6 +50,130 @@ const run = async () => {
   assert.equal(restartPolicy.canRestart({ metadata: { workspaceRoot: 'C:/workspace', projectName: 'Project', fullScan: true } }), true, 'explicit legacy full scans must remain restartable');
   assert.equal(restartPolicy.canRestart({ metadata: { workspaceRoot: 'C:/workspace', projectName: 'Project', fullScan: false, mediaRescanPolicyVersion: MEDIA_RESCAN_POLICY_VERSION } }), true, 'current-policy incremental work must remain restartable');
   assert.equal(restartPolicy.autoRestartDelayMs, 30000, 'restored media scans must yield startup priority to database maintenance');
+
+  const recoveryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-media-recovery-'));
+  try {
+    const persistencePath = path.join(recoveryDirectory, 'tasks.json');
+    const oldSnapshotId = '11111111-1111-4111-8111-111111111111';
+    const oldPath = path.resolve('C:/recovery-workspace/Project/old.jpg');
+    const freshPath = path.resolve('C:/recovery-workspace/Project/fresh.jpg');
+    const beforeRestart = createBackgroundTaskService({ eventBus: new EventEmitter(), persistencePath });
+    const interrupted = beforeRestart.create({
+      id: 'persisted-media-replay', type: 'version-media-rescan', title: 'persisted replay',
+      resources: [],
+      metadata: {
+        workspaceRoot: 'C:/recovery-workspace', projectName: 'Project', fullScan: false,
+        changes: [{ path: oldPath, eventType: 'rename', kind: 'file' }], changedPaths: [oldPath],
+        snapshotId: oldSnapshotId, mediaRescanPolicyVersion: MEDIA_RESCAN_POLICY_VERSION,
+      },
+    });
+    await interrupted.waitForStart();
+    beforeRestart.stop();
+
+    const restoredTasks = createBackgroundTaskService({ eventBus: new EventEmitter(), persistencePath });
+    assert.equal(restoredTasks.get('persisted-media-replay')?.state, 'interrupted');
+    const recoveryCalls = [];
+    const recoveryScheduler = createMediaTrackingScanScheduler({
+      backgroundTasks: {
+        ...restoredTasks,
+        registerTypeRestartFactory: (type, factory, options) => restoredTasks.registerTypeRestartFactory(type, factory, { ...options, autoRestart: false }),
+      },
+      delayMs: 1000,
+      mediaScanService: {
+        syncProject: async (root, projectName) => {
+          recoveryCalls.push({ kind: 'full', root, projectName });
+          return { thumbnailCandidates: [] };
+        },
+        syncChangedPaths: async (root, projectName, changes, _removed, options) => {
+          recoveryCalls.push({ kind: 'incremental', root, projectName, changes, snapshotId: options.snapshotId });
+          return { thumbnailCandidates: [] };
+        },
+      },
+      versionStaleDetectionService: { schedule: () => undefined, cancel: () => undefined },
+      getProject: () => ({ relative_path: 'Project', availability: 'available' }),
+    });
+    await recoveryScheduler.workspaceAdmission.acquire(path.resolve('C:/recovery-workspace').toLocaleLowerCase());
+    const freshTicket = recoveryScheduler.schedule('C:/recovery-workspace', 'Project', [{ path: freshPath, eventType: 'rename', kind: 'file' }]);
+    const replayPromise = restoredTasks.restart('persisted-media-replay');
+    await wait(20);
+    const normalStateBeforeReplay = recoveryScheduler.runner.getState(freshTicket.key);
+    assert.equal(normalStateBeforeReplay?.generation, 1, 'fresh watcher delta must remain pending on the normal lane');
+    assert.equal(normalStateBeforeReplay?.completedGeneration, 0, 'persisted replay must not acknowledge the normal lane generation');
+    recoveryScheduler.workspaceAdmission.release(path.resolve('C:/recovery-workspace').toLocaleLowerCase());
+    await replayPromise;
+    await recoveryScheduler.flush({ key: freshTicket.key, generation: 2 });
+    assert.deepEqual(recoveryCalls.map(call => call.kind), ['incremental', 'full'], 'old manifest replay and fresh full catch-up must execute as separate tasks');
+    assert.equal(recoveryCalls[0].snapshotId, oldSnapshotId, 'replay must keep the persisted immutable snapshot id');
+    const completedRecoveryTasks = restoredTasks.list().filter(task => task.type === 'version-media-rescan' && task.state === 'completed');
+    assert.equal(completedRecoveryTasks.length, 2);
+    const catchUpTask = completedRecoveryTasks.find(task => task.id !== 'persisted-media-replay');
+    assert(catchUpTask, 'fresh catch-up must create a distinct BackgroundTask');
+    assert.notEqual(catchUpTask.metadata.snapshotId, oldSnapshotId, 'fresh catch-up must use a new snapshot id');
+    assert.equal(catchUpTask.metadata.fullScan, true, 'catch-up must be a full scan because watcher events are not persisted');
+    assert(catchUpTask.metadata.changedPaths.includes(freshPath), 'fresh watcher delta must survive until the full catch-up batch');
+    recoveryScheduler.stop();
+    restoredTasks.stop();
+  } finally {
+    fs.rmSync(recoveryDirectory, { recursive: true, force: true });
+  }
+
+  const replayTask = {
+    id: 'replay-only',
+    metadata: {
+      workspaceRoot: 'C:/replay-only-workspace', projectName: 'Project', fullScan: false,
+      changes: [{ path: 'C:/replay-only-workspace/Project/old.jpg', eventType: 'rename', kind: 'file' }],
+      snapshotId: '22222222-2222-4222-8222-222222222222', mediaRescanPolicyVersion: MEDIA_RESCAN_POLICY_VERSION,
+    },
+  };
+  let replayOnlyFactory;
+  const replayOnlyDefinitions = [];
+  const replayOnlyScheduler = createMediaTrackingScanScheduler({
+    backgroundTasks: {
+      run: async (definition, worker) => {
+        replayOnlyDefinitions.push(definition);
+        return { task: definition, result: await worker({ report: () => undefined }) };
+      },
+      registerTypeRestartFactory: (_type, factory) => { replayOnlyFactory = factory; return () => undefined; },
+    },
+    delayMs: 0,
+    mediaScanService: { syncProject: async () => ({ thumbnailCandidates: [] }), syncChangedPaths: async () => ({ thumbnailCandidates: [] }) },
+    versionStaleDetectionService: { schedule: () => undefined, cancel: () => undefined },
+    getProject: () => ({ relative_path: 'Project', availability: 'available' }),
+  });
+  await replayOnlyFactory(replayTask);
+  await wait(20);
+  assert.equal(replayOnlyDefinitions.length, 2, 'a replay without fresh watcher work must still schedule exactly one full catch-up');
+  assert.equal(replayOnlyDefinitions[0].metadata.snapshotId, replayTask.metadata.snapshotId);
+  assert.equal(replayOnlyDefinitions[1].metadata.fullScan, true);
+  assert.notEqual(replayOnlyDefinitions[1].metadata.snapshotId, replayTask.metadata.snapshotId);
+  replayOnlyScheduler.stop();
+
+  const assertReplayWaiterTerminated = async action => {
+    let restartFactory;
+    let created = 0;
+    const scheduler = createMediaTrackingScanScheduler({
+      backgroundTasks: {
+        run: async () => { created += 1; return { result: { thumbnailCandidates: [] } }; },
+        registerTypeRestartFactory: (_type, factory) => { restartFactory = factory; return () => undefined; },
+      },
+      delayMs: 0,
+      mediaScanService: { syncProject: async () => ({ thumbnailCandidates: [] }), syncChangedPaths: async () => ({ thumbnailCandidates: [] }) },
+      versionStaleDetectionService: { schedule: () => undefined, cancel: () => undefined },
+      getProject: () => ({ relative_path: 'Project', availability: 'available' }),
+    });
+    const admissionKey = path.resolve(replayTask.metadata.workspaceRoot).toLocaleLowerCase();
+    await scheduler.workspaceAdmission.acquire(admissionKey);
+    const replay = restartFactory(replayTask);
+    await wait(10);
+    action(scheduler);
+    await assert.rejects(replay, error => ['ADMISSION_CANCELLED', 'ADMISSION_QUEUE_STOPPED', 'DIRTY_RUNNER_CANCELLED'].includes(error?.code));
+    scheduler.workspaceAdmission.release(admissionKey);
+    await wait(10);
+    assert.equal(created, 0, 'terminated replay admission waiters must not create BackgroundTasks');
+    scheduler.stop();
+  };
+  await assertReplayWaiterTerminated(scheduler => scheduler.cancel(replayTask.metadata.workspaceRoot, replayTask.metadata.projectName));
+  await assertReplayWaiterTerminated(scheduler => scheduler.stop());
 
   let releaseAdmissionScan;
   const admissionGate = new Promise(resolve => { releaseAdmissionScan = resolve; });

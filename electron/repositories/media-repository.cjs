@@ -1,3 +1,5 @@
+const { MAX_CHANGED_PATHS } = require('../contracts/media-sync-limits.cjs');
+
 const MEDIA_SYNC_BATCH_SIZE = 64;
 
 const createMediaRepository = client => {
@@ -34,7 +36,7 @@ const createMediaRepository = client => {
     return { ...finalized, count };
   };
   const syncChangedPaths = async (root, projectName, changes, externalRoots = [], options = {}) => {
-    if (!Array.isArray(changes) || changes.length > 2048) throw new Error('media_sync_paths_limit: 增量路径最多 2048 条');
+    if (!Array.isArray(changes) || changes.length > MAX_CHANGED_PATHS) throw new Error(`media_sync_paths_limit: 增量路径最多 ${MAX_CHANGED_PATHS} 条`);
     const normalizedChanges = changes.map(change => typeof change === 'string'
       ? { path: change, eventType: 'rename', kind: 'missing' }
       : { ...change, path: String(change?.path || '') });

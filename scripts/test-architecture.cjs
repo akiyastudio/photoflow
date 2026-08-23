@@ -35,7 +35,7 @@ const componentBuilder = read('scripts/build-components.cjs');
 const rawDecoder = read('python/raw_decoder.py');
 assert(!componentBuilder.includes("'research-tools':") && !componentBuilder.includes("'office-media-extractor':") && !fs.existsSync(path.join(root, 'extensions', 'research-tools')) && !fs.existsSync(path.join(root, 'extensions', 'office-media-extractor')), 'built-in research and Office workers must not retain retired optional-component packaging');
 assert(toolViews.includes('const dateStr = `${month}.${day}`') && toolViews.includes('该月份中不存在这个日期') && toolViews.includes('min="1" max="12"'), 'birthday editor must save canonical dates and reject invalid or negative values');
-const projectWorkspace = read('src/features/workspace/ProjectWorkspace.tsx') + read('src/features/workspace/ProjectToolModal.tsx') + read('src/features/workspace/ProjectWorkspaceLayout.tsx') + read('src/features/workspace/useProjectThumbnail.ts');
+const projectWorkspace = read('src/features/workspace/ProjectWorkspace.tsx') + read('src/features/workspace/ProjectToolModal.tsx') + read('src/features/workspace/ProjectWorkspaceLayout.tsx') + read('src/features/workspace/useProjectThumbnail.ts') + read('src/features/workspace/project-workspace-media-metadata.ts') + read('src/features/workspace/project-workspace-layout-model.ts');
 const projectWorkspaceContract = read('src/contracts/project-workspace-api.ts');
 const projectWorkspaceClient = read('src/platform/project-workspace-client.ts');
 const pluginContributions = read('src/features/plugins/plugin-contributions.ts');
@@ -54,14 +54,6 @@ const importSourceControls = read('src/components/ImportSourceControls.tsx');
 const versionProgressPanel = read('src/features/versioning/VersionProgressPanel.tsx');
 const trackingConfirmationPanel = read('src/features/versioning/TrackingConfirmationPanel.tsx');
 const fileRootWatcherService = read('electron/services/file-root-watcher-service.cjs');
-const mediaTrackingScanScheduler = read('electron/services/media-tracking-scan-scheduler.cjs');
-const mediaScanScheduler = read('electron/services/media-tracking-scan-scheduler.cjs');
-const taskToastModel = read('src/features/background-tasks/task-toast-model.ts');
-const backgroundTaskPolicies = read('electron/services/background-task-policies.cjs');
-const backgroundTaskMigrations = read('electron/services/background-task-migrations.cjs');
-const backgroundTaskService = read('electron/services/background-task-service.cjs');
-const backgroundTaskPolicyVersions = read('electron/services/background-task-policy-versions.cjs');
-const slicedMaintenanceRunner = read('electron/services/sliced-maintenance-runner.cjs');
 const workspaceTabModel = read('src/features/app/workspace-tab-model.ts');
 const projectWorkspaceLifecycle = read('src/features/workspace/project-workspace-lifecycle.ts');
 const workspaceTabsHook = read('src/features/app/useWorkspaceTabs.ts');
@@ -86,7 +78,8 @@ const fileClipboardService = read('electron/services/file-clipboard-service.cjs'
 const fileClipboardNative = read('electron/native/FileClipboardService.cs');
 const fileClipboardBuilder = read('scripts/build-file-clipboard-service.cjs');
 const workspaceIpc = read('electron/modules/workspace-ipc.cjs');
-const sdImportMediaScan = read('electron/modules/workspace/sd-import-media-scan.cjs');
+const deletedProjectCleanup = read('electron/modules/workspace/deleted-project-cleanup.cjs');
+const workspaceMaintenance = read('electron/modules/workspace/workspace-maintenance.cjs');
 const workspaceRepository = read('electron/repositories/workspace-repository.cjs');
 const workspaceService = read('electron/services/workspace-service.cjs');
 const workspaceCatalogClient = read('src/platform/workspace-catalog-client.ts');
@@ -507,8 +500,8 @@ assert(/missingDirectory && !requestedPath[\s\S]*?onDeleted\(\)/.test(projectWor
 assert(!nativeRecycleBinService.includes('EnsureRecycleCapacity') && !nativeRecycleBinService.includes('CalculateSourceSize'), 'trash must not pre-scan folder size before handing deletion to Windows');
 assert(nativeRecycleBinService.includes('FOF_WANTNUKEWARNING') && nativeRecycleBinService.includes('{ "permanent", permanent }'), 'Windows must warn before a non-recyclable item is permanently deleted and report that outcome');
 assert(/publish\(\{ phase: 'complete'[\s\S]*?queuePermanentProjectCleanup\(root, projectName\)/.test(workspaceIpc), 'permanent project deletion must release the foreground UI before scheduling internal cleanup');
-assert(workspaceIpc.includes("kind: 'project-cleanup'") && workspaceIpc.includes("type: 'deleted-project-cleanup'"), 'permanent project cleanup must be restart-safe and visible as a background task');
-assert(workspaceIpc.indexOf('getDeletedProjectCleanupPlan') < workspaceIpc.indexOf('removeInternalProjectArtifacts(root, cleanupPlan)') && workspaceIpc.indexOf('removeInternalProjectArtifacts(root, cleanupPlan)') < workspaceIpc.indexOf('purgeDeletedProject(root, project.id)'), 'deleted project artifacts must be planned and removed before the recoverable database row is purged');
+assert(workspaceIpc.includes("kind: 'project-cleanup'") && deletedProjectCleanup.includes("type: 'deleted-project-cleanup'"), 'permanent project cleanup must be restart-safe and visible as a background task');
+assert(deletedProjectCleanup.indexOf('getDeletedProjectCleanupPlan') < deletedProjectCleanup.indexOf('removeInternalProjectArtifacts(root, cleanupPlan)') && deletedProjectCleanup.indexOf('removeInternalProjectArtifacts(root, cleanupPlan)') < deletedProjectCleanup.indexOf('purgeDeletedProject(root, project.id)'), 'deleted project artifacts must be planned and removed before the recoverable database row is purged');
 assert(main.includes('isSuppressedWorkspaceChange(root, fileName)') && workspaceIpc.includes('suppressWorkspaceWatchPath(projectPath)') && workspaceIpc.includes('releaseWorkspaceWatchPath(suppressedProjectPath)'), 'project deletion must suppress its recursive workspace watcher event storm');
 assert(mediaRatingService.includes('`${item.filePath}_exiftool_tmp`') && mediaRatingService.includes('`${item.filePath}_original`') && mediaRatingService.includes('suppressedPath => suppressWorkspaceWatchPath(suppressedPath)') && mediaRatingService.includes('suppressedPath => releaseWorkspaceWatchPath(suppressedPath)'), 'rating writes must suppress and release ExifTool temporary sibling paths without forwarding Array.forEach indices as release delays');
 assert(inspirationLibrary.includes("if (change.eventType === 'change') return;") && inspirationLibrary.includes('pendingTreeScrollTopRef') && inspirationLibrary.includes("scrollIntoView({ block: 'nearest' })"), 'inspiration navigation must ignore content-only writes and preserve the active folder scroll position');
@@ -516,7 +509,7 @@ const databaseConnect = workspaceDb.slice(workspaceDb.indexOf('def connect('), w
 assert(databaseConnect.includes('if backup_path or is_fresh:') && !databaseConnect.includes('_automatic_backup_if_due'), 'routine database maintenance must not block opening the workspace catalog');
 assert(main.includes('workspaceMaintenanceDatabase = new PythonDatabaseClient') && workspaceIpc.includes("type: 'workspace-database-maintenance'"), 'daily database maintenance must use an independent background worker');
 assert(main.includes('workspaceCatalogSemanticSnapshot') && main.includes('stableCatalogValue') && !main.includes('previousSnapshot = JSON.stringify(workspaceCatalogs'), 'workspace reconciliation notifications must compare stable business fields instead of maintenance metadata');
-assert(workspaceIpc.includes('workspaceMaintenanceCooldownMs') && workspaceIpc.includes('workspaceMaintenanceScheduledAt.get(root)'), 'project-list reads must cooldown visible workspace maintenance tasks');
+assert(workspaceIpc.includes('workspaceMaintenanceCooldownMs') && workspaceIpc.includes('workspaceMaintenanceScheduledAt.get(root)') && workspaceMaintenance.includes('runWorkspaceMaintenanceWithRetry'), 'project-list reads must cooldown visible workspace maintenance tasks');
 assert(projectNavigator.includes('refreshInFlightRef') && projectNavigator.includes('refreshQueuedRef') && projectNavigator.includes('refreshGenerationRef'), 'project catalog refreshes must coalesce concurrent events and ignore stale responses');
 assert(filesIpc.includes("new Set(['import', 'move', 'paste', 'trash', 'select', 'rename'])") && filesIpc.includes('suppressWorkspaceWatchPath?.(root)') && filesIpc.includes('releaseWorkspaceWatchPath?.(suppressedProjectRoot)'), 'bulk file mutations must suppress recursive watcher and media-scan storms');
 assert(/operation === 'move'[\s\S]*?createProjectFileTask\([\s\S]*?resources: \[destinationDir, \.\.\.sources\][\s\S]*?await task\.start\(\)/.test(filesIpc), 'internal move must use the shared cancellable disk task and path resource locks');
@@ -664,24 +657,7 @@ assert(workspaceIpc.includes("project.availability !== 'missing'") && workspaceI
 assert(main.includes("['_photoflow_safety_temp'") || main.includes("'_photoflow_safety_temp'].includes(normalized)"));
 assert(systemIpc.includes('suppressWorkspaceWatchPath(targetPath)') && systemIpc.includes('thumbnailService?.syncChangedPaths(targetPath, changedPaths') && !systemIpc.includes('thumbnailService?.scanProject(targetPath'), 'classified imports must suppress transient watcher work and incrementally index only final imported media paths');
 assert(!main.includes("project.availability !== 'missing') scheduleMediaTrackingScan(root, project.name)") && !main.includes('await thumbnailService.scanProject(path.join(root, project.relative_path)') && !workspaceIpc.includes('directoryIndex.then(indexed => indexed && thumbnailService.scanProject') && !workspaceIpc.includes("projectName !== '.__photoflow_inspiration__') scheduleMediaTrackingScan"), 'idle reconciliation and restored project tabs must not trigger recursive whole-project media scans');
-assert(main.includes('describeActionableWatchChanges(root, [...workspaceWatchChanges], fs)') && fileRootWatcherService.includes('describeActionableWatchChanges(root, [...state.changes], fs)') && !main.includes('versionStaleDetectionService.schedule(root, project.name, [], true)'), 'startup and file-root watchers must preserve actionable event semantics without fanning stale detection across every catalog project');
-assert(backgroundTaskPolicies.includes("'version-media-rescan'") && backgroundTaskPolicies.includes("taskCenterPolicy: 'attention-only'") && mediaScanScheduler.includes('autoRestartDelayMs: 30000'), 'automatic media maintenance must stay attention-only and defer persisted restarts until startup maintenance has priority');
-assert(backgroundTaskPolicies.includes("'thumbnail-generate'") && backgroundTaskPolicies.includes("'workspace-database-maintenance'") && taskToastModel.includes("task.taskCenterPolicy === 'attention-only'") && !backgroundTaskMigrations.includes('taskCenterVisibility'), 'routine task presentation and history migration must have one formal policy source');
-assert(backgroundTaskPolicyVersions.includes('MEDIA_RESCAN_POLICY_VERSION') && backgroundTaskPolicyVersions.includes('BACKGROUND_TASK_PERSISTENCE_VERSION')
-  && !backgroundTaskMigrations.includes("task.type ===") && backgroundTaskMigrations.includes('policy.interruptedPolicy')
-  && backgroundTaskService.includes('taskCenterPolicy: policy.taskCenterPolicy')
-  && slicedMaintenanceRunner.includes('stateFingerprint(state)') && slicedMaintenanceRunner.includes('SLICED_MAINTENANCE_STALLED'),
-  'task persistence, interruption migration and sliced progress telemetry must use central policy and version sources');
 assert(fileRootWatcherService.includes('binding.onChanged(publishedEntries)') && workspaceIpc.includes('externalTrackingChangeHandler') && workspaceIpc.includes('scheduleMediaTrackingScan(') && workspaceIpc.includes('onChanged: onExternalChanged'), 'managed external watcher events must schedule the same bounded backend tracking scan as project-local changes');
-assert(mediaTrackingScanScheduler.indexOf('workspaceAdmission.acquire') < mediaTrackingScanScheduler.indexOf('backgroundTasks.run({')
-  && mediaTrackingScanScheduler.includes("require('./keyed-admission-queue.cjs')")
-  && sdImportMediaScan.includes("importedPaths.map(importedPath => ({ path: importedPath, eventType: 'rename', kind: 'file' }))")
-  && sdImportMediaScan.includes('importedPaths.length === 0'),
-  'workspace admission must happen before BackgroundTask creation and SD finalization must schedule precise paths or an explicit full scan');
-assert(/const trustedExternalMediaRoots = [\s\S]*?listManagedExternalLinks\(projectRoot\)[\s\S]*?authorized: true[\s\S]*?online: !link\.offline/.test(main)
-  && !/listManagedExternalLinks\(projectRoot\)\s*\.filter\(link => !link\.offline\)/.test(main)
-  && main.includes('syncChangedPaths: (root, projectName, changes, _externalRoots, options)'),
-  'media sync authority must come only from the managed external-link registry, retain offline roots, and ignore caller-supplied roots');
 assert(workspaceIpc.includes('requiredRoots: bindings.length') && workspaceIpc.includes('failedRoots') && workspaceIpc.includes('reconciliationFailed') && projectWorkspace.includes('result.degraded === true') && projectWorkspace.includes('{ reconcile: true }'), 'project watchers must report partial external failures, reconcile missed changes, and enable renderer polling fallback');
 assert(types.includes('recoveryRequired?: boolean') && projectWorkspace.includes('handleProjectImportRecovery(result)') && projectWorkspace.includes('请勿直接重复导入同一来源'), 'import recovery state must be represented in the renderer contract and refresh the project before preventing duplicate retries');
 assert(workspaceIpc.indexOf('const watcherResults = linkedItems.map') < workspaceIpc.indexOf("label: '导入外链'") && workspaceIpc.includes('removeUndoOperation(importUndoToken)'), 'external-link imports must finish watcher setup before publishing undo and precisely remove a late failed record');

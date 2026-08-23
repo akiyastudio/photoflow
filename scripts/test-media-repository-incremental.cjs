@@ -1,5 +1,6 @@
 const assert = require('assert/strict');
 const { createMediaRepository, MEDIA_SYNC_BATCH_SIZE } = require('../electron/repositories/media-repository.cjs');
+const { MAX_CHANGED_PATHS } = require('../electron/contracts/media-sync-limits.cjs');
 
 (async () => {
   const calls = [];
@@ -24,6 +25,6 @@ const { createMediaRepository, MEDIA_SYNC_BATCH_SIZE } = require('../electron/re
   assert(batches.every(call => call.payload.files.length <= MEDIA_SYNC_BATCH_SIZE));
   assert.equal(result.count, 1537);
   assert.equal(calls.some(call => call.action === 'media_sync_prepare'), false, 'incremental sync must never call full-project prepare');
-  await assert.rejects(createMediaRepository(client).syncChangedPaths('C:/workspace', 'Project', new Array(2049).fill('a.jpg')), /2048/);
+  await assert.rejects(createMediaRepository(client).syncChangedPaths('C:/workspace', 'Project', new Array(MAX_CHANGED_PATHS + 1).fill('a.jpg')), new RegExp(String(MAX_CHANGED_PATHS)));
   console.log('incremental media repository tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

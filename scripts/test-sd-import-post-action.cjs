@@ -7,12 +7,13 @@ const { spawnSync } = require('child_process');
 const { pathToFileURL } = require('url');
 const { normalizeSdImportAutoMove } = require('../electron/modules/system-ipc.cjs');
 const { registerWorkspaceIpc } = require('../electron/modules/workspace-ipc.cjs');
+const { MAX_CHANGED_PATHS } = require('../electron/contracts/media-sync-limits.cjs');
 
 const handlers = new Map();
 const root = 'trusted-workspace';
 const statuses = new Map([
   ['a', '待拍摄'], ['b', '策划中'], ['c', '自定义分类'], ['d', '已归档'],
-  ['e', '待拍摄'], ['f', '待拍摄'], ['g', '未分类'], ['h', '待拍摄'],
+  ['e', '待拍摄'], ['f', '待拍摄'], ['g', '未分类'], ['h', '待拍摄'], ['i', '待拍摄'],
 ]);
 const names = new Map([...statuses.keys()].map(key => [key, key.toUpperCase()]));
 let reconcileCount = 0;
@@ -89,6 +90,26 @@ registerWorkspaceIpc({
   assert.deepStrictEqual(scans[0], { root, name: 'A', changes: [{ path: importedA, eventType: 'rename', kind: 'file' }], fullScan: false }, 'SD finalization must pass all four precise incremental-scan arguments');
   assert(refreshCount > 0 && reconcileCount > 0 && projectEvents > 0, 'disabled setting must still reconcile, refresh, scan, and notify');
 
+  const boundaryPaths = Array.from({ length: MAX_CHANGED_PATHS }, (_, index) => path.resolve(root, 'I', `boundary-${index}.jpg`));
+  scans = [];
+  result = await finalize(null, root, ['I'], {
+    moveProjectAfterImport: false, workProjectNames: ['I'], importedPathsByProject: { I: boundaryPaths },
+  });
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(scans.length, 1, 'the exact incremental limit must schedule once');
+  assert.deepStrictEqual(scans[0], {
+    root, name: 'I', changes: boundaryPaths.map(filePath => ({ path: filePath, eventType: 'rename', kind: 'file' })), fullScan: false,
+  }, 'the exact incremental limit must preserve all four scheduler arguments');
+
+  const overflowPaths = [...boundaryPaths, path.resolve(root, 'I', 'overflow.jpg')];
+  scans = [];
+  result = await finalize(null, root, ['I'], {
+    moveProjectAfterImport: true, workProjectNames: ['I'], importedPathsByProject: { I: overflowPaths },
+  });
+  assert.strictEqual(result.success, true, 'overflow fallback must not fail after moving the project status');
+  assert.strictEqual(statuses.get('i'), '后期中');
+  assert.deepStrictEqual(scans, [{ root, name: 'I', changes: [], fullScan: true }], 'over-limit imports must schedule exactly one full scan and no partial increment');
+
   scans = [];
   result = await finalize(null, root, ['A', 'B', 'C', 'D', 'E', 'G'], {
     moveProjectAfterImport: true,
@@ -128,14 +149,15 @@ registerWorkspaceIpc({
   const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-sd-finalize-index-'));
   try {
     const realProject = path.join(realRoot, 'Imported');
-    const importedFile = path.join(realProject, 'from-sd.jpg');
+    const importedFiles = Array.from({ length: MAX_CHANGED_PATHS + 1 }, (_, index) => path.join(realProject, `from-sd-${index}.jpg`));
     const database = path.join(realRoot, 'workspace.sqlite3');
     fs.mkdirSync(realProject);
-    fs.writeFileSync(importedFile, 'real imported media');
+    for (const importedFile of importedFiles) fs.writeFileSync(importedFile, 'real imported media');
     const python = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
-    const workspaceDb = path.join(__dirname, '..', 'python', 'workspace_db.py');
+    const pythonModules = path.join(__dirname, '..', 'python');
+    const invokeCode = 'import json,sys;sys.path.insert(0,sys.argv[1]);import workspace_db;a,r,d=sys.argv[2:];p=json.load(sys.stdin);v=workspace_db.load(r,d) if a=="init" else workspace_db.mutate(r,d,a,p);print(json.dumps(v,ensure_ascii=False))';
     const invoke = (action, payload = {}) => {
-      const child = spawnSync(python, [workspaceDb, action, '--root', realRoot, '--database', database, '--payload', JSON.stringify(payload)], { encoding: 'utf8' });
+      const child = spawnSync(python, ['-c', invokeCode, pythonModules, action, realRoot, database], { encoding: 'utf8', input: JSON.stringify(payload) });
       if (child.status !== 0) throw new Error(child.stderr || child.stdout);
       return JSON.parse(child.stdout);
     };
@@ -155,25 +177,31 @@ registerWorkspaceIpc({
       workspaceRepository: { setProjectStatus: async () => undefined },
       scheduleMediaTrackingScan: (_root, name, changes, fullScan) => {
         capturedScans.push([_root, name, changes, fullScan]);
-        const prepared = invoke('media_sync_paths_prepare', { projectName: name, changes, externalRoots: [] });
-        for (let offset = 0; offset < prepared.files.length; offset += 64) invoke('media_sync_paths_apply_batch', {
-          projectName: name, snapshotId: prepared.snapshotId, batchIndex: offset / 64, files: prepared.files.slice(offset, offset + 64),
+        assert.strictEqual(fullScan, true);
+        assert.deepStrictEqual(changes, []);
+        const prepared = invoke('media_sync_prepare', { projectName: name, externalRoots: [] });
+        for (let offset = 0; offset < prepared.files.length; offset += 64) invoke('media_sync_apply_batch', {
+          projectName: name, snapshotId: prepared.snapshotId, batchIndex: offset / 64,
+          authorizedRoots: prepared.authorizedRoots, files: prepared.files.slice(offset, offset + 64),
         });
-        invoke('media_sync_paths_finalize', { projectName: name, snapshotId: prepared.snapshotId });
+        invoke('media_sync_finalize', {
+          projectName: name, snapshotId: prepared.snapshotId, authorizedRoots: prepared.authorizedRoots,
+          files: prepared.files, baselineVersions: prepared.baselineVersions,
+        });
       },
       mainWindow: { webContents: { send: () => undefined } },
       fs, path, crypto, getWorkspaceDataRoot: () => path.join(realRoot, '.data'), writeLog: () => undefined,
     });
     const realFinalize = realHandlers.get('workspace-finalize-sd-imports');
     const realResult = await realFinalize(null, realRoot, ['Imported'], {
-      moveProjectAfterImport: false, workProjectNames: ['Imported'], importedPathsByProject: { Imported: [importedFile] },
+      moveProjectAfterImport: false, workProjectNames: ['Imported'], importedPathsByProject: { Imported: importedFiles },
     });
-    assert.strictEqual(realResult.success, true);
-    assert.deepStrictEqual(capturedScans[0], [realRoot, 'Imported', [{ path: importedFile, eventType: 'rename', kind: 'file' }], false]);
-    const probeCode = `import sys;sys.path.insert(0,sys.argv[1]);import workspace_db;db=workspace_db.connect(sys.argv[2],sys.argv[3],include_domains=True);print(db.execute("SELECT COUNT(*) FROM versions WHERE file_path_key=? AND file_missing=0",(workspace_db.canonical_path(sys.argv[4]).casefold(),)).fetchone()[0]);db.close()`;
-    const probe = spawnSync(python, ['-c', probeCode, path.join(__dirname, '..', 'python'), realRoot, database, importedFile], { encoding: 'utf8' });
+    assert.strictEqual(realResult.success, true, realResult.error);
+    assert.deepStrictEqual(capturedScans, [[realRoot, 'Imported', [], true]]);
+    const probeCode = 'import sys;sys.path.insert(0,sys.argv[1]);import workspace_db;db=workspace_db.connect(sys.argv[2],sys.argv[3],include_domains=True);print(db.execute("SELECT COUNT(*) FROM versions WHERE file_missing=0").fetchone()[0]);print(",".join(db.execute(f"PRAGMA {row[1]}.quick_check").fetchone()[0] for row in db.execute("PRAGMA database_list").fetchall()));db.close()';
+    const probe = spawnSync(python, ['-c', probeCode, pythonModules, realRoot, database], { encoding: 'utf8' });
     assert.strictEqual(probe.status, 0, probe.stderr);
-    assert.strictEqual(probe.stdout.trim(), '1', 'the imported TEMP file must exist in the real media database index');
+    assert.deepStrictEqual(probe.stdout.trim().split(/\r?\n/), [String(importedFiles.length), 'ok,ok,ok'], 'all over-limit TEMP imports must be indexed and every database quick_check must be ok');
   } finally {
     fs.rmSync(realRoot, { recursive: true, force: true });
   }
