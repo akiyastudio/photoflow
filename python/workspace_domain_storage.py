@@ -15,7 +15,11 @@ import time
 
 SCHEMA_VERSION = 1
 DOMAIN_TABLES = {
-    "media": ("photos", "file_records"),
+    "media": (
+        "photos", "file_records", "media_incremental_snapshots",
+        "media_incremental_snapshot_files", "media_incremental_snapshot_scopes",
+        "media_incremental_snapshot_baseline", "media_incremental_snapshot_batches",
+    ),
     "versioning": (
         "versions", "version_batches", "progress_folders", "batch_file_operations",
         "batch_items", "version_compare_history", "tracking_sessions",

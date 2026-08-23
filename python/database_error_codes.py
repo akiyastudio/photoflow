@@ -4,6 +4,9 @@ import sqlite3
 
 
 def database_error_code(error: Exception) -> str:
+    explicit_code = getattr(error, "code", None)
+    if isinstance(explicit_code, str) and explicit_code:
+        return explicit_code
     if isinstance(error, sqlite3.Error):
         primary = int(getattr(error, "sqlite_errorcode", 0) or 0) & 0xFF
         if primary == sqlite3.SQLITE_BUSY:

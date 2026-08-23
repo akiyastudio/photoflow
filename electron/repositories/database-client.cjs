@@ -1,5 +1,5 @@
 const { spawn } = require('child_process');
-const { stopProcessAndWait } = require('../services/process-supervisor.cjs');
+const { stopProcessAndWait } = require('../infrastructure/process-termination.cjs');
 const { CoordinatedDatabaseClient } = require('./coordinated-database-client.cjs');
 const { WorkspaceDatabaseOperationPolicy } = require('./workspace-database-operation-policy.cjs');
 

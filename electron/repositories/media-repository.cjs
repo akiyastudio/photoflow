@@ -4,6 +4,9 @@ const createMediaRepository = client => {
   const prepareMediaSync = (root, projectName, externalRoots = []) => client.call(root, 'media_sync_prepare', { projectName, externalRoots }, 30 * 60 * 1000);
   const applyMediaSyncBatch = (root, payload) => client.call(root, 'media_sync_apply_batch', payload, 2 * 60 * 1000);
   const finalizeMediaSync = (root, payload) => client.call(root, 'media_sync_finalize', payload, 2 * 60 * 1000);
+  const prepareChangedPaths = (root, payload) => client.call(root, 'media_sync_paths_prepare', payload, 30 * 60 * 1000);
+  const applyChangedPathsBatch = (root, payload) => client.call(root, 'media_sync_paths_apply_batch', payload, 2 * 60 * 1000);
+  const finalizeChangedPaths = (root, payload) => client.call(root, 'media_sync_paths_finalize', payload, 2 * 60 * 1000);
   const syncProject = async (root, projectName, externalRoots = []) => {
     const prepared = await prepareMediaSync(root, projectName, externalRoots);
     if (prepared.projectUnavailable) return prepared;
@@ -27,6 +30,29 @@ const createMediaRepository = client => {
       authorizedRoots: prepared.authorizedRoots,
       files: prepared.files,
       baselineVersions: prepared.baselineVersions,
+    });
+    return { ...finalized, count };
+  };
+  const syncChangedPaths = async (root, projectName, changes, externalRoots = [], options = {}) => {
+    if (!Array.isArray(changes) || changes.length > 2048) throw new Error('media_sync_paths_limit: 增量路径最多 2048 条');
+    const normalizedChanges = changes.map(change => typeof change === 'string'
+      ? { path: change, eventType: 'rename', kind: 'missing' }
+      : { ...change, path: String(change?.path || '') });
+    const prepared = await prepareChangedPaths(root, {
+      projectName, changes: normalizedChanges, externalRoots,
+      ...(options.snapshotId ? { snapshotId: options.snapshotId } : {}),
+    });
+    let count = 0;
+    for (let offset = 0, batchIndex = 0; offset < prepared.files.length; offset += MEDIA_SYNC_BATCH_SIZE, batchIndex += 1) {
+      const applied = await applyChangedPathsBatch(root, {
+        projectName, snapshotId: prepared.snapshotId, batchIndex,
+        files: prepared.files.slice(offset, offset + MEDIA_SYNC_BATCH_SIZE),
+      });
+      count += Number(applied.count) || 0;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    const finalized = await finalizeChangedPaths(root, {
+      projectName, snapshotId: prepared.snapshotId,
     });
     return { ...finalized, count };
   };
@@ -55,9 +81,13 @@ const createMediaRepository = client => {
 
   return ({
   syncProject,
+  syncChangedPaths,
   prepareMediaSync,
   applyMediaSyncBatch,
   finalizeMediaSync,
+  prepareChangedPaths,
+  applyChangedPathsBatch,
+  finalizeChangedPaths,
   setThumbnail: (root, payload) => client.call(root, 'media_set_thumbnail', payload),
   getMedia: (root, payload) => client.call(root, 'media_get', payload),
   getPhoto: (root, photoId) => client.call(root, 'media_get_photo', { photoId }),

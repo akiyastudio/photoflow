@@ -2566,7 +2566,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const completeSdImport = async (completion: ImportCompletion) => {
     const result = await projectWorkspaceClient.finalizeSdImportedProjects(workspacePath, completion.projectNames, {
       moveProjectAfterImport: importConfig.autoMoveProjectAfterSdImport,
-      workProjectNames: completion.workProjectNames,
+      workProjectNames: completion.workProjectNames, importedPathsByProject: completion.importedPathsByProject,
     });
     await refresh();
     window.dispatchEvent(new Event('workspace-projects-changed'));

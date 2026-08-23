@@ -1,5 +1,5 @@
 const { findPythonJsonFailureMessage, parsePythonJsonMessages } = require('./python-json-protocol.cjs');
-const { terminateAndWait } = require('./process-supervisor.cjs');
+const { terminateAndWait } = require('../infrastructure/process-termination.cjs');
 
 const createJsonCommandRunner = ({ spawnJob, terminationTimeoutMs = 5000 }) => (
   (run, label, timeoutMs = 20 * 60 * 1000, onMessage, signal, requestedDeadlineAt) => new Promise((resolve, reject) => {

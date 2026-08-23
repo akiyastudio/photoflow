@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const { AsyncLocalStorage } = require('async_hooks');
 const { spawn } = require('child_process');
 const { ThumbnailCoordinator } = require('./services/thumbnail-coordinator.cjs');
-const { stopProcessAndWait } = require('./services/process-supervisor.cjs');
+const { stopProcessAndWait } = require('./infrastructure/process-termination.cjs');
 
 // v3 switches media covers from square crops to full-frame thumbnails.
 // v4 rejects undersized Windows Shell images that were previously cached as

@@ -68,7 +68,7 @@ registerMediaIpc({
 (async () => {
   const clearMediaCache = handlers.get('media-cache-clear');
   assert(clearMediaCache, 'media cache cleanup IPC handler was not registered');
-  assert.deepEqual(dismissed, ['legacy-daily'], 'an interrupted legacy daily cleanup must be replaced by the post-recovery daily run');
+  assert.deepEqual(dismissed, [], 'historical cleanup migration belongs to the background task service');
 
   const automatic = clearMediaCache({}, {}, 30, { origin: 'daily-auto' });
   await new Promise(resolve => setImmediate(resolve));
@@ -79,15 +79,14 @@ registerMediaIpc({
   assert.deepEqual(sequence.slice(0, 5), ['recovery:wait', 'recovery:complete', 'task:daily-auto', 'cleanup:run', 'cleanup:run']);
   assert.equal(automaticResult.deletedCount, 2, 'daily cleanup must aggregate bounded maintenance slices');
   assert.equal(definitions[0].notificationPolicy, 'error-only');
-  assert.equal(definitions[0].metadata.taskCenterVisibility, 'attention-only');
-  assert.deepEqual(dismissed, ['legacy-daily', 'task-1'], 'successful daily cleanup must not leave task history');
+  assert.equal(definitions[0].metadata.taskCenterVisibility, undefined);
 
   const manualResult = await clearMediaCache({}, {}, undefined);
   assert.equal(manualResult.success, true, manualResult.error);
   assert.equal(definitions[1].notificationPolicy, undefined, 'manual cleanup must keep the configured result/progress policy');
   assert.equal(definitions[1].metadata.origin, 'manual');
   assert.equal(definitions[1].metadata.taskCenterVisibility, undefined, 'manual cleanup progress must remain visible');
-  assert.deepEqual(dismissed, ['legacy-daily', 'task-1'], 'manual cleanup history must remain user-controlled');
+  assert.deepEqual(dismissed, [], 'cleanup IPC must not own history policy');
   console.log('media cache cleanup IPC tests passed');
 })().catch(error => {
   console.error(error);

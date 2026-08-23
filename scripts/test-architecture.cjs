@@ -54,8 +54,14 @@ const importSourceControls = read('src/components/ImportSourceControls.tsx');
 const versionProgressPanel = read('src/features/versioning/VersionProgressPanel.tsx');
 const trackingConfirmationPanel = read('src/features/versioning/TrackingConfirmationPanel.tsx');
 const fileRootWatcherService = read('electron/services/file-root-watcher-service.cjs');
+const mediaTrackingScanScheduler = read('electron/services/media-tracking-scan-scheduler.cjs');
 const mediaScanScheduler = read('electron/services/media-tracking-scan-scheduler.cjs');
 const taskToastModel = read('src/features/background-tasks/task-toast-model.ts');
+const backgroundTaskPolicies = read('electron/services/background-task-policies.cjs');
+const backgroundTaskMigrations = read('electron/services/background-task-migrations.cjs');
+const backgroundTaskService = read('electron/services/background-task-service.cjs');
+const backgroundTaskPolicyVersions = read('electron/services/background-task-policy-versions.cjs');
+const slicedMaintenanceRunner = read('electron/services/sliced-maintenance-runner.cjs');
 const workspaceTabModel = read('src/features/app/workspace-tab-model.ts');
 const projectWorkspaceLifecycle = read('src/features/workspace/project-workspace-lifecycle.ts');
 const workspaceTabsHook = read('src/features/app/useWorkspaceTabs.ts');
@@ -80,6 +86,7 @@ const fileClipboardService = read('electron/services/file-clipboard-service.cjs'
 const fileClipboardNative = read('electron/native/FileClipboardService.cs');
 const fileClipboardBuilder = read('scripts/build-file-clipboard-service.cjs');
 const workspaceIpc = read('electron/modules/workspace-ipc.cjs');
+const sdImportMediaScan = read('electron/modules/workspace/sd-import-media-scan.cjs');
 const workspaceRepository = read('electron/repositories/workspace-repository.cjs');
 const workspaceService = read('electron/services/workspace-service.cjs');
 const workspaceCatalogClient = read('src/platform/workspace-catalog-client.ts');
@@ -657,10 +664,24 @@ assert(workspaceIpc.includes("project.availability !== 'missing'") && workspaceI
 assert(main.includes("['_photoflow_safety_temp'") || main.includes("'_photoflow_safety_temp'].includes(normalized)"));
 assert(systemIpc.includes('suppressWorkspaceWatchPath(targetPath)') && systemIpc.includes('thumbnailService?.syncChangedPaths(targetPath, changedPaths') && !systemIpc.includes('thumbnailService?.scanProject(targetPath'), 'classified imports must suppress transient watcher work and incrementally index only final imported media paths');
 assert(!main.includes("project.availability !== 'missing') scheduleMediaTrackingScan(root, project.name)") && !main.includes('await thumbnailService.scanProject(path.join(root, project.relative_path)') && !workspaceIpc.includes('directoryIndex.then(indexed => indexed && thumbnailService.scanProject') && !workspaceIpc.includes("projectName !== '.__photoflow_inspiration__') scheduleMediaTrackingScan"), 'idle reconciliation and restored project tabs must not trigger recursive whole-project media scans');
-assert(main.includes('filterActionableWatchEntries(root, [...workspaceWatchChanges], fs)') && fileRootWatcherService.includes('filterActionableWatchEntries(root, [...state.changes], fs)') && !main.includes('versionStaleDetectionService.schedule(root, project.name, [], true)'), 'startup and file-root watchers must filter metadata noise without fanning stale detection across every catalog project');
-assert(mediaScanScheduler.includes("taskCenterVisibility: 'attention-only'") && mediaScanScheduler.includes('autoRestartDelayMs: 30000') && thumbnailService.includes("taskCenterVisibility: 'attention-only'"), 'automatic media maintenance must stay attention-only and defer persisted restarts until startup maintenance has priority');
-assert(workspaceIpc.includes("metadata: { root, taskCenterVisibility: 'attention-only' }") && taskToastModel.includes("task.type === 'thumbnail-generate'") && taskToastModel.includes("task.type === 'workspace-database-maintenance'"), 'routine database and thumbnail work must only enter the task center when it needs attention');
+assert(main.includes('describeActionableWatchChanges(root, [...workspaceWatchChanges], fs)') && fileRootWatcherService.includes('describeActionableWatchChanges(root, [...state.changes], fs)') && !main.includes('versionStaleDetectionService.schedule(root, project.name, [], true)'), 'startup and file-root watchers must preserve actionable event semantics without fanning stale detection across every catalog project');
+assert(backgroundTaskPolicies.includes("'version-media-rescan'") && backgroundTaskPolicies.includes("taskCenterPolicy: 'attention-only'") && mediaScanScheduler.includes('autoRestartDelayMs: 30000'), 'automatic media maintenance must stay attention-only and defer persisted restarts until startup maintenance has priority');
+assert(backgroundTaskPolicies.includes("'thumbnail-generate'") && backgroundTaskPolicies.includes("'workspace-database-maintenance'") && taskToastModel.includes("task.taskCenterPolicy === 'attention-only'") && !backgroundTaskMigrations.includes('taskCenterVisibility'), 'routine task presentation and history migration must have one formal policy source');
+assert(backgroundTaskPolicyVersions.includes('MEDIA_RESCAN_POLICY_VERSION') && backgroundTaskPolicyVersions.includes('BACKGROUND_TASK_PERSISTENCE_VERSION')
+  && !backgroundTaskMigrations.includes("task.type ===") && backgroundTaskMigrations.includes('policy.interruptedPolicy')
+  && backgroundTaskService.includes('taskCenterPolicy: policy.taskCenterPolicy')
+  && slicedMaintenanceRunner.includes('stateFingerprint(state)') && slicedMaintenanceRunner.includes('SLICED_MAINTENANCE_STALLED'),
+  'task persistence, interruption migration and sliced progress telemetry must use central policy and version sources');
 assert(fileRootWatcherService.includes('binding.onChanged(publishedEntries)') && workspaceIpc.includes('externalTrackingChangeHandler') && workspaceIpc.includes('scheduleMediaTrackingScan(') && workspaceIpc.includes('onChanged: onExternalChanged'), 'managed external watcher events must schedule the same bounded backend tracking scan as project-local changes');
+assert(mediaTrackingScanScheduler.indexOf('workspaceAdmission.acquire') < mediaTrackingScanScheduler.indexOf('backgroundTasks.run({')
+  && mediaTrackingScanScheduler.includes("require('./keyed-admission-queue.cjs')")
+  && sdImportMediaScan.includes("importedPaths.map(importedPath => ({ path: importedPath, eventType: 'rename', kind: 'file' }))")
+  && sdImportMediaScan.includes('importedPaths.length === 0'),
+  'workspace admission must happen before BackgroundTask creation and SD finalization must schedule precise paths or an explicit full scan');
+assert(/const trustedExternalMediaRoots = [\s\S]*?listManagedExternalLinks\(projectRoot\)[\s\S]*?authorized: true[\s\S]*?online: !link\.offline/.test(main)
+  && !/listManagedExternalLinks\(projectRoot\)\s*\.filter\(link => !link\.offline\)/.test(main)
+  && main.includes('syncChangedPaths: (root, projectName, changes, _externalRoots, options)'),
+  'media sync authority must come only from the managed external-link registry, retain offline roots, and ignore caller-supplied roots');
 assert(workspaceIpc.includes('requiredRoots: bindings.length') && workspaceIpc.includes('failedRoots') && workspaceIpc.includes('reconciliationFailed') && projectWorkspace.includes('result.degraded === true') && projectWorkspace.includes('{ reconcile: true }'), 'project watchers must report partial external failures, reconcile missed changes, and enable renderer polling fallback');
 assert(types.includes('recoveryRequired?: boolean') && projectWorkspace.includes('handleProjectImportRecovery(result)') && projectWorkspace.includes('请勿直接重复导入同一来源'), 'import recovery state must be represented in the renderer contract and refresh the project before preventing duplicate retries');
 assert(workspaceIpc.indexOf('const watcherResults = linkedItems.map') < workspaceIpc.indexOf("label: '导入外链'") && workspaceIpc.includes('removeUndoOperation(importUndoToken)'), 'external-link imports must finish watcher setup before publishing undo and precisely remove a late failed record');

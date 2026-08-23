@@ -1886,7 +1886,19 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                 log_progress("正在保留源文件...", 99, {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": success_imported_count, "totalFiles": len(original_sd_files)})
             
             log_progress("导入流程全部完成", 100, {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": success_imported_count, "totalFiles": len(original_sd_files)})
-            log_success("导入完成，源文件已按设置处理", {"projectNames": created_projects, "importedCount": success_imported_count, "sourceFilesDeleted": should_delete_sources, "generatedJpgCount": generated_jpg_count, "importedPaths": sorted(imported_output_paths), "importSessionId": import_session, "importManifests": import_manifests, "receiptPending": True})
+            imported_paths_by_project = {}
+            for target_folder in sorted(processed_targets):
+                target_absolute = os.path.abspath(target_folder)
+                project_paths = []
+                for imported_path in imported_output_paths:
+                    try:
+                        if os.path.commonpath((target_absolute, os.path.abspath(imported_path))) == target_absolute:
+                            project_paths.append(os.path.abspath(imported_path))
+                    except ValueError:
+                        continue
+                if project_paths:
+                    imported_paths_by_project[os.path.basename(target_absolute)] = sorted(set(project_paths))
+            log_success("导入完成，源文件已按设置处理", {"projectNames": created_projects, "importedCount": success_imported_count, "sourceFilesDeleted": should_delete_sources, "generatedJpgCount": generated_jpg_count, "importedPaths": sorted(imported_output_paths), "importedPathsByProject": imported_paths_by_project, "importSessionId": import_session, "importManifests": import_manifests, "receiptPending": True})
         else:
             log_error(f"警告：导入数量不匹配（应有{len(original_sd_files)}，实际{success_imported_count}）。SD 卡未清理，请检查桌面临时文件夹。")
 
@@ -2053,13 +2065,26 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
             log_progress("正在保留源文件...", 99, {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": len(original_files), "totalFiles": len(original_files)})
         cleanup_import_staging(staging_dir)
         log_progress("花絮导入流程全部完成", 100, {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": len(original_files), "totalFiles": len(original_files)})
+        broll_projects = sorted({os.path.abspath(project_path) for project_path in (file_routes.values() or [dest_path])})
+        imported_paths_by_project = {}
+        for project_path in broll_projects:
+            project_files = []
+            for created_file in created_files:
+                try:
+                    if os.path.commonpath((project_path, os.path.abspath(created_file))) == project_path:
+                        project_files.append(os.path.abspath(created_file))
+                except ValueError:
+                    continue
+            if project_files:
+                imported_paths_by_project[os.path.basename(os.path.normpath(project_path))] = sorted(set(project_files))
         log_success("花絮导入完成，源文件已按设置处理", {
-            "projectNames": sorted({os.path.basename(os.path.normpath(project_path)) for project_path in (file_routes.values() or [dest_path])}),
+            "projectNames": [os.path.basename(os.path.normpath(project_path)) for project_path in broll_projects],
             "importedCount": len(original_files),
             "destination": dest_path,
             "brollFolders": sorted({os.path.dirname(file_path) for file_path in created_files}),
             "sourceFilesDeleted": should_delete_sources,
             "importedPaths": sorted(created_files),
+            "importedPathsByProject": imported_paths_by_project,
         })
     except Exception as error:
         # Before source cleanup starts, remove a partial destination so retrying

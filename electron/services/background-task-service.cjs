@@ -2,49 +2,14 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { AsyncLocalStorage } = require('async_hooks');
+const { resolveBackgroundTaskPolicy } = require('./background-task-policies.cjs');
+const { migrateBackgroundTaskPayload } = require('./background-task-migrations.cjs');
+const { BACKGROUND_TASK_PERSISTENCE_VERSION } = require('./background-task-policy-versions.cjs');
 
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled']);
 const HISTORY_STATES = new Set([...TERMINAL_STATES, 'interrupted']);
 const DISMISSIBLE_STATES = new Set([...TERMINAL_STATES, 'interrupted']);
 const ACTIVE_STATES = new Set(['queued', 'running', 'pausing', 'paused', 'resuming']);
-
-const DEFAULT_POLICY = Object.freeze({ resumePolicy: 'atomic', notificationPolicy: 'error-only', historyPolicy: 'persistent', pausable: false, resumable: false });
-const TASK_POLICIES = Object.freeze({
-  'project-file-operation': { resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', resumable: true },
-  'project-archive': { resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', resumable: true },
-  'project-unarchive': { resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', resumable: true },
-  'workspace-backup': { resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', resumable: true },
-  'workspace-restore': { resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', resumable: true },
-  'project-restore': { resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', resumable: true },
-  'video-trim': { resumePolicy: 'safe-restart', notificationPolicy: 'progress-toast' },
-  'version-tracking': { resumePolicy: 'safe-restart', notificationPolicy: 'progress-toast' },
-  'version-media-rescan': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
-  'version-fingerprint-maintenance': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
-  'thumbnail-generate': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
-  'thumbnail-cache-recovery': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
-  'backup-verify': { resumePolicy: 'checkpoint', notificationPolicy: 'error-only', resumable: true },
-  'workspace-reconcile': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
-  'storage-usage-scan': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
-  'deleted-project-cleanup': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
-  'backup-cleanup': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
-  'cache-cleanup': { resumePolicy: 'safe-restart', notificationPolicy: 'result-only' },
-  'internal-artifact-cleanup': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
-  'internal-filesystem-cleanup': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
-  'system-filesystem-cleanup': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
-  'component-status-refresh': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
-});
-
-const resolvePolicy = definition => {
-  const configured = TASK_POLICIES[definition.type] || DEFAULT_POLICY;
-  const notificationPolicy = definition.notificationPolicy || configured.notificationPolicy;
-  return {
-    resumePolicy: definition.resumePolicy || configured.resumePolicy,
-    notificationPolicy,
-    historyPolicy: definition.historyPolicy || (notificationPolicy === 'silent' ? 'ephemeral' : configured.historyPolicy || 'persistent'),
-    pausable: definition.pausable ?? configured.pausable ?? false,
-    resumable: definition.resumable ?? configured.resumable ?? false,
-  };
-};
 
 const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => Date.now(), persistencePath = '', writeLog = () => undefined }) => {
   const tasks = new Map();
@@ -165,7 +130,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       const temporaryPath = `${persistencePath}.tmp`;
       fs.mkdirSync(directory, { recursive: true });
       fs.writeFileSync(temporaryPath, JSON.stringify({
-        version: 2,
+        version: BACKGROUND_TASK_PERSISTENCE_VERSION,
         tasks: [...tasks.values()].filter(task => task.historyPolicy !== 'ephemeral').map(publicTask),
       }), 'utf8');
       fs.renameSync(temporaryPath, persistencePath);
@@ -207,7 +172,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       const previous = tasks.get(task.retryOfTaskId);
       if (task.state === 'completed' || task.state === 'failed') {
         if (previous && deleteTaskInternal(previous.id)) removeIds.push(previous.id);
-        if (task.historyPolicy === 'ephemeral') {
+        if (task.historyPolicy === 'ephemeral' || (task.state === 'completed' && resolveBackgroundTaskPolicy(task).successHistory === 'auto-clear')) {
           if (task.state === 'failed') writeLog('error', 'Ephemeral background task failed', {
             taskId: task.id, type: task.type, error: task.error || task.message, metadata: task.metadata,
           });
@@ -227,7 +192,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
           upserts.push(previous);
         }
       }
-    } else if (task.historyPolicy === 'ephemeral' && HISTORY_STATES.has(task.state)) {
+    } else if ((task.historyPolicy === 'ephemeral' || (task.state === 'completed' && resolveBackgroundTaskPolicy(task).successHistory === 'auto-clear')) && HISTORY_STATES.has(task.state)) {
       if (task.state === 'failed') writeLog('error', 'Ephemeral background task failed', {
         taskId: task.id,
         type: task.type,
@@ -285,7 +250,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     const existing = requestedId ? tasks.get(requestedId) : null;
     if (existing && !TERMINAL_STATES.has(existing.state)) return { deduplicated: true, task: publicTask(existing) };
     const createdAt = now();
-    const policy = resolvePolicy(definition);
+    const policy = resolveBackgroundTaskPolicy(definition);
     const resumeFactory = typeof definition.resumeFactory === 'function' ? definition.resumeFactory : null;
     const capabilities = {
       cancellable: definition.cancellable !== false,
@@ -309,6 +274,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       resumePolicy: policy.resumePolicy,
       notificationPolicy: policy.notificationPolicy,
       historyPolicy: policy.historyPolicy,
+      taskCenterPolicy: policy.taskCenterPolicy,
       retryOfTaskId: retryOfTask?.id || null,
       replacedByTaskId: null,
       retryAttempt: retryOfTask ? Math.max(0, Number(retryOfTask.retryAttempt) || 0) + 1 : Math.max(0, Number(definition.retryAttempt) || 0),
@@ -685,6 +651,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       resumePolicy: definition.resumePolicy || 'safe-restart',
       notificationPolicy: definition.notificationPolicy || 'progress-toast',
       historyPolicy: definition.historyPolicy,
+      taskCenterPolicy: definition.taskCenterPolicy || 'always',
       metadata: definition.metadata || {},
     });
     const task = tasks.get(id);
@@ -706,17 +673,17 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   const restorePersistedTasks = () => {
     if (!persistencePath) return;
     try {
-      const payload = JSON.parse(fs.readFileSync(persistencePath, 'utf8'));
-      const restored = Array.isArray(payload?.tasks) ? payload.tasks : [];
+      const payload = migrateBackgroundTaskPayload(JSON.parse(fs.readFileSync(persistencePath, 'utf8')));
+      const restored = payload.tasks;
       for (const value of restored) {
         if (!value?.id || !value?.type) continue;
-        const policy = resolvePolicy(value);
+        const policy = resolveBackgroundTaskPolicy(value);
         if ((value.historyPolicy || policy.historyPolicy) === 'ephemeral') continue;
-        const wasActive = ACTIVE_STATES.has(value.state);
+        const wasActive = ACTIVE_STATES.has(value.state) || value.state === 'interrupted';
         const capabilities = {
           cancellable: false,
           pausable: Boolean(value.capabilities?.pausable ?? policy.pausable),
-          resumable: Boolean(value.capabilities?.resumable ?? value.resumable ?? policy.resumable),
+          resumable: false,
           retryable: false,
         };
         const state = wasActive ? 'interrupted' : value.state;
@@ -733,9 +700,10 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
           resumeAvailable: false,
           restartAvailable: false,
           capabilities,
-          resumePolicy: value.resumePolicy || policy.resumePolicy,
-          notificationPolicy: value.notificationPolicy || policy.notificationPolicy,
+          resumePolicy: policy.resumePolicy,
+          notificationPolicy: policy.notificationPolicy,
           historyPolicy: value.historyPolicy || policy.historyPolicy,
+          taskCenterPolicy: policy.taskCenterPolicy,
           retryOfTaskId: value.retryOfTaskId || null,
           replacedByTaskId: value.replacedByTaskId || null,
           retryAttempt: Math.max(0, Number(value.retryAttempt) || 0),

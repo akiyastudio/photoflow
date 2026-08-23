@@ -68,7 +68,7 @@ const run = async () => {
   assert.equal(activeThumbnailTasks.length, 1);
   assert.equal(activeThumbnailTasks[0].state, 'running');
   assert.equal(activeThumbnailTasks[0].cancellable, false, 'internal thumbnail requests must not expose a cancel action that cannot interrupt index reads');
-  assert.equal(activeThumbnailTasks[0].metadata.taskCenterVisibility, 'attention-only');
+  assert.equal(activeThumbnailTasks[0].taskCenterPolicy, 'attention-only');
   assert.equal(activeThumbnailTasks[0].metadata.kind, 'raw');
   assert.deepEqual(activeThumbnailTasks[0].metadata.cacheConfig, thumbnailRequest.cacheConfig);
   releaseThumbnailRequest({ state: 'READY' });

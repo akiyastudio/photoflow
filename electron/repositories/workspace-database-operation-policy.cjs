@@ -7,8 +7,9 @@ const CONFIRMED_READ_ACTIONS = new Set();
 
 const IDEMPOTENT_ACTIONS = new Set([
   'progress_snapshot', 'tracking_session_get', 'tracking_commit_resources', 'version_tree_layout_get',
-  'media_sync_prepare', 'progress_stale_prepare',
-  'maintenance_run', 'media_sync_apply_batch', 'media_sync_finalize', 'progress_stale_apply',
+  'media_sync_prepare', 'media_sync_paths_prepare', 'progress_stale_prepare',
+  'maintenance_run', 'media_sync_apply_batch', 'media_sync_finalize',
+  'media_sync_paths_apply_batch', 'media_sync_paths_finalize', 'progress_stale_apply',
 ]);
 const VERSIONING_ONLY_ACTIONS = new Set(['batch_list', 'progress_snapshot', 'version_graph_edge_list', 'version_tree_layout_get', 'version_tree_layout_save']);
 const TEAM_INTEGRATED_ACTIONS = new Set(['batch_commit_compare', 'media_delete_version', 'media_delete_project_missing_version', 'progress_delete_missing']);

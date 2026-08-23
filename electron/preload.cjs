@@ -102,6 +102,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   finalizeSdImportedProjects: (workspacePath, projectNames, options) => ipcRenderer.invoke('workspace-finalize-sd-imports', workspacePath, projectNames, {
     moveProjectAfterImport: options?.moveProjectAfterImport === true,
     workProjectNames: Array.isArray(options?.workProjectNames) ? options.workProjectNames : [],
+    importedPathsByProject: options?.importedPathsByProject && typeof options.importedPathsByProject === 'object' ? options.importedPathsByProject : {},
   }),
   trashWorkspaceProject: (workspacePath, status, name) => ipcRenderer.invoke('workspace-trash-project', workspacePath, status, name),
   cleanupDeletedWorkspaceProjects: (workspacePath) => ipcRenderer.invoke('workspace-cleanup-deleted-projects', workspacePath),

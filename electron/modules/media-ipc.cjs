@@ -1,3 +1,5 @@
+const { runSlicedMaintenance } = require('../services/sliced-maintenance-runner.cjs');
+
 const registerMediaIpc = context => {
   const { Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog } = context;
 
@@ -165,7 +167,6 @@ const registerMediaIpc = context => {
       ...(origin === 'daily-auto' ? { notificationPolicy: 'error-only' } : {}),
       metadata: {
         cacheConfig, olderThanDays, origin,
-        ...(origin === 'daily-auto' ? { taskCenterVisibility: 'attention-only' } : {}),
       },
     }, async task => {
       task.throwIfCancelled();
@@ -199,26 +200,20 @@ const registerMediaIpc = context => {
           onBlocked: reportBlocked(0, deadlineAt),
         });
       } else {
-        const aggregate = {
-          deletedCount: 0, deletedBytes: 0, detachedCount: 0, detachedBytes: 0,
-          prunedSourceCount: 0, repairedMissingCount: 0, failedCount: 0,
-          maintenanceComplete: false,
-        };
-        let recoveryCursor = {};
-        let processedOffset = 0;
-        let detachPending = true;
-        let prunePending = true;
-        let firstSlice = true;
-        while (!aggregate.maintenanceComplete) {
-          task.throwIfCancelled();
-          const deadlineAt = Date.now() + 60 * 1000;
+        const run = await runSlicedMaintenance({
+          task,
+          initialState: { recoveryCursor: {}, detachPending: true, prunePending: true },
+          initialMetrics: { deletedCount: 0, deletedBytes: 0, detachedCount: 0, detachedBytes: 0, prunedSourceCount: 0, repairedMissingCount: 0, recoveryInspectedCount: 0, failedCount: 0 },
+          sliceDeadlineMs: 60 * 1000,
+          yieldMs: 50,
+          runSlice: async ({ state, firstSlice, deadlineAt, signal }) => {
           const slice = await thumbnailService.evictCache({
             cacheRoot: cacheDir,
-            ...(detachPending ? cutoff == null ? { all: true } : { beforeMs: cutoff } : {}),
+            ...(state.detachPending ? cutoff == null ? { all: true } : { beforeMs: cutoff } : {}),
             recoverOrphans: true,
             orphanBeforeMs: cutoff,
-            pruneMissing: prunePending,
-            recoveryCursor,
+            pruneMissing: state.prunePending,
+            recoveryCursor: state.recoveryCursor,
             recoveryInspectLimit: 128,
             recoveryDeleteLimit: 64,
             recoveryDirectoryInspectLimit: 4096,
@@ -227,38 +222,37 @@ const registerMediaIpc = context => {
             maxRecoveryPages: 1,
             bumpCacheEpoch: firstSlice,
             task,
-            signal: task.signal,
+            signal,
             deadlineAt,
-            onBlocked: reportBlocked(processedOffset, deadlineAt),
+            onBlocked: reportBlocked(0, deadlineAt),
           });
-          for (const field of ['deletedCount', 'deletedBytes', 'detachedCount', 'detachedBytes', 'prunedSourceCount', 'repairedMissingCount', 'failedCount']) {
-            aggregate[field] += Number(slice[field]) || 0;
-          }
-          processedOffset += Number(slice.processedCount) || 0;
-          detachPending = slice.detachComplete === false;
-          prunePending = slice.pruneComplete === false;
-          recoveryCursor = slice.recoveryCursor || recoveryCursor;
-          aggregate.maintenanceComplete = slice.maintenanceComplete === true;
-          firstSlice = false;
-          if (!aggregate.maintenanceComplete) await new Promise(resolve => setTimeout(resolve, 50));
-        }
-        result = aggregate;
+            return {
+              complete: slice.maintenanceComplete === true,
+              nextState: {
+                recoveryCursor: slice.recoveryCursor || state.recoveryCursor,
+                detachPending: slice.detachComplete === false,
+                prunePending: slice.pruneComplete === false,
+              },
+              metricsDelta: Object.fromEntries(['deletedCount', 'deletedBytes', 'detachedCount', 'detachedBytes', 'prunedSourceCount', 'repairedMissingCount', 'recoveryInspectedCount', 'failedCount'].map(field => [field, Number(slice[field]) || 0])),
+              processedDelta: slice.processedCount,
+              phase: slice.maintenanceComplete ? 'complete' : slice.detachComplete === false ? 'detach' : slice.pruneComplete === false ? 'prune' : 'orphan-recovery',
+            };
+          },
+          reportProgress: ({ processedCount, phase, deadlineAt, report }) => report(
+            Math.min(95, 5 + Math.floor(processedCount / 64)),
+            `缓存维护：${phase}，已处理 ${processedCount} 条`,
+            { maintenancePhase: phase, processedCount, deadlineAt },
+          ),
+          reportSliceMetrics: metrics => writeLog('info', 'Thumbnail maintenance slice', metrics),
+        });
+        result = { ...run.metrics, maintenanceComplete: true };
       }
       task.report(100, `已清理 ${result.deletedCount} 个缓存文件`);
       mediaCacheIndexes.delete(path.resolve(cacheDir));
       return { deletedCount: result.deletedCount, prunedSourceCount: result.prunedSourceCount || 0 };
     }, () => runCacheCleanup(cacheConfig, olderThanDays, { origin }));
-    if (origin === 'daily-auto' && execution.task.state === 'completed') backgroundTasks.dismiss(execution.task.id);
     return execution;
   };
-  // Older builds did not mark the daily cleanup origin. A daily cleanup that
-  // was interrupted is safe to discard because the renderer schedules a fresh,
-  // deduplicated run after startup recovery completes.
-  for (const task of backgroundTasks?.list?.() || []) {
-    const legacyDaily = !task.metadata?.origin && Number(task.metadata?.olderThanDays) === 30;
-    if (task.type === 'cache-cleanup' && task.state === 'interrupted'
-        && (task.metadata?.origin === 'daily-auto' || legacyDaily)) backgroundTasks.dismiss(task.id);
-  }
   backgroundTasks?.registerTypeRestartFactory?.('cache-cleanup', task => runCacheCleanup(
     task.metadata?.cacheConfig || {}, task.metadata?.olderThanDays, { origin: task.metadata?.origin }, task,
   ));

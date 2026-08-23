@@ -32,13 +32,8 @@ export const collapseRetryPredecessors = (tasks: BackgroundTask[]) => {
 };
 
 export const isBackgroundTaskCenterVisible = (task: BackgroundTask) => {
-  if (task.notificationPolicy === 'silent') return false;
-  const attentionOnly = task.metadata?.taskCenterVisibility === 'attention-only'
-    || task.type === 'version-media-rescan' || task.type === 'thumbnail-cache-recovery'
-    || task.type === 'thumbnail-generate' || task.type === 'workspace-database-maintenance';
-  if (attentionOnly) {
-    return task.state === 'failed';
-  }
+  if (task.taskCenterPolicy === 'hidden') return false;
+  if (task.taskCenterPolicy === 'attention-only') return task.state === 'failed';
   return task.state === 'queued' || task.state === 'running' || task.state === 'pausing'
     || task.state === 'resuming' || task.state === 'paused' || task.state === 'interrupted' || task.state === 'failed'
     || (task.type === 'version-tracking' && (task.state === 'completed' || task.state === 'cancelled'));

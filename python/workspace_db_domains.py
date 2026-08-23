@@ -6,7 +6,9 @@ CATALOG_ACTIONS = (
     "purge_deleted_project", "missing_projects_list", "purge_missing_project",
 )
 MEDIA_ACTIONS = (
-    "media_sync_prepare", "media_sync_apply_batch", "media_sync_finalize", "media_get", "media_get_photo", "media_create_version", "media_update_version",
+    "media_sync_prepare", "media_sync_apply_batch", "media_sync_finalize",
+    "media_sync_paths_prepare", "media_sync_paths_apply_batch", "media_sync_paths_finalize",
+    "media_get", "media_get_photo", "media_create_version", "media_update_version",
     "media_refresh_metadata_fingerprint", "final_version_list", "media_set_thumbnail", "media_relocate_version",
     "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare",
     "media_workflow_import_commit",

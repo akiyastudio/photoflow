@@ -44,7 +44,9 @@ LEGACY_MEDIA_WORKFLOW_MIGRATION_KEY = "legacy_media_workflow_graph_migrated_v1"
 LEGACY_SELECTION_INDEPENDENT_KEY_PREFIX = "legacy_selection_independent:"
 SELECTION_MAINLINE_REPAIR_REVISION = "1"
 VERSION_TREE_DEFAULT_LAYOUT_REVISION = "2"
-TARGET_SCHEMA_VERSION = 28
+TARGET_SCHEMA_VERSION = 30
+MEDIA_INCREMENTAL_BATCH_SIZE = 64
+MEDIA_INCREMENTAL_COMPLETED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 TEAM_INTEGRATED_ACTIONS = frozenset((
     "batch_commit_compare",
     "media_delete_version",
@@ -1235,6 +1237,73 @@ def _migration_28(db):
     return migration_28(db, _table_columns)
 
 
+def _migration_29(db):
+    """Persist immutable incremental-media manifests and their idempotency markers."""
+    db.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS media_incremental_snapshots(
+          snapshot_id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          state TEXT NOT NULL,
+          manifest_hash TEXT NOT NULL,
+          result_json TEXT,
+          created_at INTEGER NOT NULL,
+          finalized_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS media_incremental_snapshots_cleanup
+          ON media_incremental_snapshots(state, finalized_at);
+        CREATE TABLE IF NOT EXISTS media_incremental_snapshot_files(
+          snapshot_id TEXT NOT NULL,
+          ordinal INTEGER NOT NULL,
+          file_path TEXT NOT NULL,
+          file_path_key TEXT NOT NULL,
+          file_size INTEGER NOT NULL,
+          modified_at INTEGER NOT NULL,
+          PRIMARY KEY(snapshot_id, ordinal)
+        );
+        CREATE INDEX IF NOT EXISTS media_incremental_snapshot_files_path
+          ON media_incremental_snapshot_files(snapshot_id, file_path_key);
+        CREATE TABLE IF NOT EXISTS media_incremental_snapshot_scopes(
+          snapshot_id TEXT NOT NULL,
+          ordinal INTEGER NOT NULL,
+          path_key TEXT NOT NULL,
+          scope_kind TEXT NOT NULL,
+          like_prefix TEXT,
+          PRIMARY KEY(snapshot_id, ordinal)
+        );
+        CREATE TABLE IF NOT EXISTS media_incremental_snapshot_baseline(
+          snapshot_id TEXT NOT NULL,
+          version_id TEXT NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(snapshot_id, version_id)
+        );
+        CREATE TABLE IF NOT EXISTS media_incremental_snapshot_batches(
+          snapshot_id TEXT NOT NULL,
+          batch_index INTEGER NOT NULL,
+          payload_hash TEXT NOT NULL,
+          result_json TEXT NOT NULL,
+          PRIMARY KEY(snapshot_id, batch_index)
+        );
+        """
+    )
+
+
+def _migration_30(db):
+    """Index immutable incremental scopes by snapshot and canonical path."""
+    for schema in [row[1] for row in db.execute("PRAGMA database_list").fetchall()]:
+        if not db.execute(
+            f"SELECT 1 FROM \"{schema}\".sqlite_master WHERE type='table' AND name='media_incremental_snapshot_scopes'"
+        ).fetchone():
+            continue
+        db.execute(
+            f"""CREATE INDEX IF NOT EXISTS \"{schema}\".media_incremental_snapshot_scopes_path
+                ON media_incremental_snapshot_scopes(snapshot_id,path_key,scope_kind)"""
+        )
+    # Index creation is local to whichever media schema is attached and does
+    # not require the cross-domain integrity pass used by row migrations.
+    return False
+
+
 MIGRATIONS = {
     11: _migration_11,
     12: _migration_12,
@@ -1254,6 +1323,8 @@ MIGRATIONS = {
     26: _migration_26,
     27: _migration_27,
     28: _migration_28,
+    29: _migration_29,
+    30: _migration_30,
 }
 
 
@@ -1394,6 +1465,7 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
             if requested_domains:
                 attach_workspace_domain_storage(db, database, requested_domains)
                 domain_migrated = _migration_28(db)
+                _migration_30(db)
             if include_team:
                 attach_team_retouch_storage(db, database)
         except Exception:
@@ -1702,6 +1774,8 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
             _migration_26(db)
             _migration_27(db)
             _migration_28(db)
+            _migration_29(db)
+            _migration_30(db)
             _set_meta(db, "schema_version", TARGET_SCHEMA_VERSION)
     else:
         for next_version in range(schema_version + 1, TARGET_SCHEMA_VERSION + 1):
@@ -1742,6 +1816,7 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
         if requested_domains:
             attach_workspace_domain_storage(db, database, requested_domains)
             _migration_28(db)
+            _migration_30(db)
         if include_team:
             attach_team_retouch_storage(db, database)
     except Exception:
@@ -2177,39 +2252,83 @@ def mark_missing_project_versions(db, project_id: str):
         )
 
 
-def _validated_media_scan_roots(root: str, project, external_roots) -> list[tuple[str, str]]:
+def _validated_media_scan_roots(root: str, project, external_roots) -> tuple[list[dict], list[dict]]:
+    """Return separate authorization and online-enumeration capabilities.
+
+    Offline registry entries remain authorized for missing reconciliation, but
+    they are never realpathed or walked. Online entries are revalidated here so
+    a target disappearing between the main process and worker is safely
+    downgraded to offline for this snapshot.
+    """
     project_path = os.path.join(os.path.abspath(root), project["relative_path"])
     if not isinstance(external_roots, list) or len(external_roots) > 2048:
         raise ValueError("external_media_roots_invalid: 外链媒体根目录无效")
-    scan_roots = [(canonical_path(project_path), "folder")]
+    project_path = canonical_path(project_path)
+    roots = [{
+        "path": project_path, "realPath": canonical_path(os.path.realpath(project_path)),
+        "kind": "folder", "online": True, "authorized": True,
+    }]
     for item in external_roots:
         if not isinstance(item, dict):
             raise ValueError("external_media_root_invalid: 外链媒体根目录无效")
         raw_candidate = str(item.get("path") or "").strip()
         candidate = canonical_path(raw_candidate) if raw_candidate else ""
         kind = str(item.get("kind") or "")
-        if not candidate or not os.path.isabs(candidate) or kind not in ("folder", "file"):
+        if (not candidate or not os.path.isabs(candidate) or kind not in ("folder", "file")
+                or item.get("authorized") is not True or not isinstance(item.get("online"), bool)):
             raise ValueError("external_media_root_invalid: 外链媒体根目录无效")
-        if kind == "folder" and os.path.isdir(candidate) or kind == "file" and os.path.isfile(candidate):
-            scan_roots.append((candidate, kind))
+        online = item["online"]
+        real_path = None
+        if online:
+            try:
+                os.stat(candidate)
+                kind_matches = os.path.isdir(candidate) if kind == "folder" else os.path.isfile(candidate)
+                if not kind_matches:
+                    online = False
+                else:
+                    real_path = canonical_path(os.path.realpath(candidate))
+            except (FileNotFoundError, PermissionError, OSError):
+                online = False
+        roots.append({
+            "path": candidate, **({"realPath": real_path} if real_path else {}),
+            "kind": kind, "online": online, "authorized": True,
+        })
     deduplicated = []
     seen = set()
-    for candidate, kind in scan_roots:
-        key = canonical_path(candidate).casefold()
+    for entry in roots:
+        key = (canonical_path(entry["path"]).casefold(), entry["kind"])
         if key in seen:
             continue
         seen.add(key)
-        deduplicated.append((candidate, kind))
-    return deduplicated
+        deduplicated.append(entry)
+    return deduplicated, [entry for entry in deduplicated if entry["online"]]
 
 
-def _media_path_is_authorized(file_path: str, scan_roots: list[tuple[str, str]]) -> bool:
-    candidate = canonical_path(os.path.realpath(file_path))
-    for scan_root, scan_kind in scan_roots:
-        authorized = canonical_path(os.path.realpath(scan_root))
-        if scan_kind == "file" and candidate.casefold() == authorized.casefold():
+def _media_path_is_authorized(file_path: str, roots: list[dict], require_online: bool = False) -> bool:
+    lexical_candidate = canonical_path(file_path)
+    for entry in roots:
+        if require_online and not entry["online"]:
+            continue
+        authorized = canonical_path(entry["path"])
+        lexical_match = lexical_candidate.casefold() == authorized.casefold() \
+            if entry["kind"] == "file" else (
+                lexical_candidate.casefold() == authorized.casefold()
+                or is_project_descendant(lexical_candidate, authorized)
+            )
+        if not lexical_match:
+            continue
+        if not entry["online"]:
+            # Offline authority is deliberately lexical and bounded to the
+            # registered root. It can mark missing paths but cannot broaden to
+            # a parent or acquire enumeration authority.
             return True
-        if scan_kind == "folder" and is_project_descendant(candidate, authorized):
+        candidate = canonical_path(os.path.realpath(lexical_candidate))
+        real_authorized = canonical_path(entry.get("realPath") or os.path.realpath(authorized))
+        if entry["kind"] == "file" and candidate.casefold() == real_authorized.casefold():
+            return True
+        if entry["kind"] == "folder" and (
+                candidate.casefold() == real_authorized.casefold()
+                or is_project_descendant(candidate, real_authorized)):
             return True
     return False
 
@@ -2220,7 +2339,7 @@ def media_sync_prepare(root: str, db, payload: dict):
     if "availability" in project.keys() and project["availability"] == "missing":
         return {"success": True, "count": 0, "files": [], "baselineVersions": [],
                 "authorizedRoots": [], "thumbnailCandidates": [], "projectUnavailable": True}
-    scan_roots = _validated_media_scan_roots(root, project, payload.get("externalRoots") or [])
+    authorized_roots, scan_roots = _validated_media_scan_roots(root, project, payload.get("externalRoots") or [])
     files = []
     seen_paths = set()
 
@@ -2241,7 +2360,9 @@ def media_sync_prepare(root: str, db, payload: dict):
             "modifiedAt": int(stat.st_mtime_ns / 1_000_000),
         })
 
-    for scan_root, scan_kind in scan_roots:
+    for scan_root in scan_roots:
+        scan_kind = scan_root["kind"]
+        scan_root = scan_root["path"]
         if scan_kind == "file":
             snapshot_file(scan_root)
             continue
@@ -2272,7 +2393,7 @@ def media_sync_prepare(root: str, db, payload: dict):
         "snapshotId": str(uuid.uuid4()),
         "files": files,
         "baselineVersions": [{"id": row["id"], "updatedAt": int(row["updated_at"])} for row in baseline],
-        "authorizedRoots": [{"path": candidate, "kind": kind} for candidate, kind in scan_roots],
+        "authorizedRoots": authorized_roots,
     }
 
 
@@ -2295,12 +2416,12 @@ def media_sync_apply_batch(root: str, db, payload: dict):
     files = payload.get("files") or []
     if not isinstance(files, list) or len(files) > 256:
         raise ValueError("media_sync_batch_invalid: 扫描批次过大")
-    roots = _validated_media_scan_roots(root, project, payload.get("authorizedRoots") or [])
+    _authorized_roots, roots = _validated_media_scan_roots(root, project, payload.get("authorizedRoots") or [])
     count = 0
     pending_hashes = []
     for entry in files:
         file_path = canonical_path(str((entry or {}).get("filePath") or ""))
-        if not file_path or not _media_path_is_authorized(file_path, roots):
+        if not file_path or not _media_path_is_authorized(file_path, roots, require_online=True):
             raise ValueError("media_sync_file_outside_snapshot: 扫描文件超出授权范围")
         try:
             if sync_media_file(db, project, file_path, pending_hashes):
@@ -2326,7 +2447,7 @@ def media_sync_finalize(root: str, db, payload: dict):
     baseline_versions = payload.get("baselineVersions") or []
     if not isinstance(files, list) or len(files) > 1_000_000 or not isinstance(baseline_versions, list) or len(baseline_versions) > 1_000_000:
         raise ValueError("media_sync_snapshot_invalid: 扫描快照过大")
-    roots = _validated_media_scan_roots(root, project, payload.get("authorizedRoots") or [])
+    roots, _enumeration_roots = _validated_media_scan_roots(root, project, payload.get("authorizedRoots") or [])
     seen_paths = {canonical_path(str((entry or {}).get("filePath") or "")).casefold() for entry in files}
     baseline = {str((entry or {}).get("id") or ""): int((entry or {}).get("updatedAt") or 0) for entry in baseline_versions}
     timestamp = int(time.time() * 1000)
@@ -2368,6 +2489,420 @@ def media_sync_finalize(root: str, db, payload: dict):
     _set_meta(db, marker, json.dumps(result, ensure_ascii=False))
     db.commit()
     return result
+
+
+def _incremental_like_prefix(path_key: str) -> str:
+    """Escape a canonical path for SQLite LIKE without treating %, _ or ! as wildcards."""
+    escaped = path_key.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+    separator = os.sep.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+    return escaped + separator + "%"
+
+
+def _incremental_authorized_path(candidate: str, roots: list[dict]) -> bool:
+    absolute = canonical_path(candidate)
+    if not absolute or not os.path.isabs(absolute):
+        return False
+    for entry in roots:
+        authorized = canonical_path(entry["path"])
+        lexical_match = absolute.casefold() == authorized.casefold() \
+            if entry["kind"] == "file" else (
+                absolute.casefold() == authorized.casefold()
+                or is_project_descendant(absolute, authorized)
+            )
+        if not lexical_match:
+            continue
+        if not entry["online"]:
+            return True
+        if os.path.lexists(absolute):
+            return _media_path_is_authorized(absolute, [entry], require_online=True)
+        parent = absolute
+        suffix = []
+        while parent and not os.path.lexists(parent):
+            next_parent, name = os.path.split(parent)
+            if next_parent == parent:
+                break
+            suffix.append(name)
+            parent = next_parent
+        resolved = canonical_path(os.path.join(os.path.realpath(parent), *reversed(suffix)))
+        real_authorized = canonical_path(entry.get("realPath") or os.path.realpath(authorized))
+        if entry["kind"] == "file" and resolved.casefold() == real_authorized.casefold():
+            return True
+        if entry["kind"] == "folder" and (
+                resolved.casefold() == real_authorized.casefold()
+                or is_project_descendant(resolved, real_authorized)):
+            return True
+    return False
+
+
+class MediaSyncBatchMismatch(ValueError):
+    code = "MEDIA_SYNC_BATCH_MISMATCH"
+
+
+def _incremental_manifest_digest(value) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _incremental_snapshot_row(db, snapshot_id: str):
+    return db.execute(
+        "SELECT * FROM media_incremental_snapshots WHERE snapshot_id=?", (snapshot_id,)
+    ).fetchone()
+
+
+def _incremental_snapshot_files(db, snapshot_id: str) -> list[dict]:
+    return [
+        {"filePath": row["file_path"], "fileSize": int(row["file_size"]), "modifiedAt": int(row["modified_at"])}
+        for row in db.execute(
+            """SELECT file_path,file_size,modified_at FROM media_incremental_snapshot_files
+               WHERE snapshot_id=? ORDER BY ordinal""",
+            (snapshot_id,),
+        ).fetchall()
+    ]
+
+
+def _incremental_snapshot_result(db, snapshot, project) -> dict:
+    snapshot_id = snapshot["snapshot_id"]
+    scopes = [
+        {"pathKey": row["path_key"], "kind": row["scope_kind"], "likePrefix": row["like_prefix"]}
+        for row in db.execute(
+            """SELECT path_key,scope_kind,like_prefix FROM media_incremental_snapshot_scopes
+               WHERE snapshot_id=? ORDER BY ordinal""",
+            (snapshot_id,),
+        ).fetchall()
+    ]
+    baseline = [
+        {"id": row["version_id"], "updatedAt": int(row["updated_at"])}
+        for row in db.execute(
+            """SELECT version_id,updated_at FROM media_incremental_snapshot_baseline
+               WHERE snapshot_id=? ORDER BY version_id""",
+            (snapshot_id,),
+        ).fetchall()
+    ]
+    return {
+        "success": True,
+        "projectName": project["name"],
+        "snapshotId": snapshot_id,
+        "manifestHash": snapshot["manifest_hash"],
+        "files": _incremental_snapshot_files(db, snapshot_id),
+        "scopes": scopes,
+        "baselineVersions": baseline,
+        # Kept for wire compatibility only. Apply/finalize deliberately trust
+        # the persisted manifest instead of roots echoed by Node.
+        "authorizedRoots": [],
+        **({"finalResult": json.loads(snapshot["result_json"])} if snapshot["result_json"] else {}),
+    }
+
+
+def _cleanup_incremental_snapshots(db, now: int):
+    stale_ids = [
+        row[0] for row in db.execute(
+            """SELECT snapshot_id FROM media_incremental_snapshots
+               WHERE state='finalized' AND finalized_at IS NOT NULL AND finalized_at<?""",
+            (now - MEDIA_INCREMENTAL_COMPLETED_RETENTION_MS,),
+        ).fetchall()
+    ]
+    for snapshot_id in stale_ids:
+        db.execute("DELETE FROM media_incremental_snapshot_batches WHERE snapshot_id=?", (snapshot_id,))
+        db.execute("DELETE FROM media_incremental_snapshot_baseline WHERE snapshot_id=?", (snapshot_id,))
+        db.execute("DELETE FROM media_incremental_snapshot_scopes WHERE snapshot_id=?", (snapshot_id,))
+        db.execute("DELETE FROM media_incremental_snapshot_files WHERE snapshot_id=?", (snapshot_id,))
+        db.execute("DELETE FROM media_incremental_snapshots WHERE snapshot_id=?", (snapshot_id,))
+
+
+def media_sync_paths_prepare(root: str, db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    snapshot_id = str(payload.get("snapshotId") or uuid.uuid4())
+    _media_sync_marker(snapshot_id, "paths-prepare")
+    persisted = _incremental_snapshot_row(db, snapshot_id)
+    if persisted is not None:
+        if persisted["project_id"] != project["id"]:
+            raise ValueError("media_sync_snapshot_project_mismatch: 增量快照属于其他项目")
+        # This branch must stay before validation/enumeration of changes and
+        # roots: retrying a snapshot is a pure database read.
+        return _incremental_snapshot_result(db, persisted, project)
+    changes = payload.get("changes") or []
+    if not isinstance(changes, list) or len(changes) > 2048:
+        raise ValueError("media_sync_paths_limit: 增量路径批次无效或超过 2048 条")
+    authorized_roots, enumeration_roots = _validated_media_scan_roots(root, project, payload.get("externalRoots") or [])
+    files = []
+    scopes = []
+    seen = set()
+
+    def snapshot_file(file_path: str):
+        canonical = canonical_path(file_path)
+        key = canonical.casefold()
+        if key in seen or not media_type(canonical) or not _media_path_is_authorized(canonical, enumeration_roots, require_online=True):
+            return
+        try:
+            stat = os.stat(canonical)
+        except (FileNotFoundError, PermissionError, OSError):
+            return
+        if not os.path.isfile(canonical):
+            return
+        seen.add(key)
+        files.append({"filePath": canonical, "fileSize": int(stat.st_size), "modifiedAt": int(stat.st_mtime_ns / 1_000_000)})
+
+    for change in changes:
+        if not isinstance(change, dict):
+            raise ValueError("media_sync_path_invalid: 增量路径无效")
+        candidate = canonical_path(str(change.get("path") or ""))
+        if not _incremental_authorized_path(candidate, authorized_roots):
+            raise ValueError("media_sync_path_unauthorized: 增量路径超出项目或授权外链")
+        declared_kind = str(change.get("kind") or "")
+        exists = os.path.lexists(candidate)
+        actual_kind = "directory" if exists and os.path.isdir(candidate) else "file" if exists and os.path.isfile(candidate) else "missing"
+        scope_kind = "directory" if declared_kind == "directory" or actual_kind == "directory" \
+            or actual_kind == "missing" and not media_type(candidate) else "file"
+        scopes.append({"pathKey": candidate.casefold(), "kind": scope_kind})
+        if actual_kind == "file":
+            snapshot_file(candidate)
+        elif actual_kind == "directory":
+            real_root = canonical_path(os.path.realpath(candidate))
+            def inside_incremental_root(value):
+                resolved = canonical_path(os.path.realpath(value))
+                if resolved.casefold() == real_root.casefold():
+                    return True
+                return is_project_descendant(resolved, real_root)
+            for directory, directory_names, file_names in os.walk(candidate):
+                directory_names[:] = [name for name in directory_names if inside_incremental_root(os.path.join(directory, name))]
+                if not inside_incremental_root(directory):
+                    continue
+                for name in file_names:
+                    snapshot_file(os.path.join(directory, name))
+
+    files.sort(key=lambda entry: (canonical_path(entry["filePath"]).casefold(), canonical_path(entry["filePath"])))
+    deduplicated_scopes = {
+        (scope["pathKey"], scope["kind"]): scope for scope in scopes
+    }
+    scopes = [deduplicated_scopes[key] for key in sorted(deduplicated_scopes)]
+    now = int(time.time() * 1000)
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        # A second worker may have prepared the same ID while this worker was
+        # enumerating. Its committed manifest wins; never rewrite it.
+        persisted = _incremental_snapshot_row(db, snapshot_id)
+        if persisted is not None:
+            db.rollback()
+            if persisted["project_id"] != project["id"]:
+                raise ValueError("media_sync_snapshot_project_mismatch: 增量快照属于其他项目")
+            return _incremental_snapshot_result(db, persisted, project)
+        _cleanup_incremental_snapshots(db, now)
+        db.execute(
+            """INSERT INTO media_incremental_snapshots(
+                 snapshot_id,project_id,state,manifest_hash,result_json,created_at,finalized_at)
+               VALUES(?,?,'preparing','',NULL,?,NULL)""",
+            (snapshot_id, project["id"], now),
+        )
+        db.executemany(
+            """INSERT INTO media_incremental_snapshot_files(
+                 snapshot_id,ordinal,file_path,file_path_key,file_size,modified_at)
+               VALUES(?,?,?,?,?,?)""",
+            [(snapshot_id, ordinal, entry["filePath"], canonical_path(entry["filePath"]).casefold(),
+              int(entry["fileSize"]), int(entry["modifiedAt"])) for ordinal, entry in enumerate(files)],
+        )
+        db.executemany(
+            """INSERT INTO media_incremental_snapshot_scopes(
+                 snapshot_id,ordinal,path_key,scope_kind,like_prefix) VALUES(?,?,?,?,?)""",
+            [(snapshot_id, ordinal, scope["pathKey"], scope["kind"],
+              _incremental_like_prefix(scope["pathKey"]) if scope["kind"] == "directory" else None)
+             for ordinal, scope in enumerate(scopes)],
+        )
+        # A relational EXISTS handles thousands of scopes without constructing
+        # a deeply nested OR expression.
+        db.execute(
+            """INSERT INTO media_incremental_snapshot_baseline(snapshot_id,version_id,updated_at)
+               SELECT ?,versions.id,versions.updated_at
+               FROM versions JOIN photos ON photos.id=versions.photo_id
+               WHERE photos.project_id=? AND versions.is_deleted=0 AND EXISTS(
+                 SELECT 1 FROM media_incremental_snapshot_scopes scope
+                 WHERE scope.snapshot_id=? AND (
+                   (scope.scope_kind='file' AND versions.file_path_key=scope.path_key) OR
+                   (scope.scope_kind='directory' AND (
+                     versions.file_path_key=scope.path_key OR
+                     versions.file_path_key LIKE scope.like_prefix ESCAPE '!'
+                   ))
+                 )
+               )""",
+            (snapshot_id, project["id"], snapshot_id),
+        )
+        baseline = [
+            {"id": row["version_id"], "updatedAt": int(row["updated_at"])}
+            for row in db.execute(
+                """SELECT version_id,updated_at FROM media_incremental_snapshot_baseline
+                   WHERE snapshot_id=? ORDER BY version_id""", (snapshot_id,)
+            ).fetchall()
+        ]
+        manifest_hash = _incremental_manifest_digest({
+            "projectId": project["id"], "files": files, "scopes": scopes, "baseline": baseline,
+        })
+        db.execute(
+            "UPDATE media_incremental_snapshots SET state='prepared',manifest_hash=? WHERE snapshot_id=?",
+            (manifest_hash, snapshot_id),
+        )
+        db.commit()
+    except Exception:
+        if db.in_transaction:
+            db.rollback()
+        raise
+    return _incremental_snapshot_result(db, _incremental_snapshot_row(db, snapshot_id), project)
+
+
+def media_sync_paths_apply_batch(root: str, db, payload: dict):
+    del root
+    project = project_row(db, payload["projectName"])
+    snapshot_id = str(payload.get("snapshotId") or "")
+    _media_sync_marker(snapshot_id, "paths-batch")
+    batch_index = int(payload.get("batchIndex") or 0)
+    if batch_index < 0:
+        raise ValueError("media_sync_batch_invalid: 扫描批次无效")
+    snapshot = _incremental_snapshot_row(db, snapshot_id)
+    if snapshot is None or snapshot["project_id"] != project["id"]:
+        raise ValueError("media_sync_snapshot_missing: 增量快照不存在或项目不匹配")
+    files = payload.get("files") or []
+    if not isinstance(files, list) or len(files) > MEDIA_INCREMENTAL_BATCH_SIZE:
+        raise ValueError("media_sync_batch_invalid: 扫描批次过大")
+    normalized = [
+        {"filePath": canonical_path(str((entry or {}).get("filePath") or "")),
+         "fileSize": int((entry or {}).get("fileSize") or 0),
+         "modifiedAt": int((entry or {}).get("modifiedAt") or 0)}
+        for entry in files
+    ]
+    payload_hash = _incremental_manifest_digest(normalized)
+    expected = [
+        {"filePath": row["file_path"], "fileSize": int(row["file_size"]), "modifiedAt": int(row["modified_at"])}
+        for row in db.execute(
+            """SELECT file_path,file_size,modified_at FROM media_incremental_snapshot_files
+               WHERE snapshot_id=? AND ordinal>=? AND ordinal<? ORDER BY ordinal""",
+            (snapshot_id, batch_index * MEDIA_INCREMENTAL_BATCH_SIZE,
+             (batch_index + 1) * MEDIA_INCREMENTAL_BATCH_SIZE),
+        ).fetchall()
+    ]
+    marker = db.execute(
+        """SELECT payload_hash,result_json FROM media_incremental_snapshot_batches
+           WHERE snapshot_id=? AND batch_index=?""", (snapshot_id, batch_index)
+    ).fetchone()
+    if marker is not None:
+        if marker["payload_hash"] != payload_hash:
+            raise MediaSyncBatchMismatch("MEDIA_SYNC_BATCH_MISMATCH: 批次载荷与已提交标记不一致")
+        return json.loads(marker["result_json"])
+    if not expected or normalized != expected:
+        raise MediaSyncBatchMismatch("MEDIA_SYNC_BATCH_MISMATCH: 批次载荷与不可变 manifest 不一致")
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        marker = db.execute(
+            """SELECT payload_hash,result_json FROM media_incremental_snapshot_batches
+               WHERE snapshot_id=? AND batch_index=?""", (snapshot_id, batch_index)
+        ).fetchone()
+        if marker is not None:
+            db.rollback()
+            if marker["payload_hash"] != payload_hash:
+                raise MediaSyncBatchMismatch("MEDIA_SYNC_BATCH_MISMATCH: 批次载荷与已提交标记不一致")
+            return json.loads(marker["result_json"])
+        count = 0
+        pending_hashes = []
+        for entry in expected:
+            try:
+                if sync_media_file(db, project, entry["filePath"], pending_hashes):
+                    count += 1
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+        result = {"success": True, "snapshotId": snapshot_id, "batchIndex": batch_index, "count": count}
+        db.execute(
+            """INSERT INTO media_incremental_snapshot_batches(
+                 snapshot_id,batch_index,payload_hash,result_json) VALUES(?,?,?,?)""",
+            (snapshot_id, batch_index, payload_hash, json.dumps(result, ensure_ascii=False)),
+        )
+        db.commit()
+        return result
+    except Exception:
+        if db.in_transaction:
+            db.rollback()
+        raise
+
+
+def media_sync_paths_finalize(root: str, db, payload: dict):
+    del root
+    project = project_row(db, payload["projectName"])
+    snapshot_id = str(payload.get("snapshotId") or "")
+    _media_sync_marker(snapshot_id, "paths-finalize")
+    snapshot = _incremental_snapshot_row(db, snapshot_id)
+    if snapshot is None or snapshot["project_id"] != project["id"]:
+        raise ValueError("media_sync_snapshot_missing: 增量快照不存在或项目不匹配")
+    if snapshot["result_json"]:
+        return json.loads(snapshot["result_json"])
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        snapshot = _incremental_snapshot_row(db, snapshot_id)
+        if snapshot["result_json"]:
+            db.rollback()
+            return json.loads(snapshot["result_json"])
+        file_count = db.execute(
+            "SELECT COUNT(*) FROM media_incremental_snapshot_files WHERE snapshot_id=?", (snapshot_id,)
+        ).fetchone()[0]
+        expected_batches = math.ceil(file_count / MEDIA_INCREMENTAL_BATCH_SIZE)
+        applied_batches = db.execute(
+            "SELECT COUNT(*) FROM media_incremental_snapshot_batches WHERE snapshot_id=?", (snapshot_id,)
+        ).fetchone()[0]
+        if applied_batches != expected_batches:
+            raise ValueError(
+                f"media_sync_snapshot_incomplete: 增量快照批次不完整 {applied_batches}/{expected_batches}"
+            )
+        rows = db.execute(
+            """SELECT versions.id,versions.updated_at,versions.file_path,versions.file_path_key,
+                      versions.photo_id,versions.thumbnail_path,baseline.updated_at AS baseline_updated_at,
+                      EXISTS(SELECT 1 FROM media_incremental_snapshot_files file
+                             WHERE file.snapshot_id=baseline.snapshot_id
+                               AND file.file_path_key=versions.file_path_key) AS was_seen
+               FROM media_incremental_snapshot_baseline baseline
+               JOIN versions ON versions.id=baseline.version_id
+               JOIN photos ON photos.id=versions.photo_id
+               WHERE baseline.snapshot_id=? AND photos.project_id=? AND versions.is_deleted=0""",
+            (snapshot_id, project["id"]),
+        ).fetchall()
+        timestamp = int(time.time() * 1000)
+        missing_count = 0
+        for row in rows:
+            if int(row["updated_at"]) != int(row["baseline_updated_at"]) or row["was_seen"]:
+                continue
+            changed = db.execute(
+                "UPDATE versions SET file_missing=1,updated_at=? WHERE id=? AND updated_at=?",
+                (timestamp, row["id"], row["updated_at"]),
+            ).rowcount
+            if not changed:
+                continue
+            db.execute("UPDATE file_records SET missing=1,updated_at=? WHERE owner_type='version' AND owner_id=?", (timestamp, row["id"]))
+            missing_count += 1
+        candidates = db.execute(
+            """SELECT versions.id,versions.photo_id,versions.file_path,versions.thumbnail_path
+               FROM media_incremental_snapshot_files file
+               JOIN versions ON versions.file_path_key=file.file_path_key
+               JOIN photos ON photos.id=versions.photo_id
+               WHERE file.snapshot_id=? AND photos.project_id=? AND versions.is_deleted=0
+                 AND versions.file_missing=0""",
+            (snapshot_id, project["id"]),
+        ).fetchall()
+        result = {
+            "success": True, "snapshotId": snapshot_id, "missingCount": missing_count,
+            "thumbnailCandidates": [{"versionId": row["id"], "photoId": row["photo_id"], "filePath": row["file_path"]}
+                                    for row in candidates if not row["thumbnail_path"] or not os.path.isfile(row["thumbnail_path"])],
+        }
+        serialized = json.dumps(result, ensure_ascii=False)
+        updated = db.execute(
+            """UPDATE media_incremental_snapshots
+               SET state='finalized',result_json=?,finalized_at=?
+               WHERE snapshot_id=? AND result_json IS NULL""",
+            (serialized, timestamp, snapshot_id),
+        ).rowcount
+        if not updated:
+            persisted = _incremental_snapshot_row(db, snapshot_id)
+            db.rollback()
+            return json.loads(persisted["result_json"])
+        db.commit()
+        return result
+    except Exception:
+        if db.in_transaction:
+            db.rollback()
+        raise
 
 
 def _legacy_media_sync_project(root: str, db, payload: dict):
@@ -8470,6 +9005,18 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "media_sync_finalize":
         result = media_sync_finalize(root, db, payload)
+        db.close()
+        return result
+    elif action == "media_sync_paths_prepare":
+        result = media_sync_paths_prepare(root, db, payload)
+        db.close()
+        return result
+    elif action == "media_sync_paths_apply_batch":
+        result = media_sync_paths_apply_batch(root, db, payload)
+        db.close()
+        return result
+    elif action == "media_sync_paths_finalize":
+        result = media_sync_paths_finalize(root, db, payload)
         db.close()
         return result
     elif action == "media_get":

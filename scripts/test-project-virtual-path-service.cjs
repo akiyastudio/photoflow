@@ -71,24 +71,25 @@ try {
   fs.mkdirSync(outsideJunctionTarget);
   fs.writeFileSync(path.join(outsideJunctionTarget, 'escape.jpg'), 'escape');
   const junctionPath = path.join(projectRoot, 'junction');
+  let junctionAvailable = false;
   try {
     fs.symlinkSync(outsideJunctionTarget, junctionPath, process.platform === 'win32' ? 'junction' : 'dir');
+    junctionAvailable = true;
     assert.throws(() => service.resolve(projectRoot, 'junction/escape.jpg'), /重解析点|项目目录/, 'ordinary project paths must not escape through a junction');
   } catch (error) {
     if (!['EPERM', 'EACCES', 'UNKNOWN'].includes(error?.code)) throw error;
+    process.stdout.write(`SKIP: junction escape test unavailable (${error.code})\n`);
   }
 
   const externalShortcutOutside = path.join(outsideJunctionTarget, 'escape-link.lnk');
   service.createManagedExternalLink(externalShortcutOutside, { target: externalRoot, kind: 'folder', displayName: 'escape-link' });
-  try {
+  if (junctionAvailable) {
     assert.throws(
       () => service.resolve(projectRoot, 'junction/escape-link.lnk', { externalRootMode: 'link' }),
       /重解析点|项目目录/,
       'managed external shortcuts must not escape through a junction',
     );
     assert.strictEqual(fs.existsSync(externalShortcutOutside), true, 'a rejected external shortcut must remain untouched outside the project');
-  } catch (error) {
-    if (!['EPERM', 'EACCES', 'UNKNOWN'].includes(error?.code)) throw error;
   }
 
   const listed = service.listManagedExternalLinks(projectRoot);
@@ -123,7 +124,16 @@ try {
   const offlineLink = service.resolve(projectRoot, 'RAW.lnk', { externalRootMode: 'link' });
   assert.strictEqual(offlineLink.offline, true);
   assert.throws(() => service.resolve(projectRoot, 'RAW.lnk/nested/photo.jpg'), error => error?.code === 'EXTERNAL_LINK_OFFLINE');
+  const restartedService = createProjectVirtualPathService({ shell, registryPath: path.join(temporaryRoot, 'managed-links.json') });
+  const restartedOfflineLink = restartedService.listManagedExternalLinks(projectRoot)
+    .find(item => item.shortcutVirtualPath === 'RAW.lnk');
+  assert.strictEqual(restartedOfflineLink?.offline, true, 'managed registry authority must survive restart while its target is offline');
   fs.renameSync(`${externalRoot}-offline`, externalRoot);
+  assert.strictEqual(
+    restartedService.listManagedExternalLinks(projectRoot).find(item => item.shortcutVirtualPath === 'RAW.lnk')?.offline,
+    false,
+    'a managed external link must become enumerable again when its target returns online',
+  );
 
   const detach = await rename({ sender: { isDestroyed: () => false, send: () => undefined } }, 'workspace', 'active', 'project', 'trash', ['RAW.lnk']);
   assert.strictEqual(detach.success, true, detach.error);

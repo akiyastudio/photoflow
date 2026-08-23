@@ -727,7 +727,7 @@ const App: React.FC = () => {
     setActiveTab(nextActivation.activeTab);
   };
   const handleHomeImportComplete = async (completion: ImportCompletion) => { if (!config) return;
-    const result = await window.electronAPI.finalizeSdImportedProjects(config.workspacePath, completion.projectNames, { moveProjectAfterImport: config.smartImport.autoMoveProjectAfterSdImport, workProjectNames: completion.workProjectNames });
+    const result = await window.electronAPI.finalizeSdImportedProjects(config.workspacePath, completion.projectNames, { moveProjectAfterImport: config.smartImport.autoMoveProjectAfterSdImport, workProjectNames: completion.workProjectNames, importedPathsByProject: completion.importedPathsByProject });
     if (!result.success) { showNotice(`整理导入项目失败：${result.error || '未知错误'}`, 5000); return; }
     if (result.failures.length) showNotice(`导入已完成，但有 ${result.failures.length} 个项目的分类更新失败。`, 7000);
     else if (result.movedProjects.length) showNotice('导入完成，项目已移入“后期中”。');

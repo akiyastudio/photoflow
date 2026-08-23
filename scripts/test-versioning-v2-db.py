@@ -1003,8 +1003,8 @@ def test_external_link_progress_is_persisted_and_sync_safe(root: Path) -> None:
         synced = workspace_db.media_sync_project(str(workspace), db, {
             "projectName": "Project",
             "externalRoots": [
-                {"path": str(external_original), "kind": "folder", "virtualPath": "RAW.lnk"},
-                {"path": str(external_progress), "kind": "folder", "virtualPath": "Retouch.lnk"},
+                {"path": str(external_original), "kind": "folder", "authorized": True, "online": True},
+                {"path": str(external_progress), "kind": "folder", "authorized": True, "online": True},
             ],
         })
         assert synced["count"] == 2, "trusted external roots must participate in the same media database sync as project folders"

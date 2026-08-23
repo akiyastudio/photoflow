@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { filterActionableWatchEntries } = require('./watch-change-filter.cjs');
+const { describeActionableWatchChanges, forgetMissingWatchChanges, recordActionableWatchEntry } = require('./watch-change-filter.cjs');
 
 const createFileRootWatcherService = ({
   getMainWindow,
@@ -19,14 +19,16 @@ const createFileRootWatcherService = ({
     const relative = path.relative(parent, candidate);
     return !relative || (!relative.startsWith('..') && !path.isAbsolute(relative));
   };
-  const publish = (state, changedEntries) => {
+  const publish = (state, changes) => {
     const mainWindow = getMainWindow();
     for (const binding of state.bindings.values()) {
       const publishedEntries = [];
-      for (const [changedName, eventType] of changedEntries) {
+      for (const change of changes) {
+        const changedName = path.relative(state.root, change.path);
+        const { eventType } = change;
         if (binding.fileNameFilter && comparable(path.join(state.root, changedName)) !== binding.fileNameFilter) continue;
         const fileName = [binding.virtualPrefix, binding.virtualFileName || changedName].filter(Boolean).join('/').replace(/\\/g, '/');
-        publishedEntries.push({ fileName, eventType });
+        publishedEntries.push({ ...change, fileName, sourcePath: change.path });
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('workspace-files-changed', { root: binding.publishRoot, fileName, eventType, viaExternalLink: Boolean(binding.virtualPrefix || binding.virtualFileName) });
       }
       if (publishedEntries.length && binding.onChanged) {
@@ -52,27 +54,28 @@ const createFileRootWatcherService = ({
       existing.bindings.set(bindingKey, binding);
       return { success: true, root };
     }
-    const state = { root, references: 1, watcher: null, timer: null, changes: new Map(), bindings: new Map([[bindingKey, { publishRoot, virtualPrefix, fileNameFilter, virtualFileName, onChanged: options.onChanged, references: 1 }]]) };
+    const state = { root, references: 1, watcher: null, timer: null, changes: new Map(), knownEntries: new Map(), bindings: new Map([[bindingKey, { publishRoot, virtualPrefix, fileNameFilter, virtualFileName, onChanged: options.onChanged, references: 1 }]]) };
     try {
       state.watcher = fs.watch(root, { recursive: process.platform !== 'linux' }, (eventType, fileName) => {
         if (!fileName || isInternalChange(fileName) || isSuppressedChange(root, fileName)) return;
         const changedName = String(fileName);
         const normalizedEventType = eventType === 'rename' ? 'rename' : 'change';
-        if (state.changes.get(changedName) !== 'rename') state.changes.set(changedName, normalizedEventType);
+        recordActionableWatchEntry(state.changes, state.knownEntries, root, changedName, normalizedEventType, fs);
         if (state.timer) clearTimeout(state.timer);
         state.timer = setTimeout(() => {
           state.timer = null;
-          const changedEntries = filterActionableWatchEntries(root, [...state.changes], fs);
+          const changes = describeActionableWatchChanges(root, [...state.changes], fs);
           state.changes.clear();
-          if (!changedEntries.length) return;
+          forgetMissingWatchChanges(state.knownEntries, root, changes);
+          if (!changes.length) return;
           const thumbnailService = getThumbnailService();
-          if (thumbnailService && changedEntries.length) {
-            const changedPaths = changedEntries.map(([changedName]) => path.join(root, changedName));
+          if (thumbnailService && changes.length) {
+            const changedPaths = changes.map(change => change.path);
             void thumbnailService.syncChangedPaths(root, changedPaths, getMediaCacheConfig()).catch(error => {
               writeLog('warn', 'Unable to update file-root thumbnails', { root, error: error.message || String(error) });
             });
           }
-          publish(state, changedEntries);
+          publish(state, changes);
         }, 200);
       });
       state.watcher.on('error', error => {

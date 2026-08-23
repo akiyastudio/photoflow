@@ -61,21 +61,22 @@ const { createSelectionService } = require('./services/selection-service.cjs');
 const { createTelemetryService } = require('./services/telemetry-service.cjs');
 const { createPrivacyService } = require('./privacy-service.cjs');
 const { createFileRootWatcherService } = require('./services/file-root-watcher-service.cjs');
-const { filterActionableWatchEntries } = require('./services/watch-change-filter.cjs');
+const { describeActionableWatchChanges, forgetMissingWatchChanges, recordActionableWatchEntry } = require('./services/watch-change-filter.cjs');
 const { createProjectVirtualPathService } = require('./services/project-virtual-path-service.cjs');
 const cloudConfig = require('./cloud-config.cjs');
 const { registerBackgroundTasksIpc } = require('./modules/background-tasks-ipc.cjs');
 const { createElectronSecurity, normalizeBundledPythonTool, normalizeExternalUrl } = require('./security-policy.cjs');
 const smokeTestEnabled = process.env.PHOTOFLOW_SMOKE_TEST === '1';
-const smokeUserDataPath = String(process.env.PHOTOFLOW_USER_DATA_DIR || '').trim();
+const smokeUserDataPath = String(process.env.PHOTOFLOW_USER_DATA_DIR || '').trim(); const smokeSessionDataPath = String(process.env.PHOTOFLOW_SMOKE_SESSION_DATA_DIR || '').trim();
 if (smokeTestEnabled) {
   // Headless/CI Windows sessions may be unable to initialize Electron's GPU
   // child even when Chromium receives --disable-gpu. Disable acceleration at
   // the Electron application layer as well; production startup is unchanged.
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch('disable-gpu');
-  if (!smokeUserDataPath || !path.isAbsolute(smokeUserDataPath)) throw new Error('PHOTOFLOW_USER_DATA_DIR must be an absolute path in smoke mode');
+  if (!smokeUserDataPath || !path.isAbsolute(smokeUserDataPath) || !smokeSessionDataPath || !path.isAbsolute(smokeSessionDataPath)) throw new Error('smoke userData/sessionData paths must be absolute');
   app.setPath('userData', path.resolve(smokeUserDataPath));
+  app.setPath('sessionData', path.resolve(smokeSessionDataPath));
 } else {
   // Keep user-facing OS labels localized while runtime data stays in a stable,
   // Latin-only directory name.
@@ -222,6 +223,7 @@ const normalizeMediaCacheSizeGB = (value, fallback = 50) => {
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
 };
 const workspaceWatchChanges = new Map();
+const workspaceWatchKnownEntries = new Map();
 const workspaceWatchSuppressions = new Map();
 let mediaTrackingScanScheduler = null;
 const isInternalWorkspaceChange = fileName => String(fileName || '')
@@ -1013,12 +1015,12 @@ const trustedExternalMediaRoots = (root, projectName) => {
   if (!project?.relative_path) return [];
   const projectRoot = path.resolve(root, project.relative_path);
   return projectVirtualPaths.listManagedExternalLinks(projectRoot)
-    .filter(link => !link.offline)
-    .map(link => ({ path: link.externalTargetRoot, kind: link.externalTargetKind, virtualPath: link.shortcutVirtualPath }));
+    .map(link => ({ path: link.externalTargetRoot, kind: link.externalTargetKind, authorized: true, online: !link.offline }));
 };
 const mediaRepository = {
   ...mediaBackgroundRepository,
   syncProject: (root, projectName) => mediaBackgroundRepository.syncProject(root, projectName, trustedExternalMediaRoots(root, projectName)),
+  syncChangedPaths: (root, projectName, changes, _externalRoots, options) => mediaBackgroundRepository.syncChangedPaths(root, projectName, changes, trustedExternalMediaRoots(root, projectName), options),
   getPhoto: mediaInteractionRepository.getPhoto,
   createVersion: mediaInteractionRepository.createVersion,
   updateVersion: mediaInteractionRepository.updateVersion,
@@ -1070,6 +1072,7 @@ const mediaScanRepository = createMediaRepository(mediaScanDatabase);
 const mediaScanService = createVersionService({ repository: {
   ...mediaScanRepository,
   syncProject: (root, projectName) => mediaScanRepository.syncProject(root, projectName, trustedExternalMediaRoots(root, projectName)),
+  syncChangedPaths: (root, projectName, changes, _externalRoots, options) => mediaScanRepository.syncChangedPaths(root, projectName, changes, trustedExternalMediaRoots(root, projectName), options),
 } });
 // Version comparisons can run alongside a full media-index scan. Give them a
 // separate database worker so the scheduler's read concurrency is real rather
@@ -1132,6 +1135,7 @@ const stopWorkspaceWatcher = () => {
   workspaceWatcher = null;
   watchedWorkspacePath = '';
   workspaceWatchChanges.clear();
+  workspaceWatchKnownEntries.clear();
   workspaceWatchSuppressions.clear();
   if (workspaceReconciliationTimer) clearInterval(workspaceReconciliationTimer);
   workspaceReconciliationTimer = null;
@@ -1176,22 +1180,25 @@ const watchWorkspace = (root) => {
       if (isSuppressedWorkspaceChange(root, fileName)) return;
       const changedName = String(fileName);
       const normalizedEventType = eventType === 'rename' ? 'rename' : 'change';
-      if (workspaceWatchChanges.get(changedName) !== 'rename') workspaceWatchChanges.set(changedName, normalizedEventType);
+      recordActionableWatchEntry(workspaceWatchChanges, workspaceWatchKnownEntries, root, changedName, normalizedEventType, fs);
       if (workspaceWatchTimer) clearTimeout(workspaceWatchTimer);
       workspaceWatchTimer = setTimeout(() => {
-        const changedEntries = filterActionableWatchEntries(root, [...workspaceWatchChanges], fs);
+        const describedChanges = describeActionableWatchChanges(root, [...workspaceWatchChanges], fs);
         workspaceWatchChanges.clear();
-        if (!changedEntries.length) return;
+        forgetMissingWatchChanges(workspaceWatchKnownEntries, root, describedChanges);
+        if (!describedChanges.length) return;
+        const changedEntries = describedChanges.map(change => [path.relative(root, change.path), change.eventType]);
         const changedNames = changedEntries.map(([changedName]) => changedName);
         const changedEventTypes = new Map(changedEntries);
         if (thumbnailService) {
           const changesByProject = new Map();
-          for (const changedName of changedNames) {
+          for (const change of describedChanges) {
+            const changedName = path.relative(root, change.path);
             const segments = changedName.split(/[\\/]/).filter(Boolean);
             if (segments.length < 2) continue;
             const projectRoot = path.join(root, segments[0]);
             if (!changesByProject.has(projectRoot)) changesByProject.set(projectRoot, []);
-            changesByProject.get(projectRoot).push(path.join(root, changedName));
+            changesByProject.get(projectRoot).push(change.path);
           }
           for (const [projectRoot, changedPaths] of changesByProject) {
             void thumbnailService.syncChangedPaths(projectRoot, changedPaths, mediaRuntimeState.activeMediaCacheConfig).catch(error => {
@@ -1212,7 +1219,8 @@ const watchWorkspace = (root) => {
         const catalogMayHaveChanged = !changedNames.length || changedSegments.some(segments => segments.length === 1 || !knownProjectPaths.has(String(segments[0] || '').toLocaleLowerCase()));
         const changedProjects = new Set();
         const changedPathsByProject = new Map();
-        for (const changedName of changedNames) {
+        for (const change of describedChanges) {
+          const changedName = path.relative(root, change.path);
           const segments = changedName.split(/[\\/]/).filter(Boolean);
           if (segments.length < 2) continue;
           const firstSegment = segments[0];
@@ -1220,7 +1228,7 @@ const watchWorkspace = (root) => {
           if (project) {
             changedProjects.add(project.name);
             if (!changedPathsByProject.has(project.name)) changedPathsByProject.set(project.name, []);
-            changedPathsByProject.get(project.name).push(path.join(root, changedName));
+            changedPathsByProject.get(project.name).push(change);
           }
         }
         if (!changedNames.length) for (const project of catalog?.projects || []) changedProjects.add(project.name);
@@ -1602,7 +1610,7 @@ thumbnailPipeline = new ThumbnailPipeline({
   concurrency: Math.max(2, Math.min(4, Math.floor((os.availableParallelism?.() || os.cpus().length || 4) / 4))),
   maxBackgroundTasks: 1000,
 });
-thumbnailService = createThumbnailService({ pipeline: thumbnailPipeline, backgroundTasks });
+thumbnailService = createThumbnailService({ pipeline: thumbnailPipeline, backgroundTasks, writeLog });
 fileRootWatcherService = createFileRootWatcherService({
   getMainWindow: () => mainWindow,
   getThumbnailService: () => thumbnailService,

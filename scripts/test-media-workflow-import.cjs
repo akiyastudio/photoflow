@@ -131,7 +131,7 @@ const createReceipt = () => {
 
   failAckCleanup = false;
   result = await recover(null, temporaryRoot);
-  assert.equal(result.success, true, 'restart recovery must replay an unacknowledged receipt without renderer storage');
+  assert.equal(result.success, true, `restart recovery must replay an unacknowledged receipt without renderer storage: ${JSON.stringify(result)}`);
   assert.equal(fs.existsSync(sessionDir), false, 'successful ACK must remove the exact session staging directory');
   assert.equal(fs.readFileSync(importedMediaPath, 'utf8'), initialMedia);
 

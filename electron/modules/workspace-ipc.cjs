@@ -5,10 +5,11 @@ const { startDetachedBackgroundOperation } = require('../services/detached-backg
 const { replaceVideoFileWithRollback } = require('../services/video-trim-commit-service.cjs');
 const { createProjectVirtualPathService } = require('../services/project-virtual-path-service.cjs');
 const { normalizeProjectFileListFilter, projectFileListEntryMatchesFilter, projectFileListSessionMatches } = require('./workspace/file-list-contract.cjs');
-const { createImportReceiptService, validImportSessionId } = require('./workspace/import-receipt-service.cjs');
+const { IMPORT_GRAPH_RECEIPT_NAME, createImportReceiptService, validImportSessionId } = require('./workspace/import-receipt-service.cjs');
 const { createWorkspaceStoragePolicy } = require('./workspace/storage-policy.cjs');
 const { cleanupImportArtifacts } = require('./workspace/import-recovery.cjs');
 const { createManagedExternalWatcherBindings } = require('./workspace/managed-external-watcher.cjs');
+const { scheduleSdImportedMedia } = require('./workspace/sd-import-media-scan.cjs');
 
 const MANAGED_EXTERNAL_FOLDER_PREFIX = 'PhotoFlow 外链文件夹：';
 const MANAGED_EXTERNAL_FILE_PREFIX = 'PhotoFlow 外链文件：';
@@ -123,16 +124,16 @@ const registerWorkspaceIpc = context => {
   const progressImportConflictCache = new Map();
   const workspaceMaintenanceScheduledAt = new Map();
   const workspaceMaintenanceCooldownMs = 24 * 60 * 60 * 1000;
-  for (const task of backgroundTasks?.list?.() || []) {
-    if (task.type === 'workspace-database-maintenance' && task.state === 'interrupted') backgroundTasks.dismiss(task.id);
-  }
   const watchedProjectFileRoots = new Map();
   const watchedProjectFileRootHealth = new Map();
   const watchedProjectFileRootKey = (workspaceRoot, status, projectName) => `${path.resolve(workspaceRoot).toLocaleLowerCase()}\0${String(status)}\0${String(projectName).toLocaleLowerCase()}`;
   const externalTrackingChangeHandler = (publishRoot, projectName) => entries => scheduleMediaTrackingScan(
     publishRoot,
     projectName,
-    entries.map(entry => path.join(publishRoot, entry.fileName)),
+    entries.map(entry => ({
+      path: entry.sourcePath || path.join(publishRoot, entry.fileName), eventType: entry.eventType,
+      kind: entry.kind, observedMtimeMs: entry.observedMtimeMs, observedSize: entry.observedSize,
+    })),
   );
   const { attach: attachManagedExternalWatcher, detach: detachManagedExternalWatcher } = createManagedExternalWatcherBindings({ fs, path, ensureWorkspace, getProjectPath, watchedProjectFileRoots, watchedProjectFileRootKey, acquireFileRootWatcher, releaseFileRootWatcher, externalTrackingChangeHandler, writeLog });
   const transientRenameErrorCodes = new Set(['EACCES', 'EBUSY', 'EPERM']);
@@ -346,7 +347,7 @@ const registerWorkspaceIpc = context => {
       dedupeKey: `workspace-database-maintenance:${root}`,
       cancellable: false,
       resources: [workspaceDatabaseTaskResource(root)],
-      metadata: { root, taskCenterVisibility: 'attention-only' },
+      metadata: { root },
     }, async task => {
       task.report(10, '正在检查项目数据库');
       const result = await runWorkspaceMaintenanceWithRetry({ root, repository: workspaceMaintenanceRepository, task });
@@ -1102,7 +1103,6 @@ const registerWorkspaceIpc = context => {
       await reconcileWorkspaceCatalog(root);
       const movedNames = new Set();
       const failures = [];
-
       for (const requestedName of requestedNames) {
         const currentCatalog = await reconcileWorkspaceCatalog(root);
         const row = currentCatalog.projects.find(project => project.name.toLocaleLowerCase() === requestedName);
@@ -1126,7 +1126,6 @@ const registerWorkspaceIpc = context => {
           failures.push({ projectName: row.name, error: error.message || String(error) });
         }
       }
-
       const finalCatalog = await reconcileWorkspaceCatalog(root);
       const projects = finalCatalog.projects.flatMap(row => {
         if (!requestedNames.has(row.name.toLocaleLowerCase())) return [];
@@ -1135,7 +1134,7 @@ const registerWorkspaceIpc = context => {
         return [{ id: row.id, name: row.name, path: projectPath, status: row.status, updatedAt: fs.statSync(projectPath).mtimeMs }];
       });
       await refreshWorkspaceCatalog(root);
-      for (const project of projects) scheduleMediaTrackingScan(root, project.name);
+      scheduleSdImportedMedia({ root, projects, importedPathsByProject: options.importedPathsByProject, imageExtensions: IMAGE_EXTENSIONS, rawExtensions: RAW_EXTENSIONS, videoExtensions: VIDEO_EXTENSIONS, fs, path, scheduleMediaTrackingScan });
       mainWindow?.webContents.send('workspace-projects-changed', { root, reason: 'sd-import-finalized' });
       const movedProjects = projects.filter(project => movedNames.has(project.name.toLocaleLowerCase()));
       const unchangedProjects = projects.filter(project => !movedNames.has(project.name.toLocaleLowerCase()));

@@ -33,7 +33,7 @@ def test_schema_28_migrates_detached_versioning_store(temp_root):
     versioning.close()
 
     catalog_only = workspace_db.connect(workspace_root, database, include_domains=False)
-    assert catalog_only.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "28"
+    assert catalog_only.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
     catalog_only.close()
     upgraded = workspace_db.connect(workspace_root, database, include_domains=True)
     columns = {row[1] for row in upgraded.execute("PRAGMA versioning.table_info(tracking_sessions)").fetchall()}

@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const path = require('path');
+const { runSlicedMaintenance } = require('./sliced-maintenance-runner.cjs');
 
 const RECOVERY_TYPE = 'thumbnail-cache-recovery';
 const MIGRATION_VERSION = 'thumbnail-cache-migration-v2';
@@ -19,16 +20,10 @@ const deferred = () => {
   return { promise, resolve, reject };
 };
 
-const createThumbnailService = ({ pipeline, backgroundTasks }) => {
+const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline.log || (() => undefined) }) => {
   const recoveryRuns = new Map();
   const startupGeneration = crypto.randomUUID();
   let unregisterRecoveryRestart = null;
-
-  // Viewport thumbnail requests are reconstructible. Do not leave interrupted
-  // cards from the previous renderer lifecycle waiting for manual recovery.
-  for (const task of backgroundTasks.list()) {
-    if (task.type === 'thumbnail-generate' && task.state === 'interrupted') backgroundTasks.dismiss(task.id);
-  }
 
   const recoveryDescriptor = (cacheConfig = {}) => {
     const cacheRoot = path.resolve(pipeline.cacheDirectory(cacheConfig));
@@ -61,13 +56,11 @@ const createThumbnailService = ({ pipeline, backgroundTasks }) => {
       metadata: {
         cacheConfig, cacheRoot: descriptor.cacheRoot, migrationVersion: MIGRATION_VERSION,
         reconciliationVersion: RECONCILIATION_VERSION, migrationKey: descriptor.migrationKey, maintenanceKey: descriptor.maintenanceKey,
-        taskCenterVisibility: 'attention-only',
       },
     }, async task => {
       const cacheRoot = path.resolve(await pipeline.ensureCacheDirectory(cacheConfig));
       if (cacheRoot !== descriptor.cacheRoot) throw new Error('缩略图缓存目录在恢复入队前发生变化');
       let lastPhaseReportAt = 0;
-      let processedOffset = 0;
       task.report(5, '正在检查缩略图缓存一致性', { maintenancePhase: 'startup-recovery' });
       const [migrationState, reconciliationState] = await Promise.all([
         pipeline.maintenanceState(descriptor.migrationKey),
@@ -83,19 +76,15 @@ const createThumbnailService = ({ pipeline, backgroundTasks }) => {
         ? previousCursor
         : { generation: startupGeneration, generationMaxRowId: 0, afterRowId: 0, lastCompletedAt: 0, directory: {} };
       await pipeline.saveMaintenanceState(descriptor.maintenanceKey, recoveryCursor);
-      const aggregate = {
-        success: true, repairedMissingCount: 0, deletedCount: 0, deletedBytes: 0,
-        detachedCount: 0, detachedBytes: 0, prunedSourceCount: 0, failedCount: 0,
-        detachComplete: true, pruneComplete: false, recoveryComplete: false,
-        maintenanceComplete: false, recoveryCursor,
-      };
       const orphanBeforeMs = Date.now() - 24 * 60 * 60 * 1000;
-      let firstSlice = true;
-      let prunePending = true;
-      while (!aggregate.maintenanceComplete) {
-        task.throwIfCancelled();
-        const deadlineAt = Date.now() + RECOVERY_SLICE_DEADLINE_MS;
-        const result = await pipeline.evictCache({
+      const run = await runSlicedMaintenance({
+        task,
+        initialState: { recoveryCursor, prunePending: true },
+        initialMetrics: { repairedMissingCount: 0, recoveryInspectedCount: 0, deletedCount: 0, deletedBytes: 0, detachedCount: 0, detachedBytes: 0, prunedSourceCount: 0, failedCount: 0 },
+        sliceDeadlineMs: RECOVERY_SLICE_DEADLINE_MS,
+        yieldMs: RECOVERY_SLICE_DELAY_MS,
+        runSlice: async ({ state, firstSlice, deadlineAt, signal }) => {
+          const result = await pipeline.evictCache({
           cacheRoot,
           verifyIntegrity: firstSlice && !migrationState.completed,
           completeMigrationKey: firstSlice && !migrationState.completed ? descriptor.migrationKey : '',
@@ -104,52 +93,54 @@ const createThumbnailService = ({ pipeline, backgroundTasks }) => {
           recoverOrphans: true,
           scanRootOrphans: !String(cacheConfig?.directory || '').trim(),
           orphanBeforeMs,
-          pruneMissing: prunePending,
+          pruneMissing: state.prunePending,
           maxPruneBatches: 1,
           failOnDeleteError: true,
           completeMaintenanceKey: descriptor.maintenanceKey,
-          recoveryCursor,
+          recoveryCursor: state.recoveryCursor,
           recoveryInspectLimit: RECOVERY_INSPECT_LIMIT,
           recoveryDeleteLimit: RECOVERY_DELETE_LIMIT,
           recoveryDirectoryInspectLimit: RECOVERY_DIRECTORY_INSPECT_LIMIT,
           maxRecoveryPages: 1,
           bumpCacheEpoch: firstSlice,
           task,
-          signal: task.signal,
+          signal,
           deadlineAt,
           onAdmitted: details => admit({ maintenance: details }),
           onBlocked: ({ phase, processedCount }) => {
-            const totalProcessed = processedOffset + Number(processedCount || 0);
             if (Date.now() - lastPhaseReportAt < 250) return;
             lastPhaseReportAt = Date.now();
-            task.report(Math.min(95, 5 + Math.floor(totalProcessed / 64)), `缓存修复：${phase}，已处理 ${totalProcessed} 条`, {
+            task.report(Math.min(95, 5 + Math.floor(Number(processedCount || 0) / 64)), `缓存修复：${phase}，正在处理当前分片`, {
               maintenancePhase: phase,
-              processedCount: totalProcessed,
+              processedCount,
               deadlineAt,
             });
           },
-        });
-        for (const field of ['repairedMissingCount', 'deletedCount', 'deletedBytes', 'detachedCount', 'detachedBytes', 'prunedSourceCount', 'failedCount']) {
-          aggregate[field] += Number(result[field]) || 0;
-        }
-        processedOffset += Number(result.processedCount) || 0;
-        recoveryCursor = result.recoveryCursor || recoveryCursor;
-        aggregate.recoveryCursor = recoveryCursor;
-        aggregate.detachComplete = result.detachComplete !== false;
-        aggregate.pruneComplete = result.pruneComplete !== false;
-        aggregate.recoveryComplete = result.recoveryComplete === true;
-        aggregate.maintenanceComplete = result.maintenanceComplete === true;
-        prunePending = !aggregate.pruneComplete;
-        firstSlice = false;
-        if (!aggregate.maintenanceComplete) await new Promise(resolve => setTimeout(resolve, RECOVERY_SLICE_DELAY_MS));
-      }
+          });
+          const metricsDelta = Object.fromEntries(['repairedMissingCount', 'recoveryInspectedCount', 'deletedCount', 'deletedBytes', 'detachedCount', 'detachedBytes', 'prunedSourceCount', 'failedCount'].map(field => [field, Number(result[field]) || 0]));
+          return {
+            complete: result.maintenanceComplete === true,
+            nextState: { recoveryCursor: result.recoveryCursor || state.recoveryCursor, prunePending: result.pruneComplete === false },
+            metricsDelta,
+            processedDelta: result.processedCount,
+            phase: result.maintenanceComplete ? 'complete' : result.pruneComplete === false ? 'prune' : 'orphan-recovery',
+          };
+        },
+        reportProgress: ({ processedCount, phase, deadlineAt, report }) => report(
+          Math.min(95, 5 + Math.floor(processedCount / 64)),
+          `缓存修复：${phase}，已处理 ${processedCount} 条`,
+          { maintenancePhase: phase, processedCount, deadlineAt },
+        ),
+        reportSliceMetrics: metrics => writeLog('info', 'Thumbnail maintenance slice', metrics),
+      });
+      recoveryCursor = run.state.recoveryCursor;
+      const aggregate = { success: true, ...run.metrics, recoveryCursor, maintenanceComplete: true };
       task.report(100, `缓存索引修复完成：${aggregate.repairedMissingCount} 条缺失缓存，${aggregate.deletedCount} 个孤立文件`);
       return aggregate;
     }, retryFactory);
     taskId = execution.task.id;
     const completion = execution.completion.then(result => {
       if (!admitted) admit({ completedBeforeAdmission: true });
-      if (result.task.state === 'completed') backgroundTasks.dismiss(result.task.id);
       return result;
     }, error => {
       if (!admitted) admission.reject(error);
@@ -232,7 +223,6 @@ const createThumbnailService = ({ pipeline, backgroundTasks }) => {
         cancellable: false,
         metadata: {
           ...normalizedRequest,
-          taskCenterVisibility: 'attention-only',
         },
       }, async task => {
         task.report(10, '正在生成缩略图');
@@ -242,9 +232,6 @@ const createThumbnailService = ({ pipeline, backgroundTasks }) => {
         }
         return outcome;
       }, () => requestThumbnail(normalizedRequest));
-      void execution.completion.then(result => {
-        if (result.task.state === 'completed') backgroundTasks.dismiss(result.task.id);
-      }, () => undefined);
       return execution;
     };
     const execution = run();

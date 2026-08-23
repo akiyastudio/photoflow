@@ -26,7 +26,7 @@ const task = (id, state = 'failed', updatedAt = 1, extra = {}) => ({
   id, type: 'test', title: id, state, progress: state === 'completed' ? 100 : 0, message: '',
   cancellable: false, retryable: state === 'failed', resumable: false, resumeAvailable: false,
   restartAvailable: false, capabilities: { cancellable: false, pausable: false, resumable: false, retryable: state === 'failed' },
-  resumePolicy: 'atomic', notificationPolicy: 'error-only', historyPolicy: 'persistent', retryAttempt: 0,
+  resumePolicy: 'atomic', notificationPolicy: 'error-only', taskCenterPolicy: 'always', historyPolicy: 'persistent', retryAttempt: 0,
   retryPending: false, metadata: {}, createdAt: updatedAt, updatedAt, startedAt: 0, finishedAt: updatedAt,
   ...extra,
 });
@@ -67,14 +67,10 @@ const predecessor = task('predecessor', 'failed', 1, { retryPending: true, repla
 const replacement = task('retry', 'running', 2, { retryOfTaskId: 'predecessor' });
 assert.deepEqual(toastModel.collapseRetryPredecessors([predecessor, replacement]).map(item => item.id), ['retry']);
 
-assert.equal(toastModel.isBackgroundTaskCenterVisible(task('automatic-running', 'running', 3, { metadata: { taskCenterVisibility: 'attention-only' } })), false, 'routine automatic work must stay out of the task center while healthy');
-assert.equal(toastModel.isBackgroundTaskCenterVisible(task('automatic-failed', 'failed', 4, { metadata: { taskCenterVisibility: 'attention-only' } })), true, 'automatic failures must remain visible and retryable');
-assert.equal(toastModel.isBackgroundTaskCenterVisible(task('automatic-interrupted', 'interrupted', 5, { metadata: { taskCenterVisibility: 'attention-only' } })), false, 'safe-restart automatic work must remain quiet while it is being recovered');
-assert.equal(toastModel.isBackgroundTaskCenterVisible(task('legacy-rescan', 'running', 5, { type: 'version-media-rescan' })), false, 'persisted rescans from older builds must inherit attention-only presentation');
-assert.equal(toastModel.isBackgroundTaskCenterVisible(task('legacy-rescan-failed', 'failed', 5, { type: 'version-media-rescan' })), true, 'persisted rescan failures from older builds must remain visible');
-assert.equal(toastModel.isBackgroundTaskCenterVisible(task('thumbnail-running', 'running', 5, { type: 'thumbnail-generate' })), false, 'automatic thumbnail requests must not fill the task center');
-assert.equal(toastModel.isBackgroundTaskCenterVisible(task('thumbnail-failed', 'failed', 5, { type: 'thumbnail-generate' })), true, 'thumbnail failures must remain visible');
-assert.equal(toastModel.isBackgroundTaskCenterVisible(task('maintenance-queued', 'queued', 5, { type: 'workspace-database-maintenance' })), false, 'routine database maintenance must stay attention-only while healthy');
+assert.equal(toastModel.isBackgroundTaskCenterVisible(task('automatic-running', 'running', 3, { taskCenterPolicy: 'attention-only' })), false, 'routine automatic work must stay out of the task center while healthy');
+assert.equal(toastModel.isBackgroundTaskCenterVisible(task('automatic-failed', 'failed', 4, { taskCenterPolicy: 'attention-only' })), true, 'automatic failures must remain visible and retryable');
+assert.equal(toastModel.isBackgroundTaskCenterVisible(task('automatic-interrupted', 'interrupted', 5, { taskCenterPolicy: 'attention-only' })), false, 'safe-restart automatic work must remain quiet while it is being recovered');
+assert.equal(toastModel.isBackgroundTaskCenterVisible(task('hidden-failed', 'failed', 5, { taskCenterPolicy: 'hidden' })), false, 'hidden tasks must never enter the task center');
 assert.equal(toastModel.isBackgroundTaskCenterVisible(task('manual-running', 'running', 6, { type: 'cache-cleanup', notificationPolicy: 'result-only' })), true, 'manual maintenance must continue to expose progress');
 
 console.log('background task renderer model tests passed');

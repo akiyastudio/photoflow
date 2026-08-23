@@ -55,7 +55,7 @@ const runElectronSmokeProbe = async ({ app, mainWindow, rendererEntryFile, loadR
     process.stdout.write(`PHOTOFLOW_SMOKE_RESULT=${JSON.stringify({
       type: 'photoflow-electron-smoke', rendererLoaded: false, preloadApi: false,
       backgroundTaskSnapshot: false, probeError: error.message || String(error),
-      managedProcesses: processSupervisor.list(), userDataPath: app.getPath('userData'), rendererFile: rendererEntryFile,
+      managedProcesses: processSupervisor.list(), userDataPath: app.getPath('userData'), sessionDataPath: app.getPath('sessionData'), rendererFile: rendererEntryFile,
     })}\n`);
     setImmediate(() => app.quit());
     return;
@@ -74,6 +74,7 @@ const runElectronSmokeProbe = async ({ app, mainWindow, rendererEntryFile, loadR
     startupRecoveryResult: recoveryResult?.result || null,
     managedProcesses: processSupervisor.list(),
     userDataPath: app.getPath('userData'),
+    sessionDataPath: app.getPath('sessionData'),
     rendererFile: rendererEntryFile,
   };
   process.stdout.write(`PHOTOFLOW_SMOKE_RESULT=${JSON.stringify(result)}\n`);

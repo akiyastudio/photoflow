@@ -200,6 +200,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
   const importedProjectNamesRef = React.useRef<string[]>([]);
   const importedWorkProjectNamesRef = React.useRef<string[]>([]);
   const importedBrollProjectNamesRef = React.useRef<string[]>([]);
+  const importedPathsByProjectRef = React.useRef<Record<string, string[]>>({});
   const importedCountRef = React.useRef(0);
   const completedDriveCountRef = React.useRef(0);
   const failedDrivesRef = React.useRef<string[]>([]);
@@ -293,6 +294,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     projectNames: [...importedProjectNamesRef.current],
     workProjectNames: [...importedWorkProjectNamesRef.current],
     brollProjectNames: [...importedBrollProjectNamesRef.current],
+    importedPathsByProject: { ...importedPathsByProjectRef.current },
     importedCount: importedCountRef.current,
     skipped: importedCountRef.current === 0 && skippedDrivesRef.current.length > 0,
   });
@@ -575,6 +577,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
             }
             const completion = appendImportSuccess(importCompletion(), {
               projectNames: event.data?.projectNames,
+              importedPathsByProject: event.data?.importedPathsByProject,
               importedCount: event.data?.importedCount,
               skipped,
               sourceType: currentDriveTypeRef.current,
@@ -582,6 +585,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
             importedProjectNamesRef.current = completion.projectNames;
             importedWorkProjectNamesRef.current = completion.workProjectNames;
             importedBrollProjectNamesRef.current = completion.brollProjectNames;
+            importedPathsByProjectRef.current = completion.importedPathsByProject;
             importedCountRef.current = completion.importedCount;
             const completedDrive = currentDriveRef.current;
             if (completedDrive && currentImportSessionKeyRef.current) {
@@ -615,6 +619,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
               importedProjectNamesRef.current = [];
               importedWorkProjectNamesRef.current = [];
               importedBrollProjectNamesRef.current = [];
+              importedPathsByProjectRef.current = {};
               importedCountRef.current = 0;
               setStatus('completed');
               setProgress(100);
@@ -786,6 +791,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     importedProjectNamesRef.current = [];
     importedWorkProjectNamesRef.current = [];
     importedBrollProjectNamesRef.current = [];
+    importedPathsByProjectRef.current = {};
     importedCountRef.current = 0;
     completedDriveCountRef.current = 0;
     failedDrivesRef.current = [];

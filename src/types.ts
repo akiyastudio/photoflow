@@ -924,6 +924,7 @@ export interface BackgroundTask {
   };
   resumePolicy: 'checkpoint' | 'safe-restart' | 'atomic';
   notificationPolicy: 'progress-toast' | 'result-only' | 'error-only' | 'silent';
+  taskCenterPolicy: 'always' | 'attention-only' | 'hidden';
   historyPolicy: 'persistent' | 'ephemeral';
   retryOfTaskId?: string | null;
   replacedByTaskId?: string | null;
@@ -1005,7 +1006,7 @@ export interface IElectronAPI {
   createProjectShellNewFile: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, typeId: string) => Promise<{ success: boolean; file?: { name: string; path: string; relativePath: string; extension: string; updatedAt: number }; error?: string }>;
   undoLastRename: (workspacePath?: string, options?: { restoreConflictPolicy?: 'rename' | 'overwrite' }) => Promise<{ success: boolean; message?: string; project?: WorkspaceProject; requiresDecision?: { kind: 'restore-conflict'; names: string[]; conflictCount: number; message: string; detail: string }; error?: string }> ;
   moveWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, nextStatus: ProjectStatus) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
-  finalizeSdImportedProjects: (workspacePath: string, projectNames: string[], options: { moveProjectAfterImport: boolean; workProjectNames: string[] }) => Promise<{ success: boolean; projects: WorkspaceProject[]; movedProjects: WorkspaceProject[]; unchangedProjects: WorkspaceProject[]; failures: Array<{ projectName: string; error: string }>; error?: string }>;
+  finalizeSdImportedProjects: (workspacePath: string, projectNames: string[], options: { moveProjectAfterImport: boolean; workProjectNames: string[]; importedPathsByProject: Record<string, string[]> }) => Promise<{ success: boolean; projects: WorkspaceProject[]; movedProjects: WorkspaceProject[]; unchangedProjects: WorkspaceProject[]; failures: Array<{ projectName: string; error: string }>; error?: string }>;
   trashWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; operationId?: string; permanent?: boolean; error?: string; errorCode?: string }>;
   cleanupDeletedWorkspaceProjects: (workspacePath: string) => Promise<{ success: boolean; checkedCount: number; cleanedCount: number; outcomes: Array<{ projectId: string; name: string; cleaned: boolean; status: 'in_recycle_bin' | 'missing' | 'restored' | 'unknown'; removedArtifactCount?: number }>; error?: string }>;
 
