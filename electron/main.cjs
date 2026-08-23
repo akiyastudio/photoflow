@@ -1861,8 +1861,7 @@ app.whenReady().then(async () => {
     versionService,
     IMAGE_EXTENSIONS,
     path, fs, crypto, getConfigPath, readSavedConfig,
-    getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks,
-    uniqueDestination, ensureTrackedVersionThumbnail, pluginService, privacyService,
+    getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks, uniqueDestination, ensureTrackedVersionThumbnail, pluginService, privacyService,
   });
   componentServiceManager = new ComponentServiceManager({
     registry: componentHostRegistry,
