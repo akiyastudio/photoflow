@@ -86,7 +86,7 @@
     "test:backup-service": "node scripts/test-backup-service.cjs",
     "test:storage-usage": "node scripts/test-storage-usage-service.cjs && node scripts/test-media-cache-multi-process.cjs",
     "test:archive-service": "node scripts/test-archive-service.cjs",
-    "test:components": "node scripts/test-components.cjs && node scripts/test-component-status-refresh-policy.cjs",
+    "test:components": "node scripts/test-components.cjs && node scripts/test-component-status-refresh-policy.cjs && node scripts/test-component-host.cjs",
     "test:advanced-video": "node scripts/test-advanced-video-service.cjs",
     "test:raw-decoder": ".venv\\Scripts\\python.exe scripts\\test-raw-decoder.py",
     "test:office-media": ".venv\\Scripts\\python.exe scripts\\test-office-media-extractor.py",

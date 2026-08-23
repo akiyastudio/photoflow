@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain: electronIpcMain, Menu, shell, dialog, protocol, nativeImage, clipboard, screen } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain: electronIpcMain, Menu, shell, dialog, protocol, nativeImage, clipboard, screen } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -7,6 +7,9 @@ const os = require('os');
 const { exiftool, exiftoolPath } = require('exiftool-vendored');
 const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY, isThumbnailSizeSufficient } = require('./thumbnail-pipeline.cjs');
 const { createComponentRegistry } = require('./component-registry.cjs');
+const { createComponentHostRegistry } = require('./component-host-contract.cjs');
+const { ComponentViewManager } = require('./services/component-view-manager.cjs');
+const { registerComponentHostIpc } = require('./modules/component-host-ipc.cjs');
 const { PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
 const { registerBrollImportIpc } = require('./modules/broll-import.cjs');
 const { registerSystemIpc } = require('./modules/system-ipc.cjs');
@@ -107,6 +110,8 @@ const componentRegistry = createComponentRegistry({
   userComponentRoot,
   isPackaged: app.isPackaged,
 });
+const componentHostRegistry = createComponentHostRegistry({ roots: componentRegistry.roots });
+let componentViewManager;
 
 protocol.registerSchemesAsPrivileged([{ scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }]);
 let mediaAccessService;
@@ -1784,48 +1789,6 @@ const buildVersionBatchImportKey = async (folderA, folderB) => {
   return `folder-snapshot:${crypto.createHash('sha256').update(tokens.join('|')).digest('hex')}`;
 };
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 registerBrollImportIpc({
   ipcMain,
   dialog,
@@ -1882,6 +1845,16 @@ app.whenReady().then(async () => {
   // IPC modules capture the BrowserWindow instance, so create it first but do
   // not load renderer code until every channel has been registered.
   createWindow(false);
+
+  componentViewManager = new ComponentViewManager({
+    WebContentsView,
+    mainWindow,
+    registry: componentHostRegistry,
+    preloadPath: path.join(__dirname, 'component-preload.cjs'),
+    ipcMain: electronIpcMain,
+    writeLog,
+  });
+  registerComponentHostIpc({ ipcMain, manager: componentViewManager });
 
   registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
   const workspaceIpcController = registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
@@ -1959,6 +1932,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('before-quit', () => {
+  componentViewManager?.destroy();
   telemetryService?.stop();
   pluginService?.stop?.();
   stopWorkspaceWatcher();

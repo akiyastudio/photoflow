@@ -14,6 +14,8 @@ file workflows.
 4. Repositories are the only code allowed to know SQLite table structure.
 5. Python and packaged component processes are workers, not sources of UI state.
 
+Optional UI components follow the separate [Component Host V1 contract](./COMPONENT_HOST_V1.md): the application owns the project-toolbar button and tab chrome, while an isolated, host-preloaded `WebContentsView` owns the component page. No component UI is injected into the main React DOM.
+
 ## Current module boundaries
 
 - `electron/main.cjs`: application composition root only. It creates services,

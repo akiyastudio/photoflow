@@ -1,18 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import {
-  Folder,
-  X,
-  Settings,
-  PanelLeftClose,
-  PanelLeftOpen,
-  ChevronLeft,
-  ChevronRight,
-  GitBranch,
-  Home,
-  UsersRound,
-  Lightbulb,
-  Pin,
-} from 'lucide-react';
+import { Folder, X, Settings, PanelLeftClose, PanelLeftOpen, ChevronLeft, ChevronRight, GitBranch, Home, UsersRound, Lightbulb, Pin, Puzzle } from 'lucide-react';
 import { useAppDialog } from './components/AppDialogProvider';
 import { ProjectNavigator } from './components/ProjectNavigator';
 import { ProjectWorkspace } from './features/workspace/ProjectWorkspace';
@@ -27,6 +14,8 @@ import { useTaskCenter } from './features/background-tasks/TaskCenter';
 import { useTopToastStack } from './features/app/useTopToastStack';
 import { rendererErrorFingerprint, rendererErrorNoticeSummary, shouldReportRendererError, type RendererErrorOccurrence } from './features/app/renderer-error-notice-model';
 import { DomainHealthBanner } from './features/app/DomainHealthBanner';
+import { ComponentPageSurface } from './features/components/ComponentPageSurface';
+import { useComponentPages } from './features/components/useComponentPages';
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
 import { UsagePreferencesOnboarding, USAGE_PREFERENCES_VERSION } from './features/settings/UsagePreferencesOnboarding';
 import type { SettingsSection } from './features/settings/SettingsFeature';
@@ -36,22 +25,10 @@ import { useStartupSdAutoImport } from './features/tools/use-startup-sd-auto-imp
 import { normalizeSavedSdDeviceRecords } from './features/tools/sd-startup-import-model';
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
 import { normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
-import type { AppConfig, BackupStatus, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
+import type { AppConfig, BackupStatus, ComponentHostAction, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
 import { ColumnResizeHandle } from './features/app/AppShellLayout';
 import { clampNumber, readStoredNumber } from './features/app/app-shell-layout-model';
-import {
-  DEFAULT_CONFIG,
-  DEFAULT_HOME_ORDER,
-  IMAGE_SELECTION_FOLDER_NAME,
-  VIDEO_SELECTION_FOLDER_NAME,
-  isMac,
-  localDateKey,
-  normalizeHomeOrder,
-  normalizeMediaCacheSize,
-  normalizeProjectCategories,
-  normalizeProjectToolbar,
-  normalizeVideoPreviewQuality,
-} from './features/app/app-config';
+import { DEFAULT_CONFIG, DEFAULT_HOME_ORDER, IMAGE_SELECTION_FOLDER_NAME, VIDEO_SELECTION_FOLDER_NAME, isMac, localDateKey, normalizeHomeOrder, normalizeMediaCacheSize, normalizeProjectCategories, normalizeProjectToolbar, normalizeVideoPreviewQuality } from './features/app/app-config';
 type WorkspaceToolKind = 'version' | 'team';
 type WorkspaceToolTab = { ownerPageId: string; projectId: string; projectPath: string; kind: WorkspaceToolKind; label: string; busy: boolean };
 interface PythonEvent {
@@ -120,6 +97,8 @@ const App: React.FC = () => {
   const [componentInstallPath, setComponentInstallPath] = useState('');
   const [componentsLoading, setComponentsLoading] = useState(true);
   const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed).map(component => component.id)), [components]);
+  const componentHost = useComponentPages({ browserPages: projectPages, components, onProjectFallback: page => { if (page.project) { activatePage(page.id); setSelectedProject(page.project); setProjectDestination(page.project.path); setActiveTab('project'); } }, onHomeFallback: () => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); }, onNotice: showNotice });
+  const { actions: componentHostActions, pages: componentPages, activeIdentity: activeComponentPageIdentity } = componentHost;
 
   useEffect(() => {
     if (componentsLoading) return;
@@ -130,6 +109,8 @@ const App: React.FC = () => {
   useEffect(() => {
     window.localStorage.setItem('photoflow:sidebar-width', String(Math.round(sidebarWidth)));
   }, [sidebarWidth]);
+
+  useEffect(() => { if (activeTab !== 'component') componentHost.deactivate(); }, [activeTab, componentHost.deactivate]);
 
   useEffect(() => { window.localStorage.setItem('photoflow:sidebar-collapsed', String(sidebarCollapsed)); }, [sidebarCollapsed]);
   const previousInspirationRootRef = useRef<string>(); const previousInspirationPinnedRef = useRef<boolean>();
@@ -620,6 +601,17 @@ const App: React.FC = () => {
     setProjectDestination(project.path);
     setActiveTab(tab.kind === 'version' ? 'project-version' : 'project-team');
   };
+  const activateComponentPageTab = (page: typeof componentPages[number]) => {
+    const projectPage = projectPages.find(candidate => candidate.projectId === page.projectId && candidate.project);
+    if (projectPage?.project) { setSelectedProject(projectPage.project); setProjectDestination(projectPage.project.path); }
+    componentHost.activate(page); setActiveTab('component');
+  };
+  const openComponentPage = async (action: ComponentHostAction, project: WorkspaceProject, workspacePath: string) => {
+    setSelectedProject(project); setProjectDestination(project.path); setActiveTab('component');
+    if (!await componentHost.open(action, project, workspacePath)) setActiveTab('project');
+  };
+  const closeComponentPageTab = (page: typeof componentPages[number]) => componentHost.close(page);
+  const disposeProjectComponentPages = componentHost.disposeProject;
   const updateWorkspaceToolTabBusy = useCallback((ownerPageId: string, kind: WorkspaceToolKind, busy: boolean) => {
     setWorkspaceToolTabs(current => {
       let changed = false;
@@ -701,9 +693,12 @@ const App: React.FC = () => {
     })) return;
     const remaining = projectPages.filter(candidate => candidate.id !== pageId);
     const closingIndex = projectPages.findIndex(candidate => candidate.id === pageId);
+    const closingLastProjectPage = !remaining.some(candidate => candidate.projectId === page.projectId);
+    const closingActiveComponent = componentPages.some(candidate => candidate.identity === activeComponentPageIdentity && candidate.projectId === page.projectId);
     disposePageOwnedUi([pageId]);
+    if (closingLastProjectPage) disposeProjectComponentPages(page.project.workspacePath || config?.workspacePath || '', page.projectId);
     closePage(pageId);
-    if (activePageId !== pageId) return;
+    if (activePageId !== pageId && !closingActiveComponent) return;
     const nextPage = remaining[Math.min(Math.max(closingIndex, 0), remaining.length - 1)];
     if (nextPage?.project) {
       activatePage(nextPage.id); setActiveTab('project');
@@ -716,8 +711,9 @@ const App: React.FC = () => {
     } else showHomeTab();
   };
   const closeAllPagesForProject = (project: WorkspaceProject) => {
-    const closingPageIds = projectPages.filter(page => page.projectId === project.id).map(page => page.id); const activeBelongsToProject = projectPages.some(page => page.id === activePageId && page.projectId === project.id); const remaining = projectPages.filter(page => page.projectId !== project.id);
+    const closingPageIds = projectPages.filter(page => page.projectId === project.id).map(page => page.id); const activeBelongsToProject = projectPages.some(page => page.id === activePageId && page.projectId === project.id) || componentPages.some(page => page.identity === activeComponentPageIdentity && page.projectId === project.id); const remaining = projectPages.filter(page => page.projectId !== project.id);
     disposePageOwnedUi(closingPageIds);
+    disposeProjectComponentPages(project.workspacePath || config?.workspacePath || '', project.id);
     closeProject(project.id);
     if (!activeBelongsToProject) return;
     const nextPage = remaining[0];
@@ -806,6 +802,10 @@ const App: React.FC = () => {
                 </div>;
               })}
             </React.Fragment>; })}
+            {componentPages.map(page => { const isActive = activeTab === 'component' && activeComponentPageIdentity === page.identity; return <div key={page.identity} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[128px] max-w-[230px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
+              <button type="button" onClick={() => activateComponentPageTab(page)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Puzzle size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{page.title} · {page.projectName}</span></button>
+              <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${page.title}`} title={`关闭 ${page.title}`} onClick={() => void closeComponentPageTab(page)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
+            </div>; })}
             {settingsTabOpen && <div {...titlebarTabDragProps('settings')} data-active-tab={activeTab === 'settings'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[108px] max-w-[180px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'settings' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={openSettingsTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Settings size={14} className="shrink-0"/><span className="truncate">设置</span></button><button type="button" data-tab-drag-ignore="true" aria-label="关闭设置" title="关闭设置" onClick={closeSettingsTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}
           </div>
           {titlebarTabScroll.overflow && <button type="button" aria-label="向右滚动标签" title="向右滚动标签" disabled={!titlebarTabScroll.canScrollRight} onClick={() => scrollTitlebarTabs(1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronRight size={15}/></button>}
@@ -848,7 +848,7 @@ const App: React.FC = () => {
       {!sidebarCollapsed && <ColumnResizeHandle label="调整项目栏宽度" onDrag={deltaX => setSidebarWidth(width => clampNumber(width + deltaX, 128, 420))}/>}
 
       {/* Main Content */}
-      <main className={`relative min-w-0 flex-1 bg-slate-50 ${activeTab.startsWith('project') || activeTab === 'inspiration' ? 'overflow-hidden p-0' : activeTab === 'settings' ? 'overflow-auto p-0' : 'overflow-auto p-8'}`}>
+      <main className={`relative min-w-0 flex-1 bg-slate-50 ${activeTab.startsWith('project') || activeTab === 'inspiration' || activeTab === 'component' ? 'overflow-hidden p-0' : activeTab === 'settings' ? 'overflow-auto p-0' : 'overflow-auto p-8'}`}>
         <div className={activeTab === 'home' ? 'mx-auto max-w-6xl space-y-4' : 'hidden'}>{homeOrder.filter(card => card !== 'birthday' || config.birthdayEnabled).map(card => {
           const dragProps = {
             draggable: true,
@@ -877,6 +877,7 @@ const App: React.FC = () => {
         })}</div>
         {projectPages.filter(page => page.kind === 'inspiration').map(page => { const active = activeTab === 'inspiration' && activePageId === page.id; return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage pageId={page.id} active={active} initialRelativePath={page.initialRelativePath} navigationRequest={browserNavigationRequests[page.id]} config={config} components={components} componentsLoading={componentsLoading} onUpdateConfig={handleConfigUpdate} onDirectoryChange={updatePagePath} onOpenDirectoryPage={openInspirationDirectoryPage} onNotice={showNotice}/></div>; })}
         {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} backupProjectFocus={backupProjectFocus} onClearBackupProjectFocus={() => setBackupProjectFocus(null)} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={() => refreshComponents(true)} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} getDefaultSettings={getDefaultSettings} onNotice={showNotice}/>}
+        {componentPages.map(page => <ComponentPageSurface key={page.identity} page={page} active={activeTab === 'component' && activeComponentPageIdentity === page.identity}/>)}
         {projectPages.filter(page => page.project).map(page => { const project = page.project!;
           const active = activeTab.startsWith('project') && activePageId === page.id;
           const activeView = activeTab === 'project-version' ? 'version' : activeTab === 'project-team' ? 'team' : 'project';
@@ -890,6 +891,8 @@ const App: React.FC = () => {
             installedComponentIds={installedComponentIds}
             componentsLoading={componentsLoading}
             teamRetouchStatus={components.find(component => component.id === 'team-retouch')}
+            componentHostActions={componentHostActions}
+            onOpenComponentPage={action => void openComponentPage(action, project, project.workspacePath || config.workspacePath)}
             advancedVideoSettings={config.videoPlayback}
             projectToolbar={config.projectToolbar}
             customProjectCategories={config.customProjectCategories}

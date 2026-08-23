@@ -4,7 +4,7 @@ export interface LogEntry {
   type: 'info' | 'success' | 'warning' | 'error';
 }
 
-export type ToolType = 'home' | 'inspiration' | 'project' | 'project-version' | 'project-team' | 'settings' | 'dashboard' | 'match' | 'video_split';
+export type ToolType = 'home' | 'inspiration' | 'project' | 'project-version' | 'project-team' | 'component' | 'settings' | 'dashboard' | 'match' | 'video_split';
 
 export type Theme = 'light' | 'dark' | 'system';
 export type VideoTranscodeSettings = {
@@ -855,6 +855,28 @@ export interface ComponentStatus {
   advancedState?: 'ready' | 'not-installed' | 'repair-needed';
 }
 
+export interface ComponentHostAction {
+  componentId: string;
+  componentVersion: string;
+  contractVersion: 1;
+  hostApiVersion: 1;
+  actionId: string;
+  label: string;
+  pageId: string;
+  pageTitle: string;
+}
+
+export interface ComponentPageInstance {
+  identity: string;
+  componentId: string;
+  pageId: string;
+  title: string;
+  workspacePath: string;
+  projectId: string;
+  projectName: string;
+  instanceId: string;
+}
+
 export interface AdvancedVideoState {
   sessionId: string;
   playerId: string;
@@ -971,6 +993,12 @@ export interface IElectronAPI {
   checkForUpdates: () => Promise<{ success: boolean; updateAvailable?: boolean; currentVersion?: string; latestVersion?: string; url?: string; notes?: string; sha256?: string; error?: string }>;
   submitFeedback: (message: string) => Promise<{ success: boolean; error?: string }>;
   getComponents: (force?: boolean) => Promise<{ success: boolean; components: ComponentStatus[]; installPath: string; error?: string }>;
+  getComponentHostActions: () => Promise<{ success: boolean; actions: ComponentHostAction[]; error?: string }>;
+  openComponentPage: (request: { componentId: string; pageId: string; workspacePath: string; projectId: string; projectName: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string }; error?: string }>;
+  activateComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
+  setComponentPageBounds: (instanceId: string, bounds: { x: number; y: number; width: number; height: number }) => Promise<{ success: boolean }>;
+  closeComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
+  closeProjectComponentPages: (workspacePath: string, projectId: string) => Promise<{ success: boolean; closedCount: number }>;
   onComponentsStatusChanged: (callback: (result: { success: boolean; components: ComponentStatus[]; installPath: string; error?: string }) => void) => () => void;
   openComponentsFolder: (componentId?: string) => Promise<{ success: boolean; path?: string; error?: string }>;
   openLogsFolder: () => Promise<{ success: boolean; path?: string; error?: string }>;
