@@ -52,7 +52,7 @@ console.log(JSON.stringify({ detector: 'fake-child', personCount: 1, tasks: [{ i
 let currentBasePath = basePath;
 let materializeCount = 0;
 const emittedTopics = new Set();
-const outputStages = new Map(); const outputReceipts = new Map(); const projectOutputRoot = path.join(sandbox, 'project-output');
+const outputStages = new Map(); const outputReceipts = new Map(); const outputByIdempotencyKey = new Map(); const versionsByIdempotencyKey = new Map(); const projectOutputRoot = path.join(sandbox, 'project-output');
 let controlledReplacementWrites = 0;
 const child = spawn(process.execPath, [path.join(__dirname, '..', 'extensions', 'team-retouch', 'service.cjs')], {
   env: { SystemRoot: process.env.SystemRoot, PHOTOFLOW_TEAM_TEST_ENGINE: enginePath, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
@@ -90,12 +90,12 @@ const ready = new Promise((resolve, reject) => {
           else if (frame.payload.action === 'adoptLegacyV1') throw new Error('legacy output missing');
           else if (frame.payload.action === 'write') { if (frame.payload.replace) controlledReplacementWrites += 1; const stage = outputStages.get(frame.payload.stageId); stage.files.push(frame.payload); result = { apiVersion: 2, stageId: frame.payload.stageId, artifactId: crypto.randomUUID(), byteLength: fs.statSync(path.join(stage.privatePath, frame.payload.sourceName)).size }; }
           else if (frame.payload.action === 'validate') result = { apiVersion: 2, stageId: frame.payload.stageId, valid: true, fileCount: outputStages.get(frame.payload.stageId).files.length, totalBytes: 1 };
-          else if (frame.payload.action === 'commit') { const stage = outputStages.get(frame.payload.stageId); const commitId = crypto.randomUUID(); const outputs = stage.files.map(file => { const filePath = path.join(projectOutputRoot, file.outputRelativePath); fs.mkdirSync(path.dirname(filePath), { recursive: true }); fs.copyFileSync(path.join(stage.privatePath, file.sourceName), filePath); return { artifactId: crypto.randomUUID(), relativePath: file.outputRelativePath, filePath, sha256: crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex') }; }); result = { apiVersion: 2, commitId, idempotencyKey: frame.payload.idempotencyKey, outputs }; outputReceipts.set(commitId, result); }
+          else if (frame.payload.action === 'commit') { const replay = outputByIdempotencyKey.get(frame.payload.idempotencyKey); if (replay) result = replay; else { const stage = outputStages.get(frame.payload.stageId); const commitId = crypto.randomUUID(); const outputs = stage.files.map(file => { const filePath = path.join(projectOutputRoot, file.outputRelativePath); fs.mkdirSync(path.dirname(filePath), { recursive: true }); fs.copyFileSync(path.join(stage.privatePath, file.sourceName), filePath); return { artifactId: crypto.randomUUID(), relativePath: file.outputRelativePath, filePath, sha256: crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex') }; }); result = { apiVersion: 2, commitId, idempotencyKey: frame.payload.idempotencyKey, outputs }; outputReceipts.set(commitId, result); outputByIdempotencyKey.set(frame.payload.idempotencyKey, result); } }
           else if (frame.payload.action === 'materializeOwned') { const output = outputReceipts.get(frame.payload.commitId).outputs.find(item => item.artifactId === frame.payload.artifactId); const importId = crypto.randomUUID(); const directory = path.join(dataRoot, 'imported-outputs', importId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(output.filePath)); fs.copyFileSync(output.filePath, privatePath); result = { apiVersion: 2, importId, privatePath, byteLength: fs.statSync(privatePath).size, sha256: output.sha256, outputRef: { commitId: frame.payload.commitId, artifactId: frame.payload.artifactId } }; }
-          else if (frame.payload.action === 'rollback') result = { apiVersion: 2, stageId: frame.payload.stageId, rolledBack: true };
+          else if (frame.payload.action === 'rollback') { const stage = outputStages.get(frame.payload.stageId); if (stage) fs.rmSync(stage.privatePath, { recursive: true, force: true }); outputStages.delete(frame.payload.stageId); result = { apiVersion: 2, stageId: frame.payload.stageId, rolledBack: true }; }
           else throw new Error(`unexpected output action ${frame.payload.action}`);
         } else if (frame.method === 'project.progress.v2') result = { apiVersion: 2, progress: [{ id: 'progress-2', mediaKind: 'image', contentRef: { relativeDirectory: 'merged' } }], edges: [] };
-        else if (frame.method === 'version.create.v2') result = { apiVersion: 2, versionId: crypto.randomUUID(), result: { success: true, photo: { id: frame.payload.photoId }, versions: [] } };
+        else if (frame.method === 'version.create.v2') { result = versionsByIdempotencyKey.get(frame.payload.idempotencyKey); if (!result) { result = { apiVersion: 2, versionId: crypto.randomUUID(), result: { success: true, photo: { id: frame.payload.photoId }, versions: [] } }; versionsByIdempotencyKey.set(frame.payload.idempotencyKey, result); } }
         else throw new Error(`unexpected capability ${frame.method}`);
       } catch (value) { error = value; }
       child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: !error, result, error: error?.message })}\n`);
@@ -142,8 +142,16 @@ const ready = new Promise((resolve, reject) => {
     const returned = await invoke('team.patch.return-batch.v1', { returnedFiles: selectedReturns.files, relativePaths: ['one.jpg'] });
     assert.equal(returned.acceptedCount, 1, `return matching consumes V2 selector tokens and archives into component-private storage: ${JSON.stringify(returned)}`);
     assert(emittedTopics.has('team.return.progress.v1'), 'return progress reaches the declared V2 event topic');
+    const faultDb = new DatabaseSync(databasePath); faultDb.exec(`CREATE TRIGGER fail_merge_db_update BEFORE UPDATE OF status ON team_patch_tasks WHEN NEW.status='merged' BEGIN SELECT RAISE(ABORT,'injected merge DB failure'); END;`); faultDb.close();
+    await assert.rejects(invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2' }), /injected merge DB failure/);
+    const repairDb = new DatabaseSync(databasePath); repairDb.exec('DROP TRIGGER fail_merge_db_update'); repairDb.close();
     const merged = await invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2' });
-    assert(merged.merge.versionId, 'merge commits through project.output.v2 and registers through version.create.v2');
+    const replayed = await invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2' });
+    assert.equal(replayed.merge.versionId, merged.merge.versionId, 'identical merge input reuses the stable version id after crash recovery');
+    assert.equal([...outputByIdempotencyKey.keys()].filter(key => key.startsWith('merge-')).length, 1, 'merge crash retry creates one committed output receipt');
+    assert.equal([...versionsByIdempotencyKey.keys()].filter(key => key.startsWith('merge-version-')).length, 1, 'merge crash retry creates one version');
+    assert.equal(fs.readdirSync(path.join(projectOutputRoot, 'merged')).length, 1, 'stable merge output name prevents duplicate project files');
+    assert.equal(outputStages.size, 0, 'commit replay and success both clean their redundant output stages');
     assert(emittedTopics.has('team.patch.detect.progress.v1') && emittedTopics.has('team.patch.detect-batch.progress.v1'), 'single and batch detection events retain distinct declared V2 topics');
     console.log('Team-retouch mutation subprocess, privilege, and rollback tests passed');
   } finally {

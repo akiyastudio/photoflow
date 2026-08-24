@@ -3,7 +3,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
-const { ensureSchema } = require('../extensions/team-retouch/service.cjs');
+const servicePath = require.resolve('../extensions/team-retouch/service.cjs');
+const serviceModule = require(servicePath);
+const { ensureSchema, startService, migrateAdoptedPrivatePaths } = serviceModule;
+assert.equal((fs.readFileSync(servicePath, 'utf8').match(/module\.exports\s*=/g) || []).length, 1, 'team-retouch service must have one authoritative CommonJS export assignment');
+for (const [name, value] of Object.entries({ ensureSchema, startService, migrateAdoptedPrivatePaths })) assert.equal(typeof value, 'function', `team-retouch service export missing: ${name}`);
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'team-retouch-schema-'));
 const databasePath = path.join(root, 'legacy.sqlite3');

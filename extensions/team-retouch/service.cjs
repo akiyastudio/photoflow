@@ -174,10 +174,7 @@ const publishProjectFileV2 = async (parentId, sourcePath, outputRelativePath, id
     await callHostV2(parentId, 'project.output.v2', { action: 'write', stageId: stage.stageId, name, sourceName, outputRelativePath, ...(replacement ? { replace: true, previousCommitId: replacement.commitId, previousArtifactId: replacement.artifactId, expectedDigest: replacement.sha256 } : {}) });
     await callHostV2(parentId, 'project.output.v2', { action: 'validate', stageId: stage.stageId });
     return await callHostV2(parentId, 'project.output.v2', { action: 'commit', stageId: stage.stageId, idempotencyKey });
-  } catch (error) {
-    await callHostV2(parentId, 'project.output.v2', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined);
-    throw error;
-  }
+  } finally { await callHostV2(parentId, 'project.output.v2', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined); }
 };
 const publishProjectFilesV2 = async (parentId, files, idempotencyKey, replacements = new Map()) => {
   const stage = await callHostV2(parentId, 'project.output.v2', { action: 'stage' });
@@ -190,10 +187,7 @@ const publishProjectFilesV2 = async (parentId, files, idempotencyKey, replacemen
     }
     await callHostV2(parentId, 'project.output.v2', { action: 'validate', stageId: stage.stageId });
     return await callHostV2(parentId, 'project.output.v2', { action: 'commit', stageId: stage.stageId, idempotencyKey });
-  } catch (error) {
-    await callHostV2(parentId, 'project.output.v2', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined);
-    throw error;
-  }
+  } finally { await callHostV2(parentId, 'project.output.v2', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined); }
 };
 const publishWorkingImageV2 = async (parentId, storage, sourcePath, baseRelativePath, operationKey) => {
   const normalizedBase = String(baseRelativePath || '').replace(/\\/g, '/'); const parsed = path.posix.parse(normalizedBase);
@@ -748,21 +742,24 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
   if (!outputProgress || outputProgress.mediaKind !== 'image' || !relativeDirectory) throw new Error('合成结果的目标图片进度不存在或不在项目内容边界内');
   const output = await artifactGrantV2(parentId, { operation: 'artifacts', photoId: payload.photoId, baseVersionId: payload.baseVersionId });
   await fs.promises.mkdir(output.mergeDirectory, { recursive: true });
-  const operationId = crypto.randomUUID();
+  const fingerprintTasks = await Promise.all([...tasks].sort((left, right) => String(left.id).localeCompare(String(right.id))).map(async task => ({ id: String(task.id), editedSha256: await fileSha256(task.editedPatchPath), crop: task.crop || {}, generation: task.generation || {} })));
+  const mergeFingerprint = sha256(JSON.stringify({ projectId: String(context.projectId), photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), outputProgressId: String(payload.outputProgressId), strategyVersion: 1, tasks: fingerprintTasks }));
+  const operationId = `merge-${mergeFingerprint.slice(0, 32)}`;
   const manifestPath = path.join(output.mergeDirectory, `merge-${operationId}.json`);
-  const outputName = `${safeSegment(path.parse(bundle.photo?.originalName || bundle.photo?.displayName || payload.photoId).name, '素材')}_多人修图_${Date.now()}.tif`;
+  const outputName = `${safeSegment(path.parse(bundle.photo?.originalName || bundle.photo?.displayName || payload.photoId).name, '素材')}_多人修图_${mergeFingerprint.slice(0, 12)}.tif`;
   const privateOutputPath = path.join(output.mergeDirectory, outputName);
   const outputRelativePath = [relativeDirectory, outputName].filter(Boolean).join('/');
   await appendCommand(storage, { operationId, type: 'patch-merge', state: 'prepared', photoId: payload.photoId, outputRelativePath });
   try {
+    await fs.promises.rm(privateOutputPath, { force: true }).catch(() => undefined);
     await fs.promises.writeFile(manifestPath, JSON.stringify({ photoId: payload.photoId, baseVersionId: base.id, tasks }), 'utf8');
     const merged = await runAlgorithm(parentId, ['merge', '--input', base.filePath, '--manifest', manifestPath, '--output', privateOutputPath]);
     if (!fs.existsSync(privateOutputPath)) throw new Error('合成算法没有生成输出文件');
     const threshold = Math.max(500, Number(merged.width || 0) * Number(merged.height || 0) * .00005);
     const needsReview = Boolean(merged.needsReview) || Number(merged.conflictPixels || 0) > threshold;
-    const committed = await publishProjectFileV2(parentId, privateOutputPath, outputRelativePath, `merge-${operationId}`);
+    const committed = await publishProjectFileV2(parentId, privateOutputPath, outputRelativePath, `merge-${mergeFingerprint.slice(0, 40)}`);
     const artifact = committed.outputs[0];
-    const registered = await callHostV2(parentId, 'version.create.v2', { commitId: committed.commitId, artifactId: artifact.artifactId, photoId: payload.photoId, parentVersionId: base.id, idempotencyKey: `version-${operationId}`, name: String(payload.versionName || '').trim().slice(0, 80) || '团片协作合成', type: 'team-retouch', note: `由 ${merged.mergedCount} 张人物工作图自动合回原尺寸；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(threshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`, status: needsReview ? 'needs-review' : 'draft', isFinal: false });
+    const registered = await callHostV2(parentId, 'version.create.v2', { commitId: committed.commitId, artifactId: artifact.artifactId, photoId: payload.photoId, parentVersionId: base.id, idempotencyKey: `merge-version-${mergeFingerprint.slice(0, 40)}`, name: String(payload.versionName || '').trim().slice(0, 80) || '团片协作合成', type: 'team-retouch', note: `由 ${merged.mergedCount} 张人物工作图自动合回原尺寸；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(threshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`, status: needsReview ? 'needs-review' : 'draft', isFinal: false });
     const versionId = registered.versionId;
     db.exec('BEGIN IMMEDIATE');
     try {
@@ -1972,5 +1969,4 @@ process.once('exit', () => { for (const child of activeAlgorithms) child.kill();
 };
 
 if (require.main === module) startService();
-module.exports = { ensureSchema, migrateAdoptedPrivatePaths };
-module.exports = { ensureSchema, startService };
+module.exports = { ensureSchema, startService, migrateAdoptedPrivatePaths };
