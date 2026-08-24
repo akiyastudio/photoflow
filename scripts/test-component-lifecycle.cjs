@@ -4,7 +4,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-const { createComponentLifecycleService } = require('../electron/services/component-lifecycle-service.cjs');
+const { advancedStateFromProbe, createComponentLifecycleService } = require('../electron/services/component-lifecycle-service.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-component-lifecycle-'));
 const componentRoot = path.join(sandbox, 'component');
@@ -26,7 +26,7 @@ const component = { id: 'team-retouch', installed: true, version: '1.0.0', sourc
 const pluginService = {
   list: () => [component],
   verifyComponentDirectoryAsync: async () => true,
-  runJson: async () => ({ pairDetrReady: true, sam2Ready: true }),
+  runJson: async () => ({ success: true, advancedAvailable: true, pairDetrReady: true, sam2Ready: true }),
 };
 const service = createComponentLifecycleService({ app: {}, backgroundTasks, pluginService, spawn, developmentActionRoot: actionRoot });
 const descriptor = {
@@ -42,6 +42,7 @@ const descriptor = {
   try {
     const result = await service.invoke({ action: 'advanced.preflight' }, {}, descriptor);
     assert.equal(result.success, true);
+    assert.deepEqual({ available: result.available, installed: result.installed, advancedAvailable: result.advancedAvailable, state: result.state, advancedError: result.advancedError }, { available: true, installed: true, advancedAvailable: true, state: 'ready', advancedError: '' }, 'preflight must return the renderer status contract rather than only prerequisite success');
     assert.match(result.message, /real process/);
     assert.equal(result.taskId, 'task-real-process');
     assert(progress.length >= 2, 'real lifecycle process must report through the task center');
@@ -52,6 +53,8 @@ const descriptor = {
     const escaped = { ...descriptor, service: { lifecycleActions: { 'advanced.preflight': { entry: scriptPath, relativeEntry: '../actions/fixture-action.ps1', sha256: digest } } } };
     component.source = 'user';
     await assert.rejects(service.resolveAction(escaped, 'advanced.preflight'), /escapes verified component root/);
+    assert.deepEqual(advancedStateFromProbe({ probe: { success: true, advancedAvailable: false, advancedError: 'models missing' }, vhdPresent: true }), { available: false, installed: true, advancedAvailable: false, state: 'repair-needed', advancedError: 'models missing' });
+    assert.equal(advancedStateFromProbe({ probe: { success: false, error: 'distro missing' }, vhdPresent: false }).state, 'not-installed');
     console.log('Component lifecycle real-process, signature, and path-boundary tests passed');
   } finally {
     fs.rmSync(sandbox, { recursive: true, force: true });

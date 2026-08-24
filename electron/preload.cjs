@@ -163,7 +163,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       versionKey: request?.progress?.versionKey,
       parentProgressId: request?.progress?.parentProgressId,
       displayName: request?.progress?.displayName,
-      relationKind: request?.progress?.relationKind,
       trackingEnabled: request?.progress?.trackingEnabled,
       trackingState: request?.progress?.trackingState,
       renameFromParent: request?.progress?.renameFromParent,

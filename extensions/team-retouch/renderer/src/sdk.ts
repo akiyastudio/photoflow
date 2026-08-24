@@ -4,6 +4,11 @@ export type ComponentContext = {
   projectId: string;
   projectName: string;
   projectStatus: string;
+  scopeRelativePath: string;
+  selectedRelativePaths: string[];
+  sourcePageId: string;
+  themeContractVersion: 1;
+  resolvedTheme: 'light' | 'dark';
 };
 
 export type ComponentSdk = {
@@ -13,6 +18,8 @@ export type ComponentSdk = {
   onEvent(topic: string, callback: (value: unknown) => void): () => void;
   onActivate(callback: () => void): () => void;
   onDeactivate(callback: () => void): () => void;
+  onThemeChange(callback: (value: { contractVersion: 1; resolvedTheme: 'light' | 'dark' }) => void): () => void;
+  onContextChange(callback: (value: ComponentContext) => void): () => void;
 };
 
 declare global { interface Window { photoFlowComponent: ComponentSdk } }

@@ -33,18 +33,33 @@ const requiredId = (value, field) => {
   return id;
 };
 
-const parseComponentIcon = (value, componentRoot) => {
+const resolveDevelopmentFile = ({ declaredEntry, componentRoot, overrideRoot, overrideEntry, label }) => {
+  const declared = path.resolve(componentRoot, declaredEntry);
+  if (!isInside(componentRoot, declared)) throw new Error(`${label} escapes component root`);
+  const resolvedOverrideRoot = path.resolve(overrideRoot);
+  const resolvedOverride = path.resolve(overrideEntry);
+  if (!isInside(resolvedOverrideRoot, resolvedOverride)) throw new Error(`${label} development override escapes its approved root`);
+  const rootStat = fs.lstatSync(resolvedOverrideRoot, { throwIfNoEntry: false });
+  const entryStat = fs.lstatSync(resolvedOverride, { throwIfNoEntry: false });
+  if (!rootStat?.isDirectory() || rootStat.isSymbolicLink() || !entryStat?.isFile() || entryStat.isSymbolicLink()) throw new Error(`${label} development override is missing or unsafe`);
+  const realRoot = fs.realpathSync(resolvedOverrideRoot); const realEntry = fs.realpathSync(resolvedOverride);
+  if (!isInside(realRoot, realEntry)) throw new Error(`${label} development override escapes its approved root through a linked path`);
+  return realEntry;
+};
+
+const parseComponentIcon = (value, componentRoot, developmentOverride = null) => {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value !== 'string') throw new Error('Invalid component icon declaration');
   const relativeEntry = requiredText(value, 'icon', 512).replace(/\\/g, '/');
   if (/^[a-z][a-z0-9+.-]*:/i.test(relativeEntry) || relativeEntry.startsWith('//')) throw new Error('Component icon must be a package-local file');
-  const entry = path.resolve(componentRoot, relativeEntry);
-  if (!isInside(componentRoot, entry)) throw new Error('Component icon escapes component root');
+  const declaredEntry = path.resolve(componentRoot, relativeEntry);
+  if (!isInside(componentRoot, declaredEntry)) throw new Error('Component icon escapes component root');
+  const entry = developmentOverride ? resolveDevelopmentFile({ declaredEntry: relativeEntry, componentRoot, ...developmentOverride, label: 'Component icon' }) : declaredEntry;
   const mimeType = COMPONENT_ICON_MIME_TYPES.get(path.extname(entry).toLowerCase());
   if (!mimeType) throw new Error('Component icon must be SVG or PNG');
   const stat = fs.lstatSync(entry, { throwIfNoEntry: false });
   if (!stat?.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > MAX_COMPONENT_ICON_BYTES) throw new Error(`Component icon is missing or unsafe: ${relativeEntry}`);
-  const realRoot = fs.realpathSync(componentRoot); const realEntry = fs.realpathSync(entry);
+  const realRoot = fs.realpathSync(developmentOverride?.overrideRoot || componentRoot); const realEntry = fs.realpathSync(entry);
   if (!isInside(realRoot, realEntry)) throw new Error('Component icon escapes component root through a linked path');
   const bytes = fs.readFileSync(realEntry);
   if (mimeType === 'image/png') {
@@ -65,7 +80,7 @@ const parseComponentIcon = (value, componentRoot) => {
   return Object.freeze({ entry: realEntry, relativeEntry, mimeType });
 };
 
-const parseComponentHostManifest = (manifest, componentRoot) => {
+const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = null) => {
   const host = manifest?.componentHost;
   if (host === undefined) return null; // Existing native V1 components remain valid.
   if (Number(manifest.apiVersion) !== 1) throw new Error(`Unsupported component apiVersion: ${manifest.apiVersion}`);
@@ -80,7 +95,7 @@ const parseComponentHostManifest = (manifest, componentRoot) => {
   if (!Array.isArray(host.contributions) || host.contributions.length < 2 || host.contributions.length > 32) throw new Error('Component host contributions must be a bounded array');
 
   const componentId = requiredId(manifest.id, 'component id');
-  const icon = parseComponentIcon(manifest.icon, componentRoot);
+  const icon = parseComponentIcon(manifest.icon, componentRoot, developmentFiles?.icon || null);
   const seen = new Set();
   const pages = new Map();
   const actions = [];
@@ -93,8 +108,9 @@ const parseComponentHostManifest = (manifest, componentRoot) => {
     seen.add(key);
     if (raw.type === 'component.fullPage') {
       const relativeEntry = requiredText(raw.entry, 'page entry', 512).replace(/\\/g, '/');
-      const entry = path.resolve(componentRoot, relativeEntry);
-      if (!isInside(componentRoot, entry)) throw new Error('Component page entry escapes component root');
+      const declaredEntry = path.resolve(componentRoot, relativeEntry);
+      if (!isInside(componentRoot, declaredEntry)) throw new Error('Component page entry escapes component root');
+      const entry = developmentFiles?.page ? resolveDevelopmentFile({ declaredEntry: relativeEntry, componentRoot, ...developmentFiles.page, label: 'Component page entry' }) : declaredEntry;
       const stat = fs.statSync(entry, { throwIfNoEntry: false });
       if (!stat?.isFile() || stat.isSymbolicLink()) throw new Error(`Component page entry is missing or unsafe: ${relativeEntry}`);
       pages.set(id, { type: raw.type, id, title: requiredText(raw.title, 'page title'), entry, relativeEntry });
@@ -174,7 +190,7 @@ const parseComponentHostManifest = (manifest, componentRoot) => {
   });
 };
 
-const createComponentHostRegistry = ({ roots }) => {
+const createComponentHostRegistry = ({ roots, developmentRendererRoot = '' }) => {
   const candidates = () => {
     const values = [];
     for (const root of roots) {
@@ -185,14 +201,27 @@ const createComponentHostRegistry = ({ roots }) => {
         const container = path.join(root.path, entry.name);
         const runtime = path.join(container, 'runtime');
         const componentRoot = fs.existsSync(path.join(runtime, 'component.json')) ? runtime : container;
-        values.push({ componentRoot, source: root.source });
+        const manifestPath = path.join(componentRoot, 'component.json');
+        if (fs.existsSync(manifestPath)) values.push({ componentRoot, manifestPath, expectedId: entry.name, source: root.source });
+        else if (root.source === 'development' && developmentRendererRoot) {
+          const templatePath = path.join(container, 'component.template.json');
+          const templateStat = fs.lstatSync(templatePath, { throwIfNoEntry: false });
+          if (templateStat?.isFile() && !templateStat.isSymbolicLink()) values.push({ componentRoot: container, manifestPath: templatePath, expectedId: entry.name, source: root.source, developmentRendererRoot: path.join(developmentRendererRoot, entry.name) });
+        }
       }
     }
     return values;
   };
-  const inspectRoot = ({ componentRoot, source }) => {
-    const manifest = JSON.parse(fs.readFileSync(path.join(componentRoot, 'component.json'), 'utf8'));
-    const descriptor = parseComponentHostManifest(manifest, componentRoot);
+  const inspectRoot = ({ componentRoot, manifestPath = path.join(componentRoot, 'component.json'), expectedId = '', source, developmentRendererRoot: developmentRoot }) => {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    if (expectedId && manifest.id !== expectedId) throw new Error(`Component id does not match its directory: ${manifest.id || 'missing'}`);
+    const pageDeclaration = manifest.componentHost?.contributions?.find(item => item?.type === 'component.fullPage')?.entry;
+    const iconDeclaration = manifest.icon;
+    const developmentFiles = developmentRoot ? {
+      page: { overrideRoot: developmentRoot, overrideEntry: path.join(developmentRoot, path.basename(String(pageDeclaration || ''))) },
+      ...(iconDeclaration ? { icon: { overrideRoot: path.join(componentRoot, 'renderer'), overrideEntry: path.join(componentRoot, 'renderer', path.basename(String(iconDeclaration))) } } : {}),
+    } : null;
+    const descriptor = parseComponentHostManifest(manifest, componentRoot, developmentFiles);
     return descriptor ? { ...descriptor, componentRoot, source } : null;
   };
   const list = () => {

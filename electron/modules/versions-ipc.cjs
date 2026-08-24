@@ -4,6 +4,10 @@ const registerVersionIpc = context => {
   const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
   const listRatedProjectMedia = projectPath => mediaRatingService.listProject(projectPath);
   const validProgressFolderName = value => Boolean(value && path.basename(value) === value && !/[<>:"/\\|?*\x00-\x1f]/.test(value) && !/[. ]$/.test(value));
+  const isValidProgressParent = (folder, mediaKind) => Boolean(folder && !folder.folderMissing
+    && folder.mediaKind === mediaKind
+    && (folder.nodeRole === 'original' && !folder.artifactKind
+      || folder.nodeRole === 'progress' && folder.parentProgressId && folder.relationKind === 'main'));
   const isInside = (root, candidate) => {
     const relative = path.relative(path.resolve(root), path.resolve(candidate));
     return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative);
@@ -131,8 +135,7 @@ const registerVersionIpc = context => {
       const versionKey = String((imageRoots.at(-1) ? Number(imageRoots.at(-1).versionKey) : 0) + 1);
       const parentProgressId = String(request.parentProgressId || '');
       const explicitParent = (progressResult.progressFolders || []).find(progress => progress.id === parentProgressId);
-      if (!explicitParent || explicitParent.mediaKind !== 'image' || explicitParent.folderMissing
-        || explicitParent.nodeRole === 'selection' || explicitParent.relationKind === 'auxiliary') {
+      if (!isValidProgressParent(explicitParent, 'image')) {
         throw new Error('export_parent_required: 请选择明确的图片主分支父节点');
       }
       const displayName = `图片后期_${versionKey}_喜爱`;
@@ -186,6 +189,22 @@ const registerVersionIpc = context => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      const allowed = ['relativePath', 'mediaKind', 'versionKey', 'parentProgressId', 'displayName', 'trackingEnabled', 'trackingState', 'renameFromParent', 'copyMissingFromParent', 'progressId', 'moveToRoot'];
+      if (!request || Object.keys(request).some(key => !allowed.includes(key))) {
+        throw new Error('progress_payload_invalid: renderer 不能提交节点角色、绝对路径或关系类型');
+      }
+      const mediaKind = String(request.mediaKind || '');
+      const parentProgressId = String(request.parentProgressId || '').trim();
+      const progressId = String(request.progressId || '').trim();
+      const listed = await versionService.listProgress(workspaceRoot, projectName, true);
+      const existing = progressId ? (listed.progressFolders || []).find(folder => folder.id === progressId) : null;
+      const parent = (listed.progressFolders || []).find(folder => folder.id === parentProgressId);
+      if (!['image', 'video'].includes(mediaKind) || !parentProgressId || !isValidProgressParent(parent, mediaKind)) {
+        throw new Error('progress_parent_required: 版本进度必须选择同媒体类型的原始素材或进度父节点');
+      }
+      if (progressId && (!existing || existing.nodeRole !== 'progress')) {
+        throw new Error('progress_target_invalid: 只能更新普通版本进度');
+      }
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
       const resolution = projectVirtualPaths.resolve(projectPath, request.relativePath, { externalRootMode: 'target' });
       let folderPath = resolution.physicalPath;
@@ -205,19 +224,19 @@ const registerVersionIpc = context => {
       }
       const registered = await versionService.registerProgress(workspaceRoot, {
         projectName,
-        mediaKind: request.mediaKind,
+        mediaKind,
         versionKey: request.versionKey,
-        parentProgressId: request.parentProgressId,
+        parentProgressId,
         displayName: request.displayName || path.basename(folderPath),
         folderPath,
         externalLinkRelativePath: shortcutRelativePath || undefined,
         trackingEnabled: Boolean(request.trackingEnabled),
         trackingState: request.trackingState,
-        nodeRole: request.nodeRole,
-        relationKind: request.relationKind,
+        nodeRole: 'progress',
+        relationKind: 'main',
         renameFromParent: Boolean(request.renameFromParent),
         copyMissingFromParent: Boolean(request.copyMissingFromParent),
-        progressId: request.progressId,
+        progressId: progressId || undefined,
       });
       if (!registered?.success || !registered.progressFolder) throw new Error(registered?.error || '无法登记版本进度');
       return {
@@ -256,7 +275,7 @@ const registerVersionIpc = context => {
       }
       const projectName = String(request.projectName || '').trim();
       const progress = request.progress && typeof request.progress === 'object' ? request.progress : {};
-      const allowedProgressFields = ['progressId', 'relativePath', 'mediaKind', 'versionKey', 'parentProgressId', 'displayName', 'relationKind', 'trackingEnabled', 'trackingState', 'renameFromParent', 'copyMissingFromParent', 'moveToRoot'];
+      const allowedProgressFields = ['progressId', 'relativePath', 'mediaKind', 'versionKey', 'parentProgressId', 'displayName', 'trackingEnabled', 'trackingState', 'renameFromParent', 'copyMissingFromParent', 'moveToRoot'];
       if (Object.keys(progress).some(key => !allowedProgressFields.includes(key))) {
         throw new Error('progress_graph_payload_invalid: renderer 不能提交节点角色、绝对路径或图边类型');
       }
@@ -282,7 +301,12 @@ const registerVersionIpc = context => {
         const displayName = String(progress.displayName || '').trim();
         const mediaKind = String(progress.mediaKind || '');
         const versionKey = String(progress.versionKey || '').trim();
-        if (!validProgressFolderName(displayName) || !['image', 'video'].includes(mediaKind) || !versionKey) {
+        const parentProgressId = String(progress.parentProgressId || '').trim();
+        const listed = await versionService.listProgress(workspaceRoot, projectName, true);
+        const parent = (listed.progressFolders || []).find(folder => folder.id === parentProgressId);
+        if (existing && existing.nodeRole !== 'progress') throw new Error('progress_graph_target_invalid: 只能更新普通版本进度');
+        if (!validProgressFolderName(displayName) || !['image', 'video'].includes(mediaKind) || !versionKey
+          || !parentProgressId || !isValidProgressParent(parent, mediaKind)) {
           throw new Error('progress_graph_payload_invalid: 新进度字段无效');
         }
         let folderResolution = progress.relativePath !== undefined
@@ -320,8 +344,8 @@ const registerVersionIpc = context => {
           progressId: progressId || undefined,
           mediaKind, versionKey, displayName, folderPath,
           externalLinkRelativePath: shortcutRelativePath || undefined,
-          parentProgressId: progress.parentProgressId ? String(progress.parentProgressId) : undefined,
-          relationKind: progress.relationKind || undefined,
+          parentProgressId,
+          relationKind: 'main',
           trackingEnabled: Boolean(progress.trackingEnabled),
           trackingState: progress.trackingState || undefined,
           renameFromParent: Boolean(progress.renameFromParent),
@@ -386,15 +410,22 @@ const registerVersionIpc = context => {
       const mediaKind = String(request.mediaKind || '');
       const sourceProgressId = String(request.sourceProgressId || '').trim();
       if (!projectName || !relativePath || relativePath.split('/').some(part => !part || part === '.' || part === '..')
-        || !['original', 'companion', 'preview'].includes(mode) || !['image', 'video'].includes(mediaKind)) {
+        || !['original', 'companion', 'preview', 'broll'].includes(mode)
+        || (mode === 'broll' ? mediaKind !== 'mixed' : !['image', 'video'].includes(mediaKind))) {
         throw new Error('media_adopt_payload_invalid: 项目内相对路径和素材类型必填');
+      }
+      if ((mode === 'original' || mode === 'broll') && sourceProgressId || (mode === 'companion' || mode === 'preview') && !sourceProgressId) {
+        throw new Error('media_adopt_payload_invalid: 来源节点无效');
       }
       const resolution = projectVirtualPaths.resolve(path.resolve(getProjectPath(workspacePath, status, projectName)), relativePath, { externalRootMode: 'target' });
       const folderPath = resolution.physicalPath;
       if (resolution.viaExternalLink && resolution.externalTargetKind !== 'folder') throw new Error('media_adopt_folder_invalid: 只有文件夹外链可以纳入版本树');
       if (!fs.statSync(folderPath).isDirectory()) throw new Error('media_adopt_folder_invalid: 目标必须是文件夹');
       const listed = await versionService.listProgress(workspaceRoot, projectName, true);
-      if (sourceProgressId && !(listed.progressFolders || []).some(folder => folder.id === sourceProgressId && !folder.folderMissing)) {
+      const source = sourceProgressId ? (listed.progressFolders || []).find(folder => folder.id === sourceProgressId) : null;
+      if (sourceProgressId && (mode === 'companion'
+        ? !source || source.folderMissing || source.mediaKind !== mediaKind || source.nodeRole !== 'original' || source.artifactKind
+        : !isValidProgressParent(source, mediaKind))) {
         throw new Error('media_adopt_source_invalid: 来源不属于当前项目');
       }
       return await versionService.adoptMediaFolder(workspaceRoot, {
@@ -413,10 +444,14 @@ const registerVersionIpc = context => {
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       const listed = await versionService.listProgress(workspaceRoot, projectName, true);
       const projectNodeIds = new Set((listed.progressFolders || []).map(folder => folder.id));
+      const child = (listed.progressFolders || []).find(folder => folder.id === String(request.childProgressId || ''));
       const childProgressId = String(request.childProgressId || '');
       const parentProgressId = request.parentProgressId == null ? null : String(request.parentProgressId);
       if (!projectNodeIds.has(childProgressId) || parentProgressId && !projectNodeIds.has(parentProgressId)) {
         throw new Error('relation_project_mismatch: 父子节点不属于当前项目');
+      }
+      if (child?.nodeRole === 'progress' && parentProgressId === null) {
+        throw new Error('progress_detach_requires_unregister: 断开进度必须显式取消版本登记');
       }
       return await versionService.updateProgressRelation(workspaceRoot, {
         childProgressId,
@@ -600,11 +635,11 @@ const registerVersionIpc = context => {
       };
       visit(current);
       const subtreeIds = new Set(subtree.map(progress => progress.id));
-      const requestedParentId = request.parentProgressId || null;
+      const requestedParentId = String(request.parentProgressId || '').trim();
+      if (!requestedParentId) throw new Error('progress_parent_required: 版本进度必须保留有效父节点');
       if (requestedParentId && subtreeIds.has(requestedParentId)) throw new Error('进度不能移动到自己的后代版本下');
       const requestedParent = requestedParentId ? progressFolders.find(progress => progress.id === requestedParentId) : null;
-      if (requestedParentId && (!requestedParent || requestedParent.mediaKind !== current.mediaKind
-        || requestedParent.nodeRole === 'selection' || requestedParent.relationKind === 'auxiliary')) throw new Error('父版本进度不存在');
+      if (!isValidProgressParent(requestedParent, current.mediaKind)) throw new Error('父版本进度不存在');
       const replacementTarget = progressFolders.find(progress => !subtreeIds.has(progress.id)
         && progress.folderMissing
         && progress.mediaKind === current.mediaKind

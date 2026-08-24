@@ -20,6 +20,12 @@ class ComponentCapabilityBroker {
     this.handlers.set(method, handler);
   }
 
+  assertCapabilities(descriptor) {
+    const missing = (descriptor?.service?.capabilities || []).filter(method => !this.handlers.has(method));
+    if (missing.length) throw new Error(`Component declares unavailable host capabilities: ${descriptor.componentId}: ${missing.join(', ')}`);
+    return true;
+  }
+
   invoke(descriptor, method, payload, boundContext) {
     const normalized = String(method || '');
     if (!descriptor?.service?.capabilities.includes(normalized)) throw new Error(`Component capability is not granted: ${normalized}`);

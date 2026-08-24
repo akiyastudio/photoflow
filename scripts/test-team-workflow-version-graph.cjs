@@ -189,7 +189,10 @@ fs.mkdirSync(projectPath);
 const handlers = new Map();
 let repositoryPayload;
 let failCommit = 'empty';
-let listedProgressFolders = [];
+const sourceNode = { id: 'source', nodeRole: 'original', mediaKind: 'image', folderMissing: false, displayName: 'source', folderPath: path.join(projectPath, 'source') };
+const selectionNode = { id: 'selection', nodeRole: 'selection', mediaKind: 'image', folderMissing: false, displayName: 'selection', folderPath: path.join(projectPath, 'selection') };
+const workflowNode = { id: 'workflow', nodeRole: 'workflow', mediaKind: 'image', folderMissing: false, displayName: 'workflow', folderPath: path.join(projectPath, 'workflow') };
+let listedProgressFolders = [sourceNode, selectionNode, workflowNode];
 registerVersionIpc({
   Array, Boolean, Date, Error, JSON, Math, Number, Object, Promise, Set, String, undefined,
   ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
@@ -237,7 +240,7 @@ assert.equal(typeof atomicHandler, 'function');
     projectName: 'Project',
     progress: {
       progressId: 'existing', relativePath: 'nested/existing', mediaKind: 'image', versionKey: '2',
-      parentProgressId: 'source', displayName: 'existing', relationKind: 'main', trackingEnabled: true,
+      parentProgressId: 'source', displayName: 'existing', trackingEnabled: true,
       trackingState: 'pending_compare', renameFromParent: true, copyMissingFromParent: true, moveToRoot: true,
     },
     workflowInputProgressIds: ['selection'],
@@ -264,6 +267,7 @@ assert.equal(typeof atomicHandler, 'function');
   assert.equal(result.success, true, result.error);
   assert.equal(repositoryPayload.progress.nodeRole, undefined);
   assert.equal(repositoryPayload.progress.edgeKind, undefined);
+  assert.equal(repositoryPayload.progress.relationKind, 'main', 'main process must derive the structural relation');
   assert.equal(repositoryPayload.progress.folderPath, path.join(projectPath, 'output-three'), 'the main process must author the project path');
   const adoptedPath = path.join(projectPath, 'nested', 'existing');
   fs.mkdirSync(adoptedPath, { recursive: true });
@@ -271,7 +275,7 @@ assert.equal(typeof atomicHandler, 'function');
     projectName: 'Project',
     progress: {
       relativePath: 'nested/existing', mediaKind: 'image', versionKey: '5', displayName: 'adopted',
-      parentProgressId: 'source', relationKind: 'main', trackingEnabled: true, trackingState: 'pending_compare',
+      parentProgressId: 'source', trackingEnabled: true, trackingState: 'pending_compare',
       renameFromParent: true, copyMissingFromParent: true,
     },
     workflowInputProgressIds: ['selection'],
@@ -284,7 +288,7 @@ assert.equal(typeof atomicHandler, 'function');
   assert.equal(repositoryPayload.progress.renameFromParent, true);
   assert.equal(repositoryPayload.progress.copyMissingFromParent, true);
   assert.equal(result.relativePath, 'nested/existing');
-  listedProgressFolders = [{ id: 'workflow', folderPath: adoptedPath, folderMissing: false }];
+  listedProgressFolders = [{ ...workflowNode, folderPath: adoptedPath }];
   result = await atomicHandler(null, ipcRoot, 'active', {
     projectName: 'Project',
     progress: { progressId: 'workflow', mediaKind: undefined, versionKey: undefined, displayName: undefined },
@@ -294,12 +298,12 @@ assert.equal(typeof atomicHandler, 'function');
   assert.deepEqual(repositoryPayload.progress, { progressId: 'workflow' }, 'main must treat undefined optional fields as absent during an ID-only relation update');
   const moveSource = path.join(projectPath, 'nested', 'move-me');
   fs.mkdirSync(moveSource, { recursive: true });
-  listedProgressFolders = [{ id: 'move-existing', folderPath: moveSource, folderMissing: false }];
+  listedProgressFolders = [sourceNode, { id: 'move-existing', nodeRole: 'progress', mediaKind: 'image', parentProgressId: 'source', relationKind: 'main', folderPath: moveSource, folderMissing: false }];
   const moveRequest = {
     projectName: 'Project',
     progress: {
       progressId: 'move-existing', relativePath: 'nested/move-me', mediaKind: 'image', versionKey: '6', displayName: 'move-me',
-      parentProgressId: 'source', relationKind: 'main', trackingEnabled: false, trackingState: 'disabled', moveToRoot: true,
+      parentProgressId: 'source', trackingEnabled: false, trackingState: 'disabled', moveToRoot: true,
     },
     workflowInputProgressIds: [],
   };
@@ -318,6 +322,12 @@ assert.equal(typeof atomicHandler, 'function');
   assert.equal(escaped.success, false, 'renderer must not escape the registered project with a relative path');
   const rejected = await atomicHandler(null, ipcRoot, 'active', { ...request, progress: { ...request.progress, nodeRole: 'selection', folderPath: 'C:\\outside', edgeKind: 'workflow_input' } });
   assert.equal(rejected.success, false, 'renderer graph semantics must be rejected');
+  listedProgressFolders = [sourceNode];
+  const missingParent = await atomicHandler(null, ipcRoot, 'active', {
+    projectName: 'Project', progress: { mediaKind: 'image', versionKey: '7', displayName: 'missing-parent' }, workflowInputProgressIds: [],
+  });
+  assert.equal(missingParent.success, false);
+  assert.match(missingParent.error, /新进度字段无效|parent/);
   fs.rmSync(ipcRoot, { recursive: true, force: true });
   console.log('team workflow version graph tests passed');
 })().catch(error => { fs.rmSync(ipcRoot, { recursive: true, force: true }); console.error(error); process.exitCode = 1; });

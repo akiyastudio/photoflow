@@ -357,6 +357,8 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
   const appDialog = useAppDialog();
   const [workspace, setWorkspace] = useState<TeamIdentityWorkspace>({ success: true, photos: [], identities: [], assignments: [] });
   const [loading, setLoading] = useState(true);
+  const [workspaceLoadError, setWorkspaceLoadError] = useState('');
+  const workspaceLoadSequenceRef = useRef(0);
   const [busy, setBusy] = useState('');
   const tab = activeStep;
   const [assigningSubject, setAssigningSubject] = useState<Subject | null>(null);
@@ -412,14 +414,22 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
   const peopleScrollRef = useRef<HTMLElement>(null);
   const pendingPeopleScrollAnchorRef = useRef<{ key: string; top: number; scrollTop: number } | null>(null);
   const load = async (showLoading = true) => {
+    const sequence = ++workspaceLoadSequenceRef.current;
     if (showLoading) setLoading(true);
-    const result = await legacyApi.getTeamProjectWorkspace(workspacePath, project.name, project.status);
-    if (showLoading) setLoading(false);
-    if (!result.success) { onNotice(`读取人物识别失败：${result.error || '未知错误'}`); return; }
-    setWorkspace(result);
-    if (result.workflowNodeCreated) onProjectChanged();
+    setWorkspaceLoadError('');
+    try {
+      const result = await legacyApi.getTeamProjectWorkspace(workspacePath, project.name, project.status);
+      if (!result.success) throw new Error(result.error || '未知错误');
+      if (sequence !== workspaceLoadSequenceRef.current) return;
+      setWorkspace(result);
+      if (result.workflowNodeCreated) onProjectChanged();
+    } catch (error) {
+      if (sequence !== workspaceLoadSequenceRef.current) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setWorkspaceLoadError(message); onNotice(`读取人物识别失败：${message}`);
+    } finally { if (showLoading && sequence === workspaceLoadSequenceRef.current) setLoading(false); }
   };
-  useEffect(() => { void load(true); }, [workspacePath, project.name]);
+  useEffect(() => { void load(true); return () => { workspaceLoadSequenceRef.current += 1; }; }, [workspacePath, project.name]);
   useEffect(() => {
     let active = true;
     setWorkflowReturnResult(null);
@@ -1123,7 +1133,7 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, act
       </div>
     </div>}
     {busy === 'workflow-return' && <div className="border-b border-emerald-100 bg-emerald-50 px-5 py-3"><div className="flex items-center justify-between gap-4 text-xs"><span className="font-bold text-emerald-700">{workflowReturnProgress.message}</span><span className="tabular-nums text-emerald-600">{Math.round(workflowReturnProgress.progress)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-emerald-100"><div className="h-full rounded-full bg-emerald-600 transition-[width] duration-500" style={{ width: `${workflowReturnProgress.progress}%` }}/></div></div>}
-    {loading ? <div className="flex flex-1 items-center justify-center text-sm text-slate-500"><Loader2 className="mr-2 animate-spin"/>正在读取项目人物…</div> : !workspace.photos.length ? <div className="flex flex-1 flex-col items-center justify-center text-center"><UsersRound size={42} className="text-slate-300"/><h3 className="mt-4 font-bold text-slate-700">尚未识别人物</h3><p className="mt-2 text-sm text-slate-500">请先加入图片并识别人物。</p><button onClick={() => onStepChange('detect')} className="dialog-primary mt-5">返回人物识别</button></div> : <main ref={peopleScrollRef} className={`min-h-0 flex-1 p-6 ${tab === 'workflow' ? 'overflow-hidden' : 'overflow-y-auto'}`}><div className={`mx-auto max-w-[1800px] ${tab === 'workflow' ? 'h-full' : 'min-h-full'}`}><div className={tab === 'workflow' ? 'workflow-board-view' : 'min-h-full'}>
+    {loading ? <div className="flex flex-1 items-center justify-center text-sm text-slate-500"><Loader2 className="mr-2 animate-spin"/>正在读取团片历史人物…</div> : workspaceLoadError ? <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"><AlertTriangle size={28} className="text-red-500"/><h3 className="font-bold text-red-700">团片历史人物读取失败</h3><p className="max-w-2xl text-xs leading-5 text-slate-500">{workspaceLoadError}</p><button type="button" className="dialog-primary" onClick={() => void load(true)}>重新读取团片历史</button></div> : !workspace.photos.length ? <div className="flex flex-1 flex-col items-center justify-center text-center"><UsersRound size={42} className="text-slate-300"/><h3 className="mt-4 font-bold text-slate-700">尚未识别人物</h3><p className="mt-2 text-sm text-slate-500">请先加入图片并识别人物。</p><button onClick={() => onStepChange('detect')} className="dialog-primary mt-5">返回人物识别</button></div> : <main ref={peopleScrollRef} className={`min-h-0 flex-1 p-6 ${tab === 'workflow' ? 'overflow-hidden' : 'overflow-y-auto'}`}><div className={`mx-auto max-w-[1800px] ${tab === 'workflow' ? 'h-full' : 'min-h-full'}`}><div className={tab === 'workflow' ? 'workflow-board-view' : 'min-h-full'}>
       {tab === 'people' ? <><div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4"><div className="min-w-0 flex-1"><h3 className="text-sm font-bold text-blue-800">请确认自动分组</h3><p className="mt-1 text-xs leading-5 text-blue-700">系统会结合人脸和外观分组，无法确认的人保持未标注。请点击缩略图核对。</p></div>{subjects.length > 18 && <button onClick={() => setShowAllSubjects(current => !current)} className="dialog-secondary">{showAllSubjects ? '每组只显示前 18 张' : '显示全部人物图'}</button>}<button disabled={Boolean(busy)} onClick={() => void suggest()} className="dialog-primary inline-flex items-center gap-2">{busy === 'suggest' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}自动识别同一个人</button><button onClick={() => void createIdentity()} className="dialog-secondary">新建人物</button></div>
         <div className="space-y-5">{[...workspace.identities, { id: '__unassigned__', name: '未标注人物', color: '#64748b', createdAt: 0, updatedAt: 0 }].map(identity => { const items = grouped.get(identity.id) || []; if (!items.length && identity.id === '__unassigned__') return null; const visibleItems = showAllSubjects ? items : items.slice(0, 18); return <section key={identity.id} className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm" style={{ contentVisibility: 'auto', containIntrinsicSize: '420px' }}><header className="flex items-center gap-3 border-b border-slate-100 px-4 py-3"><span className="h-3 w-3 rounded-full" style={{ background: identity.color }}/>{identity.id === '__unassigned__' ? <h3 className="font-bold text-slate-700">未标注人物</h3> : <input defaultValue={identity.name} onBlur={event => void renameIdentity(identity, event.target.value)} className="min-w-40 rounded border border-transparent px-1 py-1 font-bold text-slate-800 hover:border-slate-200 focus:border-blue-400 focus:outline-none"/>}<span className="text-xs text-slate-400">{items.length} 张人物实例 · {new Set(items.map(item => item.photo.photoId)).size} 张照片{!showAllSubjects && items.length > visibleItems.length ? ` · 当前显示 ${visibleItems.length} 张` : ''}</span>{identity.id !== '__unassigned__' && <button onClick={() => void removeIdentity(identity)} title="删除人物身份" className="ml-auto rounded p-2 text-slate-400 hover:bg-red-50 hover:text-red-600"><Trash2 size={15}/></button>}</header><div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-6">{visibleItems.map(subject => <div key={subject.key} data-team-person-key={subject.key} className="space-y-2"><SubjectThumb subject={subject} cacheConfig={cacheConfig}/><select value={subject.identity?.id || ''} onChange={event => void assign(subject, event.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700"><option value="">未标注</option>{workspace.identities.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}</select>{subject.assignment?.source === 'suggested' && <p className="text-[10px] text-amber-600">自动候选 · {Math.round(subject.assignment.confidence * 100)}% · 请人工确认</p>}</div>)}</div></section>; })}</div></> : <>{!workspace.identities.length ? <div className="rounded-xl border border-dashed border-slate-300 p-10 text-center text-sm text-slate-500">请先在“标记人物”中确认身份。</div> : <div className="space-y-7">{weeks.map(week => <section key={week}><h3 className="mb-3 text-sm font-bold text-slate-700">第 {week} 周</h3><div className="space-y-4">{[...workflowGroups.values()].filter(group => group.week === week).map(group => {
           const pending = group.items.filter(item => !item.assignment?.completed);

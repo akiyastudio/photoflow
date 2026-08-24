@@ -252,6 +252,36 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
         manifest, status: 'invalid', integrityStatus: 'invalid', error: error.message || String(error) };
     }
   };
+  const inspectDevelopmentTemplate = (componentRoot, expectedId) => {
+    const manifestPath = path.join(componentRoot, 'component.template.json');
+    const stat = fs.lstatSync(manifestPath, { throwIfNoEntry: false });
+    if (!stat?.isFile() || stat.isSymbolicLink()) return null;
+    let manifest = null;
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      if (manifest.id !== expectedId) throw new Error(`组件 ID 与目录不匹配：需要 ${expectedId}，实际为 ${manifest.id || '未填写'}`);
+      const compatibilityError = manifestCompatibilityError(manifest, platform, arch); if (compatibilityError) throw new Error(compatibilityError);
+      const definition = COMPONENT_DEFINITIONS[manifest.id];
+      if (!definition?.developmentEntry) throw new Error('组件模板没有受支持的开发运行入口');
+      const command = path.resolve(projectRoot, ...definition.developmentEntry);
+      const extensionRoot = path.resolve(componentRoot);
+      const commandStat = fs.lstatSync(command, { throwIfNoEntry: false });
+      if (!isInside(extensionRoot, command) || !commandStat?.isFile() || commandStat.isSymbolicLink() || !isInside(fs.realpathSync(extensionRoot), fs.realpathSync(command))) throw new Error('组件开发运行入口不存在或路径不安全');
+      for (const asset of definition.requiredAssets || []) {
+        const assetPath = path.resolve(path.dirname(command), ...asset);
+        const assetStat = fs.lstatSync(assetPath, { throwIfNoEntry: false });
+        if (!isInside(extensionRoot, assetPath) || !assetStat?.isFile() || assetStat.isSymbolicLink() || !isInside(fs.realpathSync(extensionRoot), fs.realpathSync(assetPath))) throw new Error(`组件开发资源不存在或路径不安全：${asset.join('/')}`);
+      }
+      const identity = manifestIdentity(manifest, definition);
+      return { ...definition, ...identity, capability: definition.capability || identity.capabilities[0] || '', installed: true, compatible: true, version: String(manifest.version), path: componentRoot,
+        source: 'development', sizeBytes: 0, command, argsPrefix: [], manifest, status: 'installed', integrityStatus: 'development', integrityMessage: '开发源码组件；不代表用户组件已安装' };
+    } catch (error) {
+      const id = String(manifest?.id || expectedId || '').trim(); if (!COMPONENT_ID.test(id)) return null;
+      const definition = definitionFor(id, manifest);
+      return { ...definition, ...manifestIdentity(manifest, definition), id, capability: definition.capability || '', installed: false, compatible: false, version: String(manifest?.version || ''), path: componentRoot,
+        source: 'development', sizeBytes: 0, manifest, status: 'invalid', integrityStatus: 'invalid', error: error.message || String(error) };
+    }
+  };
   const installedComponents = () => {
     const byId = new Map();
     for (const root of roots) {
@@ -260,7 +290,9 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
         if (!entry.isDirectory() || !COMPONENT_ID.test(entry.name) || entry.name.startsWith('.')) continue;
         const container = path.join(root.path, entry.name); const runtime = path.join(container, 'runtime');
         const componentRoot = fs.existsSync(path.join(runtime, 'component.json')) ? runtime : container;
-        const inspected = inspectRoot(componentRoot, root.source, entry.name); if (inspected && !byId.has(inspected.id)) byId.set(inspected.id, inspected);
+        const inspected = inspectRoot(componentRoot, root.source, entry.name)
+          || (root.source === 'development' ? inspectDevelopmentTemplate(container, entry.name) : null);
+        if (inspected && !byId.has(inspected.id)) byId.set(inspected.id, inspected);
       }
     }
     return byId;
@@ -298,6 +330,7 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     return [...ids].map(id => {
       const current = installed.get(id); const available = packages.get(id);
       if (!current) return available;
+      if (current.source === 'development') return { ...current, status: current.compatible ? 'installed' : 'invalid' };
       if (!available) return { ...current, status: current.compatible ? 'installed' : 'invalid' };
       const update = current.compatible && available.compatible && compareVersions(current.version, available.packageVersion) < 0;
       return { ...current, packagePath: available.packagePath, packageSizeBytes: available.packageSizeBytes, packageVersion: available.packageVersion, packageCompatible: available.compatible,
@@ -322,7 +355,7 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
       try { await verifyDirectoryAsync(component.id, component.path); verified = { ...component, integrityStatus: 'verified', integrityMessage: '已按应用固定完整性清单校验' }; }
       catch (error) { verified = { ...component, compatible: false, status: 'integrity-invalid', integrityStatus: 'invalid', error: error.message || String(error) }; }
     }
-    return { ...verified, sizeBytes: verified.installed && verified.path && await fs.promises.stat(verified.path).then(stat => stat.isDirectory(), () => false) ? await directorySize(verified.path) : 0 };
+    return { ...verified, sizeBytes: verified.installed && verified.source === 'user' && verified.path && await fs.promises.stat(verified.path).then(stat => stat.isDirectory(), () => false) ? await directorySize(verified.path) : 0 };
   }));
   const resolvePackage = id => {
     const component = packageComponents().get(String(id));

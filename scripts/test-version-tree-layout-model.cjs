@@ -144,10 +144,11 @@ const { pathToFileURL } = require('url');
     assert.strictEqual(edgeModel.versionTreeEdgePresentation(kind).strokeDasharray, undefined, `${kind} relations must use solid lines`);
   }
   assert.deepStrictEqual(['main', 'auxiliary', 'media_companion', 'derived_preview', 'workflow_input'].map(edgeModel.versionTreeRelationLabel), ['版本关系', '选片关联', '配套素材', '预览产物', '工作流输入']);
-  const relationNode = (id, nodeRole, artifactKind) => ({ id, projectId: 'p', mediaKind: 'image', nodeRole, artifactKind, folderMissing: false });
+  const relationNode = (id, nodeRole, artifactKind) => ({ id, projectId: 'p', mediaKind: 'image', nodeRole, artifactKind, folderMissing: false, ...(nodeRole === 'progress' ? { parentProgressId: 'raw', relationKind: 'main' } : {}) });
   assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('raw', 'original'), relationNode('jpg', 'artifact', 'companion')), ['media_companion']);
   assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('raw', 'original'), relationNode('preview', 'artifact', 'preview')), ['derived_preview']);
   assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('selection', 'selection'), relationNode('v1', 'progress')), ['workflow_input']);
+  assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('selection', 'selection'), { ...relationNode('orphan', 'progress'), parentProgressId: undefined, relationKind: undefined }), [], 'legacy orphan progress must be repaired before accepting workflow inputs');
   assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('artifact', 'artifact', 'preview'), relationNode('v1', 'progress')), [], 'illegal role pairs must not expose a relation type');
   assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('raw', 'original'), relationNode('ambiguous', 'artifact')), ['media_companion', 'derived_preview'], 'ambiguous artifacts must require an explicit finite type choice');
   assert.match(edgeModel.versionTreeEdgePath(0, 0, 100, 100), /^M /);

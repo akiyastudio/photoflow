@@ -2,7 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 const subscribe = (channel, callback) => {
   if (typeof callback !== 'function') throw new TypeError('Component lifecycle callback must be a function');
-  const listener = () => callback();
+  const listener = (_event, value) => callback(value);
   ipcRenderer.on(channel, listener);
   return () => ipcRenderer.removeListener(channel, listener);
 };
@@ -29,4 +29,6 @@ contextBridge.exposeInMainWorld('photoFlowComponent', Object.freeze({
   },
   onActivate: callback => subscribe('component-sdk:activate', callback),
   onDeactivate: callback => subscribe('component-sdk:deactivate', callback),
+  onThemeChange: callback => subscribe('component-sdk:theme-changed', callback),
+  onContextChange: callback => subscribe('component-sdk:context-changed', callback),
 }));

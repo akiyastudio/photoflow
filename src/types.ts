@@ -503,7 +503,7 @@ export interface VersionBatch {
 export interface ProgressFolder {
   id: string;
   projectId: string;
-  mediaKind: 'image' | 'video';
+  mediaKind: 'image' | 'video' | 'mixed';
   versionKey: string;
   parentProgressId?: string;
   parentVersionKey?: string;
@@ -512,7 +512,7 @@ export interface ProgressFolder {
   externalLinkRelativePath?: string;
   folderMissing: boolean;
   missingSince?: number;
-  nodeRole: 'original' | 'progress' | 'selection' | 'artifact' | 'workflow';
+  nodeRole: 'original' | 'progress' | 'selection' | 'artifact' | 'workflow' | 'broll';
   artifactKind?: 'companion' | 'preview' | 'team_workspace';
   relationKind?: 'main' | 'auxiliary';
   trackingEnabled: boolean;
@@ -876,6 +876,15 @@ export interface ComponentHostAction {
   iconUrl?: string;
 }
 
+export interface ComponentPageOpenScope {
+  /** Folder visible when the toolbar action was invoked. */
+  scopeRelativePath: string;
+  /** Explicit image selection; an empty list means restore component history only. */
+  selectedRelativePaths: string[];
+  /** Owning browser page used for auditable reopen context. */
+  sourcePageId: string;
+}
+
 export interface ComponentPageInstance {
   identity: string;
   componentId: string;
@@ -1007,7 +1016,7 @@ export interface IElectronAPI {
   submitFeedback: (message: string) => Promise<{ success: boolean; error?: string }>;
   getComponents: (force?: boolean) => Promise<{ success: boolean; components: ComponentStatus[]; installPath: string; error?: string }>;
   getComponentHostActions: () => Promise<{ success: boolean; actions: ComponentHostAction[]; error?: string }>;
-  openComponentPage: (request: { componentId: string; pageId: string; workspacePath: string; projectId: string; projectName: string; projectStatus: ProjectStatus }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string }; error?: string }>;
+  openComponentPage: (request: { componentId: string; pageId: string; workspacePath: string; projectId: string; projectName: string; projectStatus: ProjectStatus; scopeRelativePath?: string; selectedRelativePaths?: string[]; sourcePageId?: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string }; error?: string }>;
   activateComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
   setComponentPageBounds: (instanceId: string, bounds: { x: number; y: number; width: number; height: number }) => Promise<{ success: boolean }>;
   closeComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
@@ -1125,9 +1134,9 @@ export interface IElectronAPI {
   getMediaRatings: (entries: Array<{ path: string; updatedAt: number }>) => Promise<{ success: boolean; results: Array<{ path: string; updatedAt: number; success: boolean; rating: number; error?: string }>; checked: number; error?: string }>;
   setMediaRating: (workspacePath: string, filePath: string, rating: number) => Promise<{ success: boolean; rating: number; error?: string }>;
   createProgressFolder: (workspacePath: string, status: ProjectStatus, projectName: string, request: { mediaKind: 'image' | 'video'; versionKey: string; parentProgressId?: string; displayName: string }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
-  registerProgressWithGraph: (workspacePath: string, status: ProjectStatus, request: { projectName: string; progress: { progressId?: string; relativePath?: string; mediaKind?: 'image' | 'video'; versionKey?: string; parentProgressId?: string; displayName?: string; relationKind?: 'main' | 'auxiliary'; trackingEnabled?: boolean; trackingState?: ProgressFolder['trackingState']; renameFromParent?: boolean; copyMissingFromParent?: boolean; moveToRoot?: boolean }; workflowInputProgressIds: string[] }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; edges?: VersionGraphEdge[]; relativePath?: string; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
-  adoptVersionTreeFolder: (workspacePath: string, status: ProjectStatus, request: { projectName: string; relativePath: string; mode: 'original' | 'companion' | 'preview'; mediaKind: 'image' | 'video'; sourceProgressId?: string }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; edge?: VersionGraphEdge | null; error?: string }>;
-  registerProgressFolder: (workspacePath: string, status: ProjectStatus, projectName: string, request: { relativePath: string; mediaKind: 'image' | 'video' | 'mixed'; versionKey: string; parentProgressId?: string; displayName: string; nodeRole?: ProgressFolder['nodeRole']; relationKind?: ProgressFolder['relationKind']; trackingEnabled: boolean; renameFromParent?: boolean; copyMissingFromParent?: boolean; trackingState?: ProgressFolder['trackingState']; progressId?: string; moveToRoot?: boolean }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; relativePath?: string; error?: string }>;
+  registerProgressWithGraph: (workspacePath: string, status: ProjectStatus, request: { projectName: string; progress: { progressId?: string; relativePath?: string; mediaKind?: 'image' | 'video'; versionKey?: string; parentProgressId?: string; displayName?: string; trackingEnabled?: boolean; trackingState?: ProgressFolder['trackingState']; renameFromParent?: boolean; copyMissingFromParent?: boolean; moveToRoot?: boolean }; workflowInputProgressIds: string[] }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; edges?: VersionGraphEdge[]; relativePath?: string; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
+  adoptVersionTreeFolder: (workspacePath: string, status: ProjectStatus, request: { projectName: string; relativePath: string; mode: 'original' | 'companion' | 'preview' | 'broll'; mediaKind: 'image' | 'video' | 'mixed'; sourceProgressId?: string }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; edge?: VersionGraphEdge | null; error?: string }>;
+  registerProgressFolder: (workspacePath: string, status: ProjectStatus, projectName: string, request: { relativePath: string; mediaKind: 'image' | 'video'; versionKey: string; parentProgressId?: string; displayName: string; trackingEnabled: boolean; renameFromParent?: boolean; copyMissingFromParent?: boolean; trackingState?: ProgressFolder['trackingState']; progressId?: string; moveToRoot?: boolean }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; relativePath?: string; error?: string }>;
   updateProgressFolder: (workspacePath: string, status: ProjectStatus, projectName: string, request: { progressId: string; mediaKind: 'image' | 'video'; versionKey: string; parentProgressId?: string; displayName: string; trackingEnabled: boolean; trackingState?: ProgressFolder['trackingState']; preserveFolderPath?: boolean }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; progressFolders?: ProgressFolder[]; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
   updateProgressRelation: (workspacePath: string, projectName: string, request: { childProgressId: string; parentProgressId: string | null; expectedUpdatedAt?: number }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; error?: string }>;
   repairLegacySelectionRelation: (workspacePath: string, projectName: string, request: { progressId: string; sourceProgressId?: string; action?: 'connect' | 'keep-independent' }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; keptIndependent?: boolean; error?: string }>;

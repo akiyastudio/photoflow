@@ -158,6 +158,7 @@ export const versionNodeRole = (relationKind: VersionRelationKind): ProgressFold
 
 export const trackingStateLabel = (folder: Pick<ProgressFolder, 'nodeRole' | 'relationKind' | 'trackingState'>) => {
   if (folder.nodeRole === 'original') return '原始素材';
+  if (folder.nodeRole === 'broll') return '花絮';
   if (folder.nodeRole === 'selection' || folder.relationKind === 'auxiliary') return '选片辅助节点';
   if (folder.nodeRole === 'artifact') return '派生产物';
   if (folder.nodeRole === 'workflow') return '工作流节点';
@@ -170,6 +171,7 @@ export const trackingStateLabel = (folder: Pick<ProgressFolder, 'nodeRole' | 're
 
 export const versionTreeNodeBadgeLabel = (folder: Pick<ProgressFolder, 'nodeRole' | 'relationKind' | 'artifactKind' | 'versionKey'>) => {
   if (folder.nodeRole === 'original') return '原始素材';
+  if (folder.nodeRole === 'broll') return '花絮';
   if (folder.nodeRole === 'selection' || folder.relationKind === 'auxiliary') return '选片';
   if (folder.nodeRole === 'artifact' && folder.artifactKind === 'preview') return '预览';
   if (folder.nodeRole === 'workflow' && folder.artifactKind === 'team_workspace') return '协作';
@@ -179,7 +181,7 @@ export const versionTreeNodeBadgeLabel = (folder: Pick<ProgressFolder, 'nodeRole
 };
 
 export const progressTrackingAction = (folder: ProgressFolder): 'refresh' | 'resume' | 'repair' | null => {
-  if (folder.folderMissing || folder.nodeRole !== 'progress' || folder.relationKind === 'auxiliary') return null;
+  if (folder.folderMissing || folder.nodeRole !== 'progress' || folder.relationKind !== 'main' || !folder.parentProgressId) return null;
   if (folder.trackingState === 'needs_repair') return 'repair';
   if (!folder.trackingEnabled || folder.trackingState === 'disabled') return null;
   if (folder.trackingState === 'pending_compare' || folder.trackingState === 'pending_confirm' || folder.trackingState === 'committing') return 'resume';
@@ -203,7 +205,7 @@ export const planProgressRootMove = (relativePath: string) => {
 
 export const isStructuralMainParent = (folder: ProgressFolder) => !folder.folderMissing
   && folder.relationKind !== 'auxiliary'
-  && (folder.nodeRole === 'progress'
+  && (folder.nodeRole === 'progress' && Boolean(folder.parentProgressId) && folder.relationKind === 'main'
     || folder.nodeRole === 'original' && folder.artifactKind !== 'companion' && folder.artifactKind !== 'preview');
 
 export const selectableVersionParents = (folders: ProgressFolder[], draft: { mediaKind: ProgressFolder['mediaKind']; relationKind: VersionRelationKind; existingProgressId?: string }) => {
@@ -326,6 +328,7 @@ export const progressRelationChangeError = (folders: ProgressFolder[], childId: 
   const child = byId.get(childId);
   if (!child) return '子节点不存在';
   if (child.nodeRole === 'original') return '原始素材不能拥有父节点';
+  if (child.nodeRole === 'broll') return '花絮不进入版本关系';
   if (child.nodeRole === 'artifact') return '产物节点不使用结构父关系';
   if (parentId === null) {
     if (child.nodeRole === 'selection') return '选片节点不能断开为根节点';

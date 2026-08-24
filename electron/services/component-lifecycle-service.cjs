@@ -29,6 +29,21 @@ const progressFor = text => {
   return markers.find(([needle]) => text.includes(needle));
 };
 
+const advancedStateFromProbe = ({ probe, vhdPresent = false }) => {
+  const available = probe?.success !== false && probe?.advancedAvailable === true;
+  const installed = available || vhdPresent;
+  return {
+    available,
+    installed,
+    advancedAvailable: available,
+    state: available ? 'ready' : installed ? 'repair-needed' : 'not-installed',
+    advancedError: available ? '' : String(probe?.advancedError || probe?.error || '未检测到可用的高级人物检测环境'),
+  };
+};
+const advancedInstallRoot = component => component.source === 'development' && process.env.LOCALAPPDATA
+  ? path.join(process.env.LOCALAPPDATA, 'PhotoFlow', 'components', component.id, 'advanced', 'wsl', 'PhotoFlowNative')
+  : path.join(path.basename(component.path) === 'runtime' ? path.dirname(component.path) : component.path, 'advanced', 'wsl', 'PhotoFlowNative');
+
 const runProcess = ({ spawn, command, args, cwd, report }) => new Promise((resolve, reject) => {
   const child = spawn(command, args, { cwd, windowsHide: true });
   let output = '';
@@ -66,7 +81,7 @@ const createComponentLifecycleService = ({ app, backgroundTasks, pluginService, 
     if (Object.keys(payload).some(field => !allowed.has(field))) throw new Error('组件 lifecycle 不接受脚本或路径参数');
     const { component, entry } = await resolveAction(descriptor, action);
     const containerRoot = path.basename(component.path) === 'runtime' ? path.dirname(component.path) : component.path;
-    const installRoot = path.join(containerRoot, 'advanced', 'wsl', 'PhotoFlowNative');
+    const installRoot = advancedInstallRoot(component);
     const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', entry];
     let title = '检查高级修图引擎';
     if (action === 'advanced.preflight') args.push('-CheckOnly');
@@ -101,9 +116,16 @@ const createComponentLifecycleService = ({ app, backgroundTasks, pluginService, 
     const message = action === 'advanced.preflight'
       ? execution.result.split(/\r?\n/).find(line => line.includes('OFFLINE_PREFLIGHT_OK'))?.split('|').slice(1).join(' · ') || '高级环境预检通过'
       : `${title}完成`;
+    if (action === 'advanced.preflight') {
+      let probe;
+      try { probe = await pluginService.runJson(component.id, ['probe'], 2 * 60 * 1000); }
+      catch (error) { probe = { success: false, advancedError: error.message || String(error) }; }
+      const status = advancedStateFromProbe({ probe, vhdPresent: fs.existsSync(path.join(installRoot, 'ext4.vhdx')) });
+      return { success: true, preflightPassed: true, message, taskId: execution.task.id, ...status };
+    }
     return { success: true, message, taskId: execution.task.id };
   };
   return { invoke, resolveAction };
 };
 
-module.exports = { createComponentLifecycleService, inside, progressFor, runProcess, sha256File };
+module.exports = { advancedInstallRoot, advancedStateFromProbe, createComponentLifecycleService, inside, progressFor, runProcess, sha256File };

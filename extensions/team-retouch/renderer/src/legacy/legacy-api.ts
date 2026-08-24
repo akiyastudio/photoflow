@@ -4,32 +4,33 @@ type Json = Record<string, any>;
 type MediaKind = 'original' | 'working' | 'returned' | 'review-return';
 export type LegacyMediaReference =
   | { kind: 'original'; photoId: string; baseVersionId: string }
-  | { kind: 'working' | 'returned'; photoId: string; baseVersionId: string; taskId: string }
+  | { kind: 'working' | 'returned'; photoId: string; baseVersionId: string; taskId: string; personIndex?: number }
   | { kind: 'review-return'; reviewSessionId: string; returnId: string };
 const projectEntryPaths = new Map<string, string>();
 const mediaAliases = new Map<string, string>();
 const normalizedRelativePath = (value: string) => value.replace(/\\/g, '/').replace(/^\.\//, '').toLocaleLowerCase();
-const mediaRef = (kind: MediaKind, photoId = '', baseVersionId = '', taskId = '', reviewSessionId = '', returnId = '') =>
-  ['photoflow-ref', kind, photoId, baseVersionId, taskId, reviewSessionId, returnId].map((part, index) => index < 2 ? part : encodeURIComponent(part)).join(':');
+const mediaRef = (kind: MediaKind, photoId = '', baseVersionId = '', taskId = '', reviewSessionId = '', returnId = '', personIndex = '') =>
+  ['photoflow-ref', kind, photoId, baseVersionId, taskId, reviewSessionId, returnId, personIndex].map((part, index) => index < 2 ? part : encodeURIComponent(part)).join(':');
 export const parseLegacyMediaRef = (value = ''): LegacyMediaReference | undefined => {
   const parts = String(value).split(':');
-  if (parts.length !== 7 || parts[0] !== 'photoflow-ref') return undefined;
+  if (![7, 8].includes(parts.length) || parts[0] !== 'photoflow-ref') return undefined;
   const kind = parts[1] as MediaKind;
   if (!['original', 'working', 'returned', 'review-return'].includes(kind)) return undefined;
-  let photoId: string; let baseVersionId: string; let taskId: string; let reviewSessionId: string; let returnId: string;
-  try { [photoId, baseVersionId, taskId, reviewSessionId, returnId] = parts.slice(2).map(part => decodeURIComponent(part)); } catch { return undefined; }
-  if (kind === 'original') return photoId && baseVersionId && !taskId && !reviewSessionId && !returnId ? { kind, photoId, baseVersionId } : undefined;
-  if (kind === 'working' || kind === 'returned') return photoId && baseVersionId && taskId && !reviewSessionId && !returnId ? { kind, photoId, baseVersionId, taskId } : undefined;
-  return !photoId && !baseVersionId && !taskId && reviewSessionId && returnId ? { kind, reviewSessionId, returnId } : undefined;
+  let photoId: string; let baseVersionId: string; let taskId: string; let reviewSessionId: string; let returnId: string; let personIndex: string;
+  try { [photoId, baseVersionId, taskId, reviewSessionId, returnId, personIndex = ''] = parts.slice(2).map(part => decodeURIComponent(part)); } catch { return undefined; }
+  if (kind === 'original') return photoId && baseVersionId && !taskId && !reviewSessionId && !returnId && !personIndex ? { kind, photoId, baseVersionId } : undefined;
+  if (kind === 'working' || kind === 'returned') return photoId && baseVersionId && taskId && !reviewSessionId && !returnId && (kind === 'returned' || !personIndex) ? { kind, photoId, baseVersionId, taskId, ...(personIndex ? { personIndex: Number(personIndex) } : {}) } : undefined;
+  return !photoId && !baseVersionId && !taskId && reviewSessionId && returnId && !personIndex ? { kind, reviewSessionId, returnId } : undefined;
 };
 const hydrateTask = (task: Json, photoId: string, baseVersionId: string) => ({
   ...task,
   patchPath: mediaRef('working', photoId, baseVersionId, String(task.id || '')),
   ...(task.editedPatchPath || ['uploaded', 'merged'].includes(String(task.status || '')) ? { editedPatchPath: mediaRef('returned', photoId, baseVersionId, String(task.id || '')) } : {}),
 });
-const hydrateBundle = (bundle: Json) => {
+export const resolveLegacyBundleBaseVersionId = (bundle: Json, registrationBaseVersionId = '') => String(registrationBaseVersionId || bundle.baseVersionId || bundle.tasks?.find((task: Json) => task.baseVersionId)?.baseVersionId || bundle.photo?.currentVersionId || bundle.versions?.find((version: Json) => version.isCurrent)?.id || bundle.versions?.[0]?.id || '');
+export const hydrateLegacyBundle = (bundle: Json, registrationBaseVersionId = '') => {
   const photoId = String(bundle.photo?.id || bundle.photoId || '');
-  const baseVersionId = String(bundle.photo?.currentVersionId || bundle.baseVersionId || bundle.versions?.[0]?.id || '');
+  const baseVersionId = resolveLegacyBundleBaseVersionId(bundle, registrationBaseVersionId);
   return {
     ...bundle,
     photo: bundle.photo ? { ...bundle.photo, originalFilePath: mediaRef('original', photoId, baseVersionId) } : bundle.photo,
@@ -47,7 +48,7 @@ const hydrateWorkspace = (workspace: Json) => {
   const assignments = (workspace.assignments || []).map((assignment: Json) => {
     const photo = photos.find((item: Json) => String(item.photoId) === String(assignment.photoId) && String(item.baseVersionId) === String(assignment.baseVersionId));
     const task = photo?.tasks?.find((item: Json) => (item.members?.length ? item.members : [{ personIndex: item.personIndex }]).some((member: Json) => Number(member.personIndex) === Number(assignment.personIndex)));
-    return { ...assignment, ...(assignment.completed && assignment.completionKind === 'returned' && task ? { editedPatchPath: mediaRef('returned', String(assignment.photoId), String(assignment.baseVersionId), String(task.id)) } : {}) };
+    return { ...assignment, ...(assignment.completed && assignment.completionKind === 'returned' && task ? { editedPatchPath: mediaRef('returned', String(assignment.photoId), String(assignment.baseVersionId), String(task.id), '', '', String(assignment.personIndex)) } : {}) };
   });
   return { ...workspace, photos, assignments };
 };
@@ -62,14 +63,27 @@ const hydrateReviewResult = (result: Json) => {
 const payload = (args: any[]) => { for (let index = args.length - 1; index >= 0; index -= 1) { const value = args[index]; if (value && typeof value === 'object' && !Array.isArray(value)) return value; } return {}; };
 const ok = async (method: string, value?: Json) => rpc<Json>(method, value);
 const event = (topic: string, callback: (value: any) => void) => window.photoFlowComponent.onEvent(topic, callback);
+export const componentStatusFromAdvancedPreflight = (state: Json) => {
+  const advancedAvailable = state.advancedAvailable !== undefined
+    ? state.advancedAvailable === true
+    : state.available !== undefined ? state.available === true : state.installed === true;
+  const advancedState = ['ready', 'not-installed', 'repair-needed'].includes(String(state.state || ''))
+    ? state.state
+    : advancedAvailable ? 'ready' : state.installed === true ? 'repair-needed' : state.installed === false ? 'not-installed' : undefined;
+  return {
+    id: 'team-retouch', installed: true, runtimeAvailable: true, identityAvailable: true,
+    advancedAvailable, advancedState,
+    advancedError: String(state.advancedError || state.error || ''), provider: '内置人物检测',
+  };
+};
 
 export const legacyApi = {
-  getTeamPatches: async (...args: any[]) => hydrateBundle(await ok('team.patch.get.v1', { relativePath: String(args[3] || '') })),
+  getTeamPatches: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.get.v1', { relativePath: String(args[3] || '') }), String(args[4] || '')),
   getTeamProjectWorkspace: async () => hydrateWorkspace(await ok('team.project.get.v1')),
-  detectTeamPatchPeople: async (...args: any[]) => hydrateBundle(await ok('team.patch.detect.v1', payload(args))),
+  detectTeamPatchPeople: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.detect.v1', payload(args))),
   detectTeamPatchBatch: (...args: any[]) => ok('team.patch.detect-batch.v1', payload(args)),
-  updateTeamPatch: async (...args: any[]) => hydrateBundle(await ok('team.patch.update.v1', payload(args))),
-  deleteTeamPatch: async (...args: any[]) => hydrateBundle(await ok('team.patch.delete.v1', payload(args))),
+  updateTeamPatch: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.update.v1', payload(args))),
+  deleteTeamPatch: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.delete.v1', payload(args))),
   removeProjectTeamPhoto: (...args: any[]) => ok('team.project.remove-photo.v1', payload(args)),
   excludeTeamPerson: async (...args: any[]) => hydrateWorkspace(await ok('team.person.exclude.v1', payload(args))),
   saveTeamIdentity: async (...args: any[]) => hydrateWorkspace(await ok('team.identity.save.v1', payload(args))),
@@ -104,7 +118,7 @@ export const legacyApi = {
   onTeamPatchBatchProgress: (callback: (value: any) => void) => event('patch.detect-batch.progress', callback),
   onTeamPatchReturnBatchProgress: (callback: (value: any) => void) => event('patch.return-batch.progress', callback),
   onTeamWorkflowGenerationProgress: (callback: (value: any) => void) => event('workflow.progress', callback),
-  getComponents: async () => { const state: Json = await ok('component.advanced.preflight.v1').catch(() => ({} as Json)); return { success: true, components: [{ id: 'team-retouch', installed: true, runtimeAvailable: true, identityAvailable: true, advancedAvailable: state.success !== false && Boolean(state.available || state.installed), advancedState: state.state, advancedError: state.error, provider: '内置人物检测' }] }; },
+  getComponents: async () => { const state: Json = await ok('component.advanced.preflight.v1'); if (state.success === false) throw new Error(state.error || '高级人物检测状态检查失败'); return { success: true, components: [componentStatusFromAdvancedPreflight(state)] }; },
   getContext: (): Promise<ComponentContext> => window.photoFlowComponent.getContext(),
   setProjectEntries: (entries: Json[]) => { projectEntryPaths.clear(); for (const entry of entries || []) if (entry.relativePath && entry.path) projectEntryPaths.set(normalizedRelativePath(String(entry.relativePath)), String(entry.path)); },
 };

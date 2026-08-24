@@ -1,4 +1,158 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-html,body,#app{height:100%;margin:0}.legacy-root{min-height:100%;background:#f8fafc;color:#1e293b}.legacy-root .top-10{top:0}.dialog-primary,.dialog-secondary{border-radius:.5rem;padding:.55rem .9rem;font-size:.875rem;font-weight:700;transition:background .15s,color .15s}.dialog-primary{background:#2563eb;color:#fff}.dialog-primary:hover{background:#1d4ed8}.dialog-primary:disabled{cursor:not-allowed;opacity:.45}.dialog-secondary{border:1px solid #cbd5e1;color:#475569;background:#fff}.dialog-secondary:hover{background:#f8fafc}.dialog-secondary:disabled{cursor:not-allowed;opacity:.5}.form-input{width:100%;border:1px solid #cbd5e1;border-radius:.5rem;padding:.55rem .7rem;color:#1e293b;background:#fff;outline:none}.form-input:focus{border-color:#3b82f6;box-shadow:0 0 0 2px rgb(59 130 246/.15)}
+html,body,#app{height:100%;margin:0}.legacy-root{min-height:100%;background:#f8fafc;color:#1e293b}.legacy-root .top-10{top:0}.dialog-primary,.dialog-secondary{border-radius:.5rem;padding:.55rem .9rem;font-size:.875rem;font-weight:700;transition:background .15s,color .15s}.dialog-primary{background:#2563eb;color:#fff}.dialog-primary:hover{background:#1d4ed8}.dialog-primary:disabled{cursor:not-allowed;opacity:.45}.dialog-secondary{border:1px solid #cbd5e1;color:#475569;background:#fff}.dialog-secondary:hover{background:#f8fafc}.dialog-secondary:disabled,.dialog-secondary:disabled:hover{cursor:not-allowed;border-color:#cbd5e1;background:#f1f5f9;color:#94a3b8;opacity:.8}.form-input{width:100%;border:1px solid #cbd5e1;border-radius:.5rem;padding:.55rem .7rem;color:#1e293b;background:#fff;outline:none}.form-input:focus{border-color:#3b82f6;box-shadow:0 0 0 2px rgb(59 130 246/.15)}
+
+/* Source-faithful subset of the pre-externalization html.dark utility overrides. */
+html.dark{color-scheme:dark}html.dark body,html.dark #app{background:#030407;color:#e5e7eb}html.dark .legacy-root{background:#030407;color:#e5e7eb}
+html.dark .bg-white{background-color:#090c12}html.dark .bg-slate-50{background-color:#030407}html.dark .bg-slate-100,html.dark .bg-slate-200{background-color:#111827}html.dark .bg-blue-50{background-color:#071a3d}html.dark .bg-violet-50{background-color:#11132a}
+html.dark .border-slate-100,html.dark .border-slate-200,html.dark .border-slate-300{border-color:#1f2937}html.dark .border-blue-100,html.dark .border-blue-200{border-color:#1d4ed8}html.dark .border-violet-100{border-color:#312e81}
+html.dark .text-slate-900,html.dark .text-slate-800,html.dark .text-slate-700{color:#e2e8f0}html.dark .text-slate-600,html.dark .text-slate-500{color:#9ca3af}html.dark .text-slate-400{color:#d1d5db}html.dark .text-violet-700,html.dark .text-violet-800{color:#c4b5fd}
+html.dark .hover\:bg-slate-50:hover,html.dark .hover\:bg-slate-100:hover{background-color:#111827}html.dark .hover\:text-slate-800:hover,html.dark .hover\:text-slate-900:hover{color:#f8fafc}html.dark .hover\:bg-blue-50:hover{background-color:#1e3a8a}
+html.dark input,html.dark select,html.dark textarea{background-color:#030407!important;color:#e5e7eb!important;border-color:#374151!important}html.dark .dialog-secondary,html.dark .form-input{background:#090c12;border-color:#374151;color:#bfdbfe}html.dark .dialog-secondary:hover{background:#111827}html.dark .dialog-secondary:disabled,html.dark .dialog-secondary:disabled:hover{background:#111827;border-color:#334155;color:#64748b;opacity:1}
+html.dark [role="dialog"]{color:#e2e8f0}html.dark .bg-white\/50,html.dark .bg-white\/75,html.dark .bg-white\/80,html.dark .bg-white\/90,html.dark .bg-white\/95{background-color:rgb(9 12 18/.9)}html.dark .border-white\/80{border-color:#334155}html.dark .bg-slate-50\/50,html.dark .bg-slate-50\/80{background-color:rgb(3 4 7/.86)}html.dark .bg-slate-200\/85{background-color:rgb(30 41 59/.88)}
+html.dark .bg-blue-100{background-color:#1e3a8a}html.dark .bg-emerald-50{background-color:#052e2b}html.dark .bg-emerald-50\/40,html.dark .bg-emerald-50\/70{background-color:rgb(5 46 43/.78)}html.dark .bg-emerald-100{background-color:#064e3b}html.dark .bg-amber-50,html.dark .bg-amber-50\/60{background-color:#291b05}html.dark .bg-amber-100{background-color:#452a05}html.dark .bg-red-50{background-color:#2b0b0d}html.dark .bg-red-100{background-color:#450a0a}html.dark .bg-blue-50\/70{background-color:rgb(7 26 61/.82)}html.dark .bg-slate-50\/70{background-color:rgb(15 23 42/.72)}html.dark .bg-violet-50\/70{background-color:rgb(17 19 42/.84)}html.dark .bg-violet-100{background-color:#27204d}
+html.dark .border-emerald-100,html.dark .border-emerald-200{border-color:#047857}html.dark .border-amber-100,html.dark .border-amber-200,html.dark .border-amber-300{border-color:#92400e}html.dark .border-red-200,html.dark .border-red-300{border-color:#7f1d1d}html.dark .border-violet-200{border-color:#4c3b8f}
+html.dark .text-blue-700,html.dark .text-blue-800{color:#93c5fd}html.dark .text-emerald-600,html.dark .text-emerald-700{color:#6ee7b7}html.dark .text-amber-600,html.dark .text-amber-700,html.dark .text-amber-800{color:#fcd34d}html.dark .text-red-600,html.dark .text-red-700{color:#fca5a5}html.dark .text-violet-500,html.dark .text-violet-600,html.dark .text-violet-700,html.dark .text-violet-800,html.dark .text-violet-900{color:#c4b5fd}
+html.dark .hover\:bg-slate-200:hover,html.dark .hover\:bg-slate-700:hover,html.dark .hover\:bg-slate-800:hover{background-color:#1f2937}html.dark .hover\:bg-red-50:hover{background-color:#450a0a}html.dark .hover\:bg-violet-100:hover{background-color:#312e81}html.dark input[type="checkbox"],html.dark input[type="range"]{accent-color:#3b82f6}
+
+/* Weeks stack vertically. Each person gets one compact horizontal task lane. */
+.workflow-board-view {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+}
+main:has(> div > .workflow-board-view) {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+main:has(> div > .workflow-board-view) > div {
+  width: 100%;
+  height: auto;
+  min-height: 100%;
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
+.workflow-board-view > .space-y-7 {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 1.25rem;
+  overflow: visible;
+  padding-bottom: .5rem;
+}
+.workflow-board-view > .space-y-7 > section {
+  display: flex;
+  flex: none;
+  min-width: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  border-radius: .8rem;
+  background: #f8fafc;
+}
+.workflow-board-view > .space-y-7 > section > h3 {
+  flex: none;
+  margin: 0;
+  border-bottom: 1px solid #e2e8f0;
+  padding: .8rem 1rem;
+  background: #fff;
+  font-size: .8rem;
+}
+.workflow-board-view > .space-y-7 > section > div {
+  display: flex;
+  flex-direction: column;
+  gap: .85rem;
+  padding: 1rem;
+}
+.workflow-person-lane {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(175px, 205px) minmax(0, 1fr);
+}
+.workflow-person-summary {
+  min-width: 0;
+  min-height: 9.5rem;
+  align-content: flex-start;
+  align-items: flex-start;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  border-right: 1px solid #e2e8f0;
+  border-bottom-width: 0;
+  padding: .8rem .9rem;
+}
+.workflow-person-summary .dialog-primary,
+.workflow-person-summary .dialog-secondary {
+  flex-basis: auto;
+  margin-left: 0;
+  padding: .4rem .55rem;
+  font-size: .68rem;
+}
+.workflow-task-strip {
+  display: flex;
+  min-width: 0;
+  gap: .7rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  padding: .8rem;
+}
+.workflow-task-card {
+  display: grid;
+  width: 220px;
+  flex: none;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: .45rem;
+  align-content: start;
+  contain: paint;
+  overflow: hidden;
+  border: 1px solid #e2e8f0;
+  border-radius: .55rem;
+  background: #fff;
+}
+.workflow-task-card > .workflow-task-action {
+  min-width: 0;
+  height: 2rem;
+  gap: .3rem;
+  padding: 0 .5rem;
+  border-radius: .4rem;
+  font-size: .7rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+.workflow-task-thumbnail,
+.workflow-task-card > .min-w-0 {
+  grid-column: 1 / -1;
+}
+.workflow-task-thumbnail {
+  width: 100%;
+  height: 150px;
+  overflow: hidden;
+  background: #020617;
+}
+.workflow-task-thumbnail > [role="button"] {
+  width: 100%;
+  height: 100%;
+  aspect-ratio: auto;
+  overflow: hidden;
+}
+.workflow-board-view [role="button"] { cursor: pointer; }
+@media (max-width: 900px) {
+  .workflow-person-lane { grid-template-columns: minmax(0, 1fr); }
+  .workflow-person-summary {
+    min-height: auto;
+    border-right-width: 0;
+    border-bottom-width: 1px;
+  }
+}
+html.dark .workflow-board-view > .space-y-7 > section {
+  border-color: #1f2937;
+  background: #060910;
+}
+html.dark .workflow-board-view > .space-y-7 > section > h3 {
+  border-color: #1f2937;
+  background: #090c12;
+}
+html.dark .workflow-person-summary { border-color: #273244; }
+html.dark .workflow-task-card { border-color: #273244; background: #090c12; }

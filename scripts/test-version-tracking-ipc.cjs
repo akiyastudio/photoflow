@@ -248,7 +248,11 @@ async function main() {
     request: { sessionId: '11111111-1111-4111-8111-111111111111', batchId: 'batch-id' },
   }, 'tracking snapshot finalization must use the isolated media-scan database worker');
   assert.strictEqual(calls.commitTaskDefinitions[0].resourceAccess, 'write', 'tracking commit must reserve both version folders for writes');
-  assert.deepStrictEqual(calls.commitTaskDefinitions[0].resources, [trustedParent, trustedProgress]);
+  assert.deepStrictEqual(calls.commitTaskDefinitions[0].resources, [
+    { path: trustedParent, access: 'write' },
+    { path: trustedProgress, access: 'write' },
+    { path: `photoflow-workspace-database/${workspaceRoot}`, access: 'write' },
+  ]);
   assert.strictEqual(calls.commitTaskDefinitions[0].notificationPolicy, 'progress-toast', 'detached tracking commits must remain visible while running');
   assert(!JSON.stringify(calls.commit.request).includes(maliciousPath));
 
@@ -303,24 +307,61 @@ async function main() {
   assert.strictEqual(auxiliary.success, false);
   assert.match(auxiliary.error, /auxiliary/);
 
+  const mainBranchMedia = handlers.get('workspace-progress-main-branch-media');
+  versionService.getMainBranchMedia = async (_root, request) => {
+    calls.mainBranchRequest = request;
+    if (request.progressId === 'broll-or-orphan') throw new Error('main_branch_progress_invalid');
+    return { success: true, progressId: request.progressId, entries: [], branchProgressIds: [request.progressId] };
+  };
+  const invalidMainBranch = await mainBranchMedia({}, workspaceRoot, {
+    progressId: 'broll-or-orphan', nodeRole: 'original', folderPath: 'C:\\outside',
+  });
+  assert.strictEqual(invalidMainBranch.success, false);
+  assert.match(invalidMainBranch.error, /main_branch_progress_invalid/);
+  assert.deepStrictEqual(calls.mainBranchRequest, { progressId: 'broll-or-orphan' }, 'main-branch IPC must forward only stable media/progress IDs');
+  const validMainBranch = await mainBranchMedia({}, workspaceRoot, { progressId: 'progress-node-id', photoId: 'photo-id', nodeRole: 'broll' });
+  assert.strictEqual(validMainBranch.success, true);
+  assert.deepStrictEqual(calls.mainBranchRequest, { progressId: 'progress-node-id', photoId: 'photo-id' });
+
   const register = handlers.get('workspace-progress-register');
   const externalProgressPath = path.join(workspaceRoot, 'external-progress');
   const externalShortcutPath = path.join(workspaceRoot, 'Project', 'external-progress.lnk');
   fs.mkdirSync(externalProgressPath, { recursive: true });
   projectVirtualPaths.createManagedExternalLink(externalShortcutPath, { target: externalProgressPath, kind: 'folder', displayName: 'external-progress' });
   let externalRegistrationRequest;
+  const originalParentNode = {
+    id: 'parent-progress-id', nodeRole: 'original', mediaKind: 'image', folderMissing: false,
+    versionKey: 'source', displayName: 'Source', folderPath: trustedParent,
+  };
+  versionService.listProgress = async () => ({ success: true, progressFolders: [originalParentNode] });
   versionService.registerProgress = async (_root, request) => {
     externalRegistrationRequest = request;
     return { success: true, progressFolder: { id: 'external-node', ...request } };
   };
+  const injectedRegistration = await register({}, workspaceRoot, 'active', 'Project', {
+    relativePath: 'external-progress.lnk', mediaKind: 'image', versionKey: '1',
+    displayName: 'external-progress', parentProgressId: originalParentNode.id,
+    nodeRole: 'original', folderPath: 'C:\\outside', trackingEnabled: true,
+  });
+  assert.strictEqual(injectedRegistration.success, false, 'renderer role and absolute-path injection must be rejected');
+  assert.strictEqual(externalRegistrationRequest, undefined);
+  const missingParentRegistration = await register({}, workspaceRoot, 'active', 'Project', {
+    relativePath: 'external-progress.lnk', mediaKind: 'image', versionKey: '1',
+    displayName: 'external-progress', trackingEnabled: true,
+  });
+  assert.strictEqual(missingParentRegistration.success, false);
+  assert.match(missingParentRegistration.error, /progress_parent_required/);
+  assert.strictEqual(externalRegistrationRequest, undefined, 'missing-parent progress must fail before any repository write');
   const externalRegistration = await register({}, workspaceRoot, 'active', 'Project', {
     relativePath: 'external-progress.lnk', mediaKind: 'image', versionKey: '1',
-    displayName: 'external-progress', nodeRole: 'progress', relationKind: 'main', trackingEnabled: true,
+    displayName: 'external-progress', parentProgressId: originalParentNode.id, trackingEnabled: true,
   });
   assert.strictEqual(externalRegistration.success, true, externalRegistration.error);
   assert.strictEqual(externalRegistration.relativePath, 'external-progress.lnk');
   assert.strictEqual(externalRegistrationRequest.folderPath, externalProgressPath, 'external progress tracking must persist the shortcut target path');
   assert.strictEqual(externalRegistrationRequest.externalLinkRelativePath, 'external-progress.lnk');
+  assert.strictEqual(externalRegistrationRequest.nodeRole, 'progress');
+  assert.strictEqual(externalRegistrationRequest.relationKind, 'main', 'main process must derive the only legal progress role/relation');
 
   const updateProgress = handlers.get('workspace-progress-update');
   let treeUpdateRequest;
@@ -328,11 +369,11 @@ async function main() {
   versionService.finishProgressTreeUpdate = async () => ({ success: true });
   versionService.listProgress = async () => ({
     success: true,
-    progressFolders: [{
+    progressFolders: [originalParentNode, {
       id: 'external-node', nodeRole: 'progress', relationKind: 'main', mediaKind: 'image',
       versionKey: '1', displayName: 'external-progress', folderPath: externalProgressPath,
       externalLinkRelativePath: 'external-progress.lnk', trackingEnabled: false,
-      trackingState: 'disabled', parentProgressId: null,
+      trackingState: 'disabled', parentProgressId: originalParentNode.id,
     }],
   });
   versionService.updateProgressTree = async (_root, request) => {
@@ -341,7 +382,7 @@ async function main() {
   };
   const externalUpdate = await updateProgress({}, workspaceRoot, 'active', 'Project', {
     progressId: 'external-node', mediaKind: 'image', versionKey: '2',
-    displayName: 'renamed-external-progress', preserveFolderPath: false,
+    displayName: 'renamed-external-progress', parentProgressId: originalParentNode.id, preserveFolderPath: false,
   });
   assert.strictEqual(externalUpdate.success, true, externalUpdate.error);
   assert.strictEqual(treeUpdateRequest.mutationToken, 'tree-mutation-token');
@@ -355,7 +396,7 @@ async function main() {
   versionService.registerProgress = async () => { throw new Error('simulated database failure'); };
   const failedRegistration = await register({}, workspaceRoot, 'active', 'Project', {
     relativePath: path.join('nested', 'Rollback me'), mediaKind: 'image', versionKey: 'arbitrary-child',
-    displayName: 'Rollback me', nodeRole: 'progress', relationKind: 'main',
+    displayName: 'Rollback me',
     parentProgressId: 'parent-progress-id', trackingEnabled: true, moveToRoot: true,
   });
   assert.strictEqual(failedRegistration.success, false);
@@ -367,7 +408,7 @@ async function main() {
   versionService.registerProgress = async (_root, request) => ({ success: true, progressFolder: { id: 'moved-node', ...request } });
   const successfulRegistration = await register({}, workspaceRoot, 'active', 'Project', {
     relativePath: path.join('nested', 'Move me'), mediaKind: 'image', versionKey: 'not-derived-from-parent',
-    displayName: 'Move me', nodeRole: 'progress', relationKind: 'main',
+    displayName: 'Move me',
     parentProgressId: 'parent-progress-id', trackingEnabled: true, renameFromParent: true,
     copyMissingFromParent: true, moveToRoot: true,
   });

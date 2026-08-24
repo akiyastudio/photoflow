@@ -840,7 +840,7 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
     throw error;
   }
 });
-const mediaRequest = payload => Object.fromEntries(['kind', 'photoId', 'baseVersionId', 'taskId', 'reviewSessionId', 'returnId'].filter(field => Object.hasOwn(payload || {}, field)).map(field => [field, payload[field]]));
+const mediaRequest = payload => Object.fromEntries(['kind', 'photoId', 'baseVersionId', 'taskId', 'personIndex', 'reviewSessionId', 'returnId'].filter(field => Object.hasOwn(payload || {}, field)).map(field => [field, payload[field]]));
 const completionRequest = payload => Object.fromEntries(['photoId', 'baseVersionId', 'personIndex', 'completed', 'completionKind', 'taskId', 'taskOrder'].filter(field => Object.hasOwn(payload || {}, field)).map(field => [field, payload[field]]));
 const publicWorkspace = value => ({
   ...value,
@@ -861,13 +861,19 @@ const workspaceSnapshot = async (parentId, context) => {
   const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
   const db = ensureSchema(storage.databasePath);
   try {
-    const projectId = String(context.projectId || '');
+    const projectId = String(storage.projectId || context.projectId || '');
     const registered = db.prepare('SELECT * FROM team_retouch_photos WHERE project_id=? ORDER BY created_at').all(projectId);
     const assignments = db.prepare('SELECT * FROM team_person_assignments WHERE project_id=?').all(projectId);
     const candidatePhotoIds = uniqueText([
       ...registered.map(row => row.photo_id),
       ...assignments.map(row => row.photo_id),
-      ...db.prepare('SELECT DISTINCT photo_id FROM team_patch_tasks WHERE is_deleted=0').all().map(row => row.photo_id),
+      // Old releases could leave tasks without either ownership table. Probe
+      // only those genuinely orphaned rows through the host; registered tasks
+      // from another project must never expand this project's media query.
+      ...db.prepare(`SELECT DISTINCT t.photo_id FROM team_patch_tasks t
+        WHERE t.is_deleted=0
+          AND NOT EXISTS (SELECT 1 FROM team_retouch_photos p WHERE p.photo_id=t.photo_id)
+          AND NOT EXISTS (SELECT 1 FROM team_person_assignments a WHERE a.photo_id=t.photo_id)`).all().map(row => row.photo_id),
     ]).slice(0, MAX_ITEMS);
     const media = candidatePhotoIds.length
       ? await callHost(parentId, 'project.media.read.v1', { photoIds: candidatePhotoIds })
@@ -896,14 +902,12 @@ const workspaceSnapshot = async (parentId, context) => {
       }
       const currentVersionId = String(bundle.photo?.currentVersionId || '');
       let baseVersionId = String(registration?.base_version_id || '');
-      if (!baseVersionId || !grouped.has(baseVersionId)) {
-        baseVersionId = grouped.has(currentVersionId) ? currentVersionId : [...grouped.keys()].at(-1) || baseVersionId;
-      }
+      if (!baseVersionId) baseVersionId = grouped.has(currentVersionId) ? currentVersionId : [...grouped.keys()].at(-1) || '';
       const base = (bundle.versions || []).find(version => String(version.id) === baseVersionId);
       if (!base) continue;
       photos.push({
         photoId, baseVersionId, name: bundle.photo?.displayName || path.parse(bundle.photo?.originalName || base.filePath || '').name,
-        relativePath: bundle.relativePath || '', sourcePath: base.filePath,
+        relativePath: base.relativePath || '', relativePathState: base.relativePathState || 'unresolvable', sourcePath: base.filePath,
         tasks: (grouped.get(baseVersionId) || []).map(serializeTask),
         excludedPersonCount: Number(db.prepare('SELECT COUNT(*) AS count FROM team_person_exclusions WHERE project_id=? AND photo_id=? AND base_version_id=?').get(projectId, photoId, baseVersionId)?.count || 0),
       });
@@ -1253,7 +1257,20 @@ const handlers = {
   'team.project.register.v1': async (parentId, payload, context) => {
     const relativePaths = uniqueText(payload.relativePaths);
     if (relativePaths.length > MAX_ITEMS) throw new Error(`Too many project media items: ${relativePaths.length}`);
-    await callHost(parentId, 'project.media.read.v1', { relativePaths });
+    const media = await callHost(parentId, 'project.media.read.v1', { relativePaths });
+    await withDomain(parentId, db => {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        for (const bundle of media.items || []) {
+          const photoId = String(bundle.photo?.id || '');
+          const base = (bundle.versions || []).find(version => String(version.id) === String(bundle.photo?.currentVersionId))
+            || (bundle.versions || []).find(version => version.isCurrent) || (bundle.versions || []).at(-1);
+          if (!photoId || !base?.id) throw new Error('无法登记缺少照片或当前版本的团片图片');
+          registerPhoto(db, context, photoId, String(base.id));
+        }
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+    });
     return publicWorkspace(await workspaceSnapshot(parentId, context));
   },
   'team.project.remove-photo.v1': removeProjectPhoto,

@@ -26,11 +26,13 @@ const { pathToFileURL } = require('url');
     { branchIndex: 0, progressId: 'raw', nodeRole: 'original', relationKind: 'main', photoId: 'photo-a', originalName: 'renamed-original.jpg', version: version('first', 10) },
     { branchIndex: 1, progressId: 'selection', nodeRole: 'progress', relationKind: 'auxiliary', photoId: 'photo-a', originalName: 'renamed-original.jpg', version: version('aux', 15) },
     { branchIndex: 1, progressId: 'v1', nodeRole: 'progress', relationKind: 'main', photoId: 'photo-a', originalName: 'renamed-original.jpg', version: version('second', 20) },
+    { branchIndex: 1, progressId: 'broll', nodeRole: 'broll', photoId: 'photo-a', originalName: 'renamed-original.jpg', version: version('behind-scenes', 18) },
     { branchIndex: 0, progressId: 'raw', nodeRole: 'original', relationKind: 'main', photoId: 'photo-b', originalName: 'other.jpg', version: { ...version('other', 5), photoId: 'photo-b' } },
   ];
   assert.deepStrictEqual(model.mainBranchVersionsForPhoto(entries, 'photo-a').map(item => item.id), ['first', 'second', 'third'], 'main branch order follows branchIndex and excludes auxiliary');
   assert.strictEqual(model.mainBranchVersionsForPhoto(entries, 'photo-a').at(-1).fileMissing, true, 'missing versions remain in the branch');
   assert.strictEqual(model.mainBranchVersionsForPhoto(entries, 'photo-a').length, 3, 'photo identity, not renamed file names, controls association');
+  assert(!model.mainBranchVersionsForPhoto(entries, 'photo-a').some(item => item.id === 'behind-scenes'), 'broll must never enter the original/progress main branch');
 
   const summaries = model.mainBranchPhotoSummaries(entries);
   assert.deepStrictEqual(new Set(summaries.map(item => item.photoId)), new Set(['photo-a', 'photo-b']));

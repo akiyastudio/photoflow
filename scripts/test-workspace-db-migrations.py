@@ -38,6 +38,14 @@ def test_schema_28_migrates_detached_versioning_store(temp_root):
     upgraded = workspace_db.connect(workspace_root, database, include_domains=True)
     columns = {row[1] for row in upgraded.execute("PRAGMA versioning.table_info(tracking_sessions)").fetchall()}
     assert "copy_operations_json" in columns, "the first versioning caller must finish deferred domain migration"
+    trigger_names = {row[0] for row in upgraded.execute(
+        "SELECT name FROM versioning.sqlite_master WHERE type='trigger'"
+    ).fetchall()}
+    assert {
+        "progress_folders_v2_shape_insert", "progress_folders_v2_policy_insert",
+        "progress_folders_parent_validate_insert", "progress_folders_structural_parent_update", "progress_folders_v2_cycle_update",
+        "version_graph_edges_validate_insert", "progress_folders_graph_endpoint_update",
+    } <= trigger_names, "domain extraction must reinstall all version graph guards, not only shape/policy triggers"
     upgraded.close()
 
 
@@ -298,10 +306,17 @@ def test_progress_tree_version_remap(temp_root):
     )
     root_old = os.path.join(project_path, "图片后期_1")
     child_old = os.path.join(project_path, "图片后期_1_1_精修")
+    original_path = os.path.join(project_path, "Original")
+    os.makedirs(original_path)
     os.makedirs(root_old)
     os.makedirs(child_old)
+    original = workspace_db.progress_register(workspace_root, db, {
+        "projectName": "进度重映射", "mediaKind": "image", "versionKey": "source",
+        "displayName": "Original", "folderPath": original_path, "nodeRole": "original", "trackingEnabled": False,
+    })["progressFolder"]
     root_progress = workspace_db.progress_register(workspace_root, db, {
         "projectName": "进度重映射", "mediaKind": "image", "versionKey": "1",
+        "parentProgressId": original["id"], "relationKind": "main",
         "displayName": "图片后期_1", "folderPath": root_old, "trackingEnabled": True,
     })["progressFolder"]
     child_progress = workspace_db.progress_register(workspace_root, db, {
@@ -318,7 +333,7 @@ def test_progress_tree_version_remap(temp_root):
         "projectName": "进度重映射",
         "primaryProgressId": root_progress["id"],
         "updates": [
-            {"id": root_progress["id"], "mediaKind": "image", "versionKey": "3", "displayName": "图片后期_3", "folderPath": root_new, "trackingEnabled": False},
+            {"id": root_progress["id"], "mediaKind": "image", "versionKey": "3", "parentProgressId": original["id"], "displayName": "图片后期_3", "folderPath": root_new, "trackingEnabled": False},
             {"id": child_progress["id"], "mediaKind": "image", "versionKey": "3_1", "parentProgressId": root_progress["id"], "displayName": "图片后期_3_1_精修", "folderPath": child_new},
         ],
     })
@@ -622,6 +637,9 @@ def test_schema_23_upgrades_to_graph_schema_24(temp_root):
         DROP TRIGGER IF EXISTS progress_folders_graph_endpoint_update;
         DROP TRIGGER IF EXISTS progress_folders_v2_shape_insert;
         DROP TRIGGER IF EXISTS progress_folders_v2_shape_update;
+        DROP TRIGGER IF EXISTS progress_folders_parent_validate_insert;
+        DROP TRIGGER IF EXISTS progress_folders_parent_validate_update;
+        DROP TRIGGER IF EXISTS progress_folders_structural_parent_update;
         DROP TRIGGER IF EXISTS progress_folders_v2_cycle_insert;
         DROP TRIGGER IF EXISTS progress_folders_v2_cycle_update;
         DROP TRIGGER IF EXISTS progress_folders_v2_policy_insert;
@@ -718,9 +736,31 @@ def test_schema_24_upgrades_to_import_slots_schema_25(temp_root):
         upgraded.close()
 
 
+def test_fresh_catalog_records_purpose_constraint_revision(temp_root):
+    workspace_root = os.path.join(temp_root, "fresh-purpose-workspace")
+    database = os.path.join(temp_root, "fresh-purpose.sqlite3")
+    os.makedirs(workspace_root)
+    first = workspace_db.connect(workspace_root, database, include_domains=False)
+    try:
+        assert first.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
+        assert first.execute("SELECT value FROM meta WHERE key='progress_purpose_constraint_revision'").fetchone()[0] == workspace_db.PROGRESS_PURPOSE_CONSTRAINT_REVISION
+    finally:
+        first.close()
+
+    writer = sqlite3.connect(database, timeout=1)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        second = workspace_db.connect(workspace_root, database, include_domains=False)
+        second.close()
+    finally:
+        writer.rollback()
+        writer.close()
+
+
 def main():
     temp_root = tempfile.mkdtemp(prefix="photoflow-db-migration-")
     try:
+        test_fresh_catalog_records_purpose_constraint_revision(temp_root)
         workspace_root = os.path.join(temp_root, "workspace")
         os.makedirs(workspace_root)
         database = os.path.join(temp_root, "workspace.sqlite3")

@@ -1,13 +1,13 @@
 import { Loader2 } from 'lucide-react';
 import type { ProgressFolder } from '../../types';
 import { ImportSourceControls, type ImportMaterialKind } from '../../components/ImportSourceControls';
-import { isUserVersionKey, nextVersionKeys, normalizeTrackingPolicy, planProgressRootMove, selectableVersionParents, versionKeyMatchesParentKind, versionKeyWithFinalIndex, versionKindForParent, type VersionPanelState, type VersionPanelTaskProgress, type VersionRelationKind } from './versioning-v2-model';
+import { defaultMainParentId, isUserVersionKey, nextVersionKeys, normalizeTrackingPolicy, planProgressRootMove, selectableVersionParents, versionKeyMatchesParentKind, versionKeyWithFinalIndex, versionKindForParent, type VersionPanelState, type VersionPanelTaskProgress, type VersionRelationKind } from './versioning-v2-model';
 
 export type VersionProgressDraft = {
   mode: 'create' | 'create-next' | 'import' | 'modify';
   sourceRelativePath: string;
   displayName: string;
-  mediaKind: ProgressFolder['mediaKind'];
+  mediaKind: 'image' | 'video';
   relationKind: VersionRelationKind;
   parentProgressId: string;
   trackingEnabled: boolean;
@@ -46,7 +46,7 @@ const stateLabel: Partial<Record<VersionPanelState, string>> = {
   move_confirm: '需要确认移动', processing: '正在处理', waiting_confirmation: '等待确认', result: '操作完成', failure: '处理失败',
 };
 const fieldClass = 'mt-1 h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-800 outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:bg-slate-50 disabled:text-slate-500';
-const folderPrefix = (mediaKind: ProgressFolder['mediaKind']) => mediaKind === 'video' ? '视频后期' : '图片后期';
+const folderPrefix = (mediaKind: VersionProgressDraft['mediaKind']) => mediaKind === 'video' ? '视频后期' : '图片后期';
 const lastPathPart = (value: string) => value.replace(/\\/g, '/').replace(/\/$/, '').split('/').pop() || '项目根目录';
 const generatedFolderName = (draft: VersionProgressDraft) => `${folderPrefix(draft.mediaKind)}_${draft.versionKey?.trim() || '—'}${draft.displayName.trim() ? `_${draft.displayName.trim()}` : ''}`;
 
@@ -60,7 +60,7 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
   const restrictedNode = draft.relationKind === 'auxiliary';
   const policy = normalizeTrackingPolicy(draft.relationKind, draft);
   const parents = selectableVersionParents(folders, { ...draft, relationKind: 'main' });
-  const parent = folders.find(folder => folder.id === draft.parentProgressId);
+  const parent = parents.find(folder => folder.id === draft.parentProgressId);
   const movePlan = planProgressRootMove(draft.sourceRelativePath);
   const requiresMove = draft.mode !== 'create' && movePlan.requiresMove;
   const busy = state === 'processing';
@@ -106,24 +106,25 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
       versionKey: versionKind === 'branch' ? nextSuggestions.branch : nextSuggestions.main,
     });
   };
-  const setMediaKind = (mediaKind: ProgressFolder['mediaKind']) => {
+  const setMediaKind = (mediaKind: VersionProgressDraft['mediaKind']) => {
     if (mediaKind === draft.mediaKind) return;
     const nextParents = selectableVersionParents(folders, { ...draft, mediaKind, relationKind: 'main' });
-    const nextParent = nextParents.find(folder => folder.id === draft.parentProgressId) || nextParents.at(-1);
+    const semanticParentId = defaultMainParentId(folders, [], mediaKind);
+    const nextParent = nextParents.find(folder => folder.id === semanticParentId);
     const nextSuggestions = nextVersionKeys(folders, mediaKind, nextParent, draft.existingProgressId);
     update({
       mediaKind,
       parentProgressId: nextParent?.id || '',
       versionKind: nextParent ? versionKind : 'main',
-      versionKey: nextParent && versionKind === 'branch' ? nextSuggestions.branch : nextSuggestions.main,
+      versionKey: nextParent ? versionKind === 'branch' ? nextSuggestions.branch : nextSuggestions.main : '',
     });
   };
-  const canCreateWithoutParent = parents.length === 0;
-  const parentSelectionRequired = !parent && !canCreateWithoutParent;
+  const noAvailableParents = parents.length === 0;
+  const parentSelectionRequired = !parent;
   const resolvedVersionKey = versionStructureValid ? normalizedVersionKey : '';
   const resolvedVersionLabel = `V${resolvedVersionKey || '—'}`;
   const parentVersionLabel = parent?.nodeRole === 'original' ? '原始素材' : parent ? `V${parent.versionKey}` : '';
-  const parentLabel = parent ? `${parent.nodeRole === 'original' ? '原始素材' : `V${parent.versionKey}`} · ${parent.displayName}` : parentSelectionRequired ? '请选择父版本' : '无父版本';
+  const parentLabel = parent ? `${parent.nodeRole === 'original' ? '原始素材' : `V${parent.versionKey}`} · ${parent.displayName}` : '请选择父版本';
   const outputFolderName = draft.targetFolderLocked ? targetName : generatedFolderName({ ...draft, versionKey: resolvedVersionKey });
   const locationLabel = draft.targetFolderLocked ? `使用现有文件夹“${targetName}”` : '项目根目录';
   const modeAction = draft.mode === 'import' ? '导入并创建' : draft.mode === 'modify' ? '保存修改' : '创建';
@@ -137,9 +138,9 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
         <b className="block text-sm">创建子分支</b><span className="mt-1 block text-xs font-semibold tabular-nums">{parentVersionLabel} → V{suggestions.branch}</span>
       </button>
     </div>
-  </fieldset> : parentSelectionRequired
-    ? <Callout tone="warning" title="请选择父版本">当前媒体类型已有版本节点，选择父版本后才能生成正确的延续版本或子分支。</Callout>
-    : <Callout title={`将创建首个版本 ${resolvedVersionLabel}`}>当前媒体类型还没有可选父版本，因此会建立第一个独立版本节点。</Callout>;
+  </fieldset> : <Callout tone="warning" title={noAvailableParents ? '请先标记原始素材' : '请选择父版本'}>{noAvailableParents
+    ? '当前媒体类型没有可用来源。请先将一个文件夹标记为原始素材，再创建版本进度。'
+    : '选择同媒体类型的原始素材或已有进度后，才能生成延续版本或子分支。'}</Callout>;
 
   if (state !== 'ready') {
     const totalCount = progress?.totalCount && progress.totalCount > 0 ? progress.totalCount : 0;
@@ -180,7 +181,7 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
 
   return <div className="space-y-4">
     {draft.mode === 'import' && <Card title="导入来源" meta={`${draft.sourcePaths?.length || 0} 个`}><div className="flex flex-wrap items-center justify-between gap-3"><p className="text-xs leading-5 text-slate-500">已确认来源；{draft.linkOnly ? '将以外链方式使用，不复制源文件。' : draft.deleteSourceAfterImport ? '导入验证成功后将删除源文件。' : '将复制到项目内并保留源文件。'}</p><button type="button" onClick={() => onImportStepChange?.('source')} className="dialog-secondary">返回重新选择</button></div></Card>}
-    {draft.mode === 'import' && requiresMove && <Callout tone="warning" title="所选文件夹将移动到项目根目录">登记前会预检并移动到“{movePlan.targetRelativePath}”。快捷方式或外部目录不能移动或覆盖。</Callout>}
+    {requiresMove && <Callout tone="warning" title="所选文件夹将移动到项目根目录">登记前会预检并移动到“{movePlan.targetRelativePath}”。快捷方式或外部目录不能移动或覆盖。</Callout>}
     {draft.mode === 'modify' && <Callout tone="warning" title={`修改 ${versionLabel}`}>保存时会同步更新版本关系、文件夹名称和数据库记录。</Callout>}
     {restrictedNode && <Callout tone="warning" title="辅助节点不参与版本跟踪">选片、预览和协作节点不参与版本跟踪传播。</Callout>}
     <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
@@ -188,7 +189,7 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
       <div className="space-y-4">
         <div>
           <p className="text-xs font-semibold text-slate-600">父版本</p>
-          {draft.contextLocked ? <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3"><b className="block text-sm text-slate-800">{parentLabel}</b><span className="mt-1 block text-xs text-slate-400">从版本树发起，媒体类型和父版本已锁定</span></div> : <select aria-label="父版本" className={fieldClass} value={draft.parentProgressId} onChange={event => setParent(event.target.value)}>{parentSelectionRequired && <option value="" disabled>请选择父版本</option>}{canCreateWithoutParent && <option value="">无父版本（建立首个版本）</option>}{parents.map(folder => <option key={folder.id} value={folder.id}>{folder.nodeRole === 'original' ? `原始素材 · ${folder.displayName}` : `V${folder.versionKey} · ${folder.displayName}`}</option>)}</select>}
+          {draft.contextLocked ? <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3"><b className="block text-sm text-slate-800">{parentLabel}</b><span className="mt-1 block text-xs text-slate-400">从版本树发起，媒体类型和父版本已锁定</span></div> : <select aria-label="父版本" className={fieldClass} value={draft.parentProgressId} onChange={event => setParent(event.target.value)}><option value="" disabled>{noAvailableParents ? '没有可用父版本' : '请选择父版本'}</option>{parents.map(folder => <option key={folder.id} value={folder.id}>{folder.nodeRole === 'original' ? `原始素材 · ${folder.displayName}` : `V${folder.versionKey} · ${folder.displayName}`}</option>)}</select>}
         </div>
         {!draft.contextLocked && draft.mode !== 'modify' && <fieldset><legend className="text-xs font-semibold text-slate-600">媒体类型</legend><div className="mt-2 grid grid-cols-2 gap-2"><button type="button" aria-pressed={draft.mediaKind === 'image'} onClick={() => setMediaKind('image')} className={`h-10 rounded-lg border text-sm font-semibold ${draft.mediaKind === 'image' ? 'border-blue-500 bg-blue-50 text-blue-700 ring-1 ring-blue-200' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>图片</button><button type="button" aria-pressed={draft.mediaKind === 'video'} onClick={() => setMediaKind('video')} className={`h-10 rounded-lg border text-sm font-semibold ${draft.mediaKind === 'video' ? 'border-blue-500 bg-blue-50 text-blue-700 ring-1 ring-blue-200' : 'border-slate-300 text-slate-600 hover:bg-slate-50'}`}>视频</button></div></fieldset>}
         {versionKindControl}
@@ -198,7 +199,7 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
         </label>
         {!draft.targetFolderLocked && <label className="block text-xs font-semibold text-slate-600">名称（可选）<input className={fieldClass} value={draft.displayName} placeholder="例如 精修" onChange={event => update({ displayName: event.target.value })}/>{namePresets.length > 0 && <span className="mt-2 flex flex-wrap gap-2">{namePresets.map(name => <button key={name} type="button" onClick={() => update({ displayName: name })} className="rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700 transition hover:border-blue-400 hover:bg-blue-100">{name}</button>)}</span>}</label>}
         <div className="rounded-xl border border-blue-200 bg-blue-50/70 p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold text-blue-600">{draft.mode === 'modify' ? '修改后' : '将创建'}</p><p className="mt-1 text-base font-bold text-slate-900">{resolvedVersionLabel} · {outputFolderName}</p></div><span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-blue-700 shadow-sm">{versionKind === 'branch' ? '子分支' : parent?.nodeRole === 'original' ? '主版本' : parent ? '继续当前分支' : '首个版本'}</span></div>
+          <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold text-blue-600">{draft.mode === 'modify' ? '修改后' : '将创建'}</p><p className="mt-1 text-base font-bold text-slate-900">{resolvedVersionLabel} · {outputFolderName}</p></div><span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-blue-700 shadow-sm">{versionKind === 'branch' ? '子分支' : parent?.nodeRole === 'original' ? '主版本' : parent ? '继续当前分支' : '等待父版本'}</span></div>
           <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2"><div><dt className="text-slate-400">父版本</dt><dd className="mt-0.5 font-semibold text-slate-700">{parentLabel}</dd></div><div><dt className="text-slate-400">位置</dt><dd className="mt-0.5 font-semibold text-slate-700">{locationLabel}</dd></div></dl>
         </div>
       </div>

@@ -88,6 +88,13 @@ def test_existing_progress_is_never_overwritten(root: Path, db):
     project, project_id = make_project(root, db, "role-conflict")
     folder = project / "explicit-slot-path"
     folder.mkdir()
+    source_folder = project / "source"
+    source_folder.mkdir()
+    source = workspace_db.progress_register(str(root), db, {
+        "projectName": "role-conflict", "mediaKind": "image", "versionKey": "source",
+        "displayName": "Source", "folderPath": str(source_folder), "nodeRole": "original",
+        "trackingEnabled": False,
+    })["progressFolder"]
     original = workspace_db.progress_register(str(root), db, {
         "projectName": "role-conflict",
         "mediaKind": "image",
@@ -95,6 +102,8 @@ def test_existing_progress_is_never_overwritten(root: Path, db):
         "displayName": "Manual progress",
         "folderPath": str(folder),
         "nodeRole": "progress",
+        "parentProgressId": source["id"],
+        "relationKind": "main",
         "trackingEnabled": True,
         "trackingState": "ready",
         "renameFromParent": True,
@@ -179,6 +188,11 @@ def test_legacy_canonical_graph_migration(root: Path, db):
     project, project_id = make_project(root, db, "legacy-canonical")
     for name in ("raw", "jpg", "mov", "mov_预览", "团片协作", "ordinary-folder", "edit-source"):
         (project / name).mkdir()
+    raw_source = workspace_db.progress_register(str(root), db, {
+        "projectName": "legacy-canonical", "mediaKind": "image", "versionKey": "raw-source",
+        "displayName": "raw", "folderPath": str(project / "raw"), "nodeRole": "original",
+        "trackingEnabled": False,
+    })["progressFolder"]
     source = workspace_db.progress_register(str(root), db, {
         "projectName": "legacy-canonical",
         "mediaKind": "image",
@@ -186,6 +200,8 @@ def test_legacy_canonical_graph_migration(root: Path, db):
         "displayName": "Explicit edit source",
         "folderPath": str(project / "edit-source"),
         "nodeRole": "progress",
+        "parentProgressId": raw_source["id"],
+        "relationKind": "main",
         "trackingEnabled": False,
     })["progressFolder"]
     now = int(time.time() * 1000)
@@ -273,8 +289,10 @@ def test_import_mapping_follows_external_rename(root: Path, db):
 
 def test_manual_media_adoption(root: Path, db):
     project, project_id = make_project(root, db, "manual-adopt")
-    for name in ("camera-master", "camera-jpeg", "manual-preview", "ordinary-progress"):
+    for name in ("camera-master", "camera-jpeg", "manual-preview", "ordinary-progress", "manual-broll"):
         (project / name).mkdir()
+    (project / "manual-broll" / "behind-scenes.jpg").write_bytes(b"jpg")
+    (project / "manual-broll" / "behind-scenes.mp4").write_bytes(b"mp4")
     original = workspace_db.progress_adopt_media(str(root), db, {
         "projectName": "manual-adopt", "folderPath": str(project / "camera-master"),
         "mode": "original", "mediaKind": "image",
@@ -290,10 +308,27 @@ def test_manual_media_adoption(root: Path, db):
     assert companion["artifactKind"] == "companion" and preview["artifactKind"] == "preview"
     assert edge_count(db, project_id, "media_companion") == 1
     assert edge_count(db, project_id, "derived_preview") == 1
+    broll_result = workspace_db.progress_adopt_media(str(root), db, {
+        "projectName": "manual-adopt", "folderPath": str(project / "manual-broll"),
+        "mode": "broll", "mediaKind": "mixed",
+    })
+    broll = broll_result["progressFolder"]
+    assert broll["nodeRole"] == "broll" and broll["mediaKind"] == "mixed"
+    assert broll.get("parentProgressId") is None and broll.get("relationKind") is None and broll.get("artifactKind") is None
+    assert not broll["trackingEnabled"] and broll["trackingState"] == "disabled"
+    assert edge_count(db, project_id, "media_companion") == 1 and edge_count(db, project_id, "derived_preview") == 1
+    repeated_broll = workspace_db.progress_adopt_media(str(root), db, {
+        "projectName": "manual-adopt", "folderPath": str(project / "manual-broll"),
+        "mode": "broll", "mediaKind": "mixed",
+    })
+    assert repeated_broll["created"] is False and repeated_broll["progressFolder"]["id"] == broll["id"]
+    reloaded_broll = next(node for node in workspace_db.progress_list(str(root), db, {"projectName": "manual-adopt"})["progressFolders"] if node["id"] == broll["id"])
+    assert reloaded_broll["nodeRole"] == "broll" and reloaded_broll["mediaKind"] == "mixed", "broll must survive an ordinary reload"
     tracked = workspace_db.progress_register(str(root), db, {
         "projectName": "manual-adopt", "mediaKind": "image", "versionKey": "tracked",
         "displayName": "Tracked", "folderPath": str(project / "ordinary-progress"),
-        "nodeRole": "progress", "trackingEnabled": True, "trackingState": "ready",
+        "nodeRole": "progress", "parentProgressId": original["id"], "relationKind": "main",
+        "trackingEnabled": True, "trackingState": "ready",
     })["progressFolder"]
     try:
         workspace_db.progress_adopt_media(str(root), db, {
@@ -329,12 +364,15 @@ def test_selection_mainline_repair(root: Path, db):
         "projectName": "selection-mainline-repair", "scopeKey": "", "expectedRevision": 0,
         "mode": "patch", "positions": [{"nodeKey": f"progress:{progress['id']}", "x": 10, "y": 500}],
     })
-    parent_trigger = db.execute(
-        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='progress_folders_v2_parent_update'"
-    ).fetchone()[0]
-    db.execute("DROP TRIGGER progress_folders_v2_parent_update")
+    parent_triggers = db.execute(
+        """SELECT name,sql FROM sqlite_master WHERE type='trigger'
+             AND name IN ('progress_folders_v2_parent_update','progress_folders_parent_validate_update')"""
+    ).fetchall()
+    for trigger in parent_triggers:
+        db.execute(f'DROP TRIGGER "{trigger["name"]}"')
     db.execute("UPDATE progress_folders SET parent_progress_id=? WHERE id=?", (selection["id"], progress["id"]))
-    db.execute(parent_trigger)
+    for trigger in parent_triggers:
+        db.execute(trigger["sql"])
     db.commit()
     try:
         workspace_db._check_integrity(db, force=True)
@@ -357,6 +395,46 @@ def test_selection_mainline_repair(root: Path, db):
     workspace_db._check_integrity(db, force=True)
 
 
+def test_role_conversion_rejects_structural_children(root: Path, db):
+    project, _project_id = make_project(root, db, "role-conversion-children")
+    for name in ("camera", "camera-v1", "团片协作", "team-v1"):
+        (project / name).mkdir()
+    camera = workspace_db.progress_register(str(root), db, {
+        "projectName": "role-conversion-children", "mediaKind": "image", "versionKey": "camera-source",
+        "displayName": "camera", "folderPath": str(project / "camera"), "nodeRole": "original", "trackingEnabled": False,
+    })["progressFolder"]
+    workspace_db.progress_register(str(root), db, {
+        "projectName": "role-conversion-children", "mediaKind": "image", "versionKey": "1",
+        "displayName": "camera-v1", "folderPath": str(project / "camera-v1"), "nodeRole": "progress",
+        "parentProgressId": camera["id"], "relationKind": "main", "trackingEnabled": False,
+    })
+    try:
+        workspace_db.media_workflow_import_commit(str(root), db, {
+            "schemaVersion": 2, "projectName": "role-conversion-children", "importSessionId": "camera-companion",
+            "artifacts": [{"relativePath": "camera", "mediaKind": "image", "importSlot": "camera_jpg", "displayName": "camera"}],
+        })
+        raise AssertionError("original with structural children was converted to companion")
+    except ValueError as error:
+        assert "import_graph_role_conflict" in str(error) and "结构子节点" in str(error)
+    assert db.execute("SELECT node_role,artifact_kind FROM progress_folders WHERE id=?", (camera["id"],)).fetchone()[:] == ("original", None)
+
+    team_source = workspace_db.progress_register(str(root), db, {
+        "projectName": "role-conversion-children", "mediaKind": "image", "versionKey": "team-source",
+        "displayName": "团片协作", "folderPath": str(project / "团片协作"), "nodeRole": "original", "trackingEnabled": False,
+    })["progressFolder"]
+    workspace_db.progress_register(str(root), db, {
+        "projectName": "role-conversion-children", "mediaKind": "image", "versionKey": "team-1",
+        "displayName": "team-v1", "folderPath": str(project / "team-v1"), "nodeRole": "progress",
+        "parentProgressId": team_source["id"], "relationKind": "main", "trackingEnabled": False,
+    })
+    try:
+        workspace_db.ensure_team_workflow_node(str(root), db, workspace_db.project_row(db, "role-conversion-children"))
+        raise AssertionError("original with structural children was converted to workflow")
+    except ValueError as error:
+        assert "role_conversion_children_forbidden" in str(error)
+    assert db.execute("SELECT node_role,artifact_kind FROM progress_folders WHERE id=?", (team_source["id"],)).fetchone()[:] == ("original", None)
+
+
 def main():
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary) / "workspace"
@@ -374,6 +452,7 @@ def main():
             test_import_mapping_follows_external_rename(root, db)
             test_manual_media_adoption(root, db)
             test_selection_mainline_repair(root, db)
+            test_role_conversion_rejects_structural_children(root, db)
         finally:
             db.close()
     print("media workflow graph database tests passed")

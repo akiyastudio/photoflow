@@ -291,7 +291,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
               : component.source === 'development' ? '开发组件' : component.compatible ? '已安装' : '已安装但不可用';
       const busy = busyId === component.id;
       const canUninstall = component.installed && component.source === 'user';
-      const hasInstallablePackage = Boolean(component.packagePath && (component.packageCompatible ?? component.compatible) && component.status !== 'package-invalid');
+      const hasInstallablePackage = Boolean(component.source !== 'development' && component.packagePath && (component.packageCompatible ?? component.compatible) && component.status !== 'package-invalid');
       const trustText = component.integrityStatus === 'verified' ? '完整性已验证' : component.integrityMessage || '';
       const details = [component.description, stateText, component.version ? `版本 ${component.version}` : '', component.installed ? formatComponentSize(component.sizeBytes) : '', trustText, component.error || component.packageError || ''].filter(Boolean).join(' · ');
       return <SettingsRow key={component.id} title={component.name} description={details}><div className="ml-auto flex w-fit items-center gap-2"><button type="button" onClick={() => void openFolder(component.installed ? component.id : undefined)} className="dialog-secondary inline-flex items-center gap-1.5"><FolderOpen size={13}/>目录</button>{hasInstallablePackage && (!component.installed || component.updateAvailable || !component.compatible) && <button type="button" onClick={() => void install(component)} disabled={Boolean(busyId)} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}{component.updateAvailable ? '更新' : component.installed ? '重新安装' : '安装'}</button>}{canUninstall ? <button type="button" onClick={() => void uninstall(component)} disabled={Boolean(busyId)} className="inline-flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}卸载</button> : component.installed ? <span className="text-xs text-slate-400">{component.source === 'development' ? '由源码提供' : '系统组件'}</span> : null}</div></SettingsRow>;
@@ -328,7 +328,7 @@ const PROJECT_TOOLBAR_ITEMS: Record<ProjectToolbarActionId, { label: string; des
   'image-tools': { label: '图片工具', description: 'PNG 转 JPG 和提取截图主图', icon: <ImageIcon size={17}/> },
   photoshop: { label: '用 Photoshop 打开', description: '用 Photoshop 打开所选图片、RAW 或 PSD/PSB', icon: <span className="flex h-[17px] w-[17px] items-center justify-center rounded border border-blue-400 text-[9px] font-bold text-blue-600">Ps</span> },
   'office-extract': { label: '提取文档图片', description: '提取 Word、PowerPoint 和 Excel 中的图片', icon: <FileImage size={17}/> },
-  'version-management': { label: '版本管理', description: '管理素材版本或标记进度文件夹', icon: <GitBranch size={17}/> },
+  'version-management': { label: '版本管理', description: '管理素材版本或标记文件夹用途', icon: <GitBranch size={17}/> },
 };
 
 const ProjectToolbarSettingsEditor = ({ value, onChange }: { value: AppConfig['projectToolbar']; onChange: (value: AppConfig['projectToolbar']) => void }) => {

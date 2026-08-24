@@ -25,7 +25,7 @@ import { useStartupSdAutoImport } from './features/tools/use-startup-sd-auto-imp
 import { normalizeSavedSdDeviceRecords } from './features/tools/sd-startup-import-model';
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
 import { normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
-import type { AppConfig, BackupStatus, ComponentHostAction, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
+import type { AppConfig, BackupStatus, ComponentHostAction, ComponentPageOpenScope, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
 import { ColumnResizeHandle } from './features/app/AppShellLayout';
 import { clampNumber, readStoredNumber } from './features/app/app-shell-layout-model';
 import { DEFAULT_CONFIG, DEFAULT_HOME_ORDER, IMAGE_SELECTION_FOLDER_NAME, VIDEO_SELECTION_FOLDER_NAME, isMac, localDateKey, normalizeHomeOrder, normalizeMediaCacheSize, normalizeProjectCategories, normalizeProjectToolbar, normalizeVideoPreviewQuality } from './features/app/app-config';
@@ -596,7 +596,7 @@ const App: React.FC = () => {
     if (projectPage?.project) { setSelectedProject(projectPage.project); setProjectDestination(projectPage.project.path); }
     componentHost.activate(page); setActiveTab('component');
   };
-  const openComponentPage = async (action: ComponentHostAction, project: WorkspaceProject, workspacePath: string) => {
+  const openComponentPage = async (action: ComponentHostAction, project: WorkspaceProject, workspacePath: string, scope?: ComponentPageOpenScope) => {
     const insertAfterTabId = activeTab === 'home' ? 'home'
       : activeTab === 'settings' ? 'settings'
         : activeTab === 'component' && activeComponentPageIdentity ? componentTabId(activeComponentPageIdentity)
@@ -604,7 +604,7 @@ const App: React.FC = () => {
             : activeTab === 'inspiration' && activePageId ? inspirationTabId(activePageId)
               : activePageId ? projectTabId(activePageId) : 'home';
     setSelectedProject(project); setProjectDestination(project.path); setActiveTab('component');
-    if (!await componentHost.open(action, project, workspacePath, insertAfterTabId)) setActiveTab('project');
+    if (!await componentHost.open(action, project, workspacePath, insertAfterTabId, scope)) setActiveTab('project');
   };
   const closeComponentPageTab = (page: typeof componentPages[number]) => componentHost.close(page);
   const disposeProjectComponentPages = componentHost.disposeProject;
@@ -862,7 +862,7 @@ const App: React.FC = () => {
             workspacePath={project.workspacePath || config.workspacePath}
             inspirationLibraryRootPath={config.inspirationLibrary.rootPath}
             installedComponentIds={installedComponentIds}
-            componentHostActions={componentHostActions} onOpenComponentPage={action => void openComponentPage(action, project, project.workspacePath || config.workspacePath)}
+            componentHostActions={componentHostActions} onOpenComponentPage={(action, scope) => void openComponentPage(action, project, project.workspacePath || config.workspacePath, scope)}
             advancedVideoSettings={config.videoPlayback}
             projectToolbar={config.projectToolbar}
             customProjectCategories={config.customProjectCategories}

@@ -5,6 +5,7 @@ const MAX_LINE_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 60 * 1000;
 const LONG_RUNNING_METHODS = new Set(['team.workflow.generate.v1', 'team.workflow.return-batch.v1', 'team.patch.return-batch.v1']);
 const LONG_REQUEST_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+const COALESCED_READ_METHODS = new Set(['team.project.get.v1', 'component.settings.get.v1', 'component.advanced.preflight.v1']);
 
 const cloneRequestPayload = payload => {
   if (payload === undefined || payload === null) return {};
@@ -42,6 +43,8 @@ class ComponentServiceManager {
     this.executablePath = executablePath;
     this.writeLog = writeLog;
     this.sessions = new Map();
+    this.sessionTransitions = new Map();
+    this.inflightReads = new Map();
     this.nextRequestId = 1;
   }
 
@@ -52,52 +55,89 @@ class ComponentServiceManager {
   async invoke(componentId, method, payload, boundContext) {
     const descriptor = this.registry.resolve(componentId);
     if (!descriptor?.service?.rpcMethods.includes(String(method || ''))) throw new Error(`Unknown component service RPC method: ${method}`);
+    this.capabilityBroker.assertCapabilities(descriptor);
+    const normalizedMethod = String(method || '');
+    const normalizedPayload = cloneRequestPayload(payload);
+    if (COALESCED_READ_METHODS.has(normalizedMethod)) {
+      const key = JSON.stringify([descriptor.componentId, descriptor.componentVersion, normalizedMethod, path.resolve(String(boundContext.workspacePath || '.')).toLocaleLowerCase(), boundContext.projectId, boundContext.projectName, boundContext.projectStatus, normalizedPayload]);
+      const existing = this.inflightReads.get(key);
+      if (existing) return existing;
+      const operation = this.invokeOnce(descriptor, normalizedMethod, normalizedPayload, boundContext).finally(() => {
+        if (this.inflightReads.get(key) === operation) this.inflightReads.delete(key);
+      });
+      this.inflightReads.set(key, operation);
+      return operation;
+    }
+    return this.invokeOnce(descriptor, normalizedMethod, normalizedPayload, boundContext);
+  }
+
+  async invokeOnce(descriptor, method, payload, boundContext) {
     const session = await this.ensureSession(descriptor);
     await session.ready;
     const id = String(this.nextRequestId++);
-    const message = { type: 'request', id, method, payload: cloneRequestPayload(payload), context: publicContext(boundContext) };
+    const message = { type: 'request', id, method, payload, context: publicContext(boundContext) };
     return new Promise((resolve, reject) => {
+      const startedAt = Date.now();
       const timer = setTimeout(() => {
+        const pending = session.pending.get(id);
+        if (!pending) return;
         session.pending.delete(id);
-        reject(new Error(`Component service request timed out: ${method}`));
+        const elapsedMs = Date.now() - startedAt;
+        const capability = pending.lastCapability
+          ? `; last capability ${pending.lastCapability} for ${Math.max(0, Date.now() - pending.capabilityStartedAt)}ms`
+          : '; no capability response was pending';
+        const error = new Error(`Component service request timed out after ${elapsedMs}ms: ${descriptor.componentId}.${method}${capability}`);
+        error.code = 'COMPONENT_SERVICE_TIMEOUT';
+        this.writeLog('warn', 'Component service request timed out', { componentId: descriptor.componentId, method, elapsedMs, lastCapability: pending.lastCapability || '', pendingCount: session.pending.size });
+        reject(error);
       }, LONG_RUNNING_METHODS.has(String(method || '')) ? LONG_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
       timer.unref?.();
-      session.pending.set(id, { resolve, reject, timer, context: boundContext });
+      session.pending.set(id, { resolve, reject, timer, context: boundContext, method, startedAt, lastCapability: '', capabilityStartedAt: 0 });
       try { this.writeFrame(session, message); }
       catch (error) { clearTimeout(timer); session.pending.delete(id); reject(error); }
     });
   }
 
   async ensureSession(descriptor) {
-    const existing = this.sessions.get(descriptor.componentId);
+    const componentId = descriptor.componentId;
+    const existing = this.sessions.get(componentId);
     if (existing && existing.version === descriptor.componentVersion && !existing.managed.released) return existing;
-    if (existing) await existing.managed.stop('component-version-changed');
-    const service = descriptor.service;
-    const nodeRuntime = service.runtime === 'node';
-    const command = nodeRuntime ? this.executablePath : service.entry;
-    const args = nodeRuntime ? [service.entry] : [];
-    const options = {
-      cwd: path.dirname(service.entry),
-      env: { ...serviceEnvironment(), ...(nodeRuntime ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    };
-    const session = {
-      descriptor, version: descriptor.componentVersion, pending: new Map(), bufferBytes: 0,
-      ready: null, readyResolve: null, readyReject: null, readySettled: false, managed: null,
-    };
-    prepareReady(session);
-    session.managed = this.processSupervisor.launch({
-      id: `component-service:${descriptor.componentId}`,
-      kind: 'component-service', command, args, options,
-      health: { startupTimeoutMs: 15000 },
-      restart: { enabled: true, maxRestarts: 2, windowMs: 60000, backoffMs: [100, 500] },
-      onSpawn: (child, managed) => this.attach(session, child, managed),
-    });
-    session.managed.on('restart-exhausted', () => {
-      if (!session.readySettled) session.readyReject(new Error('Component service restart limit reached'));
-    });
-    this.sessions.set(descriptor.componentId, session);
-    return session;
+    const activeTransition = this.sessionTransitions.get(componentId);
+    if (activeTransition) { await activeTransition; return this.ensureSession(descriptor); }
+    const transition = (async () => {
+      const current = this.sessions.get(componentId);
+      if (current && current.version === descriptor.componentVersion && !current.managed.released) return current;
+      if (current) await current.managed.stop('component-version-changed');
+      const service = descriptor.service;
+      const nodeRuntime = service.runtime === 'node';
+      const command = nodeRuntime ? this.executablePath : service.entry;
+      const args = nodeRuntime ? [service.entry] : [];
+      const options = {
+        cwd: path.dirname(service.entry),
+        env: { ...serviceEnvironment(), ...(nodeRuntime ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      };
+      const session = {
+        descriptor, version: descriptor.componentVersion, pending: new Map(), bufferBytes: 0,
+        ready: null, readyResolve: null, readyReject: null, readySettled: false, managed: null,
+      };
+      prepareReady(session);
+      session.managed = this.processSupervisor.launch({
+        id: `component-service:${componentId}`,
+        kind: 'component-service', command, args, options,
+        health: { startupTimeoutMs: 15000 },
+        restart: { enabled: true, maxRestarts: 2, windowMs: 60000, backoffMs: [100, 500] },
+        onSpawn: (child, managed) => this.attach(session, child, managed),
+      });
+      session.managed.on('restart-exhausted', () => {
+        if (!session.readySettled) session.readyReject(new Error('Component service restart limit reached'));
+      });
+      this.sessions.set(componentId, session);
+      return session;
+    })();
+    this.sessionTransitions.set(componentId, transition);
+    try { return await transition; }
+    finally { if (this.sessionTransitions.get(componentId) === transition) this.sessionTransitions.delete(componentId); }
   }
 
   attach(session, child, managed) {
@@ -114,8 +154,12 @@ class ComponentServiceManager {
     });
     child.once('exit', () => {
       lines.close();
-      const error = new Error('Component service exited before completing requests');
-      for (const pending of session.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
+      for (const pending of session.pending.values()) {
+        clearTimeout(pending.timer);
+        const error = new Error(`Component service exited before completing ${session.descriptor.componentId}.${pending.method}`);
+        error.code = 'COMPONENT_SERVICE_EXITED';
+        pending.reject(error);
+      }
       session.pending.clear();
       if (session.readySettled) prepareReady(session);
     });
@@ -139,11 +183,19 @@ class ComponentServiceManager {
     if (frame?.type === 'capability') {
       const parent = session.pending.get(String(frame.parentId || ''));
       if (!parent) { this.writeFrame(session, { type: 'capability-response', id: frame.id, ok: false, error: 'Unknown parent request' }); return; }
+      parent.lastCapability = String(frame.method || '');
+      const capabilityStartedAt = Date.now();
+      parent.capabilityStartedAt = capabilityStartedAt;
       try {
         const result = await this.capabilityBroker.invoke(session.descriptor, frame.method, frame.payload, parent.context);
         this.writeFrame(session, { type: 'capability-response', id: frame.id, ok: true, result });
       } catch (error) {
         this.writeFrame(session, { type: 'capability-response', id: frame.id, ok: false, error: error.message || String(error) });
+      } finally {
+        if (session.pending.get(String(frame.parentId || '')) === parent && parent.capabilityStartedAt === capabilityStartedAt) {
+          parent.lastCapability = '';
+          parent.capabilityStartedAt = 0;
+        }
       }
       return;
     }
@@ -157,18 +209,21 @@ class ComponentServiceManager {
   }
 
   async stop(componentId, reason = 'component-service-stop') {
-    const session = this.sessions.get(String(componentId || ''));
+    const id = String(componentId || '');
+    await this.sessionTransitions.get(id)?.catch(() => undefined);
+    const session = this.sessions.get(id);
     if (!session) return false;
-    this.sessions.delete(String(componentId));
+    this.sessions.delete(id);
     await session.managed.stop(reason);
     return true;
   }
 
   async destroy() {
+    await Promise.allSettled([...this.sessionTransitions.values()]);
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
     await Promise.all(sessions.map(session => session.managed.stop('component-service-manager-destroy')));
   }
 }
 
-module.exports = { ComponentServiceManager, LONG_REQUEST_TIMEOUT_MS, MAX_LINE_BYTES, REQUEST_TIMEOUT_MS, cloneRequestPayload, prepareReady, publicContext, serviceEnvironment };
+module.exports = { COALESCED_READ_METHODS, ComponentServiceManager, LONG_REQUEST_TIMEOUT_MS, MAX_LINE_BYTES, REQUEST_TIMEOUT_MS, cloneRequestPayload, prepareReady, publicContext, serviceEnvironment };

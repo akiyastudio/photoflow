@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react';
+import type { DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { ProgressFolder, ProjectFileEntry, VersionGraphEdge } from '../types';
 import { layoutVersionTree, DEFAULT_VERSION_TREE_SPACING, versionTreeAreaSize, versionTreeCanvasBounds, allowedVersionTreeRelationKinds, versionTreeEdgeGeometry, versionTreeEdgePath, versionTreeEdgePresentation, versionTreeRelationLabel, type VersionTreeEdgeKind, type VersionTreeSupplementalEdgeKind, useVersionTreeCanvas, type VersionTreeDragState, progressRelationChangeError, projectVisibleVersionGraph, trackingStateLabel } from '../features/versioning/public';
 import { FILE_GRID_GAP } from '../features/workspace/marquee-selection-model';
@@ -28,6 +28,7 @@ type ProjectVersionTreeProps = {
   onRequestSupplementalEdgeCreate?: (sourceProgressId: string, targetProgressId: string, edgeKind: VersionTreeSupplementalEdgeKind) => void;
   onRequestCreateVersion?: (source: ProgressFolder, target: ProjectFileEntry) => void;
   onRequestCreateEmptyVersion?: (source: ProgressFolder, branch: boolean) => void;
+  onStartFileDrag?: (event: ReactDragEvent<HTMLDivElement>, entry: ProjectFileEntry) => void;
   canUndoRelation?: boolean;
   canRedoRelation?: boolean;
   onUndoRelation?: () => void;
@@ -69,7 +70,7 @@ const afterVersionTreePaint = (callback: () => void) => typeof window.requestAni
   ? window.requestAnimationFrame(callback)
   : globalThis.setTimeout(callback, 0);
 
-export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION_TREE_EDGES, entries, structureEntries = entries, selectedRelativePaths = EMPTY_VERSION_TREE_IDS, filterActive = false, activeRelativePath, gridIconSize, workspacePath, projectName, projectRelativePath, renderEntry, pendingChildId, hoverParentId, mutatingChildIds = EMPTY_VERSION_TREE_IDS, onBeginRelationEdit, onHoverRelationParent, onRequestRelationChange, onRequestSupplementalEdgeDelete, onRequestSupplementalEdgeReconnect, onRequestSupplementalEdgeCreate, onRequestCreateVersion, onRequestCreateEmptyVersion, canUndoRelation = false, canRedoRelation = false, onUndoRelation, onRedoRelation, onCancelRelationEdit, onNotice, onCanvasControllerChange }: ProjectVersionTreeProps) => {
+export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION_TREE_EDGES, entries, structureEntries = entries, selectedRelativePaths = EMPTY_VERSION_TREE_IDS, filterActive = false, activeRelativePath, gridIconSize, workspacePath, projectName, projectRelativePath, renderEntry, pendingChildId, hoverParentId, mutatingChildIds = EMPTY_VERSION_TREE_IDS, onBeginRelationEdit, onHoverRelationParent, onRequestRelationChange, onRequestSupplementalEdgeDelete, onRequestSupplementalEdgeReconnect, onRequestSupplementalEdgeCreate, onRequestCreateVersion, onRequestCreateEmptyVersion, onStartFileDrag, canUndoRelation = false, canRedoRelation = false, onUndoRelation, onRedoRelation, onCancelRelationEdit, onNotice, onCanvasControllerChange }: ProjectVersionTreeProps) => {
   const [pointerPoint, setPointerPoint] = useState<{ x: number; y: number } | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState('');
   const [dragState, setDragState] = useState<VersionTreeDragState>(null);
@@ -81,6 +82,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   const [viewportBounds, setViewportBounds] = useState({ left: 0, top: 0, width: 1600, height: 1000 });
   const [areaBandSizes, setAreaBandSizes] = useState<Partial<Record<VersionTreeAreaKind, VersionTreeAreaSize>>>({});
   const areaResizeRef = useRef<{ element: Element; pointerId: number; areaKind: VersionTreeAreaKind; axis: 'x' | 'y' | 'both'; startX: number; startY: number; width: number; height: number } | null>(null);
+  const nativeFileDragRef = useRef<{ nodeKey: string; pointerId: number } | null>(null);
   const dragStateRef = useRef<VersionTreeDragState>(null);
   const changeDragState = useCallback((next: VersionTreeDragState) => {
     dragStateRef.current = next;
@@ -110,6 +112,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
     const areaResize = areaResizeRef.current;
     if (areaResize?.element.hasPointerCapture(areaResize.pointerId)) areaResize.element.releasePointerCapture(areaResize.pointerId);
     areaResizeRef.current = null;
+    nativeFileDragRef.current = null;
     dragStateRef.current = null;
   }, []);
   const scopePath = normalizePath(activeRelativePath);
@@ -151,7 +154,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
     for (const mediaKind of ['image', 'video'] as const) {
       const mediaIds = new Set(versionItems.filter(item => item.folder.mediaKind === mediaKind).map(item => item.folder.id));
       const forest = layoutVersionTree({
-        nodes: versionItems.filter(item => mediaIds.has(item.folder.id)).map(({ folder }) => ({ id: folder.id, mediaKind: folder.mediaKind, nodeRole: folder.nodeRole, artifactKind: folder.artifactKind, relationKind: folder.relationKind, createdAt: folder.createdAt })),
+        nodes: versionItems.filter(item => mediaIds.has(item.folder.id)).map(({ folder }) => ({ id: folder.id, mediaKind, nodeRole: folder.nodeRole, artifactKind: folder.artifactKind, relationKind: folder.relationKind, createdAt: folder.createdAt })),
         edges: visibleEdges.filter(edge => mediaIds.has(edge.parentId) && mediaIds.has(edge.childId)).map(edge => ({ ...edge, id: edge.id || `${edge.parentId}:${edge.childId}:${edge.relationKind}` })),
         nodeWidth, nodeHeight, columnGap, rowGap, auxiliaryGap, rootGap,
       });
@@ -179,13 +182,25 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
     const otherTop = graphBottom ? graphBottom + rootGap + 12 : 0;
     // Keep loose folders in a compact horizontal shelf. They do not need the
     // wider column spacing reserved for relation arrows in the version graph.
+    const brollItems = versionItems.filter(item => item.folder.nodeRole === 'broll');
     const otherEntries = ordinaryEntries.filter(entry => !inferredExternalOriginalKind(entry));
-    const otherColumns = Math.max(1, otherEntries.length);
-    positioned.push(...otherEntries.map((entry, index) => ({
-      key: `entry:${normalizePath(entry.relativePath)}`,
-      nodeKey: `entry:${normalizePath(entry.relativePath)}`,
-      areaKind: 'other' as const,
-      entry,
+    const otherItems = [
+      ...brollItems.map(item => ({
+        key: `entry:${normalizePath(item.entry.relativePath)}`,
+        nodeKey: `progress:${item.folder.id}`,
+        areaKind: 'other' as const,
+        ...item,
+      })),
+      ...otherEntries.map(entry => ({
+        key: `entry:${normalizePath(entry.relativePath)}`,
+        nodeKey: `entry:${normalizePath(entry.relativePath)}`,
+        areaKind: 'other' as const,
+        entry,
+      })),
+    ];
+    const otherColumns = Math.max(1, otherItems.length);
+    positioned.push(...otherItems.map((item, index) => ({
+      ...item,
       x: index % otherColumns * (nodeWidth + otherColumnGap),
       y: otherTop + Math.floor(index / otherColumns) * (nodeHeight + rowGap),
     })));
@@ -616,9 +631,13 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
       </div>}
       {renderedItems.map(item => {
         const nodeHandlers = canvas.nodePointerHandlers(item.key);
-        const canBeParent = Boolean(item.folder && !item.folder.folderMissing && ['original', 'progress', 'selection', 'workflow'].includes(item.folder.nodeRole));
+        const canBeParent = Boolean(item.folder && !item.folder.folderMissing
+          && (item.folder.nodeRole === 'original' && !item.folder.artifactKind
+            || ['selection', 'workflow'].includes(item.folder.nodeRole)
+            || item.folder.nodeRole === 'progress' && item.folder.parentProgressId && item.folder.relationKind === 'main'));
         const hasInputRelation = Boolean(item.folder && layout.edges.some(edge => edge.childId === item.folder!.id && edge.parentId));
-        const canAcceptInput = Boolean(item.folder && (item.folder.nodeRole !== 'original' || item.folder.artifactKind));
+        const canAcceptInput = Boolean(item.folder && (['progress', 'selection', 'artifact', 'workflow'].includes(item.folder.nodeRole)
+          || item.folder.nodeRole === 'original' && item.folder.artifactKind));
         const createVersionTarget = !item.folder && isVersionFolderEntry(item.entry) && (!item.entry.viaShortcut || item.entry.viaExternalLink);
         const candidateError = item.folder && activeRelationChildId ? relationError(activeRelationChildId, item.folder.id) : '';
         const candidateHovered = Boolean(item.folder && activeRelationChildId && hoverParentId === item.folder.id);
@@ -631,7 +650,39 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
               : candidateHovered
                 ? 'bg-emerald-500'
                 : 'bg-blue-600';
-        return <div key={item.key} {...nodeHandlers} data-version-tree-node="true" data-version-progress-id={item.folder?.id} data-version-output-target-key={createVersionTarget || item.folder ? item.key : undefined} onPointerDownCapture={() => setSelectedNodeKey(item.key)} onFocusCapture={() => setSelectedNodeKey(item.key)} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }} className={`group/version-node absolute z-20 cursor-grab rounded-xl active:cursor-grabbing ${createVersionTargetKey === item.key ? 'ring-2 ring-emerald-400 ring-offset-2' : ''}`} data-node-role={item.folder?.nodeRole} data-tracking-label={item.folder ? trackingStateLabel(item.folder) : undefined} style={{ left: item.x, top: item.y, width: nodeWidth, minHeight: nodeHeight, touchAction: 'none' }}>
+        return <div key={item.key} {...nodeHandlers} draggable={false} data-version-tree-node="true" data-version-progress-id={item.folder?.id} data-version-output-target-key={createVersionTarget || item.folder && item.folder.nodeRole !== 'broll' ? item.key : undefined} onPointerDownCapture={event => {
+          setSelectedNodeKey(item.key);
+          if (event.button !== 0 || !(event.ctrlKey || event.metaKey) || !onStartFileDrag || (event.target as Element).closest('button,input,select,textarea,[data-version-tree-port]')) return;
+          nativeFileDragRef.current = { nodeKey: item.key, pointerId: event.pointerId };
+          event.currentTarget.draggable = true;
+          // Ctrl-drag belongs to the OS file-drag path. Do not let the canvas
+          // node handler claim this pointer and persist a new layout position.
+          event.stopPropagation();
+        }} onPointerUpCapture={event => {
+          const nativeDrag = nativeFileDragRef.current;
+          if (!nativeDrag || nativeDrag.nodeKey !== item.key || nativeDrag.pointerId !== event.pointerId) return;
+          nativeFileDragRef.current = null;
+          event.currentTarget.draggable = false;
+        }} onPointerCancelCapture={event => {
+          const nativeDrag = nativeFileDragRef.current;
+          if (!nativeDrag || nativeDrag.nodeKey !== item.key || nativeDrag.pointerId !== event.pointerId) return;
+          nativeFileDragRef.current = null;
+          event.currentTarget.draggable = false;
+        }} onDragStart={event => {
+          const nativeDrag = nativeFileDragRef.current;
+          if (!nativeDrag || nativeDrag.nodeKey !== item.key || !onStartFileDrag) { event.preventDefault(); return; }
+          event.stopPropagation();
+          try { onStartFileDrag(event, item.entry); }
+          finally {
+            // Electron owns the drag after startProjectFileDrag is sent and a
+            // cancelled HTML drag is not guaranteed to emit dragend.
+            nativeFileDragRef.current = null;
+            event.currentTarget.draggable = false;
+          }
+        }} onDragEnd={event => {
+          nativeFileDragRef.current = null;
+          event.currentTarget.draggable = false;
+        }} onFocusCapture={() => setSelectedNodeKey(item.key)} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }} className={`group/version-node absolute z-20 cursor-grab rounded-xl active:cursor-grabbing ${createVersionTargetKey === item.key ? 'ring-2 ring-emerald-400 ring-offset-2' : ''}`} data-node-role={item.folder?.nodeRole} data-tracking-label={item.folder ? trackingStateLabel(item.folder) : undefined} style={{ left: item.x, top: item.y, width: nodeWidth, minHeight: nodeHeight, touchAction: 'none' }}>
         {renderEntry(item.entry, item.folder, item.sourceKind)}
         {item.folder && <>
           {canAcceptInput && <button type="button" data-version-tree-port="true" disabled={mutatingIds.has(item.folder.id)} aria-label={hasInputRelation ? `断开 ${item.folder.displayName} 的输入连接` : `${item.folder.displayName} 等待输入连接`} title={mutatingIds.has(item.folder.id) ? '关系正在更新' : hasInputRelation ? '按下只会断开左侧输入连接' : '空输入端：请从来源节点右侧输出端拖入'} onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation(); if (hasInputRelation) removeNodeInput(item.folder!); else onNotice('左侧触点只用于断开已有连接；请从来源节点右侧拖出新线。'); }} onClick={event => { event.preventDefault(); event.stopPropagation(); }} className="absolute -left-2.5 top-1/2 z-20 flex h-5 w-5 -translate-y-1/2 items-center justify-center opacity-0 transition-opacity group-hover/version-node:opacity-100 group-focus-within/version-node:opacity-100 focus:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"><span aria-hidden className={`h-2.5 w-2.5 rounded-full border-2 shadow ${hasInputRelation ? 'border-white bg-red-500' : 'border-slate-400 bg-white'}`}/></button>}

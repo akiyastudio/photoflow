@@ -150,7 +150,7 @@ def test_schema_17_cycle_repairs(root: Path) -> None:
                 (repaired_id,),
             ).fetchone()
             assert repaired["parent_progress_id"] is None and repaired["relation_kind"] is None
-            assert repaired["node_role"] == "progress"
+            assert repaired["node_role"] == "original", "cycle repair must leave a legal structural root instead of an orphan progress parent"
             repair_log = db.execute("SELECT * FROM progress_relation_repair_log").fetchall()
             assert len(repair_log) == 1
             assert repair_log[0]["repaired_progress_id"] == repaired_id
@@ -364,9 +364,9 @@ def test_v2_node_operations(root: Path) -> None:
         assert selection["id"] not in branch_ids
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
 
-        # If a deleted original has only a surviving auxiliary selection child,
-        # maintenance removes both relationship records but never touches the
-        # real selection folder or its user media.
+        # If a deleted original has a surviving child but no replacement parent,
+        # maintenance preserves both relationship records for explicit repair
+        # and never touches the real selection folder or its user media.
         orphan_source_folder = project / "孤立来源"
         orphan_selection_folder = project / "孤立来源_选片"
         orphan_source_folder.mkdir()
@@ -392,18 +392,18 @@ def test_v2_node_operations(root: Path) -> None:
             str(workspace), str(database), "maintenance_run", {"progressTombstoneCutoff": 1}
         )["progressTombstones"]
         db = workspace_db.connect(str(workspace), str(database))
-        assert set(orphan_maintenance["removedProgressIds"]) == {orphan_source["id"], orphan_selection["id"]}
-        assert orphan_maintenance["removedSelectionMetadataIds"] == [orphan_selection["id"]]
-        assert orphan_source["id"] not in orphan_maintenance["skippedProgressIds"]
+        assert orphan_maintenance["removedProgressIds"] == []
+        assert orphan_maintenance["removedSelectionMetadataIds"] == []
+        assert orphan_source["id"] in orphan_maintenance["skippedProgressIds"]
         assert db.execute(
             "SELECT COUNT(*) FROM progress_folders WHERE id IN (?,?)",
             (orphan_source["id"], orphan_selection["id"]),
-        ).fetchone()[0] == 0
+        ).fetchone()[0] == 2
         assert orphan_selection_folder.is_dir() and selected_media.read_bytes() == b"selected-user-media"
         listed_paths = {Path(item["folderPath"]) for item in workspace_db.progress_list(
             str(workspace), db, {"projectName": "Project", "includeMissing": True}
         )["progressFolders"]}
-        assert orphan_selection_folder.resolve() not in listed_paths
+        assert orphan_selection_folder.resolve() in listed_paths
     finally:
         db.close()
 
@@ -422,7 +422,7 @@ def test_v2_node_operations(root: Path) -> None:
 def test_relation_update_transactions(root: Path) -> None:
     workspace = root / "relation-workspace"
     project = workspace / "Project"
-    for name in ("RAW", "JPG", "MOV", "P1", "P2", "P3", "Selection", "VideoProgress"):
+    for name in ("RAW", "JPG", "MOV", "Source2", "P1", "P2", "P3", "Selection", "VideoProgress"):
         (project / name).mkdir(parents=True, exist_ok=True)
     database = root / "relations.sqlite3"
     db = workspace_db.connect(str(workspace), str(database))
@@ -437,6 +437,9 @@ def test_relation_update_transactions(root: Path) -> None:
         raw = next(item for item in originals if item["displayName"] == "RAW")
         jpg = next(item for item in originals if item["displayName"] == "JPG")
         mov = next(item for item in originals if item["displayName"] == "MOV")
+        source_two = workspace_db.progress_adopt_media(str(workspace), db, {
+            "projectName": "Project", "folderPath": str(project / "Source2"), "mode": "original", "mediaKind": "image",
+        })["progressFolder"]
         p1 = register(
             db, workspace, mediaKind="image", versionKey="p1", displayName="P1", folderPath=str(project / "P1"),
             nodeRole="progress", relationKind="main", parentProgressId=raw["id"], trackingEnabled=True,
@@ -456,20 +459,25 @@ def test_relation_update_transactions(root: Path) -> None:
         )
 
         moved = workspace_db.progress_relation_update(db, {
-            "childProgressId": p1["id"], "parentProgressId": jpg["id"], "expectedUpdatedAt": p1["updatedAt"],
+            "childProgressId": p1["id"], "parentProgressId": source_two["id"], "expectedUpdatedAt": p1["updatedAt"],
         })["progressFolder"]
-        assert moved["parentProgressId"] == jpg["id"] and moved["relationKind"] == "main"
+        assert moved["parentProgressId"] == source_two["id"] and moved["relationKind"] == "main"
         assert moved["trackingState"] == "stale" and moved["trackingSnapshot"] == {}
         assert moved["renameFromParent"] and moved["copyMissingFromParent"]
-        detached = workspace_db.progress_relation_update(db, {
-            "childProgressId": p2["id"], "parentProgressId": None, "expectedUpdatedAt": p2["updatedAt"],
-        })["progressFolder"]
-        assert detached.get("parentProgressId") is None and detached.get("relationKind") is None
+        try:
+            workspace_db.progress_relation_update(db, {
+                "childProgressId": p2["id"], "parentProgressId": None, "expectedUpdatedAt": p2["updatedAt"],
+            })
+            raise AssertionError("progress detach must use explicit unregister")
+        except ValueError as error:
+            assert "progress_detach_requires_unregister" in str(error)
+        unchanged_p2 = workspace_db.serialize_progress(workspace_db._progress_row_by_id(db, p2["id"]))
+        assert unchanged_p2["parentProgressId"] == p1["id"] and unchanged_p2["relationKind"] == "main"
         moved_selection = workspace_db.progress_relation_update(db, {
-            "childProgressId": selection["id"], "parentProgressId": jpg["id"], "expectedUpdatedAt": selection["updatedAt"],
+            "childProgressId": selection["id"], "parentProgressId": source_two["id"], "expectedUpdatedAt": selection["updatedAt"],
         })["progressFolder"]
-        assert moved_selection["parentProgressId"] == jpg["id"] and moved_selection["relationKind"] == "auxiliary"
-        assert moved_selection["versionKey"] == f"selection-{jpg['id']}"
+        assert moved_selection["parentProgressId"] == source_two["id"] and moved_selection["relationKind"] == "auxiliary"
+        assert moved_selection["versionKey"] == f"selection-{source_two['id']}"
 
         def rejected(payload, code):
             before = tuple(db.execute(
@@ -491,14 +499,13 @@ def test_relation_update_transactions(root: Path) -> None:
         tracking = workspace_db.tracking_session_create(str(workspace), db, {
             "projectName": "Project", "progressId": p1["id"], "mode": "refresh",
         })
-        detached_tracked = workspace_db.progress_relation_update(db, {
-            "childProgressId": p1["id"], "parentProgressId": None,
-        })["progressFolder"]
-        assert detached_tracked.get("parentProgressId") is None
-        assert not detached_tracked["trackingEnabled"] and detached_tracked["trackingState"] == "disabled"
-        assert not detached_tracked["renameFromParent"] and not detached_tracked["copyMissingFromParent"]
-        assert db.execute("SELECT 1 FROM tracking_sessions WHERE id=?", (tracking["sessionId"],)).fetchone() is None
+        rejected({"childProgressId": p1["id"], "parentProgressId": None}, "progress_detach_requires_unregister")
+        unchanged_tracked = workspace_db.serialize_progress(workspace_db._progress_row_by_id(db, p1["id"]))
+        assert unchanged_tracked["parentProgressId"] == source_two["id"] and unchanged_tracked["trackingEnabled"]
+        assert db.execute("SELECT 1 FROM tracking_sessions WHERE id=?", (tracking["sessionId"],)).fetchone() is not None
+        workspace_db.tracking_session_release(db, {"sessionId": tracking["sessionId"]})
         rejected({"childProgressId": raw["id"], "parentProgressId": jpg["id"]}, "original_parent_forbidden")
+        rejected({"childProgressId": p2["id"], "parentProgressId": jpg["id"]}, "invalid_parent_role")
         rejected({"childProgressId": p2["id"], "parentProgressId": selection["id"]}, "invalid_parent_role")
         rejected({"childProgressId": p2["id"], "parentProgressId": video_progress["id"]}, "media_kind_mismatch")
         current_p1 = workspace_db.serialize_progress(workspace_db._progress_row_by_id(db, p1["id"]))
@@ -694,13 +701,14 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
             "progress": {
                 "progressId": progress["id"], "mediaKind": "image", "versionKey": "1",
                 "displayName": "Progress", "folderPath": str(project / "Progress"),
+                "parentProgressId": raw["id"], "relationKind": "main",
                 "trackingEnabled": False, "trackingState": "disabled",
                 "renameFromParent": False, "copyMissingFromParent": False,
             },
             "workflowInputProgressIds": [],
         }), "node_busy")
         workspace_db.tracking_session_release(db, {"sessionId": tracking["sessionId"]})
-        detached_progress = workspace_db.progress_register_with_graph(str(workspace), db, {
+        rejected(lambda: workspace_db.progress_register_with_graph(str(workspace), db, {
             "projectName": "Project",
             "progress": {
                 "progressId": progress["id"], "mediaKind": "image", "versionKey": "1",
@@ -709,14 +717,17 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
                 "renameFromParent": False, "copyMissingFromParent": False,
             },
             "workflowInputProgressIds": [],
-        })["progressFolder"]
-        assert detached_progress.get("parentProgressId") is None
-        assert not detached_progress["trackingEnabled"] and detached_progress["trackingState"] == "disabled"
+        }), "progress_parent_required")
+        still_attached = workspace_db.serialize_progress(workspace_db._progress_row_by_id(db, progress["id"]))
+        assert still_attached["parentProgressId"] == raw["id"], "a rejected update must preserve the valid structural parent"
+        workspace_db.progress_unregister(str(workspace), db, {"projectName": "Project", "progressId": progress["id"]})
+        assert (project / "Progress").is_dir(), "explicit unregister must preserve the physical folder"
+        assert db.execute("SELECT 1 FROM progress_folders WHERE id=?", (progress["id"],)).fetchone() is None
         assert db.execute(
             """SELECT 1 FROM version_graph_edges WHERE source_progress_id=?
                AND target_progress_id=? AND edge_kind='workflow_input'""",
-            (selection["id"], detached_progress["id"]),
-        ).fetchone() is None, "disconnecting the original-material parent must remove its derived selection input"
+            (selection["id"], progress["id"]),
+        ).fetchone() is None, "explicit unregister must remove derived selection inputs"
         assert db.execute("SELECT 1 FROM tracking_sessions WHERE id=?", (tracking["sessionId"],)).fetchone() is None
 
         db.execute("DELETE FROM progress_folders WHERE id=?", (mov_preview["id"],))
@@ -1176,6 +1187,511 @@ def test_external_link_progress_is_persisted_and_sync_safe(root: Path) -> None:
         db.close()
 
 
+def test_folder_purposes_and_legacy_orphan_survive_reload(root: Path) -> None:
+    workspace = root / "folder-purpose-workspace"
+    project = workspace / "Project"
+    original_folder = project / "Original"
+    progress_folder = project / "Progress"
+    selection_folder = project / "Selection"
+    broll_folder = project / "Behind the scenes"
+    companion_folder = project / "Companion"
+    artifact_folder = project / "Artifact"
+    workflow_folder = project / "Workflow"
+    orphan_folder = project / "Legacy orphan"
+    for folder in (original_folder, progress_folder, selection_folder, broll_folder, companion_folder, artifact_folder, workflow_folder, orphan_folder):
+        folder.mkdir(parents=True)
+    (broll_folder / "still.jpg").write_bytes(b"still")
+    (broll_folder / "clip.mp4").write_bytes(b"clip")
+    database = root / "folder-purpose.sqlite3"
+    db = workspace_db.connect(str(workspace), str(database))
+    now = int(time.time() * 1000)
+    db.execute(
+        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES('folder-purpose-project','Project','后期中','Project',?,?)",
+        (now, now),
+    )
+    db.commit()
+    try:
+        original = workspace_db.progress_adopt_media(str(workspace), db, {
+            "projectName": "Project", "folderPath": str(original_folder),
+            "mode": "original", "mediaKind": "image",
+        })["progressFolder"]
+        selection = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": f"selection-{original['id']}",
+            "displayName": "Selection", "folderPath": str(selection_folder), "nodeRole": "selection",
+            "parentProgressId": original["id"], "relationKind": "auxiliary", "trackingEnabled": False,
+        })["progressFolder"]
+        try:
+            workspace_db.progress_register(str(workspace), db, {
+                "projectName": "Project", "progressId": selection["id"], "mediaKind": "image", "versionKey": selection["versionKey"],
+                "displayName": "Selection", "folderPath": str(selection_folder),
+                "parentProgressId": original["id"], "relationKind": "main", "trackingEnabled": False,
+            })
+            raise AssertionError("generic progress registration must not convert a selection role")
+        except ValueError as error:
+            assert "progress_role_change_forbidden" in str(error)
+        assert workspace_db._progress_row_by_id(db, selection["id"])["node_role"] == "selection"
+        broll_result = workspace_db.progress_adopt_media(str(workspace), db, {
+            "projectName": "Project", "folderPath": str(broll_folder),
+            "mode": "broll", "mediaKind": "mixed",
+        })
+        broll = broll_result["progressFolder"]
+        assert broll["nodeRole"] == "broll" and broll["mediaKind"] == "mixed"
+        assert broll.get("parentProgressId") is None and broll.get("relationKind") is None and broll.get("artifactKind") is None
+        assert not broll["trackingEnabled"] and broll["trackingState"] == "disabled"
+        try:
+            workspace_db.progress_policy_save(db, {
+                "progressId": broll["id"], "trackingEnabled": True,
+            })
+            raise AssertionError("broll tracking must be rejected")
+        except ValueError as error:
+            assert "broll" in str(error)
+        repeated = workspace_db.progress_adopt_media(str(workspace), db, {
+            "projectName": "Project", "folderPath": str(broll_folder),
+            "mode": "broll", "mediaKind": "mixed",
+        })
+        assert repeated["created"] is False and repeated["progressFolder"]["id"] == broll["id"]
+        companion = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "companion",
+            "displayName": "Companion", "folderPath": str(companion_folder), "nodeRole": "original",
+            "artifactKind": "companion", "trackingEnabled": False,
+        })["progressFolder"]
+        artifact = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "artifact",
+            "displayName": "Artifact", "folderPath": str(artifact_folder), "nodeRole": "artifact",
+            "artifactKind": "preview", "trackingEnabled": False,
+        })["progressFolder"]
+        workflow = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "workflow",
+            "displayName": "Workflow", "folderPath": str(workflow_folder), "nodeRole": "workflow",
+            "artifactKind": "team_workspace", "trackingEnabled": False,
+        })["progressFolder"]
+        progress = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "1",
+            "displayName": "Progress", "folderPath": str(progress_folder), "nodeRole": "progress",
+            "parentProgressId": original["id"], "relationKind": "main", "trackingEnabled": False,
+        })["progressFolder"]
+        try:
+            workspace_db.progress_register(str(workspace), db, {
+                "projectName": "Project", "mediaKind": "image", "versionKey": "2",
+                "displayName": "No parent", "folderPath": str(progress_folder), "nodeRole": "progress",
+                "trackingEnabled": False,
+            })
+            raise AssertionError("parentless progress must be rejected")
+        except ValueError as error:
+            assert "progress_parent_required" in str(error)
+
+        # Simulate a schema-30 orphan already present before the stricter role
+        # trigger was installed. Reinstalling the constraint must preserve the
+        # row so users can repair or explicitly unregister it.
+        for schema in [row[1] for row in db.execute("PRAGMA database_list").fetchall()]:
+            owns_progress = db.execute(
+                f'SELECT 1 FROM "{schema}".sqlite_master WHERE type=\'table\' AND name=\'progress_folders\''
+            ).fetchone()
+            if owns_progress:
+                db.execute(f'DROP TRIGGER IF EXISTS "{schema}".progress_folders_v2_shape_insert')
+                db.execute(f'DROP TRIGGER IF EXISTS "{schema}".progress_folders_v2_policy_insert')
+        db.execute(
+            """INSERT INTO progress_folders(
+                 id,project_id,media_kind,version_key,parent_progress_id,display_name,
+                 folder_path,folder_path_key,node_role,relation_kind,tracking_enabled,
+                 tracking_state,rename_from_parent,copy_missing_from_parent,
+                 tracking_snapshot_json,tombstone_json,created_at,updated_at)
+               VALUES('legacy-orphan','folder-purpose-project','image','legacy',NULL,'Legacy orphan',
+                 ?,?,'progress',NULL,1,'ready',0,0,'{}','{}',?,?)""",
+            (str(orphan_folder.resolve()), str(orphan_folder.resolve()).casefold(), now, now),
+        )
+        db.commit()
+        assert workspace_db._install_progress_purpose_constraints(db)
+        try:
+            workspace_db.progress_policy_save(db, {"progressId": "legacy-orphan", "trackingEnabled": True})
+            raise AssertionError("legacy orphan tracking policy must be rejected")
+        except ValueError as error:
+            assert "禁止开启版本跟踪" in str(error)
+        assert workspace_db.progress_mark_stale(db, {"progressId": "legacy-orphan"})["changed"] is False
+        try:
+            workspace_db.progress_mark_ready(db, {"progressId": "legacy-orphan", "trackingSnapshot": {}})
+            raise AssertionError("legacy orphan must not become tracking-ready")
+        except ValueError as error:
+            assert "main progress" in str(error)
+        db.execute("UPDATE progress_folders SET tracking_enabled=0,tracking_state='disabled' WHERE id='legacy-orphan'")
+        db.commit()
+        db.execute("DROP TRIGGER version_graph_edges_validate_insert")
+        db.execute(
+            """INSERT INTO version_graph_edges(id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
+               VALUES('legacy-orphan-preview','folder-purpose-project','legacy-orphan',?,'derived_preview',?,?)""",
+            (artifact["id"], now, now),
+        )
+        workspace_db._install_progress_purpose_constraints(db)
+        try:
+            workspace_db._check_integrity(db, force=True)
+            raise AssertionError("integrity accepted a legacy orphan as a graph endpoint")
+        except RuntimeError as error:
+            assert "version_graph_edges.owner_kind" in str(error)
+        graph_cleanup = workspace_db.cleanup_media_workflow_graph(str(workspace), db, session_cutoff=0)
+        assert graph_cleanup["removedEdgeIds"] == ["legacy-orphan-preview"]
+        for invalid in (broll, selection, companion, artifact, workflow, {"id": "legacy-orphan"}):
+            try:
+                workspace_db.progress_main_branch_media(db, {"progressId": invalid["id"]})
+                raise AssertionError(f"invalid main-branch progress was accepted: {invalid['id']}")
+            except ValueError as error:
+                assert "main_branch_progress_invalid" in str(error)
+        assert workspace_db.progress_main_branch_media(db, {"progressId": original["id"]})["progressId"] == original["id"]
+        assert workspace_db.progress_main_branch_media(db, {"progressId": progress["id"]})["progressId"] == progress["id"]
+        first = workspace_db.progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"]
+        second = workspace_db.progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"]
+        assert {item["id"] for item in first} == {item["id"] for item in second}
+        assert any(item["id"] == "legacy-orphan" and item.get("parentProgressId") is None for item in second)
+        assert any(item["id"] == progress["id"] and item["parentProgressId"] == original["id"] for item in second)
+        assert not db.execute(
+            "SELECT 1 FROM version_graph_edges WHERE source_progress_id=? OR target_progress_id=?",
+            (broll["id"], broll["id"]),
+        ).fetchone()
+    finally:
+        db.close()
+
+    reopened = workspace_db.connect(str(workspace), str(database))
+    try:
+        reloaded = workspace_db.progress_list(str(workspace), reopened, {"projectName": "Project"})["progressFolders"]
+        by_id = {item["id"]: item for item in reloaded}
+        assert by_id[broll["id"]]["nodeRole"] == "broll" and by_id[broll["id"]]["mediaKind"] == "mixed"
+        assert by_id["legacy-orphan"].get("parentProgressId") is None, "ordinary reload must never delete legacy orphan metadata"
+        assert broll_folder.is_dir() and (broll_folder / "still.jpg").is_file() and (broll_folder / "clip.mp4").is_file()
+        assert orphan_folder.is_dir(), "repair handling must not delete user folders"
+    finally:
+        reopened.close()
+
+
+def test_detached_missing_progress_cleanup_is_atomic(root: Path) -> None:
+    workspace = root / "detached-cleanup-workspace"
+    project = workspace / "Project"
+    original_folder = project / "Original"
+    progress_folder = project / "Progress"
+    preview_folder = project / "Preview"
+    companion_folder = project / "Companion"
+    original_folder.mkdir(parents=True)
+    progress_folder.mkdir()
+    preview_folder.mkdir()
+    companion_folder.mkdir()
+    (original_folder / "base.jpg").write_bytes(b"base")
+    (progress_folder / "edit.jpg").write_bytes(b"edit")
+    database = root / "detached-cleanup.sqlite3"
+    db = workspace_db.connect(str(workspace), str(database), include_domains=True, include_team=True)
+    now = int(time.time() * 1000)
+    db.execute(
+        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES('detached-project','Project','后期中','Project',?,?)",
+        (now, now),
+    )
+    db.commit()
+    try:
+        assert "versioning" in {row[1] for row in db.execute("PRAGMA database_list").fetchall()}
+        assert db.execute("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='progress_folders'").fetchone() is None
+        original = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "source",
+            "displayName": "Original", "folderPath": str(original_folder), "nodeRole": "original", "trackingEnabled": False,
+        })["progressFolder"]
+        progress = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "1",
+            "displayName": "Progress", "folderPath": str(progress_folder), "nodeRole": "progress",
+            "parentProgressId": original["id"], "relationKind": "main", "trackingEnabled": True, "trackingState": "ready",
+        })["progressFolder"]
+        try:
+            db.execute("UPDATE progress_folders SET artifact_kind='companion' WHERE id=?", (original["id"],))
+            raise AssertionError("detached parent trigger allowed original with structural child to become companion")
+        except sqlite3.IntegrityError as error:
+            assert "structural parent role conversion forbidden" in str(error)
+        db.execute("DROP TRIGGER versioning.progress_folders_structural_parent_update")
+        db.execute("UPDATE progress_folders SET artifact_kind='companion' WHERE id=?", (original["id"],))
+        try:
+            workspace_db._check_integrity(db, force=True)
+            raise AssertionError("integrity missed companion original acting as a structural parent")
+        except RuntimeError as error:
+            assert "progress_folders.v2_parent_role" in str(error)
+        db.execute("UPDATE progress_folders SET artifact_kind=NULL WHERE id=?", (original["id"],))
+        workspace_db._install_progress_purpose_constraints(db)
+        db.execute("UPDATE progress_folders SET missing_since=? WHERE id=?", (now, original["id"]))
+        db.execute("UPDATE progress_folders SET missing_since=NULL WHERE id=?", (original["id"],))
+        preview = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "preview",
+            "displayName": "Preview", "folderPath": str(preview_folder), "nodeRole": "artifact",
+            "artifactKind": "preview", "trackingEnabled": False,
+        })["progressFolder"]
+        companion = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "companion",
+            "displayName": "Companion", "folderPath": str(companion_folder), "nodeRole": "original",
+            "artifactKind": "companion", "trackingEnabled": False,
+        })["progressFolder"]
+        db.execute("DROP TRIGGER versioning.version_graph_edges_validate_insert")
+        db.execute(
+            """INSERT INTO version_graph_edges(id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
+               VALUES('invalid-detached-edge','detached-project',?,?,'derived_preview',?,?)""",
+            (companion["id"], preview["id"], now, now),
+        )
+        try:
+            workspace_db._check_integrity(db, force=True)
+            raise AssertionError("integrity missed companion source for a derived preview edge")
+        except RuntimeError as error:
+            assert "version_graph_edges.owner_kind" in str(error)
+        db.execute("DELETE FROM version_graph_edges WHERE id='invalid-detached-edge'")
+        workspace_db._install_progress_purpose_constraints(db)
+        edge = workspace_db.version_graph_edge_create(db, {
+            "projectId": "detached-project", "sourceProgressId": progress["id"],
+            "targetProgressId": preview["id"], "edgeKind": "derived_preview",
+        })["edge"]
+        workspace_db.batch_register_baseline(str(workspace), db, {"projectName": "Project", "folderPath": str(original_folder)})
+        committed = workspace_db.batch_commit_compare(str(workspace), db, {
+            "projectName": "Project", "folderA": str(original_folder), "folderB": str(progress_folder),
+            "importKey": "detached-cleanup-batch", "displayName": "Progress",
+            "matches": [{"reference": "base.jpg", "source": "edit.jpg", "target": "edit.jpg", "distance": 0, "confidence": "high"}],
+        })
+        batch_id = committed["batch"]["id"]
+        db.execute(
+            """INSERT INTO batch_file_operations(
+                 id,batch_id,operation_type,source_path,target_path,status,attempt_count,error,created_at,updated_at)
+               VALUES('detached-operation',?,'rename','old.jpg','new.jpg','pending',0,'',?,?)""",
+            (batch_id, now, now),
+        )
+        session = workspace_db.tracking_session_create(str(workspace), db, {
+            "projectName": "Project", "progressId": progress["id"], "mode": "compare",
+        })
+        workspace_db.tracking_store_preview(db, {
+            "sessionId": session["sessionId"],
+            "items": [{"kind": "recognized", "sourceName": "edit.jpg", "referenceName": "base.jpg", "targetName": "edit.jpg", "status": "recognized"}],
+        })
+        db.execute(
+            """INSERT INTO media_import_artifact_slots(
+                 project_id,progress_id,import_slot,relative_path_key,created_at,updated_at)
+               VALUES('detached-project',?,'raw','detached-progress-slot',?,?)""",
+            (progress["id"], now, now),
+        )
+        workspace_db.version_tree_layout_save(db, {
+            "projectName": "Project", "scopeKey": "", "expectedRevision": 0, "mode": "patch",
+            "positions": [{"nodeKey": f"progress:{progress['id']}", "x": 10, "y": 20}],
+        })
+        db.commit()
+
+        (progress_folder / "edit.jpg").unlink()
+        progress_folder.rmdir()
+        workspace_db.progress_list(str(workspace), db, {"projectName": "Project", "includeMissing": True})
+        db.execute(
+            f"""CREATE TRIGGER versioning.fail_detached_progress_delete BEFORE DELETE ON progress_folders
+                  WHEN OLD.id='{progress['id']}' BEGIN SELECT RAISE(ABORT,'forced detached cleanup failure'); END"""
+        )
+        try:
+            workspace_db.progress_delete_missing(str(workspace), db, {"projectName": "Project", "progressId": progress["id"]})
+            raise AssertionError("forced detached cleanup failure was ignored")
+        except sqlite3.IntegrityError as error:
+            assert "forced detached cleanup failure" in str(error)
+        assert db.execute("SELECT COUNT(*) FROM batch_items WHERE batch_id=?", (batch_id,)).fetchone()[0] > 0
+        assert db.execute("SELECT COUNT(*) FROM tracking_sessions WHERE id=?", (session["sessionId"],)).fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM version_graph_edges WHERE id=?", (edge["id"],)).fetchone()[0] == 1
+        db.execute("DROP TRIGGER versioning.fail_detached_progress_delete")
+        removed = workspace_db.progress_delete_missing(str(workspace), db, {"projectName": "Project", "progressId": progress["id"]})
+        assert removed["success"] and removed["deletedBatchCount"] == 1
+        assert db.execute("SELECT COUNT(*) FROM batch_items WHERE batch_id=?", (batch_id,)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM batch_file_operations WHERE batch_id=?", (batch_id,)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM tracking_session_items WHERE session_id=?", (session["sessionId"],)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM tracking_sessions WHERE id=?", (session["sessionId"],)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM media_import_artifact_slots WHERE progress_id=?", (progress["id"],)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM version_graph_edges WHERE id=?", (edge["id"],)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM version_tree_node_positions WHERE node_key=?", (f"progress:{progress['id']}",)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM version_batches WHERE id=?", (batch_id,)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM progress_folders WHERE id=?", (progress["id"],)).fetchone()[0] == 0
+        workspace_db._check_integrity(db, force=True)
+    finally:
+        db.close()
+
+
+def test_detached_reconcile_repairs_legacy_dangling_projections(root: Path) -> None:
+    workspace = root / "detached-reconcile-workspace"
+    project = workspace / "Project"
+    folders = {
+        name: project / name
+        for name in ("Original", "Progress", "DisposableProgress", "DisposableOriginal", "Preview")
+    }
+    for folder in folders.values():
+        folder.mkdir(parents=True, exist_ok=True)
+    (folders["Original"] / "base.jpg").write_bytes(b"base")
+    (folders["Progress"] / "edit.jpg").write_bytes(b"edit")
+    (folders["DisposableProgress"] / "discard.jpg").write_bytes(b"discard")
+    database = root / "detached-reconcile.sqlite3"
+    db = workspace_db.connect(str(workspace), str(database), include_domains=True, include_team=True)
+    now = int(time.time() * 1000)
+    db.execute(
+        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES('reconcile-project','Project','后期中','Project',?,?)",
+        (now, now),
+    )
+    db.commit()
+
+    def clone_row(table: str, source_id: str, replacement: dict) -> None:
+        source = db.execute(f"SELECT * FROM {table} WHERE id=?", (source_id,)).fetchone()
+        assert source is not None
+        values = dict(source)
+        values.update(replacement)
+        columns = list(values)
+        db.execute(
+            f"INSERT INTO {table}({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+            tuple(values[column] for column in columns),
+        )
+
+    try:
+        assert "versioning" in {row[1] for row in db.execute("PRAGMA database_list").fetchall()}
+        original = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "source",
+            "displayName": "Original", "folderPath": str(folders["Original"]),
+            "nodeRole": "original", "trackingEnabled": False,
+        })["progressFolder"]
+        progress = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "1",
+            "displayName": "Progress", "folderPath": str(folders["Progress"]),
+            "nodeRole": "progress", "parentProgressId": original["id"],
+            "relationKind": "main", "trackingEnabled": True, "trackingState": "ready",
+        })["progressFolder"]
+        disposable_progress = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "2",
+            "displayName": "DisposableProgress", "folderPath": str(folders["DisposableProgress"]),
+            "nodeRole": "progress", "parentProgressId": progress["id"],
+            "relationKind": "main", "trackingEnabled": True, "trackingState": "ready",
+        })["progressFolder"]
+        disposable_original = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "disposable-source",
+            "displayName": "DisposableOriginal", "folderPath": str(folders["DisposableOriginal"]),
+            "nodeRole": "original", "trackingEnabled": False,
+        })["progressFolder"]
+        preview = workspace_db.progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "preview",
+            "displayName": "Preview", "folderPath": str(folders["Preview"]),
+            "nodeRole": "artifact", "artifactKind": "preview", "trackingEnabled": False,
+        })["progressFolder"]
+
+        baseline = workspace_db.batch_register_baseline(
+            str(workspace), db, {"projectName": "Project", "folderPath": str(folders["Original"])}
+        )
+        committed = workspace_db.batch_commit_compare(str(workspace), db, {
+            "projectName": "Project", "folderA": str(folders["Original"]),
+            "folderB": str(folders["Progress"]), "importKey": "legacy-dirty-batch",
+            "displayName": "Progress", "matches": [{
+                "reference": "base.jpg", "source": "edit.jpg", "target": "edit.jpg",
+                "distance": 0, "confidence": "high",
+            }],
+        })
+        valid_batch_id = baseline["batch"]["id"]
+        missing_batch_id = committed["batch"]["id"]
+        db.execute(
+            """INSERT INTO batch_file_operations(
+                 id,batch_id,operation_type,source_path,target_path,status,attempt_count,error,created_at,updated_at)
+               VALUES('valid-operation',?,'rename','valid-old.jpg','valid-new.jpg','pending',0,'',?,?)""",
+            (valid_batch_id, now, now),
+        )
+        db.execute(
+            """INSERT INTO batch_file_operations(
+                 id,batch_id,operation_type,source_path,target_path,status,attempt_count,error,created_at,updated_at)
+               VALUES('orphan-operation',?,'rename','orphan-old.jpg','orphan-new.jpg','pending',0,'',?,?)""",
+            (missing_batch_id, now, now),
+        )
+
+        valid_session = workspace_db.tracking_session_create(str(workspace), db, {
+            "projectName": "Project", "progressId": progress["id"], "mode": "compare",
+        })
+        workspace_db.tracking_store_preview(db, {
+            "sessionId": valid_session["sessionId"], "items": [{
+                "kind": "recognized", "sourceName": "edit.jpg", "referenceName": "base.jpg",
+                "targetName": "edit.jpg", "status": "recognized",
+            }],
+        })
+        disposable_session = workspace_db.tracking_session_create(str(workspace), db, {
+            "projectName": "Project", "progressId": disposable_progress["id"], "mode": "compare",
+        })
+        workspace_db.tracking_store_preview(db, {
+            "sessionId": disposable_session["sessionId"], "items": [{
+                "kind": "recognized", "sourceName": "discard.jpg", "referenceName": "edit.jpg",
+                "targetName": "discard.jpg", "status": "recognized",
+            }],
+        })
+        clone_row("tracking_sessions", valid_session["sessionId"], {
+            "id": "missing-committed-batch-session", "status": "committed",
+            "committed_batch_id": missing_batch_id,
+        })
+        valid_item_id = db.execute(
+            "SELECT id FROM tracking_session_items WHERE session_id=?",
+            (valid_session["sessionId"],),
+        ).fetchone()[0]
+        clone_row("tracking_session_items", valid_item_id, {
+            "id": "missing-committed-batch-item", "session_id": "missing-committed-batch-session",
+        })
+        clone_row("tracking_session_items", valid_item_id, {
+            "id": "missing-session-item", "session_id": "missing-session",
+        })
+
+        valid_edge = workspace_db.version_graph_edge_create(db, {
+            "projectId": "reconcile-project", "sourceProgressId": progress["id"],
+            "targetProgressId": preview["id"], "edgeKind": "derived_preview",
+        })["edge"]
+        orphan_edge = workspace_db.version_graph_edge_create(db, {
+            "projectId": "reconcile-project", "sourceProgressId": disposable_progress["id"],
+            "targetProgressId": preview["id"], "edgeKind": "derived_preview",
+        })["edge"]
+        for progress_id, key in ((original["id"], "valid-raw"), (disposable_original["id"], "orphan-raw")):
+            db.execute(
+                """INSERT INTO media_import_artifact_slots(
+                     project_id,progress_id,import_slot,relative_path_key,created_at,updated_at)
+                   VALUES('reconcile-project',?,'raw',?,?,?)""",
+                (progress_id, key, now, now),
+            )
+        workspace_db.version_tree_layout_save(db, {
+            "projectName": "Project", "scopeKey": "", "expectedRevision": 0, "mode": "patch",
+            "positions": [
+                {"nodeKey": f"progress:{progress['id']}", "x": 10, "y": 20},
+                {"nodeKey": f"progress:{disposable_progress['id']}", "x": 30, "y": 40},
+            ],
+        })
+        db.execute(
+            """INSERT INTO legacy_selection_relation_repairs(
+                 progress_id,project_id,legacy_name,expected_source_name,reason,candidate_ids_json,created_at)
+               VALUES(?,'reconcile-project','Legacy','Source','missing_source','[]',?)""",
+            (disposable_progress["id"], now),
+        )
+        db.commit()
+
+        missing_batch_item_count = db.execute(
+            "SELECT COUNT(*) FROM batch_items WHERE batch_id=?", (missing_batch_id,)
+        ).fetchone()[0]
+        assert missing_batch_item_count > 0
+        db.execute("DELETE FROM version_batches WHERE id=?", (missing_batch_id,))
+        db.execute("DELETE FROM progress_folders WHERE id=?", (disposable_progress["id"],))
+        db.execute("DELETE FROM progress_folders WHERE id=?", (disposable_original["id"],))
+        db.commit()
+        try:
+            workspace_db._check_integrity(db, force=True)
+            raise AssertionError("integrity accepted historical detached-store dangling projections")
+        except RuntimeError as error:
+            assert "batch_items.owner" in str(error)
+
+        repaired = workspace_db.reconcile_cross_domain_references(db)
+        assert repaired["removedBatchItems"] == missing_batch_item_count
+        assert repaired["removedBatchOperations"] == 1
+        assert repaired["removedTrackingSessions"] == 2
+        assert repaired["removedTrackingSessionItems"] == 3
+        assert repaired["removedVersionGraphEdges"] == 1
+        assert repaired["removedImportSlotMappings"] == 1
+        assert repaired["removedLegacySelectionRepairs"] == 1
+        assert repaired["removedVersionTreePositions"] == 1
+
+        assert db.execute("SELECT 1 FROM version_batches WHERE id=?", (valid_batch_id,)).fetchone()
+        assert db.execute("SELECT 1 FROM batch_items WHERE batch_id=?", (valid_batch_id,)).fetchone()
+        assert db.execute("SELECT 1 FROM batch_file_operations WHERE id='valid-operation'").fetchone()
+        assert db.execute("SELECT 1 FROM tracking_sessions WHERE id=?", (valid_session["sessionId"],)).fetchone()
+        assert db.execute("SELECT 1 FROM tracking_session_items WHERE id=?", (valid_item_id,)).fetchone()
+        assert db.execute("SELECT 1 FROM version_graph_edges WHERE id=?", (valid_edge["id"],)).fetchone()
+        assert not db.execute("SELECT 1 FROM version_graph_edges WHERE id=?", (orphan_edge["id"],)).fetchone()
+        assert db.execute("SELECT 1 FROM media_import_artifact_slots WHERE progress_id=?", (original["id"],)).fetchone()
+        assert db.execute(
+            "SELECT 1 FROM version_tree_node_positions WHERE node_key=?", (f"progress:{progress['id']}",)
+        ).fetchone()
+        workspace_db._check_integrity(db, force=True)
+    finally:
+        db.close()
+
+
 def main() -> None:
     temp_root = Path(tempfile.mkdtemp(prefix="photoflow-versioning-v2-db-"))
     try:
@@ -1189,6 +1705,9 @@ def main() -> None:
         test_legacy_selection_keep_independent_is_durable(temp_root)
         test_version_tree_layout_persistence(temp_root)
         test_external_link_progress_is_persisted_and_sync_safe(temp_root)
+        test_folder_purposes_and_legacy_orphan_survive_reload(temp_root)
+        test_detached_missing_progress_cleanup_is_atomic(temp_root)
+        test_detached_reconcile_repairs_legacy_dangling_projections(temp_root)
         print("versioning V2 database tests passed")
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)

@@ -2,6 +2,7 @@
 import { legacyApi } from './legacy-api';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ProgressFolder, TeamProjectPhoto, WorkspaceProject } from './legacy-types';
+import { resolveLegacyTeamSourceProgressIds } from './legacy-progress-scope';
 
 const normalizePath = (value = '') => value.replace(/\\/g, '/').replace(/\/+$/, '').toLocaleLowerCase();
 
@@ -15,21 +16,7 @@ export const isTeamSourceProgressCandidate = (folder: ProgressFolder) => folder.
 export const isTeamProgressCandidate = (folder: ProgressFolder) => isTeamSourceProgressCandidate(folder)
   && folder.nodeRole === 'progress';
 
-export const resolveTeamSourceProgressIds = (sourceFilePaths: string[], folders: ProgressFolder[]) => {
-  const eligible = folders.filter(isTeamSourceProgressCandidate);
-  const resolved: string[] = [];
-  for (const sourceFilePath of sourceFilePaths.filter(Boolean)) {
-    const sourcePath = normalizePath(sourceFilePath);
-    const owner = eligible
-      .filter(folder => {
-        const folderPath = normalizePath(folder.folderPath);
-        return sourcePath === folderPath || sourcePath.startsWith(`${folderPath}/`);
-      })
-      .sort((left, right) => normalizePath(right.folderPath).length - normalizePath(left.folderPath).length)[0];
-    if (owner && !resolved.includes(owner.id)) resolved.push(owner.id);
-  }
-  return resolved;
-};
+export const resolveTeamSourceProgressIds = resolveLegacyTeamSourceProgressIds;
 
 /** Only photos that produced at least one AI crop are real team-workflow inputs. */
 export const teamWorkflowSourcePaths = (photos: TeamProjectPhoto[]) => photos

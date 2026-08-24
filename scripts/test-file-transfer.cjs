@@ -999,7 +999,7 @@ const run = async () => {
     fs.writeFileSync(path.join(progressLinkSource, 'progress.jpg'), 'progress');
     const linkedProgress = await importProjectHandlers.get('workspace-import-progress-files')(
       null, importWorkspaceRoot, '策划中', fileLinkProjectName, 'linked-progress', {
-        linkOnly: true, deleteSourceAfterImport: false, sourcePaths: [progressLinkSource], mediaKind: 'image', versionKey: '1', trackingEnabled: true, trackingState: 'pending_compare',
+        linkOnly: true, deleteSourceAfterImport: false, sourcePaths: [progressLinkSource], mediaKind: 'image', versionKey: '1', parentProgressId: 'original-id', trackingEnabled: true, trackingState: 'pending_compare',
       },
     );
     assert.strictEqual(linkedProgress.success, true, linkedProgress.error);

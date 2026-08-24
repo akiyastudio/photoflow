@@ -233,7 +233,7 @@ try {
   const markProgressSource = projectWorkspace.slice(projectWorkspace.indexOf('const openMarkProgress'), projectWorkspace.indexOf('useEffect(() => {', projectWorkspace.indexOf('const openMarkProgress')));
   assert(markProgressSource.indexOf('setProgressSetup(initialDraft)') < markProgressSource.indexOf('void loadProgressFolders().then'), 'mark-progress must open from cached data before refreshing progress folders');
   assert(markProgressSource.includes('current === initialDraft ? latestDraft : current'), 'background progress refresh must not overwrite a mark-progress draft after the user edits it');
-  assert(projectWorkspace.includes('纳入版本管理…') && projectWorkspace.includes('moveToRoot') && projectWorkspace.includes('registered.relativePath || targetRelativePath'), 'the component must expose version adoption and consume the backend-confirmed root move; executable IPC/DB tests cover rollback and V0-free registration');
+  assert(projectWorkspace.includes('标记…') && projectWorkspace.includes('<FolderMarkPanel') && projectWorkspace.includes('moveToRoot') && projectWorkspace.includes('registered.relativePath || targetRelativePath'), 'the component must expose unified purpose marking and consume the backend-confirmed root move; executable IPC/DB tests cover rollback and parent-required registration');
   const projectNavigator = fs.readFileSync(path.join(repositoryRoot, 'src', 'components', 'ProjectNavigator.tsx'), 'utf8');
   assert(projectNavigator.includes('<FolderInput size={15}/>导入项目') && projectNavigator.includes('importExistingProject') && projectNavigator.includes('photoflow:imported-project-tracking:'), 'the split project-create action must import existing projects and continue into tracking onboarding');
   const fileTransferToast = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'background-tasks', 'FileTransferToast.tsx'), 'utf8');
@@ -334,7 +334,7 @@ try {
   assert(systemIpc.includes('packageSizeBytes'), 'successful installers must report the actual package size for cleanup confirmation');
   assert(systemIpc.includes("const teamRetouchRoot"), 'all team-retouch packages must share one component directory');
   const componentLifecycleService = fs.readFileSync(path.join(repositoryRoot, 'electron', 'services', 'component-lifecycle-service.cjs'), 'utf8');
-  assert(componentLifecycleService.includes("path.join(containerRoot, 'advanced', 'wsl', 'PhotoFlowNative')") && !systemIpc.includes("path.join(teamRetouchRoot(), 'identity-models')"), 'only the component lifecycle may retain an optional detection-engine data directory');
+  assert(componentLifecycleService.includes('const advancedInstallRoot') && componentLifecycleService.includes("'advanced', 'wsl', 'PhotoFlowNative'") && componentLifecycleService.includes("'PhotoFlow', 'components', component.id") && !systemIpc.includes("path.join(teamRetouchRoot(), 'identity-models')"), 'only the component lifecycle may retain an optional detection-engine data directory and development must recognize the application-data installation');
   assert(teamRenderer.includes('人物身份') && teamRenderer.includes('自动生成候选') && !settingsFeature.includes("activeSection === 'team-retouch'"), 'cross-photo identity controls must be owned by the component renderer');
   assert(!settingsFeature.includes('实验人物识别模型 · 用户自备'), 'settings must not require end users to compile identity models');
 
@@ -449,6 +449,13 @@ try {
   const developmentVideo = developmentRegistry.resolve('video-playback-mpv');
   assert.strictEqual(developmentVideo?.source, 'development');
   assert.strictEqual(developmentVideo?.path, path.join(projectRoot, 'extensions', 'video-playback-mpv', 'runtime'));
+
+  assert(!fs.existsSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'component.json')), 'development registration must not generate a source component.json');
+  const sourceDevelopmentRegistry = createComponentRegistry({ projectRoot: repositoryRoot, isPackaged: false, platform: 'win32', arch: 'x64' });
+  const sourceTeamRetouch = sourceDevelopmentRegistry.inspect('team-retouch');
+  assert.deepStrictEqual({ source: sourceTeamRetouch?.source, installed: sourceTeamRetouch?.installed, compatible: sourceTeamRetouch?.compatible }, { source: 'development', installed: true, compatible: true }, 'the checked-in component.template.json must register the development source component');
+  assert.strictEqual(sourceTeamRetouch?.path, path.join(repositoryRoot, 'extensions', 'team-retouch'));
+  assert.strictEqual(registry.list().some(component => component.id === 'team-retouch'), false, 'packaged registries must not discover source templates');
 
   assert.strictEqual(registry.resolve('research-tools'), null);
 

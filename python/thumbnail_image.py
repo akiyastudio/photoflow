@@ -11,13 +11,19 @@ import sys
 from pathlib import Path
 
 from PIL import Image, ImageOps
-from pi_heif import register_heif_opener
 
-
-# Pillow does not decode HEIC/HEIF by itself. Register pi-heif once in this
-# long-lived worker so thumbnails and browser-compatible full-size previews use
-# the same decoder without relying on an optional Windows codec extension.
-register_heif_opener(thumbnails=False)
+HEIF_EXTENSIONS = {".heic", ".heif", ".hif", ".avif"}
+HEIF_DECODER_AVAILABLE = False
+try:
+    from pi_heif import register_heif_opener
+except ImportError:
+    register_heif_opener = None
+else:
+    # Pillow does not decode HEIC/HEIF by itself. Register pi-heif once when it
+    # is available, while keeping ordinary image and RAW workers usable in a
+    # lightweight development environment.
+    register_heif_opener(thumbnails=False)
+    HEIF_DECODER_AVAILABLE = True
 
 
 def _embedded_jpeg(source_path: str) -> Image.Image:
@@ -43,6 +49,8 @@ def _embedded_jpeg(source_path: str) -> Image.Image:
 def _open_source(source_path: str, kind: str) -> Image.Image:
     if kind == "raw":
         return _embedded_jpeg(source_path)
+    if Path(source_path).suffix.lower() in HEIF_EXTENSIONS and not HEIF_DECODER_AVAILABLE:
+        raise RuntimeError("HEIC/HEIF/HIF/AVIF 预览需要安装 pi-heif 解码依赖")
     with Image.open(source_path) as source:
         source.seek(0)
         return ImageOps.exif_transpose(source).copy()

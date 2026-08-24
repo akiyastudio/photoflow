@@ -2770,6 +2770,7 @@ const registerWorkspaceIpc = context => {
         ? (await versionService.listProgress(workspaceRoot, projectName)).progressFolders?.find(progress => progress.id === appendProgressId)
         : null;
       if (appendProgressId && (!appendProgress || appendProgress.folderMissing)) throw new Error('要追加的进度文件夹不存在');
+      if (appendProgress && (appendProgress.nodeRole !== 'progress' || !appendProgress.parentProgressId || appendProgress.relationKind !== 'main')) throw new Error('只能向已连接有效父版本的普通进度追加文件');
       if (appendProgress && (appendProgress.mediaKind !== mediaKind || appendProgress.versionKey !== String(options.versionKey || ''))) {
         throw new Error('追加目标与所选进度类型或版本号不一致');
       }

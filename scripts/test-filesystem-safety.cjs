@@ -83,17 +83,18 @@ const syncMediaProject = (python, script, workspace, database, projectName) => {
     fs.writeFileSync(selectedOriginal, 'selected-original');
     runJson(python, [script, 'progress_register', '--root', workspace, '--database', database, '--payload', JSON.stringify({
       projectName: 'progress-project', mediaKind: 'image', versionKey: '0',
-      displayName: '图片选片（原图）', folderPath: selectionPath, trackingEnabled: true,
+      displayName: '图片选片（原图）', folderPath: selectionPath, nodeRole: 'original', trackingEnabled: false,
     })]);
     const repeatedSelectionProgress = runJson(python, [script, 'progress_register', '--root', workspace, '--database', database, '--payload', JSON.stringify({
       projectName: 'progress-project', mediaKind: 'image', versionKey: '0',
-      displayName: '图片选片（原图）', folderPath: selectionPath, trackingEnabled: true,
+      displayName: '图片选片（原图）', folderPath: selectionPath, nodeRole: 'original', trackingEnabled: false,
     })]);
     assert.strictEqual(repeatedSelectionProgress.progressFolder.versionKey, '0', 'ensuring the selection baseline repeatedly must be idempotent');
     const nestedProgressPath = path.join(projectPath, '外部结构', '交付批次');
     fs.mkdirSync(nestedProgressPath, { recursive: true });
     const nestedProgress = runJson(python, [script, 'progress_register', '--root', workspace, '--database', database, '--payload', JSON.stringify({
       projectName: 'progress-project', mediaKind: 'image', versionKey: '7',
+      parentProgressId: repeatedSelectionProgress.progressFolder.id, relationKind: 'main',
       displayName: '图片后期_7_接管', folderPath: nestedProgressPath, trackingEnabled: false,
     })]).progressFolder;
     assert.strictEqual(path.resolve(nestedProgress.folderPath), path.resolve(nestedProgressPath), 'any descendant folder must be eligible for version progress');
@@ -122,6 +123,7 @@ const syncMediaProject = (python, script, workspace, database, projectName) => {
     assert.strictEqual(prunedBaseline.batch.itemCount, 1, 'refreshing a V0 baseline must remove files that no longer exist in the selection folder');
     runJson(python, [script, 'progress_register', '--root', workspace, '--database', database, '--payload', JSON.stringify({
       projectName: 'progress-project', mediaKind: 'image', versionKey: '2',
+      parentProgressId: repeatedSelectionProgress.progressFolder.id, relationKind: 'main',
       displayName: '图片后期_2_调色', folderPath: progressPath, trackingEnabled: false,
     })]);
     runJson(python, [script, 'progress_list', '--root', workspace, '--database', database, '--payload', JSON.stringify({ projectName: 'progress-project' })]);

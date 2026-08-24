@@ -1,23 +1,74 @@
+const { DatabaseSync } = require('node:sqlite');
+
 const MAX_MEDIA_ITEMS = 2000;
 const componentTaskHandles = new Map();
+
+const insideOrEqual = (path, root, candidate) => {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return !relative || (!relative.startsWith('..') && !path.isAbsolute(relative));
+};
+const normalizeRelativePath = value => String(value || '').replace(/\\/g, '/').replace(/^\/+/, '');
+const versionProjectPath = ({ version, projectRoot, projectVirtualPaths, externalLinks = [], path, fs }) => {
+  if (!version?.filePath) return { relativePath: '', relativePathState: 'unresolvable' };
+  const filePath = path.resolve(String(version.filePath));
+  const root = path.resolve(projectRoot);
+  if (insideOrEqual(path, root, filePath)) {
+    const relativePath = normalizeRelativePath(path.relative(root, filePath));
+    if (!relativePath) return { relativePath: '', relativePathState: 'unresolvable' };
+    if (!version.fileMissing && fs.existsSync(filePath)) {
+      try {
+        if (projectVirtualPaths?.resolve) projectVirtualPaths.resolve(root, relativePath, { externalRootMode: 'target' });
+        else if (!insideOrEqual(path, fs.realpathSync(root), fs.realpathSync(filePath))) return { relativePath: '', relativePathState: 'outside-project' };
+      } catch { return { relativePath: '', relativePathState: 'outside-project' }; }
+    }
+    return { relativePath, relativePathState: version.fileMissing || !fs.existsSync(filePath) ? 'missing' : 'ready' };
+  }
+  for (const link of externalLinks) {
+    const targetRoot = path.resolve(String(link.externalTargetRoot || ''));
+    const targetKind = link.externalTargetKind === 'file' ? 'file' : 'folder';
+    const relative = path.relative(targetRoot, filePath);
+    const belongs = targetKind === 'file' ? !relative : (!relative || (!relative.startsWith('..') && !path.isAbsolute(relative)));
+    if (!belongs) continue;
+    let relativePath;
+    try {
+      relativePath = projectVirtualPaths?.toVirtualPath
+        ? normalizeRelativePath(projectVirtualPaths.toVirtualPath(root, filePath, link))
+        : [normalizeRelativePath(link.shortcutVirtualPath), targetKind === 'folder' ? normalizeRelativePath(relative) : ''].filter(Boolean).join('/');
+    } catch { return { relativePath: '', relativePathState: 'outside-project' }; }
+    if (!relativePath) return { relativePath: '', relativePathState: 'unresolvable' };
+    if (!version.fileMissing && fs.existsSync(filePath) && projectVirtualPaths?.resolve) {
+      try { projectVirtualPaths.resolve(root, relativePath, { externalRootMode: 'target' }); }
+      catch { return { relativePath: '', relativePathState: 'outside-project' }; }
+    }
+    return { relativePath, relativePathState: link.offline || version.fileMissing || !fs.existsSync(filePath) ? 'missing' : 'external' };
+  }
+  return { relativePath: '', relativePathState: 'outside-project' };
+};
 
 const registerComponentProjectCapabilities = ({
   broker, ensureWorkspace, getWorkspaceDataRoot,
   resolveProjectEntry, versionService, IMAGE_EXTENSIONS, path, fs, crypto, getConfigPath, readSavedConfig,
   getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks,
-  uniqueDestination, ensureTrackedVersionThumbnail,
+  uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths = null, getBoundProject = null,
+  RAW_EXTENSIONS = new Set(), IMAGE_PREVIEW_CONVERSION_EXTENSIONS = new Set(),
 }) => {
+  const boundProject = (workspaceRoot, context) => getBoundProject?.(workspaceRoot, context.projectName) || { id: context.projectId, name: context.projectName, status: context.projectStatus };
   broker.register('component.storage.v1', (payload, context, descriptor) => {
     if (payload.namespace !== 'domain') throw new Error('Unknown component storage namespace');
     const workspaceRoot = ensureWorkspace(context.workspacePath);
     const componentId = String(descriptor.componentId || '');
     const dataRoot = path.join(getWorkspaceDataRoot(workspaceRoot), componentId);
     const databasePath = path.join(getWorkspaceDataRoot(workspaceRoot), 'databases', `${componentId}.sqlite3`);
-    return { databasePath, dataRoot };
+    const project = boundProject(workspaceRoot, context);
+    return { databasePath, dataRoot, projectId: String(project?.id || context.projectId || '') };
   });
 
   broker.register('project.media.read.v1', async (payload, context) => {
     const workspaceRoot = ensureWorkspace(context.workspacePath);
+    const project = boundProject(workspaceRoot, context);
+    const projectRoot = path.resolve(getProjectPath(workspaceRoot, context.projectStatus, context.projectName));
+    const externalLinks = projectVirtualPaths?.listManagedExternalLinks?.(projectRoot) || [];
+    const withProjectPaths = bundle => ({ ...bundle, versions: (bundle?.versions || []).map(version => ({ ...version, ...versionProjectPath({ version, projectRoot, projectVirtualPaths, externalLinks, path, fs }) })) });
     const relativePaths = Array.isArray(payload.relativePaths) ? payload.relativePaths : [];
     const photoIds = Array.isArray(payload.photoIds) ? payload.photoIds : [];
     if (relativePaths.length + photoIds.length > MAX_MEDIA_ITEMS) throw new Error('Too many component media inputs');
@@ -27,21 +78,36 @@ const registerComponentProjectCapabilities = ({
       const photoId = String(value || '').trim();
       if (!photoId || seen.has(photoId)) continue;
       const bundle = await versionService.getPhoto(workspaceRoot, photoId);
-      if (String(bundle.photo?.projectId || '') !== String(context.projectId || '')) continue;
+      if (String(bundle.photo?.projectId || '') !== String(project?.id || context.projectId || '')) continue;
       seen.add(photoId);
-      items.push(bundle);
+      items.push(withProjectPaths(bundle));
     }
     for (const value of relativePaths) {
       const relativePath = String(value || '');
       const filePath = resolveProjectEntry(context.workspacePath, context.projectStatus, context.projectName, relativePath);
       if (!IMAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) throw new Error(`Unsupported component image input: ${path.basename(filePath)}`);
       const bundle = await versionService.getMedia(workspaceRoot, { projectName: context.projectName, filePath });
-      if (String(bundle.photo?.projectId || '') !== String(context.projectId || '')) throw new Error('Component media input is outside the bound project');
+      if (String(bundle.photo?.projectId || '') !== String(project?.id || context.projectId || '')) throw new Error('Component media input is outside the bound project');
       if (seen.has(String(bundle.photo.id))) continue;
       seen.add(String(bundle.photo.id));
-      items.push({ ...bundle, relativePath });
+      items.push({ ...withProjectPaths(bundle), relativePath });
     }
     return { items };
+  });
+
+  broker.register('project.identity.complete.v1', async (payload, context, descriptor) => {
+    if (descriptor.componentId !== 'team-retouch') throw new Error('Unknown component identity namespace');
+    const workspaceRoot = ensureWorkspace(context.workspacePath);
+    const photoId = String(payload.photoId || ''); const baseVersionId = String(payload.baseVersionId || '');
+    const bundle = await versionService.getPhoto(workspaceRoot, photoId);
+    if (String(bundle?.photo?.projectId || '') !== String(context.projectId || '')) throw new Error('Component identity is outside the bound project');
+    if (!(bundle.versions || []).some(version => String(version.id || '') === baseVersionId)) throw new Error('Component identity version is outside the bound photo');
+    const personIndex = Number(payload.personIndex);
+    if (!Number.isInteger(personIndex) || personIndex < 0) throw new Error('Invalid component identity person index');
+    return versionService.completeTeamIdentity(workspaceRoot, {
+      photoId, baseVersionId, personIndex, completed: payload.completed === true,
+      completionKind: String(payload.completionKind || '').slice(0, 80),
+    });
   });
 
   const componentRoot = (workspaceRoot, componentId) => path.join(getWorkspaceDataRoot(workspaceRoot), componentId);
@@ -155,6 +221,80 @@ const registerComponentProjectCapabilities = ({
 
   broker.register('project.output.authorize.v1', authorizeComponentWorkspaceOutput);
 
+  const taskMediaRow = (databasePath, projectId, payload) => {
+    const db = new DatabaseSync(databasePath);
+    try {
+      db.exec('PRAGMA busy_timeout=30000;');
+      return db.prepare(`SELECT t.patch_path,t.edited_patch_path,
+        (SELECT a.edited_patch_path FROM team_person_assignments a WHERE a.project_id=? AND a.photo_id=t.photo_id AND a.base_version_id=t.base_version_id AND a.person_index=? LIMIT 1) AS assignment_edited_path
+        FROM team_patch_tasks t WHERE t.id=? AND t.photo_id=? AND t.base_version_id=? AND t.is_deleted=0`)
+        .get(String(projectId || ''), Number(payload.personIndex ?? -1), String(payload.taskId || ''), String(payload.photoId || ''), String(payload.baseVersionId || '')) || null;
+    } finally { db.close(); }
+  };
+  const reviewMediaPath = (dataRoot, context, payload) => {
+    const directory = path.join(dataRoot, 'workflow-return-reviews', crypto.createHash('sha256').update(String(context.projectName || '')).digest('hex'));
+    const sessionPath = path.join(directory, 'session.json');
+    const session = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+    if (String(session.id || '') !== String(payload.reviewSessionId || '') || String(session.projectName || '') !== String(context.projectName || '')) throw new Error('Component review media is outside the bound project');
+    const match = (session.result?.matches || []).find(item => String(item.returnId || '') === String(payload.returnId || ''));
+    const candidate = path.resolve(String(match?.path || ''));
+    if (!match || !inside(directory, candidate)) throw new Error('Component review media is outside its review session');
+    return candidate;
+  };
+  broker.register('project.media.access.v1', async (payload, context, descriptor) => {
+    if (descriptor.componentId !== 'team-retouch') throw new Error('Unknown component media namespace');
+    if (!['authorize', 'open'].includes(payload.action)) throw new Error('Unknown component media action');
+    if (!['original', 'working', 'returned', 'review-return'].includes(payload.kind)) throw new Error('Unknown component media kind');
+    const workspaceRoot = ensureWorkspace(context.workspacePath);
+    const project = boundProject(workspaceRoot, context);
+    const projectRoot = path.resolve(getProjectPath(workspaceRoot, project?.status || context.projectStatus, project?.name || context.projectName));
+    const componentDataRoot = path.join(getWorkspaceDataRoot(workspaceRoot), descriptor.componentId);
+    let candidate;
+    let basePath = null;
+    if (payload.kind === 'review-return') candidate = reviewMediaPath(componentDataRoot, context, payload);
+    else {
+      const bundle = await versionService.getPhoto(workspaceRoot, String(payload.photoId || ''));
+      if (String(bundle?.photo?.projectId || '') !== String(project?.id || context.projectId || '')) throw new Error('Component media photo is outside the bound project');
+      const base = (bundle.versions || []).find(version => String(version.id || '') === String(payload.baseVersionId || ''));
+      if (!base) throw new Error('Component media base version is outside the bound photo');
+      const externalLinks = projectVirtualPaths?.listManagedExternalLinks?.(projectRoot) || [];
+      basePath = versionProjectPath({ version: base, projectRoot, projectVirtualPaths, externalLinks, path, fs });
+      if (!basePath.relativePath || basePath.relativePathState === 'outside-project') throw new Error('Component media base version has no safe project path');
+      if (payload.kind === 'original') candidate = path.resolve(base.filePath);
+      else {
+        const databasePath = path.join(getWorkspaceDataRoot(workspaceRoot), 'databases', `${descriptor.componentId}.sqlite3`);
+        const task = taskMediaRow(databasePath, String(project?.id || context.projectId || ''), payload);
+        if (!task) throw new Error('Component media task is outside the bound photo version');
+        const returnedPath = payload.personIndex !== undefined ? task.assignment_edited_path : task.edited_patch_path;
+        candidate = path.resolve(payload.kind === 'returned' ? String(returnedPath || '') : String(task.patch_path || ''));
+        if (!candidate || (payload.kind === 'returned' && !returnedPath)) throw new Error('Component returned media is unavailable');
+      }
+    }
+    if (!fs.lstatSync(candidate, { throwIfNoEntry: false })?.isFile()) throw new Error('Component media file is missing');
+    try { await mediaService.authorizeInput(candidate); }
+    catch (error) {
+      if (!basePath?.relativePath || !projectVirtualPaths?.resolve) throw error;
+      const resolution = projectVirtualPaths.resolve(projectRoot, basePath.relativePath, { externalRootMode: 'target' });
+      if (!resolution.viaExternalLink || !insideOrEqual(path, resolution.mediaRoot, candidate)) throw error;
+      mediaService.grantRoot(resolution.mediaRoot);
+      await mediaService.authorizeInput(candidate);
+    }
+    if (payload.action === 'open') {
+      const error = await shell.openPath(candidate);
+      if (error) throw new Error(error);
+      return { success: true };
+    }
+    const originalUrl = mediaService.toUrl(candidate, true);
+    if (payload.kind !== 'original') return { success: true, url: originalUrl, previewUrl: originalUrl, originalUrl };
+    const extension = path.extname(candidate).toLowerCase();
+    if (!RAW_EXTENSIONS.has(extension) && !IMAGE_PREVIEW_CONVERSION_EXTENSIONS.has(extension)) return { success: true, url: originalUrl, previewUrl: originalUrl, originalUrl };
+    const config = readSavedConfig() || {};
+    const thumbnail = await mediaService.requestThumbnail({ filePath: candidate, kind: RAW_EXTENSIONS.has(extension) ? 'raw' : 'image', cacheConfig: config.mediaCache || {}, requestedSize: 1600, priority: 0, queueOrder: 0 });
+    const previewUrl = thumbnail?.previewUrl || thumbnail?.mediaUrl;
+    if (!previewUrl) throw new Error(thumbnail?.error || 'Component media preview could not be generated');
+    return { success: true, url: previewUrl, previewUrl, originalUrl };
+  });
+
   broker.register('dialogs.open.v1', async (payload, context, descriptor) => {
     if (descriptor.componentId !== 'team-retouch') throw new Error('Unknown component dialog namespace');
     if (payload.kind === 'image') {
@@ -182,13 +322,6 @@ const registerComponentProjectCapabilities = ({
       const error = await shell.openPath(directory);
       if (error) throw new Error(error);
       return { success: true };
-    }
-    if (payload.kind === 'image') {
-      const choice = await dialog.showOpenDialog(mainWindow, { title: String(payload.title || '选择图片'), properties: ['openFile'], filters: [{ name: '图片', extensions: [...IMAGE_EXTENSIONS].map(value => value.slice(1)) }] });
-      if (choice.canceled || !choice.filePaths.length) return { cancelled: true };
-      const filePath = path.resolve(choice.filePaths[0]);
-      if (!IMAGE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) throw new Error('请选择支持的图片文件');
-      return { cancelled: false, filePath };
     }
     throw new Error('Unknown component dialog action');
   });
@@ -310,4 +443,4 @@ const registerComponentProjectCapabilities = ({
 
 };
 
-module.exports = { MAX_MEDIA_ITEMS, registerComponentProjectCapabilities };
+module.exports = { MAX_MEDIA_ITEMS, normalizeRelativePath, registerComponentProjectCapabilities, versionProjectPath };

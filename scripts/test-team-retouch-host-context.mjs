@@ -1,0 +1,65 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { resolveTeamRetouchEntriesForOpen, teamRetouchEntriesForOpen } from '../extensions/team-retouch/renderer/src/legacy/legacy-entry-scope.ts';
+import { resolveLegacyTeamSourceProgressIds } from '../extensions/team-retouch/renderer/src/legacy/legacy-progress-scope.ts';
+import { createLatestHistoryLoadGuard, historyLoadPresentation } from '../extensions/team-retouch/renderer/src/legacy/legacy-history-load-model.ts';
+import { legacyAdvancedStatusPresentation } from '../extensions/team-retouch/renderer/src/legacy/legacy-advanced-status-model.ts';
+import { legacyPreviewRequests, readableLegacyMediaError, summarizeLegacyPreviewResults } from '../extensions/team-retouch/renderer/src/legacy/legacy-media-preview-model.ts';
+
+const workspace = { photos: [
+  { photoId: 'p1', relativePath: '图片后期_1/a.jpg', name: 'a.jpg' },
+  { photoId: 'p2', relativePath: '图片后期_1/b.jpg', name: 'b.jpg' },
+] };
+assert.deepEqual(teamRetouchEntriesForOpen(workspace, []).map(item => item.relativePath), ['图片后期_1/a.jpg', '图片后期_1/b.jpg'], 'no selection restores registered history only');
+assert.deepEqual(teamRetouchEntriesForOpen(workspace, ['图片后期_1/b.jpg', '图片后期_2/c.jpg']).map(item => item.relativePath), ['图片后期_1/a.jpg', '图片后期_1/b.jpg', '图片后期_2/c.jpg'], 'explicit selection is deduplicated after registered history');
+assert.deepEqual(teamRetouchEntriesForOpen(workspace, ['图片后期_2/current.jpg', '图片后期_2/new.jpg']).map(item => item.relativePath), ['图片后期_1/a.jpg', '图片后期_1/b.jpg', '图片后期_2/current.jpg', '图片后期_2/new.jpg'], 'currently opened entries and the new selection remain in their historical union order');
+const realHistory = { photos: Array.from({ length: 27 }, (_, index) => ({ photoId: `photo-${index + 1}`, baseVersionId: `version-${index + 1}`, name: `${index + 1}.jpg`, relativePath: `图片后期_1/${index + 1}.jpg`, tasks: Array.from({ length: index < 25 ? 3 : 2 }, (_value, taskIndex) => ({ id: `task-${index + 1}-${taskIndex + 1}` })) })) };
+const realResolution = resolveTeamRetouchEntriesForOpen(realHistory, []);
+assert.deepEqual({ entries: realResolution.entries.length, photos: realResolution.historyPhotoCount, missing: realResolution.missingHistoryCount, tasks: realResolution.historyTaskCount }, { entries: 27, photos: 27, missing: 0, tasks: 79 }, '27 persisted photos and their 79 tasks map one-to-one into renderer history entries');
+const previewRequests = legacyPreviewRequests(realHistory);
+assert.deepEqual({ total: previewRequests.length, originals: previewRequests.filter(item => item.kind === 'original').length, working: previewRequests.filter(item => item.kind === 'working').length }, { total: 106, originals: 27, working: 79 }, '27 cards produce 27 registration-base originals and 79 task-base working preview grants');
+assert(previewRequests.filter(item => item.kind === 'original').every((item, index) => item.baseVersionId === `version-${index + 1}`), 'original previews use each registration base version');
+const previewResults = previewRequests.map((request, index) => index === 40 ? { success: false, error: readableLegacyMediaError(new Error('工作图授权失败：任务版本不存在'), request.kind) } : { success: true });
+const previewSummary = summarizeLegacyPreviewResults(previewRequests, previewResults);
+assert.deepEqual({ total: previewSummary.total, succeeded: previewSummary.succeeded, failed: previewSummary.failed }, { total: 106, succeeded: 105, failed: 1 }, 'one missing preview remains visible without turning all 27 cards black');
+assert.match(previewSummary.failures[0].error, /历史版本不存在|工作图任务不存在/);
+const missingResolution = resolveTeamRetouchEntriesForOpen({ photos: realHistory.photos.map(photo => ({ ...photo, relativePath: '' })) }, []);
+assert.deepEqual({ entries: missingResolution.entries.length, resolved: missingResolution.resolvedHistoryCount, missing: missingResolution.missingHistoryCount }, { entries: 27, resolved: 0, missing: 27 }, 'empty host paths remain diagnosable history records instead of collapsing to zero entries');
+assert(missingResolution.entries.every(entry => entry.teamHistoryMissing && entry.teamHistoryPhotoId), 'every unresolved history photo retains its identity for relinking');
+const partialResolution = resolveTeamRetouchEntriesForOpen({ photos: realHistory.photos.map((photo, index) => index < 3 ? { ...photo, relativePath: '' } : photo) }, []);
+assert.deepEqual({ entries: partialResolution.entries.length, resolved: partialResolution.resolvedHistoryCount, missing: partialResolution.missingHistoryCount }, { entries: 27, resolved: 24, missing: 3 }, 'partially missing history exposes an explicit count while retaining every card');
+const deletedResolution = resolveTeamRetouchEntriesForOpen({ photos: realHistory.photos.map((photo, index) => index === 0 ? { ...photo, fileMissing: true } : photo) }, []);
+assert.deepEqual({ entries: deletedResolution.entries.length, resolvedPaths: deletedResolution.resolvedHistoryCount, missing: deletedResolution.missingHistoryCount, unresolvedPaths: deletedResolution.unresolvedPathCount }, { entries: 27, resolvedPaths: 27, missing: 1, unresolvedPaths: 0 }, 'a genuinely deleted file keeps its known path identity but renders as a missing/relink card');
+const sixPhotoProject = resolveTeamRetouchEntriesForOpen({ photos: realHistory.photos.slice(0, 6) }, []);
+assert.deepEqual({ found: sixPhotoProject.returnedPhotoCount, total: sixPhotoProject.historyPhotoCount, pending: sixPhotoProject.ownershipPendingCount }, { found: 6, total: 6, pending: 0 }, 'a different project with six registered photos is normal 6/6 and never inherits another project expected count');
+const diagnosedOwnershipGap = resolveTeamRetouchEntriesForOpen({ photos: realHistory.photos.slice(0, 6), historyDiagnostics: { registeredPhotoCount: 27, unresolvedOwnershipCount: 21 } }, []);
+assert.deepEqual({ found: diagnosedOwnershipGap.returnedPhotoCount, total: diagnosedOwnershipGap.historyPhotoCount, pending: diagnosedOwnershipGap.ownershipPendingCount }, { found: 6, total: 27, pending: 21 }, '6/27 is shown only when the same workspace snapshot explicitly declares that ownership gap');
+assert.deepEqual(resolveLegacyTeamSourceProgressIds(['图片后期_1/a.jpg'], [{ id: 'progress-1', mediaKind: 'image', folderMissing: false, nodeRole: 'progress', folderPath: 'D:/照片流/项目/图片后期_1' }]), ['progress-1'], 'opaque renderer entries still resolve their existing source progress without exposing a project root');
+assert.deepEqual(historyLoadPresentation({ initialLoading: true, loadError: '', entriesLoaded: false, entryCount: 0 }), { phase: 'loading', title: '团片协作 · 正在读取团片历史' }, 'initial loading must not claim zero photos');
+assert.deepEqual(historyLoadPresentation({ initialLoading: false, loadError: 'RPC 超时', entriesLoaded: false, entryCount: 0 }), { phase: 'error', title: '团片协作 · 历史读取失败' });
+assert.deepEqual(historyLoadPresentation({ initialLoading: false, loadError: '', entriesLoaded: true, entryCount: 27 }), { phase: 'ready', title: '团片协作 · 27 张图片' }, 'successful history load publishes the real count');
+const guard = createLatestHistoryLoadGuard(); const staleRequest = guard.begin(); const currentRequest = guard.begin();
+assert.equal(guard.isCurrent(staleRequest), false); assert.equal(guard.isCurrent(currentRequest), true, 'a newer context load invalidates an older request');
+guard.invalidate(); assert.equal(guard.isCurrent(currentRequest), false, 'unmount invalidates the active request');
+assert.deepEqual(legacyAdvancedStatusPresentation(undefined, true), { state: 'checking', text: '正在检查高级人物检测…' });
+assert.equal(legacyAdvancedStatusPresentation(undefined, false, '超时').state, 'error');
+assert.equal(legacyAdvancedStatusPresentation(undefined, false).state, 'unknown');
+assert.equal(legacyAdvancedStatusPresentation({ advancedState: 'not-installed' }, false).state, 'not-installed', 'only explicit not-installed metadata renders that state');
+
+const entry = fs.readFileSync(new URL('../extensions/team-retouch/renderer/src/legacy-main.tsx', import.meta.url), 'utf8');
+assert(!entry.includes("rpc<Json>('project.files.list.v1'"), 'team entry must never recursively enumerate the project');
+assert(entry.includes("rpc<Json>('team.project.get.v1'") && entry.includes('currentRelativePaths') && entry.includes('selectedRelativePaths') && entry.includes("rpc<Json>('team.project.register.v1'"), 'entry restores history, keeps opened entries, then registers explicit selection');
+assert(entry.indexOf('setEntries(historyEntries)') < entry.indexOf("rpc<Json>('team.project.register.v1'"), 'registration failure must preserve the successfully restored history');
+assert(entry.includes('重新读取团片历史') && entry.includes('retryHistory') && entry.includes('entriesLoaded') && entry.includes('loadGuardRef'), 'loading failure exposes retry and latest-request state');
+assert(entry.includes('团片历史路径恢复失败') && entry.includes('resolvedHistoryCount === 0') && entry.includes('historyPathWarning'), 'all-missing and partially-missing paths have distinct diagnostic states');
+assert(!entry.includes('整个项目'), 'team history loading copy must not imply recursive project scope');
+assert(entry.includes('onThemeChange') && entry.includes('onContextChange') && entry.includes("classList.toggle('dark'"), 'renderer applies initial and runtime host theme/context changes');
+
+const style = fs.readFileSync(new URL('../extensions/team-retouch/renderer/src/legacy-style.css', import.meta.url), 'utf8');
+for (const selector of ['html.dark .bg-white', 'html.dark .bg-slate-50', 'html.dark .border-slate-200', 'html.dark .text-slate-900', 'html.dark input', 'html.dark [role="dialog"]', 'html.dark .bg-emerald-50', 'html.dark .bg-amber-50', 'html.dark .bg-red-50']) assert(style.includes(selector), `legacy dark theme is missing ${selector}`);
+const app = fs.readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+const systemIpc = fs.readFileSync(new URL('../electron/modules/system-ipc.cjs', import.meta.url), 'utf8');
+assert(app.includes("config.theme === 'dark'") && app.includes("setTheme?.(isDark ? 'dark' : 'light')"), 'host must publish the app-resolved preference instead of guessing nativeTheme in the component');
+assert(systemIpc.includes("componentViewManager?.setResolvedTheme(isDark ? 'dark' : 'light')"), 'resolved main-app theme must reach sandboxed component views');
+
+console.log('Team-retouch host theme and historical entry-scope tests passed');

@@ -138,7 +138,10 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, pr
     const listed = await versionService.listProgress(workspaceRoot, projectName, true);
     const nodes = listed.progressFolders || [];
     const sourceNode = nodes.find(node => comparable(node.folderPath) === comparable(source.path) && !node.folderMissing);
-    if (sourceNode?.nodeRole === 'selection' || sourceNode?.relationKind === 'auxiliary') throw new Error('selection/auxiliary 节点不能作为新的选片来源');
+    if (sourceNode && (!['original', 'progress'].includes(sourceNode.nodeRole)
+      || sourceNode.nodeRole === 'progress' && (!sourceNode.parentProgressId || sourceNode.relationKind !== 'main'))) {
+      throw new Error('selection/附属分支/花絮等节点不能作为新的选片来源；只有原始素材或有效版本进度可以使用');
+    }
     const targetNode = nodes.find(node => comparable(node.folderPath) === comparable(target.targetPath));
     const sourceSelections = sourceNode ? nodes.filter(node => node.nodeRole === 'selection' && node.parentProgressId === sourceNode.id) : [];
     let recoverableEmptyTarget = false;
@@ -411,8 +414,9 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, pr
         trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false, trackingState: 'disabled',
       })).progressFolder;
     }
-    if (!sourceNode || sourceNode.nodeRole === 'selection' || sourceNode.relationKind === 'auxiliary') {
-      throw new Error('selection_source_invalid：选片或附属分支不能作为新的选片来源');
+    if (!sourceNode || !['original', 'progress'].includes(sourceNode.nodeRole)
+      || sourceNode.nodeRole === 'progress' && (!sourceNode.parentProgressId || sourceNode.relationKind !== 'main')) {
+      throw new Error('selection_source_invalid：selection/附属分支/花絮等节点不能作为新的选片来源；只有原始素材或有效版本进度可以使用');
     }
     if (targetNode && (targetNode.nodeRole !== 'selection' || targetNode.parentProgressId !== sourceNode.id)) throw new Error('output_name_conflict');
     const selectionDisplayName = nodes.some(node => node.id !== targetNode?.id && node.displayName.toLocaleLowerCase() === plan.target.outputName.toLocaleLowerCase())

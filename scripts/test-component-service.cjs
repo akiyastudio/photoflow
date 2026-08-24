@@ -26,14 +26,14 @@ const baseManifest = {
     ],
     service: {
       protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' },
-      rpcMethods: ['sample.echo.v1'], capabilities: ['project.media.list.v1'],
+      rpcMethods: ['sample.echo.v1', 'sample.crash.v1', 'team.project.get.v1', 'component.settings.get.v1', 'component.advanced.preflight.v1'], capabilities: ['project.media.list.v1'],
     },
   },
 };
 
 const descriptor = parseComponentHostManifest(baseManifest, sandbox);
 assert.equal(descriptor.service.entry, serviceEntry);
-assert.deepEqual(descriptor.service.rpcMethods, ['sample.echo.v1']);
+assert.deepEqual(descriptor.service.rpcMethods, ['sample.echo.v1', 'sample.crash.v1', 'team.project.get.v1', 'component.settings.get.v1', 'component.advanced.preflight.v1']);
 assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, rpcMethods: ['unversioned'] } } }, sandbox), /versioned allowlist/);
 assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, capabilities: ['ipc.any.v1'] } } }, sandbox), /unknown host capability/);
 assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, entrypoints: { default: '../escape.cjs' } } } }, sandbox), /escapes component root/);
@@ -42,6 +42,8 @@ assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost:
 
 const broker = new ComponentCapabilityBroker();
 broker.register('project.media.list.v1', (payload, context) => ({ cursor: payload.cursor, workspace: context.workspacePath }));
+assert.equal(broker.assertCapabilities(descriptor), true);
+assert.throws(() => broker.assertCapabilities({ componentId: 'broken', service: { capabilities: ['project.media.access.v1'] } }), /declares unavailable host capabilities.*project\.media\.access\.v1/, 'allowlisting a capability without a broker implementation must fail registration consistency checks');
 const boundContext = { componentId: 'sample-component', componentVersion: '1.0.0', workspacePath: 'C:/private/workspace', projectId: 'p1', projectName: 'One', projectStatus: 'active' };
 assert.deepEqual(publicContext(boundContext), { componentId: 'sample-component', componentVersion: '1.0.0', projectId: 'p1', projectName: 'One', projectStatus: 'active' });
 assert.throws(() => broker.invoke(descriptor, 'dialogs.open.v1', {}, boundContext), /not granted/);
@@ -63,14 +65,17 @@ const launched = [];
 let serviceRequestCount = 0;
 const fakeSupervisor = {
   launch(spec) {
-    let requestFrame;
+    const requestFrames = new Map();
     const child = new FakeChild((frame, target) => {
       if (frame.type === 'request') {
         serviceRequestCount += 1;
-        if (serviceRequestCount === 2) { process.nextTick(() => target.emit('exit', 9, null)); return true; }
-        requestFrame = frame;
-        target.stdout.write(`${JSON.stringify({ type: 'capability', id: 'cap-1', parentId: frame.id, method: 'project.media.list.v1', payload: { cursor: 'next' } })}\n`);
+        if (frame.method === 'sample.crash.v1') { process.nextTick(() => target.emit('exit', 9, null)); return true; }
+        requestFrames.set(frame.id, frame);
+        target.stdout.write(`${JSON.stringify({ type: 'capability', id: `cap-${frame.id}`, parentId: frame.id, method: 'project.media.list.v1', payload: { cursor: 'next' } })}\n`);
       } else if (frame.type === 'capability-response') {
+        const requestId = String(frame.id).replace(/^cap-/, '');
+        const requestFrame = requestFrames.get(requestId);
+        requestFrames.delete(requestId);
         target.stdout.write(`${JSON.stringify({ type: 'response', id: requestFrame.id, ok: true, result: { capability: frame.result, context: requestFrame.context } })}\n`);
       }
       return true;
@@ -89,7 +94,8 @@ const fakeSupervisor = {
   },
 };
 
-const registry = { resolve: id => id === descriptor.componentId ? descriptor : null };
+let activeDescriptor = descriptor;
+const registry = { resolve: id => id === activeDescriptor.componentId ? activeDescriptor : null };
 const manager = new ComponentServiceManager({ registry, processSupervisor: fakeSupervisor, capabilityBroker: broker, executablePath: 'electron.exe' });
 const keepAlive = setInterval(() => undefined, 1000);
 
@@ -103,8 +109,30 @@ const keepAlive = setInterval(() => undefined, 1000);
   assert.equal(result.context.workspacePath, undefined, 'raw workspace paths are never sent to the component service');
   assert.equal(result.context.projectId, 'p1');
 
-  const pending = manager.invoke('sample-component', 'sample.echo.v1', {}, boundContext);
-  await assert.rejects(pending, /exited before completing/);
+  const beforeCoalesced = serviceRequestCount;
+  const snapshots = await Promise.all(Array.from({ length: 3 }, () => manager.invoke('sample-component', 'team.project.get.v1', {}, boundContext)));
+  assert.equal(serviceRequestCount - beforeCoalesced, 1, 'concurrent project snapshots for one private workspace context must share one service request');
+  assert.equal(snapshots.length, 3);
+  const beforeIndependentReads = serviceRequestCount;
+  await Promise.all([
+    manager.invoke('sample-component', 'component.settings.get.v1', {}, boundContext),
+    manager.invoke('sample-component', 'component.advanced.preflight.v1', {}, boundContext),
+  ]);
+  assert.equal(serviceRequestCount - beforeIndependentReads, 2, 'different startup reads remain concurrent without waiting on each other');
+
+  const launchCountBeforeUpgrade = launched.length;
+  activeDescriptor = parseComponentHostManifest({ ...baseManifest, version: '2.0.0' }, sandbox);
+  const upgradedContext = { ...boundContext, componentVersion: '2.0.0' };
+  const upgraded = await Promise.all([
+    manager.invoke('sample-component', 'sample.echo.v1', { caller: 'one' }, upgradedContext),
+    manager.invoke('sample-component', 'sample.echo.v1', { caller: 'two' }, upgradedContext),
+  ]);
+  assert.equal(launched.length - launchCountBeforeUpgrade, 1, 'concurrent requests during a component version change must start exactly one replacement service');
+  assert(launched[launchCountBeforeUpgrade - 1].managed.released, 'the previous component service is stopped before the replacement becomes active');
+  assert(upgraded.every(item => item.context.componentVersion === '2.0.0'));
+
+  const pending = manager.invoke('sample-component', 'sample.crash.v1', {}, boundContext);
+  await assert.rejects(pending, /exited before completing sample-component\.sample\.crash\.v1/);
   await manager.destroy();
   console.log('Component service protocol and capability boundary tests passed');
 })().finally(() => { clearInterval(keepAlive); fs.rmSync(sandbox, { recursive: true, force: true }); }).catch(error => { console.error(error); process.exitCode = 1; });

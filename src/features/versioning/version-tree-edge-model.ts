@@ -7,9 +7,10 @@ export type VersionTreeRelationNode = {
   id: string;
   projectId: string;
   mediaKind: string;
-  nodeRole: 'original' | 'progress' | 'selection' | 'artifact' | 'workflow';
+  nodeRole: 'original' | 'progress' | 'selection' | 'artifact' | 'workflow' | 'broll';
   artifactKind?: 'companion' | 'preview' | 'team_workspace';
   relationKind?: 'main' | 'auxiliary';
+  parentProgressId?: string;
   folderMissing?: boolean;
 };
 
@@ -28,15 +29,17 @@ export const versionTreeRelationLabel = (kind: VersionTreeEdgeKind) => kind === 
 export const allowedVersionTreeRelationKinds = (source: VersionTreeRelationNode, target: VersionTreeRelationNode): VersionTreeEdgeKind[] => {
   if (source.folderMissing || target.folderMissing || source.id === target.id || source.projectId !== target.projectId || source.mediaKind !== target.mediaKind) return [];
   const result: VersionTreeEdgeKind[] = [];
-  const sourceIsMain = source.relationKind !== 'auxiliary' && (source.nodeRole === 'original' || source.nodeRole === 'progress');
+  const sourceIsMain = source.nodeRole === 'original' && !source.artifactKind
+    || source.nodeRole === 'progress' && source.relationKind === 'main' && Boolean(source.parentProgressId);
+  const targetIsMainProgress = target.nodeRole === 'progress' && target.relationKind === 'main' && Boolean(target.parentProgressId);
   if (target.nodeRole === 'progress' && target.relationKind !== 'auxiliary' && sourceIsMain) result.push('main');
   if (target.nodeRole === 'selection' && sourceIsMain) result.push('auxiliary');
-  if (source.nodeRole === 'original' && (target.nodeRole === 'artifact' || target.nodeRole === 'original')
+  if (source.nodeRole === 'original' && !source.artifactKind && (target.nodeRole === 'artifact' || target.nodeRole === 'original')
     && (!target.artifactKind || target.artifactKind === 'companion')) result.push('media_companion');
-  if ((source.nodeRole === 'original' || source.nodeRole === 'progress') && target.nodeRole === 'artifact'
+  if (sourceIsMain && target.nodeRole === 'artifact'
     && (!target.artifactKind || target.artifactKind === 'preview')) result.push('derived_preview');
-  if ((source.nodeRole === 'selection' || source.nodeRole === 'workflow') && target.nodeRole === 'progress'
-    || source.nodeRole === 'progress' && target.nodeRole === 'workflow' && target.artifactKind === 'team_workspace') result.push('workflow_input');
+  if ((source.nodeRole === 'selection' || source.nodeRole === 'workflow') && targetIsMainProgress
+    || sourceIsMain && source.nodeRole === 'progress' && target.nodeRole === 'workflow' && target.artifactKind === 'team_workspace') result.push('workflow_input');
   return result;
 };
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { ComponentHostAction, ComponentPageInstance, ComponentStatus, WorkspaceProject } from '../../types';
+import type { ComponentHostAction, ComponentPageInstance, ComponentPageOpenScope, ComponentStatus, WorkspaceProject } from '../../types';
 import { bindComponentPageInstance, closeComponentPage, closeProjectComponentPages, ensureComponentPage } from './component-page-model';
 
 type ComponentHostBrowserPage = { id: string; projectId: string; project?: WorkspaceProject | null };
@@ -27,11 +27,11 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     setActiveIdentity(page.identity);
     if (page.instanceId) void window.electronAPI.activateComponentPage(page.instanceId);
   }, []);
-  const open = useCallback(async (action: ComponentHostAction, project: WorkspaceProject, workspacePath: string, insertAfterTabId = 'home') => {
+  const open = useCallback(async (action: ComponentHostAction, project: WorkspaceProject, workspacePath: string, insertAfterTabId = 'home', scope?: ComponentPageOpenScope) => {
     const ensured = ensureComponentPage(pages, action, project, workspacePath, insertAfterTabId);
     setPages(current => ensureComponentPage(current, action, project, workspacePath, insertAfterTabId).pages);
     setActiveIdentity(ensured.page.identity);
-    const result = await window.electronAPI.openComponentPage({ componentId: action.componentId, pageId: action.pageId, workspacePath, projectId: project.id, projectName: project.name, projectStatus: project.status });
+    const result = await window.electronAPI.openComponentPage({ componentId: action.componentId, pageId: action.pageId, workspacePath, projectId: project.id, projectName: project.name, projectStatus: project.status, ...scope });
     if (!result.success || !result.page) {
       if (ensured.created) setPages(current => closeComponentPage(current, ensured.page.identity));
       setActiveIdentity(ensured.created ? '' : ensured.page.identity);

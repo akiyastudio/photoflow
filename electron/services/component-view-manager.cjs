@@ -2,6 +2,24 @@ const path = require('path');
 
 const PAGE_KEY_SEPARATOR = '\u001f';
 const normalizeIdentity = value => String(value || '').trim().replace(/\\/g, '/').toLocaleLowerCase();
+const normalizeResolvedTheme = value => value === 'dark' ? 'dark' : 'light';
+const normalizeRelativePath = (value, field = 'component scope') => {
+  const raw = String(value || '').trim().replace(/\\/g, '/');
+  if (raw.length > 1024 || /^(?:[a-z]:|\/)/i.test(raw)) throw new Error(`Invalid ${field}`);
+  const normalized = raw.replace(/\/+$/g, '');
+  if (normalized.split('/').some(part => part === '..')) throw new Error(`Invalid ${field}`);
+  return normalized;
+};
+const normalizeOpenScope = request => {
+  const scopeRelativePath = normalizeRelativePath(request.scopeRelativePath, 'component scope');
+  const selected = Array.isArray(request.selectedRelativePaths) ? request.selectedRelativePaths : [];
+  if (selected.length > 10000) throw new Error('Too many component selected paths');
+  const selectedRelativePaths = [...new Set(selected.map(value => normalizeRelativePath(value, 'component selected path')).filter(Boolean))];
+  if (scopeRelativePath && selectedRelativePaths.some(value => value !== scopeRelativePath && !value.startsWith(`${scopeRelativePath}/`))) throw new Error('Component selection escapes its folder scope');
+  const sourcePageId = String(request.sourcePageId || '').trim();
+  if (sourcePageId.length > 160) throw new Error('Invalid component source page');
+  return { scopeRelativePath, selectedRelativePaths, sourcePageId };
+};
 const componentPageKey = ({ componentId, workspacePath, projectId }) => [componentId, normalizeIdentity(workspacePath), String(projectId || '').trim()].join(PAGE_KEY_SEPARATOR);
 const validBounds = value => value && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(value[key]))
   && value.width >= 0 && value.height >= 0 && value.width <= 20000 && value.height <= 20000;
@@ -18,6 +36,7 @@ class ComponentViewManager {
     this.instances = new Map();
     this.senderBindings = new Map();
     this.rpcMethods = new Map();
+    this.resolvedTheme = 'light';
     this.registerComponentSdkIpc();
   }
 
@@ -25,8 +44,7 @@ class ComponentViewManager {
     this.ipcMain.handle('component-sdk:get-context', event => {
       const instance = this.senderBindings.get(event.sender.id);
       if (!instance || instance.view.webContents !== event.sender) throw new Error('Unauthorized component sender');
-      const { workspacePath: _privateWorkspacePath, eventSender: _privateEventSender, ...publicContext } = instance.context;
-      return publicContext;
+      return this.publicContext(instance);
     });
     this.ipcMain.handle('component-sdk:rpc', (event, method, payload) => {
       const instance = this.senderBindings.get(event.sender.id);
@@ -65,8 +83,23 @@ class ComponentViewManager {
     const descriptor = this.registry.resolve(request.componentId);
     if (!descriptor || descriptor.fullPage.id !== request.pageId) throw new Error('Unknown component page');
     const key = componentPageKey(request);
-    const existing = this.instances.get(key);
-    if (existing) { this.activate(existing.instanceId); return this.publicInstance(existing); }
+    this.writeLog('info', 'Component page context bound', { componentId: request.componentId, projectId: String(request.projectId || ''), projectName: String(request.projectName || ''), projectStatus: String(request.projectStatus || ''), sourcePageId: String(request.sourcePageId || '') });
+    let existing = this.instances.get(key);
+    if (existing && (existing.descriptor.componentVersion !== descriptor.componentVersion || existing.descriptor.fullPage.entry !== descriptor.fullPage.entry)) {
+      this.close(existing.instanceId);
+      existing = null;
+    }
+    if (existing) {
+      existing.context = Object.freeze({
+        ...existing.context,
+        componentVersion: descriptor.componentVersion,
+        projectName: String(request.projectName || ''),
+        projectStatus: String(request.projectStatus || ''),
+        ...normalizeOpenScope(request),
+      });
+      if (!existing.view.webContents.isDestroyed()) existing.view.webContents.send('component-sdk:context-changed', this.publicContext(existing));
+      this.activate(existing.instanceId); return this.publicInstance(existing);
+    }
     const instanceId = `component-page-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const view = new this.WebContentsView({ webPreferences: {
       preload: this.preloadPath,
@@ -84,6 +117,7 @@ class ComponentViewManager {
         projectId: String(request.projectId || ''),
         projectName: String(request.projectName || ''),
         projectStatus: String(request.projectStatus || ''),
+        ...normalizeOpenScope(request),
         eventSender: view.webContents,
         emitComponentEvent: (topic, payload) => {
           const channels = { 'workflow.progress': 'workspace-team-workflow-progress', 'patch.return-batch.progress': 'workspace-team-patch-return-batch-progress' };
@@ -114,6 +148,19 @@ class ComponentViewManager {
 
   publicInstance(instance) {
     return { instanceId: instance.instanceId, componentId: instance.descriptor.componentId, pageId: instance.descriptor.fullPage.id, pageTitle: instance.descriptor.fullPage.title };
+  }
+
+  publicContext(instance) {
+    const { workspacePath: _privateWorkspacePath, eventSender: _privateEventSender, emitComponentEvent: _privateEmit, ...publicContext } = instance.context;
+    return { ...publicContext, themeContractVersion: 1, resolvedTheme: this.resolvedTheme };
+  }
+
+  setResolvedTheme(value) {
+    const resolvedTheme = normalizeResolvedTheme(value);
+    if (this.resolvedTheme === resolvedTheme) return false;
+    this.resolvedTheme = resolvedTheme;
+    for (const instance of this.instances.values()) if (!instance.view.webContents.isDestroyed()) instance.view.webContents.send('component-sdk:theme-changed', { contractVersion: 1, resolvedTheme });
+    return true;
   }
 
   activate(instanceId) {
@@ -155,4 +202,4 @@ class ComponentViewManager {
   destroy() { [...this.instances.values()].forEach(instance => this.close(instance.instanceId)); }
 }
 
-module.exports = { ComponentViewManager, componentPageKey, validBounds };
+module.exports = { ComponentViewManager, componentPageKey, normalizeOpenScope, normalizeResolvedTheme, validBounds };

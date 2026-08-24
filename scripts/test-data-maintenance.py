@@ -29,6 +29,7 @@ from workspace_db import (  # noqa: E402
     progress_list,
     progress_delete_missing,
     progress_register,
+    progress_relation_update,
     progress_update_tree,
     version_graph_edge_create,
     team_identity_complete,
@@ -591,10 +592,12 @@ def test_thumbnail_startup_recovery_contract(root: Path) -> None:
 def test_media_workflow_graph_cleanup(root: Path) -> None:
     workspace = root / "workflow-cleanup-workspace"
     project = workspace / "Project"
+    original_path = project / "Original"
     progress_path = project / "图片后期_1"
     team_path = project / "团片协作"
     import_path = project / "explicit-import-slot"
-    progress_path.mkdir(parents=True)
+    original_path.mkdir(parents=True)
+    progress_path.mkdir()
     team_path.mkdir()
     import_path.mkdir()
     db = connect(str(workspace), str(root / "workflow-cleanup.sqlite3"))
@@ -603,10 +606,15 @@ def test_media_workflow_graph_cleanup(root: Path) -> None:
         ("workflow-cleanup-project", "Project", "后期中", "Project", 1, 1),
     )
     db.commit()
+    original = progress_register(str(workspace), db, {
+        "projectName": "Project", "mediaKind": "image", "versionKey": "source",
+        "displayName": "Original", "folderPath": str(original_path),
+        "nodeRole": "original", "trackingEnabled": False,
+    })["progressFolder"]
     progress = progress_register(str(workspace), db, {
         "projectName": "Project", "mediaKind": "image", "versionKey": "1",
         "displayName": "图片后期_1", "folderPath": str(progress_path),
-        "nodeRole": "progress", "trackingEnabled": False,
+        "nodeRole": "progress", "parentProgressId": original["id"], "relationKind": "main", "trackingEnabled": False,
     })["progressFolder"]
     workflow = team_project_workspace(str(workspace), db, {"projectName": "Project"})["workflowNode"]
     imported = media_workflow_import_commit(str(workspace), db, {
@@ -622,8 +630,18 @@ def test_media_workflow_graph_cleanup(root: Path) -> None:
         "projectId": "workflow-cleanup-project", "sourceProgressId": progress["id"],
         "targetProgressId": workflow["id"], "edgeKind": "workflow_input",
     })
+    db.execute("UPDATE progress_folders SET artifact_kind='companion' WHERE id=?", (imported["id"],))
+    db.execute("DROP TRIGGER version_graph_edges_validate_insert")
+    db.execute(
+        """INSERT INTO version_graph_edges(id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
+           VALUES('invalid-companion-source','workflow-cleanup-project',?,?,'workflow_input',1,1)""",
+        (imported["id"], workflow["id"]),
+    )
+    workspace_db_module._install_progress_purpose_constraints(db)
+    db.commit()
     preserved = cleanup_media_workflow_graph(str(workspace), db, session_cutoff=0)
-    assert preserved["removedEdgeIds"] == []
+    assert preserved["removedEdgeIds"] == ["invalid-companion-source"]
+    assert preserved["removedImportSlotMappingCount"] == 1
     assert db.execute("SELECT COUNT(*) FROM version_graph_edges").fetchone()[0] == 1
     db.execute(
         """INSERT INTO media_import_graph_sessions(project_id,import_session_id,manifest_json,status,error,created_at,updated_at)
@@ -751,8 +769,10 @@ def test_team_return_missing_reconciliation(root: Path) -> None:
 def test_missing_progress_replacement(root: Path) -> None:
     workspace = root / "progress-workspace"
     project = workspace / "Project"
+    source = project / "Original"
     original = project / "图片后期_1"
-    original.mkdir(parents=True)
+    source.mkdir(parents=True)
+    original.mkdir()
     db = connect(str(workspace), str(root / "progress-workspace.sqlite3"))
     db.execute(
         "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
@@ -760,31 +780,37 @@ def test_missing_progress_replacement(root: Path) -> None:
     )
     db.commit()
     try:
+        source_node = progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "source",
+            "displayName": "Original", "folderPath": str(source), "nodeRole": "original", "trackingEnabled": False,
+        })["progressFolder"]
         registered = progress_register(str(workspace), db, {
             "projectName": "Project", "mediaKind": "image", "versionKey": "1",
+            "parentProgressId": source_node["id"], "relationKind": "main",
             "displayName": "图片后期_1", "folderPath": str(original), "trackingEnabled": True,
         })["progressFolder"]
         original.rmdir()
-        missing = progress_list(str(workspace), db, {"projectName": "Project", "includeMissing": True})["progressFolders"][0]
+        missing = next(item for item in progress_list(str(workspace), db, {"projectName": "Project", "includeMissing": True})["progressFolders"] if item["id"] == registered["id"])
         assert missing["id"] == registered["id"] and missing["folderMissing"] and missing["missingSince"]
 
         # Recreating the original path produces a new filesystem identity. It
         # must revive the tombstone and keep following subsequent renames.
         original.mkdir()
-        revived = progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"][0]
+        revived = next(item for item in progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"] if item["id"] == registered["id"])
         assert revived["id"] == registered["id"] and not revived["folderMissing"] and revived["missingSince"] is None
         relocated = project / "图片后期_1_已恢复"
         original.rename(relocated)
-        followed = progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"][0]
+        followed = next(item for item in progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"] if item["id"] == registered["id"])
         assert Path(followed["folderPath"]).resolve() == relocated.resolve()
         relocated.rmdir()
-        missing_again = progress_list(str(workspace), db, {"projectName": "Project", "includeMissing": True})["progressFolders"][0]
+        missing_again = next(item for item in progress_list(str(workspace), db, {"projectName": "Project", "includeMissing": True})["progressFolders"] if item["id"] == registered["id"])
         assert missing_again["folderMissing"] and missing_again["missingSince"]
 
         replacement = project / "图片后期_1_替换"
         replacement.mkdir()
         replaced = progress_register(str(workspace), db, {
             "projectName": "Project", "mediaKind": "image", "versionKey": "1",
+            "parentProgressId": source_node["id"], "relationKind": "main",
             "displayName": "图片后期_1_替换", "folderPath": str(replacement), "trackingEnabled": True,
         })["progressFolder"]
         assert replaced["id"] == registered["id"]
@@ -847,7 +873,8 @@ def test_modify_progress_replaces_missing_version(root: Path) -> None:
     missing_path = project / "图片后期_1"
     active_path = project / "图片后期_2"
     child_path = project / "图片后期_2_1"
-    for folder in (missing_path, active_path, child_path):
+    original_path = project / "Original"
+    for folder in (original_path, missing_path, active_path, child_path):
         folder.mkdir(parents=True, exist_ok=True)
     db = connect(str(workspace), str(root / "replace-progress-workspace.sqlite3"))
     db.execute(
@@ -856,12 +883,18 @@ def test_modify_progress_replaces_missing_version(root: Path) -> None:
     )
     db.commit()
     try:
+        original = progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "source",
+            "displayName": "Original", "folderPath": str(original_path), "nodeRole": "original", "trackingEnabled": False,
+        })["progressFolder"]
         missing = progress_register(str(workspace), db, {
             "projectName": "Project", "mediaKind": "image", "versionKey": "1",
+            "parentProgressId": original["id"], "relationKind": "main",
             "displayName": "图片后期_1", "folderPath": str(missing_path), "trackingEnabled": True,
         })["progressFolder"]
         active = progress_register(str(workspace), db, {
             "projectName": "Project", "mediaKind": "image", "versionKey": "2",
+            "parentProgressId": original["id"], "relationKind": "main",
             "displayName": "图片后期_2", "folderPath": str(active_path), "trackingEnabled": True,
         })["progressFolder"]
         child = progress_register(str(workspace), db, {
@@ -877,7 +910,7 @@ def test_modify_progress_replaces_missing_version(root: Path) -> None:
             "projectName": "Project", "primaryProgressId": missing["id"],
             "replacementProgressId": active["id"],
             "updates": [
-                {"id": missing["id"], "mediaKind": "image", "versionKey": "1", "displayName": "图片后期_1", "folderPath": str(missing_path), "trackingEnabled": True},
+                {"id": missing["id"], "mediaKind": "image", "versionKey": "1", "parentProgressId": original["id"], "displayName": "图片后期_1", "folderPath": str(missing_path), "trackingEnabled": True},
                 {"id": child["id"], "mediaKind": "image", "versionKey": "1_1", "parentProgressId": missing["id"], "displayName": "图片后期_1_1", "folderPath": str(remapped_child_path), "trackingEnabled": True},
             ],
         })
@@ -912,7 +945,7 @@ def test_missing_progress_removal_is_safe(root: Path) -> None:
     try:
         baseline_progress = progress_register(str(workspace), db, {
             "projectName": "Project", "mediaKind": "image", "versionKey": "0",
-            "displayName": "selection", "folderPath": str(baseline_folder), "trackingEnabled": True,
+            "displayName": "selection", "folderPath": str(baseline_folder), "nodeRole": "original", "trackingEnabled": False,
         })["progressFolder"]
         parent_progress = progress_register(str(workspace), db, {
             "projectName": "Project", "mediaKind": "image", "versionKey": "1",
@@ -978,14 +1011,31 @@ def test_missing_progress_removal_is_safe(root: Path) -> None:
             assert "可用文件" in str(error)
 
         recovered_file.unlink()
+        try:
+            progress_delete_missing(str(workspace), db, {
+                "projectName": "Project", "progressId": parent_progress["id"],
+            })
+            raise AssertionError("missing progress must not strand a child under a missing original")
+        except ValueError as error:
+            assert "下游节点" in str(error)
+        repair_source_folder = project / "repair-source"
+        repair_source_folder.mkdir()
+        repair_source = progress_register(str(workspace), db, {
+            "projectName": "Project", "mediaKind": "image", "versionKey": "repair-source",
+            "displayName": "repair-source", "folderPath": str(repair_source_folder),
+            "nodeRole": "original", "trackingEnabled": False,
+        })["progressFolder"]
+        progress_relation_update(db, {
+            "childProgressId": child_progress["id"], "parentProgressId": repair_source["id"],
+        })
         removed = progress_delete_missing(str(workspace), db, {
             "projectName": "Project", "progressId": parent_progress["id"],
         })
         assert removed["success"] and removed["deletedVersionCount"] == 1
-        assert removed["deletedBatchCount"] == 1 and removed["reparentedProgressCount"] == 1
+        assert removed["deletedBatchCount"] == 1 and removed["reparentedProgressCount"] == 0
         remaining = {item["id"]: item for item in progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"]}
         assert parent_progress["id"] not in remaining
-        assert remaining[child_progress["id"]]["parentProgressId"] == baseline_progress["id"]
+        assert remaining[child_progress["id"]]["parentProgressId"] == repair_source["id"]
         assert preview_progress["id"] in remaining
         assert db.execute("SELECT 1 FROM version_graph_edges WHERE id=?", (preview_edge["id"],)).fetchone() is None
         assert db.execute("SELECT is_deleted FROM versions WHERE id=?", (version_id,)).fetchone()[0] == 1

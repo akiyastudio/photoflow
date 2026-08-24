@@ -5,7 +5,7 @@ export type VersionTreeLayoutRelationKind = 'main' | 'auxiliary' | 'media_compan
 export type VersionTreeLayoutNode = {
   id: string;
   mediaKind?: 'image' | 'video';
-  nodeRole: 'original' | 'progress' | 'selection' | 'artifact' | 'workflow';
+  nodeRole: 'original' | 'progress' | 'selection' | 'artifact' | 'workflow' | 'broll';
   artifactKind?: 'companion' | 'preview' | 'team_workspace';
   relationKind?: 'main' | 'auxiliary';
   createdAt: number;
@@ -52,7 +52,7 @@ export type VersionTreeLayoutResult = {
   height: number;
 };
 
-const roleOrder = { original: 0, workflow: 1, artifact: 2, progress: 3, selection: 4 } as const;
+const roleOrder = { original: 0, workflow: 1, artifact: 2, progress: 3, selection: 4, broll: 5 } as const;
 const relationOrder: Record<VersionTreeLayoutRelationKind, number> = { main: 0, auxiliary: 1, workflow_input: 2, media_companion: 3, derived_preview: 4 };
 const compareNodes = (left: VersionTreeLayoutNode, right: VersionTreeLayoutNode) =>
   roleOrder[left.nodeRole] - roleOrder[right.nodeRole]

@@ -41,9 +41,11 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(model.trackingStateLabel({ nodeRole: 'selection', relationKind: 'auxiliary', trackingState: 'disabled' }), '选片辅助节点');
   assert.strictEqual(model.trackingStateLabel({ nodeRole: 'progress', trackingState: 'stale' }), '待刷新');
   assert.strictEqual(model.trackingStateLabel({ nodeRole: 'progress', trackingState: 'needs_repair' }), '版本关系需要修复');
+  assert.strictEqual(model.trackingStateLabel({ nodeRole: 'broll', trackingState: 'disabled' }), '花絮');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'artifact', artifactKind: 'preview', versionKey: 'legacy-preview-mov' }), '预览');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'workflow', artifactKind: 'team_workspace', versionKey: 'team-workspace' }), '协作');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'progress', versionKey: '2' }), 'V2');
+  assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'broll', versionKey: 'adopt-internal' }), '花絮');
   assert.deepStrictEqual(model.planProgressRootMove('客户/一组/RAW'), { sourceRelativePath: '客户/一组/RAW', targetRelativePath: 'RAW', requiresMove: true });
   assert.strictEqual(model.selectionOutputName('客户/一组/RAW'), '图片选片');
   assert.strictEqual(model.selectionOutputName('客户/一组/MOV'), '视频选片');
@@ -69,8 +71,10 @@ const { pathToFileURL } = require('url');
   assert.deepStrictEqual(model.nextVersionKeys([importedRaw, v1Branch], 'image', v1Branch), { main: '1_2', branch: '1_1_1' }, 'the main successor of V1_1 must remain on the V1 branch line');
   assert.deepStrictEqual(model.nextVersionKeys([importedRaw, v1Branch, v1BranchNext], 'image', v1Branch), { main: '1_3', branch: '1_1_1' }, 'a branch-line main successor must skip an occupied sibling number');
   assert.deepStrictEqual(model.nextVersionKeys([importedRaw, v1Branch, v1BranchNext], 'image', v1BranchNext), { main: '1_3', branch: '1_2_1' }, 'a continued branch version must support creating its own child branch');
-  assert.strictEqual(model.progressTrackingAction({ ...base, id: 'branch', nodeRole: 'progress', relationKind: 'main', versionKey: '1_1', trackingEnabled: true, trackingState: 'ready' }), 'refresh', 'V1_1 version branches must retain the full tracking workflow');
+  assert.strictEqual(model.progressTrackingAction({ ...base, id: 'branch', nodeRole: 'progress', relationKind: 'main', parentProgressId: importedRaw.id, versionKey: '1_1', trackingEnabled: true, trackingState: 'ready' }), 'refresh', 'V1_1 version branches must retain the full tracking workflow');
+  assert.strictEqual(model.progressTrackingAction({ ...base, id: 'legacy-root', nodeRole: 'progress', relationKind: undefined, parentProgressId: undefined, versionKey: '1', trackingEnabled: true, trackingState: 'ready' }), null, 'legacy orphan progress must never expose tracking actions');
   assert.strictEqual(model.progressTrackingAction({ ...base, id: 'untracked', nodeRole: 'progress', relationKind: 'main', trackingEnabled: false, trackingState: 'disabled' }), null, 'an untracked node must not offer a refresh action');
+  assert.strictEqual(model.progressTrackingAction({ ...base, id: 'broll', mediaKind: 'mixed', nodeRole: 'broll', trackingEnabled: false, trackingState: 'disabled' }), null, 'broll must never enter progress tracking');
   const nodes = [
     { ...base, id: 'root', nodeRole: 'original', relationKind: 'main', folderMissing: false },
     { ...base, id: 'hidden', nodeRole: 'progress', relationKind: 'main', parentProgressId: 'root', folderMissing: true },
@@ -110,10 +114,12 @@ const { pathToFileURL } = require('url');
 
   const semanticNodes = [
     { ...base, id: 'raw-semantic', nodeRole: 'original', relationKind: undefined, folderMissing: false, displayName: '不是靠名称识别', versionKey: 'zzz' },
-    { ...base, id: 'camera-jpg', nodeRole: 'artifact', artifactKind: 'companion', relationKind: undefined, folderMissing: false, displayName: 'RAW', versionKey: '1' },
+    { ...base, id: 'camera-jpg', nodeRole: 'original', artifactKind: 'companion', relationKind: undefined, folderMissing: false, displayName: 'RAW', versionKey: '1' },
     { ...base, id: 'generated-jpg', nodeRole: 'artifact', artifactKind: 'preview', relationKind: undefined, folderMissing: false, displayName: '图片后期_999', versionKey: '999' },
     { ...base, id: 'image-selection', nodeRole: 'selection', relationKind: 'auxiliary', parentProgressId: 'raw-semantic', folderMissing: false, displayName: '随意名称', versionKey: '0' },
     { ...base, id: 'team-workflow', nodeRole: 'workflow', artifactKind: 'team_workspace', relationKind: undefined, folderMissing: false, displayName: '也不靠名称', versionKey: '0' },
+    { ...base, id: 'broll-semantic', mediaKind: 'mixed', nodeRole: 'broll', relationKind: undefined, folderMissing: false, displayName: '幕后花絮', versionKey: 'adopt-broll' },
+    { ...base, id: 'legacy-orphan', nodeRole: 'progress', relationKind: undefined, parentProgressId: undefined, folderMissing: false, displayName: '旧版 V1', versionKey: '1' },
   ];
   const semanticEdges = [
     { id: 'companion', projectId: 'p', sourceProgressId: 'raw-semantic', targetProgressId: 'camera-jpg', edgeKind: 'media_companion', createdAt: 0, updatedAt: 0 },
@@ -130,6 +136,8 @@ const { pathToFileURL } = require('url');
     'the executable graph projection must preserve supplemental edges instead of relying on a source-string assertion',
   );
   assert.deepStrictEqual(model.selectableVersionParents(semanticNodes, { mediaKind: 'image', relationKind: 'main' }).map(node => node.id), ['raw-semantic'], 'artifacts, selections, and workflows are never structural parents');
+  assert(!model.projectVisibleVersionGraph(semanticNodes, semanticEdges).edges.some(edge => edge.parentId === 'broll-semantic' || edge.childId === 'broll-semantic'), 'broll must remain outside main/auxiliary and supplemental version edges');
+  assert(!model.selectableVersionParents(semanticNodes, { mediaKind: 'image', relationKind: 'main' }).some(node => node.id === 'legacy-orphan'), 'a preserved legacy orphan must not become the parent of new progress');
   assert.strictEqual(model.defaultMainParentId(semanticNodes, semanticEdges, 'image'), 'raw-semantic', 'RAW/JPG companion semantics select the graph source without reading names or version keys');
   const videoNodes = [
     { ...base, id: 'mov-semantic', mediaKind: 'video', nodeRole: 'original', relationKind: undefined, folderMissing: false, displayName: '不是 MOV', versionKey: 'preview' },

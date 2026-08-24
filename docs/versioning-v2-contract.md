@@ -8,7 +8,8 @@
 ## 1. 统一节点与关系模型
 
 ```ts
-type VersionNodeRole = 'original' | 'progress' | 'selection'
+type VersionNodeRole = 'original' | 'progress' | 'selection' | 'artifact' | 'workflow' | 'broll'
+type MediaKind = 'image' | 'video' | 'mixed'
 type RelationKind = 'main' | 'auxiliary'
 type TrackingState =
   | 'disabled'
@@ -29,6 +30,7 @@ interface VersionNode {
   id: string
   projectId: string
   role: VersionNodeRole
+  mediaKind: MediaKind
   parentNodeId: string | null
   relationKind: RelationKind | null
   folderIdentity: string
@@ -45,17 +47,22 @@ interface VersionNode {
 
 节点角色：
 
-- `original`：原始素材节点，包括 RAW、JPG、MOV，以及第一次被加入关系的普通项目内文件夹。
+- `original`：用户明确标记的原始素材节点，以及受限导入命令登记的 RAW、JPG、MOV；不使用版本号、结构父关系或跟踪。
 - `progress`：主分支的版本进度节点。
 - `selection`：选片产生的附属分支节点。
+- `artifact`：配套/预览等由专用命令推导的产物节点；不得用来表示花絮。
+- `workflow`：协作工作流节点。
+- `broll`：用户明确标记的花絮节点，固定 `mediaKind='mixed'`，允许图片、RAW 与视频混合；不使用版本号、父关系、版本跟踪或任何版本图边。
 
 边类型由子节点的 `relationKind` 表示：
 
 - `main`：主分支边，版本树用实线绘制。
 - `auxiliary`：附属分支边，版本树用虚线绘制。
-- 无父节点时 `parentNodeId` 与 `relationKind` 都必须为 `null`；有父节点时两者都必须非空。
+- `original` 与 `broll` 的 `parentNodeId`/`relationKind` 必须为 `null`。
+- `progress` 必须选择同项目、同媒体类型、仍存在的 `original` 或已合法连接的 `progress` 父节点，并持久化 `relationKind='main'`；不存在合法父节点时不得创建无父 V1。
+- `selection` 必须有父节点并使用 `relationKind='auxiliary'`。`artifact`/`workflow` 的关系只由各自受限命令推导。
 
-`relationKind` 是权威值。不得通过 `versionKey` 是否包含下划线、文件夹名或节点角色反推边类型。V2 写入时，`progress` 节点必须使用 `main`，`selection` 节点必须使用 `auxiliary`；读取旧数据时由迁移明确补齐，不能在运行时继续推断。
+`relationKind` 是权威值。不得通过 `versionKey` 是否包含下划线、文件夹名或节点角色反推边类型。V2 写入时，`progress` 节点必须使用 `main`，`selection` 节点必须使用 `auxiliary`；读取旧数据时由迁移明确补齐，不能在运行时继续推断。`versionKey` 对 `original`/`artifact`/`workflow`/`broll` 仅可作为内部唯一键，界面不得把它显示成用户版本号。
 
 ## 2. 跟踪策略与界面状态
 
@@ -65,7 +72,7 @@ interface VersionNode {
 - `renameFromParent`：提交时是否沿用父版本文件名。
 - `copyMissingFromParent`：是否从父版本补齐当前版本缺失的媒体。
 
-`renameFromParent` 和 `copyMissingFromParent` 只有在 `trackingEnabled=true` 时可为 `true`。`auxiliary` 节点必须持久化为三个值全为 `false`，界面必须禁用并解释以下能力不可用：图片跟踪、沿用上一版本文件名、补齐缺失媒体。后端也必须拒绝 auxiliary 节点开启任意一个选项，不能只依赖界面禁用。
+`renameFromParent` 和 `copyMissingFromParent` 只有在 `trackingEnabled=true` 时可为 `true`。只有带合法 `main` 父节点的 `progress` 可以启用跟踪；`original`、`broll`、`artifact`、`workflow` 与 `auxiliary` 节点必须持久化为三个值全为 `false`。界面必须隐藏或禁用并解释不可用能力，后端也必须拒绝这些角色开启任意一个选项。
 
 内部状态到界面文案的唯一映射：
 
@@ -79,12 +86,21 @@ interface VersionNode {
 | `stale` | 待刷新 | 已提交结果已被文件变化影响 |
 | `needs_repair` | 需要修复 | 异常/不完整状态，绝不能显示或计作“已跟踪” |
 | `original` 节点 | 原始素材 | 节点角色文案，优先于跟踪状态文案 |
+| `broll` 节点 | 花絮 | 独立用途分类，不属于版本链 |
 
 状态转换的正常路径为：`disabled → pending_compare → pending_confirm → committing → ready`。刷新从 `stale → pending_compare` 开始。取消 compare 回到开始前状态；提交失败进入 `needs_repair` 或保留可恢复的 `pending_confirm`，由失败是否造成部分写入决定。
 
 ## 3. 任意项目内文件夹
 
-任意项目根目录内的真实文件夹都可以作为关系来源，不要求名称符合版本规则。首次加入关系的普通文件夹先以 `original` 节点登记，再通过节点 ID 连接后续节点。
+任意项目内的真实文件夹都可以从统一“标记…”入口打开同一个标记面板，不要求名称符合版本规则。面板第一层仅提供“标记为：原始素材 / 进度 / 花絮”：
+
+- 原始素材只显示媒体类型等必要字段，不显示版本号、父版本或跟踪设置。
+- 进度显示媒体类型、父版本、版本号/分支和跟踪设置；没有合法父节点时显示“请先标记原始素材”并禁用提交。
+- 花絮只显示分类说明，提交为 `broll/mixed`，不显示或提交父节点、版本号与跟踪字段。
+
+三种用途之间切换必须构造新的分支草稿；从进度切到原始素材/花絮时，父节点、版本号、分支、跟踪和工作流输入字段必须从提交对象中消失，切回进度也不得恢复旧临时值。工具栏、右键菜单和待接入提示都只能打开该统一面板；右键“纳入版本树”高级子菜单只保留配套素材/预览产物等专用关系。
+
+父版本自动选择只允许唯一明确的语义主线叶节点。存在多个原始来源、多个主线叶节点或其他歧义时，`parentProgressId` 与 `versionKey` 必须保持空值，由用户明确选择；不得依赖数组顺序或“最后一个节点”。
 
 将非根目录文件夹标记为 `progress` 前必须：
 
@@ -138,6 +154,14 @@ compare/refresh 会话中的每个媒体项目必须具有以下状态之一：
 
 ## 7. 删除生命周期与树重连
 
+普通文件列表刷新、版本快照读取和 renderer effect 都是只读协调过程，不得自动调用 `unregister`。历史上已存在的无父 `progress` 必须原样保留并明确提示修复：用户可选择合法父节点，或显式取消版本登记；两条路径都不得删除物理文件。游离进度不能成为新进度或预览关系的来源。显式断开普通进度必须走受限的 `unregister(progressId)`，不能先持久化一个新的无父 progress。
+
+仍被 structural children 引用的父节点不得转换为 companion、artifact、workflow、broll 或不兼容媒体类型；父端更新触发器与所有受限角色转换命令都必须在写入前拒绝。仅更新 `missingSince` 不改变结构语义，可以保留现有关系供恢复。
+
+维护任务在找不到存活替代父节点时必须保留 tombstone 与下游关系供修复，不能把下游静默改成根节点。以下生命周期规则仅适用于不会制造非法游离节点的记录：
+
+detached versioning store 不依赖被抽取器剥离的 FK cascade。删除失效进度必须在同一事务中显式清理 batch items/operations、tracking sessions/items、图边、导入 slot 与布局投影，再删除 batch 和 progress；任一步失败必须整体回滚。
+
 物理文件夹被确认消失后：
 
 1. 立即从版本树和可选父节点列表隐藏；
@@ -171,6 +195,9 @@ interface StartTrackingTaskResult {
 ## 9. 实现验收约束
 
 - 数据库迁移必须显式写入 `role`、`relationKind`、三个策略字段、`trackingState` 和 tombstone 字段。
+- 用途写入必须覆盖“选择用途 → 提交 → reload/effect → 同一节点仍持久存在”；同时覆盖三模式字段隔离、broll mixed/无边/无跟踪、无父 progress 拒绝以及旧游离 progress 不被刷新删除。
+- renderer 只能提交项目相对路径、受限用途命令和项目内节点 ID；不得提交 `nodeRole`、绝对路径或任意边类型。Electron/后端根据受限命令推导角色和关系。
+- 若节点/文件已持久化而后台跟踪启动失败，界面必须报告“登记/导入已成功，跟踪启动失败且可重试”，不得把部分成功误报为创建或导入失败。
 - API、数据库和界面行为测试必须覆盖 auxiliary 禁用、状态文案、stale 传播、新素材确认门禁、非根目录移动预检、selection 冲突、tombstone 隐藏/接管以及 task/session 分离。
 - 生产界面字段、状态和按钮行为以 `docs/prototypes/tool-panels/README.md` 为实现清单；视觉参考可直接打开同目录 `index.html`。
 

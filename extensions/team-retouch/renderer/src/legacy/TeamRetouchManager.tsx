@@ -1,6 +1,8 @@
 // @ts-nocheck -- source-faithful migration from fef15e4^; RPC types are enforced by legacy-api.ts
 import { legacyApi } from './legacy-api';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { readableLegacyMediaError } from './legacy-media-preview-model';
+import { legacyAdvancedStatusPresentation } from './legacy-advanced-status-model';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, ExternalLink, Loader2, Maximize2, RefreshCw, ScanFace, Settings, SlidersHorizontal, Trash2, UserRound, UsersRound, Wand2, X } from 'lucide-react';
@@ -13,10 +15,15 @@ import { teamWorkflowSourcePaths, useTeamOutputProgress } from './useTeamOutputP
 
 type Props = {
   entries: ProjectFileEntry[];
+  historyRecordCount?: number;
+  historyOwnershipPendingCount?: number;
   workspacePath: string;
   project: WorkspaceProject;
   cacheConfig: AppConfig['mediaCache'];
   componentStatus?: ComponentStatus;
+  advancedStatusLoading?: boolean;
+  advancedStatusError?: string;
+  onRetryAdvancedStatus?: () => void;
   activeStep: TeamRetouchStep;
   onStepChange: (step: TeamRetouchStep) => void;
   onClose: () => void;
@@ -153,15 +160,15 @@ const useLazyPreview = (filePath: string | undefined, cacheConfig: AppConfig['me
         const url = pickThumbnailUrl(update.previewUrls, size);
         if (url) setState({ url, status: 'ready', error: '' });
       } else if (update.state === 'FAILED' || update.state === 'MISSING') {
-        setState({ url: '', status: 'failed', error: update.error || (update.state === 'MISSING' ? '原始文件不存在或磁盘离线' : '预览生成失败') });
+        setState({ url: '', status: 'failed', error: readableLegacyMediaError(update.error || (update.state === 'MISSING' ? '原始文件不存在或磁盘离线' : '预览生成失败'), filePath.includes(':working:') ? 'working' : 'original') });
       }
     });
     void legacyApi.getMediaThumbnail(filePath, originalPreviewKind(filePath), cacheConfig, size, 1, 0).then(result => {
       if (!active) return;
       if (result.previewUrl) setState({ url: result.previewUrl, status: 'ready', error: '' });
-      else if (!result.success || result.state === 'FAILED' || result.state === 'MISSING') setState({ url: '', status: 'failed', error: result.error || '预览生成失败' });
+      else if (!result.success || result.state === 'FAILED' || result.state === 'MISSING') setState({ url: '', status: 'failed', error: readableLegacyMediaError(result.error || '预览生成失败', filePath.includes(':working:') ? 'working' : 'original') });
     }).catch(error => {
-      if (active) setState({ url: '', status: 'failed', error: error instanceof Error ? error.message : String(error) });
+      if (active) setState({ url: '', status: 'failed', error: readableLegacyMediaError(error, filePath.includes(':working:') ? 'working' : 'original') });
     });
     return () => { active = false; stop(); };
   }, [filePath, size, refreshKey, enabled, cacheConfig.directory, cacheConfig.maxSizeGB, retryToken]);
@@ -191,7 +198,7 @@ const useOriginalPreview = (filePath: string | undefined, cacheConfig: AppConfig
 };
 
 const LazyPreviewPlaceholder = ({ failed, error, onRetry }: { failed: boolean; error: string; onRetry: () => void }) => failed
-  ? <div className="flex flex-col items-center justify-center gap-2 px-4 text-center text-xs text-amber-400"><AlertTriangle size={22}/><span title={error}>预览加载失败</span><button type="button" onClick={onRetry} className="rounded-md border border-amber-400/40 px-2.5 py-1 font-bold text-amber-300 hover:bg-amber-400/10">重试</button></div>
+  ? <div className="flex max-w-lg flex-col items-center justify-center gap-2 px-4 text-center text-xs text-amber-300"><AlertTriangle size={22}/><strong>预览加载失败</strong><span className="break-words leading-5 text-amber-200" title={error}>{error || '未知媒体读取错误'}</span><button type="button" onClick={onRetry} className="rounded-md border border-amber-400/40 px-2.5 py-1 font-bold text-amber-300 hover:bg-amber-400/10">重试预览</button></div>
   : <Loader2 className="animate-spin text-slate-500"/>;
 
 const FullscreenImageViewer = ({ url, filePath, cacheConfig, title, details, onClose }: { url: string; filePath?: string; cacheConfig?: AppConfig['mediaCache']; title: string; details?: string; onClose: () => void }) => {
@@ -457,7 +464,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, iden
 
   const load = async () => {
     setLoading(true);
-    const result = await legacyApi.getTeamPatches(workspacePath, project.status, project.name, entry.relativePath);
+    const result = await legacyApi.getTeamPatches(workspacePath, project.status, project.name, entry.relativePath, initialPhoto?.baseVersionId || entry.teamHistoryBaseVersionId || '');
     setLoading(false);
     if (!result.success) { onNotice(`打开团片协作失败：${result.error || '未知错误'}`); return; }
     setBundle(normalizeBundle(result));
@@ -589,7 +596,7 @@ const syncTaskLabels = async (workspacePath: string, workspace: TeamIdentityWork
   })));
 };
 
-const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, componentStatus, activeStep, onStepChange, onClose, onOpenSettings, onNotice, onEntriesChange, onProjectChanged, onBusyChange }: Props) => {
+const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, historyOwnershipPendingCount = 0, workspacePath, project, cacheConfig, componentStatus, advancedStatusLoading = false, advancedStatusError = '', onRetryAdvancedStatus, activeStep, onStepChange, onClose, onOpenSettings, onNotice, onEntriesChange, onProjectChanged, onBusyChange }: Props) => {
   const appDialog = useAppDialog();
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<BatchResult[]>([]);
@@ -616,7 +623,7 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, co
   useEffect(() => () => onBusyChangeRef.current?.(false), []);
   const identitySubjects = useMemo(() => identitySubjectsFromWorkspace(identityState), [identityState]);
   const unrecognizedPaths = useMemo(() => entries
-    .filter(entry => !(workspacePhotoForEntry(identityState.photos, entry)?.tasks.length))
+    .filter(entry => !entry.teamHistoryMissing && !(workspacePhotoForEntry(identityState.photos, entry)?.tasks.length))
     .map(entry => entry.relativePath), [entries, identityState.photos]);
   const selectedIdentitySubject = identitySubjects.find(subject => subject.key === identityPickerKey);
   const selectedCandidateSubjects = useMemo(() => {
@@ -838,23 +845,24 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, co
 
   const overallProgress = progress.itemCount ? Math.max(0, Math.min(100, ((Math.max(1, progress.itemIndex) - 1) + progress.progress / 100) / progress.itemCount * 100)) : 0;
   const resultByPath = new Map(results.map(result => [result.relativePath, result]));
-  const advancedNeedsRepair = componentStatus?.advancedState === 'repair-needed';
+  const advancedPresentation = legacyAdvancedStatusPresentation(componentStatus, advancedStatusLoading, advancedStatusError);
   const confirmedIdentityCount = identitySubjects.filter(subject => subject.identity && !isGeneratedIdentity(subject.identity) && ['manual', 'manual-group'].includes(subject.assignment?.source || '')).length;
   const candidateIdentityCount = identitySubjects.filter(subject => subject.identity && !isGeneratedIdentity(subject.identity) && subject.assignment?.source === 'suggested').length;
   const unmarkedIdentityCount = identitySubjects.filter(isUnmarkedIdentitySubject).length;
 
-  return <div className="fixed inset-x-0 bottom-0 top-10 z-[310] flex flex-col bg-slate-50"><header className="flex min-h-16 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-3"><span className="rounded-xl bg-violet-50 p-2 text-violet-600"><UsersRound size={20}/></span><div><h2 className="font-bold text-slate-900">团片协作 · {entries.length} 张图片</h2><p className="mt-0.5 text-xs text-slate-500">识别、裁图并标记人物，确认后生成协作流程。</p></div><TeamRetouchSteps value={activeStep} onChange={onStepChange} disabled={running}/><div className="ml-auto flex items-center gap-2"><button disabled={running || identityLoading} onClick={() => void runBatch()} className="dialog-secondary inline-flex items-center gap-2">{running || identityLoading ? <Loader2 size={15} className="animate-spin"/> : <ScanFace size={15}/>} {identityLoading ? '读取项目数据…' : unrecognizedPaths.length ? `识别新增图片（${unrecognizedPaths.length} 张）` : entries.length > 1 ? '重新识别全部图片' : '重新识别图片'}</button><button disabled={running || identityLoading || identityState.identifying} onClick={() => void identifyAndSync()} className="dialog-primary inline-flex items-center gap-2">{identityState.identifying ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}重新自动标记人物</button><button type="button" onClick={onOpenSettings} title="团片协作设置" aria-label="团片协作设置" className="rounded-md p-2 text-slate-500 hover:bg-slate-100"><Settings size={20}/></button></div></header>
-    <div className={`border-b px-5 py-2 text-xs ${componentStatus?.advancedAvailable ? 'border-violet-100 bg-violet-50 text-violet-700' : advancedNeedsRepair ? 'border-amber-100 bg-amber-50 text-amber-700' : 'border-blue-100 bg-blue-50 text-blue-700'}`}><span className="font-bold">{componentStatus?.advancedAvailable ? '当前使用高级人物检测' : advancedNeedsRepair ? '当前使用基础人物检测；高级检测需要修复。' : '当前使用基础人物检测；高级检测未安装。'}</span></div>
+  return <div className="fixed inset-x-0 bottom-0 top-10 z-[310] flex flex-col bg-slate-50"><header className="flex min-h-16 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-3"><span className="rounded-xl bg-violet-50 p-2 text-violet-600"><UsersRound size={20}/></span><div><h2 className="font-bold text-slate-900">{historyOwnershipPendingCount ? `团片协作 · 已找到 ${entries.length}/${historyRecordCount} 张图片` : `团片协作 · ${entries.length} 张图片`}</h2><p className="mt-0.5 text-xs text-slate-500">识别、裁图并标记人物，确认后生成协作流程。</p></div><TeamRetouchSteps value={activeStep} onChange={onStepChange} disabled={running}/><div className="ml-auto flex items-center gap-2"><button disabled={running || identityLoading} onClick={() => void runBatch()} className="dialog-secondary inline-flex items-center gap-2">{running || identityLoading ? <Loader2 size={15} className="animate-spin"/> : <ScanFace size={15}/>} {identityLoading ? '读取团片历史…' : unrecognizedPaths.length ? `识别新增图片（${unrecognizedPaths.length} 张）` : entries.length > 1 ? '重新识别全部图片' : '重新识别图片'}</button><button disabled={running || identityLoading || identityState.identifying} onClick={() => void identifyAndSync()} className="dialog-primary inline-flex items-center gap-2">{identityState.identifying ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}重新自动标记人物</button><button type="button" onClick={onOpenSettings} title="团片协作设置" aria-label="团片协作设置" className="rounded-md p-2 text-slate-500 hover:bg-slate-100"><Settings size={20}/></button></div></header>
+    <div className={`flex items-center gap-2 border-b px-5 py-2 text-xs ${advancedPresentation.state === 'ready' ? 'border-violet-100 bg-violet-50 text-violet-700' : advancedPresentation.state === 'repair-needed' || advancedPresentation.state === 'error' ? 'border-amber-100 bg-amber-50 text-amber-700' : 'border-blue-100 bg-blue-50 text-blue-700'}`}>{advancedPresentation.state === 'checking' && <Loader2 size={13} className="animate-spin"/>}<span className="font-bold">{advancedPresentation.text}</span>{advancedPresentation.state === 'error' && <button type="button" className="ml-auto rounded-md border border-amber-300 px-2 py-1 font-bold" onClick={onRetryAdvancedStatus}>重新检查</button>}</div>
     {!!identitySubjects.length && <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-5 py-2 text-xs"><span className="font-bold text-slate-700">人物标记</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 font-bold text-emerald-700">已确认 {confirmedIdentityCount}</span>{candidateIdentityCount > 0 && <span className="rounded-full bg-amber-50 px-2.5 py-1 font-bold text-amber-700">自动候选 {candidateIdentityCount}</span>}<button type="button" disabled={!unmarkedIdentityCount || identityLoading || identityState.identifying} onClick={openNextUnmarkedIdentity} title="打开下一个未标记人物" className="rounded-full bg-slate-100 px-2.5 py-1 font-bold text-slate-600 transition hover:bg-blue-50 hover:text-blue-700 disabled:cursor-default disabled:opacity-50">未标记 {unmarkedIdentityCount}{unmarkedIdentityCount ? ' · 下一个' : ''}</button><span className="ml-auto text-slate-500">点击“未标记”查看下一处，或直接选择人物。</span></div>}
     {running && <div className="border-b border-blue-100 bg-blue-50 px-5 py-3"><div className="flex justify-between text-xs font-bold text-blue-700"><span>{progress.itemIndex ? `${progress.itemIndex}/${progress.itemCount} · ${progress.itemName} · ` : ''}{progress.message}</span><span>{Math.round(overallProgress)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full bg-blue-600" style={{ width: `${overallProgress}%` }}/></div></div>}
     <main className="min-h-0 flex-1 overflow-y-auto p-6"><div className="mx-auto max-w-[1600px] space-y-6">{!entries.length && !identityLoading && <div className="flex min-h-52 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white text-sm font-bold text-slate-500">当前项目没有团片协作图片，可从项目文件中重新打开团片协作。</div>}{identityLoading
-      ? <div className="flex min-h-52 items-center justify-center rounded-xl border border-slate-200 bg-white text-sm font-bold text-slate-600"><Loader2 size={18} className="mr-2 animate-spin text-blue-600"/>正在读取整个项目的人物与工作图数据…</div>
+      ? <div className="flex min-h-52 items-center justify-center rounded-xl border border-slate-200 bg-white text-sm font-bold text-slate-600"><Loader2 size={18} className="mr-2 animate-spin text-blue-600"/>正在读取团片历史中的人物与工作图…</div>
       : identityLoadError
         ? <div className="flex min-h-52 flex-col items-center justify-center gap-3 rounded-xl border border-red-200 bg-white px-6 text-center text-sm text-red-700"><p className="font-bold">团片协作数据读取失败</p><p className="max-w-2xl text-xs text-slate-500">{identityLoadError}</p><button type="button" className="dialog-primary" onClick={() => { setIdentityLoading(true); void loadIdentities(); }}>重新读取</button></div>
         : entries.map(entry => {
         const result = resultByPath.get(entry.relativePath);
         const initialPhoto = workspacePhotoForEntry(identityState.photos, entry);
         const photoId = initialPhoto?.photoId || '';
+        if (entry.teamHistoryMissing) return <section key={entry.relativePath} className="rounded-xl border border-amber-300 bg-white p-5"><div className="flex items-start gap-3"><AlertTriangle size={22} className="mt-0.5 shrink-0 text-amber-500"/><div className="min-w-0 flex-1"><h3 className="font-bold text-slate-800">{entry.name || '团片历史图片'} · 缺失 / 需重新关联</h3><p className="mt-1 text-xs leading-5 text-slate-500">{entry.teamHistoryMissingReason || '历史记录暂时无法恢复项目内路径。'} 已保留该记录，不会删除人物、任务或版本数据。</p><div className="mt-3 flex flex-wrap gap-2 text-[11px] text-slate-500"><span className="rounded-full bg-slate-100 px-2.5 py-1">Photo ID：{entry.teamHistoryPhotoId || '未知'}</span><span className="rounded-full bg-slate-100 px-2.5 py-1">版本：{entry.teamHistoryBaseVersionId || '未知'}</span><span className="rounded-full bg-amber-50 px-2.5 py-1 font-bold text-amber-700">关联任务 {entry.teamHistoryTaskCount || 0}</span></div><button type="button" className="dialog-secondary mt-4" onClick={() => onProjectChanged?.()}>重新读取并关联</button></div></div></section>;
         return <section key={entry.relativePath} className="space-y-2">{result && !result.success && <div className="rounded-lg bg-red-50 px-3 py-2 text-xs font-bold text-red-600">{result.error || `${entry.name} 识别失败`}</div>}<TeamRetouchPhotoCard entry={entry} workspacePath={workspacePath} project={project} cacheConfig={cacheConfig} componentStatus={componentStatus} onClose={onClose} onNotice={onNotice} onProjectChanged={onProjectChanged} onEntriesChange={() => { const next = entries.filter(candidate => candidate.relativePath !== entry.relativePath); onEntriesChange?.(next); }} identityState={identityState} initialPhoto={initialPhoto} refreshToken={refreshToken + (photoRefreshTokens[photoId] || 0)} processingMessage={photoProcessingMessages[photoId]} onIdentityChanged={() => loadIdentities(true)} onDetectionComplete={identifyAndSync} onPickIdentity={openIdentityPicker}/></section>;
         })}</div></main>
     {selectedIdentitySubject && <IdentityPicker
@@ -886,12 +894,27 @@ const TeamRetouchWorkspace = ({ entries, workspacePath, project, cacheConfig, co
 
 export const TeamRetouchManager = (props: Props) => {
   const [freshComponentStatus, setFreshComponentStatus] = useState(props.componentStatus);
+  const [advancedStatusLoading, setAdvancedStatusLoading] = useState(!props.componentStatus?.advancedState && !props.componentStatus?.advancedAvailable);
+  const [advancedStatusError, setAdvancedStatusError] = useState('');
+  const advancedStatusSequenceRef = useRef(0);
+  const refreshAdvancedStatus = useCallback(async () => {
+    const sequence = ++advancedStatusSequenceRef.current;
+    setAdvancedStatusLoading(true); setAdvancedStatusError('');
+    try {
+      const result = await legacyApi.getComponents();
+      if (!result.success) throw new Error(result.error || '宿主没有返回组件状态');
+      const latest = result.components?.find(component => component.id === 'team-retouch');
+      if (!latest) throw new Error('未找到团片协作组件状态');
+      if (sequence === advancedStatusSequenceRef.current) setFreshComponentStatus(latest);
+    } catch (error) {
+      if (sequence === advancedStatusSequenceRef.current) setAdvancedStatusError(error instanceof Error ? error.message : String(error));
+    } finally { if (sequence === advancedStatusSequenceRef.current) setAdvancedStatusLoading(false); }
+  }, []);
   useEffect(() => {
     setFreshComponentStatus(props.componentStatus);
-    if (props.componentStatus?.advancedAvailable) return;
-    let active = true;
-    void legacyApi.getComponents().then(result => { const latest = result.components?.find(component => component.id === 'team-retouch'); if (active && result.success && latest) setFreshComponentStatus(latest); });
-    return () => { active = false; };
-  }, [props.componentStatus]);
-  return <TeamRetouchWorkspace {...props} componentStatus={freshComponentStatus}/>;
+    if (props.componentStatus?.advancedState || props.componentStatus?.advancedAvailable) { advancedStatusSequenceRef.current += 1; setAdvancedStatusLoading(false); setAdvancedStatusError(''); return; }
+    void refreshAdvancedStatus();
+    return () => { advancedStatusSequenceRef.current += 1; };
+  }, [props.componentStatus, refreshAdvancedStatus]);
+  return <TeamRetouchWorkspace {...props} componentStatus={freshComponentStatus} advancedStatusLoading={advancedStatusLoading} advancedStatusError={advancedStatusError} onRetryAdvancedStatus={() => void refreshAdvancedStatus()}/>;
 };

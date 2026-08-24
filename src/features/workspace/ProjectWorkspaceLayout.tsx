@@ -1,10 +1,10 @@
 import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
-import type { ComponentHostAction } from '../../types';
+import type { ComponentHostAction, ComponentPageOpenScope } from '../../types';
 import { ComponentIcon } from '../../components/ComponentIcon';
 
 const CONTEXT_MENU_VIEWPORT_MARGIN = 8;
 
-export const ComponentToolbarActions = ({ actions, onOpen }: { actions: ComponentHostAction[]; onOpen: (action: ComponentHostAction) => void }) => actions.length ? <><span aria-hidden className="toolbar-divider"/><div aria-label="UI 组件" className="component-toolbar-actions flex shrink-0 items-center gap-1">{actions.map(action => <button key={`${action.componentId}:${action.actionId}`} type="button" onClick={() => onOpen(action)} title={`${action.label}：在独立组件页中打开`} className="project-action-button"><ComponentIcon src={action.iconUrl} size={16}/>{action.label}</button>)}</div></> : null;
+export const ComponentToolbarActions = ({ actions, scope, onOpen }: { actions: ComponentHostAction[]; scope: ComponentPageOpenScope; onOpen: (action: ComponentHostAction, scope: ComponentPageOpenScope) => void }) => actions.length ? <><span aria-hidden className="toolbar-divider"/><div aria-label="UI 组件" className="component-toolbar-actions flex shrink-0 items-center gap-1">{actions.map(action => <button key={`${action.componentId}:${action.actionId}`} type="button" onClick={() => onOpen(action, scope)} title={action.label} className="project-action-button"><ComponentIcon src={action.iconUrl} size={16}/>{action.label}</button>)}</div></> : null;
 
 export const ViewportContextMenu = ({ x, y, widthClass, allowSubmenus = false, children }: { x: number; y: number; widthClass: string; allowSubmenus?: boolean; children: React.ReactNode }) => {
   const menuRef = useRef<HTMLDivElement>(null);

@@ -6,7 +6,7 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   const handlers = new Map();
   const workspaceRoot = 'trusted-workspace-root';
   const child = { id: 'child', nodeRole: 'progress' };
-  const parent = { id: 'parent', nodeRole: 'original' };
+  const parent = { id: 'parent', nodeRole: 'original', mediaKind: 'image', folderMissing: false };
   let repositoryPayload;
   let repairPayload;
   let layoutGetPayload;
@@ -121,6 +121,14 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
     expectedUpdatedAt: 123,
   }, 'only node IDs and the optional revision may cross the repository boundary');
   assert.strictEqual(filesystemCalls, 0, 'relation updates must not move, overwrite, delete, or inspect files');
+
+  repositoryPayload = undefined;
+  const forbiddenDetach = await handler(null, workspaceRoot, 'Trusted Project', {
+    childProgressId: child.id, parentProgressId: null,
+  });
+  assert.strictEqual(forbiddenDetach.success, false);
+  assert.match(forbiddenDetach.error, /progress_detach_requires_unregister/);
+  assert.strictEqual(repositoryPayload, undefined, 'parentless progress must use the explicit ID-only unregister command');
 
   const replaceEdgeHandler = handlers.get('workspace-version-graph-edge-replace-source');
   assert(replaceEdgeHandler, 'supplemental edge reconnect IPC must be registered');
@@ -278,6 +286,14 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   assert.deepStrictEqual(adoptionPayload, {
     projectName: 'Trusted Project', folderPath: path.resolve('D:\\external-originals'), externalLinkRelativePath: 'RAW.lnk', mode: 'original', mediaKind: 'image',
   }, 'a managed external folder imported as original material must register its resolved target as an original version-tree node');
+  adoptionPayload = undefined;
+  const adoptedBroll = await adoptionHandler(null, workspaceRoot, '后期中', {
+    projectName: 'Trusted Project', relativePath: 'manual/broll', mode: 'broll', mediaKind: 'mixed',
+  });
+  assert.strictEqual(adoptedBroll.success, true, adoptedBroll.error);
+  assert.deepStrictEqual(adoptionPayload, {
+    projectName: 'Trusted Project', folderPath: path.join('C:\\trusted-project', 'manual', 'broll'), mode: 'broll', mediaKind: 'mixed',
+  }, 'broll adoption must pass only a main-process-resolved path and the restricted broll/mixed purpose command');
   adoptionPayload = undefined;
   const injectedAdoption = await adoptionHandler(null, workspaceRoot, '后期中', {
     projectName: 'Trusted Project', relativePath: 'manual/source', mode: 'preview', mediaKind: 'image',

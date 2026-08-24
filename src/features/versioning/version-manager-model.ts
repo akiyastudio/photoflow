@@ -6,7 +6,7 @@ export const MAIN_BRANCH_PHOTO_PAGE_SIZE = 48;
 
 export const mainBranchVersionsForPhoto = (entries: readonly MainBranchMediaLike[], photoId: string): MediaVersion[] => entries
   .filter(entry => entry.photoId === photoId
-    && entry.nodeRole !== 'selection'
+    && (entry.nodeRole === 'original' || entry.nodeRole === 'progress')
     && entry.relationKind !== 'auxiliary')
   .sort((left, right) => left.branchIndex - right.branchIndex
     || left.version.createdAt - right.version.createdAt
@@ -25,7 +25,7 @@ export type MainBranchPhotoSummary = {
 export const mainBranchPhotoSummaries = (entries: readonly MainBranchMediaLike[]): MainBranchPhotoSummary[] => {
   const grouped = new Map<string, MainBranchMediaLike[]>();
   entries.forEach(entry => {
-    if (entry.nodeRole === 'selection' || entry.relationKind === 'auxiliary') return;
+    if ((entry.nodeRole !== 'original' && entry.nodeRole !== 'progress') || entry.relationKind === 'auxiliary') return;
     const current = grouped.get(entry.photoId) || [];
     current.push(entry);
     grouped.set(entry.photoId, current);
