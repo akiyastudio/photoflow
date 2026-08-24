@@ -5,6 +5,156 @@ export type Tab = 'detect' | 'people' | 'workflow' | 'returns' | 'merge' | 'sett
 export type Crop = { x: number; y: number; width: number; height: number };
 export type CropHandle = 'move' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw';
 export type CompareMode = 'side-by-side' | 'overlay' | 'blink' | 'difference' | 'split';
+export type WorkflowStage = 'detect' | 'assignment' | 'relay' | 'review';
+export type StageState = 'complete' | 'current' | 'available' | 'blocked';
+
+export type StageSummary = {
+  id: WorkflowStage;
+  number: number;
+  label: string;
+  completion: string;
+  state: StageState;
+  complete: boolean;
+  count: string;
+  blockedReason?: string;
+};
+
+export const WORKFLOW_STAGES: ReadonlyArray<Pick<StageSummary, 'id' | 'number' | 'label' | 'completion'>> = [
+  { id: 'detect', number: 1, label: '提交工作图', completion: '完成识别、裁剪并人工确认全部人物' },
+  { id: 'assignment', number: 2, label: '设置任务分配', completion: '接收人和自动排期已确认，协作流程已生成' },
+  { id: 'relay', number: 3, label: '分发任务与返图', completion: '全部接力任务已返图或明确标记不用修' },
+  { id: 'review', number: 4, label: '审核与输出', completion: '返图审核通过且合并阻断项为零' },
+];
+
+export const normalizeWorkspace = (value: Json | undefined): Json => {
+  const workspace = value && typeof value === 'object' ? value : {};
+  const photos = Array.isArray(workspace.photos) ? workspace.photos.map((photo: Json) => ({
+    ...photo,
+    tasks: Array.isArray(photo?.tasks) ? photo.tasks.map((task: Json) => ({
+      ...task,
+      members: Array.isArray(task?.members) ? task.members : task?.personIndex === undefined ? [] : [{ personIndex: task.personIndex, bbox: task.bbox }],
+    })) : [],
+  })) : [];
+  return {
+    ...workspace,
+    photos,
+    identities: Array.isArray(workspace.identities) ? workspace.identities : [],
+    assignments: Array.isArray(workspace.assignments) ? workspace.assignments : [],
+    workflowSettings: workspace.workflowSettings && typeof workspace.workflowSettings === 'object' ? workspace.workflowSettings : {},
+  };
+};
+
+const generatedIdentity = (identity: Json | undefined) => /^待确认人物\s+\d+$/.test(String(identity?.name || ''));
+export const isIdentityConfirmed = (assignment: Json | undefined, identity: Json | undefined) => {
+  if (!assignment?.identityId || !identity || generatedIdentity(identity)) return false;
+  if (typeof assignment.identityConfirmed === 'boolean') return assignment.identityConfirmed;
+  if (assignment.identityConfirmedAt || assignment.confirmedAt) return true;
+  return ['manual', 'manual-group'].includes(String(assignment.source || ''));
+};
+
+export const workflowStageSummaries = (value: Json | undefined, active: WorkflowStage = 'detect'): StageSummary[] => {
+  const workspace = normalizeWorkspace(value);
+  const subjects = subjectsFromWorkspace(workspace);
+  const tasks = workspace.photos.flatMap((photo: Json) => photo.tasks || []);
+  const confirmed = subjects.filter((subject: Json) => isIdentityConfirmed(subject.assignment, subject.identity)).length;
+  const cropReview = tasks.filter((task: Json) => Boolean(task.needsReview || task.patchMissing)).length;
+  const eligible = subjects.filter((subject: Json) => isIdentityConfirmed(subject.assignment, subject.identity));
+  const completed = eligible.filter((subject: Json) => Boolean(subject.assignment?.completed)).length;
+  const returned = eligible.filter((subject: Json) => subject.assignment?.completionKind === 'returned' && !subject.assignment?.returnMissing).length;
+  const missingReturns = eligible.filter((subject: Json) => Boolean(subject.assignment?.returnMissing)).length;
+  const pendingReviews = Number(workspace.pendingReturnReviewCount ?? workspace.reviewCount ?? 0) || 0;
+  const mergeBlockers = mergeAudit(workspace).blockers.length;
+  const merged = workspace.photos.filter((photo: Json) => (photo.tasks || []).length && (photo.tasks || []).every((task: Json) => task.status === 'merged')).length;
+  const detectComplete = Boolean(workspace.photos.length && tasks.length && subjects.length && confirmed === subjects.length && cropReview === 0);
+  const assignmentComplete = Boolean(detectComplete && workspace.workflowGenerated && !workspace.workflowNeedsRegeneration);
+  const relayComplete = Boolean(assignmentComplete && eligible.length && completed === eligible.length && missingReturns === 0 && pendingReviews === 0);
+  const stageComplete: Record<WorkflowStage, boolean> = { detect: detectComplete, assignment: assignmentComplete, relay: relayComplete, review: Boolean(relayComplete && workspace.photos.length && merged === workspace.photos.length && mergeBlockers === 0) };
+  const reasons: Record<WorkflowStage, string> = {
+    detect: '',
+    assignment: !workspace.photos.length ? '请先明确选择并识别工作图' : cropReview ? `还有 ${cropReview} 张工作图需要复核` : confirmed < subjects.length ? `还有 ${subjects.length - confirmed} 个人物需要人工确认` : '',
+    relay: !stageComplete.detect ? '请先完成识别、裁剪和人物确认' : !stageComplete.assignment ? '请先确认接收人和排期并生成协作流程' : '',
+    review: !stageComplete.detect ? '请先完成识别、裁剪和人物确认' : !stageComplete.assignment ? '请先生成协作流程' : '',
+  };
+  const counts: Record<WorkflowStage, string> = {
+    detect: `${confirmed}/${subjects.length} 人已确认`,
+    assignment: `${new Set(eligible.map((subject: Json) => subject.identity?.id).filter(Boolean)).size} 人 · ${tasks.length} 工作图`,
+    relay: `${completed}/${eligible.length} 已完成 · ${returned} 已返图`,
+    review: `${merged}/${workspace.photos.length} 已输出 · ${mergeBlockers} 阻断`,
+  };
+  return WORKFLOW_STAGES.map(stage => {
+    const blockedReason = reasons[stage.id];
+    return { ...stage, complete: stageComplete[stage.id], count: counts[stage.id], blockedReason: blockedReason || undefined, state: stage.id === active ? 'current' : stageComplete[stage.id] ? 'complete' : blockedReason ? 'blocked' : 'available' };
+  });
+};
+
+export const canEnterWorkflowStage = (workspace: Json | undefined, stage: WorkflowStage) => {
+  const summary = workflowStageSummaries(workspace, stage).find(item => item.id === stage)!;
+  return { allowed: !summary.blockedReason, reason: summary.blockedReason || '' };
+};
+
+export const workflowLayoutMode = (width: number) => Number.isFinite(width) && width < 760 ? 'compact-menu' : width < 1120 ? 'scrollable-steps' : 'full-steps';
+
+export const workingImageMetrics = (task: Json, photo: Json = {}) => {
+  const crop = task?.crop || {};
+  const width = Math.max(0, Number(crop.width || task?.width || 0));
+  const height = Math.max(0, Number(crop.height || task?.height || 0));
+  const sourceWidth = Math.max(width, Number(task?.sourceWidth || photo?.width || 0));
+  const sourceHeight = Math.max(height, Number(task?.sourceHeight || photo?.height || 0));
+  const areaRatio = sourceWidth && sourceHeight ? Math.min(1, width * height / (sourceWidth * sourceHeight)) : undefined;
+  const entire = sourceWidth > 0 && sourceHeight > 0 && Math.abs(width - sourceWidth) <= 1 && Math.abs(height - sourceHeight) <= 1 && Number(crop.x || 0) === 0 && Number(crop.y || 0) === 0;
+  const backend = String(task?.detectionBackend || task?.backend || task?.engine || 'basic').toLowerCase().includes('advanced') ? '增强' : '基础';
+  const fallbackReason = String(task?.fallbackReason || task?.backendFallbackReason || task?.detectionFallbackReason || '');
+  return { width, height, sourceWidth, sourceHeight, areaRatio, entire, over4000: width > 4000 || height > 4000, backend, fallbackReason };
+};
+
+export type RelayNode = { key: string; label: string; kind: 'source' | 'return' | 'holder' | 'waiting'; state: 'done' | 'current' | 'waiting' | 'warning'; reason?: string };
+export const relayChainForItems = (items: Json[]) => {
+  const ordered = [...items].sort((left, right) => Number(left.week || 0) - Number(right.week || 0) || Number(left.personIndex || 0) - Number(right.personIndex || 0));
+  const nodes: RelayNode[] = [{ key: 'source', label: '原始裁图', kind: 'source', state: 'done' }];
+  let predecessorReady = true;
+  for (const item of ordered) {
+    const name = String(item.identity?.name || item.personName || `人物 ${item.personIndex || ''}`).trim();
+    const assignment = item.assignment || {};
+    const returned = assignment.completionKind === 'returned' && !assignment.returnMissing;
+    const skipped = Boolean(assignment.completed) && assignment.completionKind !== 'returned';
+    const ready = predecessorReady && item.ready !== false;
+    const reason = assignment.returnMissing ? '返图文件缺失' : returned ? '' : ready ? `当前持有人：${name}` : `等待 ${item.blockedBy?.join('、') || '上一位返图'}`;
+    nodes.push({ key: String(item.key || `${item.task?.id || item.taskId}:${item.personIndex}`), label: returned ? `${name} 返图` : skipped ? `${name} · 不用修` : name, kind: returned ? 'return' : ready ? 'holder' : 'waiting', state: assignment.returnMissing ? 'warning' : returned || skipped ? 'done' : ready ? 'current' : 'waiting', reason: reason || undefined });
+    predecessorReady = predecessorReady && Boolean(assignment.completed) && !assignment.returnMissing;
+  }
+  return nodes;
+};
+
+export const returnModificationAssessment = (match: Json) => {
+  const score = Number(match.modificationScore ?? match.changeScore ?? match.editScore);
+  const unchangedProbability = Number(match.unchangedProbability ?? match.sameImageProbability);
+  const explicitlyUnchanged = match.modified === false || match.isModified === false || match.unchanged === true;
+  const suspicious = explicitlyUnchanged || Number.isFinite(score) && score < .03 || Number.isFinite(unchangedProbability) && unchangedProbability >= .85;
+  const known = explicitlyUnchanged || Number.isFinite(score) || Number.isFinite(unchangedProbability) || typeof match.modified === 'boolean' || typeof match.isModified === 'boolean';
+  return { known, suspicious, label: !known ? '修改有效性待人工查看' : suspicious ? '返图疑似未修改' : '检测到有效修改', score: Number.isFinite(score) ? score : undefined };
+};
+
+export const returnMatchAssessment = (match: Json) => {
+  const score = Number(match.score ?? match.matchScore ?? 0);
+  return { score, label: score >= .85 ? '任务匹配度高' : score >= .6 ? '任务匹配度中' : '任务匹配度低', needsManualMatch: !match.taskId || score < .6 };
+};
+
+export const mergeAudit = (value: Json | undefined) => {
+  const workspace = normalizeWorkspace(value);
+  const subjects = subjectsFromWorkspace(workspace);
+  const blockers: Array<{ code: string; label: string; count: number }> = [];
+  const unconfirmed = subjects.filter((subject: Json) => !isIdentityConfirmed(subject.assignment, subject.identity)).length;
+  const incomplete = subjects.filter((subject: Json) => isIdentityConfirmed(subject.assignment, subject.identity) && !subject.assignment?.completed).length;
+  const missing = subjects.filter((subject: Json) => Boolean(subject.assignment?.returnMissing)).length;
+  const cropReview = workspace.photos.flatMap((photo: Json) => photo.tasks || []).filter((task: Json) => Boolean(task.needsReview || task.patchMissing)).length;
+  const pendingReview = Number(workspace.pendingReturnReviewCount ?? workspace.reviewCount ?? 0) || 0;
+  if (unconfirmed) blockers.push({ code: 'unconfirmed-identity', label: '人物未确认', count: unconfirmed });
+  if (cropReview) blockers.push({ code: 'crop-review', label: '工作图待复核', count: cropReview });
+  if (incomplete) blockers.push({ code: 'incomplete-task', label: '任务未完成', count: incomplete });
+  if (missing) blockers.push({ code: 'missing-return', label: '返图缺失', count: missing });
+  if (pendingReview) blockers.push({ code: 'pending-return-review', label: '返图待审核', count: pendingReview });
+  return { blockers, ready: blockers.length === 0, photoCount: workspace.photos.length, completedPhotoCount: workspace.photos.filter((photo: Json) => (photo.tasks || []).length && (photo.tasks || []).every((task: Json) => task.status === 'merged')).length };
+};
 
 export const assignmentKey = (photoId: unknown, baseVersionId: unknown, personIndex: unknown) =>
   `${String(photoId || '')}:${String(baseVersionId || '')}:${Number(personIndex || 0)}`;

@@ -156,3 +156,27 @@ html.dark .workflow-board-view > .space-y-7 > section > h3 {
 }
 html.dark .workflow-person-summary { border-color: #273244; }
 html.dark .workflow-task-card { border-color: #273244; background: #090c12; }
+
+/* Four-stage shell: keyboard-focusable, horizontally scrollable before it collapses. */
+.team-stage-nav { max-width: min(100%, 920px); overflow-x: auto; overscroll-behavior-x: contain; }
+.team-stage-button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+[data-relay-chains] ol { scrollbar-width: thin; }
+
+@media (max-width: 1120px) {
+  .team-workflow-header { align-items: flex-start; }
+  .team-stage-nav { order: 3; width: 100%; margin-left: 0; }
+  .team-stage-actions { margin-left: 0; flex-wrap: wrap; }
+  .team-photo-layout { grid-template-columns: minmax(0, 1fr); }
+  .team-photo-layout > section:first-child { border-right-width: 0; border-bottom: 1px solid #e2e8f0; }
+}
+
+@media (max-width: 760px) {
+  .team-stage-nav { display: grid; grid-template-columns: repeat(4, minmax(2.5rem, 1fr)); }
+  .team-stage-button { justify-content: center; padding-inline: .45rem; }
+  .team-stage-label { display: none; }
+  .team-stage-count { display: none; }
+  .team-stage-actions { width: 100%; }
+  .team-stage-actions .dialog-primary { margin-left: auto; }
+  [role="dialog"][aria-label="批量返图图片确认"] > div > .grid { grid-template-columns: minmax(0, 1fr); }
+  [role="dialog"][aria-label="批量返图图片确认"] aside { max-height: 11rem; border-right-width: 0; border-bottom: 1px solid #e2e8f0; }
+}

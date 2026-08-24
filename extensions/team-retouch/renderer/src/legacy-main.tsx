@@ -12,6 +12,7 @@ import { rpc, type ComponentContext } from './sdk';
 import { legacyApi } from './legacy/legacy-api';
 import { resolveTeamRetouchEntriesForOpen } from './legacy/legacy-entry-scope';
 import { createLatestHistoryLoadGuard, historyLoadPresentation } from './legacy/legacy-history-load-model';
+import { canEnterWorkflowStage, normalizeWorkspace, workflowStageSummaries, type WorkflowStage } from './interaction-model';
 import './legacy-style.css';
 
 type Json = Record<string, any>;
@@ -44,6 +45,7 @@ const App = () => {
   const [initialLoading, setInitialLoading] = useState(true); const [loadError, setLoadError] = useState(''); const [entriesLoaded, setEntriesLoaded] = useState(false);
   const [historyPathWarning, setHistoryPathWarning] = useState('');
   const [historyRecordCount, setHistoryRecordCount] = useState(0); const [historyOwnershipPendingCount, setHistoryOwnershipPendingCount] = useState(0);
+  const [workspaceSnapshot, setWorkspaceSnapshot] = useState<Json>(() => normalizeWorkspace(undefined));
   const contextRef = useRef<ComponentContext>();
   const entriesRef = useRef<Json[]>([]);
   const entriesLoadedRef = useRef(false);
@@ -57,6 +59,7 @@ const App = () => {
     try {
       let workspace = assertSuccess(await rpc<Json>('team.project.get.v1'), '无法读取团片协作历史');
       if (!loadGuardRef.current.isCurrent(requestId)) return;
+      setWorkspaceSnapshot(normalizeWorkspace(workspace));
       const currentRelativePaths = entriesRef.current.filter(entry => !entry.teamHistoryMissing).map(entry => String(entry.relativePath || '')).filter(Boolean);
       const historyResolution = resolveTeamRetouchEntriesForOpen(workspace, currentRelativePaths);
       setHistoryRecordCount(historyResolution.historyPhotoCount); setHistoryOwnershipPendingCount(historyResolution.ownershipPendingCount);
@@ -76,6 +79,7 @@ const App = () => {
           const registered = assertSuccess(await rpc<Json>('team.project.register.v1', { relativePaths: selectedRelativePaths }), '无法登记所选团片图片');
           if (!loadGuardRef.current.isCurrent(requestId)) return;
           if (registered.photos) workspace = registered;
+          setWorkspaceSnapshot(normalizeWorkspace(workspace));
           const nextResolution = resolveTeamRetouchEntriesForOpen(workspace, [...currentRelativePaths, ...selectedRelativePaths]);
           setHistoryRecordCount(nextResolution.historyPhotoCount); setHistoryOwnershipPendingCount(nextResolution.ownershipPendingCount);
           const nextWarnings = [];
@@ -104,12 +108,18 @@ const App = () => {
     return () => { mounted = false; loadGuardRef.current.invalidate(); stopTheme(); stopContext(); };
   }, [loadEntries]);
   const project = { id: context?.projectId || '', name: context?.projectName || '', status: context?.projectStatus || '', path: '' };
-  const common = { workspacePath: context?.projectId || '', project, cacheConfig: { directory: '', maxSizeGB: 0 }, activeStep: step, onStepChange: setStep, onClose: () => undefined, onOpenSettings: () => setSettingsOpen(true), onNotice: setNotice, onProjectChanged: () => { if (contextRef.current) void loadEntries(contextRef.current); } };
+  const stageSummaries = workflowStageSummaries(workspaceSnapshot, step);
+  const changeStep = (next: WorkflowStage) => {
+    const guard = canEnterWorkflowStage(workspaceSnapshot, next);
+    if (!guard.allowed) { setNotice(guard.reason); return; }
+    setStep(next);
+  };
+  const common = { workspacePath: context?.projectId || '', project, cacheConfig: { directory: '', maxSizeGB: 0 }, activeStep: step, onStepChange: changeStep, stageSummaries, onBlockedStage: setNotice, onClose: () => undefined, onOpenSettings: () => setSettingsOpen(true), onNotice: setNotice, onProjectChanged: () => { if (contextRef.current) void loadEntries(contextRef.current); } };
   const retryHistory = () => {
     if (contextRef.current) { void loadEntries(contextRef.current); return; }
     setInitialLoading(true); setLoadError('');
     void window.photoFlowComponent.getContext().then(nextContext => { contextRef.current = nextContext; setContext(nextContext); applyResolvedTheme(nextContext.resolvedTheme); void loadEntries(nextContext); }).catch(error => { setInitialLoading(false); setLoadError(error instanceof Error ? error.message : String(error)); });
   };
-  return <LegacyDialogProvider><div className="legacy-root">{!entriesLoaded ? <TeamHistoryLoadSurface initialLoading={initialLoading} loadError={loadError} entriesLoaded={entriesLoaded} entryCount={entries.length} retry={retryHistory} openSettings={common.onOpenSettings}/> : step === 'workflow' ? <PersonIdentityManager {...common} onClose={common.onOpenSettings} activeStep="workflow"/> : <TeamRetouchManager {...common} historyRecordCount={historyRecordCount} historyOwnershipPendingCount={historyOwnershipPendingCount} entries={entries as any} onEntriesChange={value => setEntries(value)} />}{historyPathWarning && entriesLoaded && <div role="status" className="fixed left-1/2 top-20 z-[819] flex max-w-3xl -translate-x-1/2 items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-xs font-bold text-amber-700 shadow-xl"><AlertTriangle size={16}/><span>{historyPathWarning}</span><button type="button" aria-label="关闭路径提示" onClick={() => setHistoryPathWarning('')}>×</button></div>}{loadError && entriesLoaded && <div role="alert" className="fixed left-1/2 top-20 z-[820] flex max-w-3xl -translate-x-1/2 items-center gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-xs font-bold text-red-700 shadow-xl"><AlertTriangle size={16}/><span>{loadError}</span><button type="button" className="rounded-md border border-red-300 px-2 py-1" onClick={retryHistory}>重试</button><button type="button" aria-label="关闭加载错误" onClick={() => setLoadError('')}>×</button></div>}{notice && <div className="fixed bottom-5 left-1/2 z-[820] flex max-w-2xl -translate-x-1/2 items-center gap-3 rounded-lg bg-slate-900 px-4 py-3 text-sm font-bold text-white shadow-xl"><UsersRound size={16}/><span>{notice}</span><button className="ml-2 text-slate-300" onClick={() => setNotice('')}>×</button></div>}{settingsOpen && <TeamSettingsDialog value={settings} update={setSettings} close={() => setSettingsOpen(false)} notice={setNotice}/>}</div></LegacyDialogProvider>;
+  return <LegacyDialogProvider><div className="legacy-root">{!entriesLoaded ? <TeamHistoryLoadSurface initialLoading={initialLoading} loadError={loadError} entriesLoaded={entriesLoaded} entryCount={entries.length} retry={retryHistory} openSettings={common.onOpenSettings}/> : step !== 'detect' ? <PersonIdentityManager {...common} onClose={common.onOpenSettings} activeStep={step}/> : <TeamRetouchManager {...common} historyRecordCount={historyRecordCount} historyOwnershipPendingCount={historyOwnershipPendingCount} entries={entries as any} onEntriesChange={value => setEntries(value)} />}{historyPathWarning && entriesLoaded && <div role="status" className="fixed left-1/2 top-20 z-[819] flex max-w-3xl -translate-x-1/2 items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-xs font-bold text-amber-700 shadow-xl"><AlertTriangle size={16}/><span>{historyPathWarning}</span><button type="button" aria-label="关闭路径提示" onClick={() => setHistoryPathWarning('')}>×</button></div>}{loadError && entriesLoaded && <div role="alert" className="fixed left-1/2 top-20 z-[820] flex max-w-3xl -translate-x-1/2 items-center gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-xs font-bold text-red-700 shadow-xl"><AlertTriangle size={16}/><span>{loadError}</span><button type="button" className="rounded-md border border-red-300 px-2 py-1" onClick={retryHistory}>重试</button><button type="button" aria-label="关闭加载错误" onClick={() => setLoadError('')}>×</button></div>}{notice && <div className="fixed bottom-5 left-1/2 z-[820] flex max-w-2xl -translate-x-1/2 items-center gap-3 rounded-lg bg-slate-900 px-4 py-3 text-sm font-bold text-white shadow-xl"><UsersRound size={16}/><span>{notice}</span><button className="ml-2 text-slate-300" onClick={() => setNotice('')}>×</button></div>}{settingsOpen && <TeamSettingsDialog value={settings} update={setSettings} close={() => setSettingsOpen(false)} notice={setNotice}/>}</div></LegacyDialogProvider>;
 };
 createRoot(document.getElementById('app')!).render(<StrictMode><App/></StrictMode>);
