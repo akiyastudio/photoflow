@@ -164,6 +164,13 @@ const ensureSchema = databasePath => {
   db.prepare(`INSERT INTO meta(key,value) VALUES('schema_version','4') ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
   return db;
 };
+const fileSha256 = filePath => new Promise((resolve, reject) => {
+  const digest = crypto.createHash('sha256');
+  const input = fs.createReadStream(filePath);
+  input.on('error', reject);
+  input.on('data', chunk => digest.update(chunk));
+  input.on('end', () => resolve(digest.digest('hex')));
+});
 
 const serializeTask = row => {
   const generation = parseJson(row.generation_json, {});
@@ -492,6 +499,7 @@ const uploadPatch = (parentId, payload, context) => withDomain(parentId, async (
   const stagedPath = path.join(authorized.uploadDirectory, `.${row.id}-${operationId}.staging${path.extname(choice.filePath).toLowerCase()}`);
   const outputPath = path.join(authorized.uploadDirectory, `${row.id}-${operationId}${path.extname(choice.filePath).toLowerCase()}`);
   await appendCommand(storage, { operationId, type: 'patch-upload', state: 'prepared', taskId: row.id });
+  let committed = false;
   try {
     await fs.promises.copyFile(choice.filePath, stagedPath, fs.constants.COPYFILE_EXCL);
     await fs.promises.rename(stagedPath, outputPath);
@@ -500,19 +508,23 @@ const uploadPatch = (parentId, payload, context) => withDomain(parentId, async (
       const artifact = createArtifact(db, row, personIndex, outputPath, 'manual-upload');
       db.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status='uploaded',updated_at=? WHERE id=?`).run(outputPath, Date.now(), row.id);
       db.prepare(`${upsertAssignmentSql}`).run(String(context.projectId), row.photo_id, row.base_version_id, personIndex, null, 1, 'manual', 1, Date.now());
-      db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,artifact_id=?,edited_patch_path=?,completed=1,completion_kind='retouched',completed_at=?,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, artifact.stageId, artifact.id, outputPath, Date.now(), Date.now(), row.photo_id, row.base_version_id, personIndex);
+      db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,artifact_id=?,edited_patch_path=?,completed=1,completion_kind='retouched',return_missing=0,return_missing_since=NULL,completed_at=?,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, artifact.stageId, artifact.id, outputPath, Date.now(), Date.now(), row.photo_id, row.base_version_id, personIndex);
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     await appendCommand(storage, { operationId, type: 'patch-upload', state: 'committed' });
+    committed = true;
+    await reconcileWorkflowTaskChain(parentId, context, row.id, db);
     return { success: true, tasks: listTasks(db, row.photo_id).map(publicTask) };
   } catch (error) {
-    await removeArtifacts([stagedPath, outputPath]);
-    await appendCommand(storage, { operationId, type: 'patch-upload', state: 'rolled-back', error: error.message || String(error) }).catch(() => undefined);
+    if (!committed) {
+      await removeArtifacts([stagedPath, outputPath]);
+      await appendCommand(storage, { operationId, type: 'patch-upload', state: 'rolled-back', error: error.message || String(error) }).catch(() => undefined);
+    } else await appendCommand(storage, { operationId, type: 'workflow-reconcile', state: 'pending-retry', taskId: row.id, error: error.message || String(error) }).catch(() => undefined);
     throw error;
   }
 });
 
-const removeUpload = (parentId, payload) => withDomain(parentId, async (db, storage) => {
+const removeUpload = (parentId, payload, context) => withDomain(parentId, async (db, storage) => {
   const row = db.prepare('SELECT * FROM team_patch_tasks WHERE id=? AND photo_id=? AND is_deleted=0').get(String(payload.taskId || ''), String(payload.photoId || ''));
   if (!row) throw new Error('人物修图任务不存在');
   const personIndex = Number(payload.personIndex);
@@ -535,6 +547,7 @@ const removeUpload = (parentId, payload) => withDomain(parentId, async (db, stor
   } catch (error) { db.exec('ROLLBACK'); await appendCommand(storage, { operationId, type: 'patch-remove-upload', state: 'rolled-back', error: error.message || String(error) }); throw error; }
   await appendCommand(storage, { operationId, type: 'patch-remove-upload', state: 'committed' });
   if (removedPath) await removeArtifacts([removedPath]);
+  await reconcileWorkflowTaskChain(parentId, context, row.id, db);
   return { success: true, tasks: listTasks(db, row.photo_id).map(publicTask), cleanupQueued: Boolean(removedPath) };
 });
 
@@ -969,7 +982,7 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
       if (payload.complete) {
         const personIndex = Number(payload.personIndex);
         db.prepare(upsertAssignmentSql).run(String(context.projectId), row.photo_id, row.base_version_id, personIndex, null, 1, 'manual', 1, Date.now());
-        db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,artifact_id=?,edited_patch_path=?,completed=1,completion_kind='returned',completed_at=?,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, artifact.stageId, artifact.id, destination, Date.now(), Date.now(), row.photo_id, row.base_version_id, personIndex);
+        db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,artifact_id=?,edited_patch_path=?,completed=1,completion_kind='returned',return_missing=0,return_missing_since=NULL,completed_at=?,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, artifact.stageId, artifact.id, destination, Date.now(), Date.now(), row.photo_id, row.base_version_id, personIndex);
       }
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -1006,11 +1019,12 @@ const completeIdentity = (parentId, payload, context) => withDomain(parentId, as
       db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,artifact_id=NULL,completed=0,completion_kind='',edited_patch_path=NULL,completed_at=NULL,updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, stage?.id || null, Date.now(), String(context.projectId), photoId, baseVersionId, personIndex);
       db.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status=?,updated_at=? WHERE id=?`).run(predecessor, predecessor ? 'uploaded' : 'exported', Date.now(), row.id);
     } else {
-      db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,completed=1,completion_kind=?,completed_at=?,updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, stage?.id || null, String(payload.completionKind || 'no-retouch'), Date.now(), Date.now(), String(context.projectId), photoId, baseVersionId, personIndex);
+      db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,completed=1,completion_kind=?,return_missing=0,return_missing_since=NULL,completed_at=?,updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, stage?.id || null, String(payload.completionKind || 'no-retouch'), Date.now(), Date.now(), String(context.projectId), photoId, baseVersionId, personIndex);
     }
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
   if (removedPath) await fs.promises.rm(removedPath, { force: true }).catch(() => undefined);
+  await reconcileWorkflowTaskChain(parentId, context, row.id, db);
   return { success: true, completed: payload.completed !== false, taskId: row.id, personIndex };
 });
 const publicWorkspace = value => ({
@@ -1309,32 +1323,90 @@ const runMatcher = async (returned, candidates) => {
   } finally { await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined); }
 };
 
-const refreshDownstream = async (parentId, context, taskId, personIndex, sourcePath) => {
+const reconcileWorkflowTaskChain = async (parentId, context, taskId, existingDb = null) => {
   const scope = await readWorkflowManifest(parentId);
-  if (!scope.manifest) return;
+  if (!scope.manifest) return { reconciled: false, reason: 'workflow-missing' };
   const chain = [];
   for (const [groupIndex, group] of (scope.manifest.groups || []).entries()) for (const [itemIndex, item] of (group.items || []).entries()) if (String(item.taskId) === String(taskId)) chain.push({ group, item, groupIndex, itemIndex });
   chain.sort((a, b) => Number(a.group.week) - Number(b.group.week) || a.groupIndex - b.groupIndex || a.itemIndex - b.itemIndex);
-  const sourceIndex = chain.findIndex(entry => Number(entry.item.personIndex) === Number(personIndex));
-  if (sourceIndex < 0) return;
-  for (let index = sourceIndex; index < chain.length; index += 1) {
-    const entry = chain[index];
-    entry.item.available = false;
-    const target = path.resolve(scope.outputDirectory, String(entry.item.relativePath || ''));
-    if (entry.item.relativePath && isInside(scope.outputDirectory, target)) await fs.promises.rm(target, { force: true }).catch(() => undefined);
-  }
-  const next = chain[sourceIndex + 1];
-  if (next?.item.relativePath) {
-    const oldTarget = path.resolve(scope.outputDirectory, next.item.relativePath);
-    if (isInside(scope.outputDirectory, oldTarget)) {
-      const parsed = path.parse(oldTarget);
-      const target = path.join(parsed.dir, `${parsed.name}${path.extname(sourcePath) || parsed.ext}`);
-      await copyFileAtomic(sourcePath, target);
-      next.item.relativePath = path.relative(scope.outputDirectory, target).replace(/\\/g, '/');
-      next.item.available = true;
+  if (!chain.length) return { reconciled: false, reason: 'task-not-in-workflow' };
+  const reconcile = async db => {
+    const task = db.prepare('SELECT * FROM team_patch_tasks WHERE id=? AND is_deleted=0').get(String(taskId));
+    if (!task) throw new Error('工作流程引用的修图任务不存在');
+    if (chain.some(entry => String(entry.item.photoId) !== String(task.photo_id) || String(entry.item.baseVersionId) !== String(task.base_version_id))) throw new Error('工作流程 task 链跨越了错误的照片版本');
+    const artifactGrant = await callHost(parentId, 'project.output.authorize.v1', { operation: 'artifacts', photoId: task.photo_id, baseVersionId: task.base_version_id });
+    const artifactRoots = [artifactGrant.dataDirectory, artifactGrant.deliveryDirectory].filter(Boolean);
+    const assertSource = sourcePath => {
+      if (!sourcePath || !fs.existsSync(sourcePath)) return false;
+      if (!artifactRoots.some(root => isInside(root, sourcePath))) throw new Error('工作流程输入超出组件授权目录');
+      return true;
+    };
+    if (!assertSource(task.patch_path)) throw new Error('原始工作图不存在，无法重建任务链');
+    let sourcePath = task.patch_path;
+    let activeIndex = -1;
+    const stages = [];
+    for (const [index, entry] of chain.entries()) {
+      const personIndex = Number(entry.item.personIndex);
+      const assignment = db.prepare(`SELECT * FROM team_person_assignments WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?`).get(String(context.projectId), task.photo_id, task.base_version_id, personIndex);
+      const boundAssignment = assignment && (!assignment.task_id || String(assignment.task_id) === String(task.id)) ? assignment : null;
+      let completed = Boolean(boundAssignment?.completed) && !Boolean(boundAssignment?.return_missing);
+      let artifact = null;
+      if (completed && ['returned', 'retouched'].includes(String(boundAssignment?.completion_kind || ''))) {
+        artifact = boundAssignment.artifact_id
+          ? db.prepare('SELECT * FROM team_task_artifacts WHERE id=? AND task_id=? AND is_deleted=0').get(boundAssignment.artifact_id, task.id)
+          : db.prepare('SELECT * FROM team_task_artifacts WHERE task_id=? AND person_index=? AND is_deleted=0 ORDER BY created_at DESC,id DESC LIMIT 1').get(task.id, personIndex);
+        if (!artifact || !assertSource(artifact.artifact_path)) {
+          completed = false;
+          db.prepare('UPDATE team_person_assignments SET return_missing=1,return_missing_since=COALESCE(return_missing_since,?),updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?').run(Date.now(), Date.now(), String(context.projectId), task.photo_id, task.base_version_id, personIndex);
+        }
+      }
+      stages.push({ entry, personIndex, completed, inputPath: sourcePath, artifact });
+      const stage = db.prepare('SELECT id FROM team_task_stages WHERE task_id=? AND person_index=?').get(task.id, personIndex);
+      if (stage) db.prepare('UPDATE team_task_stages SET state=?,updated_at=? WHERE id=?').run(completed ? 'complete' : activeIndex < 0 ? 'ready' : 'pending', Date.now(), stage.id);
+      if (!completed) { if (activeIndex < 0) activeIndex = index; continue; }
+      if (artifact) sourcePath = artifact.artifact_path;
     }
-  }
-  await writeJsonAtomic(scope.manifestPath, scope.manifest);
+    if (activeIndex >= 0) {
+      for (const [index, stage] of stages.entries()) {
+        const stored = db.prepare('SELECT id FROM team_task_stages WHERE task_id=? AND person_index=?').get(task.id, stage.personIndex);
+        if (stored) db.prepare('UPDATE team_task_stages SET state=?,updated_at=? WHERE id=?').run(index === activeIndex ? 'ready' : index < activeIndex ? 'complete' : 'pending', Date.now(), stored.id);
+      }
+    }
+    let activeTarget = '';
+    const activeSource = activeIndex >= 0 ? stages[activeIndex].inputPath : '';
+    for (const [index, stage] of stages.entries()) {
+      const relativePath = String(stage.entry.item.relativePath || '');
+      const currentTarget = relativePath ? path.resolve(scope.outputDirectory, relativePath) : '';
+      if (!currentTarget || !isInside(scope.outputDirectory, currentTarget)) throw new Error('工作流程阶段路径超出授权输出目录');
+      stage.entry.item.available = false;
+      if (index === activeIndex) {
+        const parsed = path.parse(currentTarget);
+        activeTarget = path.join(parsed.dir, `${parsed.name}${path.extname(activeSource) || parsed.ext || '.png'}`);
+        if (!isInside(scope.outputDirectory, activeTarget)) throw new Error('工作流程发布路径超出授权输出目录');
+        if (path.resolve(activeTarget) !== path.resolve(currentTarget)) await fs.promises.rm(currentTarget, { force: true }).catch(() => undefined);
+      } else {
+        await fs.promises.rm(currentTarget, { force: true }).catch(() => undefined);
+      }
+    }
+    if (activeIndex >= 0) {
+      const sourceStat = await fs.promises.stat(activeSource);
+      let reusable = false;
+      try {
+        const targetStat = await fs.promises.stat(activeTarget);
+        reusable = targetStat.isFile() && targetStat.size === sourceStat.size && await fileSha256(activeTarget) === await fileSha256(activeSource);
+      } catch { reusable = false; }
+      if (!reusable) {
+        await fs.promises.rm(activeTarget, { force: true }).catch(() => undefined);
+        await copyFileAtomic(activeSource, activeTarget);
+      }
+      const active = stages[activeIndex].entry.item;
+      active.relativePath = path.relative(scope.outputDirectory, activeTarget).replace(/\\/g, '/');
+      active.available = true;
+    }
+    await writeJsonAtomic(scope.manifestPath, scope.manifest);
+    return { reconciled: true, taskId: task.id, activePersonIndex: activeIndex >= 0 ? stages[activeIndex].personIndex : null, complete: activeIndex < 0 };
+  };
+  return existingDb ? reconcile(existingDb) : withDomain(parentId, reconcile);
 };
 
 const returnBatch = async (parentId, payload, context, workflowMode) => {
@@ -1356,7 +1428,7 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
     for (const [index, match] of high.entries()) {
       if (!stagedSources.has(path.resolve(match.path))) throw new Error('Matched return escaped its component staging grant');
       const registered = await withPhotoOperation(match.photoId, () => storeReturnedPatch(parentId, match.path, { photoId: match.photoId, baseVersionId: match.baseVersionId, taskId: match.taskId, personIndex: match.personIndex, complete: workflowMode, matchConfidence: match.matchConfidence, editEvidence: match.editEvidence, returnWarnings: match.returnWarnings }, context));
-      if (workflowMode) await refreshDownstream(parentId, context, match.taskId, match.personIndex, registered.artifactPath).catch(() => undefined);
+      await reconcileWorkflowTaskChain(parentId, context, match.taskId);
       accepted.push({ ...match, path: undefined, patchPath: undefined, accepted: true });
       await reportTask(parentId, returnOperationId, 'report', { phase: 'importing', progress: 82 + 18 * (index + 1) / Math.max(1, high.length), message: `正在归档返图 ${index + 1}/${high.length}` }, 'patch.return-batch.progress').catch(() => undefined);
     }
@@ -1419,7 +1491,7 @@ const returnConfirm = async (parentId, payload, context) => {
   if (!candidate || String(candidate.taskId) !== String(payload.taskId)) throw new Error('候选任务当前不可确认');
   if (!match.path || !isInside(target.directory, match.path)) throw new Error('Reviewed return escaped its component review grant');
   const registered = await withPhotoOperation(candidate.photoId, () => storeReturnedPatch(parentId, match.path, { photoId: candidate.photoId, baseVersionId: candidate.baseVersionId, taskId: candidate.taskId, personIndex: candidate.personIndex, complete: true }, context));
-  await refreshDownstream(parentId, context, candidate.taskId, candidate.personIndex, registered.artifactPath).catch(() => undefined);
+  await reconcileWorkflowTaskChain(parentId, context, candidate.taskId);
   match.accepted = true; match.confidence = 'manual'; match.photoId = candidate.photoId; match.baseVersionId = candidate.baseVersionId; match.taskId = candidate.taskId; match.personIndex = candidate.personIndex;
   target.session.result.reviewCount = target.session.result.matches.filter(item => !item.accepted).length;
   target.session.result.acceptedCount = target.session.result.matches.filter(item => item.accepted).length;
