@@ -7,6 +7,11 @@ const START_TIMEOUT_MS = 8000;
 const SCREENSHOT_TIMEOUT_MS = 8000;
 const SCREENSHOT_PROBE_MS = 40;
 const CLIENT_TOKEN_PATTERN = /^[a-zA-Z0-9_-]{8,96}$/;
+const DEFAULT_SUBTITLE_FONT_SIZE = 55;
+const normalizeSubtitleFontSize = value => {
+  const migrated = value === 'large' ? 74 : value === 'default' ? DEFAULT_SUBTITLE_FONT_SIZE : Number(value);
+  return Number.isFinite(migrated) ? Math.max(16, Math.min(120, Math.round(migrated))) : DEFAULT_SUBTITLE_FONT_SIZE;
+};
 
 const nativeWindowHandleValue = window => {
   const handle = window.getNativeWindowHandle();
@@ -269,7 +274,7 @@ const createAdvancedVideoService = ({
         command: 'set-subtitle-defaults',
         enabled: settings.subtitlesEnabled === true,
         preferredLanguages: Array.isArray(settings.subtitlePreferredLanguages) ? settings.subtitlePreferredLanguages.slice(0, 8) : [],
-        size: settings.subtitleSize === 'large' ? 'large' : 'default',
+        fontSize: normalizeSubtitleFontSize(settings.subtitleSize),
         style: settings.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard',
       });
       if (!sendCommand(session, { command: 'open', path: authorizedPath })) throw new Error('无法向视频播放器发送文件');
@@ -294,6 +299,11 @@ const createAdvancedVideoService = ({
     const holeY = Math.max(0, Math.min(height, number(requestedHole.y)));
     const holeWidth = Math.max(0, Math.min(width - holeX, number(requestedHole.width)));
     const holeHeight = Math.max(0, Math.min(height - holeY, number(requestedHole.height)));
+    const requestedControlsHole = bounds.controlsOverlayHole && typeof bounds.controlsOverlayHole === 'object' ? bounds.controlsOverlayHole : {};
+    const controlsHoleX = Math.max(0, Math.min(width, number(requestedControlsHole.x)));
+    const controlsHoleY = Math.max(0, Math.min(height, number(requestedControlsHole.y)));
+    const controlsHoleWidth = Math.max(0, Math.min(width - controlsHoleX, number(requestedControlsHole.width)));
+    const controlsHoleHeight = Math.max(0, Math.min(height - controlsHoleY, number(requestedControlsHole.height)));
     const requestedCornerHole = bounds.cornerOverlayHole && typeof bounds.cornerOverlayHole === 'object' ? bounds.cornerOverlayHole : {};
     const cornerHoleX = Math.max(0, Math.min(width, number(requestedCornerHole.x)));
     const cornerHoleY = Math.max(0, Math.min(height, number(requestedCornerHole.y)));
@@ -310,6 +320,10 @@ const createAdvancedVideoService = ({
       holeY,
       holeWidth,
       holeHeight,
+      controlsHoleX,
+      controlsHoleY,
+      controlsHoleWidth,
+      controlsHoleHeight,
       cornerHoleX,
       cornerHoleY,
       cornerHoleWidth,
@@ -323,7 +337,12 @@ const createAdvancedVideoService = ({
     const allowed = new Set(['play', 'pause', 'seek', 'volume', 'mute', 'speed', 'stop', 'subtitle-select', 'subtitle-visible', 'subtitle-delay', 'subtitle-style']);
     const command = String(request.action || '');
     if (!allowed.has(command)) return;
-    sendCommand(session, { command, value: request.value, size: request.size, style: request.style });
+    sendCommand(session, {
+      command,
+      value: request.value,
+      fontSize: command === 'subtitle-style' ? normalizeSubtitleFontSize(request.fontSize ?? request.size) : undefined,
+      style: request.style,
+    });
   };
 
   const ownsSession = (sessionId, senderId) => {

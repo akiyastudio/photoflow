@@ -458,11 +458,39 @@ const registerSystemIpc = context => {
   ipcMain.on('window-close', event => BrowserWindow.fromWebContents(event.sender)?.close());
   
   ipcMain.handle('window-is-maximized', event => BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false);
+  const fullscreenRestoreState = new WeakMap();
   ipcMain.handle('window-set-fullscreen', (event, enabled) => {
     const targetWindow = BrowserWindow.fromWebContents(event.sender);
     if (!targetWindow || targetWindow.isDestroyed()) return false;
-    targetWindow.setFullScreen(Boolean(enabled));
-    return targetWindow.isFullScreen();
+    const next = Boolean(enabled);
+    if (next) {
+      if (!fullscreenRestoreState.has(targetWindow)) fullscreenRestoreState.set(targetWindow, {
+        alwaysOnTop: targetWindow.isAlwaysOnTop(),
+        fullScreen: targetWindow.isFullScreen(),
+        kiosk: targetWindow.isKiosk(),
+        maximized: targetWindow.isMaximized(),
+      });
+      if (process.platform === 'win32') {
+        // A frameless maximized window can remain below the always-on-top
+        // Windows taskbar. Kiosk plus the screen-saver z-order guarantees the
+        // media surface covers the complete display until preview full-screen exits.
+        targetWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+        targetWindow.setKiosk(true);
+        targetWindow.show();
+        targetWindow.focus();
+        targetWindow.moveTop();
+        return targetWindow.isKiosk() && targetWindow.isAlwaysOnTop();
+      }
+      targetWindow.setFullScreen(true);
+      return targetWindow.isFullScreen();
+    }
+    const restore = fullscreenRestoreState.get(targetWindow);
+    targetWindow.setKiosk(restore?.kiosk ?? false);
+    targetWindow.setFullScreen(restore?.fullScreen ?? false);
+    targetWindow.setAlwaysOnTop(restore?.alwaysOnTop ?? false);
+    if (restore?.maximized && !targetWindow.isMaximized()) targetWindow.maximize();
+    fullscreenRestoreState.delete(targetWindow);
+    return false;
   });
 
   ipcMain.handle('cursor-screen-point', () => screen.getCursorScreenPoint());

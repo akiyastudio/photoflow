@@ -13,6 +13,13 @@ const versions = read('src/components/VersionManager.tsx');
 const config = read('src/features/app/app-config.ts');
 const ts = require('typescript');
 
+const sizeJavaScript = ts.transpileModule(read('src/features/app/video-player-settings.ts'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+}).outputText;
+const sizeModule = { exports: {} };
+new Function('exports', 'module', 'require', sizeJavaScript)(sizeModule.exports, sizeModule, require);
+const { DEFAULT_SUBTITLE_FONT_SIZE, MIN_SUBTITLE_FONT_SIZE, MAX_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSize } = sizeModule.exports;
+
 const memoryJavaScript = ts.transpileModule(read('src/components/video-subtitle-memory.ts'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
 }).outputText;
@@ -47,15 +54,24 @@ for (let index = 0; index < MAX_SUBTITLE_MEMORIES + 5; index += 1) {
 }
 assert.strictEqual(store.entries.length, 100);
 assert.strictEqual(findSubtitleMemory(store, 'c:/video/0.mov'), undefined, 'the oldest per-video memory must be evicted');
+assert.strictEqual(DEFAULT_SUBTITLE_FONT_SIZE, 55);
+assert.strictEqual(normalizeSubtitleFontSize('default'), 55);
+assert.strictEqual(normalizeSubtitleFontSize('large'), 74);
+assert.strictEqual(normalizeSubtitleFontSize(63.6), 64);
+assert.strictEqual(normalizeSubtitleFontSize(1), 16);
+assert.strictEqual(normalizeSubtitleFontSize(999), 120);
+assert.deepStrictEqual([MIN_SUBTITLE_FONT_SIZE, MAX_SUBTITLE_FONT_SIZE], [16, 120]);
 
 assert(decoder.includes('SetOption("sub-auto", "no")') && decoder.includes('SetOption("sid", "no")') && decoder.includes('SetOption("sub-visibility", "no")'), 'subtitle discovery must start hidden');
 for (const extension of ['.srt', '.ass', '.ssa', '.vtt']) assert(decoder.includes(`extension == "${extension}"`), `${extension} sidecars must be supported`);
 for (const command of ['subtitle-select', 'subtitle-visible', 'subtitle-delay', 'subtitle-style', 'subtitle-add']) assert(decoder.includes(`name == "${command}"`), `${command} must be handled by libmpv`);
 assert(decoder.includes('stableId') && decoder.includes('source') && decoder.includes('language') && decoder.includes('format') && decoder.includes('external-filename'), 'track protocol must expose stable typed metadata');
-assert(player.includes('添加本地字幕') && player.includes('提前') && player.includes('延后') && player.includes('归零') && player.includes('默认字号') && player.includes('较大字号'), 'CC menu must expose the first-version subtitle controls');
+assert(player.includes('添加本地字幕') && player.includes('提前') && player.includes('延后') && player.includes('归零') && player.includes("{ label: '小', value: 20 }") && player.includes("{ label: '中', value: 30 }") && player.includes("{ label: '大', value: 40 }"), 'CC menu must expose 20/30/40 small, medium and large subtitle shortcuts');
 assert(player.includes('disableSubtitles') && player.includes("selection: { mode: 'off' }") && player.includes('resolveRememberedSubtitle'), 'the CC menu must persist explicit off and restore through the memory state model');
 assert(preload.includes("ipcRenderer.invoke('video-player-subtitle-choose'") && ipc.includes("properties: ['openFile']") && ipc.includes("extensions: ['srt', 'ass', 'ssa', 'vtt']"), 'local subtitle selection must stay behind the Electron native-dialog boundary');
-assert(config.includes('subtitlesEnabled: false') && config.includes("subtitleSize: 'default'") && config.includes("subtitleStyle: 'standard'"), 'global subtitle defaults must remain disabled and normalized');
+assert(config.includes('subtitlesEnabled: false') && config.includes('subtitleSize: DEFAULT_SUBTITLE_FONT_SIZE') && config.includes("subtitleStyle: 'standard'"), 'global subtitle defaults must remain disabled and numerically normalized');
+assert(read('src/features/settings/SettingsFeature.tsx').includes('type="range"') && read('src/features/settings/SettingsFeature.tsx').includes('step={1}') && read('src/features/settings/SettingsFeature.tsx').includes('aria-label="字幕字号"'), 'global subtitle size must use a one-step slider with a numeric readout');
+assert(decoder.includes('ReadSubtitleFontSize') && decoder.includes('sub-font-size') && decoder.includes('normalized / 55.0'), 'native subtitle sizing must accept bounded integer values while preserving legacy scale behavior');
 assert(!workspace.includes('<video') && !versions.includes('<video'), 'formal playback and hover paths must not use Chromium video');
 assert(decoder.includes('GetProperty("track-list/count")') && decoder.includes('"track-list/" + index') && !decoder.includes('GetProperty("track-list")'), 'libmpv node arrays must be read through indexed scalar properties');
 assert(decoder.indexOf('player.LoadPendingSidecars()') > decoder.indexOf('type == "file-loaded"') && decoder.indexOf('Run("loadfile"') < decoder.indexOf('player.LoadPendingSidecars()'), 'sidecars must be attached only after the active file-loaded event');

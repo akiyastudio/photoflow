@@ -5817,6 +5817,7 @@ const VideoTrimTimeline = ({ duration, start, end, currentTime, frames, exportMo
     </div>
   </div>;
 };
+const FULLSCREEN_CONTROLS_HIDE_DELAY_MS = 1800;
 const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSettings, videoTrimExportMode, photoshopAvailable, ratingAvailable, rating, ratingMode, ratingLoading, ratingBusy, onChangeRating, onTogglePinned, onTechnicalMetadata, onNavigate, onContextMenu, onContextMenuAt, onAnalyzeImageCrop, onConfirmImageCrop, onTrimVideo, onLoadVideoTimelineFrames, onOpen, onOpenInPhotoshop, onClose }: {
   entry?: ProjectFileEntry;
   cacheConfig: AppConfig['mediaCache'];
@@ -6107,7 +6108,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSettings,
   useEffect(() => {
     if (!fullscreen) return;
     setFullscreenControlsVisible(true);
-    fullscreenControlsTimerRef.current = window.setTimeout(() => setFullscreenControlsVisible(false), 1800);
+    fullscreenControlsTimerRef.current = window.setTimeout(() => setFullscreenControlsVisible(false), FULLSCREEN_CONTROLS_HIDE_DELAY_MS);
     void projectWorkspaceClient.setWindowFullscreen(true);
     return () => {
       window.clearTimeout(fullscreenControlsTimerRef.current);
@@ -6118,7 +6119,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSettings,
     if (!fullscreen) return;
     setFullscreenControlsVisible(true);
     window.clearTimeout(fullscreenControlsTimerRef.current);
-    fullscreenControlsTimerRef.current = window.setTimeout(() => setFullscreenControlsVisible(false), 1800);
+    fullscreenControlsTimerRef.current = window.setTimeout(() => setFullscreenControlsVisible(false), FULLSCREEN_CONTROLS_HIDE_DELAY_MS);
   };
   const cancelImageCrop = () => {
     if (imageCropPhase === 'saving') return;
@@ -6375,7 +6376,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSettings,
     onSave={mode => void confirmVideoTrim(mode)}
   /> : undefined;
 
-  const previewPane = <section onContextMenu={onContextMenu} onMouseMove={revealFullscreenControls} style={fullscreen ? undefined : { width }} className={`flex min-h-0 shrink-0 flex-col ${fullscreen ? 'fixed inset-0 z-[500] h-screen w-screen bg-black' : 'bg-slate-50'}`}>
+  const previewPane = <section onContextMenu={onContextMenu} onMouseMove={revealFullscreenControls} style={fullscreen ? undefined : { width }} className={`flex min-h-0 shrink-0 flex-col ${fullscreen ? 'media-preview-fullscreen fixed inset-0 z-[500] h-screen w-screen bg-black' : 'bg-slate-50'}`}>
     {!fullscreen && <header className="flex min-h-14 shrink-0 items-center justify-between border-b border-slate-200 px-3 py-2">
       <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wider text-slate-400">{imageCropPhase ? '裁剪' : trimEditor ? '剪辑' : '预览'}</p><p className="truncate text-sm font-semibold text-slate-700">{entry?.name || '未选择媒体'}</p></div>
       {imageCropPhase ? <div className="ml-2 flex shrink-0 items-center gap-2">
@@ -6390,7 +6391,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSettings,
     <div className={`relative flex min-h-0 flex-1 items-center justify-center overflow-hidden ${fullscreen ? 'bg-black' : 'bg-slate-50'}`}>
       {!entry && <div className="max-w-[220px] text-center"><ImageIcon size={38} strokeWidth={1.4} className="mx-auto text-slate-600"/><p className="mt-3 text-sm font-medium text-slate-300">点击图片、RAW 或视频文件</p><p className="mt-1 text-xs leading-5 text-slate-500">此处显示图片或视频预览。</p></div>}
       {entry && entry.kind === 'video' && trimBusy && <div className="absolute inset-0 flex min-h-0 flex-col bg-black"><div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">{resource.previewUrl ? <img src={resource.previewUrl} alt="" draggable={false} className="max-h-full max-w-full object-contain opacity-70"/> : <Video size={52} strokeWidth={1.3} className="text-slate-700"/>}</div>{videoTrimControls}</div>}
-      {useVideoPlayer && entry && !trimBusy && <VideoPlayer filePath={entry.path} poster={resource.previewUrl} keyboardSettings={keyboardSettings} bottomControls={trimEditor ? videoTrimControls : undefined} editorSeekRequest={videoEditorSeek} onPlaybackState={playback => setVideoPlaybackTime(playback.time)} onError={handleVideoPlayerError} onMetadata={metadata => { setLoading(false); setVideoDuration(Number(metadata.duration) || 0); onTechnicalMetadata(metadata); }} onNavigate={onNavigate} onContextMenuAt={onContextMenuAt} onPointerActivity={revealFullscreenControls} topRightOverlayHole={fullscreen && fullscreenControlsVisible ? 72 : 0} onEscape={() => setFullscreen(false)}/>}
+      {useVideoPlayer && entry && !trimBusy && <VideoPlayer filePath={entry.path} poster={resource.previewUrl} keyboardSettings={keyboardSettings} bottomControls={trimEditor ? videoTrimControls : undefined} controlsVisible={!fullscreen || fullscreenControlsVisible} controlsOverlay={fullscreen} editorSeekRequest={videoEditorSeek} onPlaybackState={playback => setVideoPlaybackTime(playback.time)} onError={handleVideoPlayerError} onMetadata={metadata => { setLoading(false); setVideoDuration(Number(metadata.duration) || 0); onTechnicalMetadata(metadata); }} onNavigate={onNavigate} onContextMenuAt={onContextMenuAt} onPointerActivity={revealFullscreenControls} topRightOverlayHole={fullscreen && fullscreenControlsVisible ? 60 : 0} onEscape={() => setFullscreen(false)}/>}
       {entry && entry.kind === 'video' && videoPlaybackFailed && !trimBusy && <div role="alert" className="flex max-h-full w-full flex-col items-center justify-center gap-4 text-center">{resource.previewUrl ? <img src={resource.previewUrl} alt={entry.name} draggable={false} className="max-h-[70%] max-w-full object-contain opacity-60"/> : <Video size={52} strokeWidth={1.3} className="text-slate-600"/>}<div className="max-w-sm px-6"><p className="text-sm font-bold text-red-600">视频播放器无法启动</p><p className="mt-1 text-xs leading-5 text-slate-500">{videoPlayerError || '请在组件管理中修复或重新安装视频播放器运行时，然后重新打开视频。'}</p><p className="mt-1 text-xs leading-5 text-slate-500">不会改用 Chromium 播放，以避免不同入口出现不同的解码与字幕行为。</p><button type="button" onClick={onOpen} className="mt-3 inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-500"><ExternalLink size={14}/>使用系统播放器打开</button></div></div>}
       {entry && entry.kind === 'image' && displayedImageUrl && imageCropEditor && <div className="absolute inset-0 bg-slate-950">
         <InteractiveCropEditor embedded snapEnabled snapGuides={imageCropEditor.snapGuides} previewUrl={displayedImageUrl} imageSize={imageCropEditor.originalSize} crop={imageCropEditor.crop} onChange={crop => { if (imageCropPhase === 'editing') setImageCropEditor(current => current ? { ...current, crop } : current); }}/>

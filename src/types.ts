@@ -39,7 +39,7 @@ export interface VideoPlaybackSettings {
   arrowKeyAction: 'seek' | 'navigate';
   subtitlesEnabled: boolean;
   subtitlePreferredLanguages: string[];
-  subtitleSize: 'default' | 'large';
+  subtitleSize: number;
   subtitleStyle: 'standard' | 'high-contrast';
 }
 export interface ResearchSettings {
@@ -247,7 +247,7 @@ export interface AppConfig {
   birthdayEnabled: boolean;
   pinInspirationLibrary: boolean;
   componentSettings: ComponentSettingsMap;
-  /** Built-in player controls shared by Chromium and optional advanced decoding. */
+  /** Built-in controls for the native video player. */
   videoPlayback: VideoPlaybackSettings;
   mediaCache: {
     maxSizeGB: number;
@@ -1187,7 +1187,7 @@ export interface IElectronAPI {
   cancelMediaThumbnail: (filePath: string, requestedSize?: number) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
   onThumbnailStateChanged: (callback: (update: { filePath: string; state: ThumbnailState; previewUrls?: Partial<Record<'small' | 'medium' | 'large', string>>; sourceMtimeMs?: number; sourceSize?: number; error?: string }) => void) => () => void;
   startVideoPlayer: (filePath: string, settings: VideoPlaybackSettings, playerId: string, requestId: string) => Promise<{ success: boolean; sessionId?: string; playerId?: string; requestId?: string; error?: string }>;
-  setVideoPlayerBounds: (sessionId: string, bounds: { x: number; y: number; width: number; height: number; visible: boolean; overlayHole?: { x: number; y: number; width: number; height: number }; cornerOverlayHole?: { x: number; y: number; width: number; height: number } }) => void;
+  setVideoPlayerBounds: (sessionId: string, bounds: { x: number; y: number; width: number; height: number; visible: boolean; overlayHole?: { x: number; y: number; width: number; height: number }; controlsOverlayHole?: { x: number; y: number; width: number; height: number }; cornerOverlayHole?: { x: number; y: number; width: number; height: number } }) => void;
   setAdvancedVideoBounds: (sessionId: string, bounds: {
     x: number;
     y: number;
@@ -1195,9 +1195,10 @@ export interface IElectronAPI {
     height: number;
     visible: boolean;
     overlayHole?: { x: number; y: number; width: number; height: number };
+    controlsOverlayHole?: { x: number; y: number; width: number; height: number };
     cornerOverlayHole?: { x: number; y: number; width: number; height: number };
   }) => void;
-  controlVideoPlayer: (sessionId: string, request: { action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop' | 'subtitle-select' | 'subtitle-visible' | 'subtitle-delay' | 'subtitle-style'; value?: number | boolean | string; size?: VideoPlaybackSettings['subtitleSize']; style?: VideoPlaybackSettings['subtitleStyle'] }) => void;
+  controlVideoPlayer: (sessionId: string, request: { action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop' | 'subtitle-select' | 'subtitle-visible' | 'subtitle-delay' | 'subtitle-style'; value?: number | boolean | string; fontSize?: VideoPlaybackSettings['subtitleSize']; style?: VideoPlaybackSettings['subtitleStyle'] }) => void;
   chooseVideoSubtitle: (sessionId: string) => Promise<{ success: boolean; cancelled?: boolean; path?: string; error?: string }>;
   addVideoSubtitle: (sessionId: string, filePath: string) => Promise<{ success: boolean; error?: string }>;
   captureVideoPlayerFrame: (sessionId: string) => Promise<{ success: boolean; path?: string; error?: string }>;

@@ -29,6 +29,7 @@ import type { AppConfig, BackupStatus, ComponentHostAction, ComponentPageOpenSco
 import { ColumnResizeHandle } from './features/app/AppShellLayout';
 import { clampNumber, readStoredNumber } from './features/app/app-shell-layout-model';
 import { DEFAULT_CONFIG, DEFAULT_HOME_ORDER, IMAGE_SELECTION_FOLDER_NAME, VIDEO_SELECTION_FOLDER_NAME, isMac, localDateKey, normalizeHomeOrder, normalizeMediaCacheSize, normalizeProjectCategories, normalizeProjectToolbar, normalizeVideoPreviewQuality } from './features/app/app-config';
+import { normalizeSubtitleFontSize } from './features/app/video-player-settings';
 type WorkspaceToolKind = 'version';
 type WorkspaceToolTab = { ownerPageId: string; projectId: string; projectPath: string; kind: WorkspaceToolKind; label: string; busy: boolean };
 interface PythonEvent {
@@ -318,7 +319,7 @@ const App: React.FC = () => {
               arrowKeyAction: fileConfig.videoPlayback?.arrowKeyAction === 'navigate' ? 'navigate' : fileConfig.videoPlayback?.arrowKeyAction === 'seek' ? 'seek' : legacyAdvancedVideo?.arrowKeyAction === 'navigate' ? 'navigate' : 'seek',
               subtitlesEnabled: fileConfig.videoPlayback?.subtitlesEnabled === true,
               subtitlePreferredLanguages: Array.isArray(fileConfig.videoPlayback?.subtitlePreferredLanguages) ? fileConfig.videoPlayback.subtitlePreferredLanguages.map(value => String(value).trim().toLowerCase()).filter(Boolean).slice(0, 8) : ['zh', 'chi', 'zho'],
-              subtitleSize: fileConfig.videoPlayback?.subtitleSize === 'large' ? 'large' : 'default',
+              subtitleSize: normalizeSubtitleFontSize(fileConfig.videoPlayback?.subtitleSize),
               subtitleStyle: fileConfig.videoPlayback?.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard',
             };
             const configuredImageSource = fileConfig.smartMatch?.imageSourceFolderName;

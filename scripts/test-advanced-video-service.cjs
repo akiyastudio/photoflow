@@ -95,25 +95,27 @@ const run = async () => {
   assert.strictEqual(spawned[0].options.windowsHide, true);
   assert.deepStrictEqual(spawned[0].args, ['--parent-hwnd', '123456']);
   assert.deepStrictEqual(stdinLines[0], { command: 'set-keyboard-mode', value: 'navigate' });
-  assert.deepStrictEqual(stdinLines[1], { command: 'set-subtitle-defaults', enabled: false, preferredLanguages: [], size: 'default', style: 'standard' });
+  assert.deepStrictEqual(stdinLines[1], { command: 'set-subtitle-defaults', enabled: false, preferredLanguages: [], fontSize: 55, style: 'standard' });
   assert.deepStrictEqual(stdinLines[2], { command: 'open', path: path.resolve(sourceVideo) });
   assert.deepStrictEqual(stdinLines[3], { command: 'play' });
 
   service.setBounds({ sender }, result.sessionId, {
     x: 10.4, y: 20.6, width: 300.2, height: 200.8, visible: true,
     overlayHole: { x: 210.2, y: 80.4, width: 120.7, height: 150.1 },
+    controlsOverlayHole: { x: 0, y: 150.2, width: 300.2, height: 60.1 },
     cornerOverlayHole: { x: 240.4, y: 0, width: 80.2, height: 72.1 },
   });
   service.control({ sender }, result.sessionId, { action: 'play' });
   service.control({ sender }, result.sessionId, { action: 'subtitle-select', value: '3' });
   service.control({ sender }, result.sessionId, { action: 'subtitle-visible', value: false });
   service.control({ sender }, result.sessionId, { action: 'subtitle-delay', value: 1.5 });
-  service.control({ sender }, result.sessionId, { action: 'subtitle-style', size: 'large', style: 'high-contrast' });
+  service.control({ sender }, result.sessionId, { action: 'subtitle-style', fontSize: 73, style: 'high-contrast' });
   service.control({ sender }, result.sessionId, { action: 'arbitrary-command' });
   service.control({ sender: { id: 99 } }, result.sessionId, { action: 'pause' });
   assert.deepStrictEqual(stdinLines[4], {
     command: 'set-bounds', x: 10, y: 21, width: 300, height: 201, visible: true,
     holeX: 210, holeY: 80, holeWidth: 90, holeHeight: 121,
+    controlsHoleX: 0, controlsHoleY: 150, controlsHoleWidth: 300, controlsHoleHeight: 51,
     cornerHoleX: 240, cornerHoleY: 0, cornerHoleWidth: 60, cornerHoleHeight: 72,
   });
   assert.deepStrictEqual(stdinLines[5], { command: 'play' });
@@ -121,7 +123,7 @@ const run = async () => {
     { command: 'subtitle-select', value: '3' },
     { command: 'subtitle-visible', value: false },
     { command: 'subtitle-delay', value: 1.5 },
-    { command: 'subtitle-style', size: 'large', style: 'high-contrast' },
+    { command: 'subtitle-style', fontSize: 73, style: 'high-contrast' },
   ]);
   assert.strictEqual(stdinLines.length, 10, 'only allowlisted commands from the owning renderer may reach the native session');
 
@@ -189,6 +191,7 @@ const run = async () => {
 
   const playerSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'components', 'AdvancedVideoPlayer.tsx'), 'utf8');
   const workspaceSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
+  const systemIpcSource = require('fs').readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
   const decoderSource = require('fs').readFileSync(path.join(__dirname, '..', 'extensions', 'video-playback-mpv', 'AdvancedVideoDecoder.cs'), 'utf8');
   const decoderBuildSource = require('fs').readFileSync(path.join(__dirname, 'build-advanced-video-decoder.cjs'), 'utf8');
   const runtimeBuildSource = require('fs').readFileSync(path.join(__dirname, 'media-runtime', 'build-libmpv-dependencies-windows.sh'), 'utf8');
@@ -230,9 +233,14 @@ const run = async () => {
   assert(playerSource.includes('backwardControlLabel') && playerSource.includes('forwardControlLabel') && playerSource.includes('runForwardBackControl(-1)') && playerSource.includes('runForwardBackControl(1)'), 'the controls beside play/pause must expose their active seek or navigation behavior');
   assert(playerSource.includes('cyclePlaybackSpeed') && playerSource.includes("controlPanel === 'speed'") && playerSource.includes('absolute bottom-full') && playerSource.includes('PLAYBACK_SPEEDS.map') && playerSource.includes('captureVideoPlayerFrame'), 'video controls must expose a compact floating playback-speed panel, click-to-cycle speed, and current-frame capture');
   assert(playerSource.includes("controlPanel === 'volume'") && playerSource.includes('aria-label="调整音量"') && playerSource.includes("control('mute', !muted)"), 'volume must use a floating panel above its icon while icon clicks toggle mute');
-  assert(playerSource.includes('overlayHole') && playerSource.includes('cornerOverlayHole') && decoderSource.includes('ApplyOverlayHoles'), 'the native video surface must expose only the floating controls and full-screen close-button areas');
+  assert(playerSource.includes('overlayHole') && playerSource.includes('controlsOverlayHole') && playerSource.includes('cornerOverlayHole') && decoderSource.includes('controlsHoleWidth') && decoderSource.includes('ApplyOverlayHoles') && decoderSource.includes('path.AddEllipse(bounds)'), 'the native video surface must expose floating panels and controls with rectangular holes and the full-screen close button with a circular hole');
   assert(playerSource.includes('useHostSurfaceState') && playerSource.includes('!hostSurfaceSuspended') && !playerSource.includes('hasVisibleExternalModal') && !playerSource.includes('MutationObserver'), 'native video surfaces must consume explicit host suspension instead of guessing from modal DOM');
-  assert(playerSource.includes('topRightOverlayHole') && !playerSource.includes('marginTop: Math.max(0, topOverlayInset)') && workspaceSource.includes('topRightOverlayHole={fullscreen && fullscreenControlsVisible ? 72 : 0}'), 'full-screen video must reach the top edge while keeping the close button interactive');
+  assert(playerSource.includes('topRightOverlayHole') && !playerSource.includes('marginTop: Math.max(0, topOverlayInset)') && workspaceSource.includes('topRightOverlayHole={fullscreen && fullscreenControlsVisible ? 60 : 0}'), 'full-screen video must reach the top edge while keeping the close button interactive without exposing a rectangular patch');
+  assert(playerSource.includes('controlsOverlay ? <div ref={controlsOverlayRef} className="absolute inset-x-0 bottom-0') && workspaceSource.includes('controlsVisible={!fullscreen || fullscreenControlsVisible}') && workspaceSource.includes('controlsOverlay={fullscreen}'), 'full-screen playback controls must float over a full-size video surface, hide with the close button, and return on pointer activity');
+  assert(decoderSource.includes('eventArgs.Location == lastPointerLocation'), 'native video pointer activity must ignore repeated events at the same coordinates so full-screen controls can time out');
+  assert(workspaceSource.includes('FULLSCREEN_CONTROLS_HIDE_DELAY_MS = 1800'), 'full-screen media controls must hide after exactly 1.8 seconds of inactivity');
+  assert(workspaceSource.includes('projectWorkspaceClient.setWindowFullscreen(true)') && workspaceSource.includes('projectWorkspaceClient.setWindowFullscreen(false)') && systemIpcSource.includes("setAlwaysOnTop(true, 'screen-saver', 1)") && systemIpcSource.includes('targetWindow.setKiosk(true)') && systemIpcSource.includes('targetWindow.focus()'), 'media preview full-screen must focus a Windows kiosk window above the taskbar without requiring a follow-up click');
+  assert(!playerSource.includes('title="单击播放或暂停"'), 'the video surface must not show a redundant hover tooltip for its click action');
   assert(!workspaceSource.includes('autoPlay controls') && workspaceSource.includes('不会改用 Chromium 播放'), 'advanced playback failures must not silently switch to a divergent Chromium decoder path');
   assert(!playerSource.includes('高级解码</span>'), 'the advanced-decoder label must not remain in the control bar');
   assert(workspaceSource.includes("previewMediaEntries.filter(entry => entry.kind === 'video')"), 'previous and next controls must navigate between videos only');

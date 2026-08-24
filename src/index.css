@@ -10,6 +10,12 @@
   height: auto;
 }
 
+/* Media viewing is the one immersive surface that also covers the titlebar. */
+.fixed.inset-0.media-preview-fullscreen {
+  top: 0;
+  height: 100vh;
+}
+
 .tool-panel-backdrop {
   background-color: rgb(15 23 42 / 45%);
   backdrop-filter: blur(2px);

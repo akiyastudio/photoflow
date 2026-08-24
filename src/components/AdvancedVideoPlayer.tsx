@@ -5,6 +5,7 @@ import { Camera, Captions, Gauge, Loader2, Pause, Play, Plus, SkipBack, SkipForw
 import type { VideoPlayerState, VideoPlaybackSettings, VideoSubtitleTrack } from '../types';
 import { useHostSurfaceState } from './LayerProvider';
 import { readSubtitleMemory, resolveRememberedSubtitle, writeSubtitleMemory } from './video-subtitle-memory';
+import { DEFAULT_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSize } from '../features/app/video-player-settings';
 
 const formatTime = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
@@ -19,7 +20,8 @@ const formatTime = (seconds: number) => {
 
 const PLAYBACK_SPEEDS = [0.5, 1, 1.25, 1.5, 2, 3, 4];
 const SKIP_SECONDS = 5;
-const DEFAULT_VIDEO_SETTINGS: VideoPlaybackSettings = { arrowKeyAction: 'seek', subtitlesEnabled: false, subtitlePreferredLanguages: ['zh', 'chi', 'zho'], subtitleSize: 'default', subtitleStyle: 'standard' };
+const SUBTITLE_FONT_SIZE_PRESETS = [{ label: '小', value: 20 }, { label: '中', value: 30 }, { label: '大', value: 40 }] as const;
+const DEFAULT_VIDEO_SETTINGS: VideoPlaybackSettings = { arrowKeyAction: 'seek', subtitlesEnabled: false, subtitlePreferredLanguages: ['zh', 'chi', 'zho'], subtitleSize: DEFAULT_SUBTITLE_FONT_SIZE, subtitleStyle: 'standard' };
 const createPlaybackToken = () => globalThis.crypto?.randomUUID?.() || `video_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 
 type VideoDirectionalInputGroup = 'arrows' | 'forward-back';
@@ -45,6 +47,8 @@ type VideoPlayerProps = {
   onContextMenuAt?: (x: number, y: number) => void;
   onPointerActivity?: () => void;
   topRightOverlayHole?: number;
+  controlsVisible?: boolean;
+  controlsOverlay?: boolean;
   onEscape?: () => void;
   bottomControls?: ReactNode;
   editorSeekRequest?: { id: number; time: number; pause?: boolean };
@@ -66,13 +70,14 @@ const initialState = (): VideoPlayerState => ({
   duration: 0,
 });
 
-const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onContextMenuAt, onPointerActivity, topRightOverlayHole = 0, onEscape, bottomControls, editorSeekRequest, onPlaybackState, keyboardSettings = DEFAULT_VIDEO_SETTINGS }: VideoPlayerProps) => {
+const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onContextMenuAt, onPointerActivity, topRightOverlayHole = 0, controlsVisible = true, controlsOverlay = false, onEscape, bottomControls, editorSeekRequest, onPlaybackState, keyboardSettings = DEFAULT_VIDEO_SETTINGS }: VideoPlayerProps) => {
   const { suspended: hostSurfaceSuspended } = useHostSurfaceState();
   const navigate = onNavigate || (() => undefined);
   const showNavigation = Boolean(onNavigate);
   const playerRootRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const controlPanelRef = useRef<HTMLDivElement>(null);
+  const controlsOverlayRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef('');
   const playerIdRef = useRef(createPlaybackToken());
   const requestIdRef = useRef('');
@@ -99,9 +104,12 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const [capturing, setCapturing] = useState(false);
   const [captureNotice, setCaptureNotice] = useState<{ text: string; error?: boolean } | null>(null);
   const [controlPanel, setControlPanel] = useState<'speed' | 'volume' | 'subtitles' | null>(null);
+  const [subtitleFontSize, setSubtitleFontSize] = useState(() => normalizeSubtitleFontSize(keyboardSettings.subtitleSize));
   const subtitleMemoryRestoredRef = useRef(false);
   const rememberAddedSubtitleRef = useRef(false);
   const [state, setState] = useState<VideoPlayerState>(initialState);
+
+  useEffect(() => setSubtitleFontSize(normalizeSubtitleFontSize(keyboardSettings.subtitleSize)), [keyboardSettings.subtitleSize]);
 
   useEffect(() => {
     let active = true;
@@ -222,6 +230,10 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     return () => window.clearTimeout(timer);
   }, [captureNotice]);
 
+  useEffect(() => {
+    if (!controlsVisible) setControlPanel(null);
+  }, [controlsVisible]);
+
   const syncBounds = useCallback(() => {
     const surface = surfaceRef.current;
     if (!surface || !sessionRef.current) return;
@@ -238,10 +250,22 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       width: Math.round((panelRight - panelLeft) * scale),
       height: Math.round((panelBottom - panelTop) * scale),
     } : undefined;
+    const controlsRect = controlsOverlay && controlsVisible ? controlsOverlayRef.current?.getBoundingClientRect() : undefined;
+    const controlsLeft = controlsRect ? Math.max(rect.left, controlsRect.left) : 0;
+    const controlsTop = controlsRect ? Math.max(rect.top, controlsRect.top) : 0;
+    const controlsRight = controlsRect ? Math.min(rect.right, controlsRect.right) : 0;
+    const controlsBottom = controlsRect ? Math.min(rect.bottom, controlsRect.bottom) : 0;
+    const controlsOverlayHole = controlsRect && controlsRight > controlsLeft && controlsBottom > controlsTop ? {
+      x: Math.round((controlsLeft - rect.left) * scale),
+      y: Math.round((controlsTop - rect.top) * scale),
+      width: Math.round((controlsRight - controlsLeft) * scale),
+      height: Math.round((controlsBottom - controlsTop) * scale),
+    } : undefined;
     const cornerSize = Math.max(0, Math.min(rect.width, rect.height, topRightOverlayHole));
+    const cornerInset = Math.min(10, Math.max(0, (Math.min(rect.width, rect.height) - cornerSize) / 2));
     const cornerOverlayHole = cornerSize > 0 ? {
-      x: Math.round((rect.width - cornerSize) * scale),
-      y: 0,
+      x: Math.round((rect.width - cornerSize - cornerInset) * scale),
+      y: Math.round(cornerInset * scale),
       width: Math.round(cornerSize * scale),
       height: Math.round(cornerSize * scale),
     } : undefined;
@@ -254,9 +278,10 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       height: Math.round(rect.height * scale),
       visible,
       overlayHole,
+      controlsOverlayHole,
       cornerOverlayHole,
     });
-  }, [hostSurfaceSuspended, topRightOverlayHole]);
+  }, [controlsOverlay, controlsVisible, hostSurfaceSuspended, topRightOverlayHole]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -284,7 +309,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     if (!sessionId) return;
     const frame = window.requestAnimationFrame(syncBounds);
     return () => window.cancelAnimationFrame(frame);
-  }, [controlPanel, sessionId, syncBounds]);
+  }, [controlPanel, controlsOverlay, controlsVisible, sessionId, syncBounds]);
 
   useEffect(() => {
     const width = Number(state.width) || 0;
@@ -415,6 +440,11 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     control('subtitle-delay', bounded);
     rememberSubtitle(selectedSubtitle, bounded);
   };
+  const changeSubtitleFontSize = (fontSize: number) => {
+    const normalized = normalizeSubtitleFontSize(fontSize);
+    setSubtitleFontSize(normalized);
+    if (sessionRef.current) window.electronAPI.controlVideoPlayer(sessionRef.current, { action: 'subtitle-style', fontSize: normalized, style: keyboardSettings.subtitleStyle });
+  };
   const addSubtitle = async () => {
     if (!sessionRef.current) return;
     // Choosing a new subtitle is an explicit override of a remembered "off" state.
@@ -432,24 +462,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const backwardControlLabel = forwardBackAction === 'navigate' ? '上一个视频' : '快退 5 秒';
   const forwardControlLabel = forwardBackAction === 'navigate' ? '下一个视频' : '快进 5 秒';
 
-  return <div ref={playerRootRef} data-video-player="true" className="absolute inset-0 flex min-h-0 flex-col bg-black">
-    <div
-      ref={surfaceRef}
-      role="button"
-      tabIndex={0}
-      aria-label={paused ? '播放视频' : '暂停视频'}
-      title="单击播放或暂停"
-      onClick={togglePlayback}
-      onKeyDown={event => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault();
-          togglePlayback();
-        }
-      }}
-      className="relative min-h-0 flex-1 cursor-pointer bg-black bg-contain bg-center bg-no-repeat outline-none"
-      style={poster ? { backgroundImage: `url(${JSON.stringify(poster).slice(1, -1)})` } : undefined}
-    />
-    {bottomControls || <div className="relative z-20 flex h-12 shrink-0 items-center gap-1 border-t border-white/10 bg-[#070b15] px-2 text-white">
+  const playbackControls = bottomControls || <div className={`relative z-20 flex h-12 shrink-0 items-center gap-1 px-2 text-white ${controlsOverlay ? 'bg-[#070b15]/95 shadow-[0_-10px_24px_rgba(0,0,0,.35)]' : 'border-t border-white/10 bg-[#070b15]'}`}>
         {showNavigation && <button type="button" onClick={() => runForwardBackControl(-1)} title={backwardControlLabel} aria-label={backwardControlLabel} className="rounded p-1.5 text-slate-100 hover:bg-white/10"><SkipBack size={16}/></button>}
         <button type="button" disabled={!sessionId} onClick={togglePlayback} title={paused ? '播放' : '暂停'} aria-label={paused ? '播放' : '暂停'} className="rounded p-1.5 text-slate-100 hover:bg-white/10 disabled:opacity-40">{paused ? <Play size={17} fill="currentColor"/> : <Pause size={17} fill="currentColor"/>}</button>
         {showNavigation && <button type="button" onClick={() => runForwardBackControl(1)} title={forwardControlLabel} aria-label={forwardControlLabel} className="rounded p-1.5 text-slate-100 hover:bg-white/10"><SkipForward size={16}/></button>}
@@ -477,7 +490,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
               <div className="mt-2 border-t border-white/10 pt-2">
                 <button type="button" disabled={!selectedSubtitle} onClick={() => { const visible = state.subtitleVisible === false; control('subtitle-visible', visible); rememberSubtitle(selectedSubtitle, subtitleDelay, visible); }} className="w-full rounded px-2 py-1.5 text-left text-slate-200 hover:bg-white/10 disabled:opacity-40">{state.subtitleVisible === false ? '显示字幕' : '隐藏字幕'}</button>
                 <div className="flex items-center gap-1 px-2 py-1 text-slate-300"><span className="mr-auto">同步 {subtitleDelay > 0 ? `+${subtitleDelay.toFixed(1)}` : subtitleDelay.toFixed(1)} 秒</span><button type="button" onClick={() => changeSubtitleDelay(subtitleDelay - 0.5)} className="rounded bg-white/5 px-2 py-1 hover:bg-white/15">提前</button><button type="button" onClick={() => changeSubtitleDelay(0)} className="rounded bg-white/5 px-2 py-1 hover:bg-white/15">归零</button><button type="button" onClick={() => changeSubtitleDelay(subtitleDelay + 0.5)} className="rounded bg-white/5 px-2 py-1 hover:bg-white/15">延后</button></div>
-                <div className="grid grid-cols-2 gap-1 px-2 pt-1"><button type="button" onClick={() => window.electronAPI.controlVideoPlayer(sessionRef.current, { action: 'subtitle-style', size: 'default', style: keyboardSettings.subtitleStyle })} className="rounded bg-white/5 py-1 hover:bg-white/15">默认字号</button><button type="button" onClick={() => window.electronAPI.controlVideoPlayer(sessionRef.current, { action: 'subtitle-style', size: 'large', style: keyboardSettings.subtitleStyle })} className="rounded bg-white/5 py-1 hover:bg-white/15">较大字号</button></div>
+                <div className="mt-1 flex items-center gap-1 px-2 py-1 text-slate-300"><span className="mr-auto">字号</span>{SUBTITLE_FONT_SIZE_PRESETS.map(preset => <button key={preset.label} type="button" aria-label={`字幕字号${preset.label}`} aria-pressed={subtitleFontSize === preset.value} onClick={() => changeSubtitleFontSize(preset.value)} className={`rounded px-2.5 py-1 font-bold transition ${subtitleFontSize === preset.value ? 'bg-blue-500 text-white' : 'bg-white/5 text-slate-200 hover:bg-white/15'}`}>{preset.label}</button>)}</div>
               </div>
             </div>
           </div>}
@@ -494,7 +507,25 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         </div>
         {(starting || state.buffering) && <span role="status" className="inline-flex items-center gap-1 whitespace-nowrap text-[11px] text-blue-200"><Loader2 size={13} className="animate-spin"/>加载中</span>}
         {captureNotice && <span role="status" aria-live="polite" title={captureNotice.text} className={`max-w-24 truncate whitespace-nowrap text-[11px] ${captureNotice.error ? 'text-red-300' : 'text-emerald-300'}`}>{captureNotice.text}</span>}
-    </div>}
+    </div>;
+
+  return <div ref={playerRootRef} data-video-player="true" className="absolute inset-0 flex min-h-0 flex-col bg-black">
+    <div
+      ref={surfaceRef}
+      role="button"
+      tabIndex={0}
+      aria-label={paused ? '播放视频' : '暂停视频'}
+      onClick={togglePlayback}
+      onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          togglePlayback();
+        }
+      }}
+      className="relative min-h-0 flex-1 cursor-pointer bg-black bg-contain bg-center bg-no-repeat outline-none"
+      style={poster ? { backgroundImage: `url(${JSON.stringify(poster).slice(1, -1)})` } : undefined}
+    />
+    {controlsVisible && (controlsOverlay ? <div ref={controlsOverlayRef} className="absolute inset-x-0 bottom-0 z-20">{playbackControls}</div> : playbackControls)}
   </div>;
 };
 

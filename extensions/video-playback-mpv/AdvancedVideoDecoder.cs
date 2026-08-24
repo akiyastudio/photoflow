@@ -449,6 +449,8 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private bool subtitleDefaultsPending;
         private string lastSubtitleState = string.Empty;
         private int lastPointerActivityTick;
+        private Point lastPointerLocation;
+        private bool hasLastPointerLocation;
 
         internal DecoderHost(IntPtr parentWindow)
         {
@@ -523,6 +525,10 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 int holeY = ReadInt(value, "holeY");
                 int holeWidth = ReadInt(value, "holeWidth");
                 int holeHeight = ReadInt(value, "holeHeight");
+                int controlsHoleX = ReadInt(value, "controlsHoleX");
+                int controlsHoleY = ReadInt(value, "controlsHoleY");
+                int controlsHoleWidth = ReadInt(value, "controlsHoleWidth");
+                int controlsHoleHeight = ReadInt(value, "controlsHoleHeight");
                 int cornerHoleX = ReadInt(value, "cornerHoleX");
                 int cornerHoleY = ReadInt(value, "cornerHoleY");
                 int cornerHoleWidth = ReadInt(value, "cornerHoleWidth");
@@ -534,6 +540,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     ApplyOverlayHoles(
                         width, height,
                         holeX, holeY, holeWidth, holeHeight,
+                        controlsHoleX, controlsHoleY, controlsHoleWidth, controlsHoleHeight,
                         cornerHoleX, cornerHoleY, cornerHoleWidth, cornerHoleHeight);
                     if (visible)
                     {
@@ -565,7 +572,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 subtitleDefaultsPending = true;
                 lock (playerLock)
                 {
-                    if (player != null) ApplySubtitleStyle(player, ReadString(value, "size"), ReadString(value, "style"));
+                    if (player != null) ApplySubtitleStyle(player, ReadSubtitleFontSize(value), ReadString(value, "style"));
                 }
                 return;
             }
@@ -594,7 +601,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 }
                 else if (name == "subtitle-visible") player.SetProperty("sub-visibility", ReadBool(value, "value") ? "yes" : "no");
                 else if (name == "subtitle-delay") player.SetProperty("sub-delay", Math.Max(-30, Math.Min(30, ReadDouble(value, "value"))).ToString(CultureInfo.InvariantCulture));
-                else if (name == "subtitle-style") ApplySubtitleStyle(player, ReadString(value, "size"), ReadString(value, "style"));
+                else if (name == "subtitle-style") ApplySubtitleStyle(player, ReadSubtitleFontSize(value), ReadString(value, "style"));
                 else if (name == "subtitle-add")
                 {
                     string subtitlePath = ReadString(value, "path");
@@ -651,9 +658,18 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 });
         }
 
-        private static void ApplySubtitleStyle(LibMpv player, string size, string style)
+        private static int ReadSubtitleFontSize(Dictionary<string, object> value)
         {
-            player.SetProperty("sub-scale", size == "large" ? "1.35" : "1.0");
+            int fontSize = ReadInt(value, "fontSize");
+            if (fontSize <= 0) fontSize = ReadString(value, "size") == "large" ? 74 : 55;
+            return Math.Max(16, Math.Min(120, fontSize));
+        }
+
+        private static void ApplySubtitleStyle(LibMpv player, int fontSize, string style)
+        {
+            int normalized = Math.Max(16, Math.Min(120, fontSize));
+            player.SetProperty("sub-font-size", "55");
+            player.SetProperty("sub-scale", (normalized / 55.0).ToString("0.###", CultureInfo.InvariantCulture));
             player.SetProperty("sub-border-size", style == "high-contrast" ? "4" : "2.5");
             player.SetProperty("sub-shadow-offset", style == "high-contrast" ? "2" : "1");
         }
@@ -667,30 +683,43 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 || preferred.StartsWith(track + "-", StringComparison.OrdinalIgnoreCase);
         }
 
-        private static void ExcludeOverlayHole(System.Drawing.Region region, int width, int height, int holeX, int holeY, int holeWidth, int holeHeight)
+        private static void ExcludeOverlayHole(System.Drawing.Region region, int width, int height, int holeX, int holeY, int holeWidth, int holeHeight, bool ellipse)
         {
             if (holeWidth <= 0 || holeHeight <= 0) return;
             int left = Math.Max(0, Math.Min(width, holeX));
             int top = Math.Max(0, Math.Min(height, holeY));
             int clippedWidth = Math.Max(0, Math.Min(width - left, holeWidth));
             int clippedHeight = Math.Max(0, Math.Min(height - top, holeHeight));
-            if (clippedWidth > 0 && clippedHeight > 0)
-                region.Exclude(new Rectangle(left, top, clippedWidth, clippedHeight));
+            if (clippedWidth <= 0 || clippedHeight <= 0) return;
+            var bounds = new Rectangle(left, top, clippedWidth, clippedHeight);
+            if (!ellipse)
+            {
+                region.Exclude(bounds);
+                return;
+            }
+            using (var path = new System.Drawing.Drawing2D.GraphicsPath())
+            {
+                path.AddEllipse(bounds);
+                region.Exclude(path);
+            }
         }
 
         private void ApplyOverlayHoles(
             int width, int height,
             int holeX, int holeY, int holeWidth, int holeHeight,
+            int controlsHoleX, int controlsHoleY, int controlsHoleWidth, int controlsHoleHeight,
             int cornerHoleX, int cornerHoleY, int cornerHoleWidth, int cornerHoleHeight)
         {
             System.Drawing.Region previous = Region;
             bool hasPanelHole = holeWidth > 0 && holeHeight > 0;
+            bool hasControlsHole = controlsHoleWidth > 0 && controlsHoleHeight > 0;
             bool hasCornerHole = cornerHoleWidth > 0 && cornerHoleHeight > 0;
-            if (hasPanelHole || hasCornerHole)
+            if (hasPanelHole || hasControlsHole || hasCornerHole)
             {
                 var next = new System.Drawing.Region(new Rectangle(0, 0, width, height));
-                ExcludeOverlayHole(next, width, height, holeX, holeY, holeWidth, holeHeight);
-                ExcludeOverlayHole(next, width, height, cornerHoleX, cornerHoleY, cornerHoleWidth, cornerHoleHeight);
+                ExcludeOverlayHole(next, width, height, holeX, holeY, holeWidth, holeHeight, false);
+                ExcludeOverlayHole(next, width, height, controlsHoleX, controlsHoleY, controlsHoleWidth, controlsHoleHeight, false);
+                ExcludeOverlayHole(next, width, height, cornerHoleX, cornerHoleY, cornerHoleWidth, cornerHoleHeight, true);
                 Region = next;
             }
             else Region = null;
@@ -700,6 +729,9 @@ namespace PhotoFlow.AdvancedVideoDecoder
         protected override void OnMouseMove(MouseEventArgs eventArgs)
         {
             base.OnMouseMove(eventArgs);
+            if (hasLastPointerLocation && eventArgs.Location == lastPointerLocation) return;
+            lastPointerLocation = eventArgs.Location;
+            hasLastPointerLocation = true;
             int now = Environment.TickCount;
             if (unchecked(now - lastPointerActivityTick) < 200) return;
             lastPointerActivityTick = now;
