@@ -85,14 +85,16 @@ global.window = testWindow; global.document = testDocument; global.navigator = {
 
 const compile = relativePath => ts.transpileModule(fs.readFileSync(path.resolve(__dirname, '..', relativePath), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
 const loadCommonJs = (source, localRequire = require) => { const module = { exports: {} }; new Function('module', 'exports', 'require', source)(module, module.exports, localRequire); return module.exports; };
-const model = loadCommonJs(compile('src/features/versioning/versioning-v2-model.ts'));
+const versionSourceCompatibility = loadCommonJs(compile('src/compatibility/version-source.ts'));
+const compatibilityRequire = request => request === '../../compatibility/version-source.ts' ? versionSourceCompatibility : require(request);
+const model = loadCommonJs(compile('src/features/versioning/versioning-v2-model.ts'), compatibilityRequire);
 const panelSwitch = loadCommonJs(compile('src/components/PanelSwitch.tsx'));
 const importSourceControls = loadCommonJs(compile('src/components/ImportSourceControls.tsx'), request => request === './PanelSwitch' ? panelSwitch : require(request));
 const panel = loadCommonJs(compile('src/features/versioning/VersionProgressPanel.tsx'), request => request === './versioning-v2-model' ? model : request === '../../components/ImportSourceControls' ? importSourceControls : require(request));
 const folderMarkModel = loadCommonJs(compile('src/features/versioning/folder-mark-model.ts'), request => request === './versioning-v2-model' ? model : request === './VersionProgressPanel' ? panel : require(request));
 const folderMarkPanel = { ...folderMarkModel, ...loadCommonJs(compile('src/features/versioning/FolderMarkPanel.tsx'), request => request === './versioning-v2-model' ? model : request === './VersionProgressPanel' ? panel : request === './folder-mark-model' ? folderMarkModel : require(request)) };
 const canvasModel = loadCommonJs(compile('src/features/versioning/version-tree-canvas-model.ts'));
-const edgeModel = loadCommonJs(compile('src/features/versioning/version-tree-edge-model.ts'));
+const edgeModel = loadCommonJs(compile('src/features/versioning/version-tree-edge-model.ts'), compatibilityRequire);
 const layoutModel = loadCommonJs(compile('src/features/versioning/version-tree-layout-model.ts'), request => request === './version-tree-edge-model.ts' ? edgeModel : require(request));
 const canvasHook = loadCommonJs(compile('src/features/versioning/use-version-tree-canvas.ts'), request => request === './version-tree-canvas-model' ? canvasModel : require(request));
 const canvasHookSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/features/versioning/use-version-tree-canvas.ts'), 'utf8');
@@ -141,6 +143,7 @@ const tree = loadCommonJs(compile('src/components/ProjectVersionTree.tsx'), requ
   if (request === '../features/versioning/version-tree-edge-model') return edgeModel;
   if (request === '../features/versioning/use-version-tree-canvas') return canvasHook;
   if (request === '../features/workspace/marquee-selection-model') return workspaceGridModel;
+  if (request === './LayerProvider') return { useHostSurfaceSuspension: () => undefined };
   return require(request);
 });
 const legacyRepairNotice = loadCommonJs(compile('src/features/versioning/LegacySelectionRepairNotice.tsx'));

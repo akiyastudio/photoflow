@@ -1,4 +1,6 @@
-export type VersionTreeEdgeKind = 'main' | 'auxiliary' | 'media_companion' | 'derived_preview' | 'workflow_input' | 'team-workspace';
+import { legacyVersionSourceMetadata } from '../../compatibility/version-source.ts';
+
+export type VersionTreeEdgeKind = 'main' | 'auxiliary' | 'media_companion' | 'derived_preview' | 'workflow_input';
 export type VersionTreeEdgePort = 'left' | 'right' | 'top' | 'bottom';
 export type VersionTreeEdgeRect = { x: number; y: number; width: number; height: number };
 export type VersionTreeEdgePoint = { x: number; y: number };
@@ -8,13 +10,14 @@ export type VersionTreeRelationNode = {
   projectId: string;
   mediaKind: string;
   nodeRole: 'original' | 'progress' | 'selection' | 'artifact' | 'workflow' | 'broll';
-  artifactKind?: 'companion' | 'preview' | 'team_workspace';
+  artifactKind?: string;
+  sourceMetadata?: { parentCapability?: 'structural' | 'workflow-input' | 'none' };
   relationKind?: 'main' | 'auxiliary';
   parentProgressId?: string;
   folderMissing?: boolean;
 };
 
-const VERSION_TREE_RELATION_LABELS: Record<Exclude<VersionTreeEdgeKind, 'team-workspace'>, string> = {
+const VERSION_TREE_RELATION_LABELS: Record<VersionTreeEdgeKind, string> = {
   main: '版本关系',
   auxiliary: '选片关联',
   media_companion: '配套素材',
@@ -22,9 +25,7 @@ const VERSION_TREE_RELATION_LABELS: Record<Exclude<VersionTreeEdgeKind, 'team-wo
   workflow_input: '工作流输入',
 };
 
-export const versionTreeRelationLabel = (kind: VersionTreeEdgeKind) => kind === 'team-workspace'
-  ? '工作流输入'
-  : VERSION_TREE_RELATION_LABELS[kind];
+export const versionTreeRelationLabel = (kind: VersionTreeEdgeKind) => VERSION_TREE_RELATION_LABELS[kind];
 
 export const allowedVersionTreeRelationKinds = (source: VersionTreeRelationNode, target: VersionTreeRelationNode): VersionTreeEdgeKind[] => {
   if (source.folderMissing || target.folderMissing || source.id === target.id || source.projectId !== target.projectId || source.mediaKind !== target.mediaKind) return [];
@@ -38,8 +39,13 @@ export const allowedVersionTreeRelationKinds = (source: VersionTreeRelationNode,
     && (!target.artifactKind || target.artifactKind === 'companion')) result.push('media_companion');
   if (sourceIsMain && target.nodeRole === 'artifact'
     && (!target.artifactKind || target.artifactKind === 'preview')) result.push('derived_preview');
-  if ((source.nodeRole === 'selection' || source.nodeRole === 'workflow') && targetIsMainProgress
-    || sourceIsMain && source.nodeRole === 'progress' && target.nodeRole === 'workflow' && target.artifactKind === 'team_workspace') result.push('workflow_input');
+  const parentCapability = (node: VersionTreeRelationNode) => node.sourceMetadata?.parentCapability
+    || legacyVersionSourceMetadata(node)?.parentCapability
+    || (node.nodeRole === 'selection' || node.nodeRole === 'workflow' ? 'workflow-input' : undefined);
+  const sourceCapability = parentCapability(source);
+  const targetCapability = parentCapability(target);
+  if (sourceCapability === 'workflow-input' && targetIsMainProgress
+    || sourceIsMain && source.nodeRole === 'progress' && target.nodeRole === 'workflow' && targetCapability === 'workflow-input') result.push('workflow_input');
   return result;
 };
 
@@ -100,7 +106,7 @@ export const versionTreeEdgeGeometry = (parentRect: VersionTreeEdgeRect, childRe
 
 export const versionTreeEdgePresentation = (kind: VersionTreeEdgeKind, selected = false) => ({
   stroke: selected ? '#2563eb'
-    : kind === 'team-workspace' || kind === 'workflow_input' ? '#0ea5e9'
+    : kind === 'workflow_input' ? '#0ea5e9'
       : kind === 'auxiliary' ? '#8b5cf6'
         : kind === 'media_companion' ? '#14b8a6'
           : kind === 'derived_preview' ? '#f59e0b'

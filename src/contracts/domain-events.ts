@@ -6,12 +6,12 @@ export const DOMAIN_IDS = [
   'media',
   'versioning',
   'backup-archive',
-  'team-retouch',
+  'components',
   'inspiration-tools',
   'telemetry',
 ] as const;
 
-export type DomainId = typeof DOMAIN_IDS[number];
+export type DomainId = typeof DOMAIN_IDS[number] | `component:${string}`;
 export type StableEntityId = string;
 export type StableWorkspaceId = string;
 export type DomainEventType = `${DomainId}.${string}.${string}.v${number}`;

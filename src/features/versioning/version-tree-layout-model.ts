@@ -6,7 +6,8 @@ export type VersionTreeLayoutNode = {
   id: string;
   mediaKind?: 'image' | 'video';
   nodeRole: 'original' | 'progress' | 'selection' | 'artifact' | 'workflow' | 'broll';
-  artifactKind?: 'companion' | 'preview' | 'team_workspace';
+  artifactKind?: string;
+  sourceMetadata?: { parentCapability?: 'structural' | 'workflow-input' | 'none' };
   relationKind?: 'main' | 'auxiliary';
   createdAt: number;
 };

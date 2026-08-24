@@ -122,7 +122,6 @@ export const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   },
   brollImport: { splitVideosOnImport: false, transcodeVideosOnImport: false },
   inspirationLibrary: { rootPath: '' },
-  personDetection: { useGpu: true, oversizeCropMode: 'face-centered' },
   smartMatch: {
     imageDestFolderName: '',
     videoDestFolderName: '',

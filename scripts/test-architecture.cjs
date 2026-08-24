@@ -9,6 +9,13 @@ const root = path.resolve(__dirname, '..');
 const read = relativePath => fs.readFileSync(path.join(root, relativePath), 'utf8');
 const lines = value => value.split(/\r?\n/).length;
 
+const coreRendererSource = fs.readdirSync(path.join(root, 'src'), { recursive: true })
+  .filter(name => /\.(?:ts|tsx)$/.test(name) && !String(name).replace(/\\/g, '/').startsWith('compatibility/'))
+  .map(name => read(path.join('src', name)))
+  .join('\n');
+const forbiddenComponentSemantics = /team-retouch|teamRetouch|TeamRetouch|团片|edited_patch_path|identityComplete|personDetection|TeamPatch|TeamIdentity|TeamPerson|TeamProject|team_workspace|team-workspace/i;
+assert(!forbiddenComponentSemantics.test(coreRendererSource), 'core renderer/types must not retain component-owned settings, data, domain, or version semantics outside src/compatibility');
+
 const main = read('electron/main.cjs');
 const preload = read('electron/preload.cjs');
 const appEntry = read('src/App.tsx');
@@ -448,7 +455,9 @@ assert(workspaceDb.includes('CREATE TABLE IF NOT EXISTS version_graph_edges')
   && workspaceDb.includes("source.media_kind=target.media_kind")
   && workspaceDb.includes("target.node_role='progress'")
   && types.includes("'artifact' | 'workflow'")
-  && types.includes("artifactKind?: 'companion' | 'preview' | 'team_workspace'")
+  && types.includes('artifactKind?: string')
+  && types.includes('sourceMetadata?: VersionSourceMetadata')
+  && types.includes("parentCapability?: 'structural' | 'workflow-input' | 'none'")
   && types.includes("'workflow' | 'broll'")
   && types.includes("'image' | 'video' | 'mixed'"), 'the versioning schema must keep structural parents singular while adding constrained graph edges and a first-class broll/mixed purpose');
 assert(workspaceIpc.includes("appendProgress.nodeRole !== 'progress'") && workspaceDb.includes('progress_role_change_forbidden'), 'progress append and generic registration must not convert selection/broll/artifact roles into progress');

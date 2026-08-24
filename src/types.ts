@@ -31,10 +31,6 @@ export const BUILT_IN_PROJECT_STATUSES = ['策划中', '待拍摄', '后期中',
 export type BuiltInProjectStatus = typeof BUILT_IN_PROJECT_STATUSES[number];
 /** Project status names are persisted values; built-ins are reserved and users may add more. */
 export type ProjectStatus = '未分类' | BuiltInProjectStatus | (string & {});
-export interface TeamRetouchComponentSettings {
-  useGpu: boolean;
-  oversizeCropMode: 'face-centered' | 'expand';
-}
 export interface VideoPlaybackSettings {
   arrowKeyAction: 'seek' | 'navigate';
   subtitlesEnabled: boolean;
@@ -52,9 +48,9 @@ export interface InspirationLibrarySettings {
   rootPath: string;
 }
 export interface ComponentSettingsMap {
-  'team-retouch'?: TeamRetouchComponentSettings;
   /** Legacy location read during migration; video playback UI is owned by the app. */
   'video-playback-mpv'?: VideoPlaybackSettings;
+  /** Component-owned opaque JSON; the application never interprets component namespaces. */
   [componentId: string]: unknown;
 }
 export const PROJECT_STATUS_LABELS: Record<string, string> = {
@@ -313,8 +309,6 @@ export interface AppConfig {
     splitLargeFiles?: boolean;
   };
   inspirationLibrary: InspirationLibrarySettings;
-  /** Compatibility mirror for versions before componentSettings. */
-  personDetection: TeamRetouchComponentSettings;
   smartMatch: {
     imageDestFolderName: string;
     videoDestFolderName: string;
@@ -517,7 +511,9 @@ export interface ProgressFolder {
   folderMissing: boolean;
   missingSince?: number;
   nodeRole: 'original' | 'progress' | 'selection' | 'artifact' | 'workflow' | 'broll';
-  artifactKind?: 'companion' | 'preview' | 'team_workspace';
+  artifactKind?: string;
+  /** Generic source semantics supplied by the version producer or component. */
+  sourceMetadata?: VersionSourceMetadata;
   relationKind?: 'main' | 'auxiliary';
   trackingEnabled: boolean;
   renameFromParent: boolean;
@@ -531,6 +527,16 @@ export interface ProgressFolder {
   pendingOperationCount?: number;
   createdAt: number;
   updatedAt: number;
+}
+
+export type ComponentDataDomainId = 'media' | 'versioning' | 'operations' | `component:${string}` | (string & {});
+
+export interface VersionSourceMetadata {
+  category: 'original' | 'progress' | 'selection' | 'artifact' | 'workflow' | 'supplemental' | string;
+  role?: 'primary' | 'companion' | 'preview' | 'component-workspace' | string;
+  displayName?: string;
+  componentId?: string;
+  parentCapability?: 'structural' | 'workflow-input' | 'none';
 }
 
 export interface MediaWorkflowImportManifest {
@@ -681,152 +687,6 @@ export interface VersionBatchFileOperation {
   updatedAt: number;
 }
 
-export interface TeamPatchTask {
-  id: string;
-  photoId: string;
-  baseVersionId: string;
-  personIndex: number;
-  personName: string;
-  assignee: string;
-  detector: string;
-  bbox: { x: number; y: number; width: number; height: number };
-  members?: Array<{
-    personIndex: number;
-    confidence?: number;
-    bbox: { x: number; y: number; width: number; height: number };
-    faceBox?: { x: number; y: number; width: number; height: number } | null;
-  }>;
-  crop: { x: number; y: number; width: number; height: number };
-  patchPath: string;
-  patchMissing?: boolean;
-  maskPath?: string;
-  mask?: { width?: number; height?: number; scale?: number };
-  needsReview?: boolean;
-  reviewReason?: string;
-  editedPatchPath?: string;
-  status: 'exported' | 'uploaded' | 'merged' | string;
-  mergeMetrics?: Record<string, number>;
-  mergedVersionId?: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface TeamPatchBundle extends MediaVersionBundle {
-  tasks: TeamPatchTask[];
-  excludedPersonCount?: number;
-  excludedPersonCounts?: Record<string, number>;
-  detection?: { detector: string; backend?: 'gpu' | 'cpu' | string; provider?: string; requestedMode?: 'auto' | 'basic' | 'advanced'; advancedBackend?: boolean; width: number; height: number; personCount?: number; workTileEdge?: number; needsReviewCount?: number; fallbackReason?: string };
-  merge?: { outputPath: string; outputProgressId?: string; versionId?: string; mergedCount: number; conflictPixels: number; seamScore: number; needsReview?: boolean };
-}
-
-export interface TeamIdentity {
-  id: string;
-  name: string;
-  color: string;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface TeamPersonAssignment {
-  photoId: string;
-  baseVersionId: string;
-  personIndex: number;
-  identityId?: string;
-  confidence: number;
-  source: 'manual' | 'suggested' | string;
-  completed: boolean;
-  completionKind?: '' | 'returned' | 'no-retouch' | 'skip-requested' | string;
-  editedPatchPath?: string;
-  returnMissing?: boolean;
-  returnMissingSince?: number;
-  completedAt?: number;
-  updatedAt: number;
-}
-
-export interface TeamProjectPhoto {
-  photoId: string;
-  baseVersionId: string;
-  name: string;
-  relativePath: string;
-  sourcePath: string;
-  tasks: TeamPatchTask[];
-  excludedPersonCount?: number;
-}
-
-export interface TeamIdentityWorkspace {
-  success: boolean;
-  workflowNode?: ProgressFolder;
-  workflowNodeCreated?: boolean;
-  photos: TeamProjectPhoto[];
-  identities: TeamIdentity[];
-  assignments: TeamPersonAssignment[];
-  missingReturnCount?: number;
-  workflowGenerated?: boolean;
-  workflowNeedsRegeneration?: boolean;
-  workflowAvailableKeys?: string[];
-  workflowAvailableSubjectKeys?: string[];
-  workflowSettings?: {
-    preferredIdentityOrder?: string[];
-    preferredIdentityId?: string;
-    sameWeekIdentityIds?: string[];
-  };
-  similarities?: Array<{
-    leftKey: string;
-    rightKey: string;
-    score: number;
-    faceScore?: number;
-    bodyScore: number;
-    evidence: 'face+body' | 'body-only' | string;
-  }>;
-  error?: string;
-}
-
-export interface TeamPatchReturnMatch {
-  returnId: string;
-  sourceName: string;
-  path: string;
-  mediaPath?: string;
-  matched: boolean;
-  accepted: boolean;
-  confidence: 'high' | 'medium' | 'low' | 'unmatched' | string;
-  score: number;
-  margin: number;
-  taskId?: string;
-  photoId?: string;
-  baseVersionId?: string;
-  personIndex?: number;
-  photoName?: string;
-  personName?: string;
-  patchPath?: string;
-  alternatives?: Array<{
-    taskId?: string;
-    photoId?: string;
-    baseVersionId?: string;
-    personIndex?: number;
-    identityId?: string;
-    photoName?: string;
-    personName?: string;
-    patchPath?: string;
-    score: number;
-  }>;
-}
-
-export interface TeamPatchReturnBatchResult {
-  success: boolean;
-  cancelled?: boolean;
-  returnedCount?: number;
-  candidateCount?: number;
-  acceptedCount?: number;
-  reviewCount?: number;
-  missingTaskCount?: number;
-  mergedCount?: number;
-  matches: TeamPatchReturnMatch[];
-  merges: Array<{ photoId: string; photoName: string; relativePath?: string; success: boolean; skipped?: boolean; outputPath?: string; versionId?: string; baseVersionId?: string; needsReview?: boolean; error?: string }>;
-  error?: string;
-  warning?: string;
-  reviewSessionId?: string;
-}
-
 export interface ComponentStatus {
   id: string;
   name: string;
@@ -848,23 +708,9 @@ export interface ComponentStatus {
   packageError?: string;
   updateAvailable?: boolean;
   runtimeAvailable?: boolean;
-  gpuAvailable?: boolean;
-  advancedAvailable?: boolean;
-  mergeAvailable?: boolean;
-  identityAvailable?: boolean;
-  faceBackend?: string;
-  bodyBackend?: string;
-  identityError?: string;
   provider?: string;
-  advancedProvider?: string;
-  providers?: string[];
   runtimeError?: string;
-  gpuError?: string;
-  advancedError?: string;
   packagePath?: string;
-  advancedSizeBytes?: number;
-  advancedFreeBytes?: number;
-  advancedState?: 'ready' | 'not-installed' | 'repair-needed';
 }
 
 export interface ComponentHostAction {
@@ -958,21 +804,6 @@ export interface ProjectFileOperationProgress {
   error?: string;
 }
 
-export interface TeamWorkflowGenerationProgress {
-  operationId: string;
-  projectName: string;
-  state: 'running' | 'completed' | 'cancelled' | 'failed';
-  phase: 'preparing' | 'copying' | 'resuming' | 'finalizing' | 'cancelling' | 'complete' | 'cancelled' | 'failed' | string;
-  progress: number;
-  completedFiles: number;
-  totalFiles: number;
-  copiedBytes: number;
-  totalBytes: number;
-  currentName: string;
-  message: string;
-  error?: string;
-}
-
 export interface BackgroundTask {
   id: string;
   type: string;
@@ -1054,7 +885,7 @@ export interface IElectronAPI {
   deleteComponentPackage: (kind: 'component' | 'advanced', componentId?: string) => Promise<{ success: boolean; deletedBytes?: number; error?: string }>;
   uninstallComponent: (componentId: string) => Promise<{ success: boolean; error?: string }>;
   getStorageDevices: () => Promise<StorageDeviceInventoryResult>;
-  getDomainHealth: () => Promise<{ success: boolean; domains: Array<{ domainId: string; state: 'healthy' | 'degraded' | 'unavailable' | 'recovering'; failures: number; lastError: string; updatedAt: number }>; commands: Array<{ commandId: string; target: string; type: string; status: 'pending' | 'processing' | 'dead'; attempts: number; error: string }> }>;
+  getDomainHealth: () => Promise<{ success: boolean; domains: Array<{ domainId: string; componentId?: string; displayName?: string; state: 'healthy' | 'degraded' | 'unavailable' | 'recovering'; failures: number; lastError: string; updatedAt: number }>; commands: Array<{ commandId: string; target: string; type: string; status: 'pending' | 'processing' | 'dead'; attempts: number; error: string }> }>;
   retryDomainCommand: (commandId: string) => Promise<{ success: boolean; error?: string }>;
   getDrives: () => Promise<string[]>;
   setTheme: (theme: Theme) => Promise<void>;
@@ -1261,10 +1092,10 @@ export interface IElectronAPI {
   runBackup: (workspacePath: string, reason?: 'manual' | 'daily' | 'after-import') => Promise<{ success: boolean; queued?: boolean; error?: string }>;
   runBackupIfDue: (workspacePath: string) => Promise<{ success: boolean; skipped?: boolean; error?: string }>;
   verifyBackup: (workspacePath: string, snapshotId: string) => Promise<{ success: boolean; queued?: boolean; error?: string }>;
-  verifyDomainStorage: (workspacePath: string, domain: 'media' | 'versioning' | 'operations' | 'team-retouch') => Promise<{ success: boolean; state?: string; schemaVersion?: number; error?: string }>;
-  runDomainBackup: (workspacePath: string, domain: 'media' | 'versioning' | 'operations' | 'team-retouch') => Promise<{ success: boolean; path?: string; error?: string }>;
-  restoreDomainBackup: (workspacePath: string, snapshotId: string, domain: 'media' | 'versioning' | 'operations' | 'team-retouch') => Promise<{ success: boolean; error?: string }>;
-  resetDomainStorage: (workspacePath: string, domain: 'media' | 'operations' | 'team-retouch') => Promise<{ success: boolean; quarantine?: string; requiresReindex?: boolean; error?: string }>;
+  verifyDomainStorage: (workspacePath: string, domain: ComponentDataDomainId) => Promise<{ success: boolean; state?: string; schemaVersion?: number; error?: string }>;
+  runDomainBackup: (workspacePath: string, domain: ComponentDataDomainId) => Promise<{ success: boolean; path?: string; error?: string }>;
+  restoreDomainBackup: (workspacePath: string, snapshotId: string, domain: ComponentDataDomainId) => Promise<{ success: boolean; error?: string }>;
+  resetDomainStorage: (workspacePath: string, domain: ComponentDataDomainId) => Promise<{ success: boolean; quarantine?: string; requiresReindex?: boolean; error?: string }>;
   restoreBackupWorkspace: (workspacePath: string, snapshotId: string) => Promise<{ success: boolean; cancelled?: boolean; workspacePath?: string; error?: string }>;
   restoreBackupProject: (workspacePath: string, snapshotId: string, projectId: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }>;
   openBackupTarget: () => Promise<{ success: boolean; error?: string }>;

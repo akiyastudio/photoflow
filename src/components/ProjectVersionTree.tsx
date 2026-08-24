@@ -157,7 +157,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
     for (const mediaKind of ['image', 'video'] as const) {
       const mediaIds = new Set(versionItems.filter(item => item.folder.mediaKind === mediaKind).map(item => item.folder.id));
       const forest = layoutVersionTree({
-        nodes: versionItems.filter(item => mediaIds.has(item.folder.id)).map(({ folder }) => ({ id: folder.id, mediaKind, nodeRole: folder.nodeRole, artifactKind: folder.artifactKind, relationKind: folder.relationKind, createdAt: folder.createdAt })),
+        nodes: versionItems.filter(item => mediaIds.has(item.folder.id)).map(({ folder }) => ({ id: folder.id, mediaKind, nodeRole: folder.nodeRole, artifactKind: folder.artifactKind, sourceMetadata: folder.sourceMetadata, relationKind: folder.relationKind, createdAt: folder.createdAt })),
         edges: visibleEdges.filter(edge => mediaIds.has(edge.parentId) && mediaIds.has(edge.childId)).map(edge => ({ ...edge, id: edge.id || `${edge.parentId}:${edge.childId}:${edge.relationKind}` })),
         nodeWidth, nodeHeight, columnGap, rowGap, auxiliaryGap, rootGap,
       });
@@ -586,7 +586,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [graph.folders, onCancelRelationEdit, onRequestRelationChange, onRequestSupplementalEdgeDelete, selectedBusy, selectedChild, selectedEdge, selectedSupplementalEdge]);
   const selectEdge = (edge: DrawnEdge) => {
-    if (!edge.childId || !edge.parentId || edge.kind === 'team-workspace') return;
+    if (!edge.childId || !edge.parentId) return;
     setSelectedEdgeId(edge.id);
   };
   function cancelRelationSelection() {

@@ -1,4 +1,5 @@
 import type { BackgroundTask, ProgressFolder, VersionGraphEdge } from '../../types';
+import { legacyVersionSourceMetadata } from '../../compatibility/version-source.ts';
 
 export type VersionPanelKind = 'create' | 'create-next' | 'import' | 'modify' | 'confirm';
 export type VersionPanelState = 'ready' | 'move_confirm' | 'processing' | 'waiting_confirmation' | 'loading' | 'committing' | 'result' | 'failure';
@@ -11,6 +12,18 @@ export type VersionPanelTaskProgress = {
   currentName?: string;
   waiting?: boolean;
 };
+
+export const versionSourceMetadata = (folder: Pick<ProgressFolder, 'nodeRole' | 'artifactKind' | 'sourceMetadata'>) => folder.sourceMetadata
+  || legacyVersionSourceMetadata(folder)
+  || {
+    category: folder.nodeRole,
+    role: folder.artifactKind,
+    parentCapability: folder.nodeRole === 'original' || folder.nodeRole === 'progress'
+      ? 'structural' as const
+      : folder.nodeRole === 'selection' || folder.nodeRole === 'workflow'
+        ? 'workflow-input' as const
+        : 'none' as const,
+  };
 
 export const VERSION_PANEL_DEFINITIONS: Record<VersionPanelKind, { title: string; states: readonly VersionPanelState[] }> = {
   create: { title: '新建进度', states: ['ready', 'processing', 'result', 'failure'] },
@@ -169,12 +182,13 @@ export const trackingStateLabel = (folder: Pick<ProgressFolder, 'nodeRole' | 're
   return '跟踪处理中';
 };
 
-export const versionTreeNodeBadgeLabel = (folder: Pick<ProgressFolder, 'nodeRole' | 'relationKind' | 'artifactKind' | 'versionKey'>) => {
+export const versionTreeNodeBadgeLabel = (folder: Pick<ProgressFolder, 'nodeRole' | 'relationKind' | 'artifactKind' | 'sourceMetadata' | 'versionKey'>) => {
+  const source = versionSourceMetadata(folder);
+  if (source.displayName) return source.displayName;
   if (folder.nodeRole === 'original') return '原始素材';
   if (folder.nodeRole === 'broll') return '花絮';
   if (folder.nodeRole === 'selection' || folder.relationKind === 'auxiliary') return '选片';
   if (folder.nodeRole === 'artifact' && folder.artifactKind === 'preview') return '预览';
-  if (folder.nodeRole === 'workflow' && folder.artifactKind === 'team_workspace') return '协作';
   if (folder.nodeRole === 'artifact') return '派生产物';
   if (folder.nodeRole === 'workflow') return '工作流';
   return `V${folder.versionKey}`;
@@ -204,6 +218,7 @@ export const planProgressRootMove = (relativePath: string) => {
 };
 
 export const isStructuralMainParent = (folder: ProgressFolder) => !folder.folderMissing
+  && versionSourceMetadata(folder).parentCapability === 'structural'
   && folder.relationKind !== 'auxiliary'
   && (folder.nodeRole === 'progress' && Boolean(folder.parentProgressId) && folder.relationKind === 'main'
     || folder.nodeRole === 'original' && folder.artifactKind !== 'companion' && folder.artifactKind !== 'preview');
@@ -253,12 +268,11 @@ export const defaultMainParentId = (
 };
 
 export const selectableWorkflowInputs = (folders: ProgressFolder[], mediaKind: ProgressFolder['mediaKind']) => folders.filter(folder => !folder.folderMissing
-  && (folder.nodeRole === 'selection' && folder.mediaKind === mediaKind
-    || folder.nodeRole === 'workflow' && folder.artifactKind === 'team_workspace'));
+  && folder.mediaKind === mediaKind
+  && versionSourceMetadata(folder).parentCapability === 'workflow-input');
 
-export const workflowInputLabel = (folder: ProgressFolder) => folder.nodeRole === 'workflow'
-  ? '团片协作'
-  : folder.mediaKind === 'video' ? '视频选片' : '图片选片';
+export const workflowInputLabel = (folder: ProgressFolder) => versionSourceMetadata(folder).displayName
+  || (folder.nodeRole === 'workflow' ? '组件工作流' : folder.mediaKind === 'video' ? '视频选片' : '图片选片');
 
 export const defaultWorkflowInputIds = (
   folders: ProgressFolder[],
@@ -295,7 +309,10 @@ export const workflowInputIdsForRelationChange = (
   const existingInputIds = graphEdges
     .filter(edge => edge.edgeKind === 'workflow_input' && edge.targetProgressId === childProgressId)
     .map(edge => edge.sourceProgressId);
-  const preservedWorkflowIds = existingInputIds.filter(id => byId.get(id)?.nodeRole === 'workflow');
+  const preservedWorkflowIds = existingInputIds.filter(id => {
+    const source = byId.get(id);
+    return source?.nodeRole === 'workflow' && versionSourceMetadata(source).parentCapability === 'workflow-input';
+  });
   const parent = parentProgressId ? byId.get(parentProgressId) : undefined;
   const matchingSelectionIds = parent?.nodeRole === 'original'
     ? folders
@@ -336,15 +353,15 @@ export const progressRelationChangeError = (folders: ProgressFolder[], childId: 
   }
   const parent = byId.get(parentId);
   if (parent && !parent.folderMissing && parent.mediaKind === child.mediaKind
-    && child.nodeRole === 'progress' && (parent.nodeRole === 'selection' || parent.nodeRole === 'workflow')) return '';
+    && child.nodeRole === 'progress' && versionSourceMetadata(parent).parentCapability === 'workflow-input') return '';
   if (parent && !parent.folderMissing && parent.mediaKind === child.mediaKind
-    && child.nodeRole === 'workflow' && parent.nodeRole === 'progress') return '';
-  if (child.nodeRole === 'workflow') return '团片协作只能接收普通后期版本作为工作流输入';
+    && versionSourceMetadata(child).parentCapability === 'workflow-input' && parent.nodeRole === 'progress') return '';
+  if (child.nodeRole === 'workflow') return '组件工作流只能接收兼容的普通版本作为输入';
   if (!parent || parent.folderMissing) return '候选父节点不存在或已经失效';
   if (childId === parentId) return '节点不能连接到自己';
   if (parent.mediaKind !== child.mediaKind) return '父子节点媒体类型不一致';
   if (parent.nodeRole === 'selection' || parent.relationKind === 'auxiliary') return '不能挂到选片或附属分支下';
-  if (parent.nodeRole !== 'original' && parent.nodeRole !== 'progress') return '只能挂到原始素材或普通版本下面';
+  if (versionSourceMetadata(parent).parentCapability !== 'structural') return '所选来源不能作为结构父版本';
   let cursor: ProgressFolder | undefined = parent;
   const visited = new Set<string>();
   while (cursor?.parentProgressId && !visited.has(cursor.id)) {
@@ -401,8 +418,12 @@ export const projectVisibleVersionGraph = (folders: ProgressFolder[], graphEdges
     const source = byId.get(edge.sourceProgressId);
     const target = byId.get(edge.targetProgressId);
     if (!source || !target || source.folderMissing || target.folderMissing) continue;
-    if (edge.edgeKind === 'workflow_input' && target.nodeRole === 'workflow'
-      && (target.artifactKind !== 'team_workspace' || source.nodeRole !== 'progress')) continue;
+    if (edge.edgeKind === 'workflow_input') {
+      const valid = target.nodeRole === 'workflow'
+        ? versionSourceMetadata(target).parentCapability === 'workflow-input' && source.nodeRole === 'progress'
+        : target.nodeRole === 'progress' && versionSourceMetadata(source).parentCapability === 'workflow-input';
+      if (!valid) continue;
+    }
     edges.push({ id: edge.id, parentId: edge.sourceProgressId, childId: edge.targetProgressId, relationKind: edge.edgeKind });
   }
   return { folders: visible, edges, cycleNodeIds: [...cycleNodeIds] };

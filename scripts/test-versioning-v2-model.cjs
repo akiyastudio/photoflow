@@ -44,6 +44,7 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(model.trackingStateLabel({ nodeRole: 'broll', trackingState: 'disabled' }), '花絮');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'artifact', artifactKind: 'preview', versionKey: 'legacy-preview-mov' }), '预览');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'workflow', artifactKind: 'team_workspace', versionKey: 'team-workspace' }), '协作');
+  assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'workflow', sourceMetadata: { category: 'workflow', displayName: '云端校样', parentCapability: 'workflow-input' }, versionKey: 'opaque' }), '云端校样');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'progress', versionKey: '2' }), 'V2');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'broll', versionKey: 'adopt-internal' }), '花絮');
   assert.deepStrictEqual(model.planProgressRootMove('客户/一组/RAW'), { sourceRelativePath: '客户/一组/RAW', targetRelativePath: 'RAW', requiresMove: true });
@@ -121,6 +122,8 @@ const { pathToFileURL } = require('url');
     { ...base, id: 'broll-semantic', mediaKind: 'mixed', nodeRole: 'broll', relationKind: undefined, folderMissing: false, displayName: '幕后花絮', versionKey: 'adopt-broll' },
     { ...base, id: 'legacy-orphan', nodeRole: 'progress', relationKind: undefined, parentProgressId: undefined, folderMissing: false, displayName: '旧版 V1', versionKey: '1' },
   ];
+  const genericWorkflow = { ...base, id: 'generic-workflow', nodeRole: 'workflow', folderMissing: false, sourceMetadata: { category: 'workflow', role: 'component-workspace', displayName: '云端校样', componentId: 'cloud-proofing', parentCapability: 'workflow-input' } };
+  const nonParentVersion = { ...base, id: 'non-parent', nodeRole: 'progress', relationKind: 'main', parentProgressId: 'raw-semantic', folderMissing: false, sourceMetadata: { category: 'artifact', role: 'output', parentCapability: 'none' } };
   const semanticEdges = [
     { id: 'companion', projectId: 'p', sourceProgressId: 'raw-semantic', targetProgressId: 'camera-jpg', edgeKind: 'media_companion', createdAt: 0, updatedAt: 0 },
     { id: 'preview', projectId: 'p', sourceProgressId: 'raw-semantic', targetProgressId: 'generated-jpg', edgeKind: 'derived_preview', createdAt: 0, updatedAt: 0 },
@@ -136,6 +139,9 @@ const { pathToFileURL } = require('url');
     'the executable graph projection must preserve supplemental edges instead of relying on a source-string assertion',
   );
   assert.deepStrictEqual(model.selectableVersionParents(semanticNodes, { mediaKind: 'image', relationKind: 'main' }).map(node => node.id), ['raw-semantic'], 'artifacts, selections, and workflows are never structural parents');
+  assert.deepStrictEqual(model.selectableWorkflowInputs([...semanticNodes, genericWorkflow], 'image').map(node => node.id), ['image-selection', 'team-workflow', 'generic-workflow'], 'component workflow inputs are discovered through generic source metadata');
+  assert.strictEqual(model.workflowInputLabel(genericWorkflow), '云端校样');
+  assert(!model.selectableVersionParents([...semanticNodes, nonParentVersion], { mediaKind: 'image', relationKind: 'main' }).some(node => node.id === 'non-parent'), 'source metadata can forbid a version from becoming a structural parent');
   assert(!model.projectVisibleVersionGraph(semanticNodes, semanticEdges).edges.some(edge => edge.parentId === 'broll-semantic' || edge.childId === 'broll-semantic'), 'broll must remain outside main/auxiliary and supplemental version edges');
   assert(!model.selectableVersionParents(semanticNodes, { mediaKind: 'image', relationKind: 'main' }).some(node => node.id === 'legacy-orphan'), 'a preserved legacy orphan must not become the parent of new progress');
   assert.strictEqual(model.defaultMainParentId(semanticNodes, semanticEdges, 'image'), 'raw-semantic', 'RAW/JPG companion semantics select the graph source without reading names or version keys');
