@@ -39,7 +39,7 @@ let holdSecondWorkflowScope = false;
 let heldWorkflowFrame = null;
 let heldWorkflowResolve = null;
 let workflowScopeCount = 0;
-let breakManifestOnSecondArtifact = false;
+let breakManifestOnArtifactCall = 0;
 let artifactScopeCount = 0;
 let manifestDirectoryBackup = '';
 const waitForHeldWorkflow = () => new Promise(resolve => { heldWorkflowResolve = resolve; });
@@ -67,7 +67,7 @@ const ready = new Promise((resolve, reject) => {
         else if (frame.method === 'dialogs.open.v1') result = { cancelled: false, filePath: returnedSource };
         else if (frame.method === 'project.output.authorize.v1' && frame.payload.operation === 'artifacts') {
           artifactScopeCount += 1;
-          if (breakManifestOnSecondArtifact && artifactScopeCount === 2) {
+          if (breakManifestOnArtifactCall > 0 && artifactScopeCount === breakManifestOnArtifactCall) {
             const manifestDirectory = path.dirname(manifestPath);
             manifestDirectoryBackup = `${manifestDirectory}.backup`;
             fs.renameSync(manifestDirectory, manifestDirectoryBackup);
@@ -217,12 +217,12 @@ const restoreManifestDirectory = () => {
     assertInactive('task-1', 2);
 
     seedReview('recoverable-return', 'RECOVERABLE-RETURN');
-    breakManifestOnSecondArtifact = true;
+    breakManifestOnArtifactCall = 2;
     artifactScopeCount = 0;
     const recoverable = await invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'recoverable-return', returnId: 'recoverable-return', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
     assert.equal(recoverable.success, true, 'a committed return must not be reported as an upload failure');
     assert.equal(recoverable.reconcilePending, true);
-    assert.match(recoverable.warning, /无需重复上传/);
+    assert.match(recoverable.warning, /无需重复操作/);
     const pendingDb = new DatabaseSync(databasePath);
     const archived = pendingDb.prepare(`SELECT a.completed,a.artifact_id,r.artifact_path FROM team_person_assignments a JOIN team_task_artifacts r ON r.id=a.artifact_id WHERE a.photo_id='photo' AND a.base_version_id='base' AND a.person_index=1`).get();
     assert.equal(archived.completed, 1);
@@ -230,13 +230,32 @@ const restoreManifestDirectory = () => {
     assert.equal(pendingDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 1);
     pendingDb.close();
     restoreManifestDirectory();
-    breakManifestOnSecondArtifact = false;
+    breakManifestOnArtifactCall = 0;
     await invoke('team.project.get.v1');
     const recoveredDb = new DatabaseSync(databasePath);
     assert.equal(recoveredDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 0, 'project reload clears a successfully reconciled pending task');
     recoveredDb.close();
     assertActive('task-1', 2, 'RECOVERABLE-RETURN');
     assertInactive('task-1', 1);
+    await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false });
+    assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
+    artifactScopeCount = 0;
+    breakManifestOnArtifactCall = 1;
+    const savedNoRetouch = await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: true, completionKind: 'no-retouch' });
+    assert.equal(savedNoRetouch.success, true, 'committed no-retouch state must not be reported as a failed operation');
+    assert.equal(savedNoRetouch.reconcilePending, true);
+    assert.match(savedNoRetouch.warning, /无需重复操作/);
+    const noRetouchPendingDb = new DatabaseSync(databasePath);
+    assert.equal(noRetouchPendingDb.prepare(`SELECT completed,completion_kind FROM team_person_assignments WHERE photo_id='photo' AND base_version_id='base' AND person_index=1`).get().completion_kind, 'no-retouch');
+    assert.equal(noRetouchPendingDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 1);
+    noRetouchPendingDb.close();
+    restoreManifestDirectory();
+    breakManifestOnArtifactCall = 0;
+    await invoke('team.project.get.v1');
+    assertActive('task-1', 2, 'ORIGINAL-TASK-ONE');
+    const noRetouchRecoveredDb = new DatabaseSync(databasePath);
+    assert.equal(noRetouchRecoveredDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 0);
+    noRetouchRecoveredDb.close();
     await invoke('team.identity.assign.v1', { photoId: 'photo', baseVersionId: 'base', personIndex: 1, identityId: null, completed: false });
     const cleared = await invoke('team.project.get.v1');
     assert.equal(cleared.assignments.find(item => item.personIndex === 1).identityId, null, 'explicit empty identity assignment restores the unlabelled state');

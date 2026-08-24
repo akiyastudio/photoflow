@@ -518,8 +518,7 @@ const uploadPatch = (parentId, payload, context) => withDomain(parentId, async (
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     await appendCommand(storage, { operationId, type: 'patch-upload', state: 'committed' });
     committed = true;
-    await reconcileWorkflowTaskChain(parentId, context, row.id, db);
-    return { success: true, tasks: listTasks(db, row.photo_id).map(publicTask) };
+    return finalizeReconcile(parentId, context, { taskId: row.id, photoId: row.photo_id }, { success: true, tasks: listTasks(db, row.photo_id).map(publicTask) }, db);
   } catch (error) {
     if (!committed) {
       await removeArtifacts([stagedPath, outputPath]);
@@ -552,8 +551,7 @@ const removeUpload = (parentId, payload, context) => withDomain(parentId, async 
   } catch (error) { db.exec('ROLLBACK'); await appendCommand(storage, { operationId, type: 'patch-remove-upload', state: 'rolled-back', error: error.message || String(error) }); throw error; }
   await appendCommand(storage, { operationId, type: 'patch-remove-upload', state: 'committed' });
   if (removedPath) await removeArtifacts([removedPath]);
-  await reconcileWorkflowTaskChain(parentId, context, row.id, db);
-  return { success: true, tasks: listTasks(db, row.photo_id).map(publicTask), cleanupQueued: Boolean(removedPath) };
+  return finalizeReconcile(parentId, context, { taskId: row.id, photoId: row.photo_id }, { success: true, tasks: listTasks(db, row.photo_id).map(publicTask), cleanupQueued: Boolean(removedPath) }, db);
 });
 
 const bboxIou = (left, right) => {
@@ -1030,8 +1028,7 @@ const completeIdentity = (parentId, payload, context) => withDomain(parentId, as
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
   if (removedPath) await fs.promises.rm(removedPath, { force: true }).catch(() => undefined);
-  await reconcileWorkflowTaskChain(parentId, context, row.id, db);
-  return { success: true, completed: payload.completed !== false, taskId: row.id, personIndex };
+  return finalizeReconcile(parentId, context, { taskId: row.id, photoId: row.photo_id }, { success: true, completed: payload.completed !== false, taskId: row.id, personIndex }, db);
 });
 const publicWorkspace = value => ({
   ...value,
@@ -1416,20 +1413,29 @@ const reconcileWorkflowTaskChain = async (parentId, context, taskId, existingDb 
   return existingDb ? reconcile(existingDb) : withDomain(parentId, reconcile);
 };
 
+const queueWorkflowReconcile = async (parentId, payload, error) => {
+  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+  const db = ensureSchema(storage.databasePath);
+  try { db.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET photo_id=excluded.photo_id,error=excluded.error,updated_at=excluded.updated_at`).run(String(payload.taskId), String(payload.photoId), error.message || String(error), Date.now()); }
+  finally { db.close(); }
+  await appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: payload.taskId, photoId: payload.photoId, error: error.message || String(error) }).catch(() => undefined);
+};
+
+const finalizeReconcile = async (parentId, context, payload, result = { success: true }, existingDb = null) => {
+  try {
+    await reconcileWorkflowTaskChain(parentId, context, payload.taskId, existingDb);
+    if (existingDb) existingDb.prepare('DELETE FROM team_workflow_reconcile_pending WHERE task_id=?').run(String(payload.taskId));
+    else await withDomain(parentId, db => db.prepare('DELETE FROM team_workflow_reconcile_pending WHERE task_id=?').run(String(payload.taskId)));
+    return result;
+  } catch (error) {
+    await queueWorkflowReconcile(parentId, payload, error);
+    return { ...result, success: true, reconcilePending: true, warning: '操作已安全保存，但工作流程目录暂未更新；组件将在下次加载时自动重试，无需重复操作' };
+  }
+};
+
 const storeReturnedAndReconcile = (parentId, sourcePath, payload, context) => withPhotoOperation(payload.photoId, async () => {
   const registered = await storeReturnedPatch(parentId, sourcePath, payload, context);
-  try {
-    await reconcileWorkflowTaskChain(parentId, context, payload.taskId);
-    await withDomain(parentId, db => db.prepare('DELETE FROM team_workflow_reconcile_pending WHERE task_id=?').run(String(payload.taskId)));
-  } catch (error) {
-    const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
-    const db = ensureSchema(storage.databasePath);
-    try { db.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET photo_id=excluded.photo_id,error=excluded.error,updated_at=excluded.updated_at`).run(String(payload.taskId), String(payload.photoId), error.message || String(error), Date.now()); }
-    finally { db.close(); }
-    await appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: payload.taskId, photoId: payload.photoId, error: error.message || String(error) }).catch(() => undefined);
-    return { ...registered, reconcilePending: true, warning: '返图已安全归档，但工作流程目录暂未更新；组件将在下次加载时自动重试，无需重复上传' };
-  }
-  return registered;
+  return finalizeReconcile(parentId, context, payload, registered);
 });
 
 const retryPendingWorkflowReconciles = async (parentId, context) => {
