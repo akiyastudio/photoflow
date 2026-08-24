@@ -18,7 +18,7 @@ catalog. New domain-owned tables must not be added to the shared core store.
   writes a completion marker in the target database. The source table is left
   untouched as a rollback copy, but runtime reads and writes use only the owned
   store after migration.
-- `team_retouch_storage.py` creates the owned schema, copies all five legacy
+- `python/compatibility/team_retouch_v1/storage.py` creates the owned schema, copies all five legacy
   team tables, and drops those tables from the core database in one attached
   SQLite transaction. A pre-schema-migration backup still contains the legacy
   layout if an older application must be restored.

@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 import workspace_db  # noqa: E402
-from team_retouch_storage import database_path_for_workspace_database, restore_project, snapshot  # noqa: E402
+from compatibility.team_retouch_v1.storage import database_path_for_workspace_database, restore_project, snapshot  # noqa: E402
 
 
 def main():
@@ -22,7 +22,7 @@ def main():
         database = temporary_root / "workspace-data" / "isolated.sqlite3"
         now = int(time.time() * 1000)
 
-        db = workspace_db.connect(str(workspace), str(database), include_team=True)
+        db = workspace_db.connect(str(workspace), str(database), include_compatibility=True)
         db.execute(
             """INSERT INTO projects(id,name,status,relative_path,is_deleted,created_at,updated_at,extra_json)
                VALUES('project-1','项目 1','后期中','项目 1',1,?,?, '{}')""",
@@ -69,7 +69,7 @@ def main():
             "name": "待重建项目", "status": "策划中", "relativePath": "待重建项目", "extra": {},
         })
         assert recreated_project["success"] is True
-        recreated_check = workspace_db.connect(str(workspace), str(database), include_team=True)
+        recreated_check = workspace_db.connect(str(workspace), str(database), include_compatibility=True)
         try:
             replacement = recreated_check.execute(
                 "SELECT id,is_deleted FROM projects WHERE name='待重建项目'"
@@ -98,10 +98,9 @@ def main():
         progress = workspace_db.progress_list(
             str(workspace), progress_only, {"projectName": "项目 2"}
         )
-        assert any(
-            item["nodeRole"] == "workflow" and item["artifactKind"] == "team_workspace"
-            for item in progress["progressFolders"]
-        )
+        workflow = next(item for item in progress["progressFolders"] if item["nodeRole"] == "workflow")
+        assert workflow["artifactKind"] == "team_workspace"
+        assert workflow["sourceMetadata"]["parentCapability"] == "workflow-input"
         progress_only.close()
 
         # A core schema upgrade used to recreate empty legacy team tables after
@@ -178,7 +177,7 @@ def main():
             ).fetchone()[0] == "人物 2", "non-empty legacy data must not be dropped by catalog cleanup"
         finally:
             catalog_only.close()
-        migrated_team = workspace_db.connect(str(workspace), str(database), include_team=True)
+        migrated_team = workspace_db.connect(str(workspace), str(database), include_compatibility=True)
         try:
             assert migrated_team.execute(
                 "SELECT name FROM team_person_identities WHERE id='identity-2'"
@@ -192,7 +191,7 @@ def main():
         team_snapshot = temporary_root / "snapshots" / "team-retouch.sqlite3"
         assert snapshot(str(team_database), str(team_snapshot))["schemaVersion"] == 1
 
-        reopened = workspace_db.connect(str(workspace), str(database), include_team=True)
+        reopened = workspace_db.connect(str(workspace), str(database), include_compatibility=True)
         assert reopened.execute(
             "SELECT name FROM team_person_identities WHERE id='identity-1'"
         ).fetchone()[0] == "人物 1", "runtime queries must resolve the attached team-retouch store"

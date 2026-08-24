@@ -16,20 +16,22 @@ import uuid
 from pathlib import Path
 
 try:
+    from compatibility.registry import action_names as compatibility_action_names
+    from compatibility.registry import dispatch_action as dispatch_compatibility_action
+    from compatibility.registry import integrated_action_names, resolve_export as resolve_compatibility_export, run_hooks as run_compatibility_hooks
     from database_error_codes import error_response
-    from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
-    from team_retouch_storage import attach_and_migrate as attach_team_retouch_storage
-    from team_retouch_storage import cleanup_empty_recreated_legacy_tables as cleanup_empty_team_retouch_legacy_tables
+    from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
     from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage
     from workspace_db_migrations import migration_26, migration_27, migration_28
 except ModuleNotFoundError:
     # Some regression tests load this file directly through importlib instead
     # of importing it from the Python source directory.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from compatibility.registry import action_names as compatibility_action_names
+    from compatibility.registry import dispatch_action as dispatch_compatibility_action
+    from compatibility.registry import integrated_action_names, resolve_export as resolve_compatibility_export, run_hooks as run_compatibility_hooks
     from database_error_codes import error_response
-    from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
-    from team_retouch_storage import attach_and_migrate as attach_team_retouch_storage
-    from team_retouch_storage import cleanup_empty_recreated_legacy_tables as cleanup_empty_team_retouch_legacy_tables
+    from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
     from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage
     from workspace_db_migrations import migration_26, migration_27, migration_28
 
@@ -48,18 +50,12 @@ SELECTION_MAINLINE_REPAIR_REVISION = "1"
 VERSION_TREE_DEFAULT_LAYOUT_REVISION = "2"
 PROGRESS_PURPOSE_CONSTRAINT_REVISION = "1"
 LEGACY_PROGRESS_PARENT_REPAIR_REVISION = "1"
-TARGET_SCHEMA_VERSION = 31
+TARGET_SCHEMA_VERSION = 32
 MEDIA_INCREMENTAL_BATCH_SIZE = 64
 MEDIA_INCREMENTAL_COMPLETED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
-TEAM_INTEGRATED_ACTIONS = frozenset((
-    "batch_commit_compare",
-    "media_delete_version",
-    "media_delete_project_missing_version",
-    "progress_delete_missing",
-))
 PROGRESS_NODE_ROLES = ("original", "progress", "selection", "artifact", "workflow", "broll")
 PROGRESS_RELATION_KINDS = ("main", "auxiliary")
-PROGRESS_ARTIFACT_KINDS = ("companion", "preview", "team_workspace")
+OPAQUE_ARTIFACT_KIND = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 VERSION_GRAPH_EDGE_KINDS = ("media_companion", "derived_preview", "workflow_input")
 IMPORT_ARTIFACT_SLOTS = ("raw", "camera_jpg", "generated_jpg", "mov", "video_preview")
 IMPORT_ARTIFACT_SLOT_SHAPES = {
@@ -78,6 +74,11 @@ INTEGRITY_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 MIGRATION_BACKUP_LIMIT = 5
 AUTOMATIC_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000
 AUTOMATIC_BACKUP_LIMIT = 7
+
+
+def __getattr__(name):
+    run_compatibility_hooks("bind_core", globals())
+    return resolve_compatibility_export(name)
 
 
 def valid_project_status(value) -> bool:
@@ -209,26 +210,7 @@ def _migration_11(db):
         db.execute("ALTER TABLE projects ADD COLUMN filesystem_id TEXT")
     if "is_deleted" not in columns:
         db.execute("ALTER TABLE projects ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0")
-    patch_columns = _table_columns(db, "team_patch_tasks")
-    if "mask_path" not in patch_columns:
-        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN mask_path TEXT")
-    if "mask_json" not in patch_columns:
-        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN mask_json TEXT NOT NULL DEFAULT '{}'")
-    if "members_json" not in patch_columns:
-        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN members_json TEXT NOT NULL DEFAULT '[]'")
-    if "needs_review" not in patch_columns:
-        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0")
-    if "review_reason" not in patch_columns:
-        db.execute("ALTER TABLE team_patch_tasks ADD COLUMN review_reason TEXT NOT NULL DEFAULT ''")
-    db.execute(
-        """INSERT OR IGNORE INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at)
-           SELECT task.photo_id,photos.project_id,task.base_version_id,MIN(task.created_at),MAX(task.updated_at)
-           FROM team_patch_tasks task JOIN photos ON photos.id=task.photo_id
-           WHERE task.is_deleted=0 AND task.updated_at=(
-             SELECT MAX(latest.updated_at) FROM team_patch_tasks latest
-             WHERE latest.photo_id=task.photo_id AND latest.is_deleted=0
-           ) GROUP BY task.photo_id"""
-    )
+    run_compatibility_hooks("migrate", db, 11)
 
 
 def _migration_12(db):
@@ -367,27 +349,6 @@ def _migration_13(db):
             "NOT EXISTS(SELECT 1 FROM version_batches batch JOIN photos ON photos.project_id=batch.project_id JOIN versions ON versions.photo_id=photos.id WHERE batch.id=NEW.batch_id AND photos.id=NEW.photo_id AND versions.id=NEW.version_id)",
             "batch item owners are inconsistent",
         ),
-        (
-            "team_retouch_photo_consistency",
-            "team_retouch_photos",
-            "project_id,photo_id,base_version_id",
-            "NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=NEW.project_id AND photos.id=NEW.photo_id AND versions.id=NEW.base_version_id)",
-            "team retouch photo owners are inconsistent",
-        ),
-        (
-            "team_assignment_consistency",
-            "team_person_assignments",
-            "project_id,photo_id,base_version_id,identity_id",
-            "NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=NEW.project_id AND photos.id=NEW.photo_id AND versions.id=NEW.base_version_id) OR (NEW.identity_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM team_person_identities identity WHERE identity.id=NEW.identity_id AND identity.project_id=NEW.project_id))",
-            "team assignment owners are inconsistent",
-        ),
-        (
-            "team_exclusion_consistency",
-            "team_person_exclusions",
-            "project_id,photo_id,base_version_id",
-            "NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=NEW.project_id AND photos.id=NEW.photo_id AND versions.id=NEW.base_version_id)",
-            "team exclusion owners are inconsistent",
-        ),
     )
     for name, table, update_columns, condition, message in guards:
         db.execute(
@@ -435,44 +396,7 @@ def _migration_14(db):
 
 
 def _migration_15(db):
-    """Store return artifacts on the exact person hand-off node."""
-    columns = _table_columns(db, "team_person_assignments")
-    if "completion_kind" not in columns:
-        db.execute("ALTER TABLE team_person_assignments ADD COLUMN completion_kind TEXT NOT NULL DEFAULT ''")
-    if "edited_patch_path" not in columns:
-        db.execute("ALTER TABLE team_person_assignments ADD COLUMN edited_patch_path TEXT")
-    if "completed_at" not in columns:
-        db.execute("ALTER TABLE team_person_assignments ADD COLUMN completed_at INTEGER")
-
-    # Older builds stored just one latest return on the shared crop task. Keep
-    # that artifact on the most recently completed member and treat any older
-    # completed members as no-retouch hand-offs instead of claiming that every
-    # person returned the same file.
-    db.execute(
-        """UPDATE team_person_assignments
-           SET completion_kind=CASE WHEN completed=1 THEN 'no-retouch' ELSE '' END,
-               completed_at=CASE WHEN completed=1 THEN updated_at ELSE NULL END
-           WHERE completion_kind=''"""
-    )
-    tasks = db.execute(
-        """SELECT photo_id,base_version_id,edited_patch_path
-           FROM team_patch_tasks
-           WHERE is_deleted=0 AND edited_patch_path IS NOT NULL"""
-    ).fetchall()
-    for task in tasks:
-        latest = db.execute(
-            """SELECT person_index FROM team_person_assignments
-               WHERE photo_id=? AND base_version_id=? AND completed=1
-               ORDER BY updated_at DESC,person_index DESC LIMIT 1""",
-            (task["photo_id"], task["base_version_id"]),
-        ).fetchone()
-        if latest is not None:
-            db.execute(
-                """UPDATE team_person_assignments
-                   SET completion_kind='returned',edited_patch_path=?
-                   WHERE photo_id=? AND base_version_id=? AND person_index=?""",
-                (task["edited_patch_path"], task["photo_id"], task["base_version_id"], latest["person_index"]),
-            )
+    run_compatibility_hooks("migrate", db, 15)
 
 
 def _migration_16(db):
@@ -483,12 +407,7 @@ def _migration_16(db):
 
 
 def _migration_17(db):
-    """Track externally removed team-retouch return artifacts without losing history."""
-    columns = _table_columns(db, "team_person_assignments")
-    if "return_missing" not in columns:
-        db.execute("ALTER TABLE team_person_assignments ADD COLUMN return_missing INTEGER NOT NULL DEFAULT 0 CHECK(return_missing IN (0,1))")
-    if "return_missing_since" not in columns:
-        db.execute("ALTER TABLE team_person_assignments ADD COLUMN return_missing_since INTEGER")
+    run_compatibility_hooks("migrate", db, 17)
 
 
 def _progress_relation_cycles(db) -> list[tuple[str, ...]]:
@@ -926,6 +845,8 @@ def _migration_24(db):
     columns = _table_columns(db, "progress_folders")
     if "artifact_kind" not in columns:
         db.execute("ALTER TABLE progress_folders ADD COLUMN artifact_kind TEXT")
+    if "source_metadata_json" not in columns:
+        db.execute("ALTER TABLE progress_folders ADD COLUMN source_metadata_json TEXT NOT NULL DEFAULT '{}'")
     db.execute(
         """UPDATE progress_folders SET tracking_enabled=0,rename_from_parent=0,
            copy_missing_from_parent=0,tracking_state='disabled'
@@ -977,7 +898,7 @@ def _migration_24(db):
         BEFORE INSERT ON progress_folders WHEN
           NEW.node_role NOT IN ('original','progress','selection','artifact','workflow','broll')
           OR (NEW.relation_kind IS NOT NULL AND NEW.relation_kind NOT IN ('main','auxiliary'))
-          OR (NEW.artifact_kind IS NOT NULL AND NEW.artifact_kind NOT IN ('companion','preview','team_workspace'))
+          OR (NEW.artifact_kind IS NOT NULL AND (length(NEW.artifact_kind)>128 OR NEW.artifact_kind='' OR NEW.artifact_kind GLOB '*[^A-Za-z0-9._:-]*'))
           OR (NEW.parent_progress_id IS NULL) != (NEW.relation_kind IS NULL)
           OR (NEW.node_role='original' AND (NEW.parent_progress_id IS NOT NULL OR NEW.artifact_kind NOT IN ('companion')))
           OR (NEW.node_role='selection' AND (NEW.relation_kind!='auxiliary' OR NEW.artifact_kind IS NOT NULL))
@@ -985,7 +906,7 @@ def _migration_24(db):
           OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NULL)
           OR (NEW.node_role='progress' AND NEW.media_kind NOT IN ('image','video'))
           OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview')))
-          OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind!='team_workspace'))
+          OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NULL))
           OR (NEW.node_role='broll' AND (NEW.media_kind!='mixed' OR NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NOT NULL))
           OR (NEW.relation_kind='auxiliary' AND NEW.node_role!='selection')
         BEGIN SELECT RAISE(ABORT,'invalid V3 progress node shape'); END;
@@ -1026,7 +947,7 @@ def _migration_24(db):
         BEFORE UPDATE OF media_kind,node_role,artifact_kind,relation_kind,parent_progress_id ON progress_folders WHEN
           NEW.node_role NOT IN ('original','progress','selection','artifact','workflow','broll')
           OR (NEW.relation_kind IS NOT NULL AND NEW.relation_kind NOT IN ('main','auxiliary'))
-          OR (NEW.artifact_kind IS NOT NULL AND NEW.artifact_kind NOT IN ('companion','preview','team_workspace'))
+          OR (NEW.artifact_kind IS NOT NULL AND (length(NEW.artifact_kind)>128 OR NEW.artifact_kind='' OR NEW.artifact_kind GLOB '*[^A-Za-z0-9._:-]*'))
           OR (NEW.parent_progress_id IS NULL) != (NEW.relation_kind IS NULL)
           OR (NEW.node_role='original' AND (NEW.parent_progress_id IS NOT NULL OR NEW.artifact_kind NOT IN ('companion')))
           OR (NEW.node_role='selection' AND (NEW.relation_kind!='auxiliary' OR NEW.artifact_kind IS NOT NULL))
@@ -1034,7 +955,7 @@ def _migration_24(db):
           OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NULL)
           OR (NEW.node_role='progress' AND NEW.media_kind NOT IN ('image','video'))
           OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview')))
-          OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind!='team_workspace'))
+          OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NULL))
           OR (NEW.node_role='broll' AND (NEW.media_kind!='mixed' OR NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NOT NULL))
           OR (NEW.relation_kind='auxiliary' AND NEW.node_role!='selection')
         BEGIN SELECT RAISE(ABORT,'invalid V3 progress node shape'); END;
@@ -1095,7 +1016,7 @@ def _migration_24(db):
               AND (
                 (NEW.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                 OR (NEW.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
-                OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
+                OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input')))
               )
           )
           OR EXISTS(
@@ -1121,7 +1042,7 @@ def _migration_24(db):
               AND (
                 (NEW.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                 OR (NEW.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
-                OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
+                OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input')))
               )
           )
           OR EXISTS(
@@ -1145,7 +1066,7 @@ def _migration_24(db):
               AND NEW.media_kind=target.media_kind AND (
                 (edge.edge_kind='media_companion' AND NEW.node_role='original' AND NEW.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                 OR (edge.edge_kind='derived_preview' AND (NEW.node_role='original' AND NEW.artifact_kind IS NULL OR NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
-                OR (edge.edge_kind='workflow_input' AND ((NEW.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main' AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
+                OR (edge.edge_kind='workflow_input' AND ((NEW.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input')))
               )
             )
           )
@@ -1156,7 +1077,7 @@ def _migration_24(db):
               AND source.media_kind=NEW.media_kind AND (
                 (edge.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND NEW.node_role='original' AND NEW.artifact_kind='companion')
                 OR (edge.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND NEW.node_role='artifact' AND NEW.artifact_kind='preview')
-                OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND NEW.node_role='workflow' AND NEW.artifact_kind='team_workspace')))
+                OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND NEW.node_role='workflow' AND json_extract(NEW.source_metadata_json,'$.parentCapability')='workflow-input')))
               )
             )
           )
@@ -1196,7 +1117,7 @@ def _install_progress_purpose_constraints(db):
             BEFORE INSERT ON progress_folders WHEN
               NEW.node_role NOT IN ('original','progress','selection','artifact','workflow','broll')
               OR (NEW.relation_kind IS NOT NULL AND NEW.relation_kind NOT IN ('main','auxiliary'))
-              OR (NEW.artifact_kind IS NOT NULL AND NEW.artifact_kind NOT IN ('companion','preview','team_workspace'))
+              OR (NEW.artifact_kind IS NOT NULL AND (length(NEW.artifact_kind)>128 OR NEW.artifact_kind='' OR NEW.artifact_kind GLOB '*[^A-Za-z0-9._:-]*'))
               OR (NEW.parent_progress_id IS NULL) != (NEW.relation_kind IS NULL)
               OR (NEW.node_role='original' AND (NEW.parent_progress_id IS NOT NULL OR NEW.artifact_kind NOT IN ('companion')))
               OR (NEW.node_role='selection' AND (NEW.relation_kind!='auxiliary' OR NEW.artifact_kind IS NOT NULL))
@@ -1204,7 +1125,7 @@ def _install_progress_purpose_constraints(db):
               OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NULL)
               OR (NEW.node_role='progress' AND NEW.media_kind NOT IN ('image','video'))
               OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview')))
-              OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind!='team_workspace'))
+              OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NULL))
               OR (NEW.node_role='broll' AND (NEW.media_kind!='mixed' OR NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NOT NULL))
               OR (NEW.relation_kind='auxiliary' AND NEW.node_role!='selection')
             BEGIN SELECT RAISE(ABORT,'invalid V3 progress node shape'); END;
@@ -1212,7 +1133,7 @@ def _install_progress_purpose_constraints(db):
             BEFORE UPDATE OF media_kind,node_role,artifact_kind,relation_kind,parent_progress_id ON progress_folders WHEN
               NEW.node_role NOT IN ('original','progress','selection','artifact','workflow','broll')
               OR (NEW.relation_kind IS NOT NULL AND NEW.relation_kind NOT IN ('main','auxiliary'))
-              OR (NEW.artifact_kind IS NOT NULL AND NEW.artifact_kind NOT IN ('companion','preview','team_workspace'))
+              OR (NEW.artifact_kind IS NOT NULL AND (length(NEW.artifact_kind)>128 OR NEW.artifact_kind='' OR NEW.artifact_kind GLOB '*[^A-Za-z0-9._:-]*'))
               OR (NEW.parent_progress_id IS NULL) != (NEW.relation_kind IS NULL)
               OR (NEW.node_role='original' AND (NEW.parent_progress_id IS NOT NULL OR NEW.artifact_kind NOT IN ('companion')))
               OR (NEW.node_role='selection' AND (NEW.relation_kind!='auxiliary' OR NEW.artifact_kind IS NOT NULL))
@@ -1220,7 +1141,7 @@ def _install_progress_purpose_constraints(db):
               OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NULL)
               OR (NEW.node_role='progress' AND NEW.media_kind NOT IN ('image','video'))
               OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview')))
-              OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind!='team_workspace'))
+              OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NULL))
               OR (NEW.node_role='broll' AND (NEW.media_kind!='mixed' OR NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NOT NULL))
               OR (NEW.relation_kind='auxiliary' AND NEW.node_role!='selection')
             BEGIN SELECT RAISE(ABORT,'invalid V3 progress node shape'); END;
@@ -1294,7 +1215,7 @@ def _install_progress_purpose_constraints(db):
                 AND source.media_kind=target.media_kind AND (
                   (NEW.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                   OR (NEW.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
-                  OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
+                  OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input')))
                 )
             ) OR EXISTS(
               WITH RECURSIVE descendants(id) AS (
@@ -1311,7 +1232,7 @@ def _install_progress_purpose_constraints(db):
                 AND source.media_kind=target.media_kind AND (
                   (NEW.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                   OR (NEW.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
-                  OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
+                  OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input')))
                 )
             ) OR EXISTS(
               WITH RECURSIVE descendants(id) AS (
@@ -1329,7 +1250,7 @@ def _install_progress_purpose_constraints(db):
                   NEW.project_id=edge.project_id AND target.project_id=edge.project_id AND NEW.media_kind=target.media_kind AND (
                     (edge.edge_kind='media_companion' AND NEW.node_role='original' AND NEW.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                     OR (edge.edge_kind='derived_preview' AND (NEW.node_role='original' AND NEW.artifact_kind IS NULL OR NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
-                    OR (edge.edge_kind='workflow_input' AND ((NEW.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main' AND target.node_role='workflow' AND target.artifact_kind='team_workspace')))
+                    OR (edge.edge_kind='workflow_input' AND ((NEW.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input')))
                   )
                 )
               ) OR EXISTS(
@@ -1338,7 +1259,7 @@ def _install_progress_purpose_constraints(db):
                   NEW.project_id=edge.project_id AND source.project_id=edge.project_id AND source.media_kind=NEW.media_kind AND (
                     (edge.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND NEW.node_role='original' AND NEW.artifact_kind='companion')
                     OR (edge.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND NEW.node_role='artifact' AND NEW.artifact_kind='preview')
-                    OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND NEW.node_role='workflow' AND NEW.artifact_kind='team_workspace')))
+                    OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND NEW.node_role='workflow' AND json_extract(NEW.source_metadata_json,'$.parentCapability')='workflow-input')))
                   )
                 )
               )
@@ -1501,7 +1422,7 @@ def _repair_legacy_progress_structural_roots(db):
                                 AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main')
                                OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL
                                 AND source.relation_kind='main' AND target.node_role='workflow'
-                                AND target.artifact_kind='team_workspace')))))""",
+                               )))))""",
                 (*converted_ids, *converted_ids),
             )
         if converted_ids and "media_import_artifact_slots" in tables:
@@ -1763,6 +1684,23 @@ def _migration_31(db):
     return False
 
 
+def _migration_32(db):
+    """Persist generic producer metadata for opaque workflow nodes."""
+    found_progress = False
+    for schema in (row[1] for row in db.execute("PRAGMA database_list").fetchall()):
+        tables = {row[0] for row in db.execute(f"SELECT name FROM {schema}.sqlite_master WHERE type='table'").fetchall()}
+        if "progress_folders" not in tables:
+            continue
+        found_progress = True
+        columns = {row[1] for row in db.execute(f"PRAGMA {schema}.table_info(progress_folders)").fetchall()}
+        if "source_metadata_json" not in columns:
+            db.execute(f"ALTER TABLE {schema}.progress_folders ADD COLUMN source_metadata_json TEXT NOT NULL DEFAULT '{{}}'")
+    run_compatibility_hooks("migrate", db, 32)
+    if found_progress:
+        _install_progress_purpose_constraints(db)
+    return False
+
+
 MIGRATIONS = {
     11: _migration_11,
     12: _migration_12,
@@ -1785,6 +1723,7 @@ MIGRATIONS = {
     29: _migration_29,
     30: _migration_30,
     31: _migration_31,
+    32: _migration_32,
 }
 
 
@@ -1794,12 +1733,10 @@ def _check_integrity(db, force: bool = False):
     if not force and now - last_check < INTEGRITY_CHECK_INTERVAL_MS:
         return
     quick_check = [row[0] for row in db.execute("PRAGMA quick_check").fetchall()]
-    attached_databases = {row[1] for row in db.execute("PRAGMA database_list").fetchall()}
-    team_attached = "team_retouch" in attached_databases
-    team_quick_check = [row[0] for row in db.execute("PRAGMA team_retouch.quick_check").fetchall()] if team_attached else ["not-attached"]
     foreign_key_errors = [*db.execute("PRAGMA foreign_key_check").fetchall()]
-    if team_attached:
-        foreign_key_errors.extend(db.execute("PRAGMA team_retouch.foreign_key_check").fetchall())
+    compatibility_integrity = run_compatibility_hooks("integrity", db)
+    for report in compatibility_integrity:
+        foreign_key_errors.extend(report.get("foreignKeyErrors") or [])
     business_checks = {
         "photos.current_version": """SELECT COUNT(*) FROM photos WHERE current_version_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM versions WHERE versions.id=photos.current_version_id AND versions.photo_id=photos.id AND versions.is_deleted=0)""",
         "versions.parent": """SELECT COUNT(*) FROM versions child WHERE parent_version_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM versions parent WHERE parent.id=child.parent_version_id AND parent.photo_id=child.photo_id)""",
@@ -1808,14 +1745,14 @@ def _check_integrity(db, force: bool = False):
         "progress_folders.v2_shape": """SELECT COUNT(*) FROM progress_folders WHERE
           node_role NOT IN ('original','progress','selection','artifact','workflow','broll')
           OR (relation_kind IS NOT NULL AND relation_kind NOT IN ('main','auxiliary'))
-          OR (artifact_kind IS NOT NULL AND artifact_kind NOT IN ('companion','preview','team_workspace'))
+          OR (artifact_kind IS NOT NULL AND (length(artifact_kind)>128 OR artifact_kind='' OR artifact_kind GLOB '*[^A-Za-z0-9._:-]*'))
           OR (parent_progress_id IS NULL) != (relation_kind IS NULL)
           OR (node_role='original' AND (parent_progress_id IS NOT NULL OR artifact_kind NOT IN ('companion')))
           OR (node_role='selection' AND (relation_kind!='auxiliary' OR artifact_kind IS NOT NULL))
           OR (node_role='progress' AND ((parent_progress_id IS NOT NULL AND relation_kind!='main') OR artifact_kind IS NOT NULL))
           OR (node_role='progress' AND media_kind NOT IN ('image','video'))
           OR (node_role='artifact' AND (parent_progress_id IS NOT NULL OR relation_kind IS NOT NULL OR artifact_kind NOT IN ('companion','preview')))
-          OR (node_role='workflow' AND (parent_progress_id IS NOT NULL OR relation_kind IS NOT NULL OR artifact_kind!='team_workspace'))
+          OR (node_role='workflow' AND (parent_progress_id IS NOT NULL OR relation_kind IS NOT NULL OR artifact_kind IS NULL))
           OR (node_role='broll' AND (media_kind!='mixed' OR parent_progress_id IS NOT NULL OR relation_kind IS NOT NULL OR artifact_kind IS NOT NULL))""",
         "progress_folders.v2_policy": """SELECT COUNT(*) FROM progress_folders WHERE
           tracking_state NOT IN ('disabled','pending_compare','pending_confirm','committing','ready','stale','needs_repair')
@@ -1836,7 +1773,7 @@ def _check_integrity(db, force: bool = False):
               AND target.project_id=edge.project_id AND source.media_kind=target.media_kind
               AND ((edge.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                 OR (edge.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
-                OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND target.artifact_kind='team_workspace'))))
+                OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input'))))
           )""",
         "media_import_artifact_slots.owner_kind": """SELECT COUNT(*) FROM media_import_artifact_slots slot
           WHERE NOT EXISTS(SELECT 1 FROM progress_folders progress WHERE progress.id=slot.progress_id
@@ -1849,14 +1786,8 @@ def _check_integrity(db, force: bool = False):
             ))""",
         "batch_items.owner": """SELECT COUNT(*) FROM batch_items item WHERE NOT EXISTS(SELECT 1 FROM version_batches batch JOIN photos ON photos.project_id=batch.project_id JOIN versions ON versions.photo_id=photos.id WHERE batch.id=item.batch_id AND photos.id=item.photo_id AND versions.id=item.version_id)""",
     }
-    if team_attached:
-        business_checks.update({
-            "team_patch_tasks.owner": """SELECT COUNT(*) FROM team_patch_tasks item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.id=item.photo_id AND versions.id=item.base_version_id) OR (item.merged_version_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM versions WHERE versions.id=item.merged_version_id))""",
-            "team_retouch_photos.owner": """SELECT COUNT(*) FROM team_retouch_photos item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id)""",
-            "team_person_identities.owner": """SELECT COUNT(*) FROM team_person_identities item WHERE NOT EXISTS(SELECT 1 FROM projects WHERE projects.id=item.project_id)""",
-            "team_person_assignments.owner": """SELECT COUNT(*) FROM team_person_assignments item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id) OR (item.identity_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM team_person_identities identity WHERE identity.id=item.identity_id AND identity.project_id=item.project_id))""",
-            "team_person_exclusions.owner": """SELECT COUNT(*) FROM team_person_exclusions item WHERE NOT EXISTS(SELECT 1 FROM photos JOIN versions ON versions.photo_id=photos.id WHERE photos.project_id=item.project_id AND photos.id=item.photo_id AND versions.id=item.base_version_id)""",
-        })
+    for report in compatibility_integrity:
+        business_checks.update(report.get("businessChecks") or {})
     business_errors = {name: db.execute(query).fetchone()[0] for name, query in business_checks.items()}
     progress_cycles = _progress_relation_cycles(db)
     if progress_cycles:
@@ -1865,16 +1796,17 @@ def _check_integrity(db, force: bool = False):
     if version_graph_cycle_nodes:
         business_errors["version_graph_edges.cycle"] = len(version_graph_cycle_nodes)
     business_errors = {name: count for name, count in business_errors.items() if count}
-    if quick_check != ["ok"] or team_attached and team_quick_check != ["ok"] or foreign_key_errors or business_errors:
+    compatibility_errors = [report.get("quickCheck") for report in compatibility_integrity if report.get("quickCheck") != ["ok"]]
+    if quick_check != ["ok"] or compatibility_errors or foreign_key_errors or business_errors:
         raise RuntimeError(
-            f"数据库完整性检查失败：quick_check={quick_check[:3]}，team_quick_check={team_quick_check[:3]}，foreign_key_errors={len(foreign_key_errors)}，business_errors={business_errors}"
+            f"数据库完整性检查失败：quick_check={quick_check[:3]}，compatibility_errors={compatibility_errors[:3]}，foreign_key_errors={len(foreign_key_errors)}，business_errors={business_errors}"
         )
     _set_meta(db, "last_integrity_check_at", now)
     _set_meta(db, "last_integrity_check_result", "ok")
     db.commit()
 
 
-def connect(root: str, database: str, include_domains=None, include_team: bool = False):
+def connect(root: str, database: str, include_domains=None, include_compatibility: bool = False):
     root = os.path.abspath(root)
     database = os.path.abspath(database)
     os.makedirs(os.path.dirname(database), exist_ok=True)
@@ -1915,7 +1847,7 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
         and _meta_value(db, "version_tree_default_layout_revision") == VERSION_TREE_DEFAULT_LAYOUT_REVISION
         and _meta_value(db, "workspace_root") == root
     )
-    if include_team or include_domains is True:
+    if include_compatibility or include_domains is True:
         requested_domains = tuple(DOMAIN_TABLES)
     elif isinstance(include_domains, (tuple, list, set, frozenset)):
         requested_domains = tuple(dict.fromkeys(include_domains))
@@ -1928,13 +1860,14 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
         purpose_constraints_migrated = False
         legacy_parent_revision_recorded = False
         try:
-            cleanup_empty_team_retouch_legacy_tables(db)
+            run_compatibility_hooks("prepare_connection", db, database, False)
             if requested_domains:
                 attach_workspace_domain_storage(db, database, requested_domains)
                 domain_migrated = _migration_28(db)
                 _migration_30(db)
-            if include_team:
-                attach_team_retouch_storage(db, database)
+                _migration_32(db)
+            if include_compatibility:
+                run_compatibility_hooks("prepare_connection", db, database, True)
             if _meta_value(db, "legacy_progress_parent_repair_revision") != LEGACY_PROGRESS_PARENT_REPAIR_REVISION:
                 found_versioning, _repairs = _repair_legacy_progress_structural_roots(db)
                 if found_versioning:
@@ -2069,6 +2002,7 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
             external_link_relative_path TEXT,
             node_role TEXT NOT NULL DEFAULT 'progress',
             artifact_kind TEXT,
+            source_metadata_json TEXT NOT NULL DEFAULT '{}',
             relation_kind TEXT,
             tracking_enabled INTEGER NOT NULL DEFAULT 0,
             tracking_state TEXT NOT NULL DEFAULT 'disabled',
@@ -2153,79 +2087,6 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
         CREATE INDEX IF NOT EXISTS version_compare_history_photo ON version_compare_history(photo_id);
         CREATE INDEX IF NOT EXISTS version_compare_history_left ON version_compare_history(left_version_id);
         CREATE INDEX IF NOT EXISTS version_compare_history_right ON version_compare_history(right_version_id);
-        CREATE TABLE IF NOT EXISTS team_patch_tasks (
-            id TEXT PRIMARY KEY,
-            photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
-            base_version_id TEXT NOT NULL REFERENCES versions(id),
-            person_index INTEGER NOT NULL,
-            person_name TEXT NOT NULL,
-            assignee TEXT NOT NULL DEFAULT '',
-            detector TEXT NOT NULL DEFAULT '',
-            bbox_json TEXT NOT NULL,
-            crop_json TEXT NOT NULL,
-            patch_path TEXT NOT NULL,
-            mask_path TEXT,
-            mask_json TEXT NOT NULL DEFAULT '{}',
-            members_json TEXT NOT NULL DEFAULT '[]',
-            needs_review INTEGER NOT NULL DEFAULT 0,
-            review_reason TEXT NOT NULL DEFAULT '',
-            edited_patch_path TEXT,
-            status TEXT NOT NULL DEFAULT 'exported',
-            merge_metrics_json TEXT NOT NULL DEFAULT '{}',
-            merged_version_id TEXT REFERENCES versions(id),
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            is_deleted INTEGER NOT NULL DEFAULT 0
-        );
-        CREATE INDEX IF NOT EXISTS team_patch_photo ON team_patch_tasks(photo_id, base_version_id, is_deleted);
-        CREATE INDEX IF NOT EXISTS team_patch_base_version ON team_patch_tasks(base_version_id);
-        CREATE INDEX IF NOT EXISTS team_patch_merged_version ON team_patch_tasks(merged_version_id);
-        CREATE TABLE IF NOT EXISTS team_retouch_photos (
-            photo_id TEXT PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            base_version_id TEXT NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS team_retouch_photo_project ON team_retouch_photos(project_id, updated_at);
-        CREATE TABLE IF NOT EXISTS team_person_identities (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            name TEXT NOT NULL,
-            color TEXT NOT NULL DEFAULT '#2563eb',
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS team_person_identity_project ON team_person_identities(project_id, created_at);
-        CREATE TABLE IF NOT EXISTS team_person_assignments (
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
-            base_version_id TEXT NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
-            person_index INTEGER NOT NULL,
-            identity_id TEXT REFERENCES team_person_identities(id) ON DELETE SET NULL,
-            confidence REAL NOT NULL DEFAULT 0,
-            source TEXT NOT NULL DEFAULT 'manual',
-            completed INTEGER NOT NULL DEFAULT 0,
-            completion_kind TEXT NOT NULL DEFAULT '',
-            edited_patch_path TEXT,
-            return_missing INTEGER NOT NULL DEFAULT 0 CHECK(return_missing IN (0,1)),
-            return_missing_since INTEGER,
-            completed_at INTEGER,
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY (photo_id, base_version_id, person_index)
-        );
-        CREATE INDEX IF NOT EXISTS team_person_assignment_project ON team_person_assignments(project_id, identity_id);
-        CREATE TABLE IF NOT EXISTS team_person_exclusions (
-            id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            photo_id TEXT NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
-            base_version_id TEXT NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
-            bbox_json TEXT NOT NULL,
-            reason TEXT NOT NULL DEFAULT 'false-positive',
-            created_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS team_person_exclusion_photo
-            ON team_person_exclusions(photo_id, base_version_id, created_at);
         CREATE TABLE IF NOT EXISTS undo_records (
             id TEXT PRIMARY KEY,
             kind TEXT NOT NULL,
@@ -2252,6 +2113,7 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
             _migration_28(db)
             _migration_29(db)
             _migration_30(db)
+            _migration_32(db)
             _set_meta(db, "schema_version", TARGET_SCHEMA_VERSION)
     else:
         for next_version in range(schema_version + 1, TARGET_SCHEMA_VERSION + 1):
@@ -2293,8 +2155,9 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
             attach_workspace_domain_storage(db, database, requested_domains)
             _migration_28(db)
             _migration_30(db)
-        if include_team:
-            attach_team_retouch_storage(db, database)
+            _migration_32(db)
+        if include_compatibility:
+            run_compatibility_hooks("prepare_connection", db, database, True)
     except Exception:
         db.close()
         raise
@@ -2312,7 +2175,7 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
     if backup_path:
         _set_meta(db, "last_migration_backup", backup_path)
     db.commit()
-    cleanup_empty_team_retouch_legacy_tables(db)
+    run_compatibility_hooks("prepare_connection", db, database, False)
     # A fresh database and a migration must be verified before it is exposed.
     # Routine daily maintenance is dispatched by Electron on a separate worker
     # so opening the project list never waits for a full integrity scan/backup.
@@ -3557,6 +3420,23 @@ def serialize_batch(row):
     }
 
 
+def normalize_source_metadata(value) -> str:
+    if value is None:
+        return "{}"
+    if not isinstance(value, dict) or set(value) - {"category", "role", "displayName", "componentId", "parentCapability"}:
+        raise ValueError("无效的来源元数据")
+    normalized = {}
+    for key, item in value.items():
+        if not isinstance(item, str) or not item.strip() or len(item) > 128 or any(ord(character) < 32 for character in item):
+            raise ValueError("无效的来源元数据")
+        normalized[key] = item.strip()
+    if normalized and "category" not in normalized:
+        raise ValueError("来源元数据必须指定类别")
+    if normalized.get("parentCapability") not in (None, "structural", "workflow-input", "none"):
+        raise ValueError("无效的来源父级能力")
+    return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+
+
 def serialize_progress(row):
     tracking_state = row["tracking_state"] if "tracking_state" in row.keys() else ("ready" if row["tracking_enabled"] else "disabled")
     folder_missing = row["missing_since"] is not None if "missing_since" in row.keys() else not os.path.isdir(row["folder_path"])
@@ -3570,6 +3450,7 @@ def serialize_progress(row):
         "missingSince": missing_since if folder_missing else None,
         "nodeRole": row["node_role"] if "node_role" in row.keys() else "progress",
         "artifactKind": row["artifact_kind"] if "artifact_kind" in row.keys() else None,
+        "sourceMetadata": (json.loads(row["source_metadata_json"] or "{}") or None) if "source_metadata_json" in row.keys() else None,
         "relationKind": row["relation_kind"] if "relation_kind" in row.keys() else ("main" if row["parent_progress_id"] else None),
         "trackingEnabled": bool(row["tracking_enabled"]),
         "renameFromParent": bool(row["rename_from_parent"]) if "rename_from_parent" in row.keys() else False,
@@ -3808,7 +3689,7 @@ def register_original_baselines(root: str, db, project):
 
 
 def migrate_legacy_media_workflow_graph_once(root: str, db, project):
-    """Reconcile canonical import/team artifacts into explicit graph records.
+    """Reconcile canonical import and producer artifacts into explicit graph records.
 
     Despite the historical function name this is intentionally repeatable:
     projects can be opened before RAW/JPG/MOV folders are created. It never
@@ -3887,41 +3768,7 @@ def migrate_legacy_media_workflow_graph_once(root: str, db, project):
             if preview["node_role"] == "artifact" and preview["artifact_kind"] == "preview":
                 add_edge(mov, preview, "derived_preview")
 
-        team_path = directories.get("团片协作")
-        if team_path:
-            workflow = insert_artifact(
-                team_path, os.path.basename(team_path), "image",
-                "team-workspace", "workflow", "team_workspace",
-            )
-            attached_databases = {row[1] for row in db.execute("PRAGMA database_list").fetchall()}
-            team_source_table = (
-                "team_retouch.team_retouch_photos" if "team_retouch" in attached_databases
-                else "main.team_retouch_photos" if _table_exists(db, "team_retouch_photos")
-                else None
-            )
-            if workflow["node_role"] == "workflow" and workflow["artifact_kind"] == "team_workspace" \
-                    and team_source_table:
-                source_rows = db.execute(
-                    f"""SELECT versions.file_path FROM {team_source_table} team
-                       JOIN versions ON versions.id=team.base_version_id AND versions.is_deleted=0
-                       WHERE team.project_id=?""",
-                    (project["id"],),
-                ).fetchall()
-                candidates = db.execute(
-                    """SELECT * FROM progress_folders WHERE project_id=? AND media_kind='image'
-                       AND node_role='progress' AND missing_since IS NULL""",
-                    (project["id"],),
-                ).fetchall()
-                sources = set()
-                for source_row in source_rows:
-                    file_key = canonical_path(source_row["file_path"]).casefold()
-                    matches = [candidate for candidate in candidates if file_key.startswith(candidate["folder_path_key"] + os.sep.casefold())]
-                    if matches:
-                        sources.add(max(matches, key=lambda candidate: len(candidate["folder_path_key"]))["id"])
-                for source_id in sorted(sources):
-                    source = next(candidate for candidate in candidates if candidate["id"] == source_id)
-                    add_edge(source, workflow, "workflow_input")
-
+        run_compatibility_hooks("migrate_workflow_graph", db, project, directories, timestamp, node_for_path, insert_artifact, add_edge)
         db.execute(
             "INSERT OR IGNORE INTO project_properties(project_id,key,value_json,updated_at) VALUES(?,?,?,?)",
             (project["id"], LEGACY_MEDIA_WORKFLOW_MIGRATION_KEY, "true", timestamp),
@@ -4452,7 +4299,7 @@ def progress_register(root: str, db, payload: dict, commit: bool = True, sync_lo
     if node_role not in PROGRESS_NODE_ROLES:
         raise ValueError("无效的文件夹节点角色")
     artifact_kind = str(payload.get("artifactKind") or "") or None
-    if artifact_kind not in (*PROGRESS_ARTIFACT_KINDS, None):
+    if artifact_kind is not None and OPAQUE_ARTIFACT_KIND.fullmatch(artifact_kind) is None:
         raise ValueError("无效的产物节点类型")
     parent_id = payload.get("parentProgressId") or None
     relation_kind = payload.get("relationKind") or None
@@ -4476,8 +4323,8 @@ def progress_register(root: str, db, payload: dict, commit: bool = True, sync_lo
         raise ValueError("进度节点只支持图片或视频媒体类型")
     if node_role == "artifact" and (parent_id or relation_kind or artifact_kind not in ("companion", "preview")):
         raise ValueError("产物节点不能使用结构父关系，且必须指定 companion 或 preview 类型")
-    if node_role == "workflow" and (parent_id or relation_kind or artifact_kind != "team_workspace"):
-        raise ValueError("工作流节点不能使用结构父关系，且必须是 team_workspace 类型")
+    if node_role == "workflow" and (parent_id or relation_kind or artifact_kind is None):
+        raise ValueError("工作流节点不能使用结构父关系，且必须指定合法的产物类型")
     if node_role == "broll" and (media_kind != "mixed" or parent_id or relation_kind or artifact_kind is not None):
         raise ValueError("花絮节点必须是 mixed 类型，且不能使用父关系或产物类型")
     if node_role == "original" and artifact_kind not in (None, "companion"):
@@ -4610,15 +4457,18 @@ def progress_register(root: str, db, payload: dict, commit: bool = True, sync_lo
             last_tracked_at = existing["last_tracked_at"]
         else:
             last_tracked_at = timestamp if tracking_state == "ready" else None
+    source_metadata_json = normalize_source_metadata(payload.get("sourceMetadata")) if "sourceMetadata" in payload else (
+        existing["source_metadata_json"] if existing is not None and "source_metadata_json" in existing.keys() else "{}"
+    )
     values = (
         parent_id, display_name, folder_path, folder_path.casefold(), directory_identity(folder_path),
-        external_link_relative_path, node_role, artifact_kind, relation_kind, int(tracking_enabled), tracking_state, int(rename_from_parent),
+        external_link_relative_path, node_role, artifact_kind, source_metadata_json, relation_kind, int(tracking_enabled), tracking_state, int(rename_from_parent),
         int(copy_missing_from_parent), last_tracked_at, snapshot_json, folder_signature, timestamp,
     )
     if existing:
         db.execute(
             """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,display_name=?,folder_path=?,folder_path_key=?,
-               folder_id=?,external_link_relative_path=?,node_role=?,artifact_kind=?,relation_kind=?,tracking_enabled=?,tracking_state=?,rename_from_parent=?,
+               folder_id=?,external_link_relative_path=?,node_role=?,artifact_kind=?,source_metadata_json=?,relation_kind=?,tracking_enabled=?,tracking_state=?,rename_from_parent=?,
                copy_missing_from_parent=?,last_tracked_at=?,tracking_snapshot_json=?,folder_signature=?,
                missing_since=NULL,tombstone_json='{}',updated_at=? WHERE id=?""",
             (media_kind, version_key, *values, existing["id"]),
@@ -4628,10 +4478,10 @@ def progress_register(root: str, db, payload: dict, commit: bool = True, sync_lo
         progress_id = str(uuid.uuid4())
         db.execute(
             """INSERT INTO progress_folders(id,project_id,media_kind,version_key,parent_progress_id,
-               display_name,folder_path,folder_path_key,folder_id,external_link_relative_path,node_role,artifact_kind,relation_kind,tracking_enabled,
+               display_name,folder_path,folder_path_key,folder_id,external_link_relative_path,node_role,artifact_kind,source_metadata_json,relation_kind,tracking_enabled,
                tracking_state,rename_from_parent,copy_missing_from_parent,last_tracked_at,tracking_snapshot_json,
                folder_signature,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (progress_id, project["id"], media_kind, version_key, *values[:-1], timestamp, timestamp),
         )
     if commit:
@@ -4651,7 +4501,7 @@ def progress_register_with_graph(root: str, db, payload: dict):
         raise ValueError("progress_graph_payload_invalid: project, progress or workflow inputs are invalid")
     allowed_progress_fields = {
         "progressId", "mediaKind", "versionKey", "parentProgressId", "displayName", "folderPath",
-        "externalLinkRelativePath", "relationKind", "trackingEnabled", "trackingState", "renameFromParent", "copyMissingFromParent",
+        "externalLinkRelativePath", "sourceMetadata", "relationKind", "trackingEnabled", "trackingState", "renameFromParent", "copyMissingFromParent",
     }
     if set(progress_payload) - allowed_progress_fields or "nodeRole" in progress_payload or "edgeKind" in progress_payload:
         raise ValueError("progress_graph_payload_invalid: renderer cannot assign node roles, paths or edge kinds")
@@ -4893,6 +4743,7 @@ def _validated_version_graph_edge(db, payload: dict, exclude_edge_id: str | None
         and source["parent_progress_id"] is not None and source["relation_kind"] == "main"
     target_is_main_progress = target["node_role"] == "progress" \
         and target["parent_progress_id"] is not None and target["relation_kind"] == "main"
+    target_source_metadata = json.loads(target["source_metadata_json"] or "{}") if "source_metadata_json" in target.keys() else {}
     valid_roles = (
         edge_kind == "media_companion" and source["node_role"] == "original" and source["artifact_kind"] is None and target["node_role"] == "original"
         and target["artifact_kind"] == "companion"
@@ -4901,7 +4752,7 @@ def _validated_version_graph_edge(db, payload: dict, exclude_edge_id: str | None
         or edge_kind == "workflow_input" and (
             source["node_role"] in ("selection", "workflow") and target_is_main_progress
             or source_is_main_progress and target["node_role"] == "workflow"
-            and target["artifact_kind"] == "team_workspace"
+            and target_source_metadata.get("parentCapability") == "workflow-input"
         )
     )
     if not valid_roles:
@@ -5903,6 +5754,7 @@ def cleanup_progress_tombstones(root: str, db, cutoff: int | None = None):
             # relationship metadata; its existing folder and media stay on disk
             # and therefore become an ordinary project folder.
             for child in orphaned_selections:
+                db.execute("DELETE FROM version_graph_edges WHERE source_progress_id=? OR target_progress_id=?", (child["id"], child["id"]))
                 db.execute("DELETE FROM progress_folders WHERE id=?", (child["id"],))
                 removed.append(child["id"])
                 removed_selection_metadata.append(child["id"])
@@ -5914,6 +5766,7 @@ def cleanup_progress_tombstones(root: str, db, cutoff: int | None = None):
                 (parent_id, relation_kind, timestamp, child["id"]),
             )
             reparented += 1
+        db.execute("DELETE FROM version_graph_edges WHERE source_progress_id=? OR target_progress_id=?", (candidate["id"], candidate["id"]))
         db.execute("DELETE FROM progress_folders WHERE id=?", (candidate["id"],))
         removed.append(candidate["id"])
     return {
@@ -7388,7 +7241,7 @@ def batch_register_baseline(root: str, db, payload: dict):
 def merge_source_photo_history(db, project, source_path: str, target_photo_id: str, parent_version_id: str, version_name: str):
     """Attach an already-registered returned image to an earlier photo history.
 
-    A returned image can be used by team retouch before its V0 relationship is
+    A returned image can be consumed by an external producer before its V0 relationship is
     registered. Preserve that V1 version ID and move every dependent row to the
     V0 photo instead of deleting and recreating the version.
     """
@@ -7457,22 +7310,7 @@ def merge_source_photo_history(db, project, source_path: str, target_photo_id: s
     # Move every owner reference before deleting the now-empty source photo.
     db.execute("UPDATE batch_items SET photo_id=?,updated_at=? WHERE photo_id=?", (target_photo_id, timestamp, source_photo_id))
     db.execute("UPDATE version_compare_history SET photo_id=? WHERE photo_id=?", (target_photo_id, source_photo_id))
-    db.execute("UPDATE team_patch_tasks SET photo_id=?,updated_at=? WHERE photo_id=?", (target_photo_id, timestamp, source_photo_id))
-    db.execute("UPDATE team_person_assignments SET photo_id=?,updated_at=? WHERE photo_id=?", (target_photo_id, timestamp, source_photo_id))
-    db.execute("UPDATE team_person_exclusions SET photo_id=? WHERE photo_id=?", (target_photo_id, source_photo_id))
-
-    registration = db.execute(
-        "SELECT * FROM team_retouch_photos WHERE photo_id=?",
-        (source_photo_id,),
-    ).fetchone()
-    if registration is not None:
-        # The returned V1 is the later workflow base. Its registration replaces
-        # an older V0 registration while all actual tasks remain intact.
-        db.execute("DELETE FROM team_retouch_photos WHERE photo_id=?", (target_photo_id,))
-        db.execute(
-            "UPDATE team_retouch_photos SET photo_id=?,project_id=?,updated_at=? WHERE photo_id=?",
-            (target_photo_id, project["id"], timestamp, source_photo_id),
-        )
+    run_compatibility_hooks("merge_photo_history", db, project, source_photo_id, target_photo_id, timestamp)
 
     selected_version_id = row["id"]
     db.execute("UPDATE versions SET is_current=0,updated_at=? WHERE photo_id=?", (timestamp, target_photo_id))
@@ -8125,58 +7963,17 @@ def media_relocate_version(db, payload: dict):
     return {"success": True, **media_bundle(db, row["photo_id"])}
 
 
-def team_artifact_paths(rows) -> list[str]:
-    values = []
-    for row in rows:
-        values.extend(value for value in (row["patch_path"], row["mask_path"], row["edited_patch_path"]) if value)
-        try:
-            members = json.loads(row["members_json"] or "[]")
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError):
-            members = []
-        values.extend(str(member.get("maskPath")) for member in members if member.get("maskPath"))
-    return list(dict.fromkeys(values))
 
 
-def team_assignment_artifact_paths(db, photo_id: str, base_version_id: str, person_indices=None) -> list[str]:
-    values = [photo_id, base_version_id]
-    member_filter = ""
-    if person_indices:
-        indexes = sorted({int(value) for value in person_indices})
-        member_filter = f" AND person_index IN ({','.join('?' for _ in indexes)})"
-        values.extend(indexes)
-    rows = db.execute(
-        f"""SELECT edited_patch_path FROM team_person_assignments
-            WHERE photo_id=? AND base_version_id=? AND edited_patch_path IS NOT NULL{member_filter}""",
-        values,
-    ).fetchall()
-    return list(dict.fromkeys(row["edited_patch_path"] for row in rows if row["edited_patch_path"]))
 
 
-def unreferenced_team_artifact_paths(db, candidates: list[str]) -> list[str]:
-    if not candidates:
-        return []
-    referenced = set()
-    for row in db.execute(
-        "SELECT patch_path,mask_path,edited_patch_path,members_json FROM team_patch_tasks WHERE is_deleted=0"
-    ).fetchall():
-        referenced.update(canonical_path(value) for value in (row["patch_path"], row["mask_path"], row["edited_patch_path"]) if value)
-        try:
-            members = json.loads(row["members_json"] or "[]")
-        except json.JSONDecodeError:
-            members = []
-        referenced.update(canonical_path(member["maskPath"]) for member in members if member.get("maskPath"))
-    for row in db.execute(
-        "SELECT edited_patch_path FROM team_person_assignments WHERE edited_patch_path IS NOT NULL"
-    ).fetchall():
-        referenced.add(canonical_path(row["edited_patch_path"]))
-    return [value for value in dict.fromkeys(candidates) if canonical_path(value) not in referenced]
 
 
 def delete_version_rows(db, rows) -> dict:
     timestamp = int(time.time() * 1000)
     version_ids = [row["id"] for row in rows]
     if not version_ids:
-        return {"deletedVersions": [], "teamArtifactPaths": [], "sourcePaths": []}
+        return {"deletedVersions": [], "sourcePaths": []}
     placeholders = ",".join("?" for _ in version_ids)
     reparented_count = 0
     for row in rows:
@@ -8186,22 +7983,9 @@ def delete_version_rows(db, rows) -> dict:
             (row["parent_version_id"], timestamp, row["id"]),
         )
         reparented_count += cursor.rowcount
-    task_rows = db.execute(
-        f"""SELECT patch_path,mask_path,edited_patch_path FROM team_patch_tasks
-            WHERE base_version_id IN ({placeholders})""",
-        version_ids,
-    ).fetchall()
-    team_candidates = team_artifact_paths(task_rows)
-    db.execute(f"DELETE FROM team_patch_tasks WHERE base_version_id IN ({placeholders})", version_ids)
-    db.execute(f"DELETE FROM team_person_assignments WHERE base_version_id IN ({placeholders})", version_ids)
-    db.execute(f"DELETE FROM team_person_exclusions WHERE base_version_id IN ({placeholders})", version_ids)
-    db.execute(f"DELETE FROM team_retouch_photos WHERE base_version_id IN ({placeholders})", version_ids)
-    db.execute(
-        f"""UPDATE team_patch_tasks SET merged_version_id=NULL,
-              status=CASE WHEN edited_patch_path IS NOT NULL THEN 'uploaded' ELSE 'exported' END,
-              updated_at=? WHERE merged_version_id IN ({placeholders}) AND is_deleted=0""",
-        (timestamp, *version_ids),
-    )
+    compatibility_cleanup = {}
+    for report in run_compatibility_hooks("delete_versions", db, version_ids, timestamp):
+        compatibility_cleanup.update(report or {})
     db.execute(
         f"UPDATE versions SET is_deleted=1,is_current=0,is_final=0,updated_at=? WHERE id IN ({placeholders})",
         (timestamp, *version_ids),
@@ -8227,7 +8011,7 @@ def delete_version_rows(db, rows) -> dict:
             "id": row["id"], "photoId": row["photo_id"], "filePath": row["file_path"],
             "thumbnailPath": row["thumbnail_path"], "versionNumber": row["version_number"],
         } for row in rows],
-        "teamArtifactPaths": unreferenced_team_artifact_paths(db, team_candidates),
+        **compatibility_cleanup,
         "sourcePaths": list(dict.fromkeys(row["file_path"] for row in rows if row["file_path"])),
         "reparentedCount": reparented_count,
     }
@@ -8316,745 +8100,46 @@ def media_record_compare(db, payload: dict):
     return {"success": True}
 
 
-def serialize_team_patch(row):
-    return {
-        "id": row["id"], "photoId": row["photo_id"], "baseVersionId": row["base_version_id"],
-        "personIndex": row["person_index"], "personName": row["person_name"], "assignee": row["assignee"],
-        "detector": row["detector"], "bbox": json.loads(row["bbox_json"]), "crop": json.loads(row["crop_json"]),
-        "patchPath": row["patch_path"], "maskPath": row["mask_path"], "mask": json.loads(row["mask_json"] or "{}"),
-        "members": json.loads(row["members_json"] or "[]"),
-        "needsReview": bool(row["needs_review"]), "reviewReason": row["review_reason"],
-        "editedPatchPath": row["edited_patch_path"], "status": row["status"],
-        "mergeMetrics": json.loads(row["merge_metrics_json"] or "{}"), "mergedVersionId": row["merged_version_id"],
-        "createdAt": row["created_at"], "updatedAt": row["updated_at"],
-    }
 
 
-def is_generated_team_identity_name(name):
-    prefix = "\u5f85\u786e\u8ba4\u4eba\u7269 "
-    value = str(name or "")
-    return value.startswith(prefix) and value[len(prefix):].isdigit()
 
 
-def cleanup_empty_generated_team_identities(db, project_id):
-    rows = db.execute(
-        """SELECT identity.id,identity.name
-           FROM team_person_identities identity
-           LEFT JOIN team_person_assignments assignment ON assignment.identity_id=identity.id
-           WHERE identity.project_id=?
-           GROUP BY identity.id
-           HAVING COUNT(assignment.identity_id)=0""",
-        (project_id,),
-    ).fetchall()
-    stale_ids = [row["id"] for row in rows if is_generated_team_identity_name(row["name"])]
-    if stale_ids:
-        db.executemany("DELETE FROM team_person_identities WHERE id=?", ((identity_id,) for identity_id in stale_ids))
-    return len(stale_ids)
 
 
-def team_patch_list(db, payload: dict):
-    rows = db.execute(
-        """SELECT * FROM team_patch_tasks WHERE photo_id=? AND is_deleted=0
-           ORDER BY person_index, created_at""", (payload["photoId"],)
-    ).fetchall()
-    return {"success": True, "tasks": [serialize_team_patch(row) for row in rows]}
 
 
-def reconcile_team_return_artifacts(db, project_id: str) -> dict:
-    """Reconcile returned-image history with disk while keeping paths recoverable."""
-    timestamp = int(time.time() * 1000)
-    assignments = db.execute(
-        """SELECT photo_id,base_version_id,person_index,edited_patch_path,
-                  return_missing,return_missing_since,completed_at,updated_at
-           FROM team_person_assignments
-           WHERE project_id=? AND completed=1 AND completion_kind='returned'""",
-        (project_id,),
-    ).fetchall()
-    assignment_states = {}
-    missing_count = 0
-    changed_count = 0
-    for row in assignments:
-        artifact_exists = bool(row["edited_patch_path"] and os.path.isfile(row["edited_patch_path"]))
-        missing = not artifact_exists
-        missing_count += int(missing)
-        missing_since = (row["return_missing_since"] or timestamp) if missing else None
-        if bool(row["return_missing"]) != missing or row["return_missing_since"] != missing_since:
-            db.execute(
-                """UPDATE team_person_assignments
-                   SET return_missing=?,return_missing_since=?
-                   WHERE photo_id=? AND base_version_id=? AND person_index=?""",
-                (int(missing), missing_since, row["photo_id"], row["base_version_id"], row["person_index"]),
-            )
-            changed_count += 1
-        assignment_states[(row["photo_id"], row["base_version_id"], int(row["person_index"]))] = {
-            "path": row["edited_patch_path"],
-            "missing": missing,
-            "completed_at": int(row["completed_at"] or row["updated_at"] or 0),
-        }
-
-    tasks = db.execute(
-        """SELECT task.id,task.photo_id,task.base_version_id,task.person_index,task.members_json,
-                  task.edited_patch_path,task.status
-           FROM team_patch_tasks task
-           JOIN photos ON photos.id=task.photo_id
-           WHERE photos.project_id=? AND task.is_deleted=0""",
-        (project_id,),
-    ).fetchall()
-    for task in tasks:
-        try:
-            members = json.loads(task["members_json"] or "[]")
-        except json.JSONDecodeError:
-            members = []
-        person_indices = {int(member.get("personIndex") or 0) for member in members}
-        if not person_indices:
-            person_indices = {int(task["person_index"])}
-        task_assignments = [
-            assignment_states[(task["photo_id"], task["base_version_id"], person_index)]
-            for person_index in person_indices
-            if (task["photo_id"], task["base_version_id"], person_index) in assignment_states
-        ]
-        # Legacy task-only returns have no person assignment to reconcile.
-        if not task_assignments:
-            continue
-        available = [item for item in task_assignments if not item["missing"] and item["path"]]
-        latest = max(available, key=lambda item: item["completed_at"], default=None)
-        desired_path = latest["path"] if latest else None
-        desired_status = task["status"] if task["status"] == "merged" else "uploaded" if desired_path else "exported"
-        current_path = canonical_path(task["edited_patch_path"]) if task["edited_patch_path"] else None
-        if current_path != desired_path or task["status"] != desired_status:
-            db.execute(
-                "UPDATE team_patch_tasks SET edited_patch_path=?,status=?,updated_at=? WHERE id=?",
-                (desired_path, desired_status, timestamp, task["id"]),
-            )
-            changed_count += 1
-    if changed_count:
-        db.commit()
-    return {"missingCount": missing_count, "changedCount": changed_count}
 
 
-def ensure_team_workflow_node(root: str, db, project):
-    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
-    folder_path = canonical_path(os.path.join(project_path, "团片协作"))
-    if not os.path.isdir(folder_path):
-        return None, False
-    existing = db.execute(
-        "SELECT id FROM progress_folders WHERE project_id=? AND folder_path_key=?",
-        (project["id"], folder_path.casefold()),
-    ).fetchone()
-    request = {
-        "projectName": project["name"],
-        "mediaKind": "image",
-        "versionKey": "team-workspace",
-        "displayName": "团片协作",
-        "folderPath": folder_path,
-        "nodeRole": "workflow",
-        "artifactKind": "team_workspace",
-        "trackingEnabled": False,
-        "trackingState": "disabled",
-        "renameFromParent": False,
-        "copyMissingFromParent": False,
-    }
-    if existing is not None:
-        request["progressId"] = existing["id"]
-    return progress_register(root, db, request, allow_role_conversion=True)["progressFolder"], existing is None
 
 
-def team_project_workspace(root: str, db, payload: dict):
-    project = project_row(db, payload["projectName"])
-    return_artifacts = reconcile_team_return_artifacts(db, project["id"])
-    if cleanup_empty_generated_team_identities(db, project["id"]):
-        db.commit()
-    project_path = os.path.join(os.path.abspath(root), project["relative_path"])
-    workflow_node, workflow_node_created = ensure_team_workflow_node(root, db, project)
-    rows = db.execute(
-        """SELECT task.*, photos.display_name AS photo_name, photos.original_name, photos.current_version_id,
-                  versions.file_path AS source_path
-           FROM team_patch_tasks task
-           JOIN photos ON photos.id=task.photo_id AND photos.is_deleted=0
-           JOIN versions ON versions.id=task.base_version_id AND versions.is_deleted=0
-           WHERE photos.project_id=? AND task.is_deleted=0
-           ORDER BY photos.created_at, task.photo_id, task.person_index""",
-        (project["id"],),
-    ).fetchall()
-    groups = {}
-    for row in rows:
-        key = f'{row["photo_id"]}:{row["base_version_id"]}'
-        if key not in groups:
-            relative_path = os.path.relpath(row["source_path"], project_path)
-            groups[key] = {
-                "photoId": row["photo_id"], "baseVersionId": row["base_version_id"],
-                "name": row["photo_name"] or os.path.splitext(row["original_name"])[0],
-                "relativePath": relative_path, "sourcePath": row["source_path"], "tasks": [],
-                "currentVersionId": row["current_version_id"], "latestTaskAt": 0,
-            }
-        groups[key]["tasks"].append(serialize_team_patch(row))
-        groups[key]["latestTaskAt"] = max(groups[key]["latestTaskAt"], int(row["updated_at"] or 0))
-    selected_groups = {}
-    for group in groups.values():
-        current = selected_groups.get(group["photoId"])
-        group_is_current = group["baseVersionId"] == group["currentVersionId"]
-        current_is_current = current and current["baseVersionId"] == current["currentVersionId"]
-        if current is None or group_is_current and not current_is_current or group_is_current == current_is_current and group["latestTaskAt"] > current["latestTaskAt"]:
-            selected_groups[group["photoId"]] = group
-    registered = db.execute(
-        """SELECT registered.photo_id,registered.base_version_id,registered.created_at,registered.updated_at,
-                  photos.display_name,photos.original_name,versions.file_path AS source_path
-           FROM team_retouch_photos registered
-           JOIN photos ON photos.id=registered.photo_id AND photos.is_deleted=0
-           JOIN versions ON versions.id=registered.base_version_id AND versions.is_deleted=0
-           WHERE registered.project_id=? ORDER BY registered.created_at""",
-        (project["id"],),
-    ).fetchall()
-    for row in registered:
-        key = f'{row["photo_id"]}:{row["base_version_id"]}'
-        group = groups.get(key) or {
-            "photoId": row["photo_id"], "baseVersionId": row["base_version_id"],
-            "name": row["display_name"] or os.path.splitext(row["original_name"])[0],
-            "relativePath": os.path.relpath(row["source_path"], project_path),
-            "sourcePath": row["source_path"], "tasks": [], "currentVersionId": row["base_version_id"],
-            "latestTaskAt": int(row["updated_at"] or 0),
-        }
-        selected_groups[row["photo_id"]] = group
-    photos = []
-    exclusion_counts = {
-        f'{row["photo_id"]}:{row["base_version_id"]}': int(row["count"])
-        for row in db.execute(
-            """SELECT photo_id,base_version_id,COUNT(*) AS count
-               FROM team_person_exclusions WHERE project_id=?
-               GROUP BY photo_id,base_version_id""",
-            (project["id"],),
-        ).fetchall()
-    }
-    for group in selected_groups.values():
-        group.pop("currentVersionId", None)
-        group.pop("latestTaskAt", None)
-        group["excludedPersonCount"] = exclusion_counts.get(f'{group["photoId"]}:{group["baseVersionId"]}', 0)
-        photos.append(group)
-    identities = [dict(row) for row in db.execute(
-        "SELECT id,name,color,created_at AS createdAt,updated_at AS updatedAt FROM team_person_identities WHERE project_id=? ORDER BY created_at",
-        (project["id"],),
-    ).fetchall()]
-    assignments = [dict(row) for row in db.execute(
-        """SELECT photo_id AS photoId,base_version_id AS baseVersionId,person_index AS personIndex,
-                  identity_id AS identityId,confidence,source,completed,
-                  completion_kind AS completionKind,edited_patch_path AS editedPatchPath,
-                  return_missing AS returnMissing,return_missing_since AS returnMissingSince,
-                  completed_at AS completedAt,updated_at AS updatedAt
-           FROM team_person_assignments WHERE project_id=?""",
-        (project["id"],),
-    ).fetchall()]
-    for item in assignments:
-        item["returnMissing"] = bool(item["returnMissing"])
-        item["completed"] = bool(item["completed"]) and not item["returnMissing"]
-    return {"success": True, "photos": photos, "identities": identities, "assignments": assignments,
-            "workflowNode": workflow_node, "workflowNodeCreated": workflow_node_created,
-            "missingReturnCount": return_artifacts["missingCount"]}
 
 
-def team_project_register_photo(db, payload: dict):
-    project = project_row(db, payload["projectName"])
-    photo = db.execute("SELECT id,project_id FROM photos WHERE id=? AND is_deleted=0", (payload["photoId"],)).fetchone()
-    version = db.execute("SELECT id,photo_id FROM versions WHERE id=? AND is_deleted=0", (payload["baseVersionId"],)).fetchone()
-    if photo is None or photo["project_id"] != project["id"] or version is None or version["photo_id"] != photo["id"]:
-        raise ValueError("团片协作图片或基础版本不属于当前项目")
-    has_crop_task = db.execute(
-        "SELECT 1 FROM team_patch_tasks WHERE photo_id=? AND base_version_id=? AND is_deleted=0 LIMIT 1",
-        (photo["id"], version["id"]),
-    ).fetchone()
-    if has_crop_task is None:
-        raise ValueError("团片协作图片尚未产生实际裁剪任务，不能登记")
-    timestamp = int(time.time() * 1000)
-    db.execute(
-        """INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)
-           ON CONFLICT(photo_id) DO UPDATE SET base_version_id=excluded.base_version_id,updated_at=excluded.updated_at""",
-        (photo["id"], project["id"], version["id"], timestamp, timestamp),
-    )
-    db.commit()
-    return {"success": True}
 
 
-def team_project_unregister_photo(db, payload: dict):
-    db.execute("DELETE FROM team_retouch_photos WHERE photo_id=?", (payload["photoId"],))
-    db.commit()
-    return {"success": True}
 
 
-def team_identity_save(db, payload: dict):
-    project = project_row(db, payload["projectName"])
-    timestamp = int(time.time() * 1000)
-    identity_id = str(payload.get("identityId") or uuid.uuid4())
-    name = str(payload.get("name") or "未命名人物").strip()[:80] or "未命名人物"
-    existing = db.execute("SELECT id FROM team_person_identities WHERE id=? AND project_id=?", (identity_id, project["id"])).fetchone()
-    if existing:
-        db.execute("UPDATE team_person_identities SET name=?,updated_at=? WHERE id=?", (name, timestamp, identity_id))
-    else:
-        colors = ("#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#059669", "#0891b2", "#4f46e5")
-        count = db.execute("SELECT COUNT(*) FROM team_person_identities WHERE project_id=?", (project["id"],)).fetchone()[0]
-        db.execute(
-            "INSERT INTO team_person_identities(id,project_id,name,color,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-            (identity_id, project["id"], name, colors[count % len(colors)], timestamp, timestamp),
-        )
-    for assignment in payload.get("assignments") or []:
-        db.execute(
-            """INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,identity_id,confidence,source,completed,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(photo_id,base_version_id,person_index) DO UPDATE SET
-                 identity_id=excluded.identity_id,confidence=excluded.confidence,source=excluded.source,
-                 completed=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.completed ELSE 0 END,
-                 completion_kind=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.completion_kind ELSE '' END,
-                 edited_patch_path=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.edited_patch_path ELSE NULL END,
-                 return_missing=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.return_missing ELSE 0 END,
-                 return_missing_since=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.return_missing_since ELSE NULL END,
-                 completed_at=CASE WHEN team_person_assignments.identity_id=excluded.identity_id THEN team_person_assignments.completed_at ELSE NULL END,
-                 updated_at=excluded.updated_at""",
-            (project["id"], assignment["photoId"], assignment["baseVersionId"], int(assignment["personIndex"]),
-             identity_id, float(assignment.get("confidence", 1)), str(assignment.get("source") or "manual"),
-             int(bool(assignment.get("completed", False))), timestamp),
-        )
-    db.commit()
-    return {"success": True, "identityId": identity_id}
 
 
-def team_identity_assign(db, payload: dict):
-    project = project_row(db, payload["projectName"])
-    identity_id = payload.get("identityId") or None
-    if identity_id and db.execute("SELECT id FROM team_person_identities WHERE id=? AND project_id=?", (identity_id, project["id"])).fetchone() is None:
-        raise ValueError("人物身份不存在")
-    timestamp = int(time.time() * 1000)
-    existing = db.execute(
-        "SELECT identity_id,completed FROM team_person_assignments WHERE photo_id=? AND base_version_id=? AND person_index=?",
-        (payload["photoId"], payload["baseVersionId"], int(payload["personIndex"])),
-    ).fetchone()
-    completed = bool(payload.get("completed", False))
-    if not identity_id or existing and existing["identity_id"] != identity_id:
-        completed = False
-    db.execute(
-        """INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,identity_id,confidence,source,completed,updated_at)
-           VALUES(?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(photo_id,base_version_id,person_index) DO UPDATE SET
-             identity_id=excluded.identity_id,confidence=excluded.confidence,source=excluded.source,
-             completed=excluded.completed,
-             completion_kind=CASE WHEN excluded.completed=1 THEN team_person_assignments.completion_kind ELSE '' END,
-             edited_patch_path=CASE WHEN excluded.completed=1 THEN team_person_assignments.edited_patch_path ELSE NULL END,
-             return_missing=CASE WHEN excluded.completed=1 THEN team_person_assignments.return_missing ELSE 0 END,
-             return_missing_since=CASE WHEN excluded.completed=1 THEN team_person_assignments.return_missing_since ELSE NULL END,
-             completed_at=CASE WHEN excluded.completed=1 THEN team_person_assignments.completed_at ELSE NULL END,
-             updated_at=excluded.updated_at""",
-        (project["id"], payload["photoId"], payload["baseVersionId"], int(payload["personIndex"]), identity_id,
-         float(payload.get("confidence", 1)), str(payload.get("source") or "manual"), int(completed), timestamp),
-    )
-    previous_identity_id = existing["identity_id"] if existing else None
-    if previous_identity_id and previous_identity_id != identity_id:
-        cleanup_empty_generated_team_identities(db, project["id"])
-    db.commit()
-    return {"success": True}
 
 
-def team_identity_confirm_group(db, payload: dict):
-    project = project_row(db, payload["projectName"])
-    timestamp = int(time.time() * 1000)
-    requested_identity_id = str(payload.get("identityId") or "").strip() or None
-    requested_name = str(payload.get("name") or "").strip()[:80]
-    assignments = payload.get("assignments") or []
-    if not assignments:
-        raise ValueError("没有需要标记的人物")
-
-    identity_id = requested_identity_id
-    if requested_name:
-        same_name = db.execute(
-            "SELECT id FROM team_person_identities WHERE project_id=? AND lower(trim(name))=lower(trim(?)) LIMIT 1",
-            (project["id"], requested_name),
-        ).fetchone()
-        if same_name and same_name["id"] != requested_identity_id:
-            identity_id = same_name["id"]
-        elif requested_identity_id:
-            existing = db.execute(
-                "SELECT id FROM team_person_identities WHERE id=? AND project_id=?",
-                (requested_identity_id, project["id"]),
-            ).fetchone()
-            if existing is None:
-                raise ValueError("人物身份不存在")
-            db.execute(
-                "UPDATE team_person_identities SET name=?,updated_at=? WHERE id=?",
-                (requested_name, timestamp, requested_identity_id),
-            )
-        else:
-            identity_id = str(uuid.uuid4())
-            colors = ("#2563eb", "#7c3aed", "#db2777", "#dc2626", "#ea580c", "#059669", "#0891b2", "#4f46e5")
-            count = db.execute("SELECT COUNT(*) FROM team_person_identities WHERE project_id=?", (project["id"],)).fetchone()[0]
-            db.execute(
-                "INSERT INTO team_person_identities(id,project_id,name,color,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-                (identity_id, project["id"], requested_name, colors[count % len(colors)], timestamp, timestamp),
-            )
-    elif identity_id:
-        existing = db.execute(
-            "SELECT id FROM team_person_identities WHERE id=? AND project_id=?",
-            (identity_id, project["id"]),
-        ).fetchone()
-        if existing is None:
-            raise ValueError("人物身份不存在")
-
-    anchor_key = str(payload.get("anchorSubjectKey") or "")
-    seen = set()
-    updated = 0
-    previous_identity_ids = set()
-    for assignment in payload.get("clearAssignments") or []:
-        photo_id = str(assignment.get("photoId") or "")
-        base_version_id = str(assignment.get("baseVersionId") or "")
-        person_index = int(assignment.get("personIndex"))
-        existing_assignment = db.execute(
-            """SELECT identity_id FROM team_person_assignments
-               WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?""",
-            (project["id"], photo_id, base_version_id, person_index),
-        ).fetchone()
-        if existing_assignment is None:
-            continue
-        if existing_assignment["identity_id"]:
-            previous_identity_ids.add(existing_assignment["identity_id"])
-        db.execute(
-            """DELETE FROM team_person_assignments
-               WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?""",
-            (project["id"], photo_id, base_version_id, person_index),
-        )
-    for assignment in assignments:
-        photo_id = str(assignment.get("photoId") or "")
-        base_version_id = str(assignment.get("baseVersionId") or "")
-        person_index = int(assignment.get("personIndex"))
-        key = f"{photo_id}:{base_version_id}:{person_index}"
-        if key in seen:
-            continue
-        seen.add(key)
-        owned = db.execute(
-            """SELECT 1 FROM photos photo
-               JOIN versions version ON version.id=? AND version.photo_id=photo.id AND version.is_deleted=0
-               WHERE photo.id=? AND photo.project_id=? AND photo.is_deleted=0""",
-            (base_version_id, photo_id, project["id"]),
-        ).fetchone()
-        if owned is None:
-            raise ValueError("人物实例不属于当前团片协作项目")
-        existing_assignment = db.execute(
-            "SELECT identity_id,completed FROM team_person_assignments WHERE photo_id=? AND base_version_id=? AND person_index=?",
-            (photo_id, base_version_id, person_index),
-        ).fetchone()
-        previous_identity_id = existing_assignment["identity_id"] if existing_assignment else None
-        if previous_identity_id:
-            previous_identity_ids.add(previous_identity_id)
-        completed = bool(existing_assignment["completed"]) if existing_assignment and previous_identity_id == identity_id else False
-        source = "manual" if key == anchor_key else "manual-group"
-        db.execute(
-            """INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,identity_id,confidence,source,completed,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(photo_id,base_version_id,person_index) DO UPDATE SET
-                 identity_id=excluded.identity_id,confidence=excluded.confidence,source=excluded.source,
-                 completed=excluded.completed,
-                 completion_kind=CASE WHEN excluded.completed=1 THEN team_person_assignments.completion_kind ELSE '' END,
-                 edited_patch_path=CASE WHEN excluded.completed=1 THEN team_person_assignments.edited_patch_path ELSE NULL END,
-                 return_missing=CASE WHEN excluded.completed=1 THEN team_person_assignments.return_missing ELSE 0 END,
-                 return_missing_since=CASE WHEN excluded.completed=1 THEN team_person_assignments.return_missing_since ELSE NULL END,
-                 completed_at=CASE WHEN excluded.completed=1 THEN team_person_assignments.completed_at ELSE NULL END,
-                 updated_at=excluded.updated_at""",
-            (project["id"], photo_id, base_version_id, person_index, identity_id,
-             float(assignment.get("confidence", 1)), source, int(completed), timestamp),
-        )
-        updated += 1
-
-    if any(previous_identity_id != identity_id for previous_identity_id in previous_identity_ids):
-        cleanup_empty_generated_team_identities(db, project["id"])
-    db.commit()
-    return {"success": True, "identityId": identity_id, "updatedCount": updated}
 
 
-def team_identity_complete(db, payload: dict):
-    timestamp = int(time.time() * 1000)
-    completed = bool(payload.get("completed"))
-    completion_kind = str(payload.get("completionKind") or ("no-retouch" if completed else ""))
-    if completion_kind not in ("", "returned", "no-retouch", "skip-requested"):
-        raise ValueError("人物完成方式无效")
-    edited_patch_path = canonical_path(payload["editedPatchPath"]) if payload.get("editedPatchPath") else None
-    result = db.execute(
-        """UPDATE team_person_assignments
-           SET completed=?,completion_kind=?,edited_patch_path=?,return_missing=0,return_missing_since=NULL,completed_at=?,updated_at=?
-           WHERE photo_id=? AND base_version_id=? AND person_index=?""",
-        (int(completed), completion_kind, edited_patch_path, timestamp if completed else None, timestamp,
-         payload["photoId"], payload["baseVersionId"], int(payload["personIndex"])),
-    )
-    if result.rowcount != 1:
-        raise ValueError("请先给这个人物标记身份")
-    db.commit()
-    return {"success": True}
 
 
-def team_identity_delete(db, payload: dict):
-    project = project_row(db, payload["projectName"])
-    db.execute(
-        """UPDATE team_person_assignments
-           SET completed=0,completion_kind='',edited_patch_path=NULL,return_missing=0,return_missing_since=NULL,completed_at=NULL
-           WHERE identity_id=? AND project_id=?""",
-        (payload["identityId"], project["id"]),
-    )
-    db.execute("DELETE FROM team_person_identities WHERE id=? AND project_id=?", (payload["identityId"], project["id"]))
-    db.commit()
-    return {"success": True}
 
 
-def team_person_exclusion_list(db, payload: dict):
-    values = [payload["photoId"], payload["baseVersionId"]]
-    project_filter = ""
-    if payload.get("projectName"):
-        project = project_row(db, payload["projectName"])
-        project_filter = " AND project_id=?"
-        values.append(project["id"])
-    rows = db.execute(
-        f"""SELECT id,photo_id AS photoId,base_version_id AS baseVersionId,
-                   bbox_json,reason,created_at AS createdAt
-            FROM team_person_exclusions
-            WHERE photo_id=? AND base_version_id=?{project_filter}
-            ORDER BY created_at""",
-        values,
-    ).fetchall()
-    return {
-        "success": True,
-        "exclusions": [{
-            "id": row["id"],
-            "photoId": row["photoId"],
-            "baseVersionId": row["baseVersionId"],
-            "bbox": json.loads(row["bbox_json"]),
-            "reason": row["reason"],
-            "createdAt": row["createdAt"],
-        } for row in rows],
-    }
 
 
-def team_person_exclusion_add(db, payload: dict):
-    project = project_row(db, payload["projectName"])
-    photo = db.execute(
-        "SELECT id,project_id FROM photos WHERE id=? AND is_deleted=0",
-        (payload["photoId"],),
-    ).fetchone()
-    version = db.execute(
-        "SELECT id,photo_id FROM versions WHERE id=? AND is_deleted=0",
-        (payload["baseVersionId"],),
-    ).fetchone()
-    if photo is None or photo["project_id"] != project["id"] or version is None or version["photo_id"] != photo["id"]:
-        raise ValueError("人物实例不属于当前团片协作项目")
-    bbox = payload.get("bbox") or {}
-    normalized_bbox = {key: int(round(float(bbox.get(key, 0)))) for key in ("x", "y", "width", "height")}
-    if normalized_bbox["x"] < 0 or normalized_bbox["y"] < 0 or normalized_bbox["width"] < 1 or normalized_bbox["height"] < 1:
-        raise ValueError("人物识别框无效")
-    exclusion_id = str(payload.get("id") or uuid.uuid4())
-    timestamp = int(time.time() * 1000)
-    db.execute(
-        """INSERT INTO team_person_exclusions(
-             id,project_id,photo_id,base_version_id,bbox_json,reason,created_at
-           ) VALUES(?,?,?,?,?,?,?)""",
-        (
-            exclusion_id, project["id"], photo["id"], version["id"],
-            json.dumps(normalized_bbox, ensure_ascii=False),
-            str(payload.get("reason") or "false-positive")[:80],
-            timestamp,
-        ),
-    )
-    db.commit()
-    return {"success": True, "id": exclusion_id, "bbox": normalized_bbox}
 
 
-def team_person_exclusion_clear(db, payload: dict):
-    project = project_row(db, payload["projectName"])
-    result = db.execute(
-        """DELETE FROM team_person_exclusions
-           WHERE project_id=? AND photo_id=? AND base_version_id=?""",
-        (project["id"], payload["photoId"], payload["baseVersionId"]),
-    )
-    db.commit()
-    return {"success": True, "clearedCount": result.rowcount}
 
 
-def team_patch_replace(db, payload: dict):
-    timestamp = int(time.time() * 1000)
-    previous_rows = db.execute(
-        "SELECT patch_path,mask_path,edited_patch_path,members_json FROM team_patch_tasks WHERE photo_id=? AND base_version_id=?",
-        (payload["photoId"], payload["baseVersionId"]),
-    ).fetchall()
-    assignment_artifacts = team_assignment_artifact_paths(db, payload["photoId"], payload["baseVersionId"])
-    db.execute(
-        "DELETE FROM team_patch_tasks WHERE photo_id=? AND base_version_id=?",
-        (payload["photoId"], payload["baseVersionId"]),
-    )
-    # Person indices are produced by the detector and can change after a new
-    # recognition pass. Keeping old identity links would silently attach names
-    # to the wrong body, so the user must confirm them again.
-    db.execute(
-        "DELETE FROM team_person_assignments WHERE photo_id=? AND base_version_id=?",
-        (payload["photoId"], payload["baseVersionId"]),
-    )
-    for task in payload.get("tasks", []):
-        db.execute(
-            """INSERT INTO team_patch_tasks(id,photo_id,base_version_id,person_index,person_name,assignee,
-               detector,bbox_json,crop_json,patch_path,mask_path,mask_json,members_json,needs_review,review_reason,status,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (task["id"], payload["photoId"], payload["baseVersionId"], int(task["personIndex"]),
-             task.get("personName") or f"人物 {task['personIndex']}", task.get("assignee") or "",
-             task.get("detector") or "", json.dumps(task["bbox"], ensure_ascii=False),
-             json.dumps(task["crop"], ensure_ascii=False), canonical_path(task["patchPath"]),
-             canonical_path(task["maskPath"]) if task.get("maskPath") else None,
-             json.dumps(task.get("mask") or {}, ensure_ascii=False),
-             json.dumps(task.get("members") or [], ensure_ascii=False),
-             int(bool(task.get("needsReview"))),
-             str(task.get("reviewReason") or ""),
-             task.get("status") or "exported", timestamp, timestamp),
-        )
-    if not payload.get("tasks"):
-        db.execute(
-            "DELETE FROM team_retouch_photos WHERE photo_id=? AND base_version_id=?",
-            (payload["photoId"], payload["baseVersionId"]),
-        )
-    db.commit()
-    result = team_patch_list(db, {"photoId": payload["photoId"]})
-    result["artifactPaths"] = unreferenced_team_artifact_paths(db, team_artifact_paths(previous_rows) + assignment_artifacts)
-    return result
 
 
-def team_patch_cleanup(db, payload: dict):
-    rows = db.execute(
-        """SELECT * FROM team_patch_tasks
-           WHERE photo_id=? AND base_version_id=? AND is_deleted=0""",
-        (payload["photoId"], payload["baseVersionId"]),
-    ).fetchall()
-    if not rows:
-        return {**team_patch_list(db, {"photoId": payload["photoId"]}), "artifactPaths": [], "cleanedCount": 0}
-    if not payload.get("force") and any(row["status"] != "merged" for row in rows):
-        raise ValueError("仍有未完成的团片协作任务，不能清理工作数据")
-    candidates = team_artifact_paths(rows) + team_assignment_artifact_paths(db, payload["photoId"], payload["baseVersionId"])
-    db.execute(
-        "DELETE FROM team_patch_tasks WHERE photo_id=? AND base_version_id=?",
-        (payload["photoId"], payload["baseVersionId"]),
-    )
-    db.execute(
-        "DELETE FROM team_person_assignments WHERE photo_id=? AND base_version_id=?",
-        (payload["photoId"], payload["baseVersionId"]),
-    )
-    db.execute(
-        "DELETE FROM team_retouch_photos WHERE photo_id=? AND base_version_id=?",
-        (payload["photoId"], payload["baseVersionId"]),
-    )
-    db.commit()
-    result = team_patch_list(db, {"photoId": payload["photoId"]})
-    result.update({"artifactPaths": unreferenced_team_artifact_paths(db, candidates), "cleanedCount": len(rows)})
-    return result
 
 
-def team_patch_update(db, payload: dict):
-    row = db.execute("SELECT * FROM team_patch_tasks WHERE id=? AND is_deleted=0", (payload["taskId"],)).fetchone()
-    if row is None:
-        raise ValueError("人物修图任务不存在")
-    assignment_completion = payload.get("assignmentCompletion")
-    assignment_person_index = None
-    if assignment_completion is not None:
-        if not isinstance(assignment_completion, dict):
-            raise ValueError("人物完成状态无效")
-        assignment_person_index = int(assignment_completion.get("personIndex") or 0)
-        members = json.loads(row["members_json"] or "[]") or [{"personIndex": row["person_index"]}]
-        member_indices = {int(member.get("personIndex") or 0) for member in members}
-        if assignment_person_index < 1 or assignment_person_index not in member_indices:
-            raise ValueError("人物不属于这个修图任务")
-        assignment = db.execute(
-            """SELECT 1 FROM team_person_assignments
-               WHERE photo_id=? AND base_version_id=? AND person_index=?""",
-            (row["photo_id"], row["base_version_id"], assignment_person_index),
-        ).fetchone()
-        if assignment is None:
-            raise ValueError("请先给这个人物标记身份")
-    fields, values = [], []
-    mapping = {"personName": "person_name", "assignee": "assignee", "status": "status", "mergedVersionId": "merged_version_id"}
-    for source, target in mapping.items():
-        if source in payload:
-            fields.append(f"{target}=?")
-            values.append(None if source == "mergedVersionId" and not payload[source] else str(payload[source] or ""))
-    if "editedPatchPath" in payload:
-        fields.append("edited_patch_path=?")
-        values.append(canonical_path(payload["editedPatchPath"]) if payload["editedPatchPath"] else None)
-    if "patchPath" in payload:
-        fields.append("patch_path=?")
-        values.append(canonical_path(payload["patchPath"]) if payload["patchPath"] else None)
-    if "mergeMetrics" in payload:
-        fields.append("merge_metrics_json=?")
-        values.append(json.dumps(payload["mergeMetrics"] or {}, ensure_ascii=False))
-    if "needsReview" in payload:
-        fields.append("needs_review=?")
-        values.append(int(bool(payload["needsReview"])))
-    if "reviewReason" in payload:
-        fields.append("review_reason=?")
-        values.append(str(payload["reviewReason"] or ""))
-    if "crop" in payload:
-        crop = payload.get("crop") or {}
-        normalized_crop = {key: int(crop.get(key, 0)) for key in ("x", "y", "width", "height")}
-        if normalized_crop["x"] < 0 or normalized_crop["y"] < 0 or normalized_crop["width"] < 1 or normalized_crop["height"] < 1:
-            raise ValueError("工作图范围无效")
-        fields.append("crop_json=?")
-        values.append(json.dumps(normalized_crop, ensure_ascii=False))
-    timestamp = int(time.time() * 1000)
-    fields.append("updated_at=?")
-    values.append(timestamp)
-    values.append(row["id"])
-    try:
-        db.execute(f"UPDATE team_patch_tasks SET {', '.join(fields)} WHERE id=?", values)
-        if assignment_person_index is not None:
-            assignment_completed = bool(assignment_completion.get("completed"))
-            assignment_completion_kind = str(assignment_completion.get("completionKind") or ("returned" if assignment_completed and payload.get("editedPatchPath") else "no-retouch" if assignment_completed else ""))
-            if assignment_completion_kind not in ("", "returned", "no-retouch", "skip-requested"):
-                raise ValueError("人物完成方式无效")
-            assignment_edited_path = assignment_completion.get("editedPatchPath")
-            if assignment_edited_path is None and assignment_completion_kind == "returned":
-                assignment_edited_path = payload.get("editedPatchPath")
-            db.execute(
-                """UPDATE team_person_assignments
-                   SET completed=?,completion_kind=?,edited_patch_path=?,return_missing=0,return_missing_since=NULL,completed_at=?,updated_at=?
-                   WHERE photo_id=? AND base_version_id=? AND person_index=?""",
-                (int(assignment_completed), assignment_completion_kind,
-                 canonical_path(assignment_edited_path) if assignment_edited_path else None,
-                 timestamp if assignment_completed else None, timestamp,
-                 row["photo_id"], row["base_version_id"], assignment_person_index),
-            )
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    return team_patch_list(db, {"photoId": row["photo_id"]})
 
 
-def team_patch_delete(db, payload: dict):
-    row = db.execute(
-        """SELECT task.*,photos.project_id FROM team_patch_tasks task
-           JOIN photos ON photos.id=task.photo_id WHERE task.id=? AND task.is_deleted=0""",
-        (payload["taskId"],),
-    ).fetchone()
-    if row is None:
-        raise ValueError("人物工作图不存在")
-    members = json.loads(row["members_json"] or "[]") or [{"personIndex": row["person_index"]}]
-    person_indices = sorted({int(member.get("personIndex") or 0) for member in members if int(member.get("personIndex") or 0) > 0})
-    candidates = team_artifact_paths([row]) + team_assignment_artifact_paths(db, row["photo_id"], row["base_version_id"], person_indices)
-    db.execute("DELETE FROM team_patch_tasks WHERE id=?", (row["id"],))
-    if person_indices:
-        placeholders = ",".join("?" for _ in person_indices)
-        db.execute(
-            f"""DELETE FROM team_person_assignments
-                WHERE photo_id=? AND base_version_id=? AND person_index IN ({placeholders})""",
-            (row["photo_id"], row["base_version_id"], *person_indices),
-        )
-    remaining_task = db.execute(
-        "SELECT 1 FROM team_patch_tasks WHERE photo_id=? AND base_version_id=? AND is_deleted=0 LIMIT 1",
-        (row["photo_id"], row["base_version_id"]),
-    ).fetchone()
-    if remaining_task is None:
-        db.execute(
-            "DELETE FROM team_retouch_photos WHERE photo_id=? AND base_version_id=?",
-            (row["photo_id"], row["base_version_id"]),
-        )
-    cleanup_empty_generated_team_identities(db, row["project_id"])
-    db.commit()
-    result = team_patch_list(db, {"photoId": row["photo_id"]})
-    result["artifactPaths"] = unreferenced_team_artifact_paths(db, candidates)
-    return result
 
 
 def sync_directories(root: str, db):
@@ -9140,9 +8225,9 @@ def load(root: str, database: str):
         initialized = connect(root, database, include_domains=False)
         try:
             # Preserve eager creation/migration for a healthy installation, but
-            # never make catalog startup depend on the optional team store.
+            # never make catalog startup depend on an optional compatibility domain.
             try:
-                attach_team_retouch_storage(initialized, database)
+                run_compatibility_hooks("prepare_connection", initialized, database, True)
             except (OSError, sqlite3.Error, RuntimeError, ValueError):
                 pass
         finally:
@@ -9242,6 +8327,9 @@ def project_cleanup_plan(db, project, payload=None):
         if str(catalog.get("name") or "").casefold() == str(project["name"]).casefold():
             removed_undo_ids.append(record["id"])
 
+    compatibility_cleanup = {}
+    for report in run_compatibility_hooks("project_cleanup_plan", db, project_id, photo_ids):
+        compatibility_cleanup.update(report or {})
     return {
         "success": True,
         "name": project["name"],
@@ -9249,39 +8337,12 @@ def project_cleanup_plan(db, project, payload=None):
         "sourcePaths": list(dict.fromkeys(source_paths)),
         "artifactPaths": list(dict.fromkeys(artifact_paths)),
         "removedUndoIds": removed_undo_ids,
-        "teamCleanup": {"projectId": project_id, "photoIds": photo_ids},
+        **compatibility_cleanup,
     }
 
 
-def delete_team_project_rows(db, project_id: str):
-    photo_ids = [row[0] for row in db.execute("SELECT id FROM photos WHERE project_id=?", (project_id,)).fetchall()]
-    if photo_ids:
-        placeholders = ",".join("?" for _ in photo_ids)
-        db.execute(f"DELETE FROM team_patch_tasks WHERE photo_id IN ({placeholders})", photo_ids)
-    db.execute("DELETE FROM team_person_exclusions WHERE project_id=?", (project_id,))
-    db.execute("DELETE FROM team_person_assignments WHERE project_id=?", (project_id,))
-    db.execute("DELETE FROM team_retouch_photos WHERE project_id=?", (project_id,))
-    db.execute("DELETE FROM team_person_identities WHERE project_id=?", (project_id,))
 
 
-def team_project_purge(db, payload: dict):
-    project_id = str(payload.get("projectId") or "")
-    photo_ids = [str(value) for value in payload.get("photoIds", []) if value]
-    artifact_rows = []
-    if photo_ids:
-        placeholders = ",".join("?" for _ in photo_ids)
-        artifact_rows = db.execute(
-            f"""SELECT patch_path,mask_path,edited_patch_path,members_json FROM team_patch_tasks
-                WHERE photo_id IN ({placeholders})""", photo_ids
-        ).fetchall()
-        db.execute(f"DELETE FROM team_patch_tasks WHERE photo_id IN ({placeholders})", photo_ids)
-    if project_id:
-        db.execute("DELETE FROM team_person_exclusions WHERE project_id=?", (project_id,))
-        db.execute("DELETE FROM team_person_assignments WHERE project_id=?", (project_id,))
-        db.execute("DELETE FROM team_retouch_photos WHERE project_id=?", (project_id,))
-        db.execute("DELETE FROM team_person_identities WHERE project_id=?", (project_id,))
-    db.commit()
-    return {"success": True, "artifactPaths": unreferenced_team_artifact_paths(db, team_artifact_paths(artifact_rows))}
 
 
 def deleted_project_cleanup_plan(db, payload: dict):
@@ -9390,12 +8451,14 @@ def cleanup_media_workflow_graph(root: str, db, session_cutoff: int | None = Non
                   source.artifact_kind AS source_artifact_kind,source.parent_progress_id AS source_parent_id,
                   source.relation_kind AS source_relation_kind,target.media_kind AS target_media_kind,
                   target.node_role AS target_role,target.artifact_kind AS target_artifact_kind,
-                  target.parent_progress_id AS target_parent_id,target.relation_kind AS target_relation_kind
+                  target.parent_progress_id AS target_parent_id,target.relation_kind AS target_relation_kind,
+                  target.source_metadata_json AS target_source_metadata_json
            FROM version_graph_edges edge
            LEFT JOIN progress_folders source ON source.id=edge.source_progress_id
            LEFT JOIN progress_folders target ON target.id=edge.target_progress_id"""
     ).fetchall()
     for row in rows:
+        target_source_metadata = json.loads(row["target_source_metadata_json"] or "{}")
         valid = row["source_role"] is not None and row["target_role"] is not None and row["source_media_kind"] == row["target_media_kind"] and (
             row["edge_kind"] == "media_companion" and row["source_role"] == "original" and row["source_artifact_kind"] is None
             and row["target_role"] == "original" and row["target_artifact_kind"] == "companion"
@@ -9406,7 +8469,7 @@ def cleanup_media_workflow_graph(root: str, db, session_cutoff: int | None = Non
                 row["source_role"] in ("selection", "workflow") and row["target_role"] == "progress"
                 and row["target_parent_id"] is not None and row["target_relation_kind"] == "main"
                 or row["source_role"] == "progress" and row["source_parent_id"] is not None and row["source_relation_kind"] == "main" and row["target_role"] == "workflow"
-                and row["target_artifact_kind"] == "team_workspace"
+                and target_source_metadata.get("parentCapability") == "workflow-input"
             )
         )
         if not valid:
@@ -9567,16 +8630,14 @@ def reconcile_cross_domain_references(db) -> dict:
 def mutate(root: str, database: str, action: str, payload: dict):
     # Interactive version-tree and confirmation reads must never compete for
     # SQLite's writer slot with media scans or tracking commits.
-    # Team-retouch is attached for its dedicated actions and for the few
-    # media/versioning mutations that must preserve cross-store owner
-    # references. Other actions remain isolated from an unavailable team store.
+    run_compatibility_hooks("bind_core", globals())
     domain_actions = set(MEDIA_ACTIONS) | set(PROGRESS_ACTIONS) | set(TRACKING_ACTIONS) | {
         "maintenance_run", "deleted_projects_list", "deleted_project_cleanup_plan",
         "purge_deleted_project", "purge_missing_project",
     }
-    needs_team = action in TEAM_ACTIONS or action in TEAM_INTEGRATED_ACTIONS
-    needs_domains = ("versioning",) if action in VERSIONING_ONLY_ACTIONS else needs_team or action in domain_actions
-    db = connect(root, database, include_domains=needs_domains, include_team=needs_team)
+    needs_compatibility = action in compatibility_action_names() or action in integrated_action_names()
+    needs_domains = ("versioning",) if action in VERSIONING_ONLY_ACTIONS else needs_compatibility or action in domain_actions
+    db = connect(root, database, include_domains=needs_domains, include_compatibility=needs_compatibility)
     now = int(time.time() * 1000)
     if action == "catalog_sync":
         try:
@@ -9614,13 +8675,13 @@ def mutate(root: str, database: str, action: str, payload: dict):
         retired = db.execute("SELECT id FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],)).fetchone()
         if retired is not None:
             # Most project creation only needs the catalog. Reusing a retired
-            # name also removes detached media/team ownership, so reopen with
+            # name also removes detached domain ownership, so reopen with
             # those stores attached only for this conflict path.
             db.close()
-            db = connect(root, database, include_team=True)
+            db = connect(root, database, include_compatibility=True)
             retired = db.execute("SELECT id FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],)).fetchone()
             if retired is not None:
-                delete_team_project_rows(db, retired["id"])
+                run_compatibility_hooks("purge_project_rows", db, retired["id"])
                 db.execute("DELETE FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],))
         db.execute(
             "INSERT INTO projects(id,name,status,relative_path,filesystem_id,created_at,updated_at,extra_json) VALUES(?,?,?,?,?,?,?,?)",
@@ -9964,70 +9025,8 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = media_record_compare(db, payload)
         db.close()
         return result
-    elif action == "team_patch_list":
-        result = team_patch_list(db, payload)
-        db.close()
-        return result
-    elif action == "team_project_workspace":
-        result = team_project_workspace(root, db, payload)
-        db.close()
-        return result
-    elif action == "team_project_register_photo":
-        result = team_project_register_photo(db, payload)
-        db.close()
-        return result
-    elif action == "team_project_unregister_photo":
-        result = team_project_unregister_photo(db, payload)
-        db.close()
-        return result
-    elif action == "team_identity_save":
-        result = team_identity_save(db, payload)
-        db.close()
-        return result
-    elif action == "team_identity_assign":
-        result = team_identity_assign(db, payload)
-        db.close()
-        return result
-    elif action == "team_identity_confirm_group":
-        result = team_identity_confirm_group(db, payload)
-        db.close()
-        return result
-    elif action == "team_identity_complete":
-        result = team_identity_complete(db, payload)
-        db.close()
-        return result
-    elif action == "team_identity_delete":
-        result = team_identity_delete(db, payload)
-        db.close()
-        return result
-    elif action == "team_person_exclusion_list":
-        result = team_person_exclusion_list(db, payload)
-        db.close()
-        return result
-    elif action == "team_person_exclusion_add":
-        result = team_person_exclusion_add(db, payload)
-        db.close()
-        return result
-    elif action == "team_person_exclusion_clear":
-        result = team_person_exclusion_clear(db, payload)
-        db.close()
-        return result
-    elif action == "team_patch_replace":
-        result = team_patch_replace(db, payload)
-        db.close()
-        return result
-    elif action == "team_patch_update":
-        result = team_patch_update(db, payload)
-        db.close()
-        return result
-    elif action == "team_patch_delete":
-        result = team_patch_delete(db, payload)
-        db.close()
-        return result
-    elif action == "team_patch_cleanup":
-        result = team_patch_cleanup(db, payload)
-    elif action == "team_project_purge":
-        result = team_project_purge(db, payload)
+    elif action in compatibility_action_names():
+        result = dispatch_compatibility_action(action, root, db, payload)
         db.close()
         return result
     elif action == "undo_record_add":

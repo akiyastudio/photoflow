@@ -24,7 +24,9 @@ const LEGACY_HOST_CAPABILITIES = Object.freeze([
 ]);
 const LEGACY_LONG_RUNNING_METHODS = Object.freeze(['team.workflow.generate.v1', 'team.workflow.return-batch.v1', 'team.patch.return-batch.v1']);
 const LEGACY_COALESCED_READ_METHODS = Object.freeze(['team.project.get.v1', 'component.settings.get.v1', 'component.advanced.preflight.v1']);
-const LEGACY_MERGED_PYTHON_TOOLS = Object.freeze(['team_retouch_db']);
+const LEGACY_PYTHON_TOOL_ENTRIES = Object.freeze({
+  team_retouch_db: Object.freeze(['compatibility', 'team_retouch_v1', 'database_tool.py']),
+});
 const LEGACY_VIEW_EVENT_CHANNELS = Object.freeze({
   'workflow.progress': 'workspace-team-workflow-progress',
   'patch.return-batch.progress': 'workspace-team-patch-return-batch-progress',
@@ -102,7 +104,7 @@ module.exports = {
   LEGACY_HOST_CAPABILITIES,
   LEGACY_LONG_RUNNING_METHODS,
   LEGACY_COALESCED_READ_METHODS,
-  LEGACY_MERGED_PYTHON_TOOLS,
+  LEGACY_PYTHON_TOOL_ENTRIES,
   LEGACY_PLUGIN_DEFINITIONS,
   LEGACY_PRELOAD_EVENTS,
   LEGACY_VIEW_EVENT_CHANNELS,

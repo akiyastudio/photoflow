@@ -1,6 +1,8 @@
 import importlib
 import sys
 
+from compatibility.registry import tool_modules
+
 
 TOOLS = {
     "catch": "catch",
@@ -15,9 +17,9 @@ TOOLS = {
     "video_preview": "video_preview",
     "workspace_db": "workspace_db",
     "operations_db": "operations_db",
-    "team_retouch_db": "team_retouch_db",
     "backup_db": "backup_db",
 }
+TOOLS.update(tool_modules())
 
 
 def main(args_list):

@@ -11,6 +11,7 @@ const { createWorkspaceRepository } = require('../electron/repositories/workspac
 const { createMediaRepository } = require('../electron/repositories/media-repository.cjs');
 const { createOperationsRepository } = require('../electron/repositories/operations-repository.cjs');
 const { createBackupService, safeDestination, STORE_DIRECTORY } = require('../electron/services/backup-service.cjs');
+const { LEGACY_PYTHON_TOOL_ENTRIES } = require('../electron/compatibility/component-v1-metadata.cjs');
 
 const waitForCoordinatorQueue = async (coordinator, minimum, timeoutMs = 5000) => {
   const deadline = Date.now() + timeoutMs;
@@ -22,7 +23,10 @@ const waitForCoordinatorQueue = async (coordinator, minimum, timeoutMs = 5000) =
 
 const runPython = (script, args, timeoutMs = 120000) => new Promise((resolve, reject) => {
   const executable = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
-  const child = spawn(executable, [path.join(__dirname, '..', 'python', script), ...args], {
+  const baseName = path.basename(script, '.py');
+  const developmentEntry = LEGACY_PYTHON_TOOL_ENTRIES[baseName];
+  const scriptPath = developmentEntry ? path.join(__dirname, '..', 'python', ...developmentEntry) : path.join(__dirname, '..', 'python', script);
+  const child = spawn(executable, [scriptPath, ...args], {
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe'],
   });

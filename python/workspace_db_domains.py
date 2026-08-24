@@ -1,5 +1,7 @@
 """Stable workspace database action catalog grouped by application domain."""
 
+from compatibility.registry import action_names as compatibility_action_names
+
 CATALOG_ACTIONS = (
     "catalog_sync", "maintenance_run", "add", "status", "archive_project", "unarchive_project",
     "rename", "delete", "restore_project", "deleted_projects_list", "deleted_project_cleanup_plan",
@@ -35,15 +37,9 @@ VERSIONING_ONLY_ACTIONS = frozenset((
     "batch_list", "progress_snapshot", "version_graph_edge_list",
     "version_tree_layout_get", "version_tree_layout_save",
 ))
-TEAM_ACTIONS = (
-    "team_patch_list", "team_project_workspace", "team_project_register_photo", "team_project_unregister_photo",
-    "team_identity_save", "team_identity_assign", "team_identity_confirm_group", "team_identity_complete",
-    "team_identity_delete", "team_person_exclusion_list", "team_person_exclusion_add", "team_person_exclusion_clear",
-    "team_patch_replace", "team_patch_update", "team_patch_delete", "team_patch_cleanup", "team_project_purge",
-)
 UNDO_ACTIONS = ("undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable")
 
-ALL_ACTIONS = ("init", *CATALOG_ACTIONS, *MEDIA_ACTIONS, *PROGRESS_ACTIONS, *TRACKING_ACTIONS, *TEAM_ACTIONS, *UNDO_ACTIONS)
+ALL_ACTIONS = ("init", *CATALOG_ACTIONS, *MEDIA_ACTIONS, *PROGRESS_ACTIONS, *TRACKING_ACTIONS, *compatibility_action_names(), *UNDO_ACTIONS)
 READ_ONLY_ACTIONS = frozenset((
     "progress_snapshot", "tracking_session_get", "tracking_commit_resources", "version_tree_layout_get",
     "media_sync_prepare", "progress_stale_prepare",

@@ -600,7 +600,7 @@ def test_media_workflow_graph_cleanup(root: Path) -> None:
     progress_path.mkdir()
     team_path.mkdir()
     import_path.mkdir()
-    db = connect(str(workspace), str(root / "workflow-cleanup.sqlite3"))
+    db = connect(str(workspace), str(root / "workflow-cleanup.sqlite3"), include_compatibility=True)
     db.execute(
         "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
         ("workflow-cleanup-project", "Project", "后期中", "Project", 1, 1),
@@ -715,7 +715,7 @@ def test_team_return_missing_reconciliation(root: Path) -> None:
     returned = root / "workspace-data" / "team-retouch" / "uploads" / "returned.jpg"
     for file_path, content in ((original, b"original"), (patch, b"patch"), (returned, b"returned")):
         write_media(file_path, content)
-    db = connect(str(workspace), str(root / "team-return.sqlite3"))
+    db = connect(str(workspace), str(root / "team-return.sqlite3"), include_compatibility=True)
     now = 1
     db.execute(
         "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
@@ -1049,7 +1049,7 @@ def test_version_and_team_cleanup(root: Path) -> None:
     originals = [project / "one.jpg", project / "two.jpg"]
     for index, original in enumerate(originals):
         write_media(original, f"original-{index}".encode())
-    db = connect(str(workspace), str(root / "workspace.sqlite3"))
+    db = connect(str(workspace), str(root / "workspace.sqlite3"), include_compatibility=True)
     now = 1
     db.execute(
         "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",

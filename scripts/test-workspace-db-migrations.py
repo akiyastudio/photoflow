@@ -138,7 +138,7 @@ def test_existing_v1_can_receive_v0(temp_root):
         output.write(b"returned-jpeg-v1")
 
     database = os.path.join(temp_root, "merge-workspace.sqlite3")
-    db = workspace_db.connect(workspace_root, database, include_team=True)
+    db = workspace_db.connect(workspace_root, database, include_compatibility=True)
     now = int(time.time() * 1000)
     project_id = "merge-project-id"
     db.execute(
@@ -198,7 +198,7 @@ def test_existing_v1_can_receive_v0(temp_root):
         workspace_db.mutate(workspace_root, database, "batch_commit_compare", payload)
     except ValueError:
         failed = True
-    db = workspace_db.connect(workspace_root, database, include_team=True)
+    db = workspace_db.connect(workspace_root, database, include_compatibility=True)
     assert failed, "a bad later match must fail the batch"
     assert db.execute("SELECT photo_id FROM versions WHERE id=?", (v1["id"],)).fetchone()[0] == source_photo_id
     assert db.execute("SELECT photo_id FROM team_patch_tasks WHERE id='merge-task'").fetchone()[0] == source_photo_id
@@ -209,7 +209,7 @@ def test_existing_v1_can_receive_v0(temp_root):
     payload["matches"] = payload["matches"][:1]
     db.close()
     result = workspace_db.mutate(workspace_root, database, "batch_commit_compare", payload)
-    db = workspace_db.connect(workspace_root, database, include_team=True)
+    db = workspace_db.connect(workspace_root, database, include_compatibility=True)
     assert result["success"] is True
     moved_v1 = db.execute("SELECT * FROM versions WHERE id=?", (v1["id"],)).fetchone()
     assert moved_v1["photo_id"] == v0["photo_id"]
@@ -953,6 +953,8 @@ def test_schema_30_repairs_legacy_parentless_progress_parent(temp_root):
         assert leaf["tracking_enabled"] == 0 and leaf["tracking_state"] == "disabled"
         assert upgraded.execute("SELECT source_progress_id FROM version_graph_edges WHERE id='schema30-preview-edge'").fetchone()[0] == "schema30-root"
         assert upgraded.execute("SELECT source_progress_id FROM version_graph_edges WHERE id='schema30-workflow-edge'").fetchone()[0] == "schema30-child"
+        workflow_metadata = json.loads(upgraded.execute("SELECT source_metadata_json FROM progress_folders WHERE id='schema30-workflow'").fetchone()[0])
+        assert workflow_metadata["parentCapability"] == "workflow-input" and workflow_metadata["componentId"] == "team-retouch"
         assert upgraded.execute("SELECT value FROM meta WHERE key='legacy_progress_parent_repair_revision'").fetchone()[0] == workspace_db.LEGACY_PROGRESS_PARENT_REPAIR_REVISION
         workspace_db._check_integrity(upgraded, force=True)
         snapshot = [tuple(row) for row in upgraded.execute("SELECT * FROM progress_folders ORDER BY id")]
@@ -1001,6 +1003,7 @@ def test_schema_31_detached_repairs_deleted_project_and_clean_db_is_stable(temp_
         )
     clean_snapshot = [tuple(row) for row in db.execute("SELECT * FROM progress_folders ORDER BY id")]
     db.execute("DELETE FROM meta WHERE key='legacy_progress_parent_repair_revision'")
+    db.execute("UPDATE meta SET value='31' WHERE key='schema_version'")
     db.commit()
     db.close()
 
@@ -1045,9 +1048,19 @@ def test_schema_31_detached_repairs_deleted_project_and_clean_db_is_stable(temp_
         assert leaf["node_role"] == "progress" and leaf["parent_progress_id"] is None
         assert repaired.execute("SELECT is_deleted FROM projects WHERE id='deleted-parent-project'").fetchone()[0] == 1
         assert repaired.execute("SELECT 1 FROM versioning.sqlite_master WHERE type='trigger' AND name='progress_folders_parent_validate_insert'").fetchone()
+        workflow_metadata_json = repaired.execute("SELECT source_metadata_json FROM progress_folders WHERE id='detached31-workflow'").fetchone()[0]
+        workflow_metadata = json.loads(workflow_metadata_json)
+        assert workflow_metadata["parentCapability"] == "workflow-input" and workflow_metadata["componentId"] == "team-retouch"
         workspace_db._check_integrity(repaired, force=True)
     finally:
         repaired.close()
+
+    reopened = workspace_db.connect(workspace_root, database, include_domains=True)
+    try:
+        assert reopened.execute("SELECT source_metadata_json FROM progress_folders WHERE id='detached31-workflow'").fetchone()[0] == workflow_metadata_json
+        assert reopened.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
+    finally:
+        reopened.close()
 
 
 def main():
@@ -1070,8 +1083,7 @@ def main():
         assert db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_tree_layouts'").fetchone()
         assert db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_tree_node_positions'").fetchone()
         assert db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='version_graph_edges'").fetchone()
-        assignment_columns = {row[1] for row in db.execute("PRAGMA table_info(team_person_assignments)").fetchall()}
-        assert {"completion_kind", "edited_patch_path", "return_missing", "return_missing_since", "completed_at"} <= assignment_columns
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name LIKE 'team_%'").fetchone() is None
         progress_columns = {row[1] for row in db.execute("PRAGMA table_info(progress_folders)").fetchall()}
         assert {"node_role", "relation_kind", "tracking_state", "rename_from_parent",
                 "copy_missing_from_parent", "last_tracked_at", "tracking_snapshot_json",

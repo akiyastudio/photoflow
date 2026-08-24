@@ -48,15 +48,16 @@ Optional UI components follow the separate [Component Host V1 contract](./COMPON
 - `electron/component-registry.cjs`: optional packaged component discovery.
 - `python/workspace_db.py`: the catalog/media/version worker. Stable action
   groups live in `workspace_db_domains.py` and schema migrations live in
-  `workspace_db_migrations.py`. Team-retouch tables are attached from their
-  owned database for compatibility while callers migrate to a dedicated
-  repository; the main database no longer contains those tables.
+  `workspace_db_migrations.py`. Deprecated domains attach through the generic
+  `python/compatibility/registry.py`; the main database no longer contains
+  component-owned tables or action dispatch.
 - `python/operations_db.py`: the file-operations journal worker. It owns the
   persistent undo journal and imports legacy `undo_records` once. Deleted media
   bytes are never stored in SQLite.
-- `python/team_retouch_storage.py`: the physical team-retouch schema, legacy
-  extraction, and attached-store adapter. Snapshot and restore commands live in
-  `team_retouch_db.py`.
+- `python/compatibility/team_retouch_v1/`: the deprecated V1 physical schema,
+  legacy extraction, attached-store adapter, workspace actions, and snapshot /
+  restore CLI. Development and packaged runtimes discover it through generic
+  compatibility metadata and registries.
 - `python/tools.py`: source entry point for the shared packaged runtime,
   published as `PhotoFlowImportWorker` (`PhotoFlowImportWorker.exe` on Windows),
   for lightweight Python commands, the thumbnail image server, the built-in

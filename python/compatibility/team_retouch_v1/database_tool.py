@@ -3,9 +3,15 @@
 import argparse
 import json
 import sys
+from pathlib import Path
+
+if __package__:
+    from .storage import restore_project, snapshot
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from compatibility.team_retouch_v1.storage import restore_project, snapshot
 
 from domain_recovery import restore_workspace as restore_domain_workspace
-from team_retouch_storage import restore_project, snapshot
 
 
 def _replacements(args):

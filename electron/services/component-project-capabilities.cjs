@@ -731,6 +731,22 @@ const registerComponentProjectCapabilities = ({
     if (folderPath && insideOrEqual(path, scope.projectRoot, folderPath)) result.contentRef = { relativeDirectory: normalizeRelativePath(path.relative(scope.projectRoot, folderPath)) };
     return result;
   };
+  const progressSourceMetadata = (value, componentId) => {
+    if (value !== undefined && (!value || typeof value !== 'object' || Array.isArray(value))) throw hostError(CODES.INVALID_REQUEST, 'Progress sourceMetadata must be an object');
+    const supplied = value || {};
+    const allowed = new Set(['category', 'role', 'displayName', 'componentId', 'parentCapability']);
+    if (Object.keys(supplied).some(key => !allowed.has(key))) throw hostError(CODES.INVALID_REQUEST, 'Progress sourceMetadata has an unknown field');
+    const normalized = { category: 'progress', parentCapability: 'structural' };
+    for (const key of ['category', 'role', 'displayName']) if (supplied[key] !== undefined) {
+      if (typeof supplied[key] !== 'string' || !supplied[key].trim() || supplied[key].length > 128 || /[\x00-\x1f\x7f]/.test(supplied[key])) throw hostError(CODES.INVALID_REQUEST, `Invalid progress sourceMetadata ${key}`);
+      normalized[key] = supplied[key].trim();
+    }
+    if (supplied.parentCapability !== undefined) {
+      if (!['structural', 'workflow-input', 'none'].includes(supplied.parentCapability)) throw hostError(CODES.INVALID_REQUEST, 'Invalid progress sourceMetadata parentCapability');
+      normalized.parentCapability = supplied.parentCapability;
+    }
+    return { ...normalized, componentId };
+  };
   broker.register('project.progress.v2', async (payload, context, descriptor) => {
     const scope = bound(context, descriptor);
     if (payload.action === 'list') {
@@ -746,6 +762,7 @@ const registerComponentProjectCapabilities = ({
     if (!['image', 'video'].includes(mediaKind)) throw hostError(CODES.INVALID_REQUEST, 'Progress mediaKind must be image or video');
     const versionKey = String(payload.versionKey || '').trim(); const parentProgressId = String(payload.parentProgressId || '').trim();
     if (!versionKey || versionKey.length > 128 || !parentProgressId) throw hostError(CODES.INVALID_REQUEST, 'Progress versionKey and parentProgressId are required');
+    const sourceMetadata = progressSourceMetadata(payload.sourceMetadata, descriptor.componentId);
     const relativePath = assertRelativePath(path, payload.relativePath, 'progress relativePath');
     const resolution = projectVirtualPaths?.resolve ? projectVirtualPaths.resolve(scope.projectRoot, relativePath, { externalRootMode: 'target' }) : { physicalPath: path.resolve(scope.projectRoot, relativePath), viaExternalLink: false };
     const folderPath = path.resolve(resolution.physicalPath);
@@ -759,7 +776,7 @@ const registerComponentProjectCapabilities = ({
     try {
       registered = await versionService.registerProgressWithGraph(scope.workspaceRoot, {
         projectName: context.projectName,
-        progress: { mediaKind, versionKey, parentProgressId, displayName: String(payload.displayName || path.basename(folderPath)).slice(0, 160), folderPath, externalLinkRelativePath: resolution.viaExternalLink ? relativePath : undefined, relationKind: 'main', trackingEnabled: payload.trackingEnabled === true },
+        progress: { mediaKind, versionKey, parentProgressId, displayName: String(payload.displayName || path.basename(folderPath)).slice(0, 160), folderPath, externalLinkRelativePath: resolution.viaExternalLink ? relativePath : undefined, sourceMetadata, relationKind: 'main', trackingEnabled: payload.trackingEnabled === true },
         workflowInputProgressIds: Array.isArray(payload.sourceProgressIds) ? [...new Set(payload.sourceProgressIds.map(String).filter(Boolean))].slice(0, 2000) : [],
       });
     } catch (error) { if (createdDirectory) await fs.promises.rmdir(folderPath).catch(() => undefined); throw error; }

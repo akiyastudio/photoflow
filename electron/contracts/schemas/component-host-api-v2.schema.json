@@ -23,6 +23,7 @@
     "uuid": { "type": "string", "pattern": "^[A-Fa-f0-9-]{36}$" },
     "relativePath": { "type": "string", "minLength": 1, "maxLength": 1024, "not": { "pattern": "(^[\\/]|^[A-Za-z]:|(^|[\\/])\\.\\.([\\/]|$))" } },
     "jsonObject": { "type": "object" },
+    "versionSourceMetadata": { "type": "object", "additionalProperties": false, "properties": { "category": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001F\\u007F]+$" }, "role": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001F\\u007F]+$" }, "displayName": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001F\\u007F]+$" }, "componentId": { "$ref": "#/$defs/id" }, "parentCapability": { "enum": ["structural", "workflow-input", "none"] } } },
     "apiResult": { "type": "object", "required": ["apiVersion"], "properties": { "apiVersion": { "const": 2 } } },
     "mediaPage": { "type": "object", "additionalProperties": false, "required": ["method", "payload", "result"], "properties": {
       "method": { "const": "project.media.page.v2" },
@@ -74,7 +75,7 @@
       "method": { "const": "project.progress.v2" },
       "payload": { "oneOf": [
         { "type": "object", "additionalProperties": false, "required": ["action"], "properties": { "action": { "const": "list" }, "includeMissing": { "type": "boolean" } } },
-        { "type": "object", "additionalProperties": false, "required": ["action", "relativePath", "mediaKind", "versionKey", "parentProgressId"], "properties": { "action": { "const": "create" }, "relativePath": { "$ref": "#/$defs/relativePath" }, "mediaKind": { "enum": ["image", "video"] }, "versionKey": { "type": "string" }, "parentProgressId": { "type": "string" }, "displayName": { "type": "string" }, "trackingEnabled": { "type": "boolean" }, "sourceProgressIds": { "type": "array", "items": { "type": "string" } } } },
+        { "type": "object", "additionalProperties": false, "required": ["action", "relativePath", "mediaKind", "versionKey", "parentProgressId"], "properties": { "action": { "const": "create" }, "relativePath": { "$ref": "#/$defs/relativePath" }, "mediaKind": { "enum": ["image", "video"] }, "versionKey": { "type": "string" }, "parentProgressId": { "type": "string" }, "displayName": { "type": "string" }, "trackingEnabled": { "type": "boolean" }, "sourceMetadata": { "$ref": "#/$defs/versionSourceMetadata" }, "sourceProgressIds": { "type": "array", "items": { "type": "string" } } } },
         { "type": "object", "additionalProperties": false, "required": ["action", "childProgressId", "parentProgressId"], "properties": { "action": { "const": "relate" }, "childProgressId": { "type": "string" }, "parentProgressId": { "type": "string" }, "expectedUpdatedAt": { "type": "number" } } }
       ] },
       "result": { "allOf": [{ "$ref": "#/$defs/apiResult" }, { "type": "object" }] }

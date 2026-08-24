@@ -83,7 +83,8 @@ def audit_scope(
     allowed: set[str] | None = None,
     local_paths: list[Path] | None = None,
 ) -> list[str]:
-    local_modules = {path.stem for path in (local_paths or paths)}
+    scoped_paths = local_paths or paths
+    local_modules = {path.stem for path in scoped_paths} | {path.parent.name for path in scoped_paths}
     failures = []
     for import_name in sorted(third_party_imports(paths, local_modules)):
         distribution = IMPORT_DISTRIBUTIONS.get(import_name, import_name)
@@ -109,12 +110,9 @@ def verify_installed(requirements: dict[str, Requirement]) -> list[str]:
 
 def verify_worker_imports() -> list[str]:
     python_root = ROOT / "python"
-    modules = [
-        "catch", "classify", "cut_video", "ffmpeg_transcode", "png_to_jpg",
-        "raw_decoder", "rename", "thumbnail_db", "thumbnail_image", "video_preview",
-        "workspace_db", "operations_db", "team_retouch_db", "backup_db", "research",
-        "office_media_extract", "screenshot_main_image",
-    ]
+    sys.path.insert(0, str(python_root))
+    from tools import TOOLS
+    modules = sorted(set(TOOLS.values()) | {"research", "office_media_extract", "screenshot_main_image"})
     failures = []
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(python_root)
@@ -139,25 +137,17 @@ def main() -> None:
     root_requirements = read_requirements(ROOT / "requirements.txt")
     failures = verify_installed(root_requirements)
     if not quick:
-        component_requirements = read_requirements(ROOT / "extensions" / "team-retouch" / "requirements.txt")
         export_requirements = read_requirements(ROOT / "requirements-model-export.txt")
 
-        python_paths = sorted((ROOT / "python").glob("*.py"))
+        python_paths = sorted((ROOT / "python").rglob("*.py"))
         script_paths = sorted((ROOT / "scripts").glob("*.py"))
-        component_root = ROOT / "extensions" / "team-retouch"
-        component_paths = sorted(component_root.glob("*.py"))
-        advanced_paths = sorted((component_root / "advanced").glob("*.py"))
-        export_paths = sorted((ROOT / "scripts").glob("export-team-retouch-*.py"))
-        all_local_paths = [*python_paths, *script_paths, *component_paths, *advanced_paths]
+        all_local_paths = sorted(ROOT.rglob("*.py"))
 
         failures += audit_scope("主 Python worker", python_paths, root_requirements)
-        failures += audit_scope("团片组件", component_paths, component_requirements)
-        failures += audit_scope("模型导出工具", export_paths, export_requirements)
-        failures += audit_scope("高级 WSL 后端", advanced_paths, {}, ADVANCED_EXTERNAL_IMPORTS)
         failures += audit_scope(
             "开发与测试脚本",
             script_paths,
-            root_requirements | component_requirements | export_requirements,
+            root_requirements | export_requirements,
             local_paths=all_local_paths,
         )
         failures += verify_worker_imports()

@@ -20,6 +20,12 @@ const electronCoreSource = fs.readdirSync(path.join(root, 'electron'), { recursi
   .map(name => read(path.join('electron', name)))
   .join('\n');
 assert(!/team-retouch|team_patch|团片|edited_patch_path|identity\.complete|team\.|workspace-team|team_/i.test(electronCoreSource), 'Electron core must contain no component-owned identifiers, RPC methods, event channels, or tool names outside compatibility');
+const pythonCoreFiles = fs.readdirSync(path.join(root, 'python'), { recursive: true })
+  .filter(name => String(name).endsWith('.py') && !String(name).replace(/\\/g, '/').startsWith('compatibility/'));
+const forbiddenPythonCompatibilitySemantics = /team-retouch|team_retouch|team_patch|team_workspace|team-workspace|team retouch|team store|team artifacts|workspace-team|团片|edited_patch_path|identity\.complete/i;
+assert(!pythonCoreFiles.some(name => forbiddenPythonCompatibilitySemantics.test(String(name))), 'Python core paths must not retain deprecated component identifiers outside compatibility');
+const pythonCoreSource = pythonCoreFiles.map(name => read(path.join('python', name))).join('\n');
+assert(!forbiddenPythonCompatibilitySemantics.test(pythonCoreSource), 'Python core must contain no deprecated component tables, paths, actions, or fields outside compatibility');
 
 const main = read('electron/main.cjs');
 const preload = read('electron/preload.cjs');
@@ -65,6 +71,9 @@ const componentTemplate = JSON.parse(read('extensions/team-retouch/component.tem
 const { COMPONENT_RPC_METHODS } = require('../electron/compatibility/component-team-retouch-rpc-v1.cjs');
 const componentRenderer = read('extensions/team-retouch/renderer/src/main.tsx') + read('extensions/team-retouch/renderer/src/interaction-model.ts');
 const componentSdk = read('extensions/team-retouch/renderer/src/sdk.ts');
+const publicComponentSdkTypes = read('component-sdk/index.d.ts');
+const componentHostApiSchema = read('electron/contracts/schemas/component-host-api-v2.schema.json');
+const pluginHostApiDocs = read('docs/PLUGIN_HOST_API.md');
 const fileEntryInteractionModel = read('src/features/workspace/file-entry-interaction-model.ts');
 const fileEntrySortModel = read('src/features/workspace/file-entry-sort-model.ts');
 const folderAlphabetFilterModel = read('src/features/workspace/folder-alphabet-filter-model.ts');
@@ -122,8 +131,8 @@ const backupService = read('electron/services/backup-service.cjs');
 const legacyStorageAdoption = read('electron/compatibility/component-storage-v1-adoption.cjs');
 const backupDb = read('python/backup_db.py');
 const domainRecovery = read('python/domain_recovery.py');
-const teamRetouchStorage = read('python/team_retouch_storage.py');
-const teamRetouchDb = read('python/team_retouch_db.py');
+const teamRetouchStorage = read('python/compatibility/team_retouch_v1/storage.py');
+const teamRetouchDb = read('python/compatibility/team_retouch_v1/database_tool.py');
 const mediaRatingService = read('electron/services/media-rating-service.cjs');
 const mediaRatingIpc = read('electron/modules/media-rating-ipc.cjs');
 const imageThumbnailRuntime = read('electron/services/image-thumbnail-runtime.cjs');
@@ -145,6 +154,11 @@ assert(componentProjectCapabilities.includes("'component.media.v2'") && componen
   && componentProjectCapabilities.includes("kind: 'component-output-commit'") && componentProjectCapabilities.includes("state: 'prepared'")
   && systemIpc.includes("register('component.lifecycle.v2'") && read('electron/services/component-lifecycle-service.cjs').includes("'component.lifecycle.manage'"),
 'Component Host V2 infrastructure must retain persistent output journals, private media/progress capabilities, and separately authorized lifecycle management');
+assert(publicComponentSdkTypes.includes('sourceMetadata?: VersionSourceMetadata')
+  && componentHostApiSchema.includes('"versionSourceMetadata"')
+  && componentProjectCapabilities.includes("parentCapability: 'structural'")
+  && pluginHostApiDocs.includes('omitted or `{}` metadata'),
+'project progress source metadata defaults and constraints must stay aligned across Host, schema, SDK, and documentation');
 assert(!read('electron/services/version-service.cjs').includes('Team') && !read('electron/services/version-service.cjs').includes('team'), 'generic version service must not expose component-owned business operations');
 assert.equal((versionsIpc.match(/ipcMain\.handle\('workspace-team-/g) || []).length, 0, 'versions IPC must not retain legacy team handlers');
 assert(componentTemplate.componentHost.service.rpcMethods.filter(method => method.startsWith('team.')).every(method => !COMPONENT_RPC_METHODS[method]), 'manifest-owned team RPC methods must have no legacy mapping');
@@ -197,6 +211,12 @@ assert(toolViews.includes('setShouldDeleteSourceAfterImport(deleteSourceAfterImp
 assert(!projectNavigator.includes('从 SD 卡导入</button>') && !projectNavigator.includes('从文件名选片</button>'), 'project-list context menus must not duplicate project import tools');
 const inspirationTools = read('python/inspiration_tools.py');
 const pythonBuild = read('scripts/build-python.cjs');
+assert(pythonBuild.includes("join(root, 'python', 'compatibility')") && pythonBuild.includes('compatibilityHiddenImports')
+  && !forbiddenPythonCompatibilitySemantics.test(pythonBuild)
+  && !forbiddenPythonCompatibilitySemantics.test(pythonEnvironmentVerifier)
+  && !fs.existsSync(path.join(root, 'python', 'team_retouch_db.py'))
+  && !fs.existsSync(path.join(root, 'python', 'team_retouch_storage.py')),
+'the main Python build/verifier must discover compatibility packages without component IDs or deprecated root entry shims');
 const appDialogProvider = read('src/components/AppDialogProvider.tsx');
 const indexCss = read('src/index.css');
 assert(app.includes("titlebarTabDragProps(projectTabId(page.id))") && app.includes("titlebarTabDragProps(workspaceToolTabId(tab.ownerPageId, tab.kind))") && app.includes("titlebarTabDragProps('settings')") && titlebarTabOrder.includes("window.addEventListener('pointermove', move") && titlebarTabOrder.includes('setOrder(current =>') && titlebarTabOrder.includes("window.localStorage.setItem(TITLEBAR_TAB_ORDER_KEY"), 'visible title-bar tabs must support pointer reordering and persist their order');

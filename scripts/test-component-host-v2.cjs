@@ -38,7 +38,7 @@ const databaseClient = {
     if (action === 'media_get_photo') return bundles.get(String(payload.photoId));
     if (action === 'media_get') return path.resolve(payload.filePath) === path.resolve(externalImagePath) ? externalBundle : bundle;
     if (action === 'progress_list') return { success: true, progressFolders: [{ id: 'progress-original', mediaKind: 'image', nodeRole: 'original', folderPath: projectRoot }], edges: [] };
-    if (action === 'progress_register_with_graph') return { success: true, progressFolder: { id: 'progress-created', mediaKind: payload.progress.mediaKind, nodeRole: 'progress', folderPath: payload.progress.folderPath }, edges: [{ id: 'edge-created', sourceProgressId: payload.progress.parentProgressId, targetProgressId: 'progress-created' }] };
+    if (action === 'progress_register_with_graph') return { success: true, progressFolder: { id: 'progress-created', mediaKind: payload.progress.mediaKind, nodeRole: 'progress', folderPath: payload.progress.folderPath, sourceMetadata: payload.progress.sourceMetadata }, edges: [{ id: 'edge-created', sourceProgressId: payload.progress.parentProgressId, targetProgressId: 'progress-created' }] };
     if (action === 'progress_relation_update') return { success: true, childProgressId: payload.childProgressId, parentProgressId: payload.parentProgressId };
     if (action === 'media_create_version') {
       const target = bundles.get(String(payload.photoId));
@@ -196,8 +196,27 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   assert(openedPaths.includes(privateMediaPath));
   const listedProgress = await broker.invoke(descriptor, 'project.progress.v2', { action: 'list' }, context);
   assert.equal(listedProgress.progress[0].folderPath, undefined, 'progress responses do not expose host paths');
-  const createdProgress = await broker.invoke(descriptor, 'project.progress.v2', { action: 'create', relativePath: 'progress-v2', mediaKind: 'image', versionKey: '2', parentProgressId: 'progress-original', sourceProgressIds: ['progress-original'] }, context);
+  const createdProgress = await broker.invoke(descriptor, 'project.progress.v2', { action: 'create', relativePath: 'progress-v2', mediaKind: 'image', versionKey: '2', parentProgressId: 'progress-original', sourceMetadata: { category: 'progress', role: 'component-output', displayName: '组件进度', componentId: 'forged-component' }, sourceProgressIds: ['progress-original'] }, context);
   assert.equal(createdProgress.progress.id, 'progress-created');
+  assert.deepStrictEqual(createdProgress.progress.sourceMetadata, { category: 'progress', role: 'component-output', displayName: '组件进度', parentCapability: 'structural', componentId: descriptor.componentId });
+  await broker.invoke(descriptor, 'project.progress.v2', { action: 'create', relativePath: 'progress-empty-metadata', mediaKind: 'image', versionKey: '3', parentProgressId: 'progress-original', sourceMetadata: {} }, context);
+  const emptyMetadata = calls.filter(call => call.action === 'progress_register_with_graph').at(-1).payload.progress.sourceMetadata;
+  await broker.invoke(descriptor, 'project.progress.v2', { action: 'create', relativePath: 'progress-default-metadata', mediaKind: 'image', versionKey: '4', parentProgressId: 'progress-original' }, context);
+  const defaultMetadata = calls.filter(call => call.action === 'progress_register_with_graph').at(-1).payload.progress.sourceMetadata;
+  assert.deepStrictEqual(emptyMetadata, defaultMetadata);
+  assert.deepStrictEqual(defaultMetadata, { category: 'progress', parentCapability: 'structural', componentId: descriptor.componentId });
+  for (const [relativePath, sourceMetadata] of [
+    ['progress-unknown-metadata', { category: 'progress', unknown: true }],
+    ['progress-nested-metadata', { category: 'progress', role: { nested: true } }],
+    ['progress-long-metadata', { category: 'x'.repeat(129) }],
+    ['progress-control-metadata', { category: 'progress\ninvalid' }],
+  ]) {
+    await assert.rejects(
+      broker.invoke(descriptor, 'project.progress.v2', { action: 'create', relativePath, mediaKind: 'image', versionKey: '5', parentProgressId: 'progress-original', sourceMetadata }, context),
+      /sourceMetadata/,
+    );
+    assert(!fs.existsSync(path.join(projectRoot, relativePath)), 'invalid metadata must be rejected before directory creation');
+  }
   const saved = await broker.invoke(descriptor, 'component.settings.v2', { action: 'replace', settings: { quality: 90 } }, context);
   assert.equal(saved.revision, 1); config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   assert.equal(config.componentSettings[descriptor.componentId].quality, 90);

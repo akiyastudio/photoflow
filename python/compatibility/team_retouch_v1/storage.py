@@ -1,4 +1,4 @@
-"""Physical SQLite storage for the team-retouch bounded context."""
+"""Deprecated physical SQLite storage for Component Host V1."""
 
 import os
 import sqlite3

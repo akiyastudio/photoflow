@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 
 from workspace_domain_storage import DOMAIN_TABLES
+from compatibility.registry import run_hooks as run_compatibility_hooks
 
 
 PATH_COLUMNS = {
@@ -26,11 +27,9 @@ PATH_COLUMNS = {
         "batch_items": ("source_path", "source_path_key"),
     },
     "operations": {},
-    "team-retouch": {
-        "team_patch_tasks": ("patch_path", "mask_path", "edited_patch_path"),
-        "team_person_assignments": ("edited_patch_path",),
-    },
 }
+for extension in run_compatibility_hooks("recovery_declaration"):
+    PATH_COLUMNS.update(extension.get("pathColumns") or {})
 
 
 def _connect(path: str, readonly: bool = False) -> sqlite3.Connection:
@@ -183,7 +182,8 @@ def _copy_filtered(db: sqlite3.Connection, table: str, where: str, values) -> in
 
 
 def _restore_project_in_place(source: str, destination: str, domain: str, project_id: str, peer_source: str = "", replacements=()) -> dict:
-    if domain not in ("media", "versioning", "team-retouch"):
+    compatibility_supported = any(run_compatibility_hooks("recovery_supports", domain))
+    if domain not in ("media", "versioning") and not compatibility_supported:
         raise ValueError("project restore is not supported for this domain")
     db = _connect(destination)
     db.execute("ATTACH DATABASE ? AS source_domain", (os.path.abspath(source),))
@@ -219,16 +219,7 @@ def _restore_project_in_place(source: str, destination: str, domain: str, projec
                 restored += _copy_filtered(db, "versions", f"photo_id IN ({placeholders})", photo_ids)
                 restored += _copy_filtered(db, "version_compare_history", f"photo_id IN ({placeholders})", photo_ids)
         else:
-            existing = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-            for table in ("team_person_exclusions", "team_person_assignments", "team_retouch_photos", "team_person_identities"):
-                if table in existing:
-                    db.execute(f'DELETE FROM "{table}" WHERE project_id=?', (project_id,))
-                    restored += _copy_filtered(db, table, "project_id=?", (project_id,))
-            photo_ids = [row[0] for row in db.execute("SELECT photo_id FROM source_domain.team_retouch_photos WHERE project_id=?", (project_id,)).fetchall()]
-            if photo_ids:
-                placeholders = ",".join("?" for _ in photo_ids)
-                db.execute(f"DELETE FROM team_patch_tasks WHERE photo_id IN ({placeholders})", photo_ids)
-                restored += _copy_filtered(db, "team_patch_tasks", f"photo_id IN ({placeholders})", photo_ids)
+            restored += sum(run_compatibility_hooks("recovery_restore_project", domain, db, project_id, _copy_filtered))
         db.commit()
         _rebase(db, domain, replacements)
     finally:
@@ -276,10 +267,8 @@ def reset_store(destination: str, domain: str) -> dict:
             from operations_db import _connect as connect_operations
             db = connect_operations(staged)
             db.close()
-        elif domain == "team-retouch":
-            from team_retouch_storage import ensure_schema
-            db = ensure_schema(staged)
-            db.close()
+        elif any(run_compatibility_hooks("recovery_reset_store", domain, staged)):
+            pass
         elif domain in DOMAIN_TABLES:
             import workspace_db
             from workspace_domain_storage import attach_and_migrate, database_path_for_workspace_database

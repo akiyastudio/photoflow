@@ -14,7 +14,7 @@ const { ComponentServiceManager } = require('./services/component-service-manage
 const { registerComponentProjectCapabilities } = require('./services/component-project-capabilities.cjs');
 const { COMPONENT_HOST_V1_RPC_REGISTRARS, registerDeprecatedComponentHostV1Capabilities } = require('./compatibility/component-host-v1.cjs');
 const { createComponentRpcIpcProxy } = require('./component-rpc-contract.cjs');
-const { LEGACY_MERGED_PYTHON_TOOLS, legacyDatabasePath } = require('./compatibility/component-v1-metadata.cjs');
+const { LEGACY_PYTHON_TOOL_ENTRIES, legacyDatabasePath } = require('./compatibility/component-v1-metadata.cjs');
 const { registerComponentHostIpc } = require('./modules/component-host-ipc.cjs');
 const { registerComponentIconProtocol } = require('./modules/component-icon-protocol.cjs');
 const { PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
@@ -608,7 +608,7 @@ const loadMainWindowRenderer = () => {
 };
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'ffmpeg_transcode', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'operations_db', 'backup_db', ...LEGACY_MERGED_PYTHON_TOOLS]);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'ffmpeg_transcode', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'operations_db', 'backup_db', ...Object.keys(LEGACY_PYTHON_TOOL_ENTRIES)]);
 const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract', 'screenshot_main_image']);
 
 const getDevelopmentPython = createDevelopmentPythonResolver({ projectRoot });
@@ -646,7 +646,10 @@ const getRunConfig = (scriptName, args) => {
   } else {
     // 【开发环境】使用 python 解释器运行对应的 .py 脚本
     // 脚本路径: python/classify.py
-    const scriptPath = path.join(projectRoot, 'python', `${baseName}.py`);
+    const developmentEntry = LEGACY_PYTHON_TOOL_ENTRIES[baseName];
+    const scriptPath = developmentEntry
+      ? path.join(projectRoot, 'python', ...developmentEntry)
+      : path.join(projectRoot, 'python', `${baseName}.py`);
 
     return {
       command: getDevelopmentPython(),

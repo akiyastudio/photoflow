@@ -12,6 +12,8 @@ import sys
 import uuid
 from pathlib import Path
 
+from compatibility.registry import run_hooks as run_compatibility_hooks
+
 
 PATH_COLUMNS = {
     "photos": ("original_file_path",),
@@ -21,8 +23,6 @@ PATH_COLUMNS = {
     "batch_file_operations": ("source_path", "target_path"),
     "batch_items": ("source_path", "source_path_key"),
     "file_records": ("current_path",),
-    "team_patch_tasks": ("patch_path", "mask_path", "edited_patch_path"),
-    "team_person_assignments": ("edited_patch_path",),
 }
 
 PROJECT_TABLE_ORDER = (
@@ -37,12 +37,10 @@ PROJECT_TABLE_ORDER = (
     "batch_items",
     "file_records",
     "version_compare_history",
-    "team_patch_tasks",
-    "team_retouch_photos",
-    "team_person_identities",
-    "team_person_assignments",
-    "team_person_exclusions",
 )
+for extension in run_compatibility_hooks("backup_declaration"):
+    PATH_COLUMNS.update(extension.get("pathColumns") or {})
+    PROJECT_TABLE_ORDER += tuple(extension.get("projectTables") or ())
 
 
 def connect(path: str, *, readonly: bool = False) -> sqlite3.Connection:
@@ -84,19 +82,16 @@ def snapshot(source: str, destination: str, media: str = "") -> dict:
             )]
             name_hash = hashlib.sha256(row["name"].encode("utf-8")).hexdigest()
             workflow_hash = hashlib.sha256(f'{row["status"]}\0{row["name"]}'.encode("utf-8")).hexdigest()
-            projects.append({
+            project = {
                 "id": row["id"],
                 "name": row["name"],
                 "status": row["status"],
                 "relativePath": row["relative_path"],
                 "extra": json.loads(row["extra_json"] or "{}"),
-                "workspaceDataPrefixes": [f"team-retouch/{photo_id}/" for photo_id in photo_ids],
-                "workspaceDataFiles": [
-                    f"team-retouch/workflows/{workflow_hash}.json",
-                    f"team-retouch/identity-similarities/{name_hash}.json",
-                    f"team-retouch/workflow-settings/{name_hash}.json",
-                ],
-            })
+            }
+            for extension in run_compatibility_hooks("backup_project_metadata", source_db, row, photo_ids, name_hash, workflow_hash):
+                project.update(extension or {})
+            projects.append(project)
         schema = target_db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
         return {"success": True, "schemaVersion": int(schema[0] if schema else 0), "projects": projects}
     finally:
@@ -294,11 +289,8 @@ def restore_project(source: str, destination: str, project_id: str, old_root: st
                         f"INSERT INTO version_compare_history({column_list}) SELECT {column_list} FROM portable.version_compare_history WHERE photo_id IN (SELECT id FROM portable.photos WHERE project_id=?)",
                         (project_id,),
                     )
-                elif table == "team_patch_tasks":
-                    target_db.execute(
-                        f"INSERT INTO team_patch_tasks({column_list}) SELECT {column_list} FROM portable.team_patch_tasks WHERE photo_id IN (SELECT id FROM portable.photos WHERE project_id=?)",
-                        (project_id,),
-                    )
+                elif any(run_compatibility_hooks("backup_restore_project_table", target_db, table, column_list, project_id)):
+                    pass
             target_db.commit()
             target_db.execute("DETACH DATABASE portable")
         except Exception:

@@ -12,6 +12,11 @@ const sharedWorkerName = 'PhotoFlowImportWorker';
 const pythonDistRoot = join(root, 'artifacts', 'python');
 const pythonBuildRoot = join(root, 'artifacts', 'python-build');
 const releaseRoot = join(root, 'artifacts', 'installers');
+const compatibilityRoot = join(root, 'python', 'compatibility');
+const compatibilityHiddenImports = readdirSync(compatibilityRoot, { recursive: true, withFileTypes: true })
+  .filter(entry => entry.isFile() && entry.name.endsWith('.py') && entry.name !== '__init__.py')
+  .map(entry => join(entry.parentPath, entry.name).slice(join(root, 'python').length + 1, -3).replace(/[\\/]/g, '.'))
+  .flatMap(moduleName => ['--hidden-import', moduleName]);
 
 // These workers now share the tools runtime. Remove stale standalone outputs
 // so local release inspection cannot mistake them for packaged resources.
@@ -42,7 +47,8 @@ const result = spawnSync(python, [
   '--hidden-import', 'cut_video', '--hidden-import', 'png_to_jpg', '--hidden-import', 'raw_decoder', '--hidden-import', 'rawpy',
   '--hidden-import', 'rename',
   '--hidden-import', 'thumbnail_db', '--hidden-import', 'thumbnail_image',
-  '--hidden-import', 'video_preview', '--hidden-import', 'workspace_db', '--hidden-import', 'operations_db', '--hidden-import', 'team_retouch_db', '--hidden-import', 'team_retouch_storage', '--hidden-import', 'backup_db',
+  '--hidden-import', 'video_preview', '--hidden-import', 'workspace_db', '--hidden-import', 'operations_db', '--hidden-import', 'backup_db',
+  ...compatibilityHiddenImports,
   'tools.py',
 ], { cwd: join(root, 'python'), stdio: 'inherit' });
 

@@ -88,6 +88,16 @@ const loadCommonJs = (source, localRequire = require) => { const module = { expo
 const versionSourceCompatibility = loadCommonJs(compile('src/compatibility/version-source.ts'));
 const compatibilityRequire = request => request === '../../compatibility/version-source.ts' ? versionSourceCompatibility : require(request);
 const model = loadCommonJs(compile('src/features/versioning/versioning-v2-model.ts'), compatibilityRequire);
+const sourceFixture = overrides => ({ id: 'node', projectId: 'project', mediaKind: 'image', versionKey: '1', nodeRole: 'progress', relationKind: 'main', parentProgressId: 'root', folderMissing: false, trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false, trackingState: 'disabled', ...overrides });
+const ordinarySelection = sourceFixture({ id: 'selection', nodeRole: 'selection', relationKind: 'auxiliary', sourceMetadata: null });
+const ordinaryProgress = sourceFixture({ id: 'progress', sourceMetadata: null });
+const legacyWorkflow = sourceFixture({ id: 'legacy-workflow', nodeRole: 'workflow', relationKind: undefined, parentProgressId: undefined, artifactKind: 'team_workspace', sourceMetadata: null });
+const metadataWorkflow = sourceFixture({ id: 'metadata-workflow', nodeRole: 'workflow', relationKind: undefined, parentProgressId: undefined, artifactKind: 'vendor.workflow', sourceMetadata: { category: 'workflow', displayName: '供应商流程', componentId: 'vendor', parentCapability: 'workflow-input' } });
+assert.equal(model.workflowInputLabel(ordinarySelection), '图片选片');
+assert.equal(model.versionSourceMetadata(ordinaryProgress).parentCapability, 'structural');
+assert.equal(model.workflowInputLabel(legacyWorkflow), '协作');
+assert.equal(model.workflowInputLabel(metadataWorkflow), '供应商流程');
+assert.deepEqual(model.selectableWorkflowInputs([ordinarySelection, ordinaryProgress, legacyWorkflow, metadataWorkflow], 'image').map(item => item.id), ['selection', 'legacy-workflow', 'metadata-workflow']);
 const panelSwitch = loadCommonJs(compile('src/components/PanelSwitch.tsx'));
 const importSourceControls = loadCommonJs(compile('src/components/ImportSourceControls.tsx'), request => request === './PanelSwitch' ? panelSwitch : require(request));
 const panel = loadCommonJs(compile('src/features/versioning/VersionProgressPanel.tsx'), request => request === './versioning-v2-model' ? model : request === '../../components/ImportSourceControls' ? importSourceControls : require(request));
