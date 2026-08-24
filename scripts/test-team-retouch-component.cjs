@@ -15,7 +15,13 @@ const versionsIpc = fs.readFileSync(path.join(root, 'electron', 'modules', 'vers
 const systemIpc = fs.readFileSync(path.join(root, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
 const sha256 = file => require('crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const lifecycleScripts = ['setup-team-retouch-advanced.ps1', 'uninstall-team-retouch-advanced.ps1'];
-for (const name of lifecycleScripts) assert.equal(fs.readFileSync(path.join(root, 'scripts', name)).includes(Buffer.from('\r\n')), false, `${name} must remain LF-only so lifecycle SHA-256 is stable across autocrlf checkouts`);
+for (const name of lifecycleScripts) {
+  const relativePath = `scripts/${name}`; const workingBytes = fs.readFileSync(path.join(root, relativePath));
+  const indexBytes = require('child_process').execFileSync('git', ['show', `:${relativePath}`], { cwd: root, encoding: 'buffer' });
+  assert.equal(workingBytes.includes(Buffer.from('\r\n')), false, `${name} working tree bytes must remain LF-only across autocrlf checkouts`);
+  assert.equal(indexBytes.includes(Buffer.from('\r\n')), false, `${name} Git index blob must be LF-only for fresh checkouts`);
+  assert.deepEqual(indexBytes, workingBytes, `${name} working bytes must exactly match the staged repository blob`);
+}
 
 assert(fs.existsSync(path.join(rendererOutput, 'index.html')), 'independent team-retouch renderer must be built before this test');
 const outputFiles = fs.readdirSync(path.join(rendererOutput, 'assets'));

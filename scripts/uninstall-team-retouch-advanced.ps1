@@ -1,3 +1,4 @@
+# Byte-exact lifecycle payload: keep this file LF-only; the component manifest hashes its raw packaged bytes.
 param([string]$DistroName = 'PhotoFlowNative')
 
 $ErrorActionPreference = 'Stop'
