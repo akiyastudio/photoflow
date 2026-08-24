@@ -62,6 +62,10 @@ const hydrateReviewResult = (result: Json) => {
 };
 const payload = (args: any[]) => { for (let index = args.length - 1; index >= 0; index -= 1) { const value = args[index]; if (value && typeof value === 'object' && !Array.isArray(value)) return value; } return {}; };
 const ok = async (method: string, value?: Json) => rpc<Json>(method, value);
+const missingMediaResult = (kind: 'thumbnail' | 'original') => ({
+  success: false, state: 'MISSING',
+  error: kind === 'thumbnail' ? '历史预览文件缺失或引用已失效，可重新识别或关联原图' : '历史原图缺失或引用已失效，可重新关联后重试',
+});
 const event = (topic: string, callback: (value: any) => void) => window.photoFlowComponent.onEvent(topic, callback);
 export const componentStatusFromAdvancedPreflight = (state: Json) => {
   const advancedAvailable = state.advancedAvailable !== undefined
@@ -111,8 +115,8 @@ export const legacyApi = {
   getProgressFolders: () => ok('team.progress.list.v1'),
   registerProgressWithGraph: (...args: any[]) => ok('team.progress.create.v1', payload(args)),
   openTeamPatch: async (reference: string) => { const ref = parseLegacyMediaRef(reference); return ref?.kind === 'working' ? ok('team.patch.open.v1', ref) : { success: false, error: '工作图引用已失效' }; },
-  getMediaThumbnail: async (...args: any[]): Promise<Json> => { const value = String(args[0] || ''); const ref = parseLegacyMediaRef(value) || parseLegacyMediaRef(mediaAliases.get(value) || ''); if (!ref) return { success: false, state: 'MISSING', error: '预览引用尚未建立' }; const result = await ok('team.media.authorize.v1', ref); return { ...result, state: result.success === false ? 'FAILED' : 'READY', previewUrl: result.url, previewUrls: { small: result.url, medium: result.url, large: result.url } }; },
-  getMediaOriginal: async (...args: any[]): Promise<Json> => { const value = String(args[0] || ''); const ref = parseLegacyMediaRef(value) || parseLegacyMediaRef(mediaAliases.get(value) || ''); if (!ref) return { success: false, error: '原图引用尚未建立' }; const result = await ok('team.media.authorize.v1', ref); return { ...result, mediaUrl: result.url, orientation: { matrix: [1, 0, 0, 1] } }; },
+  getMediaThumbnail: async (...args: any[]): Promise<Json> => { const value = String(args[0] || ''); const ref = parseLegacyMediaRef(value) || parseLegacyMediaRef(mediaAliases.get(value) || ''); if (!ref) return { success: false, state: 'MISSING', error: '预览引用尚未建立' }; try { const result = await ok('team.media.authorize.v1', ref); return { ...result, state: result.success === false ? 'MISSING' : 'READY', previewUrl: result.url, previewUrls: { small: result.url, medium: result.url, large: result.url } }; } catch { return missingMediaResult('thumbnail'); } },
+  getMediaOriginal: async (...args: any[]): Promise<Json> => { const value = String(args[0] || ''); const ref = parseLegacyMediaRef(value) || parseLegacyMediaRef(mediaAliases.get(value) || ''); if (!ref) return { success: false, state: 'MISSING', error: '原图引用尚未建立' }; try { const result = await ok('team.media.authorize.v1', ref); return { ...result, state: result.success === false ? 'MISSING' : 'READY', mediaUrl: result.url, orientation: { matrix: [1, 0, 0, 1] } }; } catch { return missingMediaResult('original'); } },
   onThumbnailStateChanged: (_callback: (value: any) => void) => () => undefined,
   onTeamPatchDetectionProgress: (callback: (value: any) => void) => event('team.patch.detect.progress.v1', callback),
   onTeamPatchBatchProgress: (callback: (value: any) => void) => event('team.patch.detect-batch.progress.v1', callback),

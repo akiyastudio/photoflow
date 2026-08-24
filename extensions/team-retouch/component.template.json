@@ -38,7 +38,7 @@
       "runtime": "node",
       "entrypoints": { "default": "service.cjs" },
       "rpcMethods": [
-        "team.project.get.v1", "team.project.register.v1", "team.project.remove-photo.v1",
+        "team.project.get.v1", "team.project.migrate-step.v1", "team.project.register.v1", "team.project.remove-photo.v1",
         "team.identity.save.v1", "team.identity.assign.v1",
         "team.identity.confirm-group.v1", "team.identity.delete.v1",
         "team.person.exclude.v1", "team.patch.get.v1",
@@ -74,10 +74,10 @@
       ],
       "runtimeActions": [],
       "lifecycleActions": {
-        "preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "ce3bfacb701c26eb471072fe281eefe499e2eedd0796961792df384d21e860ad" },
-        "install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "ce3bfacb701c26eb471072fe281eefe499e2eedd0796961792df384d21e860ad" },
-        "repair": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "ce3bfacb701c26eb471072fe281eefe499e2eedd0796961792df384d21e860ad" },
-        "uninstall": { "entry": "advanced-installer/uninstall-team-retouch-advanced.ps1", "sha256": "e683b87d3e245eb52457f550490f5e266a1807f414410137a11c0432e2336479" }
+        "preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "de716fabc7677cd66d01251192e136b056ed9d36ecdd7ca2d9513a11309239ab" },
+        "install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "de716fabc7677cd66d01251192e136b056ed9d36ecdd7ca2d9513a11309239ab" },
+        "repair": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "de716fabc7677cd66d01251192e136b056ed9d36ecdd7ca2d9513a11309239ab" },
+        "uninstall": { "entry": "advanced-installer/uninstall-team-retouch-advanced.ps1", "sha256": "91e59ae1c2689350c1c24003731a41ce5d9208dadf2a19110e488d7d78a89395" }
       }
     }
   }

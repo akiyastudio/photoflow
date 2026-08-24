@@ -39,7 +39,7 @@ const verifyServiceProgressBoundary = () => new Promise((resolve, reject) => {
     if (frame.type === 'ready') {
       void (async () => {
         const listed = await request('team.progress.list.v1');
-        assert.deepEqual(listed, { success: true, progressFolders: [{ id: 'original', nodeRole: 'original' }], edges: [{ sourceProgressId: 'source', targetProgressId: 'target' }] });
+        assert.deepEqual(listed, { success: true, progressFolders: [{ id: 'original', nodeRole: 'original' }], graphEdges: [{ sourceProgressId: 'source', targetProgressId: 'target' }], edges: [{ sourceProgressId: 'source', targetProgressId: 'target' }] });
         const created = await request('team.progress.create.v1', {
           progress: { mediaKind: 'image', displayName: 'Output' }, workflowInputProgressIds: ['workflow', 'selection'],
         });

@@ -4,7 +4,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-const { advancedStateFromProbe, createComponentLifecycleService } = require('../electron/services/component-lifecycle-service.cjs');
+const { advancedStateFromProbe, componentDataRoot, createComponentLifecycleService } = require('../electron/services/component-lifecycle-service.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-component-lifecycle-'));
 const componentRoot = path.join(sandbox, 'component');
@@ -14,7 +14,7 @@ const v2ScriptPath = path.join(actionRoot, 'fixture-v2.ps1');
 fs.mkdirSync(componentRoot, { recursive: true });
 fs.mkdirSync(actionRoot, { recursive: true });
 fs.writeFileSync(scriptPath, "param([switch]$CheckOnly,[string]$InstallRoot,[string]$PackagePath,[string]$ExpectedComponentVersion,[int]$ExpectedAdvancedRuntimeApiVersion,[string]$CompatibleLegacyComponentVersions,[switch]$Repair)\nif ($CheckOnly) { Write-Output 'OFFLINE_PREFLIGHT_OK|real process|fixed action'; exit 0 }\nif ($ExpectedAdvancedRuntimeApiVersion -ne 1 -or $CompatibleLegacyComponentVersions -ne '26.7.30.1') { throw 'advanced compatibility arguments missing' }\nWrite-Output 'offline environment is ready'\n", 'utf8');
-fs.writeFileSync(v2ScriptPath, "if ($env:PHOTOFLOW_COMPONENT_LIFECYCLE_ACTION -ne 'preflight') { throw 'missing fixed lifecycle action' }\nWrite-Output 'generic lifecycle action ready'\n", 'utf8');
+fs.writeFileSync(v2ScriptPath, "if ($env:PHOTOFLOW_COMPONENT_LIFECYCLE_ACTION -ne 'preflight') { throw 'missing fixed lifecycle action' }\nif (-not $env:PHOTOFLOW_COMPONENT_DATA_ROOT) { throw 'missing controlled component data root' }\nif ($env:LOCALAPPDATA) { throw 'V2 lifecycle must not inherit LOCALAPPDATA' }\nWrite-Output ('generic lifecycle action ready|' + $env:PHOTOFLOW_COMPONENT_DATA_ROOT)\n", 'utf8');
 fs.writeFileSync(path.join(componentRoot, 'PhotoFlow-team-retouch-advanced-legacy-win32-x64.zip'), 'fixture', 'utf8');
 const digest = crypto.createHash('sha256').update(fs.readFileSync(scriptPath)).digest('hex');
 const v2Digest = crypto.createHash('sha256').update(fs.readFileSync(v2ScriptPath)).digest('hex');
@@ -57,6 +57,7 @@ const descriptor = {
     const v2Descriptor = { componentId: 'team-retouch', componentVersion: '1.0.0', hostApiVersion: 2, service: { permissions: ['component.lifecycle.read', 'component.lifecycle.manage'], events: [], lifecycleActions: { preflight: { entry: path.join(componentRoot, 'actions', 'fixture-v2.ps1'), relativeEntry: 'actions/fixture-v2.ps1', sha256: v2Digest } } } };
     assert.equal((await service.invokeV2({ action: 'describe' }, {}, v2Descriptor)).negotiatedHostApiVersion, 2);
     assert.equal((await service.invokeV2({ action: 'preflight' }, {}, v2Descriptor)).success, true, 'V2 executes only the declared and hash-verified lifecycle entry');
+    assert(componentDataRoot(component).endsWith(path.join('PhotoFlow', 'components', 'team-retouch')), 'Host derives one controlled component data root from the verified install root');
     await assert.rejects(service.invokeV2({ action: 'preflight', path: 'C:/escape.ps1' }, {}, v2Descriptor), /does not accept commands/);
     await assert.rejects(service.invokeV2({ action: 'preflight' }, {}, { ...v2Descriptor, service: { ...v2Descriptor.service, permissions: ['component.lifecycle.read'] } }), /permission is not granted/);
     const escaped = { ...descriptor, service: { lifecycleActions: { 'advanced.preflight': { entry: scriptPath, relativeEntry: '../actions/fixture-action.ps1', sha256: digest } } } };

@@ -100,6 +100,8 @@ const readMediaV2 = async (parentId, payload) => {
       });
     } catch (error) {
       if (payload.strict) throw error;
+      const photoId = String(ref.photoId || ''); const versionId = String(ref.versionId || ''); const relativePath = String(ref.relativePath || '');
+      if (photoId && versionId) items.push({ photo: { id: photoId, currentVersionId: versionId, displayName: path.basename(relativePath) || photoId, originalName: path.basename(relativePath) || photoId }, versions: [{ id: versionId, photoId, relativePath, relativePathState: 'missing', fileMissing: true, isCurrent: true, mediaRef: { photoId, versionId, relativePath } }], relativePath });
     }
   } });
   await Promise.all(workers);
@@ -1184,7 +1186,7 @@ const saveWorkflowSettings = async (parentId, payload, context) => {
 };
 
 const componentSettings = async (parentId, payload) => payload.action === 'get' ? hostSettings(parentId) : hostSettings(parentId, payload.settings || {});
-const listProjectProgress = async parentId => { const value = await callHostV2(parentId, 'project.progress.v2', { action: 'list' }); return { success: true, progressFolders: value.progress || [], edges: value.edges || [] }; };
+const listProjectProgress = async parentId => { const value = await callHostV2(parentId, 'project.progress.v2', { action: 'list' }); const graphEdges = Array.isArray(value.graphEdges) ? value.graphEdges : Array.isArray(value.edges) ? value.edges : []; return { success: true, progressFolders: Array.isArray(value.progressFolders) ? value.progressFolders : Array.isArray(value.progress) ? value.progress : [], graphEdges, edges: graphEdges }; };
 const createProjectProgress = async (parentId, payload) => {
   const listed = await callHostV2(parentId, 'project.progress.v2', { action: 'list' });
   const raw = payload.progress || payload; const parentProgressId = String(raw.parentProgressId || payload.workflowInputProgressIds?.[0] || (listed.progress || []).find(item => item.nodeRole === 'original')?.id || '');
@@ -1354,7 +1356,7 @@ const workspaceSnapshot = async (parentId, context) => {
       if (!base) continue;
       photos.push({
         photoId, baseVersionId, name: bundle.photo?.displayName || path.parse(bundle.photo?.originalName || base.relativePath || '').name,
-        relativePath: base.relativePath || '', relativePathState: base.relativePathState || 'unresolvable', mediaRef: { photoId, versionId: baseVersionId, relativePath: base.relativePath || '' },
+        relativePath: base.relativePath || '', relativePathState: base.relativePathState || 'unresolvable', fileMissing: Boolean(base.fileMissing), mediaRef: { photoId, versionId: baseVersionId, relativePath: base.relativePath || '' },
         tasks: (grouped.get(baseVersionId) || []).map(serializeTask),
         excludedPersonCount: Number(db.prepare('SELECT COUNT(*) AS count FROM team_person_exclusions WHERE project_id=? AND photo_id=? AND base_version_id=?').get(projectId, photoId, baseVersionId)?.count || 0),
       });

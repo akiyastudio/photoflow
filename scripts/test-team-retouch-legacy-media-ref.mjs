@@ -61,11 +61,13 @@ for (const request of requests) {
   const reference = request.kind === 'original' ? legacyMediaRef('original', request.photoId, request.baseVersionId) : legacyMediaRef('working', request.photoId, request.baseVersionId, request.taskId);
   try {
     const result = request.kind === 'original' ? await legacyApi.getMediaOriginal(reference) : await legacyApi.getMediaThumbnail(reference);
-    results.push({ success: Boolean(result.mediaUrl || result.previewUrl) });
+    results.push({ success: Boolean(result.mediaUrl || result.previewUrl), error: result.error });
   } catch (error) { results.push({ success: false, error: readableLegacyMediaError(error, request.kind) }); }
 }
 const summary = summarizeLegacyPreviewResults(requests, results);
 assert.deepEqual({ total: summary.total, succeeded: summary.succeeded, failed: summary.failed }, { total: 106, succeeded: 105, failed: 1 }, '27 original and 79 patch authorizations execute independently');
-assert.match(summary.failures[0].error, /历史版本不存在|工作图任务不存在/, 'the failed item keeps a visible actionable diagnostic');
+assert.match(summary.failures[0].error, /历史版本不存在|工作图任务不存在|历史预览文件缺失/, 'the failed item keeps a visible actionable diagnostic');
+const missingCard = await legacyApi.getMediaThumbnail(legacyMediaRef('working', 'fixture-photo-14', 'fixture-base-14', failedTaskId));
+assert.deepEqual({ success: missingCard.success, state: missingCard.state }, { success: false, state: 'MISSING' }, 'expired historical component media degrades to one missing card instead of rejecting the stage');
 
 console.log('Team-retouch legacy media reference round-trip tests passed');

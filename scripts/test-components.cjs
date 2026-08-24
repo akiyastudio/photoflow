@@ -138,7 +138,7 @@ try {
   assert(!componentBuilder.includes('setup-team-retouch-advanced-wsl.sh'), 'network environment builder must not ship in the end-user component');
 
   const advancedInstaller = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'setup-team-retouch-advanced.ps1'), 'utf8');
-  assert(advancedInstaller.includes("PhotoFlow\\components\\team-retouch\\advanced\\wsl\\PhotoFlowNative"), 'advanced data must default to the component application-data namespace');
+  assert(advancedInstaller.includes('PHOTOFLOW_COMPONENT_DATA_ROOT') && advancedInstaller.includes("Join-Path $componentDataRoot 'advanced\\wsl\\PhotoFlowNative'"), 'advanced data must default to the Host-controlled component data namespace');
   assert(advancedInstaller.includes('PackagePath'), 'advanced setup must require a selected offline package');
   assert(advancedInstaller.includes('vhdSha256'), 'offline VHD must be checksum verified');
   assert(advancedInstaller.includes('ExpectedAdvancedRuntimeApiVersion') && advancedInstaller.includes('advancedRuntimeApiVersion'), 'advanced packages must be checked by an API version independent from the component release');
@@ -350,7 +350,7 @@ try {
   const legacyComponentMetadata = fs.readFileSync(path.join(repositoryRoot, 'electron', 'compatibility', 'component-v1-metadata.cjs'), 'utf8');
   assert(!systemIpc.includes('teamRetouchRoot') && legacyComponentMetadata.includes('advancedPackagePattern'), 'legacy advanced-package discovery must stay behind compatibility metadata instead of a core component directory constant');
   const componentLifecycleService = fs.readFileSync(path.join(repositoryRoot, 'electron', 'services', 'component-lifecycle-service.cjs'), 'utf8');
-  assert(componentLifecycleService.includes('const advancedInstallRoot') && componentLifecycleService.includes("'advanced', 'wsl', 'PhotoFlowNative'") && componentLifecycleService.includes("'PhotoFlow', 'components', component.id") && !systemIpc.includes("path.join(teamRetouchRoot(), 'identity-models')"), 'only the component lifecycle may retain an optional detection-engine data directory and development must recognize the application-data installation');
+  assert(componentLifecycleService.includes('const advancedInstallRoot') && componentLifecycleService.includes('PHOTOFLOW_COMPONENT_DATA_ROOT') && componentLifecycleService.includes("'advanced', 'wsl', 'PhotoFlowNative'") && componentLifecycleService.includes("'PhotoFlow', 'components', component.id") && !systemIpc.includes("path.join(teamRetouchRoot(), 'identity-models')"), 'only generic component lifecycle code may derive and pass the controlled component data root');
   assert(teamRenderer.includes('人物身份') && teamRenderer.includes('自动生成候选') && !settingsFeature.includes("activeSection === 'team-retouch'"), 'cross-photo identity controls must be owned by the component renderer');
   assert(!settingsFeature.includes('实验人物识别模型 · 用户自备'), 'settings must not require end users to compile identity models');
 

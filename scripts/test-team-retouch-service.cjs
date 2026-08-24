@@ -208,6 +208,8 @@ const ready = new Promise((resolve, reject) => {
     assert(!requestedPhotoIds.includes('photo-other'), 'registered tasks owned by another project must not expand the current project media query');
     assert(!snapshot.photos.some(photo => photo.photoId === 'photo-orphan' || photo.photoId === 'photo-other'), 'host-filtered orphan or foreign tasks must never leak into the snapshot');
     assert.equal(snapshot.migration.state, 'committed', 'another project missing output does not block the current project snapshot');
+    const photoOneBundle = bundles.get('photo-1'); bundles.delete('photo-1'); const missingSnapshot = await invoke('team.project.get.v1'); bundles.set('photo-1', photoOneBundle);
+    assert.equal(missingSnapshot.photos.find(photo => photo.photoId === 'photo-1')?.fileMissing, true, 'an expired historical media reference remains a missing card instead of rejecting the workspace');
     await invoke('team.project.migrate-step.v1');
     const markerDb = new DatabaseSync(databasePath); const markerHash = value => require('crypto').createHash('sha256').update(value).digest('hex').slice(0, 24);
     assert.equal(markerDb.prepare('SELECT value FROM meta WHERE key=?').get(`legacy_project_artifacts_v2:${markerHash('project-1')}`)?.value, 'committed');

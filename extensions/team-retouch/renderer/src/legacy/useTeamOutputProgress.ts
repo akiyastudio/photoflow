@@ -3,6 +3,7 @@ import { legacyApi } from './legacy-api';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ProgressFolder, TeamProjectPhoto, WorkspaceProject } from './legacy-types';
 import { resolveLegacyTeamSourceProgressIds } from './legacy-progress-scope';
+import { normalizeLegacyProgressResult } from './legacy-progress-result-model';
 
 const normalizePath = (value = '') => value.replace(/\\/g, '/').replace(/\/+$/, '').toLocaleLowerCase();
 
@@ -43,24 +44,25 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
   }, [sourceProgressKey]);
 
   const refresh = useCallback(async () => {
-    const result = await legacyApi.getProgressFolders(workspacePath, project.name);
+    const result = normalizeLegacyProgressResult(await legacyApi.getProgressFolders(workspacePath, project.name));
     if (!result.success) throw new Error(result.error || '无法读取项目进度');
-    const sources = resolveTeamSourceProgressIds(normalizedSourcePaths, result.progressFolders);
-    const candidates = result.progressFolders.filter(folder => isTeamProgressCandidate(folder) && !sources.includes(folder.id));
+    const { progressFolders, graphEdges } = result;
+    const sources = resolveTeamSourceProgressIds(normalizedSourcePaths, progressFolders);
+    const candidates = progressFolders.filter(folder => isTeamProgressCandidate(folder) && !sources.includes(folder.id));
     const rememberedKey = `photoflow:team-retouch-output:${workspacePath}|${project.name}|${sources.join('|') || sourcePathKey}`;
     const remembered = candidates.find(folder => folder.id === (window.localStorage.getItem(rememberedKey) || ''));
-    const workflowOutputIds = new Set(result.graphEdges
+    const workflowOutputIds = new Set(graphEdges
       .filter(edge => edge.edgeKind === 'workflow_input')
-      .filter(edge => result.progressFolders.some(folder => folder.id === edge.sourceProgressId && folder.nodeRole === 'workflow'))
+      .filter(edge => progressFolders.some(folder => folder.id === edge.sourceProgressId && folder.nodeRole === 'workflow'))
       .map(edge => edge.targetProgressId));
     const related = [...candidates].reverse().find(folder => workflowOutputIds.has(folder.id));
-    setFolders(result.progressFolders);
+    setFolders(progressFolders);
     setSourceProgressIds(sources);
     setTargetProgressIdState(current => {
       if (current !== '__new__' && candidates.some(folder => folder.id === current)) return current;
       return remembered?.id || related?.id || '__new__';
     });
-    return { ...result, sourceProgressIds: sources };
+    return { ...result, progressFolders, graphEdges, sourceProgressIds: sources };
   }, [workspacePath, project.name, sourcePathKey]);
 
   useEffect(() => {

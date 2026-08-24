@@ -13,6 +13,7 @@ const workspace = fs.readFileSync(path.join(root, 'src', 'features', 'workspace'
 const settings = fs.readFileSync(path.join(root, 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
 const versionsIpc = fs.readFileSync(path.join(root, 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
 const systemIpc = fs.readFileSync(path.join(root, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
+const rendererSdk = fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'renderer', 'src', 'sdk.ts'), 'utf8');
 const sha256 = file => require('crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const lifecycleScripts = ['setup-team-retouch-advanced.ps1', 'uninstall-team-retouch-advanced.ps1'];
 for (const name of lifecycleScripts) {
@@ -35,7 +36,7 @@ assert(template.requiredFiles.includes('workflow-generation.cjs') && template.re
 assert.equal(template.componentHost.service.lifecycleActions.preflight.sha256, sha256(path.join(root, 'scripts', 'setup-team-retouch-advanced.ps1')));
 assert.equal(template.componentHost.service.lifecycleActions.uninstall.sha256, sha256(path.join(root, 'scripts', 'uninstall-team-retouch-advanced.ps1')));
 assert.deepEqual(template.componentHost.service.rpcMethods, [
-  'team.project.get.v1', 'team.project.register.v1', 'team.project.remove-photo.v1',
+  'team.project.get.v1', 'team.project.migrate-step.v1', 'team.project.register.v1', 'team.project.remove-photo.v1',
   'team.identity.save.v1', 'team.identity.assign.v1', 'team.identity.confirm-group.v1', 'team.identity.delete.v1',
   'team.person.exclude.v1', 'team.patch.get.v1', 'team.patch.detect.v1', 'team.patch.detect-batch.v1',
   'team.patch.update.v1', 'team.patch.delete.v1', 'team.patch.cleanup.v1', 'team.patch.upload.v1',
@@ -52,6 +53,9 @@ assert.deepEqual(template.componentHost.service.rpcMethods, [
   'team.settings.get.v1', 'team.settings.update.v1',
   'team.advanced.preflight.v1', 'team.advanced.install.v1', 'team.advanced.uninstall.v1',
 ]);
+const rendererAllowedBlock = rendererSdk.match(/const allowedMethods = new Set\(\[([\s\S]*?)\]\);/)?.[1] || '';
+const rendererAllowedMethods = [...rendererAllowedBlock.matchAll(/'(team\.[^']+\.v\d+)'/g)].map(match => match[1]);
+assert.deepEqual([...rendererAllowedMethods].sort(), [...template.componentHost.service.rpcMethods].sort(), 'renderer SDK and source manifest must expose the same component RPC allowlist');
 assert(template.componentHost.service.rpcMethods.every(method => !COMPONENT_RPC_METHODS[method]), 'service-owned routes must not retain legacy RPC mappings');
 for (const channel of [
   'workspace-team-identity-similarities', 'workspace-team-workflow-settings-save',

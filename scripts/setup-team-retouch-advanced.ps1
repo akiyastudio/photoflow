@@ -40,12 +40,19 @@ function Assert-SafeArchiveEntries {
 }
 
 if ($LinuxUser -notmatch '^[a-z_][a-z0-9_-]*$') { throw 'Invalid Linux user name' }
-$defaultRoot = Join-Path $env:LOCALAPPDATA 'PhotoFlow\components\team-retouch\advanced\wsl\PhotoFlowNative'
+$componentDataRoot = [string]$env:PHOTOFLOW_COMPONENT_DATA_ROOT
+if (-not $componentDataRoot.Trim()) {
+    if ($InstallRoot.Trim()) { $componentDataRoot = [IO.Path]::GetFullPath((Join-Path $InstallRoot '..\..\..')) }
+    elseif ([string]$env:LOCALAPPDATA) { $componentDataRoot = Join-Path $env:LOCALAPPDATA 'PhotoFlow\components\team-retouch' }
+    else { throw 'The Host did not grant a controlled component data root.' }
+}
+$componentDataRoot = [IO.Path]::GetFullPath($componentDataRoot)
+$defaultRoot = Join-Path $componentDataRoot 'advanced\wsl\PhotoFlowNative'
 if (-not $InstallRoot.Trim()) { $InstallRoot = $defaultRoot }
 $InstallRoot = [IO.Path]::GetFullPath($InstallRoot)
-$allowedRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'PhotoFlow'))
+$allowedRoot = $componentDataRoot
 if (-not $InstallRoot.StartsWith($allowedRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-    throw 'The advanced environment must be installed inside the PhotoFlow application data directory.'
+    throw 'The advanced environment must be installed inside the Host-controlled component data root.'
 }
 $stableVhd = Join-Path $InstallRoot 'ext4.vhdx'
 
@@ -94,7 +101,7 @@ if (-not $PackagePath.Trim()) { throw 'Select a PhotoFlow advanced engine offlin
 $PackagePath = [IO.Path]::GetFullPath($PackagePath)
 if (-not (Test-Path -LiteralPath $PackagePath)) { throw 'The selected offline package does not exist.' }
 
-$stateRoot = Join-Path $env:LOCALAPPDATA 'PhotoFlow\components\team-retouch\advanced'
+$stateRoot = Join-Path $componentDataRoot 'advanced'
 $stagingRoot = Join-Path $stateRoot ('.offline-stage-' + [Guid]::NewGuid().ToString('N'))
 $packageRoot = ''
 $manifestPath = ''

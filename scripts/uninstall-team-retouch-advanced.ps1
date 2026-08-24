@@ -4,6 +4,12 @@ param([string]$DistroName = 'PhotoFlowNative')
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $OutputEncoding = [Text.Encoding]::UTF8
+$componentDataRoot = [string]$env:PHOTOFLOW_COMPONENT_DATA_ROOT
+if (-not $componentDataRoot.Trim()) {
+    if (-not [string]$env:LOCALAPPDATA) { throw 'The Host did not grant a controlled component data root.' }
+    $componentDataRoot = Join-Path $env:LOCALAPPDATA 'PhotoFlow\components\team-retouch'
+}
+$componentDataRoot = [IO.Path]::GetFullPath($componentDataRoot)
 $lxssRoot = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss'
 $registration = Get-ChildItem -LiteralPath $lxssRoot -ErrorAction SilentlyContinue | Where-Object {
     (Get-ItemProperty -LiteralPath $_.PSPath -Name DistributionName -ErrorAction SilentlyContinue).DistributionName -eq $DistroName
@@ -16,7 +22,7 @@ if (-not $registration) {
 
 $properties = Get-ItemProperty -LiteralPath $registration.PSPath
 $basePath = [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$properties.BasePath))
-$allowedRoot = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'PhotoFlow'))
+$allowedRoot = $componentDataRoot
 $allowedPrefix = $allowedRoot.TrimEnd('\') + '\'
 if (-not $basePath.StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to remove a WSL environment outside PhotoFlow application data: $basePath"
@@ -31,6 +37,6 @@ if ($LASTEXITCODE -ne 0) { throw "Unable to unregister $DistroName" }
 if ((Test-Path -LiteralPath $basePath -PathType Container) -and -not @(Get-ChildItem -LiteralPath $basePath -Force).Count) {
     Remove-Item -LiteralPath $basePath
 }
-$statePath = Join-Path $env:LOCALAPPDATA 'PhotoFlow\components\team-retouch\advanced\install-state.json'
+$statePath = Join-Path $componentDataRoot 'advanced\install-state.json'
 if (Test-Path -LiteralPath $statePath -PathType Leaf) { Remove-Item -LiteralPath $statePath -Force }
 Write-Host 'PhotoFlow advanced environment was removed'

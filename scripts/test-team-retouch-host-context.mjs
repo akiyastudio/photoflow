@@ -6,6 +6,7 @@ import { createLatestHistoryLoadGuard, historyLoadPresentation } from '../extens
 import { legacyAdvancedStatusPresentation } from '../extensions/team-retouch/renderer/src/legacy/legacy-advanced-status-model.ts';
 import { legacyPreviewRequests, readableLegacyMediaError, summarizeLegacyPreviewResults } from '../extensions/team-retouch/renderer/src/legacy/legacy-media-preview-model.ts';
 import { readableComponentRpcError } from '../extensions/team-retouch/renderer/src/sdk.ts';
+import { normalizeLegacyProgressResult } from '../extensions/team-retouch/renderer/src/legacy/legacy-progress-result-model.ts';
 
 const workspace = { photos: [
   { photoId: 'p1', relativePath: '图片后期_1/a.jpg', name: 'a.jpg' },
@@ -49,6 +50,8 @@ assert.equal(legacyAdvancedStatusPresentation({ advancedState: 'not-installed' }
 assert.match(readableComponentRpcError('team.project.get.v1', new Error('Error invoking remote method: Component service request timed out after 60000ms\n    at ipc (C:\\secret\\preload.js:1)')), /团片历史读取超时.*重试/);
 for (const unsafe of ['Component service request timed out', ' at ipc ', 'C:\\secret', 'localhost']) assert(!readableComponentRpcError('team.project.get.v1', new Error('Error invoking remote method: Component service request timed out after 60000ms\n    at ipc (C:\\secret\\preload.js:1)')).includes(unsafe), `renderer error leaked technical detail: ${unsafe}`);
 assert.match(readableComponentRpcError('team.project.migrate-step.v1', new Error('SQLITE_BUSY: database is locked')), /正在整理.*稍后重试/);
+assert.deepEqual(normalizeLegacyProgressResult({ progressFolders: [{ id: 'p' }], edges: [{ id: 'legacy-edge' }] }), { progressFolders: [{ id: 'p' }], edges: [{ id: 'legacy-edge' }], graphEdges: [{ id: 'legacy-edge' }] }, 'legacy edge alias is normalized for the output-progress hook');
+assert.deepEqual(normalizeLegacyProgressResult({ progressFolders: null, graphEdges: undefined }), { progressFolders: [], graphEdges: [] }, 'missing progress arrays degrade to an empty selectable graph');
 
 const entry = fs.readFileSync(new URL('../extensions/team-retouch/renderer/src/legacy-main.tsx', import.meta.url), 'utf8');
 assert(!entry.includes("rpc<Json>('project.files.list.v1'"), 'team entry must never recursively enumerate the project');
