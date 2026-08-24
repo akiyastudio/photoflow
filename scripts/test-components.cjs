@@ -183,7 +183,12 @@ try {
   assert(teamRenderer.includes("export type Tab = 'detect' | 'people' | 'workflow' | 'returns' | 'merge' | 'settings'") && teamRenderer.includes('workflowGroups') && teamRenderer.includes('team.workflow.return-batch.v1'), 'the React component renderer must own the complete collaboration UI and workflow orchestration');
   assert(teamSdk.includes('allowedMethods') && teamSdk.includes('window.photoFlowComponent.rpc') && !teamSdk.includes('electronAPI') && !teamSdk.includes('ipcRenderer'), 'the component renderer must depend only on its restricted SDK');
   assert(componentRpcContract.includes('sanitizePayload') && componentRpcContract.includes('fields:') && componentRpcContract.includes('manager.registerRpcMethod') && componentRpcContract.includes("'team-retouch'"), 'component RPC methods must have payload field allowlists and a component owner');
-  assert(componentPreload.includes('COMPONENT_EVENTS') && !componentPreload.includes("exposeInMainWorld('electronAPI'"), 'component events must use a closed topic map without the application bridge');
+  assert(componentPreload.includes("ipcRenderer.on('component-sdk:event'")
+    && componentPreload.includes("LEGACY_PRELOAD_EVENTS[normalizedTopic]")
+    && componentPreload.includes('Invalid component event topic')
+    && !componentPreload.includes('COMPONENT_EVENTS')
+    && !componentPreload.includes("exposeInMainWorld('electronAPI'"),
+  'component preload must use the single versioned event stream while legacy channels remain compatibility-owned and the application bridge stays absent');
   assert(teamTemplate.componentHost.contributions.some(item => item.type === 'component.fullPage' && item.entry === 'ui/index.html'), 'team-retouch manifest must declare its packaged renderer entry');
   assert(teamTemplate.displayName === '团片协作' && teamTemplate.icon === 'ui/team-retouch.svg', 'team-retouch package must own its copy and icon');
   const projectWorkspace = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
@@ -299,7 +304,8 @@ try {
   assert(pluginService.includes('registry.inspect(pluginId, { verifyIntegrity: false })'), 'component status queries must defer native payload hashing to the asynchronous detailed refresh');
   assert(teamService.includes('autoReleasedCount: clearAssignments.length') && teamService.includes("['manual', 'manual-group'].includes(current.source)"), 'manual identity selection must displace automatic same-photo candidates while preserving manual conflicts');
   assert(teamTemplate.componentHost.service.rpcMethods.filter(method => method.startsWith('team.')).every(method => !COMPONENT_RPC_METHODS[method]), 'every team RPC must have one service owner and no legacy mapping');
-  for (const token of ['runAlgorithm', 'appendCommand', "state: 'prepared'", "state: 'rolled-back'", "'version.register.v1'", "'project.output.authorize.v1'"]) assert(teamService.includes(token), `component service must retain ${token}`);
+  for (const token of ['runAlgorithm', 'appendCommand', "state: 'prepared'", "state: 'rolled-back'", "'project.output.v2'", "'version.create.v2'"]) assert(teamService.includes(token), `component service must retain ${token}`);
+  assert(!teamService.includes("'version.register.v1'") && !teamService.includes("'project.output.authorize.v1'"), 'the V2 component service must not call retired V1 host output/version capabilities');
   assert(teamService.includes("'--advanced-mode', 'auto'") && !teamService.includes('request.backendMode'), 'component-owned detection must automatically prefer advanced and fall back to basic');
   assert(teamService.includes("'team.workflow.return-batch.v1'") && teamService.includes("'team.workflow.return-confirm.v1'") && teamService.includes('readyWorkflowCandidates'), 'workflow return confirmation must be component-owned and revalidate the selected task');
   assert(teamService.includes("'team.workflow.generate.v1'"), 'workflow generation must have exactly one component-service owner');
@@ -307,7 +313,7 @@ try {
   assert(teamService.includes("path.resolve(project.rootPath, '团片协作')") || teamService.includes('scope.outputDirectory'), 'workflow output must remain inside the authorized project-local team-retouch folder');
   assert(teamService.includes("path.join(storage.dataRoot, 'workflows'") || teamService.includes('workflowDirectory'), 'workflow metadata must remain in component-owned workspace data');
   assert(teamService.includes('legacyManifestPath') || teamService.includes('artifact.migrate'), 'legacy project-local workflow metadata must migrate automatically');
-  assert(teamService.includes('refreshDownstream('), 'returned edits must refresh generated downstream workflow files');
+  assert(teamService.includes('reconcileWorkflowTaskChain(') && teamService.includes('team_workflow_reconcile_pending'), 'returned edits must reconcile generated downstream workflow files with a persistent retry queue');
   assert(teamService.includes("type: 'recrop'") && teamService.includes('backupPath') && teamService.includes("state: 'rolled-back'"), 'recropping must stage replacement content and compensate after failure');
   assert(teamService.includes('readyWorkflowCandidates(snapshot, payload.items)'), 'workflow return matching must revalidate the currently unlocked person in the component service');
   assert(teamService.includes('current = await workspaceSnapshot(parentId, context);'), 'background identity matching must preserve manual decisions made while inference is running');
@@ -331,11 +337,15 @@ try {
   assert(systemIpc.includes('await shell.trashItem(containerPath)'), 'component uninstall must recycle the complete component container');
   assert(!systemIpc.includes("ipcMain.handle('team-retouch-advanced-install'") && !systemIpc.includes("ipcMain.handle('team-retouch-advanced-preflight'") && !systemIpc.includes("ipcMain.handle('team-retouch-advanced-uninstall'"), 'advanced environment actions must not retain system IPC routes');
   const lifecycleTemplate = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'component.template.json'), 'utf8'));
-  assert(lifecycleTemplate.componentHost.service.rpcMethods.includes('component.advanced.install.v1') && lifecycleTemplate.componentHost.service.capabilities.includes('component.lifecycle.v1'), 'settings must use the component service lifecycle capability');
+  assert(lifecycleTemplate.componentHost.service.capabilities.includes('component.lifecycle.v2')
+    && lifecycleTemplate.componentHost.service.permissions.includes('component.lifecycle.manage')
+    && !lifecycleTemplate.componentHost.service.capabilities.includes('component.lifecycle.v1'),
+  'settings must use the permission-gated Component Host V2 lifecycle capability');
   assert(!systemIpc.includes("ipcMain.handle('team-retouch-identity-models"), 'identity models must not retain a separate package installer');
   assert(systemIpc.includes("ipcMain.handle('components-delete-package'") && systemIpc.includes("path.extname(resolvedArchive).toLowerCase() !== '.zip'") && systemIpc.includes('await fs.promises.unlink(archivePath)'), 'confirmed package cleanup must only delete a validated ZIP from its component directory');
   assert(systemIpc.includes('packageSizeBytes'), 'successful installers must report the actual package size for cleanup confirmation');
-  assert(systemIpc.includes("const teamRetouchRoot"), 'all team-retouch packages must share one component directory');
+  const legacyComponentMetadata = fs.readFileSync(path.join(repositoryRoot, 'electron', 'compatibility', 'component-v1-metadata.cjs'), 'utf8');
+  assert(!systemIpc.includes('teamRetouchRoot') && legacyComponentMetadata.includes('advancedPackagePattern'), 'legacy advanced-package discovery must stay behind compatibility metadata instead of a core component directory constant');
   const componentLifecycleService = fs.readFileSync(path.join(repositoryRoot, 'electron', 'services', 'component-lifecycle-service.cjs'), 'utf8');
   assert(componentLifecycleService.includes('const advancedInstallRoot') && componentLifecycleService.includes("'advanced', 'wsl', 'PhotoFlowNative'") && componentLifecycleService.includes("'PhotoFlow', 'components', component.id") && !systemIpc.includes("path.join(teamRetouchRoot(), 'identity-models')"), 'only the component lifecycle may retain an optional detection-engine data directory and development must recognize the application-data installation');
   assert(teamRenderer.includes('人物身份') && teamRenderer.includes('自动生成候选') && !settingsFeature.includes("activeSection === 'team-retouch'"), 'cross-photo identity controls must be owned by the component renderer');

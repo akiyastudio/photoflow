@@ -4,6 +4,7 @@ const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { pathToFileURL } = require('url');
+const vm = require('vm');
 const { parseComponentHostManifest, createComponentHostRegistry } = require('../electron/component-host-contract.cjs');
 const { ComponentViewManager, componentPageKey, normalizeOpenScope, normalizeResolvedTheme, validBounds } = require('../electron/services/component-view-manager.cjs');
 const { registerComponentIconProtocol } = require('../electron/modules/component-icon-protocol.cjs');
@@ -84,6 +85,25 @@ try {
   registerComponentIconProtocol({ protocol: { handle: (scheme, handler) => protocolHandlers.set(scheme, handler) }, registry, fs });
   const componentPreload = fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'component-preload.cjs'), 'utf8');
   assert(componentPreload.includes("exposeInMainWorld('photoFlowComponent'") && !componentPreload.includes("exposeInMainWorld('electronAPI'"), 'component preload exposes the restricted SDK instead of the application bridge');
+  const preloadIpc = new EventEmitter();
+  preloadIpc.invoke = async () => ({});
+  preloadIpc.removeListener = preloadIpc.removeListener.bind(preloadIpc);
+  const exposedWorlds = new Map();
+  vm.runInNewContext(componentPreload, {
+    Object, String, TypeError, Error,
+    require: requestPath => requestPath === 'electron'
+      ? { contextBridge: { exposeInMainWorld: (name, value) => exposedWorlds.set(name, value) }, ipcRenderer: preloadIpc }
+      : requestPath === './compatibility/component-v1-metadata.cjs' ? { LEGACY_PRELOAD_EVENTS: Object.freeze({}) } : require(requestPath),
+  });
+  assert.equal(exposedWorlds.has('electronAPI'), false, 'component preload behavior must not expose the application bridge');
+  const restrictedSdk = exposedWorlds.get('photoFlowComponent');
+  assert.throws(() => restrictedSdk.onEvent('invalid-topic', () => undefined), /Invalid component event topic/, 'preload rejects non-versioned topics');
+  const receivedEvents = [];
+  const unsubscribeEvent = restrictedSdk.onEvent('sample.changed.v1', payload => receivedEvents.push(payload));
+  preloadIpc.emit('component-sdk:event', {}, { topic: 'other.changed.v1', payload: { ignored: true } });
+  preloadIpc.emit('component-sdk:event', {}, { topic: 'sample.changed.v1', payload: { value: 7 } });
+  assert.deepStrictEqual(receivedEvents, [{ value: 7 }], 'preload forwards only the matching versioned topic payload');
+  unsubscribeEvent();
   const projectWorkspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
   const projectWorkspaceLayoutSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspaceLayout.tsx'), 'utf8');
   assert(projectWorkspaceLayoutSource.includes("overflow ? 'component-toolbar-actions-overflow' : 'component-toolbar-actions flex shrink-0 items-center gap-1'") && projectWorkspaceSource.includes('<ComponentToolbarActions overflow actions={componentHostActions}'), 'declarative UI component actions provide dedicated wide-toolbar and overflow-menu presentations');
@@ -109,7 +129,7 @@ try {
   const mainWindow = { contentView: { addChildView: view => children.push(view), removeChildView: view => children.splice(children.indexOf(view), 1) } };
   const handlers = new Map();
   const rawIpc = { handle: (channel, handler) => handlers.set(channel, handler) };
-  let activeSampleDescriptor = registry.resolve('sample-component');
+  let activeSampleDescriptor = { ...registry.resolve('sample-component'), service: { events: ['sample.changed.v1'] } };
   const liveRegistry = {
     list: () => registry.list().map(item => item.componentId === 'sample-component' ? activeSampleDescriptor : item),
     resolve: componentId => componentId === 'sample-component' ? activeSampleDescriptor : registry.resolve(componentId),
@@ -155,6 +175,11 @@ try {
     assert.equal(first.instanceId, second.instanceId, 'same componentId + workspace + project focuses one page');
     assert.equal(FakeView.created.length, 1);
     const view = FakeView.created[0];
+    const boundInstance = manager.instances.get(componentPageKey(request));
+    boundInstance.context.emitComponentEvent('sample.undeclared.v1', { hidden: true });
+    assert.equal(view.webContents.sent.some(item => item.channel === 'component-sdk:event' && item.payload.topic === 'sample.undeclared.v1'), false, 'undeclared component event topics are not forwarded');
+    boundInstance.context.emitComponentEvent('sample.changed.v1', { value: 9 });
+    assert.deepStrictEqual(view.webContents.sent.find(item => item.channel === 'component-sdk:event' && item.payload.topic === 'sample.changed.v1')?.payload, { topic: 'sample.changed.v1', payload: { value: 9 } }, 'manifest-declared event topics forward their payload through the single component event channel');
     assert.deepEqual(view.options.webPreferences, { preload: 'host-preload.cjs', nodeIntegration: false, contextIsolation: true, sandbox: true, webviewTag: false });
     assert.deepEqual(view.webContents.windowOpenHandler(), { action: 'deny' });
     const navigation = { prevented: false, preventDefault() { this.prevented = true; } };
