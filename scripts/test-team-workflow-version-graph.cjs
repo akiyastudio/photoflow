@@ -3,14 +3,73 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
+const readline = require('node:readline');
 const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const componentRenderer = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'main.tsx'), 'utf8');
 const interactionModel = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'interaction-model.ts'), 'utf8');
 assert(interactionModel.includes("folder.mediaKind === 'image'") && interactionModel.includes('!folder.folderMissing') && interactionModel.includes("folder.nodeRole === 'progress'"), 'component merge targets must be existing image progress nodes');
-assert(componentRenderer.includes("rpc<Json>('project.progress.list.v1')") && !componentRenderer.includes('createVersionGraphEdge'), 'the component must use versioned host graph capabilities instead of assembling edges directly');
+assert(componentRenderer.includes("rpc<Json>('team.progress.list.v1')") && componentRenderer.includes("rpc<Json>('team.progress.create.v1'"), 'the renderer must call only its component-owned progress RPC boundary');
+assert(!componentRenderer.includes('project.progress.') && !componentRenderer.includes('createVersionGraphEdge'), 'the renderer must not call host progress capabilities or assemble graph edges directly');
+
+const verifyServiceProgressBoundary = () => new Promise((resolve, reject) => {
+  const child = spawn(process.execPath, [path.join(repositoryRoot, 'extensions', 'team-retouch', 'service.cjs')], {
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const pending = new Map();
+  const capabilityCalls = [];
+  let nextRequestId = 1;
+  let stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  child.once('error', reject);
+  child.once('exit', code => {
+    if (code && pending.size) reject(new Error(`team-retouch service exited ${code}: ${stderr}`));
+  });
+  const request = (method, payload = {}) => new Promise((resolveRequest, rejectRequest) => {
+    const id = `request-${nextRequestId++}`;
+    pending.set(id, { resolve: resolveRequest, reject: rejectRequest });
+    child.stdin.write(`${JSON.stringify({ type: 'request', id, method, payload })}\n`);
+  });
+  lines.on('line', line => {
+    let frame;
+    try { frame = JSON.parse(line); } catch (error) { reject(error); return; }
+    if (frame.type === 'ready') {
+      void (async () => {
+        const listed = await request('team.progress.list.v1');
+        assert.deepEqual(listed, { success: true, progressFolders: [{ id: 'original', nodeRole: 'original' }], edges: [{ sourceProgressId: 'source', targetProgressId: 'target' }] });
+        const created = await request('team.progress.create.v1', {
+          progress: { mediaKind: 'image', displayName: 'Output' }, workflowInputProgressIds: ['workflow', 'selection'],
+        });
+        assert.equal(created.progressFolder.id, 'output');
+        assert.deepEqual(capabilityCalls.map(call => call.method), ['project.progress.v2', 'project.progress.v2', 'project.progress.v2']);
+        assert.deepEqual(capabilityCalls.map(call => call.payload.action), ['list', 'list', 'create']);
+        assert.deepEqual(capabilityCalls[2].payload.sourceProgressIds, ['workflow', 'selection']);
+        assert.equal(capabilityCalls.some(call => call.method === 'project.progress.list.v1' || call.method === 'workspace-version-graph-edge-create' || call.payload?.action === 'createVersionGraphEdge'), false, 'service must not use Host V1 progress or direct edge creation');
+        child.kill();
+        resolve();
+      })().catch(error => { child.kill(); reject(error); });
+      return;
+    }
+    if (frame.type === 'capability') {
+      capabilityCalls.push({ method: frame.method, payload: frame.payload });
+      let result;
+      if (frame.payload.action === 'list') result = { progress: [{ id: 'original', nodeRole: 'original' }], edges: [{ sourceProgressId: 'source', targetProgressId: 'target' }] };
+      else if (frame.payload.action === 'create') result = { progress: { id: 'output' }, edges: [{ sourceProgressId: 'workflow', targetProgressId: 'output' }] };
+      else { reject(new Error(`unexpected capability action: ${frame.payload.action}`)); return; }
+      child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: true, result })}\n`);
+      return;
+    }
+    if (frame.type === 'response') {
+      const target = pending.get(frame.id);
+      pending.delete(frame.id);
+      if (!target) return;
+      frame.ok ? target.resolve(frame.result) : target.reject(new Error(frame.error));
+    }
+  });
+});
 
 const dagResult = spawnSync(process.execPath, [path.join(repositoryRoot, 'scripts', 'test-version-tree-dag-layout.cjs')], { encoding: 'utf8' });
 assert.equal(dagResult.status, 0, dagResult.stderr || dagResult.stdout);
@@ -18,7 +77,7 @@ assert.equal(dagResult.status, 0, dagResult.stderr || dagResult.stdout);
 const python = process.env.PYTHON || (process.platform === 'win32'
   ? path.join(repositoryRoot, '.venv', 'Scripts', 'python.exe') : 'python3');
 const databaseProgram = String.raw`
-import os, sys, tempfile, time, uuid
+import json, os, sys, tempfile, time, uuid
 sys.path.insert(0, os.path.join(sys.argv[1], 'python'))
 import workspace_db
 
@@ -30,20 +89,23 @@ with tempfile.TemporaryDirectory() as root:
     os.makedirs(project)
     db.execute("INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)", (project_id, 'Project', 'active', 'Project', now, now))
     db.commit()
-    def register(name, role='progress', parent=None, relation=None, artifact=None):
+    def register(name, role='progress', parent=None, relation=None, artifact=None, source_metadata=None):
         target = os.path.join(project, name)
         os.makedirs(target, exist_ok=True)
         return workspace_db.progress_register(root, db, {
             'projectName':'Project', 'mediaKind':'image', 'versionKey':name,
             'displayName':name, 'folderPath':target, 'nodeRole':role,
             'parentProgressId':parent, 'relationKind':relation, 'artifactKind':artifact,
+            'sourceMetadata':source_metadata,
             'trackingEnabled':False, 'trackingState':'disabled',
         })['progressFolder']
     source_one = register('source-one', 'original')
     source_two = register('source-two', 'progress', source_one['id'], 'main')
     selection = register('selection', 'selection', source_one['id'], 'auxiliary')
     artifact = register('artifact', 'artifact', artifact='preview')
-    workflow = register('team-workflow', 'workflow', artifact='team_workspace')
+    workflow = register('vendor-workflow', 'workflow', artifact='vendor.workflow', source_metadata={
+        'category':'workflow', 'componentId':'vendor', 'parentCapability':'workflow-input',
+    })
 
     inputs = workspace_db.progress_register_with_graph(root, db, {
         'projectName':'Project', 'progress':{'progressId':workflow['id']},
@@ -135,31 +197,28 @@ with tempfile.TemporaryDirectory() as root:
         assert 'forced team relation failure' in str(error)
     assert db.execute("SELECT COUNT(*) FROM progress_folders WHERE version_key='99'").fetchone()[0] == 0
 
-    source_file = os.path.join(project, 'source-two', 'cropped.jpg')
-    db.execute("INSERT INTO photos(id,project_id,media_type,original_name,display_name,original_file_path,created_at,updated_at) VALUES('team-photo',?,'image','cropped.jpg','cropped.jpg',?,?,?)", (project_id, source_file, now, now))
-    db.execute("INSERT INTO versions(id,photo_id,version_number,version_name,file_path,file_path_key,created_at,updated_at) VALUES('team-version','team-photo',0,'base',?,?,?,?)", (source_file, source_file.casefold(), now, now))
-    db.commit()
-    try:
-        workspace_db.team_project_register_photo(db, {'projectName':'Project','photoId':'team-photo','baseVersionId':'team-version'})
-        raise AssertionError('uncropped photo was registered in the team workflow')
-    except ValueError as error:
-        assert 'actual crop' in str(error) or '实际裁剪任务' in str(error)
-    crop_task = {
-        'id':'team-crop','personIndex':1,'detector':'test',
-        'bbox':{'x':0,'y':0,'width':10,'height':10},
-        'crop':{'x':0,'y':0,'width':10,'height':10},
-        'patchPath':os.path.join(project,'team-crop.png'),
-    }
-    workspace_db.team_patch_replace(db, {'photoId':'team-photo','baseVersionId':'team-version','tasks':[crop_task]})
-    workspace_db.team_project_register_photo(db, {'projectName':'Project','photoId':'team-photo','baseVersionId':'team-version'})
-    assert db.execute("SELECT 1 FROM team_retouch_photos WHERE photo_id='team-photo'").fetchone() is not None
-    workspace_db.team_patch_replace(db, {'photoId':'team-photo','baseVersionId':'team-version','tasks':[]})
-    assert db.execute("SELECT 1 FROM team_retouch_photos WHERE photo_id='team-photo'").fetchone() is None
-    workspace_db.team_patch_replace(db, {'photoId':'team-photo','baseVersionId':'team-version','tasks':[crop_task]})
-    workspace_db.team_project_register_photo(db, {'projectName':'Project','photoId':'team-photo','baseVersionId':'team-version'})
-    workspace_db.team_patch_delete(db, {'taskId':'team-crop'})
-    assert db.execute("SELECT 1 FROM team_retouch_photos WHERE photo_id='team-photo'").fetchone() is None
     db.close()
+
+with tempfile.TemporaryDirectory() as compatibility_root:
+    compatibility_db = workspace_db.connect(compatibility_root, os.path.join(compatibility_root, 'workspace.db'))
+    compatibility_now = int(time.time() * 1000)
+    compatibility_project_id = str(uuid.uuid4())
+    compatibility_project = os.path.join(compatibility_root, 'LegacyProject')
+    compatibility_workflow = os.path.join(compatibility_project, '团片协作')
+    os.makedirs(compatibility_workflow)
+    compatibility_db.execute("INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)", (compatibility_project_id, 'LegacyProject', 'active', 'LegacyProject', compatibility_now, compatibility_now))
+    compatibility_db.commit()
+    legacy = workspace_db.progress_register(compatibility_root, compatibility_db, {
+        'projectName':'LegacyProject', 'mediaKind':'image', 'versionKey':'team-workspace',
+        'displayName':'团片协作', 'folderPath':compatibility_workflow, 'nodeRole':'workflow',
+        'artifactKind':'team_workspace', 'trackingEnabled':False, 'trackingState':'disabled',
+    })['progressFolder']
+    compatibility_db.execute("UPDATE progress_folders SET source_metadata_json='{}' WHERE id=?", (legacy['id'],))
+    from compatibility.team_retouch_v1 import workspace as team_v1_compatibility
+    team_v1_compatibility.migrate(compatibility_db, 32)
+    metadata = json.loads(compatibility_db.execute("SELECT source_metadata_json FROM progress_folders WHERE id=?", (legacy['id'],)).fetchone()[0])
+    assert metadata['category'] == 'workflow' and metadata['componentId'] == 'team-retouch'
+    compatibility_db.close()
 print('database graph checks passed')
 `;
 const databaseResult = spawnSync(python, ['-c', databaseProgram, repositoryRoot], { encoding: 'utf8', env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
@@ -236,6 +295,7 @@ registerVersionIpc({
 const atomicHandler = handlers.get('workspace-progress-register-with-graph');
 assert.equal(typeof atomicHandler, 'function');
 (async () => {
+  await verifyServiceProgressBoundary();
   const bridgeRequest = {
     projectName: 'Project',
     progress: {
