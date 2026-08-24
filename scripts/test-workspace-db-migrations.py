@@ -744,8 +744,20 @@ def test_fresh_catalog_records_purpose_constraint_revision(temp_root):
     try:
         assert first.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
         assert first.execute("SELECT value FROM meta WHERE key='progress_purpose_constraint_revision'").fetchone()[0] == workspace_db.PROGRESS_PURPOSE_CONSTRAINT_REVISION
+        assert first.execute("SELECT value FROM meta WHERE key='legacy_progress_parent_repair_revision'").fetchone()[0] == workspace_db.LEGACY_PROGRESS_PARENT_REPAIR_REVISION
     finally:
         first.close()
+
+    revision_reset = sqlite3.connect(database)
+    revision_reset.execute("DELETE FROM meta WHERE key='legacy_progress_parent_repair_revision'")
+    revision_reset.commit()
+    revision_reset.close()
+    clean_reopen = workspace_db.connect(workspace_root, database, include_domains=False)
+    try:
+        assert clean_reopen.execute("SELECT COUNT(*) FROM progress_folders").fetchone()[0] == 0
+        assert clean_reopen.execute("SELECT value FROM meta WHERE key='legacy_progress_parent_repair_revision'").fetchone()[0] == workspace_db.LEGACY_PROGRESS_PARENT_REPAIR_REVISION
+    finally:
+        clean_reopen.close()
 
     writer = sqlite3.connect(database, timeout=1)
     writer.execute("BEGIN IMMEDIATE")
@@ -757,10 +769,170 @@ def test_fresh_catalog_records_purpose_constraint_revision(temp_root):
         writer.close()
 
 
+def _drop_progress_purpose_triggers(db, schema="main"):
+    names = [
+        row[0] for row in db.execute(
+            f"SELECT name FROM {schema}.sqlite_master WHERE type='trigger' "
+            "AND tbl_name IN ('progress_folders','version_graph_edges')"
+        ).fetchall()
+    ]
+    for name in names:
+        db.execute(f'DROP TRIGGER IF EXISTS {schema}."{name}"')
+
+
+def _insert_legacy_parentless_chain(db, project_id, prefix, folder_root, include_graph=False):
+    now = int(time.time() * 1000)
+    folders = {}
+    for name in ("root", "child", "leaf", "preview", "workflow"):
+        folder = os.path.join(folder_root, f"{prefix}-{name}")
+        os.makedirs(folder, exist_ok=True)
+        folders[name] = folder
+    rows = (
+        (f"{prefix}-root", "1", None, "progress", None, None, 1, "ready", folders["root"]),
+        (f"{prefix}-child", "2", f"{prefix}-root", "progress", None, "main", 1, "ready", folders["child"]),
+        (f"{prefix}-leaf", "leaf", None, "progress", None, None, 1, "ready", folders["leaf"]),
+        (f"{prefix}-preview", "preview", None, "artifact", "preview", None, 0, "disabled", folders["preview"]),
+        (f"{prefix}-workflow", "workflow", None, "workflow", "team_workspace", None, 0, "disabled", folders["workflow"]),
+    )
+    for node_id, version_key, parent_id, role, artifact_kind, relation_kind, tracking_enabled, state, folder in rows:
+        db.execute(
+            """INSERT INTO progress_folders(
+                 id,project_id,media_kind,version_key,parent_progress_id,display_name,
+                 folder_path,folder_path_key,node_role,artifact_kind,relation_kind,
+                 tracking_enabled,tracking_state,rename_from_parent,copy_missing_from_parent,
+                 tracking_snapshot_json,tombstone_json,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,'{}','{}',?,?)""",
+            (node_id, project_id, "image", version_key, parent_id, node_id, folder,
+             folder.casefold(), role, artifact_kind, relation_kind, tracking_enabled, state, now, now),
+        )
+    if include_graph:
+        db.execute(
+            """INSERT INTO version_graph_edges(
+                 id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (f"{prefix}-preview-edge", project_id, f"{prefix}-root", f"{prefix}-preview", "derived_preview", now, now),
+        )
+        db.execute(
+            """INSERT INTO version_graph_edges(
+                 id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (f"{prefix}-workflow-edge", project_id, f"{prefix}-root", f"{prefix}-workflow", "workflow_input", now, now),
+        )
+
+
+def test_schema_30_repairs_legacy_parentless_progress_parent(temp_root):
+    workspace_root = os.path.join(temp_root, "legacy-parent-schema30-workspace")
+    database = os.path.join(temp_root, "legacy-parent-schema30.sqlite3")
+    os.makedirs(workspace_root)
+    db = workspace_db.connect(workspace_root, database, include_domains=False)
+    now = int(time.time() * 1000)
+    db.execute(
+        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES('legacy-parent-project','Legacy parent','后期中','Legacy parent',?,?)",
+        (now, now),
+    )
+    _drop_progress_purpose_triggers(db)
+    _insert_legacy_parentless_chain(db, "legacy-parent-project", "schema30", workspace_root, include_graph=True)
+    db.execute("UPDATE meta SET value='30' WHERE key='schema_version'")
+    db.execute("DELETE FROM meta WHERE key='legacy_progress_parent_repair_revision'")
+    db.commit()
+    db.close()
+
+    upgraded = workspace_db.connect(workspace_root, database, include_domains=False)
+    try:
+        root = upgraded.execute("SELECT * FROM progress_folders WHERE id='schema30-root'").fetchone()
+        child = upgraded.execute("SELECT * FROM progress_folders WHERE id='schema30-child'").fetchone()
+        leaf = upgraded.execute("SELECT * FROM progress_folders WHERE id='schema30-leaf'").fetchone()
+        assert root["node_role"] == "original" and root["artifact_kind"] is None
+        assert root["tracking_enabled"] == 0 and root["tracking_state"] == "disabled"
+        assert child["parent_progress_id"] == root["id"] and child["relation_kind"] == "main"
+        assert leaf["node_role"] == "progress" and leaf["parent_progress_id"] is None
+        assert leaf["tracking_enabled"] == 0 and leaf["tracking_state"] == "disabled"
+        assert upgraded.execute("SELECT source_progress_id FROM version_graph_edges WHERE id='schema30-preview-edge'").fetchone()[0] == "schema30-root"
+        assert upgraded.execute("SELECT source_progress_id FROM version_graph_edges WHERE id='schema30-workflow-edge'").fetchone()[0] == "schema30-child"
+        assert upgraded.execute("SELECT value FROM meta WHERE key='legacy_progress_parent_repair_revision'").fetchone()[0] == workspace_db.LEGACY_PROGRESS_PARENT_REPAIR_REVISION
+        workspace_db._check_integrity(upgraded, force=True)
+        snapshot = [tuple(row) for row in upgraded.execute("SELECT * FROM progress_folders ORDER BY id")]
+        repair_meta = upgraded.execute("SELECT value FROM meta WHERE key='last_legacy_progress_parent_repair'").fetchone()[0]
+    finally:
+        upgraded.close()
+
+    reopened = workspace_db.connect(workspace_root, database, include_domains=False)
+    try:
+        assert [tuple(row) for row in reopened.execute("SELECT * FROM progress_folders ORDER BY id")] == snapshot
+        assert reopened.execute("SELECT value FROM meta WHERE key='last_legacy_progress_parent_repair'").fetchone()[0] == repair_meta
+    finally:
+        reopened.close()
+
+
+def test_schema_31_detached_repairs_deleted_project_and_clean_db_is_stable(temp_root):
+    workspace_root = os.path.join(temp_root, "legacy-parent-detached-workspace")
+    database = os.path.join(temp_root, "legacy-parent-detached.sqlite3")
+    os.makedirs(workspace_root)
+    db = workspace_db.connect(workspace_root, database, include_domains=True)
+    now = int(time.time() * 1000)
+    db.execute(
+        """INSERT INTO projects(id,name,status,relative_path,is_deleted,created_at,updated_at)
+           VALUES('deleted-parent-project','Deleted legacy','已归档','Deleted legacy',1,?,?)""",
+        (now, now),
+    )
+    db.execute(
+        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES('clean-project','Clean','后期中','Clean',?,?)",
+        (now, now),
+    )
+    for node_id, version_key, parent_id, role, relation_kind in (
+        ("clean-original", "source", None, "original", None),
+        ("clean-progress", "1", "clean-original", "progress", "main"),
+    ):
+        folder = os.path.join(workspace_root, node_id)
+        os.makedirs(folder)
+        db.execute(
+            """INSERT INTO progress_folders(
+                 id,project_id,media_kind,version_key,parent_progress_id,display_name,
+                 folder_path,folder_path_key,node_role,artifact_kind,relation_kind,
+                 tracking_enabled,tracking_state,rename_from_parent,copy_missing_from_parent,
+                 tracking_snapshot_json,tombstone_json,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,NULL,?,0,'disabled',0,0,'{}','{}',?,?)""",
+            (node_id, "clean-project", "image", version_key, parent_id, node_id,
+             folder, folder.casefold(), role, relation_kind, now, now),
+        )
+    clean_snapshot = [tuple(row) for row in db.execute("SELECT * FROM progress_folders ORDER BY id")]
+    db.execute("DELETE FROM meta WHERE key='legacy_progress_parent_repair_revision'")
+    db.commit()
+    db.close()
+
+    versioning_path = os.path.join(
+        os.path.splitext(database)[0], "databases", "versioning.sqlite3",
+    )
+    detached = sqlite3.connect(versioning_path)
+    try:
+        _drop_progress_purpose_triggers(detached)
+        _insert_legacy_parentless_chain(detached, "deleted-parent-project", "detached31", workspace_root)
+        detached.commit()
+    finally:
+        detached.close()
+
+    repaired = workspace_db.connect(workspace_root, database, include_domains=True)
+    try:
+        assert [tuple(row) for row in repaired.execute("SELECT * FROM progress_folders WHERE id NOT LIKE 'detached31-%' ORDER BY id")] == clean_snapshot
+        root = repaired.execute("SELECT * FROM progress_folders WHERE id='detached31-root'").fetchone()
+        child = repaired.execute("SELECT * FROM progress_folders WHERE id='detached31-child'").fetchone()
+        leaf = repaired.execute("SELECT * FROM progress_folders WHERE id='detached31-leaf'").fetchone()
+        assert root["node_role"] == "original" and root["tracking_enabled"] == 0
+        assert child["parent_progress_id"] == "detached31-root"
+        assert leaf["node_role"] == "progress" and leaf["parent_progress_id"] is None
+        assert repaired.execute("SELECT is_deleted FROM projects WHERE id='deleted-parent-project'").fetchone()[0] == 1
+        assert repaired.execute("SELECT 1 FROM versioning.sqlite_master WHERE type='trigger' AND name='progress_folders_parent_validate_insert'").fetchone()
+        workspace_db._check_integrity(repaired, force=True)
+    finally:
+        repaired.close()
+
+
 def main():
     temp_root = tempfile.mkdtemp(prefix="photoflow-db-migration-")
     try:
         test_fresh_catalog_records_purpose_constraint_revision(temp_root)
+        test_schema_30_repairs_legacy_parentless_progress_parent(temp_root)
+        test_schema_31_detached_repairs_deleted_project_and_clean_db_is_stable(temp_root)
         workspace_root = os.path.join(temp_root, "workspace")
         os.makedirs(workspace_root)
         database = os.path.join(temp_root, "workspace.sqlite3")

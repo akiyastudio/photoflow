@@ -45,6 +45,7 @@ LEGACY_SELECTION_INDEPENDENT_KEY_PREFIX = "legacy_selection_independent:"
 SELECTION_MAINLINE_REPAIR_REVISION = "1"
 VERSION_TREE_DEFAULT_LAYOUT_REVISION = "2"
 PROGRESS_PURPOSE_CONSTRAINT_REVISION = "1"
+LEGACY_PROGRESS_PARENT_REPAIR_REVISION = "1"
 TARGET_SCHEMA_VERSION = 31
 MEDIA_INCREMENTAL_BATCH_SIZE = 64
 MEDIA_INCREMENTAL_COMPLETED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
@@ -1346,6 +1347,181 @@ def _install_progress_purpose_constraints(db):
     return installed
 
 
+def _repair_legacy_progress_structural_roots(db):
+    """Normalize legacy parentless progress nodes that own structural children.
+
+    The oldest node is the deterministic baseline: preserve its identity,
+    folder, and children, promote it to ``original``, and disable tracking.
+    Parentless progress leaves remain in place but cannot continue tracking.
+    """
+    trigger_names = (
+        "progress_folders_v2_shape_insert", "progress_folders_v2_shape_update",
+        "progress_folders_v2_policy_insert", "progress_folders_v2_policy_update",
+        "progress_folders_parent_validate_insert", "progress_folders_parent_validate_update",
+        "progress_folders_structural_parent_update",
+        "progress_folders_v2_parent_insert", "progress_folders_v2_parent_update",
+        "progress_folders_v2_cycle_insert", "progress_folders_v2_cycle_update",
+        "version_graph_edges_validate_insert", "version_graph_edges_validate_update",
+        "progress_folders_graph_endpoint_update",
+    )
+    found_owner = False
+    repaired = []
+    timestamp = int(time.time() * 1000)
+    for schema in [row[1] for row in db.execute("PRAGMA database_list").fetchall()]:
+        quoted_schema = schema.replace('"', '""')
+        tables = {
+            row[0] for row in db.execute(
+                f'SELECT name FROM "{quoted_schema}".sqlite_master WHERE type=\'table\''
+            ).fetchall()
+        }
+        if "progress_folders" not in tables:
+            continue
+        found_owner = True
+        roots = db.execute(
+            f"""SELECT root.id,root.tracking_enabled,root.tracking_state,
+                       root.rename_from_parent,root.copy_missing_from_parent,
+                       EXISTS(SELECT 1 FROM "{quoted_schema}".progress_folders child
+                              WHERE child.parent_progress_id=root.id) AS has_children,
+                       (SELECT child.id FROM "{quoted_schema}".progress_folders child
+                        WHERE child.parent_progress_id=root.id AND child.node_role='progress'
+                          AND child.relation_kind='main'
+                        ORDER BY child.created_at,child.id LIMIT 1) AS canonical_child_id
+                FROM "{quoted_schema}".progress_folders root
+                WHERE root.node_role='progress' AND root.parent_progress_id IS NULL
+                ORDER BY root.created_at,root.id"""
+        ).fetchall()
+        candidates = [
+            row for row in roots
+            if row["has_children"] or row["tracking_enabled"] != 0
+            or row["tracking_state"] != "disabled" or row["rename_from_parent"] != 0
+            or row["copy_missing_from_parent"] != 0
+        ]
+        if not candidates:
+            continue
+        for name in trigger_names:
+            db.execute(f'DROP TRIGGER IF EXISTS "{quoted_schema}"."{name}"')
+        schema_repairs = []
+        for row in candidates:
+            node_id = str(row["id"])
+            if row["has_children"]:
+                db.execute(
+                    f"""UPDATE "{quoted_schema}".progress_folders
+                        SET node_role='original',artifact_kind=NULL,relation_kind=NULL,
+                            tracking_enabled=0,tracking_state='disabled',
+                            rename_from_parent=0,copy_missing_from_parent=0,updated_at=?
+                        WHERE id=?""",
+                    (timestamp, node_id),
+                )
+                canonical_child_id = row["canonical_child_id"]
+                if canonical_child_id and "version_graph_edges" in tables:
+                    edges = db.execute(
+                        f"""SELECT id,source_progress_id,target_progress_id
+                            FROM "{quoted_schema}".version_graph_edges
+                            WHERE edge_kind='workflow_input'
+                              AND (source_progress_id=? OR target_progress_id=?)
+                            ORDER BY created_at,id""",
+                        (node_id, node_id),
+                    ).fetchall()
+                    for edge in edges:
+                        source_id = str(edge["source_progress_id"])
+                        target_id = str(edge["target_progress_id"])
+                        replacement_source = str(canonical_child_id) if source_id == node_id else source_id
+                        replacement_target = str(canonical_child_id) if target_id == node_id else target_id
+                        try:
+                            db.execute(
+                                f"""UPDATE "{quoted_schema}".version_graph_edges
+                                    SET source_progress_id=?,target_progress_id=?,updated_at=? WHERE id=?""",
+                                (replacement_source, replacement_target, timestamp, edge["id"]),
+                            )
+                            creates_cycle = db.execute(
+                                f"""WITH RECURSIVE descendants(id) AS (
+                                      SELECT ? UNION
+                                      SELECT child.id FROM "{quoted_schema}".progress_folders child
+                                      JOIN descendants ON child.parent_progress_id=descendants.id UNION
+                                      SELECT graph.target_progress_id
+                                      FROM "{quoted_schema}".version_graph_edges graph
+                                      JOIN descendants ON graph.source_progress_id=descendants.id
+                                      WHERE graph.id!=?
+                                    ) SELECT 1 FROM descendants WHERE id=?""",
+                                (replacement_target, edge["id"], replacement_source),
+                            ).fetchone()
+                            if creates_cycle:
+                                db.execute(
+                                    f'DELETE FROM "{quoted_schema}".version_graph_edges WHERE id=?',
+                                    (edge["id"],),
+                                )
+                        except sqlite3.IntegrityError:
+                            db.execute(
+                                f'DELETE FROM "{quoted_schema}".version_graph_edges WHERE id=?',
+                                (edge["id"],),
+                            )
+                if "tracking_sessions" in tables:
+                    db.execute(
+                        f"""UPDATE "{quoted_schema}".tracking_sessions
+                            SET status='cancelled',error=CASE WHEN error='' THEN
+                              'legacy structural root normalized to original' ELSE error END,updated_at=?
+                            WHERE progress_id=? AND status IN ('comparing','pending_confirm','committing')""",
+                        (timestamp, node_id),
+                    )
+                schema_repairs.append({"id": node_id, "kind": "structural_root_to_original"})
+            else:
+                db.execute(
+                    f"""UPDATE "{quoted_schema}".progress_folders
+                        SET tracking_enabled=0,tracking_state='disabled',rename_from_parent=0,
+                            copy_missing_from_parent=0,updated_at=? WHERE id=?""",
+                    (timestamp, node_id),
+                )
+                schema_repairs.append({"id": node_id, "kind": "legacy_leaf_tracking_disabled"})
+
+        converted_ids = [item["id"] for item in schema_repairs if item["kind"] == "structural_root_to_original"]
+        if converted_ids and "version_graph_edges" in tables:
+            placeholders = ",".join("?" for _ in converted_ids)
+            db.execute(
+                f"""DELETE FROM "{quoted_schema}".version_graph_edges AS edge
+                    WHERE (edge.source_progress_id IN ({placeholders})
+                           OR edge.target_progress_id IN ({placeholders}))
+                      AND NOT EXISTS(
+                        SELECT 1 FROM "{quoted_schema}".progress_folders source
+                        JOIN "{quoted_schema}".progress_folders target ON target.id=edge.target_progress_id
+                        WHERE source.id=edge.source_progress_id
+                          AND source.project_id=edge.project_id AND target.project_id=edge.project_id
+                          AND source.media_kind=target.media_kind AND (
+                            (edge.edge_kind='media_companion' AND source.node_role='original'
+                              AND source.artifact_kind IS NULL AND target.node_role='original'
+                              AND target.artifact_kind='companion')
+                            OR (edge.edge_kind='derived_preview' AND
+                              (source.node_role='original' AND source.artifact_kind IS NULL
+                               OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL
+                                  AND source.relation_kind='main')
+                              AND target.node_role='artifact' AND target.artifact_kind='preview')
+                            OR (edge.edge_kind='workflow_input' AND
+                              ((source.node_role IN ('selection','workflow') AND target.node_role='progress'
+                                AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main')
+                               OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL
+                                AND source.relation_kind='main' AND target.node_role='workflow'
+                                AND target.artifact_kind='team_workspace')))))""",
+                (*converted_ids, *converted_ids),
+            )
+        if converted_ids and "media_import_artifact_slots" in tables:
+            placeholders = ",".join("?" for _ in converted_ids)
+            db.execute(
+                f"""DELETE FROM "{quoted_schema}".media_import_artifact_slots AS slot
+                    WHERE slot.progress_id IN ({placeholders}) AND NOT EXISTS(
+                      SELECT 1 FROM "{quoted_schema}".progress_folders progress
+                      WHERE progress.id=slot.progress_id AND
+                        (slot.import_slot='raw' AND progress.media_kind='image'
+                         OR slot.import_slot='mov' AND progress.media_kind='video'))""",
+                tuple(converted_ids),
+            )
+        repaired.extend(schema_repairs)
+    if repaired:
+        _set_meta(
+            db, "last_legacy_progress_parent_repair",
+            json.dumps(repaired, ensure_ascii=False, separators=(",", ":")),
+        )
+    return found_owner, repaired
+
+
 def _progress_purpose_constraints_current(db):
     expected = {
         "progress_folders_v2_shape_insert", "progress_folders_v2_shape_update",
@@ -1748,6 +1924,7 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
     if schema_is_current:
         domain_migrated = False
         purpose_constraints_migrated = False
+        legacy_parent_revision_recorded = False
         try:
             if requested_domains:
                 attach_workspace_domain_storage(db, database, requested_domains)
@@ -1755,6 +1932,11 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
                 _migration_30(db)
             if include_team:
                 attach_team_retouch_storage(db, database)
+            if _meta_value(db, "legacy_progress_parent_repair_revision") != LEGACY_PROGRESS_PARENT_REPAIR_REVISION:
+                found_versioning, _repairs = _repair_legacy_progress_structural_roots(db)
+                if found_versioning:
+                    _set_meta(db, "legacy_progress_parent_repair_revision", LEGACY_PROGRESS_PARENT_REPAIR_REVISION)
+                    legacy_parent_revision_recorded = True
             if not _progress_purpose_constraints_current(db):
                 purpose_constraints_migrated = _install_progress_purpose_constraints(db)
                 if purpose_constraints_migrated:
@@ -1762,7 +1944,7 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
         except Exception:
             db.close()
             raise
-        if domain_migrated or purpose_constraints_migrated:
+        if domain_migrated or purpose_constraints_migrated or legacy_parent_revision_recorded:
             db.commit()
             _check_integrity(db, force=True)
         return db
@@ -2114,6 +2296,10 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
         db.close()
         raise
     with db:
+        if _meta_value(db, "legacy_progress_parent_repair_revision") != LEGACY_PROGRESS_PARENT_REPAIR_REVISION:
+            found_versioning, _repairs = _repair_legacy_progress_structural_roots(db)
+            if found_versioning:
+                _set_meta(db, "legacy_progress_parent_repair_revision", LEGACY_PROGRESS_PARENT_REPAIR_REVISION)
         purpose_constraints_ready = _progress_purpose_constraints_current(db)
         if not purpose_constraints_ready:
             purpose_constraints_ready = _install_progress_purpose_constraints(db)
