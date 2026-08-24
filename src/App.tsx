@@ -64,6 +64,8 @@ const App: React.FC = () => {
   const [draggedHomeCard, setDraggedHomeCard] = useState<HomeCardId | null>(null);
   const [sidebarWidth, setSidebarWidth] = useState(() => readStoredNumber('photoflow:sidebar-width', 256));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem('photoflow:sidebar-collapsed') === 'true');
+  const [backgroundTaskDrawerOpen, setBackgroundTaskDrawerOpen] = useState(false);
+  const backgroundTaskDrawerHostRef = useRef<HTMLDivElement>(null);
   const [backupStatus, setBackupStatus] = useState<BackupStatus>({ success: true, enabled: false, state: 'unconfigured', snapshots: [] });
   const [backupProjectFocus, setBackupProjectFocus] = useState<WorkspaceProject | null>(null);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
@@ -314,6 +316,10 @@ const App: React.FC = () => {
             const legacyAdvancedVideo = fileConfig.componentSettings?.['video-playback-mpv'];
             const videoPlayback: AppConfig['videoPlayback'] = {
               arrowKeyAction: fileConfig.videoPlayback?.arrowKeyAction === 'navigate' ? 'navigate' : fileConfig.videoPlayback?.arrowKeyAction === 'seek' ? 'seek' : legacyAdvancedVideo?.arrowKeyAction === 'navigate' ? 'navigate' : 'seek',
+              subtitlesEnabled: fileConfig.videoPlayback?.subtitlesEnabled === true,
+              subtitlePreferredLanguages: Array.isArray(fileConfig.videoPlayback?.subtitlePreferredLanguages) ? fileConfig.videoPlayback.subtitlePreferredLanguages.map(value => String(value).trim().toLowerCase()).filter(Boolean).slice(0, 8) : ['zh', 'chi', 'zho'],
+              subtitleSize: fileConfig.videoPlayback?.subtitleSize === 'large' ? 'large' : 'default',
+              subtitleStyle: fileConfig.videoPlayback?.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard',
             };
             const configuredImageSource = fileConfig.smartMatch?.imageSourceFolderName;
             const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;
@@ -784,7 +790,7 @@ const App: React.FC = () => {
           {titlebarTabScroll.overflow && <button type="button" aria-label="向右滚动标签" title="向右滚动标签" disabled={!titlebarTabScroll.canScrollRight} onClick={() => scrollTitlebarTabs(1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronRight size={15}/></button>}
           <div aria-label={folderTabSourceDragActive ? '标签栏空白区域' : '拖动窗口'} className={`${folderTabSourceDragActive ? 'app-titlebar-control' : 'app-window-drag-region'} min-w-8 flex-1`}/>
         </div>
-        <BackgroundTaskIndicator ownerPageIds={openPageIds}/>
+        <BackgroundTaskIndicator ownerPageIds={openPageIds} open={backgroundTaskDrawerOpen} onOpenChange={setBackgroundTaskDrawerOpen} drawerHostRef={backgroundTaskDrawerHostRef}/>
         <WindowControls/>
       </header>
 
@@ -863,7 +869,7 @@ const App: React.FC = () => {
             inspirationLibraryRootPath={config.inspirationLibrary.rootPath}
             installedComponentIds={installedComponentIds}
             componentHostActions={componentHostActions} onOpenComponentPage={(action, scope) => void openComponentPage(action, project, project.workspacePath || config.workspacePath, scope)}
-            advancedVideoSettings={config.videoPlayback}
+            videoPlaybackSettings={config.videoPlayback}
             projectToolbar={config.projectToolbar}
             customProjectCategories={config.customProjectCategories}
             projectCategoryOrder={config.projectCategoryOrder}
@@ -909,6 +915,7 @@ const App: React.FC = () => {
 
         {activeTab === 'video_split' && <VideoSplitView />}
       </main>
+      <div ref={backgroundTaskDrawerHostRef} className={backgroundTaskDrawerOpen ? 'w-80 shrink-0 overflow-hidden border-l border-slate-200 bg-white' : 'hidden'} />
       </div>}
     </div>
   );

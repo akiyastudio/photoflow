@@ -99,7 +99,7 @@ const AppDialogProvider = ({ children }: { children: ReactNode }) => {
     resolvingId.current = null;
   }, [active]);
 
-  useEscapeLayer(Boolean(active), () => finish(active?.kind === 'confirm' ? false : null));
+  useEscapeLayer(Boolean(active), () => finish(active?.kind === 'confirm' ? false : null), true, true);
 
   const submitPrompt = (event: FormEvent) => {
     event.preventDefault();

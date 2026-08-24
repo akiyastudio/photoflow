@@ -119,6 +119,8 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private readonly MpvFree free;
         private readonly MpvTerminateDestroy terminateDestroy;
         private IntPtr context;
+        private string[] pendingSidecars = new string[0];
+        private string pendingVideoPath = string.Empty;
 
         internal LibMpv(IntPtr videoWindow, bool probeOnly = false)
         {
@@ -134,7 +136,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     if (library != IntPtr.Zero) break;
                 }
             }
-            if (library == IntPtr.Zero) throw new InvalidOperationException("无法加载 libmpv-2.dll，请重新安装“高级视频解码”组件");
+            if (library == IntPtr.Zero) throw new InvalidOperationException("无法加载 libmpv-2.dll，请在组件管理中修复或重新安装“视频播放器”运行时");
 
             create = Load<MpvCreate>("mpv_create");
             initialize = Load<MpvInitialize>("mpv_initialize");
@@ -163,10 +165,9 @@ namespace PhotoFlow.AdvancedVideoDecoder
             SetOption("demuxer-max-bytes", "256MiB");
             SetOption("keep-open", "yes");
             SetOption("idle", "yes");
-            // Subtitle playback is temporarily disabled. DJI and similar camera files
-            // can contain telemetry subtitle tracks, and mpv may also discover a
-            // same-name sidecar subtitle automatically.
+            // Discovery is explicit so camera telemetry and sidecars never become visible automatically.
             SetOption("sub-auto", "no");
+            SetOption("sub-codepage", "auto");
             SetOption("sid", "no");
             SetOption("sub-visibility", "no");
             SetOptionalOption("osc", "no");
@@ -240,7 +241,87 @@ namespace PhotoFlow.AdvancedVideoDecoder
 
         internal void Open(string filePath)
         {
+            pendingVideoPath = Path.GetFullPath(filePath);
+            pendingSidecars = DiscoverSidecars(filePath);
             Check(Run("loadfile", filePath, "replace"), "打开视频");
+        }
+
+        private static string[] DiscoverSidecars(string filePath)
+        {
+            var result = new List<string>();
+            string directory = Path.GetDirectoryName(filePath);
+            string baseName = Path.GetFileNameWithoutExtension(filePath);
+            if (string.IsNullOrWhiteSpace(directory) || string.IsNullOrWhiteSpace(baseName) || !Directory.Exists(directory)) return result.ToArray();
+            try
+            {
+                foreach (string sidecar in Directory.GetFiles(directory))
+                {
+                    string extension = Path.GetExtension(sidecar).ToLowerInvariant();
+                    string stem = Path.GetFileNameWithoutExtension(sidecar);
+                    if ((extension == ".srt" || extension == ".ass" || extension == ".ssa" || extension == ".vtt")
+                        && (string.Equals(stem, baseName, StringComparison.OrdinalIgnoreCase) || stem.StartsWith(baseName + ".", StringComparison.OrdinalIgnoreCase)))
+                        result.Add(sidecar);
+                }
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            result.Sort(StringComparer.OrdinalIgnoreCase);
+            return result.ToArray();
+        }
+
+        internal bool LoadPendingSidecars()
+        {
+            string loadedPath = GetProperty("path");
+            try
+            {
+                if (string.IsNullOrWhiteSpace(loadedPath)
+                    || !string.Equals(Path.GetFullPath(loadedPath), pendingVideoPath, StringComparison.OrdinalIgnoreCase)) return false;
+            }
+            catch (Exception) { return false; }
+            string[] sidecars = pendingSidecars;
+            pendingSidecars = new string[0];
+            foreach (string sidecar in sidecars)
+            {
+                if (!File.Exists(sidecar)) continue;
+                Check(Run("sub-add", sidecar, "auto"), "发现外挂字幕");
+            }
+            return true;
+        }
+
+        internal IList<Dictionary<string, object>> SubtitleTracks()
+        {
+            var result = new List<Dictionary<string, object>>();
+            int count;
+            if (!int.TryParse(GetProperty("track-list/count"), NumberStyles.Integer, CultureInfo.InvariantCulture, out count) || count <= 0) return result;
+            var identityOccurrences = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int index = 0; index < count; index++)
+            {
+                string prefix = "track-list/" + index.ToString(CultureInfo.InvariantCulture) + "/";
+                if (!string.Equals(GetProperty(prefix + "type"), "sub", StringComparison.OrdinalIgnoreCase)) continue;
+                string id = GetProperty(prefix + "id") ?? string.Empty;
+                string path = GetProperty(prefix + "external-filename") ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(path)) path = GetProperty(prefix + "filename") ?? string.Empty;
+                bool external = !string.IsNullOrWhiteSpace(path) || IsYesValue(GetProperty(prefix + "external"));
+                string language = GetProperty(prefix + "lang") ?? string.Empty;
+                string title = GetProperty(prefix + "title") ?? string.Empty;
+                string format = GetProperty(prefix + "codec") ?? string.Empty;
+                string externalName = string.IsNullOrWhiteSpace(path) ? title : Path.GetFileName(path);
+                string identityBase = external
+                    ? "external:" + externalName.Replace('\\', '/').ToLowerInvariant()
+                    : "embedded:" + language.ToLowerInvariant() + ":" + title.ToLowerInvariant() + ":" + format.ToLowerInvariant();
+                int occurrence;
+                identityOccurrences.TryGetValue(identityBase, out occurrence);
+                identityOccurrences[identityBase] = occurrence + 1;
+                string identity = identityBase + ":" + occurrence.ToString(CultureInfo.InvariantCulture);
+                var value = new Dictionary<string, object> {
+                    { "id", id }, { "stableId", identity }, { "source", external ? "external" : "embedded" },
+                    { "language", language }, { "title", title }, { "format", format },
+                    { "selected", IsYesValue(GetProperty(prefix + "selected")) }
+                };
+                if (external) value["path"] = path;
+                result.Add(value);
+            }
+            return result;
         }
 
         internal void TogglePause()
@@ -363,6 +444,10 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private string lastState = string.Empty;
         private bool loading;
         private bool arrowKeysNavigate;
+        private bool subtitleDefaultEnabled;
+        private string[] subtitlePreferredLanguages = new string[0];
+        private bool subtitleDefaultsPending;
+        private string lastSubtitleState = string.Empty;
         private int lastPointerActivityTick;
 
         internal DecoderHost(IntPtr parentWindow)
@@ -469,6 +554,21 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 arrowKeysNavigate = ReadString(value, "value") == "navigate";
                 return;
             }
+            if (name == "set-subtitle-defaults")
+            {
+                subtitleDefaultEnabled = ReadBool(value, "enabled");
+                object languages;
+                var list = new List<string>();
+                if (value.TryGetValue("preferredLanguages", out languages) && languages is object[])
+                    foreach (object language in (object[])languages) if (language != null) list.Add(language.ToString().Trim().ToLowerInvariant());
+                subtitlePreferredLanguages = list.ToArray();
+                subtitleDefaultsPending = true;
+                lock (playerLock)
+                {
+                    if (player != null) ApplySubtitleStyle(player, ReadString(value, "size"), ReadString(value, "style"));
+                }
+                return;
+            }
             lock (playerLock)
             {
                 if (player == null) return;
@@ -477,6 +577,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     string path = ReadString(value, "path");
                     if (string.IsNullOrWhiteSpace(path)) throw new InvalidOperationException("视频路径为空");
                     loading = true;
+                    subtitleDefaultsPending = true;
                     player.Open(path);
                 }
                 else if (name == "play") player.Play();
@@ -485,6 +586,25 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 else if (name == "volume") player.SetProperty("volume", Math.Max(0, Math.Min(100, ReadDouble(value, "value"))).ToString(CultureInfo.InvariantCulture));
                 else if (name == "mute") player.SetProperty("mute", ReadBool(value, "value") ? "yes" : "no");
                 else if (name == "speed") player.SetProperty("speed", Math.Max(0.25, Math.Min(4, ReadDouble(value, "value"))).ToString(CultureInfo.InvariantCulture));
+                else if (name == "subtitle-select")
+                {
+                    string id = ReadString(value, "value");
+                    player.SetProperty("sid", string.IsNullOrWhiteSpace(id) ? "no" : id);
+                    player.SetProperty("sub-visibility", string.IsNullOrWhiteSpace(id) ? "no" : "yes");
+                }
+                else if (name == "subtitle-visible") player.SetProperty("sub-visibility", ReadBool(value, "value") ? "yes" : "no");
+                else if (name == "subtitle-delay") player.SetProperty("sub-delay", Math.Max(-30, Math.Min(30, ReadDouble(value, "value"))).ToString(CultureInfo.InvariantCulture));
+                else if (name == "subtitle-style") ApplySubtitleStyle(player, ReadString(value, "size"), ReadString(value, "style"));
+                else if (name == "subtitle-add")
+                {
+                    string subtitlePath = ReadString(value, "path");
+                    if (!Path.IsPathRooted(subtitlePath) || !File.Exists(subtitlePath)) throw new FileNotFoundException("字幕文件不存在", subtitlePath);
+                    string extension = Path.GetExtension(subtitlePath).ToLowerInvariant();
+                    if (extension != ".srt" && extension != ".ass" && extension != ".ssa" && extension != ".vtt") throw new InvalidOperationException("字幕格式不受支持");
+                    int result = player.Run("sub-add", subtitlePath, "select");
+                    if (result < 0) throw new InvalidOperationException("字幕文件损坏或无法加载");
+                    player.SetProperty("sub-visibility", "yes");
+                }
                 else if (name == "screenshot")
                 {
                     string requestId = ReadString(value, "requestId");
@@ -494,6 +614,8 @@ namespace PhotoFlow.AdvancedVideoDecoder
                         if (string.IsNullOrWhiteSpace(targetPath) || !Path.IsPathRooted(targetPath))
                             throw new InvalidOperationException("截图保存路径无效");
                         player.Screenshot(targetPath);
+                        if (!WaitForCompletePng(targetPath, 7000))
+                            throw new IOException("视频截图文件在超时前未完整写入");
                         Emit(new Dictionary<string, object> {
                             { "type", "screenshot-result" }, { "requestId", requestId },
                             { "success", true }, { "path", targetPath }
@@ -501,6 +623,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     }
                     catch (Exception error)
                     {
+                        try { if (File.Exists(targetPath)) File.Delete(targetPath); } catch { }
                         Emit(new Dictionary<string, object> {
                             { "type", "screenshot-result" }, { "requestId", requestId },
                             { "success", false }, { "error", error.Message }
@@ -526,6 +649,22 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 Emit(new Dictionary<string, object> {
                     { "type", "context-menu" }, { "x", eventArgs.X }, { "y", eventArgs.Y }
                 });
+        }
+
+        private static void ApplySubtitleStyle(LibMpv player, string size, string style)
+        {
+            player.SetProperty("sub-scale", size == "large" ? "1.35" : "1.0");
+            player.SetProperty("sub-border-size", style == "high-contrast" ? "4" : "2.5");
+            player.SetProperty("sub-shadow-offset", style == "high-contrast" ? "2" : "1");
+        }
+
+        private static bool SubtitleLanguageMatches(string trackLanguage, string preferredLanguage)
+        {
+            string track = (trackLanguage ?? string.Empty).Trim().Replace('_', '-');
+            string preferred = (preferredLanguage ?? string.Empty).Trim().Replace('_', '-');
+            return string.Equals(track, preferred, StringComparison.OrdinalIgnoreCase)
+                || track.StartsWith(preferred + "-", StringComparison.OrdinalIgnoreCase)
+                || preferred.StartsWith(track + "-", StringComparison.OrdinalIgnoreCase);
         }
 
         private static void ExcludeOverlayHole(System.Drawing.Region region, int width, int height, int holeX, int holeY, int holeWidth, int holeHeight)
@@ -596,6 +735,41 @@ namespace PhotoFlow.AdvancedVideoDecoder
             }
         }
 
+        private static bool WaitForCompletePng(string filePath, int timeoutMs)
+        {
+            DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+            while (DateTime.UtcNow < deadline)
+            {
+                try
+                {
+                    using (FileStream stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                    {
+                        if (stream.Length >= 20)
+                        {
+                            byte[] header = new byte[8];
+                            byte[] trailer = new byte[12];
+                            if (stream.Read(header, 0, header.Length) == header.Length)
+                            {
+                                stream.Seek(-trailer.Length, SeekOrigin.End);
+                                if (stream.Read(trailer, 0, trailer.Length) == trailer.Length)
+                                {
+                                    bool valid = header[0] == 137 && header[1] == 80 && header[2] == 78 && header[3] == 71
+                                        && header[4] == 13 && header[5] == 10 && header[6] == 26 && header[7] == 10;
+                                    if (valid && trailer[0] == 0 && trailer[1] == 0 && trailer[2] == 0 && trailer[3] == 0
+                                        && trailer[4] == (byte)'I' && trailer[5] == (byte)'E' && trailer[6] == (byte)'N' && trailer[7] == (byte)'D')
+                                        return true;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+                Thread.Sleep(40);
+            }
+            return false;
+        }
+
         private void PollState()
         {
             while (!shuttingDown)
@@ -609,9 +783,45 @@ namespace PhotoFlow.AdvancedVideoDecoder
                             foreach (Dictionary<string, object> eventValue in player.DrainEvents())
                             {
                                 string type = ReadString(eventValue, "type");
-                                if (type == "file-loaded") loading = false;
+                                if (type == "file-loaded")
+                                {
+                                    // Ignore a stale event from a superseded loadfile command.
+                                    if (!player.LoadPendingSidecars()) continue;
+                                    loading = false;
+                                    subtitleDefaultsPending = true;
+                                }
                                 Emit(eventValue);
                             }
+                            IList<Dictionary<string, object>> subtitleTracks = player.SubtitleTracks();
+                            if (subtitleDefaultsPending && !loading)
+                            {
+                                subtitleDefaultsPending = false;
+                                string selectedId = null;
+                                if (subtitleDefaultEnabled)
+                                {
+                                    foreach (string language in subtitlePreferredLanguages)
+                                    {
+                                        foreach (Dictionary<string, object> track in subtitleTracks)
+                                        {
+                                            if (!SubtitleLanguageMatches(Convert.ToString(track["language"]), language)) continue;
+                                            selectedId = Convert.ToString(track["id"]);
+                                            break;
+                                        }
+                                        if (selectedId != null) break;
+                                    }
+                                    if (selectedId == null && subtitleTracks.Count > 0) selectedId = Convert.ToString(subtitleTracks[0]["id"]);
+                                }
+                                player.SetProperty("sid", selectedId ?? "no");
+                                player.SetProperty("sub-visibility", selectedId == null ? "no" : "yes");
+                            }
+                            var subtitleState = new Dictionary<string, object> {
+                                { "type", "subtitle-tracks" }, { "subtitleTracks", subtitleTracks },
+                                { "subtitleTrackId", player.GetProperty("sid") },
+                                { "subtitleVisible", IsYes(player.GetProperty("sub-visibility")) },
+                                { "subtitleDelay", ReadNumber(player.GetProperty("sub-delay")) }
+                            };
+                            string serializedSubtitleState = serializer.Serialize(subtitleState);
+                            if (serializedSubtitleState != lastSubtitleState) { lastSubtitleState = serializedSubtitleState; EmitSerialized(serializedSubtitleState); }
                             var state = new Dictionary<string, object> {
                                 { "type", "state" },
                                 { "time", ReadNumber(player.GetProperty("time-pos")) },

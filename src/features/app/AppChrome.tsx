@@ -47,7 +47,7 @@ export const BackupHomeCard = ({ status, onOpen, onRun }: { status: BackupStatus
 };
 
 export const UpdateModal = ({ version, notes, url, onClose }: { version: string; notes: string; url: string; onClose: () => void }) => {
-  useEscapeLayer(true, onClose);
+  useEscapeLayer(true, onClose, true, true);
   return <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-50/80 backdrop-blur-sm p-4 animate-in fade-in duration-300">
     <div role="dialog" aria-modal="true" aria-label={`发现新版本 ${version}`} className="bg-white border border-blue-500/30 w-full max-w-md rounded-2xl shadow-2xl flex flex-col relative overflow-hidden">
       <div className="absolute top-0 right-0 p-16 bg-blue-500/20 blur-3xl rounded-full -translate-y-1/2 translate-x-1/2 pointer-events-none"/>

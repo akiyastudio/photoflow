@@ -14,8 +14,9 @@ const PLUGIN_DEFINITIONS = Object.freeze({
     id: 'video-playback-mpv',
     runtimeOnly: true,
     version: '26.8.16.1',
-    name: '高级视频解码',
+    name: '视频播放器',
     description: '使用独立 libmpv 进程、硬件解码和预读缓存播放相机原始视频。',
+    // Legacy capability token retained for already published package metadata.
     capabilities: ['video-playback.advanced'],
     integrityManifest: 'video-playback-mpv-integrity.json',
   },

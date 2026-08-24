@@ -6,7 +6,7 @@ const { ThumbnailPipeline, PRIORITY, isThumbnailSizeSufficient } = require('../e
 
 const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(124), Buffer.from([0xff, 0xd9])]);
 
-const createPipeline = ({ root, target, generate, toPreviewUrl = filePath => filePath, notify = () => undefined, log = () => undefined, sourceStabilityDelayMs = 20, sourceStabilityProbeMs = 10, maxBackgroundTasks }) => {
+const createPipeline = ({ root, target, generate, toPreviewUrl = filePath => filePath, notify = () => undefined, log = () => undefined, sourceStabilityDelayMs = 20, sourceStabilityProbeMs = 10, slowWriteRetryWindowMs = 500, maxBackgroundTasks }) => {
   const pipeline = new ThumbnailPipeline({
     getRunConfig: () => { throw new Error('database service must not start during this test'); },
     databasePath: path.join(root, 'thumbnail-index.sqlite3'),
@@ -21,6 +21,7 @@ const createPipeline = ({ root, target, generate, toPreviewUrl = filePath => fil
     ...(maxBackgroundTasks === undefined ? {} : { maxBackgroundTasks }),
     sourceStabilityDelayMs,
     sourceStabilityProbeMs,
+    slowWriteRetryWindowMs,
   });
   pipeline.database.call = async (operation, args = {}) => {
     if (operation === 'capture_thumbnail_publish') {
@@ -77,6 +78,67 @@ const run = async () => {
     assert.equal(attempts, 2, 'a vanished cache output should be regenerated exactly once');
     assert.equal(fs.existsSync(retryTarget), true);
     retryPipeline.stop();
+
+    const growingSource = path.join(temporaryRoot, 'growing.png');
+    const growingTarget = path.join(temporaryRoot, 'growing-thumbnail.jpg');
+    const growingNotifications = [];
+    let growingNotify = () => undefined;
+    let growingAttempts = 0;
+    fs.writeFileSync(growingSource, 'part-0');
+    const growingPipeline = createPipeline({
+      root: temporaryRoot,
+      target: growingTarget,
+      sourceStabilityDelayMs: 45,
+      sourceStabilityProbeMs: 10,
+      slowWriteRetryWindowMs: 800,
+      notify: update => { growingNotifications.push(update); growingNotify(update); },
+      generate: async (filePath, _stat, _kind, _config, sizes) => {
+        growingAttempts += 1;
+        if (!fs.readFileSync(filePath, 'utf8').endsWith('|complete')) {
+          throw Object.assign(new Error('PNG decoder reached an incomplete stream'), { code: 'EIMAGEDECODE' });
+        }
+        for (const size of sizes) fs.writeFileSync(size.path, jpeg);
+        return sizes.map(size => ({ sizeLabel: size.label, pixelSize: size.pixels, path: size.path }));
+      },
+    });
+    const growingWriter = setInterval(() => fs.appendFileSync(growingSource, '|part'), 25);
+    setTimeout(() => {
+      clearInterval(growingWriter);
+      fs.appendFileSync(growingSource, '|complete');
+    }, 150);
+    const growingResult = await waitForTerminalState(notify => {
+      growingNotify = notify;
+      void growingPipeline.request({ filePath: growingSource, kind: 'image', requestedSize: 640, priority: PRIORITY.visible });
+    });
+    assert.equal(growingResult.state, 'READY', 'a source that grows beyond the old 25ms retry must self-heal to READY');
+    assert(growingAttempts >= 2);
+    assert.equal(growingNotifications.some(update => update.state === 'FAILED'), false, 'a self-healed slow write must not publish FAILED');
+    growingPipeline.stop();
+
+    const fastSource = path.join(temporaryRoot, 'fast-existing.png');
+    const fastTarget = path.join(temporaryRoot, 'fast-existing-thumbnail.jpg');
+    fs.writeFileSync(fastSource, 'already complete');
+    let fastNotify = () => undefined;
+    let fastGenerateStartedAt = 0;
+    const fastPipeline = createPipeline({
+      root: temporaryRoot,
+      target: fastTarget,
+      sourceStabilityDelayMs: 300,
+      generate: async (_filePath, _stat, _kind, _config, sizes) => {
+        fastGenerateStartedAt = Date.now();
+        for (const size of sizes) fs.writeFileSync(size.path, jpeg);
+        return sizes.map(size => ({ sizeLabel: size.label, pixelSize: size.pixels, path: size.path }));
+      },
+    });
+    const fastRequestedAt = Date.now();
+    const fastResult = await waitForTerminalState(notify => {
+      fastNotify = notify;
+      fastPipeline.notify = update => fastNotify(update);
+      void fastPipeline.request({ filePath: fastSource, kind: 'image', requestedSize: 640, priority: PRIORITY.visible });
+    });
+    assert.equal(fastResult.state, 'READY');
+    assert(fastGenerateStartedAt - fastRequestedAt < 150, 'an existing readable image must not unconditionally wait for the stability window');
+    fastPipeline.stop();
 
     const stagedTarget = path.join(temporaryRoot, 'staged-final.jpg');
     const publishOrder = [];

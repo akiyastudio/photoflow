@@ -283,7 +283,7 @@ class ThumbnailPipeline {
   constructor({ getRunConfig, databasePath, getCacheDir, cacheFilePath, generateThumbnailSet,
     toPreviewUrl, trimCache, notify, log, concurrency = 2, maxBackgroundTasks = 1000,
     sourceStabilityDelayMs = 350, sourceStabilityProbeMs = 100, processSupervisor = null,
-    databaseServiceArgs = [], resolveCacheDir = getCacheDir }) {
+    slowWriteRetryWindowMs = 5000, databaseServiceArgs = [], resolveCacheDir = getCacheDir }) {
     this.databaseConfig = { getRunConfig, databasePath, log, processSupervisor, serviceArgs: databaseServiceArgs };
     this.database = new ThumbnailDatabaseClient(this.databaseConfig);
     this.resolveCacheDir = resolveCacheDir;
@@ -318,6 +318,7 @@ class ThumbnailPipeline {
     this.sourceChangeVersions = new Map();
     this.sourceStabilityDelayMs = sourceStabilityDelayMs;
     this.sourceStabilityProbeMs = sourceStabilityProbeMs;
+    this.slowWriteRetryWindowMs = slowWriteRetryWindowMs;
     this.lastForegroundActivityAt = Date.now();
     this.directoryIdleDelayMs = 1500;
     this.projectIdleDelayMs = 5000;
@@ -464,6 +465,30 @@ class ThumbnailPipeline {
 
   cacheKey(filePath, stat, sizeLabel) {
     return `${pathKey(filePath)}|${stat.size}|${stat.mtimeMs}|${sizeLabel}|v${THUMBNAIL_VERSION}`;
+  }
+
+  async waitForSourceStability(filePath, baselineStat, deadlineAt) {
+    let previous = baselineStat;
+    let changed = false;
+    let stableSince = Date.now();
+    while (Date.now() < deadlineAt) {
+      let current;
+      try {
+        current = await fs.promises.stat(filePath);
+        if (!current.isFile()) throw Object.assign(new Error('原始文件不存在'), { code: 'ENOENT' });
+      } catch (error) {
+        if (!error.code) error.code = 'ENOENT';
+        throw error;
+      }
+      if (!previous || current.size !== previous.size || current.mtimeMs !== previous.mtimeMs) {
+        changed = true;
+        stableSince = Date.now();
+        previous = current;
+      }
+      if (Date.now() - stableSince >= this.sourceStabilityDelayMs) return { stat: current, changed, stable: true };
+      await new Promise(resolve => setTimeout(resolve, Math.min(this.sourceStabilityProbeMs, Math.max(1, deadlineAt - Date.now()))));
+    }
+    return { stat: previous, changed, stable: false };
   }
 
   targetFor(filePath, stat, cacheConfig, size) {
@@ -830,7 +855,10 @@ class ThumbnailPipeline {
         const requestedSizes = [...task.requestedSizes.values()].filter(size => !task.completedSizes.has(size.label));
         if (!requestedSizes.length) break;
         let published;
-        for (let attempt = 0; attempt < 2; attempt += 1) {
+        let attempt = 0;
+        let slowWriteDeadline = 0;
+        let observedSourceChange = false;
+        while (true) {
           try {
             const capture = await this.coordinator.withIndexer(() => this.database.call('capture_thumbnail_publish', {
               file_path: filePath,
@@ -838,30 +866,52 @@ class ThumbnailPipeline {
             }));
             stat = await fs.promises.stat(filePath);
             const staged = await this.generateStagedThumbnailSet(filePath, stat, kind, cacheConfig, requestedSizes);
-            if (!staged.length) throw Object.assign(new Error('缩略图缓存输出在生成后丢失'), { code: 'ECACHEMISS' });
+            if (!staged.length) throw Object.assign(new Error('缩略图解码未产生输出；源文件可能仍在写入或内容无法解码'), { code: 'ECACHEMISS' });
             published = await this.publishStagedThumbnailSet(filePath, { ...capture, sourceDigest: sourceHash || null }, staged);
             break;
           } catch (error) {
-            let sourceExists = false;
-            try { sourceExists = (await fs.promises.stat(filePath)).isFile(); } catch { /* source is genuinely missing/offline */ }
-            const retryable = error?.code === 'ENOENT' || error?.code === 'ECACHEMISS'
-              || error?.code === 'EPOCH_STALE' || error?.code === 'SOURCE_STALE';
-            if (attempt === 0 && sourceExists && retryable) {
-              this.log('warn', 'Thumbnail publish became stale; retrying with a fresh epoch', { filePath, code: error?.code, error: error.message || String(error) });
+            let currentStat = null;
+            try {
+              currentStat = await fs.promises.stat(filePath);
+              if (!currentStat.isFile()) currentStat = null;
+            } catch { /* source is genuinely missing/offline */ }
+            if (currentStat && error?.code === 'EPOCH_STALE' && attempt === 0) {
+              attempt += 1;
+              this.log('warn', 'Thumbnail cache epoch changed; retrying under the fresh epoch', { filePath, code: error.code });
               await new Promise(resolve => setTimeout(resolve, 25));
               continue;
             }
-            if (sourceExists && (error?.code === 'EPOCH_STALE' || error?.code === 'SOURCE_STALE')) {
+            const slowWriteCandidate = error?.code === 'ENOENT' || error?.code === 'ECACHEMISS' || error?.code === 'EIMAGEDECODE'
+              || error?.code === 'SOURCE_STALE';
+            if (currentStat && slowWriteCandidate) {
+              if (!slowWriteDeadline) slowWriteDeadline = Date.now() + this.slowWriteRetryWindowMs;
+              const baseline = stat || currentStat;
+              if (currentStat.size !== baseline.size || currentStat.mtimeMs !== baseline.mtimeMs) observedSourceChange = true;
+              const stability = await this.waitForSourceStability(filePath, currentStat, slowWriteDeadline);
+              observedSourceChange ||= stability.changed || error?.code === 'SOURCE_STALE';
+              stat = stability.stat || currentStat;
+              if (stability.stable && (attempt === 0 || observedSourceChange) && Date.now() < slowWriteDeadline) {
+                attempt += 1;
+                this.log('warn', 'Thumbnail source was not yet readable; retrying after a bounded stability probe', {
+                  filePath, code: error?.code, attempt, observedSourceChange,
+                });
+                continue;
+              }
+            }
+            if (currentStat && (error?.code === 'EPOCH_STALE' || error?.code === 'SOURCE_STALE' || observedSourceChange)) {
               const freshStat = await fs.promises.stat(filePath);
               this.notify({ filePath, state: 'STALE', sourceMtimeMs: freshStat.mtimeMs, sourceSize: freshStat.size });
               void this.setPersistentState(filePath, 'STALE').catch(() => undefined);
+              const recoveryCount = Number(task.input.slowWriteRecoveryCount) || 0;
+              if (recoveryCount >= 2) throw error;
               setTimeout(() => this.enqueue({
                 ...task.input,
                 filePath,
                 stat: freshStat,
                 forceRegenerate: true,
                 requestedSizes,
-              }, task.priority), 0);
+                slowWriteRecoveryCount: recoveryCount + 1,
+              }, task.priority), this.sourceStabilityDelayMs);
               return { state: 'STALE' };
             }
             throw error;

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Loader2, X } from 'lucide-react';
 import type { AppConfig, ProgressFolder, ProgressTrackingItem } from '../../types';
 import { ProgressPairPreview, type ProgressPairPreviewMode } from './ProgressPairPreview';
+import { useHostSurfaceSuspension } from '../../components/LayerProvider';
 import {
   adjacentTrackingPreviewItemId,
   applyTrackingItemDecision,
@@ -16,6 +17,7 @@ import {
 } from './tracking-confirmation-model';
 
 type TrackingConfirmationPanelProps = {
+  active: boolean;
   sessionId: string;
   workspacePath: string;
   progressFolders: ProgressFolder[];
@@ -32,7 +34,8 @@ const statusLabel: Record<ProgressTrackingItem['status'], string> = {
 const categoryLabel = { recognized: '识别匹配', accepted: '已接受', pending: '待确认新素材', missing: '旧版缺失' } as const;
 const TRACKING_PAGE_SIZE = 200;
 
-export const TrackingConfirmationPanel = ({ sessionId, workspacePath, progressFolders, cacheConfig, onClose, onCommitted, onReleased, onNotice }: TrackingConfirmationPanelProps) => {
+export const TrackingConfirmationPanel = ({ active, sessionId, workspacePath, progressFolders, cacheConfig, onClose, onCommitted, onReleased, onNotice }: TrackingConfirmationPanelProps) => {
+  useHostSurfaceSuspension(active);
   const [view, setView] = useState<TrackingConfirmationViewState>({ sessionId, items: [], minimized: false });
   const [loading, setLoading] = useState(true);
   const [busyItemId, setBusyItemId] = useState('');

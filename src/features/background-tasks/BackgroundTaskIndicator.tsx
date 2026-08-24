@@ -1,11 +1,12 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { Activity, Pause, Play, RotateCcw, X } from 'lucide-react';
 import { ProgressBar } from '../../components/ProgressBar';
+import { useEscapeLayer } from '../../components/LayerProvider';
 import type { BackgroundTask } from '../../types';
 import { useTaskCenter } from './TaskCenter';
 import { panelTaskRestoreDetail } from './panel-task-session-model';
-import { collapseRetryPredecessors, isBackgroundTaskCenterVisible, isPointerInsideTaskIndicator } from './task-toast-model';
+import { collapseRetryPredecessors, isBackgroundTaskCenterVisible } from './task-toast-model';
 const formatBytes = (value: number) => value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(1)} GB` : value >= 1024 ** 2 ? `${(value / 1024 ** 2).toFixed(1)} MB` : `${Math.round(value / 1024)} KB`;
 const taskSummary = (task: BackgroundTask) => {
   const metadata = task.metadata || {};
@@ -19,38 +20,14 @@ const taskSummary = (task: BackgroundTask) => {
   return parts.join(' · ');
 };
 
-export const BackgroundTaskIndicator = ({ ownerPageIds }: { ownerPageIds: ReadonlySet<string> }) => {
+export const BackgroundTaskIndicator = ({ ownerPageIds, open, onOpenChange, drawerHostRef }: { ownerPageIds: ReadonlySet<string>; open: boolean; onOpenChange: (open: boolean) => void; drawerHostRef: RefObject<HTMLDivElement> }) => {
   const { backgroundTasks: tasks, panelTasks, dismissPanelTask, dismissBackgroundTask, retryBackgroundTask, isTaskToastMinimized, restoreTaskToast } = useTaskCenter();
-  const [open, setOpen] = useState(false);
-  const [panelPosition, setPanelPosition] = useState({ top: 44, right: 8 });
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
-
-  useLayoutEffect(() => {
-    if (!open) return;
-    const updatePanelPosition = () => {
-      const trigger = triggerRef.current;
-      if (!trigger) return;
-      const bounds = trigger.getBoundingClientRect();
-      setPanelPosition({
-        top: bounds.bottom + 4,
-        right: Math.max(8, window.innerWidth - bounds.right),
-      });
-    };
-    updatePanelPosition();
-    window.addEventListener('resize', updatePanelPosition);
-    return () => window.removeEventListener('resize', updatePanelPosition);
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const handlePointerDown = (event: PointerEvent) => {
-      if (!(event.target instanceof Node) || isPointerInsideTaskIndicator(triggerRef.current, panelRef.current, event.target)) return;
-      setOpen(false);
-    };
-    document.addEventListener('pointerdown', handlePointerDown);
-    return () => document.removeEventListener('pointerdown', handlePointerDown);
-  }, [open]);
+  const closeAndRestoreFocus = () => {
+    onOpenChange(false);
+    window.requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+  useEscapeLayer(open, closeAndRestoreFocus);
 
   const presentedTasks = useMemo(() => collapseRetryPredecessors(tasks), [tasks]);
   const visibleTasks = useMemo(() => presentedTasks.filter(task => isBackgroundTaskCenterVisible(task) || (
@@ -64,14 +41,14 @@ export const BackgroundTaskIndicator = ({ ownerPageIds }: { ownerPageIds: Readon
   const visibleCount = visibleTasks.length + visiblePanelTasks.length;
   const restorePanelTask = (task: (typeof visiblePanelTasks)[number]) => {
     window.dispatchEvent(new CustomEvent('photoflow:restore-panel-task', { detail: panelTaskRestoreDetail(task.ownerPageId, task.panelKind) }));
-    setOpen(false);
+    onOpenChange(false);
   };
   const restoreBackgroundTaskPanel = (task: BackgroundTask) => {
     const ownerPageId = String(task.metadata?.presentationOwnerPageId || '');
     const panelKind = String(task.metadata?.presentationPanelKind || '');
     if (!ownerPageId || !panelKind || !ownerPageIds.has(ownerPageId)) return;
     window.dispatchEvent(new CustomEvent('photoflow:restore-panel-task', { detail: panelTaskRestoreDetail(ownerPageId, panelKind) }));
-    setOpen(false);
+    onOpenChange(false);
   };
   const cancelTask = (task: BackgroundTask) => task.type === 'selection-operation'
     ? window.electronAPI.cancelSelectionOperation(String(task.metadata?.operationId || ''))
@@ -82,7 +59,7 @@ export const BackgroundTaskIndicator = ({ ownerPageIds }: { ownerPageIds: Readon
   const continueTask = (task: BackgroundTask) => window.electronAPI.continueBackgroundTask(task.id);
   const showTaskProgress = (task: BackgroundTask) => {
     restoreTaskToast(task.id);
-    setOpen(false);
+    onOpenChange(false);
   };
   const openTrackingConfirmation = (task: BackgroundTask) => {
     const sessionId = String(task.metadata?.sessionId || '');
@@ -90,18 +67,18 @@ export const BackgroundTaskIndicator = ({ ownerPageIds }: { ownerPageIds: Readon
     window.dispatchEvent(new CustomEvent('photoflow:open-tracking-confirmation', {
       detail: { sessionId, progressId: String(task.metadata?.progressId || ''), taskId: task.id },
     }));
-    setOpen(false);
+    onOpenChange(false);
   };
   if (!visibleCount && !open) return null;
 
   return <div className="app-titlebar-control relative flex shrink-0 items-center px-1">
-    <button ref={triggerRef} type="button" onClick={() => setOpen(value => !value)} title="后台任务" aria-label="后台任务" className={`relative flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-medium ${failedCount ? 'text-red-600 hover:bg-red-50' : 'text-slate-500 hover:bg-slate-100'}`}>
+    <button ref={triggerRef} type="button" aria-expanded={open} aria-controls="background-task-drawer" onClick={() => onOpenChange(!open)} title="后台任务" aria-label="后台任务" className={`relative flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-medium ${failedCount ? 'text-red-600 hover:bg-red-50' : 'text-slate-500 hover:bg-slate-100'}`}>
       <Activity size={15}/><span>{runningCount || failedCount || visibleCount}</span>
       {runningCount > 0 && <span className="absolute right-1 top-1 h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500"/>}
     </button>
-    {open && createPortal(<div ref={panelRef} style={panelPosition} className="fixed z-[600] w-80 max-w-[calc(100vw-1rem)] rounded-xl border border-slate-200 bg-white p-2 shadow-2xl">
-      <div className="flex items-center justify-between px-2 py-1.5"><strong className="text-sm text-slate-800">后台任务</strong><button type="button" onClick={() => setOpen(false)} className="rounded p-1 text-slate-400 hover:bg-slate-100"><X size={14}/></button></div>
-      <div className="max-h-80 space-y-1 overflow-y-auto">
+    {open && drawerHostRef.current && createPortal(<aside id="background-task-drawer" className="flex h-full w-80 flex-col bg-white p-2" aria-label="后台任务抽屉">
+      <div className="flex shrink-0 items-center justify-between px-2 py-1.5"><strong className="text-sm text-slate-800">后台任务</strong><button type="button" onClick={closeAndRestoreFocus} aria-label="关闭后台任务抽屉" className="rounded p-1 text-slate-400 hover:bg-slate-100"><X size={14}/></button></div>
+      <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
         {visibleCount === 0 && <p className="px-2 py-6 text-center text-xs text-slate-400">暂无进行中的任务</p>}
         {visiblePanelTasks.map(task => <div key={task.key} className="rounded-lg border border-slate-100 p-2.5">
           <button type="button" onClick={() => restorePanelTask(task)} className="block w-full text-left">
@@ -134,6 +111,6 @@ export const BackgroundTaskIndicator = ({ ownerPageIds }: { ownerPageIds: Readon
           </div>
         </div>)}
       </div>
-    </div>, document.body)}
+    </aside>, drawerHostRef.current)}
   </div>;
 };

@@ -652,11 +652,11 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
 };
 
 const ProjectDialog = ({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) => {
-  useEscapeLayer(true, onClose);
+  useEscapeLayer(true, onClose, true, true);
   return createPortal(<div className="fixed inset-x-0 bottom-0 top-10 z-[500] overflow-y-auto bg-slate-950/40 p-4"><div className="flex min-h-full items-center justify-center"><div role="dialog" aria-modal="true" aria-label={title} className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="mb-3 flex items-center justify-between"><h3 className="font-bold text-slate-800">{title}</h3><button onClick={onClose} aria-label="关闭" className="rounded p-1 text-slate-500 hover:bg-slate-100"><X size={18}/></button></div>{children}</div></div></div>, document.body);
 };
 
 const ProjectImportDialog = ({ title, busy, onClose, children }: { title: string; busy: boolean; onClose: () => void; children: React.ReactNode }) => {
-  useEscapeLayer(true, onClose);
+  useEscapeLayer(true, onClose, true, true);
   return createPortal(<div className="tool-panel-backdrop fixed inset-x-0 bottom-0 top-10 z-[500] flex items-center justify-center p-4" onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose(); }}><section role="dialog" aria-modal="true" aria-label={title} className="tool-panel-window flex max-h-[90vh] w-full max-w-[960px] flex-col overflow-hidden border bg-white"><header className="tool-panel-header flex shrink-0 items-center gap-3 border-b border-slate-200 px-5"><span className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[10px] bg-blue-50 text-blue-600"><FolderInput size={18}/></span><div className="min-w-0 flex-1"><h3 className="truncate text-[15px] font-bold text-slate-800">{title}</h3><p className="mt-0.5 truncate text-[10px] text-slate-400">将现有项目复制或移动到工作目录，并归入“策划中”。</p></div><button type="button" onClick={onClose} aria-label={busy ? '取消导入' : '关闭'} title={busy ? '取消当前导入任务' : '关闭'} className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100"><X size={18}/></button></header><div className="tool-panel-body min-h-0 flex-1 overflow-y-auto p-[22px]">{children}</div></section></div>, document.body);
 };

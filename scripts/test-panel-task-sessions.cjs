@@ -18,6 +18,9 @@ const projectPanelLifecycleSource = read('src/features/workspace/project-panel-l
 const panelTaskSessionModelSource = read('src/features/background-tasks/panel-task-session-model.ts');
 const workspace = read('src/features/workspace/ProjectWorkspace.tsx');
 const projectToolModal = read('src/features/workspace/ProjectToolModal.tsx');
+const projectVersionTree = read('src/components/ProjectVersionTree.tsx');
+const trackingConfirmation = read('src/features/versioning/TrackingConfirmationPanel.tsx');
+const versionManager = read('src/components/VersionManager.tsx');
 
 const compiledFileTransferToast = ts.transpileModule(fileTransferToast, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
 
@@ -171,13 +174,21 @@ assert(taskStatus.includes('usePanelTaskReporter') && taskStatus.includes("const
 assert(indicator.includes('useTaskCenter()') && !indicator.includes('onBackgroundTaskChanged('), 'the background indicator must consume the shared provider instead of creating a duplicate subscription');
 assert(workspace.includes('mountedPanels.has') && workspace.includes("open={panel === 'research'}") && workspace.includes("open={panel === 'converter'}"), 'component panels must stay mounted while their modal is minimized');
 assert(projectToolModal.includes("aria-label={effectiveBusy ? '收起到后台' : '关闭'}") && projectToolModal.includes('if (event.target === event.currentTarget && !effectiveBusy)'), 'running panels must minimize explicitly and ignore accidental backdrop clicks');
+for (const inlineLayerState of ['progressCompare', 'progressRepair', 'pendingProgressFolders.length', 'draggingChildId || pendingRelationChange', 'batchRenameOpen', 'confirmDelete']) {
+  assert(workspace.includes(`useEscapeLayer(active && Boolean(${inlineLayerState})`) || workspace.includes(`useEscapeLayer(active && ${inlineLayerState}`), `inline ${inlineLayerState} host suspension must release when its project page becomes inactive`);
+}
+assert(projectVersionTree.includes('useHostSurfaceSuspension(active && Boolean(relationChoice || blankOutputSourceId))') && workspace.includes("active={active && activeView === 'project'}"), 'inline version-tree choices must not suspend host surfaces from a hidden project page or a different project subview');
+assert(trackingConfirmation.includes('useHostSurfaceSuspension(active)') && workspace.includes('active={active} sessionId={trackingConfirmationSessionId}'), 'the inline tracking confirmation must follow its owning project page visibility');
+assert(versionManager.includes('useEscapeLayer(active && Boolean(editing)') && workspace.includes('<VersionManager active={active && activeView === \'version\'}'), 'the inline version editor must release suspension outside its active version tab');
+assert(projectToolModal.includes('createPortal(') && projectToolModal.includes('useEscapeLayer(open, onClose, true, true)') && workspace.includes('useEscapeLayer(Boolean(gatherPickerPaths)'), 'body-portal project tools remain globally visible and continue suspending host surfaces across tab switches');
 assert(indicator.includes('visiblePanelTasks') && indicator.includes('恢复面板') && workspace.includes('photoflow:restore-panel-task'), 'minimized component tasks must restore through the single global task center');
 assert(taskCenter.includes('minimizedToastTaskIds') && taskCenter.includes('minimizeTaskToast') && taskCenter.includes('restoreTaskToast') && taskCenter.includes('isTaskToastMinimized') && !taskCenter.includes('localStorage'), 'file-transfer toast minimization must be session-only shared task-center state');
 assert(taskCenter.includes('pruneFinishedTaskToastIds(current, backgroundTasks)'), 'terminal background tasks must be removed from the minimized-toast set');
 assert(indicator.includes('isTaskToastMinimized(task.id)') && indicator.includes('显示进度') && indicator.includes('restoreTaskToast(task.id)'), 'the background task indicator must restore the current minimized file-transfer task');
 assert(fileTransferToast.includes('Minimize2') && fileTransferToast.includes('aria-label="收起到任务中心"') && fileTransferToast.includes('title="收起到任务中心，任务会继续运行"') && !fileTransferToast.includes('minimizeTaskToast(task.id)} className="shrink-0 rounded-md px-2.5 py-1.5 text-xs font-bold text-red'), 'minimizing a file-transfer toast must use a clearly labeled control rather than the cancel action');
-assert(indicator.includes('triggerRef') && indicator.includes('panelRef') && indicator.includes("document.addEventListener('pointerdown', handlePointerDown)") && indicator.includes("document.removeEventListener('pointerdown', handlePointerDown)"), 'the task popover must register and clean up one document pointer boundary listener while open');
-assert(indicator.includes('createPortal(') && indicator.includes('document.body') && indicator.includes('className="fixed z-[600]'), 'the task popover must escape the titlebar stacking context so workspace tool surfaces cannot cover it');
+assert(indicator.includes('aria-expanded={open}') && indicator.includes('onOpenChange(!open)') && indicator.includes('useEscapeLayer(open') && indicator.includes('aria-label="关闭后台任务抽屉"') && indicator.includes('triggerRef.current?.focus()'), 'the controlled background task drawer must toggle accessibly, retain Escape handling, and restore trigger focus when dismissed');
+assert(indicator.includes('drawerHostRef.current') && indicator.includes('createPortal(') && app.includes('backgroundTaskDrawerHostRef') && app.includes("'w-80 shrink-0 overflow-hidden border-l"), 'the task center must dock beside the host content so native child surfaces receive smaller layout bounds');
+assert(!indicator.includes('document.body') && !indicator.includes('z-[600]'), 'the docked task drawer must not depend on a global numeric stacking override');
 assert(main.includes('<TaskCenterProvider>') && !main.includes('<FileTransferToast') && app.includes('useTopToastStack()') && topToastStack.includes('className="top-toast-stack"') && topToastStack.includes('<FileTransferToast stackRef={stackRef}/>') && topToastStack.includes('notices.map('), 'ordinary notices and file task progress must render in one shared top stack');
 assert(projectToolModal.includes("const reportBusyAsPanelTask = !panelKind.startsWith('version-')") && workspace.includes('progressSubmittingRef.current'), 'version operations must not create a duplicate panel task and must synchronously reject repeated submissions');
 const closePngConverter = workspace.slice(workspace.indexOf('const closePngConverterPanel'), workspace.indexOf('const openPngConverter'));
@@ -187,7 +198,7 @@ assert(app.includes('photoflow:restore-panel-task') && app.includes('item.id ===
 const closeProjectPage = app.slice(app.indexOf('const closeProjectTab'), app.indexOf('const closeAllPagesForProject'));
 assert(closeProjectPage.includes('disposePageOwnedUi([pageId])') && app.includes('dismissPanelTasksByOwnerPageId(pageId)') && !closeProjectPage.includes('cancelBackgroundTask'), 'closing a page must remove its page-owned panel and tool state without cancelling shared main-process tasks');
 assert(app.includes('disposePageOwnedUi(closingPageIds)') && app.includes('const closingPageIds = projectPages.filter'), 'whole-project and external deletion flows must clean panel state for every owned page');
-assert(indicator.includes('ownerPageIds.has(task.ownerPageId)') && app.includes('<BackgroundTaskIndicator ownerPageIds={openPageIds}/>'), 'the background list must not offer restoration for a missing owner page');
+assert(indicator.includes('ownerPageIds.has(task.ownerPageId)') && app.includes('<BackgroundTaskIndicator ownerPageIds={openPageIds}'), 'the background list must not offer restoration for a missing owner page');
 assert(taskCenter.includes('ownerPageId: string') && workspace.includes('ownerPageId={pageId}') && !taskCenter.includes('scopeKey: string'), 'panel task identity must be owned by a page instead of a project path');
 for (const panelKind of ['converter', 'screenshot-main-image', 'import', 'negative-import', 'broll', 'file-import', 'match', 'research', 'trash']) {
   assert(workspace.includes(`mountedPanels.has('${panelKind}')`), `${panelKind} must use the persistent component panel host`);

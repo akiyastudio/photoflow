@@ -7,6 +7,7 @@ const { pathToFileURL } = require('url');
 const { parseComponentHostManifest, createComponentHostRegistry } = require('../electron/component-host-contract.cjs');
 const { ComponentViewManager, componentPageKey, normalizeOpenScope, normalizeResolvedTheme, validBounds } = require('../electron/services/component-view-manager.cjs');
 const { registerComponentIconProtocol } = require('../electron/modules/component-icon-protocol.cjs');
+const { registerComponentHostIpc } = require('../electron/modules/component-host-ipc.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-component-host-'));
 try {
@@ -116,6 +117,25 @@ try {
   const manager = new ComponentViewManager({ WebContentsView: FakeView, mainWindow, registry: liveRegistry, preloadPath: 'host-preload.cjs', ipcMain: rawIpc });
   const request = { componentId: 'sample-component', pageId: 'main', workspacePath: 'C:\\Work', projectId: 'project-1', projectName: '项目一', projectStatus: '后期中', scopeRelativePath: '图片后期_1', selectedRelativePaths: ['图片后期_1/a.jpg'], sourcePageId: 'project-page-1' };
   Promise.resolve().then(async () => {
+    const hostLayerModel = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'components', 'host-layer-state.ts')).href);
+    const hostLayerStates = [];
+    const hostLayers = hostLayerModel.createHostLayerRegistry(state => hostLayerStates.push(state));
+    const releaseOuter = hostLayers.acquire('outer');
+    const releaseNested = hostLayers.acquire('nested');
+    assert.deepEqual(hostLayers.snapshot(), { revision: 2, suspended: true, referenceCount: 2 }, 'nested host layers use reference counting');
+    releaseOuter();
+    assert.deepEqual(hostLayers.snapshot(), { revision: 3, suspended: true, referenceCount: 1 }, 'releasing one layer cannot resume external surfaces while another layer remains');
+    releaseOuter();
+    assert.equal(hostLayers.snapshot().revision, 3, 'a stale duplicate cleanup cannot advance or corrupt the host layer revision');
+    releaseNested();
+    assert.deepEqual(hostLayers.snapshot(), { revision: 4, suspended: false, referenceCount: 0 }, 'the final cleanup resumes host surfaces');
+    assert.equal(hostLayerStates.length, 4);
+    const hostIpcHandlers = new Map();
+    const hostRenderer = new FakeWebContents();
+    const hostIpcManager = { setHostSurfaceSuspended: update => update.suspended };
+    registerComponentHostIpc({ ipcMain: { handle: (channel, handler) => hostIpcHandlers.set(channel, handler) }, manager: hostIpcManager, mainWindow: { isDestroyed: () => false, webContents: hostRenderer } });
+    assert.deepEqual(hostIpcHandlers.get('component-host-set-suspended')({ sender: hostRenderer }, { suspended: true }), { success: true }, 'the application renderer may suspend host surfaces');
+    assert.throws(() => hostIpcHandlers.get('component-host-set-suspended')({ sender: new FakeWebContents() }, { suspended: false }), /Unauthorized host surface sender/, 'a component or unrelated renderer cannot control host surface visibility');
     const iconResponse = await protocolHandlers.get('photoflow-component')({ method: 'GET', url: 'photoflow-component://icon/sample-component?v=3.4.5' });
     assert.equal(iconResponse.status, 200);
     assert.equal(iconResponse.headers.get('content-type'), 'image/svg+xml');
@@ -173,6 +193,30 @@ try {
     assert.equal(developmentView.webContents.loadedEntry, path.join(repositoryRoot, 'artifacts', 'component-renderers', 'team-retouch', 'index.html'), 'clicking the development toolbar action loads the prepared independent renderer');
     assert.equal(developmentPage.componentId, 'team-retouch');
     developmentManager.destroy();
+
+    const suspensionManager = new ComponentViewManager({ WebContentsView: FakeView, mainWindow, registry: liveRegistry, preloadPath: 'host-preload.cjs', ipcMain: { handle() {} } });
+    assert(suspensionManager.setHostSurfaceSuspended({ rendererToken: 'renderer-a', revision: 1, suspended: true }));
+    const suspendedFirst = await suspensionManager.open({ ...request, projectId: 'suspended-a' });
+    const suspendedFirstView = FakeView.created.at(-1);
+    assert.equal(suspendedFirstView.visible, false, 'a view created during host suspension stays visually hidden while becoming logically active');
+    const suspendedSecond = await suspensionManager.open({ ...request, projectId: 'suspended-b' });
+    const suspendedSecondView = FakeView.created.at(-1);
+    assert.equal(suspendedFirstView.visible, false); assert.equal(suspendedSecondView.visible, false, 'switching component pages during suspension must not reveal either view');
+    assert.equal(suspendedFirstView.webContents.sent.filter(item => item.channel === 'component-sdk:deactivate').length, 1, 'logical page switching still emits one business deactivation');
+    assert.equal(suspendedSecondView.webContents.sent.filter(item => item.channel === 'component-sdk:deactivate').length, 0, 'visual suspension is not reported as business deactivation');
+    assert(suspensionManager.setHostSurfaceSuspended({ rendererToken: 'renderer-a', revision: 2, suspended: false }));
+    assert.equal(suspendedFirstView.visible, false); assert.equal(suspendedSecondView.visible, true, 'resuming restores only the latest logically active component page');
+    assert.equal(suspensionManager.setHostSurfaceSuspended({ rendererToken: 'renderer-a', revision: 1, suspended: true }), false, 'an old renderer revision cannot re-suspend a restored page');
+    assert.equal(suspendedSecondView.visible, true);
+    assert(suspensionManager.setHostSurfaceSuspended({ rendererToken: 'renderer-after-reload', revision: 0, suspended: true }), 'a renderer reload starts a fresh revision namespace');
+    assert.equal(suspendedSecondView.visible, false);
+    assert.equal(suspendedSecondView.webContents.sent.filter(item => item.channel === 'component-sdk:deactivate').length, 1, 'renderer reload clears the stale logical activation instead of restoring an orphaned view');
+    suspensionManager.activate(suspendedFirst.instanceId);
+    assert.equal(suspendedFirstView.visible, false, 'activation remains visual-only hidden during a post-reload suspension');
+    assert(suspensionManager.setHostSurfaceSuspended({ rendererToken: 'renderer-after-reload', revision: 1, suspended: false }));
+    assert.equal(suspendedFirstView.visible, true); assert.equal(suspendedSecondView.visible, false);
+    suspensionManager.close(suspendedSecond.instanceId);
+    suspensionManager.destroy();
 
     const pageModel = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'components', 'component-page-model.ts')).href);
     const action = manager.listToolbarActions()[0];

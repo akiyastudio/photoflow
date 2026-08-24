@@ -1,10 +1,10 @@
-# 高级视频解码
+# 视频播放器
 
-这是照片流的可选高级解码运行时。它只提供 `advanced-video-decoder.exe`、libmpv 运行库、清单、完整性材料和许可证材料，在独立进程中运行 libmpv，通过 Win32 子窗口把视频画面嵌入照片流，并通过 JSON Lines 与 Electron 主进程交换播放状态和控制命令。
+这是照片流“视频播放器”的可选原生运行时。它只提供兼容命名的 `advanced-video-decoder.exe`、libmpv 运行库、清单、完整性材料和许可证材料，在独立进程中运行 libmpv，通过 Win32 子窗口把视频画面嵌入照片流，并通过 JSON Lines 与 Electron 主进程交换播放状态和控制命令。
 
-播放器界面、Chromium 普通视频回退、裁剪、截图、键盘控制和播放设置全部属于照片流主程序。安装此运行时不安装任何 renderer bundle；缺少或卸载运行时时，这些主程序功能仍可加载，高级解码按既有策略回退。
+播放器界面、裁剪、截图、键盘控制和播放设置全部属于照片流主程序。安装此运行时不安装任何 renderer bundle；缺少、卸载或启动失败时，主程序会显示明确错误并允许使用系统播放器打开，不会切换到 Chromium/Electron HTML `<video>` 播放。
 
-组件默认使用稳定的 `gpu` 视频输出、D3D11、`hwdec=auto-safe` 和预读缓存。硬件不支持相机的 H.265 10-bit 4:2:2 时，libmpv 会回退到 CPU 解码；组件启动或播放失败时，照片流会回退到 Chromium `<video>` 预览。这里不启用 `gpu-next`，因为它在嵌入 Electron 子窗口时可能触发原生 D3D11 访问冲突。
+组件默认使用稳定的 `gpu` 视频输出、D3D11、`hwdec=auto-safe` 和预读缓存。硬件不支持相机的 H.265 10-bit 4:2:2 时，libmpv 自身会回退到 CPU 解码。这里不启用 `gpu-next`，因为它在嵌入 Electron 子窗口时可能触发原生 D3D11 访问冲突。
 
 ## 一键构建发布包
 

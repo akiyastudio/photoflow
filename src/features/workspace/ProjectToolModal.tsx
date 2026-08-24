@@ -49,7 +49,7 @@ export const ToolModal = ({ title, ownerPageId, panelKind, open, busy = false, o
   const task = panelTasks[taskKey];
   const manualBusyRef = useRef(false);
   const effectiveBusy = busy || task?.state === 'running';
-  useEscapeLayer(open, onClose, true);
+  useEscapeLayer(open, onClose, true, true);
 
   const reportBusyAsPanelTask = !panelKind.startsWith('version-');
   useEffect(() => {

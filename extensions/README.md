@@ -61,9 +61,10 @@ The current component IDs are:
   GPU/CPU person detection, lossless crop export, high-resolution alignment,
   color matching, overlap blending, and recomposition. When it is missing the
   whole team-retouch workflow is unavailable.
-- `video-playback-mpv`: “高级视频解码”. It runs libmpv in an isolated process,
-  embeds the native video surface in PhotoFlow, and falls back to Chromium
-  playback if startup or decoding fails. It is a runtime-only backend
+- `video-playback-mpv`: “视频播放器”. The legacy installation ID is retained
+  for package compatibility. It runs libmpv in an isolated process and embeds
+  the native video surface in PhotoFlow; startup or decoding failures are
+  reported explicitly and never fall back to Chromium playback. It is a runtime-only backend
   capability: the player, controls, trimming, screenshots and settings remain
   in the main application, and the component package must not contain renderer
   JavaScript, HTML or CSS.
@@ -82,7 +83,7 @@ the user's machine.
 separate from the base PhotoFlow installer so the core application stays small.
 
 `npm run build:advanced-video-release` builds the pinned LGPL dependency stack,
-audited libmpv runtime, compliance archives, and installable advanced-video ZIP.
+audited libmpv runtime, compliance archives, and installable video-player ZIP.
 If that runtime already exists, `npm run build:advanced-video-decoder --
 --mpv-root <directory>` only performs the final component packaging step. The
 component remains outside `electron:build`, so the main installer does not

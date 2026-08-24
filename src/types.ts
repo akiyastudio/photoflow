@@ -37,6 +37,10 @@ export interface TeamRetouchComponentSettings {
 }
 export interface VideoPlaybackSettings {
   arrowKeyAction: 'seek' | 'navigate';
+  subtitlesEnabled: boolean;
+  subtitlePreferredLanguages: string[];
+  subtitleSize: 'default' | 'large';
+  subtitleStyle: 'standard' | 'high-contrast';
 }
 export interface ResearchSettings {
   sensitivity: 'low' | 'standard' | 'high';
@@ -899,11 +903,11 @@ export interface ComponentPageInstance {
   iconUrl?: string;
 }
 
-export interface AdvancedVideoState {
+export interface VideoPlayerState {
   sessionId: string;
   playerId: string;
   requestId: string;
-  type: 'ready' | 'loading' | 'file-loaded' | 'state' | 'ended' | 'navigate' | 'context-menu' | 'pointer-activity' | 'escape' | 'stopped' | 'error' | 'fatal';
+  type: 'ready' | 'loading' | 'file-loaded' | 'state' | 'subtitle-tracks' | 'ended' | 'navigate' | 'context-menu' | 'pointer-activity' | 'escape' | 'stopped' | 'error' | 'fatal';
   time?: number;
   duration?: number;
   paused?: boolean;
@@ -917,6 +921,24 @@ export interface AdvancedVideoState {
   x?: number;
   y?: number;
   error?: string;
+  subtitleTracks?: VideoSubtitleTrack[];
+  subtitleTrackId?: string | null;
+  subtitleVisible?: boolean;
+  subtitleDelay?: number;
+}
+
+/** Legacy type alias for the compatibility IPC surface. */
+export type AdvancedVideoState = VideoPlayerState;
+
+export interface VideoSubtitleTrack {
+  id: string;
+  stableId: string;
+  source: 'embedded' | 'external';
+  language?: string;
+  title?: string;
+  format?: string;
+  path?: string;
+  selected: boolean;
 }
 
 export interface ProjectFileOperationProgress {
@@ -1018,6 +1040,7 @@ export interface IElectronAPI {
   getComponentHostActions: () => Promise<{ success: boolean; actions: ComponentHostAction[]; error?: string }>;
   openComponentPage: (request: { componentId: string; pageId: string; workspacePath: string; projectId: string; projectName: string; projectStatus: ProjectStatus; scopeRelativePath?: string; selectedRelativePaths?: string[]; sourcePageId?: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string }; error?: string }>;
   activateComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
+  setHostSurfaceSuspended: (update: { rendererToken: string; revision: number; suspended: boolean }) => Promise<{ success: boolean }>;
   setComponentPageBounds: (instanceId: string, bounds: { x: number; y: number; width: number; height: number }) => Promise<{ success: boolean }>;
   closeComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
   closeProjectComponentPages: (workspacePath: string, projectId: string) => Promise<{ success: boolean; closedCount: number }>;
@@ -1163,7 +1186,8 @@ export interface IElectronAPI {
   getMediaThumbnail: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache'], requestedSize?: number, priority?: 0 | 1 | 2 | 3, queueOrder?: number) => Promise<{ success: boolean; taskId?: string; state?: ThumbnailState; previewUrl?: string; mediaUrl?: string; usingImportedPreview?: boolean; importedVideoWithoutPreview?: boolean; cacheLayer?: 'memory' | 'disk' | 'source'; error?: string }>;
   cancelMediaThumbnail: (filePath: string, requestedSize?: number) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
   onThumbnailStateChanged: (callback: (update: { filePath: string; state: ThumbnailState; previewUrls?: Partial<Record<'small' | 'medium' | 'large', string>>; sourceMtimeMs?: number; sourceSize?: number; error?: string }) => void) => () => void;
-  startAdvancedVideo: (filePath: string, arrowKeyAction: VideoPlaybackSettings['arrowKeyAction'] | undefined, playerId: string, requestId: string) => Promise<{ success: boolean; sessionId?: string; playerId?: string; requestId?: string; error?: string }>;
+  startVideoPlayer: (filePath: string, settings: VideoPlaybackSettings, playerId: string, requestId: string) => Promise<{ success: boolean; sessionId?: string; playerId?: string; requestId?: string; error?: string }>;
+  setVideoPlayerBounds: (sessionId: string, bounds: { x: number; y: number; width: number; height: number; visible: boolean; overlayHole?: { x: number; y: number; width: number; height: number }; cornerOverlayHole?: { x: number; y: number; width: number; height: number } }) => void;
   setAdvancedVideoBounds: (sessionId: string, bounds: {
     x: number;
     y: number;
@@ -1173,7 +1197,12 @@ export interface IElectronAPI {
     overlayHole?: { x: number; y: number; width: number; height: number };
     cornerOverlayHole?: { x: number; y: number; width: number; height: number };
   }) => void;
-  controlAdvancedVideo: (sessionId: string, request: { action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop'; value?: number | boolean }) => void;
+  controlVideoPlayer: (sessionId: string, request: { action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop' | 'subtitle-select' | 'subtitle-visible' | 'subtitle-delay' | 'subtitle-style'; value?: number | boolean | string; size?: VideoPlaybackSettings['subtitleSize']; style?: VideoPlaybackSettings['subtitleStyle'] }) => void;
+  chooseVideoSubtitle: (sessionId: string) => Promise<{ success: boolean; cancelled?: boolean; path?: string; error?: string }>;
+  addVideoSubtitle: (sessionId: string, filePath: string) => Promise<{ success: boolean; error?: string }>;
+  captureVideoPlayerFrame: (sessionId: string) => Promise<{ success: boolean; path?: string; error?: string }>;
+  stopVideoPlayer: (sessionId: string) => Promise<{ success: boolean }>;
+  onVideoPlayerState: (callback: (state: VideoPlayerState) => void) => () => void;
   captureAdvancedVideoFrame: (sessionId: string) => Promise<{ success: boolean; path?: string; error?: string }>;
   stopAdvancedVideo: (sessionId: string) => Promise<{ success: boolean }>;
   onAdvancedVideoState: (callback: (state: AdvancedVideoState) => void) => () => void;

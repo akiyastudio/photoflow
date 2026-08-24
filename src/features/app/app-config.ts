@@ -85,7 +85,7 @@ export const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   birthdayEnabled: true,
   pinInspirationLibrary: false,
   componentSettings: {},
-  videoPlayback: { arrowKeyAction: 'seek' },
+  videoPlayback: { arrowKeyAction: 'seek', subtitlesEnabled: false, subtitlePreferredLanguages: ['zh', 'chi', 'zho'], subtitleSize: 'default', subtitleStyle: 'standard' },
   mediaCache: { maxSizeGB: 50, directory: '', autoCleanup30Days: false },
   backup: {
     enabled: false,

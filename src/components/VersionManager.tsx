@@ -24,7 +24,7 @@ import type { AppConfig, MediaMetadataField, MediaVersion, MediaVersionBundle, P
 import { useAppDialog } from './AppDialogProvider';
 import { useEscapeLayer } from './LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG } from '../utils/recycleBinFailure';
-import { AdvancedVideoPlayer } from './AdvancedVideoPlayer';
+import { VideoPlayer } from './AdvancedVideoPlayer';
 import { metadataFieldLabel, metadataGroupLabel } from '../features/metadata/metadata-labels';
 import { mainBranchPhotoSummaries, mainBranchVersionsForPhoto, paginateMainBranchPhotos, type MainBranchPhotoSummary } from '../features/versioning/public';
 import { ImageComparisonView, type ImageComparisonMode } from './ImageComparisonView';
@@ -35,6 +35,7 @@ type VersionManagerProps = {
   workspacePath: string;
   project: WorkspaceProject;
   cacheConfig: AppConfig['mediaCache'];
+  videoPlaybackSettings: AppConfig['videoPlayback'];
   onClose: () => void;
   onNotice: (message: string) => void;
   onVersionStateChanged?: () => void;
@@ -73,7 +74,6 @@ const mediaKind = (filePath: string): 'image' | 'raw' | 'video' => {
 
 type VersionResourceData = {
   url?: string;
-  videoUrl?: string;
   orientationMatrix?: number[];
   orientationSwapsAxes?: boolean;
 };
@@ -108,7 +108,7 @@ const loadVersionResource = (version: MediaVersion, cacheConfig: AppConfig['medi
         orientationSwapsAxes = original.orientation?.swapsAxes;
       }
     }
-    const resource = { url, videoUrl: 'mediaUrl' in result ? result.mediaUrl : undefined, orientationMatrix, orientationSwapsAxes };
+    const resource = { url, orientationMatrix, orientationSwapsAxes };
     if (versionResourceCache.size >= 80) versionResourceCache.delete(versionResourceCache.keys().next().value as string);
     versionResourceCache.set(key, resource);
     return resource;
@@ -186,11 +186,12 @@ const OrientedVersionImage = ({ src, alt, orientationMatrix, contentStyle }: {
   </div>;
 };
 
-const VersionResource = ({ version, cacheConfig, className = '', contentStyle, videoPlayback = true }: { version: MediaVersion; cacheConfig: AppConfig['mediaCache']; className?: string; contentStyle?: React.CSSProperties; videoPlayback?: boolean }) => {
+const VersionResource = ({ version, cacheConfig, videoPlaybackSettings, className = '', contentStyle, videoPlayback = true }: { version: MediaVersion; cacheConfig: AppConfig['mediaCache']; videoPlaybackSettings?: AppConfig['videoPlayback']; className?: string; contentStyle?: React.CSSProperties; videoPlayback?: boolean }) => {
   const resourceKey = versionResourceCacheKey(version);
   const [resource, setResource] = useState<VersionResourceData>(() => versionResourceCache.get(resourceKey) || {});
   const [loading, setLoading] = useState(false);
-  const [advancedPlaybackFailed, setAdvancedPlaybackFailed] = useState(false);
+  const [videoPlaybackFailed, setVideoPlaybackFailed] = useState(false);
+  const [videoPlayerError, setVideoPlayerError] = useState('');
   const kind = mediaKind(version.filePath);
   useEffect(() => {
     let active = true;
@@ -205,25 +206,27 @@ const VersionResource = ({ version, cacheConfig, className = '', contentStyle, v
     loadVersionResource(version, cacheConfig).then(result => { if (active) setResource(result); }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [resourceKey, version.fileMissing, cacheConfig.directory, cacheConfig.maxSizeGB]);
-  useEffect(() => setAdvancedPlaybackFailed(false), [resourceKey]);
+  useEffect(() => { setVideoPlaybackFailed(false); setVideoPlayerError(''); }, [resourceKey]);
 
   if (version.fileMissing) return <div className={`flex items-center justify-center bg-slate-100 text-slate-400 ${className}`}><AlertTriangle size={26}/></div>;
-  if (kind === 'video' && videoPlayback && !advancedPlaybackFailed) return <div style={contentStyle} className={`relative overflow-hidden bg-black ${className}`}><AdvancedVideoPlayer filePath={version.filePath} poster={resource.url} onError={message => {
-    setAdvancedPlaybackFailed(true);
-    window.electronAPI.reportRendererError('Advanced video decoder failed in version manager; falling back to Chromium playback', `${version.filePath}: ${message}`);
+  if (kind === 'video' && videoPlayback && !videoPlaybackFailed) return <div style={contentStyle} className={`relative overflow-hidden bg-black ${className}`}><VideoPlayer filePath={version.filePath} poster={resource.url} keyboardSettings={videoPlaybackSettings} onError={message => {
+    setVideoPlaybackFailed(true);
+    setVideoPlayerError(message);
+    window.electronAPI.reportRendererError('Video player failed in version manager', `${version.filePath}: ${message}`);
   }} onMetadata={() => undefined}/></div>;
-  if (kind === 'video' && videoPlayback && resource.videoUrl) return <video controls preload="metadata" poster={resource.url} style={contentStyle} className={`bg-black object-contain ${className}`}><source src={resource.videoUrl}/></video>;
+  if (kind === 'video' && videoPlayback && videoPlaybackFailed) return <div role="alert" style={contentStyle} className={`flex flex-col items-center justify-center bg-slate-950 p-4 text-center text-white ${className}`}><AlertTriangle size={26} className="text-red-400"/><p className="mt-2 text-sm font-bold">视频播放器无法启动</p><p className="mt-1 max-w-sm text-xs text-slate-300">{videoPlayerError || '请修复或重新安装视频播放器运行时。'}</p></div>;
   return <div className={`relative flex items-center justify-center overflow-hidden bg-slate-100 ${className}`}>
     {resource.url ? <OrientedVersionImage src={resource.url} alt={version.versionName} orientationMatrix={resource.orientationMatrix} contentStyle={contentStyle}/> : <ImageIcon size={28} className="text-slate-400"/>}
     {loading && <span className="absolute rounded-full bg-slate-900/70 p-2 text-white"><Loader2 size={16} className="animate-spin"/></span>}
   </div>;
 };
 
-const CompareView = ({ active, left, right, cacheConfig, workspacePath, photoId, onClose, initialMode = 'side-by-side' }: {
+const CompareView = ({ active, left, right, cacheConfig, videoPlaybackSettings, workspacePath, photoId, onClose, initialMode = 'side-by-side' }: {
   active: boolean;
   left: MediaVersion;
   right: MediaVersion;
   cacheConfig: AppConfig['mediaCache'];
+  videoPlaybackSettings: AppConfig['videoPlayback'];
   workspacePath: string;
   photoId: string;
   onClose: () => void;
@@ -238,8 +241,8 @@ const CompareView = ({ active, left, right, cacheConfig, workspacePath, photoId,
     void window.electronAPI.recordMediaVersionCompare(workspacePath, { photoId, leftVersionId: left.id, rightVersionId: right.id, compareMode: mode });
   }, [mode, left.id, right.id, photoId, workspacePath]);
   return <ImageComparisonView
-    left={{ label: `${visibleVersionLabel(left)} ${visibleVersionName(left)}`, interactive: active && mediaKind(left.filePath) === 'video', content: <VersionResource version={left} cacheConfig={cacheConfig} videoPlayback={active} className="absolute inset-0 h-full w-full"/> }}
-    right={{ label: `${visibleVersionLabel(right)} ${visibleVersionName(right)}`, interactive: active && mediaKind(right.filePath) === 'video', content: <VersionResource version={right} cacheConfig={cacheConfig} videoPlayback={active} className="absolute inset-0 h-full w-full"/> }}
+    left={{ label: `${visibleVersionLabel(left)} ${visibleVersionName(left)}`, interactive: active && mediaKind(left.filePath) === 'video', content: <VersionResource version={left} cacheConfig={cacheConfig} videoPlaybackSettings={videoPlaybackSettings} videoPlayback={active} className="absolute inset-0 h-full w-full"/> }}
+    right={{ label: `${visibleVersionLabel(right)} ${visibleVersionName(right)}`, interactive: active && mediaKind(right.filePath) === 'video', content: <VersionResource version={right} cacheConfig={cacheConfig} videoPlaybackSettings={videoPlaybackSettings} videoPlayback={active} className="absolute inset-0 h-full w-full"/> }}
     mode={mode}
     onModeChange={setMode}
     comparisonKey={`${left.id}|${right.id}`}
@@ -250,10 +253,11 @@ const CompareView = ({ active, left, right, cacheConfig, workspacePath, photoId,
   />;
 };
 
-const SingleVersionView = ({ active, version, cacheConfig, busy, onClose, onNotice, onEditNote, onMakeCurrent, onRelocate, onDelete }: {
+const SingleVersionView = ({ active, version, cacheConfig, videoPlaybackSettings, busy, onClose, onNotice, onEditNote, onMakeCurrent, onRelocate, onDelete }: {
   active: boolean;
   version: MediaVersion;
   cacheConfig: AppConfig['mediaCache'];
+  videoPlaybackSettings: AppConfig['videoPlayback'];
   busy: boolean;
   onClose: () => void;
   onNotice: (message: string) => void;
@@ -332,7 +336,7 @@ const SingleVersionView = ({ active, version, cacheConfig, busy, onClose, onNoti
       onPointerUp={event => { if (dragRef.current?.pointerId === event.pointerId) { dragRef.current = null; setDragging(false); } }}
       onPointerCancel={() => { dragRef.current = null; setDragging(false); }}
     >
-      <VersionResource version={version} cacheConfig={cacheConfig} videoPlayback={active} contentStyle={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: 'center', transition: dragging ? 'none' : 'transform 100ms ease-out' }} className="h-full w-full"/>
+      <VersionResource version={version} cacheConfig={cacheConfig} videoPlaybackSettings={videoPlaybackSettings} videoPlayback={active} contentStyle={{ transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: 'center', transition: dragging ? 'none' : 'transform 100ms ease-out' }} className="h-full w-full"/>
       {mediaKind(version.filePath) !== 'video' && !version.fileMissing && <button type="button" onClick={resetView} title="恢复适合窗口" className="absolute bottom-4 right-4 rounded-md bg-slate-900/75 px-2 py-1 font-mono text-[11px] text-slate-200 shadow-lg">{Math.round(zoom * 100)}%</button>}
     </div>
   </section>;
@@ -359,7 +363,7 @@ const SingleVersionView = ({ active, version, cacheConfig, busy, onClose, onNoti
   </div>;
 };
 
-export const VersionManager = ({ active = true, entry, workspacePath, project, cacheConfig, onClose, onNotice, onVersionStateChanged, progressVersionKey = '', progressId = '', initialCompareIds = [], initialCompareMode = 'side-by-side' }: VersionManagerProps) => {
+export const VersionManager = ({ active = true, entry, workspacePath, project, cacheConfig, videoPlaybackSettings, onClose, onNotice, onVersionStateChanged, progressVersionKey = '', progressId = '', initialCompareIds = [], initialCompareMode = 'side-by-side' }: VersionManagerProps) => {
   const appDialog = useAppDialog();
   const initialCompareKey = initialCompareIds.join('|');
   const [bundle, setBundle] = useState<MediaVersionBundle>({ success: true, versions: [] });
@@ -384,7 +388,7 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     branchPhotoRequestRef.current += 1;
   }
   const pageGenerationIsCurrent = (generation: number) => generation === pageGenerationRef.current;
-  useEscapeLayer(Boolean(editing), () => setEditing(null), !busy);
+  useEscapeLayer(active && Boolean(editing), () => setEditing(null), !busy, true);
   const initialCompareAppliedRef = useRef('');
   const [editNote, setEditNote] = useState('');
   const [treeWidth, setTreeWidth] = useState(() => {
@@ -717,8 +721,8 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
         onPointerCancel={() => { resizeRef.current = null; }}
         className="column-resize-handle"
       />
-      <main className="flex min-w-0 flex-1 overflow-hidden">{compareVersions.length === 2 ? null : selected ? <SingleVersionView active={active} version={selected} cacheConfig={cacheConfig} busy={busy} onClose={onClose} onNotice={onNotice} onEditNote={() => { setEditing(selected); setEditNote(selected.note); }} onMakeCurrent={() => void updateVersion({ versionId: selected.id, makeCurrent: true }, '已切换当前版本')} onRelocate={() => void relocateVersion(selected)} onDelete={() => void deleteVersion(selected)}/> : <div className="flex h-full flex-1 items-center justify-center text-slate-400">请选择一个版本</div>}</main>
-      {bundle.photo && compareVersions.length === 2 && <div className="absolute inset-y-0 right-0 z-20 bg-slate-950" style={{ left: treeWidth + 1 }}><CompareView active={active} left={compareVersions[0]} right={compareVersions[1]} cacheConfig={cacheConfig} workspacePath={workspacePath} photoId={bundle.photo.id} initialMode={initialCompareMode} onClose={() => setCompareIds([])}/></div>}
+      <main className="flex min-w-0 flex-1 overflow-hidden">{compareVersions.length === 2 ? null : selected ? <SingleVersionView active={active} version={selected} cacheConfig={cacheConfig} videoPlaybackSettings={videoPlaybackSettings} busy={busy} onClose={onClose} onNotice={onNotice} onEditNote={() => { setEditing(selected); setEditNote(selected.note); }} onMakeCurrent={() => void updateVersion({ versionId: selected.id, makeCurrent: true }, '已切换当前版本')} onRelocate={() => void relocateVersion(selected)} onDelete={() => void deleteVersion(selected)}/> : <div className="flex h-full flex-1 items-center justify-center text-slate-400">请选择一个版本</div>}</main>
+      {bundle.photo && compareVersions.length === 2 && <div className="absolute inset-y-0 right-0 z-20 bg-slate-950" style={{ left: treeWidth + 1 }}><CompareView active={active} left={compareVersions[0]} right={compareVersions[1]} cacheConfig={cacheConfig} videoPlaybackSettings={videoPlaybackSettings} workspacePath={workspacePath} photoId={bundle.photo.id} initialMode={initialCompareMode} onClose={() => setCompareIds([])}/></div>}
     </div>}
     {editing && <div className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><div role="dialog" aria-modal="true" aria-label={`编辑版本说明 ${visibleVersionLabel(editing)}`} className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-5 shadow-2xl"><header className="flex items-center justify-between"><h3 className="font-bold text-slate-800">编辑版本说明 · {visibleVersionLabel(editing)}</h3><button onClick={() => setEditing(null)}><X size={18}/></button></header><label className="form-label">版本说明</label><textarea autoFocus rows={5} value={editNote} onChange={event => setEditNote(event.target.value)} placeholder="记录本次进度的修改内容" className="form-input resize-none"/><p className="mt-3 text-xs text-slate-500">版本名称由进度规则生成。</p><footer className="mt-5 flex justify-end gap-2"><button onClick={() => setEditing(null)} className="dialog-secondary">取消</button><button disabled={busy} onClick={() => void updateVersion({ versionId: editing.id, note: editNote }, '版本说明已更新')} className="dialog-primary">保存</button></footer></div></div>}
   </div>;

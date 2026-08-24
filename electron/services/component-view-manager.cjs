@@ -37,6 +37,8 @@ class ComponentViewManager {
     this.senderBindings = new Map();
     this.rpcMethods = new Map();
     this.resolvedTheme = 'light';
+    this.activeInstanceId = '';
+    this.hostSurfaceState = { rendererToken: '', revision: -1, suspended: false };
     this.registerComponentSdkIpc();
   }
 
@@ -110,6 +112,7 @@ class ComponentViewManager {
     } });
     const instance = {
       key, instanceId, view, descriptor,
+      logicalActive: false,
       context: Object.freeze({
         componentId: descriptor.componentId,
         componentVersion: descriptor.componentVersion,
@@ -164,14 +167,40 @@ class ComponentViewManager {
   }
 
   activate(instanceId) {
-    let found = false;
+    const found = !instanceId || [...this.instances.values()].some(instance => instance.instanceId === instanceId);
+    if (!found) return false;
+    this.activeInstanceId = instanceId;
     for (const instance of this.instances.values()) {
       const active = instance.instanceId === instanceId;
-      found ||= active;
-      instance.view.setVisible(active);
-      instance.view.webContents.send(active ? 'component-sdk:activate' : 'component-sdk:deactivate');
+      if (instance.logicalActive !== active) {
+        instance.logicalActive = active;
+        if (!instance.view.webContents.isDestroyed()) instance.view.webContents.send(active ? 'component-sdk:activate' : 'component-sdk:deactivate');
+      }
+      this.applyVisibility(instance);
     }
-    return found;
+    return Boolean(instanceId);
+  }
+
+  applyVisibility(instance) {
+    instance.view.setVisible(instance.logicalActive && !this.hostSurfaceState.suspended);
+  }
+
+  setHostSurfaceSuspended(update) {
+    const rendererToken = String(update?.rendererToken || '');
+    const revision = Number(update?.revision);
+    if (!rendererToken || rendererToken.length > 200 || !Number.isSafeInteger(revision) || revision < 0 || typeof update?.suspended !== 'boolean') throw new Error('Invalid host surface state');
+    if (rendererToken === this.hostSurfaceState.rendererToken && revision <= this.hostSurfaceState.revision) return false;
+    const rendererReloaded = Boolean(this.hostSurfaceState.rendererToken && rendererToken !== this.hostSurfaceState.rendererToken);
+    this.hostSurfaceState = { rendererToken, revision, suspended: update.suspended };
+    if (rendererReloaded) this.activeInstanceId = '';
+    for (const instance of this.instances.values()) {
+      if (rendererReloaded && instance.logicalActive) {
+        instance.logicalActive = false;
+        if (!instance.view.webContents.isDestroyed()) instance.view.webContents.send('component-sdk:deactivate');
+      }
+      this.applyVisibility(instance);
+    }
+    return true;
   }
 
   setBounds(instanceId, bounds) {
@@ -186,6 +215,7 @@ class ComponentViewManager {
     const instance = [...this.instances.values()].find(item => item.instanceId === instanceId);
     if (!instance) return false;
     this.instances.delete(instance.key);
+    if (this.activeInstanceId === instanceId) this.activeInstanceId = '';
     this.senderBindings.delete(instance.view.webContents.id);
     try { this.mainWindow.contentView.removeChildView(instance.view); } catch { /* already detached */ }
     if (!instance.view.webContents.isDestroyed()) instance.view.webContents.close({ waitForBeforeUnload: false });

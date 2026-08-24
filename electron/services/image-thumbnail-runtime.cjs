@@ -50,7 +50,11 @@ const createImageThumbnailRuntime = ({
           clearTimeout(worker.timer);
           worker.timer = null;
           if (response.success) job.resolve(response.generated || []);
-          else job.reject(new Error(response.error || '图片解码失败'));
+          else {
+            const error = new Error(response.error || '图片解码失败');
+            error.code = response.code || 'EIMAGEDECODE';
+            job.reject(error);
+          }
           this.pump();
         }
       });
@@ -178,12 +182,17 @@ const createImageThumbnailRuntime = ({
         await generateImageThumbnailFiles(sourcePath, kind === 'raw' ? 'raw' : 'image', missing.map(size => ({ sizeLabel: size.label, pixels: size.pixels, path: targets.get(size.label) })));
       } catch (decodeError) {
         if (kind === 'raw') throw decodeError;
+        let fallbackGenerated = false;
         for (const size of missing) {
           const target = targets.get(size.label);
           let thumbnail = nativeImage.createEmpty();
           try { thumbnail = await nativeImage.createThumbnailFromPath(sourcePath, { width: size.pixels, height: size.pixels }); } catch {}
-          if (!thumbnail.isEmpty()) await writeThumbnailJpeg(target, thumbnail, size.pixels >= 960 ? 84 : 80);
+          if (!thumbnail.isEmpty()) {
+            await writeThumbnailJpeg(target, thumbnail, size.pixels >= 960 ? 84 : 80);
+            fallbackGenerated = true;
+          }
         }
+        if (!fallbackGenerated) throw decodeError;
       }
     }
     return ordered.filter(size => fs.existsSync(targets.get(size.label))).map(size => ({ sizeLabel: size.label, pixelSize: size.pixels, path: targets.get(size.label) }));

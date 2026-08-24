@@ -374,6 +374,8 @@ try {
 
   assert.strictEqual(registry.list().length, 0, 'static compatibility definitions must not manufacture component UI entries');
   const advancedVideoManifest = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'extensions', 'video-playback-mpv', 'component.template.json'), 'utf8'));
+  assert.strictEqual(advancedVideoManifest.name, '视频播放器');
+  assert.strictEqual(advancedVideoManifest.name, PLUGIN_DEFINITIONS['video-playback-mpv'].name, 'component template and catalog must expose the same canonical product name');
   assert.strictEqual(PLUGIN_DEFINITIONS['video-playback-mpv'].version, '26.8.16.1', 'the app must accept the latest published advanced-video component');
   assert.strictEqual(PLUGIN_DEFINITIONS['video-playback-mpv'].runtimeOnly, true, 'advanced video must be catalogued as a backend runtime only');
   assert.strictEqual(advancedVideoManifest.version, PLUGIN_DEFINITIONS['video-playback-mpv'].version, 'the advanced-video manifest and app compatibility pin must stay aligned');

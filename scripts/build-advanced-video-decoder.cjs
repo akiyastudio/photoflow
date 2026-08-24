@@ -8,7 +8,7 @@ const { normalizeDotnetAssembly } = require('./deterministic-dotnet-assembly.cjs
 const { verifyPeDependencyClosure } = require('./media-runtime/pe-dependency-closure.cjs');
 
 if (process.platform !== 'win32' || process.arch !== 'x64') {
-  throw new Error('“高级视频解码”组件当前只支持 Windows x64');
+  throw new Error('“视频播放器”组件当前只支持 Windows x64');
 }
 
 const root = path.resolve(__dirname, '..');
@@ -71,7 +71,7 @@ const normalizeZipTimestamps = (archivePath, epochSeconds) => {
       break;
     }
   }
-  if (endOfCentralDirectory < 0) throw new Error('高级视频解码组件 ZIP 缺少中央目录');
+  if (endOfCentralDirectory < 0) throw new Error('视频播放器组件 ZIP 缺少中央目录');
 
   const normalizeExtraFields = (start, length) => {
     const end = start + length;
@@ -79,13 +79,13 @@ const normalizeZipTimestamps = (archivePath, epochSeconds) => {
       const fieldId = image.readUInt16LE(cursor);
       const fieldLength = image.readUInt16LE(cursor + 2);
       const fieldEnd = cursor + 4 + fieldLength;
-      if (fieldEnd > end) throw new Error('高级视频解码组件 ZIP 扩展字段损坏');
+      if (fieldEnd > end) throw new Error('视频播放器组件 ZIP 扩展字段损坏');
       if (fieldId === 0x5455 && fieldLength >= 1) {
         const flags = image[cursor + 4];
         let timestampOffset = cursor + 5;
         for (const flag of [1, 2, 4]) {
           if (!(flags & flag)) continue;
-          if (timestampOffset + 4 > fieldEnd) throw new Error('高级视频解码组件 ZIP 时间字段损坏');
+          if (timestampOffset + 4 > fieldEnd) throw new Error('视频播放器组件 ZIP 时间字段损坏');
           image.writeUInt32LE(epochSeconds, timestampOffset);
           timestampOffset += 4;
         }
@@ -97,12 +97,12 @@ const normalizeZipTimestamps = (archivePath, epochSeconds) => {
   const entryCount = image.readUInt16LE(endOfCentralDirectory + 10);
   let centralOffset = image.readUInt32LE(endOfCentralDirectory + 16);
   for (let index = 0; index < entryCount; index++) {
-    if (image.readUInt32LE(centralOffset) !== 0x02014b50) throw new Error('高级视频解码组件 ZIP 中央目录损坏');
+    if (image.readUInt32LE(centralOffset) !== 0x02014b50) throw new Error('视频播放器组件 ZIP 中央目录损坏');
     const nameLength = image.readUInt16LE(centralOffset + 28);
     const extraLength = image.readUInt16LE(centralOffset + 30);
     const commentLength = image.readUInt16LE(centralOffset + 32);
     const localOffset = image.readUInt32LE(centralOffset + 42);
-    if (image.readUInt32LE(localOffset) !== 0x04034b50) throw new Error('高级视频解码组件 ZIP 本地条目损坏');
+    if (image.readUInt32LE(localOffset) !== 0x04034b50) throw new Error('视频播放器组件 ZIP 本地条目损坏');
 
     image.writeUInt16LE(0, localOffset + 10);
     image.writeUInt16LE(33, localOffset + 12);
@@ -134,7 +134,7 @@ const frameworkRoots = [
   path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', 'Framework', 'v4.0.30319'),
 ];
 const frameworkRoot = frameworkRoots.find(candidate => fs.existsSync(path.join(candidate, 'csc.exe')));
-if (!frameworkRoot) throw new Error('找不到 Windows C# 编译器，无法构建高级视频解码桥接程序');
+if (!frameworkRoot) throw new Error('找不到 Windows C# 编译器，无法构建视频播放器桥接程序');
 
 const releaseRoot = path.join(root, 'artifacts', 'installers');
 const outputRoot = path.resolve(argumentValue('--output-root') || path.join(releaseRoot, 'components'));
@@ -154,7 +154,7 @@ const compile = spawnSync(path.join(frameworkRoot, 'csc.exe'), [
   `/reference:${path.join(frameworkRoot, 'System.Web.Extensions.dll')}`,
   path.join(sourceRoot, 'AdvancedVideoDecoder.cs'),
 ], { cwd: root, encoding: 'utf8', windowsHide: true });
-if (compile.status !== 0) throw new Error(`高级视频解码桥接程序构建失败：${compile.stderr || compile.stdout}`);
+if (compile.status !== 0) throw new Error(`视频播放器桥接程序构建失败：${compile.stderr || compile.stdout}`);
 normalizeDotnetAssembly(executable);
 
 const runtimeRoot = path.dirname(mpvLibrary);
@@ -216,7 +216,7 @@ const archiveEntries = fs.readdirSync(target, { withFileTypes: true })
 const runtimePackageExtensions = new Set(['.dll', '.exe', '.json', '.md', '.txt', '.zip']);
 const unexpectedPackageEntries = archiveEntries.filter(name => !runtimePackageExtensions.has(path.extname(name).toLowerCase()));
 if (unexpectedPackageEntries.length) {
-  throw new Error(`高级视频解码运行时包含非运行时/清单/许可证文件：${unexpectedPackageEntries.join(', ')}`);
+  throw new Error(`视频播放器运行时包含非运行时/清单/许可证文件：${unexpectedPackageEntries.join(', ')}`);
 }
 for (const name of archiveEntries) fs.utimesSync(path.join(target, name), zipTimestamp, zipTimestamp);
 fs.utimesSync(target, zipTimestamp, zipTimestamp);
@@ -234,6 +234,6 @@ const archive = spawnSync('tar.exe', ['-a', '-c', '-f', artifactPath,
   encoding: 'utf8',
   windowsHide: true,
 });
-if (archive.status !== 0) throw new Error(`高级视频解码组件打包失败：${archive.stderr || archive.stdout}`);
+if (archive.status !== 0) throw new Error(`视频播放器组件打包失败：${archive.stderr || archive.stdout}`);
 normalizeZipTimestamps(artifactPath, Math.floor(zipTimestamp.getTime() / 1000));
-console.log(`高级视频解码组件已生成：${artifactPath}`);
+console.log(`视频播放器组件已生成：${artifactPath}`);

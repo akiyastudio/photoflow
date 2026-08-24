@@ -1,8 +1,10 @@
 /* eslint-disable react-refresh/only-export-components -- directional input helpers are intentionally colocated with the player contract */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Camera, Gauge, Loader2, Pause, Play, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
-import type { AdvancedVideoState, VideoPlaybackSettings } from '../types';
+import { Camera, Captions, Gauge, Loader2, Pause, Play, Plus, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
+import type { VideoPlayerState, VideoPlaybackSettings, VideoSubtitleTrack } from '../types';
+import { useHostSurfaceState } from './LayerProvider';
+import { readSubtitleMemory, resolveRememberedSubtitle, writeSubtitleMemory } from './video-subtitle-memory';
 
 const formatTime = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
@@ -17,6 +19,7 @@ const formatTime = (seconds: number) => {
 
 const PLAYBACK_SPEEDS = [0.5, 1, 1.25, 1.5, 2, 3, 4];
 const SKIP_SECONDS = 5;
+const DEFAULT_VIDEO_SETTINGS: VideoPlaybackSettings = { arrowKeyAction: 'seek', subtitlesEnabled: false, subtitlePreferredLanguages: ['zh', 'chi', 'zho'], subtitleSize: 'default', subtitleStyle: 'standard' };
 const createPlaybackToken = () => globalThis.crypto?.randomUUID?.() || `video_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 
 type VideoDirectionalInputGroup = 'arrows' | 'forward-back';
@@ -33,7 +36,7 @@ const videoDirectionalKeyboardInput = (key: string): { direction: -1 | 1; group:
   return null;
 };
 
-type AdvancedVideoPlayerProps = {
+type VideoPlayerProps = {
   filePath: string;
   poster?: string;
   onError: (message: string) => void;
@@ -49,7 +52,7 @@ type AdvancedVideoPlayerProps = {
   keyboardSettings?: VideoPlaybackSettings;
 };
 
-const initialState = (): AdvancedVideoState => ({
+const initialState = (): VideoPlayerState => ({
   sessionId: '',
   playerId: '',
   requestId: '',
@@ -63,16 +66,8 @@ const initialState = (): AdvancedVideoState => ({
   duration: 0,
 });
 
-const hasVisibleExternalModal = (surface: HTMLElement | null) => {
-  if (!surface) return false;
-  return [...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')].some(dialog => {
-    if (dialog.contains(surface) || dialog.hidden || dialog.getAttribute('aria-hidden') === 'true') return false;
-    const style = window.getComputedStyle(dialog);
-    return style.display !== 'none' && style.visibility !== 'hidden' && dialog.getClientRects().length > 0;
-  });
-};
-
-const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onContextMenuAt, onPointerActivity, topRightOverlayHole = 0, onEscape, bottomControls, editorSeekRequest, onPlaybackState, keyboardSettings = { arrowKeyAction: 'seek' } }: AdvancedVideoPlayerProps) => {
+const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onContextMenuAt, onPointerActivity, topRightOverlayHole = 0, onEscape, bottomControls, editorSeekRequest, onPlaybackState, keyboardSettings = DEFAULT_VIDEO_SETTINGS }: VideoPlayerProps) => {
+  const { suspended: hostSurfaceSuspended } = useHostSurfaceState();
   const navigate = onNavigate || (() => undefined);
   const showNavigation = Boolean(onNavigate);
   const playerRootRef = useRef<HTMLDivElement>(null);
@@ -103,31 +98,10 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
   const [starting, setStarting] = useState(true);
   const [capturing, setCapturing] = useState(false);
   const [captureNotice, setCaptureNotice] = useState<{ text: string; error?: boolean } | null>(null);
-  const [controlPanel, setControlPanel] = useState<'speed' | 'volume' | null>(null);
-  const [coveredByModal, setCoveredByModal] = useState(false);
-  const [state, setState] = useState<AdvancedVideoState>(initialState);
-
-  useEffect(() => {
-    let frame = 0;
-    const inspect = () => {
-      frame = 0;
-      setCoveredByModal(current => {
-        const next = hasVisibleExternalModal(surfaceRef.current);
-        return current === next ? current : next;
-      });
-    };
-    const schedule = () => {
-      if (frame) return;
-      frame = window.requestAnimationFrame(inspect);
-    };
-    inspect();
-    const observer = new MutationObserver(schedule);
-    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-hidden', 'aria-modal', 'class', 'hidden', 'role', 'style'] });
-    return () => {
-      window.cancelAnimationFrame(frame);
-      observer.disconnect();
-    };
-  }, []);
+  const [controlPanel, setControlPanel] = useState<'speed' | 'volume' | 'subtitles' | null>(null);
+  const subtitleMemoryRestoredRef = useRef(false);
+  const rememberAddedSubtitleRef = useRef(false);
+  const [state, setState] = useState<VideoPlayerState>(initialState);
 
   useEffect(() => {
     let active = true;
@@ -142,8 +116,10 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
     setCapturing(false);
     setCaptureNotice(null);
     setControlPanel(null);
+    subtitleMemoryRestoredRef.current = false;
+    rememberAddedSubtitleRef.current = false;
     setState(initialState());
-    const unsubscribe = window.electronAPI.onAdvancedVideoState(update => {
+    const unsubscribe = window.electronAPI.onVideoPlayerState(update => {
       if (update.playerId !== playerIdRef.current || update.requestId !== requestIdRef.current) return;
       if (sessionRef.current && update.sessionId !== sessionRef.current) return;
       if (update.type === 'navigate') {
@@ -155,7 +131,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
         const rect = surfaceRef.current?.getBoundingClientRect();
         if (rect) {
           nativeContextMenuOpenRef.current = true;
-          if (sessionRef.current) window.electronAPI.setAdvancedVideoBounds(sessionRef.current, { x: 0, y: 0, width: 0, height: 0, visible: false });
+          if (sessionRef.current) window.electronAPI.setVideoPlayerBounds(sessionRef.current, { x: 0, y: 0, width: 0, height: 0, visible: false });
           onContextMenuAtRef.current(rect.left + Number(update.x || 0), rect.top + Number(update.y || 0));
         }
         return;
@@ -171,11 +147,13 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
       if (update.type === 'fatal' || update.type === 'error' || update.type === 'stopped') {
         if (!errorReportedRef.current) {
           errorReportedRef.current = true;
-          onErrorRef.current(update.error || (update.type === 'stopped' ? '高级视频播放会话已停止' : '高级视频解码失败'));
+          onErrorRef.current(update.error || (update.type === 'stopped' ? '视频播放器会话已停止' : '视频播放器失败，请修复或重新安装视频播放器运行时'));
         }
         return;
       }
-      if (update.type === 'loading') setState(current => ({ ...current, ...update, buffering: true }));
+      if (update.type === 'subtitle-tracks') {
+        setState(current => ({ ...current, ...update }));
+      } else if (update.type === 'loading') setState(current => ({ ...current, ...update, buffering: true }));
       else if (update.type === 'file-loaded') {
         setStarting(false);
         setState(current => ({ ...current, ...update, buffering: false }));
@@ -185,16 +163,16 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
         setState(current => ({ ...current, ...update }));
       }
     });
-    void window.electronAPI.startAdvancedVideo(filePath, keyboardSettings.arrowKeyAction, playerIdRef.current, requestId).then(result => {
+    void window.electronAPI.startVideoPlayer(filePath, keyboardSettings, playerIdRef.current, requestId).then(result => {
       if (!result.success || !result.sessionId) {
         if (active && !errorReportedRef.current) {
           errorReportedRef.current = true;
-          onErrorRef.current(result.error || '高级视频解码组件无法启动');
+          onErrorRef.current(result.error || '视频播放器无法启动，请在组件管理中修复或重新安装视频播放器运行时');
         }
         return;
       }
       if (!active || requestIdRef.current !== requestId) {
-        void window.electronAPI.stopAdvancedVideo(result.sessionId);
+        void window.electronAPI.stopVideoPlayer(result.sessionId);
         return;
       }
       sessionRef.current = result.sessionId;
@@ -207,11 +185,36 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
       const currentSession = sessionRef.current;
       sessionRef.current = '';
       if (currentSession) {
-        window.electronAPI.setAdvancedVideoBounds(currentSession, { x: 0, y: 0, width: 0, height: 0, visible: false });
-        void window.electronAPI.stopAdvancedVideo(currentSession);
+        window.electronAPI.setVideoPlayerBounds(currentSession, { x: 0, y: 0, width: 0, height: 0, visible: false });
+        void window.electronAPI.stopVideoPlayer(currentSession);
       }
     };
-  }, [filePath, keyboardSettings.arrowKeyAction]);
+  }, [filePath, keyboardSettings.arrowKeyAction, keyboardSettings.subtitlesEnabled, keyboardSettings.subtitlePreferredLanguages.join(','), keyboardSettings.subtitleSize, keyboardSettings.subtitleStyle]);
+
+  useEffect(() => {
+    if (!sessionId || subtitleMemoryRestoredRef.current || !state.subtitleTracks?.length) return;
+    subtitleMemoryRestoredRef.current = true;
+    let memory;
+    try { memory = readSubtitleMemory(localStorage, filePath); } catch { return; }
+    const resolution = resolveRememberedSubtitle(memory, state.subtitleTracks);
+    if (resolution.mode === 'default' || resolution.mode === 'missing') return;
+    if (resolution.mode === 'off') {
+      window.electronAPI.controlVideoPlayer(sessionId, { action: 'subtitle-select', value: '' });
+      window.electronAPI.controlVideoPlayer(sessionId, { action: 'subtitle-delay', value: resolution.delay });
+      return;
+    }
+    window.electronAPI.controlVideoPlayer(sessionId, { action: 'subtitle-select', value: resolution.track.id });
+    window.electronAPI.controlVideoPlayer(sessionId, { action: 'subtitle-delay', value: resolution.delay });
+    window.electronAPI.controlVideoPlayer(sessionId, { action: 'subtitle-visible', value: resolution.visible });
+  }, [filePath, sessionId, state.subtitleTracks]);
+
+  useEffect(() => {
+    if (!rememberAddedSubtitleRef.current || !state.subtitleTracks?.length) return;
+    const selected = state.subtitleTracks.find(track => track.id === String(state.subtitleTrackId ?? '') || track.selected);
+    if (!selected) return;
+    rememberAddedSubtitleRef.current = false;
+    try { writeSubtitleMemory(localStorage, filePath, { selection: { mode: 'track', stableId: selected.stableId }, delay: Number(state.subtitleDelay) || 0, visible: state.subtitleVisible !== false, updatedAt: Date.now() }); } catch { /* storage can be unavailable */ }
+  }, [filePath, state.subtitleDelay, state.subtitleTrackId, state.subtitleTracks, state.subtitleVisible]);
 
   useEffect(() => {
     if (!captureNotice) return;
@@ -242,9 +245,9 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
       width: Math.round(cornerSize * scale),
       height: Math.round(cornerSize * scale),
     } : undefined;
-    const visible = !coveredByModal && !nativeContextMenuOpenRef.current && document.visibilityState === 'visible' && rect.width > 1 && rect.height > 1
+    const visible = !hostSurfaceSuspended && !nativeContextMenuOpenRef.current && document.visibilityState === 'visible' && rect.width > 1 && rect.height > 1
       && rect.right > 0 && rect.bottom > 0 && rect.left < window.innerWidth && rect.top < window.innerHeight;
-    window.electronAPI.setAdvancedVideoBounds(sessionRef.current, {
+    window.electronAPI.setVideoPlayerBounds(sessionRef.current, {
       x: Math.round(rect.left * scale),
       y: Math.round(rect.top * scale),
       width: Math.round(rect.width * scale),
@@ -253,7 +256,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
       overlayHole,
       cornerOverlayHole,
     });
-  }, [coveredByModal, topRightOverlayHole]);
+  }, [hostSurfaceSuspended, topRightOverlayHole]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -294,9 +297,9 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
     onMetadataRef.current({ width: width || undefined, height: height || undefined, duration: duration || undefined });
   }, [state.width, state.height, state.duration]);
 
-  const control = (action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop', value?: number | boolean) => {
+  const control = (action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop' | 'subtitle-select' | 'subtitle-visible' | 'subtitle-delay', value?: number | boolean | string) => {
     if (!sessionRef.current) return;
-    window.electronAPI.controlAdvancedVideo(sessionRef.current, { action, value });
+    window.electronAPI.controlVideoPlayer(sessionRef.current, { action, value });
   };
   const paused = state.paused !== false;
   const duration = Math.max(0, Number(state.duration) || 0);
@@ -328,7 +331,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
   const seekRelative = useCallback((seconds: number) => {
     if (!sessionRef.current) return;
     const current = playbackPositionRef.current;
-    window.electronAPI.controlAdvancedVideo(sessionRef.current, {
+    window.electronAPI.controlVideoPlayer(sessionRef.current, {
       action: 'seek',
       value: Math.max(0, Math.min(current.duration || Number.MAX_SAFE_INTEGER, current.time + seconds)),
     });
@@ -361,7 +364,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
       const input = videoDirectionalKeyboardInput(event.key);
       if (!input) return;
       if (event.ctrlKey || event.metaKey || event.altKey) return;
-      const visiblePlayers = [...document.querySelectorAll<HTMLElement>('[data-advanced-video-player="true"]')]
+      const visiblePlayers = [...document.querySelectorAll<HTMLElement>('[data-video-player="true"]')]
         .filter(player => player.getClientRects().length > 0);
       if (visiblePlayers.length > 1 && !playerRootRef.current?.contains(document.activeElement)) return;
       const target = event.target as HTMLElement | null;
@@ -381,7 +384,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
     setCapturing(true);
     setCaptureNotice(null);
     try {
-      const result = await window.electronAPI.captureAdvancedVideoFrame(currentSession);
+      const result = await window.electronAPI.captureVideoPlayerFrame(currentSession);
       setCaptureNotice(result.success
         ? { text: '当前帧已保存' }
         : { text: result.error || '截图失败', error: true });
@@ -390,6 +393,35 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
     } finally {
       setCapturing(false);
     }
+  };
+  const subtitleTracks = state.subtitleTracks || [];
+  const selectedSubtitle = subtitleTracks.find(track => track.id === String(state.subtitleTrackId ?? '') || track.selected);
+  const subtitleDelay = Math.max(-30, Math.min(30, Number(state.subtitleDelay) || 0));
+  const rememberSubtitle = (track: VideoSubtitleTrack | undefined = selectedSubtitle, delay = subtitleDelay, visible = state.subtitleVisible !== false) => {
+    if (!track) return;
+    try { writeSubtitleMemory(localStorage, filePath, { selection: { mode: 'track', stableId: track.stableId }, delay, visible, updatedAt: Date.now() }); } catch { /* storage can be unavailable */ }
+  };
+  const disableSubtitles = () => {
+    control('subtitle-select', '');
+    try { writeSubtitleMemory(localStorage, filePath, { selection: { mode: 'off' }, delay: subtitleDelay, visible: false, updatedAt: Date.now() }); } catch { /* storage can be unavailable */ }
+  };
+  const selectSubtitle = (id: string) => {
+    control('subtitle-select', id);
+    const track = subtitleTracks.find(item => item.id === id);
+    if (track) rememberSubtitle(track, subtitleDelay, true);
+  };
+  const changeSubtitleDelay = (delay: number) => {
+    const bounded = Math.max(-30, Math.min(30, delay));
+    control('subtitle-delay', bounded);
+    rememberSubtitle(selectedSubtitle, bounded);
+  };
+  const addSubtitle = async () => {
+    if (!sessionRef.current) return;
+    // Choosing a new subtitle is an explicit override of a remembered "off" state.
+    subtitleMemoryRestoredRef.current = true;
+    const chosen = await window.electronAPI.chooseVideoSubtitle(sessionRef.current);
+    if (!chosen.success) setCaptureNotice({ text: chosen.error || '字幕加载失败', error: true });
+    else if (!chosen.cancelled) rememberAddedSubtitleRef.current = true;
   };
 
   const forwardBackAction = videoDirectionalAction(keyboardSettings.arrowKeyAction, 'forward-back');
@@ -400,7 +432,7 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
   const backwardControlLabel = forwardBackAction === 'navigate' ? '上一个视频' : '快退 5 秒';
   const forwardControlLabel = forwardBackAction === 'navigate' ? '下一个视频' : '快进 5 秒';
 
-  return <div ref={playerRootRef} data-advanced-video-player="true" className="absolute inset-0 flex min-h-0 flex-col bg-black">
+  return <div ref={playerRootRef} data-video-player="true" className="absolute inset-0 flex min-h-0 flex-col bg-black">
     <div
       ref={surfaceRef}
       role="button"
@@ -436,6 +468,21 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
           <button type="button" disabled={!sessionId} onFocus={() => setControlPanel('speed')} onClick={cyclePlaybackSpeed} title={`播放速度 ${speed}×；单击切换，悬停选择`} aria-label={`当前播放速度 ${speed} 倍，单击切换到下一档`} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'speed' ? 'bg-white/10' : ''}`}><Gauge size={16}/></button>
         </div>
         <button type="button" disabled={!sessionId || starting || capturing} onClick={() => void captureFrame()} title="截取当前视频帧并保存到原视频目录" aria-label="截取当前视频帧" className="rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40">{capturing ? <Loader2 size={16} className="animate-spin"/> : <Camera size={16}/>}</button>
+        <div className="relative shrink-0" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }}>
+          {controlPanel === 'subtitles' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-72 pb-2" onClick={event => event.stopPropagation()}>
+            <div role="menu" aria-label="字幕" className="max-h-80 overflow-auto rounded-lg border border-white/15 bg-[#101827] p-2 text-xs shadow-2xl shadow-black/70">
+              <div className="mb-2 flex items-center justify-between px-1 text-slate-300"><span className="font-bold">字幕</span><button type="button" onClick={() => void addSubtitle()} className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-white/10"><Plus size={13}/>添加本地字幕</button></div>
+              <button role="menuitemradio" aria-checked={!selectedSubtitle} type="button" onClick={disableSubtitles} className={`block w-full rounded px-2 py-1.5 text-left ${!selectedSubtitle ? 'bg-blue-500 text-white' : 'text-slate-200 hover:bg-white/10'}`}>关闭</button>
+              {subtitleTracks.map(track => <button key={track.stableId} role="menuitemradio" aria-checked={selectedSubtitle?.stableId === track.stableId} type="button" onClick={() => selectSubtitle(track.id)} className={`block w-full truncate rounded px-2 py-1.5 text-left ${selectedSubtitle?.stableId === track.stableId ? 'bg-blue-500 text-white' : 'text-slate-200 hover:bg-white/10'}`}>{track.source === 'external' ? '外挂' : '内嵌'} · {track.title || track.language || track.format || `轨道 ${track.id}`}</button>)}
+              <div className="mt-2 border-t border-white/10 pt-2">
+                <button type="button" disabled={!selectedSubtitle} onClick={() => { const visible = state.subtitleVisible === false; control('subtitle-visible', visible); rememberSubtitle(selectedSubtitle, subtitleDelay, visible); }} className="w-full rounded px-2 py-1.5 text-left text-slate-200 hover:bg-white/10 disabled:opacity-40">{state.subtitleVisible === false ? '显示字幕' : '隐藏字幕'}</button>
+                <div className="flex items-center gap-1 px-2 py-1 text-slate-300"><span className="mr-auto">同步 {subtitleDelay > 0 ? `+${subtitleDelay.toFixed(1)}` : subtitleDelay.toFixed(1)} 秒</span><button type="button" onClick={() => changeSubtitleDelay(subtitleDelay - 0.5)} className="rounded bg-white/5 px-2 py-1 hover:bg-white/15">提前</button><button type="button" onClick={() => changeSubtitleDelay(0)} className="rounded bg-white/5 px-2 py-1 hover:bg-white/15">归零</button><button type="button" onClick={() => changeSubtitleDelay(subtitleDelay + 0.5)} className="rounded bg-white/5 px-2 py-1 hover:bg-white/15">延后</button></div>
+                <div className="grid grid-cols-2 gap-1 px-2 pt-1"><button type="button" onClick={() => window.electronAPI.controlVideoPlayer(sessionRef.current, { action: 'subtitle-style', size: 'default', style: keyboardSettings.subtitleStyle })} className="rounded bg-white/5 py-1 hover:bg-white/15">默认字号</button><button type="button" onClick={() => window.electronAPI.controlVideoPlayer(sessionRef.current, { action: 'subtitle-style', size: 'large', style: keyboardSettings.subtitleStyle })} className="rounded bg-white/5 py-1 hover:bg-white/15">较大字号</button></div>
+              </div>
+            </div>
+          </div>}
+          <button type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'subtitles' ? null : 'subtitles')} title="字幕" aria-label="字幕菜单" aria-expanded={controlPanel === 'subtitles'} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'subtitles' ? 'bg-white/10' : ''}`}><Captions size={17}/></button>
+        </div>
         <div className="relative shrink-0" onPointerEnter={() => setControlPanel('volume')} onPointerLeave={() => setControlPanel(null)} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }}>
           {controlPanel === 'volume' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-44 pb-2" onClick={event => event.stopPropagation()}>
             <div className="rounded-lg border border-white/15 bg-[#101827] p-3 shadow-2xl shadow-black/70">
@@ -451,4 +498,6 @@ const AdvancedVideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate
   </div>;
 };
 
-export { AdvancedVideoPlayer, videoDirectionalAction, videoDirectionalKeyboardInput };
+/** Legacy export name retained only for source compatibility during migration. */
+const AdvancedVideoPlayer = VideoPlayer;
+export { AdvancedVideoPlayer, VideoPlayer, videoDirectionalAction, videoDirectionalKeyboardInput };

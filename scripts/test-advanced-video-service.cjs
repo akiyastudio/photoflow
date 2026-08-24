@@ -58,6 +58,9 @@ const run = async () => {
   const nativeHandle = Buffer.alloc(8);
   nativeHandle.writeBigUInt64LE(123456n);
   assert.strictEqual(nativeWindowHandleValue({ getNativeWindowHandle: () => nativeHandle }), '123456');
+  const screenshotRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-video-screenshot-'));
+  const sourceVideo = path.join(screenshotRoot, 'camera.mov');
+  fs.writeFileSync(sourceVideo, 'video');
 
   const sender = new EventEmitter();
   sender.id = 7;
@@ -85,15 +88,16 @@ const run = async () => {
     writeLog: () => undefined,
   });
 
-  const result = await service.start({ sender }, 'C:\\workspace\\camera.mov', 'navigate', 'player-one', 'request-one');
+  const result = await service.start({ sender }, sourceVideo, 'navigate', 'player-one', 'request-one');
   const child = children[0];
   const stdinLines = child.stdinLines;
   assert.strictEqual(result.sessionId, 'session-1');
   assert.strictEqual(spawned[0].options.windowsHide, true);
   assert.deepStrictEqual(spawned[0].args, ['--parent-hwnd', '123456']);
   assert.deepStrictEqual(stdinLines[0], { command: 'set-keyboard-mode', value: 'navigate' });
-  assert.deepStrictEqual(stdinLines[1], { command: 'open', path: path.resolve('C:\\workspace\\camera.mov') });
-  assert.deepStrictEqual(stdinLines[2], { command: 'play' });
+  assert.deepStrictEqual(stdinLines[1], { command: 'set-subtitle-defaults', enabled: false, preferredLanguages: [], size: 'default', style: 'standard' });
+  assert.deepStrictEqual(stdinLines[2], { command: 'open', path: path.resolve(sourceVideo) });
+  assert.deepStrictEqual(stdinLines[3], { command: 'play' });
 
   service.setBounds({ sender }, result.sessionId, {
     x: 10.4, y: 20.6, width: 300.2, height: 200.8, visible: true,
@@ -101,14 +105,25 @@ const run = async () => {
     cornerOverlayHole: { x: 240.4, y: 0, width: 80.2, height: 72.1 },
   });
   service.control({ sender }, result.sessionId, { action: 'play' });
+  service.control({ sender }, result.sessionId, { action: 'subtitle-select', value: '3' });
+  service.control({ sender }, result.sessionId, { action: 'subtitle-visible', value: false });
+  service.control({ sender }, result.sessionId, { action: 'subtitle-delay', value: 1.5 });
+  service.control({ sender }, result.sessionId, { action: 'subtitle-style', size: 'large', style: 'high-contrast' });
   service.control({ sender }, result.sessionId, { action: 'arbitrary-command' });
-  assert.deepStrictEqual(stdinLines[3], {
+  service.control({ sender: { id: 99 } }, result.sessionId, { action: 'pause' });
+  assert.deepStrictEqual(stdinLines[4], {
     command: 'set-bounds', x: 10, y: 21, width: 300, height: 201, visible: true,
     holeX: 210, holeY: 80, holeWidth: 90, holeHeight: 121,
     cornerHoleX: 240, cornerHoleY: 0, cornerHoleWidth: 60, cornerHoleHeight: 72,
   });
-  assert.deepStrictEqual(stdinLines[4], { command: 'play' });
-  assert.strictEqual(stdinLines.length, 5);
+  assert.deepStrictEqual(stdinLines[5], { command: 'play' });
+  assert.deepStrictEqual(stdinLines.slice(6), [
+    { command: 'subtitle-select', value: '3' },
+    { command: 'subtitle-visible', value: false },
+    { command: 'subtitle-delay', value: 1.5 },
+    { command: 'subtitle-style', size: 'large', style: 'high-contrast' },
+  ]);
+  assert.strictEqual(stdinLines.length, 10, 'only allowlisted commands from the owning renderer may reach the native session');
 
   assert(sender.sent.some(item => item.channel === 'advanced-video-state'
     && item.value.sessionId === 'session-1'
@@ -120,10 +135,57 @@ const run = async () => {
   const screenshotCommand = stdinLines.at(-1);
   assert.strictEqual(screenshotCommand.command, 'screenshot');
   assert.strictEqual(screenshotCommand.requestId, 'session-2');
-  assert.strictEqual(path.dirname(screenshotCommand.path), path.dirname(path.resolve('C:\\workspace\\camera.mov')));
-  assert.match(path.basename(screenshotCommand.path), /^camera_截图_\d{8}-\d{6}-\d{3}_session-\.png$/);
+  assert.strictEqual(path.dirname(screenshotCommand.path), screenshotRoot);
+  assert.match(path.basename(screenshotCommand.path), /^\.camera\.session-2\.photoflow-transcode-screenshot\.png$/);
+  const publicScreenshot = fs.readdirSync(screenshotRoot).find(name => name.startsWith('camera_截图_'));
+  assert.strictEqual(publicScreenshot, undefined, 'the public screenshot must not appear while the component is writing');
+  const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const pngIend = Buffer.from([0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]);
+  fs.writeFileSync(screenshotCommand.path, Buffer.concat([pngSignature, Buffer.from('partial')]));
   child.stdout.write(`${JSON.stringify({ type: 'screenshot-result', requestId: screenshotCommand.requestId, success: true, path: screenshotCommand.path })}\n`);
-  assert.deepStrictEqual(await screenshotPromise, { path: screenshotCommand.path });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(fs.readdirSync(screenshotRoot).some(name => name.startsWith('camera_截图_')), false, 'a partial PNG must remain hidden after a premature component success');
+  fs.appendFileSync(screenshotCommand.path, pngIend);
+  const screenshotResult = await screenshotPromise;
+  assert.match(path.basename(screenshotResult.path), /^camera_截图_\d{8}-\d{6}-\d{3}_session-\.png$/);
+  assert.equal(fs.existsSync(screenshotCommand.path), false, 'atomic publication must consume the internal temporary file');
+  assert.equal(fs.existsSync(screenshotResult.path), true);
+
+  const cleanupChildren = [];
+  let cleanupUuid = 0;
+  const cleanupService = createAdvancedVideoService({
+    BrowserWindow: { fromWebContents: () => ({ isDestroyed: () => false, getNativeWindowHandle: () => nativeHandle }) },
+    crypto: { randomUUID: () => `cleanup-${++cleanupUuid}` },
+    mediaService: { authorizeInput: async value => path.resolve(value) },
+    path,
+    pluginService: { resolveRunConfigAsync: async () => ({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] }) },
+    spawn: () => {
+      const cleanupChild = makeChild();
+      cleanupChildren.push(cleanupChild);
+      process.nextTick(() => cleanupChild.stdout.write('{"type":"ready"}\n'));
+      return cleanupChild;
+    },
+    screenshotTimeoutMs: 120,
+    screenshotProbeMs: 10,
+    writeLog: () => undefined,
+  });
+  const cleanupSession = await cleanupService.start({ sender }, sourceVideo, 'seek', 'player-cleanup', 'request-cleanup');
+  const failedCapture = cleanupService.screenshot({ sender }, cleanupSession.sessionId);
+  const failedCommand = cleanupChildren[0].stdinLines.at(-1);
+  fs.writeFileSync(failedCommand.path, 'partial');
+  cleanupChildren[0].stdout.write(`${JSON.stringify({ type: 'screenshot-result', requestId: failedCommand.requestId, success: false, error: 'capture failed' })}\n`);
+  await assert.rejects(failedCapture, /capture failed/);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fs.existsSync(failedCommand.path), false, 'component errors must clean the internal screenshot file');
+  const timedOutCapture = cleanupService.screenshot({ sender }, cleanupSession.sessionId);
+  const timedOutCommand = cleanupChildren[0].stdinLines.at(-1);
+  fs.writeFileSync(timedOutCommand.path, 'partial');
+  const timeoutKeepAlive = setTimeout(() => undefined, 250);
+  await assert.rejects(timedOutCapture, /超时/);
+  clearTimeout(timeoutKeepAlive);
+  assert.equal(fs.existsSync(timedOutCommand.path), false, 'screenshot timeouts must clean the internal screenshot file');
+  cleanupService.stop(cleanupSession.sessionId, sender.id);
+  fs.rmSync(screenshotRoot, { recursive: true, force: true });
 
   const playerSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'components', 'AdvancedVideoPlayer.tsx'), 'utf8');
   const workspaceSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
@@ -166,12 +228,12 @@ const run = async () => {
   assert(decoderSource.includes('if (IsAtEnd()) Check(Run("seek", "0", "absolute+exact")') && decoderSource.includes('{ "paused", player.IsAtEnd() || IsYes(player.GetProperty("pause")) }'), 'playback controls must recover from EOF and report the ended state as paused');
   assert(decoderSource.includes('if (IsAtEnd())') && decoderSource.includes('SeekAbsolute(duration + seconds)'), 'relative seeking must remain available after playback reaches EOF');
   assert(playerSource.includes('backwardControlLabel') && playerSource.includes('forwardControlLabel') && playerSource.includes('runForwardBackControl(-1)') && playerSource.includes('runForwardBackControl(1)'), 'the controls beside play/pause must expose their active seek or navigation behavior');
-  assert(playerSource.includes('cyclePlaybackSpeed') && playerSource.includes("controlPanel === 'speed'") && playerSource.includes('absolute bottom-full') && playerSource.includes('PLAYBACK_SPEEDS.map') && playerSource.includes('captureAdvancedVideoFrame'), 'video controls must expose a compact floating playback-speed panel, click-to-cycle speed, and current-frame capture');
+  assert(playerSource.includes('cyclePlaybackSpeed') && playerSource.includes("controlPanel === 'speed'") && playerSource.includes('absolute bottom-full') && playerSource.includes('PLAYBACK_SPEEDS.map') && playerSource.includes('captureVideoPlayerFrame'), 'video controls must expose a compact floating playback-speed panel, click-to-cycle speed, and current-frame capture');
   assert(playerSource.includes("controlPanel === 'volume'") && playerSource.includes('aria-label="调整音量"') && playerSource.includes("control('mute', !muted)"), 'volume must use a floating panel above its icon while icon clicks toggle mute');
   assert(playerSource.includes('overlayHole') && playerSource.includes('cornerOverlayHole') && decoderSource.includes('ApplyOverlayHoles'), 'the native video surface must expose only the floating controls and full-screen close-button areas');
-  assert(playerSource.includes('hasVisibleExternalModal') && playerSource.includes("'[role=\"dialog\"][aria-modal=\"true\"]'") && playerSource.includes('!coveredByModal'), 'native video surfaces must hide while an external modal dialog covers the workspace');
+  assert(playerSource.includes('useHostSurfaceState') && playerSource.includes('!hostSurfaceSuspended') && !playerSource.includes('hasVisibleExternalModal') && !playerSource.includes('MutationObserver'), 'native video surfaces must consume explicit host suspension instead of guessing from modal DOM');
   assert(playerSource.includes('topRightOverlayHole') && !playerSource.includes('marginTop: Math.max(0, topOverlayInset)') && workspaceSource.includes('topRightOverlayHole={fullscreen && fullscreenControlsVisible ? 72 : 0}'), 'full-screen video must reach the top edge while keeping the close button interactive');
-  assert(workspaceSource.includes('autoPlay controls') && workspaceSource.includes('event.currentTarget.play().catch'), 'Chromium fallback video previews must autoplay');
+  assert(!workspaceSource.includes('autoPlay controls') && workspaceSource.includes('不会改用 Chromium 播放'), 'advanced playback failures must not silently switch to a divergent Chromium decoder path');
   assert(!playerSource.includes('高级解码</span>'), 'the advanced-decoder label must not remain in the control bar');
   assert(workspaceSource.includes("previewMediaEntries.filter(entry => entry.kind === 'video')"), 'previous and next controls must navigate between videos only');
   assert(workspaceSource.includes("!['image', 'raw'].includes(previewEntry.kind)"), 'image and raw previews must retain left and right navigation');
@@ -255,6 +317,7 @@ const run = async () => {
   const currentIntegrity = await currentIntegrityStart;
   assert.strictEqual(integrityRaceChildren.length, 1);
   integrityRaceService.stop(currentIntegrity.sessionId, sender.id);
+
   testDeterministicDecoderBuild();
   console.log('Advanced video service tests passed');
 };

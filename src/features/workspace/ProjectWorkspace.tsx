@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom';
 import { FolderInput, FolderPlus, Folder, Image as ImageIcon, ScanSearch, GalleryVerticalEnd, Play, Trash2, Edit, X, Plus, Loader2, CheckCircle2, ExternalLink, Video, ChevronDown, ChevronUp, File, FileImage, MemoryStick, LayoutList, Grid2X2, FileText, Copy, Scissors as Cut, ClipboardPaste, CheckSquare, ArrowLeft, ArrowRight, Camera, Aperture, Timer, Gauge, Ruler, Calendar, Activity, Volume2, PanelLeftOpen, ArrowUpDown, ArrowUp, ArrowDown, ArrowUpRight, AlertTriangle, Search, Filter as Funnel, Info, GripVertical, Maximize2, GitBranch, Heart, Star, RefreshCw, Crop, Pin } from 'lucide-react';
 import { VersionManager } from '../../components/VersionManager';
-import { AdvancedVideoPlayer, videoDirectionalAction, videoDirectionalKeyboardInput } from '../../components/AdvancedVideoPlayer';
+import { VideoPlayer } from '../../components/AdvancedVideoPlayer';
 import { InteractiveCropEditor } from '../../components/InteractiveCropEditor';
 import { ImportSourceControls, type ImportMaterialKind } from '../../components/ImportSourceControls';
 import type { CropRectangle } from '../../components/InteractiveCropEditor';
@@ -276,7 +276,7 @@ type FileBrowserWorkspaceProps = {
   inspirationTargetWorkspacePath?: string;
   inspirationLibraryRootPath?: string;
   installedComponentIds: ReadonlySet<string>;
-  componentHostActions?: ComponentHostAction[]; onOpenComponentPage?: (action: ComponentHostAction, scope: ComponentPageOpenScope) => void; advancedVideoSettings: AppConfig['videoPlayback'];
+  componentHostActions?: ComponentHostAction[]; onOpenComponentPage?: (action: ComponentHostAction, scope: ComponentPageOpenScope) => void; videoPlaybackSettings: AppConfig['videoPlayback'];
   projectToolbar?: AppConfig['projectToolbar'];
   customProjectCategories?: string[];
   projectCategoryOrder?: string[];
@@ -312,7 +312,7 @@ const isUnsupportedShortcutContent = (entry: ProjectFileEntry) => entry.viaShort
 const backgroundTaskPathKey = (value: unknown) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '').toLocaleLowerCase();
 const handledVideoTrimTaskIds = new Set<string>();
 
-const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePath, inspirationTargetWorkspacePath, inspirationLibraryRootPath, installedComponentIds, componentHostActions = [], onOpenComponentPage = () => undefined, advancedVideoSettings, projectToolbar = { order: [...PROJECT_TOOLBAR_ACTION_IDS], hidden: [], onlyShowAvailable: false }, customProjectCategories = [], projectCategoryOrder = [], progressNamePresets = [], initialPanel, initialRelativePath = '', importConfig, importDefaults, brollConfig, videoTools, matchConfig, researchConfig, mediaCacheConfig, defaultFolderSort, itemOpenMode, folderAlphabetFilterEnabled = true, favoriteDisplayMode = 'binary', browserContext, navigationRequest, onDirectoryChange, onOpenInspirationPath, onOpenDirectoryPage, onOpenToolTab = () => undefined, onCloseToolTab = () => undefined, onImportConfigChange, onMatchConfigChange, onResearchConfigChange, onNotice, onProjectMoved = () => undefined, onDeleted = () => undefined }: FileBrowserWorkspaceProps) => {
+const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePath, inspirationTargetWorkspacePath, inspirationLibraryRootPath, installedComponentIds: _installedComponentIds, componentHostActions = [], onOpenComponentPage = () => undefined, videoPlaybackSettings, projectToolbar = { order: [...PROJECT_TOOLBAR_ACTION_IDS], hidden: [], onlyShowAvailable: false }, customProjectCategories = [], projectCategoryOrder = [], progressNamePresets = [], initialPanel, initialRelativePath = '', importConfig, importDefaults, brollConfig, videoTools, matchConfig, researchConfig, mediaCacheConfig, defaultFolderSort, itemOpenMode, folderAlphabetFilterEnabled = true, favoriteDisplayMode = 'binary', browserContext, navigationRequest, onDirectoryChange, onOpenInspirationPath, onOpenDirectoryPage, onOpenToolTab = () => undefined, onCloseToolTab = () => undefined, onImportConfigChange, onMatchConfigChange, onResearchConfigChange, onNotice, onProjectMoved = () => undefined, onDeleted = () => undefined }: FileBrowserWorkspaceProps) => {
   const appDialog = useAppDialog();
   const projectStatuses = useMemo<Array<WorkspaceProject['status']>>(() => {
     const values = [...normalizeProjectCategoryOrder(projectCategoryOrder, customProjectCategories), project.status];
@@ -686,13 +686,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setProgressImportStep('source');
     setProgressSetup(null);
   }, []);
-  useEscapeLayer(Boolean(progressCompare), () => { void closeProgressCompare(); }, !progressSubmitting);
-  useEscapeLayer(Boolean(progressRepair), () => setProgressRepair(null), !progressRepairBusy);
-  useEscapeLayer(Boolean(pendingProgressFolders.length) && !progressSetup && !folderMarkSetup, () => setPendingProgressFolders([]));
-  useEscapeLayer(Boolean(draggingChildId || pendingRelationChange), cancelRelationEdit);
-  useEscapeLayer(batchRenameOpen, () => { if (!renameCommitRef.current) setBatchRenameOpen(false); });
-  useEscapeLayer(confirmDelete, () => setConfirmDelete(false));
-  useEscapeLayer(Boolean(gatherPickerPaths), () => setGatherPickerPaths(null), !gatheringInspiration);
+  useEscapeLayer(active && Boolean(progressCompare), () => { void closeProgressCompare(); }, !progressSubmitting, true);
+  useEscapeLayer(active && Boolean(progressRepair), () => setProgressRepair(null), !progressRepairBusy, true);
+  useEscapeLayer(active && Boolean(pendingProgressFolders.length) && !progressSetup && !folderMarkSetup, () => setPendingProgressFolders([]), true, true);
+  useEscapeLayer(active && Boolean(draggingChildId || pendingRelationChange), cancelRelationEdit, true, true);
+  useEscapeLayer(active && batchRenameOpen, () => { if (!renameCommitRef.current) setBatchRenameOpen(false); }, true, true);
+  useEscapeLayer(active && confirmDelete, () => setConfirmDelete(false), true, true);
+  useEscapeLayer(Boolean(gatherPickerPaths), () => setGatherPickerPaths(null), !gatheringInspiration, true);
   const [fileMenu, setFileMenu] = useState<{ entry: ProjectFileEntry; x: number; y: number } | null>(null);
   const [surfaceMenu, setSurfaceMenu] = useState<{ x: number; y: number; targetRelativePath: string; targetLabel: string; kind: 'files' | 'version-tree-layout' } | null>(null);
   const versionTreeCanvasControllerRef = useRef<VersionTreeCanvasController | null>(null);
@@ -5594,7 +5594,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         onSubmit={() => void submitProgressSetup()}
         onClose={closeProgressSetup}
       /></ToolModal>}
-      {trackingConfirmationSessionId && <TrackingConfirmationPanel key={`${workspacePath}:${trackingConfirmationSessionId}`} sessionId={trackingConfirmationSessionId} workspacePath={workspacePath} progressFolders={progressFolders} cacheConfig={mediaCacheConfig} onNotice={onNotice} onClose={() => setTrackingConfirmationSessionId('')} onCommitted={() => { const committedSessionId = trackingConfirmationSessionId; const committedProgressId = trackingConfirmationProgressId; dismissTrackingTaskForSession(committedSessionId); if (committedProgressId) window.localStorage.removeItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${committedProgressId}`); setTrackingConfirmationSessionId(current => current === committedSessionId ? '' : current); setTrackingConfirmationProgressId(current => current === committedProgressId ? '' : current); void loadProgressFolders().then(() => refresh('')); }} onReleased={() => { dismissTrackingTaskForSession(trackingConfirmationSessionId); if (trackingConfirmationProgressId) window.localStorage.removeItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${trackingConfirmationProgressId}`); setTrackingConfirmationSessionId(''); setTrackingConfirmationProgressId(''); void loadProgressFolders(); }}/>
+      {trackingConfirmationSessionId && <TrackingConfirmationPanel key={`${workspacePath}:${trackingConfirmationSessionId}`} active={active} sessionId={trackingConfirmationSessionId} workspacePath={workspacePath} progressFolders={progressFolders} cacheConfig={mediaCacheConfig} onNotice={onNotice} onClose={() => setTrackingConfirmationSessionId('')} onCommitted={() => { const committedSessionId = trackingConfirmationSessionId; const committedProgressId = trackingConfirmationProgressId; dismissTrackingTaskForSession(committedSessionId); if (committedProgressId) window.localStorage.removeItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${committedProgressId}`); setTrackingConfirmationSessionId(current => current === committedSessionId ? '' : current); setTrackingConfirmationProgressId(current => current === committedProgressId ? '' : current); void loadProgressFolders().then(() => refresh('')); }} onReleased={() => { dismissTrackingTaskForSession(trackingConfirmationSessionId); if (trackingConfirmationProgressId) window.localStorage.removeItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${trackingConfirmationProgressId}`); setTrackingConfirmationSessionId(''); setTrackingConfirmationProgressId(''); void loadProgressFolders(); }}/>
       }
       {progressCompare && <div role="dialog" aria-modal="true" aria-label="确认版本关系" className="fixed inset-0 z-[345] flex items-center justify-center bg-slate-950/50 p-4"><div className="flex h-[min(92vh,820px)] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
         <header className="border-b border-slate-200 px-5 py-4"><h3 className="text-lg font-bold text-slate-800">确认版本关系</h3><p className="mt-1 text-xs text-slate-500">“{progressCompare.parentFolder.displayName}” → “{progressCompare.progressFolder.displayName}”</p></header>
@@ -5645,11 +5645,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         <section className="mt-5 border-t border-slate-200 pt-5"><h4 className="mb-2 text-sm font-bold text-slate-700">扩展名</h4><div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3"><select value={batchExtensionMode} onChange={event => setBatchExtensionMode(event.target.value as 'preserve' | 'replace')} className="w-40 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"><option value="preserve">不修改扩展名</option><option value="replace">修改扩展名</option></select>{batchExtensionMode === 'replace' && <input autoFocus value={batchExtensionValue} onChange={event => setBatchExtensionValue(event.target.value.replace(/^\.+/, ''))} placeholder="例如 jpg" className="min-w-[180px] flex-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"/>}<span className="text-xs text-slate-400">文件夹不受此设置影响</span></div></section>
         <section className="mt-5 border-t border-slate-200 pt-5"><h4 className="mb-2 text-sm font-bold text-slate-700">预览</h4><div className="max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50">{batchRenameEntries.slice(0, 20).map((entry, index) => <div key={entry.path} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 border-b border-slate-200 px-3 py-2 text-xs last:border-0"><span className="truncate text-slate-500" title={entry.name}>{entry.name}</span><ArrowRight size={13} className="text-slate-300"/><span className="truncate font-medium text-slate-700" title={batchRenameNames[index]}>{batchRenameNames[index] || '（空文件名）'}</span></div>)}{batchRenameEntries.length > 20 && <p className="px-3 py-2 text-center text-xs text-slate-400">另有 {batchRenameEntries.length - 20} 个项目</p>}</div></section>
       </div><footer className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-5 py-4"><p className="text-xs text-slate-500">重命名使用临时文件过渡，不会因名称互换产生冲突。</p><div className="flex gap-2"><button onClick={() => setBatchRenameOpen(false)} className="dialog-secondary">取消</button><button onClick={commitBatchRename} disabled={!batchRenameNames.length || batchRenameNames.some(name => !name) || batchExtensionMode === 'replace' && !batchExtensionValue.trim() || new Set(batchRenameNames.map(name => name.toLocaleLowerCase())).size !== batchRenameNames.length || renameCommitRef.current} className="dialog-primary">批量重命名</button></div></footer></div></div>}
-      {versionEntry && <div className={activeView === 'version' ? 'contents' : 'hidden'}><VersionManager active={active && activeView === 'version'} entry={versionEntry} workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} progressId={progressFolderForMediaEntry(versionEntry)?.id} progressVersionKey={progressFolderForMediaEntry(versionEntry)?.versionKey} onNotice={onNotice} onVersionStateChanged={() => { if (finalViewOpen) void loadFinalViewEntries(); }} onClose={() => { setVersionEntry(null); onCloseToolTab('version'); if (finalViewOpen) void loadFinalViewEntries(); }}/></div>}
+      {versionEntry && <div className={activeView === 'version' ? 'contents' : 'hidden'}><VersionManager active={active && activeView === 'version'} entry={versionEntry} workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} videoPlaybackSettings={videoPlaybackSettings} progressId={progressFolderForMediaEntry(versionEntry)?.id} progressVersionKey={progressFolderForMediaEntry(versionEntry)?.versionKey} onNotice={onNotice} onVersionStateChanged={() => { if (finalViewOpen) void loadFinalViewEntries(); }} onClose={() => { setVersionEntry(null); onCloseToolTab('version'); if (finalViewOpen) void loadFinalViewEntries(); }}/></div>}
 
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         {versionTreeOpen ? <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={handleFileSurfacePointerDownCapture} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} style={{ marginInline: -FILE_SURFACE_HORIZONTAL_PADDING }} className={`relative min-h-0 flex-1 select-none overflow-hidden outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
           {progressRelationInspection.needsRepair ? <div role="alert" className="m-4 rounded-xl border border-amber-300 bg-amber-50 p-5 text-amber-900"><div className="flex items-center gap-2 font-bold"><AlertTriangle size={18}/>版本关系需要修复</div><p className="mt-2 text-sm">检测到循环关系，已停止版本树遍历，避免应用崩溃。</p><p className="mt-2 break-all font-mono text-xs text-amber-700">节点 ID：{progressRelationInspection.cycleNodeIds.join('、')}</p></div> : <>{orphanedProgressFolders.length > 0 && <div role="alert" className="m-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-900"><div className="flex items-center gap-2 font-bold"><AlertTriangle size={18}/>旧版游离进度已保留</div><p className="mt-2 text-sm">这些节点不会在刷新时自动删除，也不能作为新版本的父节点。请打开“修改进度”选择有效父版本，或显式取消版本登记；物理文件不会被删除。</p><p className="mt-2 text-xs text-amber-700">{orphanedProgressFolders.map(folder => folder.displayName).join('、')}</p></div>}<ProjectVersionTree
+            active={active && activeView === 'project'}
             progressFolders={progressFolders}
             graphEdges={versionGraphEdges}
             entries={displayedFileEntries}
@@ -5717,7 +5718,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       </section>
 
       </div>
-      {previewPaneOpen && active && activeView === 'project' && <><ColumnResizeHandle label="调整文件区和预览区宽度" onDrag={resizeFilesAndPreview}/><MediaPreviewPane entry={previewEntry} cacheConfig={mediaCacheConfig} width={displayedColumnWidths.preview} pinned={previewPanePinned} advancedVideoAvailable={installedComponentIds.has('video-playback-mpv')} keyboardSettings={advancedVideoSettings} videoTrimExportMode={videoTools.trim.exportMode} photoshopAvailable={photoshopAvailable && (!previewEntry || !isUnsupportedShortcutContent(previewEntry))} ratingAvailable={previewCanMarkFinal} rating={previewRating} ratingMode={favoriteDisplayMode} ratingLoading={previewRatingLoading} ratingBusy={previewRatingBusy} onChangeRating={rating => void updatePreviewRating(rating)} onTogglePinned={togglePreviewPanePinned} onTechnicalMetadata={setPreviewTechnicalMetadata} onNavigate={navigatePreviewMedia} onContextMenu={event => previewEntry && openFileMenu(event, previewEntry, false)} onContextMenuAt={(x, y) => previewEntry && openFileMenuAt(x, y, previewEntry, false)} onAnalyzeImageCrop={analyzePreviewImageCrop} onConfirmImageCrop={savePreviewImageCrop} onTrimVideo={trimPreviewVideo} onLoadVideoTimelineFrames={loadPreviewVideoTimelineFrames} onOpen={() => previewEntry && openProjectEntry(previewEntry)} onOpenInPhotoshop={() => previewEntry && openProjectEntriesInPhotoshop([previewEntry])} onClose={closePreviewPaneByUser}/></>}
+      {previewPaneOpen && active && activeView === 'project' && <><ColumnResizeHandle label="调整文件区和预览区宽度" onDrag={resizeFilesAndPreview}/><MediaPreviewPane entry={previewEntry} cacheConfig={mediaCacheConfig} width={displayedColumnWidths.preview} pinned={previewPanePinned} keyboardSettings={videoPlaybackSettings} videoTrimExportMode={videoTools.trim.exportMode} photoshopAvailable={photoshopAvailable && (!previewEntry || !isUnsupportedShortcutContent(previewEntry))} ratingAvailable={previewCanMarkFinal} rating={previewRating} ratingMode={favoriteDisplayMode} ratingLoading={previewRatingLoading} ratingBusy={previewRatingBusy} onChangeRating={rating => void updatePreviewRating(rating)} onTogglePinned={togglePreviewPanePinned} onTechnicalMetadata={setPreviewTechnicalMetadata} onNavigate={navigatePreviewMedia} onContextMenu={event => previewEntry && openFileMenu(event, previewEntry, false)} onContextMenuAt={(x, y) => previewEntry && openFileMenuAt(x, y, previewEntry, false)} onAnalyzeImageCrop={analyzePreviewImageCrop} onConfirmImageCrop={savePreviewImageCrop} onTrimVideo={trimPreviewVideo} onLoadVideoTimelineFrames={loadPreviewVideoTimelineFrames} onOpen={() => previewEntry && openProjectEntry(previewEntry)} onOpenInPhotoshop={() => previewEntry && openProjectEntriesInPhotoshop([previewEntry])} onClose={closePreviewPaneByUser}/></>}
       {metadataPaneOpen && <><ColumnResizeHandle label={previewPaneOpen ? '调整预览区和详细信息区宽度' : '调整文件区和详细信息区宽度'} onDrag={previewPaneOpen ? resizePreviewAndMetadata : resizeFilesAndMetadata}/><FileMetadataPane entry={focusedEntry} entryDetails={previewEntryDetails} metadataFields={currentPreviewMetadataFields} metadataLoading={currentPreviewMetadataLoading} metadataError={currentPreviewMetadataError} technicalMetadata={focusedEntry?.relativePath === previewEntry?.relativePath ? previewTechnicalMetadata : EMPTY_PREVIEW_TECHNICAL_METADATA} formatFileSize={formatFileSize} width={displayedColumnWidths.metadata} pinned={metadataPanePinned} onTogglePinned={toggleMetadataPanePinned} onOpen={() => focusedEntry && openProjectEntry(focusedEntry, true)} onCopyPath={() => focusedEntry && copyEntryPath(focusedEntry)} onClose={closeMetadataPaneByUser}/></>}
       </div>
 
@@ -5816,12 +5817,11 @@ const VideoTrimTimeline = ({ duration, start, end, currentTime, frames, exportMo
     </div>
   </div>;
 };
-const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvailable, keyboardSettings, videoTrimExportMode, photoshopAvailable, ratingAvailable, rating, ratingMode, ratingLoading, ratingBusy, onChangeRating, onTogglePinned, onTechnicalMetadata, onNavigate, onContextMenu, onContextMenuAt, onAnalyzeImageCrop, onConfirmImageCrop, onTrimVideo, onLoadVideoTimelineFrames, onOpen, onOpenInPhotoshop, onClose }: {
+const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSettings, videoTrimExportMode, photoshopAvailable, ratingAvailable, rating, ratingMode, ratingLoading, ratingBusy, onChangeRating, onTogglePinned, onTechnicalMetadata, onNavigate, onContextMenu, onContextMenuAt, onAnalyzeImageCrop, onConfirmImageCrop, onTrimVideo, onLoadVideoTimelineFrames, onOpen, onOpenInPhotoshop, onClose }: {
   entry?: ProjectFileEntry;
   cacheConfig: AppConfig['mediaCache'];
   width: number;
   pinned: boolean;
-  advancedVideoAvailable: boolean;
   keyboardSettings: AppConfig['videoPlayback'];
   videoTrimExportMode: AppConfig['videoTools']['trim']['exportMode'];
   photoshopAvailable: boolean;
@@ -5848,12 +5848,12 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
   const backgroundTrimTask = entry?.kind === 'video' ? backgroundTasks.find(task => task.type === 'video-trim'
     && (task.state === 'queued' || task.state === 'running')
     && backgroundTaskPathKey(task.metadata?.sourcePath) === backgroundTaskPathKey(entry.path)) : undefined;
-  const [resource, setResource] = useState<{ sourcePath?: string; previewUrl?: string; originalUrl?: string; mediaUrl?: string; usingImportedPreview?: boolean; importedVideoWithoutPreview?: boolean; orientationMatrix?: number[]; orientationSwapsAxes?: boolean }>({});
+  const [resource, setResource] = useState<{ sourcePath?: string; previewUrl?: string; originalUrl?: string; orientationMatrix?: number[]; orientationSwapsAxes?: boolean }>({});
   const [loading, setLoading] = useState(false);
   const [originalLoading, setOriginalLoading] = useState(false);
   const [originalLoadError, setOriginalLoadError] = useState('');
-  const [playbackFailed, setPlaybackFailed] = useState(false);
-  const [advancedPlaybackFailed, setAdvancedPlaybackFailed] = useState(false);
+  const [videoPlaybackFailed, setVideoPlaybackFailed] = useState(false);
+  const [videoPlayerError, setVideoPlayerError] = useState('');
   const [imageZoom, setImageZoom] = useState(1);
   const [imagePan, setImagePan] = useState({ x: 0, y: 0 });
   const [imageNaturalSize, setImageNaturalSize] = useState({ width: 0, height: 0 });
@@ -5863,7 +5863,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
   const [fullscreenControlsVisible, setFullscreenControlsVisible] = useState(true);
   const [videoDuration, setVideoDuration] = useState(0);
   const [videoPlaybackTime, setVideoPlaybackTime] = useState(0);
-  const [advancedEditorSeek, setAdvancedEditorSeek] = useState<{ id: number; time: number; pause?: boolean }>();
+  const [videoEditorSeek, setVideoEditorSeek] = useState<{ id: number; time: number; pause?: boolean }>();
   const [videoTrimFrames, setVideoTrimFrames] = useState<string[]>([]);
   const [trimEditor, setTrimEditor] = useState<{ start: number; end: number } | null>(null);
   const [trimBusyMode, setTrimBusyMode] = useState<'new' | 'replace' | ''>('');
@@ -5877,7 +5877,6 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
   // lock the source file on Windows before a replace commit.
   const trimBusy = Boolean(trimBusyMode || backgroundTrimTask);
   const imageSurfaceRef = useRef<HTMLDivElement>(null);
-  const fallbackVideoRef = useRef<HTMLVideoElement>(null);
   const imageDragRef = useRef<{ pointerId: number; startX: number; startY: number; panX: number; panY: number } | null>(null);
   const previewResourcePathRef = useRef('');
   const fullscreenControlsTimerRef = useRef(0);
@@ -5915,15 +5914,15 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
     const sourceChanged = previewResourcePathRef.current !== nextSourcePath;
     previewResourcePathRef.current = nextSourcePath;
     if (sourceChanged) {
-      setPlaybackFailed(false);
-      setAdvancedPlaybackFailed(false);
+      setVideoPlaybackFailed(false);
+      setVideoPlayerError('');
       setImageZoom(1);
       setImagePan({ x: 0, y: 0 });
       setImageNaturalSize({ width: 0, height: 0 });
       setImageDragging(false);
       setVideoDuration(0);
       setVideoPlaybackTime(0);
-      setAdvancedEditorSeek(undefined);
+      setVideoEditorSeek(undefined);
       setVideoTrimFrames([]);
       setTrimEditor(null);
       imageCropRequestRef.current += 1;
@@ -5967,7 +5966,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
         if (!active) return;
         if (result.success) {
           if (result.previewUrl) rememberMediaThumbnailPreview(mediaThumbnailPreviewKey(entry.path, entry.updatedAt, 1600), result.previewUrl);
-          setResource(current => current.sourcePath === entry.path ? { ...current, previewUrl: result.previewUrl || current.previewUrl || entry.previewUrl, mediaUrl: result.mediaUrl, usingImportedPreview: result.usingImportedPreview, importedVideoWithoutPreview: result.importedVideoWithoutPreview } : current);
+          setResource(current => current.sourcePath === entry.path ? { ...current, previewUrl: result.previewUrl || current.previewUrl || entry.previewUrl } : current);
           setLoading(result.state === 'QUEUED' || result.state === 'GENERATING' || result.state === 'NOT_READY' || result.state === 'STALE');
         } else {
           setLoading(false);
@@ -6275,30 +6274,17 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
     setImageCropPhase('editing');
     setImageCropError(result.error || '裁剪失败');
   };
-  const handleVideoPlaybackError = () => {
-    if (!entry || entry.kind !== 'video') return;
-    setPlaybackFailed(true);
+  const handleVideoPlayerError = (message: string) => {
+    setVideoPlaybackFailed(true);
+    setVideoPlayerError(message);
     setLoading(false);
-    onTechnicalMetadata({ unavailable: true });
-  };
-  const handleAdvancedVideoError = (message: string) => {
-    setAdvancedPlaybackFailed(true);
-    setLoading(Boolean(resource.mediaUrl));
-    console.warn('Advanced video decoder failed; falling back to Chromium playback', message);
-    projectWorkspaceClient.trackTelemetry('media_preview_failed', { media_kind: 'video', reason: 'advanced_decoder_fallback' });
+    projectWorkspaceClient.trackTelemetry('media_preview_failed', { media_kind: 'video', reason: 'video_player_failed' });
   };
   const previewVideoTrimTime = (requestedTime: number) => {
     const time = Math.max(0, Math.min(videoDuration, requestedTime));
     setVideoPlaybackTime(time);
-    if (useAdvancedVideo) {
-      editorSeekIdRef.current += 1;
-      setAdvancedEditorSeek({ id: editorSeekIdRef.current, time, pause: true });
-      return;
-    }
-    const video = fallbackVideoRef.current;
-    if (!video) return;
-    video.pause();
-    video.currentTime = time;
+    editorSeekIdRef.current += 1;
+    setVideoEditorSeek({ id: editorSeekIdRef.current, time, pause: true });
   };
   const changeVideoTrimEdge = (edge: 'start' | 'end', requestedTime: number) => {
     if (!trimEditor || trimBusy) return;
@@ -6327,13 +6313,6 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
     trimProgressTimerRef.current = window.setTimeout(() => {
       if (trimOperationIdRef.current === operationId) setTrimProgressVisible(true);
     }, 500);
-    const fallbackVideo = fallbackVideoRef.current;
-    if (fallbackVideo) {
-      fallbackVideo.pause();
-      fallbackVideo.removeAttribute('src');
-      fallbackVideo.querySelectorAll('source').forEach(source => source.removeAttribute('src'));
-      fallbackVideo.load();
-    }
     setTrimBusyMode(saveMode);
     let startedInBackground = false;
     try {
@@ -6364,7 +6343,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
     setTrimExportProgress(current => ({ phase: 'cancelling', progress: current?.progress || 0, message: '正在取消导出…' }));
     void projectWorkspaceClient.cancelProjectVideoTrim(operationId);
   };
-  const useAdvancedVideo = Boolean(entry && entry.kind === 'video' && advancedVideoAvailable && !advancedPlaybackFailed);
+  const useVideoPlayer = Boolean(entry && entry.kind === 'video' && !videoPlaybackFailed);
   // Frame extraction opens a second hidden video element. Stop it together
   // with the visible player so Windows can release the source before replace.
   const trimEditing = Boolean(trimEditor) && !trimBusy;
@@ -6396,34 +6375,6 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
     onSave={mode => void confirmVideoTrim(mode)}
   /> : undefined;
 
-  useEffect(() => {
-    if (!entry || entry.kind !== 'video' || useAdvancedVideo) return;
-    const runDirectionalAction = (direction: -1 | 1, group: 'arrows' | 'forward-back') => {
-      if (videoDirectionalAction(keyboardSettings.arrowKeyAction, group) === 'navigate') {
-        onNavigate(direction);
-        return;
-      }
-      const video = fallbackVideoRef.current;
-      if (!video) return;
-      const duration = Number.isFinite(video.duration) ? video.duration : Number.MAX_SAFE_INTEGER;
-      video.currentTime = Math.max(0, Math.min(duration, video.currentTime + direction * 5));
-    };
-    const handleFallbackVideoKey = (event: KeyboardEvent) => {
-      const input = videoDirectionalKeyboardInput(event.key);
-      if (!input) return;
-      if (event.ctrlKey || event.metaKey || event.altKey) return;
-      const target = event.target as HTMLElement | null;
-      if (target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
-      event.preventDefault();
-      event.stopPropagation();
-      runDirectionalAction(input.direction, input.group);
-    };
-    window.addEventListener('keydown', handleFallbackVideoKey);
-    return () => {
-      window.removeEventListener('keydown', handleFallbackVideoKey);
-    };
-  }, [entry?.path, useAdvancedVideo, keyboardSettings.arrowKeyAction, onNavigate]);
-
   const previewPane = <section onContextMenu={onContextMenu} onMouseMove={revealFullscreenControls} style={fullscreen ? undefined : { width }} className={`flex min-h-0 shrink-0 flex-col ${fullscreen ? 'fixed inset-0 z-[500] h-screen w-screen bg-black' : 'bg-slate-50'}`}>
     {!fullscreen && <header className="flex min-h-14 shrink-0 items-center justify-between border-b border-slate-200 px-3 py-2">
       <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wider text-slate-400">{imageCropPhase ? '裁剪' : trimEditor ? '剪辑' : '预览'}</p><p className="truncate text-sm font-semibold text-slate-700">{entry?.name || '未选择媒体'}</p></div>
@@ -6439,9 +6390,8 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, advancedVideoAvai
     <div className={`relative flex min-h-0 flex-1 items-center justify-center overflow-hidden ${fullscreen ? 'bg-black' : 'bg-slate-50'}`}>
       {!entry && <div className="max-w-[220px] text-center"><ImageIcon size={38} strokeWidth={1.4} className="mx-auto text-slate-600"/><p className="mt-3 text-sm font-medium text-slate-300">点击图片、RAW 或视频文件</p><p className="mt-1 text-xs leading-5 text-slate-500">此处显示图片或视频预览。</p></div>}
       {entry && entry.kind === 'video' && trimBusy && <div className="absolute inset-0 flex min-h-0 flex-col bg-black"><div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">{resource.previewUrl ? <img src={resource.previewUrl} alt="" draggable={false} className="max-h-full max-w-full object-contain opacity-70"/> : <Video size={52} strokeWidth={1.3} className="text-slate-700"/>}</div>{videoTrimControls}</div>}
-      {useAdvancedVideo && entry && !trimBusy && <AdvancedVideoPlayer filePath={entry.path} poster={resource.previewUrl} keyboardSettings={keyboardSettings} bottomControls={videoTrimControls} editorSeekRequest={advancedEditorSeek} onPlaybackState={playback => setVideoPlaybackTime(playback.time)} onError={handleAdvancedVideoError} onMetadata={metadata => { setLoading(false); setVideoDuration(Number(metadata.duration) || 0); onTechnicalMetadata(metadata); }} onNavigate={onNavigate} onContextMenuAt={onContextMenuAt} onPointerActivity={revealFullscreenControls} topRightOverlayHole={fullscreen && fullscreenControlsVisible ? 72 : 0} onEscape={() => setFullscreen(false)}/>}
-      {entry && entry.kind === 'video' && !useAdvancedVideo && !trimBusy && resource.mediaUrl && !playbackFailed && <div className="absolute inset-0 flex min-h-0 flex-col bg-black"><video ref={fallbackVideoRef} key={resource.mediaUrl} autoPlay controls={!trimEditor} preload="metadata" poster={resource.previewUrl} className="min-h-0 w-full flex-1 bg-black object-contain" onTimeUpdate={event => setVideoPlaybackTime(event.currentTarget.currentTime)} onLoadedMetadata={event => { setLoading(false); setVideoDuration(Number(event.currentTarget.duration) || 0); setVideoPlaybackTime(event.currentTarget.currentTime); onTechnicalMetadata({ width: event.currentTarget.videoWidth, height: event.currentTarget.videoHeight, duration: event.currentTarget.duration }); void event.currentTarget.play().catch(() => undefined); }} onError={handleVideoPlaybackError}><source src={resource.mediaUrl}/></video>{videoTrimControls}</div>}
-      {entry && entry.kind === 'video' && !useAdvancedVideo && !trimBusy && (!resource.mediaUrl || playbackFailed) && <div className="flex max-h-full w-full flex-col items-center justify-center gap-4 text-center">{resource.previewUrl ? <img src={resource.previewUrl} alt={entry.name} draggable={false} className="max-h-[70%] max-w-full object-contain"/> : <Video size={52} strokeWidth={1.3} className="text-slate-600"/>}<div className="max-w-sm px-6"><p className="text-sm font-medium text-slate-700">{resource.importedVideoWithoutPreview ? '此导入视频无法在软件内直接播放' : playbackFailed ? resource.usingImportedPreview ? '导入的视频预览无法播放' : '当前视频无法在软件内播放。' : loading ? '正在准备视频预览…' : resource.previewUrl ? '视频封面已就绪' : '没有可用的视频封面'}</p>{resource.importedVideoWithoutPreview && <p className="mt-1 text-xs leading-5 text-slate-500">可在“设置 → 导入行为”中开启视频转码，让以后导入的视频按视频转码面板参数生成兼容版本。</p>}{playbackFailed && !resource.importedVideoWithoutPreview && <p className="mt-1 text-xs leading-5 text-slate-500">可使用系统播放器打开。</p>}<button type="button" onClick={onOpen} className="mt-3 inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-500"><ExternalLink size={14}/>外部打开</button></div></div>}
+      {useVideoPlayer && entry && !trimBusy && <VideoPlayer filePath={entry.path} poster={resource.previewUrl} keyboardSettings={keyboardSettings} bottomControls={trimEditor ? videoTrimControls : undefined} editorSeekRequest={videoEditorSeek} onPlaybackState={playback => setVideoPlaybackTime(playback.time)} onError={handleVideoPlayerError} onMetadata={metadata => { setLoading(false); setVideoDuration(Number(metadata.duration) || 0); onTechnicalMetadata(metadata); }} onNavigate={onNavigate} onContextMenuAt={onContextMenuAt} onPointerActivity={revealFullscreenControls} topRightOverlayHole={fullscreen && fullscreenControlsVisible ? 72 : 0} onEscape={() => setFullscreen(false)}/>}
+      {entry && entry.kind === 'video' && videoPlaybackFailed && !trimBusy && <div role="alert" className="flex max-h-full w-full flex-col items-center justify-center gap-4 text-center">{resource.previewUrl ? <img src={resource.previewUrl} alt={entry.name} draggable={false} className="max-h-[70%] max-w-full object-contain opacity-60"/> : <Video size={52} strokeWidth={1.3} className="text-slate-600"/>}<div className="max-w-sm px-6"><p className="text-sm font-bold text-red-600">视频播放器无法启动</p><p className="mt-1 text-xs leading-5 text-slate-500">{videoPlayerError || '请在组件管理中修复或重新安装视频播放器运行时，然后重新打开视频。'}</p><p className="mt-1 text-xs leading-5 text-slate-500">不会改用 Chromium 播放，以避免不同入口出现不同的解码与字幕行为。</p><button type="button" onClick={onOpen} className="mt-3 inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-500"><ExternalLink size={14}/>使用系统播放器打开</button></div></div>}
       {entry && entry.kind === 'image' && displayedImageUrl && imageCropEditor && <div className="absolute inset-0 bg-slate-950">
         <InteractiveCropEditor embedded snapEnabled snapGuides={imageCropEditor.snapGuides} previewUrl={displayedImageUrl} imageSize={imageCropEditor.originalSize} crop={imageCropEditor.crop} onChange={crop => { if (imageCropPhase === 'editing') setImageCropEditor(current => current ? { ...current, crop } : current); }}/>
         <span className="pointer-events-none absolute bottom-4 left-4 rounded-md bg-slate-950/80 px-2.5 py-1.5 text-[11px] font-bold text-cyan-200 shadow-lg">磁吸边缘已开启</span>
@@ -6746,29 +6696,15 @@ const SystemFileIcon = ({ filePath, size }: { filePath: string; size: number }) 
   }, [filePath]);
   return dataUrl ? <img src={dataUrl} alt="" draggable={false} style={{ width: size, height: size }} className="object-contain"/> : <File size={size} className="text-slate-400"/>;
 };
-const HOVER_VIDEO_PLAY_DELAY_MS = 300;
-let activeHoverVideo: HTMLVideoElement | null = null;
-
 const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large = false }: { entry: ProjectFileEntry; cacheConfig: AppConfig['mediaCache']; requestedSize: number; queueOrder: number; large?: boolean }) => {
   const previewCacheKey = mediaThumbnailPreviewKey(entry.path, entry.updatedAt, requestedSize);
   const cachedPreview = getMediaThumbnailPreview(previewCacheKey)
     ? { url: getMediaThumbnailPreview(previewCacheKey), size: requestedSize }
     : findCachedMediaThumbnailPreview(entry.path, entry.updatedAt);
   const [preview, setPreview] = useState<{ url?: string; size: number }>({ url: cachedPreview?.url || entry.previewUrl, size: cachedPreview?.size || (entry.previewUrl ? 320 : 0) });
-  const [videoUrl, setVideoUrl] = useState<string>();
-  const [videoActivated, setVideoActivated] = useState(false);
-  const [videoUnavailable, setVideoUnavailable] = useState(false);
-  const [videoDuration, setVideoDuration] = useState(0);
-  const [videoTime, setVideoTime] = useState(0);
-  const [hovering, setHovering] = useState(false);
-  const [playing, setPlaying] = useState(false);
-  const [playbackFailed, setPlaybackFailed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [sourceRevision, setSourceRevision] = useState(0);
   const container = useRef<HTMLSpanElement>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const hoverRatioRef = useRef(0);
-  const hoverSeekFrameRef = useRef<number>();
   const previewSourceKeyRef = useRef(`${entry.path}|${entry.updatedAt}`);
   const thumbnailRequestRef = useRef<{ key: string; promoted: boolean; promise: ReturnType<typeof projectWorkspaceClient.getMediaThumbnail> }>();
   const failedPreviewLoadCountRef = useRef(0);
@@ -6796,8 +6732,6 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
       forgetMediaThumbnailPreviews(entry.path);
       thumbnailRequestRef.current = undefined;
       setPreview({ url: undefined, size: 0 });
-      setVideoUrl(undefined);
-      setVideoActivated(false);
       setLoading(true);
       setSourceRevision(version => version + 1);
     } else if (state === 'FAILED' || state === 'MISSING') {
@@ -6820,11 +6754,6 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
     thumbnailRequestRef.current = { key, promoted: priority === 0, promise };
     return promise;
   };
-  const captureVideoResource = (result: Awaited<ReturnType<typeof projectWorkspaceClient.getMediaThumbnail>>) => {
-    if (entry.kind !== 'video') return;
-    if (result.mediaUrl) setVideoUrl(result.mediaUrl);
-    if (result.importedVideoWithoutPreview) setVideoUnavailable(true);
-  };
   useEffect(() => {
     if (preview.size >= requestedSize || !container.current) return;
     let active = true;
@@ -6836,7 +6765,6 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
         .then(result => {
           if (!active) return;
           if (result.previewUrl) { rememberMediaThumbnailPreview(previewCacheKey, result.previewUrl); setPreview({ url: result.previewUrl, size: requestedSize }); }
-          captureVideoResource(result);
           if (result.state !== 'QUEUED' && result.state !== 'GENERATING') setLoading(false);
         })
         .catch(() => { if (active) setLoading(false); });
@@ -6852,7 +6780,6 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
       observer.disconnect();
       void requestTileThumbnail(0).then(result => {
         if (!active) return;
-        captureVideoResource(result);
         if (result.previewUrl) {
           rememberMediaThumbnailPreview(previewCacheKey, result.previewUrl);
           setPreview({ url: result.previewUrl, size: requestedSize });
@@ -6863,153 +6790,6 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
     observer.observe(container.current);
     return () => { active = false; observer.disconnect(); };
   }, [entry.kind, entry.path, entry.updatedAt, cacheConfig, requestedSize, queueOrder, previewCacheKey, sourceRevision]);
-  useEffect(() => {
-    if (!hovering || entry.kind !== 'video' || videoUnavailable) return;
-    let active = true;
-    const timer = window.setTimeout(() => {
-      if (!active) return;
-      setVideoActivated(true);
-      if (!videoUrl) setLoading(true);
-      requestTileThumbnail(0).then(result => {
-        if (!active) return;
-        captureVideoResource(result);
-        if (!result.mediaUrl) setVideoUnavailable(true);
-      }).finally(() => { if (active) setLoading(false); });
-    }, HOVER_VIDEO_PLAY_DELAY_MS);
-    return () => { active = false; window.clearTimeout(timer); };
-  }, [entry.kind, hovering, videoUnavailable, videoUrl]);
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!hovering || !videoActivated || !videoUrl || !video) return;
-    let active = true;
-    const beginPlayback = () => {
-      if (!active) return;
-      if (activeHoverVideo && activeHoverVideo !== video) activeHoverVideo.pause();
-      activeHoverVideo = video;
-      video.play().catch(() => {
-        if (!active) return;
-        if (activeHoverVideo === video) activeHoverVideo = null;
-        setPlaybackFailed(true);
-        setPlaying(false);
-      });
-    };
-    const seekBeforePlayback = () => {
-      if (!active || !Number.isFinite(video.duration) || video.duration <= 0) return;
-      const endBuffer = Math.max(0.05, Math.min(0.5, video.duration * 0.01));
-      const targetTime = Math.min(Math.max(0, video.duration - endBuffer), hoverRatioRef.current * video.duration);
-      setVideoDuration(video.duration);
-      setVideoTime(targetTime);
-      if (Math.abs(video.currentTime - targetTime) <= 0.04) { beginPlayback(); return; }
-      video.addEventListener('seeked', beginPlayback, { once: true });
-      video.currentTime = targetTime;
-    };
-    const preparePlayback = () => {
-      if (!active) return;
-      if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
-        video.addEventListener('loadeddata', seekBeforePlayback, { once: true });
-        return;
-      }
-      seekBeforePlayback();
-    };
-    if (video.readyState >= HTMLMediaElement.HAVE_METADATA) preparePlayback();
-    else video.addEventListener('loadedmetadata', preparePlayback, { once: true });
-    return () => {
-      active = false;
-      video.removeEventListener('loadedmetadata', preparePlayback);
-      video.removeEventListener('loadeddata', seekBeforePlayback);
-      video.removeEventListener('seeked', beginPlayback);
-      video.pause();
-      if (activeHoverVideo === video) activeHoverVideo = null;
-    };
-  }, [hovering, videoActivated, videoUrl]);
-  useEffect(() => () => {
-    const video = videoRef.current;
-    if (video) video.pause();
-    if (activeHoverVideo === video) activeHoverVideo = null;
-    if (hoverSeekFrameRef.current !== undefined) window.cancelAnimationFrame(hoverSeekFrameRef.current);
-  }, []);
-  useEffect(() => {
-    if (!playing) return;
-    let animationFrame = 0;
-    const updateProgress = () => {
-      const video = videoRef.current;
-      if (video) setVideoTime(video.currentTime);
-      animationFrame = window.requestAnimationFrame(updateProgress);
-    };
-    animationFrame = window.requestAnimationFrame(updateProgress);
-    return () => window.cancelAnimationFrame(animationFrame);
-  }, [playing]);
-  const hoverTargetTime = (duration: number, ratio = hoverRatioRef.current) => {
-    const endBuffer = Math.max(0.05, Math.min(0.5, duration * 0.01));
-    return Math.min(Math.max(0, duration - endBuffer), ratio * duration);
-  };
-  const seekVideoToRatio = (ratio: number) => {
-    const video = videoRef.current;
-    if (!video || !Number.isFinite(video.duration) || video.duration <= 0) return;
-    if (hoverSeekFrameRef.current !== undefined) window.cancelAnimationFrame(hoverSeekFrameRef.current);
-    hoverSeekFrameRef.current = window.requestAnimationFrame(() => {
-      hoverSeekFrameRef.current = undefined;
-      const targetTime = hoverTargetTime(video.duration, ratio);
-      video.currentTime = targetTime;
-      setVideoTime(targetTime);
-    });
-  };
-  const handleMouseLeave = () => {
-    setHovering(false);
-    if (hoverSeekFrameRef.current !== undefined) {
-      window.cancelAnimationFrame(hoverSeekFrameRef.current);
-      hoverSeekFrameRef.current = undefined;
-    }
-    const video = videoRef.current;
-    if (video) {
-      video.pause();
-      video.currentTime = 0;
-    }
-    hoverRatioRef.current = 0;
-    setVideoTime(0);
-    setVideoActivated(false);
-  };
-  const seekVideo = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const video = videoRef.current;
-    if (!video) return;
-    const nextTime = Number(event.currentTarget.value);
-    video.currentTime = nextTime;
-    if (video.duration > 0) hoverRatioRef.current = nextTime / video.duration;
-    setVideoTime(nextTime);
-  };
-  const restartHoverPlayback = (event: React.SyntheticEvent<HTMLVideoElement>) => {
-    const video = event.currentTarget;
-    if (!hovering) { setPlaying(false); return; }
-    const targetTime = hoverTargetTime(video.duration);
-    video.currentTime = targetTime;
-    setVideoTime(targetTime);
-    video.play().catch(() => setPlaying(false));
-  };
-  useEffect(() => {
-    if (!hovering || entry.kind !== 'video') return;
-    let active = true;
-    let pollTimer: number | undefined;
-    const trackSystemPointer = async () => {
-      const [cursorPoint, bounds] = await Promise.all([
-        projectWorkspaceClient.getCursorScreenPoint().catch(() => null),
-        Promise.resolve(container.current?.getBoundingClientRect()),
-      ]);
-      if (!active) return;
-      if (cursorPoint && bounds && bounds.width > 0) {
-        const clientX = cursorPoint.x - window.screenX;
-        const ratio = Math.min(1, Math.max(0, (clientX - bounds.left) / bounds.width));
-        if (Math.abs(ratio - hoverRatioRef.current) >= 0.002) {
-          hoverRatioRef.current = ratio;
-          seekVideoToRatio(ratio);
-        }
-      }
-      pollTimer = window.setTimeout(trackSystemPointer, 40);
-    };
-    void trackSystemPointer();
-    return () => { active = false; window.clearTimeout(pollTimer); };
-  }, [entry.kind, hovering]);
-  const showVideo = entry.kind === 'video' && videoActivated && videoUrl && !playbackFailed;
-  const progress = videoDuration > 0 ? Math.min(100, Math.max(0, videoTime / videoDuration * 100)) : 0;
   const handlePreviewLoadError = () => {
     deleteMediaThumbnailPreview(previewCacheKey);
     thumbnailRequestRef.current = undefined;
@@ -7022,15 +6802,10 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
     setPreview({ url: undefined, size: 0 });
     setLoading(true);
   };
-  return <span ref={container} onMouseEnter={() => setHovering(true)} onMouseLeave={handleMouseLeave} className="relative flex h-full w-full items-center justify-center overflow-hidden bg-black/5">
-    {showVideo
-      ? <video ref={videoRef} src={videoUrl} muted playsInline preload="auto" poster={preview.url} className="h-full w-full object-contain" onLoadedMetadata={event => { setVideoDuration(event.currentTarget.duration); setLoading(false); }} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={restartHoverPlayback} onError={() => { setPlaybackFailed(true); setPlaying(false); setLoading(false); }}/>
-      : preview.url ? <img src={preview.url} alt="" draggable={false} className="h-full w-full object-contain" onLoad={() => { failedPreviewLoadCountRef.current = 0; setLoading(false); }} onError={handlePreviewLoadError}/> : <FileImage size={large ? 42 : 23} className="text-slate-400"/>}
+  return <span ref={container} className="relative flex h-full w-full items-center justify-center overflow-hidden bg-black/5">
+    {preview.url ? <img src={preview.url} alt="" draggable={false} className="h-full w-full object-contain" onLoad={() => { failedPreviewLoadCountRef.current = 0; setLoading(false); }} onError={handlePreviewLoadError}/> : <FileImage size={large ? 42 : 23} className="text-slate-400"/>}
     {loading && <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-slate-900/25"><Loader2 size={large ? 24 : 16} className="animate-spin text-white drop-shadow"/><span className="sr-only">正在加载预览</span></span>}
-    {entry.kind === 'video' && !playing && <Play size={large ? 25 : 15} fill="currentColor" className="pointer-events-none absolute text-white drop-shadow-[0_1px_4px_rgba(0,0,0,.8)]"/>}
-    {entry.kind === 'video' && showVideo && hovering && videoDuration > 0 && <span className="absolute inset-x-0 bottom-0 z-10 flex items-center gap-1.5 bg-gradient-to-t from-black/85 to-black/20 px-2 pb-1.5 pt-3" onPointerDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}>
-      <input type="range" min="0" max={videoDuration} step="0.05" value={Math.min(videoTime, videoDuration)} onChange={seekVideo} aria-label={`调整 ${entry.name} 的播放进度`} className="video-hover-seek min-w-0 flex-1" style={{ '--seek-progress': `${progress}%` } as React.CSSProperties}/>
-    </span>}
+    {entry.kind === 'video' && <Play size={large ? 25 : 15} fill="currentColor" className="pointer-events-none absolute text-white drop-shadow-[0_1px_4px_rgba(0,0,0,.8)]"/>}
   </span>;
 };
 

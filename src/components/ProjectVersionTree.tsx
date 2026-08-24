@@ -3,8 +3,10 @@ import type { DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent, Re
 import type { ProgressFolder, ProjectFileEntry, VersionGraphEdge } from '../types';
 import { layoutVersionTree, DEFAULT_VERSION_TREE_SPACING, versionTreeAreaSize, versionTreeCanvasBounds, allowedVersionTreeRelationKinds, versionTreeEdgeGeometry, versionTreeEdgePath, versionTreeEdgePresentation, versionTreeRelationLabel, type VersionTreeEdgeKind, type VersionTreeSupplementalEdgeKind, useVersionTreeCanvas, type VersionTreeDragState, progressRelationChangeError, projectVisibleVersionGraph, trackingStateLabel } from '../features/versioning/public';
 import { FILE_GRID_GAP } from '../features/workspace/marquee-selection-model';
+import { useHostSurfaceSuspension } from './LayerProvider';
 
 type ProjectVersionTreeProps = {
+  active: boolean;
   progressFolders: ProgressFolder[];
   graphEdges?: VersionGraphEdge[];
   entries: ProjectFileEntry[];
@@ -70,7 +72,7 @@ const afterVersionTreePaint = (callback: () => void) => typeof window.requestAni
   ? window.requestAnimationFrame(callback)
   : globalThis.setTimeout(callback, 0);
 
-export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION_TREE_EDGES, entries, structureEntries = entries, selectedRelativePaths = EMPTY_VERSION_TREE_IDS, filterActive = false, activeRelativePath, gridIconSize, workspacePath, projectName, projectRelativePath, renderEntry, pendingChildId, hoverParentId, mutatingChildIds = EMPTY_VERSION_TREE_IDS, onBeginRelationEdit, onHoverRelationParent, onRequestRelationChange, onRequestSupplementalEdgeDelete, onRequestSupplementalEdgeReconnect, onRequestSupplementalEdgeCreate, onRequestCreateVersion, onRequestCreateEmptyVersion, onStartFileDrag, canUndoRelation = false, canRedoRelation = false, onUndoRelation, onRedoRelation, onCancelRelationEdit, onNotice, onCanvasControllerChange }: ProjectVersionTreeProps) => {
+export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY_VERSION_TREE_EDGES, entries, structureEntries = entries, selectedRelativePaths = EMPTY_VERSION_TREE_IDS, filterActive = false, activeRelativePath, gridIconSize, workspacePath, projectName, projectRelativePath, renderEntry, pendingChildId, hoverParentId, mutatingChildIds = EMPTY_VERSION_TREE_IDS, onBeginRelationEdit, onHoverRelationParent, onRequestRelationChange, onRequestSupplementalEdgeDelete, onRequestSupplementalEdgeReconnect, onRequestSupplementalEdgeCreate, onRequestCreateVersion, onRequestCreateEmptyVersion, onStartFileDrag, canUndoRelation = false, canRedoRelation = false, onUndoRelation, onRedoRelation, onCancelRelationEdit, onNotice, onCanvasControllerChange }: ProjectVersionTreeProps) => {
   const [pointerPoint, setPointerPoint] = useState<{ x: number; y: number } | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState('');
   const [dragState, setDragState] = useState<VersionTreeDragState>(null);
@@ -79,6 +81,7 @@ export const ProjectVersionTree = ({ progressFolders, graphEdges = EMPTY_VERSION
   const [zoom, setZoom] = useState(1);
   const [selectedNodeKey, setSelectedNodeKey] = useState('');
   const [blankOutputSourceId, setBlankOutputSourceId] = useState('');
+  useHostSurfaceSuspension(active && Boolean(relationChoice || blankOutputSourceId));
   const [viewportBounds, setViewportBounds] = useState({ left: 0, top: 0, width: 1600, height: 1000 });
   const [areaBandSizes, setAreaBandSizes] = useState<Partial<Record<VersionTreeAreaKind, VersionTreeAreaSize>>>({});
   const areaResizeRef = useRef<{ element: Element; pointerId: number; areaKind: VersionTreeAreaKind; axis: 'x' | 'y' | 'both'; startX: number; startY: number; width: number; height: number } | null>(null);
