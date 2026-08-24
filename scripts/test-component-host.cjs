@@ -86,7 +86,7 @@ try {
   assert(componentPreload.includes("exposeInMainWorld('photoFlowComponent'") && !componentPreload.includes("exposeInMainWorld('electronAPI'"), 'component preload exposes the restricted SDK instead of the application bridge');
   const projectWorkspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
   const projectWorkspaceLayoutSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspaceLayout.tsx'), 'utf8');
-  assert.equal((`${projectWorkspaceSource}\n${projectWorkspaceLayoutSource}`.match(/component-toolbar-actions/g) || []).length, 1, 'declarative UI component actions have one dedicated project-toolbar group');
+  assert(projectWorkspaceLayoutSource.includes("overflow ? 'component-toolbar-actions-overflow' : 'component-toolbar-actions flex shrink-0 items-center gap-1'") && projectWorkspaceSource.includes('<ComponentToolbarActions overflow actions={componentHostActions}'), 'declarative UI component actions provide dedicated wide-toolbar and overflow-menu presentations');
   assert(projectWorkspaceLayoutSource.includes('title={action.label}') && !projectWorkspaceLayoutSource.includes('在独立组件页中打开'), 'component toolbar hover text is owned by the component label and does not expose host implementation details');
   assert(!projectWorkspaceSource.includes('dangerouslySetInnerHTML') && !projectWorkspaceSource.includes('<iframe'), 'component page code is never injected into the workspace React DOM');
 

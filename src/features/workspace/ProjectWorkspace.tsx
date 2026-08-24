@@ -2011,6 +2011,15 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     window.addEventListener('photoflow-menu-open', closeMenus);
     return () => { window.removeEventListener('click', closeMenus); window.removeEventListener('photoflow-menu-open', closeMenus); };
   }, []);
+  useEffect(() => {
+    const closeToolbarOverflow = () => setShowToolbarOverflowMenu(false);
+    window.addEventListener('resize', closeToolbarOverflow);
+    window.visualViewport?.addEventListener('resize', closeToolbarOverflow);
+    return () => {
+      window.removeEventListener('resize', closeToolbarOverflow);
+      window.visualViewport?.removeEventListener('resize', closeToolbarOverflow);
+    };
+  }, []);
 
   const recursiveSearchActive = (recursiveFlatOpen || currentFolderRecursiveSearchActive || projectRootFilterActive) && !finalViewOpen;
   const groupedResultsActive = (recursiveFlatOpen || currentFolderRecursiveSearchActive || projectRootFilterActive) && !finalViewOpen;
@@ -5352,10 +5361,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         </div>
         {gatherToProject && !hiddenProjectToolbarActions.has('video-tools') && projectToolbarAvailability['video-tools'] && projectToolbarButtons['video-tools']}
         </div>
-        {projectWorkflows && <ComponentToolbarActions actions={componentHostActions} scope={{ scopeRelativePath: currentRelativePath, selectedRelativePaths: selectedEntries.filter(entry => entry.kind === 'image').map(entry => entry.relativePath), sourcePageId: pageId }} onOpen={onOpenComponentPage}/>}
+        {projectWorkflows && <div className="project-toolbar-component-actions contents"><ComponentToolbarActions actions={componentHostActions} scope={{ scopeRelativePath: currentRelativePath, selectedRelativePaths: selectedEntries.filter(entry => entry.kind === 'image').map(entry => entry.relativePath), sourcePageId: pageId }} onOpen={onOpenComponentPage}/></div>}
         <div className="project-toolbar-overflow relative" onClick={event => event.stopPropagation()}>
           <button type="button" onClick={() => { const next = !showToolbarOverflowMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowToolbarOverflowMenu(next); }} aria-label="展开工具栏操作" aria-haspopup="menu" aria-expanded={showToolbarOverflowMenu} className={`project-action-button ${showToolbarOverflowMenu ? 'bg-blue-50 text-blue-600' : ''}`}><ChevronDown size={17} className={`transition-transform ${showToolbarOverflowMenu ? 'rotate-180' : ''}`}/></button>
-          {showToolbarOverflowMenu && <div className="project-toolbar-overflow-menu absolute left-0 top-full z-50 mt-1 w-56 overflow-visible rounded-lg border border-slate-200 bg-white p-1 shadow-xl" onClick={event => { const button = (event.target as HTMLElement).closest('button'); if (button && button.getAttribute('aria-haspopup') !== 'menu') setShowToolbarOverflowMenu(false); }}>
+          {showToolbarOverflowMenu && <div role="menu" aria-label="更多工具栏操作" className="project-toolbar-overflow-menu absolute left-0 top-full z-50 mt-1 w-56 overflow-visible rounded-lg border border-slate-200 bg-white p-1 shadow-xl" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setShowToolbarOverflowMenu(false); (event.currentTarget.previousElementSibling as HTMLButtonElement | null)?.focus(); } }} onClick={event => { const button = (event.target as HTMLElement).closest('button'); if (button && button.getAttribute('aria-haspopup') !== 'menu') setShowToolbarOverflowMenu(false); }}>
             <div className="project-toolbar-overflow-primary">
               <button disabled={finalViewOpen || selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || !selectedPaths.length} onClick={() => beginRename()} className="project-menu-item"><Edit size={14}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
               <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} onClick={() => runFileOperation('cut')} className="project-menu-item"><Cut size={14}/>剪切</button>
@@ -5369,6 +5378,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
               {gatherToProject && !hiddenProjectToolbarActions.has('image-tools') && projectToolbarAvailability['image-tools'] && projectToolbarButtons['image-tools']}
               {projectWorkflows && visibleProjectToolbarActionIds.map(id => <React.Fragment key={`overflow-${id}`}>{projectToolbarButtons[id]}</React.Fragment>)}
               {gatherToProject && !hiddenProjectToolbarActions.has('video-tools') && projectToolbarAvailability['video-tools'] && projectToolbarButtons['video-tools']}
+              {projectWorkflows && componentHostActions.length > 0 && <><div className="my-1 border-t border-slate-100"/><ComponentToolbarActions overflow actions={componentHostActions} scope={{ scopeRelativePath: currentRelativePath, selectedRelativePaths: selectedEntries.filter(entry => entry.kind === 'image').map(entry => entry.relativePath), sourcePageId: pageId }} onOpen={onOpenComponentPage}/></>}
             </div>
           </div>}
         </div>

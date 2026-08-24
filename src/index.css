@@ -350,6 +350,7 @@ html.dark .workflow-task-card { border-color: #273244; background: #090c12; }
 }
 @container (max-width: 760px) {
   .project-toolbar-secondary { display:none !important; }
+  .project-toolbar-component-actions { display:none !important; }
   .project-toolbar-overflow-secondary { display:contents; }
 }
 .toolbar-divider { align-self:stretch; width:1px; flex:0 0 1px; margin:.3rem .45rem; background:#e2e8f0; }
