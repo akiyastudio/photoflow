@@ -495,6 +495,7 @@ const uploadPatch = (parentId, payload, context) => withDomain(parentId, async (
   const members = parseJson(row.members_json, []).length ? parseJson(row.members_json, []) : [{ personIndex: row.person_index }];
   const personIndex = Number(payload.personIndex);
   if (!Number.isInteger(personIndex) || !members.some(member => Number(member.personIndex) === personIndex)) throw new Error('人物不属于这个修图任务');
+  const existingAssignment = db.prepare('SELECT identity_id FROM team_person_assignments WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?').get(String(context.projectId), row.photo_id, row.base_version_id, personIndex);
   const choice = await callHost(parentId, 'dialogs.open.v1', { kind: 'image', title: `上传 ${row.person_name} 的修图结果` });
   if (choice.cancelled) return { success: true, cancelled: true, tasks: listTasks(db, row.photo_id).map(publicTask) };
   const authorized = await callHost(parentId, 'project.output.authorize.v1', { operation: 'artifacts', photoId: row.photo_id, baseVersionId: row.base_version_id });
@@ -511,7 +512,7 @@ const uploadPatch = (parentId, payload, context) => withDomain(parentId, async (
     try {
       const artifact = createArtifact(db, row, personIndex, outputPath, 'manual-upload');
       db.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status='uploaded',updated_at=? WHERE id=?`).run(outputPath, Date.now(), row.id);
-      db.prepare(`${upsertAssignmentSql}`).run(String(context.projectId), row.photo_id, row.base_version_id, personIndex, null, 1, 'manual', 1, Date.now());
+      db.prepare(`${upsertAssignmentSql}`).run(String(context.projectId), row.photo_id, row.base_version_id, personIndex, existingAssignment?.identity_id || null, 1, 'manual', 1, Date.now());
       db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,artifact_id=?,edited_patch_path=?,completed=1,completion_kind='retouched',return_missing=0,return_missing_since=NULL,completed_at=?,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, artifact.stageId, artifact.id, outputPath, Date.now(), Date.now(), row.photo_id, row.base_version_id, personIndex);
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -715,7 +716,7 @@ const assertOwnedSubjects = async (parentId, projectId, assignments) => {
 
 const upsertAssignmentSql = `INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,identity_id,confidence,source,completed,updated_at)
   VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(photo_id,base_version_id,person_index) DO UPDATE SET
-  identity_id=COALESCE(excluded.identity_id,team_person_assignments.identity_id),confidence=excluded.confidence,source=excluded.source,completed=excluded.completed,
+  identity_id=excluded.identity_id,confidence=excluded.confidence,source=excluded.source,completed=excluded.completed,
   completion_kind=CASE WHEN excluded.completed=1 THEN team_person_assignments.completion_kind ELSE '' END,
   edited_patch_path=CASE WHEN excluded.completed=1 THEN team_person_assignments.edited_patch_path ELSE NULL END,
   return_missing=CASE WHEN excluded.completed=1 THEN team_person_assignments.return_missing ELSE 0 END,
@@ -985,7 +986,8 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
       db.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status='uploaded',needs_review=?,review_reason=?,updated_at=? WHERE id=?`).run(destination, warnings.length ? 1 : 0, warnings.join('；'), Date.now(), row.id);
       if (payload.complete) {
         const personIndex = Number(payload.personIndex);
-        db.prepare(upsertAssignmentSql).run(String(context.projectId), row.photo_id, row.base_version_id, personIndex, null, 1, 'manual', 1, Date.now());
+        const existingAssignment = db.prepare('SELECT identity_id FROM team_person_assignments WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?').get(String(context.projectId), row.photo_id, row.base_version_id, personIndex);
+        db.prepare(upsertAssignmentSql).run(String(context.projectId), row.photo_id, row.base_version_id, personIndex, existingAssignment?.identity_id || null, 1, 'manual', 1, Date.now());
         db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,artifact_id=?,edited_patch_path=?,completed=1,completion_kind='returned',return_missing=0,return_missing_since=NULL,completed_at=?,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, artifact.stageId, artifact.id, destination, Date.now(), Date.now(), row.photo_id, row.base_version_id, personIndex);
       }
       db.exec('COMMIT');

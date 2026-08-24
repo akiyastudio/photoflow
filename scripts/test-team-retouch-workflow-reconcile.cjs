@@ -189,6 +189,9 @@ const restoreManifestDirectory = () => {
     assertActive('task-1', 2, 'RETURNED-BY-A');
     assertInactive('task-1', 1);
     assertActive('task-2', 3, 'ORIGINAL-TASK-TWO');
+    const identityDb = new DatabaseSync(databasePath);
+    assert.equal(identityDb.prepare(`SELECT identity_id FROM team_person_assignments WHERE photo_id='photo' AND base_version_id='base' AND person_index=1`).get().identity_id, 'identity-1', 'Alice identity survives return upload');
+    identityDb.close();
 
     await invoke('team.patch.remove-upload.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
     assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
@@ -234,6 +237,9 @@ const restoreManifestDirectory = () => {
     recoveredDb.close();
     assertActive('task-1', 2, 'RECOVERABLE-RETURN');
     assertInactive('task-1', 1);
+    await invoke('team.identity.assign.v1', { photoId: 'photo', baseVersionId: 'base', personIndex: 1, identityId: null, completed: false });
+    const cleared = await invoke('team.project.get.v1');
+    assert.equal(cleared.assignments.find(item => item.personIndex === 1).identityId, null, 'explicit empty identity assignment restores the unlabelled state');
     console.log('Team-retouch workflow task-chain reconciliation tests passed');
   } finally {
     lines.close();
