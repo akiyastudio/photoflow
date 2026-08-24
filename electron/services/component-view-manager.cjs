@@ -126,6 +126,9 @@ class ComponentViewManager {
           const channels = { 'workflow.progress': 'workspace-team-workflow-progress', 'patch.return-batch.progress': 'workspace-team-patch-return-batch-progress' };
           const channel = channels[String(topic || '')];
           if (channel && !view.webContents.isDestroyed()) view.webContents.send(channel, payload);
+          if (descriptor.service?.events?.includes(String(topic || '')) && !view.webContents.isDestroyed()) {
+            view.webContents.send('component-sdk:event', { topic: String(topic), payload });
+          }
         },
       }),
     };
@@ -155,7 +158,14 @@ class ComponentViewManager {
 
   publicContext(instance) {
     const { workspacePath: _privateWorkspacePath, eventSender: _privateEventSender, emitComponentEvent: _privateEmit, ...publicContext } = instance.context;
-    return { ...publicContext, themeContractVersion: 1, resolvedTheme: this.resolvedTheme };
+    return {
+      ...publicContext,
+      hostApiVersion: instance.descriptor.hostApiVersion,
+      permissions: instance.descriptor.service?.permissions || [],
+      events: instance.descriptor.service?.events || [],
+      themeContractVersion: 1,
+      resolvedTheme: this.resolvedTheme,
+    };
   }
 
   setResolvedTheme(value) {

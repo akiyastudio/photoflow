@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const { PLUGIN_API_VERSION, PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
-const { COMPONENT_HOST_API_VERSION, COMPONENT_HOST_CONTRACT_VERSION, parseComponentHostManifest } = require('./component-host-contract.cjs');
+const { COMPONENT_HOST_API_VERSION, COMPONENT_HOST_CONTRACT_VERSION, COMPONENT_HOST_MIN_API_VERSION, parseComponentHostManifest } = require('./component-host-contract.cjs');
 const { listIntegrityFiles, readPinnedComponentIntegrity, validateComponentIntegrity, validateComponentIntegrityAsync } = require('./component-integrity.cjs');
 
 const COMPONENT_API_VERSION = PLUGIN_API_VERSION;
@@ -117,9 +117,11 @@ const manifestCompatibilityError = (manifest, platform, arch) => {
     const host = manifest.componentHost;
     const compatibility = host?.compatibility;
     const min = Number(compatibility?.minHostApiVersion); const max = Number(compatibility?.maxHostApiVersion);
-    if (!host || Number(host.contractVersion) !== COMPONENT_HOST_CONTRACT_VERSION) return `组件 Host 协议不兼容：${host?.contractVersion || '未填写'}`;
+    if (!host || ![1, COMPONENT_HOST_CONTRACT_VERSION].includes(Number(host.contractVersion))) return `组件 Host 协议不兼容：${host?.contractVersion || '未填写'}`;
     if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max < min) return '组件 Host API 兼容范围无效';
-    if (COMPONENT_HOST_API_VERSION < min || COMPONENT_HOST_API_VERSION > max) return `组件 Host API ${COMPONENT_HOST_API_VERSION} 不在支持范围 ${min}-${max}`;
+    const negotiated = Math.min(COMPONENT_HOST_API_VERSION, max);
+    if (negotiated < Math.max(COMPONENT_HOST_MIN_API_VERSION, min)) return `组件 Host API ${COMPONENT_HOST_MIN_API_VERSION}-${COMPONENT_HOST_API_VERSION} 与支持范围 ${min}-${max} 不重叠`;
+    if (Number(host.contractVersion) === 2 && negotiated !== 2) return '组件 Host V2 需要 Host API 2';
     const contributions = Array.isArray(host.contributions) ? host.contributions : [];
     const toolbarCount = contributions.filter(item => item?.type === 'workspace.toolbarAction').length;
     const pageCount = contributions.filter(item => item?.type === 'component.fullPage').length;

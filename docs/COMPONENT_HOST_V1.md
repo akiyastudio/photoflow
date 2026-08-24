@@ -1,5 +1,7 @@
 # Component Host V1
 
+> Deprecated for new development. Installed V1 components continue through the isolated compatibility adapters. Use [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md) and [PLUGIN_HOST_API.md](PLUGIN_HOST_API.md) for Component Host V2.
+
 Component Host V1 is the only supported path for optional component UI. PhotoFlow reads a component's `component.json`, renders one host-owned button in the dedicated **UI 组件** group at the top of a project folder workspace, and opens one independent full-page component tab. A component cannot contribute React code to PhotoFlow's renderer.
 
 V1 deliberately does not support file-list decorations, context-menu items, media-preview overlays, ordinary settings pages, DOM injection, or advanced-video playback. Existing native `apiVersion: 1` components remain on the legacy process-capability path when `componentHost` is absent.

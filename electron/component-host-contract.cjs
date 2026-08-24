@@ -1,8 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 
-const COMPONENT_HOST_CONTRACT_VERSION = 1;
-const COMPONENT_HOST_API_VERSION = 1;
+const COMPONENT_HOST_CONTRACT_VERSION = 2;
+const COMPONENT_HOST_API_VERSION = 2;
+const COMPONENT_HOST_MIN_API_VERSION = 1;
 const COMPONENT_SERVICE_PROTOCOL_VERSION = 1;
 const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPage']);
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
@@ -12,7 +13,29 @@ const HOST_CAPABILITIES = new Set([
   'version.register.v1', 'tasks.report.v1', 'component.settings.v1',
   'component.storage.v1', 'dialogs.open.v1', 'component.lifecycle.v1',
   'component.runtime.v1', 'project.media.access.v1', 'project.identity.complete.v1',
+  'project.media.page.v2', 'project.media.variants.v2', 'project.input.tokens.v2',
+  'project.output.v2', 'version.create.v2', 'tasks.v2', 'dialogs.v2',
+  'component.storage.v2', 'component.settings.v2', 'component.events.v2',
+  'component.lifecycle.v2',
 ]);
+const HOST_PERMISSIONS = new Set([
+  'project.media.read', 'project.input.read', 'project.output.write',
+  'project.version.create', 'component.storage', 'component.settings',
+  'tasks', 'dialogs', 'events', 'component.lifecycle.read',
+]);
+const CAPABILITY_PERMISSIONS = Object.freeze({
+  'project.media.page.v2': 'project.media.read',
+  'project.media.variants.v2': 'project.media.read',
+  'project.input.tokens.v2': 'project.input.read',
+  'project.output.v2': 'project.output.write',
+  'version.create.v2': 'project.version.create',
+  'tasks.v2': 'tasks',
+  'dialogs.v2': 'dialogs',
+  'component.storage.v2': 'component.storage',
+  'component.settings.v2': 'component.settings',
+  'component.events.v2': 'events',
+  'component.lifecycle.v2': 'component.lifecycle.read',
+});
 const COMPONENT_ICON_MIME_TYPES = new Map([['.png', 'image/png'], ['.svg', 'image/svg+xml']]);
 const MAX_COMPONENT_ICON_BYTES = 512 * 1024;
 
@@ -31,6 +54,10 @@ const requiredId = (value, field) => {
   const id = requiredText(value, field, 80);
   if (!IDENTIFIER.test(id)) throw new Error(`Invalid component host ${field}`);
   return id;
+};
+const rejectUnknownFields = (value, allowed, label) => {
+  const unknown = Object.keys(value || {}).filter(field => !allowed.includes(field));
+  if (unknown.length) throw new Error(`Unknown ${label} field: ${unknown[0]}`);
 };
 
 const resolveDevelopmentFile = ({ declaredEntry, componentRoot, overrideRoot, overrideEntry, label }) => {
@@ -85,13 +112,18 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   if (host === undefined) return null; // Existing native V1 components remain valid.
   if (Number(manifest.apiVersion) !== 1) throw new Error(`Unsupported component apiVersion: ${manifest.apiVersion}`);
   if (!host || typeof host !== 'object' || Array.isArray(host)) throw new Error('Invalid componentHost manifest');
-  if (Number(host.contractVersion) !== COMPONENT_HOST_CONTRACT_VERSION) throw new Error(`Unsupported component host contractVersion: ${host.contractVersion}`);
+  const contractVersion = Number(host.contractVersion);
+  if (![1, COMPONENT_HOST_CONTRACT_VERSION].includes(contractVersion)) throw new Error(`Unsupported component host contractVersion: ${host.contractVersion}`);
+  if (contractVersion === 2) rejectUnknownFields(host, ['contractVersion', 'compatibility', 'contributions', 'service'], 'component host');
   const compatibility = host.compatibility;
   if (!compatibility || typeof compatibility !== 'object') throw new Error('Missing component host compatibility range');
+  if (contractVersion === 2) rejectUnknownFields(compatibility, ['minHostApiVersion', 'maxHostApiVersion'], 'component compatibility');
   const min = Number(compatibility.minHostApiVersion);
   const max = Number(compatibility.maxHostApiVersion);
   if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max < min) throw new Error('Invalid component host compatibility range');
-  if (COMPONENT_HOST_API_VERSION < min || COMPONENT_HOST_API_VERSION > max) throw new Error(`Component host API ${COMPONENT_HOST_API_VERSION} is outside supported range ${min}-${max}`);
+  const negotiatedHostApiVersion = Math.min(COMPONENT_HOST_API_VERSION, max);
+  if (negotiatedHostApiVersion < Math.max(COMPONENT_HOST_MIN_API_VERSION, min)) throw new Error(`Component host APIs ${COMPONENT_HOST_MIN_API_VERSION}-${COMPONENT_HOST_API_VERSION} do not overlap supported range ${min}-${max}`);
+  if (contractVersion === 2 && negotiatedHostApiVersion !== 2) throw new Error('Component Host contractVersion 2 requires Host API 2');
   if (!Array.isArray(host.contributions) || host.contributions.length < 2 || host.contributions.length > 32) throw new Error('Component host contributions must be a bounded array');
 
   const componentId = requiredId(manifest.id, 'component id');
@@ -107,6 +139,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     if (seen.has(key)) throw new Error(`Duplicate component host contribution: ${key}`);
     seen.add(key);
     if (raw.type === 'component.fullPage') {
+      if (contractVersion === 2) rejectUnknownFields(raw, ['type', 'id', 'title', 'entry'], 'component fullPage contribution');
       const relativeEntry = requiredText(raw.entry, 'page entry', 512).replace(/\\/g, '/');
       const declaredEntry = path.resolve(componentRoot, relativeEntry);
       if (!isInside(componentRoot, declaredEntry)) throw new Error('Component page entry escapes component root');
@@ -115,6 +148,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       if (!stat?.isFile() || stat.isSymbolicLink()) throw new Error(`Component page entry is missing or unsafe: ${relativeEntry}`);
       pages.set(id, { type: raw.type, id, title: requiredText(raw.title, 'page title'), entry, relativeEntry });
     } else {
+      if (contractVersion === 2) rejectUnknownFields(raw, ['type', 'id', 'label', 'pageId'], 'component toolbarAction contribution');
       actions.push({ type: raw.type, id, label: requiredText(raw.label, 'toolbar label', 80), pageId: requiredId(raw.pageId, 'toolbar pageId') });
     }
   }
@@ -122,9 +156,11 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   if (!pages.has(actions[0].pageId)) throw new Error(`Component toolbar action references an unknown page: ${actions[0].pageId}`);
   const page = pages.get(actions[0].pageId);
   let service = null;
+  if (contractVersion === 2 && host.service === undefined) throw new Error('Component Host V2 requires a service declaration');
   if (host.service !== undefined) {
     const raw = host.service;
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid component service manifest');
+    if (contractVersion === 2) rejectUnknownFields(raw, ['protocolVersion', 'runtime', 'entrypoints', 'rpcMethods', 'capabilities', 'permissions', 'events', 'runtimeActions', 'lifecycleActions'], 'component service');
     if (Number(raw.protocolVersion) !== COMPONENT_SERVICE_PROTOCOL_VERSION) throw new Error(`Unsupported component service protocolVersion: ${raw.protocolVersion}`);
     if (!['node', 'executable'].includes(raw.runtime)) throw new Error('Invalid component service runtime');
     const entries = raw.entrypoints;
@@ -139,6 +175,15 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     if (!rpcMethods.length || rpcMethods.length > 128 || rpcMethods.some(method => !VERSIONED_METHOD.test(method))) throw new Error('Component service RPC methods must be a bounded versioned allowlist');
     const capabilities = [...new Set((raw.capabilities || []).map(value => requiredText(value, 'service capability', 128)))];
     if (capabilities.length > 32 || capabilities.some(capability => !HOST_CAPABILITIES.has(capability))) throw new Error('Component service requests an unknown host capability');
+    const permissions = [...new Set((raw.permissions || []).map(value => requiredText(value, 'service permission', 128)))];
+    if (permissions.length > 32 || permissions.some(permission => !HOST_PERMISSIONS.has(permission))) throw new Error('Component service requests an unknown host permission');
+    if (contractVersion === 2 && !Array.isArray(raw.permissions)) throw new Error('Component Host V2 service must declare a permissions allowlist');
+    for (const capability of capabilities) {
+      const permission = CAPABILITY_PERMISSIONS[capability];
+      if (permission && !permissions.includes(permission)) throw new Error(`Component capability ${capability} requires permission ${permission}`);
+    }
+    const events = [...new Set((raw.events || []).map(value => requiredText(value, 'service event', 128)))];
+    if (events.length > 32 || events.some(event => !VERSIONED_METHOD.test(event))) throw new Error('Component service events must be a bounded versioned allowlist');
     const runtimeActions = [...new Set((raw.runtimeActions || []).map(value => requiredId(value, 'runtime action')))];
     if (runtimeActions.length > 32) throw new Error('Component runtime actions must be a bounded allowlist');
     const lifecycleActions = {};
@@ -160,6 +205,8 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       relativeEntry,
       rpcMethods: Object.freeze(rpcMethods),
       capabilities: Object.freeze(capabilities),
+      permissions: Object.freeze(permissions),
+      events: Object.freeze(events),
       runtimeActions: Object.freeze(runtimeActions),
       lifecycleActions: Object.freeze(lifecycleActions),
     });
@@ -179,8 +226,8 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   return Object.freeze({
     componentId,
     componentVersion: requiredText(manifest.version, 'component version', 80),
-    contractVersion: COMPONENT_HOST_CONTRACT_VERSION,
-    hostApiVersion: COMPONENT_HOST_API_VERSION,
+    contractVersion,
+    hostApiVersion: negotiatedHostApiVersion,
     compatibility: { minHostApiVersion: min, maxHostApiVersion: max },
     toolbarAction: Object.freeze({ ...actions[0], pageTitle: page.title }),
     fullPage: Object.freeze(page),
@@ -240,10 +287,13 @@ const createComponentHostRegistry = ({ roots, developmentRendererRoot = '' }) =>
 
 module.exports = {
   COMPONENT_HOST_API_VERSION,
+  COMPONENT_HOST_MIN_API_VERSION,
   COMPONENT_HOST_CONTRACT_VERSION,
   COMPONENT_SERVICE_PROTOCOL_VERSION,
   CONTRIBUTION_TYPES,
   HOST_CAPABILITIES,
+  HOST_PERMISSIONS,
+  CAPABILITY_PERMISSIONS,
   COMPONENT_ICON_MIME_TYPES,
   MAX_COMPONENT_ICON_BYTES,
   createComponentHostRegistry,

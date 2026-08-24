@@ -1,4 +1,4 @@
-const { HOST_CAPABILITIES } = require('../component-host-contract.cjs');
+const { CAPABILITY_PERMISSIONS, HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 
 const MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
 
@@ -29,6 +29,8 @@ class ComponentCapabilityBroker {
   invoke(descriptor, method, payload, boundContext) {
     const normalized = String(method || '');
     if (!descriptor?.service?.capabilities.includes(normalized)) throw new Error(`Component capability is not granted: ${normalized}`);
+    const permission = CAPABILITY_PERMISSIONS[normalized];
+    if (permission && !descriptor.service.permissions?.includes(permission)) throw new Error(`Component capability permission is not granted: ${permission}`);
     const handler = this.handlers.get(normalized);
     if (!handler) throw new Error(`Host capability is unavailable: ${normalized}`);
     return handler(clonePayload(payload), boundContext, descriptor);

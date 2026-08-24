@@ -71,8 +71,8 @@ try {
   fs.unlinkSync(incompatible);
 
   const hostIncompatible = path.join(componentRoot, 'host-incompatible.zip');
-  writeZip(hostIncompatible, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), componentHost: { contractVersion: 1, compatibility: { minHostApiVersion: 2, maxHostApiVersion: 3 }, contributions: [{ type: 'workspace.toolbarAction' }, { type: 'component.fullPage' }] } }), 'tool.exe': 'binary' });
-  assert.match(registry.list().find(item => item.id === 'third-party-tool').error, /Host API 1 不在支持范围/);
+  writeZip(hostIncompatible, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), componentHost: { contractVersion: 1, compatibility: { minHostApiVersion: 3, maxHostApiVersion: 4 }, contributions: [{ type: 'workspace.toolbarAction' }, { type: 'component.fullPage' }] } }), 'tool.exe': 'binary' });
+  assert.match(registry.list().find(item => item.id === 'third-party-tool').error, /不重叠/);
   fs.unlinkSync(hostIncompatible);
 
   const unsafe = path.join(componentRoot, 'unsafe.zip');

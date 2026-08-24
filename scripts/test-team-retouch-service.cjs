@@ -6,7 +6,7 @@ const { spawn } = require('child_process');
 const readline = require('readline');
 const { DatabaseSync } = require('node:sqlite');
 const { ComponentCapabilityBroker } = require('../electron/services/component-capability-broker.cjs');
-const { registerComponentProjectCapabilities, versionProjectPath } = require('../electron/services/component-project-capabilities.cjs');
+const { registerDeprecatedTeamRetouchV1Capabilities: registerComponentProjectCapabilities, versionProjectPath } = require('../electron/compatibility/component-team-retouch-v1-adapter.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-team-service-'));
 const workspace = path.join(sandbox, 'workspace');

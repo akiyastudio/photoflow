@@ -46,9 +46,11 @@ const projectWorkspace = read('src/features/workspace/ProjectWorkspace.tsx') + r
 const projectWorkspaceContract = read('src/contracts/project-workspace-api.ts');
 const projectWorkspaceClient = read('src/platform/project-workspace-client.ts');
 const componentRpcContract = read('electron/component-rpc-contract.cjs');
+const deprecatedComponentRpc = read('electron/compatibility/component-team-retouch-rpc-v1.cjs');
 const componentProjectCapabilities = read('electron/services/component-project-capabilities.cjs');
+const deprecatedComponentCapabilities = read('electron/compatibility/component-team-retouch-v1-adapter.cjs');
 const componentTemplate = JSON.parse(read('extensions/team-retouch/component.template.json'));
-const { COMPONENT_RPC_METHODS } = require('../electron/component-rpc-contract.cjs');
+const { COMPONENT_RPC_METHODS } = require('../electron/compatibility/component-team-retouch-rpc-v1.cjs');
 const componentRenderer = read('extensions/team-retouch/renderer/src/main.tsx') + read('extensions/team-retouch/renderer/src/interaction-model.ts');
 const componentSdk = read('extensions/team-retouch/renderer/src/sdk.ts');
 const fileEntryInteractionModel = read('src/features/workspace/file-entry-interaction-model.ts');
@@ -116,6 +118,12 @@ const retiredCacheService = read('electron/services/retired-cache-service.cjs');
 assert((projectWorkspace.match(/loadFinalVersionSummary\(\)/g) || []).length === 2, 'full-project media rating scans must only run during the explicit favorite export workflow');
 assert(main.includes('const mediaInteractionDatabase = new PythonDatabaseClient') && main.includes('decideTrackingItem: mediaInteractionRepository.decideTrackingItem'), 'interactive media confirmations must remain isolated from long media jobs');
 assert(!main.includes('teamRetouchDatabase') && !main.includes('teamRetouchRepository') && !fs.existsSync(path.join(root, 'electron/repositories/team-retouch-repository.cjs')), 'the application process must not own team-retouch persistence');
+assert(!['team-retouch', 'edited_patch_path', 'team_patch_tasks', '团片'].some(value => componentProjectCapabilities.includes(value))
+  && deprecatedComponentCapabilities.includes('@deprecated')
+  && main.includes("require('./compatibility/component-host-v1.cjs')")
+  && !main.includes("require('./compatibility/component-team-retouch"),
+'generic component capabilities and the composition root must isolate all V1 business knowledge behind one deprecated protocol adapter');
+assert(!read('electron/services/version-service.cjs').includes('Team') && !read('electron/services/version-service.cjs').includes('team'), 'generic version service must not expose component-owned business operations');
 assert.equal((versionsIpc.match(/ipcMain\.handle\('workspace-team-/g) || []).length, 0, 'versions IPC must not retain legacy team handlers');
 assert(componentTemplate.componentHost.service.rpcMethods.filter(method => method.startsWith('team.')).every(method => !COMPONENT_RPC_METHODS[method]), 'manifest-owned team RPC methods must have no legacy mapping');
 assert(!versionsIpc.includes('shell.openPath') && !componentProjectCapabilities.includes("pluginService.runJson('team-retouch'"), 'legacy arbitrary-path routes and host-owned team algorithm calls must not remain');
@@ -452,7 +460,7 @@ assert(!fs.existsSync(path.join(root, 'src', 'features', 'plugins', 'plugin-cont
   && !projectWorkspace.includes('TeamRetouch') && !settingsFeature.includes("activeSection === 'team-retouch'")
   && componentRenderer.includes("type Tab = 'detect' | 'people' | 'workflow' | 'returns' | 'merge' | 'settings'")
   && componentSdk.includes('window.photoFlowComponent.rpc') && !componentRenderer.includes('window.electronAPI')
-  && componentRpcContract.includes('sanitizePayload') && componentRpcContract.includes("'team-retouch'"),
+  && componentRpcContract.includes('sanitizePayload') && deprecatedComponentRpc.includes("'team-retouch'"),
 'team-retouch UI and settings must live in its isolated renderer behind an owned, payload-filtered component RPC contract');
 assert(PLUGIN_DEFINITIONS['video-playback-mpv'].runtimeOnly === true
   && PLUGIN_DEFINITIONS['video-playback-mpv'].capabilities.includes('video-playback.advanced')
@@ -577,7 +585,7 @@ assert(recycleBinService.includes('const trashMany = async filePaths =>') && rec
 const componentsListHandler = systemIpc.slice(systemIpc.indexOf("ipcMain.handle('components-list'"), systemIpc.indexOf("ipcMain.handle('components-open-folder'"));
 assert(componentsListHandler.includes('pluginService.list()') && componentsListHandler.includes('queueComponentStatusRefresh(force === true)') && !componentsListHandler.includes('listWithSizes'), 'component listing must return cached status before recursive sizing and optionally queue a forced runtime probe');
 assert(systemIpc.includes("type: 'component-status-refresh'") && app.includes('onComponentsStatusChanged'), 'detailed component status must refresh through a background event');
-assert(systemIpc.includes('queueSystemFilesystemCleanup(cleanupPaths') && versionsIpc.includes('queueCleanupArtifacts(workspaceRoot') && componentProjectCapabilities.includes("type: 'component-workflow-cleanup'") && componentProjectCapabilities.includes('backgroundTasks.start({'), 'committed installs, versions, and workflows must defer obsolete internal-file cleanup');
+assert(systemIpc.includes('queueSystemFilesystemCleanup(cleanupPaths') && versionsIpc.includes('queueCleanupArtifacts(workspaceRoot') && componentProjectCapabilities.includes("payload.action === 'rollback'") && componentProjectCapabilities.includes('fs.promises.rm(stage.root'), 'committed installs and versions must defer cleanup while generic component output rollback removes only its private stage');
 assert(appDialogProvider.includes('choice: (options: ChoiceDialogOptions)') && appDialogProvider.includes("enqueue('choice', options)"), 'the shared in-app dialog provider must support multi-choice decisions');
 assert(filesIpc.includes("kind: 'paste-conflict'") && projectWorkspace.includes("value: 'replace'") && projectWorkspace.includes("value: 'keep-both'"), 'paste conflicts must return a decision request and let the in-app UI replace, keep both, or cancel');
 assert(workspaceIpc.includes("kind: 'restore-conflict'") && app.includes("value: 'rename'") && app.includes("value: 'overwrite'"), 'occupied restore targets must be resolved through the in-app choice dialog');

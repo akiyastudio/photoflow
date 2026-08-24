@@ -1,7 +1,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { COMPONENT_RPC_METHODS, sanitizePayload, stripReturnPaths, stripWorkspacePaths } = require('../electron/component-rpc-contract.cjs');
+const { COMPONENT_RPC_METHODS, sanitizePayload, stripReturnPaths, stripWorkspacePaths } = require('../electron/compatibility/component-team-retouch-rpc-v1.cjs');
 const { parseComponentHostManifest } = require('../electron/component-host-contract.cjs');
 
 const root = path.resolve(__dirname, '..');

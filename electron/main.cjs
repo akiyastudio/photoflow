@@ -12,6 +12,7 @@ const { ComponentViewManager } = require('./services/component-view-manager.cjs'
 const { ComponentCapabilityBroker } = require('./services/component-capability-broker.cjs');
 const { ComponentServiceManager } = require('./services/component-service-manager.cjs');
 const { registerComponentProjectCapabilities } = require('./services/component-project-capabilities.cjs');
+const { COMPONENT_HOST_V1_RPC_REGISTRARS, registerDeprecatedComponentHostV1Capabilities } = require('./compatibility/component-host-v1.cjs');
 const { createComponentRpcIpcProxy } = require('./component-rpc-contract.cjs');
 const { registerComponentHostIpc } = require('./modules/component-host-ipc.cjs');
 const { registerComponentIconProtocol } = require('./modules/component-icon-protocol.cjs');
@@ -1847,6 +1848,19 @@ app.whenReady().then(async () => {
     getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks,
     uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths,
     getBoundProject: (workspaceRoot, projectName) => workspaceCatalogs.get(path.resolve(workspaceRoot))?.byName.get(String(projectName || '').toLocaleLowerCase()) || null,
+    RAW_EXTENSIONS, VIDEO_EXTENSIONS,
+  });
+  registerDeprecatedComponentHostV1Capabilities({
+    broker: componentCapabilityBroker,
+    ensureWorkspace,
+    getWorkspaceDataRoot,
+    resolveProjectEntry,
+    versionService,
+    IMAGE_EXTENSIONS,
+    path, fs, crypto, getConfigPath, readSavedConfig,
+    getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks,
+    uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths,
+    getBoundProject: (workspaceRoot, projectName) => workspaceCatalogs.get(path.resolve(workspaceRoot))?.byName.get(String(projectName || '').toLocaleLowerCase()) || null,
     RAW_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS,
   });
   componentServiceManager = new ComponentServiceManager({
@@ -1865,7 +1879,7 @@ app.whenReady().then(async () => {
     writeLog,
   });
   registerComponentHostIpc({ ipcMain, manager: componentViewManager, mainWindow });
-  const componentRpcIpcMain = createComponentRpcIpcProxy({ ipcMain, manager: componentViewManager });
+  const componentRpcIpcMain = createComponentRpcIpcProxy({ ipcMain, manager: componentViewManager, compatibilityRegistrars: COMPONENT_HOST_V1_RPC_REGISTRARS });
 
   registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, componentCapabilityBroker, componentViewManager, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
   for (const descriptor of componentHostRegistry.list()) componentCapabilityBroker.assertCapabilities(descriptor);

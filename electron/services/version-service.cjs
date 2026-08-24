@@ -49,22 +49,6 @@ const createVersionService = ({ repository }) => ({
   completeTrackingCommit: (root, payload) => repository.completeTrackingCommit(root, payload),
   failTrackingCommit: (root, payload) => repository.failTrackingCommit(root, payload),
   getMainBranchMedia: (root, payload) => repository.getMainBranchMedia(root, payload),
-  listTeamPatches: (root, photoId) => repository.listTeamPatches(root, photoId),
-  getTeamProjectWorkspace: (root, projectName) => repository.getTeamProjectWorkspace(root, projectName),
-  registerTeamProjectPhoto: (root, payload) => repository.registerTeamProjectPhoto(root, payload),
-  unregisterTeamProjectPhoto: (root, payload) => repository.unregisterTeamProjectPhoto(root, payload),
-  saveTeamIdentity: (root, payload) => repository.saveTeamIdentity(root, payload),
-  assignTeamIdentity: (root, payload) => repository.assignTeamIdentity(root, payload),
-  confirmTeamIdentityGroup: (root, payload) => repository.confirmTeamIdentityGroup(root, payload),
-  completeTeamIdentity: (root, payload) => repository.completeTeamIdentity(root, payload),
-  deleteTeamIdentity: (root, payload) => repository.deleteTeamIdentity(root, payload),
-  listTeamPersonExclusions: (root, payload) => repository.listTeamPersonExclusions(root, payload),
-  addTeamPersonExclusion: (root, payload) => repository.addTeamPersonExclusion(root, payload),
-  clearTeamPersonExclusions: (root, payload) => repository.clearTeamPersonExclusions(root, payload),
-  replaceTeamPatches: (root, payload) => repository.replaceTeamPatches(root, payload),
-  updateTeamPatch: (root, payload) => repository.updateTeamPatch(root, payload),
-  deleteTeamPatch: (root, payload) => repository.deleteTeamPatch(root, payload),
-  cleanupTeamPatches: (root, payload) => repository.cleanupTeamPatches(root, payload),
 });
 
 module.exports = { createVersionService };

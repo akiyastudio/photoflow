@@ -75,7 +75,11 @@ class ComponentServiceManager {
     const session = await this.ensureSession(descriptor);
     await session.ready;
     const id = String(this.nextRequestId++);
-    const message = { type: 'request', id, method, payload, context: publicContext(boundContext) };
+    const message = { type: 'request', id, method, payload, context: {
+      ...publicContext(boundContext),
+      hostApiVersion: descriptor.hostApiVersion,
+      permissions: descriptor.service.permissions || [],
+    } };
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
       const timer = setTimeout(() => {
@@ -87,7 +91,7 @@ class ComponentServiceManager {
           ? `; last capability ${pending.lastCapability} for ${Math.max(0, Date.now() - pending.capabilityStartedAt)}ms`
           : '; no capability response was pending';
         const error = new Error(`Component service request timed out after ${elapsedMs}ms: ${descriptor.componentId}.${method}${capability}`);
-        error.code = 'COMPONENT_SERVICE_TIMEOUT';
+        error.code = 'COMPONENT_HOST_TIMEOUT';
         this.writeLog('warn', 'Component service request timed out', { componentId: descriptor.componentId, method, elapsedMs, lastCapability: pending.lastCapability || '', pendingCount: session.pending.size });
         reject(error);
       }, LONG_RUNNING_METHODS.has(String(method || '')) ? LONG_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
@@ -157,7 +161,7 @@ class ComponentServiceManager {
       for (const pending of session.pending.values()) {
         clearTimeout(pending.timer);
         const error = new Error(`Component service exited before completing ${session.descriptor.componentId}.${pending.method}`);
-        error.code = 'COMPONENT_SERVICE_EXITED';
+        error.code = 'COMPONENT_HOST_SERVICE_EXITED';
         pending.reject(error);
       }
       session.pending.clear();
@@ -176,8 +180,12 @@ class ComponentServiceManager {
       if (!pending) return;
       session.pending.delete(String(frame.id));
       clearTimeout(pending.timer);
-      if (frame.ok === false) pending.reject(new Error(String(frame.error || 'Component service request failed')));
-      else pending.resolve(frame.result);
+      if (frame.ok === false) {
+        const error = new Error(String(frame.error || 'Component service request failed'));
+        error.code = String(frame.errorCode || 'COMPONENT_SERVICE_REQUEST_FAILED');
+        error.retryable = frame.retryable === true;
+        pending.reject(error);
+      } else pending.resolve(frame.result);
       return;
     }
     if (frame?.type === 'capability') {
@@ -190,7 +198,7 @@ class ComponentServiceManager {
         const result = await this.capabilityBroker.invoke(session.descriptor, frame.method, frame.payload, parent.context);
         this.writeFrame(session, { type: 'capability-response', id: frame.id, ok: true, result });
       } catch (error) {
-        this.writeFrame(session, { type: 'capability-response', id: frame.id, ok: false, error: error.message || String(error) });
+        this.writeFrame(session, { type: 'capability-response', id: frame.id, ok: false, error: error.message || String(error), errorCode: error.code || 'COMPONENT_HOST_INTERNAL', retryable: error.retryable === true });
       } finally {
         if (session.pending.get(String(frame.parentId || '')) === parent && parent.capabilityStartedAt === capabilityStartedAt) {
           parent.lastCapability = '';

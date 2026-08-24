@@ -7,7 +7,7 @@ const { createComponentRegistry, readComponentPackageManifest } = require('../el
 const { createComponentIntegrityManifest } = require('../electron/component-integrity.cjs');
 const { decideComponentStatusRefresh } = require('../electron/services/component-status-refresh-policy.cjs');
 const { PLUGIN_DEFINITIONS } = require('../electron/plugins/plugin-catalog.cjs');
-const { COMPONENT_RPC_METHODS } = require('../electron/component-rpc-contract.cjs');
+const { COMPONENT_RPC_METHODS } = require('../electron/compatibility/component-team-retouch-rpc-v1.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-components-test-'));
 const resourcesPath = path.join(sandbox, 'resources');
@@ -172,7 +172,7 @@ try {
   const teamRenderer = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'main.tsx'), 'utf8')
     + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'interaction-model.ts'), 'utf8');
   const teamSdk = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'sdk.ts'), 'utf8');
-  const componentRpcContract = fs.readFileSync(path.join(repositoryRoot, 'electron', 'component-rpc-contract.cjs'), 'utf8');
+  const componentRpcContract = fs.readFileSync(path.join(repositoryRoot, 'electron', 'compatibility', 'component-team-retouch-rpc-v1.cjs'), 'utf8');
   const componentPreload = fs.readFileSync(path.join(repositoryRoot, 'electron', 'component-preload.cjs'), 'utf8');
   const teamTemplate = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'component.template.json'), 'utf8'));
   for (const legacyUi of ['TeamRetouchManager.tsx', 'PersonIdentityManager.tsx', 'TeamRetouchSteps.tsx', 'TeamRetouchOutputProgress.tsx', 'useTeamOutputProgress.ts']) {
