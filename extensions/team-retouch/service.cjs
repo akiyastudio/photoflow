@@ -134,6 +134,10 @@ const ensureSchema = databasePath => {
       FOREIGN KEY(task_id) REFERENCES team_patch_tasks(id), FOREIGN KEY(stage_id) REFERENCES team_task_stages(id)
     );
     CREATE INDEX IF NOT EXISTS team_artifact_chain ON team_task_artifacts(task_id, created_at, is_deleted);
+    CREATE TABLE IF NOT EXISTS team_workflow_reconcile_pending (
+      task_id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL,
+      FOREIGN KEY(task_id) REFERENCES team_patch_tasks(id)
+    );
   `);
   const storedSchemaVersion = Number(db.prepare("SELECT value FROM meta WHERE key='schema_version'").get()?.value || 0);
   if (storedSchemaVersion < 4) {
@@ -161,7 +165,7 @@ const ensureSchema = databasePath => {
       }
     }
   }
-  db.prepare(`INSERT INTO meta(key,value) VALUES('schema_version','4') ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
+  db.prepare(`INSERT INTO meta(key,value) VALUES('schema_version','5') ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
   return db;
 };
 const fileSha256 = filePath => new Promise((resolve, reject) => {
@@ -711,7 +715,7 @@ const assertOwnedSubjects = async (parentId, projectId, assignments) => {
 
 const upsertAssignmentSql = `INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,identity_id,confidence,source,completed,updated_at)
   VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(photo_id,base_version_id,person_index) DO UPDATE SET
-  identity_id=excluded.identity_id,confidence=excluded.confidence,source=excluded.source,completed=excluded.completed,
+  identity_id=COALESCE(excluded.identity_id,team_person_assignments.identity_id),confidence=excluded.confidence,source=excluded.source,completed=excluded.completed,
   completion_kind=CASE WHEN excluded.completed=1 THEN team_person_assignments.completion_kind ELSE '' END,
   edited_patch_path=CASE WHEN excluded.completed=1 THEN team_person_assignments.edited_patch_path ELSE NULL END,
   return_missing=CASE WHEN excluded.completed=1 THEN team_person_assignments.return_missing ELSE 0 END,
@@ -1233,14 +1237,15 @@ const generateWorkflow = async (parentId, payload, context) => {
 };
 
 const workflowStatus = async (parentId, _payload, context) => {
+  const reconciliation = await retryPendingWorkflowReconciles(parentId, context).catch(() => ({ pendingCount: 0, recoveredCount: 0 }));
   const key = `${context.projectId}:${context.projectStatus}:${context.projectName}`;
   const job = workflowJobs.get(key) || null;
   if (!job) {
     const recovered = await callHost(parentId, 'tasks.report.v1', { action: 'latest', kind: 'workspace-team-workflow' }).catch(() => null);
-    return { success: true, job: recovered?.task ? { operationId: recovered.task.metadata?.operationId, state: recovered.task.state, phase: recovered.task.metadata?.phase, progress: recovered.task.progress, message: recovered.task.message, resumable: recovered.task.state === 'interrupted' } : null };
+    return { success: true, job: recovered?.task ? { operationId: recovered.task.metadata?.operationId, state: recovered.task.state, phase: recovered.task.metadata?.phase, progress: recovered.task.progress, message: recovered.task.message, resumable: recovered.task.state === 'interrupted' } : null, reconciliation };
   }
   const host = await reportTask(parentId, job.operationId, 'status').catch(() => null);
-  return { success: true, job: { ...job, task: host?.task || undefined } };
+  return { success: true, job: { ...job, task: host?.task || undefined }, reconciliation };
 };
 
 const cancelWorkflow = async (parentId, payload) => {
@@ -1409,6 +1414,37 @@ const reconcileWorkflowTaskChain = async (parentId, context, taskId, existingDb 
   return existingDb ? reconcile(existingDb) : withDomain(parentId, reconcile);
 };
 
+const storeReturnedAndReconcile = (parentId, sourcePath, payload, context) => withPhotoOperation(payload.photoId, async () => {
+  const registered = await storeReturnedPatch(parentId, sourcePath, payload, context);
+  try {
+    await reconcileWorkflowTaskChain(parentId, context, payload.taskId);
+    await withDomain(parentId, db => db.prepare('DELETE FROM team_workflow_reconcile_pending WHERE task_id=?').run(String(payload.taskId)));
+  } catch (error) {
+    const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+    const db = ensureSchema(storage.databasePath);
+    try { db.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET photo_id=excluded.photo_id,error=excluded.error,updated_at=excluded.updated_at`).run(String(payload.taskId), String(payload.photoId), error.message || String(error), Date.now()); }
+    finally { db.close(); }
+    await appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: payload.taskId, photoId: payload.photoId, error: error.message || String(error) }).catch(() => undefined);
+    return { ...registered, reconcilePending: true, warning: '返图已安全归档，但工作流程目录暂未更新；组件将在下次加载时自动重试，无需重复上传' };
+  }
+  return registered;
+});
+
+const retryPendingWorkflowReconciles = async (parentId, context) => {
+  const pending = await withDomain(parentId, db => db.prepare('SELECT task_id,photo_id FROM team_workflow_reconcile_pending ORDER BY updated_at').all());
+  let recovered = 0;
+  for (const item of pending) await withPhotoOperation(item.photo_id, async () => {
+    try {
+      await reconcileWorkflowTaskChain(parentId, context, item.task_id);
+      await withDomain(parentId, db => db.prepare('DELETE FROM team_workflow_reconcile_pending WHERE task_id=?').run(item.task_id));
+      recovered += 1;
+    } catch (error) {
+      await withDomain(parentId, db => db.prepare('UPDATE team_workflow_reconcile_pending SET error=?,updated_at=? WHERE task_id=?').run(error.message || String(error), Date.now(), item.task_id)).catch(() => undefined);
+    }
+  });
+  return { pendingCount: Math.max(0, pending.length - recovered), recoveredCount: recovered };
+};
+
 const returnBatch = async (parentId, payload, context, workflowMode) => {
   const existing = workflowMode ? await readReview(parentId) : null;
   if (existing?.session) throw new Error('还有一批返图等待确认，请先继续处理或放弃');
@@ -1427,15 +1463,15 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
     const high = (matched.matches || []).filter(item => item.confidence === 'high' && item.taskId);
     for (const [index, match] of high.entries()) {
       if (!stagedSources.has(path.resolve(match.path))) throw new Error('Matched return escaped its component staging grant');
-      const registered = await withPhotoOperation(match.photoId, () => storeReturnedPatch(parentId, match.path, { photoId: match.photoId, baseVersionId: match.baseVersionId, taskId: match.taskId, personIndex: match.personIndex, complete: workflowMode, matchConfidence: match.matchConfidence, editEvidence: match.editEvidence, returnWarnings: match.returnWarnings }, context));
-      await reconcileWorkflowTaskChain(parentId, context, match.taskId);
-      accepted.push({ ...match, path: undefined, patchPath: undefined, accepted: true });
+      const registered = await storeReturnedAndReconcile(parentId, match.path, { photoId: match.photoId, baseVersionId: match.baseVersionId, taskId: match.taskId, personIndex: match.personIndex, complete: workflowMode, matchConfidence: match.matchConfidence, editEvidence: match.editEvidence, returnWarnings: match.returnWarnings }, context);
+      accepted.push({ ...match, path: undefined, patchPath: undefined, accepted: true, reconcilePending: Boolean(registered.reconcilePending), warning: registered.warning });
       await reportTask(parentId, returnOperationId, 'report', { phase: 'importing', progress: 82 + 18 * (index + 1) / Math.max(1, high.length), message: `正在归档返图 ${index + 1}/${high.length}` }, 'patch.return-batch.progress').catch(() => undefined);
     }
     const acceptedById = new Map(accepted.map(item => [String(item.returnId), item]));
     let matches = (matched.matches || []).map(item => acceptedById.get(String(item.returnId)) || { ...item, path: undefined, patchPath: undefined, accepted: false });
     matches = matches.map(publicMatch);
-    const result = { success: true, matches, merges: [], returnedCount: returned.length, candidateCount: candidates.length, acceptedCount: accepted.length, reviewCount: matches.filter(item => !item.accepted).length, missingTaskCount: Math.max(0, candidates.length - accepted.length), mergedCount: 0 };
+    const reconcilePending = accepted.some(item => item.reconcilePending);
+    const result = { success: true, matches, merges: [], returnedCount: returned.length, candidateCount: candidates.length, acceptedCount: accepted.length, reviewCount: matches.filter(item => !item.accepted).length, missingTaskCount: Math.max(0, candidates.length - accepted.length), mergedCount: 0, reconcilePending, warning: reconcilePending ? '部分返图已安全归档，工作流程目录将在下次加载时自动修复，无需重复上传' : undefined };
     await reportTask(parentId, returnOperationId, 'complete', { state: 'completed', phase: 'complete', progress: 100, message: '返图处理完成' }, 'patch.return-batch.progress');
     if (workflowMode && result.reviewCount) {
       const target = await reviewTarget(parentId);
@@ -1490,18 +1526,20 @@ const returnConfirm = async (parentId, payload, context) => {
   const candidate = readyWorkflowCandidates(await workspaceSnapshot(parentId, context), [payload])[0];
   if (!candidate || String(candidate.taskId) !== String(payload.taskId)) throw new Error('候选任务当前不可确认');
   if (!match.path || !isInside(target.directory, match.path)) throw new Error('Reviewed return escaped its component review grant');
-  const registered = await withPhotoOperation(candidate.photoId, () => storeReturnedPatch(parentId, match.path, { photoId: candidate.photoId, baseVersionId: candidate.baseVersionId, taskId: candidate.taskId, personIndex: candidate.personIndex, complete: true }, context));
-  await reconcileWorkflowTaskChain(parentId, context, candidate.taskId);
+  const registered = await storeReturnedAndReconcile(parentId, match.path, { photoId: candidate.photoId, baseVersionId: candidate.baseVersionId, taskId: candidate.taskId, personIndex: candidate.personIndex, complete: true }, context);
   match.accepted = true; match.confidence = 'manual'; match.photoId = candidate.photoId; match.baseVersionId = candidate.baseVersionId; match.taskId = candidate.taskId; match.personIndex = candidate.personIndex;
   target.session.result.reviewCount = target.session.result.matches.filter(item => !item.accepted).length;
   target.session.result.acceptedCount = target.session.result.matches.filter(item => item.accepted).length;
   if (target.session.result.reviewCount) await writeJsonAtomic(target.sessionPath, target.session);
   else await fs.promises.rm(target.directory, { recursive: true, force: true });
-  return { success: true, warning: undefined };
+  return { success: true, warning: registered.warning, reconcilePending: Boolean(registered.reconcilePending) };
 };
 
 const handlers = {
-  'team.project.get.v1': async (parentId, _payload, context) => publicWorkspace(await workspaceSnapshot(parentId, context)),
+  'team.project.get.v1': async (parentId, _payload, context) => {
+    await retryPendingWorkflowReconciles(parentId, context).catch(() => undefined);
+    return publicWorkspace(await workspaceSnapshot(parentId, context));
+  },
   'team.project.register.v1': async (parentId, payload, context) => {
     const relativePaths = uniqueText(payload.relativePaths);
     if (relativePaths.length > MAX_ITEMS) throw new Error(`Too many project media items: ${relativePaths.length}`);

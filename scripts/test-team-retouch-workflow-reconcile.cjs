@@ -35,6 +35,18 @@ const child = spawn(process.execPath, [path.join(__dirname, '..', 'extensions', 
 const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
 const pending = new Map();
 let nextId = 1;
+let holdSecondWorkflowScope = false;
+let heldWorkflowFrame = null;
+let heldWorkflowResolve = null;
+let workflowScopeCount = 0;
+let breakManifestOnSecondArtifact = false;
+let artifactScopeCount = 0;
+let manifestDirectoryBackup = '';
+const waitForHeldWorkflow = () => new Promise(resolve => { heldWorkflowResolve = resolve; });
+const releaseHeldWorkflow = () => {
+  child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: heldWorkflowFrame.id, ok: true, result: { outputDirectory, manifestPath, reviewDirectory } })}\n`);
+  heldWorkflowFrame = null;
+};
 const invoke = (method, payload = {}) => new Promise((resolve, reject) => {
   const id = String(nextId++);
   pending.set(id, { resolve, reject });
@@ -54,9 +66,22 @@ const ready = new Promise((resolve, reject) => {
         else if (frame.method === 'tasks.report.v1') result = { cancelled: false };
         else if (frame.method === 'dialogs.open.v1') result = { cancelled: false, filePath: returnedSource };
         else if (frame.method === 'project.output.authorize.v1' && frame.payload.operation === 'artifacts') {
+          artifactScopeCount += 1;
+          if (breakManifestOnSecondArtifact && artifactScopeCount === 2) {
+            const manifestDirectory = path.dirname(manifestPath);
+            manifestDirectoryBackup = `${manifestDirectory}.backup`;
+            fs.renameSync(manifestDirectory, manifestDirectoryBackup);
+            fs.writeFileSync(manifestDirectory, 'block manifest writes');
+          }
           const itemRoot = path.join(dataRoot, 'photo', 'base');
           result = { dataDirectory: itemRoot, analysisDirectory: path.join(itemRoot, 'analysis'), uploadDirectory: path.join(itemRoot, 'uploads'), mergeDirectory: path.join(itemRoot, 'merge'), deliveryDirectory, deliveryPrefix: 'photo' };
         } else if (frame.method === 'project.output.authorize.v1' && frame.payload.action === 'workflow') {
+          workflowScopeCount += 1;
+          if (holdSecondWorkflowScope && workflowScopeCount === 2) {
+            heldWorkflowFrame = frame;
+            heldWorkflowResolve?.();
+            return;
+          }
           result = { outputDirectory, manifestPath, reviewDirectory };
         } else if (frame.method === 'project.output.authorize.v1' && frame.payload.action === 'cleanup-workflow-backup') result = { success: true };
         else throw new Error(`unexpected capability ${frame.method} ${JSON.stringify(frame.payload)}`);
@@ -90,6 +115,21 @@ const assertInactive = (taskId, personIndex) => {
   const { item, filePath } = itemPath(taskId, personIndex);
   assert.equal(item.available, false);
   assert.equal(fs.existsSync(filePath), false);
+};
+const seedReview = (id, content) => {
+  fs.rmSync(reviewDirectory, { recursive: true, force: true });
+  fs.mkdirSync(reviewDirectory, { recursive: true });
+  const reviewPath = path.join(reviewDirectory, `${id}.png`);
+  fs.writeFileSync(reviewPath, content);
+  fs.writeFileSync(path.join(reviewDirectory, 'session.json'), JSON.stringify({
+    version: 2, id, status: 'active', result: { matches: [{ returnId: id, path: reviewPath, accepted: false }] },
+  }));
+};
+const restoreManifestDirectory = () => {
+  if (!manifestDirectoryBackup) return;
+  fs.rmSync(path.dirname(manifestPath), { force: true });
+  fs.renameSync(manifestDirectoryBackup, path.dirname(manifestPath));
+  manifestDirectoryBackup = '';
 };
 
 (async () => {
@@ -155,6 +195,45 @@ const assertInactive = (taskId, personIndex) => {
     assertInactive('task-1', 2);
     assertActive('task-2', 3, 'ORIGINAL-TASK-TWO');
     assertInactive('task-2', 4);
+
+    seedReview('concurrent-return', 'CONCURRENT-RETURN');
+    holdSecondWorkflowScope = true;
+    workflowScopeCount = 0;
+    const held = waitForHeldWorkflow();
+    const confirmation = invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'concurrent-return', returnId: 'concurrent-return', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
+    await held;
+    let undoResolved = false;
+    const concurrentUndo = invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false }).then(value => { undoResolved = true; return value; });
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal(undoResolved, false, 'same-photo completion cannot enter between return archival and reconciliation');
+    releaseHeldWorkflow();
+    assert.equal((await confirmation).success, true);
+    await concurrentUndo;
+    holdSecondWorkflowScope = false;
+    assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
+    assertInactive('task-1', 2);
+
+    seedReview('recoverable-return', 'RECOVERABLE-RETURN');
+    breakManifestOnSecondArtifact = true;
+    artifactScopeCount = 0;
+    const recoverable = await invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'recoverable-return', returnId: 'recoverable-return', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
+    assert.equal(recoverable.success, true, 'a committed return must not be reported as an upload failure');
+    assert.equal(recoverable.reconcilePending, true);
+    assert.match(recoverable.warning, /无需重复上传/);
+    const pendingDb = new DatabaseSync(databasePath);
+    const archived = pendingDb.prepare(`SELECT a.completed,a.artifact_id,r.artifact_path FROM team_person_assignments a JOIN team_task_artifacts r ON r.id=a.artifact_id WHERE a.photo_id='photo' AND a.base_version_id='base' AND a.person_index=1`).get();
+    assert.equal(archived.completed, 1);
+    assert.equal(fs.readFileSync(archived.artifact_path, 'utf8'), 'RECOVERABLE-RETURN');
+    assert.equal(pendingDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 1);
+    pendingDb.close();
+    restoreManifestDirectory();
+    breakManifestOnSecondArtifact = false;
+    await invoke('team.project.get.v1');
+    const recoveredDb = new DatabaseSync(databasePath);
+    assert.equal(recoveredDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 0, 'project reload clears a successfully reconciled pending task');
+    recoveredDb.close();
+    assertActive('task-1', 2, 'RECOVERABLE-RETURN');
+    assertInactive('task-1', 1);
     console.log('Team-retouch workflow task-chain reconciliation tests passed');
   } finally {
     lines.close();
