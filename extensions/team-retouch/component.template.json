@@ -74,10 +74,10 @@
       ],
       "runtimeActions": [],
       "lifecycleActions": {
-        "preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "d40533333233f17d587a93552952ece0cf3909c9a307e9285c5dcbd9c27a6a34" },
-        "install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "d40533333233f17d587a93552952ece0cf3909c9a307e9285c5dcbd9c27a6a34" },
-        "repair": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "d40533333233f17d587a93552952ece0cf3909c9a307e9285c5dcbd9c27a6a34" },
-        "uninstall": { "entry": "advanced-installer/uninstall-team-retouch-advanced.ps1", "sha256": "582cf986b2e16de10ee88cc4b7e828793115fe364ab7e618076641570c2ca02c" }
+        "preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "04080cd879712748e7f26484fa895b1c41fc1c247e2bc93480c21a60d465a866" },
+        "install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "04080cd879712748e7f26484fa895b1c41fc1c247e2bc93480c21a60d465a866" },
+        "repair": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "04080cd879712748e7f26484fa895b1c41fc1c247e2bc93480c21a60d465a866" },
+        "uninstall": { "entry": "advanced-installer/uninstall-team-retouch-advanced.ps1", "sha256": "1a0e2cc8688ca6f42f4bd61d66fe046d3eb193b9c5d7ed04148fbd6509d476da" }
       }
     }
   }

@@ -14,6 +14,8 @@ const settings = fs.readFileSync(path.join(root, 'src', 'features', 'settings', 
 const versionsIpc = fs.readFileSync(path.join(root, 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
 const systemIpc = fs.readFileSync(path.join(root, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
 const sha256 = file => require('crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const lifecycleScripts = ['setup-team-retouch-advanced.ps1', 'uninstall-team-retouch-advanced.ps1'];
+for (const name of lifecycleScripts) assert.equal(fs.readFileSync(path.join(root, 'scripts', name)).includes(Buffer.from('\r\n')), false, `${name} must remain LF-only so lifecycle SHA-256 is stable across autocrlf checkouts`);
 
 assert(fs.existsSync(path.join(rendererOutput, 'index.html')), 'independent team-retouch renderer must be built before this test');
 const outputFiles = fs.readdirSync(path.join(rendererOutput, 'assets'));
