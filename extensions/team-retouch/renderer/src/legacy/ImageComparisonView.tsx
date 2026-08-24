@@ -21,6 +21,7 @@ type ImageComparisonViewProps = {
   className?: string;
   stageClassName?: string;
   unavailable?: boolean;
+  active?: boolean;
 };
 
 const MODES: Array<[ImageComparisonMode, string]> = [
@@ -33,7 +34,7 @@ const MODES: Array<[ImageComparisonMode, string]> = [
 
 const clamp = (value: number, minimum: number, maximum: number) => Math.max(minimum, Math.min(maximum, value));
 
-export const ImageComparisonView = ({ left, right, mode, onModeChange, swapped = false, onSwappedChange, comparisonKey, leading, trailing, className = '', stageClassName = '', unavailable = false }: ImageComparisonViewProps) => {
+export const ImageComparisonView = ({ left, right, mode, onModeChange, swapped = false, onSwappedChange, comparisonKey, leading, trailing, className = '', stageClassName = '', unavailable = false, active = true }: ImageComparisonViewProps) => {
   const [internalSwapped, setInternalSwapped] = useState(false);
   const [split, setSplit] = useState(50);
   const [opacity, setOpacity] = useState(50);
@@ -62,10 +63,10 @@ export const ImageComparisonView = ({ left, right, mode, onModeChange, swapped =
 
   useEffect(() => {
     setBlinkRight(false);
-    if (mode !== 'blink' || unavailable) return;
+    if (mode !== 'blink' || unavailable || !active) return;
     const timer = window.setInterval(() => setBlinkRight(current => !current), 700);
     return () => window.clearInterval(timer);
-  }, [mode, unavailable, comparisonKey]);
+  }, [mode, unavailable, active, comparisonKey]);
 
   const updateSplit = (clientX: number) => {
     const rect = stageRef.current?.getBoundingClientRect();
@@ -132,4 +133,3 @@ export const ImageComparisonView = ({ left, right, mode, onModeChange, swapped =
     </div>
   </section>;
 };
-

@@ -90,8 +90,13 @@ const safeWorkspace = stripWorkspacePaths({ photos: [{ photoId: 'p1', sourcePath
 assert(!JSON.stringify(safeWorkspace).includes('C:/'), 'component workspace responses must not disclose host file paths');
 const safeReview = stripReturnPaths({ path: 'C:/return.jpg', matches: [{ returnId: 'r1', path: 'C:/return.jpg', mediaPath: 'media-token:secret', alternatives: [{ taskId: 't1', patchPath: 'C:/patch.png' }] }] });
 assert(!JSON.stringify(safeReview).includes('C:/') && !JSON.stringify(safeReview).includes('media-token:'), 'review responses must expose only IDs and scores');
-const rendererSource = fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'renderer', 'src', 'main.tsx'), 'utf8');
-assert(rendererSource.includes("rpc<Json>('team.identity.similarities.v1')") && rendererSource.includes('data-crop-handle') && rendererSource.includes("'difference', '差异'") && rendererSource.includes("'blink', '闪烁'"), 'independent renderer must contain ranked identity, 8-handle crop, and five-mode comparison behavior');
+const rendererSource = fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy-main.tsx'), 'utf8')
+  + fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'PersonIdentityManager.tsx'), 'utf8')
+  + fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'TeamRetouchManager.tsx'), 'utf8')
+  + fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'ImageComparisonView.tsx'), 'utf8')
+  + fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'legacy-api.ts'), 'utf8');
+for (const handle of ["'n'", "'ne'", "'e'", "'se'", "'s'", "'sw'", "'w'", "'nw'"]) assert(rendererSource.includes(`handle: ${handle}`), `active crop editor missing ${handle} resize handle`);
+assert(rendererSource.includes("ok('team.identity.similarities.v1')") && rendererSource.includes('data-crop-handle') && rendererSource.includes('aria-label={handle.label}') && rendererSource.includes("'difference', '差异'") && rendererSource.includes("'blink', '闪烁'"), 'active renderer must contain ranked identity, accessible 8-handle crop, and five-mode comparison behavior');
 assert(!rendererSource.includes('returnedPath:') && !rendererSource.includes('patchPath: subject.task') && !rendererSource.includes('window.electronAPI'), 'renderer must never submit paths or access the application preload');
 const serviceSource = fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'service.cjs'), 'utf8');
 assert(serviceSource.includes('if (host?.cancelled) job.cancelled = true') && serviceSource.includes('.photoflow-workflow-checkpoint.json'), 'task-center cancellation and checkpoint recovery must be enforced by the component service');

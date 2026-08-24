@@ -8,10 +8,14 @@ const readline = require('node:readline');
 const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
-const componentRenderer = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'main.tsx'), 'utf8');
+const componentRenderer = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy-main.tsx'), 'utf8')
+  + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'PersonIdentityManager.tsx'), 'utf8')
+  + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'TeamRetouchOutputProgress.tsx'), 'utf8')
+  + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'useTeamOutputProgress.ts'), 'utf8')
+  + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'legacy-api.ts'), 'utf8');
 const interactionModel = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'interaction-model.ts'), 'utf8');
 assert(interactionModel.includes("folder.mediaKind === 'image'") && interactionModel.includes('!folder.folderMissing') && interactionModel.includes("folder.nodeRole === 'progress'"), 'component merge targets must be existing image progress nodes');
-assert(componentRenderer.includes("rpc<Json>('team.progress.list.v1')") && componentRenderer.includes("rpc<Json>('team.progress.create.v1'"), 'the renderer must call only its component-owned progress RPC boundary');
+assert(componentRenderer.includes('legacyApi.getProgressFolders') && componentRenderer.includes('legacyApi.registerProgressWithGraph') && componentRenderer.includes("ok('team.progress.list.v1')") && componentRenderer.includes("ok('team.progress.create.v1'"), 'the active renderer must call only its component-owned progress RPC boundary through the compatibility adapter');
 assert(!componentRenderer.includes('project.progress.') && !componentRenderer.includes('createVersionGraphEdge'), 'the renderer must not call host progress capabilities or assemble graph edges directly');
 
 const verifyServiceProgressBoundary = () => new Promise((resolve, reject) => {

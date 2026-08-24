@@ -66,7 +66,10 @@ assert(!entry.includes('整个项目'), 'team history loading copy must not impl
 assert(entry.includes('onThemeChange') && entry.includes('onContextChange') && entry.includes("classList.toggle('dark'"), 'renderer applies initial and runtime host theme/context changes');
 
 const style = fs.readFileSync(new URL('../extensions/team-retouch/renderer/src/legacy-style.css', import.meta.url), 'utf8');
-for (const selector of ['html.dark .bg-white', 'html.dark .bg-slate-50', 'html.dark .border-slate-200', 'html.dark .text-slate-900', 'html.dark input', 'html.dark [role="dialog"]', 'html.dark .bg-emerald-50', 'html.dark .bg-amber-50', 'html.dark .bg-red-50']) assert(style.includes(selector), `legacy dark theme is missing ${selector}`);
+const sharedUi = fs.readFileSync(new URL('../component-sdk/ui.css', import.meta.url), 'utf8');
+for (const tokenUse of ['var(--pf-canvas)', 'var(--pf-surface)', 'var(--pf-border-subtle)', 'var(--pf-text)', 'var(--pf-primary)']) assert(style.includes(tokenUse), `legacy renderer is missing shared token use ${tokenUse}`);
+assert(sharedUi.includes('html.dark') && sharedUi.includes('--pf-canvas: #030407') && !style.includes('@media (prefers-color-scheme: dark)'), 'host-resolved dark theme must come from the shared contract, never OS preference overrides');
+assert(entry.includes("document.body.classList.add('legacy-root', 'pf-canvas')"), 'settings, confirmation, review, and preview portals must inherit the active renderer theme scope');
 const app = fs.readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const systemIpc = fs.readFileSync(new URL('../electron/modules/system-ipc.cjs', import.meta.url), 'utf8');
 assert(app.includes("config.theme === 'dark'") && app.includes("setTheme?.(isDark ? 'dark' : 'light')"), 'host must publish the app-resolved preference instead of guessing nativeTheme in the component');

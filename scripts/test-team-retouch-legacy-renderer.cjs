@@ -46,19 +46,19 @@ for (const topic of ['team.patch.detect.progress.v1', 'team.patch.detect-batch.p
 }
 const workflowCssMarker = '/* Weeks stack vertically. Each person gets one compact horizontal task lane. */';
 const migratedWorkflowCss = legacyStyle.slice(legacyStyle.indexOf(workflowCssMarker));
-for (const rule of ['grid-template-columns: minmax(175px, 205px) minmax(0, 1fr)', 'width: 220px', 'height: 150px', 'overflow-x: auto', '@media (max-width: 900px)', 'html.dark .workflow-task-card']) assert(migratedWorkflowCss.includes(rule), `workflow CSS key rule missing: ${rule}`);
+for (const rule of ['grid-template-columns: minmax(175px, 205px) minmax(0, 1fr)', 'width: 220px', 'height: 150px', 'overflow-x: auto', '@media (max-width: 900px)', 'var(--pf-surface)']) assert(migratedWorkflowCss.includes(rule), `workflow CSS key rule missing: ${rule}`);
 for (const marker of [
-  '.workflow-board-view{display:flex;min-height:100%;flex-direction:column',
+  '.workflow-board-view{display:flex;min-width:0;min-height:100%;flex-direction:column',
   'main:has(>div>.workflow-board-view){overflow-x:hidden;overflow-y:auto',
   'height:auto;min-height:100%;max-width:none',
   '.workflow-person-lane{display:grid;min-width:0;grid-template-columns:minmax(175px,205px)minmax(0,1fr)',
-  '.workflow-task-strip{display:flex;min-width:0;gap:.7rem;overflow-x:auto;overflow-y:hidden',
+  '.workflow-task-strip{display:flex;min-width:0;gap:var(--pf-space-3);overflow-x:auto;overflow-y:hidden',
   '.workflow-task-card{display:grid;width:220px;flex:none;grid-template-columns:74pxminmax(0,1fr)',
   '.workflow-task-thumbnail{width:100%;height:150px;overflow:hidden',
   '@media(max-width:900px)',
 ]) assert(compactStyle.includes(marker), `sandbox renderer lost pre-component workflow layout rule: ${marker}`);
-assert(compactStyle.includes('html,body,#app{height:100%;margin:0}') && compactStyle.includes('.legacy-root.top-10{top:0}'), 'the isolated #app viewport must fill its WebContentsView and mechanically remove the old app-titlebar offset');
-for (const marker of ['.team-stage-nav', '.team-stage-button:focus-visible', '@media(max-width:760px)', 'grid-template-columns:repeat(4,minmax(2.5rem,1fr))', '.team-photo-layout{grid-template-columns:minmax(0,1fr)']) assert(compactStyle.includes(marker), `four-stage narrow layout missing: ${marker}`);
+assert(compactStyle.includes('html,body,#app{width:100%;height:100%;margin:0;overflow:hidden') && compactStyle.includes('.legacy-root.top-10{top:0;}'), 'the isolated #app viewport must fill its WebContentsView and mechanically remove the old app-titlebar offset');
+for (const marker of ['.team-stage-nav', '.team-stage-button[aria-current="step"]', '@media(max-width:760px)', 'grid-template-columns:repeat(4,minmax(2.5rem,1fr))', '.team-photo-layout{grid-template-columns:minmax(0,1fr)']) assert(compactStyle.includes(marker), `four-stage narrow layout missing: ${marker}`);
 const steps = read('extensions/team-retouch/renderer/src/legacy/TeamRetouchSteps.tsx');
 for (const stage of ["'detect'", "'assignment'", "'relay'", "'review'"]) assert(steps.includes(stage) || read('extensions/team-retouch/renderer/src/interaction-model.ts').includes(stage), `stage navigation missing ${stage}`);
 assert(entry.includes("step !== 'detect'") && !entry.includes("step === 'workflow'"), 'legacy-main must be the single four-stage entry without the old split route');

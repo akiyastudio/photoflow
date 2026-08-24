@@ -169,7 +169,14 @@ try {
 
   const settingsFeature = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
   const projectPreload = fs.readFileSync(path.join(repositoryRoot, 'electron', 'preload.cjs'), 'utf8');
-  const teamRenderer = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'main.tsx'), 'utf8')
+  const teamRenderer = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy-main.tsx'), 'utf8')
+    + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'PersonIdentityManager.tsx'), 'utf8')
+    + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'TeamRetouchManager.tsx'), 'utf8')
+    + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'legacy-api.ts'), 'utf8')
+    + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'ImageComparisonView.tsx'), 'utf8')
+    + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'legacy-layer.ts'), 'utf8')
+    + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'TeamRetouchOutputProgress.tsx'), 'utf8')
+    + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'useTeamOutputProgress.ts'), 'utf8')
     + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'interaction-model.ts'), 'utf8');
   const teamSdk = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'sdk.ts'), 'utf8');
   const componentRpcContract = fs.readFileSync(path.join(repositoryRoot, 'electron', 'compatibility', 'component-team-retouch-rpc-v1.cjs'), 'utf8');
@@ -181,7 +188,11 @@ try {
   }
   assert(!settingsFeature.includes("activeSection === 'team-retouch'") && !settingsFeature.includes('TeamRetouchEngineSettings'), 'application settings must only retain generic component management');
   assert(!projectPreload.includes('workspace-team-') && !projectPreload.includes('TeamRetouch'), 'the application preload must not expose team-retouch APIs or events');
-  assert(teamRenderer.includes("export type Tab = 'detect' | 'people' | 'workflow' | 'returns' | 'merge' | 'settings'") && teamRenderer.includes('workflowGroups') && teamRenderer.includes('team.workflow.return-batch.v1'), 'the React component renderer must own the complete collaboration UI and workflow orchestration');
+  assert(teamRenderer.includes("export type WorkflowStage = 'detect' | 'assignment' | 'relay' | 'review'")
+    && ["id: 'detect'", "id: 'assignment'", "id: 'relay'", "id: 'review'"].every(stage => teamRenderer.includes(stage))
+    && teamRenderer.includes('workflowGroups') && teamRenderer.includes('generateTeamWorkflow') && teamRenderer.includes("ok('team.workflow.generate.v1'")
+    && teamRenderer.includes('returnTeamWorkflowBatch') && teamRenderer.includes("ok('team.workflow.return-batch.v1'") && teamRenderer.includes('confirmTeamWorkflowReturn')
+    && teamRenderer.includes('mergeTeamPatches') && teamRenderer.includes("ok('team.patch.merge.v1'") && teamRenderer.includes('TeamOutputProgressPicker'), 'the active React component renderer must own detect/assignment/relay/review plus workflow, return, and merge orchestration');
   assert(teamSdk.includes('allowedMethods') && teamSdk.includes('window.photoFlowComponent.rpc') && !teamSdk.includes('electronAPI') && !teamSdk.includes('ipcRenderer'), 'the component renderer must depend only on its restricted SDK');
   assert(componentRpcContract.includes('sanitizePayload') && componentRpcContract.includes('fields:') && componentRpcContract.includes('manager.registerRpcMethod') && componentRpcContract.includes("'team-retouch'"), 'component RPC methods must have payload field allowlists and a component owner');
   assert(componentPreload.includes("ipcRenderer.on('component-sdk:event'")
@@ -279,10 +290,10 @@ try {
   assert(projectWorkspace.includes('browserContext.rootFilterLabel') && projectWorkspace.includes('当前文件夹'), 'the shared filter menu must use project and inspiration-specific scope labels');
   assert(projectWorkspace.includes("projectWorkspaceClient.listProjectFiles(workspacePath, project.status, project.name, '', FILE_LIST_PAGE_SIZE") && projectWorkspace.includes('projectWorkspaceClient.cancelListProjectFiles'), 'project-root filtering must use the typed, cancellable paginated file-list API');
   assert(appSource.includes('photoflow:components-cache') && appSource.includes('componentHostActions={componentHostActions}'), 'installed component state must drive the declarative component host action list');
-  for (const requiredInteraction of ['检测全部', '逐人物身份确认', '确认人物组', '工作图上传', '拖拽排期', '生成工作流', '取消工作流', '导出人物任务', '选择返图文件', '逐张对比确认', '忽略返图', '选择合并目标进度', '合并到目标进度', '组件设置', '安装 / 修复', '卸载']) {
-    assert(teamRenderer.includes(requiredInteraction), `the independent React renderer must retain ${requiredInteraction}`);
+  for (const requiredInteraction of ['重新识别全部图片', '点击人物框或人物行确认身份', '应用到整组', '上传返图', '拖拽开工顺序', '确认分配并生成流程', '停止生成', '打开任务文件夹', '批量导入返图', '同时核对匹配度与修改有效性', '不是任务返图', '合成保存到', '审核通过并合并', '团片协作设置', '安装 / 修复', '卸载']) {
+    assert(teamRenderer.includes(requiredInteraction), `the active React renderer must retain ${requiredInteraction}`);
   }
-  assert(teamRenderer.includes('IntersectionObserver') && teamRenderer.includes('onDeactivate') && teamRenderer.includes("event.key === 'Escape'"), 'preview loading, deactivation, and Escape handling must remain component-owned');
+  assert(teamRenderer.includes('IntersectionObserver') && teamRenderer.includes('componentActive') && teamRenderer.includes('if (!componentActive)') && teamRenderer.includes('active={componentActive}') && teamRenderer.includes('useEscapeLayer') && teamRenderer.includes("event.key === 'Escape'") && teamRenderer.includes('window.clearInterval(timer)'), 'preview authorization, blink cleanup, activation gating, and layered Escape handling must remain component-owned');
   const versionsIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
   const teamService = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'service.cjs'), 'utf8');
   assert(teamService.includes('workflowAvailableSubjectKeys') && teamService.includes('`${item.baseVersionId}:${Number(item.personIndex)}`'), 'the component backend must expose stable availability keys for generated workflow subjects');
@@ -351,7 +362,7 @@ try {
   assert(!systemIpc.includes('teamRetouchRoot') && legacyComponentMetadata.includes('advancedPackagePattern'), 'legacy advanced-package discovery must stay behind compatibility metadata instead of a core component directory constant');
   const componentLifecycleService = fs.readFileSync(path.join(repositoryRoot, 'electron', 'services', 'component-lifecycle-service.cjs'), 'utf8');
   assert(componentLifecycleService.includes('const advancedInstallRoot') && componentLifecycleService.includes('PHOTOFLOW_COMPONENT_DATA_ROOT') && componentLifecycleService.includes("'advanced', 'wsl', 'PhotoFlowNative'") && componentLifecycleService.includes("'PhotoFlow', 'components', component.id") && !systemIpc.includes("path.join(teamRetouchRoot(), 'identity-models')"), 'only generic component lifecycle code may derive and pass the controlled component data root');
-  assert(teamRenderer.includes('人物身份') && teamRenderer.includes('自动生成候选') && !settingsFeature.includes("activeSection === 'team-retouch'"), 'cross-photo identity controls must be owned by the component renderer');
+  assert(teamRenderer.includes('人物身份') && teamRenderer.includes('自动标记候选') && teamRenderer.includes('team.identity.confirm-group.v1') && !settingsFeature.includes("activeSection === 'team-retouch'"), 'cross-photo identity controls must be owned by the active component renderer');
   assert(!settingsFeature.includes('实验人物识别模型 · 用户自备'), 'settings must not require end users to compile identity models');
 
   assert(componentBuilder.includes("'.cache', 'model-lab', 'adaface', 'adaface_ir18_webface4m.onnx") && componentBuilder.includes("'.cache', 'model-lab', 'osnet', 'osnet_x1_0_msmt17.onnx"), 'team-retouch component must contain both enhanced identity ONNX models');

@@ -1,3 +1,5 @@
+@import '../component-sdk/ui.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -396,39 +398,38 @@ html.dark .workflow-task-card { border-color: #273244; background: #090c12; }
 .sort-menu .project-menu-item { display:flex; align-items:center; gap:.5rem; }
 .project-context-menu .project-menu-danger { color: #dc2626; }
 .project-context-menu .project-menu-danger:hover { background: #fef2f2; color: #b91c1c; }
-.form-label { display: block; margin-top: 1rem; margin-bottom: .4rem; font-size: .75rem; font-weight: 700; color: #64748b; }
-.form-input { width: 100%; border: 1px solid #cbd5e1; border-radius: .5rem; padding: .55rem .7rem; color: #1e293b; background: #fff; outline: none; }
-.form-input:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgb(59 130 246 / .15); }
+.form-label { display: block; margin-top: 1rem; margin-bottom: .4rem; font-size: .75rem; font-weight: 700; color: var(--pf-muted); }
+.form-input { width: 100%; border: 1px solid var(--pf-border); border-radius: var(--pf-radius-sm); padding: .55rem .7rem; color: var(--pf-text); background: var(--pf-surface); outline: none; }
+.form-input:focus { border-color: var(--pf-focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--pf-focus) 15%, transparent); }
 .dialog-primary, .dialog-secondary { border-radius: .5rem; padding: .55rem .9rem; font-size: .875rem; font-weight: 700; transition: background .15s, color .15s; }
-.dialog-primary { background: #2563eb; color: #fff; }
-.dialog-primary:hover { background: #1d4ed8; }
+.dialog-primary { background: var(--pf-primary); color: #fff; }
+.dialog-primary:hover { background: var(--pf-primary-hover); }
 .dialog-primary:disabled { cursor: not-allowed; opacity: .45; }
-.dialog-secondary { border: 1px solid #cbd5e1; color: #475569; background: #fff; }
-.dialog-secondary:hover { background: #f8fafc; }
+.dialog-secondary { border: 1px solid var(--pf-border); color: var(--pf-text); background: var(--pf-surface); }
+.dialog-secondary:hover { background: var(--pf-subtle); }
 .dialog-secondary:disabled,
-.dialog-secondary:disabled:hover { cursor: not-allowed; border-color: #cbd5e1; background: #f1f5f9; color: #94a3b8; opacity: .8; }
+.dialog-secondary:disabled:hover { cursor: not-allowed; border-color: var(--pf-border); background: var(--pf-subtle); color: var(--pf-muted); opacity: .8; }
 
 /* The application uses Tailwind utility classes, while theme is applied to <html>. */
 html.dark { color-scheme: dark; }
-html.dark body, html.dark #root { background: #030407; color: #e5e7eb; }
-html.dark .bg-white { background-color: #090c12; }
-html.dark .bg-slate-50 { background-color: #030407; }
-html.dark .bg-slate-100, html.dark .bg-slate-200 { background-color: #111827; }
-html.dark .bg-blue-50 { background-color: #071a3d; }
+html.dark body, html.dark #root { background: var(--pf-canvas); color: var(--pf-text); }
+html.dark .bg-white { background-color: var(--pf-surface); }
+html.dark .bg-slate-50 { background-color: var(--pf-canvas); }
+html.dark .bg-slate-100, html.dark .bg-slate-200 { background-color: var(--pf-subtle); }
+html.dark .bg-blue-50 { background-color: var(--pf-primary-soft); }
 html.dark .bg-violet-50 { background-color: #11132a; }
-html.dark .border-slate-100, html.dark .border-slate-200, html.dark .border-slate-300 { border-color: #1f2937; }
-html.dark .border-blue-100, html.dark .border-blue-200 { border-color: #1d4ed8; }
+html.dark .border-slate-100, html.dark .border-slate-200, html.dark .border-slate-300 { border-color: var(--pf-border-subtle); }
+html.dark .border-blue-100, html.dark .border-blue-200 { border-color: var(--pf-primary); }
 html.dark .border-violet-100 { border-color: #312e81; }
-html.dark .text-slate-900, html.dark .text-slate-800, html.dark .text-slate-700 { color: #e2e8f0; }
-html.dark .text-slate-600, html.dark .text-slate-500 { color: #9ca3af; }
-html.dark .text-slate-400 { color: #d1d5db; }
+html.dark .text-slate-900, html.dark .text-slate-800, html.dark .text-slate-700 { color: var(--pf-text); }
+html.dark .text-slate-600, html.dark .text-slate-500, html.dark .text-slate-400 { color: var(--pf-muted); }
 html.dark .text-violet-700, html.dark .text-violet-800 { color: #c4b5fd; }
-html.dark .hover\:bg-slate-50:hover, html.dark .hover\:bg-slate-100:hover { background-color: #111827; }
-html.dark .hover\:text-slate-800:hover, html.dark .hover\:text-slate-900:hover { color: #f8fafc; }
+html.dark .hover\:bg-slate-50:hover, html.dark .hover\:bg-slate-100:hover { background-color: var(--pf-subtle); }
+html.dark .hover\:text-slate-800:hover, html.dark .hover\:text-slate-900:hover { color: var(--pf-text-strong); }
 html.dark .hover\:bg-blue-50:hover { background-color: #1e3a8a; }
-html.dark input, html.dark select, html.dark textarea { background-color: #030407 !important; color: #e5e7eb !important; border-color: #374151 !important; }
-html.dark .project-action-button, html.dark .dialog-secondary, html.dark .form-input { background: #090c12; border-color: #374151; color: #bfdbfe; }
-html.dark .project-action-button:hover, html.dark .dialog-secondary:hover, html.dark .project-menu-item:hover { background: #111827; }
+html.dark input, html.dark select, html.dark textarea { background-color: var(--pf-canvas) !important; color: var(--pf-text) !important; border-color: var(--pf-border) !important; }
+html.dark .project-action-button, html.dark .dialog-secondary, html.dark .form-input { background: var(--pf-surface); border-color: var(--pf-border); color: var(--pf-text); }
+html.dark .project-action-button:hover, html.dark .dialog-secondary:hover, html.dark .project-menu-item:hover { background: var(--pf-subtle); }
 html.dark .dialog-secondary:disabled,
 html.dark .dialog-secondary:disabled:hover { cursor: not-allowed; background: #111827; border-color: #334155; color: #64748b; opacity: 1; }
 html.dark .project-action-danger { color: #fca5a5; border-color: #7f1d1d; }

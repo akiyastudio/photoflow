@@ -1,0 +1,95 @@
+/* PhotoFlow component UI contract.
+ * Stable, framework-free tokens and primitives shared by the host and isolated
+ * component renderers. Components must not import host React implementation.
+ */
+:root {
+  color-scheme: light;
+  --pf-canvas: #f8fafc;
+  --pf-surface: #ffffff;
+  --pf-subtle: #f1f5f9;
+  --pf-elevated: #ffffff;
+  --pf-border: #cbd5e1;
+  --pf-border-subtle: #e2e8f0;
+  --pf-text: #1e293b;
+  --pf-text-strong: #0f172a;
+  --pf-muted: #64748b;
+  --pf-primary: #2563eb;
+  --pf-primary-hover: #1d4ed8;
+  --pf-primary-soft: #eff6ff;
+  --pf-focus: #3b82f6;
+  --pf-success: #047857;
+  --pf-success-soft: #ecfdf5;
+  --pf-warn: #b45309;
+  --pf-warn-soft: #fffbeb;
+  --pf-danger: #dc2626;
+  --pf-danger-soft: #fef2f2;
+  --pf-overlay: rgb(15 23 42 / 55%);
+  --pf-radius-sm: 8px;
+  --pf-radius-md: 10px;
+  --pf-radius-lg: 12px;
+  --pf-shadow-sm: 0 1px 2px rgb(15 23 42 / 8%);
+  --pf-shadow-lg: 0 18px 46px rgb(15 23 42 / 18%);
+  --pf-space-1: 4px;
+  --pf-space-2: 8px;
+  --pf-space-3: 12px;
+  --pf-space-4: 16px;
+  --pf-space-5: 20px;
+  --pf-control-sm: 30px;
+  --pf-control-md: 36px;
+  --pf-control-lg: 40px;
+}
+
+html.dark {
+  color-scheme: dark;
+  --pf-canvas: #030407;
+  --pf-surface: #090c12;
+  --pf-subtle: #111827;
+  --pf-elevated: #0d1119;
+  --pf-border: #374151;
+  --pf-border-subtle: #1f2937;
+  --pf-text: #e2e8f0;
+  --pf-text-strong: #f8fafc;
+  --pf-muted: #9ca3af;
+  --pf-primary: #2563eb;
+  --pf-primary-hover: #3b82f6;
+  --pf-primary-soft: #071a3d;
+  --pf-focus: #3b82f6;
+  --pf-success: #6ee7b7;
+  --pf-success-soft: #052e2b;
+  --pf-warn: #fcd34d;
+  --pf-warn-soft: #291b05;
+  --pf-danger: #fca5a5;
+  --pf-danger-soft: #2b0b0d;
+  --pf-overlay: rgb(2 6 23 / 72%);
+  --pf-shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
+  --pf-shadow-lg: 0 22px 54px rgb(0 0 0 / 48%);
+}
+
+.pf-canvas { background: var(--pf-canvas); color: var(--pf-text); }
+.pf-surface { background: var(--pf-surface); border-color: var(--pf-border-subtle); color: var(--pf-text); }
+.pf-card { border: 1px solid var(--pf-border-subtle); border-radius: var(--pf-radius-lg); background: var(--pf-surface); color: var(--pf-text); box-shadow: var(--pf-shadow-sm); }
+.pf-toolbar { border-bottom: 1px solid var(--pf-border-subtle); background: var(--pf-surface); color: var(--pf-text); }
+.pf-modal-backdrop { background: var(--pf-overlay); }
+.pf-modal { border: 1px solid var(--pf-border); border-radius: var(--pf-radius-lg); background: var(--pf-elevated); color: var(--pf-text); box-shadow: var(--pf-shadow-lg); }
+.pf-button { min-height: var(--pf-control-md); border-radius: var(--pf-radius-sm); border: 1px solid var(--pf-border); background: var(--pf-surface); color: var(--pf-text); }
+.pf-button:hover:not(:disabled) { background: var(--pf-subtle); }
+.pf-button-primary { border-color: var(--pf-primary); background: var(--pf-primary); color: #fff; }
+.pf-button-primary:hover:not(:disabled) { border-color: var(--pf-primary-hover); background: var(--pf-primary-hover); }
+.pf-input { min-height: var(--pf-control-md); border: 1px solid var(--pf-border); border-radius: var(--pf-radius-sm); background: var(--pf-canvas); color: var(--pf-text); }
+.pf-button:disabled, .pf-button-primary:disabled, .pf-input:disabled { cursor: not-allowed; opacity: .48; }
+.pf-icon-tile { display: inline-flex; align-items: center; justify-content: center; border-radius: var(--pf-radius-sm); background: var(--pf-primary-soft); color: var(--pf-primary); }
+.pf-banner { border: 1px solid var(--pf-border); border-radius: var(--pf-radius-md); background: var(--pf-elevated); color: var(--pf-text); box-shadow: var(--pf-shadow-sm); }
+.pf-banner[data-tone="warning"] { border-color: color-mix(in srgb, var(--pf-warn) 42%, var(--pf-border)); background: var(--pf-warn-soft); color: var(--pf-warn); }
+.pf-banner[data-tone="danger"] { border-color: color-mix(in srgb, var(--pf-danger) 42%, var(--pf-border)); background: var(--pf-danger-soft); color: var(--pf-danger); }
+.pf-status { border-radius: 999px; background: var(--pf-subtle); color: var(--pf-muted); }
+.pf-status[data-tone="primary"] { background: var(--pf-primary-soft); color: var(--pf-primary); }
+.pf-status[data-tone="success"] { background: var(--pf-success-soft); color: var(--pf-success); }
+
+:where(button, [role="button"], input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--pf-focus);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
