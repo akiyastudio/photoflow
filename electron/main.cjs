@@ -1050,8 +1050,8 @@ const versionService = createVersionService({ repository: mediaRepository });
 let selectionService = null;
 const versionStaleDetectionService = createVersionStaleDetectionService({ versionService, backgroundTasks, writeLog });
 // Directory walks and deferred full-hash backfills can take minutes on large
-// projects. Run scheduled scans on a separate worker so opening team retouch
-// never waits behind background media tracking work.
+// projects. Run scheduled scans on a separate worker so opening a component
+// view never waits behind background media tracking work.
 const mediaScanDatabase = new PythonDatabaseClient({
   coordinator: workspaceSqliteCoordinator,
   getRunConfig,

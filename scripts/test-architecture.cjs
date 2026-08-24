@@ -19,7 +19,7 @@ const electronCoreSource = fs.readdirSync(path.join(root, 'electron'), { recursi
   .filter(name => /\.cjs$/.test(name) && !String(name).replace(/\\/g, '/').startsWith('compatibility/'))
   .map(name => read(path.join('electron', name)))
   .join('\n');
-assert(!/team-retouch|team_patch|团片|edited_patch_path|identity\.complete|team\.|workspace-team|team_/i.test(electronCoreSource), 'Electron core must contain no component-owned identifiers, RPC methods, event channels, or tool names outside compatibility');
+assert(!/team-retouch|team_patch|team retouch|team store|team artifacts|team_workspace|team-workspace|团片|edited_patch_path|identity\.complete|team\.|workspace-team|team_/i.test(electronCoreSource), 'Electron core must contain no component-owned identifiers, RPC methods, event channels, or tool names outside compatibility');
 const pythonCoreFiles = fs.readdirSync(path.join(root, 'python'), { recursive: true })
   .filter(name => String(name).endsWith('.py') && !String(name).replace(/\\/g, '/').startsWith('compatibility/'));
 const forbiddenPythonCompatibilitySemantics = /team-retouch|team_retouch|team_patch|team_workspace|team-workspace|team retouch|team store|team artifacts|workspace-team|团片|edited_patch_path|identity\.complete/i;
