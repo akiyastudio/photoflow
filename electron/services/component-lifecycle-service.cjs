@@ -137,7 +137,7 @@ const createComponentLifecycleService = ({ app, backgroundTasks, pluginService, 
     const execution = await backgroundTasks.run({ type: 'component-lifecycle', title, dedupeKey: `component-lifecycle:${descriptor.componentId}`, cancellable: false, resumePolicy: 'atomic', metadata: { componentId: descriptor.componentId, action } }, async task => {
       task.report(1, `${title}已启动`, { phase: 'starting' });
       const inherited = Object.fromEntries(['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'Path', 'PATH', 'PATHEXT', 'ComSpec'].filter(key => typeof process.env[key] === 'string' && process.env[key]).map(key => [key, process.env[key]]));
-      const output = await runProcess({ spawn, command: 'powershell.exe', args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', entry], cwd: path.dirname(entry), report: task.report, env: { ...inherited, PHOTOFLOW_COMPONENT_LIFECYCLE_ACTION: action, PHOTOFLOW_COMPONENT_ID: descriptor.componentId, PHOTOFLOW_COMPONENT_VERSION: descriptor.componentVersion } });
+      const output = await runProcess({ spawn, command: 'powershell.exe', args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', entry], cwd: path.dirname(entry), report: task.report, env: { ...inherited, PHOTOFLOW_COMPONENT_LIFECYCLE_ACTION: action, PHOTOFLOW_COMPONENT_ID: descriptor.componentId, PHOTOFLOW_COMPONENT_VERSION: descriptor.componentVersion, PHOTOFLOW_COMPONENT_ADVANCED_RUNTIME_API_VERSION: String(descriptor.advancedRuntime?.apiVersion || ''), PHOTOFLOW_COMPONENT_COMPATIBLE_LEGACY_VERSIONS: (descriptor.advancedRuntime?.compatibleLegacyComponentVersions || []).join(',') } });
       task.report(99, `${title}即将完成`, { phase: 'complete' });
       return output;
     });

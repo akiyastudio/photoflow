@@ -8,6 +8,7 @@ PhotoFlow calls optional packages **components**. “Plugin” is retained in th
 2. Keep `componentHost.contractVersion` and both compatibility values at `2` while developing against this API.
 3. Add one `workspace.toolbarAction`, one linked `component.fullPage`, a package-local UI entry, and a service entry.
 4. Declare every service RPC method, Host capability, permission, and emitted event. Undeclared access fails closed.
+   For an upgrade from an installed Host V1 package with the same component ID, optionally declare `componentHost.migrations.legacyStorageV1` and/or `legacyOutputV1`; never add component tables or path fields to Host code.
 5. Run `node scripts/mock-component-service.cjs path/to/service.cjs` to exercise the newline-delimited service protocol without Electron.
 6. Place the directory in PhotoFlow's user component folder, or add it under `extensions/` for a source checkout. A packaged install uses `component.json`; source development may use `component.template.json` plus the existing component build flow.
 
@@ -55,14 +56,14 @@ See `examples/hello-component/service.cjs` for a complete implementation. Ordina
 ## A safe media-to-version flow
 
 1. Page through `project.media.page.v2`.
-2. Resolve only the needed `thumbnail`, `preview`, or `original` via `project.media.variants.v2`.
+2. Use `variants:[]` for stable media metadata. Resolve only the needed `thumbnail`, `preview`, or `original` when pixels or a URL are actually needed.
 3. Exchange the returned short-lived, single-use input token with `project.input.tokens.v2` when the service needs a private file copy.
 4. Call `project.output.v2` `stage`; write below the returned private staging directory; register each file with `write`; then `validate`.
 5. Call `commit` with a stable idempotency key. The host publishes only declared relative targets under the bound project.
 6. Optionally call `version.create.v2` with the returned commit/artifact IDs and another stable idempotency key.
 7. Call `rollback` for an abandoned stage.
 
-Stages persist their metadata and registered files for 24 hours, so a restarted Host can resume `validate`, `commit`, or `rollback`. Keep the returned `stageId`, `commitId`, and artifact IDs rather than private paths. A committed artifact can be opened or revealed through `dialogs.v2`; arbitrary output paths are never accepted.
+Stages persist their metadata and registered files for 24 hours, so a restarted Host can resume `validate`, `commit`, or `rollback`. Keep the returned `stageId`, `commitId`, and artifact IDs rather than private paths. A committed artifact can be opened or revealed through `dialogs.v2`; `materializeOwned` can verify and import it into private storage during migration. Arbitrary output paths are never accepted.
 
 Use `component.media.v2` for files owned under `component.storage.v2`, and `project.progress.v2` to list/create image or video progress nodes and record generic source relationships. Component-private media requests take only a relative path. Project media pages and variants include Host-managed external/virtual paths while preserving their virtual identity.
 

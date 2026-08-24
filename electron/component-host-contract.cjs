@@ -117,7 +117,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   if (!host || typeof host !== 'object' || Array.isArray(host)) throw new Error('Invalid componentHost manifest');
   const contractVersion = Number(host.contractVersion);
   if (![1, COMPONENT_HOST_CONTRACT_VERSION].includes(contractVersion)) throw new Error(`Unsupported component host contractVersion: ${host.contractVersion}`);
-  if (contractVersion === 2) rejectUnknownFields(host, ['contractVersion', 'compatibility', 'contributions', 'service'], 'component host');
+  if (contractVersion === 2) rejectUnknownFields(host, ['contractVersion', 'compatibility', 'contributions', 'service', 'migrations'], 'component host');
   const compatibility = host.compatibility;
   if (!compatibility || typeof compatibility !== 'object') throw new Error('Missing component host compatibility range');
   if (contractVersion === 2) rejectUnknownFields(compatibility, ['minHostApiVersion', 'maxHostApiVersion'], 'component compatibility');
@@ -130,6 +130,15 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   if (!Array.isArray(host.contributions) || host.contributions.length < 2 || host.contributions.length > 32) throw new Error('Component host contributions must be a bounded array');
 
   const componentId = requiredId(manifest.id, 'component id');
+  let migrations = Object.freeze({ legacyStorageV1: false, legacyOutputV1: false });
+  if (host.migrations !== undefined) {
+    const raw = host.migrations;
+    if (contractVersion !== 2 || !raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid component host migrations declaration');
+    rejectUnknownFields(raw, ['legacyStorageV1', 'legacyOutputV1'], 'component migrations');
+    if (raw.legacyStorageV1 !== undefined && raw.legacyStorageV1 !== true) throw new Error('legacyStorageV1 migration must be true when declared');
+    if (raw.legacyOutputV1 !== undefined && raw.legacyOutputV1 !== true) throw new Error('legacyOutputV1 migration must be true when declared');
+    migrations = Object.freeze({ legacyStorageV1: raw.legacyStorageV1 === true, legacyOutputV1: raw.legacyOutputV1 === true });
+  }
   const icon = parseComponentIcon(manifest.icon, componentRoot, developmentFiles?.icon || null);
   const seen = new Set();
   const pages = new Map();
@@ -232,6 +241,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     contractVersion,
     hostApiVersion: negotiatedHostApiVersion,
     compatibility: { minHostApiVersion: min, maxHostApiVersion: max },
+    migrations,
     toolbarAction: Object.freeze({ ...actions[0], pageTitle: page.title }),
     fullPage: Object.freeze(page),
     icon,

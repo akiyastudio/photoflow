@@ -22,6 +22,7 @@ const committedOutputs = new Map();
 const createdVersions = new Map();
 const commitOperations = new Map();
 const versionOperations = new Map();
+const storageAdoptions = new Map();
 
 const insideOrEqual = (path, root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -71,6 +72,64 @@ const replaceJsonAtomic = async ({ fs, crypto, filePath, value }) => {
 const readJson = async (fs, filePath) => {
   try { return JSON.parse(await fs.promises.readFile(filePath, 'utf8')); } catch { return null; }
 };
+const copyTreeSafe = async (fs, path, source, destination, { overwrite = false } = {}) => {
+  const stat = await fs.promises.lstat(source);
+  if (stat.isSymbolicLink()) throw hostError(CODES.PERMISSION_DENIED, 'Legacy component storage contains a symbolic link');
+  if (stat.isDirectory()) {
+    await fs.promises.mkdir(destination, { recursive: true });
+    for (const entry of await fs.promises.readdir(source)) await copyTreeSafe(fs, path, path.join(source, entry), path.join(destination, entry), { overwrite });
+    return;
+  }
+  if (!stat.isFile()) throw hostError(CODES.PERMISSION_DENIED, 'Legacy component storage contains an unsupported entry');
+  await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+  await fs.promises.copyFile(source, destination, overwrite ? 0 : fs.constants.COPYFILE_EXCL);
+};
+const adoptLegacyStorageV1 = async ({ fs, path, crypto, dataRoot, componentRoot, descriptor }) => {
+  const receiptPath = path.join(componentRoot, 'receipts', 'migrations', 'legacy-storage-v1.json');
+  const existingReceipt = await readJson(fs, receiptPath);
+  if (existingReceipt?.state === 'committed' && existingReceipt?.componentId === descriptor.componentId) return existingReceipt;
+  const legacyDataRoot = path.join(dataRoot, descriptor.componentId);
+  const legacyDatabasePath = path.join(dataRoot, 'databases', `${descriptor.componentId}.sqlite3`);
+  const legacyData = await fs.promises.lstat(legacyDataRoot).catch(() => null);
+  const legacyDatabase = await fs.promises.lstat(legacyDatabasePath).catch(() => null);
+  if ((!legacyData?.isDirectory() || legacyData.isSymbolicLink()) && (!legacyDatabase?.isFile() || legacyDatabase.isSymbolicLink())) return null;
+  if ((legacyData && (!legacyData.isDirectory() || legacyData.isSymbolicLink())) || (legacyDatabase && (!legacyDatabase.isFile() || legacyDatabase.isSymbolicLink()))) throw hostError(CODES.PERMISSION_DENIED, 'Legacy component storage source is unsafe');
+  const parent = path.dirname(componentRoot); const token = crypto.randomUUID();
+  const pending = path.join(parent, `.${descriptor.componentId}.legacy-v1-${token}.pending`);
+  const backup = path.join(parent, `.${descriptor.componentId}.legacy-v1-${token}.backup`);
+  let backedUp = false;
+  await fs.promises.mkdir(parent, { recursive: true });
+  try {
+    if (legacyData) await copyTreeSafe(fs, path, legacyDataRoot, pending);
+    else await fs.promises.mkdir(pending, { recursive: true });
+    if (legacyDatabase) {
+      const pendingDatabase = path.join(pending, 'storage.sqlite3'); await fs.promises.copyFile(legacyDatabasePath, pendingDatabase, fs.constants.COPYFILE_EXCL);
+      if (await sha256File(fs, crypto, pendingDatabase) !== await sha256File(fs, crypto, legacyDatabasePath)) throw hostError(CODES.CONFLICT, 'Legacy component database copy verification failed');
+      for (const suffix of ['-wal', '-shm']) {
+        const source = `${legacyDatabasePath}${suffix}`; const stat = await fs.promises.lstat(source).catch(() => null);
+        if (!stat) continue;
+        if (!stat.isFile() || stat.isSymbolicLink()) throw hostError(CODES.PERMISSION_DENIED, 'Legacy component database sidecar is unsafe');
+        await fs.promises.copyFile(source, `${pendingDatabase}${suffix}`, fs.constants.COPYFILE_EXCL);
+      }
+    }
+    if (fs.existsSync(componentRoot)) {
+      await copyTreeSafe(fs, path, componentRoot, pending, { overwrite: true });
+      await fs.promises.rename(componentRoot, backup); backedUp = true;
+    }
+    await fs.promises.rename(pending, componentRoot);
+    const receipt = { schemaVersion: 1, kind: 'component-storage-adoption', state: 'committed', componentId: descriptor.componentId, fromHostApiVersion: 1, toHostApiVersion: 2, adoptedDataRoot: Boolean(legacyData), adoptedDatabase: Boolean(legacyDatabase), legacyDataRoot: legacyData ? legacyDataRoot : '', legacyDatabasePath: legacyDatabase ? legacyDatabasePath : '', databaseSha256: legacyDatabase ? await sha256File(fs, crypto, legacyDatabasePath) : '', adoptedAt: Date.now() };
+    await replaceJsonAtomic({ fs, crypto, filePath: receiptPath, value: receipt });
+    if (backedUp) await fs.promises.rm(backup, { recursive: true, force: true });
+    return receipt;
+  } catch (error) {
+    await fs.promises.rm(pending, { recursive: true, force: true }).catch(() => undefined);
+    if (backedUp) {
+      await fs.promises.rm(componentRoot, { recursive: true, force: true }).catch(() => undefined);
+      await fs.promises.rename(backup, componentRoot).catch(() => undefined);
+    }
+    throw error;
+  }
+};
 const stableUuid = (crypto, value) => {
   const bytes = crypto.createHash('sha256').update(String(value)).digest().subarray(0, 16);
   bytes[6] = (bytes[6] & 0x0f) | 0x50;
@@ -85,8 +144,26 @@ const sha256File = (fs, crypto, filePath) => new Promise((resolve, reject) => {
   input.on('data', chunk => hash.update(chunk));
   input.on('end', () => resolve(hash.digest('hex')));
 });
+const adoptLegacyOutputV1 = async ({ fs, path, crypto, componentRoot, componentId, projectId, scopeDigest: digest, projectRoot, migrationId, outputs }) => {
+  if (!ID.test(String(migrationId || '')) || !Array.isArray(outputs) || !outputs.length || outputs.length > 2000) throw hostError(CODES.INVALID_REQUEST, 'Invalid legacy output adoption request');
+  const commitId = stableUuid(crypto, `component-output-v1-adoption\0${componentId}\0${projectId}\0${migrationId}`);
+  const receiptPath = path.join(componentRoot, 'receipts', 'commits', `${commitId}.json`);
+  if (fs.existsSync(receiptPath)) return JSON.parse(await fs.promises.readFile(receiptPath, 'utf8'));
+  const adopted = [];
+  for (const item of outputs) {
+    const relativePath = assertRelativePath(path, item.relativePath, 'legacy output relativePath');
+    const filePath = path.resolve(projectRoot, relativePath);
+    if (!inside(path, projectRoot, filePath)) throw hostError(CODES.PERMISSION_DENIED, 'Legacy adopted output escapes project');
+    const stat = await fs.promises.lstat(filePath).catch(() => null);
+    if (!stat?.isFile() || stat.isSymbolicLink()) throw hostError(CODES.NOT_FOUND, 'Legacy adopted output is missing or unsafe');
+    adopted.push({ artifactId: String(item.artifactId || stableUuid(crypto, `${commitId}\0${relativePath}`)), relativePath, size: stat.size, sha256: await sha256File(fs, crypto, filePath), published: true });
+  }
+  const receipt = { schemaVersion: RECEIPT_SCHEMA_VERSION, kind: 'component-output-commit', state: 'committed', commitId, idempotencyKey: `legacy-${migrationId}`.slice(0, 80), componentId, projectId: String(projectId), scopeDigest: digest, stageId: stableUuid(crypto, `${commitId}\0adopted-stage`), createdAt: Date.now(), committedAt: Date.now(), adoptedFromHostApiVersion: 1, outputs: adopted };
+  await replaceJsonAtomic({ fs, crypto, filePath: receiptPath, value: receipt });
+  return receipt;
+};
 const resetComponentHostCapabilityStateForTest = () => {
-  inputGrants.clear(); listSessions.clear(); outputStages.clear(); componentTaskHandles.clear(); committedOutputs.clear(); createdVersions.clear(); commitOperations.clear(); versionOperations.clear();
+  inputGrants.clear(); listSessions.clear(); outputStages.clear(); componentTaskHandles.clear(); committedOutputs.clear(); createdVersions.clear(); commitOperations.clear(); versionOperations.clear(); storageAdoptions.clear();
 };
 
 const registerComponentProjectCapabilities = ({
@@ -233,10 +310,10 @@ const registerComponentProjectCapabilities = ({
     const media = await resolveSafeMedia(payload, context, descriptor);
     const stat = await fs.promises.lstat(media.filePath).catch(() => null);
     if (!stat?.isFile() || stat.isSymbolicLink()) throw hostError(CODES.NOT_FOUND, 'Media file is missing or unsafe');
-    mediaService.grantPath(media.filePath);
-    const originalUrl = mediaService.toUrl(media.filePath, true);
     const requested = new Set(Array.isArray(payload.variants) ? payload.variants : ['thumbnail', 'preview']);
     if ([...requested].some(value => !['thumbnail', 'preview', 'original'].includes(value))) throw hostError(CODES.INVALID_REQUEST, 'Unknown media variant');
+    let originalUrl = '';
+    if (requested.size) { mediaService.grantPath(media.filePath); originalUrl = mediaService.toUrl(media.filePath, true); }
     const result = {};
     const requestVariant = async (name, requestedSize) => {
       const generated = await mediaService.requestThumbnail({ filePath: media.filePath, kind: kindFor(media.filePath), cacheConfig: (readSavedConfig() || {}).mediaCache || {}, requestedSize, priority: 0, queueOrder: 0 });
@@ -247,8 +324,19 @@ const registerComponentProjectCapabilities = ({
     if (requested.has('thumbnail')) await requestVariant('thumbnail', 320);
     if (requested.has('preview')) await requestVariant('preview', 1600);
     if (requested.has('original')) result.original = { url: originalUrl, byteLength: stat.size, derived: false };
-    const grant = grantInput(media.filePath, descriptor, context);
-    return { apiVersion: 2, mediaRef: { photoId: media.bundle?.photo?.id, versionId: media.version?.id, relativePath: media.relativePath }, variants: result, input: grant };
+    const input = requested.has('original') ? grantInput(media.filePath, descriptor, context) : null;
+    return {
+      apiVersion: 2,
+      mediaRef: { photoId: media.bundle?.photo?.id, versionId: media.version?.id, relativePath: media.relativePath },
+      metadata: {
+        photoId: String(media.bundle?.photo?.id || ''), versionId: String(media.version?.id || ''),
+        currentVersionId: String(media.bundle?.photo?.currentVersionId || (media.bundle?.versions || []).find(item => item.isCurrent)?.id || media.version?.id || ''),
+        displayName: String(media.bundle?.photo?.displayName || media.bundle?.photo?.originalName || path.basename(media.filePath)),
+        originalName: String(media.bundle?.photo?.originalName || path.basename(media.filePath)), relativePath: media.relativePath,
+        isCurrent: Boolean(media.version?.isCurrent), fileMissing: Boolean(media.version?.fileMissing),
+      },
+      variants: result, ...(input ? { input } : {}),
+    };
   });
 
   broker.register('project.input.tokens.v2', async (payload, context, descriptor) => {
@@ -264,8 +352,18 @@ const registerComponentProjectCapabilities = ({
 
   broker.register('component.storage.v2', async (payload, context, descriptor) => {
     const scope = bound(context, descriptor);
+    let adoption = null;
+    if (descriptor.migrations?.legacyStorageV1) {
+      const key = `${descriptor.componentId}\0${scope.workspaceRoot}`;
+      let operation = storageAdoptions.get(key);
+      if (!operation) {
+        operation = adoptLegacyStorageV1({ fs, path, crypto, dataRoot: getWorkspaceDataRoot(scope.workspaceRoot), componentRoot: scope.componentRoot, descriptor }).finally(() => storageAdoptions.delete(key));
+        storageAdoptions.set(key, operation);
+      }
+      adoption = await operation;
+    }
     await fs.promises.mkdir(scope.componentRoot, { recursive: true });
-    return { apiVersion: 2, dataPath: scope.componentRoot, databasePath: path.join(scope.componentRoot, 'storage.sqlite3'), projectId: String(scope.project.id), ownership: 'component-private' };
+    return { apiVersion: 2, dataPath: scope.componentRoot, databasePath: path.join(scope.componentRoot, 'storage.sqlite3'), projectId: String(scope.project.id), ownership: 'component-private', ...(adoption ? { adoption: { kind: adoption.kind, fromHostApiVersion: 1, state: adoption.state, legacyDataRoot: adoption.legacyDataRoot || '', legacyDatabasePath: adoption.legacyDatabasePath || '', databaseSha256: adoption.databaseSha256 || '' } } : {}) };
   });
 
   broker.register('component.settings.v2', async (payload, _context, descriptor) => {
@@ -513,6 +611,49 @@ const registerComponentProjectCapabilities = ({
   };
   broker.register('project.output.v2', async (payload, context, descriptor) => {
     const scope = { ...bound(context, descriptor), componentId: descriptor.componentId };
+    if (payload.action === 'adoptLegacyV1') {
+      if (!descriptor.migrations?.legacyOutputV1) throw hostError(CODES.PERMISSION_DENIED, 'Legacy output adoption is not declared by this component');
+      const receipt = await adoptLegacyOutputV1({ fs, path, crypto, componentRoot: scope.componentRoot, componentId: descriptor.componentId, projectId: String(scope.project.id), scopeDigest: scopeDigest(scope), projectRoot: scope.projectRoot, migrationId: payload.migrationId, outputs: payload.outputs });
+      const response = commitResponse(scope, receipt);
+      committedOutputs.set(receipt.commitId, { ...response, scope: scope.key });
+      return response;
+    }
+    if (payload.action === 'delete') {
+      const previousCommitId = String(payload.previousCommitId || ''); const previousArtifactId = String(payload.previousArtifactId || '');
+      const expectedDigest = String(payload.expectedDigest || '').toLowerCase(); const idempotencyKey = String(payload.idempotencyKey || '');
+      if (!SAFE_STAGE_ID.test(previousCommitId) || !SAFE_STAGE_ID.test(previousArtifactId) || !/^[a-f0-9]{64}$/.test(expectedDigest) || !ID.test(idempotencyKey)) throw hostError(CODES.INVALID_REQUEST, 'Controlled deletion requires ownership, digest, and idempotency key');
+      const deletionId = stableUuid(crypto, `component-output-delete\0${scope.key}\0${idempotencyKey}`);
+      const deletionReceiptPath = path.join(scope.componentRoot, 'receipts', 'deletions', `${deletionId}.json`);
+      const existingDeletion = await readJson(fs, deletionReceiptPath);
+      if (existingDeletion?.state === 'committed') return { apiVersion: 2, deletionId, deleted: true, relativePath: existingDeletion.relativePath };
+      const receipt = await loadCommitReceipt(scope, previousCommitId);
+      const output = receipt?.outputs?.find(item => item.artifactId === previousArtifactId);
+      if (!output || output.sha256 !== expectedDigest) throw hostError(CODES.TOKEN_SCOPE, 'Controlled deletion ownership does not match');
+      const destination = await safeDestination(scope, output.relativePath, false);
+      if (!await fileMatchesDigest(destination, output.size, expectedDigest)) throw hostError(CODES.CONFLICT, 'Controlled deletion target changed');
+      const trashRoot = path.join(scope.componentRoot, 'staging', 'deletions'); await fs.promises.mkdir(trashRoot, { recursive: true });
+      const backup = path.join(trashRoot, deletionId); await fs.promises.rename(destination, backup);
+      try {
+        await replaceJson({ fs, crypto, filePath: deletionReceiptPath, value: { schemaVersion: RECEIPT_SCHEMA_VERSION, kind: 'component-output-deletion', state: 'committed', deletionId, idempotencyKey, componentId: descriptor.componentId, projectId: String(scope.project.id), scopeDigest: scopeDigest(scope), previousCommitId, previousArtifactId, relativePath: output.relativePath, sha256: expectedDigest, deletedAt: Date.now() } });
+        await fs.promises.rm(backup, { force: true });
+      } catch (error) { if (!fs.existsSync(destination)) await fs.promises.rename(backup, destination).catch(() => undefined); throw error; }
+      return { apiVersion: 2, deletionId, deleted: true, relativePath: output.relativePath };
+    }
+    if (payload.action === 'materializeOwned') {
+      const commitId = String(payload.commitId || ''); const artifactId = String(payload.artifactId || '');
+      const receipt = await loadCommitReceipt(scope, commitId); const output = receipt?.outputs?.find(item => item.artifactId === artifactId);
+      if (!output || receipt.state !== 'committed') throw hostError(CODES.TOKEN_SCOPE, 'Owned output artifact was not found');
+      if (!await outputMatches(scope, output)) throw hostError(CODES.CONFLICT, 'Owned output changed before private materialization');
+      const importId = stableUuid(crypto, `component-output-import\0${scope.key}\0${commitId}\0${artifactId}`);
+      const directory = path.join(scope.componentRoot, 'imported-outputs', importId); const privatePath = path.join(directory, path.basename(output.relativePath));
+      const source = path.resolve(scope.projectRoot, output.relativePath); await fs.promises.mkdir(directory, { recursive: true });
+      if (!await fileMatchesDigest(privatePath, output.size, output.sha256)) {
+        const pending = `${privatePath}.${crypto.randomUUID()}.tmp`; await fs.promises.copyFile(source, pending, fs.constants.COPYFILE_EXCL);
+        if (!await fileMatchesDigest(pending, output.size, output.sha256)) { await fs.promises.rm(pending, { force: true }); throw hostError(CODES.CONFLICT, 'Owned output digest changed during private materialization'); }
+        await fs.promises.rm(privatePath, { force: true }); await fs.promises.rename(pending, privatePath);
+      }
+      return { apiVersion: 2, importId, privatePath, byteLength: output.size, sha256: output.sha256, outputRef: { commitId, artifactId } };
+    }
     if (payload.action === 'stage') {
       const createdAt = now(); const stageId = `${createdAt.toString(16)}-${crypto.randomUUID()}`;
       const root = stageRootFor(scope, stageId); const payloadRoot = path.join(root, 'payload');
@@ -641,11 +782,17 @@ const registerComponentProjectCapabilities = ({
   });
 
   const stripProgressPaths = value => Object.fromEntries(Object.entries(value || {}).filter(([field]) => !/(?:path|url)$/i.test(field)));
+  const publicProgress = (scope, value) => {
+    const result = stripProgressPaths(value);
+    const folderPath = path.resolve(String(value?.folderPath || ''));
+    if (folderPath && insideOrEqual(path, scope.projectRoot, folderPath)) result.contentRef = { relativeDirectory: normalizeRelativePath(path.relative(scope.projectRoot, folderPath)) };
+    return result;
+  };
   broker.register('project.progress.v2', async (payload, context, descriptor) => {
     const scope = bound(context, descriptor);
     if (payload.action === 'list') {
       const listed = await versionService.listProgress(scope.workspaceRoot, context.projectName, payload.includeMissing === true);
-      return { apiVersion: 2, progress: (listed.progressFolders || []).map(stripProgressPaths), edges: (listed.edges || listed.graphEdges || []).map(stripProgressPaths) };
+      return { apiVersion: 2, progress: (listed.progressFolders || []).map(item => publicProgress(scope, item)), edges: (listed.edges || listed.graphEdges || []).map(stripProgressPaths) };
     }
     if (payload.action === 'relate') {
       const result = await versionService.updateProgressRelation(scope.workspaceRoot, { childProgressId: String(payload.childProgressId || ''), parentProgressId: String(payload.parentProgressId || ''), expectedUpdatedAt: payload.expectedUpdatedAt });
@@ -674,7 +821,7 @@ const registerComponentProjectCapabilities = ({
       });
     } catch (error) { if (createdDirectory) await fs.promises.rmdir(folderPath).catch(() => undefined); throw error; }
     if (!registered?.success || !registered.progressFolder?.id) throw hostError(CODES.INTERNAL, registered?.error || 'Progress registration failed');
-    return { apiVersion: 2, progress: stripProgressPaths(registered.progressFolder), edges: (registered.edges || []).map(stripProgressPaths) };
+    return { apiVersion: 2, progress: publicProgress(scope, registered.progressFolder), edges: (registered.edges || []).map(stripProgressPaths) };
   });
 
   broker.register('tasks.v2', async (payload, context, descriptor) => {
@@ -759,6 +906,7 @@ module.exports = {
   STAGE_TTL_MS,
   assertRelativePath,
   normalizeRelativePath,
+  adoptLegacyOutputV1,
   registerComponentProjectCapabilities,
   resetComponentHostCapabilityStateForTest,
   stableUuid,

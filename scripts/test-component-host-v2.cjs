@@ -7,7 +7,6 @@ const { parseComponentHostManifest, HOST_CAPABILITIES } = require('../electron/c
 const { ComponentCapabilityBroker } = require('../electron/services/component-capability-broker.cjs');
 const { registerComponentProjectCapabilities, resetComponentHostCapabilityStateForTest, stableUuid, STAGE_TTL_MS } = require('../electron/services/component-project-capabilities.cjs');
 const { createServiceHostClient } = require('../component-sdk/service.cjs');
-const { adoptDeprecatedV1OutputReceipt } = require('../electron/compatibility/component-output-v1-adoption.cjs');
 const { createMediaRepository } = require('../electron/domains/media/public.cjs');
 const { createVersionService } = require('../electron/services/version-service.cjs');
 
@@ -66,6 +65,7 @@ const manifest = {
   apiVersion: 1, id: 'fixture-component', version: '1.0.0',
   componentHost: {
     contractVersion: 2, compatibility: { minHostApiVersion: 2, maxHostApiVersion: 3 },
+    migrations: { legacyStorageV1: true, legacyOutputV1: true },
     contributions: [
       { type: 'workspace.toolbarAction', id: 'open', label: 'Fixture', pageId: 'main' },
       { type: 'component.fullPage', id: 'main', title: 'Fixture', entry: 'ui/index.html' },
@@ -93,10 +93,11 @@ assert(typedHostClient.acceptFrame({ type: 'capability-response', id: writtenFra
 
 const broker = new ComponentCapabilityBroker();
 const thumbnailRequests = [];
+const mediaGrants = [];
 let returnOriginalAsThumbnail = false;
 const originalUrl = 'photoflow-media://original/one.jpg';
 const mediaService = {
-  grantPath: value => value,
+  grantPath: value => { mediaGrants.push(value); return value; },
   grantRoot: value => value,
   toUrl: () => originalUrl,
   requestThumbnail: async request => {
@@ -164,6 +165,11 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   const firstPage = await broker.invoke(descriptor, 'project.media.page.v2', { pageSize: 10, kinds: ['image'] }, context);
   assert(firstPage.items.some(item => item.relativePath === 'images/one.jpg'));
   assert(firstPage.items.some(item => item.relativePath === 'External/outside.jpg' && item.viaExternalLink), 'managed external media participates in V2 pagination');
+  const grantsBeforeMetadata = mediaGrants.length; const thumbnailsBeforeMetadata = thumbnailRequests.length;
+  const metadataOnly = await broker.invoke(descriptor, 'project.media.variants.v2', { photoId: 'photo-1', versionId: 'version-1', variants: [] }, context);
+  assert.equal(metadataOnly.input, undefined, 'metadata-only media descriptions do not mint input grants');
+  assert.equal(mediaGrants.length, grantsBeforeMetadata, 'metadata-only media descriptions do not mint media URL grants');
+  assert.equal(thumbnailRequests.length, thumbnailsBeforeMetadata, 'metadata-only media descriptions do not request thumbnails');
   const variants = await broker.invoke(descriptor, 'project.media.variants.v2', { photoId: 'photo-1', versionId: 'version-1', variants: ['thumbnail', 'preview', 'original'] }, context);
   assert.notEqual(variants.variants.thumbnail.url, variants.variants.original.url, 'a JPEG thumbnail must be a generated derivative rather than its original URL');
   assert.deepEqual(thumbnailRequests.map(item => item.requestedSize), [320, 1600]);
@@ -177,8 +183,11 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   assert(fs.existsSync(materialized.privatePath));
   await assert.rejects(broker.invoke(descriptor, 'project.input.tokens.v2', { action: 'materialize', token: variants.input.token }, context), error => error.code === 'COMPONENT_HOST_TOKEN_EXPIRED', 'input grants are single-use');
 
+  const legacyDataRoot = path.join(dataRoot, descriptor.componentId); const legacyDatabasePath = path.join(dataRoot, 'databases', `${descriptor.componentId}.sqlite3`);
+  fs.mkdirSync(legacyDataRoot, { recursive: true }); fs.mkdirSync(path.dirname(legacyDatabasePath), { recursive: true }); fs.writeFileSync(path.join(legacyDataRoot, 'legacy-private.bin'), 'legacy-private'); fs.writeFileSync(legacyDatabasePath, 'legacy-database');
   const storage = await broker.invoke(descriptor, 'component.storage.v2', {}, context);
   assert(storage.dataPath.startsWith(path.join(dataRoot, 'components', descriptor.componentId)));
+  assert.equal(storage.adoption?.state, 'committed'); assert.equal(storage.adoption.legacyDataRoot, legacyDataRoot); assert.equal(fs.readFileSync(path.join(storage.dataPath, 'legacy-private.bin'), 'utf8'), 'legacy-private'); assert.equal(fs.readFileSync(storage.databasePath, 'utf8'), 'legacy-database');
   const privateMediaPath = path.join(storage.dataPath, 'previews', 'private.jpg');
   fs.mkdirSync(path.dirname(privateMediaPath), { recursive: true }); fs.writeFileSync(privateMediaPath, 'private-media');
   const privateMedia = await broker.invoke(descriptor, 'component.media.v2', { action: 'variants', relativePath: 'previews/private.jpg', variants: ['thumbnail', 'original'] }, context);
@@ -277,9 +286,11 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   assert(!fs.existsSync(failedOutput) && !fs.existsSync(path.join(projectRoot, 'receipt-failure', 'failure-2.jpg')) && !fs.existsSync(path.join(dataRoot, 'components', descriptor.componentId, 'receipts', 'commits', `${failedCommitId}.json`)), 'final receipt failure rolls back every output and removes the unusable journal');
 
   const adoptedPath = path.join(projectRoot, 'legacy', 'adopted.jpg'); fs.mkdirSync(path.dirname(adoptedPath), { recursive: true }); fs.writeFileSync(adoptedPath, 'legacy-output');
-  const adopted = await adoptDeprecatedV1OutputReceipt({ fs, path, crypto, componentRoot: path.join(dataRoot, 'components', descriptor.componentId), componentId: descriptor.componentId, projectId: 'project-1', scopeDigest, projectRoot, migrationId: 'migration-one', outputs: [{ relativePath: 'legacy/adopted.jpg' }] });
-  assert.equal(adopted.state, 'committed');
+  const adopted = await broker.invoke(descriptor, 'project.output.v2', { action: 'adoptLegacyV1', migrationId: 'migration-one', outputs: [{ relativePath: 'legacy/adopted.jpg' }] }, context);
+  assert(adopted.commitId && adopted.outputs.length === 1);
   assert((await broker.invoke(descriptor, 'dialogs.v2', { kind: 'openOutput', commitId: adopted.commitId, artifactId: adopted.outputs[0].artifactId }, context)).opened, 'one-time V1 adoption creates a receipt consumable by generic V2 output refs');
+  const importedLegacy = await broker.invoke(descriptor, 'project.output.v2', { action: 'materializeOwned', commitId: adopted.commitId, artifactId: adopted.outputs[0].artifactId }, context);
+  assert.equal(fs.readFileSync(importedLegacy.privatePath, 'utf8'), 'legacy-output', 'owned legacy project output can be safely copied into component-private storage');
 
   const started = await broker.invoke(descriptor, 'tasks.v2', { action: 'start', operationId: 'fixture-task', title: 'Fixture' }, context);
   await broker.invoke(descriptor, 'tasks.v2', { action: 'report', operationId: 'fixture-task', progress: 25, checkpoint: { page: 1 } }, context);

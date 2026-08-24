@@ -40,13 +40,13 @@ Permissions are checked when parsing the manifest and again for every capability
 
 `project.media.page.v2` accepts `pageSize` (1–200), opaque `cursor`, and `kinds` (`image`, `raw`, `video`). A cursor expires after five minutes, is bound to one component/project, and must not be decoded or persisted. Each page inspects at most 1,000 entries and does not follow symlinks. Host-managed external files/folders participate using their virtual relative paths; unmanaged external paths remain denied.
 
-`project.media.variants.v2` accepts either `{photoId, versionId}` or `{relativePath}` plus a subset of `thumbnail`, `preview`, `original`. Thumbnail is a generated 320-pixel derivative and is never replaced by a normal original URL. Preview is a generated 1,600-pixel derivative. Original is explicitly marked `derived:false`. The response also carries a ten-minute, single-use input token.
+`project.media.variants.v2` accepts either `{photoId, versionId}` or `{relativePath}` plus a subset of `thumbnail`, `preview`, `original`. Thumbnail is a generated 320-pixel derivative and is never replaced by a normal original URL. Preview is a generated 1,600-pixel derivative. Original is explicitly marked `derived:false`. `variants:[]` is metadata-only: it creates no URL grant, thumbnail request, or input token. A request containing `original` also carries a ten-minute, single-use input token for explicit materialization.
 
 `project.input.tokens.v2 {action:"materialize",token}` consumes the token and copies the input into component-private storage. Tokens are scoped to component, workspace, and project, and are invalid after use or expiry. Raw paths are never accepted from the renderer.
 
 ### Private storage and settings
 
-`component.storage.v2` returns component-owned locations under workspace application data, never a project-content write grant. A component owns its schema and migrations; the host does not inspect its tables. Cross-domain references use stable project/media/version IDs.
+`component.storage.v2` returns component-owned locations under workspace application data, never a project-content write grant. A component owns its schema and migrations; the host does not inspect its tables. A V2 manifest may declare `migrations.legacyStorageV1:true`; the Host then copies the same component ID's known V1 data root/database transactionally, preserves the V1 source for rollback/old-package compatibility, and returns a source-root/digest adoption receipt so the component can safely rewrite its own stored paths. Cross-domain references use stable project/media/version IDs.
 
 `component.media.v2` accepts only a relative file below that private storage and an action: `variants`, `open`, or `reveal`. Variants have the same explicit derivative semantics as project media. The result contains URLs and an opaque media ref, never a caller-supplied absolute path. Deletion and invalidation remain the component database's responsibility.
 
@@ -61,12 +61,15 @@ Permissions are checked when parsing the manifest and again for every capability
 - `validate`: rejects empty, linked, escaped, missing, or oversized stages. A stage is limited to 2,000 files and 2 GiB.
 - `commit`: requires an ID-shaped idempotency key, refuses overwrite, atomically publishes files below the bound project, rolls back files created by a failed multi-file commit, and returns commit/artifact IDs. Retrying the same key returns the original result.
 - `rollback`: recursively removes only the component-private stage and is safe to call for abandoned work.
+- `adoptLegacyV1`: when `migrations.legacyOutputV1:true` is declared, creates a one-time ownership receipt for bounded, existing project-relative outputs from the same component's V1 installation.
+- `materializeOwned`: verifies a committed output receipt/current digest and copies that artifact into component-private storage, allowing component-owned schema migration without retaining a project path.
+- `delete`: removes only a current output whose prior commit/artifact IDs and expected digest still match, and writes an idempotent deletion receipt.
 
 Stage state is not memory-only. The Host atomically persists stage metadata and its registered file list outside the writable payload subdirectory, binds it to component/workspace/project, and enforces an immutable `createdAt + 24h` expiry on every non-terminal action. Expiry deletes only that exact validated stage directory.
 
 Before publishing, `commit` writes a `prepared` receipt containing a stable commit ID, target relative paths, artifact IDs, sizes, SHA-256 digests, and per-file publication state. It journals after every atomic publication and changes the receipt to `committed` only when all outputs exist with matching digests. Restart recovery reuses only matching published bytes. A conflict rolls back all still-matching Host outputs and preserves any file changed by the user. Failure to finalize the receipt rolls back the complete multi-file publication and removes its unusable journal.
 
-Controlled replacement requires `replace:true`, `previousCommitId`, `previousArtifactId`, and `expectedDigest` on `write`. The prior committed receipt must own the same target and the current bytes must still match. Replacement backups live in the expiring stage until the new multi-file receipt commits. A deprecated compatibility helper can adopt reviewed V1 outputs into a one-time migration receipt; it contains no component business rules.
+Controlled replacement requires `replace:true`, `previousCommitId`, `previousArtifactId`, and `expectedDigest` on `write`. The prior committed receipt must own the same target and the current bytes must still match. Replacement backups live in the expiring stage until the new multi-file receipt commits. Legacy adoption is generic, manifest-gated, same-component/project scoped, project-relative, digest checked, and contains no component business rules.
 
 Project-content targets are relative; absolute paths and `..` are invalid. A component cannot commit outside its bound project or use a stage/commit from another component/project.
 

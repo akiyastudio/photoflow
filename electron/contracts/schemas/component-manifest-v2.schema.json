@@ -16,6 +16,14 @@
       "required": ["contractVersion", "compatibility", "contributions", "service"],
       "properties": {
         "contractVersion": { "const": 2 },
+        "migrations": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "legacyStorageV1": { "const": true },
+            "legacyOutputV1": { "const": true }
+          }
+        },
         "compatibility": {
           "type": "object",
           "additionalProperties": false,
