@@ -86,15 +86,32 @@ const waitingRelay = relayChainForItems([{ key: 'a', week: 1, identity: { name: 
 assert.equal(waitingRelay[1].state, 'waiting');
 assert.match(waitingRelay[1].reason, /等待/);
 
-assert.deepEqual(returnModificationAssessment({}), { known: false, suspicious: false, label: '修改有效性待人工查看', score: undefined }, 'missing editEvidence must degrade to manual review, not safe');
+const unknownEdit = returnModificationAssessment({});
+assert.equal(unknownEdit.known, false); assert.equal(unknownEdit.suspicious, false); assert.equal(unknownEdit.label, '修改有效性待人工查看');
 assert.equal(returnModificationAssessment({ modificationScore: .01 }).suspicious, true, 'near-identical returns must warn as potentially unmodified');
 assert.equal(returnModificationAssessment({ modificationScore: .4 }).suspicious, false);
+for (const editEvidence of [
+  { reallyModified: false }, { exactSame: true }, { nearUnchanged: true }, { mistakenFullOriginal: true }, { abnormalDimensions: true },
+]) assert.equal(returnModificationAssessment({ editEvidence }).suspicious, true, `backend editEvidence must require review: ${JSON.stringify(editEvidence)}`);
+const backendEdit = returnModificationAssessment({ editEvidence: { reallyModified: true, exactSame: false, nearUnchanged: false, changedFraction: .17, meanAbsoluteDifference: 8.2, mistakenFullOriginal: false, abnormalDimensions: false } });
+assert.equal(backendEdit.known, true); assert.equal(backendEdit.suspicious, false); assert.equal(backendEdit.score, .17); assert.equal(backendEdit.changedFraction, .17); assert.equal(backendEdit.meanAbsoluteDifference, 8.2);
+assert.equal(returnModificationAssessment({ editEvidence: { reallyModified: true }, returnWarnings: ['色彩空间异常'] }).suspicious, true, 'any backend returnWarnings must force manual review');
 assert.equal(returnMatchAssessment({ taskId: 't1', score: .91 }).needsManualMatch, false);
 assert.equal(returnMatchAssessment({ score: .4 }).needsManualMatch, true);
+assert.equal(returnMatchAssessment({ taskId: 't1', matchConfidence: 'low', score: .99 }).needsManualMatch, true, 'matchConfidence must take priority over numeric score');
+assert.equal(returnMatchAssessment({ taskId: 't1', matchConfidence: 'medium', score: .1 }).label, '任务匹配度中');
+assert.equal(returnMatchAssessment({ taskId: 't1', matchConfidence: 'review', score: .99 }).label, '任务匹配需人工确认');
 
-assert.deepEqual(workingImageMetrics({}, {}), { width: 0, height: 0, sourceWidth: 0, sourceHeight: 0, areaRatio: undefined, entire: false, over4000: false, backend: '基础', fallbackReason: '' }, 'missing crop metadata must remain explicitly unknown');
-const metrics = workingImageMetrics({ crop: { x: 0, y: 0, width: 5000, height: 2500 }, sourceWidth: 5000, sourceHeight: 5000, detectionBackend: 'advanced', fallbackReason: '显存不足' });
-assert.equal(metrics.areaRatio, .5); assert.equal(metrics.over4000, true); assert.equal(metrics.backend, '增强'); assert.equal(metrics.fallbackReason, '显存不足');
+const unknownMetrics = workingImageMetrics({}, {});
+assert.equal(unknownMetrics.width, 0); assert.equal(unknownMetrics.fullFrame, undefined); assert.equal(unknownMetrics.requiresManualCrop, undefined); assert.equal(unknownMetrics.backend, '未知');
+const metrics = workingImageMetrics({
+  detector: 'rtmdet-pairdetr-sam2', fallbackReason: '显存不足，已回退基础检测',
+  generation: { sourceWidth: 8000, sourceHeight: 6000, workWidth: 4000, workHeight: 3000, fullFrame: false, sourceCoverage: .25, requiresManualCrop: true, exceedsWorkTileEdge: false, reason: '多人靠近画面边缘' },
+});
+assert.equal(metrics.width, 4000); assert.equal(metrics.height, 3000); assert.equal(metrics.sourceWidth, 8000); assert.equal(metrics.sourceHeight, 6000);
+assert.equal(metrics.areaRatio, .25); assert.equal(metrics.fullFrame, false); assert.equal(metrics.requiresManualCrop, true); assert.equal(metrics.exceedsWorkTileEdge, false); assert.equal(metrics.backend, '增强'); assert.equal(metrics.detector, 'rtmdet-pairdetr-sam2'); assert.equal(metrics.fallbackReason, '显存不足，已回退基础检测'); assert.equal(metrics.reason, '多人靠近画面边缘');
+const legacyTopLevelMetrics = workingImageMetrics({ workWidth: 5000, workHeight: 2500, sourceWidth: 5000, sourceHeight: 5000, fullFrame: true, sourceCoverage: .5, requiresManualCrop: false, exceedsWorkTileEdge: true, detector: 'rtmdet-ins-m', reason: 'legacy top-level' });
+assert.equal(legacyTopLevelMetrics.areaRatio, .5); assert.equal(legacyTopLevelMetrics.fullFrame, true); assert.equal(legacyTopLevelMetrics.over4000, true); assert.equal(legacyTopLevelMetrics.backend, '基础'); assert.equal(legacyTopLevelMetrics.reason, 'legacy top-level');
 
 const audit = mergeAudit({ ...generatedWorkspace, assignments: [{ ...confirmedWorkspace.assignments[0], completed: false }] });
 assert.equal(audit.ready, false);

@@ -95,16 +95,26 @@ export const canEnterWorkflowStage = (workspace: Json | undefined, stage: Workfl
 export const workflowLayoutMode = (width: number) => Number.isFinite(width) && width < 760 ? 'compact-menu' : width < 1120 ? 'scrollable-steps' : 'full-steps';
 
 export const workingImageMetrics = (task: Json, photo: Json = {}) => {
+  const generation = task?.generation && typeof task.generation === 'object' ? task.generation : {};
   const crop = task?.crop || {};
-  const width = Math.max(0, Number(crop.width || task?.width || 0));
-  const height = Math.max(0, Number(crop.height || task?.height || 0));
-  const sourceWidth = Math.max(width, Number(task?.sourceWidth || photo?.width || 0));
-  const sourceHeight = Math.max(height, Number(task?.sourceHeight || photo?.height || 0));
-  const areaRatio = sourceWidth && sourceHeight ? Math.min(1, width * height / (sourceWidth * sourceHeight)) : undefined;
-  const entire = sourceWidth > 0 && sourceHeight > 0 && Math.abs(width - sourceWidth) <= 1 && Math.abs(height - sourceHeight) <= 1 && Number(crop.x || 0) === 0 && Number(crop.y || 0) === 0;
-  const backend = String(task?.detectionBackend || task?.backend || task?.engine || 'basic').toLowerCase().includes('advanced') ? '增强' : '基础';
+  const width = Math.max(0, Number(generation.workWidth ?? task?.workWidth ?? crop.width ?? task?.width ?? 0));
+  const height = Math.max(0, Number(generation.workHeight ?? task?.workHeight ?? crop.height ?? task?.height ?? 0));
+  const sourceWidth = Math.max(width, Number(generation.sourceWidth ?? task?.sourceWidth ?? photo?.width ?? 0));
+  const sourceHeight = Math.max(height, Number(generation.sourceHeight ?? task?.sourceHeight ?? photo?.height ?? 0));
+  const coverageValue = generation.sourceCoverage ?? task?.sourceCoverage;
+  const reportedCoverage = coverageValue === undefined || coverageValue === null || coverageValue === '' ? Number.NaN : Number(coverageValue);
+  const areaRatio = Number.isFinite(reportedCoverage) ? Math.max(0, Math.min(1, reportedCoverage)) : sourceWidth && sourceHeight ? Math.min(1, width * height / (sourceWidth * sourceHeight)) : undefined;
+  const fullFrameValue = generation.fullFrame ?? task?.fullFrame;
+  const fullFrame = typeof fullFrameValue === 'boolean' ? fullFrameValue : undefined;
+  const manualCropValue = generation.requiresManualCrop ?? task?.requiresManualCrop;
+  const requiresManualCrop = typeof manualCropValue === 'boolean' ? manualCropValue : undefined;
+  const exceedsValue = generation.exceedsWorkTileEdge ?? task?.exceedsWorkTileEdge;
+  const exceedsWorkTileEdge = typeof exceedsValue === 'boolean' ? exceedsValue : width && height ? width > 4000 || height > 4000 : undefined;
+  const detector = String(task?.detector || task?.detectionBackend || task?.backend || task?.engine || '');
+  const backend = detector === 'rtmdet-pairdetr-sam2' || /advanced|pairdetr|sam2/i.test(detector) ? '增强' : detector === 'rtmdet-ins-m' || /basic|ins-m/i.test(detector) ? '基础' : '未知';
   const fallbackReason = String(task?.fallbackReason || task?.backendFallbackReason || task?.detectionFallbackReason || '');
-  return { width, height, sourceWidth, sourceHeight, areaRatio, entire, over4000: width > 4000 || height > 4000, backend, fallbackReason };
+  const reason = String(generation.reason || task?.reason || '');
+  return { width, height, sourceWidth, sourceHeight, areaRatio, entire: fullFrame === true, fullFrame, requiresManualCrop, over4000: exceedsWorkTileEdge === true, exceedsWorkTileEdge, backend, detector, fallbackReason, reason };
 };
 
 export type RelayNode = { key: string; label: string; kind: 'source' | 'return' | 'holder' | 'waiting'; state: 'done' | 'current' | 'waiting' | 'warning'; reason?: string };
@@ -126,17 +136,28 @@ export const relayChainForItems = (items: Json[]) => {
 };
 
 export const returnModificationAssessment = (match: Json) => {
-  const score = Number(match.modificationScore ?? match.changeScore ?? match.editScore);
+  const evidence = match.editEvidence && typeof match.editEvidence === 'object' ? match.editEvidence : {};
+  const warnings = Array.isArray(match.returnWarnings) ? match.returnWarnings.filter(Boolean) : match.returnWarnings ? [match.returnWarnings] : [];
+  const finiteMetric = (value: unknown) => value === undefined || value === null || value === '' || !Number.isFinite(Number(value)) ? undefined : Number(value);
+  const changedFraction = finiteMetric(evidence.changedFraction);
+  const meanAbsoluteDifference = finiteMetric(evidence.meanAbsoluteDifference);
+  const score = changedFraction ?? finiteMetric(match.modificationScore ?? match.changeScore ?? match.editScore);
   const unchangedProbability = Number(match.unchangedProbability ?? match.sameImageProbability);
-  const explicitlyUnchanged = match.modified === false || match.isModified === false || match.unchanged === true;
-  const suspicious = explicitlyUnchanged || Number.isFinite(score) && score < .03 || Number.isFinite(unchangedProbability) && unchangedProbability >= .85;
-  const known = explicitlyUnchanged || Number.isFinite(score) || Number.isFinite(unchangedProbability) || typeof match.modified === 'boolean' || typeof match.isModified === 'boolean';
-  return { known, suspicious, label: !known ? '修改有效性待人工查看' : suspicious ? '返图疑似未修改' : '检测到有效修改', score: Number.isFinite(score) ? score : undefined };
+  const explicitlyUnchanged = evidence.reallyModified === false || match.modified === false || match.isModified === false || match.unchanged === true;
+  const evidenceWarning = evidence.exactSame === true || evidence.nearUnchanged === true || evidence.mistakenFullOriginal === true || evidence.abnormalDimensions === true;
+  const suspicious = Boolean(warnings.length || explicitlyUnchanged || evidenceWarning || score !== undefined && score < .03 || Number.isFinite(unchangedProbability) && unchangedProbability >= .85);
+  const known = Boolean(Object.keys(evidence).length || warnings.length || explicitlyUnchanged || score !== undefined || Number.isFinite(unchangedProbability) || typeof match.modified === 'boolean' || typeof match.isModified === 'boolean');
+  return { known, suspicious, label: !known ? '修改有效性待人工查看' : suspicious ? '返图疑似未修改 / 需人工核对' : '检测到有效修改', score, changedFraction, meanAbsoluteDifference, warnings, evidence };
 };
 
 export const returnMatchAssessment = (match: Json) => {
-  const score = Number(match.score ?? match.matchScore ?? 0);
-  return { score, label: score >= .85 ? '任务匹配度高' : score >= .6 ? '任务匹配度中' : '任务匹配度低', needsManualMatch: !match.taskId || score < .6 };
+  const scoreValue = match.score ?? match.matchScore;
+  const numericScore = scoreValue === undefined || scoreValue === null || scoreValue === '' ? Number.NaN : Number(scoreValue);
+  const score = Number.isFinite(numericScore) ? numericScore : undefined;
+  const confidence = ['high', 'medium', 'low', 'unknown', 'review'].includes(String(match.matchConfidence)) ? String(match.matchConfidence) : '';
+  const labels: Record<string, string> = { high: '任务匹配度高', medium: '任务匹配度中', low: '任务匹配度低', unknown: '任务匹配度未知', review: '任务匹配需人工确认' };
+  if (confidence) return { score, confidence, label: labels[confidence], needsManualMatch: !match.taskId || ['low', 'unknown', 'review'].includes(confidence) };
+  return { score, confidence: '', label: score === undefined ? '任务匹配度未知' : score >= .85 ? '任务匹配度高' : score >= .6 ? '任务匹配度中' : '任务匹配度低', needsManualMatch: !match.taskId || score === undefined || score < .6 };
 };
 
 export const mergeAudit = (value: Json | undefined) => {

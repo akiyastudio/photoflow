@@ -25,6 +25,7 @@ for (const copy of ['默认自动排期', '高级排期', '批量导入返图', 
 assert(people.includes('modificationAssessment.label'), 'return evidence label must come from the tested progressive-enhancement model');
 assert(people.includes('data-relay-chains') && people.includes('relayChainForItems') && people.includes('当前持有人'), 'relay stage must render semantic handoff chains');
 assert(people.includes('data-return-evidence') && people.includes('returnModificationAssessment') && people.includes('returnMatchAssessment'), 'return review must separate matching and modification evidence');
+assert(manager.includes('data-manual-crop-warning') && manager.includes('需要人工调整裁剪范围') && manager.includes('当前为整幅工作图') && manager.includes('旧数据缺少 generation 元数据'), 'generation crop decisions must be prominent and degrade explicitly for old data');
 for (const hierarchy of ['workflow-board-view', 'workflow-person-lane', 'workflow-person-summary', 'workflow-task-strip', 'workflow-task-card', 'workflow-task-thumbnail']) assert(people.includes(hierarchy), `workflow DOM hierarchy missing: ${hierarchy}`);
 assert(people.includes('workspaceLoadError') && people.includes('重新读取团片历史') && people.includes('workspaceLoadSequenceRef'), 'workflow history load must terminate on error, expose retry, and reject stale results');
 for (const mode of ['side-by-side', 'split', 'overlay', 'blink', 'difference']) assert(comparison.includes(`'${mode}'`), `return comparison lost ${mode} mode`);
