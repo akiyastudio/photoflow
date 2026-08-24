@@ -9,6 +9,7 @@ person cut-out workflow.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import itertools
 import json
 import math
@@ -710,6 +711,8 @@ def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, overs
             planning_box = union_box([items[index].get("planningBox", items[index]["box"]) for index in key])
             focus_box = planning_box
             focus_margin_ratio = 0.04 if len(key) > 1 else 0.08
+            requires_manual_crop = False
+            crop_reason = "完整人物范围可在工作图限制内安全容纳"
             crop = planned_work_crop(
                 planning_box, image_width, image_height, edge,
                 allow_oversize=False, margin_ratio=focus_margin_ratio,
@@ -729,6 +732,8 @@ def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, overs
                     focus_box, image_width, image_height, edge,
                     allow_oversize=False, prefer_edge_fill=True,
                 )
+                if crop is not None:
+                    crop_reason = "人物范围超过限制，已改用人脸与肩部中心裁剪"
             if crop is None and oversize_crop_mode == "expand" and len(key) > 1:
                 padded_group = expanded_planning_box(
                     planning_box, image_width, image_height, focus_margin_ratio,
@@ -752,8 +757,20 @@ def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, overs
                         planning_box, image_width, image_height, edge,
                         allow_oversize=True, margin_ratio=focus_margin_ratio,
                     )
-            if crop is None and len(key) == 1:
+            if crop is None and len(key) == 1 and oversize_crop_mode == "expand":
                 crop = planned_work_crop(box, image_width, image_height, edge, allow_oversize=True)
+                if crop is not None:
+                    crop_reason = "完整人物无法在限制内安全容纳，expand 策略允许扩大工作图"
+            if crop is None and len(key) == 1 and oversize_crop_mode == "face-centered":
+                face_box = face_shoulder_planning_box(items[key[0]], image_width, image_height)
+                center_x = (face_box[0] + face_box[2]) / 2
+                center_y = (face_box[1] + face_box[3]) / 2
+                crop_width, crop_height = min(edge, image_width), min(edge, image_height)
+                left = max(0, min(image_width - crop_width, int(round(center_x - crop_width / 2))))
+                top = max(0, min(image_height - crop_height, int(round(center_y - crop_height / 2))))
+                crop = [left, top, crop_width, crop_height]
+                requires_manual_crop = True
+                crop_reason = "人脸肩部范围无法在 4000px 限制内完整安全容纳，请人工调整裁剪"
             if crop is None:
                 candidate_cache[key] = None
             else:
@@ -775,6 +792,10 @@ def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, overs
                 bystander_cost = sum(bystander_crop_penalty(coverage) for coverage in bystander_coverages)
                 candidate_cache[key] = {
                     "indices": list(key), "box": box, "crop": crop,
+                    "requiresManualCrop": requires_manual_crop,
+                    "cropReason": crop_reason,
+                    "fullFrame": crop[0] == 0 and crop[1] == 0 and crop[2] == image_width and crop[3] == image_height,
+                    "sourceCoverage": float(crop[2] * crop[3]) / max(1, image_width * image_height),
                     "bystanderCost": bystander_cost,
                     "visibleBystanderCount": sum(coverage >= 0.8 for coverage in bystander_coverages),
                     "cutBystanderCount": sum(0.1 <= coverage < 0.8 for coverage in bystander_coverages),
@@ -927,6 +948,9 @@ def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, 
         reason = "；".join(dict.fromkeys(
             member.get("reviewReason", "") for member in members if member.get("reviewReason")
         ))
+        if tile.get("requiresManualCrop"):
+            reason = "；".join(filter(None, (reason, tile.get("cropReason"))))
+        patch_rgb = rgb[crop_y:crop_y + crop_height, crop_x:crop_x + crop_width]
         tasks.append({
             "id": task_id,
             "personIndex": index,
@@ -940,6 +964,20 @@ def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, 
             "patchPath": str(patch_path),
             "maskPath": str(mask_file),
             "mask": {"width": proxy_width, "height": proxy_height, "scale": proxy_scale},
+            "generation": {
+                "version": 2, "strategy": oversize_crop_mode,
+                "sourceWidth": width, "sourceHeight": height,
+                "workWidth": crop_width, "workHeight": crop_height,
+                "workDigest": hashlib.sha256(patch_rgb.tobytes()).hexdigest(),
+                "fullFrame": bool(tile.get("fullFrame")),
+                "sourceCoverage": round(float(tile.get("sourceCoverage", 0)), 6),
+                "requiresManualCrop": bool(tile.get("requiresManualCrop")),
+                "reason": str(tile.get("cropReason") or ""),
+                "exceedsWorkTileEdge": max(crop_width, crop_height) > WORK_TILE_EDGE,
+            },
+            "requiresManualCrop": bool(tile.get("requiresManualCrop")),
+            "fullFrame": bool(tile.get("fullFrame")),
+            "sourceCoverage": round(float(tile.get("sourceCoverage", 0)), 6),
             "needsReview": bool(reason),
             "reviewReason": reason,
             "status": "exported",
@@ -1257,11 +1295,42 @@ def describe_match_image(image_path):
     edges = cv2.Canny(structure, 55, 145)
     sift = cv2.SIFT_create(nfeatures=900, contrastThreshold=0.025, edgeThreshold=12)
     keypoints, descriptors = sift.detectAndCompute(normalized, None)
+    comparison = cv2.resize(rgb, (192, 192), interpolation=cv2.INTER_AREA)
     return {
         "path": str(image_path), "width": width, "height": height,
+        "pixelDigest": hashlib.sha256(rgb.tobytes()).hexdigest(), "comparison": comparison,
         "proxyWidth": proxy.shape[1], "proxyHeight": proxy.shape[0],
         "structure": structure, "edges": edges, "hash": _perceptual_hash(normalized),
         "keypoints": keypoints or [], "descriptors": descriptors,
+    }
+
+
+def return_edit_evidence(returned, candidate):
+    difference = np.mean(np.abs(
+        returned["comparison"].astype(np.float32) - candidate["comparison"].astype(np.float32)
+    ), axis=2)
+    mean_absolute = float(np.mean(difference))
+    changed_fraction = float(np.mean(difference > 4.0))
+    exact_same = (returned["width"], returned["height"], returned["pixelDigest"]) == (
+        candidate["width"], candidate["height"], candidate["pixelDigest"]
+    )
+    returned_ratio = returned["width"] / max(1, returned["height"])
+    candidate_ratio = candidate["width"] / max(1, candidate["height"])
+    aspect_delta = abs(math.log(max(1e-6, returned_ratio / candidate_ratio)))
+    dimension_scale = math.sqrt(
+        (returned["width"] * returned["height"]) / max(1, candidate["width"] * candidate["height"])
+    )
+    abnormal_dimensions = dimension_scale < 0.35 or dimension_scale > 2.5
+    near_unchanged = exact_same or mean_absolute < 1.6 or (mean_absolute < 3.0 and changed_fraction < 0.008)
+    return {
+        "exactSame": exact_same, "nearUnchanged": near_unchanged,
+        "meanAbsoluteDifference": round(mean_absolute, 4),
+        "changedFraction": round(changed_fraction, 6),
+        "aspectRatioDelta": round(aspect_delta, 6),
+        "dimensionScale": round(dimension_scale, 6), "abnormalDimensions": abnormal_dimensions,
+        "returnedSize": {"width": returned["width"], "height": returned["height"]},
+        "workingSize": {"width": candidate["width"], "height": candidate["height"]},
+        "reallyModified": not near_unchanged and aspect_delta <= 0.08 and not abnormal_dimensions,
     }
 
 
@@ -1383,6 +1452,11 @@ def match_returned_batch(manifest_path):
     for index, item in enumerate(candidates, start=1):
         candidate_descriptors.append(describe_match_image(item["patchPath"]))
         emit_progress(20 + 20 * index / len(candidates), f"读取原始工作图 {index}/{len(candidates)}")
+    original_descriptors = {}
+    for candidate in candidates:
+        original_path = candidate.get("originalPath")
+        if original_path and original_path not in original_descriptors and os.path.isfile(original_path):
+            original_descriptors[original_path] = describe_match_image(original_path)
 
     scores = []
     for row_index, returned in enumerate(returned_descriptors):
@@ -1414,6 +1488,33 @@ def match_returned_batch(manifest_path):
         else:
             confidence = "low"
         candidate = candidates[candidate_index]
+        edit_evidence = return_edit_evidence(returned_descriptors[row_index], candidate_descriptors[candidate_index])
+        warnings = []
+        if edit_evidence["exactSame"]:
+            warnings.append("返图与原始工作图完全相同，未检测到实际修改")
+        elif edit_evidence["nearUnchanged"]:
+            warnings.append("返图与原始工作图近似相同，修改证据不足")
+        if edit_evidence["aspectRatioDelta"] > 0.08:
+            warnings.append("返图长宽比与工作图异常不一致")
+        if edit_evidence["abnormalDimensions"]:
+            warnings.append("返图尺寸与工作图比例异常")
+        original = original_descriptors.get(candidate.get("originalPath"))
+        mistaken_original = False
+        if original is not None:
+            original_score = fast_match_score(returned_descriptors[row_index], original)
+            same_original_pixels = returned_descriptors[row_index]["pixelDigest"] == original["pixelDigest"]
+            original_ratio_delta = abs(math.log(max(1e-6,
+                (returned_descriptors[row_index]["width"] / max(1, returned_descriptors[row_index]["height"])) /
+                (original["width"] / max(1, original["height"])))))
+            mistaken_original = same_original_pixels or (original_score >= 0.84 and original_ratio_delta <= 0.035
+                and returned_descriptors[row_index]["width"] >= candidate_descriptors[candidate_index]["width"] * 1.15)
+            edit_evidence["originalFrameScore"] = round(float(original_score), 4)
+            edit_evidence["mistakenFullOriginal"] = mistaken_original
+            if mistaken_original:
+                warnings.append("疑似误传整张原图，而不是当前人物工作图")
+        edit_evidence["reallyModified"] = bool(edit_evidence["reallyModified"] and not mistaken_original)
+        if warnings and confidence == "high":
+            confidence = "review"
         alternatives = [{
             "taskId": candidates[index].get("taskId"),
             "photoId": candidates[index].get("photoId"),
@@ -1427,7 +1528,9 @@ def match_returned_batch(manifest_path):
         } for index in ranked[:3]]
         matches.append({
             **returned_item, **candidate, "matched": True, "confidence": confidence,
-            "score": round(score, 4), "margin": round(margin, 4), "alternatives": alternatives,
+            "matchConfidence": "high" if score >= 0.68 and margin >= 0.075 else ("medium" if score >= 0.55 and margin >= 0.025 else "low"),
+            "score": round(score, 4), "margin": round(margin, 4), "editEvidence": edit_evidence,
+            "returnWarnings": warnings, "needsReview": bool(warnings), "alternatives": alternatives,
         })
     emit_progress(100, "内容比对完成")
     return {

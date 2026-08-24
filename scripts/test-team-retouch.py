@@ -19,9 +19,10 @@ ENGINE = ROOT / "extensions" / "team-retouch" / "team_retouch.py"
 sys.path.insert(0, str(ENGINE.parent))
 sys.path.insert(0, str(ROOT / "python"))
 
-from team_retouch import bounded_planning_box, box_coverage_by_crop, centered_work_crop, emit_progress, excluded_detection_indices, face_shoulder_planning_box, fuse_boxes, identify_people, load_mask, mask_bounds, match_returned_batch, matches_exclusion, maximize_assignment, plan_work_tiles, rebuild_without_person, reposition_crop_to_avoid_bystanders, restore_patches, save_mask, spatially_order_people  # noqa: E402
+import team_retouch as team_engine  # noqa: E402
+from team_retouch import bounded_planning_box, box_coverage_by_crop, centered_work_crop, detect_batch, emit_progress, excluded_detection_indices, face_shoulder_planning_box, fuse_boxes, identify_people, load_mask, mask_bounds, match_returned_batch, matches_exclusion, maximize_assignment, plan_work_tiles, rebuild_without_person, reposition_crop_to_avoid_bystanders, restore_patches, save_mask, spatially_order_people  # noqa: E402
 from identity_engine import constrained_clusters, ranked_similarity_pairs  # noqa: E402
-from patch_merge import safe_exif_bytes, save_tiff  # noqa: E402
+from patch_merge import merge, safe_exif_bytes, save_tiff  # noqa: E402
 from workspace_db import connect, team_identity_assign, team_identity_complete, team_identity_confirm_group, team_identity_save, team_patch_delete, team_patch_replace, team_patch_update, team_person_exclusion_add, team_person_exclusion_clear, team_person_exclusion_list, team_project_register_photo, team_project_unregister_photo, team_project_workspace  # noqa: E402
 
 
@@ -202,6 +203,45 @@ def main():
         assert [item["taskId"] for item in matched["matches"]] == [f"task-{index}" for index in return_order]
         assert all(item["confidence"] == "high" for item in matched["matches"])
         assert all(item["alternatives"] and item["alternatives"][0]["patchPath"] for item in matched["matches"])
+        identical_manifest = test_root / "identical-return.json"
+        identical_manifest.write_text(json.dumps({
+            "returned": [{"returnId": "same", "path": candidates[0]["patchPath"]}],
+            "candidates": [candidates[0]],
+        }), encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            identical = match_returned_batch(identical_manifest)["matches"][0]
+        assert identical["matchConfidence"] == "high"
+        assert identical["confidence"] == "review" and identical["needsReview"]
+        assert identical["editEvidence"]["exactSame"] and not identical["editEvidence"]["reallyModified"]
+        assert any("完全相同" in warning for warning in identical["returnWarnings"])
+
+        wrong_ratio_path = test_root / "wrong-ratio.png"
+        Image.open(candidates[1]["patchPath"]).resize((540, 180)).save(wrong_ratio_path)
+        wrong_ratio_manifest = test_root / "wrong-ratio-return.json"
+        wrong_ratio_manifest.write_text(json.dumps({
+            "returned": [{"returnId": "ratio", "path": str(wrong_ratio_path)}],
+            "candidates": [candidates[1]],
+        }), encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            wrong_ratio = match_returned_batch(wrong_ratio_manifest)["matches"][0]
+        assert wrong_ratio["confidence"] != "high" and wrong_ratio["needsReview"]
+        assert any("长宽比" in warning for warning in wrong_ratio["returnWarnings"])
+
+        full_original_path = test_root / "full-original.png"
+        full_original = np.pad(np.asarray(Image.open(candidates[2]["patchPath"])), ((180, 180), (270, 270), (0, 0)), mode="edge")
+        Image.fromarray(full_original).save(full_original_path)
+        crop_from_original_path = test_root / "crop-from-original.png"
+        Image.fromarray(full_original[180:540, 270:810]).save(crop_from_original_path)
+        full_original_manifest = test_root / "full-original-return.json"
+        full_original_manifest.write_text(json.dumps({
+            "returned": [{"returnId": "original", "path": str(full_original_path)}],
+            "candidates": [{**candidates[2], "patchPath": str(crop_from_original_path), "originalPath": str(full_original_path)}],
+        }), encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            original_return = match_returned_batch(full_original_manifest)["matches"][0]
+        assert original_return["confidence"] != "high" and original_return["needsReview"]
+        assert original_return["editEvidence"]["mistakenFullOriginal"]
+        assert any("整张原图" in warning for warning in original_return["returnWarnings"])
         assert maximize_assignment([[0.9, 0.2], [0.8, 0.7]]) == [0, 1]
         manifest_path.write_text(json.dumps({"tasks": [{
             "id": "test-task",
@@ -228,6 +268,16 @@ def main():
         # remains equal to the high-resolution base image.
         assert np.mean(np.abs(merged_rgb[105:145, 130:175].astype(np.int16) - base[105:145, 130:175].astype(np.int16))) > 1
         assert np.max(np.abs(merged_rgb[58:70, 82:94].astype(np.int16) - base[58:70, 82:94].astype(np.int16))) <= 1
+
+        identical_merge_manifest = test_root / "identical-merge.json"
+        identical_patch_path = test_root / "identical-patch.png"
+        Image.fromarray(base[crop["y"]:crop["y"] + crop["height"], crop["x"]:crop["x"] + crop["width"]]).save(identical_patch_path)
+        identical_merge_manifest.write_text(json.dumps({"tasks": [{
+            "id": "identical-task", "crop": crop, "editedPatchPath": str(identical_patch_path),
+        }]}), encoding="utf-8")
+        identical_merge = merge(str(base_path), str(identical_merge_manifest), str(test_root / "identical-merge.tif"))
+        assert identical_merge["needsReview"] and not identical_merge["qualityGate"]["passed"]
+        assert any("完全相同" in item["reason"] for item in identical_merge["reviewTasks"])
 
         # Corrupt source offsets are omitted. If any unexpected EXIF block
         # still reaches the writer, saving retries without EXIF.
@@ -376,6 +426,11 @@ def main():
             "box": oversized_box, "faceBox": [1320, 260, 1680, 700],
         }, 6000, 7000)
         assert box_coverage_by_crop(protected, face_centered) == 1
+        nearly_full_width = plan_work_tiles([{
+            "box": [80, 1200, 5920, 5600], "faceBox": [2800, 1320, 3200, 1800],
+        }], 6000, 7000, oversize_crop_mode="face-centered")[0]
+        assert max(nearly_full_width["crop"][2:]) == 4000
+        assert nearly_full_width["crop"] != [0, 0, 6000, 7000]
 
         oversized_pair = plan_work_tiles([
             {"box": [800, 100, 2100, 5200], "faceBox": [1200, 180, 1600, 650]},
@@ -410,9 +465,32 @@ def main():
         assert len(expanded_oversized_pair) == 1
         assert expanded_oversized_pair[0]["indices"] == [0, 1]
         assert max(expanded_oversized_pair[0]["crop"][2:]) > 4000
+        assert expanded_oversized_pair[0]["sourceCoverage"] > 0
+        assert isinstance(expanded_oversized_pair[0]["fullFrame"], bool)
         assert all(box_coverage_by_crop(item["box"], expanded_oversized_pair[0]["crop"]) == 1 for item in [
             {"box": [800, 100, 2100, 5200]}, {"box": [2200, 120, 3500, 5250]},
         ])
+
+        batch_manifest = test_root / "detect-batch-session.json"
+        batch_manifest.write_text(json.dumps({"items": [
+            {"key": "one", "input": "one.jpg", "outputDir": "out-1", "deliveryDir": "delivery-1"},
+            {"key": "two", "input": "two.jpg", "outputDir": "out-2", "deliveryDir": "delivery-2"},
+        ]}), encoding="utf-8")
+        original_detect = team_engine.detect
+        seen_sessions = []
+        try:
+            def fake_detect(_input, _output, _preference, _delivery, _prefix, _crop_mode,
+                            _batch_runner, session_bundle, _advanced_mode, _excluded):
+                seen_sessions.append(session_bundle)
+                return {"tasks": [], "personCount": 0, "advancedBackend": False}
+            team_engine.detect = fake_detect
+            session_marker = object()
+            with redirect_stdout(io.StringIO()):
+                batch_result = detect_batch(batch_manifest, advanced_mode="basic", session_bundle=session_marker, batch_runner=object())
+            assert len(seen_sessions) == 2 and all(item is session_marker for item in seen_sessions)
+            assert len(batch_result["results"]) == 2
+        finally:
+            team_engine.detect = original_detect
 
         # Group membership survives the workspace database round-trip while
         # old databases gain the new column through connect() migration.

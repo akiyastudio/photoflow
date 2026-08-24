@@ -246,15 +246,42 @@ def merge(input_path, manifest_path, output_path):
             raise ValueError(f"Patch {task.get('id')} 的坐标超出原图")
         base_crop = base_rgb[y:y + crop_height, x:x + crop_width]
         edited_rgb, _ = load_rgb(edited_path)
+        returned_height, returned_width = edited_rgb.shape[:2]
+        aspect_delta = abs(np.log(max(1e-6, (returned_width / max(1, returned_height)) / (crop_width / max(1, crop_height)))))
+        dimension_scale = float(np.sqrt((returned_width * returned_height) / max(1, crop_width * crop_height)))
+        exact_same = edited_rgb.shape == base_crop.shape and np.array_equal(edited_rgb, base_crop)
+        warnings = []
+        if exact_same:
+            warnings.append("返图与原始工作图完全相同")
+        if aspect_delta > 0.08:
+            warnings.append("返图长宽比与工作图异常不一致")
+        if dimension_scale < 0.35 or dimension_scale > 2.5:
+            warnings.append("返图尺寸与工作图比例异常")
+        if (returned_width, returned_height) == (width, height) and (crop_width, crop_height) != (width, height):
+            warnings.append("疑似误传整张原图")
         aligned, alignment_score = align_patch(base_crop, edited_rgb)
         color_matched = match_border_color(base_crop, aligned)
         weight, delta, task_metrics = edit_weight_and_delta(base_crop, color_matched)
+        changed_fraction = float(np.mean(weight > 0.08))
+        mean_delta = float(np.mean(np.abs(delta)))
+        if not exact_same and changed_fraction < 0.0005:
+            warnings.append("有效修改面积过小，修改证据不足")
+        if alignment_score < 0.35:
+            warnings.append("返图与工作图对齐分过低")
+        task_metrics.update({
+            "returnedWidth": returned_width, "returnedHeight": returned_height,
+            "aspectRatioDelta": float(aspect_delta), "dimensionScale": dimension_scale, "exactSame": bool(exact_same),
+            "changedFraction": changed_fraction, "meanAbsoluteDelta": mean_delta,
+            "returnWarnings": warnings,
+        })
         person_weight = task_mask_weight(task, width, height, (x, y, crop_width, crop_height))
         if person_weight is not None:
             weight *= np.clip(person_weight, 0.0, 1.0)
             task_metrics["maskCoverage"] = float(np.mean(person_weight > 0.08))
         if task.get("needsReview"):
             review_tasks.append({"taskId": task.get("id"), "reason": task.get("reviewReason") or "检测结果需要确认"})
+        if warnings:
+            review_tasks.append({"taskId": task.get("id"), "reason": "；".join(warnings), "returnWarnings": warnings})
         previous_weight = weight_sum[y:y + crop_height, x:x + crop_width].astype(np.float32)
         previous_coverage = np.clip(previous_weight, 0.0, 1.0)
         current_crop = result_rgb[y:y + crop_height, x:x + crop_width].astype(np.float32)
@@ -289,6 +316,7 @@ def merge(input_path, manifest_path, output_path):
         "conflictPixels": conflict_pixels,
         "seamScore": seam_score,
         "needsReview": bool(review_tasks),
+        "qualityGate": {"passed": not bool(review_tasks), "reviewTaskCount": len(review_tasks)},
         "reviewTasks": review_tasks,
         "metrics": metrics,
     }

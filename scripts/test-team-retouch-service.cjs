@@ -32,6 +32,7 @@ assert(externalMappingUsed, 'online external media paths must use the existing m
 const broker = new ComponentCapabilityBroker();
 const bundles = new Map();
 const requestedPhotoIds = [];
+let hostIdentityCompletionCalls = 0;
 const taskHandles = new Map();
 const backgroundTasks = {
   create(definition) {
@@ -66,9 +67,7 @@ registerComponentProjectCapabilities({
       bundles.set('photo-1', bundle);
       return bundle;
     },
-    completeTeamIdentity: async (_root, payload) => payload.photoId === 'photo-1' && payload.baseVersionId === 'version-1'
-      ? { success: true }
-      : Promise.reject(new Error('identity ownership rejected')),
+    completeTeamIdentity: async () => { hostIdentityCompletionCalls += 1; throw new Error('component must not use host identity completion'); },
   },
   IMAGE_EXTENSIONS: new Set(['.jpg']),
   path,
@@ -84,7 +83,7 @@ registerComponentProjectCapabilities({
   RAW_EXTENSIONS: new Set(['.dng']), IMAGE_PREVIEW_CONVERSION_EXTENSIONS: new Set(['.heic']),
 });
 broker.register('component.lifecycle.v1', payload => Object.keys(payload).every(field => ['action', 'repair'].includes(field)) ? { success: true, action: payload.action } : Promise.reject(new Error('lifecycle injection rejected')));
-const descriptor = { componentId: 'team-retouch', service: { runtimeActions: [], capabilities: ['component.storage.v1', 'project.media.read.v1', 'project.output.authorize.v1', 'version.register.v1', 'tasks.report.v1', 'dialogs.open.v1', 'project.media.access.v1', 'project.identity.complete.v1', 'component.settings.v1', 'component.lifecycle.v1'] } };
+const descriptor = { componentId: 'team-retouch', service: { runtimeActions: [], capabilities: ['component.storage.v1', 'project.media.read.v1', 'project.output.authorize.v1', 'version.register.v1', 'tasks.report.v1', 'dialogs.open.v1', 'project.media.access.v1', 'component.settings.v1', 'component.lifecycle.v1'] } };
 assert.equal(broker.assertCapabilities(descriptor), true, 'every capability declared by the real team service manifest must have a registered broker implementation');
 const context = { workspacePath: workspace, projectId: 'project-1', projectName: 'Project', projectStatus: 'active' };
 assert.throws(() => broker.invoke(descriptor, 'component.storage.v1', { namespace: 'arbitrary' }, context), /Unknown component storage namespace/);
@@ -186,6 +185,9 @@ const ready = new Promise((resolve, reject) => {
     bundles.set('photo-raw', { success: true, photo: { id: 'photo-raw', projectId: 'project-1', currentVersionId: 'version-raw' }, versions: [{ id: 'version-raw', filePath: rawPath, isCurrent: true }] });
     const rawAccess = await invoke('team.media.authorize.v1', { kind: 'original', photoId: 'photo-raw', baseVersionId: 'version-raw' });
     assert.deepEqual({ url: rawAccess.url, previewUrl: rawAccess.previewUrl, originalUrl: rawAccess.originalUrl }, { url: 'photoflow-media:generated-preview', previewUrl: 'photoflow-media:generated-preview', originalUrl: 'photoflow-media:camera.dng' }, 'RAW originals use a generated display preview while retaining a distinct original URL');
+    const heicPath = path.join(projectRoot, 'unsupported.heic'); fs.writeFileSync(heicPath, 'not-decodable');
+    bundles.set('photo-heic', { success: true, photo: { id: 'photo-heic', projectId: 'project-1', currentVersionId: 'version-heic' }, versions: [{ id: 'version-heic', filePath: heicPath, isCurrent: true }] });
+    await assert.rejects(invoke('team.patch.detect.v1', { photoId: 'photo-heic', baseVersionId: 'version-heic' }), /HEIC\/HEIF.*转换为 JPEG/, 'HEIC must be rejected with an actionable conversion error when no verified decoder is available');
     await assert.rejects(invoke('team.patch.open.v1', { photoId: 'photo-other', baseVersionId: 'version-other', taskId: 'task-other' }), /outside the bound project/, 'cross-project photo IDs must fail through the real service process');
     await assert.rejects(invoke('team.media.authorize.v1', { kind: 'working', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-other' }), /outside the bound photo version/, 'a task from another photo must not authorize media');
     await assert.rejects(invoke('team.identity.complete.v1', { photoId: 'photo-1', baseVersionId: 'other-version', personIndex: 1 }), /outside the bound photo/, 'cross-version completion must fail through the real service process');
@@ -222,6 +224,39 @@ const ready = new Promise((resolve, reject) => {
     assert.equal(selected.files[0].startsWith('media-token:'), true, 'the selector must return authorization tokens instead of paths');
     const migratedArtifacts = await invoke('team.workflow.artifact.migrate.v1', { from: { status: 'active', projectName: 'Project' }, to: { status: 'active', projectName: 'Project Renamed' } });
     assert.equal(migratedArtifacts.some(item => item.state === 'migrated'), true, 'artifact identity migration must execute inside the real component service process');
+    await invoke('team.identity.complete.v1', { photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', personIndex: 1, completed: true, completionKind: 'no-retouch' });
+    assert.equal((await invoke('team.project.get.v1')).assignments[0].completionKind, 'no-retouch', 'identity completion is persisted by the component domain service');
+    assert.equal(hostIdentityCompletionCalls, 0, 'identity completion no longer invokes the host-private capability');
+
+    const chainRoot = path.join(dataRoot, 'team-retouch', 'photo-1', 'version-1', 'uploads');
+    fs.mkdirSync(chainRoot, { recursive: true });
+    const taskOnePrevious = path.join(chainRoot, 'task-one-previous.png');
+    const taskOneLatest = path.join(chainRoot, 'task-one-latest.png');
+    const taskTwoLatest = path.join(chainRoot, 'task-two-latest.png');
+    const taskOneWork = path.join(chainRoot, 'task-one-work.png');
+    const taskTwoWork = path.join(chainRoot, 'task-two-work.png');
+    for (const filePath of [taskOnePrevious, taskOneLatest, taskTwoLatest, taskOneWork, taskTwoWork]) fs.writeFileSync(filePath, path.basename(filePath));
+    const chainDb = new DatabaseSync(databasePath);
+    chainDb.prepare(`INSERT INTO team_patch_tasks(id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,edited_patch_path,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run('task-2', 'photo-1', 'version-1', 2, '人物 2', '{}', '{}', taskTwoWork, taskTwoLatest, 2, 2);
+    chainDb.prepare(`INSERT OR IGNORE INTO team_task_stages(id,task_id,person_index,stage_order,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`).run('stage-task-1', 'task-1', 1, 1, 'complete', 1, 1);
+    const taskOneStageId = chainDb.prepare(`SELECT id FROM team_task_stages WHERE task_id='task-1' AND person_index=1`).get().id;
+    chainDb.prepare(`INSERT OR IGNORE INTO team_task_stages(id,task_id,person_index,stage_order,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`).run('stage-task-2', 'task-2', 2, 1, 'complete', 1, 1);
+    const insertArtifact = chainDb.prepare(`INSERT INTO team_task_artifacts(id,task_id,stage_id,person_index,kind,artifact_path,created_at) VALUES(?,?,?,?,?,?,?)`);
+    insertArtifact.run('artifact-task-1-old', 'task-1', taskOneStageId, 1, 'returned', taskOnePrevious, 100);
+    insertArtifact.run('artifact-task-1-new', 'task-1', taskOneStageId, 1, 'returned', taskOneLatest, 200);
+    insertArtifact.run('artifact-task-2-new', 'task-2', 'stage-task-2', 2, 'returned', taskTwoLatest, 300);
+    chainDb.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status='uploaded' WHERE id='task-1'`).run(taskOneLatest);
+    chainDb.prepare(`UPDATE team_patch_tasks SET patch_path=? WHERE id='task-1'`).run(taskOneWork);
+    chainDb.prepare(`UPDATE team_person_assignments SET task_id='task-1',stage_id=?,artifact_id='artifact-task-1-new',edited_patch_path=?,completed=1,completion_kind='returned' WHERE photo_id='photo-1' AND base_version_id='version-1' AND person_index=1`).run(taskOneStageId, taskOneLatest);
+    chainDb.prepare(`INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,confidence,source,completed,completion_kind,edited_patch_path,completed_at,updated_at,task_id,stage_id,artifact_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run('project-1', 'photo-1', 'version-1', 2, 1, 'manual', 1, 'returned', taskTwoLatest, 300, 300, 'task-2', 'stage-task-2', 'artifact-task-2-new');
+    chainDb.close();
+    await invoke('team.patch.remove-upload.v1', { photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', personIndex: 1 });
+    const verifiedChainDb = new DatabaseSync(databasePath);
+    assert.equal(verifiedChainDb.prepare("SELECT edited_patch_path FROM team_patch_tasks WHERE id='task-1'").get().edited_patch_path, taskOnePrevious, 'undo restores only the predecessor from the same task');
+    assert.equal(verifiedChainDb.prepare("SELECT edited_patch_path FROM team_patch_tasks WHERE id='task-2'").get().edited_patch_path, taskTwoLatest, 'undo never borrows or changes another task return on the same photo');
+    assert.equal(verifiedChainDb.prepare("SELECT is_deleted FROM team_task_artifacts WHERE id='artifact-task-1-new'").get().is_deleted, 1);
+    assert.equal(verifiedChainDb.prepare("SELECT is_deleted FROM team_task_artifacts WHERE id='artifact-task-2-new'").get().is_deleted, 0);
+    verifiedChainDb.close();
 
     const scaleDb = new DatabaseSync(databasePath);
     const insertPhoto = scaleDb.prepare('INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)');
@@ -256,14 +291,14 @@ const ready = new Promise((resolve, reject) => {
     assert.equal(originalAuthorizations.filter(result => result.url).length, 27, 'all production-sized original previews receive a loadable URL');
     const workingRequests = scaledSnapshot.photos.flatMap(photo => photo.tasks.map(task => ({ kind: 'working', photoId: photo.photoId, baseVersionId: photo.baseVersionId, taskId: task.id })));
     const workingAuthorizations = await Promise.all(workingRequests.map(request => invoke('team.media.authorize.v1', request)));
-    assert.equal(workingAuthorizations.filter(result => result.url).length, 79, 'all production-sized working previews receive a loadable URL');
-    assert.equal(scaledSnapshot.photos.reduce((total, photo) => total + photo.tasks.length, 0), 79, 'a production-sized snapshot retains all bound project tasks');
+    assert.equal(workingAuthorizations.filter(result => result.url).length, 80, 'all production-sized working previews receive a loadable URL');
+    assert.equal(scaledSnapshot.photos.reduce((total, photo) => total + photo.tasks.length, 0), 80, 'a production-sized snapshot retains all bound project tasks');
     assert(snapshotMediaReadCount <= 28, `84 registered photos plus one legacy orphan must require at most 28 snapshot media reads, received ${snapshotMediaReadCount}`);
     assert(scaleBytes < 2 * 1024 * 1024, `the production-sized snapshot must fit one bounded protocol frame, received ${scaleBytes} bytes`);
     assert(scaleElapsedMs < 5000, `the production-sized snapshot should not approach the 60s RPC timeout, took ${scaleElapsedMs}ms`);
     const patchBundles = await Promise.all(scaledSnapshot.photos.map(photo => invoke('team.patch.get.v1', { relativePath: photo.relativePath })));
     assert(patchBundles.every(bundle => bundle.success !== false), 'every restored project path must resolve through team.patch.get.v1');
-    assert.equal(patchBundles.reduce((total, bundle) => total + bundle.tasks.length, 0), 79, 'restored project paths must associate all existing tasks with their registered photos');
+    assert.equal(patchBundles.reduce((total, bundle) => total + bundle.tasks.length, 0), 80, 'restored project paths must associate all existing tasks with their registered photos');
     console.log(`Production-sized team snapshot: ${scaledSnapshot.photos.length} photos / ${scaledSnapshot.photos.reduce((total, photo) => total + photo.tasks.length, 0)} tasks / ${snapshotMediaReadCount} snapshot media reads / ${scaleBytes} bytes / ${scaleElapsedMs}ms`);
     const assignmentReturnedPath = path.join(dataRoot, 'assignment-returned.png'); fs.writeFileSync(assignmentReturnedPath, 'assignment-returned');
     const assignmentReturnedDb = new DatabaseSync(databasePath); assignmentReturnedDb.prepare('UPDATE team_person_assignments SET edited_patch_path=?,completed=1,completion_kind=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?').run(assignmentReturnedPath, 'returned', 'project-1', 'photo-1', 'version-1', 1); assignmentReturnedDb.close();
@@ -273,7 +308,9 @@ const ready = new Promise((resolve, reject) => {
     console.log('Team-retouch component service integration tests passed');
   } finally {
     lines.close();
+    const exited = new Promise(resolve => child.once('exit', resolve));
     child.kill();
-    fs.rmSync(sandbox, { recursive: true, force: true });
+    await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 1000))]);
+    try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch (error) { if (error.code !== 'EPERM') throw error; }
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });

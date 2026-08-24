@@ -56,7 +56,8 @@ for (const channel of [
   'workspace-team-patch-select-returns', 'workspace-team-patch-return-batch',
 ]) assert(!versionsIpc.includes(`ipcMain.handle('${channel}'`), `${channel} must have exactly one component-service writer`);
 for (const channel of ['component-settings-get', 'component-settings-update']) assert(!systemIpc.includes(`ipcMain.handle('${channel}'`), `${channel} must not retain a system IPC route`);
-for (const capability of ['component.storage.v1', 'project.media.read.v1', 'project.output.authorize.v1', 'version.register.v1', 'tasks.report.v1', 'dialogs.open.v1', 'project.media.access.v1', 'project.identity.complete.v1', 'component.settings.v1', 'component.lifecycle.v1']) assert(template.componentHost.service.capabilities.includes(capability), `${capability} must be manifest-granted`);
+for (const capability of ['component.storage.v1', 'project.media.read.v1', 'project.output.authorize.v1', 'version.register.v1', 'tasks.report.v1', 'dialogs.open.v1', 'project.media.access.v1', 'component.settings.v1', 'component.lifecycle.v1']) assert(template.componentHost.service.capabilities.includes(capability), `${capability} must be manifest-granted`);
+assert(!template.componentHost.service.capabilities.includes('project.identity.complete.v1'), 'identity completion is component-owned and must not request a host-private capability');
 assert(!template.componentHost.service.capabilities.includes('component.runtime.v1') && template.componentHost.service.runtimeActions.length === 0, 'team algorithms must execute inside the component service instead of a host runtime action');
 assert.equal((versionsIpc.match(/ipcMain\.handle\('workspace-team-/g) || []).length, 0, 'versions IPC must not register any legacy team handler');
 assert(!versionsIpc.includes('shell.openPath'), 'versions IPC must not retain arbitrary team path-opening code');

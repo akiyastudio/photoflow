@@ -8,10 +8,11 @@ const { CANCELLED_CODE, buildWorkflowPlan, copyWorkflowPlan } = require('./workf
 const { createTeamWorkflowArtifactService } = require('./workflow-artifact.cjs');
 
 const MAX_ITEMS = 2000;
-const RETURN_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp', '.heic', '.heif']);
+const RETURN_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp']);
 const pendingCapabilities = new Map();
 const activeAlgorithms = new Set();
 const workflowJobs = new Map();
+const photoOperations = new Map();
 let nextCapabilityId = 1;
 
 const writeFrame = value => process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -22,6 +23,9 @@ const uniqueText = values => [...new Set((values || []).map(value => String(valu
 const sha256 = value => crypto.createHash('sha256').update(String(value)).digest('hex');
 const safeSegment = (value, fallback) => String(value || fallback).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim().slice(0, 60) || fallback;
 const weekName = value => `第${Math.max(1, Math.floor(Number(value) || 1))}周`;
+const assertDecodableImage = filePath => {
+  if (['.heic', '.heif'].includes(path.extname(String(filePath || '')).toLowerCase())) throw new Error('HEIC/HEIF 当前未接入可验证的通用解码器；请先转换为 JPEG、PNG、TIFF 或 WebP 后再处理');
+};
 
 const copyFileAtomic = async (source, destination, { isCancelled = () => false, onProgress = () => undefined } = {}) => {
   await fs.promises.mkdir(path.dirname(destination), { recursive: true });
@@ -105,12 +109,65 @@ const ensureSchema = databasePath => {
       id TEXT PRIMARY KEY, project_id TEXT NOT NULL, photo_id TEXT NOT NULL, base_version_id TEXT NOT NULL,
       bbox_json TEXT NOT NULL, reason TEXT NOT NULL DEFAULT 'false-positive', created_at INTEGER NOT NULL
     );
-    INSERT INTO meta(key,value) VALUES('schema_version','1') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
   `);
+  const columns = table => new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name));
+  const addColumn = (table, name, definition) => {
+    if (!columns(table).has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+  };
+  addColumn('team_patch_tasks', 'generation_json', "TEXT NOT NULL DEFAULT '{}'");
+  addColumn('team_person_assignments', 'task_id', 'TEXT');
+  addColumn('team_person_assignments', 'stage_id', 'TEXT');
+  addColumn('team_person_assignments', 'artifact_id', 'TEXT');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS team_task_stages (
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL, person_index INTEGER NOT NULL,
+      stage_order INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      UNIQUE(task_id, person_index),
+      FOREIGN KEY(task_id) REFERENCES team_patch_tasks(id)
+    );
+    CREATE INDEX IF NOT EXISTS team_stage_task_order ON team_task_stages(task_id, stage_order);
+    CREATE TABLE IF NOT EXISTS team_task_artifacts (
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL, stage_id TEXT, person_index INTEGER,
+      kind TEXT NOT NULL, artifact_path TEXT NOT NULL, digest TEXT NOT NULL DEFAULT '',
+      metadata_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL, is_deleted INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY(task_id) REFERENCES team_patch_tasks(id), FOREIGN KEY(stage_id) REFERENCES team_task_stages(id)
+    );
+    CREATE INDEX IF NOT EXISTS team_artifact_chain ON team_task_artifacts(task_id, created_at, is_deleted);
+  `);
+  const storedSchemaVersion = Number(db.prepare("SELECT value FROM meta WHERE key='schema_version'").get()?.value || 0);
+  if (storedSchemaVersion < 4) {
+    const now = Date.now();
+    const tasks = db.prepare('SELECT * FROM team_patch_tasks').all();
+    const insertStage = db.prepare(`INSERT OR IGNORE INTO team_task_stages(id,task_id,person_index,stage_order,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`);
+    const updateAssignmentLink = db.prepare(`UPDATE team_person_assignments SET task_id=COALESCE(task_id,?),stage_id=COALESCE(stage_id,?) WHERE photo_id=? AND base_version_id=? AND person_index=?`);
+    const insertArtifact = db.prepare(`INSERT OR IGNORE INTO team_task_artifacts(id,task_id,stage_id,person_index,kind,artifact_path,created_at) VALUES(?,?,?,?,?,?,?)`);
+    for (const task of tasks) {
+      const members = parseJson(task.members_json, []).length ? parseJson(task.members_json, []) : [{ personIndex: task.person_index }];
+      for (const [order, member] of members.entries()) {
+        const personIndex = Number(member.personIndex);
+        const stageId = `legacy-stage:${task.id}:${personIndex}`;
+        insertStage.run(stageId, task.id, personIndex, order + 1, 'migrated', Number(task.created_at || now), now);
+        updateAssignmentLink.run(task.id, stageId, task.photo_id, task.base_version_id, personIndex);
+        const assignment = db.prepare('SELECT edited_patch_path,artifact_id,completed_at FROM team_person_assignments WHERE photo_id=? AND base_version_id=? AND person_index=?').get(task.photo_id, task.base_version_id, personIndex);
+        if (assignment?.edited_patch_path) {
+          const artifactId = assignment.artifact_id || `legacy-artifact:${task.id}:${personIndex}`;
+          insertArtifact.run(artifactId, task.id, stageId, personIndex, 'returned', assignment.edited_patch_path, Number(assignment.completed_at || task.updated_at || now));
+          db.prepare('UPDATE team_person_assignments SET artifact_id=? WHERE photo_id=? AND base_version_id=? AND person_index=? AND artifact_id IS NULL').run(artifactId, task.photo_id, task.base_version_id, personIndex);
+        }
+      }
+      if (task.edited_patch_path && !db.prepare('SELECT 1 FROM team_task_artifacts WHERE task_id=? AND artifact_path=?').get(task.id, task.edited_patch_path)) {
+        insertArtifact.run(`legacy-task-artifact:${task.id}`, task.id, null, null, 'returned', task.edited_patch_path, Number(task.updated_at || now));
+      }
+    }
+  }
+  db.prepare(`INSERT INTO meta(key,value) VALUES('schema_version','4') ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
   return db;
 };
 
-const serializeTask = row => ({
+const serializeTask = row => {
+  const generation = parseJson(row.generation_json, {});
+  return ({
   id: row.id, photoId: row.photo_id, baseVersionId: row.base_version_id,
   personIndex: row.person_index, personName: row.person_name, assignee: row.assignee,
   detector: row.detector, bbox: parseJson(row.bbox_json, {}), crop: parseJson(row.crop_json, {}),
@@ -118,8 +175,31 @@ const serializeTask = row => ({
   members: parseJson(row.members_json, []), needsReview: Boolean(row.needs_review),
   reviewReason: row.review_reason, editedPatchPath: row.edited_patch_path, status: row.status,
   mergeMetrics: parseJson(row.merge_metrics_json, {}), mergedVersionId: row.merged_version_id,
+  generation, requiresManualCrop: Boolean(generation.requiresManualCrop), fullFrame: Boolean(generation.fullFrame), sourceCoverage: generation.sourceCoverage,
   createdAt: row.created_at, updatedAt: row.updated_at,
 });
+};
+
+const withPhotoOperation = (key, worker) => {
+  const normalized = String(key || 'global');
+  const previous = photoOperations.get(normalized) || Promise.resolve();
+  const current = previous.catch(() => undefined).then(worker);
+  photoOperations.set(normalized, current);
+  return current.finally(() => { if (photoOperations.get(normalized) === current) photoOperations.delete(normalized); });
+};
+const withPhotoOperations = (keys, worker) => [...new Set(keys.map(String))].sort().reduceRight(
+  (next, key) => () => withPhotoOperation(key, next), worker,
+)();
+
+const createArtifact = (db, row, personIndex, artifactPath, kind = 'returned', metadata = {}) => {
+  const stage = db.prepare('SELECT * FROM team_task_stages WHERE task_id=? AND person_index=?').get(row.id, Number(personIndex));
+  const id = crypto.randomUUID();
+  db.prepare(`INSERT INTO team_task_artifacts(id,task_id,stage_id,person_index,kind,artifact_path,digest,metadata_json,created_at,is_deleted) VALUES(?,?,?,?,?,?,?,?,?,0)`)
+    .run(id, row.id, stage?.id || null, Number(personIndex), kind, artifactPath, '', JSON.stringify(metadata), Date.now());
+  return { id, stageId: stage?.id || null };
+};
+
+const currentTaskArtifact = (db, taskId) => db.prepare(`SELECT * FROM team_task_artifacts WHERE task_id=? AND is_deleted=0 ORDER BY created_at DESC,id DESC LIMIT 1`).get(String(taskId || ''));
 
 const publicTask = task => {
   const { patchPath, maskPath, editedPatchPath, uploadPath, returnedPath, previewUrl, patchUrl, ...value } = task || {};
@@ -148,9 +228,11 @@ const runAlgorithm = (parentId, args, { timeoutMs = 60 * 60 * 1000, topic = '', 
   let stderr = '';
   let result;
   let cancelled = false;
+  let settled = false;
+  const finish = (callback, value) => { if (settled) return; settled = true; clearTimeout(timer); callback(value); };
   activeAlgorithms.add(child);
   const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
-  const timer = setTimeout(() => { child.kill(); reject(new Error('团片组件算法运行超时')); }, timeoutMs);
+  const timer = setTimeout(() => { child.kill(); finish(reject, new Error('团片组件算法运行超时')); }, timeoutMs);
   timer.unref?.();
   child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-8000); });
   lines.on('line', line => {
@@ -162,14 +244,14 @@ const runAlgorithm = (parentId, args, { timeoutMs = 60 * 60 * 1000, topic = '', 
     else if (message?.type === 'result') result = message.result;
     else if (message && typeof message === 'object') result = message;
   });
-  child.once('error', error => { clearTimeout(timer); reject(error); });
+  child.once('error', error => { finish(reject, error); });
   child.once('exit', code => {
     activeAlgorithms.delete(child);
-    clearTimeout(timer); lines.close();
-    if (cancelled) reject(new Error('团片组件算法已取消'));
-    else if (code !== 0) reject(new Error(stderr.trim() || `团片组件算法退出（${code}）`));
-    else if (!result) reject(new Error('团片组件算法没有返回结果'));
-    else resolve(result);
+    lines.close();
+    if (cancelled) finish(reject, Object.assign(new Error('团片组件算法已取消'), { code: CANCELLED_CODE }));
+    else if (code !== 0) finish(reject, new Error(stderr.trim() || `团片组件算法退出（${code}）`));
+    else if (!result) finish(reject, new Error('团片组件算法没有返回结果'));
+    else finish(resolve, result);
   });
 });
 
@@ -181,9 +263,15 @@ const replacePatches = (db, context, photoId, baseVersionId, tasks) => {
   const old = listTasks(db, photoId, baseVersionId);
   db.prepare('UPDATE team_patch_tasks SET is_deleted=1,updated_at=? WHERE photo_id=? AND base_version_id=? AND is_deleted=0').run(Date.now(), String(photoId), String(baseVersionId));
   db.prepare('DELETE FROM team_person_assignments WHERE project_id=? AND photo_id=? AND base_version_id=?').run(String(context.projectId), String(photoId), String(baseVersionId));
-  const insert = db.prepare(`INSERT INTO team_patch_tasks(id,photo_id,base_version_id,person_index,person_name,assignee,detector,bbox_json,crop_json,patch_path,mask_path,mask_json,members_json,needs_review,review_reason,edited_patch_path,status,merge_metrics_json,merged_version_id,created_at,updated_at,is_deleted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)`);
+  const insert = db.prepare(`INSERT INTO team_patch_tasks(id,photo_id,base_version_id,person_index,person_name,assignee,detector,bbox_json,crop_json,patch_path,mask_path,mask_json,members_json,needs_review,review_reason,edited_patch_path,status,merge_metrics_json,merged_version_id,generation_json,created_at,updated_at,is_deleted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)`);
+  const insertStage = db.prepare(`INSERT OR IGNORE INTO team_task_stages(id,task_id,person_index,stage_order,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`);
   const now = Date.now();
-  for (const task of tasks || []) insert.run(String(task.id || crypto.randomUUID()), String(photoId), String(baseVersionId), Number(task.personIndex || 0), String(task.personName || `人物 ${Number(task.personIndex || 0) + 1}`), String(task.assignee || ''), String(task.detector || ''), JSON.stringify(task.bbox || {}), JSON.stringify(task.crop || {}), String(task.patchPath || ''), task.maskPath ? String(task.maskPath) : null, JSON.stringify(task.mask || {}), JSON.stringify(task.members || []), task.needsReview ? 1 : 0, String(task.reviewReason || ''), task.editedPatchPath ? String(task.editedPatchPath) : null, String(task.status || 'exported'), JSON.stringify(task.mergeMetrics || {}), task.mergedVersionId ? String(task.mergedVersionId) : null, now, now);
+  for (const task of tasks || []) {
+    const taskId = String(task.id || crypto.randomUUID());
+    insert.run(taskId, String(photoId), String(baseVersionId), Number(task.personIndex || 0), String(task.personName || `人物 ${Number(task.personIndex || 0) + 1}`), String(task.assignee || ''), String(task.detector || ''), JSON.stringify(task.bbox || {}), JSON.stringify(task.crop || {}), String(task.patchPath || ''), task.maskPath ? String(task.maskPath) : null, JSON.stringify(task.mask || {}), JSON.stringify(task.members || []), task.needsReview ? 1 : 0, String(task.reviewReason || ''), task.editedPatchPath ? String(task.editedPatchPath) : null, String(task.status || 'exported'), JSON.stringify(task.mergeMetrics || {}), task.mergedVersionId ? String(task.mergedVersionId) : null, JSON.stringify(task.generation || {}), now, now);
+    const members = task.members?.length ? task.members : [{ personIndex: task.personIndex }];
+    for (const [order, member] of members.entries()) insertStage.run(crypto.randomUUID(), taskId, Number(member.personIndex), order + 1, 'pending', now, now);
+  }
   if ((tasks || []).length) registerPhoto(db, context, photoId, baseVersionId);
   else db.prepare('DELETE FROM team_retouch_photos WHERE photo_id=? AND project_id=?').run(String(photoId), String(context.projectId));
   return { old, tasks: listTasks(db, photoId, baseVersionId) };
@@ -237,6 +325,7 @@ const detectPhoto = async (parentId, payload, context) => {
   const bundle = media.items?.[0];
   const base = bundle?.versions?.find(version => String(version.id) === String(payload.baseVersionId));
   if (!base || base.fileMissing || !fs.existsSync(base.filePath)) throw new Error('基础版本文件不存在');
+  assertDecodableImage(base.filePath);
   const authorized = await callHost(parentId, 'project.output.authorize.v1', { operation: 'artifacts', photoId: payload.photoId, baseVersionId: payload.baseVersionId });
   const settings = (await callHost(parentId, 'component.settings.v1', { action: 'get' })).settings || {};
   const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
@@ -323,7 +412,8 @@ const updatePatch = async (parentId, payload, context) => withDomain(parentId, a
     }
     db.exec('BEGIN IMMEDIATE');
     try {
-      db.prepare(`UPDATE team_patch_tasks SET person_name=COALESCE(?,person_name),assignee=COALESCE(?,assignee),crop_json=COALESCE(?,crop_json),needs_review=COALESCE(?,needs_review),review_reason=COALESCE(?,review_reason),updated_at=? WHERE id=? AND is_deleted=0`).run(payload.personName === undefined ? null : String(payload.personName).trim().slice(0, 80) || '未命名人物', payload.assignee === undefined ? null : String(payload.assignee).trim().slice(0, 80), crop ? JSON.stringify(crop) : null, payload.needsReview === undefined ? null : payload.needsReview ? 1 : 0, payload.reviewReason === undefined ? null : String(payload.reviewReason).trim().slice(0, 300), Date.now(), row.id);
+      const generation = crop ? { ...parseJson(row.generation_json, {}), version: 2, strategy: 'manual', workWidth: crop.width, workHeight: crop.height, fileDigest: crypto.createHash('sha256').update(fs.readFileSync(row.patch_path)).digest('hex'), requiresManualCrop: false, reason: '人工调整工作图范围' } : null;
+      db.prepare(`UPDATE team_patch_tasks SET person_name=COALESCE(?,person_name),assignee=COALESCE(?,assignee),crop_json=COALESCE(?,crop_json),generation_json=COALESCE(?,generation_json),needs_review=COALESCE(?,needs_review),review_reason=COALESCE(?,review_reason),updated_at=? WHERE id=? AND is_deleted=0`).run(payload.personName === undefined ? null : String(payload.personName).trim().slice(0, 80) || '未命名人物', payload.assignee === undefined ? null : String(payload.assignee).trim().slice(0, 80), crop ? JSON.stringify(crop) : null, generation ? JSON.stringify(generation) : null, payload.needsReview === undefined ? null : payload.needsReview ? 1 : 0, payload.reviewReason === undefined ? null : String(payload.reviewReason).trim().slice(0, 300), Date.now(), row.id);
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     if (backupPath) await fs.promises.rm(backupPath, { force: true });
@@ -407,9 +497,10 @@ const uploadPatch = (parentId, payload, context) => withDomain(parentId, async (
     await fs.promises.rename(stagedPath, outputPath);
     db.exec('BEGIN IMMEDIATE');
     try {
+      const artifact = createArtifact(db, row, personIndex, outputPath, 'manual-upload');
       db.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status='uploaded',updated_at=? WHERE id=?`).run(outputPath, Date.now(), row.id);
       db.prepare(`${upsertAssignmentSql}`).run(String(context.projectId), row.photo_id, row.base_version_id, personIndex, null, 1, 'manual', 1, Date.now());
-      db.prepare(`UPDATE team_person_assignments SET edited_patch_path=?,completed=1,completion_kind='retouched',completed_at=?,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(outputPath, Date.now(), Date.now(), row.photo_id, row.base_version_id, personIndex);
+      db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,artifact_id=?,edited_patch_path=?,completed=1,completion_kind='retouched',completed_at=?,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, artifact.stageId, artifact.id, outputPath, Date.now(), Date.now(), row.photo_id, row.base_version_id, personIndex);
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     await appendCommand(storage, { operationId, type: 'patch-upload', state: 'committed' });
@@ -426,14 +517,19 @@ const removeUpload = (parentId, payload) => withDomain(parentId, async (db, stor
   if (!row) throw new Error('人物修图任务不存在');
   const personIndex = Number(payload.personIndex);
   const assignment = db.prepare('SELECT * FROM team_person_assignments WHERE photo_id=? AND base_version_id=? AND person_index=?').get(row.photo_id, row.base_version_id, personIndex);
-  const removedPath = assignment?.edited_patch_path || row.edited_patch_path || '';
+  if (assignment?.task_id && String(assignment.task_id) !== String(row.id)) throw new Error('返图阶段不属于这个修图任务');
+  const removedArtifact = assignment?.artifact_id
+    ? db.prepare('SELECT * FROM team_task_artifacts WHERE id=? AND task_id=? AND is_deleted=0').get(assignment.artifact_id, row.id)
+    : db.prepare('SELECT * FROM team_task_artifacts WHERE task_id=? AND person_index=? AND is_deleted=0 ORDER BY created_at DESC,id DESC LIMIT 1').get(row.id, personIndex);
+  const removedPath = removedArtifact?.artifact_path || assignment?.edited_patch_path || '';
   await assertAuthorizedArtifacts(parentId, [row]);
   const operationId = crypto.randomUUID();
   await appendCommand(storage, { operationId, type: 'patch-remove-upload', state: 'prepared', taskId: row.id, personIndex });
   db.exec('BEGIN IMMEDIATE');
   try {
-    db.prepare(`UPDATE team_person_assignments SET completed=0,completion_kind='',edited_patch_path=NULL,completed_at=NULL,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(Date.now(), row.photo_id, row.base_version_id, personIndex);
-    const predecessor = db.prepare(`SELECT edited_patch_path FROM team_person_assignments WHERE photo_id=? AND base_version_id=? AND completed=1 AND edited_patch_path IS NOT NULL ORDER BY completed_at DESC LIMIT 1`).get(row.photo_id, row.base_version_id)?.edited_patch_path || null;
+    if (removedArtifact) db.prepare('UPDATE team_task_artifacts SET is_deleted=1 WHERE id=? AND task_id=?').run(removedArtifact.id, row.id);
+    db.prepare(`UPDATE team_person_assignments SET completed=0,completion_kind='',artifact_id=NULL,edited_patch_path=NULL,completed_at=NULL,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(Date.now(), row.photo_id, row.base_version_id, personIndex);
+    const predecessor = currentTaskArtifact(db, row.id)?.artifact_path || null;
     db.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status=?,merged_version_id=NULL,merge_metrics_json='{}',updated_at=? WHERE id=?`).run(predecessor, predecessor ? 'uploaded' : 'exported', Date.now(), row.id);
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); await appendCommand(storage, { operationId, type: 'patch-remove-upload', state: 'rolled-back', error: error.message || String(error) }); throw error; }
@@ -520,17 +616,56 @@ const detectBatch = async (parentId, payload, context) => {
   if (!relativePaths.length) throw new Error('请至少选择一张图片');
   if (relativePaths.length > MAX_ITEMS) throw new Error('批量检测图片过多');
   const media = await callHost(parentId, 'project.media.read.v1', { relativePaths });
-  const results = [];
-  for (const [index, bundle] of (media.items || []).entries()) {
-    const base = bundle.versions?.find(item => String(item.id) === String(bundle.photo?.currentVersionId)) || bundle.versions?.find(item => item.isCurrent) || bundle.versions?.at(-1);
-    const relativePath = bundle.relativePath || relativePaths[index];
-    await callHost(parentId, 'tasks.report.v1', { topic: 'patch.detect-batch.progress', value: { itemIndex: index + 1, itemCount: media.items.length, relativePath, itemName: bundle.photo?.displayName || '', progress: 100 * index / Math.max(1, media.items.length), message: '正在AI识别' } });
+  const prepared = (media.items || []).map((bundle, index) => ({
+    bundle, relativePath: bundle.relativePath || relativePaths[index],
+    base: bundle.versions?.find(item => String(item.id) === String(bundle.photo?.currentVersionId)) || bundle.versions?.find(item => item.isCurrent) || bundle.versions?.at(-1),
+  })).filter(item => item.bundle.photo?.id && item.base?.id);
+  return withPhotoOperations(prepared.map(item => item.bundle.photo.id), async () => {
+    const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+    const settings = (await callHost(parentId, 'component.settings.v1', { action: 'get' })).settings || {};
+    const operationId = crypto.randomUUID();
+    const stagingRoot = path.join(storage.dataRoot, '.batch-staging', operationId);
+    const manifestPath = path.join(stagingRoot, 'manifest.json');
+    const db = ensureSchema(storage.databasePath);
+    const entries = [];
     try {
-      const detected = await detectPhoto(parentId, { photoId: bundle.photo.id, baseVersionId: base.id, restoreExcluded: false }, context);
-      results.push({ relativePath, name: bundle.photo?.displayName || '', success: true, photoId: bundle.photo.id, baseVersionId: base.id, personCount: detected.detection.personCount, workTileCount: detected.tasks.length, detector: detected.detection.detector, fallbackReason: detected.detection.fallbackReason });
-    } catch (error) { results.push({ relativePath, name: bundle.photo?.displayName || '', success: false, error: error.message || String(error) }); }
-  }
-  return { success: results.some(item => item.success), results, persistentBackend: false, requestedMode: 'auto', advancedUsedCount: results.filter(item => item.advancedBackend).length, fallbackCount: results.filter(item => item.fallbackReason).length, error: results.some(item => item.success) ? undefined : '批量识别全部失败' };
+      for (const [index, item] of prepared.entries()) {
+        assertDecodableImage(item.base.filePath);
+        const authorized = await callHost(parentId, 'project.output.authorize.v1', { operation: 'artifacts', photoId: item.bundle.photo.id, baseVersionId: item.base.id });
+        const itemRoot = path.join(stagingRoot, String(index + 1));
+        const exclusions = db.prepare('SELECT bbox_json FROM team_person_exclusions WHERE project_id=? AND photo_id=? AND base_version_id=?').all(String(context.projectId), String(item.bundle.photo.id), String(item.base.id)).map(row => parseJson(row.bbox_json, {}));
+        entries.push({ ...item, authorized, key: `${index}`, outputDir: path.join(itemRoot, 'analysis'), deliveryDir: path.join(itemRoot, 'delivery'), exclusions });
+      }
+      for (const item of entries) { await fs.promises.mkdir(item.outputDir, { recursive: true }); await fs.promises.mkdir(item.deliveryDir, { recursive: true }); }
+      await fs.promises.writeFile(manifestPath, JSON.stringify({ items: entries.map(item => ({ key: item.key, name: item.bundle.photo?.displayName || '', input: item.base.filePath, outputDir: item.outputDir, deliveryDir: item.deliveryDir, deliveryPrefix: item.authorized.deliveryPrefix, excludedBoxes: item.exclusions })) }), 'utf8');
+      const detectedBatch = await runAlgorithm(parentId, ['detect-batch', '--manifest', manifestPath, '--provider', settings.useGpu === false ? 'cpu' : 'auto', '--oversize-crop-mode', settings.oversizeCropMode === 'expand' ? 'expand' : 'face-centered', '--advanced-mode', 'auto'], { topic: 'patch.detect-batch.progress' });
+      const byKey = new Map((detectedBatch.results || []).map(item => [String(item.key), item]));
+      const results = [];
+      for (const item of entries) {
+        const detected = byKey.get(item.key);
+        if (!detected?.success) { results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: false, error: detected?.error || '批量算法没有返回这一项' }); continue; }
+        const published = [];
+        try {
+          const publishedTasks = [];
+          for (const task of detected.tasks || []) {
+            const patchTarget = path.join(item.authorized.deliveryDirectory, path.basename(task.patchPath));
+            published.push(await publishStagedFile(task.patchPath, patchTarget, operationId));
+            let maskTarget = null;
+            if (task.maskPath) { maskTarget = path.join(item.authorized.analysisDirectory, path.basename(task.maskPath)); published.push(await publishStagedFile(task.maskPath, maskTarget, operationId)); }
+            publishedTasks.push({ ...task, patchPath: patchTarget, maskPath: maskTarget });
+          }
+          db.exec('BEGIN IMMEDIATE');
+          let replaced;
+          try { replaced = replacePatches(db, context, item.bundle.photo.id, item.base.id, publishedTasks); db.exec('COMMIT'); }
+          catch (error) { db.exec('ROLLBACK'); throw error; }
+          await commitPublished(published);
+          await removeArtifacts(replaced.old.flatMap(task => [task.patchPath, task.maskPath, task.editedPatchPath]).filter(filePath => filePath && !publishedTasks.some(task => task.patchPath === filePath || task.maskPath === filePath)));
+          results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: true, photoId: item.bundle.photo.id, baseVersionId: item.base.id, personCount: detected.personCount, workTileCount: publishedTasks.length, detector: detected.detector, advancedBackend: detected.advancedBackend, fallbackReason: detected.fallbackReason });
+        } catch (error) { await rollbackPublished(published); results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: false, error: error.message || String(error) }); }
+      }
+      return { success: results.some(item => item.success), results, persistentBackend: Boolean(detectedBatch.persistentBackend), requestedMode: detectedBatch.requestedMode || 'auto', advancedUsedCount: results.filter(item => item.advancedBackend).length, fallbackCount: results.filter(item => item.fallbackReason).length, error: results.some(item => item.success) ? undefined : '批量识别全部失败' };
+    } finally { db.close(); await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined); }
+  });
 };
 
 const readJsonFile = filePath => {
@@ -816,7 +951,9 @@ const componentSettings = async (parentId, payload) => callHost(parentId, 'compo
 const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomain(parentId, async db => {
   const source = path.resolve(sourcePath);
   const sourceStat = await fs.promises.stat(source).catch(() => null);
-  if (!sourceStat?.isFile() || !RETURN_IMAGE_EXTENSIONS.has(path.extname(source).toLowerCase())) throw new Error('Component return input is not a supported image');
+  const extension = path.extname(source).toLowerCase();
+  if (['.heic', '.heif'].includes(extension)) throw new Error('HEIC/HEIF 返图当前无法可靠解码；请先在系统照片或修图软件中导出为 JPEG、PNG、TIFF 或 WebP 后重试');
+  if (!sourceStat?.isFile() || !RETURN_IMAGE_EXTENSIONS.has(extension)) throw new Error('返图格式不受支持；请导出为 JPEG、PNG、TIFF 或 WebP');
   const row = db.prepare('SELECT * FROM team_patch_tasks WHERE id=? AND photo_id=? AND base_version_id=? AND is_deleted=0').get(String(payload.taskId || ''), String(payload.photoId || ''), String(payload.baseVersionId || ''));
   if (!row) throw new Error('Component return task is outside the bound photo version');
   const authorized = await callHost(parentId, 'project.output.authorize.v1', { operation: 'artifacts', photoId: row.photo_id, baseVersionId: row.base_version_id });
@@ -826,11 +963,13 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
   try {
     db.exec('BEGIN IMMEDIATE');
     try {
-      db.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status='uploaded',needs_review=0,review_reason='',updated_at=? WHERE id=?`).run(destination, Date.now(), row.id);
+      const artifact = createArtifact(db, row, Number(payload.personIndex), destination, 'returned', { matchConfidence: payload.matchConfidence, editEvidence: payload.editEvidence, returnWarnings: payload.returnWarnings || [] });
+      const warnings = uniqueText(payload.returnWarnings);
+      db.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status='uploaded',needs_review=?,review_reason=?,updated_at=? WHERE id=?`).run(destination, warnings.length ? 1 : 0, warnings.join('；'), Date.now(), row.id);
       if (payload.complete) {
         const personIndex = Number(payload.personIndex);
         db.prepare(upsertAssignmentSql).run(String(context.projectId), row.photo_id, row.base_version_id, personIndex, null, 1, 'manual', 1, Date.now());
-        db.prepare(`UPDATE team_person_assignments SET edited_patch_path=?,completed=1,completion_kind='returned',completed_at=?,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(destination, Date.now(), Date.now(), row.photo_id, row.base_version_id, personIndex);
+        db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,artifact_id=?,edited_patch_path=?,completed=1,completion_kind='returned',completed_at=?,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, artifact.stageId, artifact.id, destination, Date.now(), Date.now(), row.photo_id, row.base_version_id, personIndex);
       }
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -841,7 +980,39 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
   }
 });
 const mediaRequest = payload => Object.fromEntries(['kind', 'photoId', 'baseVersionId', 'taskId', 'personIndex', 'reviewSessionId', 'returnId'].filter(field => Object.hasOwn(payload || {}, field)).map(field => [field, payload[field]]));
-const completionRequest = payload => Object.fromEntries(['photoId', 'baseVersionId', 'personIndex', 'completed', 'completionKind', 'taskId', 'taskOrder'].filter(field => Object.hasOwn(payload || {}, field)).map(field => [field, payload[field]]));
+const completeIdentity = (parentId, payload, context) => withDomain(parentId, async db => {
+  const photoId = String(payload.photoId || '');
+  const baseVersionId = String(payload.baseVersionId || '');
+  const personIndex = Number(payload.personIndex);
+  if (!photoId || !baseVersionId || !Number.isInteger(personIndex)) throw new Error('人物完成状态参数无效');
+  const candidates = taskRows(db, photoId, baseVersionId).filter(row => {
+    const members = parseJson(row.members_json, []).length ? parseJson(row.members_json, []) : [{ personIndex: row.person_index }];
+    return members.some(member => Number(member.personIndex) === personIndex);
+  });
+  const row = payload.taskId ? candidates.find(item => String(item.id) === String(payload.taskId)) : candidates[0];
+  if (!row || (!payload.taskId && candidates.length > 1)) throw new Error('人物完成状态 outside the bound photo version，或无法唯一绑定到组件修图任务');
+  const stage = db.prepare('SELECT * FROM team_task_stages WHERE task_id=? AND person_index=?').get(row.id, personIndex);
+  const existing = db.prepare('SELECT * FROM team_person_assignments WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?').get(String(context.projectId), photoId, baseVersionId, personIndex);
+  let removedPath = '';
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.prepare(upsertAssignmentSql).run(String(context.projectId), photoId, baseVersionId, personIndex, existing?.identity_id || null, Number(existing?.confidence || 1), existing?.source || 'manual', payload.completed === false ? 0 : 1, Date.now());
+    if (payload.completed === false) {
+      if (existing?.artifact_id) {
+        const artifact = db.prepare('SELECT * FROM team_task_artifacts WHERE id=? AND task_id=? AND is_deleted=0').get(existing.artifact_id, row.id);
+        if (artifact) { removedPath = artifact.artifact_path; db.prepare('UPDATE team_task_artifacts SET is_deleted=1 WHERE id=?').run(artifact.id); }
+      }
+      const predecessor = currentTaskArtifact(db, row.id)?.artifact_path || null;
+      db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,artifact_id=NULL,completed=0,completion_kind='',edited_patch_path=NULL,completed_at=NULL,updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, stage?.id || null, Date.now(), String(context.projectId), photoId, baseVersionId, personIndex);
+      db.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status=?,updated_at=? WHERE id=?`).run(predecessor, predecessor ? 'uploaded' : 'exported', Date.now(), row.id);
+    } else {
+      db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,completed=1,completion_kind=?,completed_at=?,updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, stage?.id || null, String(payload.completionKind || 'no-retouch'), Date.now(), Date.now(), String(context.projectId), photoId, baseVersionId, personIndex);
+    }
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); throw error; }
+  if (removedPath) await fs.promises.rm(removedPath, { force: true }).catch(() => undefined);
+  return { success: true, completed: payload.completed !== false, taskId: row.id, personIndex };
+});
 const publicWorkspace = value => ({
   ...value,
   photos: (value?.photos || []).map(photo => ({
@@ -1084,9 +1255,14 @@ const reviewTarget = async parentId => {
 };
 const readReview = async parentId => {
   const target = await reviewTarget(parentId);
-  return { ...target, session: await readJson(target.sessionPath, null) };
+  let session = await readJson(target.sessionPath, null);
+  if (session && Number(session.version || 1) < 2) {
+    session = { ...session, version: 2, updatedAt: Date.now(), result: { ...session.result, matches: (session.result?.matches || []).map(match => ({ matchConfidence: match.matchConfidence || match.confidence || 'unknown', editEvidence: match.editEvidence || { reallyModified: false, legacyUnknown: true }, returnWarnings: match.returnWarnings || ['旧版返图审核记录缺少修改证据，请人工确认'], needsReview: match.accepted !== true, ...match })) } };
+    await writeJsonAtomic(target.sessionPath, session);
+  }
+  return { ...target, session };
 };
-const publicMatch = ({ path: _path, patchPath: _patchPath, mediaPath: _mediaPath, alternatives, ...item }) => ({ ...item, alternatives: (alternatives || []).map(({ path: _a, patchPath: _b, mediaPath: _c, ...alternative }) => alternative) });
+const publicMatch = ({ path: _path, patchPath: _patchPath, mediaPath: _mediaPath, originalPath: _originalPath, alternatives, ...item }) => ({ ...item, alternatives: (alternatives || []).map(({ path: _a, patchPath: _b, mediaPath: _c, originalPath: _d, ...alternative }) => alternative) });
 const presentReview = session => ({ ...session.result, reviewSessionId: session.id, matches: (session.result?.matches || []).map(publicMatch) });
 
 const selectReturns = async parentId => {
@@ -1105,7 +1281,7 @@ const readyWorkflowCandidates = (snapshot, requested = []) => {
     const assignment = assignments.get(`${photo.photoId}:${photo.baseVersionId}:${Number(member.personIndex)}`);
     const identity = identities.get(String(assignment?.identityId || ''));
     if (!identity || assignment?.completed) continue;
-    candidates.push({ taskId: task.id, photoId: photo.photoId, baseVersionId: photo.baseVersionId, personIndex: Number(member.personIndex), identityId: identity.id, photoName: photo.name, personName: identity.name, patchPath: task.editedPatchPath && fs.existsSync(task.editedPatchPath) ? task.editedPatchPath : task.patchPath });
+    candidates.push({ taskId: task.id, photoId: photo.photoId, baseVersionId: photo.baseVersionId, personIndex: Number(member.personIndex), identityId: identity.id, photoName: photo.name, personName: identity.name, originalPath: photo.sourcePath, patchPath: task.editedPatchPath && fs.existsSync(task.editedPatchPath) ? task.editedPatchPath : task.patchPath });
   }
   return candidates.filter(item => item.patchPath && fs.existsSync(item.patchPath));
 };
@@ -1113,7 +1289,7 @@ const readyWorkflowCandidates = (snapshot, requested = []) => {
 const runMatcher = async (returned, candidates) => {
   const runtime = path.join(__dirname, process.platform === 'win32' ? 'team-retouch.exe' : 'team-retouch');
   if (!fs.existsSync(runtime)) {
-    return { matches: returned.map((item, index) => ({ ...item, ...(candidates[index] || {}), confidence: candidates[index] ? 'high' : 'low', score: candidates[index] ? 1 : 0 })) };
+    return { matches: returned.map((item, index) => ({ ...item, ...(candidates[index] || {}), confidence: candidates[index] ? 'review' : 'unmatched', matchConfidence: 'unknown', score: 0, needsReview: true, editEvidence: { reallyModified: false }, returnWarnings: ['返图匹配算法不可用，必须人工确认'] })) };
   }
   const manifestPath = path.join(path.dirname(returned[0].path), `match-${crypto.randomUUID()}.json`);
   await fs.promises.writeFile(manifestPath, JSON.stringify({ returned, candidates }), 'utf8');
@@ -1166,7 +1342,7 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
   if (existing?.session) throw new Error('还有一批返图等待确认，请先继续处理或放弃');
   const snapshot = await workspaceSnapshot(parentId, context);
   const requestedPaths = new Set(uniqueText(payload.relativePaths));
-  const candidates = workflowMode ? readyWorkflowCandidates(snapshot, payload.items) : (snapshot.photos || []).filter(photo => !requestedPaths.size || requestedPaths.has(String(photo.relativePath || ''))).flatMap(photo => (photo.tasks || []).map(task => ({ taskId: task.id, photoId: photo.photoId, baseVersionId: photo.baseVersionId, personIndex: task.personIndex, photoName: photo.name, personName: task.personName, patchPath: task.editedPatchPath && fs.existsSync(task.editedPatchPath) ? task.editedPatchPath : task.patchPath })).filter(item => item.patchPath && fs.existsSync(item.patchPath)));
+  const candidates = workflowMode ? readyWorkflowCandidates(snapshot, payload.items) : (snapshot.photos || []).filter(photo => !requestedPaths.size || requestedPaths.has(String(photo.relativePath || ''))).flatMap(photo => (photo.tasks || []).map(task => ({ taskId: task.id, photoId: photo.photoId, baseVersionId: photo.baseVersionId, personIndex: task.personIndex, photoName: photo.name, personName: task.personName, originalPath: photo.sourcePath, patchPath: task.editedPatchPath && fs.existsSync(task.editedPatchPath) ? task.editedPatchPath : task.patchPath })).filter(item => item.patchPath && fs.existsSync(item.patchPath)));
   if (!candidates.length) throw new Error('当前没有可接收返图的任务');
   const staged = await callHost(parentId, 'project.output.authorize.v1', { action: 'stage-inputs', tokens: payload.returnedFiles || [] });
   try {
@@ -1179,7 +1355,7 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
     const high = (matched.matches || []).filter(item => item.confidence === 'high' && item.taskId);
     for (const [index, match] of high.entries()) {
       if (!stagedSources.has(path.resolve(match.path))) throw new Error('Matched return escaped its component staging grant');
-      const registered = await storeReturnedPatch(parentId, match.path, { photoId: match.photoId, baseVersionId: match.baseVersionId, taskId: match.taskId, personIndex: match.personIndex, complete: workflowMode }, context);
+      const registered = await withPhotoOperation(match.photoId, () => storeReturnedPatch(parentId, match.path, { photoId: match.photoId, baseVersionId: match.baseVersionId, taskId: match.taskId, personIndex: match.personIndex, complete: workflowMode, matchConfidence: match.matchConfidence, editEvidence: match.editEvidence, returnWarnings: match.returnWarnings }, context));
       if (workflowMode) await refreshDownstream(parentId, context, match.taskId, match.personIndex, registered.artifactPath).catch(() => undefined);
       accepted.push({ ...match, path: undefined, patchPath: undefined, accepted: true });
       await reportTask(parentId, returnOperationId, 'report', { phase: 'importing', progress: 82 + 18 * (index + 1) / Math.max(1, high.length), message: `正在归档返图 ${index + 1}/${high.length}` }, 'patch.return-batch.progress').catch(() => undefined);
@@ -1202,7 +1378,7 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
           await fs.promises.copyFile(source, path.join(pending, storedName), fs.constants.COPYFILE_EXCL);
           return { ...match, path: path.join(target.directory, storedName), patchPath: undefined, accepted: Boolean(acceptedById.get(String(match.returnId))) };
         }));
-        const session = { version: 1, id: reviewId, projectName: context.projectName, status: context.projectStatus, createdAt: Date.now(), updatedAt: Date.now(), result: { ...result, reviewSessionId: reviewId, matches } };
+        const session = { version: 2, id: reviewId, projectName: context.projectName, status: context.projectStatus, createdAt: Date.now(), updatedAt: Date.now(), result: { ...result, reviewSessionId: reviewId, matches } };
         await fs.promises.writeFile(path.join(pending, 'session.json'), JSON.stringify(session, null, 2), 'utf8');
         await fs.promises.rename(pending, target.directory);
         return presentReview(session);
@@ -1242,7 +1418,7 @@ const returnConfirm = async (parentId, payload, context) => {
   const candidate = readyWorkflowCandidates(await workspaceSnapshot(parentId, context), [payload])[0];
   if (!candidate || String(candidate.taskId) !== String(payload.taskId)) throw new Error('候选任务当前不可确认');
   if (!match.path || !isInside(target.directory, match.path)) throw new Error('Reviewed return escaped its component review grant');
-  const registered = await storeReturnedPatch(parentId, match.path, { photoId: candidate.photoId, baseVersionId: candidate.baseVersionId, taskId: candidate.taskId, personIndex: candidate.personIndex, complete: true }, context);
+  const registered = await withPhotoOperation(candidate.photoId, () => storeReturnedPatch(parentId, match.path, { photoId: candidate.photoId, baseVersionId: candidate.baseVersionId, taskId: candidate.taskId, personIndex: candidate.personIndex, complete: true }, context));
   await refreshDownstream(parentId, context, candidate.taskId, candidate.personIndex, registered.artifactPath).catch(() => undefined);
   match.accepted = true; match.confidence = 'manual'; match.photoId = candidate.photoId; match.baseVersionId = candidate.baseVersionId; match.taskId = candidate.taskId; match.personIndex = candidate.personIndex;
   target.session.result.reviewCount = target.session.result.matches.filter(item => !item.accepted).length;
@@ -1273,24 +1449,24 @@ const handlers = {
     });
     return publicWorkspace(await workspaceSnapshot(parentId, context));
   },
-  'team.project.remove-photo.v1': removeProjectPhoto,
+  'team.project.remove-photo.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => removeProjectPhoto(parentId, payload, context)),
   'team.identity.save.v1': saveIdentity,
   'team.identity.assign.v1': assignIdentity,
   'team.identity.confirm-group.v1': async (parentId, payload, context) => publicWorkspace(await confirmIdentityGroup(parentId, payload, context)),
   'team.identity.delete.v1': deleteIdentity,
-  'team.person.exclude.v1': excludePerson,
+  'team.person.exclude.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => excludePerson(parentId, payload, context)),
   'team.patch.get.v1': getPatchBundle,
-  'team.patch.detect.v1': detectPhoto,
+  'team.patch.detect.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => detectPhoto(parentId, payload, context)),
   'team.patch.detect-batch.v1': detectBatch,
-  'team.patch.update.v1': updatePatch,
-  'team.patch.delete.v1': deletePatch,
-  'team.patch.cleanup.v1': cleanupPatches,
-  'team.patch.upload.v1': uploadPatch,
-  'team.patch.remove-upload.v1': removeUpload,
-  'team.patch.merge.v1': mergePatches,
+  'team.patch.update.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => updatePatch(parentId, payload, context)),
+  'team.patch.delete.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => deletePatch(parentId, payload, context)),
+  'team.patch.cleanup.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => cleanupPatches(parentId, payload, context)),
+  'team.patch.upload.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => uploadPatch(parentId, payload, context)),
+  'team.patch.remove-upload.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => removeUpload(parentId, payload, context)),
+  'team.patch.merge.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => mergePatches(parentId, payload, context)),
   'team.identity.similarities.v1': readIdentitySimilarities,
   'team.identity.suggest.v1': suggestIdentities,
-  'team.identity.complete.v1': (parentId, payload) => callHost(parentId, 'project.identity.complete.v1', completionRequest(payload)),
+  'team.identity.complete.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => completeIdentity(parentId, payload, context)),
   'team.media.authorize.v1': (parentId, payload) => callHost(parentId, 'project.media.access.v1', { action: 'authorize', ...mediaRequest(payload) }),
   'team.patch.open.v1': (parentId, payload) => callHost(parentId, 'project.media.access.v1', { action: 'open', ...mediaRequest({ ...payload, kind: 'working' }) }),
   'team.workflow.settings.save.v1': saveWorkflowSettings,
@@ -1319,6 +1495,7 @@ const handlers = {
   'component.advanced.uninstall.v1': parentId => callHost(parentId, 'component.lifecycle.v1', { action: 'advanced.uninstall' }),
 };
 
+const startService = () => {
 const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 input.on('line', line => {
   let frame;
@@ -1341,3 +1518,7 @@ input.on('line', line => {
 
 writeFrame({ type: 'ready', protocolVersion: 1 });
 process.once('exit', () => { for (const child of activeAlgorithms) child.kill(); });
+};
+
+if (require.main === module) startService();
+module.exports = { ensureSchema, startService };
