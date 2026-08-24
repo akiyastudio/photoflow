@@ -123,6 +123,10 @@ assert(!['team-retouch', 'edited_patch_path', 'team_patch_tasks', '团片'].some
   && main.includes("require('./compatibility/component-host-v1.cjs')")
   && !main.includes("require('./compatibility/component-team-retouch"),
 'generic component capabilities and the composition root must isolate all V1 business knowledge behind one deprecated protocol adapter');
+assert(componentProjectCapabilities.includes("'component.media.v2'") && componentProjectCapabilities.includes("'project.progress.v2'")
+  && componentProjectCapabilities.includes("kind: 'component-output-commit'") && componentProjectCapabilities.includes("state: 'prepared'")
+  && systemIpc.includes("register('component.lifecycle.v2'") && read('electron/services/component-lifecycle-service.cjs').includes("'component.lifecycle.manage'"),
+'Component Host V2 infrastructure must retain persistent output journals, private media/progress capabilities, and separately authorized lifecycle management');
 assert(!read('electron/services/version-service.cjs').includes('Team') && !read('electron/services/version-service.cjs').includes('team'), 'generic version service must not expose component-owned business operations');
 assert.equal((versionsIpc.match(/ipcMain\.handle\('workspace-team-/g) || []).length, 0, 'versions IPC must not retain legacy team handlers');
 assert(componentTemplate.componentHost.service.rpcMethods.filter(method => method.startsWith('team.')).every(method => !COMPONENT_RPC_METHODS[method]), 'manifest-owned team RPC methods must have no legacy mapping');

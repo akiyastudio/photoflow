@@ -95,7 +95,7 @@
     "test:components": "npm run build:team-retouch-renderer && node scripts/test-component-catalog.cjs && node scripts/test-components.cjs && node scripts/test-component-status-refresh-policy.cjs && node scripts/test-component-host.cjs && node scripts/test-component-service.cjs && node scripts/test-team-retouch-component.cjs && node scripts/test-team-retouch-interaction-model.mjs && node scripts/test-team-retouch-advanced-status.mjs",
     "test:component-catalog": "node scripts/test-component-catalog.cjs",
     "test:component-host": "npm run prepare:component-dev && node scripts/test-component-host.cjs",
-    "test:component-host-v2": "node scripts/test-component-host-v2.cjs && node scripts/mock-component-service.cjs",
+    "test:component-host-v2": "tsc --noEmit --strict --skipLibCheck false --target ES2022 --moduleResolution node16 --module Node16 component-sdk/index.d.ts component-sdk/service.d.ts && node scripts/test-component-host-v2.cjs && node scripts/mock-component-service.cjs",
     "test:component-service": "node scripts/test-component-service.cjs && node scripts/test-team-retouch-service.cjs && node scripts/test-team-retouch-mutation-service.cjs && node scripts/test-component-lifecycle.cjs",
     "test:component-team-retouch": "npm run build:team-retouch-renderer && node scripts/test-team-retouch-component.cjs && node scripts/test-team-retouch-interaction-model.mjs && node scripts/test-team-retouch-legacy-renderer.cjs && node scripts/test-team-retouch-legacy-media-ref.mjs && node scripts/test-team-retouch-host-context.mjs",
     "test:advanced-video": "node scripts/test-video-player-subtitles.cjs && node scripts/test-advanced-video-screenshot-publication.cjs && node scripts/test-advanced-video-service.cjs",

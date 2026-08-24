@@ -10,11 +10,14 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-component-lifec
 const componentRoot = path.join(sandbox, 'component');
 const actionRoot = path.join(sandbox, 'actions');
 const scriptPath = path.join(actionRoot, 'fixture-action.ps1');
+const v2ScriptPath = path.join(actionRoot, 'fixture-v2.ps1');
 fs.mkdirSync(componentRoot, { recursive: true });
 fs.mkdirSync(actionRoot, { recursive: true });
 fs.writeFileSync(scriptPath, "param([switch]$CheckOnly,[string]$InstallRoot,[string]$PackagePath,[string]$ExpectedComponentVersion,[int]$ExpectedAdvancedRuntimeApiVersion,[string]$CompatibleLegacyComponentVersions,[switch]$Repair)\nif ($CheckOnly) { Write-Output 'OFFLINE_PREFLIGHT_OK|real process|fixed action'; exit 0 }\nif ($ExpectedAdvancedRuntimeApiVersion -ne 1 -or $CompatibleLegacyComponentVersions -ne '26.7.30.1') { throw 'advanced compatibility arguments missing' }\nWrite-Output 'offline environment is ready'\n", 'utf8');
+fs.writeFileSync(v2ScriptPath, "if ($env:PHOTOFLOW_COMPONENT_LIFECYCLE_ACTION -ne 'preflight') { throw 'missing fixed lifecycle action' }\nWrite-Output 'generic lifecycle action ready'\n", 'utf8');
 fs.writeFileSync(path.join(componentRoot, 'PhotoFlow-team-retouch-advanced-legacy-win32-x64.zip'), 'fixture', 'utf8');
 const digest = crypto.createHash('sha256').update(fs.readFileSync(scriptPath)).digest('hex');
+const v2Digest = crypto.createHash('sha256').update(fs.readFileSync(v2ScriptPath)).digest('hex');
 const progress = [];
 const backgroundTasks = {
   run: async (definition, worker) => ({
@@ -50,6 +53,12 @@ const descriptor = {
     assert.equal(installed.success, true, 'advanced install must receive the runtime API and reviewed legacy compatibility list');
     await assert.rejects(service.invoke({ action: 'advanced.preflight', script: 'C:/escape.ps1' }, {}, descriptor), /不接受脚本或路径参数/);
     await assert.rejects(service.resolveAction({ ...descriptor, service: { lifecycleActions: { 'advanced.preflight': { ...descriptor.service.lifecycleActions['advanced.preflight'], sha256: '0'.repeat(64) } } } }, 'advanced.preflight'), /签名\/哈希校验失败/);
+    component.source = 'development';
+    const v2Descriptor = { componentId: 'team-retouch', componentVersion: '1.0.0', hostApiVersion: 2, service: { permissions: ['component.lifecycle.read', 'component.lifecycle.manage'], events: [], lifecycleActions: { preflight: { entry: path.join(componentRoot, 'actions', 'fixture-v2.ps1'), relativeEntry: 'actions/fixture-v2.ps1', sha256: v2Digest } } } };
+    assert.equal((await service.invokeV2({ action: 'describe' }, {}, v2Descriptor)).negotiatedHostApiVersion, 2);
+    assert.equal((await service.invokeV2({ action: 'preflight' }, {}, v2Descriptor)).success, true, 'V2 executes only the declared and hash-verified lifecycle entry');
+    await assert.rejects(service.invokeV2({ action: 'preflight', path: 'C:/escape.ps1' }, {}, v2Descriptor), /does not accept commands/);
+    await assert.rejects(service.invokeV2({ action: 'preflight' }, {}, { ...v2Descriptor, service: { ...v2Descriptor.service, permissions: ['component.lifecycle.read'] } }), /permission is not granted/);
     const escaped = { ...descriptor, service: { lifecycleActions: { 'advanced.preflight': { entry: scriptPath, relativeEntry: '../actions/fixture-action.ps1', sha256: digest } } } };
     component.source = 'user';
     await assert.rejects(service.resolveAction(escaped, 'advanced.preflight'), /escapes verified component root/);

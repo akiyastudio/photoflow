@@ -11,7 +11,7 @@ PhotoFlow calls optional packages **components**. “Plugin” is retained in th
 5. Run `node scripts/mock-component-service.cjs path/to/service.cjs` to exercise the newline-delimited service protocol without Electron.
 6. Place the directory in PhotoFlow's user component folder, or add it under `extensions/` for a source checkout. A packaged install uses `component.json`; source development may use `component.template.json` plus the existing component build flow.
 
-The complete sample contains a static page and a Node service. Its page calls only `window.photoFlowComponent`; its service asks the host for a media page. `component-sdk/index.d.ts` supplies stable TypeScript declarations.
+The complete sample contains a static page and a Node service. Its page calls only `window.photoFlowComponent`; its service asks the host for a media page. `component-sdk/index.d.ts` supplies request/result/error/event/JSONL frame mappings for every V2 capability, while `component-sdk/service.cjs` provides `callHost`, `acceptFrame`, and `failAll` for service backends.
 
 ## Package layout
 
@@ -62,11 +62,17 @@ See `examples/hello-component/service.cjs` for a complete implementation. Ordina
 6. Optionally call `version.create.v2` with the returned commit/artifact IDs and another stable idempotency key.
 7. Call `rollback` for an abandoned stage.
 
+Stages persist their metadata and registered files for 24 hours, so a restarted Host can resume `validate`, `commit`, or `rollback`. Keep the returned `stageId`, `commitId`, and artifact IDs rather than private paths. A committed artifact can be opened or revealed through `dialogs.v2`; arbitrary output paths are never accepted.
+
+Use `component.media.v2` for files owned under `component.storage.v2`, and `project.progress.v2` to list/create image or video progress nodes and record generic source relationships. Component-private media requests take only a relative path. Project media pages and variants include Host-managed external/virtual paths while preserving their virtual identity.
+
+Replacing project output is explicit: register `replace:true`, `previousCommitId`, `previousArtifactId`, and `expectedDigest` in the stage write. The Host replaces only a target owned by that prior committed receipt and journals the old bytes for multi-file rollback. Never implement overwrite by deleting the target yourself.
+
 Never persist project paths as component identity. Persist PhotoFlow IDs and component-owned metadata. A token, cursor, stage, commit, or artifact ID is opaque and scoped to one component and project.
 
 ## Testing and release
 
-- `npm run test:component-host-v2` checks negotiation, permissions, media pagination/variants, token scope, settings, output transactions, version idempotency, tasks, dialogs, events, lifecycle description, the production media repository/service composition, and the service mock.
+- `npm run test:component-host-v2` first type-checks the SDK, then checks negotiation, permissions, managed-external and component-private media, persistent stage expiry/recovery, commit journals and controlled replacement, crash-safe version idempotency, progress, tasks, safe dialogs, events, the production media repository/service composition, and the service mock.
 - `npm run test:component-host`, `npm run test:component-service`, `npm run test:electron-security`, and `npm run test:architecture` cover isolation and compatibility.
 - Validate the manifest against `electron/contracts/schemas/component-manifest-v2.schema.json` before packaging.
 - Package only built UI/service/runtime files, calculate hashes for any declared lifecycle action, install into a clean profile, test cancellation and restart, then test upgrade and downgrade with real V1 data.

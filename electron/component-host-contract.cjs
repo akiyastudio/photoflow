@@ -16,12 +16,13 @@ const HOST_CAPABILITIES = new Set([
   'project.media.page.v2', 'project.media.variants.v2', 'project.input.tokens.v2',
   'project.output.v2', 'version.create.v2', 'tasks.v2', 'dialogs.v2',
   'component.storage.v2', 'component.settings.v2', 'component.events.v2',
-  'component.lifecycle.v2',
+  'component.lifecycle.v2', 'component.media.v2', 'project.progress.v2',
 ]);
 const HOST_PERMISSIONS = new Set([
   'project.media.read', 'project.input.read', 'project.output.write',
   'project.version.create', 'component.storage', 'component.settings',
-  'tasks', 'dialogs', 'events', 'component.lifecycle.read',
+  'tasks', 'dialogs', 'events', 'component.lifecycle.read', 'component.lifecycle.manage',
+  'component.media', 'project.progress',
 ]);
 const CAPABILITY_PERMISSIONS = Object.freeze({
   'project.media.page.v2': 'project.media.read',
@@ -35,6 +36,8 @@ const CAPABILITY_PERMISSIONS = Object.freeze({
   'component.settings.v2': 'component.settings',
   'component.events.v2': 'events',
   'component.lifecycle.v2': 'component.lifecycle.read',
+  'component.media.v2': 'component.media',
+  'project.progress.v2': 'project.progress',
 });
 const COMPONENT_ICON_MIME_TYPES = new Map([['.png', 'image/png'], ['.svg', 'image/svg+xml']]);
 const MAX_COMPONENT_ICON_BYTES = 512 * 1024;

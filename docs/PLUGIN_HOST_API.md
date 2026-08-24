@@ -27,6 +27,10 @@ V2 requires `contractVersion`, compatibility range, contributions, service proto
 | `dialogs.v2` | `dialogs` | Host-owned confirmation and bounded file selection |
 | `component.events.v2` | `events` | Declared versioned component events |
 | `component.lifecycle.v2` | `component.lifecycle.read` | Negotiated version, grants and lifecycle state |
+| `component.media.v2` | `component.media` | Variants/open/reveal below component-private storage |
+| `project.progress.v2` | `project.progress` | List/create progress nodes and register source relations |
+
+Running a declared lifecycle action additionally requires `component.lifecycle.manage`. The broker still checks `component.lifecycle.read` for `describe`; the lifecycle service checks the stronger permission before `preflight`, `install`, `repair`, or `uninstall`.
 
 Permissions are checked when parsing the manifest and again for every capability invocation. Component ID, version, project ID/name/status, and scope come from the bound host view; request payloads cannot replace them.
 
@@ -34,7 +38,7 @@ Permissions are checked when parsing the manifest and again for every capability
 
 ### Project media
 
-`project.media.page.v2` accepts `pageSize` (1–200), opaque `cursor`, and `kinds` (`image`, `raw`, `video`). A cursor expires after five minutes, is bound to one component/project, and must not be decoded or persisted. Each page inspects at most 1,000 entries and does not follow symlinks.
+`project.media.page.v2` accepts `pageSize` (1–200), opaque `cursor`, and `kinds` (`image`, `raw`, `video`). A cursor expires after five minutes, is bound to one component/project, and must not be decoded or persisted. Each page inspects at most 1,000 entries and does not follow symlinks. Host-managed external files/folders participate using their virtual relative paths; unmanaged external paths remain denied.
 
 `project.media.variants.v2` accepts either `{photoId, versionId}` or `{relativePath}` plus a subset of `thumbnail`, `preview`, `original`. Thumbnail is a generated 320-pixel derivative and is never replaced by a normal original URL. Preview is a generated 1,600-pixel derivative. Original is explicitly marked `derived:false`. The response also carries a ten-minute, single-use input token.
 
@@ -43,6 +47,8 @@ Permissions are checked when parsing the manifest and again for every capability
 ### Private storage and settings
 
 `component.storage.v2` returns component-owned locations under workspace application data, never a project-content write grant. A component owns its schema and migrations; the host does not inspect its tables. Cross-domain references use stable project/media/version IDs.
+
+`component.media.v2` accepts only a relative file below that private storage and an action: `variants`, `open`, or `reveal`. Variants have the same explicit derivative semantics as project media. The result contains URLs and an opaque media ref, never a caller-supplied absolute path. Deletion and invalidation remain the component database's responsibility.
 
 `component.settings.v2` supports `get`, `replace`, and shallow `merge`. Settings and checkpoints are JSON objects up to 256 KiB. Updates are atomic and return a monotonically increasing revision. Components tolerate unknown retained keys and migrate their own old shapes.
 
@@ -56,9 +62,17 @@ Permissions are checked when parsing the manifest and again for every capability
 - `commit`: requires an ID-shaped idempotency key, refuses overwrite, atomically publishes files below the bound project, rolls back files created by a failed multi-file commit, and returns commit/artifact IDs. Retrying the same key returns the original result.
 - `rollback`: recursively removes only the component-private stage and is safe to call for abandoned work.
 
+Stage state is not memory-only. The Host atomically persists stage metadata and its registered file list outside the writable payload subdirectory, binds it to component/workspace/project, and enforces an immutable `createdAt + 24h` expiry on every non-terminal action. Expiry deletes only that exact validated stage directory.
+
+Before publishing, `commit` writes a `prepared` receipt containing a stable commit ID, target relative paths, artifact IDs, sizes, SHA-256 digests, and per-file publication state. It journals after every atomic publication and changes the receipt to `committed` only when all outputs exist with matching digests. Restart recovery reuses only matching published bytes. A conflict rolls back all still-matching Host outputs and preserves any file changed by the user. Failure to finalize the receipt rolls back the complete multi-file publication and removes its unusable journal.
+
+Controlled replacement requires `replace:true`, `previousCommitId`, `previousArtifactId`, and `expectedDigest` on `write`. The prior committed receipt must own the same target and the current bytes must still match. Replacement backups live in the expiring stage until the new multi-file receipt commits. A deprecated compatibility helper can adopt reviewed V1 outputs into a one-time migration receipt; it contains no component business rules.
+
 Project-content targets are relative; absolute paths and `..` are invalid. A component cannot commit outside its bound project or use a stage/commit from another component/project.
 
-`version.create.v2` consumes a committed artifact plus photo/parent-version IDs. The host verifies project ownership and parent membership, creates a generic `component` version, schedules its thumbnail, and deduplicates by idempotency key. It has no knowledge of people, work/return images, schedules, review sessions, or component tables.
+`version.create.v2` consumes a committed artifact plus photo/parent-version IDs. It resolves `commitId` directly from the committed receipt after restart, without requiring `commit` replay. The version ID is deterministically derived from bound scope plus idempotency key and a `prepared` version receipt is persisted before the database call. A retry first searches the real photo versions for that stable ID, preventing duplicate versions even if the Host crashed or the final receipt write failed.
+
+`project.progress.v2` supports `list`, `create`, and `relate`. It returns stable progress/edge IDs without folder paths. Create accepts a project virtual `relativePath`, `image`/`video` kind, version key, structural parent ID, and optional generic `sourceProgressIds`; the versioning repository validates graph roles and cycles.
 
 ### Tasks, cancellation and recovery
 
@@ -68,15 +82,15 @@ Do not hold a synchronous service request open for a long job. The ordinary serv
 
 ### Safe dialogs, events and lifecycle
 
-`dialogs.v2` supports `confirm` and `openFiles`. File selection returns restricted tokens, not caller-selected output paths. Extension filters are normalized and limited to 64. At most 2,000 selections are returned.
+`dialogs.v2` supports `confirm`, `openFiles`, `openOutput`, and `revealOutput`. File selection returns restricted tokens, not caller-selected output paths. Output actions accept only a committed `{commitId, artifactId}` whose receipt and current digest still match. Extension filters are normalized and limited to 64. At most 2,000 selections are returned.
 
 `component.events.v2` emits only topics declared in `service.events`, with a versioned topic and a JSON object up to 256 KiB. Delivery is best effort and at least once; consumers make handlers idempotent. Events do not carry filesystem paths or mutate host state.
 
-`component.lifecycle.v2 {action:"describe"}` reports the installed component version, negotiated Host API, permissions, declared events, and state. Installation, upgrade, removal, page creation/destruction, and project close are host-owned. A component releases resources on deactivate/exit and must survive service restart. V2 does not permit a component to supply arbitrary lifecycle commands or paths.
+`component.lifecycle.v2 {action:"describe"}` reports the installed component version, negotiated Host API, permissions, declared events/actions, and state. With `component.lifecycle.manage`, `preflight`, `install`, `repair`, and `uninstall` execute only the matching manifest-declared package-local PowerShell entry after installed-version, root, symlink, and SHA-256 verification. Payload commands, arguments, and paths are rejected. The verified script receives only fixed `PHOTOFLOW_COMPONENT_LIFECYCLE_ACTION`, component ID, and component version environment values plus a small OS environment allowlist. Page creation/destruction and project close remain host-owned.
 
 ## Protocol, limits and errors
 
-UI RPC and service JSONL frames are JSON objects and limited to 2 MiB. Method and event names are bounded and versioned. Unknown methods, fields at strict manifest boundaries, senders, capabilities, permissions, stages, tokens, and event topics fail closed. Service stdout contains one JSON frame per line; logs use stderr.
+UI RPC and service JSONL frames are JSON objects and limited to 2 MiB. Method and event names are bounded and versioned. Unknown methods, fields at strict manifest boundaries, senders, capabilities, permissions, stages, tokens, and event topics fail closed. Service stdout contains one JSON frame per line; logs use stderr. `component-host-api-v2.schema.json` has one method-discriminated request/result branch per capability; `component-service-protocol-v1.schema.json` specifies JSONL frames.
 
 Stable host error codes are:
 
