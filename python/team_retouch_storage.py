@@ -16,6 +16,66 @@ TABLES = (
 )
 
 
+def _legacy_tables(workspace_db: sqlite3.Connection) -> set[str]:
+    return {
+        row[0] for row in workspace_db.execute(
+            "SELECT name FROM main.sqlite_master WHERE type='table' AND name LIKE 'team_%'"
+        ).fetchall()
+        if row[0] in TABLES
+    }
+
+
+def _drop_legacy_tables(workspace_db: sqlite3.Connection, tables) -> bool:
+    requested = set(tables)
+    ordered = [table for table in reversed(TABLES) if table in requested]
+    if not ordered:
+        return False
+    if workspace_db.in_transaction:
+        raise RuntimeError("cannot retire legacy team tables inside a transaction")
+    foreign_keys_enabled = int(workspace_db.execute("PRAGMA foreign_keys").fetchone()[0])
+    workspace_db.execute("PRAGMA foreign_keys=OFF")
+    try:
+        workspace_db.execute("BEGIN IMMEDIATE")
+        for table in ordered:
+            workspace_db.execute(f'DROP TABLE IF EXISTS main."{table}"')
+        workspace_db.commit()
+    except Exception:
+        workspace_db.rollback()
+        raise
+    finally:
+        workspace_db.execute(f"PRAGMA foreign_keys={foreign_keys_enabled}")
+    return True
+
+
+def cleanup_empty_recreated_legacy_tables(workspace_db: sqlite3.Connection) -> bool:
+    """Remove empty team tables recreated in core after domain extraction.
+
+    Core schema upgrades historically replayed the legacy all-in-one DDL even
+    after team-retouch had moved to its own database. Those empty tables retain
+    foreign keys to ``main.photos``/``main.versions`` and make an unrelated
+    project DELETE fail once the media/versioning tables are detached.
+    """
+    legacy_tables = _legacy_tables(workspace_db)
+    if not legacy_tables:
+        return False
+    if any(workspace_db.execute(f'SELECT 1 FROM main."{table}" LIMIT 1').fetchone()
+           for table in legacy_tables):
+        return False
+    main_tables = {
+        row[0] for row in workspace_db.execute(
+            "SELECT name FROM main.sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    revision = workspace_db.execute(
+        "SELECT value FROM main.meta WHERE key='team_storage_revision'"
+    ).fetchone() if "meta" in main_tables else None
+    already_extracted = revision is not None and str(revision[0]) == str(SCHEMA_VERSION)
+    detached_parents = "photos" not in main_tables or "versions" not in main_tables
+    if not already_extracted and not detached_parents:
+        return False
+    return _drop_legacy_tables(workspace_db, legacy_tables)
+
+
 def database_path_for_workspace_database(workspace_database: str) -> str:
     absolute = os.path.abspath(workspace_database)
     workspace_key = os.path.splitext(os.path.basename(absolute))[0]
@@ -143,11 +203,7 @@ def attach_and_migrate(workspace_db: sqlite3.Connection, workspace_database: str
         workspace_db.execute("ATTACH DATABASE ? AS team_retouch", (team_database,))
         workspace_db.execute("PRAGMA team_retouch.busy_timeout=30000")
 
-    legacy_tables = {
-        row[0] for row in workspace_db.execute(
-            "SELECT name FROM main.sqlite_master WHERE type='table' AND name LIKE 'team_%'"
-        ).fetchall()
-    }
+    legacy_tables = _legacy_tables(workspace_db)
     if not legacy_tables.intersection(TABLES):
         return team_database
 
@@ -165,18 +221,13 @@ def attach_and_migrate(workspace_db: sqlite3.Connection, workspace_database: str
             workspace_db.execute(
                 f"INSERT OR IGNORE INTO team_retouch.{table}({columns[table]}) SELECT {columns[table]} FROM main.{table}"
             )
-        for table in (
-            "team_person_exclusions",
-            "team_person_assignments",
-            "team_person_identities",
-            "team_retouch_photos",
-            "team_patch_tasks",
-        ):
-            if table in legacy_tables:
-                workspace_db.execute(f"DROP TABLE main.{table}")
         workspace_db.execute(
             "INSERT OR REPLACE INTO main.meta(key,value) VALUES('team_storage_revision','1')"
         )
+    # The media/versioning extraction may already have removed the referenced
+    # parent tables from main. Disable FK enforcement only for retiring the
+    # successfully copied legacy schema; runtime connections re-enable it.
+    _drop_legacy_tables(workspace_db, legacy_tables)
     return team_database
 
 

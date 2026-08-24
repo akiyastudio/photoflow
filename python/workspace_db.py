@@ -19,6 +19,7 @@ try:
     from database_error_codes import error_response
     from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
     from team_retouch_storage import attach_and_migrate as attach_team_retouch_storage
+    from team_retouch_storage import cleanup_empty_recreated_legacy_tables as cleanup_empty_team_retouch_legacy_tables
     from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage
     from workspace_db_migrations import migration_26, migration_27, migration_28
 except ModuleNotFoundError:
@@ -28,6 +29,7 @@ except ModuleNotFoundError:
     from database_error_codes import error_response
     from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TEAM_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
     from team_retouch_storage import attach_and_migrate as attach_team_retouch_storage
+    from team_retouch_storage import cleanup_empty_recreated_legacy_tables as cleanup_empty_team_retouch_legacy_tables
     from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage
     from workspace_db_migrations import migration_26, migration_27, migration_28
 
@@ -1926,6 +1928,7 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
         purpose_constraints_migrated = False
         legacy_parent_revision_recorded = False
         try:
+            cleanup_empty_team_retouch_legacy_tables(db)
             if requested_domains:
                 attach_workspace_domain_storage(db, database, requested_domains)
                 domain_migrated = _migration_28(db)
@@ -2309,6 +2312,7 @@ def connect(root: str, database: str, include_domains=None, include_team: bool =
     if backup_path:
         _set_meta(db, "last_migration_backup", backup_path)
     db.commit()
+    cleanup_empty_team_retouch_legacy_tables(db)
     # A fresh database and a migration must be verified before it is exposed.
     # Routine daily maintenance is dispatched by Electron on a separate worker
     # so opening the project list never waits for a full integrity scan/backup.
@@ -9610,7 +9614,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
         retired = db.execute("SELECT id FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],)).fetchone()
         if retired is not None:
             delete_team_project_rows(db, retired["id"])
-        db.execute("DELETE FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],))
+            db.execute("DELETE FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],))
         db.execute(
             "INSERT INTO projects(id,name,status,relative_path,filesystem_id,created_at,updated_at,extra_json) VALUES(?,?,?,?,?,?,?,?)",
             (str(uuid.uuid4()), payload["name"], payload["status"], payload["relativePath"], directory_identity(project_path), now, now, json.dumps(payload.get("extra") or {}, ensure_ascii=False)),
